@@ -45,7 +45,12 @@ loader_content() {
   printf '# oh-my-setting Loader\n\n'
   printf 'Read `PROJECT.md` first for project-specific details.\n'
   printf 'Then follow `%s` for shared `%s` rules.\n' "$display_template" "$STYLE"
-  printf 'Project rules override global defaults.\n'
+  printf 'Project rules override global defaults.\n\n'
+  printf '## Local Agent Rules\n\n'
+  printf -- '- If `PROJECT.md` lacks goal, commands, paths, or verification, ask before coding.\n'
+  printf -- '- Ask before changing public API, data format, model architecture, deps/toolchain, or Slurm resources.\n'
+  printf -- '- Keep edits task-scoped; do not rewrite unrelated files.\n'
+  printf -- '- End with: changed, verified, not verified, next command.\n'
 }
 
 project_content() {
@@ -56,6 +61,10 @@ project_content() {
   printf -- '- Type: %s\n' "$STYLE"
   printf -- '- Goal:\n'
   printf -- '- Non-goals:\n\n'
+  printf '## Current Task\n\n'
+  printf -- '- Request:\n'
+  printf -- '- Assumptions:\n'
+  printf -- '- Open questions:\n\n'
   printf '## Commands\n\n'
   printf -- '- Setup:\n'
   printf -- '- Test:\n'
@@ -70,6 +79,12 @@ project_content() {
   printf -- '- Success criteria:\n'
   printf -- '- Required checks:\n'
   printf -- '- Baseline/metric:\n\n'
+  if [ "$STYLE" = "slurm-ml" ]; then
+    printf '## Slurm\n\n'
+    printf -- '- Partition/account:\n'
+    printf -- '- CPU/GPU/memory/time:\n'
+    printf -- '- Logs/checkpoints:\n\n'
+  fi
   printf '## Notes\n\n'
   printf -- '- Do not touch:\n'
   printf -- '- Risks:\n'
