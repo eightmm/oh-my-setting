@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILED=0
+REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
 
 check_cmd() {
   if command -v "$1" >/dev/null 2>&1; then
@@ -25,6 +26,14 @@ check_path() {
 check_cmd git
 check_cmd curl
 
+if [ "$REQUIRE_TOOLS" != "0" ]; then
+  check_cmd node
+  check_cmd npm
+  check_cmd claude
+  check_cmd codex
+  check_cmd gemini
+fi
+
 check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"
 check_path "$HOME/.codex/AGENTS.md"
@@ -36,4 +45,3 @@ if [ "$FAILED" -ne 0 ]; then
 fi
 
 echo "doctor: ok"
-

@@ -29,7 +29,12 @@
       "source": "plugin",
       "enabled": true,
       "reason": "Address actionable PR review comments."
+    },
+    {
+      "name": "caveman",
+      "source": "github:JuliusBrussee/caveman",
+      "enabled": true,
+      "reason": "Compress agent output while preserving technical substance."
     }
   ]
 }
-
