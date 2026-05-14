@@ -52,6 +52,7 @@ scripts/install-tools.sh
 That script installs or verifies:
 
 - Node.js through `nvm` when the current Node is missing or older than 18
+- uv for Python development
 - Claude Code: `npm install -g @anthropic-ai/claude-code`
 - Codex CLI: `npm install -g @openai/codex`
 - Gemini CLI: `npm install -g @google/gemini-cli`
@@ -74,7 +75,7 @@ prompts/                  Reusable prompts
 workflows/                Repeatable operating procedures
 templates/                Starter files for new projects
 scripts/link.sh           Create symlinks into agent config locations
-scripts/install-tools.sh  Install Node, agent CLIs, and caveman
+scripts/install-tools.sh  Install Node, uv, agent CLIs, and caveman
 scripts/doctor.sh         Check expected files and links
 scripts/backup.sh         Copy current local agent files into backups/
 skills.manifest.json      List of external/curated skills to install or enable

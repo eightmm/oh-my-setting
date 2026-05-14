@@ -14,6 +14,14 @@ check_cmd() {
   fi
 }
 
+check_optional_cmd() {
+  if command -v "$1" >/dev/null 2>&1; then
+    echo "ok: optional command $1"
+  else
+    echo "optional missing: command $1"
+  fi
+}
+
 check_path() {
   if [ -e "$1" ] || [ -L "$1" ]; then
     echo "ok: $1"
@@ -29,10 +37,17 @@ check_cmd curl
 if [ "$REQUIRE_TOOLS" != "0" ]; then
   check_cmd node
   check_cmd npm
+  check_cmd uv
   check_cmd claude
   check_cmd codex
   check_cmd gemini
 fi
+
+check_optional_cmd sbatch
+check_optional_cmd srun
+check_optional_cmd squeue
+check_optional_cmd sinfo
+check_optional_cmd scancel
 
 check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"

@@ -87,8 +87,34 @@ install_npm_global() {
   npm install -g "$package"
 }
 
+ensure_uv() {
+  export PATH="$HOME/.local/bin:$PATH"
+
+  if has_cmd uv; then
+    echo "ok: uv $(uv --version)"
+    return 0
+  fi
+
+  if ! has_cmd curl; then
+    echo "error: curl is required to install uv" >&2
+    exit 1
+  fi
+
+  echo "installing uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
+
+  if ! has_cmd uv; then
+    echo "error: uv install completed but uv is not on PATH" >&2
+    exit 1
+  fi
+
+  echo "ok: uv $(uv --version)"
+}
+
 ensure_node
 ensure_writable_npm_global
+ensure_uv
 
 install_npm_global "@anthropic-ai/claude-code" "claude"
 install_npm_global "@openai/codex" "codex"
