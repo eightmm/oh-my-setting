@@ -44,18 +44,8 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 ## Test Strategy
 
 - Prefer behavior/interface tests over tiny per-function tests.
-- AI/ML priority: data validation -> dataloader batch -> model architecture -> output contract.
-- Test shapes, dtypes, masks, devices, seeds, NaN/Inf, empty/small batches.
-- For models, verify forward pass, loss contract, checkpoint load, inference output.
+- Test behavior at module/interface boundaries.
 - Add narrow unit tests only for fragile pure logic or past bugs.
-
-## ML Reliability
-
-- No fake green: do not skip/xfail/edit tests to hide failure.
-- Root cause first: trace NaN, shape mismatch, metric jump, data error upstream.
-- Guard leakage: check splits, labels, normalization fit scope, duplicate samples.
-- Reproducible runs: record command, config, seed, data version, commit, checkpoint.
-- Metrics contract: define metric before training; compare against baseline.
 
 ## Python Development
 
@@ -70,6 +60,5 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - If `sbatch/srun/squeue/sinfo/scancel` exist, assume Slurm workflow.
 - No long/GPU/high-CPU jobs on login nodes. Use `sbatch` or allocated `srun`.
 - For heavy jobs, confirm partition/account/time/GPU/CPU/mem/output path.
-- Prefer reproducible job scripts using `uv run`.
-- Job script defaults: `set -euo pipefail`, `cd "$SLURM_SUBMIT_DIR"`, `%x-%j` logs.
+- Prefer reproducible job scripts using project-local commands.
 - Inspect/control with `squeue -u "$USER"`, `sinfo`, `sacct`, `scancel`.

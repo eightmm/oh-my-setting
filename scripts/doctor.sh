@@ -41,6 +41,7 @@ if [ "$REQUIRE_TOOLS" != "0" ]; then
   check_cmd claude
   check_cmd codex
   check_cmd gemini
+  check_cmd pi
 fi
 
 check_optional_cmd sbatch
@@ -53,6 +54,8 @@ check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"
 check_path "$HOME/.codex/AGENTS.md"
 check_path "$HOME/.codex/skills/oh-my-setting"
+check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
+check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/oh-my-setting"
 
 if [ "$FAILED" -ne 0 ]; then
   echo "doctor: failed"

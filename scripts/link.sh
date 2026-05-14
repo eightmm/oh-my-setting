@@ -42,8 +42,9 @@ link_dir() {
 }
 
 link_file "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
+link_file "$ROOT/AGENTS.md" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
 link_dir "$ROOT/custom-skills" "$HOME/.codex/skills/oh-my-setting"
 link_dir "$ROOT/custom-skills" "$HOME/.agents/skills/oh-my-setting"
+link_dir "$ROOT/custom-skills" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/oh-my-setting"
 link_dir "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
 link_dir "$ROOT/workflows" "$HOME/.oh-my-setting-workflows"
-

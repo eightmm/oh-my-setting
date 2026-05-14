@@ -56,6 +56,7 @@ That script installs or verifies:
 - Claude Code: `npm install -g @anthropic-ai/claude-code`
 - Codex CLI: `npm install -g @openai/codex`
 - Gemini CLI: `npm install -g @google/gemini-cli`
+- Pi Coding Agent: `npm install -g @earendil-works/pi-coding-agent`
 - caveman: official installer from `JuliusBrussee/caveman`
 
 Useful overrides:
@@ -75,7 +76,7 @@ prompts/                  Reusable prompts
 workflows/                Repeatable operating procedures
 templates/                Starter files for new projects
 scripts/link.sh           Create symlinks into agent config locations
-scripts/install-tools.sh  Install Node, uv, agent CLIs, and caveman
+scripts/install-tools.sh  Install Node, uv, agent CLIs, Pi, and caveman
 scripts/doctor.sh         Check expected files and links
 scripts/backup.sh         Copy current local agent files into backups/
 skills.manifest.json      List of external/curated skills to install or enable
@@ -93,3 +94,24 @@ git pull --ff-only
 ./scripts/link.sh
 ./scripts/doctor.sh
 ```
+
+## Project Templates
+
+- `templates/project-general-AGENTS.md`: non-ML repos
+- `templates/project-ml-AGENTS.md`: ML repos
+- `templates/project-slurm-ml-AGENTS.md`: ML repos on Slurm/HPC
+
+Apply a project template without overwriting existing instructions:
+
+```bash
+~/.oh-my-setting/scripts/apply-project-template.sh ml /path/to/project
+```
+
+Behavior:
+
+- If `AGENTS.md` or `CLAUDE.md` exists, append/update a fenced managed block at the end.
+- If neither exists, create `AGENTS.md`.
+- Re-running is idempotent: the managed block is replaced, handwritten content stays.
+- Compatible with Pi: Pi loads project `AGENTS.md`/`CLAUDE.md`, global `~/.pi/agent/AGENTS.md`, and skills from `~/.pi/agent/skills/`.
+
+Available styles: `general`, `ml`, `slurm-ml`.

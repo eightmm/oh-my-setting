@@ -9,6 +9,12 @@ Use for new projects, broad features, or unclear requests.
 5. Implement smallest version.
 6. Verify against spec.
 
+For existing projects, preserve local instructions. Append project templates as a managed block:
+
+```bash
+~/.oh-my-setting/scripts/apply-project-template.sh ml .
+```
+
 Minimum spec:
 
 ```md

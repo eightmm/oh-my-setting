@@ -119,6 +119,7 @@ ensure_uv
 install_npm_global "@anthropic-ai/claude-code" "claude"
 install_npm_global "@openai/codex" "codex"
 install_npm_global "@google/gemini-cli" "gemini"
+install_npm_global "@earendil-works/pi-coding-agent" "pi"
 
 if [ "$INSTALL_CAVEMAN" != "0" ]; then
   echo "installing caveman for detected agents"
