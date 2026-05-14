@@ -31,6 +31,19 @@ check_path() {
   fi
 }
 
+check_custom_skills() {
+  local target_root="$1"
+  local skill
+  local name
+
+  for skill in "$ROOT"/custom-skills/*; do
+    [ -d "$skill" ] || continue
+    [ -f "$skill/SKILL.md" ] || continue
+    name="$(basename "$skill")"
+    check_path "$target_root/$name/SKILL.md"
+  done
+}
+
 check_cmd git
 check_cmd curl
 
@@ -55,9 +68,11 @@ check_path "$ROOT/skills.manifest.json"
 check_path "$HOME/.codex/AGENTS.md"
 check_path "$HOME/.claude/CLAUDE.md"
 check_path "$HOME/.gemini/GEMINI.md"
-check_path "$HOME/.codex/skills/oh-my-setting"
+check_custom_skills "$HOME/.codex/skills"
+check_custom_skills "$HOME/.claude/skills"
+check_custom_skills "$HOME/.agents/skills"
 check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
-check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/oh-my-setting"
+check_custom_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
 
 if [ "$FAILED" -ne 0 ]; then
   echo "doctor: failed"

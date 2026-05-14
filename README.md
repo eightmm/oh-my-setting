@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 ## What It Installs
 
 - Global rules: `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.pi/agent/AGENTS.md`
-- Custom skills: symlinked into Codex/Pi/shared skill paths
+- Custom skills: symlinked into Codex/Claude/Pi/shared skill paths
 - Tools: Node, `uv`, Claude Code, Codex, Gemini CLI, Pi Agent, caveman
 
 ## Update
@@ -60,8 +60,7 @@ Behavior:
 
 - Never overwrites existing `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`.
 - Appends/updates only the `oh-my-setting` managed block.
-- Creates `AGENTS.md` if neither file exists.
-- Updates `GEMINI.md` too when it already exists.
+- Creates/updates `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` by default.
 - Works with Codex, Claude, Gemini, and Pi.
 
 Remove:

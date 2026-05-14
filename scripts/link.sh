@@ -41,12 +41,40 @@ link_dir() {
   echo "linked $target -> $source"
 }
 
+remove_old_skill_group() {
+  local target="$1"
+
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$ROOT/custom-skills" ]; then
+    rm -f "$target"
+  fi
+}
+
+link_skills() {
+  local target_root="$1"
+  local skill
+  local name
+
+  mkdir -p "$target_root"
+
+  for skill in "$ROOT"/custom-skills/*; do
+    [ -d "$skill" ] || continue
+    [ -f "$skill/SKILL.md" ] || continue
+    name="$(basename "$skill")"
+    link_dir "$skill" "$target_root/$name"
+  done
+}
+
 link_file "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
 link_file "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
 link_file "$ROOT/AGENTS.md" "$HOME/.gemini/GEMINI.md"
 link_file "$ROOT/AGENTS.md" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
-link_dir "$ROOT/custom-skills" "$HOME/.codex/skills/oh-my-setting"
-link_dir "$ROOT/custom-skills" "$HOME/.agents/skills/oh-my-setting"
-link_dir "$ROOT/custom-skills" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/oh-my-setting"
+remove_old_skill_group "$HOME/.codex/skills/oh-my-setting"
+remove_old_skill_group "$HOME/.claude/skills/oh-my-setting"
+remove_old_skill_group "$HOME/.agents/skills/oh-my-setting"
+remove_old_skill_group "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/oh-my-setting"
+link_skills "$HOME/.codex/skills"
+link_skills "$HOME/.claude/skills"
+link_skills "$HOME/.agents/skills"
+link_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
 link_dir "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
 link_dir "$ROOT/workflows" "$HOME/.oh-my-setting-workflows"

@@ -32,11 +32,7 @@ shift || true
 if [ "$#" -gt 0 ]; then
   FILES=("$@")
 else
-  FILES=()
-  [ -e "$PROJECT_DIR/AGENTS.md" ] && FILES+=("AGENTS.md")
-  [ -e "$PROJECT_DIR/CLAUDE.md" ] && FILES+=("CLAUDE.md")
-  [ -e "$PROJECT_DIR/GEMINI.md" ] && FILES+=("GEMINI.md")
-  [ "${#FILES[@]}" -gt 0 ] || FILES=("AGENTS.md")
+  FILES=("AGENTS.md" "CLAUDE.md" "GEMINI.md")
 fi
 
 BEGIN="<!-- oh-my-setting:${STYLE}:begin -->"
