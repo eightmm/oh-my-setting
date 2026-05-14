@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
+GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-auto}"
 
 run_as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -56,4 +57,9 @@ else
 fi
 
 "$DEST/scripts/link.sh"
+
+if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v sinfo >/dev/null 2>&1; }; then
+  "$DEST/scripts/generate-slurm-skill.sh"
+fi
+
 "$DEST/scripts/doctor.sh"

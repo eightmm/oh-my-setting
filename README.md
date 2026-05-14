@@ -30,6 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 - Global rules: `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.pi/agent/AGENTS.md`
 - Custom skills: symlinked into Codex/Claude/Pi/shared skill paths
 - Tools: Node, `uv`, Claude Code, Codex, Gemini CLI, Pi Agent, caveman
+- Slurm reference: auto-generated when `sinfo` exists
 
 ## Update
 
@@ -105,7 +106,7 @@ scripts/generate-slurm-skill.sh    Generate local Slurm cluster reference
 
 ## Slurm
 
-On an HPC login node:
+Install auto-generates local Slurm reference when `sinfo` exists. Manual refresh:
 
 ```bash
 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
@@ -113,6 +114,13 @@ On an HPC login node:
 
 This writes `custom-skills/slurm-hpc/references/cluster.generated.md`.
 Generated cluster details are gitignored.
+
+Disable auto-generation:
+
+```bash
+OH_MY_SETTING_GENERATE_SLURM=0 \
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
+```
 
 ## Secrets
 

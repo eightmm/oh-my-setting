@@ -10,17 +10,76 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-run_or_note() {
-  local label="$1"
-  shift
-
-  printf '## %s\n\n' "$label"
-  if has_cmd "$1"; then
-    "$@" 2>&1 || true
-  else
-    printf 'missing command: `%s`\n' "$1"
+partition_table() {
+  if ! has_cmd sinfo; then
+    printf 'missing command: `sinfo`\n'
+    return 0
   fi
-  printf '\n'
+
+  sinfo -h -o "%P|%a|%l|%D|%G|%m|%c|%N" 2>/dev/null |
+    awk -F'|' '
+      BEGIN {
+        print "Name|State|Time|Nodes|CPUs/node|Mem|GPU/GRES|NodeList"
+        print "---|---|---|---:|---:|---:|---|---"
+      }
+      {
+        name=$1
+        sub(/\*/, "", name)
+        gres=$5
+        if (gres == "(null)") gres="-"
+        print name "|" $2 "|" $3 "|" $4 "|" $7 "|" $6 "|" gres "|" $8
+      }
+    '
+}
+
+partition_summary() {
+  if ! has_cmd sinfo; then
+    printf -- '- Slurm not detected.\n'
+    return 0
+  fi
+
+  sinfo -h -o "%P|%l|%D|%G|%c|%N" 2>/dev/null |
+    awk -F'|' '
+      {
+        name=$1
+        sub(/\*/, "", name)
+        gres=$4
+        class="CPU"
+        if (gres != "(null)" && gres != "") class="GPU"
+        split(name, parts, "_")
+        family=parts[1]
+        time=$2
+        nodes[family "|" class] += $3
+        cpus[family "|" class] = $5
+        times[family "|" class][time] = 1
+        if (gres != "(null)" && gres != "") greses[family "|" class][gres] = 1
+      }
+      END {
+        for (key in nodes) {
+          split(key, p, "|")
+          t=""
+          for (time in times[key]) t = t (t ? ", " : "") time
+          g=""
+          for (gres in greses[key]) g = g (g ? "; " : "") gres
+          if (g == "") g = "-"
+          printf "- %s %s: nodes=%d, cpus/node=%s, time=%s, gres=%s\n", p[1], p[2], nodes[key], cpus[key], t, g
+        }
+      }
+    ' | sort
+}
+
+default_partition() {
+  if has_cmd sinfo; then
+    sinfo -h -o "%P" 2>/dev/null | awk '/\*/ { gsub(/\*/, "", $1); print $1; exit }'
+  fi
+}
+
+queue_summary() {
+  if has_cmd squeue; then
+    squeue -u "${USER:-}" -o "%.18i %.9P %.32j %.2t %.10M %.6D %R" 2>/dev/null || true
+  else
+    printf 'missing command: `squeue`\n'
+  fi
 }
 
 mkdir -p "$(dirname "$OUT")"
@@ -33,13 +92,20 @@ mkdir -p "$(dirname "$OUT")"
 
   printf 'Use this as local reference only. Do not commit generated cluster details.\n\n'
 
-  run_or_note "Partitions" sinfo -o "%P|%a|%l|%D|%G|%m|%c|%N"
-  run_or_note "Node Summary" sinfo -Nel
-  run_or_note "Partition Details" scontrol show partition
-  run_or_note "My Queue" squeue -u "${USER:-}" -o "%.18i %.9P %.40j %.8u %.2t %.10M %.6D %R"
+  printf '## Summary\n\n'
+  partition_summary
+  printf '\n'
+
+  printf '## Partitions\n\n'
+  partition_table
+  printf '\n\n'
+
+  printf '## Current Queue\n\n'
+  queue_summary
+  printf '\n'
 
   printf '## Agent Defaults To Fill\n\n'
-  printf -- '- Preferred partition:\n'
+  printf -- '- Preferred partition: %s\n' "$(default_partition)"
   printf -- '- Account:\n'
   printf -- '- CPU default:\n'
   printf -- '- GPU default:\n'
@@ -52,6 +118,7 @@ mkdir -p "$(dirname "$OUT")"
 if [ "$WRITE_RAW" = "1" ]; then
   mkdir -p "$RAW_DIR"
   has_cmd sinfo && sinfo > "$RAW_DIR/sinfo.txt" 2>&1 || true
+  has_cmd sinfo && sinfo -Nel > "$RAW_DIR/nodes-summary.txt" 2>&1 || true
   has_cmd scontrol && scontrol show partition > "$RAW_DIR/partitions.txt" 2>&1 || true
   has_cmd scontrol && scontrol show nodes > "$RAW_DIR/nodes.txt" 2>&1 || true
 fi

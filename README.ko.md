@@ -30,6 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 - 전역 지침: `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.pi/agent/AGENTS.md`
 - custom skills: Codex/Claude/Pi/공용 skills 경로에 symlink
 - 도구: Node, `uv`, Claude Code, Codex, Gemini CLI, Pi Agent, caveman
+- Slurm 정보: `sinfo`가 있으면 자동 생성
 
 ## 업데이트
 
@@ -105,7 +106,7 @@ scripts/generate-slurm-skill.sh    로컬 Slurm 클러스터 정보 생성
 
 ## Slurm
 
-HPC login node에서:
+설치 시 `sinfo`가 있으면 로컬 Slurm reference를 자동 생성한다. 수동 갱신:
 
 ```bash
 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
@@ -113,6 +114,13 @@ HPC login node에서:
 
 `custom-skills/slurm-hpc/references/cluster.generated.md`를 생성한다.
 생성된 클러스터 정보는 git에 올리지 않는다.
+
+자동 생성을 끄려면:
+
+```bash
+OH_MY_SETTING_GENERATE_SLURM=0 \
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
+```
 
 ## Secrets
 
