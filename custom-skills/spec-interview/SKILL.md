@@ -3,11 +3,11 @@ name: spec-interview
 description: >
   Specification-first interview workflow. Use when starting a new project,
   feature, refactor, agent workflow, CLI, app, research pipeline, or any vague
-  build request. Ask focused questions first, write a compact spec, then code
-  only after the user confirms or ambiguity is low.
+  build request. Ask staged questions first, write or update PROJECT.md for
+  project work, then code only after the spec is confirmed.
 ---
 
-Default: no coding before clarity.
+Default: no coding before confirmed spec.
 
 ## Trigger
 
@@ -16,32 +16,79 @@ Use when request is vague, new, broad, architecture-shaping, or says:
 
 ## Flow
 
-1. Interview: ask 3-7 high-impact questions. No implementation.
-2. Spec: summarize answers into `Goal / Non-goals / Users / Scope / Constraints / Data / UX or API / Success / Tests`.
-3. Gate: list assumptions and unresolved ambiguity.
-4. Proceed only when user confirms, or ambiguity is small and local.
+1. Stage 1 intent: ask goal, users/workflow, non-goals. No implementation.
+2. Stage 2 scope: ask interface/API/CLI, data/files, paths, constraints.
+3. Stage 3 execution: ask commands, verification, risks, resources.
+4. Spec: write/update `PROJECT.md` for project work; otherwise write compact spec.
+5. Gate: list assumptions and unresolved ambiguity.
+6. Proceed only when user confirms. For project starts, `PROJECT.md` state must be `confirmed`.
 
 ## Question Rules
 
-- Ask only questions that change implementation.
+- Ask only questions that change implementation or verification.
 - Prefer multiple-choice when options are known.
 - If one default is clearly best, state it as recommended.
-- Stop asking when remaining unknowns can be handled locally.
+- Move stage by stage; do not ask every possible question at once.
+- Stop asking when remaining unknowns are local and low risk.
 
 ## Blockers
 
 Must ask before coding if unclear:
 - core user/workflow
+- project goal, scope, or non-goals
 - data model or persistence
 - public API/CLI contract
 - auth/security/privacy
 - destructive or expensive operations
 - Slurm/HPC resources for heavy jobs
 - acceptance criteria or verification
+- missing or draft `PROJECT.md` for project start
 
 ## Output
 
-Keep compact:
+For project start, create/update:
+
+```md
+# PROJECT.md
+
+## Status
+- State: draft | confirmed
+
+## Interview
+- Stage 1 intent:
+- Stage 2 scope:
+- Stage 3 execution:
+- Open decisions:
+
+## Project
+- Name:
+- Type:
+- Goal:
+- Users/workflow:
+- Scope:
+- Non-goals:
+
+## Commands
+- Setup:
+- Test:
+- Run:
+- Lint/typecheck:
+
+## Paths
+- Data:
+- Config:
+- Outputs/logs:
+- Checkpoints:
+
+## Verification
+- Success criteria:
+- Required checks:
+- Baseline/metric:
+```
+
+Keep `State: draft` while questions remain. Set `State: confirmed` only after user confirmation.
+
+For non-project work, keep compact:
 
 ```md
 Spec:
@@ -58,4 +105,4 @@ Spec:
 - Open questions:
 ```
 
-Then ask: `Confirm spec, or answer open questions.`
+Then ask: `Confirm PROJECT.md/spec, or answer open questions.`

@@ -43,11 +43,12 @@ loader_content() {
   display_template="${display_template/#$HOME/~}"
 
   printf '# oh-my-setting Loader\n\n'
-  printf 'Read `PROJECT.md` first for project-specific details.\n'
+  printf 'Read `PROJECT.md` first. Project work starts only after it is filled and confirmed.\n'
   printf 'Then follow `%s` for shared `%s` rules.\n' "$display_template" "$STYLE"
   printf 'Project rules override global defaults.\n\n'
   printf '## Local Agent Rules\n\n'
-  printf -- '- If `PROJECT.md` lacks goal, commands, paths, or verification, ask before coding.\n'
+  printf -- '- New project or broad task: run staged interview -> write/update `PROJECT.md` -> confirm -> code.\n'
+  printf -- '- If `PROJECT.md` is missing, draft, or lacks goal, scope, commands, paths, verification, or constraints, ask before coding.\n'
   printf -- '- Ask before changing public API, data format, model architecture, deps/toolchain, or Slurm resources.\n'
   printf -- '- Keep edits task-scoped; do not rewrite unrelated files.\n'
   printf -- '- End with: changed, verified, not verified, next command.\n'
@@ -55,11 +56,22 @@ loader_content() {
 
 project_content() {
   printf '# PROJECT.md\n\n'
-  printf 'Project-specific spec. Fill this file per repository.\n\n'
+  printf 'Project-specific spec. Work starts only after this file is filled and confirmed.\n\n'
+  printf '## Status\n\n'
+  printf -- '- State: draft\n'
+  printf -- '- Last confirmed by:\n'
+  printf -- '- Last updated:\n\n'
+  printf '## Interview\n\n'
+  printf -- '- Stage 1 intent: goal, users, non-goals\n'
+  printf -- '- Stage 2 scope: interface, data, paths, constraints\n'
+  printf -- '- Stage 3 execution: commands, verification, risks\n'
+  printf -- '- Open decisions:\n\n'
   printf '## Project\n\n'
   printf -- '- Name:\n'
   printf -- '- Type: %s\n' "$STYLE"
   printf -- '- Goal:\n'
+  printf -- '- Users/workflow:\n'
+  printf -- '- Scope:\n'
   printf -- '- Non-goals:\n\n'
   printf '## Current Task\n\n'
   printf -- '- Request:\n'

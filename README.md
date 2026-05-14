@@ -63,7 +63,8 @@ Behavior:
 - Never overwrites existing `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`.
 - Appends/updates only the `oh-my-setting` managed block.
 - Creates/updates `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` by default.
-- Creates `PROJECT.md` for project-specific details when missing.
+- Creates `PROJECT.md` when missing.
+- Agents must interview -> fill/confirm `PROJECT.md` -> code for new projects or broad tasks.
 - Works with Codex, Claude, Gemini, and Pi.
 
 Remove:

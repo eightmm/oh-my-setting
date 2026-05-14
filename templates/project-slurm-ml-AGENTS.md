@@ -1,6 +1,7 @@
 # Slurm ML Project Guidelines
 
 - Follow `templates/project-ml-AGENTS.md`.
+- Read `PROJECT.md` first. If missing/draft/incomplete, interview and update it before coding.
 - No long/GPU/high-CPU jobs on login nodes.
 - Use `sbatch` for batch jobs or allocated `srun` for interactive work.
 - Confirm partition/account/time/GPU/CPU/mem/output path before heavy jobs.

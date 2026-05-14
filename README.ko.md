@@ -63,7 +63,8 @@ git pull --ff-only
 - 기존 `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`는 덮어쓰지 않는다.
 - 파일 끝에 `oh-my-setting` managed block만 추가/갱신한다.
 - 기본으로 `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`를 생성/갱신한다.
-- `PROJECT.md`가 없으면 프로젝트 상세명세용으로 생성한다.
+- `PROJECT.md`가 없으면 생성한다.
+- 새 프로젝트/큰 작업은 agent가 인터뷰 -> `PROJECT.md` 작성/확인 -> 코딩 순서로 진행한다.
 - Codex, Claude, Gemini, Pi에서 사용할 수 있다.
 
 제거:

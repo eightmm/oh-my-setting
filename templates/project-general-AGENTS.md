@@ -1,6 +1,7 @@
 # Project Guidelines
 
 - Prefer local conventions over global defaults.
+- Read `PROJECT.md` first. If missing/draft/incomplete, interview and update it before coding.
 - Change only task-relevant lines.
 - New/vague work: interview -> spec -> confirm -> code.
 - Evidence before edit; no silent deps/toolchain changes.
