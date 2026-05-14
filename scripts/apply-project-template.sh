@@ -6,12 +6,17 @@ STYLE="${1:-general}"
 PROJECT_DIR="${2:-$PWD}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 
+if [ "$STYLE" = "auto" ]; then
+  STYLE="$("$ROOT/scripts/detect-project-style.sh" "$PROJECT_DIR")"
+  echo "detected project style: $STYLE"
+fi
+
 case "$STYLE" in
   general) TEMPLATE="$ROOT/templates/project-general-AGENTS.md" ;;
   ml) TEMPLATE="$ROOT/templates/project-ml-AGENTS.md" ;;
   slurm-ml) TEMPLATE="$ROOT/templates/project-slurm-ml-AGENTS.md" ;;
   *)
-    echo "usage: $0 [general|ml|slurm-ml] [project_dir] [files...]" >&2
+    echo "usage: $0 [auto|general|ml|slurm-ml] [project_dir] [files...]" >&2
     exit 2
     ;;
 esac

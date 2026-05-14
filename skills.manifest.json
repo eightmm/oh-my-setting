@@ -41,6 +41,12 @@
       "source": "custom-skills/spec-interview",
       "enabled": true,
       "reason": "Interview and write a spec before coding unclear or broad requests."
+    },
+    {
+      "name": "multi-agent-review",
+      "source": "custom-skills/multi-agent-review",
+      "enabled": true,
+      "reason": "Use independent agent/reviewer lenses for high-risk changes."
     }
   ]
 }

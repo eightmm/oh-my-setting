@@ -1,22 +1,16 @@
 # oh-my-setting
 
-LLM agent, prompt, workflow, and local skill settings for new servers or machines.
+Distribute LLM agent settings, skills, and project `AGENTS.md` templates across machines.
 
-This repo is intended to work like dotfiles:
+[한국어](README.ko.md)
 
-1. Keep the source of truth here.
-2. Install it on each machine with one command.
-3. Use symlinks so future `git pull` updates the active settings.
-
-## Quick Install
-
-New machine:
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-Safer inspect-first version:
+Inspect first:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh -o /tmp/oh-my-setting-install.sh
@@ -24,94 +18,90 @@ less /tmp/oh-my-setting-install.sh
 bash /tmp/oh-my-setting-install.sh
 ```
 
-You can override the destination or repo URL:
-
-```bash
-OH_MY_SETTING_REPO_URL=git@github.com:eightmm/oh-my-setting.git \
-OH_MY_SETTING_DIR="$HOME/.oh-my-setting" \
-bash install.sh
-```
-
-The default bootstrap clone uses HTTPS so fresh servers do not need GitHub SSH keys. Use `OH_MY_SETTING_REPO_URL` when you specifically want SSH.
-
-Skip tool installation and only link settings:
+Link settings only:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | \
   OH_MY_SETTING_INSTALL_TOOLS=0 bash
 ```
 
-## Installed Tools
+## What It Installs
 
-`install.sh` bootstraps `git` when possible, clones this repo, then runs:
+- Global rules: `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`
+- Custom skills: symlinked into Codex/Pi/shared skill paths
+- Tools: Node, `uv`, Claude Code, Codex, Gemini CLI, Pi Agent, caveman
 
-```bash
-scripts/install-tools.sh
-```
-
-That script installs or verifies:
-
-- Node.js through `nvm` when the current Node is missing or older than 18
-- uv for Python development
-- Claude Code: `npm install -g @anthropic-ai/claude-code`
-- Codex CLI: `npm install -g @openai/codex`
-- Gemini CLI: `npm install -g @google/gemini-cli`
-- Pi Coding Agent: `npm install -g @earendil-works/pi-coding-agent`
-- caveman: official installer from `JuliusBrussee/caveman`
-
-Useful overrides:
+## Update
 
 ```bash
-OH_MY_SETTING_NODE_VERSION=22 \
-OH_MY_SETTING_INSTALL_CAVEMAN=0 \
-./scripts/install-tools.sh
-```
-
-## Layout
-
-```text
-AGENTS.md                 Global coding and agent behavior rules
-custom-skills/            Skills owned by this repo
-prompts/                  Reusable prompts
-workflows/                Repeatable operating procedures
-templates/                Starter files for new projects
-scripts/link.sh           Create symlinks into agent config locations
-scripts/install-tools.sh  Install Node, uv, agent CLIs, Pi, and caveman
-scripts/doctor.sh         Check expected files and links
-scripts/backup.sh         Copy current local agent files into backups/
-skills.manifest.json      List of external/curated skills to install or enable
-```
-
-## Secrets
-
-Do not commit real tokens or API keys. Keep only variable names in `.env.example`.
-
-## Typical Update
-
-```bash
-cd "$HOME/.oh-my-setting"
+cd ~/.oh-my-setting
 git pull --ff-only
 ./scripts/link.sh
 ./scripts/doctor.sh
 ```
 
-## Project Templates
+## Project Rules
 
-- `templates/project-general-AGENTS.md`: non-ML repos
-- `templates/project-ml-AGENTS.md`: ML repos
-- `templates/project-slurm-ml-AGENTS.md`: ML repos on Slurm/HPC
-
-Apply a project template without overwriting existing instructions:
+Auto-detect:
 
 ```bash
+~/.oh-my-setting/scripts/apply-project-template.sh auto /path/to/project
+```
+
+Choose explicitly:
+
+```bash
+~/.oh-my-setting/scripts/apply-project-template.sh general /path/to/project
 ~/.oh-my-setting/scripts/apply-project-template.sh ml /path/to/project
+~/.oh-my-setting/scripts/apply-project-template.sh slurm-ml /path/to/project
 ```
 
 Behavior:
 
-- If `AGENTS.md` or `CLAUDE.md` exists, append/update a fenced managed block at the end.
-- If neither exists, create `AGENTS.md`.
-- Re-running is idempotent: the managed block is replaced, handwritten content stays.
-- Compatible with Pi: Pi loads project `AGENTS.md`/`CLAUDE.md`, global `~/.pi/agent/AGENTS.md`, and skills from `~/.pi/agent/skills/`.
+- Never overwrites existing `AGENTS.md`/`CLAUDE.md`.
+- Appends/updates only the `oh-my-setting` managed block.
+- Creates `AGENTS.md` if neither file exists.
+- Works with Codex, Claude, and Pi.
 
-Available styles: `general`, `ml`, `slurm-ml`.
+Remove:
+
+```bash
+~/.oh-my-setting/scripts/remove-project-template.sh all /path/to/project
+```
+
+Detect only:
+
+```bash
+~/.oh-my-setting/scripts/detect-project-style.sh /path/to/project
+```
+
+## Templates
+
+- `general`: non-ML projects
+- `ml`: ML projects
+- `slurm-ml`: Slurm/HPC ML projects
+
+Files:
+
+```text
+templates/project-general-AGENTS.md
+templates/project-ml-AGENTS.md
+templates/project-slurm-ml-AGENTS.md
+```
+
+## Scripts
+
+```text
+install.sh                         Full install
+scripts/install-tools.sh           Install Node/uv/agent CLIs
+scripts/link.sh                    Symlink global settings
+scripts/doctor.sh                  Check install status
+scripts/backup.sh                  Back up existing settings
+scripts/apply-project-template.sh  Add/update project rules
+scripts/remove-project-template.sh Remove managed project block
+scripts/detect-project-style.sh    Detect project style
+```
+
+## Secrets
+
+Do not commit tokens or API keys. Keep variable names only in `.env.example`.
