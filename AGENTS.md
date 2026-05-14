@@ -33,6 +33,14 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Long jobs need Slurm script, logs, resources, checkpoint/resume plan.
 - Leave handoff: changed, verified, not verified, next command.
 
+## No Masking
+
+- Do not hide bugs with broad `try/except`, fallback `if`, silent `return None`, or zero padding.
+- Catch only expected exceptions; re-raise or fail loudly with context.
+- Do not patch shape/data mismatches by padding/truncating unless spec requires it.
+- Prefer validation and explicit errors over permissive recovery.
+- If padding/masking is mathematically required, document invariant and test it.
+
 ## Test Strategy
 
 - Prefer behavior/interface tests over tiny per-function tests.
