@@ -35,6 +35,12 @@
       "source": "github:JuliusBrussee/caveman",
       "enabled": true,
       "reason": "Compress agent output while preserving technical substance."
+    },
+    {
+      "name": "spec-interview",
+      "source": "custom-skills/spec-interview",
+      "enabled": true,
+      "reason": "Interview and write a spec before coding unclear or broad requests."
     }
   ]
 }

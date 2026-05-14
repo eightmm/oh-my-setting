@@ -14,6 +14,13 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Verify with the narrowest useful command. Report checks not run.
 - Explain directly: decision, risk, uncertainty, next step.
 
+## Spec Gate
+
+- For new projects/features or vague requests: interview first, spec second, code third.
+- If ambiguity affects architecture/data model/API/UX/safety, stop and ask.
+- Do not code until goal, constraints, success criteria, and verification are clear.
+- Use `custom-skills/spec-interview` when asked to start/design/build from unclear intent.
+
 ## Python Development
 
 - Use `uv` by default.
