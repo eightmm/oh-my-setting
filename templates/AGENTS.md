@@ -8,5 +8,6 @@
 - No masking bugs with broad `try/except`, fallback `if`, or zero padding.
 - Verify by interface/behavior first, not tiny per-function tests.
 - AI/ML tests: data validation -> dataloader -> model architecture -> output contract.
+- ML reliability: guard leakage, record run metadata, compare metrics to baseline.
 - Python: use `uv sync/add/run`; local `.venv`.
 - Slurm: long CPU/GPU jobs use `sbatch` or allocated `srun`; no heavy login-node work.

@@ -49,6 +49,14 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - For models, verify forward pass, loss contract, checkpoint load, inference output.
 - Add narrow unit tests only for fragile pure logic or past bugs.
 
+## ML Reliability
+
+- No fake green: do not skip/xfail/edit tests to hide failure.
+- Root cause first: trace NaN, shape mismatch, metric jump, data error upstream.
+- Guard leakage: check splits, labels, normalization fit scope, duplicate samples.
+- Reproducible runs: record command, config, seed, data version, commit, checkpoint.
+- Metrics contract: define metric before training; compare against baseline.
+
 ## Python Development
 
 - Use `uv` by default.
