@@ -48,19 +48,25 @@ partition_summary() {
         if (gres != "(null)" && gres != "") class="GPU"
         split(name, parts, "_")
         family=parts[1]
-        time=$2
+        limit=$2
         nodes[family "|" class] += $3
         cpus[family "|" class] = $5
-        times[family "|" class][time] = 1
-        if (gres != "(null)" && gres != "") greses[family "|" class][gres] = 1
+        limits[family "|" class, limit] = 1
+        if (gres != "(null)" && gres != "") greses[family "|" class, gres] = 1
       }
       END {
         for (key in nodes) {
           split(key, p, "|")
           t=""
-          for (time in times[key]) t = t (t ? ", " : "") time
+          for (idx in limits) {
+            split(idx, parts, SUBSEP)
+            if (parts[1] == key) t = t (t ? ", " : "") parts[2]
+          }
           g=""
-          for (gres in greses[key]) g = g (g ? "; " : "") gres
+          for (idx in greses) {
+            split(idx, parts, SUBSEP)
+            if (parts[1] == key) g = g (g ? "; " : "") parts[2]
+          }
           if (g == "") g = "-"
           printf "- %s %s: nodes=%d, cpus/node=%s, time=%s, gres=%s\n", p[1], p[2], nodes[key], cpus[key], t, g
         }
