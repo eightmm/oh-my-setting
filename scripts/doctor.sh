@@ -53,6 +53,8 @@ check_optional_cmd scancel
 check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"
 check_path "$HOME/.codex/AGENTS.md"
+check_path "$HOME/.claude/CLAUDE.md"
+check_path "$HOME/.gemini/GEMINI.md"
 check_path "$HOME/.codex/skills/oh-my-setting"
 check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
 check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/oh-my-setting"

@@ -42,6 +42,8 @@ link_dir() {
 }
 
 link_file "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
+link_file "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+link_file "$ROOT/AGENTS.md" "$HOME/.gemini/GEMINI.md"
 link_file "$ROOT/AGENTS.md" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
 link_dir "$ROOT/custom-skills" "$HOME/.codex/skills/oh-my-setting"
 link_dir "$ROOT/custom-skills" "$HOME/.agents/skills/oh-my-setting"

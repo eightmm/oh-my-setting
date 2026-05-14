@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 ## 설치되는 것
 
-- 전역 지침: `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`
+- 전역 지침: `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md`, `~/.pi/agent/AGENTS.md`
 - custom skills: Codex/Pi/공용 skills 경로에 symlink
 - 도구: Node, `uv`, Claude Code, Codex, Gemini CLI, Pi Agent, caveman
 
@@ -58,10 +58,11 @@ git pull --ff-only
 
 동작:
 
-- 기존 `AGENTS.md`/`CLAUDE.md`는 덮어쓰지 않는다.
+- 기존 `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`는 덮어쓰지 않는다.
 - 파일 끝에 `oh-my-setting` managed block만 추가/갱신한다.
 - 둘 다 없으면 `AGENTS.md`를 만든다.
-- Codex, Claude, Pi에서 사용할 수 있다.
+- 기존 `GEMINI.md`가 있으면 함께 갱신한다.
+- Codex, Claude, Gemini, Pi에서 사용할 수 있다.
 
 제거:
 
