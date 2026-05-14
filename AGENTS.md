@@ -24,13 +24,12 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 ## Agentic Coding
 
 - Read evidence before edit: files, call sites, tests, logs.
-- Control blast radius. High-risk: API, DB, auth, config, deps, HPC jobs.
+- Control blast radius. High-risk: API, DB, auth, config, deps, resource-heavy jobs.
 - No silent dependency/toolchain changes.
 - Define interface contract before changing CLI/API/config/file formats.
 - Verify by ladder: syntax -> focused interface test -> broader test if needed.
 - Report failed checks with command, reason, next step.
 - Destructive/irreversible work needs backup or explicit confirmation.
-- Long jobs need Slurm script, logs, resources, checkpoint/resume plan.
 - Leave handoff: changed, verified, not verified, next command.
 
 ## No Masking
@@ -47,18 +46,10 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Test behavior at module/interface boundaries.
 - Add narrow unit tests only for fragile pure logic or past bugs.
 
-## Python Development
+## Project Rules
 
-- Use `uv` by default.
-- Prefer `uv init/add/remove/sync/lock/run`; keep env in `.venv`.
-- Run scripts/tools with `uv run`.
-- Use `uv pip ...` only for legacy non-`pyproject.toml` repos.
-- Do not introduce Conda, Poetry, or raw `requirements.txt` unless already used or requested.
-
-## Slurm / HPC
-
-- If `sbatch/srun/squeue/sinfo/scancel` exist, assume Slurm workflow.
-- No long/GPU/high-CPU jobs on login nodes. Use `sbatch` or allocated `srun`.
-- For heavy jobs, confirm partition/account/time/GPU/CPU/mem/output path.
-- Prefer reproducible job scripts using project-local commands.
-- Inspect/control with `squeue -u "$USER"`, `sinfo`, `sacct`, `scancel`.
+- Prefer project `AGENTS.md`/`CLAUDE.md` over global defaults.
+- Put language, ML, data, and HPC rules in project templates.
+- Use `templates/project-general-AGENTS.md` for non-ML repos.
+- Use `templates/project-ml-AGENTS.md` for ML repos.
+- Use `templates/project-slurm-ml-AGENTS.md` for ML repos on Slurm/HPC.

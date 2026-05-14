@@ -7,7 +7,7 @@
 - Evidence before edit; no silent deps/toolchain changes.
 - No masking bugs with broad `try/except`, fallback `if`, or zero padding.
 - Verify by interface/behavior first, not tiny per-function tests.
-- Python default: `uv sync/add/run`; local `.venv`.
+- Python, if used: prefer `uv sync/add/run`; local `.venv`.
 
 ## Fill Per Project
 

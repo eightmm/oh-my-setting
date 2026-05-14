@@ -6,7 +6,7 @@
 - Evidence before edit; no silent deps/toolchain changes.
 - No broad `try/except`, fallback `if`, silent `return None`, or masking failures.
 - Tests: behavior/interface first; narrow unit tests only for fragile pure logic.
-- Python: use `uv sync/add/run`; local `.venv`.
+- Python, if used: prefer `uv sync/add/run`; local `.venv`.
 
 ## Project Commands
 
