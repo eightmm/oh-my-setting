@@ -6,9 +6,9 @@ PROJECT_DIR="${2:-$PWD}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 
 case "$STYLE" in
-  all|general|ml|slurm-ml) ;;
+  all|general|ml|slurm) ;;
   *)
-    echo "usage: $0 [all|general|ml|slurm-ml] [project_dir] [files...]" >&2
+    echo "usage: $0 [all|general|ml|slurm] [project_dir] [files...]" >&2
     exit 2
     ;;
 esac
@@ -63,7 +63,7 @@ remove_one() {
   if [ "$STYLE" = "all" ]; then
     remove_one_style "$target" "general"
     remove_one_style "$target" "ml"
-    remove_one_style "$target" "slurm-ml"
+    remove_one_style "$target" "slurm"
   else
     remove_one_style "$target" "$STYLE"
   fi

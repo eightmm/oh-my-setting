@@ -5,6 +5,7 @@ REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-auto}"
+GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
 
 run_as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -62,4 +63,14 @@ if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v
   "$DEST/scripts/generate-slurm-skill.sh"
 fi
 
+if [ "$GENERATE_MACHINE" != "0" ]; then
+  "$DEST/scripts/write-machine-snapshot.sh"
+fi
+
 "$DEST/scripts/doctor.sh"
+
+cat <<'EOF'
+
+If oh-my-setting helped, please consider starring the repo:
+  gh repo star eightmm/oh-my-setting
+EOF

@@ -30,11 +30,7 @@ has_code_text() {
 
 style="general"
 
-if exists_any "*.sbatch" "slurm*.sh" "submit*.sh"; then
-  style="slurm-ml"
-elif has_code_text "#SBATCH|sbatch|srun|SLURM_"; then
-  style="slurm-ml"
-elif exists_any "train.py" "infer.py" "inference.py" "dataset.py" "dataloader.py" "model.py" "configs" "config.yaml" "config.yml"; then
+if exists_any "train.py" "infer.py" "inference.py" "dataset.py" "dataloader.py" "model.py" "configs" "config.yaml" "config.yml"; then
   style="ml"
 elif has_code_text "torch|tensorflow|jax|sklearn|DataLoader|LightningModule|nn\\.Module"; then
   style="ml"
