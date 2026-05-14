@@ -1,7 +1,8 @@
 # Project Coding Guidelines
 
-- Keep changes focused on the requested task.
-- Prefer local project conventions over global preferences.
-- Run the narrowest useful verification command before finishing.
-- For Python, use `uv` by default: `uv sync`, `uv add`, `uv run`, and local `.venv`.
-- If Slurm is available, submit long CPU/GPU jobs with `sbatch` or allocated `srun`; avoid heavy work on login nodes.
+- Terse, explicit, low-token. Preserve meaning; remove fluff.
+- Change only task-relevant lines. Prefer local conventions.
+- Smallest correct solution. No speculative features or abstractions.
+- Verify with the narrowest useful command.
+- Python: use `uv sync/add/run`; local `.venv`.
+- Slurm: long CPU/GPU jobs use `sbatch` or allocated `srun`; no heavy login-node work.
