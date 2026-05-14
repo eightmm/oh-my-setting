@@ -31,6 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 - custom skills: Codex/Claude/Pi/공용 skills 경로에 symlink
 - 도구: Node, `uv`, Claude Code, Codex, Gemini CLI, Pi Agent, caveman
 - Slurm 정보: `sinfo`가 있으면 자동 생성
+- 출력 스타일: 연결된 모든 agent에 caveman-lite 전역 규칙 적용
 
 ## 업데이트
 

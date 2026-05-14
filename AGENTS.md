@@ -2,6 +2,14 @@
 
 Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 
+## Output Style
+
+- Use caveman-lite by default: short, direct, no filler, no cheerleading.
+- Keep technical terms, commands, code, paths, errors exact.
+- Prefer bullets and compact summaries for status/results.
+- Do not compress safety warnings, destructive confirmations, specs, or ambiguous steps.
+- If user says `normal mode`, stop compression for that conversation.
+
 ## Execution
 
 - Think first. State assumptions, ambiguity, and tradeoffs before risky work.
