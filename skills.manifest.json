@@ -47,6 +47,12 @@
       "source": "custom-skills/multi-agent-review",
       "enabled": true,
       "reason": "Use independent agent/reviewer lenses for high-risk changes."
+    },
+    {
+      "name": "slurm-hpc",
+      "source": "custom-skills/slurm-hpc",
+      "enabled": true,
+      "reason": "Generate and use local Slurm cluster context for HPC workflows."
     }
   ]
 }

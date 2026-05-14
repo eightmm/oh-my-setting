@@ -100,7 +100,19 @@ scripts/backup.sh                  기존 설정 백업
 scripts/apply-project-template.sh  프로젝트 지침 추가/갱신
 scripts/remove-project-template.sh 프로젝트 managed block 제거
 scripts/detect-project-style.sh    프로젝트 유형 감지
+scripts/generate-slurm-skill.sh    로컬 Slurm 클러스터 정보 생성
 ```
+
+## Slurm
+
+HPC login node에서:
+
+```bash
+~/.oh-my-setting/scripts/generate-slurm-skill.sh
+```
+
+`custom-skills/slurm-hpc/references/cluster.generated.md`를 생성한다.
+생성된 클러스터 정보는 git에 올리지 않는다.
 
 ## Secrets
 

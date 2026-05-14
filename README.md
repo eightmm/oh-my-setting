@@ -100,7 +100,19 @@ scripts/backup.sh                  Back up existing settings
 scripts/apply-project-template.sh  Add/update project rules
 scripts/remove-project-template.sh Remove managed project block
 scripts/detect-project-style.sh    Detect project style
+scripts/generate-slurm-skill.sh    Generate local Slurm cluster reference
 ```
+
+## Slurm
+
+On an HPC login node:
+
+```bash
+~/.oh-my-setting/scripts/generate-slurm-skill.sh
+```
+
+This writes `custom-skills/slurm-hpc/references/cluster.generated.md`.
+Generated cluster details are gitignored.
 
 ## Secrets
 

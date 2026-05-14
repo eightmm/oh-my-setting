@@ -5,7 +5,8 @@
 .cache/
 tmp/
 backups/
+local/
+custom-skills/slurm-hpc/references/cluster.generated.md
 node_modules/
 __pycache__/
 .DS_Store
-
