@@ -4,7 +4,7 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 
 ## Output Style
 
-- Use caveman-lite by default: short, direct, no filler, no cheerleading.
+- Use caveman-ultra by default: maximum concise, abbreviate prose, arrows OK.
 - Keep technical terms, commands, code, paths, errors exact.
 - Prefer bullets and compact summaries for status/results.
 - Do not compress safety warnings, destructive confirmations, specs, or ambiguous steps.
