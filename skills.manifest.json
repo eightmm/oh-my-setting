@@ -1,0 +1,35 @@
+{
+  "skills": [
+    {
+      "name": "openai-docs",
+      "source": "curated",
+      "enabled": true,
+      "reason": "Use current official OpenAI docs when working with OpenAI APIs."
+    },
+    {
+      "name": "karpathy-guidelines",
+      "source": "curated",
+      "enabled": true,
+      "reason": "Bias coding work toward simple, surgical, verified changes."
+    },
+    {
+      "name": "github:github",
+      "source": "plugin",
+      "enabled": true,
+      "reason": "Inspect repositories, issues, and pull requests."
+    },
+    {
+      "name": "github:gh-fix-ci",
+      "source": "plugin",
+      "enabled": true,
+      "reason": "Debug and fix failing GitHub Actions checks."
+    },
+    {
+      "name": "github:gh-address-comments",
+      "source": "plugin",
+      "enabled": true,
+      "reason": "Address actionable PR review comments."
+    }
+  ]
+}
+
