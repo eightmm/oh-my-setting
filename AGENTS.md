@@ -21,6 +21,26 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Do not code until goal, constraints, success criteria, and verification are clear.
 - Use `custom-skills/spec-interview` when asked to start/design/build from unclear intent.
 
+## Agentic Coding
+
+- Read evidence before edit: files, call sites, tests, logs.
+- Control blast radius. High-risk: API, DB, auth, config, deps, HPC jobs.
+- No silent dependency/toolchain changes.
+- Define interface contract before changing CLI/API/config/file formats.
+- Verify by ladder: syntax -> focused interface test -> broader test if needed.
+- Report failed checks with command, reason, next step.
+- Destructive/irreversible work needs backup or explicit confirmation.
+- Long jobs need Slurm script, logs, resources, checkpoint/resume plan.
+- Leave handoff: changed, verified, not verified, next command.
+
+## Test Strategy
+
+- Prefer behavior/interface tests over tiny per-function tests.
+- AI/ML priority: data validation -> dataloader batch -> model architecture -> output contract.
+- Test shapes, dtypes, masks, devices, seeds, NaN/Inf, empty/small batches.
+- For models, verify forward pass, loss contract, checkpoint load, inference output.
+- Add narrow unit tests only for fragile pure logic or past bugs.
+
 ## Python Development
 
 - Use `uv` by default.
