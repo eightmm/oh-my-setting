@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILED=0
 
+load_user_tool_paths() {
+  export PATH="$HOME/.local/bin:$PATH"
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+    nvm use default >/dev/null 2>&1 || true
+  fi
+}
+
 check_cmd() {
   if command -v "$1" >/dev/null 2>&1; then
     echo "ok: command $1"
@@ -42,6 +53,8 @@ check_custom_skills() {
     check_path "$target_root/$name/SKILL.md"
   done
 }
+
+load_user_tool_paths
 
 check_cmd git
 check_cmd curl

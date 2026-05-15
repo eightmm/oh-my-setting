@@ -78,6 +78,17 @@ install_git_if_missing() {
   fi
 }
 
+load_user_tool_paths() {
+  export PATH="$HOME/.local/bin:$PATH"
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+    nvm use default >/dev/null 2>&1 || true
+  fi
+}
+
 install_git_if_missing
 
 if [ -d "$DEST/.git" ]; then
@@ -94,6 +105,7 @@ if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
 fi
 
 "$DEST/scripts/install-tools.sh"
+load_user_tool_paths
 
 "$DEST/scripts/link.sh"
 
@@ -106,6 +118,16 @@ if [ "$GENERATE_MACHINE" != "0" ]; then
 fi
 
 "$DEST/scripts/doctor.sh"
+
+if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+  cat <<'EOF'
+
+If this shell still cannot find npm-installed CLIs, open a new shell or run:
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  nvm use default
+EOF
+fi
 
 prompt_star_repo() {
   if [ "$STAR_PROMPT" = "0" ]; then

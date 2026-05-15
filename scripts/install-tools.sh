@@ -21,6 +21,19 @@ load_nvm() {
   fi
 }
 
+ensure_local_bin_path() {
+  local line='export PATH="$HOME/.local/bin:$PATH"'
+
+  export PATH="$HOME/.local/bin:$PATH"
+  mkdir -p "$HOME/.local/bin"
+
+  if [ -f "$HOME/.bashrc" ] && grep -Fqx "$line" "$HOME/.bashrc"; then
+    return 0
+  fi
+
+  printf '\n%s\n' "$line" >> "$HOME/.bashrc"
+}
+
 install_nvm() {
   if [ -s "$NVM_DIR/nvm.sh" ]; then
     return 0
@@ -86,6 +99,36 @@ install_npm_global() {
   npm install -g "$package"
 }
 
+write_npm_shim() {
+  local binary="$1"
+  local actual
+  local target="$HOME/.local/bin/$binary"
+
+  actual="$(command -v "$binary" 2>/dev/null || true)"
+  case "$actual" in
+    "$NVM_DIR"/*) ;;
+    *) return 0 ;;
+  esac
+
+  mkdir -p "$HOME/.local/bin"
+  cat > "$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+export NVM_DIR="\${NVM_DIR:-\$HOME/.nvm}"
+if [ -s "\$NVM_DIR/nvm.sh" ]; then
+  # shellcheck disable=SC1091
+  . "\$NVM_DIR/nvm.sh"
+  nvm use default >/dev/null 2>&1 || true
+fi
+
+prefix="\$(npm prefix -g)"
+exec "\$prefix/bin/$binary" "\$@"
+EOF
+  chmod +x "$target"
+  echo "ok: shim $target"
+}
+
 ensure_uv() {
   export PATH="$HOME/.local/bin:$PATH"
 
@@ -111,6 +154,7 @@ ensure_uv() {
   echo "ok: uv $(uv --version)"
 }
 
+ensure_local_bin_path
 ensure_node
 ensure_writable_npm_global
 ensure_uv
@@ -119,5 +163,10 @@ install_npm_global "@anthropic-ai/claude-code" "claude"
 install_npm_global "@openai/codex" "codex"
 install_npm_global "@google/gemini-cli" "gemini"
 install_npm_global "@earendil-works/pi-coding-agent" "pi"
+
+write_npm_shim "claude"
+write_npm_shim "codex"
+write_npm_shim "gemini"
+write_npm_shim "pi"
 
 echo "tools: ok"

@@ -3,6 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+load_user_tool_paths() {
+  export PATH="$HOME/.local/bin:$PATH"
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+    nvm use default >/dev/null 2>&1 || true
+  fi
+}
+
 tool_status() {
   local name="$1"
   if command -v "$name" >/dev/null 2>&1; then
@@ -43,6 +54,8 @@ file_status() {
     printf -- '- %s: missing\n' "$path"
   fi
 }
+
+load_user_tool_paths
 
 printf '# oh-my-setting status\n\n'
 printf -- '- root: %s\n' "$ROOT"
