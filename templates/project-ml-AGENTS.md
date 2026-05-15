@@ -8,6 +8,12 @@
 - Do not patch shape/data mismatches by padding/truncating unless spec requires it.
 - Python: use `uv sync/add/run`; local `.venv`.
 
+## Output And Artifacts
+
+- Compact, direct, low-token. Fragments and arrows OK when clear.
+- Commit messages: Conventional Commits; subject <= 50 chars; body only for non-obvious why/risk.
+- Markdown/docs: short sections, bullets, direct commands; keep setup, safety, and specs explicit.
+
 ## ML Startup Workflow
 
 1. Skeleton: create missing standard directories only. No model, training, data processing, or dependency changes yet.

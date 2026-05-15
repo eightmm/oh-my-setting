@@ -9,6 +9,12 @@
 - Verify by interface/behavior first, not tiny per-function tests.
 - Python, if used: prefer `uv sync/add/run`; local `.venv`.
 
+## Output And Artifacts
+
+- Compact, direct, low-token. Fragments and arrows OK when clear.
+- Commit messages: Conventional Commits; subject <= 50 chars; body only for non-obvious why/risk.
+- Markdown/docs: short sections, bullets, direct commands; keep setup, safety, and specs explicit.
+
 ## Fill Per Project
 
 - Setup:

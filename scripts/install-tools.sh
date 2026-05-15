@@ -4,7 +4,6 @@ set -euo pipefail
 NODE_VERSION="${OH_MY_SETTING_NODE_VERSION:-lts/*}"
 NVM_VERSION="${OH_MY_SETTING_NVM_VERSION:-v0.40.3}"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-INSTALL_CAVEMAN="${OH_MY_SETTING_INSTALL_CAVEMAN:-1}"
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
@@ -120,10 +119,5 @@ install_npm_global "@anthropic-ai/claude-code" "claude"
 install_npm_global "@openai/codex" "codex"
 install_npm_global "@google/gemini-cli" "gemini"
 install_npm_global "@earendil-works/pi-coding-agent" "pi"
-
-if [ "$INSTALL_CAVEMAN" != "0" ]; then
-  echo "installing caveman for detected agents"
-  curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh | bash
-fi
 
 echo "tools: ok"

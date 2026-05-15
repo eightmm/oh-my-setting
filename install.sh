@@ -69,8 +69,33 @@ fi
 
 "$DEST/scripts/doctor.sh"
 
-cat <<'EOF'
+prompt_star_repo() {
+  cat <<'EOF'
 
 If oh-my-setting helped, please consider starring the repo:
   gh repo star eightmm/oh-my-setting
 EOF
+
+  if ! command -v gh >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ ! -r /dev/tty ]; then
+    return 0
+  fi
+
+  printf 'Star it now with gh? [y/N] ' >/dev/tty
+  IFS= read -r answer </dev/tty || return 0
+
+  case "$answer" in
+    y|Y|yes|YES|Yes)
+      if gh repo star eightmm/oh-my-setting; then
+        echo "ok: starred eightmm/oh-my-setting"
+      else
+        echo "warning: failed to star repo with gh; you can run it manually later" >&2
+      fi
+      ;;
+  esac
+}
+
+prompt_star_repo

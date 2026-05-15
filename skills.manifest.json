@@ -13,12 +13,6 @@
       "reason": "Use local git and gh CLI for repository, PR, issue, and CI work without MCP."
     },
     {
-      "name": "caveman",
-      "source": "github:JuliusBrussee/caveman",
-      "enabled": true,
-      "reason": "Compress agent output while preserving technical substance."
-    },
-    {
       "name": "spec-interview",
       "source": "custom-skills/spec-interview",
       "enabled": true,

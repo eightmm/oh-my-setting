@@ -4,11 +4,19 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 
 ## Output Style
 
-- Use caveman-ultra by default: maximum concise, abbreviate prose, arrows OK.
+- Default: compact, direct, low-token. Fragments and arrows OK when clear.
+- Cut filler, greetings, repeated caveats, and unnecessary hedging.
 - Keep technical terms, commands, code, paths, errors exact.
 - Prefer bullets and compact summaries for status/results.
 - Do not compress safety warnings, destructive confirmations, specs, or ambiguous steps.
-- If user says `normal mode`, stop compression for that conversation.
+- If user asks for `normal mode` or more detail, expand for that conversation.
+
+## Artifact Style
+
+- Commit messages: Conventional Commits; subject <= 50 chars; body only for non-obvious why, risk, or breaking change.
+- Markdown/docs: short sections, bullets, direct commands; remove repeated explanation.
+- Keep setup, recovery, safety, and spec text explicit even if longer.
+- Review/comments: one actionable point per line when possible; do not sacrifice clarity for compression.
 
 ## Execution
 
