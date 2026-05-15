@@ -180,5 +180,5 @@ Do not commit tokens, API keys, private data, generated cluster details, or loca
 If this helped:
 
 ```bash
-gh repo star eightmm/oh-my-setting
+gh api --method PUT /user/starred/eightmm/oh-my-setting
 ```

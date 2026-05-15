@@ -73,7 +73,7 @@ prompt_star_repo() {
   cat <<'EOF'
 
 If oh-my-setting helped, please consider starring the repo:
-  gh repo star eightmm/oh-my-setting
+  gh api --method PUT /user/starred/eightmm/oh-my-setting
 EOF
 
   if ! command -v gh >/dev/null 2>&1; then
@@ -89,10 +89,10 @@ EOF
 
   case "$answer" in
     y|Y|yes|YES|Yes)
-      if gh repo star eightmm/oh-my-setting; then
+      if gh api --method PUT /user/starred/eightmm/oh-my-setting >/dev/null; then
         echo "ok: starred eightmm/oh-my-setting"
       else
-        echo "warning: failed to star repo with gh; you can run it manually later" >&2
+        echo "warning: failed to star repo with gh api; you can run it manually later" >&2
       fi
       ;;
   esac

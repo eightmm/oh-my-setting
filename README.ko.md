@@ -180,5 +180,5 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 도움이 됐다면:
 
 ```bash
-gh repo star eightmm/oh-my-setting
+gh api --method PUT /user/starred/eightmm/oh-my-setting
 ```
