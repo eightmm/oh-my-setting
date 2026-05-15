@@ -51,6 +51,12 @@ else
   git clone "$REPO_URL" "$DEST"
 fi
 
+# Continue from the updated checkout so old piped/local installers do not run stale logic.
+if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
+  export OH_MY_SETTING_REEXECED=1
+  exec bash "$DEST/install.sh"
+fi
+
 if [ "$INSTALL_TOOLS" != "0" ]; then
   "$DEST/scripts/install-tools.sh"
 else
