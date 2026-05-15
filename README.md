@@ -4,6 +4,15 @@ Sync agent rules, skills, and project templates across machines.
 
 [한국어](README.ko.md)
 
+## Local-First Agents
+
+oh-my-setting keeps agent work local and shell-visible by default:
+
+- No MCP servers, app connectors, or plugin connector tools.
+- Use local files, shell commands, `git`, and `gh` CLI.
+- Multi-agent review stays local: Codex, Claude Code, Gemini, or Pi CLI when available.
+- If local multi-agent tools are missing, run a single-agent review and report that limitation.
+
 ## Install
 
 ```bash
@@ -12,20 +21,23 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 Existing installs update to the latest checkout before setup continues.
 
-Inspect first:
+Options:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh -o /tmp/oh-my-setting-install.sh
-less /tmp/oh-my-setting-install.sh
-bash /tmp/oh-my-setting-install.sh
+OH_MY_SETTING_GENERATE_MACHINE=0  # skip machine snapshot
+OH_MY_SETTING_GENERATE_SLURM=0    # skip Slurm snapshot
+OH_MY_SETTING_DIR=/path/to/dir    # install location
 ```
 
-## Local-First Agents
+Installed paths:
 
-- No MCP servers, app connectors, or plugin connector tools.
-- Use local files, shell commands, `git`, and `gh` CLI.
-- Multi-agent review stays local: Codex, Claude Code, Gemini, or Pi CLI when available.
-- If local multi-agent tools are missing, run a single-agent review and report that limitation.
+```text
+~/.codex/AGENTS.md
+~/.claude/CLAUDE.md
+~/.gemini/GEMINI.md
+~/.pi/agent/AGENTS.md
+~/.oh-my-setting/local/machine.md
+```
 
 ## Project Setup
 
@@ -96,7 +108,7 @@ Report:
 - recommended next prompt
 ```
 
-## ML Workflow
+## ML Projects
 
 ```bash
 mkdir my-project
@@ -104,19 +116,19 @@ cd my-project
 ~/.oh-my-setting/scripts/apply-project-template.sh ml .
 ```
 
-Then ask the agent to start the project. It should:
+Expected agent flow:
 
-1. create only the safe skeleton,
-2. interview,
-3. fill/confirm `PROJECT.md`,
-4. code after confirmation.
+1. create only the safe skeleton
+2. interview
+3. fill/confirm `PROJECT.md`
+4. code after confirmation
 
 ML projects use:
 
 - `uv sync`
 - local `.venv`
 - `uv run ...`
-- machine snapshot from `~/.oh-my-setting/local/machine.md`
+- machine snapshot only when compute, GPU/CUDA, Slurm, memory, or environment details affect the task
 
 ## Local Snapshots
 
@@ -153,7 +165,9 @@ Include raw Slurm outputs:
 OH_MY_SETTING_SLURM_WRITE_RAW=1 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
 ```
 
-## Update
+## Maintenance
+
+Update:
 
 ```bash
 cd ~/.oh-my-setting
@@ -163,7 +177,7 @@ git pull --ff-only
 ./scripts/doctor.sh
 ```
 
-## Unlink
+Unlink:
 
 Remove oh-my-setting symlinks and restore the latest matching
 `*.backup.TIMESTAMP` files when present:
@@ -175,31 +189,13 @@ Remove oh-my-setting symlinks and restore the latest matching
 It only removes symlinks that point to the current oh-my-setting checkout.
 Existing regular files and unrelated symlinks are skipped.
 
-Preview first:
+Preview unlink:
 
 ```bash
 OH_MY_SETTING_DRY_RUN=1 ~/.oh-my-setting/scripts/unlink.sh
 ```
 
-## Install Flags
-
-```bash
-OH_MY_SETTING_GENERATE_MACHINE=0  # skip machine snapshot
-OH_MY_SETTING_GENERATE_SLURM=0    # skip Slurm snapshot
-OH_MY_SETTING_DIR=/path/to/dir    # install location
-```
-
-## Installed Paths
-
-```text
-~/.codex/AGENTS.md
-~/.claude/CLAUDE.md
-~/.gemini/GEMINI.md
-~/.pi/agent/AGENTS.md
-~/.oh-my-setting/local/machine.md
-```
-
-## Secrets
+## Safety
 
 Do not commit tokens, API keys, private data, generated cluster details, or local machine details.
 
