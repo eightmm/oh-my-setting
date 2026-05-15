@@ -67,6 +67,40 @@ Detect only:
 ~/.oh-my-setting/scripts/detect-project-style.sh .
 ```
 
+## Agent Prompts
+
+New project:
+
+```text
+Use the local oh-my-setting project workflow. Do not code yet.
+
+Start a new project by creating only the safe skeleton, then interview me to
+fill PROJECT.md before implementation.
+
+Success criteria:
+- clarify goal, users, non-goals, interface, data, paths, commands, risks, and verification
+- write or update PROJECT.md with confirmed answers
+- wait for confirmation before source code, dependency, API, data, or compute changes
+- report changed files and checks
+```
+
+Existing project:
+
+```text
+Read local project files first. Start by inspecting AGENTS.md/CLAUDE.md,
+PROJECT.md if present, README, pyproject/configs, and git status. Do not edit yet.
+
+Goal: understand this existing project and propose the smallest safe next step
+to onboard or continue it with oh-my-setting rules.
+
+Report:
+- project type and current structure
+- setup/test/run commands you can infer
+- missing or draft PROJECT.md fields
+- risks before editing
+- recommended next prompt
+```
+
 ## ML Workflow
 
 ```bash
