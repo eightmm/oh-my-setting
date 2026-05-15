@@ -134,6 +134,24 @@ git pull --ff-only
 ./scripts/doctor.sh
 ```
 
+## Unlink
+
+Remove oh-my-setting symlinks and restore the latest matching
+`*.backup.TIMESTAMP` files when present:
+
+```bash
+~/.oh-my-setting/scripts/unlink.sh
+```
+
+It only removes symlinks that point to the current oh-my-setting checkout.
+Existing regular files and unrelated symlinks are skipped.
+
+Preview first:
+
+```bash
+OH_MY_SETTING_DRY_RUN=1 ~/.oh-my-setting/scripts/unlink.sh
+```
+
 ## Install Flags
 
 ```bash

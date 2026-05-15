@@ -134,6 +134,24 @@ git pull --ff-only
 ./scripts/doctor.sh
 ```
 
+## 연결 해제
+
+oh-my-setting symlink를 제거하고 최신 `*.backup.TIMESTAMP` 파일이 있으면
+자동으로 복원한다:
+
+```bash
+~/.oh-my-setting/scripts/unlink.sh
+```
+
+현재 oh-my-setting checkout을 가리키는 symlink만 제거한다. 일반 파일이나
+다른 곳을 가리키는 symlink는 건드리지 않는다.
+
+먼저 확인:
+
+```bash
+OH_MY_SETTING_DRY_RUN=1 ~/.oh-my-setting/scripts/unlink.sh
+```
+
 ## 설치 옵션
 
 ```bash
