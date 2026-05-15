@@ -10,19 +10,14 @@ Sync agent rules, skills, and project templates across machines.
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
+Existing installs update to the latest checkout before setup continues.
+
 Inspect first:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh -o /tmp/oh-my-setting-install.sh
 less /tmp/oh-my-setting-install.sh
 bash /tmp/oh-my-setting-install.sh
-```
-
-Settings only, no tool install:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | \
-  OH_MY_SETTING_INSTALL_TOOLS=0 bash
 ```
 
 ## Local-First Agents
@@ -189,7 +184,6 @@ OH_MY_SETTING_DRY_RUN=1 ~/.oh-my-setting/scripts/unlink.sh
 ## Install Flags
 
 ```bash
-OH_MY_SETTING_INSTALL_TOOLS=0      # link settings only
 OH_MY_SETTING_GENERATE_MACHINE=0  # skip machine snapshot
 OH_MY_SETTING_GENERATE_SLURM=0    # skip Slurm snapshot
 OH_MY_SETTING_DIR=/path/to/dir    # install location

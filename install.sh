@@ -3,7 +3,6 @@ set -euo pipefail
 
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
-INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-auto}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
 
@@ -57,11 +56,7 @@ if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   exec bash "$DEST/install.sh"
 fi
 
-if [ "$INSTALL_TOOLS" != "0" ]; then
-  "$DEST/scripts/install-tools.sh"
-else
-  export OH_MY_SETTING_REQUIRE_TOOLS=0
-fi
+"$DEST/scripts/install-tools.sh"
 
 "$DEST/scripts/link.sh"
 

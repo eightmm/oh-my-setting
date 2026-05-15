@@ -24,8 +24,8 @@ Use for high-risk diffs or explicit requests: `multi-agent review`, `cross-check
 
 ## Local Tool Preference
 
-Before choosing tools, read `~/.oh-my-setting/local/machine.md` if present and
-use the recorded `Local Agent CLI Paths` for Codex, Claude Code, and Gemini.
+Read `~/.oh-my-setting/local/machine.md` only when compute, GPU/CUDA, Slurm,
+memory, or environment differences affect the review.
 
 If available, prefer installed local agent CLIs:
 

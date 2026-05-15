@@ -10,19 +10,14 @@
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
+기존 설치는 최신 checkout으로 갱신한 뒤 설정을 계속 진행한다.
+
 검토 후 실행:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh -o /tmp/oh-my-setting-install.sh
 less /tmp/oh-my-setting-install.sh
 bash /tmp/oh-my-setting-install.sh
-```
-
-도구 설치 없이 설정만 연결:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | \
-  OH_MY_SETTING_INSTALL_TOOLS=0 bash
 ```
 
 ## 로컬 우선 Agent
@@ -189,7 +184,6 @@ OH_MY_SETTING_DRY_RUN=1 ~/.oh-my-setting/scripts/unlink.sh
 ## 설치 옵션
 
 ```bash
-OH_MY_SETTING_INSTALL_TOOLS=0      # 설정만 연결
 OH_MY_SETTING_GENERATE_MACHINE=0  # 머신 스냅샷 생략
 OH_MY_SETTING_GENERATE_SLURM=0    # Slurm 스냅샷 생략
 OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
