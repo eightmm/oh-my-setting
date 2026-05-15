@@ -12,6 +12,5 @@ fi
 echo "External skills are tracked in:"
 echo "$MANIFEST"
 echo
-echo "Install curated or plugin-provided skills with the target agent's skill installer."
+echo "Install curated skills with the target agent's skill installer."
 echo "Keep custom skills in $ROOT/custom-skills."
-

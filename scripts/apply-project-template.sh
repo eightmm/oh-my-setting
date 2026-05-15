@@ -26,9 +26,11 @@ has_slurm_project() {
   if command -v rg >/dev/null 2>&1; then
     rg -q "#SBATCH" "$PROJECT_DIR" \
       -g '*.sh' -g '*.sbatch' \
+      -g '!scripts/apply-project-template.sh' \
       -g '!/.git' -g '!/.venv' -g '!node_modules' -g '!__pycache__' 2>/dev/null
   else
     find "$PROJECT_DIR" -maxdepth 3 -type f \( -name '*.sh' -o -name '*.sbatch' \) \
+      ! -path "$PROJECT_DIR/scripts/apply-project-template.sh" \
       -exec grep -q "#SBATCH" {} \; -print -quit 2>/dev/null | grep -q .
   fi
 }

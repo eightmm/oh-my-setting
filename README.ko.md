@@ -25,6 +25,13 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
   OH_MY_SETTING_INSTALL_TOOLS=0 bash
 ```
 
+## 로컬 우선 Agent
+
+- MCP server, app connector, plugin connector tool은 사용하지 않는다.
+- 로컬 파일, shell command, `git`, `gh` CLI를 우선 사용한다.
+- Multi-agent review도 로컬 기반으로만 수행한다: Codex, Claude Code, Gemini, Pi CLI.
+- 로컬 multi-agent 도구가 없으면 single-agent review로 진행하고 한계를 명시한다.
+
 ## 프로젝트 적용
 
 자동 감지:
@@ -95,6 +102,9 @@ ML 프로젝트 기본:
 ```text
 ~/.oh-my-setting/local/machine.md
 ```
+
+Codex, Claude Code, Gemini, Pi, `gh` 같은 로컬 agent CLI 경로도 감지되면
+함께 기록한다.
 
 Slurm 스펙:
 

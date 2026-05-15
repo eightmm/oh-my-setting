@@ -62,6 +62,7 @@ check_optional_cmd srun
 check_optional_cmd squeue
 check_optional_cmd sinfo
 check_optional_cmd scancel
+check_optional_cmd gh
 
 check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"

@@ -25,6 +25,13 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
   OH_MY_SETTING_INSTALL_TOOLS=0 bash
 ```
 
+## Local-First Agents
+
+- No MCP servers, app connectors, or plugin connector tools.
+- Use local files, shell commands, `git`, and `gh` CLI.
+- Multi-agent review stays local: Codex, Claude Code, Gemini, or Pi CLI when available.
+- If local multi-agent tools are missing, run a single-agent review and report that limitation.
+
 ## Project Setup
 
 Auto-detect:
@@ -95,6 +102,9 @@ Writes:
 ```text
 ~/.oh-my-setting/local/machine.md
 ```
+
+Also records local agent CLI paths for Codex, Claude Code, Gemini, Pi, and
+`gh` when found.
 
 Slurm snapshot:
 

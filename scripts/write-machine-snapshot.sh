@@ -71,6 +71,15 @@ slurm_status() {
   fi
 }
 
+tool_path() {
+  local name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+  else
+    printf 'not detected\n'
+  fi
+}
+
 mkdir -p "$(dirname "$OUT")"
 
 {
@@ -90,6 +99,12 @@ mkdir -p "$(dirname "$OUT")"
   printf -- '- Python: %s\n' "$(first_line python3 --version || printf 'not detected')"
   printf -- '- uv: %s\n' "$(first_line uv --version || printf 'not detected')"
   printf -- '- Slurm: %s\n' "$(slurm_status)"
+  printf '\n## Local Agent CLI Paths\n\n'
+  printf -- '- Codex CLI: %s\n' "$(tool_path codex)"
+  printf -- '- Claude Code CLI: %s\n' "$(tool_path claude)"
+  printf -- '- Gemini CLI: %s\n' "$(tool_path gemini)"
+  printf -- '- pi: %s\n' "$(tool_path pi)"
+  printf -- '- gh: %s\n' "$(tool_path gh)"
   printf '\n## Notes\n\n'
   printf -- '- Project envs should stay local at `.venv` and run through `uv`.\n'
   printf -- '- Keep private usernames, accounts, tokens, and mount paths out of this file.\n'

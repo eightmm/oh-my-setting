@@ -32,6 +32,12 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Do not print full logs; show only relevant lines.
 - Stop searching once evidence is enough.
 
+## Tool Policy
+
+- Do not use MCP servers, app connectors, or plugin connector tools.
+- Prefer local files, shell commands, `git`, and `gh` CLI.
+- If a task seems to require MCP/connector access, state the missing local path or CLI command instead.
+
 ## Stop Conditions
 
 - Stop if `PROJECT.md` is draft and the task is broad/new.
