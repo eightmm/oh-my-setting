@@ -165,19 +165,7 @@ Slurm raw 출력까지 저장:
 OH_MY_SETTING_SLURM_WRITE_RAW=1 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
 ```
 
-## 유지보수
-
-업데이트:
-
-```bash
-cd ~/.oh-my-setting
-git pull --ff-only
-./scripts/link.sh
-./scripts/write-machine-snapshot.sh
-./scripts/doctor.sh
-```
-
-연결 해제:
+## 연결 해제
 
 oh-my-setting symlink를 제거하고 최신 `*.backup.TIMESTAMP` 파일이 있으면
 자동으로 복원한다:

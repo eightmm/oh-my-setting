@@ -165,19 +165,7 @@ Include raw Slurm outputs:
 OH_MY_SETTING_SLURM_WRITE_RAW=1 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
 ```
 
-## Maintenance
-
-Update:
-
-```bash
-cd ~/.oh-my-setting
-git pull --ff-only
-./scripts/link.sh
-./scripts/write-machine-snapshot.sh
-./scripts/doctor.sh
-```
-
-Unlink:
+## Unlink
 
 Remove oh-my-setting symlinks and restore the latest matching
 `*.backup.TIMESTAMP` files when present:
