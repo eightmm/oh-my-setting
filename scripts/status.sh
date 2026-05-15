@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+tool_status() {
+  local name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    printf -- '- %s: %s\n' "$name" "$(command -v "$name")"
+  else
+    printf -- '- %s: missing\n' "$name"
+  fi
+}
+
+link_status() {
+  local target="$1"
+  local expected="$2"
+  local current
+
+  if [ -L "$target" ]; then
+    current="$(readlink "$target")"
+    if [ "$current" = "$expected" ]; then
+      printf -- '- %s: linked\n' "$target"
+    else
+      printf -- '- %s: linked elsewhere -> %s\n' "$target" "$current"
+    fi
+  elif [ -e "$target" ]; then
+    printf -- '- %s: regular file\n' "$target"
+  else
+    printf -- '- %s: missing\n' "$target"
+  fi
+}
+
+file_status() {
+  local path="$1"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if modified="$(stat -c '%y' "$path" 2>/dev/null)"; then
+      printf -- '- %s: present, updated %s\n' "$path" "${modified%%.*}"
+    else
+      printf -- '- %s: present\n' "$path"
+    fi
+  else
+    printf -- '- %s: missing\n' "$path"
+  fi
+}
+
+printf '# oh-my-setting status\n\n'
+printf -- '- root: %s\n' "$ROOT"
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf -- '- branch: %s\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+  printf -- '- commit: %s\n' "$(git -C "$ROOT" rev-parse --short HEAD)"
+fi
+
+printf '\n## Agent config links\n\n'
+link_status "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
+link_status "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
+link_status "$HOME/.gemini/GEMINI.md" "$ROOT/AGENTS.md"
+link_status "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
+
+printf '\n## Required tools\n\n'
+for tool in git curl node npm uv claude codex gemini pi; do
+  tool_status "$tool"
+done
+
+printf '\n## Optional tools\n\n'
+for tool in gh sbatch srun squeue sinfo scancel; do
+  tool_status "$tool"
+done
+
+printf '\n## Snapshots\n\n'
+file_status "$ROOT/local/machine.md"
+file_status "$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md"

@@ -13,6 +13,17 @@ oh-my-setting keeps agent work local and shell-visible by default:
 - Multi-agent review stays local: Codex, Claude Code, Gemini, or Pi CLI when available.
 - If local multi-agent tools are missing, run a single-agent review and report that limitation.
 
+## Quickstart
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
+cd /path/to/project
+~/.oh-my-setting/scripts/apply-project-template.sh auto .
+```
+
+Then paste the matching prompt from [Agent Prompts](#agent-prompts) into the
+agent.
+
 ## Install
 
 ```bash
@@ -24,10 +35,14 @@ Existing installs update to the latest checkout before setup continues.
 Options:
 
 ```bash
+OH_MY_SETTING_STAR_PROMPT=0       # skip GitHub star prompt
 OH_MY_SETTING_GENERATE_MACHINE=0  # skip machine snapshot
 OH_MY_SETTING_GENERATE_SLURM=0    # skip Slurm snapshot
 OH_MY_SETTING_DIR=/path/to/dir    # install location
 ```
+
+When running a local installer, `--no-star` is equivalent to
+`OH_MY_SETTING_STAR_PROMPT=0`.
 
 Installed paths:
 
@@ -37,6 +52,12 @@ Installed paths:
 ~/.gemini/GEMINI.md
 ~/.pi/agent/AGENTS.md
 ~/.oh-my-setting/local/machine.md
+```
+
+Check current install status:
+
+```bash
+~/.oh-my-setting/scripts/status.sh
 ```
 
 ## Project Setup

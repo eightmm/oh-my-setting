@@ -13,6 +13,16 @@ oh-my-setting은 agent 작업을 기본적으로 로컬과 shell에서 보이게
 - Multi-agent review도 로컬 기반으로만 수행한다: Codex, Claude Code, Gemini, Pi CLI.
 - 로컬 multi-agent 도구가 없으면 single-agent review로 진행하고 한계를 명시한다.
 
+## 빠른 시작
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
+cd /path/to/project
+~/.oh-my-setting/scripts/apply-project-template.sh auto .
+```
+
+그 다음 [Agent 시작 문구](#agent-시작-문구)에서 맞는 문구를 agent에 붙여넣는다.
+
 ## 설치
 
 ```bash
@@ -24,10 +34,13 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 옵션:
 
 ```bash
+OH_MY_SETTING_STAR_PROMPT=0       # GitHub star prompt 생략
 OH_MY_SETTING_GENERATE_MACHINE=0  # 머신 스냅샷 생략
 OH_MY_SETTING_GENERATE_SLURM=0    # Slurm 스냅샷 생략
 OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 ```
+
+로컬 installer를 실행할 때는 `--no-star`가 `OH_MY_SETTING_STAR_PROMPT=0`과 같다.
 
 설치 경로:
 
@@ -37,6 +50,12 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 ~/.gemini/GEMINI.md
 ~/.pi/agent/AGENTS.md
 ~/.oh-my-setting/local/machine.md
+```
+
+현재 설치 상태 확인:
+
+```bash
+~/.oh-my-setting/scripts/status.sh
 ```
 
 ## 프로젝트 적용

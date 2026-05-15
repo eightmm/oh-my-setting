@@ -5,6 +5,43 @@ REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-auto}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
+STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-1}"
+
+usage() {
+  cat <<'EOF'
+Usage: install.sh [--no-star] [--help]
+
+Options:
+  --no-star   Skip the GitHub star prompt.
+  --help      Show this help.
+
+Environment:
+  OH_MY_SETTING_STAR_PROMPT=0      Skip the GitHub star prompt.
+  OH_MY_SETTING_GENERATE_MACHINE=0 Skip machine snapshot generation.
+  OH_MY_SETTING_GENERATE_SLURM=0   Skip Slurm snapshot generation.
+  OH_MY_SETTING_DIR=/path/to/dir   Install location.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-star)
+      STAR_PROMPT=0
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"
 
 run_as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -71,6 +108,10 @@ fi
 "$DEST/scripts/doctor.sh"
 
 prompt_star_repo() {
+  if [ "$STAR_PROMPT" = "0" ]; then
+    return 0
+  fi
+
   cat <<'EOF'
 
 If oh-my-setting helped, please consider starring the repo:
