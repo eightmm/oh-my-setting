@@ -214,10 +214,7 @@ apply_one() {
 
   mkdir -p "$dir"
 
-  if [ "$DRY_RUN" = "1" ]; then
-    echo "would update $target with $style template"
-    return 0
-  fi
+  [ "$DRY_RUN" = "1" ] && return 0
 
   local tmp
   tmp="$(mktemp)"
@@ -241,15 +238,28 @@ apply_one() {
   } >> "$tmp"
 
   mv "$tmp" "$target"
-  echo "updated $target"
 }
 
 for f in "${FILES[@]}"; do
+  applied=()
   if [ -n "$BASE_STYLE" ]; then
     apply_one "$f" "$BASE_STYLE" "$TEMPLATE"
+    applied+=("$BASE_STYLE")
   fi
   if [ "$ADD_SLURM" = "1" ]; then
     apply_one "$f" "slurm" "$SLURM_TEMPLATE"
+    applied+=("slurm")
+  fi
+  if [ "${#applied[@]}" -gt 0 ]; then
+    styles="${applied[0]}"
+    for style in "${applied[@]:1}"; do
+      styles="$styles, $style"
+    done
+    if [ "$DRY_RUN" = "1" ]; then
+      printf 'would update %s/%s: %s\n' "$PROJECT_DIR" "$f" "$styles"
+    else
+      printf 'updated %s/%s: %s\n' "$PROJECT_DIR" "$f" "$styles"
+    fi
   fi
 done
 

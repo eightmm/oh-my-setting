@@ -26,10 +26,32 @@ Use when request is vague, new, broad, architecture-shaping, or says:
 ## Question Rules
 
 - Ask only questions that change implementation or verification.
+- Prefer native question UI tools when available, such as Codex
+  `request_user_input` or Claude Code `AskUserQuestion`; otherwise use
+  Markdown.
 - Prefer multiple-choice when options are known.
-- If one default is clearly best, state it as recommended.
+- Offer 2-4 choices for each question when practical.
+- If one default is clearly best, mark it `(recommended)` and explain why in
+  one short phrase.
+- Always leave a free-form escape hatch: `Other: ...`.
+- Let the user answer compactly, such as `1A 2B 3D: custom detail`.
 - Move stage by stage; do not ask every possible question at once.
 - Stop asking when remaining unknowns are local and low risk.
+
+## Question Format
+
+When native question UI is available, present one question at a time with
+choices and an `Other` option.
+
+When using Markdown, format questions like:
+
+```md
+1. Phase 1 exit metric?
+   A. Pearson >= 0.65 on cold-protein CV (recommended) - matches current goal.
+   B. Spearman >= 0.65 - rank-focused.
+   C. RMSE <= 0.8 - error-focused.
+   D. Other: specify metric and threshold.
+```
 
 ## Blockers
 
