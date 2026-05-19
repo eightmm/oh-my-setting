@@ -37,6 +37,36 @@ If available, prefer installed local agent CLIs:
 Do not install tools, authenticate CLIs, push branches, or use connector APIs
 unless the user asked for that action.
 
+## External Review Policy
+
+For any repo using this skill, sending repo context, uncommitted diffs,
+prompts, and command output to `codex`, `claude`, and `gemini` review CLIs is
+allowed by default. Do not ask for separate approval before using those three
+CLIs for review.
+
+This permission excludes secrets, credentials, private keys, and generated local
+machine or cluster details. Before external review, inspect the diff and exclude
+sensitive paths. If secret-like content appears inside an otherwise reviewable
+file, do not redact individual diff lines; skip external review for that diff and
+run current-agent local review instead.
+
+Always exclude secret files or dirs such as env files, private-key/certificate
+files, local scratch dirs, generated Slurm references, SSH/AWS credential dirs,
+netrc files, and credentials/secrets YAML files. The concrete exclude list below
+is the portable baseline; add project-specific private paths before review when
+needed.
+
+If excluded content is needed to understand the change, run current-agent local
+review for that part and tell the external reviewers only that sensitive content
+was omitted.
+
+This permission does not extend to MCP servers, app connectors, plugin
+connector tools, installing/authenticating CLIs, write/edit modes, destructive
+commands, pushes, or bypass permissions.
+
+If a platform sandbox or approval system still blocks a CLI call, report the
+block and continue with current-agent local review.
+
 ## Before Running
 
 - Read `git status --short` and the relevant `git diff`.
@@ -46,19 +76,31 @@ unless the user asked for that action.
 - Ask for findings only: bugs, regressions, missing tests, unclear contracts, unsafe operations.
 - Main agent keeps implementation ownership and integrates only findings backed by evidence.
 
-## CLI Examples
+## CLI
 
-Use read-only/non-interactive review commands where possible:
+Prefer the shared wrapper when this repo is installed:
 
 ```bash
-codex review --uncommitted "Find only actionable bugs, regressions, missing tests, unclear contracts, or unsafe operations."
-claude -p "Review the current uncommitted diff. Findings only; include file/line evidence."
-gemini -p "Review the current uncommitted diff. Findings only; include file/line evidence." --approval-mode plan
+# Covers tracked staged + unstaged changes. Use `git add -N <file>` first for
+# untracked files that are safe to include in external review.
+~/.oh-my-setting/scripts/multi-agent-review.sh \
+  --repo . \
+  --prompt "Review the current uncommitted diff for bugs, regressions, missing tests, and unsafe operations."
 ```
+
+The wrapper sends the same question and same sanitized diff/status context to
+`codex`, `claude`, and `gemini`, writes one artifact per model under
+`.omc/artifacts/review/`, and reports unavailable or failed providers. It does
+not specialize prompts per model; the goal is three independent perspectives on
+the same question.
+
+If the wrapper is unavailable, run equivalent local CLI calls manually with the
+same prompt and sanitized diff. Use read-only/non-interactive flags where
+possible.
 
 ## Output
 
-Compact synthesis:
+Compact synthesis. List unavailable, blocked, or skipped reviewers under `Verification`. Use current-agent local review if fewer than two external reviewers succeed:
 
 ```md
 Consensus:

@@ -62,6 +62,15 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 ~/.oh-my-setting/scripts/status.sh
 ```
 
+현재 repo의 tracked staged + unstaged diff를 세 모델로 review:
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-review.sh \
+  --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
+```
+
+Review artifact는 `.omc/artifacts/review/`에 저장된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Gemini CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
+
 ## 프로젝트 적용
 
 자동 감지:

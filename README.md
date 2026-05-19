@@ -64,6 +64,15 @@ Check current install status:
 ~/.oh-my-setting/scripts/status.sh
 ```
 
+Run a three-model review of the tracked staged + unstaged repo diff:
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-review.sh \
+  --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
+```
+
+Review artifacts are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Gemini CLIs; secret paths and secret-like added lines are excluded before external review.
+
 ## Project Setup
 
 Auto-detect:
