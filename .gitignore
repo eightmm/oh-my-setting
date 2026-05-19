@@ -3,6 +3,7 @@
 *.pem
 *.log
 .cache/
+.omc/
 tmp/
 backups/
 local/

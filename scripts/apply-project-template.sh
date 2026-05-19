@@ -19,7 +19,10 @@ has_slurm_runtime() {
 has_slurm_project() {
   [ -d "$PROJECT_DIR" ] || return 1
 
-  if find "$PROJECT_DIR" -maxdepth 3 -path "$PROJECT_DIR/.git" -prune -o \( -name "*.sbatch" -o -name "slurm*.sh" -o -name "submit*.sh" \) -print -quit | grep -q .; then
+  if find "$PROJECT_DIR" -maxdepth 3 \( \
+      -name ".git" -o -name ".venv" -o -name "node_modules" -o \
+      -name "__pycache__" -o -name "tmp" -o -name "backups" \
+    \) -prune -o \( -name "*.sbatch" -o -name "slurm*.sh" -o -name "submit*.sh" \) -print -quit | grep -q .; then
     return 0
   fi
 
@@ -27,9 +30,13 @@ has_slurm_project() {
     rg -q "#SBATCH" "$PROJECT_DIR" \
       -g '*.sh' -g '*.sbatch' \
       -g '!scripts/apply-project-template.sh' \
-      -g '!/.git' -g '!/.venv' -g '!node_modules' -g '!__pycache__' 2>/dev/null
+      -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
+      -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null
   else
-    find "$PROJECT_DIR" -maxdepth 3 -type f \( -name '*.sh' -o -name '*.sbatch' \) \
+    find "$PROJECT_DIR" -maxdepth 3 \( \
+      -name ".git" -o -name ".venv" -o -name "node_modules" -o \
+      -name "__pycache__" -o -name "tmp" -o -name "backups" \
+    \) -prune -o -type f \( -name '*.sh' -o -name '*.sbatch' \) \
       ! -path "$PROJECT_DIR/scripts/apply-project-template.sh" \
       -exec grep -q "#SBATCH" {} \; -print -quit 2>/dev/null | grep -q .
   fi
@@ -212,19 +219,42 @@ apply_one() {
   local end="<!-- oh-my-setting:${style}:end -->"
   dir="$(dirname "$target")"
 
-  mkdir -p "$dir"
-
   [ "$DRY_RUN" = "1" ] && return 0
+
+  mkdir -p "$dir"
 
   local tmp
   tmp="$(mktemp)"
 
   if [ -f "$target" ]; then
     awk -v begin="$begin" -v end="$end" '
-      $0 == begin { skip = 1; next }
-      $0 == end { skip = 0; next }
+      $0 == begin {
+        if (skip) {
+          printf "error: nested managed block begin: %s\n", begin > "/dev/stderr"
+          exit 2
+        }
+        skip = 1
+        next
+      }
+      $0 == end {
+        if (!skip) {
+          printf "error: unmatched managed block end: %s\n", end > "/dev/stderr"
+          exit 2
+        }
+        skip = 0
+        next
+      }
       !skip { print }
-    ' "$target" > "$tmp"
+      END {
+        if (skip) {
+          printf "error: missing managed block end: %s\n", end > "/dev/stderr"
+          exit 2
+        }
+      }
+    ' "$target" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
   fi
 
   if [ -s "$tmp" ]; then

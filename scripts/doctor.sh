@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILED=0
+REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
 
 load_user_tool_paths() {
   export PATH="$HOME/.local/bin:$PATH"
@@ -18,9 +19,11 @@ load_user_tool_paths() {
 check_cmd() {
   if command -v "$1" >/dev/null 2>&1; then
     echo "ok: command $1"
-  else
+  elif [ "$REQUIRE_TOOLS" = "1" ]; then
     echo "missing: command $1"
     FAILED=1
+  else
+    echo "optional missing: command $1"
   fi
 }
 
@@ -55,6 +58,14 @@ check_custom_skills() {
 }
 
 load_user_tool_paths
+
+case "$REQUIRE_TOOLS" in
+  0|1) ;;
+  *)
+    echo "error: OH_MY_SETTING_REQUIRE_TOOLS must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 check_cmd git
 check_cmd curl

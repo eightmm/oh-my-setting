@@ -34,10 +34,34 @@ remove_one_style() {
   tmp="$(mktemp)"
 
   awk -v begin="$begin" -v end="$end" '
-    $0 == begin { skip = 1; changed = 1; next }
-    $0 == end { skip = 0; next }
+    $0 == begin {
+      if (skip) {
+        printf "error: nested managed block begin: %s\n", begin > "/dev/stderr"
+        bad = 1
+        exit 2
+      }
+      skip = 1
+      changed = 1
+      next
+    }
+    $0 == end {
+      if (!skip) {
+        printf "error: unmatched managed block end: %s\n", end > "/dev/stderr"
+        bad = 1
+        exit 2
+      }
+      skip = 0
+      next
+    }
     !skip { print }
-    END { if (!changed) exit 3 }
+    END {
+      if (bad) exit 2
+      if (skip) {
+        printf "error: missing managed block end: %s\n", end > "/dev/stderr"
+        exit 2
+      }
+      if (!changed) exit 3
+    }
   ' "$file" > "$tmp" || {
     local code="$?"
     rm -f "$tmp"

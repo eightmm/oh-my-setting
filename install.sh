@@ -5,6 +5,7 @@ REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-auto}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
+INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-1}"
 
 usage() {
@@ -19,6 +20,8 @@ Environment:
   OH_MY_SETTING_STAR_PROMPT=0      Skip the GitHub star prompt.
   OH_MY_SETTING_GENERATE_MACHINE=0 Skip machine snapshot generation.
   OH_MY_SETTING_GENERATE_SLURM=0   Skip Slurm snapshot generation.
+  OH_MY_SETTING_INSTALL_TOOLS=0    Skip Node/uv/agent CLI installation.
+  OH_MY_SETTING_REQUIRE_TOOLS=0    Do not fail doctor on missing CLIs.
   OH_MY_SETTING_DIR=/path/to/dir   Install location.
 EOF
 }
@@ -104,8 +107,17 @@ if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   exec bash "$DEST/install.sh"
 fi
 
-"$DEST/scripts/install-tools.sh"
-load_user_tool_paths
+if [ "$INSTALL_TOOLS" = "1" ]; then
+  "$DEST/scripts/install-tools.sh"
+  load_user_tool_paths
+elif [ "$INSTALL_TOOLS" = "0" ]; then
+  echo "skipping tool install: OH_MY_SETTING_INSTALL_TOOLS=0"
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
+  load_user_tool_paths
+else
+  echo "error: OH_MY_SETTING_INSTALL_TOOLS must be 0 or 1" >&2
+  exit 2
+fi
 
 "$DEST/scripts/link.sh"
 

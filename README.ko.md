@@ -38,6 +38,8 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 OH_MY_SETTING_STAR_PROMPT=0       # GitHub star prompt 생략
 OH_MY_SETTING_GENERATE_MACHINE=0  # 머신 스냅샷 생략
 OH_MY_SETTING_GENERATE_SLURM=0    # Slurm 스냅샷 생략
+OH_MY_SETTING_INSTALL_TOOLS=0     # Node/uv/agent CLI 설치 생략
+OH_MY_SETTING_REQUIRE_TOOLS=0     # CLI 누락으로 doctor 실패 처리 안 함
 OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 ```
 

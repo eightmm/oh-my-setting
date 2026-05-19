@@ -39,6 +39,8 @@ Options:
 OH_MY_SETTING_STAR_PROMPT=0       # skip GitHub star prompt
 OH_MY_SETTING_GENERATE_MACHINE=0  # skip machine snapshot
 OH_MY_SETTING_GENERATE_SLURM=0    # skip Slurm snapshot
+OH_MY_SETTING_INSTALL_TOOLS=0     # skip Node/uv/agent CLI install
+OH_MY_SETTING_REQUIRE_TOOLS=0     # do not fail doctor on missing CLIs
 OH_MY_SETTING_DIR=/path/to/dir    # install location
 ```
 
