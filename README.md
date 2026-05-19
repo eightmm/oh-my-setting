@@ -32,6 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 Existing installs update to the latest checkout before setup continues.
 After first-time nvm setup, open a new shell if newly installed CLIs are not found.
+Installer-managed Node uses Node 20 or newer.
 
 Options:
 

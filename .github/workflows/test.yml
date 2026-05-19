@@ -1,0 +1,20 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: shellcheck install.sh scripts/*.sh tests/*.sh
+      - name: install-skills validation
+        run: bash scripts/install-skills.sh
+      - name: scripts smoke
+        run: bash tests/scripts-smoke.sh

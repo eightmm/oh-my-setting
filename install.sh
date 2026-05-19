@@ -156,6 +156,11 @@ EOF
     return 0
   fi
 
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "note: gh not authenticated; run 'gh auth login' to star with one command"
+    return 0
+  fi
+
   if [ ! -r /dev/tty ]; then
     return 0
   fi

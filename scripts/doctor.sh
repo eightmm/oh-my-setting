@@ -94,6 +94,8 @@ check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.agents/skills"
 check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
 check_custom_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
+check_path "$HOME/.oh-my-setting-prompts"
+check_path "$HOME/.oh-my-setting-workflows"
 
 if [ "$FAILED" -ne 0 ]; then
   echo "doctor: failed"

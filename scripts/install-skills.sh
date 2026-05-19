@@ -9,8 +9,61 @@ if [ ! -f "$MANIFEST" ]; then
   exit 1
 fi
 
-echo "External skills are tracked in:"
-echo "$MANIFEST"
-echo
-echo "Install curated skills with the target agent's skill installer."
-echo "Keep custom skills in $ROOT/custom-skills."
+FAILED=0
+
+check_skill() {
+  local name="$1"
+  local source="$2"
+  local path="$ROOT/$source"
+
+  case "$source" in
+    custom-skills/*) ;;
+    *)
+      echo "external: $name -> $source"
+      return
+      ;;
+  esac
+
+  if [ ! -d "$path" ]; then
+    echo "missing: $name -> $source"
+    FAILED=1
+    return
+  fi
+  if [ ! -f "$path/SKILL.md" ]; then
+    echo "missing SKILL.md: $name -> $source/SKILL.md"
+    FAILED=1
+    return
+  fi
+  echo "ok: $name -> $source"
+}
+
+read_manifest_enabled() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.skills[] | select(.enabled == true) | [.name, .source] | @tsv' "$MANIFEST"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+for s in data.get("skills", []):
+    if s.get("enabled") and s.get("source"):
+        print(f"{s[\"name\"]}\t{s[\"source\"]}")
+' "$MANIFEST"
+  else
+    echo "error: need jq or python3 to parse $MANIFEST" >&2
+    exit 1
+  fi
+}
+
+while IFS=$'\t' read -r name source; do
+  [ -n "$name" ] || continue
+  check_skill "$name" "$source"
+done < <(read_manifest_enabled)
+
+if [ "$FAILED" -ne 0 ]; then
+  echo "install-skills: failed"
+  exit 1
+fi
+
+echo "install-skills: ok"
+echo "Custom skills live in $ROOT/custom-skills and are symlinked by scripts/link.sh."

@@ -49,7 +49,7 @@ install_nvm() {
 }
 
 ensure_node() {
-  if has_cmd node && has_cmd npm && [ "$(node_major)" -ge 18 ]; then
+  if has_cmd node && has_cmd npm && [ "$(node_major)" -ge 20 ]; then
     echo "ok: node $(node --version)"
     return 0
   fi

@@ -31,6 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 기존 설치는 최신 checkout으로 갱신한 뒤 설정을 계속 진행한다.
 처음 nvm을 설치한 뒤 새 CLI를 못 찾으면 새 shell을 연다.
+Installer가 관리하는 Node는 Node 20 이상을 사용한다.
 
 옵션:
 
