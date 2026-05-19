@@ -256,6 +256,83 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-review-failing-provider-*.md' '## Exit'
 }
 
+
+test_multi_agent_ask_dry_run_no_repo() {
+  local project="$TMP/ask-no-repo"
+  local artifact_dir="$project/artifacts"
+  local count
+
+  mkdir -p "$project"
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --artifact-dir "$artifact_dir" \
+    --prompt "Compare two implementation options" >/dev/null
+
+  count="$(find "$artifact_dir" -type f -name '*.md' | wc -l)"
+  [ "$count" = "3" ] || fail "expected three ask artifacts, got $count"
+  assert_one_artifact_contains "$artifact_dir" 'codex-compare-two-implementation-options-*.md' 'Repository context: omitted.'
+  assert_one_artifact_contains "$artifact_dir" 'claude-compare-two-implementation-options-*.md' 'DRY RUN'
+  assert_one_artifact_contains "$artifact_dir" 'gemini-compare-two-implementation-options-*.md' 'Answer:'
+}
+
+test_multi_agent_ask_repo_context_subset() {
+  local project="$TMP/ask-repo-context"
+  local artifact_dir="$project/artifacts"
+  local count
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+  printf 'before\n' > "$project/file.txt"
+  git -C "$project" add file.txt
+  git -C "$project" \
+    -c user.email=test@example.com \
+    -c user.name='Test User' \
+    commit -m init >/dev/null
+  printf 'after\n' > "$project/file.txt"
+  printf 'API_%s=not-real\n' 'KEY' > "$project/.env.local"
+
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --repo-context \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --prompt "Assess repo state" >/dev/null
+
+  count="$(find "$artifact_dir" -type f -name '*.md' | wc -l)"
+  [ "$count" = "1" ] || fail "expected one ask artifact, got $count"
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-repo-state-*.md' 'Git status:'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-repo-state-*.md' 'file.txt'
+  if grep -R -Fq '.env.local' "$artifact_dir"; then
+    fail "private .env.local path leaked into ask artifact"
+  fi
+}
+
+test_multi_agent_ask_secret_diff_skips_external() {
+  local project="$TMP/ask-secret-diff"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+  printf 'safe\n' > "$project/file.txt"
+  git -C "$project" add file.txt
+  git -C "$project" \
+    -c user.email=test@example.com \
+    -c user.name='Test User' \
+    commit -m init >/dev/null
+  printf 'api_%s = "not-real"\n' 'key' >> "$project/file.txt"
+
+  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --diff \
+    --artifact-dir "$artifact_dir" \
+    --prompt "Explain this diff" >/dev/null 2>"$project/error"; then
+    fail "secret-like ask diff should skip external ask"
+  fi
+
+  assert_file_contains "$project/error" 'sensitive-looking diff content detected'
+  [ ! -d "$artifact_dir" ] || [ -z "$(find "$artifact_dir" -type f -name '*.md' -print -quit)" ] ||
+    fail "secret-like ask diff should not write provider artifacts"
+}
+
 test_apply_dry_run_has_no_writes
 test_apply_rejects_unclosed_managed_block
 test_remove_rejects_unclosed_managed_block
@@ -267,5 +344,8 @@ test_multi_agent_review_secret_diff_skips_external
 test_multi_agent_review_no_diff_provider_subset
 test_multi_agent_review_rejects_unknown_provider
 test_multi_agent_review_single_provider_failure_exits
+test_multi_agent_ask_dry_run_no_repo
+test_multi_agent_ask_repo_context_subset
+test_multi_agent_ask_secret_diff_skips_external
 
 echo "scripts-smoke: ok"

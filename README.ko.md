@@ -71,6 +71,15 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 
 Review artifact는 `.omc/artifacts/review/`에 저장된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Gemini CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
 
+개념 질문을 세 모델에 묻기:
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-ask.sh \
+  --prompt "Compare RAG and fine-tuning tradeoffs for this project."
+```
+
+Ask artifact는 `.omc/artifacts/ask/`에 저장된다. `--repo-context`나 `--diff`를 넘기지 않으면 repo context는 붙이지 않는다.
+
 ## 프로젝트 적용
 
 자동 감지:

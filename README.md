@@ -73,6 +73,15 @@ Run a three-model review of the tracked staged + unstaged repo diff:
 
 Review artifacts are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Gemini CLIs; secret paths and secret-like added lines are excluded before external review.
 
+Ask a conceptual question to all three models:
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-ask.sh \
+  --prompt "Compare RAG and fine-tuning tradeoffs for this project."
+```
+
+Ask artifacts are written to `.omc/artifacts/ask/`. No repo context is attached unless `--repo-context` or `--diff` is passed.
+
 ## Project Setup
 
 Auto-detect:
