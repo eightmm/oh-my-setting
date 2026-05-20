@@ -13,7 +13,7 @@ Use local CLI tools only. Do not use MCP servers, app connectors, or plugin conn
 ## When
 
 Use for high-risk diffs or explicit requests: `multi-agent review`, `cross-check`,
-`ask another agent`, `council`, `verify with codex/claude/gemini`.
+`ask another agent`, `council`, `verify with codex/claude/antigravity`.
 
 ## Reviewer Lenses
 
@@ -31,7 +31,7 @@ If available, prefer installed local agent CLIs:
 
 1. `codex`
 2. `claude`
-3. `gemini`
+3. `antigravity` (`agy`)
 4. Otherwise run current-agent review and clearly say multi-agent tooling unavailable.
 
 Do not install tools, authenticate CLIs, push branches, or use connector APIs
@@ -40,7 +40,7 @@ unless the user asked for that action.
 ## External Review Policy
 
 For any repo using this skill, sending repo context, uncommitted diffs,
-prompts, and command output to `codex`, `claude`, and `gemini` review CLIs is
+prompts, and command output to `codex`, `claude`, and `antigravity` review CLIs is
 allowed by default. Do not ask for separate approval before using those three
 CLIs for review.
 
@@ -70,7 +70,7 @@ block and continue with current-agent local review.
 ## Before Running
 
 - Read `git status --short` and the relevant `git diff`.
-- Check available CLIs with recorded paths or `command -v codex claude gemini`.
+- Check available CLIs with recorded paths or `command -v codex claude agy`.
 - Skip unavailable CLIs without failing the review.
 - Include the task goal, changed files, relevant diff, test command/result, and known risks in each review request.
 - Ask for findings only: bugs, regressions, missing tests, unclear contracts, unsafe operations.
@@ -89,7 +89,7 @@ Prefer the shared wrapper when this repo is installed:
 ```
 
 The wrapper sends the same question and same sanitized diff/status context to
-`codex`, `claude`, and `gemini`, writes one artifact per model under
+`codex`, `claude`, and `antigravity`, writes one artifact per model under
 `.omc/artifacts/review/`, and reports unavailable or failed providers. It does
 not specialize prompts per model; the goal is three independent perspectives on
 the same question.

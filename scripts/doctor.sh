@@ -74,7 +74,7 @@ check_cmd npm
 check_cmd uv
 check_cmd claude
 check_cmd codex
-check_cmd gemini
+check_cmd agy
 check_cmd pi
 
 check_optional_cmd sbatch

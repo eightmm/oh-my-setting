@@ -129,6 +129,32 @@ EOF
   echo "ok: shim $target"
 }
 
+install_antigravity() {
+  if has_cmd agy; then
+    echo "ok: agy already installed"
+    return 0
+  fi
+
+  if ! has_cmd curl; then
+    echo "error: curl is required to install Antigravity CLI" >&2
+    exit 1
+  fi
+
+  echo "installing Antigravity CLI"
+  local installer
+  installer="$(mktemp)"
+  curl -fsSL https://antigravity.google/cli/install.sh -o "$installer"
+  bash "$installer"
+  rm -f "$installer"
+
+  if ! has_cmd agy; then
+    echo "error: Antigravity CLI install completed but agy is not on PATH" >&2
+    exit 1
+  fi
+
+  echo "ok: agy $(agy --version)"
+}
+
 ensure_uv() {
   export PATH="$HOME/.local/bin:$PATH"
 
@@ -161,12 +187,11 @@ ensure_uv
 
 install_npm_global "@anthropic-ai/claude-code" "claude"
 install_npm_global "@openai/codex" "codex"
-install_npm_global "@google/gemini-cli" "gemini"
+install_antigravity
 install_npm_global "@earendil-works/pi-coding-agent" "pi"
 
 write_npm_shim "claude"
 write_npm_shim "codex"
-write_npm_shim "gemini"
 write_npm_shim "pi"
 
 echo "tools: ok"

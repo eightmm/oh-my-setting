@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO="$PWD"
 PROMPT=""
-PROVIDERS="codex,claude,gemini"
+PROVIDERS="codex,claude,antigravity"
 ARTIFACT_DIR=""
 NO_DIFF=0
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
@@ -34,13 +34,13 @@ usage() {
   cat <<'EOF'
 Usage: multi-agent-review.sh [options] --prompt TEXT
 
-Ask the same review question to Codex, Claude Code, and Gemini, then persist
+Ask the same review question to Codex, Claude Code, and Antigravity, then persist
 each answer as an artifact.
 
 Options:
   --prompt TEXT        Review question/task. Required.
   --repo PATH          Git repo to review. Default: current directory.
-  --providers LIST     Comma list: codex,claude,gemini. Default: all three.
+  --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
   --artifact-dir PATH  Artifact directory. Default: REPO/.omc/artifacts/review.
   --no-diff            Do not attach git diff/status context.
   --dry-run            Write prompts as artifacts without CLI calls.
@@ -130,7 +130,7 @@ write_prompt() {
   local status_file="$5"
 
   {
-    printf 'You are one of three independent reviewers: Codex, Claude Code, and Gemini.\n'
+    printf 'You are one of three independent reviewers: Codex, Claude Code, and Antigravity.\n'
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Find bugs, regressions, missing tests, unclear contracts, and unsafe operations.\n'
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
@@ -179,9 +179,14 @@ run_provider() {
     return 0
   fi
 
-  if ! command -v "$provider" >/dev/null 2>&1; then
-    printf 'SKIPPED: command not found: %s\n' "$provider" >> "$artifact"
-    echo "skipped: $provider missing -> $artifact"
+  local binary="$provider"
+  if [ "$provider" = "antigravity" ]; then
+    binary="agy"
+  fi
+
+  if ! command -v "$binary" >/dev/null 2>&1; then
+    printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
+    echo "skipped: $provider missing ($binary) -> $artifact"
     return 1
   fi
 
@@ -195,8 +200,8 @@ run_provider() {
       claude --permission-mode plan -p < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
-    gemini)
-      gemini --approval-mode plan < "$prompt_file" >> "$artifact" 2>&1
+    antigravity|agy)
+      agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     *)
@@ -299,7 +304,7 @@ for provider in "${provider_list[@]}"; do
   provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
   [ -n "$provider" ] || continue
   case "$provider" in
-    codex|claude|gemini) ;;
+    codex|claude|antigravity|agy) ;;
     *) fail "unsupported provider: $provider" ;;
   esac
   total=$((total + 1))

@@ -2,7 +2,7 @@
 name: multi-agent-ask
 description: >
   Ask the same conceptual or planning question to Codex, Claude Code, and
-  Gemini, then synthesize the independent perspectives. Use when the user asks
+  Antigravity, then synthesize the independent perspectives. Use when the user asks
   for a council, cross-model opinions, independent viewpoints, or conceptual
   comparison rather than a code diff review.
 ---
@@ -14,7 +14,7 @@ connectors, or plugin connector tools.
 ## When
 
 Use for conceptual questions, design tradeoffs, planning, alternatives, or
-"ask codex/claude/gemini" requests that are not primarily code review.
+"ask codex/claude/antigravity" requests that are not primarily code review.
 
 For code diff review, use `multi-agent-review` instead.
 
@@ -42,7 +42,7 @@ or generated cluster details, omit that context and say so in `Verification`.
 ## External Ask Policy
 
 Sending the prompt and optional sanitized repo context to `codex`, `claude`, and
-`gemini` local CLIs is allowed by default for this skill. Do not include secrets,
+`antigravity` local CLIs is allowed by default for this skill. Do not include secrets,
 private keys, local machine details, generated cluster details, or private paths.
 
 By default no repo context is attached. Use `--repo-context` only when current

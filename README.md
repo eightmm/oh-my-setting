@@ -10,7 +10,7 @@ oh-my-setting keeps agent work local and shell-visible by default:
 
 - No MCP servers, app connectors, or plugin connector tools.
 - Use local files, shell commands, `git`, and `gh` CLI.
-- Multi-agent review stays local: Codex, Claude Code, Gemini, or Pi CLI when available.
+- Multi-agent review stays local: Codex, Claude Code, and Antigravity CLI when available.
 - If local multi-agent tools are missing, run a single-agent review and report that limitation.
 
 ## Quickstart
@@ -71,7 +71,7 @@ Run a three-model review of the tracked staged + unstaged repo diff:
   --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
 ```
 
-Review artifacts are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Gemini CLIs; secret paths and secret-like added lines are excluded before external review.
+Review artifacts are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
 
 Ask a conceptual question to all three models:
 
@@ -187,7 +187,7 @@ Writes:
 ~/.oh-my-setting/local/machine.md
 ```
 
-Also records local agent CLI paths for Codex, Claude Code, Gemini, Pi, and
+Also records local agent CLI paths for Codex, Claude Code, Antigravity, Pi, and
 `gh` when found.
 
 Slurm snapshot:

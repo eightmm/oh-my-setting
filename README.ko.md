@@ -10,7 +10,7 @@ oh-my-setting은 agent 작업을 기본적으로 로컬과 shell에서 보이게
 
 - MCP server, app connector, plugin connector tool은 사용하지 않는다.
 - 로컬 파일, shell command, `git`, `gh` CLI를 우선 사용한다.
-- Multi-agent review도 로컬 기반으로만 수행한다: Codex, Claude Code, Gemini, Pi CLI.
+- Multi-agent review도 로컬 기반으로만 수행한다: Codex, Claude Code, Antigravity CLI.
 - 로컬 multi-agent 도구가 없으면 single-agent review로 진행하고 한계를 명시한다.
 
 ## 빠른 시작
@@ -69,7 +69,7 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
   --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
 ```
 
-Review artifact는 `.omc/artifacts/review/`에 저장된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Gemini CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
+Review artifact는 `.omc/artifacts/review/`에 저장된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
 
 개념 질문을 세 모델에 묻기:
 
@@ -185,7 +185,7 @@ ML 프로젝트 기본:
 ~/.oh-my-setting/local/machine.md
 ```
 
-Codex, Claude Code, Gemini, Pi, `gh` 같은 로컬 agent CLI 경로도 감지되면
+Codex, Claude Code, Antigravity, Pi, `gh` 같은 로컬 agent CLI 경로도 감지되면
 함께 기록한다.
 
 Slurm 스펙:

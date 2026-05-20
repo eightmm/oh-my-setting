@@ -71,7 +71,7 @@ link_status "$HOME/.gemini/GEMINI.md" "$ROOT/AGENTS.md"
 link_status "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
 
 printf '\n## Required tools\n\n'
-for tool in git curl node npm uv claude codex gemini pi; do
+for tool in git curl node npm uv claude codex agy pi; do
   tool_status "$tool"
 done
 

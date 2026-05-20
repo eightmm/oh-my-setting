@@ -28,7 +28,7 @@
       "name": "multi-agent-ask",
       "source": "custom-skills/multi-agent-ask",
       "enabled": true,
-      "reason": "Ask Codex, Claude Code, and Gemini the same conceptual question and synthesize perspectives."
+      "reason": "Ask Codex, Claude Code, and Antigravity the same conceptual question and synthesize perspectives."
     },
     {
       "name": "slurm-hpc",

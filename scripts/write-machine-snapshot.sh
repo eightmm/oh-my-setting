@@ -102,7 +102,7 @@ mkdir -p "$(dirname "$OUT")"
   printf '\n## Local Agent CLI Paths\n\n'
   printf -- '- Codex CLI: %s\n' "$(tool_path codex)"
   printf -- '- Claude Code CLI: %s\n' "$(tool_path claude)"
-  printf -- '- Gemini CLI: %s\n' "$(tool_path gemini)"
+  printf -- '- Antigravity CLI: %s\n' "$(tool_path agy)"
   printf -- '- pi: %s\n' "$(tool_path pi)"
   printf -- '- gh: %s\n' "$(tool_path gh)"
   printf '\n## Notes\n\n'

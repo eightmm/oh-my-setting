@@ -129,7 +129,7 @@ test_multi_agent_review_dry_run_artifacts() {
   [ "$count" = "3" ] || fail "expected three review artifacts, got $count"
   assert_one_artifact_contains "$artifact_dir" 'codex-review-current-diff-*.md' 'DRY RUN'
   assert_one_artifact_contains "$artifact_dir" 'claude-review-current-diff-*.md' 'Question:'
-  assert_one_artifact_contains "$artifact_dir" 'gemini-review-current-diff-*.md' 'Diff:'
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-review-current-diff-*.md' 'Diff:'
 }
 
 
@@ -199,13 +199,13 @@ test_multi_agent_review_no_diff_provider_subset() {
   OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
-    --providers gemini \
+    --providers antigravity \
     --no-diff \
     --prompt "Review no diff mode" >/dev/null
 
   count="$(find "$artifact_dir" -type f -name '*.md' | wc -l)"
   [ "$count" = "1" ] || fail "expected one review artifact, got $count"
-  assert_one_artifact_contains "$artifact_dir" 'gemini-review-no-diff-mode-*.md' 'Git context omitted by --no-diff.'
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-review-no-diff-mode-*.md' 'Git context omitted by --no-diff.'
 }
 
 
@@ -271,7 +271,7 @@ test_multi_agent_ask_dry_run_no_repo() {
   [ "$count" = "3" ] || fail "expected three ask artifacts, got $count"
   assert_one_artifact_contains "$artifact_dir" 'codex-compare-two-implementation-options-*.md' 'Repository context: omitted.'
   assert_one_artifact_contains "$artifact_dir" 'claude-compare-two-implementation-options-*.md' 'DRY RUN'
-  assert_one_artifact_contains "$artifact_dir" 'gemini-compare-two-implementation-options-*.md' 'Answer:'
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-compare-two-implementation-options-*.md' 'Answer:'
 }
 
 test_multi_agent_ask_repo_context_subset() {
