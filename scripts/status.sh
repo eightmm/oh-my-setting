@@ -67,7 +67,6 @@ fi
 printf '\n## Agent config links\n\n'
 link_status "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
 link_status "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
-link_status "$HOME/.gemini/GEMINI.md" "$ROOT/AGENTS.md"
 link_status "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
 
 printf '\n## Required tools\n\n'

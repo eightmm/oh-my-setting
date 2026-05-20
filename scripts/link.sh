@@ -66,7 +66,6 @@ link_skills() {
 
 link_file "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
 link_file "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
-link_file "$ROOT/AGENTS.md" "$HOME/.gemini/GEMINI.md"
 link_file "$ROOT/AGENTS.md" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
 remove_old_skill_group "$HOME/.codex/skills/oh-my-setting"
 remove_old_skill_group "$HOME/.claude/skills/oh-my-setting"

@@ -86,7 +86,6 @@ esac
 
 unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
 unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
-unlink_and_restore "$HOME/.gemini/GEMINI.md" "$ROOT/AGENTS.md"
 unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
 unlink_skills "$HOME/.codex/skills"
 unlink_skills "$HOME/.claude/skills"

@@ -51,7 +51,6 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 ```text
 ~/.codex/AGENTS.md
 ~/.claude/CLAUDE.md
-~/.gemini/GEMINI.md
 ~/.pi/agent/AGENTS.md
 ~/.oh-my-setting/local/machine.md
 ```
@@ -98,7 +97,7 @@ Ask artifact는 `.omc/artifacts/ask/`에 저장된다. `--repo-context`나 `--di
 
 동작:
 
-- `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`에 managed block 추가/갱신
+- `AGENTS.md`, `CLAUDE.md`에 managed block 추가/갱신
 - `PROJECT.md` 없으면 생성
 - managed block 밖의 기존 내용은 덮어쓰지 않음
 - Slurm 머신의 ML 프로젝트는 `ml` + 별도 `slurm` 규칙 적용

@@ -86,7 +86,7 @@ shift || true
 if [ "$#" -gt 0 ]; then
   FILES=("$@")
 else
-  FILES=("AGENTS.md" "CLAUDE.md" "GEMINI.md")
+  FILES=("AGENTS.md" "CLAUDE.md")
 fi
 
 loader_content() {

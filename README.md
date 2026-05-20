@@ -53,7 +53,6 @@ Installed paths:
 ```text
 ~/.codex/AGENTS.md
 ~/.claude/CLAUDE.md
-~/.gemini/GEMINI.md
 ~/.pi/agent/AGENTS.md
 ~/.oh-my-setting/local/machine.md
 ```
@@ -100,7 +99,7 @@ Choose explicitly:
 
 What it does:
 
-- Adds/updates managed blocks in `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`.
+- Adds/updates managed blocks in `AGENTS.md` and `CLAUDE.md`.
 - Creates `PROJECT.md` if missing.
 - Does not overwrite user content outside managed blocks.
 - For ML projects on Slurm machines, adds `ml` plus separate `slurm` rules.

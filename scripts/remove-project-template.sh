@@ -22,7 +22,6 @@ else
   FILES=()
   [ -e "$PROJECT_DIR/AGENTS.md" ] && FILES+=("AGENTS.md")
   [ -e "$PROJECT_DIR/CLAUDE.md" ] && FILES+=("CLAUDE.md")
-  [ -e "$PROJECT_DIR/GEMINI.md" ] && FILES+=("GEMINI.md")
 fi
 
 remove_one_style() {

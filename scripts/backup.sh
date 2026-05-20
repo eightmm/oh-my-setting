@@ -19,7 +19,6 @@ copy_if_exists() {
 
 copy_if_exists "$HOME/.codex/AGENTS.md" "codex-AGENTS.md"
 copy_if_exists "$HOME/.claude/CLAUDE.md" "claude-CLAUDE.md"
-copy_if_exists "$HOME/.gemini/GEMINI.md" "gemini-GEMINI.md"
 copy_if_exists "$HOME/.codex/skills" "codex-skills"
 copy_if_exists "$HOME/.claude/skills" "claude-skills"
 copy_if_exists "$HOME/.agents/skills" "agents-skills"

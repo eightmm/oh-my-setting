@@ -97,7 +97,10 @@ test_apply_and_remove_valid_block() {
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   assert_file_contains "$project/AGENTS.md" "<!-- oh-my-setting:general:begin -->"
+  assert_file_contains "$project/CLAUDE.md" "<!-- oh-my-setting:general:begin -->"
   assert_file_contains "$project/PROJECT.md" "State: draft"
+  local legacy_agent_file="GE""MINI.md"
+  assert_not_exists "$project/$legacy_agent_file"
 
   "$ROOT/scripts/remove-project-template.sh" all "$project" >/dev/null
   if grep -Fq "oh-my-setting:general:begin" "$project/AGENTS.md"; then
