@@ -312,6 +312,7 @@ slug="$(slugify "$PROMPT")"
 [ -n "$slug" ] || slug="ask"
 ok=0
 total=0
+declare -a pids artifacts provider_names
 
 IFS=',' read -r -a provider_list <<< "$PROVIDERS"
 for provider in "${provider_list[@]}"; do
@@ -323,14 +324,39 @@ for provider in "${provider_list[@]}"; do
   esac
   total=$((total + 1))
   artifact="$ARTIFACT_DIR/$provider-$slug-$timestamp.md"
-  if run_provider "$provider" "$prompt_file" "$artifact"; then
+  run_provider "$provider" "$prompt_file" "$artifact" &
+  pids+=("$!")
+  artifacts+=("$artifact")
+  provider_names+=("$provider")
+done
+
+[ "$total" -gt 0 ] || fail "no providers selected"
+
+for i in "${!pids[@]}"; do
+  if wait "${pids[i]}"; then
     ok=$((ok + 1))
   fi
 done
 
-[ "$total" -gt 0 ] || fail "no providers selected"
+synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
+{
+  printf '# Multi-agent ask synthesis\n\n'
+  printf -- '- generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf -- '- success: %d/%d providers\n\n' "$ok" "$total"
+  printf '## Prompt\n\n'
+  printf '```\n'
+  cat "$prompt_file"
+  printf '\n```\n\n'
+  for i in "${!artifacts[@]}"; do
+    printf '## %s\n\n' "${provider_names[i]}"
+    awk 'BEGIN{flag=0} /^## Output$/{flag=1;next} /^## Exit$/{flag=0} flag' "${artifacts[i]}"
+    printf '\n'
+  done
+} > "$synth_file"
+
 echo "summary: $ok/$total providers succeeded"
 echo "artifacts: $ARTIFACT_DIR"
+echo "synthesis: $synth_file"
 if [ "$ok" -eq 0 ]; then
   echo "warning: no external ask providers succeeded" >&2
   exit 1

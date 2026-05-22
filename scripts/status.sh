@@ -59,6 +59,9 @@ load_user_tool_paths
 
 printf '# oh-my-setting status\n\n'
 printf -- '- root: %s\n' "$ROOT"
+if [ -f "$ROOT/VERSION" ]; then
+  printf -- '- version: %s\n' "$(head -n 1 "$ROOT/VERSION")"
+fi
 if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   printf -- '- branch: %s\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
   printf -- '- commit: %s\n' "$(git -C "$ROOT" rev-parse --short HEAD)"

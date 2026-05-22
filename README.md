@@ -63,6 +63,13 @@ Check current install status:
 ~/.oh-my-setting/scripts/status.sh
 ```
 
+Update the local checkout, refresh symlinks, and re-run doctor:
+
+```bash
+~/.oh-my-setting/scripts/update.sh           # git pull + tools + link + doctor
+~/.oh-my-setting/scripts/update.sh --no-tools --no-doctor
+```
+
 Run a three-model review of the tracked staged + unstaged repo diff:
 
 ```bash
@@ -70,7 +77,7 @@ Run a three-model review of the tracked staged + unstaged repo diff:
   --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
 ```
 
-Review artifacts are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
+Providers run in parallel. Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
 
 Ask a conceptual question to all three models:
 
@@ -79,7 +86,7 @@ Ask a conceptual question to all three models:
   --prompt "Compare RAG and fine-tuning tradeoffs for this project."
 ```
 
-Ask artifacts are written to `.omc/artifacts/ask/`. No repo context is attached unless `--repo-context` or `--diff` is passed.
+Per-provider ask artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/ask/`. No repo context is attached unless `--repo-context` or `--diff` is passed.
 
 ## Project Setup
 
@@ -224,6 +231,18 @@ Preview unlink:
 ```bash
 OH_MY_SETTING_DRY_RUN=1 ~/.oh-my-setting/scripts/unlink.sh
 ```
+
+## Uninstall
+
+Remove symlinks (same as `unlink.sh`) and optionally delete the checkout:
+
+```bash
+~/.oh-my-setting/scripts/uninstall.sh           # unlink only
+~/.oh-my-setting/scripts/uninstall.sh --purge   # also delete the checkout (prompts)
+~/.oh-my-setting/scripts/uninstall.sh --purge --yes --dry-run
+```
+
+`--purge` refuses to delete `$HOME` or `/`. nvm, uv, and CLI binaries installed by `install-tools.sh` are not removed.
 
 ## Safety
 

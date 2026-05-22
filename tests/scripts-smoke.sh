@@ -128,11 +128,13 @@ test_multi_agent_review_dry_run_artifacts() {
     --artifact-dir "$artifact_dir" \
     --prompt "Review current diff" >/dev/null
 
-  count="$(find "$artifact_dir" -type f -name '*.md' | wc -l)"
+  count="$(find "$artifact_dir" -type f -name '*.md' ! -name '_synthesis-*' | wc -l)"
   [ "$count" = "3" ] || fail "expected three review artifacts, got $count"
   assert_one_artifact_contains "$artifact_dir" 'codex-review-current-diff-*.md' 'DRY RUN'
   assert_one_artifact_contains "$artifact_dir" 'claude-review-current-diff-*.md' 'Question:'
   assert_one_artifact_contains "$artifact_dir" 'antigravity-review-current-diff-*.md' 'Diff:'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' 'Multi-agent review synthesis'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' '## codex'
 }
 
 
@@ -206,9 +208,10 @@ test_multi_agent_review_no_diff_provider_subset() {
     --no-diff \
     --prompt "Review no diff mode" >/dev/null
 
-  count="$(find "$artifact_dir" -type f -name '*.md' | wc -l)"
+  count="$(find "$artifact_dir" -type f -name '*.md' ! -name '_synthesis-*' | wc -l)"
   [ "$count" = "1" ] || fail "expected one review artifact, got $count"
   assert_one_artifact_contains "$artifact_dir" 'antigravity-review-no-diff-mode-*.md' 'Git context omitted by --no-diff.'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-no-diff-mode-*.md' '## antigravity'
 }
 
 
@@ -270,11 +273,12 @@ test_multi_agent_ask_dry_run_no_repo() {
     --artifact-dir "$artifact_dir" \
     --prompt "Compare two implementation options" >/dev/null
 
-  count="$(find "$artifact_dir" -type f -name '*.md' | wc -l)"
+  count="$(find "$artifact_dir" -type f -name '*.md' ! -name '_synthesis-*' | wc -l)"
   [ "$count" = "3" ] || fail "expected three ask artifacts, got $count"
   assert_one_artifact_contains "$artifact_dir" 'codex-compare-two-implementation-options-*.md' 'Repository context: omitted.'
   assert_one_artifact_contains "$artifact_dir" 'claude-compare-two-implementation-options-*.md' 'DRY RUN'
   assert_one_artifact_contains "$artifact_dir" 'antigravity-compare-two-implementation-options-*.md' 'Answer:'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-compare-two-implementation-options-*.md' 'Multi-agent ask synthesis'
 }
 
 test_multi_agent_ask_repo_context_subset() {
@@ -300,7 +304,7 @@ test_multi_agent_ask_repo_context_subset() {
     --providers codex \
     --prompt "Assess repo state" >/dev/null
 
-  count="$(find "$artifact_dir" -type f -name '*.md' | wc -l)"
+  count="$(find "$artifact_dir" -type f -name '*.md' ! -name '_synthesis-*' | wc -l)"
   [ "$count" = "1" ] || fail "expected one ask artifact, got $count"
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-repo-state-*.md' 'Git status:'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-repo-state-*.md' 'file.txt'
@@ -336,6 +340,40 @@ test_multi_agent_ask_secret_diff_skips_external() {
     fail "secret-like ask diff should not write provider artifacts"
 }
 
+test_update_help_runs() {
+  "$ROOT/scripts/update.sh" --help >/dev/null
+}
+
+test_uninstall_help_runs() {
+  "$ROOT/scripts/uninstall.sh" --help >/dev/null
+}
+
+test_uninstall_dry_run_no_changes() {
+  local home_dir="$TMP/uninstall-home"
+  mkdir -p "$home_dir"
+  HOME="$home_dir" OH_MY_SETTING_DRY_RUN=1 \
+    "$ROOT/scripts/uninstall.sh" --dry-run --yes >/dev/null
+
+  [ -z "$(find "$home_dir" -mindepth 1 -print -quit 2>/dev/null)" ] ||
+    fail "uninstall dry-run created files under $home_dir"
+}
+
+test_version_file_present() {
+  [ -f "$ROOT/VERSION" ] || fail "VERSION file missing"
+  local version
+  version="$(head -n 1 "$ROOT/VERSION")"
+  case "$version" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "VERSION not semver-like: $version" ;;
+  esac
+}
+
+test_status_shows_version() {
+  local out
+  out="$("$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s' "$out" | grep -Eq '^- version: [0-9]' || fail "status.sh missing version line"
+}
+
 test_apply_dry_run_has_no_writes
 test_apply_rejects_unclosed_managed_block
 test_remove_rejects_unclosed_managed_block
@@ -350,5 +388,10 @@ test_multi_agent_review_single_provider_failure_exits
 test_multi_agent_ask_dry_run_no_repo
 test_multi_agent_ask_repo_context_subset
 test_multi_agent_ask_secret_diff_skips_external
+test_update_help_runs
+test_uninstall_help_runs
+test_uninstall_dry_run_no_changes
+test_version_file_present
+test_status_shows_version
 
 echo "scripts-smoke: ok"
