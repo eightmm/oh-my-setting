@@ -114,7 +114,8 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   git_sha="$(git rev-parse --short HEAD 2>/dev/null || echo 'no-commit')"
   dirty="$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
   if [ "$dirty" -gt 0 ]; then
-    dirty_hash="$(git diff | sha256sum | cut -c1-16)"
+    # HEAD-relative so staged-only changes get distinct hashes too.
+    dirty_hash="$(git diff HEAD | sha256sum | cut -c1-16)"
   fi
 fi
 
@@ -148,7 +149,9 @@ fi
 # contract fails. Fails loudly on unfilled contracts by design.
 if [ "$GATE" = "1" ] && [ -x scripts/check.sh ]; then
   gate_mode="fast"
-  if grep -Eq '(^|[^A-Za-z0-9_-])ml-smoke([^A-Za-z0-9_-]|$)' scripts/check.sh; then
+  # Mode is implemented only when a case label exists; a comment or usage
+  # mention must not select it.
+  if grep -Eq '(^|[[:space:]])ml-smoke\)' scripts/check.sh; then
     gate_mode="ml-smoke"
   fi
   echo "ledger: pre-flight gate: bash scripts/check.sh $gate_mode (skip with --no-gate)" >&2

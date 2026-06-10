@@ -1198,7 +1198,7 @@ test_scrubber_blocks_credential_variants() {
   local f="$TMP/scrub-variants"
   local s
 
-  for s in "MY_API_K""EY=x" "api k""ey: x" "secret k""ey=x" "MY_PRIVATE_K""EY=x" "client_s""ecret = x"; do
+  for s in "MY_API_K""EY=x" "api k""ey: x" "secret k""ey=x" "MY_PRIVATE_K""EY=x" "client_s""ecret = x" "CREDENTIAL""S=x" "aws_credential""s: x"; do
     printf '%s\n' "$s" > "$f"
     bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
       fail "scrubber should block: $s"
@@ -1224,9 +1224,11 @@ test_run_ledger_gate_blocks_failing_check() {
   mkdir -p "$project/scripts"
   cat > "$project/scripts/check.sh" <<'EOF'
 #!/usr/bin/env bash
-# modes: fast ml-smoke
-echo "$1" >> gate-mode
-exit 1
+case "${1:-fast}" in
+  fast) echo fast >> gate-mode; exit 1 ;;
+  ml-smoke) echo ml-smoke >> gate-mode; exit 1 ;;
+  *) exit 2 ;;
+esac
 EOF
   chmod +x "$project/scripts/check.sh"
 
@@ -1243,6 +1245,27 @@ EOF
   [ -s "$project/docs/EXPERIMENTS.jsonl" ] || fail "no-gate run should append a ledger row"
 }
 
+test_run_ledger_gate_mention_falls_back_to_fast() {
+  local project="$TMP/ledger-gate-fast"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  cat > "$project/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+# ml-smoke later
+echo "$1" >> gate-mode
+exit 0
+EOF
+  chmod +x "$project/scripts/check.sh"
+
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "passing gate should allow the launch"
+  assert_file_contains "$project/gate-mode" "fast"
+  if grep -q "ml-smoke" "$project/gate-mode"; then
+    fail "comment mention of ml-smoke must not select the mode"
+  fi
+}
+
 test_run_ledger_warns_duplicate_run() {
   local project="$TMP/ledger-dup"
 
@@ -1257,6 +1280,20 @@ test_run_ledger_warns_duplicate_run() {
     fail "different command should run"
   if grep -q "identical run already in ledger" "$project/dup-err2"; then
     fail "different command should not trigger the duplicate warning"
+  fi
+
+  # Staged-only changes must produce distinct diff hashes, not a shared
+  # empty-diff hash that fakes an identical run.
+  printf 'staged change one\n' >> "$project/file.txt"
+  git -C "$project" add file.txt
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "staged run one should pass"
+  printf 'staged change two\n' >> "$project/file.txt"
+  git -C "$project" add file.txt
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>"$project/dup-err3") ||
+    fail "staged run two should pass"
+  if grep -q "identical run already in ledger" "$project/dup-err3"; then
+    fail "different staged-only diffs must not look identical"
   fi
 }
 
@@ -1463,6 +1500,7 @@ test_agent_run_read_priority_routing
 test_scrubber_blocks_credential_variants
 test_review_diff_side_blocks_env_token
 test_run_ledger_gate_blocks_failing_check
+test_run_ledger_gate_mention_falls_back_to_fast
 test_run_ledger_warns_duplicate_run
 test_agent_task_close_promotes_memory
 test_link_and_unlink_with_home_override
