@@ -199,6 +199,8 @@ printf '%s\n' "\$((n + 1))" > "$dir/poll"
 case "\$n" in
   0) echo "  12345 part job R 0:01 1 node"; exit 0 ;;
   1) echo "slurm_load_jobs error: Unable to contact slurm controller" >&2; exit 1 ;;
+  2) echo "Invalid user: nobody" >&2; exit 1 ;;
+  3) echo "config file not found" >&2; exit 1 ;;
   *) echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1 ;;
 esac
 EOF
@@ -209,8 +211,9 @@ EOF
   printf '%s' "$out" | grep -Fq '# Job digest' || fail "wait mode should still emit a digest"
   assert_file_contains "$dir/werr" "no longer queued"
   assert_file_contains "$dir/werr" "transiently"
-  # Polled 3 times: queued, transient-retry, invalid-job-id (done).
-  [ "$(cat "$dir/poll")" -ge 3 ] || fail "wait loop should retry transient errors and stop on invalid-job-id"
+  # Polled 5 times: queued, contact-error, invalid-user, not-found (all retry),
+  # then invalid-job-id (done). Non-job errors must not fake completion.
+  [ "$(cat "$dir/poll")" -ge 5 ] || fail "wait loop must retry non-job errors and stop only on invalid-job-id"
 }
 
 test_run_ledger_records_and_lists() {

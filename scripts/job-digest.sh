@@ -97,7 +97,7 @@ if [ "$WAIT" = "1" ]; then
     set -e
     if [ "$q_rc" -eq 0 ]; then
       [ -z "$q_out" ] && break
-    elif grep -qiE 'invalid job id|invalid user|unknown job|not found' "$q_err"; then
+    elif grep -qiE 'invalid job id|unknown job( id)?' "$q_err"; then
       break
     else
       echo "job-digest: squeue query failed transiently (rc=$q_rc); retrying in ${POLL_SECONDS}s" >&2
