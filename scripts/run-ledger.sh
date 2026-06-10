@@ -7,6 +7,7 @@ set -euo pipefail
 
 LEDGER=""
 NOTE=""
+GATE="${OMS_RUN_LEDGER_GATE:-1}"
 
 usage() {
   cat <<'EOF'
@@ -16,12 +17,22 @@ Usage: run-ledger.sh [options] -- <command...>
 Run a command and append a row to the experiment ledger
 (default: docs/EXPERIMENTS.jsonl). Exit code mirrors the command.
 
+Before launching, when an executable scripts/check.sh exists, the project
+verification contract runs as a pre-flight gate (ml-smoke when implemented,
+else fast) and a failing gate aborts the launch. Identical earlier runs
+(same commit, same diff hash, same command) produce a warning.
+
 Options:
   --note TEXT   Free-text note recorded with the run.
   --file PATH   Ledger path. Default: docs/EXPERIMENTS.jsonl.
+  --no-gate     Skip the pre-flight scripts/check.sh gate.
   -h, --help    Show this help.
 
 list [N]        Show the last N ledger rows (default 10).
+
+Environment:
+  OMS_RUN_LEDGER_GATE=0   Same as --no-gate.
+  OMS_RUN_LEDGER_DUP=0    Disable the duplicate-run warning.
 
 The command line is recorded verbatim -- do not put secrets in arguments.
 EOF
@@ -70,6 +81,10 @@ while [ "$#" -gt 0 ]; do
       LEDGER="$2"
       shift 2
       ;;
+    --no-gate)
+      GATE=0
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -100,6 +115,46 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   dirty="$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
   if [ "$dirty" -gt 0 ]; then
     dirty_hash="$(git diff | sha256sum | cut -c1-16)"
+  fi
+fi
+
+# Duplicate-run warning: the ledger is agent memory, so surface "this exact
+# experiment already ran" before spending compute on it again.
+if [ "${OMS_RUN_LEDGER_DUP:-1}" = "1" ] && [ -s "$LEDGER" ]; then
+  dup="$(python3 - "$LEDGER" "$git_sha" "$dirty_hash" "$@" <<'EOF'
+import json, sys
+ledger, sha, dhash = sys.argv[1], sys.argv[2], sys.argv[3]
+cmd = list(sys.argv[4:])
+last = None
+with open(ledger) as f:
+    for line in f:
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get("cmd") == cmd and r.get("git_sha") == sha and (r.get("dirty_hash") or "") == dhash:
+            last = r
+if last:
+    note = " note=%s" % last["note"] if last.get("note") else ""
+    print("%s exit=%s %ss%s" % (last.get("ts"), last.get("exit"), last.get("duration_s"), note))
+EOF
+)" || dup=""
+  if [ -n "$dup" ]; then
+    echo "warning: identical run already in ledger (same commit, diff, command): $dup" >&2
+  fi
+fi
+
+# Pre-flight gate: never burn a run on a project whose own verification
+# contract fails. Fails loudly on unfilled contracts by design.
+if [ "$GATE" = "1" ] && [ -x scripts/check.sh ]; then
+  gate_mode="fast"
+  if grep -Eq '(^|[^A-Za-z0-9_-])ml-smoke([^A-Za-z0-9_-]|$)' scripts/check.sh; then
+    gate_mode="ml-smoke"
+  fi
+  echo "ledger: pre-flight gate: bash scripts/check.sh $gate_mode (skip with --no-gate)" >&2
+  if ! bash scripts/check.sh "$gate_mode" >&2; then
+    echo "error: pre-flight check failed; launch aborted (--no-gate to override)" >&2
+    exit 3
   fi
 fi
 

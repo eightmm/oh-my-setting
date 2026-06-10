@@ -31,7 +31,7 @@ agent_memory_summary_file() {
 # Bracket classes like [o] keep these literal patterns from matching their own
 # source line, so harness diffs stay reviewable. Do not "simplify" them away.
 agent_memory_sensitive_re() {
-  printf '%s\n' '((^|[^A-Za-z0-9])[A-Za-z0-9_]*(t[o]ken|s[e]cret|passw(or)?[d]|credentia[l])[[:space:]]*[:=]|(^|[^A-Za-z0-9_])(private_?[k]ey|api[-_]?[k]ey|aws_s[e]cret_access_[k]ey)[[:space:]]*[:=]|auth[o]rization:[[:space:]]+[^[:space:]]+|bear[e]r[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|(^|[^A-Za-z0-9_])s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN|/hom[e]/[^[:space:]]+|/User[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
+  printf '%s\n' '((^|[^A-Za-z0-9])[A-Za-z0-9_]*(t[o]ken|s[e]cret|passw(or)?[d]|credentia[l]|(ap[i]|s[e]cret|privat[e])[-_ ]?(ke[y]|t[o]ken)|aws_s[e]cret_access_[k]ey)[[:space:]]*[:=]|auth[o]rization:[[:space:]]+[^[:space:]]+|bear[e]r[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|(^|[^A-Za-z0-9_])s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN|/hom[e]/[^[:space:]]+|/User[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
 }
 
 agent_memory_file_has_sensitive_content() {

@@ -223,6 +223,22 @@ case "$ACTION" in
       echo "task: no active task ($TASK_FILE)"
       exit 0
     fi
+    # Promote a one-line outcome into project shared memory so the next
+    # session (any agent) starts from the conclusion, not from scratch.
+    if [ "${OMS_AGENT_TASK_CLOSE_MEMORY:-1}" = "1" ]; then
+      goal_line="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
+      next_line="$(awk '/^## Next Step$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
+      if [ -n "$goal_line" ]; then
+        note_file="$(mktemp)"
+        printf 'Closed task: %s%s\n' "$goal_line" "${next_line:+ | next: $next_line}" > "$note_file"
+        if agent_memory_append_file "$(agent_memory_project_file "$REPO")" project "$AGENT" "$note_file" >/dev/null 2>&1; then
+          echo "task: outcome noted in project shared memory"
+        else
+          echo "warning: task outcome not added to shared memory" >&2
+        fi
+        rm -f "$note_file"
+      fi
+    fi
     archive_dir="$(dirname "$TASK_FILE")/archive"
     archive_file="$archive_dir/current-$(date -u +%Y%m%dT%H%M%SZ).md"
     mkdir -p "$archive_dir"

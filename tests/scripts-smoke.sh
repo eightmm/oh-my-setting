@@ -1129,7 +1129,7 @@ test_scrubber_passes_harness_sources() {
   # Self-review regression gate: anything that can enter diff/prompt context
   # must pass the outbound scrubber. Env examples and generated cluster refs
   # are excluded here exactly like MA_SAFE_PATHS excludes them from diffs.
-  (cd "$ROOT" && git ls-files -z -- '*.sh' '*.md' '*.json' ':(exclude).env*' | xargs -0 cat) > "$bundle"
+  (cd "$ROOT" && git ls-files -z -- . ':(exclude).env*' | xargs -0 cat) > "$bundle"
   if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$bundle'"; then
     bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; grep -Ein \"\$(agent_memory_sensitive_re)\" '$bundle' | head -n 5" >&2 || true
     fail "harness sources must pass the outbound scrubber (self-review regression)"
@@ -1192,6 +1192,85 @@ test_agent_run_read_priority_routing() {
     --repo "$project" --artifact-dir "$artifact_dir" --to codex \
     --prompt "Refactor the parser module" >/dev/null 2>"$project/route3"
   assert_file_contains "$project/route3" "resolved=write"
+}
+
+test_scrubber_blocks_credential_variants() {
+  local f="$TMP/scrub-variants"
+  local s
+
+  for s in "MY_API_K""EY=x" "api k""ey: x" "secret k""ey=x" "MY_PRIVATE_K""EY=x" "client_s""ecret = x"; do
+    printf '%s\n' "$s" > "$f"
+    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+      fail "scrubber should block: $s"
+  done
+
+  printf 'max_tokens: 512\nthe private keynote speech\nmonkey: banana\n' > "$f"
+  if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
+    fail "benign vocabulary should pass the scrubber"
+  fi
+}
+
+test_review_diff_side_blocks_env_token() {
+  local diff="$TMP/env-token.diff"
+  printf '+GITHUB_TOK%s=ghx-not-real\n' "EN" > "$diff"
+  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; contains_sensitive_content '$diff'" ||
+    fail "diff-side check should block env-style tokens"
+}
+
+test_run_ledger_gate_blocks_failing_check() {
+  local project="$TMP/ledger-gate"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  cat > "$project/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+# modes: fast ml-smoke
+echo "$1" >> gate-mode
+exit 1
+EOF
+  chmod +x "$project/scripts/check.sh"
+
+  if (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'echo ran > launched' >/dev/null 2>"$project/error"); then
+    fail "failing pre-flight gate should abort the launch"
+  fi
+  assert_file_contains "$project/error" "pre-flight check failed"
+  assert_file_contains "$project/gate-mode" "ml-smoke"
+  assert_not_exists "$project/launched"
+  assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
+
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --no-gate -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "--no-gate should skip the failing gate"
+  [ -s "$project/docs/EXPERIMENTS.jsonl" ] || fail "no-gate run should append a ledger row"
+}
+
+test_run_ledger_warns_duplicate_run() {
+  local project="$TMP/ledger-dup"
+
+  make_committed_repo "$project"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "first ledgered run should pass"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>"$project/dup-err") ||
+    fail "duplicate run should warn but still run"
+  assert_file_contains "$project/dup-err" "identical run already in ledger"
+
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'true' >/dev/null 2>"$project/dup-err2") ||
+    fail "different command should run"
+  if grep -q "identical run already in ledger" "$project/dup-err2"; then
+    fail "different command should not trigger the duplicate warning"
+  fi
+}
+
+test_agent_task_close_promotes_memory() {
+  local project="$TMP/task-close-memory"
+
+  mkdir -p "$project"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --goal "Ship the dataloader fix" --next "Run gpu smoke" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" close >"$project/out"
+  assert_file_contains "$project/out" "task: archived"
+  assert_file_contains "$project/.oms/memory/shared.md" "Closed task: Ship the dataloader fix"
+  assert_file_contains "$project/.oms/memory/shared.md" "next: Run gpu smoke"
+  assert_not_exists "$project/.oms/task/current.md"
 }
 
 
@@ -1381,6 +1460,11 @@ test_scrubber_passes_harness_sources
 test_scrubber_blocks_env_style_token
 test_scrubber_no_function_name_bypass
 test_agent_run_read_priority_routing
+test_scrubber_blocks_credential_variants
+test_review_diff_side_blocks_env_token
+test_run_ledger_gate_blocks_failing_check
+test_run_ledger_warns_duplicate_run
+test_agent_task_close_promotes_memory
 test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply

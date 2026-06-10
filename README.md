@@ -106,6 +106,9 @@ when the harness calls them.
 - Active task handoff lives at `.oms/task/current.md`; provider prompts attach
   it by default so Codex, Claude Code, and Antigravity can continue the same
   work without replaying the full chat.
+- Closing a task promotes a one-line outcome (goal + next step) into project
+  shared memory, so the next session starts from the conclusion
+  (`OMS_AGENT_TASK_CLOSE_MEMORY=0` to disable).
 - Outbound prompts are scrubbed before provider CLI calls; sensitive-looking
   credentials, private keys, absolute machine paths, cluster details, raw logs,
   datasets, and checkpoints block the external call.
@@ -206,6 +209,16 @@ Show the last 10 ledger entries.
 Rows (git SHA, dirty-diff hash, Slurm job id, exit code, duration) append to
 `docs/EXPERIMENTS.jsonl`. The command line is recorded verbatim — keep secrets
 out of arguments.
+
+Two guards run before every ledgered launch:
+
+- Pre-flight gate: when `scripts/check.sh` exists, it runs first (`ml-smoke`
+  when implemented, else `fast`) and a failing contract aborts the launch —
+  no GPU time on a project whose own smoke checks fail. Skip with `--no-gate`
+  or `OMS_RUN_LEDGER_GATE=0`.
+- Duplicate warning: an identical earlier run (same commit, same diff hash,
+  same command) prints the previous result before compute is spent on it
+  again. Disable with `OMS_RUN_LEDGER_DUP=0`.
 
 Digest long training/Slurm logs instead of pasting them raw:
 

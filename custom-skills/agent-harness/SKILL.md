@@ -60,6 +60,10 @@ Common actions:
 ~/.oh-my-setting/scripts/agent-task.sh --repo . close
 ```
 
+`close` archives the packet and promotes a one-line outcome (goal + next
+step) into project shared memory, so the next session starts from the
+conclusion. Disable with `OMS_AGENT_TASK_CLOSE_MEMORY=0`.
+
 ## Individual Agent Runs
 
 Use `agent-run.sh` as the single entrypoint for one provider. In `--mode auto`,

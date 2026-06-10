@@ -92,16 +92,13 @@ ma_git_diff_base() {
   fi
 }
 
+# Diff-side check shares the outbound regex so the two scrubbers cannot
+# drift apart; added lines only.
 contains_sensitive_content() {
   local file="$1"
-  # Split terms so this script can safely review its own source diff.
-  local secret_re
-  secret_re='(^|[^A-Za-z0-9_])((t[o]ken|s[e]cret|passw[o]rd|private_[k]ey|api[-_]?[k]ey|aws_s[e]cret_access_[k]ey)[[:space:]]*[:=]|auth[o]rization:[[:space:]]+[^[:space:]]+|bear[e]r[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN)'
-
   grep -E '^\+' "$file" |
     grep -Ev '^\+\+\+ ' |
-    grep -Ev '^\+[[:space:]]*secret_re=' |
-    grep -Eiq "$secret_re"
+    grep -Eiq "$(agent_memory_sensitive_re)"
 }
 
 # No line-level exclusions here: skipping lines by name created a bypass
