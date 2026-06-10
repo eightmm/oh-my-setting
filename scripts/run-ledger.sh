@@ -114,8 +114,13 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   git_sha="$(git rev-parse --short HEAD 2>/dev/null || echo 'no-commit')"
   dirty="$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
   if [ "$dirty" -gt 0 ]; then
-    # HEAD-relative so staged-only changes get distinct hashes too.
-    dirty_hash="$(git diff HEAD | sha256sum | cut -c1-16)"
+    # HEAD-relative so staged-only changes get distinct hashes too; a repo
+    # with no commits yet has no HEAD, so hash index + worktree instead.
+    if git rev-parse --verify HEAD >/dev/null 2>&1; then
+      dirty_hash="$(git diff HEAD | sha256sum | cut -c1-16)"
+    else
+      dirty_hash="$( (git diff --cached; git diff) | sha256sum | cut -c1-16)"
+    fi
   fi
 fi
 
@@ -150,8 +155,9 @@ fi
 if [ "$GATE" = "1" ] && [ -x scripts/check.sh ]; then
   gate_mode="fast"
   # Mode is implemented only when a case label exists; a comment or usage
-  # mention must not select it.
-  if grep -Eq '(^|[[:space:]])ml-smoke\)' scripts/check.sh; then
+  # mention must not select it. Labels may be quoted, parenthesized, or in
+  # an alternation: ml-smoke), (ml-smoke), "ml-smoke"), fast|ml-smoke).
+  if grep -Eq '(^|[[:space:]("|'\''])ml-smoke("|'\'')?\)' scripts/check.sh; then
     gate_mode="ml-smoke"
   fi
   echo "ledger: pre-flight gate: bash scripts/check.sh $gate_mode (skip with --no-gate)" >&2

@@ -1245,6 +1245,39 @@ EOF
   [ -s "$project/docs/EXPERIMENTS.jsonl" ] || fail "no-gate run should append a ledger row"
 }
 
+test_run_ledger_no_commit_repo_with_staged_changes() {
+  local project="$TMP/ledger-no-commit"
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+  printf 'staged\n' > "$project/file.txt"
+  git -C "$project" add file.txt
+
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>"$project/error") ||
+    fail "ledger must not crash in a no-commit repo with staged changes: $(cat "$project/error")"
+  [ -s "$project/docs/EXPERIMENTS.jsonl" ] || fail "no-commit run should still append a ledger row"
+}
+
+test_run_ledger_gate_detects_label_variants() {
+  local project="$TMP/ledger-gate-variants"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  cat > "$project/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-fast}" in
+  fast) echo fast >> gate-mode; exit 0 ;;
+  fast-alias|"ml-smoke") echo ml-smoke >> gate-mode; exit 0 ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$project/scripts/check.sh"
+
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "gate with quoted/alternation label should run"
+  assert_file_contains "$project/gate-mode" "ml-smoke"
+}
+
 test_run_ledger_gate_mention_falls_back_to_fast() {
   local project="$TMP/ledger-gate-fast"
 
@@ -1501,6 +1534,8 @@ test_scrubber_blocks_credential_variants
 test_review_diff_side_blocks_env_token
 test_run_ledger_gate_blocks_failing_check
 test_run_ledger_gate_mention_falls_back_to_fast
+test_run_ledger_no_commit_repo_with_staged_changes
+test_run_ledger_gate_detects_label_variants
 test_run_ledger_warns_duplicate_run
 test_agent_task_close_promotes_memory
 test_link_and_unlink_with_home_override

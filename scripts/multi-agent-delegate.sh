@@ -226,7 +226,7 @@ worktree_created=1
 # Verification contract: default to the project's check.sh when present.
 if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -x "$worktree/scripts/check.sh" ]; then
   project_style="$("$(ma_scripts_dir)/detect-project-style.sh" "$worktree" 2>/dev/null || echo general)"
-  if [ "$project_style" = "ml" ] && grep -Eq '(^|[[:space:]])ml-smoke\)' "$worktree/scripts/check.sh"; then
+  if [ "$project_style" = "ml" ] && grep -Eq '(^|[[:space:]("|'\''])ml-smoke("|'\'')?\)' "$worktree/scripts/check.sh"; then
     VERIFY_CMD="bash scripts/check.sh ml-smoke"
   else
     VERIFY_CMD="bash scripts/check.sh fast"
