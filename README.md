@@ -101,6 +101,21 @@ Ask a conceptual question to all three models:
 
 Per-provider ask artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/ask/`. No repo context is attached unless `--repo-context` or `--diff` is passed.
 
+Let the models debate each other before answering:
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-ask.sh \
+  --debate 1 \
+  --prompt "Should this project use a vector DB or pgvector?"
+```
+
+`--debate N` (1-3) adds N rounds after the independent first round: each
+provider sees the others' previous answers, critiques them with evidence, and
+revises its own position. Round artifacts are saved as `*-rN.md`; the
+synthesis carries each provider's final answer. Cost scales with
+providers × (1+N) calls; 1-2 rounds is usually the sweet spot. Debate rounds
+exchange answers only — repo context is attached to round-1 prompts only.
+
 ## Project Setup
 
 Auto-detect:

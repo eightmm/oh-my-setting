@@ -7,6 +7,7 @@ PROVIDERS="codex,claude,antigravity"
 ARTIFACT_DIR=""
 INCLUDE_STATUS=0
 INCLUDE_DIFF=0
+DEBATE=0
 DRY_RUN="${OH_MY_SETTING_ASK_DRY_RUN:-0}"
 
 SAFE_PATHS=(
@@ -46,6 +47,10 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: PWD/.omc/artifacts/ask.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.
+  --debate N           Add N debate rounds (1-3). Each round, every provider
+                       sees the others' previous answers, critiques them, and
+                       revises its own. Debate rounds exchange answers only;
+                       repo context is attached to round-1 prompts only.
   --print-timeout DUR  Timeout for print mode wait. Default: 5m.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
@@ -96,6 +101,41 @@ run_with_timeout() {
   else
     "$@"
   fi
+}
+
+extract_output() {
+  awk 'BEGIN{flag=0} /^## Output$/{flag=1;next} /^## Exit$/{flag=0} flag' "$1"
+}
+
+write_debate_prompt() {
+  local output="$1"
+  local provider="$2"
+  local round="$3"
+  local self_artifact="$4"
+  shift 4
+  # Remaining args: "name:artifact" pairs for the other advisors.
+
+  {
+    printf 'You are %s, one of several independent advisors debating the same question.\n' "$provider"
+    printf 'This is debate round %s. Critique the other advisors with evidence and concrete reasoning.\n' "$round"
+    printf 'Do not converge for the sake of agreement; change your position only where another argument is stronger.\n'
+    printf 'Do not modify files.\n\n'
+    printf 'Original question:\n%s\n\n' "$PROMPT"
+    printf 'Your previous answer:\n'
+    extract_output "$self_artifact"
+    printf '\nOther advisors:\n'
+    local pair name art
+    for pair in "$@"; do
+      name="${pair%%:*}"
+      art="${pair#*:}"
+      printf '\n## %s\n' "$name"
+      extract_output "$art"
+    done
+    printf '\nReturn exactly these sections:\n'
+    printf 'Answer:\n'
+    printf 'Changed from previous round:\n'
+    printf 'Remaining disagreements:\n'
+  } > "$output"
 }
 
 contains_sensitive_content() {
@@ -269,6 +309,14 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=1
       shift
       ;;
+    --debate)
+      [ "$#" -ge 2 ] || fail "--debate requires round count"
+      case "$2" in
+        1|2|3) DEBATE="$2" ;;
+        *) fail "--debate must be 1-3" ;;
+      esac
+      shift 2
+      ;;
     --print-timeout)
       [ "$#" -ge 2 ] || fail "--print-timeout requires duration"
       OMS_MULTI_AGENT_PRINT_TIMEOUT="$2"
@@ -302,8 +350,12 @@ mkdir -p "$ARTIFACT_DIR"
 status_file="$(mktemp)" || fail "mktemp failed"
 diff_file="$(mktemp)" || fail "mktemp failed"
 prompt_file="$(mktemp)" || fail "mktemp failed"
+debate_dir=""
 cleanup() {
   rm -f "$status_file" "$diff_file" "$prompt_file"
+  if [ -n "$debate_dir" ]; then
+    rm -rf "$debate_dir"
+  fi
 }
 trap cleanup EXIT
 
@@ -348,24 +400,77 @@ done
 
 [ "$total" -gt 0 ] || fail "no providers selected"
 
+declare -a alive last_arts
 for i in "${!pids[@]}"; do
   if wait "${pids[i]}"; then
     ok=$((ok + 1))
+    alive[i]=1
+  else
+    alive[i]=0
   fi
+  last_arts[i]="${artifacts[i]}"
 done
+
+if [ "$DEBATE" -gt 0 ]; then
+  debate_dir="$(mktemp -d)" || fail "mktemp failed"
+  for ((round = 2; round <= DEBATE + 1; round++)); do
+    active=()
+    for i in "${!provider_names[@]}"; do
+      [ "${alive[i]}" = 1 ] && active+=("$i")
+    done
+    if [ "${#active[@]}" -lt 2 ]; then
+      echo "debate round $round skipped: fewer than two active providers" >&2
+      break
+    fi
+
+    r_pids=()
+    r_idx=()
+    r_arts=()
+    for i in "${active[@]}"; do
+      p="${provider_names[i]}"
+      others=()
+      for j in "${active[@]}"; do
+        [ "$j" != "$i" ] && others+=("${provider_names[j]}:${last_arts[j]}")
+      done
+      debate_prompt="$debate_dir/prompt-r$round-$p"
+      write_debate_prompt "$debate_prompt" "$p" "$round" "${last_arts[i]}" "${others[@]}"
+      artifact="$ARTIFACT_DIR/$p-$slug-$timestamp-r$round.md"
+      run_provider "$p" "$debate_prompt" "$artifact" &
+      r_pids+=("$!")
+      r_idx+=("$i")
+      r_arts+=("$artifact")
+    done
+
+    for k in "${!r_pids[@]}"; do
+      i="${r_idx[k]}"
+      if wait "${r_pids[k]}"; then
+        last_arts[i]="${r_arts[k]}"
+      else
+        # Drop failed provider from later rounds; keep its last good answer.
+        alive[i]=0
+      fi
+    done
+  done
+fi
 
 synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
 {
   printf '# Multi-agent ask synthesis\n\n'
   printf -- '- generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf -- '- success: %d/%d providers\n\n' "$ok" "$total"
-  printf '## Prompt\n\n'
+  printf -- '- success: %d/%d providers\n' "$ok" "$total"
+  if [ "$DEBATE" -gt 0 ]; then
+    printf -- '- debate rounds: %d\n' "$DEBATE"
+  fi
+  printf '\n## Prompt\n\n'
   printf '```\n'
   cat "$prompt_file"
   printf '\n```\n\n'
   for i in "${!artifacts[@]}"; do
     printf '## %s\n\n' "${provider_names[i]}"
-    awk 'BEGIN{flag=0} /^## Output$/{flag=1;next} /^## Exit$/{flag=0} flag' "${artifacts[i]}"
+    if [ "${last_arts[i]}" != "${artifacts[i]}" ]; then
+      printf '_final answer after debate_\n\n'
+    fi
+    extract_output "${last_arts[i]}"
     printf '\n'
   done
 } > "$synth_file"

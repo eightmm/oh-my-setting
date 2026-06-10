@@ -580,6 +580,56 @@ test_multi_agent_ask_print_timeout() {
     --prompt "Ask with custom print timeout" >/dev/null
 }
 
+test_multi_agent_ask_debate_dry_run() {
+  local project="$TMP/ask-debate"
+  local artifact_dir="$project/artifacts"
+  local count
+
+  mkdir -p "$project"
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --artifact-dir "$artifact_dir" \
+    --debate 1 \
+    --prompt "Debate two options" >/dev/null
+
+  count="$(find "$artifact_dir" -type f -name '*.md' ! -name '_synthesis-*' | wc -l)"
+  [ "$count" = "6" ] || fail "expected six debate artifacts (3 round1 + 3 round2), got $count"
+  assert_one_artifact_contains "$artifact_dir" 'codex-debate-two-options-*-r2.md' 'Your previous answer:'
+  assert_one_artifact_contains "$artifact_dir" 'codex-debate-two-options-*-r2.md' 'Other advisors:'
+  assert_one_artifact_contains "$artifact_dir" 'claude-debate-two-options-*-r2.md' 'debate round 2'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-debate-two-options-*.md' 'debate rounds: 1'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-debate-two-options-*.md' '_final answer after debate_'
+}
+
+test_multi_agent_ask_debate_needs_two_providers() {
+  local project="$TMP/ask-debate-single"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --debate 1 \
+    --prompt "Debate alone" >/dev/null 2>"$project/error"
+
+  assert_file_contains "$project/error" 'fewer than two active providers'
+  if find "$artifact_dir" -type f -name '*-r2.md' | grep -q .; then
+    fail "single-provider debate should not produce round-2 artifacts"
+  fi
+}
+
+test_multi_agent_ask_rejects_bad_debate_count() {
+  local project="$TMP/ask-debate-bad"
+  mkdir -p "$project"
+
+  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --artifact-dir "$project/artifacts" \
+    --debate 9 \
+    --prompt "Debate too long" >/dev/null 2>"$project/error"; then
+    fail "--debate 9 should fail"
+  fi
+  assert_file_contains "$project/error" '--debate must be 1-3'
+}
+
 test_link_and_unlink_with_home_override() {
   local home_dir="$TMP/link-home"
   mkdir -p "$home_dir"
@@ -663,6 +713,9 @@ test_multi_agent_ask_repo_context_subset
 test_multi_agent_ask_secret_diff_skips_external
 test_multi_agent_review_print_timeout
 test_multi_agent_ask_print_timeout
+test_multi_agent_ask_debate_dry_run
+test_multi_agent_ask_debate_needs_two_providers
+test_multi_agent_ask_rejects_bad_debate_count
 test_link_and_unlink_with_home_override
 test_update_help_runs
 test_uninstall_help_runs

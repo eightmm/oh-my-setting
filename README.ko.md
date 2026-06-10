@@ -99,6 +99,20 @@ Provider는 병렬 실행되며 provider별 timeout이 적용된다(`OMS_MULTI_A
 
 provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/ask/`에 저장된다. `--repo-context`나 `--diff`를 넘기지 않으면 repo context는 붙이지 않는다.
 
+모델끼리 debate 후 답변:
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-ask.sh \
+  --debate 1 \
+  --prompt "Should this project use a vector DB or pgvector?"
+```
+
+`--debate N`(1-3)은 독립적인 1라운드 뒤에 N라운드를 추가한다: 각 provider가
+다른 모델들의 직전 답변을 보고 증거 기반으로 비판하고 자기 입장을 수정한다.
+라운드별 artifact는 `*-rN.md`로 저장되고, 종합본에는 각 provider의 최종 답변이
+실린다. 비용은 provider × (1+N) 호출로 늘어나며 1-2라운드가 보통 적정선.
+debate 라운드는 답변만 교환한다 — repo context는 1라운드 프롬프트에만 붙는다.
+
 ## 프로젝트 적용
 
 자동 감지:
