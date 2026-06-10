@@ -92,10 +92,12 @@ surfaces. oh-my-setting does not try to merge those private stores directly.
 Instead, it provides a harness-owned memory file that all three agents can read
 when the harness calls them.
 
-- Project memory: `.oms/memory/shared.md`
-- Global memory: `~/.oh-my-setting/local/agent-memory.md`
-- Safety: append rejects sensitive-looking notes such as credentials, private
-  keys, local machine paths, cluster details, and project-private paths.
+- Project memory source log: `.oms/memory/shared.md`
+- Project prompt context: `.oms/memory/pins.md` + `.oms/memory/summary.md`
+- Global memory source log: `~/.oh-my-setting/local/agent-memory.md`
+- Provider prompts inject compact memory by default, not the full source log.
+- Safety: append/pin rejects sensitive-looking notes such as credentials,
+  private keys, local machine paths, cluster details, and project-private paths.
 - Rules that must always apply still belong in `AGENTS.md`, checked-in docs,
   scripts, or hooks. Shared memory is soft recall.
 
@@ -103,8 +105,8 @@ Ask the agent to manage it:
 
 ```text
 Remember for this repo: run scripts/check.sh fast before claiming done.
-Show shared harness memory for this repo.
-Forget nothing automatically; summarize what should be stored first.
+Pin for this repo: current task is preserving cross-agent context with compact memory.
+Show compact shared harness memory for this repo.
 ```
 
 Call one provider directly; the agent chooses read-only call or isolated write delegation:

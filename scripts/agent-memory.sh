@@ -12,29 +12,39 @@ ACTION=""
 AGENT="agent"
 TEXT=""
 USE_STDIN=0
+FULL=0
 
 usage() {
   cat <<'EOF'
-Usage: agent-memory.sh [options] [path|show|init|append]
+Usage: agent-memory.sh [options] [path|show|context|init|append|pin|compact]
 
 Maintain harness-owned memory shared by Codex, Claude Code, and Antigravity.
 Project memory defaults to REPO/.oms/memory/shared.md. Global memory defaults to
 ~/.oh-my-setting/local/agent-memory.md.
 
+Files:
+  shared.md   Human-readable source log; not sent to providers by default.
+  pins.md     Short high-signal notes always eligible for provider context.
+  summary.md  Compact recent notes generated from shared.md.
+
 Options:
   --repo PATH       Project repo/directory for project memory. Default: PWD.
   --global          Use global harness memory instead of project memory.
-  --file PATH       Use an explicit memory file.
+  --file PATH       Use an explicit shared memory source file.
   --agent NAME      Agent label for appended notes. Default: agent.
-  --text TEXT       Note text for append.
-  --stdin           Read append note from stdin.
+  --text TEXT       Note text for append/pin.
+  --stdin           Read append/pin note from stdin.
+  --full            context: emit full source tail instead of compact view.
   -h, --help        Show help.
 
 Commands:
   path              Print the resolved memory file path.
-  show              Print memory if it exists. Default.
-  init              Create the memory file if missing.
-  append            Append a note after sensitive-content screening.
+  show              Print source memory if it exists. Default.
+  context           Print provider context view (compact by default).
+  init              Create the source memory file if missing.
+  append            Append a source note and refresh summary.md.
+  pin               Append a short note to pins.md.
+  compact           Regenerate summary.md from source memory.
 EOF
 }
 
@@ -68,7 +78,11 @@ while [ "$#" -gt 0 ]; do
       USE_STDIN=1
       shift
       ;;
-    path|show|init|append)
+    --full)
+      FULL=1
+      shift
+      ;;
+    path|show|context|init|append|pin|compact)
       ACTION="$1"
       shift
       ;;
@@ -96,6 +110,16 @@ if [ -z "$MEMORY_FILE" ]; then
   fi
 fi
 
+write_note_file() {
+  local note_file="$1"
+  if [ "$USE_STDIN" -eq 1 ]; then
+    cat > "$note_file"
+  else
+    [ -n "$TEXT" ] || { echo "error: $ACTION requires --text or --stdin" >&2; exit 2; }
+    printf '%s\n' "$TEXT" > "$note_file"
+  fi
+}
+
 case "$ACTION" in
   path)
     printf '%s\n' "$MEMORY_FILE"
@@ -111,18 +135,33 @@ case "$ACTION" in
       echo "memory: empty ($MEMORY_FILE)"
     fi
     ;;
+  context)
+    if [ "$FULL" -eq 1 ]; then
+      agent_memory_emit_full_section "$SCOPE" "$MEMORY_FILE" || true
+    else
+      agent_memory_emit_compact_section "$SCOPE" "$MEMORY_FILE" "$SCOPE" || true
+    fi
+    ;;
   append)
     note_file="$(mktemp)"
     cleanup() { rm -f "$note_file"; }
     trap cleanup EXIT
-    if [ "$USE_STDIN" -eq 1 ]; then
-      cat > "$note_file"
-    else
-      [ -n "$TEXT" ] || { echo "error: append requires --text or --stdin" >&2; exit 2; }
-      printf '%s\n' "$TEXT" > "$note_file"
-    fi
+    write_note_file "$note_file"
     agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file"
     echo "memory: appended $MEMORY_FILE"
+    echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
+    ;;
+  pin)
+    note_file="$(mktemp)"
+    cleanup() { rm -f "$note_file"; }
+    trap cleanup EXIT
+    write_note_file "$note_file"
+    agent_memory_pin_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file"
+    echo "memory: pinned $(agent_memory_pins_file "$MEMORY_FILE")"
+    ;;
+  compact)
+    agent_memory_refresh_summary "$MEMORY_FILE" "$SCOPE"
+    echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
     ;;
   *)
     echo "error: unknown command: $ACTION" >&2

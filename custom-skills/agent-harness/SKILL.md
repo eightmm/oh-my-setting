@@ -19,14 +19,21 @@ agent decides whether the request is read-only advice or a write task.
   details, or project-private paths.
 - Required rules still belong in `AGENTS.md`, `CLAUDE.md`, checked-in docs,
   scripts, or hooks. Memory is soft recall only.
-- Project memory lives at `.oms/memory/shared.md`; global memory lives at
-  `~/.oh-my-setting/local/agent-memory.md`.
+- Project memory lives under `.oms/memory/`:
+  - `shared.md`: human-readable source log
+  - `pins.md`: short high-signal notes always eligible for context
+  - `summary.md`: compact recent notes generated from `shared.md`
+- Global memory uses `~/.oh-my-setting/local/agent-memory.md` as the source log
+  and companion compact files in the same directory.
+- Provider calls inject compact memory by default, not the full markdown log.
 
 Common actions:
 
 ```bash
 ~/.oh-my-setting/scripts/agent-memory.sh --repo . show
+~/.oh-my-setting/scripts/agent-memory.sh --repo . context
 ~/.oh-my-setting/scripts/agent-memory.sh --repo . append --agent codex --text "Prefer scripts/check.sh fast before done."
+~/.oh-my-setting/scripts/agent-memory.sh --repo . pin --agent codex --text "Current task: keep agent-run as the single provider entrypoint."
 ~/.oh-my-setting/scripts/agent-memory.sh --global append --agent claude --text "User prefers compact Korean status."
 ```
 
@@ -49,8 +56,9 @@ in an isolated git worktree and writes artifacts/patches to
 when the owning agent has decided the returned patch should be applied and the
 main tree is clean.
 
-`agent-run.sh` attaches shared harness memory by default. Use `--no-memory` when
-memory should not be sent.
+`agent-run.sh` attaches compact shared harness memory by default. Use
+`--no-memory` when memory should not be sent, or set `OMS_AGENT_MEMORY_MODE=full`
+only for debugging full source-tail prompts.
 
 ## Output
 

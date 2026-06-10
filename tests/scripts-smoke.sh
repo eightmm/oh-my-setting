@@ -905,11 +905,26 @@ test_agent_memory_append_show_and_rejects_sensitive() {
     --repo "$project" append --agent codex --text "Prefer scripts/check.sh fast before done." >/dev/null
 
   [ -f "$project/.oms/memory/shared.md" ] || fail "project memory file missing"
+  [ -f "$project/.oms/memory/summary.md" ] || fail "compact memory summary missing"
   assert_file_contains "$project/.oms/memory/shared.md" "Prefer scripts/check.sh fast before done."
+  assert_file_contains "$project/.oms/memory/summary.md" "Prefer scripts/check.sh fast before done."
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" pin --agent codex --text "Current task context should stay compact." >/dev/null
+  [ -f "$project/.oms/memory/pins.md" ] || fail "pinned memory file missing"
+  assert_file_contains "$project/.oms/memory/pins.md" "Current task context should stay compact."
 
   HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
     --repo "$project" show >"$project/out"
   assert_file_contains "$project/out" "Shared Agent Memory"
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" context >"$project/context"
+  assert_file_contains "$project/context" "Compact recent:"
+  assert_file_contains "$project/context" "Pinned:"
+  if grep -Fq "Shared Agent Memory" "$project/context"; then
+    fail "compact context should not include full shared.md header"
+  fi
 
   if HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
     --repo "$project" append --agent codex --text "private path /home/jaemin/secret" \
@@ -935,7 +950,7 @@ test_agent_call_dry_run_attaches_shared_memory() {
     --to codex \
     --prompt "Assess this plan" >/dev/null
 
-  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Shared harness memory follows'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'compact mode'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Prefer narrow verification commands.'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'DRY RUN: provider command skipped.'
 }
@@ -957,6 +972,7 @@ test_agent_run_auto_read_routes_to_call() {
     --prompt "Assess this plan" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'independent read-only pass'
+  assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'Compact recent:'
   assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'Prefer narrow verification commands.'
 }
 
