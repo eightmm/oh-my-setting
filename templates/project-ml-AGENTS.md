@@ -90,6 +90,7 @@
 - Never infer label meaning, split policy, leakage boundary, or metric direction from file names alone.
 - Ask before using validation/test data for preprocessing fit, feature selection, normalization, threshold tuning, checkpoint choice, or early stopping.
 - Do not run long training unless data, dataloader, model, and loss smoke checks pass.
+- Before long training or Slurm submission, run the pre-training gate when available: `~/.oh-my-setting/scripts/multi-agent-review.sh --ml`.
 
 ## Project Commands
 

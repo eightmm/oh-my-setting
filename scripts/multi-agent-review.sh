@@ -8,6 +8,7 @@ ARTIFACT_DIR=""
 NO_DIFF=0
 BASE_REF=""
 SYNTHESIZE=""
+ML_PRESET=0
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 REVIEW_PATHS=(
@@ -40,7 +41,11 @@ Ask the same review question to Codex, Claude Code, and Antigravity, then persis
 each answer as an artifact.
 
 Options:
-  --prompt TEXT        Review question/task. Required.
+  --prompt TEXT        Review question/task. Required unless --ml is set.
+  --ml                 ML preset: inject a silent-ML-bug checklist (leakage,
+                       splits, loss, eval mode, reproducibility, DDP) into
+                       every reviewer prompt. Intended as a pre-training gate
+                       before long runs or Slurm submissions.
   --repo PATH          Git repo to review. Default: current directory.
   --base REF           Diff base ref. Default: HEAD (staged + unstaged changes).
                        Use e.g. --base origin/main for branch/PR review.
@@ -154,6 +159,20 @@ write_prompt() {
     printf 'Find bugs, regressions, missing tests, unclear contracts, and unsafe operations.\n'
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
     printf 'If there are no actionable findings, say "No findings".\n\n'
+    if [ "$ML_PRESET" -eq 1 ]; then
+      printf 'This is an ML pre-training review. ML bugs are usually silent: the code runs,\n'
+      printf 'only the metrics are wrong. Check the diff against each item:\n'
+      printf -- '- Data leakage: val/test data used for fitting, normalization, feature selection, threshold tuning, checkpoint choice, or early stopping.\n'
+      printf -- '- Split integrity: boundary changes, group/time leakage, seed-dependent splits.\n'
+      printf -- '- Label/target or metric definition changes that silently break comparability with baselines.\n'
+      printf -- '- Loss: sign, scale, reduction, masking of padded or invalid elements.\n'
+      printf -- '- Eval correctness: model.eval() and torch.no_grad() in validation/inference paths.\n'
+      printf -- '- Reproducibility: seeds, data versions, config capture, checkpoint save/load symmetry.\n'
+      printf -- '- Silent numerics: NaN/Inf paths, division by zero, dtype/precision changes.\n'
+      printf -- '- DDP: sampler.set_epoch per epoch, rank-0-only side effects, metric all_reduce.\n'
+      printf -- '- Config or preprocessing changes that invalidate existing checkpoints or baselines.\n'
+      printf 'Rank silently-wrong-metrics bugs as the highest severity findings.\n\n'
+    fi
     printf 'Question:\n%s\n\n' "$question"
     printf 'Repository:\n%s\n\n' "$repo"
     if [ "$NO_DIFF" -eq 0 ]; then
@@ -270,6 +289,10 @@ while [ "$#" -gt 0 ]; do
       NO_DIFF=1
       shift
       ;;
+    --ml)
+      ML_PRESET=1
+      shift
+      ;;
     --synthesize)
       SYNTHESIZE="claude"
       if [ "$#" -ge 2 ]; then
@@ -306,6 +329,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$PROMPT" ] && [ "$ML_PRESET" -eq 1 ]; then
+  PROMPT="Review the current diff for silent ML bugs before running training or expensive experiments."
+fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"

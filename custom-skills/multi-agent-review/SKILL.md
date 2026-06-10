@@ -86,7 +86,14 @@ Prefer the shared wrapper when this repo is installed:
 ~/.oh-my-setting/scripts/multi-agent-review.sh \
   --repo . \
   --prompt "Review the current uncommitted diff for bugs, regressions, missing tests, and unsafe operations."
+
+# ML pre-training gate: silent-ML-bug checklist (leakage, splits, loss,
+# eval mode, reproducibility, DDP). Use before long training or Slurm jobs.
+~/.oh-my-setting/scripts/multi-agent-review.sh --repo . --ml
 ```
+
+Use `--base origin/main` for branch/PR review and `--synthesize` to append a
+model-written synthesis to the summary artifact.
 
 The wrapper sends the same question and same sanitized diff/status context to
 `codex`, `claude`, and `antigravity`, writes one artifact per model under
