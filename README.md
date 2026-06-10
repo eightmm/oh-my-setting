@@ -82,7 +82,7 @@ Two multi-agent commands with opposite defaults:
 | Purpose | Verify a diff (gate) | Explore a question (advice) |
 | Repo context | Attached by default (`--no-diff` to omit) | Omitted by default (`--repo-context`/`--diff` to attach) |
 | Reviewer contract | Findings / Risks / Missing tests / Recommendation | Answer / Tradeoffs / Risks / Recommendation |
-| Extras | `--base`, `--synthesize`, `--ml` | `--debate` |
+| Extras | `--base`, `--synthesize`, `--ml`, `--debate` | `--debate` |
 | Non-zero exit means | Review gate failed (block the change) | Not enough independent opinions |
 
 Use `review` before merging or training; use `ask` while deciding what to build.
@@ -112,7 +112,7 @@ time (leakage, split integrity, loss, eval mode, reproducibility, DDP):
 `--ml` injects the checklist into every reviewer prompt and supplies a default
 prompt, so it works with no other arguments.
 
-Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. Pass `--synthesize [codex|claude|antigravity]` (default `claude`) to append a model-written synthesis (Consensus/Must-fix/Optional/Disagreement) to the summary instead of raw concatenation only. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
+Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. Pass `--synthesize [codex|claude|antigravity]` (default `claude`) to append a model-written synthesis (Consensus/Must-fix/Optional/Disagreement) to the summary instead of raw concatenation only. `--debate N` (1-3) makes reviewers critique each other's findings before the synthesis — useful for killing false positives on high-stakes diffs. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
 
 Ask a conceptual question to all three models:
 

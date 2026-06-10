@@ -80,7 +80,7 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 | 목적 | diff 검증 (게이트) | 질문 탐색 (자문) |
 | repo context | 기본 첨부 (`--no-diff`로 생략) | 기본 생략 (`--repo-context`/`--diff`로 첨부) |
 | 응답 계약 | Findings / Risks / Missing tests / Recommendation | Answer / Tradeoffs / Risks / Recommendation |
-| 고유 기능 | `--base`, `--synthesize`, `--ml` | `--debate` |
+| 고유 기능 | `--base`, `--synthesize`, `--ml`, `--debate` | `--debate` |
 | 비정상 종료 의미 | 리뷰 게이트 실패 (변경 차단) | 독립 의견 수 부족 |
 
 merge나 훈련 전에는 `review`, 무엇을 만들지 결정할 때는 `ask`.
@@ -110,7 +110,7 @@ ML pre-training gate — GPU 시간 태우기 전에 침묵형 ML 버그(leakage
 `--ml`은 모든 reviewer 프롬프트에 체크리스트를 주입하고 기본 프롬프트를
 제공하므로 다른 인자 없이 동작한다.
 
-Provider는 병렬 실행되며 provider별 timeout이 적용된다(`OMS_MULTI_AGENT_TIMEOUT`, 기본 `5m`). provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/review/`에 저장된다. `--synthesize [codex|claude|antigravity]`(기본 `claude`)를 넘기면 단순 연결 대신 모델이 작성한 합성(Consensus/Must-fix/Optional/Disagreement)이 종합본에 추가된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
+Provider는 병렬 실행되며 provider별 timeout이 적용된다(`OMS_MULTI_AGENT_TIMEOUT`, 기본 `5m`). provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/review/`에 저장된다. `--synthesize [codex|claude|antigravity]`(기본 `claude`)를 넘기면 단순 연결 대신 모델이 작성한 합성(Consensus/Must-fix/Optional/Disagreement)이 종합본에 추가된다. `--debate N`(1-3)은 합성 전에 reviewer끼리 서로의 finding을 비판하게 한다 — 고위험 diff에서 false positive 제거에 유용. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
 
 개념 질문을 세 모델에 묻기:
 

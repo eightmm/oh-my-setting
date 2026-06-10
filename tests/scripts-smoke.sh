@@ -352,6 +352,29 @@ test_multi_agent_review_synthesize_provider_override() {
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-override-*.md' '## Synthesis (codex)'
 }
 
+test_multi_agent_review_debate_dry_run() {
+  local project="$TMP/review-debate"
+  local artifact_dir="$project/artifacts"
+  local count
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,claude \
+    --no-diff \
+    --debate 1 \
+    --prompt "Review with debate" >/dev/null
+
+  count="$(find "$artifact_dir" -type f -name '*-r2.md' | wc -l)"
+  [ "$count" = "2" ] || fail "expected two round-2 review artifacts, got $count"
+  assert_one_artifact_contains "$artifact_dir" 'codex-review-with-debate-*-r2.md' 'Other reviewers:'
+  assert_one_artifact_contains "$artifact_dir" 'claude-review-with-debate-*-r2.md' 'Remaining disagreements:'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-with-debate-*.md' 'debate rounds: 1'
+}
+
 test_multi_agent_review_ml_preset() {
   local project="$TMP/review-ml-preset"
   local artifact_dir="$project/artifacts"
@@ -738,6 +761,7 @@ test_multi_agent_review_synthesize_dry_run
 test_multi_agent_review_synthesize_provider_override
 test_multi_agent_review_ml_preset
 test_multi_agent_review_default_prompt_requires_ml
+test_multi_agent_review_debate_dry_run
 test_multi_agent_review_excludes_private_status
 test_multi_agent_review_secret_diff_skips_external
 test_multi_agent_review_no_diff_provider_subset
