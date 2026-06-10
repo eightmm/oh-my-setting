@@ -137,6 +137,8 @@ ACTION="${ACTION:-show}"
 
 OMS_TASK_TMPDIR="$(mktemp -d)" || exit 1
 trap 'rm -rf "$OMS_TASK_TMPDIR"' EXIT
+# Library temp files land here too, so crashes cannot leak them.
+export OMS_LIB_TMPDIR="$OMS_TASK_TMPDIR"
 
 write_tmp_text() {
   local output="$1"

@@ -42,12 +42,24 @@ agent_memory_file_has_sensitive_content() {
 
 # Byte-budget truncation that never leaves a split multibyte character
 # (notes are often Korean); falls back to a plain byte cut without iconv.
+# iconv exits nonzero when it drops a split trailing character — that is the
+# expected truncation case, so the status must be swallowed for pipefail.
 agent_memory_truncate_bytes() {
   local max="$1"
   if command -v iconv >/dev/null 2>&1; then
-    head -c "$max" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null
+    head -c "$max" | { iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true; }
   else
     head -c "$max"
+  fi
+}
+
+# Temp files land in the caller's trapped dir when it exports OMS_LIB_TMPDIR,
+# so a crash mid-edit cannot leak them; otherwise plain mktemp.
+agent_memory_mktemp() {
+  if [ -n "${OMS_LIB_TMPDIR:-}" ] && [ -d "${OMS_LIB_TMPDIR:-}" ]; then
+    mktemp "$OMS_LIB_TMPDIR/oms.XXXXXX"
+  else
+    mktemp
   fi
 }
 
@@ -94,7 +106,7 @@ agent_memory_refresh_summary() {
 
   summary_file="$(agent_memory_summary_file "$memory_file")"
   mkdir -p "$(dirname "$summary_file")"
-  tmp="$(mktemp)" || return 1
+  tmp="$(agent_memory_mktemp)" || return 1
 
   awk -v max_chars="$chars" '
     /^## / {
@@ -206,7 +218,7 @@ agent_memory_emit_compact_section() {
 
   # Buffer the body first: when every subsection is omitted (sensitive or
   # empty), no dangling "### label" header may reach the prompt.
-  body="$(mktemp)" || return 1
+  body="$(agent_memory_mktemp)" || return 1
 
   if [ -s "$pins_file" ]; then
     if agent_memory_file_has_sensitive_content "$pins_file"; then
@@ -261,7 +273,7 @@ ma_write_shared_memory_context() {
   fi
 
   # Buffer sections so the intro line never appears with no content below it.
-  buf="$(mktemp)" || return 0
+  buf="$(agent_memory_mktemp)" || return 0
   {
     if [ "$mode" = "full" ]; then
       if [ -s "$global_file" ]; then

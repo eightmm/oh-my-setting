@@ -135,7 +135,7 @@ ma_write_harness_context() {
   local include_ml="$4"
   local tmp
 
-  tmp="$(mktemp)" || return 0
+  tmp="$(agent_memory_mktemp)" || return 0
   {
     if [ "$include_memory" -eq 1 ]; then
       ma_write_shared_memory_context "$repo"
@@ -185,7 +185,7 @@ ma_safe_diff() {
   local base
   local tmp
   base="$(ma_git_diff_base "$repo")"
-  tmp="$(mktemp)" || return 1
+  tmp="$(agent_memory_mktemp)" || return 1
 
   if ! git -C "$repo" diff "$base" -- "${MA_SAFE_PATHS[@]}" > "$tmp"; then
     rm -f "$tmp"

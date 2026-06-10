@@ -50,7 +50,7 @@ agent_task_touch_updated() {
   local now
 
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  tmp="$(mktemp)" || return 1
+  tmp="$(agent_memory_mktemp)" || return 1
   awk -v now="$now" '
     BEGIN { done = 0 }
     /^- updated:/ {
@@ -80,7 +80,7 @@ agent_task_replace_section() {
   fi
 
   agent_task_init_file "$file"
-  tmp="$(mktemp)" || return 1
+  tmp="$(agent_memory_mktemp)" || return 1
   awk -v section="$section" -v content_file="$content_file" '
     BEGIN {
       while ((getline line < content_file) > 0) {
@@ -144,9 +144,9 @@ agent_task_append_bullet() {
   # Pass the bullet through a file: awk -v mangles backslash escapes
   # (e.g. Windows paths or \n inside notes).
   local line_file
-  line_file="$(mktemp)" || return 1
+  line_file="$(agent_memory_mktemp)" || return 1
   printf '%s\n' "$line" > "$line_file"
-  tmp="$(mktemp)" || { rm -f "$line_file"; return 1; }
+  tmp="$(agent_memory_mktemp)" || { rm -f "$line_file"; return 1; }
   awk -v section="$section" -v line_file="$line_file" '
     BEGIN { getline line < line_file; found = 0; in_section = 0; inserted = 0 }
     $0 == section {

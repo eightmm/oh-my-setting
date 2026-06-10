@@ -1343,6 +1343,26 @@ test_run_ledger_warns_duplicate_run() {
   fi
 }
 
+test_truncation_survives_split_multibyte() {
+  local project="$TMP/truncate-multibyte"
+
+  mkdir -p "$project"
+  # A 4-byte budget slices the second Korean character in half; the append
+  # and pin must still succeed with the partial character dropped.
+  OMS_AGENT_TASK_NOTE_CHARS=4 "$ROOT/scripts/agent-task.sh" \
+    --repo "$project" append --text "가나다" >/dev/null ||
+    fail "task append must survive a split multibyte truncation"
+  assert_file_contains "$project/.oms/task/current.md" "가"
+  if grep -q "가나" "$project/.oms/task/current.md"; then
+    fail "truncation should have cut after the first character"
+  fi
+
+  OMS_AGENT_MEMORY_PIN_CHARS=4 "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" pin --text "가나다" >/dev/null ||
+    fail "memory pin must survive a split multibyte truncation"
+  assert_file_contains "$project/.oms/memory/pins.md" "가"
+}
+
 test_agent_task_append_preserves_backslashes() {
   local project="$TMP/task-backslash"
 
@@ -1593,6 +1613,7 @@ test_run_ledger_no_commit_repo_with_staged_changes
 test_run_ledger_gate_detects_label_variants
 test_run_ledger_warns_duplicate_run
 test_agent_task_close_promotes_memory
+test_truncation_survives_split_multibyte
 test_agent_task_append_preserves_backslashes
 test_memory_context_omits_sensitive_sections_cleanly
 test_memory_append_survives_stale_sensitive_source
