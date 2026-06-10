@@ -13,15 +13,26 @@ oh-my-setting은 agent 작업을 기본적으로 로컬과 shell에서 보이게
 - Multi-agent review도 로컬 기반으로만 수행한다: Codex, Claude Code, Antigravity CLI.
 - 로컬 multi-agent 도구가 없으면 single-agent review로 진행하고 한계를 명시한다.
 
+설치 이후의 모든 사용은 coding agent와의 대화로 이루어진다. 설치된 규칙과
+스킬이 agent에게 어떤 로컬 스크립트를 실행할지 알려주므로, 스크립트를 직접
+호출할 일은 없다.
+
 ## 빠른 시작
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
-cd /path/to/project
-~/.oh-my-setting/scripts/apply-project-template.sh auto .
 ```
 
-그 다음 [Agent 시작 문구](#agent-시작-문구)에서 맞는 문구를 agent에 붙여넣는다.
+그 다음 coding agent를 열고 둘 중 하나를 말한다:
+
+```text
+여기서 새 프로젝트 시작하자.                    # 빈 디렉토리: 인터뷰 -> PROJECT.md -> 템플릿 -> skeleton -> doctor
+oh-my-setting 프로젝트 템플릿 적용해줘.         # 기존 repo
+```
+
+새 프로젝트 시작은 전체 플로우가 채팅 안에서 돈다: spec 인터뷰, `PROJECT.md`,
+템플릿, 안전한 skeleton, doctor 검증 — shell에 직접 칠 명령이 없다. 더 자세한
+시작 문구는 [Agent 시작 문구](#agent-시작-문구) 참고.
 
 ## 설치
 
@@ -59,145 +70,104 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 `~/.gemini/antigravity/skills/`에 링크되어 세 agent 모두 같은 규칙과 스킬을
 읽는다.
 
-현재 설치 상태 확인:
+상태 확인이나 업데이트는 agent에게 요청한다:
 
-```bash
-~/.oh-my-setting/scripts/status.sh
+```text
+oh-my-setting 설치 상태 확인해줘.
+oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 ```
 
-로컬 checkout 업데이트 + symlink 재연결 + doctor 재실행:
+## Multi-Agent 워크플로
 
-```bash
-~/.oh-my-setting/scripts/update.sh           # git pull + tools + link + doctor
-~/.oh-my-setting/scripts/update.sh --no-tools --no-doctor
-```
+기본값이 반대인 워크플로 두 개:
 
-기본값이 반대인 multi-agent 명령 두 개:
-
-| | `multi-agent-review.sh` | `multi-agent-ask.sh` |
+| | review | ask |
 |---|---|---|
 | 목적 | diff 검증 (게이트) | 질문 탐색 (자문) |
-| repo context | 기본 첨부 (`--no-diff`로 생략) | 기본 생략 (`--repo-context`/`--diff`로 첨부) |
+| repo context | 기본 첨부 | 기본 생략 (요청 시 첨부) |
 | 응답 계약 | Findings / Risks / Missing tests / Recommendation | Answer / Tradeoffs / Risks / Recommendation |
-| 고유 기능 | `--base`, `--synthesize`, `--ml`, `--debate` | `--debate` |
-| 비정상 종료 의미 | 리뷰 게이트 실패 (변경 차단) | 독립 의견 수 부족 |
+| 고유 기능 | base ref 기준 리뷰, ML 체크리스트, 합성, debate | debate |
+| 실패 의미 | 리뷰 게이트 실패 (변경 차단) | 독립 의견 수 부족 |
 
-merge나 훈련 전에는 `review`, 무엇을 만들지 결정할 때는 `ask`.
+merge나 훈련 전에는 review, 무엇을 만들지 결정할 때는 ask.
 
-현재 repo의 tracked staged + unstaged diff를 세 모델로 review:
+예시 문구:
 
-```bash
-~/.oh-my-setting/scripts/multi-agent-review.sh \
-  --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
+```text
+현재 diff를 multi-agent review로 검토해줘.
+이 branch를 origin/main 기준으로 multi-agent review 해줘.
+이 diff에 ML pre-training 리뷰 게이트 돌려줘.
+세 모델에게 물어봐줘: 이 프로젝트는 vector DB와 pgvector 중 뭐가 맞을까?
+debate 1라운드로 세 모델에게 물어봐줘: 이 프로젝트에서 RAG와 fine-tuning 비교.
 ```
 
-branch를 base ref 기준으로 review (PR 스타일):
+ML 게이트는 GPU 시간 태우기 전에 침묵형 ML 버그(leakage, split 무결성, loss,
+eval mode, 재현성, DDP)를 diff에서 검사한다. 체크리스트는 모든 reviewer
+프롬프트에 자동 주입된다.
 
-```bash
-~/.oh-my-setting/scripts/multi-agent-review.sh \
-  --base origin/main \
-  --prompt "Review this branch against origin/main."
+Provider는 병렬 실행되며 provider별 timeout이 적용된다
+(`OMS_MULTI_AGENT_TIMEOUT`, 기본 `5m`). provider별 artifact와
+`_synthesis-*.md` 종합본이 review는 `.oms/artifacts/review/`, ask는
+`.oms/artifacts/ask/`에 저장된다. 종합본은 기본적으로 모델이 작성한
+합성(Consensus/Must-fix/Optional/Disagreement)이다. debate(1-3라운드)는 각
+provider가 다른 모델들의 직전 답변을 보고 증거 기반으로 비판하고 자기 입장을
+수정한 뒤 합성한다 — 고위험 diff에서 false positive 제거에 유용. 라운드별
+artifact는 `*-rN.md`로 저장되고, 비용은 provider × (1+라운드) 호출로 늘어나며
+1-2라운드가 보통 적정선. debate 라운드는 답변만 교환한다 — repo context는
+1라운드 프롬프트에만 붙는다. sanitized diff/status context가 로컬 Codex,
+Claude Code, Antigravity CLI로 전달되며, secret path와 secret-like 추가
+라인은 외부 review 전에 제외된다.
+
+다른 agent에게 쓰기 작업 위임:
+
+```text
+codex에게 위임해줘: scripts/train.py에 입력 검증 추가.
+검증은 `uv run pytest tests/`로.
 ```
 
-ML pre-training gate — GPU 시간 태우기 전에 침묵형 ML 버그(leakage, split
-무결성, loss, eval mode, 재현성, DDP)를 diff에서 검사:
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-review.sh --ml
-```
-
-`--ml`은 모든 reviewer 프롬프트에 체크리스트를 주입하고 기본 프롬프트를
-제공하므로 다른 인자 없이 동작한다.
-
-Provider는 병렬 실행되며 provider별 timeout이 적용된다(`OMS_MULTI_AGENT_TIMEOUT`, 기본 `5m`). provider별 artifact와 `_synthesis-*.md` 종합본이 `.oms/artifacts/review/`에 저장된다. `--synthesize [codex|claude|antigravity]`(기본 `claude`)를 넘기면 단순 연결 대신 모델이 작성한 합성(Consensus/Must-fix/Optional/Disagreement)이 종합본에 추가된다. `--debate N`(1-3)은 합성 전에 reviewer끼리 서로의 finding을 비판하게 한다 — 고위험 diff에서 false positive 제거에 유용. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
-
-개념 질문을 세 모델에 묻기:
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-ask.sh \
-  --prompt "Compare RAG and fine-tuning tradeoffs for this project."
-```
-
-provider별 artifact와 `_synthesis-*.md` 종합본이 `.oms/artifacts/ask/`에 저장된다. `--repo-context`나 `--diff`를 넘기지 않으면 repo context는 붙이지 않는다.
-
-모델끼리 debate 후 답변:
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-ask.sh \
-  --debate 1 \
-  --prompt "Should this project use a vector DB or pgvector?"
-```
-
-`--debate N`(1-3)은 독립적인 1라운드 뒤에 N라운드를 추가한다: 각 provider가
-다른 모델들의 직전 답변을 보고 증거 기반으로 비판하고 자기 입장을 수정한다.
-라운드별 artifact는 `*-rN.md`로 저장되고, 종합본에는 각 provider의 최종 답변이
-실린다. 비용은 provider × (1+N) 호출로 늘어나며 1-2라운드가 보통 적정선.
-debate 라운드는 답변만 교환한다 — repo context는 1라운드 프롬프트에만 붙는다.
-
-다른 agent에게 쓰기 작업 위임 (worker는 격리된 git worktree에서 실행, 결과는
-리뷰 가능한 patch로 회수):
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-delegate.sh \
-  --to codex \
-  --brief-file /tmp/brief.md \
-  --verify "uv run pytest tests/"
-```
-
-worker는 메인 트리 수정·commit·push 불가. artifact(로그 + HEAD 기준
-`.patch`)는 `.oms/artifacts/delegate/`에 저장된다. patch 리뷰 후 `--apply`
-재실행 또는 `git apply --binary <patch>`. `multi-agent-delegate` 스킬이
-호스트 agent에게 대화 컨텍스트로부터 brief(Task/Context/Constraints/Files/
-Success criteria) 작성법을 지시한다.
+worker는 격리된 git worktree에서 실행되며 메인 트리 수정·commit·push 불가.
+artifact(로그 + HEAD 기준 `.patch`)는 `.oms/artifacts/delegate/`에 저장된다.
+호스트 agent가 대화 컨텍스트로부터 brief(Task/Context/Constraints/Files/
+Success criteria)를 작성하고, 회수된 patch를 같이 리뷰한 뒤 승인 후에만
+적용한다.
 
 ## 검증·실험 도구
 
-ML 프로젝트는 `scripts/check.sh` 검증 계약을 받는다
-(`apply-project-template.sh ml`이 스캐폴딩):
-
-```bash
-scripts/check.sh fast   # CPU, 60초 미만; agent가 완료 주장 전 실행
-scripts/check.sh gpu    # 짧은 GPU smoke; Slurm 머신에서는 srun으로 감쌈
-```
-
-`multi-agent-delegate.sh`는 계약이 있으면 worker의 worktree 안에서
-`check.sh fast`를 기본 실행한다 (`--no-verify`로 생략).
+ML 프로젝트는 `scripts/check.sh` 검증 계약을 받는다(ml 템플릿이 스캐폴딩).
+`fast`는 CPU 전용 60초 미만 — agent가 완료 주장 전 실행. `gpu`는 짧은 GPU
+smoke로 Slurm 머신에서는 srun으로 감싼다. 위임된 worker는 계약이 있으면
+worktree 안에서 `check.sh fast`를 기본 실행한다.
 
 실험은 run ledger를 통해 실행 — 모든 agent가 "뭘 이미 시도했는지" 기억:
 
-```bash
-~/.oh-my-setting/scripts/run-ledger.sh --note "lr sweep" -- uv run scripts/train.py
-~/.oh-my-setting/scripts/run-ledger.sh list 10
+```text
+이 훈련을 run ledger 통해서 실행해줘, note는 "lr sweep".
+최근 ledger 10개 보여줘.
 ```
 
 행(git SHA, dirty-diff hash, Slurm job id, exit code, duration)이
 `docs/EXPERIMENTS.jsonl`에 누적된다. 명령줄이 그대로 기록되니 인자에 secret
 넣지 말 것.
 
-긴 훈련/Slurm 로그는 raw로 agent에 붙이지 말고 digest:
+긴 훈련/Slurm 로그는 raw로 붙이지 말고 digest 요청:
 
-```bash
-~/.oh-my-setting/scripts/job-digest.sh outputs/train.log
-~/.oh-my-setting/scripts/job-digest.sh 12345 slurm-12345.out   # sacct + 로그
+```text
+outputs/train.log digest 해줘.
+Slurm job 12345랑 로그 digest 해줘.
 ```
 
 ## 프로젝트 적용
 
-자동 감지:
+프로젝트 안에서 agent에게 요청한다:
 
-```bash
-~/.oh-my-setting/scripts/apply-project-template.sh auto .
+```text
+oh-my-setting 프로젝트 템플릿 적용해줘 (자동 감지).
+oh-my-setting ml 템플릿 적용해줘.        # 또는: general, slurm
+oh-my-setting 프로젝트 규칙 제거해줘.
+oh-my-setting project doctor 돌려줘.
 ```
 
-직접 선택:
-
-```bash
-~/.oh-my-setting/scripts/apply-project-template.sh general .
-~/.oh-my-setting/scripts/apply-project-template.sh ml .
-~/.oh-my-setting/scripts/apply-project-template.sh slurm .
-```
-
-동작:
+적용 시 동작:
 
 - `AGENTS.md`, `CLAUDE.md`에 managed block 추가/갱신
 - `PROJECT.md` 없으면 생성
@@ -206,30 +176,13 @@ scripts/check.sh gpu    # 짧은 GPU smoke; Slurm 머신에서는 srun으로 감
 - managed block 밖의 기존 내용은 덮어쓰지 않음
 - Slurm 머신의 ML 프로젝트는 `ml` + 별도 `slurm` 규칙 적용
 
-제거:
+제거는 managed block만 삭제한다. `PROJECT.md`와 스캐폴딩된 `docs/` 파일은
+사용자 내용이 있을 수 있어 의도적으로 남겨둔다.
 
-```bash
-~/.oh-my-setting/scripts/remove-project-template.sh all .
-```
-
-제거는 managed block만 삭제한다. `PROJECT.md`와 스캐폴딩된 `docs/` 파일은 사용자 내용이 있을 수 있어 의도적으로 남겨둔다.
-
-감지만:
-
-```bash
-~/.oh-my-setting/scripts/detect-project-style.sh .
-```
-
-모든 agent가 같은 프로젝트 규칙을 보는지 검증:
-
-```bash
-~/.oh-my-setting/scripts/project-doctor.sh .
-```
-
-`AGENTS.md`/`CLAUDE.md` managed block이 서로 다르거나, 현재 템플릿 대비
-오래됐거나, `PROJECT.md`가 없으면 실패한다. draft `PROJECT.md`, ML 문서
-스캐폴드 누락, `.gitignore` 항목 누락은 경고. `update.sh` 후 실행하면
-템플릿 재적용이 필요한 프로젝트를 찾을 수 있다.
+project doctor는 `AGENTS.md`/`CLAUDE.md` managed block이 서로 다르거나, 현재
+템플릿 대비 오래됐거나, `PROJECT.md`가 없으면 실패한다. draft `PROJECT.md`,
+ML 문서 스캐폴드 누락, `.gitignore` 항목 누락은 경고. oh-my-setting 업데이트
+후 실행하면 템플릿 재적용이 필요한 프로젝트를 찾을 수 있다.
 
 ## Agent 시작 문구
 
@@ -238,14 +191,15 @@ scripts/check.sh gpu    # 짧은 GPU smoke; Slurm 머신에서는 srun으로 감
 ```text
 Use the local oh-my-setting project workflow. Do not code yet.
 
-Start a new project by creating only the safe skeleton, then interview me to
-fill PROJECT.md before implementation.
+Start a new project: interview me to fill PROJECT.md, and after I confirm it,
+bootstrap the project (template, safe skeleton, doctor) in one go.
 
 Success criteria:
 - clarify goal, users, non-goals, interface, data, paths, commands, risks, and verification
-- write or update PROJECT.md with confirmed answers
-- wait for confirmation before source code, dependency, API, data, or compute changes
-- report changed files and checks
+- write PROJECT.md and wait for my confirmation
+- after confirmation: apply the matching template, scaffold the safe skeleton, run the project doctor
+- wait for separate confirmation before feature code or anything beyond the confirmed spec
+- report template type, changed files, and doctor result
 ```
 
 기존 프로젝트:
@@ -267,17 +221,17 @@ Report:
 
 ## ML 프로젝트
 
-```bash
-mkdir my-project
-cd my-project
-~/.oh-my-setting/scripts/apply-project-template.sh ml .
+빈 디렉토리를 만들고, 그 안에서 agent를 열고 말한다:
+
+```text
+여기서 새 ML 프로젝트 시작하자.
 ```
 
 기대되는 agent 흐름:
 
-1. 안전한 skeleton만 생성
-2. 인터뷰
-3. `PROJECT.md` 작성/확인
+1. 인터뷰
+2. `PROJECT.md` 작성/확인
+3. ml 템플릿 적용 + 안전한 skeleton 스캐폴딩 + project doctor
 4. 확인 후 코드 작성
 
 ML 프로젝트 기본:
@@ -287,44 +241,28 @@ ML 프로젝트 기본:
 - `uv run ...`
 - 머신 스냅샷은 compute, GPU/CUDA, Slurm, memory, environment 차이가 작업에 영향을 줄 때만 참고
 
-`apply-project-template.sh ml`은 표준 문서 템플릿도 `docs/`에 스캐폴딩한다
-(`DATA.md`, `MODEL.md`, `TRAINING.md`, `EVALUATION.md`, ...). 프로젝트가
-구체화되면서 채워 나가면 되고, 기존 파일은 덮어쓰지 않는다.
+ml 템플릿은 표준 문서 템플릿도 `docs/`에 스캐폴딩한다 (`DATA.md`, `MODEL.md`,
+`TRAINING.md`, `EVALUATION.md`, ...). 프로젝트가 구체화되면서 채워 나가면
+되고, 기존 파일은 덮어쓰지 않는다.
 
 ## 로컬 스냅샷
 
-머신 스펙:
+installer가 생성하며, 다시 만들 때는 agent에게 요청한다:
 
-```bash
-~/.oh-my-setting/scripts/write-machine-snapshot.sh
+```text
+머신 스냅샷 다시 생성해줘.
+Slurm cluster 스냅샷 다시 생성해줘.        # raw 출력 포함이 필요하면 같이 말한다
 ```
 
 저장 위치:
 
 ```text
 ~/.oh-my-setting/local/machine.md
-```
-
-Codex, Claude Code, Antigravity, `gh` 같은 로컬 agent CLI 경로도 감지되면
-함께 기록한다.
-
-Slurm 스펙:
-
-```bash
-~/.oh-my-setting/scripts/generate-slurm-skill.sh
-```
-
-저장 위치:
-
-```text
 ~/.oh-my-setting/custom-skills/slurm-hpc/references/cluster.generated.md
 ```
 
-Slurm raw 출력까지 저장:
-
-```bash
-OH_MY_SETTING_SLURM_WRITE_RAW=1 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
-```
+머신 스냅샷에는 Codex, Claude Code, Antigravity, `gh` 같은 로컬 agent CLI
+경로도 감지되면 함께 기록된다.
 
 ## 연결 해제
 

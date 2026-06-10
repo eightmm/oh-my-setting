@@ -4,7 +4,9 @@ description: >
   Specification-first interview workflow. Use when starting a new project,
   feature, refactor, agent workflow, CLI, app, research pipeline, or any vague
   build request. Ask staged questions first, write or update PROJECT.md for
-  project work, then code only after the spec is confirmed.
+  project work, then code only after the spec is confirmed. For new-project
+  starts, continue into full bootstrap (template, skeleton, doctor) so the
+  user never runs setup commands in a shell.
 ---
 
 Default: no coding before confirmed spec.
@@ -22,6 +24,7 @@ Use when request is vague, new, broad, architecture-shaping, or says:
 4. Spec: write/update `PROJECT.md` for project work; otherwise write compact spec.
 5. Gate: list assumptions and unresolved ambiguity.
 6. Proceed only when user confirms. For project starts, `PROJECT.md` state must be `confirmed`.
+7. For new-project starts, run Project Bootstrap right after confirmation — do not wait for another prompt.
 
 ## Question Rules
 
@@ -109,6 +112,33 @@ For project start, create/update:
 ```
 
 Keep `State: draft` while questions remain. Set `State: confirmed` only after user confirmation.
+
+## Project Bootstrap
+
+New-project starts only. Runs after `PROJECT.md` is `confirmed`. Goal: the
+user starts a project entirely in chat — no shell commands typed by hand.
+
+1. Pick the template type from interview answers, not auto-detect (an empty
+   dir has nothing to detect):
+   - training/ML/research pipeline -> `ml`
+   - everything else -> `general`
+   - onboarding an existing repo -> `auto`
+   - Slurm overlay is added by the script on Slurm machines.
+2. Apply: `~/.oh-my-setting/scripts/apply-project-template.sh <type> .`
+3. Scaffold the safe skeleton only — structure, no feature logic:
+   - `git init` if not a repo.
+   - Python: `uv init`, `uv add` confirmed deps, `uv sync`, src layout.
+   - Directories from `PROJECT.md` Paths (e.g. `src/<pkg>/`, `scripts/`,
+     `tests/`, `configs/`; ML adds `data/`, `outputs/` — gitignored by the
+     template).
+   - Never overwrite existing files.
+4. Verify: `~/.oh-my-setting/scripts/project-doctor.sh .`; fix template/sync
+   issues it reports, rerun, then report the result.
+5. Report: template type, created/changed files, doctor result, and the next
+   step (first feature interview or implementation start).
+
+Feature code, API/data/compute changes, and dependency additions beyond the
+confirmed spec still require separate confirmation.
 
 For non-project work, keep compact:
 

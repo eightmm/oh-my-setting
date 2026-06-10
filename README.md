@@ -13,16 +13,26 @@ oh-my-setting keeps agent work local and shell-visible by default:
 - Multi-agent review stays local: Codex, Claude Code, and Antigravity CLI when available.
 - If local multi-agent tools are missing, run a single-agent review and report that limitation.
 
+Everything below the install step is used by talking to your coding agent.
+The installed rules and skills teach the agent which local script to run; you
+never call the scripts yourself.
+
 ## Quickstart
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
-cd /path/to/project
-~/.oh-my-setting/scripts/apply-project-template.sh auto .
 ```
 
-Then paste the matching prompt from [Agent Prompts](#agent-prompts) into the
-agent.
+Then open your coding agent and say one of:
+
+```text
+Start a new project here.                        # empty dir: interview -> PROJECT.md -> template -> skeleton -> doctor
+Apply the oh-my-setting project template.        # existing repo
+```
+
+A new-project start runs the whole flow in chat: spec interview, `PROJECT.md`,
+template, safe skeleton, and doctor verification — nothing typed in a shell.
+Fuller starting prompts are in [Agent Prompts](#agent-prompts).
 
 ## Install
 
@@ -61,147 +71,107 @@ Installed paths:
 also linked under `~/.gemini/antigravity/skills/`, so all three agents read the
 same rules and skills.
 
-Check current install status:
+Check status or update by asking the agent:
 
-```bash
-~/.oh-my-setting/scripts/status.sh
+```text
+Check the oh-my-setting install status.
+Update oh-my-setting and re-run its doctor.
 ```
 
-Update the local checkout, refresh symlinks, and re-run doctor:
+## Multi-Agent Workflows
 
-```bash
-~/.oh-my-setting/scripts/update.sh           # git pull + tools + link + doctor
-~/.oh-my-setting/scripts/update.sh --no-tools --no-doctor
-```
+Two workflows with opposite defaults:
 
-Two multi-agent commands with opposite defaults:
-
-| | `multi-agent-review.sh` | `multi-agent-ask.sh` |
+| | review | ask |
 |---|---|---|
 | Purpose | Verify a diff (gate) | Explore a question (advice) |
-| Repo context | Attached by default (`--no-diff` to omit) | Omitted by default (`--repo-context`/`--diff` to attach) |
+| Repo context | Attached by default | Omitted by default (attach on request) |
 | Reviewer contract | Findings / Risks / Missing tests / Recommendation | Answer / Tradeoffs / Risks / Recommendation |
-| Extras | `--base`, `--synthesize`, `--ml`, `--debate` | `--debate` |
-| Non-zero exit means | Review gate failed (block the change) | Not enough independent opinions |
+| Extras | base-ref review, ML checklist, synthesis, debate | debate |
+| Failure means | Review gate failed (block the change) | Not enough independent opinions |
 
-Use `review` before merging or training; use `ask` while deciding what to build.
+Use review before merging or training; use ask while deciding what to build.
 
-Run a three-model review of the tracked staged + unstaged repo diff:
+Example prompts:
 
-```bash
-~/.oh-my-setting/scripts/multi-agent-review.sh \
-  --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
+```text
+Run a multi-agent review of the current diff.
+Run a multi-agent review of this branch against origin/main.
+Run the ML pre-training review gate on this diff.
+Ask all three models: should this project use a vector DB or pgvector?
+Ask all three models with one debate round: compare RAG and fine-tuning for this project.
 ```
 
-Review a branch against a base ref (PR-style):
+The ML gate checks the diff for silent ML bugs before burning GPU time
+(leakage, split integrity, loss, eval mode, reproducibility, DDP); the
+checklist is injected into every reviewer prompt automatically.
 
-```bash
-~/.oh-my-setting/scripts/multi-agent-review.sh \
-  --base origin/main \
-  --prompt "Review this branch against origin/main."
+Providers run in parallel with a per-provider timeout
+(`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a
+`_synthesis-*.md` summary are written to `.oms/artifacts/review/` (review) and
+`.oms/artifacts/ask/` (ask). The synthesis is model-written
+(Consensus/Must-fix/Optional/Disagreement) by default. Debate (1-3 rounds)
+makes each provider see the others' previous answers, critique them with
+evidence, and revise its position before the synthesis — useful for killing
+false positives on high-stakes diffs. Round artifacts are saved as `*-rN.md`;
+cost scales with providers × (1+rounds), and 1-2 rounds is usually the sweet
+spot. Debate rounds exchange answers only — repo context is attached to
+round-1 prompts only. Sanitized diff/status context goes to the local Codex,
+Claude Code, and Antigravity CLIs; secret paths and secret-like added lines
+are excluded before external review.
+
+Delegate a write task to another agent:
+
+```text
+Delegate this to codex: add input validation to scripts/train.py.
+Verify with `uv run pytest tests/`.
 ```
 
-ML pre-training gate — review the diff for silent ML bugs before burning GPU
-time (leakage, split integrity, loss, eval mode, reproducibility, DDP):
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-review.sh --ml
-```
-
-`--ml` injects the checklist into every reviewer prompt and supplies a default
-prompt, so it works with no other arguments.
-
-Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.oms/artifacts/review/`. Pass `--synthesize [codex|claude|antigravity]` (default `claude`) to append a model-written synthesis (Consensus/Must-fix/Optional/Disagreement) to the summary instead of raw concatenation only. `--debate N` (1-3) makes reviewers critique each other's findings before the synthesis — useful for killing false positives on high-stakes diffs. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
-
-Ask a conceptual question to all three models:
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-ask.sh \
-  --prompt "Compare RAG and fine-tuning tradeoffs for this project."
-```
-
-Per-provider ask artifacts plus a `_synthesis-*.md` summary are written to `.oms/artifacts/ask/`. No repo context is attached unless `--repo-context` or `--diff` is passed.
-
-Let the models debate each other before answering:
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-ask.sh \
-  --debate 1 \
-  --prompt "Should this project use a vector DB or pgvector?"
-```
-
-`--debate N` (1-3) adds N rounds after the independent first round: each
-provider sees the others' previous answers, critiques them with evidence, and
-revises its own position. Round artifacts are saved as `*-rN.md`; the
-synthesis carries each provider's final answer. Cost scales with
-providers × (1+N) calls; 1-2 rounds is usually the sweet spot. Debate rounds
-exchange answers only — repo context is attached to round-1 prompts only.
-
-Delegate a write task to another agent (worker runs in an isolated git
-worktree, result comes back as a reviewable patch):
-
-```bash
-~/.oh-my-setting/scripts/multi-agent-delegate.sh \
-  --to codex \
-  --brief-file /tmp/brief.md \
-  --verify "uv run pytest tests/"
-```
-
-The worker cannot touch the main tree, commit, or push. Artifacts (log +
-`.patch` against HEAD) land in `.oms/artifacts/delegate/`. Review the patch,
-then re-run with `--apply` or `git apply --binary <patch>`. The
-`multi-agent-delegate` skill tells the host agent how to write a brief
-(Task/Context/Constraints/Files/Success criteria) from conversation context.
+The worker runs in an isolated git worktree and cannot touch the main tree,
+commit, or push. Artifacts (log + `.patch` against HEAD) land in
+`.oms/artifacts/delegate/`. The host agent writes the brief
+(Task/Context/Constraints/Files/Success criteria) from conversation context,
+reviews the returned patch with you, and applies it only after approval.
 
 ## Verification And Experiment Tools
 
 ML projects get a verification contract at `scripts/check.sh` (scaffolded by
-`apply-project-template.sh ml`):
-
-```bash
-scripts/check.sh fast   # CPU, <60s; agents run this before claiming done
-scripts/check.sh gpu    # short GPU smoke; srun-wrapped on Slurm machines
-```
-
-`multi-agent-delegate.sh` runs `check.sh fast` inside the worker's worktree by
-default when the contract exists (`--no-verify` to skip).
+the ml template): `fast` is CPU-only and under 60s — agents run it before
+claiming done; `gpu` is a short GPU smoke, srun-wrapped on Slurm machines.
+Delegated workers run `check.sh fast` inside their worktree by default when
+the contract exists.
 
 Launch experiments through the run ledger so every agent remembers what was
 already tried:
 
-```bash
-~/.oh-my-setting/scripts/run-ledger.sh --note "lr sweep" -- uv run scripts/train.py
-~/.oh-my-setting/scripts/run-ledger.sh list 10
+```text
+Launch this training run through the run ledger, note "lr sweep".
+Show the last 10 ledger entries.
 ```
 
 Rows (git SHA, dirty-diff hash, Slurm job id, exit code, duration) append to
 `docs/EXPERIMENTS.jsonl`. The command line is recorded verbatim — keep secrets
 out of arguments.
 
-Digest long training/Slurm logs instead of pasting them raw into an agent:
+Digest long training/Slurm logs instead of pasting them raw:
 
-```bash
-~/.oh-my-setting/scripts/job-digest.sh outputs/train.log
-~/.oh-my-setting/scripts/job-digest.sh 12345 slurm-12345.out   # sacct + log
+```text
+Digest outputs/train.log.
+Digest Slurm job 12345 and its log.
 ```
 
 ## Project Setup
 
-Auto-detect:
+Ask the agent inside the project:
 
-```bash
-~/.oh-my-setting/scripts/apply-project-template.sh auto .
+```text
+Apply the oh-my-setting project template (auto-detect).
+Apply the oh-my-setting ml template.        # or: general, slurm
+Remove the oh-my-setting project rules.
+Run the oh-my-setting project doctor.
 ```
 
-Choose explicitly:
-
-```bash
-~/.oh-my-setting/scripts/apply-project-template.sh general .
-~/.oh-my-setting/scripts/apply-project-template.sh ml .
-~/.oh-my-setting/scripts/apply-project-template.sh slurm .
-```
-
-What it does:
+What applying does:
 
 - Adds/updates managed blocks in `AGENTS.md` and `CLAUDE.md`.
 - Creates `PROJECT.md` if missing.
@@ -210,30 +180,14 @@ What it does:
 - Does not overwrite user content outside managed blocks.
 - For ML projects on Slurm machines, adds `ml` plus separate `slurm` rules.
 
-Remove project rules:
+Removal only deletes managed blocks. `PROJECT.md` and scaffolded `docs/` files
+may contain user content and are intentionally left in place.
 
-```bash
-~/.oh-my-setting/scripts/remove-project-template.sh all .
-```
-
-Removal only deletes managed blocks. `PROJECT.md` and scaffolded `docs/` files may contain user content and are intentionally left in place.
-
-Detect only:
-
-```bash
-~/.oh-my-setting/scripts/detect-project-style.sh .
-```
-
-Check that every agent sees the same project rules:
-
-```bash
-~/.oh-my-setting/scripts/project-doctor.sh .
-```
-
-Fails when `AGENTS.md` and `CLAUDE.md` managed blocks differ, blocks are stale
-against current templates, or `PROJECT.md` is missing. Warns on draft
-`PROJECT.md`, missing ML doc scaffold, or missing `.gitignore` entries. Run it
-after `update.sh` to find projects that need a template re-apply.
+The project doctor fails when `AGENTS.md` and `CLAUDE.md` managed blocks
+differ, blocks are stale against current templates, or `PROJECT.md` is
+missing. It warns on draft `PROJECT.md`, missing ML doc scaffold, or missing
+`.gitignore` entries. Run it after updating oh-my-setting to find projects
+that need a template re-apply.
 
 ## Agent Prompts
 
@@ -242,14 +196,15 @@ New project:
 ```text
 Use the local oh-my-setting project workflow. Do not code yet.
 
-Start a new project by creating only the safe skeleton, then interview me to
-fill PROJECT.md before implementation.
+Start a new project: interview me to fill PROJECT.md, and after I confirm it,
+bootstrap the project (template, safe skeleton, doctor) in one go.
 
 Success criteria:
 - clarify goal, users, non-goals, interface, data, paths, commands, risks, and verification
-- write or update PROJECT.md with confirmed answers
-- wait for confirmation before source code, dependency, API, data, or compute changes
-- report changed files and checks
+- write PROJECT.md and wait for my confirmation
+- after confirmation: apply the matching template, scaffold the safe skeleton, run the project doctor
+- wait for separate confirmation before feature code or anything beyond the confirmed spec
+- report template type, changed files, and doctor result
 ```
 
 Existing project:
@@ -271,17 +226,17 @@ Report:
 
 ## ML Projects
 
-```bash
-mkdir my-project
-cd my-project
-~/.oh-my-setting/scripts/apply-project-template.sh ml .
+Create an empty directory, open the agent in it, and say:
+
+```text
+Start a new ML project here.
 ```
 
 Expected agent flow:
 
-1. create only the safe skeleton
-2. interview
-3. fill/confirm `PROJECT.md`
+1. interview
+2. fill/confirm `PROJECT.md`
+3. apply the ml template, scaffold the safe skeleton, run the project doctor
 4. code after confirmation
 
 ML projects use:
@@ -291,44 +246,28 @@ ML projects use:
 - `uv run ...`
 - machine snapshot only when compute, GPU/CUDA, Slurm, memory, or environment details affect the task
 
-`apply-project-template.sh ml` also scaffolds standard doc templates under
-`docs/` (`DATA.md`, `MODEL.md`, `TRAINING.md`, `EVALUATION.md`, ...). Fill them
-as the project takes shape; existing files are never overwritten.
+The ml template also scaffolds standard doc templates under `docs/`
+(`DATA.md`, `MODEL.md`, `TRAINING.md`, `EVALUATION.md`, ...). Fill them as the
+project takes shape; existing files are never overwritten.
 
 ## Local Snapshots
 
-Machine snapshot:
+The installer generates these; regenerate by asking the agent:
 
-```bash
-~/.oh-my-setting/scripts/write-machine-snapshot.sh
+```text
+Regenerate the machine snapshot.
+Regenerate the Slurm cluster snapshot.        # add "include raw outputs" if needed
 ```
 
-Writes:
+Written paths:
 
 ```text
 ~/.oh-my-setting/local/machine.md
-```
-
-Also records local agent CLI paths for Codex, Claude Code, Antigravity, and
-`gh` when found.
-
-Slurm snapshot:
-
-```bash
-~/.oh-my-setting/scripts/generate-slurm-skill.sh
-```
-
-Writes:
-
-```text
 ~/.oh-my-setting/custom-skills/slurm-hpc/references/cluster.generated.md
 ```
 
-Include raw Slurm outputs:
-
-```bash
-OH_MY_SETTING_SLURM_WRITE_RAW=1 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
-```
+The machine snapshot also records local agent CLI paths for Codex, Claude
+Code, Antigravity, and `gh` when found.
 
 ## Unlink
 
