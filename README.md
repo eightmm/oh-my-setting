@@ -138,6 +138,22 @@ synthesis carries each provider's final answer. Cost scales with
 providers × (1+N) calls; 1-2 rounds is usually the sweet spot. Debate rounds
 exchange answers only — repo context is attached to round-1 prompts only.
 
+Delegate a write task to another agent (worker runs in an isolated git
+worktree, result comes back as a reviewable patch):
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-delegate.sh \
+  --to codex \
+  --brief-file /tmp/brief.md \
+  --verify "uv run pytest tests/"
+```
+
+The worker cannot touch the main tree, commit, or push. Artifacts (log +
+`.patch` against HEAD) land in `.omc/artifacts/delegate/`. Review the patch,
+then re-run with `--apply` or `git apply --binary <patch>`. The
+`multi-agent-delegate` skill tells the host agent how to write a brief
+(Task/Context/Constraints/Files/Success criteria) from conversation context.
+
 ## Project Setup
 
 Auto-detect:

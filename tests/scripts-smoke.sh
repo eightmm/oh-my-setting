@@ -686,6 +686,110 @@ test_multi_agent_ask_rejects_bad_debate_count() {
   assert_file_contains "$project/error" '--debate must be 1-3'
 }
 
+make_committed_repo() {
+  local project="$1"
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+  printf 'base\n' > "$project/file.txt"
+  git -C "$project" add file.txt
+  git -C "$project" \
+    -c user.email=test@example.com \
+    -c user.name='Test User' \
+    commit -m init >/dev/null
+}
+
+test_delegate_dry_run() {
+  local project="$TMP/delegate-dry"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --prompt "Add a helper" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'DRY RUN: worker command skipped.'
+  local patch
+  patch="$(find "$artifact_dir" -type f -name 'codex-add-a-helper-*.patch' | head -n 1)"
+  [ -n "$patch" ] || fail "missing delegate patch artifact"
+  [ ! -s "$patch" ] || fail "dry-run patch should be empty"
+  [ -z "$(git -C "$project" status --porcelain file.txt)" ] || fail "delegate dry-run touched main tree"
+}
+
+test_delegate_fake_worker_apply() {
+  local project="$TMP/delegate-apply"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'hello from worker\n' > delegated.txt
+echo "worker done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --apply \
+    --prompt "Create delegated file" >/dev/null
+
+  [ -f "$project/delegated.txt" ] || fail "applied patch should create delegated.txt in main tree"
+  assert_file_contains "$project/delegated.txt" "hello from worker"
+  assert_one_artifact_contains "$artifact_dir" 'codex-create-delegated-file-*.md' 'worker done'
+}
+
+test_delegate_apply_refuses_dirty_tree() {
+  local project="$TMP/delegate-dirty"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'x\n' > delegated.txt
+EOF
+  chmod +x "$bin_dir/codex"
+  printf 'dirty\n' >> "$project/file.txt"
+
+  if HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --apply \
+    --prompt "Apply on dirty tree" >/dev/null 2>"$project/error"; then
+    fail "--apply on dirty main tree should fail"
+  fi
+
+  assert_file_contains "$project/error" 'refusing --apply'
+  [ ! -f "$project/delegated.txt" ] || fail "dirty-tree apply should not modify main tree"
+}
+
+test_delegate_requires_provider() {
+  local project="$TMP/delegate-no-provider"
+  make_committed_repo "$project"
+
+  if "$ROOT/scripts/multi-agent-delegate.sh" \
+    --repo "$project" \
+    --prompt "No provider" >/dev/null 2>"$project/error"; then
+    fail "delegate without --to should fail"
+  fi
+  assert_file_contains "$project/error" '--to is required'
+}
+
 test_link_and_unlink_with_home_override() {
   local home_dir="$TMP/link-home"
   mkdir -p "$home_dir"
@@ -775,6 +879,10 @@ test_multi_agent_ask_print_timeout
 test_multi_agent_ask_debate_dry_run
 test_multi_agent_ask_debate_needs_two_providers
 test_multi_agent_ask_rejects_bad_debate_count
+test_delegate_dry_run
+test_delegate_fake_worker_apply
+test_delegate_apply_refuses_dirty_tree
+test_delegate_requires_provider
 test_link_and_unlink_with_home_override
 test_update_help_runs
 test_uninstall_help_runs

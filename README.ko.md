@@ -135,6 +135,22 @@ provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/ask/`에 
 실린다. 비용은 provider × (1+N) 호출로 늘어나며 1-2라운드가 보통 적정선.
 debate 라운드는 답변만 교환한다 — repo context는 1라운드 프롬프트에만 붙는다.
 
+다른 agent에게 쓰기 작업 위임 (worker는 격리된 git worktree에서 실행, 결과는
+리뷰 가능한 patch로 회수):
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-delegate.sh \
+  --to codex \
+  --brief-file /tmp/brief.md \
+  --verify "uv run pytest tests/"
+```
+
+worker는 메인 트리 수정·commit·push 불가. artifact(로그 + HEAD 기준
+`.patch`)는 `.omc/artifacts/delegate/`에 저장된다. patch 리뷰 후 `--apply`
+재실행 또는 `git apply --binary <patch>`. `multi-agent-delegate` 스킬이
+호스트 agent에게 대화 컨텍스트로부터 brief(Task/Context/Constraints/Files/
+Success criteria) 작성법을 지시한다.
+
 ## 프로젝트 적용
 
 자동 감지:

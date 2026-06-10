@@ -31,6 +31,12 @@
       "reason": "Ask Codex, Claude Code, and Antigravity the same conceptual question and synthesize perspectives."
     },
     {
+      "name": "multi-agent-delegate",
+      "source": "custom-skills/multi-agent-delegate",
+      "enabled": true,
+      "reason": "Delegate a scoped write task to another agent CLI in an isolated worktree and review the returned patch."
+    },
+    {
       "name": "slurm-hpc",
       "source": "custom-skills/slurm-hpc",
       "enabled": true,
