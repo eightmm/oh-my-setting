@@ -53,6 +53,12 @@
       "source": "custom-skills/slurm-hpc",
       "enabled": true,
       "reason": "Generate and use local Slurm cluster context for HPC workflows."
+    },
+    {
+      "name": "ml-training",
+      "source": "custom-skills/ml-training",
+      "enabled": true,
+      "reason": "Load PyTorch training defaults (optimizer, scheduler, DDP, checkpoint) on demand instead of carrying them in global rules."
     }
   ]
 }
