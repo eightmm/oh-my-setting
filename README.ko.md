@@ -73,6 +73,18 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 ~/.oh-my-setting/scripts/update.sh --no-tools --no-doctor
 ```
 
+기본값이 반대인 multi-agent 명령 두 개:
+
+| | `multi-agent-review.sh` | `multi-agent-ask.sh` |
+|---|---|---|
+| 목적 | diff 검증 (게이트) | 질문 탐색 (자문) |
+| repo context | 기본 첨부 (`--no-diff`로 생략) | 기본 생략 (`--repo-context`/`--diff`로 첨부) |
+| 응답 계약 | Findings / Risks / Missing tests / Recommendation | Answer / Tradeoffs / Risks / Recommendation |
+| 고유 기능 | `--base`, `--synthesize`, `--ml` | `--debate` |
+| 비정상 종료 의미 | 리뷰 게이트 실패 (변경 차단) | 독립 의견 수 부족 |
+
+merge나 훈련 전에는 `review`, 무엇을 만들지 결정할 때는 `ask`.
+
 현재 repo의 tracked staged + unstaged diff를 세 모델로 review:
 
 ```bash

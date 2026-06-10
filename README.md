@@ -75,6 +75,18 @@ Update the local checkout, refresh symlinks, and re-run doctor:
 ~/.oh-my-setting/scripts/update.sh --no-tools --no-doctor
 ```
 
+Two multi-agent commands with opposite defaults:
+
+| | `multi-agent-review.sh` | `multi-agent-ask.sh` |
+|---|---|---|
+| Purpose | Verify a diff (gate) | Explore a question (advice) |
+| Repo context | Attached by default (`--no-diff` to omit) | Omitted by default (`--repo-context`/`--diff` to attach) |
+| Reviewer contract | Findings / Risks / Missing tests / Recommendation | Answer / Tradeoffs / Risks / Recommendation |
+| Extras | `--base`, `--synthesize`, `--ml` | `--debate` |
+| Non-zero exit means | Review gate failed (block the change) | Not enough independent opinions |
+
+Use `review` before merging or training; use `ask` while deciding what to build.
+
 Run a three-model review of the tracked staged + unstaged repo diff:
 
 ```bash
