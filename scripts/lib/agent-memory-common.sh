@@ -29,7 +29,7 @@ agent_memory_summary_file() {
 }
 
 agent_memory_sensitive_re() {
-  printf '%s\n' '((api|secret|private)[-_ ]?(key|token)[[:space:]]*[:=]|password[[:space:]]*[:=]|authorization:[[:space:]]+[^[:space:]]+|bearer[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN|/home/[^[:space:]]+|/Users/[^[:space:]]+|\.ssh/|\.aws/|cluster[[:space:]]*[:=]|partition[[:space:]]*[:=]|nodelist[[:space:]]*[:=]|sbatch[[:space:]]+--partition)'
+  printf '%s\n' '((api|secret|private)[-_ ]?(key|token)[[:space:]]*[:=]|password[[:space:]]*[:=]|authorization:[[:space:]]+[^[:space:]]+|bearer[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|(^|[^A-Za-z0-9_])s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN|/home/[^[:space:]]+|/Users/[^[:space:]]+|\.ssh/|\.aws/|cluster[[:space:]]*[:=]|partition[[:space:]]*[:=]|nodelist[[:space:]]*[:=]|sbatch[[:space:]]+--partition)'
 }
 
 agent_memory_file_has_sensitive_content() {
