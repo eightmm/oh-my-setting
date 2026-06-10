@@ -110,10 +110,15 @@ if [ -z "$MEMORY_FILE" ]; then
   fi
 fi
 
-OMS_MEMORY_TMPDIR="$(mktemp -d)" || exit 1
-trap 'rm -rf "$OMS_MEMORY_TMPDIR"' EXIT
-# Library temp files land here too, so crashes cannot leak them.
-export OMS_LIB_TMPDIR="$OMS_MEMORY_TMPDIR"
+# Lazily created: read-only actions (path, show) must not depend on a
+# writable TMPDIR. Library temp files land here too once created.
+OMS_MEMORY_TMPDIR=""
+trap 'if [ -n "$OMS_MEMORY_TMPDIR" ]; then rm -rf "$OMS_MEMORY_TMPDIR"; fi' EXIT
+ensure_tmpdir() {
+  [ -n "$OMS_MEMORY_TMPDIR" ] && return 0
+  OMS_MEMORY_TMPDIR="$(mktemp -d)" || exit 1
+  export OMS_LIB_TMPDIR="$OMS_MEMORY_TMPDIR"
+}
 
 write_note_file() {
   local note_file="$1"
@@ -141,6 +146,7 @@ case "$ACTION" in
     fi
     ;;
   context)
+    ensure_tmpdir
     if [ "$FULL" -eq 1 ]; then
       agent_memory_emit_full_section "$SCOPE" "$MEMORY_FILE" || true
     else
@@ -148,6 +154,7 @@ case "$ACTION" in
     fi
     ;;
   append)
+    ensure_tmpdir
     note_file="$(mktemp "$OMS_MEMORY_TMPDIR/note.XXXXXX")"
     write_note_file "$note_file"
     agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file"
@@ -155,12 +162,14 @@ case "$ACTION" in
     echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
     ;;
   pin)
+    ensure_tmpdir
     note_file="$(mktemp "$OMS_MEMORY_TMPDIR/note.XXXXXX")"
     write_note_file "$note_file"
     agent_memory_pin_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file"
     echo "memory: pinned $(agent_memory_pins_file "$MEMORY_FILE")"
     ;;
   compact)
+    ensure_tmpdir
     agent_memory_refresh_summary "$MEMORY_FILE" "$SCOPE"
     echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
     ;;

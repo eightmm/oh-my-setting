@@ -1343,6 +1343,20 @@ test_run_ledger_warns_duplicate_run() {
   fi
 }
 
+test_read_only_actions_need_no_tmpdir() {
+  local project="$TMP/no-tmpdir"
+
+  mkdir -p "$project"
+  TMPDIR=/nonexistent-oms-tmp "$ROOT/scripts/agent-memory.sh" --repo "$project" path >/dev/null ||
+    fail "agent-memory.sh path must not require a writable TMPDIR"
+  TMPDIR=/nonexistent-oms-tmp "$ROOT/scripts/agent-memory.sh" --repo "$project" show >/dev/null ||
+    fail "agent-memory.sh show must not require a writable TMPDIR"
+  TMPDIR=/nonexistent-oms-tmp "$ROOT/scripts/agent-task.sh" --repo "$project" path >/dev/null ||
+    fail "agent-task.sh path must not require a writable TMPDIR"
+  TMPDIR=/nonexistent-oms-tmp "$ROOT/scripts/agent-task.sh" --repo "$project" show >/dev/null ||
+    fail "agent-task.sh show must not require a writable TMPDIR"
+}
+
 test_truncation_survives_split_multibyte() {
   local project="$TMP/truncate-multibyte"
 
@@ -1613,6 +1627,7 @@ test_run_ledger_no_commit_repo_with_staged_changes
 test_run_ledger_gate_detects_label_variants
 test_run_ledger_warns_duplicate_run
 test_agent_task_close_promotes_memory
+test_read_only_actions_need_no_tmpdir
 test_truncation_survives_split_multibyte
 test_agent_task_append_preserves_backslashes
 test_memory_context_omits_sensitive_sections_cleanly

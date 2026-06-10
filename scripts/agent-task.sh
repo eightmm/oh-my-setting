@@ -135,10 +135,15 @@ done
 ACTION="${ACTION:-show}"
 [ -n "$TASK_FILE" ] || TASK_FILE="$(agent_task_project_file "$REPO")"
 
-OMS_TASK_TMPDIR="$(mktemp -d)" || exit 1
-trap 'rm -rf "$OMS_TASK_TMPDIR"' EXIT
-# Library temp files land here too, so crashes cannot leak them.
-export OMS_LIB_TMPDIR="$OMS_TASK_TMPDIR"
+# Lazily created: read-only actions (path, show, context) must not depend
+# on a writable TMPDIR. Library temp files land here too once created.
+OMS_TASK_TMPDIR=""
+trap 'if [ -n "$OMS_TASK_TMPDIR" ]; then rm -rf "$OMS_TASK_TMPDIR"; fi' EXIT
+ensure_tmpdir() {
+  [ -n "$OMS_TASK_TMPDIR" ] && return 0
+  OMS_TASK_TMPDIR="$(mktemp -d)" || exit 1
+  export OMS_LIB_TMPDIR="$OMS_TASK_TMPDIR"
+}
 
 write_tmp_text() {
   local output="$1"
@@ -199,6 +204,7 @@ case "$ACTION" in
     printf '%s\n' "$TASK_FILE"
     ;;
   init)
+    ensure_tmpdir
     agent_task_init_file "$TASK_FILE"
     apply_updates
     echo "task: initialized $TASK_FILE"
@@ -214,11 +220,13 @@ case "$ACTION" in
     agent_task_emit_context "$REPO" "$TASK_FILE" || true
     ;;
   update)
+    ensure_tmpdir
     agent_task_init_file "$TASK_FILE"
     apply_updates
     echo "task: updated $TASK_FILE"
     ;;
   append)
+    ensure_tmpdir
     agent_task_init_file "$TASK_FILE"
     append_text
     echo "task: appended $TASK_FILE"
@@ -228,6 +236,7 @@ case "$ACTION" in
       echo "task: no active task ($TASK_FILE)"
       exit 0
     fi
+    ensure_tmpdir
     # Promote a one-line outcome into project shared memory so the next
     # session (any agent) starts from the conclusion, not from scratch.
     if [ "${OMS_AGENT_TASK_CLOSE_MEMORY:-1}" = "1" ]; then
