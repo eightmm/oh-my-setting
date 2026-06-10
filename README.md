@@ -111,7 +111,7 @@ time (leakage, split integrity, loss, eval mode, reproducibility, DDP):
 `--ml` injects the checklist into every reviewer prompt and supplies a default
 prompt, so it works with no other arguments.
 
-Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. Pass `--synthesize [codex|claude|antigravity]` (default `claude`) to append a model-written synthesis (Consensus/Must-fix/Optional/Disagreement) to the summary instead of raw concatenation only. `--debate N` (1-3) makes reviewers critique each other's findings before the synthesis — useful for killing false positives on high-stakes diffs. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
+Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.oms/artifacts/review/`. Pass `--synthesize [codex|claude|antigravity]` (default `claude`) to append a model-written synthesis (Consensus/Must-fix/Optional/Disagreement) to the summary instead of raw concatenation only. `--debate N` (1-3) makes reviewers critique each other's findings before the synthesis — useful for killing false positives on high-stakes diffs. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
 
 Ask a conceptual question to all three models:
 
@@ -120,7 +120,7 @@ Ask a conceptual question to all three models:
   --prompt "Compare RAG and fine-tuning tradeoffs for this project."
 ```
 
-Per-provider ask artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/ask/`. No repo context is attached unless `--repo-context` or `--diff` is passed.
+Per-provider ask artifacts plus a `_synthesis-*.md` summary are written to `.oms/artifacts/ask/`. No repo context is attached unless `--repo-context` or `--diff` is passed.
 
 Let the models debate each other before answering:
 
@@ -148,7 +148,7 @@ worktree, result comes back as a reviewable patch):
 ```
 
 The worker cannot touch the main tree, commit, or push. Artifacts (log +
-`.patch` against HEAD) land in `.omc/artifacts/delegate/`. Review the patch,
+`.patch` against HEAD) land in `.oms/artifacts/delegate/`. Review the patch,
 then re-run with `--apply` or `git apply --binary <patch>`. The
 `multi-agent-delegate` skill tells the host agent how to write a brief
 (Task/Context/Constraints/Files/Success criteria) from conversation context.

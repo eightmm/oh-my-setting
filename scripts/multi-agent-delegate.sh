@@ -41,7 +41,7 @@ Options:
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
   --keep-worktree      Keep the worktree for manual inspection.
-  --artifact-dir PATH  Artifact directory. Default: REPO/.omc/artifacts/delegate.
+  --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt and empty patch without calling the CLI.
   -h, --help           Show this help.
@@ -132,7 +132,7 @@ REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
-ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.omc/artifacts/delegate}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
 
 load_user_tool_paths
 mkdir -p "$ARTIFACT_DIR"

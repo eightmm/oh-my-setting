@@ -60,7 +60,7 @@ EOF
 ```
 
 The worker runs non-interactively in a detached git worktree: it cannot touch
-the main tree, commit, or push. Output lands in `.omc/artifacts/delegate/` as
+the main tree, commit, or push. Output lands in `.oms/artifacts/delegate/` as
 a log plus a `.patch` against HEAD.
 
 ## After the Worker Returns

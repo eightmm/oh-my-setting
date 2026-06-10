@@ -97,7 +97,7 @@ model-written synthesis to the summary artifact.
 
 The wrapper sends the same question and same sanitized diff/status context to
 `codex`, `claude`, and `antigravity`, writes one artifact per model under
-`.omc/artifacts/review/`, and reports unavailable or failed providers. It does
+`.oms/artifacts/review/`, and reports unavailable or failed providers. It does
 not specialize prompts per model; the goal is three independent perspectives on
 the same question.
 

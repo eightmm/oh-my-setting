@@ -40,7 +40,7 @@ Options:
   --base REF           Diff base ref. Default: HEAD (staged + unstaged changes).
                        Use e.g. --base origin/main for branch/PR review.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
-  --artifact-dir PATH  Artifact directory. Default: REPO/.omc/artifacts/review.
+  --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
   --no-diff            Do not attach git diff/status context.
   --debate N           Add N debate rounds (1-3). Each round, every reviewer
                        sees the others' previous findings, critiques them, and
@@ -194,7 +194,7 @@ if [ -n "$BASE_REF" ]; then
   git -C "$REPO" rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null ||
     fail "invalid --base ref: $BASE_REF"
 fi
-ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.omc/artifacts/review}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/review}"
 
 load_user_tool_paths
 mkdir -p "$ARTIFACT_DIR"

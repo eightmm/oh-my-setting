@@ -343,7 +343,7 @@ if [ "$BASE_STYLE" = "ml" ]; then
   fi
 
   GITIGNORE="$PROJECT_DIR/.gitignore"
-  ML_IGNORE_ENTRIES=("data/" "outputs/" "checkpoints/" "wandb/" "runs/" ".venv/")
+  ML_IGNORE_ENTRIES=("data/" "outputs/" "checkpoints/" "wandb/" "runs/" ".venv/" ".oms/")
   if [ "$DRY_RUN" = "1" ]; then
     echo "would ensure ML entries in $GITIGNORE"
   else

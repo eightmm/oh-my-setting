@@ -73,7 +73,7 @@ Optional sanitized diff:
   --prompt "What design alternatives does this diff suggest?"
 ```
 
-Artifacts are written under `.omc/artifacts/ask/`.
+Artifacts are written under `.oms/artifacts/ask/`.
 
 ## Output
 

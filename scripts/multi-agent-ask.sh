@@ -33,7 +33,7 @@ Options:
   --prompt TEXT        Question/task. Required.
   --repo PATH          Git repo for optional context. Default: current directory.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
-  --artifact-dir PATH  Artifact directory. Default: PWD/.omc/artifacts/ask.
+  --artifact-dir PATH  Artifact directory. Default: PWD/.oms/artifacts/ask.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.
   --debate N           Add N debate rounds (1-3). Each round, every provider
@@ -153,7 +153,7 @@ if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
   REPO="$(cd "$REPO" && pwd)"
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 fi
-ARTIFACT_DIR="${ARTIFACT_DIR:-$PWD/.omc/artifacts/ask}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-$PWD/.oms/artifacts/ask}"
 
 load_user_tool_paths
 mkdir -p "$ARTIFACT_DIR"
