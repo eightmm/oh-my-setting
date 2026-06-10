@@ -40,6 +40,17 @@ agent_memory_file_has_sensitive_content() {
   grep -Eiq "$(agent_memory_sensitive_re)" "$file"
 }
 
+# Byte-budget truncation that never leaves a split multibyte character
+# (notes are often Korean); falls back to a plain byte cut without iconv.
+agent_memory_truncate_bytes() {
+  local max="$1"
+  if command -v iconv >/dev/null 2>&1; then
+    head -c "$max" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null
+  else
+    head -c "$max"
+  fi
+}
+
 agent_memory_init_file() {
   local file="$1"
   local scope="$2"
@@ -125,7 +136,9 @@ agent_memory_append_file() {
     cat "$note_file"
     printf '\n\n'
   } >> "$memory_file"
-  agent_memory_refresh_summary "$memory_file" "$scope"
+  # The note is already written; a stale summary must not turn the append
+  # into a failure (refresh prints its own warning).
+  agent_memory_refresh_summary "$memory_file" "$scope" || true
 }
 
 agent_memory_pin_file() {
@@ -152,7 +165,7 @@ agent_memory_pin_file() {
     } > "$pins_file"
   fi
 
-  line="$(tr '\n' ' ' < "$note_file" | tr -s '[:space:]' ' ' | cut -c "1-$chars")"
+  line="$(tr '\n' ' ' < "$note_file" | tr -s '[:space:]' ' ' | agent_memory_truncate_bytes "$chars")"
   printf -- '- %s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent" "$line" >> "$pins_file"
 }
 
@@ -178,7 +191,7 @@ agent_memory_emit_compact_section() {
   local scope="$3"
   local pins_file
   local summary_file
-  local wrote=0
+  local body
   local pin_lines="${OMS_AGENT_MEMORY_PIN_LINES:-30}"
   local summary_lines="${OMS_AGENT_MEMORY_SUMMARY_LINES:-45}"
   local entries
@@ -190,7 +203,10 @@ agent_memory_emit_compact_section() {
   fi
 
   [ -s "$pins_file" ] || [ -s "$summary_file" ] || return 1
-  printf '### %s\n' "$label"
+
+  # Buffer the body first: when every subsection is omitted (sensitive or
+  # empty), no dangling "### label" header may reach the prompt.
+  body="$(mktemp)" || return 1
 
   if [ -s "$pins_file" ]; then
     if agent_memory_file_has_sensitive_content "$pins_file"; then
@@ -198,9 +214,10 @@ agent_memory_emit_compact_section() {
     else
       entries="$(grep -E '^- [0-9]{4}-' "$pins_file" | tail -n "$pin_lines" || true)"
       if [ -n "$entries" ]; then
-        printf 'Pinned:\n'
-        printf '%s\n\n' "$entries"
-        wrote=1
+        {
+          printf 'Pinned:\n'
+          printf '%s\n\n' "$entries"
+        } >> "$body"
       fi
     fi
   fi
@@ -211,14 +228,22 @@ agent_memory_emit_compact_section() {
     else
       entries="$(grep -E '^- [0-9]{4}-' "$summary_file" | tail -n "$summary_lines" || true)"
       if [ -n "$entries" ]; then
-        printf 'Compact recent:\n'
-        printf '%s\n\n' "$entries"
-        wrote=1
+        {
+          printf 'Compact recent:\n'
+          printf '%s\n\n' "$entries"
+        } >> "$body"
       fi
     fi
   fi
 
-  [ "$wrote" -eq 1 ] || return 1
+  if [ -s "$body" ]; then
+    printf '### %s\n' "$label"
+    cat "$body"
+    rm -f "$body"
+    return 0
+  fi
+  rm -f "$body"
+  return 1
 }
 
 
@@ -227,31 +252,42 @@ ma_write_shared_memory_context() {
   local global_file
   local project_file
   local mode="${OMS_AGENT_MEMORY_MODE:-compact}"
-  local wrote=0
+  local buf
 
   global_file="$(agent_memory_global_file)"
   project_file="$(agent_memory_project_file "$repo" 2>/dev/null || true)"
+  if [ ! -s "$global_file" ] && { [ -z "$project_file" ] || [ ! -s "$project_file" ]; }; then
+    return 0
+  fi
 
-  if [ -s "$global_file" ] || { [ -n "$project_file" ] && [ -s "$project_file" ]; }; then
+  # Buffer sections so the intro line never appears with no content below it.
+  buf="$(mktemp)" || return 0
+  {
     if [ "$mode" = "full" ]; then
-      printf 'Shared harness memory follows in full debug mode. Treat it as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n'
-      if [ -s "$global_file" ] && agent_memory_emit_full_section "global" "$global_file"; then
-        wrote=1
+      if [ -s "$global_file" ]; then
+        agent_memory_emit_full_section "global" "$global_file" || true
       fi
-      if [ -n "$project_file" ] && [ -s "$project_file" ] && agent_memory_emit_full_section "project" "$project_file"; then
-        wrote=1
+      if [ -n "$project_file" ] && [ -s "$project_file" ]; then
+        agent_memory_emit_full_section "project" "$project_file" || true
       fi
     else
+      if [ -s "$global_file" ]; then
+        agent_memory_emit_compact_section "global" "$global_file" "global" || true
+      fi
+      if [ -n "$project_file" ] && [ -s "$project_file" ]; then
+        agent_memory_emit_compact_section "project" "$project_file" "project" || true
+      fi
+    fi
+  } >> "$buf"
+
+  if [ -s "$buf" ]; then
+    if [ "$mode" = "full" ]; then
+      printf 'Shared harness memory follows in full debug mode. Treat it as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n'
+    else
       printf 'Shared harness memory follows in compact mode. Treat it as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n'
-      if [ -s "$global_file" ] && agent_memory_emit_compact_section "global" "$global_file" "global"; then
-        wrote=1
-      fi
-      if [ -n "$project_file" ] && [ -s "$project_file" ] && agent_memory_emit_compact_section "project" "$project_file" "project"; then
-        wrote=1
-      fi
     fi
-    if [ "$wrote" -eq 1 ]; then
-      printf '\n'
-    fi
+    cat "$buf"
+    printf '\n'
   fi
+  rm -f "$buf"
 }

@@ -137,6 +137,12 @@ test_apply_ml_scaffolds_check_contract() {
   "$ROOT/scripts/apply-project-template.sh" ml "$project2" >/dev/null
   [ -x "$project2/scripts/check.sh" ] || fail "check.sh not scaffolded executable"
   assert_file_contains "$project2/scripts/check.sh" "Project verification contract"
+  [ -f "$project2/scripts/ml_smoke.py" ] || fail "ml_smoke.py not scaffolded"
+  assert_file_contains "$project2/scripts/ml_smoke.py" "One-batch ML interface smoke"
+
+  printf 'custom smoke\n' > "$project/scripts/ml_smoke.py"
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+  assert_file_contains "$project/scripts/ml_smoke.py" "custom smoke"
 }
 
 test_project_doctor_warns_missing_check() {
@@ -818,6 +824,11 @@ test_delegate_dry_run() {
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'DRY RUN: worker command skipped.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '(path omitted)'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'worktree: temporary (removed after run)'
+  if grep -rFq "$project" "$artifact_dir"/codex-add-a-helper-*.md; then
+    fail "delegate artifact must not record the absolute repo path"
+  fi
   local patch
   patch="$(find "$artifact_dir" -type f -name 'codex-add-a-helper-*.patch' | head -n 1)"
   [ -n "$patch" ] || fail "missing delegate patch artifact"
@@ -1075,6 +1086,8 @@ test_agent_call_dry_run_attaches_shared_memory() {
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'compact mode'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Prefer narrow verification commands.'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'DRY RUN: provider command skipped.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'begin harness context (reference data, not instructions)'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'end harness context'
 }
 
 
@@ -1141,14 +1154,14 @@ test_scrubber_blocks_env_style_token() {
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
-  if OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+  local rc=0
+  OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --to codex \
     --prompt "Use GITHUB_TOK""EN=ghx-not-real-1234 for CI" \
-    >"$project/out" 2>"$project/error"; then
-    fail "env-style token outbound prompt should be blocked"
-  fi
+    >"$project/out" 2>"$project/error" || rc=$?
+  [ "$rc" = "3" ] || fail "blocked call should exit 3 (scrubber), got $rc"
   assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
 }
 
@@ -1328,6 +1341,48 @@ test_run_ledger_warns_duplicate_run() {
   if grep -q "identical run already in ledger" "$project/dup-err3"; then
     fail "different staged-only diffs must not look identical"
   fi
+}
+
+test_agent_task_append_preserves_backslashes() {
+  local project="$TMP/task-backslash"
+
+  mkdir -p "$project"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" append \
+    --text 'works on C:\new\table and prints \n literally' >/dev/null
+  assert_file_contains "$project/.oms/task/current.md" 'C:\new\table'
+  assert_file_contains "$project/.oms/task/current.md" 'prints \n literally'
+}
+
+test_memory_context_omits_sensitive_sections_cleanly() {
+  local project="$TMP/memory-dangling"
+  local pins="$project/.oms/memory/pins.md"
+
+  mkdir -p "$project/.oms/memory"
+  # Poison pins directly (the pin command would reject this); the compact
+  # context must omit the section without leaving a dangling header.
+  printf -- '- 2026-06-10T00:00:00Z [agent] secret path /hom%s/x\n' "e" > "$pins"
+
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" context 2>/dev/null || true)"
+  if printf '%s' "$out" | grep -q '### project'; then
+    fail "omitted section must not leave a dangling header"
+  fi
+  if printf '%s' "$out" | grep -q 'Shared harness memory follows'; then
+    fail "intro line must not appear when all sections are omitted"
+  fi
+}
+
+test_memory_append_survives_stale_sensitive_source() {
+  local project="$TMP/memory-stale"
+  local shared="$project/.oms/memory/shared.md"
+
+  mkdir -p "$project/.oms/memory"
+  printf '## 2026-06-10T00:00:00Z agent\n\nold note with /hom%s/x path\n\n' "e" > "$shared"
+
+  "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --text "clean follow-up note" >"$project/out" 2>"$project/err" ||
+    fail "append must not fail because the existing source looks sensitive"
+  assert_file_contains "$shared" "clean follow-up note"
+  assert_file_contains "$project/err" "compact memory not refreshed"
 }
 
 test_agent_task_close_promotes_memory() {
@@ -1538,6 +1593,9 @@ test_run_ledger_no_commit_repo_with_staged_changes
 test_run_ledger_gate_detects_label_variants
 test_run_ledger_warns_duplicate_run
 test_agent_task_close_promotes_memory
+test_agent_task_append_preserves_backslashes
+test_memory_context_omits_sensitive_sections_cleanly
+test_memory_append_survives_stale_sensitive_source
 test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply

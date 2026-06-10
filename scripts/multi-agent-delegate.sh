@@ -179,15 +179,7 @@ trap cleanup EXIT
   printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
   printf 'Do not run git commit, git push, or change git config.\n'
   printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
-  if [ "$INCLUDE_MEMORY" -eq 1 ]; then
-    ma_write_shared_memory_context "$REPO"
-  fi
-  if [ "$INCLUDE_TASK" -eq 1 ]; then
-    ma_write_task_context "$REPO"
-  fi
-  if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
-    ma_write_ml_context "$REPO"
-  fi
+  ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
   printf '## Brief\n\n'
   if [ -n "$BRIEF_FILE" ]; then
     cat "$BRIEF_FILE"
@@ -237,8 +229,12 @@ fi
 {
   printf '# %s delegate\n\n' "$TO"
   printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf -- '- repo: %s\n' "$REPO"
-  printf -- '- worktree: %s\n\n' "$worktree"
+  printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
+  if [ "$KEEP_WORKTREE" = 1 ]; then
+    printf -- '- worktree: %s\n\n' "$worktree"
+  else
+    printf -- '- worktree: temporary (removed after run)\n\n'
+  fi
   printf '## Prompt\n\n'
   cat "$prompt_file"
   printf '\n\n## Output\n\n'

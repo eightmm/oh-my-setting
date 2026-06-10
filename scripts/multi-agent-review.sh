@@ -92,15 +92,7 @@ write_prompt() {
       printf -- '- Config or preprocessing changes that invalidate existing checkpoints or baselines.\n'
       printf 'Rank silently-wrong-metrics bugs as the highest severity findings.\n\n'
     fi
-    if [ "$INCLUDE_MEMORY" -eq 1 ]; then
-      ma_write_shared_memory_context "$repo"
-    fi
-    if [ "$INCLUDE_TASK" -eq 1 ]; then
-      ma_write_task_context "$repo"
-    fi
-    if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
-      ma_write_ml_context "$repo"
-    fi
+    ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
     printf 'Question:\n%s\n\n' "$question"
     printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"
     if [ "$NO_DIFF" -eq 0 ]; then

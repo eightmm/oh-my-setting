@@ -114,7 +114,10 @@ agent_task_replace_section() {
         printf "%s", content
       }
     }
-  ' "$file" > "$tmp"
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
   mv "$tmp" "$file"
   agent_task_touch_updated "$file"
 }
@@ -134,13 +137,18 @@ agent_task_append_bullet() {
   fi
 
   agent_task_init_file "$file"
-  line="$(tr '\n' ' ' < "$content_file" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//' | cut -c "1-$max_chars")"
+  line="$(tr '\n' ' ' < "$content_file" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//' | agent_memory_truncate_bytes "$max_chars")"
   [ -n "$line" ] || return 0
   line="- $(date -u +%Y-%m-%dT%H:%M:%SZ) [$agent] $line"
 
-  tmp="$(mktemp)" || return 1
-  awk -v section="$section" -v line="$line" '
-    BEGIN { found = 0; in_section = 0; inserted = 0 }
+  # Pass the bullet through a file: awk -v mangles backslash escapes
+  # (e.g. Windows paths or \n inside notes).
+  local line_file
+  line_file="$(mktemp)" || return 1
+  printf '%s\n' "$line" > "$line_file"
+  tmp="$(mktemp)" || { rm -f "$line_file"; return 1; }
+  awk -v section="$section" -v line_file="$line_file" '
+    BEGIN { getline line < line_file; found = 0; in_section = 0; inserted = 0 }
     $0 == section {
       found = 1
       in_section = 1
@@ -165,8 +173,12 @@ agent_task_append_bullet() {
         print line
       }
     }
-  ' "$file" > "$tmp"
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp" "$line_file"
+    return 1
+  }
   mv "$tmp" "$file"
+  rm -f "$line_file"
   agent_task_touch_updated "$file"
 }
 

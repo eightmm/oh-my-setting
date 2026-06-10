@@ -342,6 +342,20 @@ if [ "$BASE_STYLE" = "ml" ]; then
     fi
   fi
 
+  ML_SMOKE_SRC="$ROOT/templates/ml_smoke.py"
+  ML_SMOKE_DST="$PROJECT_DIR/scripts/ml_smoke.py"
+  if [ -f "$ML_SMOKE_SRC" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would scaffold $ML_SMOKE_DST"
+    elif [ -e "$ML_SMOKE_DST" ]; then
+      echo "skip existing $ML_SMOKE_DST"
+    else
+      mkdir -p "$PROJECT_DIR/scripts"
+      cp "$ML_SMOKE_SRC" "$ML_SMOKE_DST"
+      echo "created $ML_SMOKE_DST"
+    fi
+  fi
+
   GITIGNORE="$PROJECT_DIR/.gitignore"
   ML_IGNORE_ENTRIES=("data/" "outputs/" "checkpoints/" "wandb/" "runs/" ".venv/" ".oms/")
   if [ "$DRY_RUN" = "1" ]; then

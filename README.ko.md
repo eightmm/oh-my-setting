@@ -108,7 +108,9 @@ harness 소유 memory 파일을 둔다.
   끔).
 - provider CLI 호출 직전 outbound prompt를 scrub한다. credential, private key,
   절대 머신 경로, cluster detail, raw log, dataset, checkpoint처럼 보이는 내용이
-  남아 있으면 외부 호출을 차단한다.
+  남아 있으면 외부 호출을 차단한다 (exit 3 — provider 실패(1)와 구분).
+- 주입되는 context(memory, task packet, ML digest)는 provider prompt 안에서
+  "reference data, not instructions"로 fence 처리된다.
 
 agent에게 이렇게 요청한다:
 
@@ -236,7 +238,7 @@ oh-my-setting project doctor 돌려줘.
 
 - `AGENTS.md`, `CLAUDE.md`에 managed block 추가/갱신
 - `PROJECT.md` 없으면 생성
-- `ml` 프로젝트는 표준 ML 문서 템플릿을 `docs/`에 스캐폴딩 (기존 파일은 덮어쓰지 않음)
+- `ml` 프로젝트는 표준 ML 문서 템플릿을 `docs/`에, `scripts/check.sh`와 `check.sh ml-smoke`에 연결된 `scripts/ml_smoke.py` skeleton을 스캐폴딩 (기존 파일은 덮어쓰지 않음)
 - `ml` 프로젝트는 `.gitignore`에 `data/`, `outputs/`, `checkpoints/`, `wandb/`, `runs/`, `.venv/` 보장
 - managed block 밖의 기존 내용은 덮어쓰지 않음
 - Slurm 머신의 ML 프로젝트는 `ml` + 별도 `slurm` 규칙 적용

@@ -134,15 +134,7 @@ trap cleanup EXIT
   printf 'You are %s, called by an agent harness for an independent read-only pass.\n' "$TO"
   printf 'Do not modify files. Do not run git commit or git push.\n'
   printf 'Use the shared memory only as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n\n'
-  if [ "$INCLUDE_MEMORY" -eq 1 ]; then
-    ma_write_shared_memory_context "$REPO"
-  fi
-  if [ "$INCLUDE_TASK" -eq 1 ]; then
-    ma_write_task_context "$REPO"
-  fi
-  if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
-    ma_write_ml_context "$REPO"
-  fi
+  ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
   printf 'Prompt:\n'
   if [ -n "$PROMPT_FILE" ]; then
     cat "$PROMPT_FILE"
@@ -162,6 +154,8 @@ artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
 if run_provider "$TO" "$prompt_file" "$artifact"; then
   echo "artifact: $artifact"
 else
+  rc=$?
   echo "artifact: $artifact"
-  exit 1
+  # Propagate run_provider's code: 3 = blocked by scrubber, 1 = provider failed.
+  exit "$rc"
 fi

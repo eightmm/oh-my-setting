@@ -69,15 +69,7 @@ write_prompt() {
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Prefer concrete reasoning, tradeoffs, assumptions, and actionable recommendations.\n'
     printf 'If the question is underspecified, state the key assumptions and what would change the answer.\n\n'
-    if [ "$INCLUDE_MEMORY" -eq 1 ]; then
-      ma_write_shared_memory_context "$repo"
-    fi
-    if [ "$INCLUDE_TASK" -eq 1 ]; then
-      ma_write_task_context "$repo"
-    fi
-    if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
-      ma_write_ml_context "$repo"
-    fi
+    ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
     printf 'Question:\n%s\n\n' "$question"
     if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
       printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"

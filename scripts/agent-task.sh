@@ -135,6 +135,9 @@ done
 ACTION="${ACTION:-show}"
 [ -n "$TASK_FILE" ] || TASK_FILE="$(agent_task_project_file "$REPO")"
 
+OMS_TASK_TMPDIR="$(mktemp -d)" || exit 1
+trap 'rm -rf "$OMS_TASK_TMPDIR"' EXIT
+
 write_tmp_text() {
   local output="$1"
   local text="$2"
@@ -147,7 +150,7 @@ replace_if_set() {
   local note_file
 
   [ -n "$value" ] || return 0
-  note_file="$(mktemp)" || return 1
+  note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || return 1
   write_tmp_text "$note_file" "$value"
   agent_task_replace_section "$TASK_FILE" "$section" "$note_file"
   rm -f "$note_file"
@@ -159,7 +162,7 @@ append_if_set() {
   local note_file
 
   [ -n "$value" ] || return 0
-  note_file="$(mktemp)" || return 1
+  note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || return 1
   write_tmp_text "$note_file" "$value"
   agent_task_append_bullet "$TASK_FILE" "$section" "$AGENT" "$note_file"
   rm -f "$note_file"
@@ -178,7 +181,7 @@ apply_updates() {
 append_text() {
   local note_file
 
-  note_file="$(mktemp)" || return 1
+  note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || return 1
   if [ "$USE_STDIN" -eq 1 ]; then
     cat > "$note_file"
   else
@@ -229,7 +232,7 @@ case "$ACTION" in
       goal_line="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
       next_line="$(awk '/^## Next Step$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
       if [ -n "$goal_line" ]; then
-        note_file="$(mktemp)"
+        note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")"
         printf 'Closed task: %s%s\n' "$goal_line" "${next_line:+ | next: $next_line}" > "$note_file"
         if agent_memory_append_file "$(agent_memory_project_file "$REPO")" project "$AGENT" "$note_file" >/dev/null 2>&1; then
           echo "task: outcome noted in project shared memory"

@@ -111,7 +111,10 @@ when the harness calls them.
   (`OMS_AGENT_TASK_CLOSE_MEMORY=0` to disable).
 - Outbound prompts are scrubbed before provider CLI calls; sensitive-looking
   credentials, private keys, absolute machine paths, cluster details, raw logs,
-  datasets, and checkpoints block the external call.
+  datasets, and checkpoints block the external call (exit 3, distinct from
+  provider failure).
+- Injected context (memory, task packet, ML digest) is fenced inside the
+  provider prompt as reference data, not instructions.
 
 Ask the agent to manage it:
 
@@ -242,7 +245,7 @@ What applying does:
 
 - Adds/updates managed blocks in `AGENTS.md` and `CLAUDE.md`.
 - Creates `PROJECT.md` if missing.
-- For `ml` projects, scaffolds standard ML doc templates under `docs/` (existing files are never overwritten).
+- For `ml` projects, scaffolds standard ML doc templates under `docs/`, plus `scripts/check.sh` and a `scripts/ml_smoke.py` skeleton wired into `check.sh ml-smoke` (existing files are never overwritten).
 - For `ml` projects, ensures `.gitignore` covers `data/`, `outputs/`, `checkpoints/`, `wandb/`, `runs/`, `.venv/`.
 - Does not overwrite user content outside managed blocks.
 - For ML projects on Slurm machines, adds `ml` plus separate `slurm` rules.
