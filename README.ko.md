@@ -105,16 +105,17 @@ agent에게 이렇게 요청한다:
 memory에 넣기 전에 저장할 내용 요약해줘.
 ```
 
-provider 하나만 읽기 전용으로 호출할 수도 있다:
+provider 하나만 호출할 수도 있다. agent가 읽기 전용 호출과 격리된 쓰기 위임 중 고른다:
 
 ```text
 Codex만 불러서 이 계획 평가해줘.
-Claude Code만 불러서 이 API 설계 허점 찾아줘.
+Claude Code만 불러서 이 focused fix 구현하고 patch로 받아와줘.
 Antigravity만 불러서 이 구현 방향 검토해줘.
 ```
 
-agent는 내부적으로 `agent-memory.sh`, `agent-call.sh`를 실행한다. 쓰기 작업은
-계속 `multi-agent-delegate.sh`를 사용해 격리된 git worktree에서 patch로 회수한다.
+agent는 내부적으로 `agent-memory.sh`, `agent-run.sh`를 실행한다. `agent-run.sh`는
+읽기 전용 질문은 `agent-call.sh`, 쓰기 작업은 `multi-agent-delegate.sh`로 라우팅해
+격리된 git worktree에서 patch로 회수한다.
 
 ## Multi-Agent 워크플로
 

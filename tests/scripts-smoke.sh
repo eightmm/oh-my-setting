@@ -901,15 +901,19 @@ test_agent_memory_append_show_and_rejects_sensitive() {
   local home_dir="$project/home"
   mkdir -p "$project" "$home_dir"
 
-  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" append --agent codex --text "Prefer scripts/check.sh fast before done." >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "Prefer scripts/check.sh fast before done." >/dev/null
 
   [ -f "$project/.oms/memory/shared.md" ] || fail "project memory file missing"
   assert_file_contains "$project/.oms/memory/shared.md" "Prefer scripts/check.sh fast before done."
 
-  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" show >"$project/out"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" show >"$project/out"
   assert_file_contains "$project/out" "Shared Agent Memory"
 
-  if HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" append --agent codex --text "private path /home/jaemin/secret"     >"$project/sensitive-out" 2>"$project/sensitive-err"; then
+  if HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "private path /home/jaemin/secret" \
+    >"$project/sensitive-out" 2>"$project/sensitive-err"; then
     fail "sensitive-looking memory note should be rejected"
   fi
   assert_file_contains "$project/sensitive-err" "sensitive-looking content"
@@ -922,13 +926,61 @@ test_agent_call_dry_run_attaches_shared_memory() {
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project" "$home_dir"
-  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
 
-  HOME="$home_dir" OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh"     --repo "$project"     --artifact-dir "$artifact_dir"     --to codex     --prompt "Assess this plan" >/dev/null
+  HOME="$home_dir" OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Assess this plan" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Shared harness memory follows'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Prefer narrow verification commands.'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'DRY RUN: provider command skipped.'
+}
+
+
+test_agent_run_auto_read_routes_to_call() {
+  local project="$TMP/agent-run-read"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project" "$home_dir"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to claude \
+    --prompt "Assess this plan" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'independent read-only pass'
+  assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'Prefer narrow verification commands.'
+}
+
+
+test_agent_run_auto_write_routes_to_delegate() {
+  local project="$TMP/agent-run-write"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+  local patch
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Implement a helper" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-implement-a-helper-*.md' 'delegated worker agent'
+  assert_one_artifact_contains "$artifact_dir" 'codex-implement-a-helper-*.md' 'DRY RUN: worker command skipped.'
+  patch="$(find "$artifact_dir" -type f -name 'codex-implement-a-helper-*.patch' | head -n 1)"
+  [ -n "$patch" ] || fail "agent-run write mode should create patch artifact"
+  [ ! -s "$patch" ] || fail "dry-run write patch should be empty"
 }
 
 
@@ -1108,6 +1160,8 @@ test_delegate_apply_refuses_dirty_tree
 test_delegate_requires_provider
 test_agent_memory_append_show_and_rejects_sensitive
 test_agent_call_dry_run_attaches_shared_memory
+test_agent_run_auto_read_routes_to_call
+test_agent_run_auto_write_routes_to_delegate
 test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply

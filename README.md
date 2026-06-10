@@ -107,17 +107,17 @@ Show shared harness memory for this repo.
 Forget nothing automatically; summarize what should be stored first.
 ```
 
-Call one provider directly for a read-only opinion:
+Call one provider directly; the agent chooses read-only call or isolated write delegation:
 
 ```text
 Ask only Codex to assess this plan.
-Ask only Claude Code to find holes in this API design.
+Ask only Claude Code to implement this focused fix and return a patch.
 Ask only Antigravity to review this implementation direction.
 ```
 
-The agent uses `agent-memory.sh` and `agent-call.sh` under the hood. Individual
-write tasks still go through `multi-agent-delegate.sh` so patches are isolated
-in a git worktree.
+The agent uses `agent-memory.sh` and `agent-run.sh` under the hood. `agent-run.sh`
+routes read-only questions to `agent-call.sh` and write tasks to
+`multi-agent-delegate.sh`, so patches are isolated in a git worktree.
 
 ## Multi-Agent Workflows
 

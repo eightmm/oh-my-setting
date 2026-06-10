@@ -3,11 +3,13 @@ name: agent-harness
 description: >
   Use when the user asks about shared agent memory, cross-model harness state,
   or calling one local agent CLI (Codex, Claude Code, or Antigravity) for an
-  independent read-only pass from the current agent session.
+  independent read-only pass or isolated write task from the current agent
+  session.
 ---
 
 Goal: keep agent state portable across Codex, Claude Code, and Antigravity, and
-let the current agent call one provider explicitly when useful.
+let the current agent call one provider explicitly when useful. The owning
+agent decides whether the request is read-only advice or a write task.
 
 ## Shared Memory
 
@@ -28,20 +30,27 @@ Common actions:
 ~/.oh-my-setting/scripts/agent-memory.sh --global append --agent claude --text "User prefers compact Korean status."
 ```
 
-## Individual Agent Calls
+## Individual Agent Runs
 
-Use `agent-call.sh` for read-only independent opinions from one provider. For
-write tasks, use `multi-agent-delegate.sh` so edits happen in an isolated
-worktree and return as a patch.
+Use `agent-run.sh` as the single entrypoint for one provider. In `--mode auto`,
+it routes read-only questions to `agent-call.sh` and write tasks to
+`multi-agent-delegate.sh`. The current/owning agent should override with
+`--mode read` or `--mode write` when intent is already clear.
 
 ```bash
-~/.oh-my-setting/scripts/agent-call.sh --to codex --repo . --prompt "Assess this plan."
-~/.oh-my-setting/scripts/agent-call.sh --to claude --repo . --prompt "Find holes in this API design."
-~/.oh-my-setting/scripts/agent-call.sh --to antigravity --repo . --prompt "Review this implementation direction."
+~/.oh-my-setting/scripts/agent-run.sh --to codex --repo . --prompt "Assess this plan."
+~/.oh-my-setting/scripts/agent-run.sh --to claude --repo . --prompt "Implement the focused fix described above."
+~/.oh-my-setting/scripts/agent-run.sh --to antigravity --repo . --mode write --prompt "Refactor this helper and return a patch."
 ```
 
-`agent-call.sh` attaches shared harness memory by default and writes artifacts to
-`.oms/artifacts/call/`. Use `--no-memory` when memory should not be sent.
+Read mode writes artifacts to `.oms/artifacts/call/`. Write mode runs the worker
+in an isolated git worktree and writes artifacts/patches to
+`.oms/artifacts/delegate/`; the worker cannot commit or push. Use `--apply` only
+when the owning agent has decided the returned patch should be applied and the
+main tree is clean.
+
+`agent-run.sh` attaches shared harness memory by default. Use `--no-memory` when
+memory should not be sent.
 
 ## Output
 

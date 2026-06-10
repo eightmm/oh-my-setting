@@ -16,6 +16,7 @@ NO_VERIFY=0
 ARTIFACT_DIR=""
 APPLY=0
 KEEP_WORKTREE=0
+INCLUDE_MEMORY=1
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
 usage() {
@@ -41,6 +42,7 @@ Options:
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
   --keep-worktree      Keep the worktree for manual inspection.
+  --no-memory          Do not attach shared harness memory.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt and empty patch without calling the CLI.
@@ -89,6 +91,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --keep-worktree)
       KEEP_WORKTREE=1
+      shift
+      ;;
+    --no-memory)
+      INCLUDE_MEMORY=0
       shift
       ;;
     --artifact-dir)
@@ -159,7 +165,9 @@ trap cleanup EXIT
   printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
   printf 'Do not run git commit, git push, or change git config.\n'
   printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
-  ma_write_shared_memory_context "$REPO"
+  if [ "$INCLUDE_MEMORY" -eq 1 ]; then
+    ma_write_shared_memory_context "$REPO"
+  fi
   printf '## Brief\n\n'
   if [ -n "$BRIEF_FILE" ]; then
     cat "$BRIEF_FILE"
