@@ -14,10 +14,27 @@ load_user_tool_paths() {
   fi
 }
 
+tool_version() {
+  local name="$1"
+  local version=""
+  if command -v timeout >/dev/null 2>&1; then
+    version="$(timeout 10 "$name" --version 2>/dev/null | head -n 1 || true)"
+  else
+    version="$("$name" --version 2>/dev/null | head -n 1 || true)"
+  fi
+  printf '%s' "$version" | cut -c1-64
+}
+
 tool_status() {
   local name="$1"
+  local version
   if command -v "$name" >/dev/null 2>&1; then
-    printf -- '- %s: %s\n' "$name" "$(command -v "$name")"
+    version="$(tool_version "$name")"
+    if [ -n "$version" ]; then
+      printf -- '- %s: %s (%s)\n' "$name" "$(command -v "$name")" "$version"
+    else
+      printf -- '- %s: %s\n' "$name" "$(command -v "$name")"
+    fi
   else
     printf -- '- %s: missing\n' "$name"
   fi
@@ -73,12 +90,12 @@ link_status "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
 link_status "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
 
 printf '\n## Required tools\n\n'
-for tool in git curl node npm uv claude codex agy pi; do
+for tool in git curl node npm uv claude codex agy gh; do
   tool_status "$tool"
 done
 
 printf '\n## Optional tools\n\n'
-for tool in gh sbatch srun squeue sinfo scancel; do
+for tool in pi timeout sbatch srun squeue sinfo scancel; do
   tool_status "$tool"
 done
 

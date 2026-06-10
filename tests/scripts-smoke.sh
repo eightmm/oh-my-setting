@@ -315,6 +315,43 @@ test_multi_agent_review_invalid_base_fails() {
   assert_file_contains "$project/error" 'invalid --base ref'
 }
 
+test_multi_agent_review_synthesize_dry_run() {
+  local project="$TMP/review-synthesize"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --no-diff \
+    --synthesize \
+    --prompt "Review synthesize mode" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-mode-*.md' '## Synthesis (claude)'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-mode-*.md' 'DRY RUN: synthesis pass skipped.'
+}
+
+test_multi_agent_review_synthesize_provider_override() {
+  local project="$TMP/review-synthesize-codex"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --no-diff \
+    --synthesize codex \
+    --prompt "Review synthesize override" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-override-*.md' '## Synthesis (codex)'
+}
+
 test_multi_agent_review_excludes_private_status() {
   local project="$TMP/review-private-status"
   local artifact_dir="$project/artifacts"
@@ -517,6 +554,32 @@ test_multi_agent_ask_secret_diff_skips_external() {
     fail "secret-like ask diff should not write provider artifacts"
 }
 
+test_multi_agent_review_print_timeout() {
+  local project="$TMP/review-timeout"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --print-timeout 10m \
+    --prompt "Review with custom print timeout" >/dev/null
+}
+
+test_multi_agent_ask_print_timeout() {
+  local project="$TMP/ask-timeout"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --artifact-dir "$artifact_dir" \
+    --print-timeout 10m \
+    --prompt "Ask with custom print timeout" >/dev/null
+}
+
 test_update_help_runs() {
   "$ROOT/scripts/update.sh" --help >/dev/null
 }
@@ -569,6 +632,8 @@ test_apply_and_remove_valid_block
 test_multi_agent_review_dry_run_artifacts
 test_multi_agent_review_base_ref_diff
 test_multi_agent_review_invalid_base_fails
+test_multi_agent_review_synthesize_dry_run
+test_multi_agent_review_synthesize_provider_override
 test_multi_agent_review_excludes_private_status
 test_multi_agent_review_secret_diff_skips_external
 test_multi_agent_review_no_diff_provider_subset
@@ -577,6 +642,8 @@ test_multi_agent_review_single_provider_failure_exits
 test_multi_agent_ask_dry_run_no_repo
 test_multi_agent_ask_repo_context_subset
 test_multi_agent_ask_secret_diff_skips_external
+test_multi_agent_review_print_timeout
+test_multi_agent_ask_print_timeout
 test_update_help_runs
 test_uninstall_help_runs
 test_uninstall_dry_run_no_changes

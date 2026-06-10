@@ -85,7 +85,7 @@ Review a branch against a base ref (PR-style):
   --prompt "Review this branch against origin/main."
 ```
 
-Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
+Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. Pass `--synthesize [codex|claude|antigravity]` (default `claude`) to append a model-written synthesis (Consensus/Must-fix/Optional/Disagreement) to the summary instead of raw concatenation only. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
 
 Ask a conceptual question to all three models:
 

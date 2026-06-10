@@ -83,7 +83,7 @@ branch를 base ref 기준으로 review (PR 스타일):
   --prompt "Review this branch against origin/main."
 ```
 
-Provider는 병렬 실행되며 provider별 timeout이 적용된다(`OMS_MULTI_AGENT_TIMEOUT`, 기본 `5m`). provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/review/`에 저장된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
+Provider는 병렬 실행되며 provider별 timeout이 적용된다(`OMS_MULTI_AGENT_TIMEOUT`, 기본 `5m`). provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/review/`에 저장된다. `--synthesize [codex|claude|antigravity]`(기본 `claude`)를 넘기면 단순 연결 대신 모델이 작성한 합성(Consensus/Must-fix/Optional/Disagreement)이 종합본에 추가된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
 
 개념 질문을 세 모델에 묻기:
 

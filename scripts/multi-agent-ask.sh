@@ -46,12 +46,14 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: PWD/.omc/artifacts/ask.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.
+  --print-timeout DUR  Timeout for print mode wait. Default: 5m.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
 
 Environment:
   OH_MY_SETTING_ASK_DRY_RUN=1   Same as --dry-run.
   OMS_MULTI_AGENT_TIMEOUT=5m    Per-provider wall-clock timeout (GNU timeout).
+  OMS_MULTI_AGENT_PRINT_TIMEOUT=5m Timeout for print mode wait (agy).
 EOF
 }
 
@@ -266,6 +268,11 @@ while [ "$#" -gt 0 ]; do
     --dry-run)
       DRY_RUN=1
       shift
+      ;;
+    --print-timeout)
+      [ "$#" -ge 2 ] || fail "--print-timeout requires duration"
+      OMS_MULTI_AGENT_PRINT_TIMEOUT="$2"
+      shift 2
       ;;
     -h|--help)
       usage

@@ -7,6 +7,7 @@ PROVIDERS="codex,claude,antigravity"
 ARTIFACT_DIR=""
 NO_DIFF=0
 BASE_REF=""
+SYNTHESIZE=""
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 REVIEW_PATHS=(
@@ -46,12 +47,16 @@ Options:
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
   --artifact-dir PATH  Artifact directory. Default: REPO/.omc/artifacts/review.
   --no-diff            Do not attach git diff/status context.
+  --synthesize [P]     After provider reviews, run a synthesis pass with
+                       provider P (codex|claude|antigravity). Default: claude.
+  --print-timeout DUR  Timeout for print mode wait. Default: 5m.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
 
 Environment:
   OH_MY_SETTING_REVIEW_DRY_RUN=1   Same as --dry-run.
   OMS_MULTI_AGENT_TIMEOUT=5m       Per-provider wall-clock timeout (GNU timeout).
+  OMS_MULTI_AGENT_PRINT_TIMEOUT=5m Timeout for print mode wait (agy).
 EOF
 }
 
@@ -265,9 +270,26 @@ while [ "$#" -gt 0 ]; do
       NO_DIFF=1
       shift
       ;;
+    --synthesize)
+      SYNTHESIZE="claude"
+      if [ "$#" -ge 2 ]; then
+        case "$2" in
+          codex|claude|antigravity|agy)
+            SYNTHESIZE="$2"
+            shift
+            ;;
+        esac
+      fi
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
+      ;;
+    --print-timeout)
+      [ "$#" -ge 2 ] || fail "--print-timeout requires duration"
+      OMS_MULTI_AGENT_PRINT_TIMEOUT="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -363,6 +385,53 @@ synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
     printf '\n'
   done
 } > "$synth_file"
+
+if [ -n "$SYNTHESIZE" ]; then
+  synth_prompt_file="$(mktemp)" || fail "mktemp failed"
+  {
+    printf 'You are the synthesis reviewer. Below are independent reviews of the same diff.\n'
+    printf 'Merge them into one verdict. Accept only findings tied to file/line, diff, command, or doc evidence.\n'
+    printf 'Return exactly these sections:\n'
+    printf 'Consensus:\nMust-fix:\nOptional:\nDisagreement:\nVerification:\n\n'
+    cat "$synth_file"
+  } > "$synth_prompt_file"
+
+  printf '\n## Synthesis (%s)\n\n' "$SYNTHESIZE" >> "$synth_file"
+  if [ "$DRY_RUN" = "1" ]; then
+    printf 'DRY RUN: synthesis pass skipped.\n' >> "$synth_file"
+    echo "dry-run: synthesis ($SYNTHESIZE)"
+  else
+    synth_binary="$SYNTHESIZE"
+    [ "$SYNTHESIZE" = "antigravity" ] && synth_binary="agy"
+    if ! command -v "$synth_binary" >/dev/null 2>&1; then
+      printf 'SKIPPED: command not found: %s\n' "$synth_binary" >> "$synth_file"
+      echo "warning: synthesis provider missing: $synth_binary" >&2
+    else
+      set +e
+      case "$SYNTHESIZE" in
+        codex)
+          run_with_timeout codex exec --sandbox read-only - < "$synth_prompt_file" >> "$synth_file" 2>&1
+          synth_status=$?
+          ;;
+        claude)
+          run_with_timeout claude --permission-mode plan -p < "$synth_prompt_file" >> "$synth_file" 2>&1
+          synth_status=$?
+          ;;
+        antigravity|agy)
+          run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$synth_prompt_file" >> "$synth_file" 2>&1
+          synth_status=$?
+          ;;
+      esac
+      set -e
+      if [ "$synth_status" -eq 0 ]; then
+        echo "ok: synthesis ($SYNTHESIZE)"
+      else
+        echo "warning: synthesis pass failed ($SYNTHESIZE, exit $synth_status)" >&2
+      fi
+    fi
+  fi
+  rm -f "$synth_prompt_file"
+fi
 
 echo "summary: $ok/$total providers succeeded"
 echo "artifacts: $ARTIFACT_DIR"
