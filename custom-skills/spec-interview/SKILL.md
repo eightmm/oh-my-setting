@@ -1,12 +1,12 @@
 ---
 name: spec-interview
 description: >
-  Specification-first interview workflow. Use when starting a new project,
-  feature, refactor, agent workflow, CLI, app, research pipeline, or any vague
-  build request. Ask staged questions first, write or update PROJECT.md for
-  project work, then code only after the spec is confirmed. For new-project
-  starts, continue into full bootstrap (template, skeleton, doctor) so the
-  user never runs setup commands in a shell.
+  Specification-first interview workflow. Use when starting, resuming, or
+  onboarding a project, feature, refactor, agent workflow, CLI, app, research
+  pipeline, or any vague build request. One entry point: detect the project
+  state first, then route to new-project interview+bootstrap, existing-repo
+  onboarding, or ongoing-work resume. Code only after the spec is confirmed;
+  the user never runs setup commands in a shell.
 ---
 
 Default: no coding before confirmed spec.
@@ -14,7 +14,23 @@ Default: no coding before confirmed spec.
 ## Trigger
 
 Use when request is vague, new, broad, architecture-shaping, or says:
-`start`, `build`, `design`, `make`, `project`, `feature`, `spec`, `interview`.
+`start`, `resume`, `continue`, `onboard`, `build`, `design`, `make`,
+`project`, `feature`, `spec`, `interview`.
+
+## Start Router
+
+Any project start/resume trigger enters here. Detect state read-only first —
+never ask the user which case applies:
+
+| State | Signals | Route |
+|---|---|---|
+| New project | no oh-my-setting managed blocks, no/trivial source tree | full interview -> `PROJECT.md` -> confirm -> Project Bootstrap |
+| Existing repo, not onboarded | source files present; no managed blocks or no `PROJECT.md` | inspect code/configs/git first; apply template (`auto`); fill `PROJECT.md` from the code; interview only for gaps the code cannot answer; confirm; doctor |
+| Ongoing, `PROJECT.md` draft | managed blocks + `PROJECT.md` with `State: draft` | resume interview at Open decisions; confirm; finish any missing bootstrap step |
+| Ongoing, confirmed | managed blocks + `State: confirmed` | read `PROJECT.md` (Current Task, Verification), run project doctor, report status, propose next step — no interview unless spec and reality have drifted |
+
+Signals: `<!-- oh-my-setting:*:begin -->` blocks in `AGENTS.md`/`CLAUDE.md`,
+`PROJECT.md` `- State:` field, presence of tracked source files.
 
 ## Flow
 
@@ -29,9 +45,11 @@ Use when request is vague, new, broad, architecture-shaping, or says:
 ## Question Rules
 
 - Ask only questions that change implementation or verification.
-- Prefer native question UI tools when available, such as Codex
-  `request_user_input` or Claude Code `AskUserQuestion`; otherwise use
-  Markdown.
+- Native question UI is MANDATORY when the harness provides one: Claude Code
+  `AskUserQuestion`, Codex `request_user_input`. Do not ask interview
+  questions as plain chat text in those harnesses.
+- Markdown questions are the fallback only when no question UI tool exists
+  (Antigravity, `codex exec`/non-interactive runs).
 - Prefer multiple-choice when options are known.
 - Offer 2-4 choices for each question when practical.
 - If one default is clearly best, mark it `(recommended)` and explain why in
