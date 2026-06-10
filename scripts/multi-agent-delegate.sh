@@ -159,6 +159,7 @@ trap cleanup EXIT
   printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
   printf 'Do not run git commit, git push, or change git config.\n'
   printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
+  ma_write_shared_memory_context "$REPO"
   printf '## Brief\n\n'
   if [ -n "$BRIEF_FILE" ]; then
     cat "$BRIEF_FILE"

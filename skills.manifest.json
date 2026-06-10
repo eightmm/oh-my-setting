@@ -19,6 +19,12 @@
       "reason": "Let agents maintain the oh-my-setting install, cleanup legacy links, and run doctors from chat."
     },
     {
+      "name": "agent-harness",
+      "source": "custom-skills/agent-harness",
+      "enabled": true,
+      "reason": "Share harness memory across agents and call one local agent CLI for a read-only independent pass."
+    },
+    {
       "name": "spec-interview",
       "source": "custom-skills/spec-interview",
       "enabled": true,

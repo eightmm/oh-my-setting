@@ -86,6 +86,7 @@ write_prompt() {
       printf -- '- Config or preprocessing changes that invalidate existing checkpoints or baselines.\n'
       printf 'Rank silently-wrong-metrics bugs as the highest severity findings.\n\n'
     fi
+    ma_write_shared_memory_context "$repo"
     printf 'Question:\n%s\n\n' "$question"
     printf 'Repository:\n%s\n\n' "$repo"
     if [ "$NO_DIFF" -eq 0 ]; then

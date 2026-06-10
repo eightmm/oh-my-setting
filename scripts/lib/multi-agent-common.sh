@@ -9,6 +9,9 @@
 #   MA_DEBATE_SECTIONS   newline-joined section list for debate replies
 # plus the per-run globals referenced inside each function.
 
+# shellcheck source=agent-memory-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-memory-common.sh"
+
 MA_SAFE_PATHS=(
   .
   ':(top,exclude,glob)local/**'

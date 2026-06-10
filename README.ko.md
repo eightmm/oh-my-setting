@@ -84,6 +84,38 @@ oh-my-setting skill doctor 돌려줘.
 실행한다. 스크립트 경로는 투명성과 복구용으로 문서화하며, 사용자가 직접 실행할
 것을 기대하지 않는다.
 
+## Shared Harness Memory
+
+Codex, Claude Code, Antigravity는 제품별 memory 저장소가 서로 다르다.
+oh-my-setting은 그 private store를 직접 합치지 않고, 세 agent가 모두 읽는
+harness 소유 memory 파일을 둔다.
+
+- 프로젝트 memory: `.oms/memory/shared.md`
+- 전역 memory: `~/.oh-my-setting/local/agent-memory.md`
+- 안전장치: credential, private key, 로컬 머신 경로, cluster detail,
+  프로젝트 private path처럼 보이는 note는 append 단계에서 거부한다.
+- 반드시 지켜야 하는 규칙은 여전히 `AGENTS.md`, repo 문서, script, hook에
+  둔다. Shared memory는 soft recall이다.
+
+agent에게 이렇게 요청한다:
+
+```text
+이 repo에서는 완료 주장 전에 scripts/check.sh fast 돌린다는 걸 기억해줘.
+이 repo shared harness memory 보여줘.
+memory에 넣기 전에 저장할 내용 요약해줘.
+```
+
+provider 하나만 읽기 전용으로 호출할 수도 있다:
+
+```text
+Codex만 불러서 이 계획 평가해줘.
+Claude Code만 불러서 이 API 설계 허점 찾아줘.
+Antigravity만 불러서 이 구현 방향 검토해줘.
+```
+
+agent는 내부적으로 `agent-memory.sh`, `agent-call.sh`를 실행한다. 쓰기 작업은
+계속 `multi-agent-delegate.sh`를 사용해 격리된 git worktree에서 patch로 회수한다.
+
 ## Multi-Agent 워크플로
 
 기본값이 반대인 워크플로 두 개:

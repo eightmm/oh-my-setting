@@ -896,6 +896,42 @@ test_delegate_requires_provider() {
   assert_file_contains "$project/error" '--to is required'
 }
 
+test_agent_memory_append_show_and_rejects_sensitive() {
+  local project="$TMP/agent-memory"
+  local home_dir="$project/home"
+  mkdir -p "$project" "$home_dir"
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" append --agent codex --text "Prefer scripts/check.sh fast before done." >/dev/null
+
+  [ -f "$project/.oms/memory/shared.md" ] || fail "project memory file missing"
+  assert_file_contains "$project/.oms/memory/shared.md" "Prefer scripts/check.sh fast before done."
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" show >"$project/out"
+  assert_file_contains "$project/out" "Shared Agent Memory"
+
+  if HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" append --agent codex --text "private path /home/jaemin/secret"     >"$project/sensitive-out" 2>"$project/sensitive-err"; then
+    fail "sensitive-looking memory note should be rejected"
+  fi
+  assert_file_contains "$project/sensitive-err" "sensitive-looking content"
+}
+
+
+test_agent_call_dry_run_attaches_shared_memory() {
+  local project="$TMP/agent-call"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project" "$home_dir"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh"     --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
+
+  HOME="$home_dir" OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh"     --repo "$project"     --artifact-dir "$artifact_dir"     --to codex     --prompt "Assess this plan" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Shared harness memory follows'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Prefer narrow verification commands.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'DRY RUN: provider command skipped.'
+}
+
+
 test_link_and_unlink_with_home_override() {
   local home_dir="$TMP/link-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
@@ -1070,6 +1106,8 @@ test_delegate_dry_run
 test_delegate_fake_worker_apply
 test_delegate_apply_refuses_dirty_tree
 test_delegate_requires_provider
+test_agent_memory_append_show_and_rejects_sensitive
+test_agent_call_dry_run_attaches_shared_memory
 test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply

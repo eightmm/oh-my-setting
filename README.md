@@ -85,6 +85,40 @@ local scripts such as `status.sh`, `doctor.sh`, `cleanup.sh`, and
 `skill-doctor.sh`. Script paths are documented for transparency and recovery,
 not because the user is expected to run them manually.
 
+## Shared Harness Memory
+
+Codex, Claude Code, and Antigravity have different product-specific memory
+surfaces. oh-my-setting does not try to merge those private stores directly.
+Instead, it provides a harness-owned memory file that all three agents can read
+when the harness calls them.
+
+- Project memory: `.oms/memory/shared.md`
+- Global memory: `~/.oh-my-setting/local/agent-memory.md`
+- Safety: append rejects sensitive-looking notes such as credentials, private
+  keys, local machine paths, cluster details, and project-private paths.
+- Rules that must always apply still belong in `AGENTS.md`, checked-in docs,
+  scripts, or hooks. Shared memory is soft recall.
+
+Ask the agent to manage it:
+
+```text
+Remember for this repo: run scripts/check.sh fast before claiming done.
+Show shared harness memory for this repo.
+Forget nothing automatically; summarize what should be stored first.
+```
+
+Call one provider directly for a read-only opinion:
+
+```text
+Ask only Codex to assess this plan.
+Ask only Claude Code to find holes in this API design.
+Ask only Antigravity to review this implementation direction.
+```
+
+The agent uses `agent-memory.sh` and `agent-call.sh` under the hood. Individual
+write tasks still go through `multi-agent-delegate.sh` so patches are isolated
+in a git worktree.
+
 ## Multi-Agent Workflows
 
 Two workflows with opposite defaults:
