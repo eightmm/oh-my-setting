@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date +%Y%m%d%H%M%S)"
+# shellcheck source=scripts/lib/agent-install-state.sh
+. "$ROOT/scripts/lib/agent-install-state.sh"
 
 backup_if_needed() {
   local target="$1"
@@ -43,72 +45,13 @@ link_dir() {
   echo "linked $target -> $source"
 }
 
-remove_old_skill_group() {
-  local target="$1"
-  local current
-
-  [ -L "$target" ] || return 0
-  current="$(readlink "$target")"
-  if legacy_source_matches "$current" "custom-skills"; then
-    rm -f "$target"
-    echo "removed legacy $target"
-  fi
-}
-
-legacy_source_matches() {
-  local current="$1"
-  local rel="$2"
-  local old_root="$HOME/.oh-my-setting"
-
-  [ "$current" = "$ROOT/$rel" ] || [ "$current" = "$old_root/$rel" ]
-}
-
-remove_legacy_link() {
-  local target="$1"
-  local rel="$2"
-  local current
-
-  [ -L "$target" ] || return 0
-  current="$(readlink "$target")"
-  if legacy_source_matches "$current" "$rel"; then
-    rm -f "$target"
-    echo "removed legacy $target"
-  fi
-}
-
-remove_legacy_skill_links() {
-  local target_root="$1"
-  local skill
-  local name
-
-  [ -d "$target_root" ] || return 0
-  find "$target_root" -maxdepth 1 -type l -name "*.backup.*" -exec rm -f {} +
-
-  for skill in "$ROOT"/custom-skills/*; do
-    [ -d "$skill" ] || continue
-    [ -f "$skill/SKILL.md" ] || continue
-    name="$(basename "$skill")"
-    remove_legacy_link "$target_root/$name" "custom-skills/$name"
-  done
-}
-
-cleanup_legacy_links() {
-  remove_legacy_link "$HOME/.gemini/GEMINI.md" "AGENTS.md"
-  remove_legacy_link "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "AGENTS.md"
-  remove_legacy_skill_links "$HOME/.agents/skills"
-  remove_legacy_skill_links "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
-
-  remove_old_skill_group "$HOME/.codex/skills/oh-my-setting"
-  remove_old_skill_group "$HOME/.claude/skills/oh-my-setting"
-}
-
 link_skills() {
   local target_root="$1"
   local skill
   local name
 
   mkdir -p "$target_root"
-  find "$target_root" -maxdepth 1 -type l -name "*.backup.*" -exec rm -f {} +
+  oms_ops_clean_backup_skill_links "$target_root" 0
 
   for skill in "$ROOT"/custom-skills/*; do
     [ -d "$skill" ] || continue
@@ -118,7 +61,7 @@ link_skills() {
   done
 }
 
-cleanup_legacy_links
+oms_ops_cleanup_legacy_links 0
 
 link_file "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
 link_file "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
