@@ -147,7 +147,7 @@ for line in sys.stdin:
     if note:
         row += " note={}".format(note)
     print(row)
-'
+' >> "$tmp"
   else
     tail -n "${OMS_AGENT_ML_LEDGER_ROWS:-8}" "$LEDGER" | sed 's/^/- /' >> "$tmp"
   fi

@@ -1011,6 +1011,10 @@ EOF
   assert_file_contains "$project/context" "train.py"
   assert_file_contains "$project/context" "preferred ML smoke: bash scripts/check.sh ml-smoke"
   assert_file_contains "$project/context" "exit=0"
+  [ "$(head -n 1 "$project/context")" = "# ML Agent Context Digest" ] ||
+    fail "digest header must be the first output line (ledger rows leaked before header)"
+  awk '/## Recent Experiments/{f=1} f && /exit=0/{found=1} END{exit !found}' "$project/context" ||
+    fail "ledger row must appear inside Recent Experiments section"
 }
 
 test_delegate_auto_verify_prefers_ml_smoke() {
