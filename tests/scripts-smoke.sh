@@ -940,6 +940,57 @@ test_link_and_unlink_with_home_override() {
     fail "antigravity skills not unlinked"
 }
 
+
+test_skill_doctor_detects_duplicate_names() {
+  local home_dir="$TMP/skill-doctor-dup"
+  mkdir -p "$home_dir/.codex/skills/a" "$home_dir/.codex/skills/b"
+
+  cat > "$home_dir/.codex/skills/a/SKILL.md" <<'EOF'
+---
+name: duplicate-skill
+---
+EOF
+  cat > "$home_dir/.codex/skills/b/SKILL.md" <<'EOF'
+---
+name: duplicate-skill
+---
+EOF
+
+  if HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/out" 2>&1; then
+    fail "skill-doctor should fail on duplicate names"
+  fi
+  assert_file_contains "$home_dir/out" "duplicate skill name: duplicate-skill"
+}
+
+test_cleanup_dry_run_and_apply() {
+  local home_dir="$TMP/cleanup-home"
+  mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
+    "$home_dir/.pi/agent/skills" "$home_dir/.gemini"
+  ln -s "$ROOT/custom-skills/multi-agent-ask" \
+    "$home_dir/.codex/skills/multi-agent-ask.backup.legacy"
+  ln -s "$ROOT/custom-skills/multi-agent-review" \
+    "$home_dir/.agents/skills/multi-agent-review"
+  ln -s "$ROOT/custom-skills/spec-interview" \
+    "$home_dir/.pi/agent/skills/spec-interview"
+  ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
+
+  HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --dry-run >"$home_dir/dry-run"
+  assert_file_contains "$home_dir/dry-run" "cleanup: 4 removable item(s) found"
+  [ -e "$home_dir/.codex/skills/multi-agent-ask.backup.legacy" ] ||
+    fail "dry-run removed backup symlink"
+
+  HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/apply"
+  [ ! -e "$home_dir/.codex/skills/multi-agent-ask.backup.legacy" ] ||
+    fail "cleanup did not remove backup symlink"
+  [ ! -e "$home_dir/.agents/skills/multi-agent-review" ] ||
+    fail "cleanup did not remove legacy .agents skill"
+  [ ! -e "$home_dir/.pi/agent/skills/spec-interview" ] ||
+    fail "cleanup did not remove legacy pi skill"
+  [ ! -e "$home_dir/.gemini/GEMINI.md" ] ||
+    fail "cleanup did not remove legacy gemini file"
+  assert_file_contains "$home_dir/apply" "skill-doctor: ok"
+}
+
 test_update_help_runs() {
   "$ROOT/scripts/update.sh" --help >/dev/null
 }
@@ -1020,6 +1071,8 @@ test_delegate_fake_worker_apply
 test_delegate_apply_refuses_dirty_tree
 test_delegate_requires_provider
 test_link_and_unlink_with_home_override
+test_skill_doctor_detects_duplicate_names
+test_cleanup_dry_run_and_apply
 test_update_help_runs
 test_uninstall_help_runs
 test_uninstall_dry_run_no_changes

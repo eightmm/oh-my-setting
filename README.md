@@ -71,12 +71,19 @@ Installed paths:
 also linked under `~/.gemini/antigravity/skills/`, so all three agents read the
 same rules and skills.
 
-Check status or update by asking the agent:
+Check status, update, or clean stale skill links by asking the agent:
 
 ```text
 Check the oh-my-setting install status.
 Update oh-my-setting and re-run its doctor.
+Clean old oh-my-setting skill links and fix duplicate $skill entries.
+Run the oh-my-setting skill doctor.
 ```
+
+After install, normal operation is chat-first: the user asks, and the agent runs
+local scripts such as `status.sh`, `doctor.sh`, `cleanup.sh`, and
+`skill-doctor.sh`. Script paths are documented for transparency and recovery,
+not because the user is expected to run them manually.
 
 ## Multi-Agent Workflows
 

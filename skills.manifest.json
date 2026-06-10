@@ -13,6 +13,12 @@
       "reason": "Use local git and gh CLI for repository, PR, issue, and CI work without MCP."
     },
     {
+      "name": "oh-my-setting-ops",
+      "source": "custom-skills/oh-my-setting-ops",
+      "enabled": true,
+      "reason": "Let agents maintain the oh-my-setting install, cleanup legacy links, and run doctors from chat."
+    },
+    {
       "name": "spec-interview",
       "source": "custom-skills/spec-interview",
       "enabled": true,

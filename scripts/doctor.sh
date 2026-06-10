@@ -95,6 +95,10 @@ check_custom_skills "$HOME/.gemini/antigravity/skills"
 check_path "$HOME/.oh-my-setting-prompts"
 check_path "$HOME/.oh-my-setting-workflows"
 
+if ! "$ROOT/scripts/skill-doctor.sh"; then
+  FAILED=1
+fi
+
 if [ "$FAILED" -ne 0 ]; then
   echo "doctor: failed"
   exit 1

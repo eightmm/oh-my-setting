@@ -42,9 +42,6 @@ gh run view --log-failed
 
 ## Output
 
-```md
-changed:
-verified:
-not verified:
-next:
-```
+Use compact prose. For implementation, commit, push, or PR work, report changed
+files and checks run. For questions or design discussion, do not use a fixed
+status block.

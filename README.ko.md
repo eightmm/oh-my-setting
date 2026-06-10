@@ -70,12 +70,19 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 `~/.gemini/antigravity/skills/`에 링크되어 세 agent 모두 같은 규칙과 스킬을
 읽는다.
 
-상태 확인이나 업데이트는 agent에게 요청한다:
+상태 확인, 업데이트, 오래된 skill 링크 정리는 agent에게 요청한다:
 
 ```text
 oh-my-setting 설치 상태 확인해줘.
 oh-my-setting 업데이트하고 doctor 다시 돌려줘.
+오래된 oh-my-setting skill 링크 정리하고 $skill 중복 고쳐줘.
+oh-my-setting skill doctor 돌려줘.
 ```
+
+설치 이후의 일반 사용은 chat-first다. 사용자는 요청만 하고, agent가
+`status.sh`, `doctor.sh`, `cleanup.sh`, `skill-doctor.sh` 같은 로컬 스크립트를
+실행한다. 스크립트 경로는 투명성과 복구용으로 문서화하며, 사용자가 직접 실행할
+것을 기대하지 않는다.
 
 ## Multi-Agent 워크플로
 
