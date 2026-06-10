@@ -13,7 +13,7 @@ jobs:
       - name: install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck
-        run: shellcheck -S warning install.sh scripts/*.sh tests/*.sh
+        run: shellcheck -x -S warning install.sh scripts/*.sh tests/*.sh
       - name: install-skills validation
         run: bash scripts/install-skills.sh
       - name: scripts smoke
