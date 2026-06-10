@@ -33,7 +33,7 @@ has_code_text() {
     \) -prune -o -type f \( -name '*.py' -o -name '*.sh' -o -name '*.yaml' -o -name '*.yml' -o -name '*.toml' \) \
       ! -path '*/scripts/detect-project-style.sh' \
       ! -path '*/scripts/doctor.sh' \
-      -exec grep -q "$1" {} \; -print -quit 2>/dev/null | grep -q .
+      -exec grep -Eq "$1" {} \; -print -quit 2>/dev/null | grep -q .
   fi
 }
 
