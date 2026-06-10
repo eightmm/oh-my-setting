@@ -580,6 +580,25 @@ test_multi_agent_ask_print_timeout() {
     --prompt "Ask with custom print timeout" >/dev/null
 }
 
+test_link_and_unlink_with_home_override() {
+  local home_dir="$TMP/link-home"
+  mkdir -p "$home_dir"
+
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+
+  [ -L "$home_dir/.codex/AGENTS.md" ] || fail "codex AGENTS.md not linked"
+  [ -L "$home_dir/.claude/CLAUDE.md" ] || fail "claude CLAUDE.md not linked"
+  [ -L "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not linked"
+  [ -L "$home_dir/.gemini/antigravity/skills/spec-interview" ] ||
+    fail "antigravity skills not linked"
+
+  HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
+
+  [ ! -e "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not unlinked"
+  [ ! -e "$home_dir/.gemini/antigravity/skills/spec-interview" ] ||
+    fail "antigravity skills not unlinked"
+}
+
 test_update_help_runs() {
   "$ROOT/scripts/update.sh" --help >/dev/null
 }
@@ -644,6 +663,7 @@ test_multi_agent_ask_repo_context_subset
 test_multi_agent_ask_secret_diff_skips_external
 test_multi_agent_review_print_timeout
 test_multi_agent_ask_print_timeout
+test_link_and_unlink_with_home_override
 test_update_help_runs
 test_uninstall_help_runs
 test_uninstall_dry_run_no_changes

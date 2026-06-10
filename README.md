@@ -53,9 +53,14 @@ Installed paths:
 ```text
 ~/.codex/AGENTS.md
 ~/.claude/CLAUDE.md
+~/.gemini/AGENTS.md
 ~/.pi/agent/AGENTS.md
 ~/.oh-my-setting/local/machine.md
 ```
+
+`~/.gemini/AGENTS.md` is the Antigravity global customizations root; skills are
+also linked under `~/.gemini/antigravity/skills/`, so all four agents read the
+same rules and skills.
 
 Check current install status:
 
