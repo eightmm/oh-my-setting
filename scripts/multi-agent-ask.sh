@@ -18,6 +18,9 @@ PROVIDERS="codex,claude,antigravity"
 ARTIFACT_DIR=""
 INCLUDE_STATUS=0
 INCLUDE_DIFF=0
+INCLUDE_MEMORY=1
+INCLUDE_TASK=1
+INCLUDE_ML_CONTEXT=1
 DEBATE=0
 DRY_RUN="${OH_MY_SETTING_ASK_DRY_RUN:-0}"
 
@@ -36,6 +39,9 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: PWD/.oms/artifacts/ask.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.
+  --no-memory          Do not attach shared harness memory.
+  --no-task            Do not attach the active task handoff packet.
+  --no-ml-context      Do not attach the compact ML context digest.
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Debate rounds exchange answers only;
@@ -63,10 +69,18 @@ write_prompt() {
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Prefer concrete reasoning, tradeoffs, assumptions, and actionable recommendations.\n'
     printf 'If the question is underspecified, state the key assumptions and what would change the answer.\n\n'
-    ma_write_shared_memory_context "$repo"
+    if [ "$INCLUDE_MEMORY" -eq 1 ]; then
+      ma_write_shared_memory_context "$repo"
+    fi
+    if [ "$INCLUDE_TASK" -eq 1 ]; then
+      ma_write_task_context "$repo"
+    fi
+    if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
+      ma_write_ml_context "$repo"
+    fi
     printf 'Question:\n%s\n\n' "$question"
     if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
-      printf 'Repository:\n%s\n\n' "$repo"
+      printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"
       printf 'Git status:\n'
       cat "$status_file"
       printf '\n'
@@ -115,6 +129,18 @@ while [ "$#" -gt 0 ]; do
     --diff)
       INCLUDE_STATUS=1
       INCLUDE_DIFF=1
+      shift
+      ;;
+    --no-memory)
+      INCLUDE_MEMORY=0
+      shift
+      ;;
+    --no-task)
+      INCLUDE_TASK=0
+      shift
+      ;;
+    --no-ml-context)
+      INCLUDE_ML_CONTEXT=0
       shift
       ;;
     --debate)

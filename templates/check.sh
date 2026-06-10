@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Project verification contract. Agents run this before claiming work done.
-#   fast  CPU-only, under 60 seconds, safe to run anytime.
-#   gpu   Short GPU smoke; wrapped in a transient srun on Slurm machines.
+#   fast      CPU-only, under 60 seconds, safe to run anytime.
+#   ml-smoke  ML interface smoke: import/config/data/model/loss one-batch checks.
+#   gpu       Short GPU smoke; wrapped in a transient srun on Slurm machines.
 # Fill the TODO blocks as the project takes shape. An empty contract fails
 # loudly on purpose -- never let "no checks" look like a pass.
 set -euo pipefail
@@ -36,6 +37,27 @@ run_fast() {
   echo "check fast: ok"
 }
 
+run_ml_smoke() {
+  local ran=0
+
+  if [ -f scripts/ml_smoke.py ] && [ -f pyproject.toml ] && command -v uv >/dev/null 2>&1; then
+    uv run python scripts/ml_smoke.py
+    ran=1
+  elif [ -f scripts/ml_smoke.py ]; then
+    python3 scripts/ml_smoke.py
+    ran=1
+  fi
+
+  # TODO ML project: implement scripts/ml_smoke.py or replace this function
+  # with a CPU-only one-batch check covering config load, dataloader sample,
+  # model forward, loss, backward, eval mode, and checkpoint save/load.
+  if [ "$ran" -eq 0 ]; then
+    echo "check ml-smoke: no ML smoke configured; add scripts/ml_smoke.py or edit scripts/check.sh" >&2
+    exit 1
+  fi
+  echo "check ml-smoke: ok"
+}
+
 run_gpu() {
   # TODO project: replace with a real 1-batch GPU train/eval smoke.
   if command -v srun >/dev/null 2>&1; then
@@ -48,9 +70,10 @@ run_gpu() {
 
 case "$MODE" in
   fast) run_fast ;;
+  ml-smoke) run_ml_smoke ;;
   gpu) run_gpu ;;
   *)
-    echo "usage: scripts/check.sh [fast|gpu]" >&2
+    echo "usage: scripts/check.sh [fast|ml-smoke|gpu]" >&2
     exit 2
     ;;
 esac

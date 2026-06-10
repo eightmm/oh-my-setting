@@ -20,6 +20,9 @@ NO_DIFF=0
 BASE_REF=""
 SYNTHESIZE=""
 ML_PRESET=0
+INCLUDE_MEMORY=1
+INCLUDE_TASK=1
+INCLUDE_ML_CONTEXT=1
 DEBATE=0
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
@@ -42,6 +45,9 @@ Options:
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
   --no-diff            Do not attach git diff/status context.
+  --no-memory          Do not attach shared harness memory.
+  --no-task            Do not attach the active task handoff packet.
+  --no-ml-context      Do not attach the compact ML context digest.
   --debate N           Add N debate rounds (1-3). Each round, every reviewer
                        sees the others' previous findings, critiques them, and
                        revises its own. Debate rounds exchange findings only;
@@ -86,9 +92,17 @@ write_prompt() {
       printf -- '- Config or preprocessing changes that invalidate existing checkpoints or baselines.\n'
       printf 'Rank silently-wrong-metrics bugs as the highest severity findings.\n\n'
     fi
-    ma_write_shared_memory_context "$repo"
+    if [ "$INCLUDE_MEMORY" -eq 1 ]; then
+      ma_write_shared_memory_context "$repo"
+    fi
+    if [ "$INCLUDE_TASK" -eq 1 ]; then
+      ma_write_task_context "$repo"
+    fi
+    if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
+      ma_write_ml_context "$repo"
+    fi
     printf 'Question:\n%s\n\n' "$question"
-    printf 'Repository:\n%s\n\n' "$repo"
+    printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"
     if [ "$NO_DIFF" -eq 0 ]; then
       printf 'Git status:\n'
       cat "$status_file"
@@ -139,6 +153,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --ml)
       ML_PRESET=1
+      shift
+      ;;
+    --no-memory)
+      INCLUDE_MEMORY=0
+      shift
+      ;;
+    --no-task)
+      INCLUDE_TASK=0
+      shift
+      ;;
+    --no-ml-context)
+      INCLUDE_ML_CONTEXT=0
       shift
       ;;
     --debate)
@@ -253,6 +279,9 @@ if [ -n "$SYNTHESIZE" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     printf 'DRY RUN: synthesis pass skipped.\n' >> "$synth_file"
     echo "dry-run: synthesis ($SYNTHESIZE)"
+  elif ! ma_validate_outbound_prompt "$synth_prompt_file"; then
+    printf 'SKIPPED: outbound synthesis context contains sensitive-looking content.\n' >> "$synth_file"
+    echo "warning: synthesis skipped; sensitive-looking outbound context" >&2
   else
     synth_binary="$SYNTHESIZE"
     [ "$SYNTHESIZE" = "antigravity" ] && synth_binary="agy"

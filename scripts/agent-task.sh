@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/agent-task-common.sh
+. "$ROOT/scripts/lib/agent-task-common.sh"
+
+REPO="$PWD"
+TASK_FILE=""
+ACTION=""
+AGENT="agent"
+GOAL=""
+CONSTRAINT=""
+DONE_CRITERIA=""
+VERIFY=""
+DECISION=""
+STATE=""
+NEXT_STEP=""
+TEXT=""
+USE_STDIN=0
+
+usage() {
+  cat <<'EOF'
+Usage: agent-task.sh [options] [path|init|show|context|update|append|close]
+
+Maintain the active handoff packet shared by Codex, Claude Code, and
+Antigravity. Project task defaults to REPO/.oms/task/current.md.
+
+Options:
+  --repo PATH       Project repo/directory. Default: PWD.
+  --file PATH       Explicit task file path.
+  --agent NAME      Agent label for appended notes. Default: agent.
+  --goal TEXT       init/update: replace Goal.
+  --constraint TEXT update: append a Constraints bullet.
+  --done TEXT       update: append a Done Criteria bullet.
+  --verify CMD      init/update: replace Verify.
+  --decision TEXT   update: append a Decisions bullet.
+  --state TEXT      init/update: replace Current State.
+  --next TEXT       init/update: replace Next Step.
+  --text TEXT       append: append a Current State bullet.
+  --stdin           Read append text from stdin.
+  -h, --help        Show help.
+
+Commands:
+  path              Print resolved task file path.
+  init              Create the task file if missing and apply provided fields.
+  show              Print task file if it exists. Default.
+  context           Print provider context view.
+  update            Apply section updates.
+  append            Append --text/--stdin to Current State.
+  close             Archive current.md under .oms/task/archive/ and remove it.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo)
+      [ "$#" -ge 2 ] || { echo "error: --repo requires path" >&2; exit 2; }
+      REPO="$2"
+      shift 2
+      ;;
+    --file)
+      [ "$#" -ge 2 ] || { echo "error: --file requires path" >&2; exit 2; }
+      TASK_FILE="$2"
+      shift 2
+      ;;
+    --agent)
+      [ "$#" -ge 2 ] || { echo "error: --agent requires name" >&2; exit 2; }
+      AGENT="$2"
+      shift 2
+      ;;
+    --goal)
+      [ "$#" -ge 2 ] || { echo "error: --goal requires text" >&2; exit 2; }
+      GOAL="$2"
+      shift 2
+      ;;
+    --constraint)
+      [ "$#" -ge 2 ] || { echo "error: --constraint requires text" >&2; exit 2; }
+      CONSTRAINT="$2"
+      shift 2
+      ;;
+    --done)
+      [ "$#" -ge 2 ] || { echo "error: --done requires text" >&2; exit 2; }
+      DONE_CRITERIA="$2"
+      shift 2
+      ;;
+    --verify)
+      [ "$#" -ge 2 ] || { echo "error: --verify requires command" >&2; exit 2; }
+      VERIFY="$2"
+      shift 2
+      ;;
+    --decision)
+      [ "$#" -ge 2 ] || { echo "error: --decision requires text" >&2; exit 2; }
+      DECISION="$2"
+      shift 2
+      ;;
+    --state)
+      [ "$#" -ge 2 ] || { echo "error: --state requires text" >&2; exit 2; }
+      STATE="$2"
+      shift 2
+      ;;
+    --next)
+      [ "$#" -ge 2 ] || { echo "error: --next requires text" >&2; exit 2; }
+      NEXT_STEP="$2"
+      shift 2
+      ;;
+    --text)
+      [ "$#" -ge 2 ] || { echo "error: --text requires text" >&2; exit 2; }
+      TEXT="$2"
+      shift 2
+      ;;
+    --stdin)
+      USE_STDIN=1
+      shift
+      ;;
+    path|init|show|context|update|append|close)
+      ACTION="$1"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [ -z "$ACTION" ]; then
+        ACTION="$1"
+      else
+        TEXT="${TEXT:+$TEXT }$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+ACTION="${ACTION:-show}"
+[ -n "$TASK_FILE" ] || TASK_FILE="$(agent_task_project_file "$REPO")"
+
+write_tmp_text() {
+  local output="$1"
+  local text="$2"
+  printf '%s\n' "$text" > "$output"
+}
+
+replace_if_set() {
+  local section="$1"
+  local value="$2"
+  local note_file
+
+  [ -n "$value" ] || return 0
+  note_file="$(mktemp)" || return 1
+  write_tmp_text "$note_file" "$value"
+  agent_task_replace_section "$TASK_FILE" "$section" "$note_file"
+  rm -f "$note_file"
+}
+
+append_if_set() {
+  local section="$1"
+  local value="$2"
+  local note_file
+
+  [ -n "$value" ] || return 0
+  note_file="$(mktemp)" || return 1
+  write_tmp_text "$note_file" "$value"
+  agent_task_append_bullet "$TASK_FILE" "$section" "$AGENT" "$note_file"
+  rm -f "$note_file"
+}
+
+apply_updates() {
+  replace_if_set "## Goal" "$GOAL"
+  replace_if_set "## Verify" "$VERIFY"
+  replace_if_set "## Current State" "$STATE"
+  replace_if_set "## Next Step" "$NEXT_STEP"
+  append_if_set "## Constraints" "$CONSTRAINT"
+  append_if_set "## Done Criteria" "$DONE_CRITERIA"
+  append_if_set "## Decisions" "$DECISION"
+}
+
+append_text() {
+  local note_file
+
+  note_file="$(mktemp)" || return 1
+  if [ "$USE_STDIN" -eq 1 ]; then
+    cat > "$note_file"
+  else
+    [ -n "$TEXT" ] || { echo "error: append requires --text or --stdin" >&2; exit 2; }
+    write_tmp_text "$note_file" "$TEXT"
+  fi
+  agent_task_append_bullet "$TASK_FILE" "## Current State" "$AGENT" "$note_file"
+  rm -f "$note_file"
+}
+
+case "$ACTION" in
+  path)
+    printf '%s\n' "$TASK_FILE"
+    ;;
+  init)
+    agent_task_init_file "$TASK_FILE"
+    apply_updates
+    echo "task: initialized $TASK_FILE"
+    ;;
+  show)
+    if [ -s "$TASK_FILE" ]; then
+      cat "$TASK_FILE"
+    else
+      echo "task: empty ($TASK_FILE)"
+    fi
+    ;;
+  context)
+    agent_task_emit_context "$REPO" "$TASK_FILE" || true
+    ;;
+  update)
+    agent_task_init_file "$TASK_FILE"
+    apply_updates
+    echo "task: updated $TASK_FILE"
+    ;;
+  append)
+    agent_task_init_file "$TASK_FILE"
+    append_text
+    echo "task: appended $TASK_FILE"
+    ;;
+  close)
+    if [ ! -e "$TASK_FILE" ]; then
+      echo "task: no active task ($TASK_FILE)"
+      exit 0
+    fi
+    archive_dir="$(dirname "$TASK_FILE")/archive"
+    archive_file="$archive_dir/current-$(date -u +%Y%m%dT%H%M%SZ).md"
+    mkdir -p "$archive_dir"
+    mv "$TASK_FILE" "$archive_file"
+    echo "task: archived $archive_file"
+    ;;
+  *)
+    echo "error: unknown command: $ACTION" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

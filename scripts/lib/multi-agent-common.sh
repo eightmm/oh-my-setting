@@ -11,6 +11,8 @@
 
 # shellcheck source=agent-memory-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-memory-common.sh"
+# shellcheck source=agent-task-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-task-common.sh"
 
 MA_SAFE_PATHS=(
   .
@@ -37,6 +39,19 @@ MA_SAFE_PATHS=(
 fail() {
   echo "error: $*" >&2
   exit 2
+}
+
+ma_scripts_dir() {
+  cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
+}
+
+ma_repo_label() {
+  local repo="$1"
+  if [ -n "$repo" ]; then
+    printf '%s (path omitted)\n' "$(basename "$repo")"
+  else
+    printf 'repository path omitted\n'
+  fi
 }
 
 load_user_tool_paths() {
@@ -89,6 +104,58 @@ contains_sensitive_content() {
     grep -Eiq "$secret_re"
 }
 
+ma_prompt_has_sensitive_content() {
+  local file="$1"
+  local tmp
+
+  [ -s "$file" ] || return 1
+  tmp="$(mktemp)" || return 1
+  grep -Ev '^[[:space:]]*(local[[:space:]]+)?[A-Za-z0-9_]*secret[A-Za-z0-9_]*_?re=' "$file" |
+    grep -Ev 'agent_memory_sensitive_re|ma_prompt_has_sensitive_content|contains_sensitive_content' > "$tmp" || true
+
+  if agent_memory_file_has_sensitive_content "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+ma_validate_outbound_prompt() {
+  local prompt="$1"
+
+  if ma_prompt_has_sensitive_content "$prompt"; then
+    echo "error: outbound provider context contains sensitive-looking content; external call blocked" >&2
+    echo "hint: remove secrets, private keys, absolute machine paths, cluster details, raw logs, datasets, or checkpoints from task/memory/prompt context" >&2
+    return 3
+  fi
+}
+
+ma_write_task_context() {
+  local repo="$1"
+  agent_task_emit_context "$repo" "$(agent_task_project_file "$repo")" || true
+}
+
+ma_write_ml_context() {
+  local repo="$1"
+  local mode="${OMS_AGENT_ML_CONTEXT:-auto}"
+  local scripts_dir
+
+  case "$mode" in
+    0|false|off|none) return 0 ;;
+    1|true|on|auto) ;;
+    *) return 0 ;;
+  esac
+
+  scripts_dir="$(ma_scripts_dir)"
+  [ -x "$scripts_dir/agent-ml-context.sh" ] || return 0
+  if [ "$mode" = "auto" ]; then
+    "$scripts_dir/agent-ml-context.sh" --repo "$repo" || true
+  else
+    "$scripts_dir/agent-ml-context.sh" --repo "$repo" --force || true
+  fi
+}
+
 ma_safe_status() {
   local repo="$1"
   git -C "$repo" status --short -- "${MA_SAFE_PATHS[@]}"
@@ -128,11 +195,24 @@ run_provider() {
 
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+  if ! ma_validate_outbound_prompt "$prompt_file"; then
+    {
+      printf '# %s %s\n\n' "$provider" "$MA_KIND"
+      printf -- '- started: %s\n' "$started"
+      printf '## Output\n\n'
+      printf 'SKIPPED: outbound provider context contains sensitive-looking content.\n'
+      printf 'No prompt content was written to this artifact.\n'
+      printf '\n\n## Exit\n\n3\n'
+    } > "$artifact"
+    echo "blocked: $provider sensitive outbound context -> $artifact"
+    return 1
+  fi
+
   {
     printf '# %s %s\n\n' "$provider" "$MA_KIND"
     printf -- '- started: %s\n' "$started"
     if [ "${MA_SHOW_REPO:-0}" = "1" ]; then
-      printf -- '- repo: %s\n' "$REPO"
+      printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
     fi
     printf -- '- prompt-file: %s\n\n' "$prompt_file"
     printf '## Prompt\n\n'
@@ -311,7 +391,7 @@ ma_write_synthesis() {
     printf '# Multi-agent %s synthesis\n\n' "$MA_KIND"
     printf -- '- generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if [ "${MA_SHOW_REPO:-0}" = "1" ]; then
-      printf -- '- repo: %s\n' "$REPO"
+      printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
     fi
     printf -- '- success: %d/%d providers\n' "$ok" "$total"
     if [ "${DEBATE:-0}" -gt 0 ]; then

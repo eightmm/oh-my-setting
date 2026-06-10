@@ -37,6 +37,29 @@ Common actions:
 ~/.oh-my-setting/scripts/agent-memory.sh --global append --agent claude --text "User prefers compact Korean status."
 ```
 
+## Active Task Handoff
+
+Use active task state for the current short-lived work item. This is separate
+from shared memory: memory is durable soft recall, task is the current handoff
+packet that lets Codex, Claude Code, and Antigravity continue the same work
+without replaying the whole chat.
+
+- Project task file: `.oms/task/current.md`
+- Do not store secrets, private paths, cluster details, raw logs, datasets, or
+  checkpoints.
+- Provider calls attach the active task by default. Use `--no-task` only when
+  the current task should not be sent.
+
+Common actions:
+
+```bash
+~/.oh-my-setting/scripts/agent-task.sh --repo . init --goal "Ship the focused fix" --verify "bash scripts/check.sh fast"
+~/.oh-my-setting/scripts/agent-task.sh --repo . update --state "Patch drafted; tests still pending" --next "Run smoke tests"
+~/.oh-my-setting/scripts/agent-task.sh --repo . append --agent codex --text "Review found one missing test."
+~/.oh-my-setting/scripts/agent-task.sh --repo . context
+~/.oh-my-setting/scripts/agent-task.sh --repo . close
+```
+
 ## Individual Agent Runs
 
 Use `agent-run.sh` as the single entrypoint for one provider. In `--mode auto`,
@@ -56,9 +79,20 @@ in an isolated git worktree and writes artifacts/patches to
 when the owning agent has decided the returned patch should be applied and the
 main tree is clean.
 
-`agent-run.sh` attaches compact shared harness memory by default. Use
-`--no-memory` when memory should not be sent, or set `OMS_AGENT_MEMORY_MODE=full`
-only for debugging full source-tail prompts.
+`agent-run.sh` attaches compact shared memory, the active task packet, and an
+ML context digest for detected ML repos by default. Use `--no-memory`,
+`--no-task`, or `--no-ml-context` to omit those layers. Set
+`OMS_AGENT_MEMORY_MODE=full` only for debugging full source-tail prompts.
+
+Every outbound provider prompt is scanned before the CLI is called.
+Sensitive-looking credentials, private keys, absolute machine paths, cluster
+details, raw logs, datasets, and checkpoints block the external call instead of
+being silently sent.
+
+For ML repos, the digest comes from `agent-ml-context.sh`: entrypoint file names,
+verification contract hints, and recent `docs/EXPERIMENTS.jsonl` rows. Delegated
+workers prefer `bash scripts/check.sh ml-smoke` when the project is detected as
+ML and that mode exists; otherwise they fall back to `fast`.
 
 ## Output
 

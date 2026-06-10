@@ -14,6 +14,8 @@ PROMPT=""
 PROMPT_FILE=""
 ARTIFACT_DIR=""
 INCLUDE_MEMORY=1
+INCLUDE_TASK=1
+INCLUDE_ML_CONTEXT=1
 DRY_RUN="${OH_MY_SETTING_CALL_DRY_RUN:-0}"
 
 usage() {
@@ -30,6 +32,8 @@ Options:
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/call.
   --no-memory          Do not attach shared harness memory.
+  --no-task            Do not attach the active task handoff packet.
+  --no-ml-context      Do not attach the compact ML context digest.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt artifact without calling the CLI.
   -h, --help           Show help.
@@ -69,6 +73,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-memory)
       INCLUDE_MEMORY=0
+      shift
+      ;;
+    --no-task)
+      INCLUDE_TASK=0
+      shift
+      ;;
+    --no-ml-context)
+      INCLUDE_ML_CONTEXT=0
       shift
       ;;
     --print-timeout)
@@ -124,6 +136,12 @@ trap cleanup EXIT
   printf 'Use the shared memory only as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n\n'
   if [ "$INCLUDE_MEMORY" -eq 1 ]; then
     ma_write_shared_memory_context "$REPO"
+  fi
+  if [ "$INCLUDE_TASK" -eq 1 ]; then
+    ma_write_task_context "$REPO"
+  fi
+  if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
+    ma_write_ml_context "$REPO"
   fi
   printf 'Prompt:\n'
   if [ -n "$PROMPT_FILE" ]; then

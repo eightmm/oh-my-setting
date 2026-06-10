@@ -17,6 +17,8 @@ ARTIFACT_DIR=""
 APPLY=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
+INCLUDE_TASK=1
+INCLUDE_ML_CONTEXT=1
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
 usage() {
@@ -37,12 +39,16 @@ Options:
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit
                        marks the delegation failed. Default: when the project
-                       has an executable scripts/check.sh, "bash scripts/check.sh fast".
+                       has executable scripts/check.sh, ML projects prefer
+                       "bash scripts/check.sh ml-smoke" when available, else
+                       "bash scripts/check.sh fast".
   --no-verify          Skip the default scripts/check.sh verification.
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
   --keep-worktree      Keep the worktree for manual inspection.
   --no-memory          Do not attach shared harness memory.
+  --no-task            Do not attach the active task handoff packet.
+  --no-ml-context      Do not attach the compact ML context digest.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt and empty patch without calling the CLI.
@@ -95,6 +101,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-memory)
       INCLUDE_MEMORY=0
+      shift
+      ;;
+    --no-task)
+      INCLUDE_TASK=0
+      shift
+      ;;
+    --no-ml-context)
+      INCLUDE_ML_CONTEXT=0
       shift
       ;;
     --artifact-dir)
@@ -168,6 +182,12 @@ trap cleanup EXIT
   if [ "$INCLUDE_MEMORY" -eq 1 ]; then
     ma_write_shared_memory_context "$REPO"
   fi
+  if [ "$INCLUDE_TASK" -eq 1 ]; then
+    ma_write_task_context "$REPO"
+  fi
+  if [ "$INCLUDE_ML_CONTEXT" -eq 1 ]; then
+    ma_write_ml_context "$REPO"
+  fi
   printf '## Brief\n\n'
   if [ -n "$BRIEF_FILE" ]; then
     cat "$BRIEF_FILE"
@@ -185,13 +205,33 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
 patch_file="$ARTIFACT_DIR/$TO-$slug-$timestamp.patch"
 
+if ! ma_validate_outbound_prompt "$prompt_file"; then
+  {
+    printf '# %s delegate\n\n' "$TO"
+    printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '## Output\n\n'
+    printf 'SKIPPED: outbound provider context contains sensitive-looking content.\n'
+    printf 'No prompt content was written to this artifact and no worktree was created.\n'
+    printf '\n\n## Exit\n\n3\n'
+  } > "$artifact"
+  : > "$patch_file"
+  echo "blocked: $TO sensitive outbound context -> $artifact"
+  echo "artifact: $artifact"
+  echo "patch: $patch_file"
+  exit 3
+fi
 git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
 
 # Verification contract: default to the project's check.sh when present.
 if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -x "$worktree/scripts/check.sh" ]; then
-  VERIFY_CMD="bash scripts/check.sh fast"
-  echo "auto-verify: scripts/check.sh fast (disable with --no-verify)"
+  project_style="$("$(ma_scripts_dir)/detect-project-style.sh" "$worktree" 2>/dev/null || echo general)"
+  if [ "$project_style" = "ml" ] && grep -Eq '(^|[^A-Za-z0-9_-])ml-smoke([^A-Za-z0-9_-]|$)' "$worktree/scripts/check.sh"; then
+    VERIFY_CMD="bash scripts/check.sh ml-smoke"
+  else
+    VERIFY_CMD="bash scripts/check.sh fast"
+  fi
+  echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
 fi
 
 {

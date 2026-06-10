@@ -935,6 +935,124 @@ test_agent_memory_append_show_and_rejects_sensitive() {
 }
 
 
+test_agent_task_init_context_and_rejects_sensitive() {
+  local project="$TMP/agent-task"
+  mkdir -p "$project"
+
+  "$ROOT/scripts/agent-task.sh" \
+    --repo "$project" \
+    init \
+    --agent codex \
+    --goal "Implement an ML-focused agent harness" \
+    --constraint "Keep provider context compact" \
+    --done "agent-task context is available" \
+    --verify "bash scripts/check.sh ml-smoke" \
+    --decision "Use active task packet before larger task registry" \
+    --state "Memory and agent-run already exist" \
+    --next "Wire task context into provider calls" >/dev/null
+
+  [ -f "$project/.oms/task/current.md" ] || fail "task file missing"
+  assert_file_contains "$project/.oms/task/current.md" "Implement an ML-focused agent harness"
+  assert_file_contains "$project/.oms/task/current.md" "Use active task packet before larger task registry"
+
+  "$ROOT/scripts/agent-task.sh" --repo "$project" context >"$project/context"
+  assert_file_contains "$project/context" "Active task packet follows"
+  assert_file_contains "$project/context" "Wire task context into provider calls"
+
+  if "$ROOT/scripts/agent-task.sh" \
+    --repo "$project" append --text "private path /home/jaemin/secret" \
+    >"$project/sensitive-out" 2>"$project/sensitive-err"; then
+    fail "sensitive-looking task note should be rejected"
+  fi
+  assert_file_contains "$project/sensitive-err" "sensitive-looking content"
+}
+
+test_agent_call_outbound_scrubber_blocks_private_path() {
+  local project="$TMP/agent-call-scrub"
+  local artifact_dir="$project/artifacts"
+  local artifact
+
+  mkdir -p "$project"
+  if OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Assess private path /home/jaemin/secret" \
+    >"$project/out" 2>"$project/error"; then
+    fail "private-path outbound prompt should be blocked"
+  fi
+
+  assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
+  artifact="$(find "$artifact_dir" -type f -name '*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "blocked call should write safe artifact"
+  assert_file_contains "$artifact" "SKIPPED: outbound provider context contains sensitive-looking content"
+  if grep -Fq "Assess private path" "$artifact"; then
+    fail "blocked artifact should not contain prompt text"
+  fi
+}
+
+test_agent_ml_context_digest() {
+  local project="$TMP/ml-context"
+  mkdir -p "$project/scripts" "$project/docs"
+  printf 'import torch\n' > "$project/train.py"
+  cat > "$project/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-fast}" in
+  fast) echo fast ;;
+  ml-smoke) echo ml-smoke ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$project/scripts/check.sh"
+  printf '%s\n' '{"ts":"2026-06-10T00:00:00Z","git_sha":"abc1234","dirty":0,"exit":0,"duration_s":2,"note":"smoke","cmd":["python","train.py"]}' > "$project/docs/EXPERIMENTS.jsonl"
+
+  "$ROOT/scripts/agent-ml-context.sh" --repo "$project" >"$project/context"
+  assert_file_contains "$project/context" "ML Agent Context Digest"
+  assert_file_contains "$project/context" "train.py"
+  assert_file_contains "$project/context" "preferred ML smoke: bash scripts/check.sh ml-smoke"
+  assert_file_contains "$project/context" "exit=0"
+}
+
+test_delegate_auto_verify_prefers_ml_smoke() {
+  local project="$TMP/delegate-ml-smoke"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts" "$bin_dir" "$home_dir"
+  printf 'import torch\n' > "$project/train.py"
+  cat > "$project/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-fast}" in
+  fast) echo fast-ran ;;
+  ml-smoke) echo ml-smoke-ran ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add train.py scripts/check.sh
+  git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm ml-smoke
+
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "worker done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --prompt "Auto verify ml smoke" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-ml-smoke-*.md' 'command: bash scripts/check.sh ml-smoke'
+  assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-ml-smoke-*.md' 'ml-smoke-ran'
+}
+
+
 test_agent_call_dry_run_attaches_shared_memory() {
   local project="$TMP/agent-call"
   local home_dir="$project/home"
@@ -1175,6 +1293,10 @@ test_delegate_fake_worker_apply
 test_delegate_apply_refuses_dirty_tree
 test_delegate_requires_provider
 test_agent_memory_append_show_and_rejects_sensitive
+test_agent_task_init_context_and_rejects_sensitive
+test_agent_call_outbound_scrubber_blocks_private_path
+test_agent_ml_context_digest
+test_delegate_auto_verify_prefers_ml_smoke
 test_agent_call_dry_run_attaches_shared_memory
 test_agent_run_auto_read_routes_to_call
 test_agent_run_auto_write_routes_to_delegate

@@ -14,6 +14,8 @@ NO_VERIFY=0
 APPLY=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
+INCLUDE_TASK=1
+INCLUDE_ML_CONTEXT=1
 DRY_RUN="${OH_MY_SETTING_AGENT_RUN_DRY_RUN:-0}"
 
 usage() {
@@ -33,11 +35,13 @@ Options:
   --mode MODE          auto, read, or write. Default: auto.
   --artifact-dir PATH  Override artifact directory.
   --verify CMD         Write mode only: verification command in worker worktree.
-  --no-verify          Write mode only: skip default scripts/check.sh fast.
+  --no-verify          Write mode only: skip default scripts/check.sh verification.
   --apply              Write mode only: apply returned patch when worker and
                        verify pass and the main tree is clean.
   --keep-worktree      Write mode only: keep worker worktree.
   --no-memory          Do not attach shared harness memory.
+  --no-task            Do not attach the active task handoff packet.
+  --no-ml-context      Do not attach the compact ML context digest.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write artifacts without calling provider CLIs.
   -h, --help           Show help.
@@ -121,6 +125,14 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_MEMORY=0
       shift
       ;;
+    --no-task)
+      INCLUDE_TASK=0
+      shift
+      ;;
+    --no-ml-context)
+      INCLUDE_ML_CONTEXT=0
+      shift
+      ;;
     --print-timeout)
       [ "$#" -ge 2 ] || { echo "error: --print-timeout requires duration" >&2; exit 2; }
       OMS_MULTI_AGENT_PRINT_TIMEOUT="$2"
@@ -181,6 +193,8 @@ if [ "$resolved_mode" = "read" ]; then
   fi
   [ -n "$ARTIFACT_DIR" ] && cmd+=(--artifact-dir "$ARTIFACT_DIR")
   [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
+  [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
+  [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   "${cmd[@]}"
 else
@@ -196,6 +210,8 @@ else
   [ "$APPLY" -eq 1 ] && cmd+=(--apply)
   [ "$KEEP_WORKTREE" -eq 1 ] && cmd+=(--keep-worktree)
   [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
+  [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
+  [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   "${cmd[@]}"
 fi
