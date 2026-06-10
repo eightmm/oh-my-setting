@@ -124,6 +124,112 @@ test_apply_ml_scaffolds_gitignore() {
     fail "re-running apply should not grow .gitignore"
 }
 
+test_apply_ml_scaffolds_check_contract() {
+  local project="$TMP/ml-check"
+  mkdir -p "$project/scripts"
+  printf '#!/bin/sh\necho custom\n' > "$project/scripts/check.sh"
+
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+  assert_file_contains "$project/scripts/check.sh" "custom"
+
+  local project2="$TMP/ml-check-new"
+  mkdir -p "$project2"
+  "$ROOT/scripts/apply-project-template.sh" ml "$project2" >/dev/null
+  [ -x "$project2/scripts/check.sh" ] || fail "check.sh not scaffolded executable"
+  assert_file_contains "$project2/scripts/check.sh" "Project verification contract"
+}
+
+test_project_doctor_warns_missing_check() {
+  local project="$TMP/doctor-no-check"
+  mkdir -p "$project"
+
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should pass fresh ml apply"
+  printf '%s' "$out" | grep -Fq 'verification contract present' ||
+    fail "doctor should confirm check.sh presence"
+
+  rm "$project/scripts/check.sh"
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "missing check.sh should warn, not fail"
+  printf '%s' "$out" | grep -Fq 'scripts/check.sh missing' ||
+    fail "doctor should warn about missing check.sh"
+}
+
+test_job_digest_log_mode() {
+  local dir="$TMP/job-digest"
+  mkdir -p "$dir"
+  printf 'step 1 loss: 0.5\nTraceback (most recent call last):\n  File "t.py", line 1\nRuntimeError: CUDA out of memory\n' > "$dir/run.log"
+
+  out="$("$ROOT/scripts/job-digest.sh" "$dir/run.log")"
+  printf '%s' "$out" | grep -Fq 'CUDA out of memory' || fail "digest missing error pattern"
+  printf '%s' "$out" | grep -Fq '## Last traceback' || fail "digest missing traceback section"
+
+  if "$ROOT/scripts/job-digest.sh" "$dir/nonexistent" >/dev/null 2>"$dir/error"; then
+    fail "digest should reject non-file non-jobid argument"
+  fi
+  assert_file_contains "$dir/error" 'not a log file or job id'
+}
+
+test_run_ledger_records_and_lists() {
+  local project="$TMP/run-ledger"
+  make_committed_repo "$project"
+
+  if (cd "$project" && "$ROOT/scripts/run-ledger.sh" --note trial -- bash -c 'exit 3' >/dev/null 2>&1); then
+    fail "ledger should propagate command exit code"
+  fi
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"exit": 3'
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"note": "trial"'
+
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "successful command should exit 0"
+  out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5)"
+  printf '%s' "$out" | grep -Fq 'exit=3' || fail "ledger list missing failed run"
+}
+
+test_delegate_auto_verify_uses_check_contract() {
+  local project="$TMP/delegate-auto-verify"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts" "$bin_dir" "$home_dir"
+  printf '#!/usr/bin/env bash\necho check-contract-ran\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm check
+
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "worker done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --prompt "Auto verify run" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-run-*.md' 'check-contract-ran'
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --no-verify \
+    --prompt "No verify run" >/dev/null
+
+  artifact="$(find "$artifact_dir" -type f -name 'codex-no-verify-run-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "missing no-verify artifact"
+  if grep -Fq '## Verify' "$artifact"; then
+    fail "--no-verify should skip verification section"
+  fi
+}
+
 test_project_doctor_ok_after_apply() {
   local project="$TMP/doctor-ok"
   mkdir -p "$project"
@@ -847,6 +953,11 @@ test_apply_dry_run_has_no_writes
 test_apply_ml_dry_run_has_no_writes
 test_apply_ml_scaffolds_docs
 test_apply_ml_scaffolds_gitignore
+test_apply_ml_scaffolds_check_contract
+test_project_doctor_warns_missing_check
+test_job_digest_log_mode
+test_run_ledger_records_and_lists
+test_delegate_auto_verify_uses_check_contract
 test_project_doctor_ok_after_apply
 test_project_doctor_detects_drift
 test_project_doctor_detects_missing_block

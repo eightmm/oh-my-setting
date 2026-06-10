@@ -153,6 +153,38 @@ then re-run with `--apply` or `git apply --binary <patch>`. The
 `multi-agent-delegate` skill tells the host agent how to write a brief
 (Task/Context/Constraints/Files/Success criteria) from conversation context.
 
+## Verification And Experiment Tools
+
+ML projects get a verification contract at `scripts/check.sh` (scaffolded by
+`apply-project-template.sh ml`):
+
+```bash
+scripts/check.sh fast   # CPU, <60s; agents run this before claiming done
+scripts/check.sh gpu    # short GPU smoke; srun-wrapped on Slurm machines
+```
+
+`multi-agent-delegate.sh` runs `check.sh fast` inside the worker's worktree by
+default when the contract exists (`--no-verify` to skip).
+
+Launch experiments through the run ledger so every agent remembers what was
+already tried:
+
+```bash
+~/.oh-my-setting/scripts/run-ledger.sh --note "lr sweep" -- uv run scripts/train.py
+~/.oh-my-setting/scripts/run-ledger.sh list 10
+```
+
+Rows (git SHA, dirty-diff hash, Slurm job id, exit code, duration) append to
+`docs/EXPERIMENTS.jsonl`. The command line is recorded verbatim — keep secrets
+out of arguments.
+
+Digest long training/Slurm logs instead of pasting them raw into an agent:
+
+```bash
+~/.oh-my-setting/scripts/job-digest.sh outputs/train.log
+~/.oh-my-setting/scripts/job-digest.sh 12345 slurm-12345.out   # sacct + log
+```
+
 ## Project Setup
 
 Auto-detect:

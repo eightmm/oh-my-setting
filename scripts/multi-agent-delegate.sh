@@ -12,6 +12,7 @@ TO=""
 PROMPT=""
 BRIEF_FILE=""
 VERIFY_CMD=""
+NO_VERIFY=0
 ARTIFACT_DIR=""
 APPLY=0
 KEEP_WORKTREE=0
@@ -34,7 +35,9 @@ Options:
   --repo PATH          Git repo to work on. Default: current directory.
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit
-                       marks the delegation failed.
+                       marks the delegation failed. Default: when the project
+                       has an executable scripts/check.sh, "bash scripts/check.sh fast".
+  --no-verify          Skip the default scripts/check.sh verification.
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
   --keep-worktree      Keep the worktree for manual inspection.
@@ -75,6 +78,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--verify requires command"
       VERIFY_CMD="$2"
       shift 2
+      ;;
+    --no-verify)
+      NO_VERIFY=1
+      shift
       ;;
     --apply)
       APPLY=1
@@ -171,6 +178,12 @@ patch_file="$ARTIFACT_DIR/$TO-$slug-$timestamp.patch"
 
 git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
+
+# Verification contract: default to the project's check.sh when present.
+if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -x "$worktree/scripts/check.sh" ]; then
+  VERIFY_CMD="bash scripts/check.sh fast"
+  echo "auto-verify: scripts/check.sh fast (disable with --no-verify)"
+fi
 
 {
   printf '# %s delegate\n\n' "$TO"

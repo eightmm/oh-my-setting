@@ -163,6 +163,12 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
       warn ".gitignore missing entry: $entry"
     fi
   done
+
+  if [ -x "$PROJECT_DIR/scripts/check.sh" ]; then
+    ok "verification contract present: scripts/check.sh"
+  else
+    warn "scripts/check.sh missing or not executable; re-run: apply-project-template.sh ml $PROJECT_DIR"
+  fi
 fi
 
 if [ "$FAILED" -ne 0 ]; then

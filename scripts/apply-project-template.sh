@@ -29,7 +29,7 @@ has_slurm_project() {
   if command -v rg >/dev/null 2>&1; then
     # Search from inside the project so exclude globs match project-relative
     # paths, not absolute path segments (e.g. a project located under /tmp).
-    (cd "$PROJECT_DIR" && rg -q "#SBATCH" \
+    (cd "$PROJECT_DIR" && rg -q "#SBATCH" . \
       -g '*.sh' -g '*.sbatch' \
       -g '!scripts/apply-project-template.sh' \
       -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
@@ -106,6 +106,8 @@ loader_content() {
   printf -- '- New/major docs: interview -> concrete outline -> confirm -> write.\n'
   if [ "$style" = "ml" ]; then
     printf -- '- New ML project: create only the standard skeleton before the interview/spec gate.\n'
+    printf -- '- Verify with `scripts/check.sh fast` before claiming work done; `scripts/check.sh gpu` for GPU smoke.\n'
+    printf -- '- Before proposing experiments, read `docs/EXPERIMENTS.jsonl` (run ledger) if present.\n'
   elif [ "$style" = "slurm" ]; then
     printf -- '- Slurm is an overlay; ask before partition/account/time/GPU/CPU/memory changes.\n'
   fi
@@ -322,6 +324,21 @@ if [ "$BASE_STYLE" = "ml" ]; then
           echo "created $dst"
         fi
       done
+    fi
+  fi
+
+  CHECK_SRC="$ROOT/templates/check.sh"
+  CHECK_DST="$PROJECT_DIR/scripts/check.sh"
+  if [ -f "$CHECK_SRC" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would scaffold $CHECK_DST"
+    elif [ -e "$CHECK_DST" ]; then
+      echo "skip existing $CHECK_DST"
+    else
+      mkdir -p "$PROJECT_DIR/scripts"
+      cp "$CHECK_SRC" "$CHECK_DST"
+      chmod +x "$CHECK_DST"
+      echo "created $CHECK_DST"
     fi
   fi
 

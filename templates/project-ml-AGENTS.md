@@ -84,6 +84,8 @@
 - Root cause first: trace NaN, shape mismatch, metric jump, data error upstream.
 - Reproducible runs: command, config, seed, data version, commit, checkpoint.
 - Metrics contract: define metric before training; compare against baseline.
+- Run ledger: launch experiments via `~/.oh-my-setting/scripts/run-ledger.sh -- <cmd>`; read `docs/EXPERIMENTS.jsonl` before proposing new experiments.
+- Long logs/failed jobs: digest with `~/.oh-my-setting/scripts/job-digest.sh <logfile|jobid>` instead of reading raw logs.
 
 ## ML Safety Stop
 
@@ -95,6 +97,7 @@
 ## Project Commands
 
 - Setup: `uv sync`
+- Verify (contract): `scripts/check.sh fast` -- run before claiming work done; `scripts/check.sh gpu` for GPU smoke
 - Data check:
 - Dataloader smoke:
 - Model smoke:

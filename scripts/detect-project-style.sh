@@ -20,7 +20,7 @@ has_code_text() {
   if command -v rg >/dev/null 2>&1; then
     # Search from inside DIR so exclude globs match project-relative paths,
     # not absolute path segments (e.g. a project located under /tmp).
-    (cd "$DIR" && rg -q "$1" \
+    (cd "$DIR" && rg -q "$1" . \
       -g '*.py' -g '*.sh' -g '*.yaml' -g '*.yml' -g '*.toml' \
       -g '!scripts/detect-project-style.sh' \
       -g '!scripts/doctor.sh' \
