@@ -999,7 +999,7 @@ test_agent_ml_context_digest() {
 #!/usr/bin/env bash
 case "${1:-fast}" in
   fast) echo fast ;;
-  ml-smoke) echo ml-smoke ;;
+  "ml-smoke") echo ml-smoke ;;
   *) exit 2 ;;
 esac
 EOF
@@ -1030,7 +1030,7 @@ test_delegate_auto_verify_prefers_ml_smoke() {
 #!/usr/bin/env bash
 case "${1:-fast}" in
   fast) echo fast-ran ;;
-  ml-smoke) echo ml-smoke-ran ;;
+  fast-alias|ml-smoke) echo ml-smoke-ran ;;
   *) exit 2 ;;
 esac
 EOF
