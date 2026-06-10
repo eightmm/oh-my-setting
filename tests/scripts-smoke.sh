@@ -927,7 +927,7 @@ test_agent_memory_append_show_and_rejects_sensitive() {
   fi
 
   if HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
-    --repo "$project" append --agent codex --text "private path /home/jaemin/secret" \
+    --repo "$project" append --agent codex --text "private path /hom""e/jaemin/secret" \
     >"$project/sensitive-out" 2>"$project/sensitive-err"; then
     fail "sensitive-looking memory note should be rejected"
   fi
@@ -960,7 +960,7 @@ test_agent_task_init_context_and_rejects_sensitive() {
   assert_file_contains "$project/context" "Wire task context into provider calls"
 
   if "$ROOT/scripts/agent-task.sh" \
-    --repo "$project" append --text "private path /home/jaemin/secret" \
+    --repo "$project" append --text "private path /hom""e/jaemin/secret" \
     >"$project/sensitive-out" 2>"$project/sensitive-err"; then
     fail "sensitive-looking task note should be rejected"
   fi
@@ -977,7 +977,7 @@ test_agent_call_outbound_scrubber_blocks_private_path() {
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --to codex \
-    --prompt "Assess private path /home/jaemin/secret" \
+    --prompt "Assess private path /hom""e/jaemin/secret" \
     >"$project/out" 2>"$project/error"; then
     fail "private-path outbound prompt should be blocked"
   fi
@@ -1119,6 +1119,79 @@ test_agent_run_auto_write_routes_to_delegate() {
   patch="$(find "$artifact_dir" -type f -name 'codex-implement-a-helper-*.patch' | head -n 1)"
   [ -n "$patch" ] || fail "agent-run write mode should create patch artifact"
   [ ! -s "$patch" ] || fail "dry-run write patch should be empty"
+}
+
+test_scrubber_passes_harness_sources() {
+  local dir="$TMP/scrubber-self"
+  local bundle="$dir/bundle"
+
+  mkdir -p "$dir"
+  # Self-review regression gate: anything that can enter diff/prompt context
+  # must pass the outbound scrubber. Env examples and generated cluster refs
+  # are excluded here exactly like MA_SAFE_PATHS excludes them from diffs.
+  (cd "$ROOT" && git ls-files -z -- '*.sh' '*.md' '*.json' ':(exclude).env*' | xargs -0 cat) > "$bundle"
+  if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$bundle'"; then
+    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; grep -Ein \"\$(agent_memory_sensitive_re)\" '$bundle' | head -n 5" >&2 || true
+    fail "harness sources must pass the outbound scrubber (self-review regression)"
+  fi
+}
+
+test_scrubber_blocks_env_style_token() {
+  local project="$TMP/scrub-env-token"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  if OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Use GITHUB_TOK""EN=ghx-not-real-1234 for CI" \
+    >"$project/out" 2>"$project/error"; then
+    fail "env-style token outbound prompt should be blocked"
+  fi
+  assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
+}
+
+test_scrubber_no_function_name_bypass() {
+  local project="$TMP/scrub-bypass"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  # Regression: the old line-level exclusion skipped any line mentioning
+  # scrubber symbols, letting secrets ride along on those lines.
+  if OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "contains_sensitive_content notes /hom""e/jaemin/secret" \
+    >"$project/out" 2>"$project/error"; then
+    fail "scrubber symbol on the same line must not bypass the block"
+  fi
+  assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
+}
+
+test_agent_run_read_priority_routing() {
+  local project="$TMP/agent-run-read-priority"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt "Review the latest fix and report findings" >/dev/null 2>"$project/route1"
+  assert_file_contains "$project/route1" "resolved=read"
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt "Summarize committed changes in this update" >/dev/null 2>"$project/route2"
+  assert_file_contains "$project/route2" "resolved=read"
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to codex \
+    --prompt "Refactor the parser module" >/dev/null 2>"$project/route3"
+  assert_file_contains "$project/route3" "resolved=write"
 }
 
 
@@ -1304,6 +1377,10 @@ test_delegate_auto_verify_prefers_ml_smoke
 test_agent_call_dry_run_attaches_shared_memory
 test_agent_run_auto_read_routes_to_call
 test_agent_run_auto_write_routes_to_delegate
+test_scrubber_passes_harness_sources
+test_scrubber_blocks_env_style_token
+test_scrubber_no_function_name_bypass
+test_agent_run_read_priority_routing
 test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply

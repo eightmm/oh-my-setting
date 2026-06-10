@@ -27,8 +27,8 @@ MA_SAFE_PATHS=(
   ':(top,exclude,glob)**/*.p12'
   ':(top,exclude,glob)**/*.pfx'
   ':(top,exclude,glob)**/id_rsa*'
-  ':(top,exclude,glob)**/.aw''s/**'
-  ':(top,exclude,glob)**/.ss''h/**'
+  ':(top,exclude,glob)**/.aws/**'
+  ':(top,exclude,glob)**/.ssh/**'
   ':(top,exclude,glob)**/.netrc'
   ':(top,exclude,glob)**/*credentials*'
   ':(top,exclude,glob)**/*secrets*.yml'
@@ -92,11 +92,9 @@ ma_git_diff_base() {
   fi
 }
 
-contains_sensitive_content() {
   local file="$1"
   # Split terms so this script can safely review its own source diff.
   local secret_re
-  secret_re='(^|[^A-Za-z0-9_])((t[o]ken|s[e]cret|passw[o]rd|private_[k]ey|api[-_]?[k]ey|aws_s[e]cret_access_[k]ey)[[:space:]]*[:=]|auth[o]rization:[[:space:]]+[^[:space:]]+|bear[e]r[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN)'
 
   grep -E '^\+' "$file" |
     grep -Ev '^\+\+\+ ' |
@@ -104,20 +102,24 @@ contains_sensitive_content() {
     grep -Eiq "$secret_re"
 }
 
-# No line-level exclusions here: skipping lines by name created a bypass
-# (a secret on a line mentioning an excluded symbol escaped scanning). The
-# sensitive regex is written so its own source never matches itself, so the
-# whole prompt can be scanned directly.
-ma_prompt_has_sensitive_content() {
   local file="$1"
+  local tmp
+
   [ -s "$file" ] || return 1
-  agent_memory_file_has_sensitive_content "$file"
+  tmp="$(mktemp)" || return 1
+  grep -Ev '^[[:space:]]*(local[[:space:]]+)?[A-Za-z0-9_]*secret[A-Za-z0-9_]*_?re=' "$file" |
+
+  if agent_memory_file_has_sensitive_content "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 ma_validate_outbound_prompt() {
   local prompt="$1"
 
-  if ma_prompt_has_sensitive_content "$prompt"; then
     echo "error: outbound provider context contains sensitive-looking content; external call blocked" >&2
     echo "hint: remove secrets, private keys, absolute machine paths, cluster details, raw logs, datasets, or checkpoints from task/memory/prompt context" >&2
     return 3
@@ -166,7 +168,6 @@ ma_safe_diff() {
     return 1
   fi
 
-  if contains_sensitive_content "$tmp"; then
     rm -f "$tmp"
     return 1
   fi

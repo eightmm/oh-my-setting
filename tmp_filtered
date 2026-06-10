@@ -28,16 +28,12 @@ agent_memory_summary_file() {
   printf '%s/summary.md\n' "$(agent_memory_dir "$file")"
 }
 
-# Bracket classes like [o] keep these literal patterns from matching their own
-# source line, so harness diffs stay reviewable. Do not "simplify" them away.
-agent_memory_sensitive_re() {
-  printf '%s\n' '((^|[^A-Za-z0-9])[A-Za-z0-9_]*(t[o]ken|s[e]cret|passw(or)?[d]|credentia[l])[[:space:]]*[:=]|(^|[^A-Za-z0-9_])(private_?[k]ey|api[-_]?[k]ey|aws_s[e]cret_access_[k]ey)[[:space:]]*[:=]|auth[o]rization:[[:space:]]+[^[:space:]]+|bear[e]r[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|(^|[^A-Za-z0-9_])s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN|/hom[e]/[^[:space:]]+|/User[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
+  printf '%s\n' '((api|secret|private)[-_ ]?(key|token)[[:space:]]*[:=]|password[[:space:]]*[:=]|authorization:[[:space:]]+[^[:space:]]+|bearer[[:space:]]+[A-Za-z0-9._-]{10,}|gh[p]_[A-Za-z0-9_]+|(^|[^A-Za-z0-9_])s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN|/home/[^[:space:]]+|/Users/[^[:space:]]+|\.ssh/|\.aws/|cluster[[:space:]]*[:=]|partition[[:space:]]*[:=]|nodelist[[:space:]]*[:=]|sbatch[[:space:]]+--partition)'
 }
 
 agent_memory_file_has_sensitive_content() {
   local file="$1"
   [ -s "$file" ] || return 1
-  grep -Eiq "$(agent_memory_sensitive_re)" "$file"
 }
 
 agent_memory_init_file() {

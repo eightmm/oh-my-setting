@@ -52,12 +52,19 @@ Environment:
 EOF
 }
 
+# Read intent wins over write keywords ("review the fix" is a read), write
+# keywords are word-bounded ("committed changes" must not match "change"),
+# and anything ambiguous stays read — the conservative default.
 classify_mode() {
   local text="$1"
   local lower
+  local read_re='(^|[^a-z])(review|assess|evaluate|analy[sz]e|explain|compare|inspect|audit|summari[sz]e|investigate|describe|why|what|how)([^a-z]|$)|검토|평가|분석|리뷰|설명|조사|비교'
+  local write_re='(^|[^a-z])(add|implement|fix|change|modify|update|refactor|remove|delete|create|generate|write|apply|migrate|rename|scaffold|build|install)([^a-z]|$)|구현|수정|추가|변경|삭제|제거|고쳐|만들|작성|적용|리팩터|정리'
   lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
 
-  if printf '%s' "$lower" | grep -Eq '(add|implement|fix|change|modify|update|refactor|remove|delete|create|generate|write|apply|migrate|rename|scaffold|build|install|구현|수정|추가|변경|삭제|제거|고쳐|만들|작성|적용|리팩터|정리)'; then
+  if printf '%s' "$lower" | grep -Eq "$read_re"; then
+    printf 'read\n'
+  elif printf '%s' "$lower" | grep -Eq "$write_re"; then
     printf 'write\n'
   else
     printf 'read\n'

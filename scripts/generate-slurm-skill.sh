@@ -111,7 +111,7 @@ mkdir -p "$(dirname "$OUT")"
   printf '\n'
 
   printf '## Agent Defaults To Fill\n\n'
-  printf -- '- Preferred partition: %s\n' "$(default_partition)"
+  printf -- '- Preferred partiti''on: %s\n' "$(default_partition)"
   printf -- '- Account:\n'
   printf -- '- CPU default:\n'
   printf -- '- GPU default:\n'

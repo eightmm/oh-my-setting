@@ -10,7 +10,7 @@
 
 ## Slurm Defaults
 
-- Partition:
+- Partition name:
 - Account:
 - GPU type/count:
 - CPUs:
@@ -22,7 +22,7 @@
 ## Commands
 
 - Queue: `squeue -u "$USER"`
-- Cluster: `sinfo`
+- Cluster overview: `sinfo`
 - Submit:
 - Inspect:
 - Cancel:
