@@ -64,11 +64,11 @@
 ## Docs
 
 - Keep `PROJECT.md` as the active spec gate; keep durable knowledge under `docs/`.
-- Create docs only after interview -> concrete outline -> confirm -> write.
-- Do not create empty placeholder docs without confirmed purpose, scope, owner, and update trigger.
-- Docs roles: `architecture.md` for flows/contracts; `data.md` for schema/labels/splits/leakage; `experiments.md` for runs/metrics/conclusions; `operations.md` for commands/logs/checkpoints/recovery.
+- Standard ML docs are scaffolded on project init under `docs/`. Fill them as the project takes shape — do not delete unused ones, mark them "n/a" if truly irrelevant.
+- Scaffolded set: `SETUP.md`, `DATA.md`, `MODEL.md`, `TRAINING.md`, `EVALUATION.md`, `EXPERIMENTS.md`, `CHECKPOINTS.md`, `LOGGING.md`, `BENCHMARKS.md`, `REPRODUCIBILITY.md`, `CONFIGS.md`, `CHANGELOG.md`, `DEBUGGING.md`.
 - Use `docs/decisions/NNNN-title.md` for architecture/data/API decisions expensive to reverse.
 - Update docs when changing data format, model interface, config schema, checkpoint format, metric, or experiment protocol.
+- Version-pin chain: `DATA.md` <-> `MODEL.md` <-> `TRAINING.md` <-> `CHECKPOINTS.md`. Any bump invalidates downstream.
 
 ## Test Strategy
 

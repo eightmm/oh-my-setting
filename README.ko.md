@@ -75,7 +75,15 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
   --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
 ```
 
-Provider는 병렬 실행된다. provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/review/`에 저장된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
+branch를 base ref 기준으로 review (PR 스타일):
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-review.sh \
+  --base origin/main \
+  --prompt "Review this branch against origin/main."
+```
+
+Provider는 병렬 실행되며 provider별 timeout이 적용된다(`OMS_MULTI_AGENT_TIMEOUT`, 기본 `5m`). provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/review/`에 저장된다. wrapper는 sanitized diff/status context를 로컬 Codex, Claude Code, Antigravity CLI로 보내며, secret path와 secret-like 추가 라인은 외부 review 전에 제외한다.
 
 개념 질문을 세 모델에 묻기:
 
@@ -106,6 +114,7 @@ provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/ask/`에 
 
 - `AGENTS.md`, `CLAUDE.md`에 managed block 추가/갱신
 - `PROJECT.md` 없으면 생성
+- `ml` 프로젝트는 표준 ML 문서 템플릿을 `docs/`에 스캐폴딩 (기존 파일은 덮어쓰지 않음)
 - managed block 밖의 기존 내용은 덮어쓰지 않음
 - Slurm 머신의 ML 프로젝트는 `ml` + 별도 `slurm` 규칙 적용
 
@@ -114,6 +123,8 @@ provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/ask/`에 
 ```bash
 ~/.oh-my-setting/scripts/remove-project-template.sh all .
 ```
+
+제거는 managed block만 삭제한다. `PROJECT.md`와 스캐폴딩된 `docs/` 파일은 사용자 내용이 있을 수 있어 의도적으로 남겨둔다.
 
 감지만:
 
@@ -176,6 +187,10 @@ ML 프로젝트 기본:
 - local `.venv`
 - `uv run ...`
 - 머신 스냅샷은 compute, GPU/CUDA, Slurm, memory, environment 차이가 작업에 영향을 줄 때만 참고
+
+`apply-project-template.sh ml`은 표준 문서 템플릿도 `docs/`에 스캐폴딩한다
+(`DATA.md`, `MODEL.md`, `TRAINING.md`, `EVALUATION.md`, ...). 프로젝트가
+구체화되면서 채워 나가면 되고, 기존 파일은 덮어쓰지 않는다.
 
 ## 로컬 스냅샷
 

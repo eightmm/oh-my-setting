@@ -18,12 +18,14 @@ exists_any() {
 
 has_code_text() {
   if command -v rg >/dev/null 2>&1; then
-    rg -q "$1" "$DIR" \
+    # Search from inside DIR so exclude globs match project-relative paths,
+    # not absolute path segments (e.g. a project located under /tmp).
+    (cd "$DIR" && rg -q "$1" \
       -g '*.py' -g '*.sh' -g '*.yaml' -g '*.yml' -g '*.toml' \
       -g '!scripts/detect-project-style.sh' \
       -g '!scripts/doctor.sh' \
       -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
-      -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null
+      -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null)
   else
     find "$DIR" -maxdepth 3 \( \
       -name ".git" -o -name ".venv" -o -name "node_modules" -o \
@@ -37,7 +39,8 @@ has_code_text() {
 
 style="general"
 
-if exists_any "train.py" "infer.py" "inference.py" "dataset.py" "dataloader.py" "model.py" "configs" "config.yaml" "config.yml"; then
+# configs/ and config.yaml alone are not ML signals; require ML filenames or ML code text.
+if exists_any "train.py" "infer.py" "inference.py" "dataset.py" "dataloader.py" "model.py"; then
   style="ml"
 elif has_code_text "torch|tensorflow|jax|sklearn|DataLoader|LightningModule|nn\\.Module"; then
   style="ml"

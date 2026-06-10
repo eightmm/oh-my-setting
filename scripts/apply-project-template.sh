@@ -27,11 +27,13 @@ has_slurm_project() {
   fi
 
   if command -v rg >/dev/null 2>&1; then
-    rg -q "#SBATCH" "$PROJECT_DIR" \
+    # Search from inside the project so exclude globs match project-relative
+    # paths, not absolute path segments (e.g. a project located under /tmp).
+    (cd "$PROJECT_DIR" && rg -q "#SBATCH" \
       -g '*.sh' -g '*.sbatch' \
       -g '!scripts/apply-project-template.sh' \
       -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
-      -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null
+      -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null)
   else
     find "$PROJECT_DIR" -maxdepth 3 \( \
       -name ".git" -o -name ".venv" -o -name "node_modules" -o \
@@ -299,4 +301,27 @@ if [ "$DRY_RUN" = "1" ]; then
 elif [ ! -e "$project_target" ]; then
   project_content "$BASE_STYLE" "$ADD_SLURM" > "$project_target"
   echo "created $project_target"
+fi
+
+if [ "$BASE_STYLE" = "ml" ]; then
+  ML_DOCS_SRC="$ROOT/templates/ml-docs"
+  if [ -d "$ML_DOCS_SRC" ]; then
+    DOCS_DIR="$PROJECT_DIR/docs"
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would scaffold ML docs at $DOCS_DIR"
+    else
+      mkdir -p "$DOCS_DIR"
+      for src in "$ML_DOCS_SRC"/*.md; do
+        [ -e "$src" ] || continue
+        base="$(basename "$src")"
+        dst="$DOCS_DIR/$base"
+        if [ -e "$dst" ]; then
+          echo "skip existing $dst"
+        else
+          cp "$src" "$dst"
+          echo "created $dst"
+        fi
+      done
+    fi
+  fi
 fi

@@ -6,6 +6,7 @@ PROMPT=""
 PROVIDERS="codex,claude,antigravity"
 ARTIFACT_DIR=""
 NO_DIFF=0
+BASE_REF=""
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 REVIEW_PATHS=(
@@ -40,6 +41,8 @@ each answer as an artifact.
 Options:
   --prompt TEXT        Review question/task. Required.
   --repo PATH          Git repo to review. Default: current directory.
+  --base REF           Diff base ref. Default: HEAD (staged + unstaged changes).
+                       Use e.g. --base origin/main for branch/PR review.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
   --artifact-dir PATH  Artifact directory. Default: REPO/.omc/artifacts/review.
   --no-diff            Do not attach git diff/status context.
@@ -47,7 +50,8 @@ Options:
   -h, --help           Show this help.
 
 Environment:
-  OH_MY_SETTING_REVIEW_DRY_RUN=1  Same as --dry-run.
+  OH_MY_SETTING_REVIEW_DRY_RUN=1   Same as --dry-run.
+  OMS_MULTI_AGENT_TIMEOUT=5m       Per-provider wall-clock timeout (GNU timeout).
 EOF
 }
 
@@ -77,10 +81,20 @@ slugify() {
 
 git_diff_base() {
   local repo="$1"
-  if git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1; then
+  if [ -n "$BASE_REF" ]; then
+    printf '%s\n' "$BASE_REF"
+  elif git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1; then
     printf 'HEAD\n'
   else
     printf '4b825dc642cb6eb9a060e54bf8d69288fbee4904\n'
+  fi
+}
+
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${OMS_MULTI_AGENT_TIMEOUT:-5m}" "$@"
+  else
+    "$@"
   fi
 }
 
@@ -193,15 +207,15 @@ run_provider() {
   set +e
   case "$provider" in
     codex)
-      codex exec --sandbox read-only - < "$prompt_file" >> "$artifact" 2>&1
+      run_with_timeout codex exec --sandbox read-only - < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     claude)
-      claude --permission-mode plan -p < "$prompt_file" >> "$artifact" 2>&1
+      run_with_timeout claude --permission-mode plan -p < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     antigravity|agy)
-      agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file" >> "$artifact" 2>&1
+      run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     *)
@@ -230,6 +244,11 @@ while [ "$#" -gt 0 ]; do
     --repo)
       [ "$#" -ge 2 ] || fail "--repo requires path"
       REPO="$2"
+      shift 2
+      ;;
+    --base)
+      [ "$#" -ge 2 ] || fail "--base requires git ref"
+      BASE_REF="$2"
       shift 2
       ;;
     --providers)
@@ -268,6 +287,10 @@ done
 [ -n "$PROMPT" ] || fail "--prompt is required"
 REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
+if [ -n "$BASE_REF" ]; then
+  git -C "$REPO" rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null ||
+    fail "invalid --base ref: $BASE_REF"
+fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.omc/artifacts/review}"
 
 load_user_tool_paths

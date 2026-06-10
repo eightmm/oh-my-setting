@@ -17,7 +17,7 @@ fail() {
 assert_file_contains() {
   local file="$1"
   local text="$2"
-  grep -Fq "$text" "$file" || fail "$file does not contain: $text"
+  grep -Fq -- "$text" "$file" || fail "$file does not contain: $text"
 }
 
 assert_not_exists() {
@@ -80,6 +80,58 @@ EOF
   assert_file_contains "$project/error" "missing managed block end"
 }
 
+test_apply_ml_dry_run_has_no_writes() {
+  local project="$TMP/ml-dry-run-new"
+
+  OH_MY_SETTING_DRY_RUN=1 "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+
+  assert_not_exists "$project"
+}
+
+test_apply_ml_scaffolds_docs() {
+  local project="$TMP/ml-docs"
+  mkdir -p "$project/docs"
+  printf 'user content\n' > "$project/docs/DATA.md"
+
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+
+  [ -f "$project/docs/MODEL.md" ] || fail "ml docs not scaffolded: MODEL.md"
+  [ -f "$project/docs/TRAINING.md" ] || fail "ml docs not scaffolded: TRAINING.md"
+  [ -f "$project/docs/REPRODUCIBILITY.md" ] || fail "ml docs not scaffolded: REPRODUCIBILITY.md"
+  assert_file_contains "$project/docs/DATA.md" "user content"
+  if grep -Fq '## Schema' "$project/docs/DATA.md"; then
+    fail "existing docs/DATA.md should not be overwritten"
+  fi
+}
+
+test_detect_configs_only_is_general() {
+  local project="$TMP/detect-configs-only"
+  mkdir -p "$project/configs"
+  printf 'port: 8080\n' > "$project/configs/app.yaml"
+  printf 'name: app\n' > "$project/config.yaml"
+
+  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
+  [ "$style" = "general" ] || fail "expected general for configs-only project, got $style"
+}
+
+test_detect_ml_filename_is_ml() {
+  local project="$TMP/detect-ml-filename"
+  mkdir -p "$project"
+  touch "$project/train.py"
+
+  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
+  [ "$style" = "ml" ] || fail "expected ml for train.py project, got $style"
+}
+
+test_detect_ml_code_text_is_ml() {
+  local project="$TMP/detect-ml-code"
+  mkdir -p "$project"
+  printf 'import torch\n' > "$project/main.py"
+
+  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
+  [ "$style" = "ml" ] || fail "expected ml for torch code, got $style"
+}
+
 test_detect_ignores_common_generated_dirs() {
   local project="$TMP/generated-dirs"
   mkdir -p "$project/.venv" "$project/node_modules/pkg" "$project/backups/old"
@@ -137,6 +189,54 @@ test_multi_agent_review_dry_run_artifacts() {
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' '## codex'
 }
 
+
+test_multi_agent_review_base_ref_diff() {
+  local project="$TMP/review-base-ref"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+  printf 'one\n' > "$project/file.txt"
+  git -C "$project" add file.txt
+  git -C "$project" \
+    -c user.email=test@example.com \
+    -c user.name='Test User' \
+    commit -m first >/dev/null
+  printf 'two\n' > "$project/file.txt"
+  git -C "$project" add file.txt
+  git -C "$project" \
+    -c user.email=test@example.com \
+    -c user.name='Test User' \
+    commit -m second >/dev/null
+
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --base HEAD~1 \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --prompt "Review base ref" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-review-base-ref-*.md' '-one'
+  assert_one_artifact_contains "$artifact_dir" 'codex-review-base-ref-*.md' '+two'
+}
+
+test_multi_agent_review_invalid_base_fails() {
+  local project="$TMP/review-bad-base"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  git -C "$project" init >/dev/null
+
+  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --base no-such-ref \
+    --artifact-dir "$artifact_dir" \
+    --prompt "Review invalid base" >/dev/null 2>"$project/error"; then
+    fail "invalid --base ref should fail"
+  fi
+
+  assert_file_contains "$project/error" 'invalid --base ref'
+}
 
 test_multi_agent_review_excludes_private_status() {
   local project="$TMP/review-private-status"
@@ -375,11 +475,18 @@ test_status_shows_version() {
 }
 
 test_apply_dry_run_has_no_writes
+test_apply_ml_dry_run_has_no_writes
+test_apply_ml_scaffolds_docs
 test_apply_rejects_unclosed_managed_block
 test_remove_rejects_unclosed_managed_block
+test_detect_configs_only_is_general
+test_detect_ml_filename_is_ml
+test_detect_ml_code_text_is_ml
 test_detect_ignores_common_generated_dirs
 test_apply_and_remove_valid_block
 test_multi_agent_review_dry_run_artifacts
+test_multi_agent_review_base_ref_diff
+test_multi_agent_review_invalid_base_fails
 test_multi_agent_review_excludes_private_status
 test_multi_agent_review_secret_diff_skips_external
 test_multi_agent_review_no_diff_provider_subset

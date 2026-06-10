@@ -50,7 +50,8 @@ Options:
   -h, --help           Show this help.
 
 Environment:
-  OH_MY_SETTING_ASK_DRY_RUN=1  Same as --dry-run.
+  OH_MY_SETTING_ASK_DRY_RUN=1   Same as --dry-run.
+  OMS_MULTI_AGENT_TIMEOUT=5m    Per-provider wall-clock timeout (GNU timeout).
 EOF
 }
 
@@ -84,6 +85,14 @@ git_diff_base() {
     printf 'HEAD\n'
   else
     printf '4b825dc642cb6eb9a060e54bf8d69288fbee4904\n'
+  fi
+}
+
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${OMS_MULTI_AGENT_TIMEOUT:-5m}" "$@"
+  else
+    "$@"
   fi
 }
 
@@ -196,15 +205,15 @@ run_provider() {
   set +e
   case "$provider" in
     codex)
-      codex exec --sandbox read-only - < "$prompt_file" >> "$artifact" 2>&1
+      run_with_timeout codex exec --sandbox read-only - < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     claude)
-      claude --permission-mode plan -p < "$prompt_file" >> "$artifact" 2>&1
+      run_with_timeout claude --permission-mode plan -p < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     antigravity|agy)
-      agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file" >> "$artifact" 2>&1
+      run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     *)

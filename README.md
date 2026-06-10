@@ -77,7 +77,15 @@ Run a three-model review of the tracked staged + unstaged repo diff:
   --prompt "Review the current diff for bugs, regressions, missing tests, and unsafe operations."
 ```
 
-Providers run in parallel. Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
+Review a branch against a base ref (PR-style):
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-review.sh \
+  --base origin/main \
+  --prompt "Review this branch against origin/main."
+```
+
+Providers run in parallel with a per-provider timeout (`OMS_MULTI_AGENT_TIMEOUT`, default `5m`). Per-provider artifacts plus a `_synthesis-*.md` summary are written to `.omc/artifacts/review/`. The wrapper sends sanitized diff/status context to the local Codex, Claude Code, and Antigravity CLIs; secret paths and secret-like added lines are excluded before external review.
 
 Ask a conceptual question to all three models:
 
@@ -108,6 +116,7 @@ What it does:
 
 - Adds/updates managed blocks in `AGENTS.md` and `CLAUDE.md`.
 - Creates `PROJECT.md` if missing.
+- For `ml` projects, scaffolds standard ML doc templates under `docs/` (existing files are never overwritten).
 - Does not overwrite user content outside managed blocks.
 - For ML projects on Slurm machines, adds `ml` plus separate `slurm` rules.
 
@@ -116,6 +125,8 @@ Remove project rules:
 ```bash
 ~/.oh-my-setting/scripts/remove-project-template.sh all .
 ```
+
+Removal only deletes managed blocks. `PROJECT.md` and scaffolded `docs/` files may contain user content and are intentionally left in place.
 
 Detect only:
 
@@ -178,6 +189,10 @@ ML projects use:
 - local `.venv`
 - `uv run ...`
 - machine snapshot only when compute, GPU/CUDA, Slurm, memory, or environment details affect the task
+
+`apply-project-template.sh ml` also scaffolds standard doc templates under
+`docs/` (`DATA.md`, `MODEL.md`, `TRAINING.md`, `EVALUATION.md`, ...). Fill them
+as the project takes shape; existing files are never overwritten.
 
 ## Local Snapshots
 
