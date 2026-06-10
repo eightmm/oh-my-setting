@@ -23,16 +23,19 @@ never call the scripts yourself.
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-Then open your coding agent and say one of:
+Then open your coding agent in any directory — empty, mid-project, or an
+ongoing oh-my-setting project — and say:
 
 ```text
-Start a new project here.                        # empty dir: interview -> PROJECT.md -> template -> skeleton -> doctor
-Apply the oh-my-setting project template.        # existing repo
+Start this project.
 ```
 
-A new-project start runs the whole flow in chat: spec interview, `PROJECT.md`,
-template, safe skeleton, and doctor verification — nothing typed in a shell.
-Fuller starting prompts are in [Agent Prompts](#agent-prompts).
+The agent detects the state and routes: empty dir → spec interview →
+`PROJECT.md` → template → safe skeleton → doctor; existing repo → inspect the
+code, apply the template, fill `PROJECT.md` from the code, interview only for
+gaps; ongoing project → read `PROJECT.md`, run the doctor, report status and
+the next step. Nothing typed in a shell. The fuller version is in
+[Agent Prompts](#agent-prompts).
 
 ## Install
 
@@ -100,6 +103,12 @@ when the harness calls them.
   private keys, local machine paths, cluster details, and project-private paths.
 - Rules that must always apply still belong in `AGENTS.md`, checked-in docs,
   scripts, or hooks. Shared memory is soft recall.
+- Active task handoff lives at `.oms/task/current.md`; provider prompts attach
+  it by default so Codex, Claude Code, and Antigravity can continue the same
+  work without replaying the full chat.
+- Outbound prompts are scrubbed before provider CLI calls; sensitive-looking
+  credentials, private keys, absolute machine paths, cluster details, raw logs,
+  datasets, and checkpoints block the external call.
 
 Ask the agent to manage it:
 
@@ -117,9 +126,10 @@ Ask only Claude Code to implement this focused fix and return a patch.
 Ask only Antigravity to review this implementation direction.
 ```
 
-The agent uses `agent-memory.sh` and `agent-run.sh` under the hood. `agent-run.sh`
-routes read-only questions to `agent-call.sh` and write tasks to
-`multi-agent-delegate.sh`, so patches are isolated in a git worktree.
+The agent uses `agent-memory.sh`, `agent-task.sh`, and `agent-run.sh` under the
+hood. `agent-run.sh` routes read-only questions to `agent-call.sh` and write
+tasks to `multi-agent-delegate.sh`, so patches are isolated in a git worktree.
+ML repos also get a compact `agent-ml-context.sh` digest by default.
 
 ## Multi-Agent Workflows
 
@@ -161,7 +171,8 @@ cost scales with providers × (1+rounds), and 1-2 rounds is usually the sweet
 spot. Debate rounds exchange answers only — repo context is attached to
 round-1 prompts only. Sanitized diff/status context goes to the local Codex,
 Claude Code, and Antigravity CLIs; secret paths and secret-like added lines
-are excluded before external review.
+are excluded before external review. The final outbound prompt is also scanned
+and blocked if sensitive-looking context remains.
 
 Delegate a write task to another agent:
 
@@ -179,10 +190,10 @@ reviews the returned patch with you, and applies it only after approval.
 ## Verification And Experiment Tools
 
 ML projects get a verification contract at `scripts/check.sh` (scaffolded by
-the ml template): `fast` is CPU-only and under 60s — agents run it before
-claiming done; `gpu` is a short GPU smoke, srun-wrapped on Slurm machines.
-Delegated workers run `check.sh fast` inside their worktree by default when
-the contract exists.
+the ml template): `fast` is CPU-only and under 60s, `ml-smoke` is a one-batch
+ML interface smoke, and `gpu` is a short GPU smoke, srun-wrapped on Slurm
+machines. Delegated workers prefer `check.sh ml-smoke` for detected ML repos
+when that mode exists; otherwise they run `check.sh fast`.
 
 Launch experiments through the run ledger so every agent remembers what was
 already tried:
@@ -234,38 +245,29 @@ that need a template re-apply.
 
 ## Agent Prompts
 
-New project:
+One prompt for every case — new, existing, or ongoing:
 
 ```text
 Use the local oh-my-setting project workflow. Do not code yet.
 
-Start a new project: interview me to fill PROJECT.md, and after I confirm it,
-bootstrap the project (template, safe skeleton, doctor) in one go.
+Start this project from the current state of the directory. Detect the state
+yourself and route:
+- new project: interview me, write PROJECT.md, and after I confirm it,
+  bootstrap (template, safe skeleton, doctor) in one go
+- existing repo without oh-my-setting: inspect the code, configs, and git
+  history first; apply the template; fill PROJECT.md from the code and
+  interview me only for what the code cannot answer
+- ongoing oh-my-setting project: read PROJECT.md, run the project doctor,
+  report status, and propose the next step
 
-Success criteria:
-- clarify goal, users, non-goals, interface, data, paths, commands, risks, and verification
-- write PROJECT.md and wait for my confirmation
-- after confirmation: apply the matching template, scaffold the safe skeleton, run the project doctor
+Always:
+- write PROJECT.md and wait for my confirmation before broad work
 - wait for separate confirmation before feature code or anything beyond the confirmed spec
 - report template type, changed files, and doctor result
 ```
 
-Existing project:
-
-```text
-Read local project files first. Start by inspecting AGENTS.md/CLAUDE.md,
-PROJECT.md if present, README, pyproject/configs, and git status. Do not edit yet.
-
-Goal: understand this existing project and propose the smallest safe next step
-to onboard or continue it with oh-my-setting rules.
-
-Report:
-- project type and current structure
-- setup/test/run commands you can infer
-- missing or draft PROJECT.md fields
-- risks before editing
-- recommended next prompt
-```
+The short trigger `Start this project.` does the same thing — the routing
+lives in the installed spec-interview skill, not in the prompt.
 
 ## ML Projects
 
