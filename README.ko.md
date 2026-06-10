@@ -52,12 +52,11 @@ OH_MY_SETTING_DIR=/path/to/dir    # 설치 경로
 ~/.codex/AGENTS.md
 ~/.claude/CLAUDE.md
 ~/.gemini/AGENTS.md
-~/.pi/agent/AGENTS.md
 ~/.oh-my-setting/local/machine.md
 ```
 
 `~/.gemini/AGENTS.md`는 Antigravity의 global customizations root다. 스킬도
-`~/.gemini/antigravity/skills/`에 링크되어 네 agent 모두 같은 규칙과 스킬을
+`~/.gemini/antigravity/skills/`에 링크되어 세 agent 모두 같은 규칙과 스킬을
 읽는다.
 
 현재 설치 상태 확인:
@@ -275,7 +274,7 @@ ML 프로젝트 기본:
 ~/.oh-my-setting/local/machine.md
 ```
 
-Codex, Claude Code, Antigravity, Pi, `gh` 같은 로컬 agent CLI 경로도 감지되면
+Codex, Claude Code, Antigravity, `gh` 같은 로컬 agent CLI 경로도 감지되면
 함께 기록한다.
 
 Slurm 스펙:

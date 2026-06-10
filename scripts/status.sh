@@ -88,7 +88,6 @@ printf '\n## Agent config links\n\n'
 link_status "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
 link_status "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
 link_status "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
-link_status "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
 
 printf '\n## Required tools\n\n'
 for tool in git curl node npm uv claude codex agy gh; do
@@ -96,7 +95,7 @@ for tool in git curl node npm uv claude codex agy gh; do
 done
 
 printf '\n## Optional tools\n\n'
-for tool in pi timeout sbatch srun squeue sinfo scancel; do
+for tool in timeout sbatch srun squeue sinfo scancel; do
   tool_status "$tool"
 done
 

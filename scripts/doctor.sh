@@ -77,7 +77,6 @@ check_cmd codex
 check_cmd agy
 check_cmd gh
 
-check_optional_cmd pi
 check_optional_cmd timeout
 check_optional_cmd sbatch
 check_optional_cmd srun
@@ -93,8 +92,6 @@ check_path "$HOME/.gemini/AGENTS.md"
 check_custom_skills "$HOME/.codex/skills"
 check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.gemini/antigravity/skills"
-check_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md"
-check_custom_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
 check_path "$HOME/.oh-my-setting-prompts"
 check_path "$HOME/.oh-my-setting-workflows"
 

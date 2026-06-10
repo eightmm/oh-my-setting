@@ -54,7 +54,11 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 
 ## Output Contract
 
-- End with: changed, verified, not verified, next.
+- Match the format to the turn type:
+  - Delegated/implementation work: report compactly; end with changed / verified / not verified. Add next only when a concrete follow-up action exists.
+  - Questions, design discussion, tradeoffs, anything the user needs explained: write clear prose; no contract block.
+- "not verified" is mandatory whenever any check was skipped or impossible — never omit it to look done.
+- Do not emit empty contract lines ("changed: none", "next: none"); drop the line instead.
 
 ## Spec Gate
 

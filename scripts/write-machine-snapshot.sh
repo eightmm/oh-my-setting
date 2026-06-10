@@ -103,7 +103,6 @@ mkdir -p "$(dirname "$OUT")"
   printf -- '- Codex CLI: %s\n' "$(tool_path codex)"
   printf -- '- Claude Code CLI: %s\n' "$(tool_path claude)"
   printf -- '- Antigravity CLI: %s\n' "$(tool_path agy)"
-  printf -- '- pi: %s\n' "$(tool_path pi)"
   printf -- '- gh: %s\n' "$(tool_path gh)"
   printf '\n## Notes\n\n'
   printf -- '- Project envs should stay local at `.venv` and run through `uv`.\n'

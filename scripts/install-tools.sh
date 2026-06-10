@@ -188,10 +188,8 @@ ensure_uv
 install_npm_global "@anthropic-ai/claude-code" "claude"
 install_npm_global "@openai/codex" "codex"
 install_antigravity
-install_npm_global "@earendil-works/pi-coding-agent" "pi"
 
 write_npm_shim "claude"
 write_npm_shim "codex"
-write_npm_shim "pi"
 
 echo "tools: ok"

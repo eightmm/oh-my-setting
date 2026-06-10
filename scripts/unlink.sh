@@ -87,10 +87,11 @@ esac
 unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
 unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
 unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
-unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
 unlink_skills "$HOME/.codex/skills"
 unlink_skills "$HOME/.claude/skills"
 unlink_skills "$HOME/.gemini/antigravity/skills"
+# Legacy cleanup: pi support was removed from defaults; still unlink old installs.
+unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
 unlink_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
 unlink_and_restore "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
 unlink_and_restore "$HOME/.oh-my-setting-workflows" "$ROOT/workflows"
