@@ -182,6 +182,34 @@ test_job_digest_log_mode() {
   assert_file_contains "$dir/werr" 'requires a slurm job id'
 }
 
+test_job_digest_wait_polls_until_empty() {
+  local dir="$TMP/job-digest-wait"
+  local bin="$dir/bin"
+  mkdir -p "$bin"
+  printf 'step 1 ok\n' > "$dir/run.log"
+
+  # Fake squeue: a state file drives queued -> error (retry) -> empty (done).
+  printf '0\n' > "$dir/poll"
+  cat > "$bin/squeue" <<EOF
+#!/usr/bin/env bash
+n="\$(cat "$dir/poll")"
+printf '%s\n' "\$((n + 1))" > "$dir/poll"
+case "\$n" in
+  0) echo "  12345 part job R 0:01 1 node"; exit 0 ;;  # still queued
+  1) exit 1 ;;                                          # transient failure -> retry
+  *) exit 0 ;;                                          # empty success -> left queue
+esac
+EOF
+  chmod +x "$bin/squeue"
+
+  out="$(OMS_JOB_DIGEST_POLL=0 PATH="$bin:$PATH" "$ROOT/scripts/job-digest.sh" --wait 12345 "$dir/run.log" 2>"$dir/werr")" ||
+    fail "--wait digest should succeed once the job leaves the queue"
+  printf '%s' "$out" | grep -Fq '# Job digest' || fail "wait mode should still emit a digest"
+  assert_file_contains "$dir/werr" "no longer queued"
+  # Polled at least 3 times: queued, error-retry, empty.
+  [ "$(cat "$dir/poll")" -ge 3 ] || fail "wait loop should retry past a transient squeue failure"
+}
+
 test_run_ledger_records_and_lists() {
   local project="$TMP/run-ledger"
   make_committed_repo "$project"
@@ -510,6 +538,7 @@ test_multi_agent_review_ml_preset() {
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'Data leakage'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'sampler.set_epoch'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'silent ML bugs'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'scaffold/sequence-identity split'
 }
 
 test_multi_agent_review_default_prompt_requires_ml() {
@@ -1575,6 +1604,7 @@ test_apply_ml_scaffolds_gitignore
 test_apply_ml_scaffolds_check_contract
 test_project_doctor_warns_missing_check
 test_job_digest_log_mode
+test_job_digest_wait_polls_until_empty
 test_run_ledger_records_and_lists
 test_delegate_auto_verify_uses_check_contract
 test_project_doctor_ok_after_apply

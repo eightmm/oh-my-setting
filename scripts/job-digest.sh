@@ -84,7 +84,19 @@ if [ "$WAIT" = "1" ]; then
   [ -n "$JOB_ID" ] || fail "--wait requires a slurm job id"
   command -v squeue >/dev/null 2>&1 || fail "--wait needs squeue (Slurm)"
   echo "job-digest: waiting for job $JOB_ID to leave the queue (poll ${POLL_SECONDS}s)" >&2
-  while squeue -h -j "$JOB_ID" >/dev/null 2>&1 && [ -n "$(squeue -h -j "$JOB_ID" 2>/dev/null)" ]; do
+  # One captured query per poll. Only an empty result from a SUCCESSFUL query
+  # means "left the queue"; a squeue error keeps waiting so a transient
+  # controller failure cannot fake completion.
+  while :; do
+    set +e
+    q_out="$(squeue -h -j "$JOB_ID" 2>/dev/null)"
+    q_rc=$?
+    set -e
+    if [ "$q_rc" -ne 0 ]; then
+      echo "job-digest: squeue query failed (rc=$q_rc); retrying in ${POLL_SECONDS}s" >&2
+    elif [ -z "$q_out" ]; then
+      break
+    fi
     sleep "$POLL_SECONDS"
   done
   echo "job-digest: job $JOB_ID no longer queued; digesting" >&2
