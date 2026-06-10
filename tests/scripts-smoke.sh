@@ -898,7 +898,18 @@ test_delegate_requires_provider() {
 
 test_link_and_unlink_with_home_override() {
   local home_dir="$TMP/link-home"
-  mkdir -p "$home_dir"
+  mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
+    "$home_dir/.pi/agent/skills" "$home_dir/.gemini" "$home_dir/old-skills"
+  ln -s "$home_dir/old-skills/multi-agent-ask" \
+    "$home_dir/.codex/skills/multi-agent-ask"
+  ln -s "$home_dir/old-skills/multi-agent-review" \
+    "$home_dir/.codex/skills/multi-agent-review.backup.legacy"
+  ln -s "$ROOT/custom-skills" "$home_dir/.codex/skills/oh-my-setting"
+  ln -s "$ROOT/custom-skills/multi-agent-ask" \
+    "$home_dir/.agents/skills/multi-agent-ask"
+  ln -s "$ROOT/custom-skills/multi-agent-review" \
+    "$home_dir/.pi/agent/skills/multi-agent-review"
+  ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
 
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
 
@@ -907,6 +918,20 @@ test_link_and_unlink_with_home_override() {
   [ -L "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not linked"
   [ -L "$home_dir/.gemini/antigravity/skills/spec-interview" ] ||
     fail "antigravity skills not linked"
+  [ "$(readlink "$home_dir/.codex/skills/multi-agent-ask")" = \
+    "$ROOT/custom-skills/multi-agent-ask" ] ||
+    fail "stale skill symlink not replaced"
+  if find "$home_dir/.codex/skills" -maxdepth 1 -name "*.backup.*" | grep -q .; then
+    fail "backup skill symlink not cleaned"
+  fi
+  [ ! -e "$home_dir/.codex/skills/oh-my-setting" ] ||
+    fail "legacy grouped skill symlink not removed"
+  [ ! -e "$home_dir/.agents/skills/multi-agent-ask" ] ||
+    fail "legacy .agents skill symlink not removed"
+  [ ! -e "$home_dir/.pi/agent/skills/multi-agent-review" ] ||
+    fail "legacy pi skill symlink not removed"
+  [ ! -e "$home_dir/.gemini/GEMINI.md" ] ||
+    fail "legacy gemini file not removed"
 
   HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
 
