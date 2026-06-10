@@ -58,6 +58,8 @@
 - Training defaults (optimizer, LR schedule, DDP, checkpoint format, CUDA env
   vars) live in the `ml-training` skill; load it for training setup work
   instead of restating defaults here.
+- For molecular/protein data, load the `chem-bio-ml` skill before deciding
+  splits, labels, metrics, or featurization (leakage is silent here).
 - Use `uv` for Python envs: `uv sync`, `uv add`, `uv run`.
 - Keep project env local at `.venv`; do not use global Python/pip unless confirmed.
 - Read machine specs from `~/.oh-my-setting/local/machine.md` when compute affects behavior.

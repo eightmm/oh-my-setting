@@ -8,6 +8,8 @@ set -euo pipefail
 TAIL_LINES=30
 PATTERN_LINES=40
 PATTERNS='Traceback|ERROR|Error:|error:|OOM|[Oo]ut of memory|CUDA|NCCL|NaN|nan loss|Killed|Segmentation fault|exitcode|srun: error'
+WAIT=0
+POLL_SECONDS="${OMS_JOB_DIGEST_POLL:-30}"
 
 usage() {
   cat <<'EOF'
@@ -20,7 +22,11 @@ mode), error-pattern hits, the last Python traceback, and the log tail.
 Options:
   --tail N      Lines of raw tail to include. Default: 30.
   --patterns N  Max error-pattern lines to include. Default: 40.
+  --wait        Job-id mode only: block until the job leaves the queue
+                (squeue), then digest. Poll interval OMS_JOB_DIGEST_POLL=30s.
   -h, --help    Show this help.
+
+The command does not run training; pair it with the run ledger or sbatch.
 EOF
 }
 
@@ -41,6 +47,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--patterns requires count"
       PATTERN_LINES="$2"
       shift 2
+      ;;
+    --wait)
+      WAIT=1
+      shift
       ;;
     -h|--help)
       usage
@@ -68,6 +78,16 @@ elif printf '%s' "${ARGS[0]}" | grep -Eq '^[0-9]+(_[0-9]+)?$'; then
   [ -z "$LOG_FILE" ] || [ -f "$LOG_FILE" ] || fail "log file not found: $LOG_FILE"
 else
   fail "not a log file or job id: ${ARGS[0]}"
+fi
+
+if [ "$WAIT" = "1" ]; then
+  [ -n "$JOB_ID" ] || fail "--wait requires a slurm job id"
+  command -v squeue >/dev/null 2>&1 || fail "--wait needs squeue (Slurm)"
+  echo "job-digest: waiting for job $JOB_ID to leave the queue (poll ${POLL_SECONDS}s)" >&2
+  while squeue -h -j "$JOB_ID" >/dev/null 2>&1 && [ -n "$(squeue -h -j "$JOB_ID" 2>/dev/null)" ]; do
+    sleep "$POLL_SECONDS"
+  done
+  echo "job-digest: job $JOB_ID no longer queued; digesting" >&2
 fi
 
 printf '# Job digest\n\n'

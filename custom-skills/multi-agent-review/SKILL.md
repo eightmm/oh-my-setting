@@ -118,3 +118,33 @@ Verification:
 ```
 
 Accept only findings tied to code, logs, tests, docs, or reproducible commands.
+
+## Gate Loop
+
+When the user wants a change to actually pass review (a "gate"), not just one
+round of opinions, iterate until reviewers converge:
+
+1. **Scope each round.** Round 1 reviews the change. Each later round names the
+   prior commit(s) and says: verify the prior findings are fixed, report only
+   NEW regressions, do not re-report accepted lower-severity items. Carry an
+   explicit accepted-limitations list forward so the same heuristic trade-off
+   is not re-raised every round.
+2. **Demand a verdict.** End the prompt with: end with exactly one line,
+   `GATE: pass` or `GATE: fail`. Extract the verdict per provider.
+3. **Triage, do not auto-apply.** Treat each finding as a claim: confirm it
+   against the code (reproduce the probe when given) before fixing. Reject
+   findings that are wrong or already-accepted limitations, and say why.
+4. **Fix → re-verify → re-gate.** Apply confirmed fixes with a regression test
+   each, run the smoke suite, commit, then run the next round against the new
+   commit. A finding without a test it would have caught is not done.
+5. **Converge.** Pass when the gate is clean (no unresolved confirmed
+   findings) — that can be a unanimous pass, or a majority pass with the last
+   dissent's findings fixed and re-verified. A lone provider repeating an
+   accepted limitation does not block. Stop when a round yields only
+   already-accepted items or pure "no findings".
+6. **Self-review caveat.** Diff-attached review of this repo's own scrubber or
+   regex sources can self-trip the outbound filter; fall back to `--no-diff`
+   with reviewers reading the range locally, and note it under `Verification`.
+
+Report each round compactly: verdicts, what was confirmed vs rejected, the fix
++ test, and the next round's scope.

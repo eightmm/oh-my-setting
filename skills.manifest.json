@@ -59,6 +59,12 @@
       "source": "custom-skills/ml-training",
       "enabled": true,
       "reason": "Load PyTorch training defaults (optimizer, scheduler, DDP, checkpoint) on demand instead of carrying them in global rules."
+    },
+    {
+      "name": "chem-bio-ml",
+      "source": "custom-skills/chem-bio-ml",
+      "enabled": true,
+      "reason": "Domain guardrails for molecule/protein ML: splitting/leakage, label semantics, metrics, and featurization conventions."
     }
   ]
 }

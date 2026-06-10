@@ -174,6 +174,12 @@ test_job_digest_log_mode() {
     fail "digest should reject non-file non-jobid argument"
   fi
   assert_file_contains "$dir/error" 'not a log file or job id'
+
+  # --wait needs a job id; a log-file arg must be rejected, not silently ignored.
+  if "$ROOT/scripts/job-digest.sh" --wait "$dir/run.log" >/dev/null 2>"$dir/werr"; then
+    fail "--wait without a job id should fail"
+  fi
+  assert_file_contains "$dir/werr" 'requires a slurm job id'
 }
 
 test_run_ledger_records_and_lists() {

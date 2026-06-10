@@ -90,6 +90,7 @@ write_prompt() {
       printf -- '- Silent numerics: NaN/Inf paths, division by zero, dtype/precision changes.\n'
       printf -- '- DDP: sampler.set_epoch per epoch, rank-0-only side effects, metric all_reduce.\n'
       printf -- '- Config or preprocessing changes that invalidate existing checkpoints or baselines.\n'
+      printf -- '- Chem-bio (if molecular/protein data): random split instead of scaffold/sequence-identity split; near-duplicate leakage across the split; flipped or unlogged target (IC50/pIC50, Ki/Kd, ΔG sign); global metric hiding within-series ranking; missing cheap baseline.\n'
       printf 'Rank silently-wrong-metrics bugs as the highest severity findings.\n\n'
     fi
     ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
