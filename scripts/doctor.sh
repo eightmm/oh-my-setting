@@ -75,14 +75,15 @@ check_cmd uv
 check_cmd claude
 check_cmd codex
 check_cmd agy
-check_cmd pi
+check_cmd gh
 
+check_optional_cmd pi
+check_optional_cmd timeout
 check_optional_cmd sbatch
 check_optional_cmd srun
 check_optional_cmd squeue
 check_optional_cmd sinfo
 check_optional_cmd scancel
-check_optional_cmd gh
 
 check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"

@@ -117,6 +117,7 @@ What it does:
 - Adds/updates managed blocks in `AGENTS.md` and `CLAUDE.md`.
 - Creates `PROJECT.md` if missing.
 - For `ml` projects, scaffolds standard ML doc templates under `docs/` (existing files are never overwritten).
+- For `ml` projects, ensures `.gitignore` covers `data/`, `outputs/`, `checkpoints/`, `wandb/`, `runs/`, `.venv/`.
 - Does not overwrite user content outside managed blocks.
 - For ML projects on Slurm machines, adds `ml` plus separate `slurm` rules.
 
@@ -133,6 +134,17 @@ Detect only:
 ```bash
 ~/.oh-my-setting/scripts/detect-project-style.sh .
 ```
+
+Check that every agent sees the same project rules:
+
+```bash
+~/.oh-my-setting/scripts/project-doctor.sh .
+```
+
+Fails when `AGENTS.md` and `CLAUDE.md` managed blocks differ, blocks are stale
+against current templates, or `PROJECT.md` is missing. Warns on draft
+`PROJECT.md`, missing ML doc scaffold, or missing `.gitignore` entries. Run it
+after `update.sh` to find projects that need a template re-apply.
 
 ## Agent Prompts
 

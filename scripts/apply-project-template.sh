@@ -324,4 +324,21 @@ if [ "$BASE_STYLE" = "ml" ]; then
       done
     fi
   fi
+
+  GITIGNORE="$PROJECT_DIR/.gitignore"
+  ML_IGNORE_ENTRIES=("data/" "outputs/" "checkpoints/" "wandb/" "runs/" ".venv/")
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "would ensure ML entries in $GITIGNORE"
+  else
+    added=0
+    for entry in "${ML_IGNORE_ENTRIES[@]}"; do
+      if [ ! -f "$GITIGNORE" ] || ! grep -qxF "$entry" "$GITIGNORE"; then
+        printf '%s\n' "$entry" >> "$GITIGNORE"
+        added=$((added + 1))
+      fi
+    done
+    if [ "$added" -gt 0 ]; then
+      echo "updated $GITIGNORE: added $added ML entries"
+    fi
+  fi
 fi

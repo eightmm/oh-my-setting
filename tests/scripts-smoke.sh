@@ -104,6 +104,83 @@ test_apply_ml_scaffolds_docs() {
   fi
 }
 
+test_apply_ml_scaffolds_gitignore() {
+  local project="$TMP/ml-gitignore"
+  mkdir -p "$project"
+  printf 'node_modules/\ndata/\n' > "$project/.gitignore"
+
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+
+  assert_file_contains "$project/.gitignore" "node_modules/"
+  assert_file_contains "$project/.gitignore" "checkpoints/"
+  assert_file_contains "$project/.gitignore" "outputs/"
+  [ "$(grep -cxF 'data/' "$project/.gitignore")" = "1" ] ||
+    fail ".gitignore should not duplicate existing data/ entry"
+
+  local before
+  before="$(wc -l < "$project/.gitignore")"
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+  [ "$(wc -l < "$project/.gitignore")" = "$before" ] ||
+    fail "re-running apply should not grow .gitignore"
+}
+
+test_project_doctor_ok_after_apply() {
+  local project="$TMP/doctor-ok"
+  mkdir -p "$project"
+
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "project-doctor should pass on freshly applied project: $out"
+  printf '%s' "$out" | grep -Fq 'ml block identical' ||
+    fail "project-doctor should confirm identical ml blocks"
+  printf '%s' "$out" | grep -Fq 'matches current template' ||
+    fail "project-doctor should confirm template freshness"
+}
+
+test_project_doctor_detects_drift() {
+  local project="$TMP/doctor-drift"
+  mkdir -p "$project"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  sed -i 's/Project rules override global defaults./TAMPERED/' "$project/CLAUDE.md"
+
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "project-doctor should fail on drifted CLAUDE.md block"
+  fi
+  printf '%s' "$out" | grep -Fq 'differs between AGENTS.md and CLAUDE.md' ||
+    fail "project-doctor should report block drift"
+}
+
+test_project_doctor_detects_missing_block() {
+  local project="$TMP/doctor-missing"
+  mkdir -p "$project"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  "$ROOT/scripts/remove-project-template.sh" general "$project" CLAUDE.md >/dev/null
+
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "project-doctor should fail when CLAUDE.md block is missing"
+  fi
+  printf '%s' "$out" | grep -Fq 'missing in CLAUDE.md' ||
+    fail "project-doctor should report missing CLAUDE.md block"
+}
+
+test_project_doctor_detects_stale_block() {
+  local project="$TMP/doctor-stale"
+  mkdir -p "$project"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  sed -i 's/Project rules override global defaults./OLD RULE/' \
+    "$project/AGENTS.md" "$project/CLAUDE.md"
+
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "project-doctor should fail on stale blocks"
+  fi
+  printf '%s' "$out" | grep -Fq 'stale' ||
+    fail "project-doctor should report stale block"
+}
+
 test_detect_configs_only_is_general() {
   local project="$TMP/detect-configs-only"
   mkdir -p "$project/configs"
@@ -477,6 +554,11 @@ test_status_shows_version() {
 test_apply_dry_run_has_no_writes
 test_apply_ml_dry_run_has_no_writes
 test_apply_ml_scaffolds_docs
+test_apply_ml_scaffolds_gitignore
+test_project_doctor_ok_after_apply
+test_project_doctor_detects_drift
+test_project_doctor_detects_missing_block
+test_project_doctor_detects_stale_block
 test_apply_rejects_unclosed_managed_block
 test_remove_rejects_unclosed_managed_block
 test_detect_configs_only_is_general

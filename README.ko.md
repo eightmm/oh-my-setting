@@ -115,6 +115,7 @@ provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/ask/`에 
 - `AGENTS.md`, `CLAUDE.md`에 managed block 추가/갱신
 - `PROJECT.md` 없으면 생성
 - `ml` 프로젝트는 표준 ML 문서 템플릿을 `docs/`에 스캐폴딩 (기존 파일은 덮어쓰지 않음)
+- `ml` 프로젝트는 `.gitignore`에 `data/`, `outputs/`, `checkpoints/`, `wandb/`, `runs/`, `.venv/` 보장
 - managed block 밖의 기존 내용은 덮어쓰지 않음
 - Slurm 머신의 ML 프로젝트는 `ml` + 별도 `slurm` 규칙 적용
 
@@ -131,6 +132,17 @@ provider별 artifact와 `_synthesis-*.md` 종합본이 `.omc/artifacts/ask/`에 
 ```bash
 ~/.oh-my-setting/scripts/detect-project-style.sh .
 ```
+
+모든 agent가 같은 프로젝트 규칙을 보는지 검증:
+
+```bash
+~/.oh-my-setting/scripts/project-doctor.sh .
+```
+
+`AGENTS.md`/`CLAUDE.md` managed block이 서로 다르거나, 현재 템플릿 대비
+오래됐거나, `PROJECT.md`가 없으면 실패한다. draft `PROJECT.md`, ML 문서
+스캐폴드 누락, `.gitignore` 항목 누락은 경고. `update.sh` 후 실행하면
+템플릿 재적용이 필요한 프로젝트를 찾을 수 있다.
 
 ## Agent 시작 문구
 
