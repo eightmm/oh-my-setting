@@ -84,18 +84,23 @@ if [ "$WAIT" = "1" ]; then
   [ -n "$JOB_ID" ] || fail "--wait requires a slurm job id"
   command -v squeue >/dev/null 2>&1 || fail "--wait needs squeue (Slurm)"
   echo "job-digest: waiting for job $JOB_ID to leave the queue (poll ${POLL_SECONDS}s)" >&2
-  # One captured query per poll. Only an empty result from a SUCCESSFUL query
-  # means "left the queue"; a squeue error keeps waiting so a transient
-  # controller failure cannot fake completion.
+  # One captured query per poll. Done when the queue no longer knows the job:
+  # either rc=0 with empty output (recent Slurm) or rc!=0 with an
+  # invalid/unknown-job-id error (job purged from the queue). Any other rc!=0
+  # is a transient controller failure -> keep waiting, never fake completion.
+  q_err="$(mktemp)" || fail "mktemp failed"
+  trap 'rm -f "$q_err"' EXIT
   while :; do
     set +e
-    q_out="$(squeue -h -j "$JOB_ID" 2>/dev/null)"
+    q_out="$(squeue -h -j "$JOB_ID" 2>"$q_err")"
     q_rc=$?
     set -e
-    if [ "$q_rc" -ne 0 ]; then
-      echo "job-digest: squeue query failed (rc=$q_rc); retrying in ${POLL_SECONDS}s" >&2
-    elif [ -z "$q_out" ]; then
+    if [ "$q_rc" -eq 0 ]; then
+      [ -z "$q_out" ] && break
+    elif grep -qiE 'invalid job id|invalid user|unknown job|not found' "$q_err"; then
       break
+    else
+      echo "job-digest: squeue query failed transiently (rc=$q_rc); retrying in ${POLL_SECONDS}s" >&2
     fi
     sleep "$POLL_SECONDS"
   done

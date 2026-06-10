@@ -190,14 +190,16 @@ test_job_digest_wait_polls_until_empty() {
 
   # Fake squeue: a state file drives queued -> error (retry) -> empty (done).
   printf '0\n' > "$dir/poll"
+  # Mirrors real squeue: queued (rc0+row) -> transient controller error
+  # (rc1, contact message -> retry) -> completed (rc1, "Invalid job id" -> done).
   cat > "$bin/squeue" <<EOF
 #!/usr/bin/env bash
 n="\$(cat "$dir/poll")"
 printf '%s\n' "\$((n + 1))" > "$dir/poll"
 case "\$n" in
-  0) echo "  12345 part job R 0:01 1 node"; exit 0 ;;  # still queued
-  1) exit 1 ;;                                          # transient failure -> retry
-  *) exit 0 ;;                                          # empty success -> left queue
+  0) echo "  12345 part job R 0:01 1 node"; exit 0 ;;
+  1) echo "slurm_load_jobs error: Unable to contact slurm controller" >&2; exit 1 ;;
+  *) echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1 ;;
 esac
 EOF
   chmod +x "$bin/squeue"
@@ -206,8 +208,9 @@ EOF
     fail "--wait digest should succeed once the job leaves the queue"
   printf '%s' "$out" | grep -Fq '# Job digest' || fail "wait mode should still emit a digest"
   assert_file_contains "$dir/werr" "no longer queued"
-  # Polled at least 3 times: queued, error-retry, empty.
-  [ "$(cat "$dir/poll")" -ge 3 ] || fail "wait loop should retry past a transient squeue failure"
+  assert_file_contains "$dir/werr" "transiently"
+  # Polled 3 times: queued, transient-retry, invalid-job-id (done).
+  [ "$(cat "$dir/poll")" -ge 3 ] || fail "wait loop should retry transient errors and stop on invalid-job-id"
 }
 
 test_run_ledger_records_and_lists() {
