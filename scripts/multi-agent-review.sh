@@ -29,9 +29,14 @@ DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 usage() {
   cat <<'EOF'
 Usage: multi-agent-review.sh [options] --prompt TEXT
+       multi-agent-review.sh verdicts [artifact-dir]
 
 Ask the same review question to Codex, Claude Code, and Antigravity, then persist
 each answer as an artifact.
+
+verdicts: inspect the latest review run's artifacts and print one line per
+provider — pass, fail, or incomplete (artifact has no exit section, e.g. the
+run died mid-flight). Exit 0 all pass, 1 any fail, 2 incomplete/undeterminable.
 
 Options:
   --prompt TEXT        Review question/task. Required unless --ml is set.
@@ -64,6 +69,54 @@ Environment:
   OMS_MULTI_AGENT_PRINT_TIMEOUT=5m Timeout for print mode wait (agy).
 EOF
 }
+
+# Verdict inspection for gate loops: one line per provider from the latest
+# run group, with died-mid-run detection (artifact without an exit section).
+if [ "${1:-}" = "verdicts" ]; then
+  shift
+  vdir="${1:-$PWD/.oms/artifacts/review}"
+  [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
+  # "|| true" inside: head's early exit must not wipe the captured output
+  # under pipefail. [!_]* skips _synthesis-*; artifact names are
+  # wrapper-generated slugs, so ls -t parsing is safe here.
+  latest="$(ls -t "$vdir"/[!_]*.md 2>/dev/null | head -n 1 || true)"
+  [ -n "$latest" ] || { echo "error: no review artifacts in $vdir" >&2; exit 2; }
+  run_id="$(printf '%s' "$latest" | sed -E 's/.*-([0-9]{8}T[0-9]{6}Z-[0-9]+)\.md$/\1/')"
+  [ "$run_id" != "$latest" ] || { echo "error: cannot parse run id from $(basename "$latest")" >&2; exit 2; }
+
+  echo "run: $run_id"
+  overall=0
+  found=0
+  for f in "$vdir"/*-"$run_id".md; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    case "$base" in _synthesis-*) continue ;; esac
+    provider="${base%%-*}"
+    found=$((found + 1))
+    if ! grep -q '^## Exit' "$f"; then
+      echo "$provider: incomplete (no exit section; run likely died — re-run the review)"
+      overall=2
+      continue
+    fi
+    # Verdict must be on its own line; a prompt echo inside the transcript
+    # ("...exactly one line: GATE: pass or GATE: fail.") must not match.
+    verdict="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
+      grep -E '^[*[:space:]]*GATE: (pass|fail)[*[:space:]]*$' | tail -n 1 | grep -oE 'pass|fail')" || verdict=""
+    case "$verdict" in
+      pass) echo "$provider: pass" ;;
+      fail)
+        echo "$provider: fail"
+        if [ "$overall" -ne 2 ]; then overall=1; fi
+        ;;
+      *)
+        echo "$provider: no-verdict (complete but no GATE line)"
+        overall=2
+        ;;
+    esac
+  done
+  [ "$found" -gt 0 ] || { echo "error: no provider artifacts for run $run_id" >&2; exit 2; }
+  exit "$overall"
+fi
 
 write_prompt() {
   local output="$1"

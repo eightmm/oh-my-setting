@@ -130,7 +130,10 @@ round of opinions, iterate until reviewers converge:
    explicit accepted-limitations list forward so the same heuristic trade-off
    is not re-raised every round.
 2. **Demand a verdict.** End the prompt with: end with exactly one line,
-   `GATE: pass` or `GATE: fail`. Extract the verdict per provider.
+   `GATE: pass` or `GATE: fail`. Then read the run with
+   `multi-agent-review.sh verdicts` — one line per provider, plus
+   `incomplete` when an artifact has no exit section (the run died, e.g. a
+   session restart killed the background process: re-run, do not interpret).
 3. **Triage, do not auto-apply.** Treat each finding as a claim: confirm it
    against the code (reproduce the probe when given) before fixing. Reject
    findings that are wrong or already-accepted limitations, and say why.

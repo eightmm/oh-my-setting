@@ -199,6 +199,59 @@ test_project_doctor_warns_structure_drift() {
   printf '%s' "$out" | grep -Fq 'gitignored dirs' || fail "missing tracked-in-ignored warning"
   printf '%s' "$out" | grep -Fq 'big model.ckpt' ||
     fail "missing over-10MB warning (filename with space must survive)"
+
+  # High cardinality: head's early exit under pipefail must not silence the
+  # warning (the exact bug: SIGPIPE wiped the captured output).
+  for i in $(seq 1 100); do printf 'x\n' > "$project/data/f$i.bin"; done
+  git -C "$project" add -f data >/dev/null
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should still warn-pass"
+  printf '%s' "$out" | grep -Fq 'gitignored dirs' ||
+    fail "many tracked ignored files must still warn (pipefail/head)"
+
+  # A small tracked symlink to a big target must not be flagged.
+  dd if=/dev/zero of="$project/.big-target" bs=1 count=0 seek=20971520 2>/dev/null
+  ln -s .big-target "$project/link.ckpt"
+  git -C "$project" add -f link.ckpt >/dev/null
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should still warn-pass"
+  if printf '%s' "$out" | grep -Fq 'link.ckpt'; then
+    fail "tracked symlink must not be measured by its target size"
+  fi
+}
+
+test_review_verdicts_subcommand() {
+  local dir="$TMP/verdicts"
+  local run="20260611T000000Z-42"
+
+  mkdir -p "$dir/mixed" "$dir/allpass"
+  # Complete pass, complete fail, and a died-mid-run artifact. The prompt echo
+  # inside Output ("...exactly one line: GATE: pass or GATE: fail.") must not
+  # be read as a verdict.
+  printf '# codex review\n\n## Output\n\nexactly one line: GATE: pass or GATE: fail.\nFindings: none\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$dir/mixed/codex-x-$run.md"
+  printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
+    > "$dir/mixed/claude-x-$run.md"
+  printf '# antigravity review\n\n## Output\n\npartial output then death\n' \
+    > "$dir/mixed/antigravity-x-$run.md"
+
+  out="$("$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/mixed")" && rc=0 || rc=$?
+  [ "$rc" = "2" ] || fail "incomplete artifact should yield exit 2, got $rc"
+  printf '%s' "$out" | grep -Fq 'codex: pass' || fail "missing codex pass"
+  printf '%s' "$out" | grep -Fq 'claude: fail' || fail "missing claude fail"
+  printf '%s' "$out" | grep -Fq 'antigravity: incomplete' || fail "missing incomplete detection"
+
+  printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$dir/allpass/codex-x-$run.md"
+  printf '# synthesis\n' > "$dir/allpass/_synthesis-x-$run.md"
+  out="$("$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/allpass")" && rc=0 || rc=$?
+  [ "$rc" = "0" ] || fail "all-pass run should exit 0, got $rc"
+  if printf '%s' "$out" | grep -q '_synthesis'; then
+    fail "synthesis artifact must not be treated as a provider"
+  fi
+
+  mkdir -p "$dir/empty"
+  if "$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/empty" >/dev/null 2>&1; then
+    fail "empty dir should exit nonzero"
+  fi
 }
 
 test_job_digest_log_mode() {
@@ -1718,6 +1771,7 @@ test_apply_ml_scaffolds_gitignore
 test_apply_ml_scaffolds_check_contract
 test_project_doctor_warns_missing_check
 test_project_doctor_warns_structure_drift
+test_review_verdicts_subcommand
 test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty
 test_run_ledger_records_and_lists
