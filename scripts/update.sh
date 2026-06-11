@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-0}"
 SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
+AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 
 usage() {
   cat <<'EOF'
@@ -18,6 +19,7 @@ Options:
 Environment:
   OH_MY_SETTING_UPDATE_SKIP_TOOLS=1   Same as --no-tools.
   OH_MY_SETTING_UPDATE_SKIP_DOCTOR=1  Same as --no-doctor.
+  OH_MY_SETTING_AUTO_UPDATE=0         Skip auto-update trigger refresh.
 EOF
 }
 
@@ -68,6 +70,13 @@ fi
 
 if [ "$SKIP_DOCTOR" != "1" ]; then
   "$ROOT/scripts/doctor.sh"
+fi
+
+if [ "$AUTO_UPDATE" = "1" ] && [ -x "$ROOT/scripts/install-autoupdate.sh" ]; then
+  "$ROOT/scripts/install-autoupdate.sh"
+elif [ "$AUTO_UPDATE" != "0" ]; then
+  echo "error: OH_MY_SETTING_AUTO_UPDATE must be 0 or 1" >&2
+  exit 2
 fi
 
 echo "update: ok"

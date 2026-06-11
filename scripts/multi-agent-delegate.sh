@@ -207,6 +207,7 @@ if ! ma_validate_outbound_prompt "$prompt_file"; then
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
   : > "$patch_file"
+  ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" || true
   echo "blocked: $TO sensitive outbound context -> $artifact"
   echo "artifact: $artifact"
   echo "patch: $patch_file"
@@ -303,6 +304,12 @@ if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 0 ]; then
     applied=1
   fi
 fi
+
+index_exit=0
+if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+  index_exit=1
+fi
+ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" || true
 
 echo "worker: $TO exit $worker_status"
 if [ -n "$VERIFY_CMD" ]; then

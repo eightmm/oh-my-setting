@@ -7,6 +7,7 @@ GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-auto}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-1}"
+AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 
 usage() {
   cat <<'EOF'
@@ -21,6 +22,8 @@ Environment:
   OH_MY_SETTING_GENERATE_MACHINE=0 Skip machine snapshot generation.
   OH_MY_SETTING_GENERATE_SLURM=0   Skip Slurm snapshot generation.
   OH_MY_SETTING_INSTALL_TOOLS=0    Skip Node/uv/agent CLI installation.
+  OH_MY_SETTING_AUTO_UPDATE=0      Skip auto-update trigger installation.
+  OH_MY_SETTING_AUTO_UPDATE_MODE=check  Install check-only trigger instead of apply.
   OH_MY_SETTING_REQUIRE_TOOLS=0    Do not fail doctor on missing CLIs.
   OH_MY_SETTING_DIR=/path/to/dir   Install location.
 EOF
@@ -130,6 +133,15 @@ if [ "$GENERATE_MACHINE" != "0" ]; then
 fi
 
 "$DEST/scripts/doctor.sh"
+
+if [ "$AUTO_UPDATE" = "1" ]; then
+  "$DEST/scripts/install-autoupdate.sh"
+elif [ "$AUTO_UPDATE" = "0" ]; then
+  echo "skipping auto-update trigger: OH_MY_SETTING_AUTO_UPDATE=0"
+else
+  echo "error: OH_MY_SETTING_AUTO_UPDATE must be 0 or 1" >&2
+  exit 2
+fi
 
 if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
   cat <<'EOF'

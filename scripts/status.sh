@@ -72,6 +72,110 @@ file_status() {
   fi
 }
 
+auto_update_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file"
+}
+
+auto_update_status() {
+  local state_file="${OH_MY_SETTING_AUTO_UPDATE_STATE:-$ROOT/local/auto-update.status}"
+  local status
+  local value
+
+  if [ ! -f "$state_file" ]; then
+    printf -- '- status: not checked\n'
+    printf -- '- command: %s/scripts/auto-update.sh check\n' "$ROOT"
+    return 0
+  fi
+
+  status="$(auto_update_value "$state_file" status)"
+  printf -- '- status: %s\n' "${status:-unknown}"
+  for key in last_run mode upstream local remote message; do
+    value="$(auto_update_value "$state_file" "$key")"
+    [ -n "$value" ] || continue
+    printf -- '- %s: %s\n' "$key" "$value"
+  done
+}
+
+task_section_value() {
+  local file="$1"
+  local section="$2"
+  local key="${3:-}"
+
+  [ -s "$file" ] || return 1
+  if [ -n "$key" ]; then
+    awk -v section="$section" -v key="$key" '
+      $0 == section { in_section = 1; next }
+      in_section == 1 && /^## / { in_section = 0 }
+      in_section == 1 {
+        pattern = "^- " key ":[[:space:]]*"
+        if ($0 ~ pattern) {
+          sub(pattern, "")
+          print
+          found = 1
+          exit
+        }
+      }
+      END { exit found ? 0 : 1 }
+    ' "$file"
+  else
+    awk -v section="$section" '
+      $0 == section { in_section = 1; next }
+      in_section == 1 && /^## / { in_section = 0 }
+      in_section == 1 && NF { print; found = 1; exit }
+      END { exit found ? 0 : 1 }
+    ' "$file"
+  fi
+}
+
+active_task_status() {
+  local task_file="${OH_MY_SETTING_TASK_FILE:-$ROOT/.oms/task/current.md}"
+  local value
+
+  if [ ! -s "$task_file" ]; then
+    printf -- '- status: none\n'
+    return 0
+  fi
+
+  printf -- '- status: active\n'
+  value="$(grep -E '^- updated:' "$task_file" | head -n 1 | sed 's/^- updated:[[:space:]]*//' || true)"
+  [ -n "$value" ] && printf -- '- updated: %s\n' "$value"
+  value="$(task_section_value "$task_file" "## Goal" 2>/dev/null || true)"
+  [ -n "$value" ] && printf -- '- goal: %s\n' "$value"
+  value="$(task_section_value "$task_file" "## Next Step" 2>/dev/null || true)"
+  [ -n "$value" ] && printf -- '- next: %s\n' "$value"
+  value="$(task_section_value "$task_file" "## Loop State" attempts 2>/dev/null || true)"
+  [ -n "$value" ] && printf -- '- loop_attempts: %s\n' "$value"
+  value="$(task_section_value "$task_file" "## Loop State" max_attempts 2>/dev/null || true)"
+  [ -n "$value" ] && printf -- '- loop_max: %s\n' "$value"
+  value="$(task_section_value "$task_file" "## Loop State" verification_level 2>/dev/null || true)"
+  [ -n "$value" ] && printf -- '- verification_level: %s\n' "$value"
+  value="$(task_section_value "$task_file" "## Loop State" diff_budget_lines 2>/dev/null || true)"
+  [ -n "$value" ] && printf -- '- diff_budget_lines: %s\n' "$value"
+}
+
+auto_update_trigger_status() {
+  local systemd_timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/oh-my-setting-autoupdate.timer"
+  local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
+
+  if [ -f "$systemd_timer" ]; then
+    printf -- '- trigger: systemd user timer\n'
+    return 0
+  fi
+
+  if [ -n "$cron_file" ] && [ -f "$cron_file" ] && grep -Fq '# oh-my-setting autoupdate:begin' "$cron_file"; then
+    printf -- '- trigger: cron\n'
+    return 0
+  fi
+  if [ -z "$cron_file" ] && command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq '# oh-my-setting autoupdate:begin'; then
+    printf -- '- trigger: cron\n'
+    return 0
+  fi
+
+  printf -- '- trigger: not installed\n'
+}
+
 load_user_tool_paths
 
 printf '# oh-my-setting status\n\n'
@@ -102,3 +206,10 @@ done
 printf '\n## Snapshots\n\n'
 file_status "$ROOT/local/machine.md"
 file_status "$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md"
+
+printf '\n## Active Task\n\n'
+active_task_status
+
+printf '\n## Auto Update\n\n'
+auto_update_status
+auto_update_trigger_status

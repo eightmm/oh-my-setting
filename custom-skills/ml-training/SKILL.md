@@ -98,6 +98,27 @@ Key patterns:
 - **Loss averaging**: `dist.all_reduce(loss, op=ReduceOp.SUM)` then `/ world_size`
 - **Cleanup**: `dist.destroy_process_group()` in finally block
 
+## Reusable Source Blocks
+
+When a project needs a known user-owned implementation such as an equivariant
+GNN block, prefer the code-source registry over ad hoc copying:
+
+```bash
+~/.oh-my-setting/scripts/github-source.sh profile --user <github-user>
+~/.oh-my-setting/scripts/github-source.sh discover --user <github-user> --query equivariant
+~/.oh-my-setting/scripts/code-source.sh add flowfrag-equivariant \
+  --repo <github-user>/flowfrag \
+  --path flowfrag/equivariant.py \
+  --target src/models/equivariant.py \
+  --tags ml,gnn,equivariant \
+  --license own-code
+~/.oh-my-setting/scripts/code-source.sh fetch flowfrag-equivariant
+```
+
+After fetching, adapt imports, device/dtype assumptions, tests, and config names
+for the current project. Treat provenance as required context, not proof that
+the copied code is correct here.
+
 ## Equivariant Models: cuEquivariance
 
 ```python

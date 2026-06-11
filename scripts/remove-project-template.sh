@@ -5,10 +5,25 @@ STYLE="${1:-all}"
 PROJECT_DIR="${2:-$PWD}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 
+usage() {
+  cat <<'EOF'
+Usage: remove-project-template.sh [all|general|ml|slurm] [project_dir] [files...]
+
+Remove oh-my-setting managed project rule blocks.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
 case "$STYLE" in
   all|general|ml|slurm) ;;
   *)
-    echo "usage: $0 [all|general|ml|slurm] [project_dir] [files...]" >&2
+    usage >&2
     exit 2
     ;;
 esac

@@ -175,6 +175,76 @@ ma_write_ml_context() {
   fi
 }
 
+ma_artifact_relpath() {
+  local repo="$1"
+  local path="$2"
+  repo="$(cd "$repo" && pwd)" || return 1
+  case "$path" in
+    "$repo"/*) printf '%s\n' "${path#"$repo"/}" ;;
+    *) printf '%s\n' "$(basename "$path")" ;;
+  esac
+}
+
+ma_task_goal() {
+  local repo="$1"
+  local task_file
+  task_file="$(agent_task_project_file "$repo")" || return 0
+  [ -s "$task_file" ] || return 0
+  awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null || true
+}
+
+ma_append_artifact_index() {
+  local repo="$1"
+  local kind="$2"
+  local provider="$3"
+  local exit_code="$4"
+  local artifact="$5"
+  local patch_file="${6:-}"
+  local prompt_file="${7:-}"
+  local verify_exit="${8:-}"
+  local index
+  local artifact_rel=""
+  local patch_rel=""
+  local prompt_hash=""
+  local task_goal=""
+
+  [ -n "$repo" ] || return 0
+  repo="$(cd "$repo" && pwd)" || return 0
+  index="${OMS_ARTIFACT_INDEX:-$repo/.oms/artifacts/index.jsonl}"
+  mkdir -p "$(dirname "$index")"
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  [ -n "$artifact" ] && artifact_rel="$(ma_artifact_relpath "$repo" "$artifact" 2>/dev/null || printf '%s' "$(basename "$artifact")")"
+  [ -n "$patch_file" ] && patch_rel="$(ma_artifact_relpath "$repo" "$patch_file" 2>/dev/null || printf '%s' "$(basename "$patch_file")")"
+  if [ -n "$prompt_file" ] && [ -f "$prompt_file" ] && command -v sha256sum >/dev/null 2>&1; then
+    prompt_hash="$(sha256sum "$prompt_file" | awk '{print $1}')"
+  fi
+  task_goal="$(ma_task_goal "$repo" | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200)"
+
+  python3 - "$index" "$kind" "$provider" "$exit_code" "$artifact_rel" "$patch_rel" "$prompt_hash" "$verify_exit" "$task_goal" <<'EOF'
+import json, sys, time
+index, kind, provider, exit_code, artifact, patch, prompt_hash, verify_exit, task_goal = sys.argv[1:]
+row = {
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "kind": kind,
+    "provider": provider,
+    "exit": int(exit_code),
+}
+if artifact:
+    row["artifact"] = artifact
+if patch:
+    row["patch"] = patch
+if prompt_hash:
+    row["prompt_sha256"] = prompt_hash
+if verify_exit:
+    row["verify_exit"] = int(verify_exit)
+if task_goal:
+    row["task_goal"] = task_goal
+with open(index, "a", encoding="utf-8") as f:
+    f.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+EOF
+}
+
 ma_safe_status() {
   local repo="$1"
   git -C "$repo" status --short -- "${MA_SAFE_PATHS[@]}"
@@ -223,6 +293,7 @@ run_provider() {
       printf 'No prompt content was written to this artifact.\n'
       printf '\n\n## Exit\n\n3\n'
     } > "$artifact"
+    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 3 "$artifact" "" "$prompt_file" || true
     echo "blocked: $provider sensitive outbound context -> $artifact"
     # 3 = blocked by scrubber, distinct from provider failure (1).
     return 3
@@ -242,6 +313,7 @@ run_provider() {
 
   if [ "$DRY_RUN" = "1" ]; then
     printf 'DRY RUN: provider command skipped.\n' >> "$artifact"
+    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 0 "$artifact" "" "$prompt_file" || true
     echo "dry-run: $provider -> $artifact"
     return 0
   fi
@@ -253,6 +325,7 @@ run_provider() {
 
   if ! command -v "$binary" >/dev/null 2>&1; then
     printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
+    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 1 "$artifact" "" "$prompt_file" || true
     echo "skipped: $provider missing ($binary) -> $artifact"
     return 1
   fi
@@ -279,6 +352,7 @@ run_provider() {
   set -e
 
   printf '\n\n## Exit\n\n%s\n' "$status" >> "$artifact"
+  ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" "$status" "$artifact" "" "$prompt_file" || true
   if [ "$status" -eq 0 ]; then
     echo "ok: $provider -> $artifact"
   else

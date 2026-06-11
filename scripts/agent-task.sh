@@ -13,6 +13,14 @@ GOAL=""
 CONSTRAINT=""
 DONE_CRITERIA=""
 VERIFY=""
+LOOP_ATTEMPTS=""
+LOOP_MAX=""
+DIFF_BUDGET=""
+VERIFY_LEVEL=""
+LAST_FAILURE=""
+VERIFICATION_NOTE=""
+HYPOTHESIS=""
+RESULT_NOTE=""
 DECISION=""
 STATE=""
 NEXT_STEP=""
@@ -34,6 +42,14 @@ Options:
   --constraint TEXT update: append a Constraints bullet.
   --done TEXT       update: append a Done Criteria bullet.
   --verify CMD      init/update: replace Verify.
+  --loop-attempts N init/update: set Loop State attempts.
+  --loop-max N      init/update: set Loop State max_attempts.
+  --diff-budget N   init/update: set Loop State diff_budget_lines.
+  --verify-level L  init/update: set Loop State verification_level.
+  --last-failure T  update: append a Last Failure bullet.
+  --verification T  update: append a Verification bullet.
+  --hypothesis T    update: append a Current State hypothesis bullet.
+  --result T        update: append a Current State result bullet.
   --decision TEXT   update: append a Decisions bullet.
   --state TEXT      init/update: replace Current State.
   --next TEXT       init/update: replace Next Step.
@@ -89,6 +105,46 @@ while [ "$#" -gt 0 ]; do
       VERIFY="$2"
       shift 2
       ;;
+    --loop-attempts)
+      [ "$#" -ge 2 ] || { echo "error: --loop-attempts requires number" >&2; exit 2; }
+      LOOP_ATTEMPTS="$2"
+      shift 2
+      ;;
+    --loop-max)
+      [ "$#" -ge 2 ] || { echo "error: --loop-max requires number" >&2; exit 2; }
+      LOOP_MAX="$2"
+      shift 2
+      ;;
+    --diff-budget)
+      [ "$#" -ge 2 ] || { echo "error: --diff-budget requires number" >&2; exit 2; }
+      DIFF_BUDGET="$2"
+      shift 2
+      ;;
+    --verify-level)
+      [ "$#" -ge 2 ] || { echo "error: --verify-level requires text" >&2; exit 2; }
+      VERIFY_LEVEL="$2"
+      shift 2
+      ;;
+    --last-failure)
+      [ "$#" -ge 2 ] || { echo "error: --last-failure requires text" >&2; exit 2; }
+      LAST_FAILURE="$2"
+      shift 2
+      ;;
+    --verification)
+      [ "$#" -ge 2 ] || { echo "error: --verification requires text" >&2; exit 2; }
+      VERIFICATION_NOTE="$2"
+      shift 2
+      ;;
+    --hypothesis)
+      [ "$#" -ge 2 ] || { echo "error: --hypothesis requires text" >&2; exit 2; }
+      HYPOTHESIS="$2"
+      shift 2
+      ;;
+    --result)
+      [ "$#" -ge 2 ] || { echo "error: --result requires text" >&2; exit 2; }
+      RESULT_NOTE="$2"
+      shift 2
+      ;;
     --decision)
       [ "$#" -ge 2 ] || { echo "error: --decision requires text" >&2; exit 2; }
       DECISION="$2"
@@ -135,6 +191,23 @@ done
 ACTION="${ACTION:-show}"
 [ -n "$TASK_FILE" ] || TASK_FILE="$(agent_task_project_file "$REPO")"
 
+require_uint() {
+  local name="$1"
+  local value="$2"
+
+  [ -z "$value" ] && return 0
+  case "$value" in
+    *[!0-9]*)
+      echo "error: $name must be a non-negative integer" >&2
+      exit 2
+      ;;
+  esac
+}
+
+require_uint "--loop-attempts" "$LOOP_ATTEMPTS"
+require_uint "--loop-max" "$LOOP_MAX"
+require_uint "--diff-budget" "$DIFF_BUDGET"
+
 # Lazily created: read-only actions (path, show, context) must not depend
 # on a writable TMPDIR. Library temp files land here too once created.
 OMS_TASK_TMPDIR=""
@@ -178,7 +251,14 @@ append_if_set() {
 apply_updates() {
   replace_if_set "## Goal" "$GOAL"
   replace_if_set "## Verify" "$VERIFY"
+  if [ -n "$LOOP_ATTEMPTS" ] || [ -n "$LOOP_MAX" ] || [ -n "$DIFF_BUDGET" ] || [ -n "$VERIFY_LEVEL" ]; then
+    agent_task_upsert_loop_state "$TASK_FILE" "$LOOP_ATTEMPTS" "$LOOP_MAX" "$DIFF_BUDGET" "$VERIFY_LEVEL"
+  fi
+  append_if_set "## Last Failure" "$LAST_FAILURE"
+  append_if_set "## Verification" "$VERIFICATION_NOTE"
   replace_if_set "## Current State" "$STATE"
+  append_if_set "## Current State" "${HYPOTHESIS:+Hypothesis: $HYPOTHESIS}"
+  append_if_set "## Current State" "${RESULT_NOTE:+Result: $RESULT_NOTE}"
   replace_if_set "## Next Step" "$NEXT_STEP"
   append_if_set "## Constraints" "$CONSTRAINT"
   append_if_set "## Done Criteria" "$DONE_CRITERIA"

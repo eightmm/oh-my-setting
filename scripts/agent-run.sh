@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/agent-task-common.sh
+. "$ROOT/scripts/lib/agent-task-common.sh"
 
 REPO="$PWD"
 TO=""
@@ -77,6 +79,75 @@ prompt_text() {
   else
     head -c 4000 "$PROMPT_FILE"
   fi
+}
+
+agent_run_relpath() {
+  local repo="$1"
+  local path="$2"
+  repo="$(cd "$repo" && pwd)" || return 1
+  case "$path" in
+    "$repo"/*) printf '%s\n' "${path#"$repo"/}" ;;
+    *) printf '%s\n' "$(basename "$path")" ;;
+  esac
+}
+
+agent_run_record_task_outcome() {
+  local repo="$1"
+  local mode="$2"
+  local provider="$3"
+  local status="$4"
+  local output_file="$5"
+  local task_file
+  local artifact=""
+  local patch=""
+  local verify=""
+  local worker=""
+  local note
+  local note_file
+
+  [ "${OMS_AGENT_RUN_TASK_OUTCOME:-1}" = "1" ] || return 0
+  [ "$INCLUDE_TASK" -eq 1 ] || return 0
+  task_file="$(agent_task_project_file "$repo")" || return 0
+  [ -s "$task_file" ] || return 0
+
+  artifact="$(awk -F': ' '$1 == "artifact" { v=$2 } END { print v }' "$output_file")"
+  patch="$(awk -F': ' '$1 == "patch" { v=$2 } END { print v }' "$output_file")"
+  verify="$(awk -F': ' '$1 == "verify" { v=$2 } END { print v }' "$output_file")"
+  worker="$(awk -F': ' '$1 == "worker" { v=$2 } END { print v }' "$output_file")"
+
+  [ -n "$artifact" ] && artifact="$(agent_run_relpath "$repo" "$artifact" 2>/dev/null || printf '%s' "$(basename "$artifact")")"
+  [ -n "$patch" ] && patch="$(agent_run_relpath "$repo" "$patch" 2>/dev/null || printf '%s' "$(basename "$patch")")"
+
+  note="agent-run $mode $provider exit=$status"
+  [ -n "$worker" ] && note="$note; worker=$worker"
+  [ -n "$verify" ] && note="$note; verify=$verify"
+  [ -n "$artifact" ] && note="$note; artifact=$artifact"
+  [ -n "$patch" ] && note="$note; patch=$patch"
+
+  note_file="$(agent_memory_mktemp)" || return 0
+  printf '%s\n' "$note" > "$note_file"
+  if ! agent_task_append_bullet "$task_file" "## Current State" agent-run "$note_file" >/dev/null 2>&1; then
+    echo "warning: task outcome not recorded" >&2
+  fi
+  rm -f "$note_file"
+}
+
+agent_run_exec_and_record() {
+  local mode="$1"
+  local provider="$2"
+  shift 2
+  local output_file
+  local status
+
+  output_file="$(mktemp)" || exit 1
+  set +e
+  "$@" > "$output_file"
+  status=$?
+  set -e
+  cat "$output_file"
+  agent_run_record_task_outcome "$REPO" "$mode" "$provider" "$status" "$output_file"
+  rm -f "$output_file"
+  return "$status"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -190,6 +261,9 @@ if [ "$MODE" = "auto" ]; then
 fi
 
 echo "agent-run: mode=$MODE resolved=$resolved_mode to=$TO" >&2
+if [ "$INCLUDE_TASK" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
+  agent_task_loop_warnings "$REPO" "$(agent_task_project_file "$REPO")" >&2 || true
+fi
 
 if [ "$resolved_mode" = "read" ]; then
   cmd=("$ROOT/scripts/agent-call.sh" --to "$TO" --repo "$REPO")
@@ -203,7 +277,7 @@ if [ "$resolved_mode" = "read" ]; then
   [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
   [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
-  "${cmd[@]}"
+  agent_run_exec_and_record read "$TO" "${cmd[@]}"
 else
   cmd=("$ROOT/scripts/multi-agent-delegate.sh" --to "$TO" --repo "$REPO")
   if [ -n "$PROMPT_FILE" ]; then
@@ -220,5 +294,5 @@ else
   [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
   [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
-  "${cmd[@]}"
+  agent_run_exec_and_record write "$TO" "${cmd[@]}"
 fi

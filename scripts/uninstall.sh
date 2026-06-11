@@ -57,6 +57,7 @@ confirm() {
   esac
 }
 
+OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/uninstall-autoupdate.sh"
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/unlink.sh"
 
 if [ "$PURGE" != "1" ]; then

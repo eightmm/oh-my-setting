@@ -91,7 +91,8 @@
 - Root cause first: trace NaN, shape mismatch, metric jump, data error upstream.
 - Reproducible runs: command, config, seed, data version, commit, checkpoint.
 - Metrics contract: define metric before training; compare against baseline.
-- Run ledger: launch experiments via `~/.oh-my-setting/scripts/run-ledger.sh -- <cmd>`; read `docs/EXPERIMENTS.jsonl` before proposing new experiments.
+- Research runs: prefer `~/.oh-my-setting/scripts/research-runner.sh ... -- <cmd>` for hypothesis-testing experiments; it pre-registers the claim and then calls the run ledger.
+- Run ledger: use `~/.oh-my-setting/scripts/run-ledger.sh -- <cmd>` for simple mechanical runs; read `docs/EXPERIMENTS.jsonl` before proposing new experiments.
 - Long logs/failed jobs: digest with `~/.oh-my-setting/scripts/job-digest.sh <logfile|jobid>` instead of reading raw logs.
 
 ## ML Safety Stop

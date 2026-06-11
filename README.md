@@ -55,6 +55,14 @@ Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
 ```
 
+Reusable code sources:
+
+```text
+Profile my GitHub and find reusable equivariant GNN code.
+Register flowfrag/equivariant.py as flowfrag-equivariant.
+Fetch flowfrag-equivariant into this project.
+```
+
 Experiments (ML):
 
 ```text
@@ -64,6 +72,7 @@ Show the last 10 ledger entries.
 Wait for Slurm job 12345 to finish, then digest it and report.
 Check this molecular dataset's split for leakage before I train.
 Frame this as a hypothesis-driven experiment before I launch the run.
+Launch this as a registered research run with metric val_auc/scaffold.
 Have all three models attack this hypothesis and experiment design before I train.
 ```
 
@@ -89,16 +98,22 @@ Unlink oh-my-setting.                        # or: uninstall it completely
   confirmed `PROJECT.md`, then template, skeleton, and doctor in one go.
 - **Multi-agent workflows** — review (diff gate, ML checklist, debate,
   synthesis), ask (independent opinions), delegate (isolated git worktree,
-  returns a reviewable patch). Artifacts land under `.oms/artifacts/`.
+  returns a reviewable patch). Artifacts land under `.oms/artifacts/` with a
+  compact JSONL index for latest/failure lookup.
 - **Safety rails** — outbound prompts are scrubbed before any external CLI
   call (credentials, private keys, machine paths, cluster details block the
   call); injected context is fenced as reference data; diffs are sanitized.
+- **Reusable code sources** — local registry for trusted GitHub files such as
+  personal model blocks; fetches go through `gh`, avoid overwrite by default,
+  and append provenance to `.oms/code-sources.jsonl`.
 - **Shared memory + task handoff** — compact cross-agent memory
   (`.oms/memory/`) and an active task packet (`.oms/task/current.md`) so any
-  of the three agents can continue the same work; closing a task promotes its
-  outcome into memory.
-- **ML guardrails** — experiment run ledger with a pre-flight `check.sh` gate
-  and duplicate-run warning, scaffolded `ml_smoke.py` one-batch contract,
+  of the three agents can continue the same work; agent runs record compact
+  outcomes back into the task, and closing a task promotes its outcome into
+  memory.
+- **ML guardrails** — registered research-run wrapper over the experiment
+  ledger, pre-flight `check.sh` gate and duplicate-run warning, scaffolded
+  `ml_smoke.py` one-batch contract,
   ML-aware review gate, chem-bio domain checklist (splitting/leakage, labels,
   metrics), hypothesis-driven research-method loop (falsifiable hypothesis,
   pre-registered metric, baseline, anti-pattern guard), long-log digester

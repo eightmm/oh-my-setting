@@ -60,6 +60,24 @@ Common actions:
 ~/.oh-my-setting/scripts/agent-task.sh --repo . close
 ```
 
+Loop hardening fields are optional but should be used when work repeats or
+moves across providers:
+
+```bash
+~/.oh-my-setting/scripts/agent-task.sh --repo . update \
+  --loop-attempts 2 --loop-max 3 --diff-budget 200 \
+  --verify-level "focused-test" \
+  --last-failure "bash tests/scripts-smoke.sh exit=1" \
+  --verification "bash -n passed" \
+  --hypothesis "failure is from stale generated state" \
+  --result "same failure after narrowing"
+```
+
+`agent-run.sh` warns before write delegation when attempts are exhausted, the
+same failure appears repeatedly, or the current git diff exceeds the task's
+line budget. The warning is advisory; the owning agent decides whether to stop
+and revise the hypothesis or continue.
+
 `close` archives the packet and promotes a one-line outcome (goal + next
 step) into project shared memory, so the next session starts from the
 conclusion. Disable with `OMS_AGENT_TASK_CLOSE_MEMORY=0`.
@@ -82,6 +100,13 @@ in an isolated git worktree and writes artifacts/patches to
 `.oms/artifacts/delegate/`; the worker cannot commit or push. Use `--apply` only
 when the owning agent has decided the returned patch should be applied and the
 main tree is clean.
+
+Every provider call/delegation appends a compact row to
+`.oms/artifacts/index.jsonl`. Use `artifact-index.sh latest`, `list`, or
+`failures` when resuming work or looking for the latest provider result; the
+index is append-only, so `artifact-index.sh prune [N]` trims it to the most
+recent N rows. When an active task exists, `agent-run.sh` also appends a
+one-line outcome with artifact and patch paths to `## Current State`.
 
 `agent-run.sh` attaches compact shared memory, the active task packet, and an
 ML context digest for detected ML repos by default. Use `--no-memory`,

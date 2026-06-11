@@ -8,6 +8,21 @@ DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 BASE_STYLE="$STYLE"
 ADD_SLURM=0
 
+usage() {
+  cat <<'EOF'
+Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir] [files...]
+
+Apply oh-my-setting project rule blocks and scaffold PROJECT.md.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
 has_slurm_runtime() {
   command -v sbatch >/dev/null 2>&1 ||
     command -v srun >/dev/null 2>&1 ||
@@ -65,7 +80,7 @@ case "$BASE_STYLE" in
   general) TEMPLATE="$ROOT/templates/project-general-AGENTS.md" ;;
   ml) TEMPLATE="$ROOT/templates/project-ml-AGENTS.md" ;;
   *)
-    echo "usage: $0 [auto|general|ml|slurm] [project_dir] [files...]" >&2
+    usage >&2
     exit 2
     ;;
 esac

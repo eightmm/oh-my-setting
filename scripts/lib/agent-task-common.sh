@@ -38,6 +38,9 @@ agent_task_init_file() {
     printf '## Constraints\n\n'
     printf '## Done Criteria\n\n'
     printf '## Verify\n\n'
+    printf '## Loop State\n\n'
+    printf '## Last Failure\n\n'
+    printf '## Verification\n\n'
     printf '## Decisions\n\n'
     printf '## Current State\n\n'
     printf '## Next Step\n'
@@ -120,6 +123,106 @@ agent_task_replace_section() {
   }
   mv "$tmp" "$file"
   agent_task_touch_updated "$file"
+}
+
+agent_task_section_value() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+
+  [ -s "$file" ] || return 1
+  awk -v section="$section" -v key="$key" '
+    $0 == section { in_section = 1; next }
+    in_section == 1 && /^## / { in_section = 0 }
+    in_section == 1 {
+      pattern = "^- " key ":[[:space:]]*"
+      if ($0 ~ pattern) {
+        sub(pattern, "")
+        print
+        found = 1
+        exit
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$file"
+}
+
+agent_task_upsert_loop_state() {
+  local file="$1"
+  local attempts="$2"
+  local max_attempts="$3"
+  local diff_budget="$4"
+  local verify_level="$5"
+  local content_file
+
+  agent_task_init_file "$file"
+  [ -n "$attempts" ] || attempts="$(agent_task_section_value "$file" "## Loop State" attempts 2>/dev/null || true)"
+  [ -n "$max_attempts" ] || max_attempts="$(agent_task_section_value "$file" "## Loop State" max_attempts 2>/dev/null || true)"
+  [ -n "$diff_budget" ] || diff_budget="$(agent_task_section_value "$file" "## Loop State" diff_budget_lines 2>/dev/null || true)"
+  [ -n "$verify_level" ] || verify_level="$(agent_task_section_value "$file" "## Loop State" verification_level 2>/dev/null || true)"
+
+  content_file="$(agent_memory_mktemp)" || return 1
+  {
+    [ -n "$attempts" ] && printf -- '- attempts: %s\n' "$attempts"
+    [ -n "$max_attempts" ] && printf -- '- max_attempts: %s\n' "$max_attempts"
+    [ -n "$diff_budget" ] && printf -- '- diff_budget_lines: %s\n' "$diff_budget"
+    [ -n "$verify_level" ] && printf -- '- verification_level: %s\n' "$verify_level"
+  } > "$content_file"
+  agent_task_replace_section "$file" "## Loop State" "$content_file"
+  rm -f "$content_file"
+}
+
+agent_task_loop_warnings() {
+  local repo="$1"
+  local file="${2:-}"
+  local attempts
+  local max_attempts
+  local diff_budget
+  local repeated_failures
+  local repeat_threshold="${OMS_AGENT_TASK_STUCK_REPEATS:-3}"
+  local changed_lines
+
+  [ -n "$file" ] || file="$(agent_task_project_file "$repo")"
+  [ -s "$file" ] || return 0
+  agent_task_file_has_sensitive_content "$file" && return 0
+
+  attempts="$(agent_task_section_value "$file" "## Loop State" attempts 2>/dev/null || true)"
+  max_attempts="$(agent_task_section_value "$file" "## Loop State" max_attempts 2>/dev/null || true)"
+  if [ -n "$attempts" ] && [ -n "$max_attempts" ] &&
+     printf '%s\n' "$attempts" | grep -Eq '^[0-9]+$' &&
+     printf '%s\n' "$max_attempts" | grep -Eq '^[0-9]+$' &&
+     [ "$attempts" -ge "$max_attempts" ] && [ "$max_attempts" -gt 0 ]; then
+    printf 'warning: loop attempts exhausted: %s/%s\n' "$attempts" "$max_attempts"
+  fi
+
+  repeated_failures="$(
+    awk '
+      /^## Last Failure$/ { in_section = 1; next }
+      in_section == 1 && /^## / { in_section = 0 }
+      in_section == 1 && /^- / {
+        line = $0
+        sub(/^- [^[]*\[[^]]*\] /, "", line)
+        if (line != "") print line
+      }
+    ' "$file" | tail -n "$repeat_threshold"
+  )"
+  if [ "$(printf '%s\n' "$repeated_failures" | sed '/^$/d' | wc -l | tr -d ' ')" -ge "$repeat_threshold" ] &&
+     [ "$(printf '%s\n' "$repeated_failures" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')" -eq 1 ]; then
+    printf 'warning: repeated last failure detected (%sx): %s\n' \
+      "$repeat_threshold" "$(printf '%s\n' "$repeated_failures" | sed '/^$/d' | head -n 1)"
+  fi
+
+  diff_budget="$(agent_task_section_value "$file" "## Loop State" diff_budget_lines 2>/dev/null || true)"
+  if [ -n "$diff_budget" ] && printf '%s\n' "$diff_budget" | grep -Eq '^[0-9]+$' &&
+     [ "$diff_budget" -gt 0 ] && git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    changed_lines="$(
+      { git -C "$repo" diff --numstat HEAD -- 2>/dev/null || git -C "$repo" diff --numstat -- 2>/dev/null || true; } |
+        awk '{ add += $1; del += $2 } END { print add + del + 0 }'
+    )"
+    if [ "$changed_lines" -gt "$diff_budget" ]; then
+      printf 'warning: loop diff budget exceeded: %s/%s changed lines\n' "$changed_lines" "$diff_budget"
+    fi
+  fi
 }
 
 agent_task_append_bullet() {

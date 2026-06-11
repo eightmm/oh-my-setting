@@ -15,7 +15,8 @@ to run scripts manually unless a command is impossible from the current agent.
 - Use local files and shell commands only. Do not use MCP servers, app
   connectors, or plugin connector tools.
 - Start with `~/.oh-my-setting/scripts/status.sh` or repo-local
-  `scripts/status.sh` when orienting.
+  `scripts/status.sh` when orienting; it reports install links, tools, active
+  task state, and auto-update state.
 - For install health, run `doctor.sh`; for skill picker duplicates, run
   `skill-doctor.sh`.
 - For legacy oh-my-setting symlink cleanup, run `cleanup.sh --dry-run` first,

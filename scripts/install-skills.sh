@@ -15,6 +15,7 @@ check_skill() {
   local name="$1"
   local source="$2"
   local path="$ROOT/$source"
+  local actual_name
 
   case "$source" in
     custom-skills/*) ;;
@@ -31,6 +32,24 @@ check_skill() {
   fi
   if [ ! -f "$path/SKILL.md" ]; then
     echo "missing SKILL.md: $name -> $source/SKILL.md"
+    FAILED=1
+    return
+  fi
+  actual_name="$(awk -F: '
+    /^name:[[:space:]]*/ {
+      sub(/^[[:space:]]+/, "", $2)
+      sub(/[[:space:]]+$/, "", $2)
+      print $2
+      exit
+    }
+  ' "$path/SKILL.md")"
+  if [ -z "$actual_name" ]; then
+    echo "missing skill name: $source/SKILL.md"
+    FAILED=1
+    return
+  fi
+  if [ "$actual_name" != "$name" ]; then
+    echo "name mismatch: $name -> $source/SKILL.md has $actual_name"
     FAILED=1
     return
   fi

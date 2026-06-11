@@ -28,8 +28,11 @@ that decides what to run and what a result means.
    subset/epoch-limited probe before a full GPU run.
 5. **Baseline** — never evaluate in isolation. Compare against a prior result,
    a trivial baseline, or an ablation. "Better than nothing" is not better.
-6. **Run through the ledger** — launch via the run ledger so the command,
-   commit, config, and outcome are recorded; read prior rows first.
+6. **Run through the ledger** — for ML/research runs, prefer
+   `research-runner.sh` so question, hypothesis, prediction, baseline, metric,
+   success threshold, and single changed variable are pre-registered before it
+   calls `run-ledger.sh`. Use raw `run-ledger.sh` only for simple mechanical
+   runs that are not testing a research claim.
 7. **Compare to the prediction** — state met / not-met / surprising, with the
    number. A failed prediction is the most informative outcome — keep it.
 8. **Revise** — update the hypothesis or the next question. One conclusion per
@@ -65,8 +68,9 @@ Deciding the bar after seeing results is how noise becomes a "finding."
 - Keep negative and null results; they prune the search space and prevent
   re-running dead ends. The ledger is the lab notebook.
 - Record the outcome metric in the same row: have the run write a small JSON
-  of scalar metrics and pass it as `run-ledger.sh --metrics <file>`, so the
-  hypothesis's number lives with its command and commit.
+  of scalar metrics and pass it as `research-runner.sh --metrics <file> -- <cmd>`
+  or `run-ledger.sh --metrics <file> -- <cmd>`, so the hypothesis's number lives
+  with its command and commit.
 - A result without its config, seed, data version, and commit is not a result.
 - When a run overturns a prior conclusion, note which ledger row it supersedes.
 

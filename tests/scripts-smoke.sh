@@ -385,6 +385,171 @@ test_run_ledger_records_metrics() {
   assert_file_contains "$project/merr" "row recorded without metrics"
 }
 
+
+
+write_fake_gh_source() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "api" ]; then
+  shift
+  case "$1" in
+    user)
+      printf '{"login":"octo-user"}\n'
+      ;;
+    users/octo-user)
+      printf '{"login":"octo-user","name":"Octo User","bio":"ML and geometry","public_repos":2}\n'
+      ;;
+    repos/octo-user/flowfrag)
+      printf '{"default_branch":"main"}\n'
+      ;;
+    repos/octo-user/flowfrag/contents/flowfrag/equivariant.py\?ref=main|repos/octo-user/flowfrag/contents/flowfrag/equivariant.py\?ref=abc123)
+      python3 - <<'PYEOF'
+import base64, json
+content = b"class EquivariantBlock:\n    pass\n"
+print(json.dumps({
+    "encoding": "base64",
+    "content": base64.b64encode(content).decode(),
+    "sha": "blob123",
+    "html_url": "https://github.com/octo-user/flowfrag/blob/main/flowfrag/equivariant.py",
+}))
+PYEOF
+      ;;
+    repos/octo-user/flowfrag/commits/main|repos/octo-user/flowfrag/commits/abc123)
+      printf '{"sha":"commit123"}\n'
+      ;;
+    search/code*)
+      printf '{"items":[{"path":"flowfrag/equivariant.py","html_url":"https://github.com/octo-user/flowfrag/blob/main/flowfrag/equivariant.py","repository":{"full_name":"octo-user/flowfrag"}}]}\n'
+      ;;
+    *)
+      echo "unexpected gh api: $1" >&2
+      exit 2
+      ;;
+  esac
+elif [ "$1" = "repo" ] && [ "$2" = "list" ]; then
+  printf '[{"name":"flowfrag","description":"equivariant molecular fragments","primaryLanguage":{"name":"Python"},"repositoryTopics":[{"name":"gnn"},{"name":"equivariant"}],"pushedAt":"2026-06-01T00:00:00Z","url":"https://github.com/octo-user/flowfrag"}]\n'
+else
+  echo "unexpected gh command: $*" >&2
+  exit 2
+fi
+EOF
+  chmod +x "$bin/gh"
+}
+
+test_github_source_profile_discover_and_fetch() {
+  local project="$TMP/github-source"
+  local bin="$project/bin"
+
+  mkdir -p "$project"
+  write_fake_gh_source "$bin"
+
+  PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" profile --user octo-user >"$project/profile"
+  assert_file_contains "$project/profile" "ML and geometry"
+  assert_file_contains "$project/profile" "topics=gnn,equivariant"
+
+  PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" discover \
+    --user octo-user --query equivariant >"$project/discover"
+  assert_file_contains "$project/discover" "octo-user/flowfrag flowfrag/equivariant.py"
+
+  (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" fetch \
+    --repo octo-user/flowfrag \
+    --path flowfrag/equivariant.py \
+    --target src/models/equivariant.py >"$project/fetch-out")
+  assert_file_contains "$project/src/models/equivariant.py" "class EquivariantBlock"
+  assert_file_contains "$project/.oms/code-sources.jsonl" '"repo": "octo-user/flowfrag"'
+  assert_file_contains "$project/.oms/code-sources.jsonl" '"commit": "commit123"'
+
+  if (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" fetch \
+    --repo octo-user/flowfrag \
+    --path flowfrag/equivariant.py \
+    --target src/models/equivariant.py >/dev/null 2>"$project/overwrite-err"); then
+    fail "github-source fetch should not overwrite without --force"
+  fi
+  assert_file_contains "$project/overwrite-err" "target exists"
+}
+
+test_code_source_registry_fetches_registered_source() {
+  local project="$TMP/code-source"
+  local bin="$project/bin"
+
+  mkdir -p "$project"
+  write_fake_gh_source "$bin"
+
+  "$ROOT/scripts/code-source.sh" --repo-dir "$project" add flowfrag-equivariant \
+    --repo octo-user/flowfrag \
+    --path flowfrag/equivariant.py \
+    --target src/models/equivariant.py \
+    --tags ml,gnn,equivariant \
+    --license own-code \
+    --notes "Reusable equivariant GNN block" >/dev/null
+
+  "$ROOT/scripts/code-source.sh" --repo-dir "$project" list >"$project/list"
+  assert_file_contains "$project/list" "flowfrag-equivariant"
+  assert_file_contains "$project/list" "tags=ml,gnn,equivariant"
+
+  (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/code-source.sh" --repo-dir "$project" fetch flowfrag-equivariant >/dev/null)
+  assert_file_contains "$project/src/models/equivariant.py" "class EquivariantBlock"
+  assert_file_contains "$project/.oms/code-sources.jsonl" '"target": "src/models/equivariant.py"'
+}
+
+test_research_runner_requires_registration() {
+  local project="$TMP/research-runner-required"
+
+  make_committed_repo "$project"
+  if (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+    --question "Does lr help?" \
+    -- bash -c 'exit 0' >/dev/null 2>"$project/error"); then
+    fail "research-runner should require full pre-registration"
+  fi
+  assert_file_contains "$project/error" "--hypothesis is required"
+  assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
+}
+
+test_research_runner_records_registered_run() {
+  local project="$TMP/research-runner-record"
+
+  make_committed_repo "$project"
+  printf '{"val_auc": 0.82, "split": "scaffold"}\n' > "$project/metrics.json"
+  (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+    --question "Does warmup improve scaffold validation?" \
+    --hypothesis "Warmup 10pct improves val_auc by at least 0.01" \
+    --prediction "val_auc increases from 0.80 to 0.81 or higher" \
+    --baseline "ledger row baseline-warmup-5pct" \
+    --metric "val_auc/scaffold" \
+    --success "+0.01 val_auc over baseline" \
+    --change "warmup_ratio 0.05 -> 0.10" \
+    --metrics metrics.json \
+    -- bash -c 'exit 0' >/dev/null 2>"$project/error") ||
+    fail "registered research run should launch"
+
+  assert_file_contains "$project/error" "research-runner: launching registered experiment"
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" "Warmup 10pct improves"
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"val_auc": 0.82'
+}
+
+test_research_runner_dry_run_no_ledger() {
+  local project="$TMP/research-runner-dry"
+
+  make_committed_repo "$project"
+  (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+    --question "Does batch size help?" \
+    --hypothesis "Batch size 64 improves val_loss" \
+    --prediction "val_loss decreases by at least 0.02" \
+    --baseline "current best config" \
+    --metric "val_loss/random" \
+    --success "-0.02 val_loss" \
+    --change "batch_size 32 -> 64" \
+    --dry-run \
+    -- bash -c 'exit 0' >"$project/out") ||
+    fail "research-runner dry-run should pass validation"
+
+  assert_file_contains "$project/out" "research-runner: dry-run"
+  assert_file_contains "$project/out" "Batch size 64 improves val_loss"
+  assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
+}
+
 test_run_ledger_metrics_sanitizes() {
   local project="$TMP/run-ledger-metrics-clean"
   make_committed_repo "$project"
@@ -1237,6 +1402,9 @@ test_agent_task_init_context_and_rejects_sensitive() {
   [ -f "$project/.oms/task/current.md" ] || fail "task file missing"
   assert_file_contains "$project/.oms/task/current.md" "Implement an ML-focused agent harness"
   assert_file_contains "$project/.oms/task/current.md" "Use active task packet before larger task registry"
+  assert_file_contains "$project/.oms/task/current.md" "## Loop State"
+  assert_file_contains "$project/.oms/task/current.md" "## Last Failure"
+  assert_file_contains "$project/.oms/task/current.md" "## Verification"
 
   "$ROOT/scripts/agent-task.sh" --repo "$project" context >"$project/context"
   assert_file_contains "$project/context" "Active task packet follows"
@@ -1248,6 +1416,50 @@ test_agent_task_init_context_and_rejects_sensitive() {
     fail "sensitive-looking task note should be rejected"
   fi
   assert_file_contains "$project/sensitive-err" "sensitive-looking content"
+}
+
+test_agent_task_loop_state_and_warnings() {
+  local project="$TMP/agent-task-loop"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+
+  "$ROOT/scripts/agent-task.sh" \
+    --repo "$project" \
+    init \
+    --loop-attempts 3 \
+    --loop-max 3 \
+    --diff-budget 1 \
+    --verify-level "focused-test" \
+    --last-failure "bash scripts/check.sh fast exit=1" \
+    --verification "bash -n scripts/*.sh passed" \
+    --hypothesis "failure is from missing guard" \
+    --result "guard still missing" >/dev/null
+
+  "$ROOT/scripts/agent-task.sh" --repo "$project" update \
+    --last-failure "bash scripts/check.sh fast exit=1" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" update \
+    --last-failure "bash scripts/check.sh fast exit=1" >/dev/null
+
+  assert_file_contains "$project/.oms/task/current.md" "- attempts: 3"
+  assert_file_contains "$project/.oms/task/current.md" "- max_attempts: 3"
+  assert_file_contains "$project/.oms/task/current.md" "- diff_budget_lines: 1"
+  assert_file_contains "$project/.oms/task/current.md" "- verification_level: focused-test"
+  assert_file_contains "$project/.oms/task/current.md" "Hypothesis: failure is from missing guard"
+  assert_file_contains "$project/.oms/task/current.md" "Result: guard still missing"
+
+  printf 'line one\nline two\n' >> "$project/file.txt"
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Implement helper" >/dev/null 2>"$project/err"
+
+  assert_file_contains "$project/err" "warning: loop attempts exhausted: 3/3"
+  assert_file_contains "$project/err" "warning: repeated last failure detected (3x): bash scripts/check.sh fast exit=1"
+  assert_file_contains "$project/err" "warning: loop diff budget exceeded:"
 }
 
 test_agent_call_outbound_scrubber_blocks_private_path() {
@@ -1339,6 +1551,74 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-ml-smoke-*.md' 'ml-smoke-ran'
 }
 
+
+
+test_artifact_index_records_call() {
+  local project="$TMP/artifact-index-call"
+  local artifact_dir="$project/artifacts"
+  local out
+
+  mkdir -p "$project"
+  OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Assess artifact indexing" >/dev/null
+
+  [ -s "$project/.oms/artifacts/index.jsonl" ] || fail "artifact index missing"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"provider": "codex"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"artifact": "artifacts/codex-assess-artifact-indexing-'
+
+  out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest)"
+  printf '%s' "$out" | grep -Fq 'call  codex  exit=0' || fail "artifact-index latest missing call row"
+}
+
+test_artifact_index_prune() {
+  local project="$TMP/artifact-index-prune"
+  local index="$project/.oms/artifacts/index.jsonl"
+
+  mkdir -p "$project/.oms/artifacts"
+  for i in $(seq 1 10); do
+    printf '{"ts":"2026-06-11T00:00:%02dZ","kind":"call","provider":"codex","exit":0}\n' "$i" >> "$index"
+  done
+
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 3)"
+  printf '%s' "$out" | grep -Fq 'pruned 10 -> 3' || fail "prune should report 10 -> 3"
+  [ "$(wc -l < "$index")" = "3" ] || fail "prune should keep exactly 3 rows"
+  # Newest rows are kept (tail).
+  tail -n1 "$index" | grep -Fq '00:10Z' || fail "prune must keep the newest rows"
+  grep -Fq '00:01Z' "$index" && fail "prune must drop the oldest rows"
+
+  # Under the keep count: no-op, exit 0.
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 100)" || fail "prune within keep should exit 0"
+  printf '%s' "$out" | grep -Fq 'nothing pruned' || fail "prune within keep should be a no-op"
+}
+
+test_agent_run_records_task_outcome() {
+  local project="$TMP/agent-run-task-outcome"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --goal "Record delegated artifact" \
+    --next "Inspect artifact index" >/dev/null
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Implement helper" >/dev/null
+
+  assert_file_contains "$project/.oms/task/current.md" "agent-run write codex exit=0"
+  assert_file_contains "$project/.oms/task/current.md" "artifact=artifacts/codex-implement-helper-"
+  assert_file_contains "$project/.oms/task/current.md" "patch=artifacts/codex-implement-helper-"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"patch": "artifacts/codex-implement-helper-'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"task_goal": "Record delegated artifact"'
+}
 
 test_agent_call_dry_run_attaches_shared_memory() {
   local project="$TMP/agent-call"
@@ -1804,6 +2084,21 @@ test_update_help_runs() {
   "$ROOT/scripts/update.sh" --help >/dev/null
 }
 
+test_auto_update_help_runs() {
+  "$ROOT/scripts/artifact-index.sh" --help >/dev/null
+  "$ROOT/scripts/github-source.sh" --help >/dev/null
+  "$ROOT/scripts/code-source.sh" --help >/dev/null
+  "$ROOT/scripts/research-runner.sh" --help >/dev/null
+  "$ROOT/scripts/auto-update.sh" --help >/dev/null
+  "$ROOT/scripts/install-autoupdate.sh" --help >/dev/null
+  "$ROOT/scripts/uninstall-autoupdate.sh" --help >/dev/null
+}
+
+test_template_help_runs() {
+  "$ROOT/scripts/apply-project-template.sh" --help >/dev/null
+  "$ROOT/scripts/remove-project-template.sh" --help >/dev/null
+}
+
 test_uninstall_help_runs() {
   "$ROOT/scripts/uninstall.sh" --help >/dev/null
 }
@@ -1834,6 +2129,197 @@ test_status_shows_version() {
   printf '%s' "$out" | grep -Eq '^- version: [0-9]' || fail "status.sh missing version line"
 }
 
+
+test_status_shows_active_task_state() {
+  local task="$TMP/status-task.md"
+  local out
+
+  cat > "$task" <<'EOF'
+# Active Agent Task
+
+- updated: 2026-06-11T00:00:00Z
+
+## Goal
+
+Ship loop hardening
+
+## Loop State
+
+- attempts: 2
+- max_attempts: 3
+- diff_budget_lines: 120
+- verification_level: focused-test
+
+## Next Step
+
+Run smoke tests
+EOF
+
+  out="$(OH_MY_SETTING_TASK_FILE="$task" "$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq '## Active Task' || fail "status.sh missing active task section"
+  printf '%s' "$out" | grep -Fq -- '- status: active' || fail "status.sh missing active task status"
+  printf '%s' "$out" | grep -Fq -- '- goal: Ship loop hardening' || fail "status.sh missing task goal"
+  printf '%s' "$out" | grep -Fq -- '- loop_attempts: 2' || fail "status.sh missing loop attempts"
+  printf '%s' "$out" | grep -Fq -- '- verification_level: focused-test' || fail "status.sh missing verification level"
+}
+
+test_status_shows_auto_update_state() {
+  local state="$TMP/auto-update.status"
+  local out
+
+  cat > "$state" <<'EOF'
+last_run=2026-06-11T00:00:00Z
+mode=check
+status=update_available
+message=update available: abc1234 -> def5678
+upstream=origin/main
+local=abc1234
+remote=def5678
+EOF
+
+  out="$(OH_MY_SETTING_AUTO_UPDATE_STATE="$state" "$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq '## Auto Update' || fail "status.sh missing auto update section"
+  printf '%s' "$out" | grep -Fq -- '- status: update_available' || fail "status.sh missing auto update status"
+  printf '%s' "$out" | grep -Fq -- '- upstream: origin/main' || fail "status.sh missing auto update upstream"
+}
+
+test_auto_update_check_detects_update() {
+  local origin="$TMP/auto-origin.git"
+  local seed="$TMP/auto-seed"
+  local work="$TMP/auto-work"
+
+  git init --bare "$origin" >/dev/null
+  git init -b main "$seed" >/dev/null
+  git -C "$seed" config user.email test@example.com
+  git -C "$seed" config user.name 'Test User'
+  mkdir -p "$seed/scripts"
+  cp "$ROOT/scripts/auto-update.sh" "$seed/scripts/auto-update.sh"
+  chmod +x "$seed/scripts/auto-update.sh"
+  printf 'one\n' > "$seed/README.md"
+  git -C "$seed" add README.md scripts/auto-update.sh >/dev/null
+  git -C "$seed" commit -m 'initial' >/dev/null
+  git -C "$seed" remote add origin "$origin"
+  git -C "$seed" push -u origin main >/dev/null
+
+  git clone --branch main "$origin" "$work" >/dev/null 2>&1
+
+  printf 'two\n' >> "$seed/README.md"
+  git -C "$seed" add README.md >/dev/null
+  git -C "$seed" commit -m 'update' >/dev/null
+  git -C "$seed" push origin main >/dev/null
+
+  "$work/scripts/auto-update.sh" check >"$work/out"
+  assert_file_contains "$work/out" "auto-update: update_available"
+  assert_file_contains "$work/local/auto-update.status" "status=update_available"
+}
+
+test_auto_update_apply_skips_dirty_tree() {
+  local origin="$TMP/auto-dirty-origin.git"
+  local seed="$TMP/auto-dirty-seed"
+  local work="$TMP/auto-dirty-work"
+
+  git init --bare "$origin" >/dev/null
+  git init -b main "$seed" >/dev/null
+  git -C "$seed" config user.email test@example.com
+  git -C "$seed" config user.name 'Test User'
+  mkdir -p "$seed/scripts"
+  cp "$ROOT/scripts/auto-update.sh" "$seed/scripts/auto-update.sh"
+  chmod +x "$seed/scripts/auto-update.sh"
+  printf 'one\n' > "$seed/README.md"
+  git -C "$seed" add README.md scripts/auto-update.sh >/dev/null
+  git -C "$seed" commit -m 'initial' >/dev/null
+  git -C "$seed" remote add origin "$origin"
+  git -C "$seed" push -u origin main >/dev/null
+
+  git clone --branch main "$origin" "$work" >/dev/null 2>&1
+  printf 'dirty\n' >> "$work/README.md"
+
+  "$work/scripts/auto-update.sh" apply >"$work/out"
+  assert_file_contains "$work/out" "auto-update: skipped (dirty tree)"
+  assert_file_contains "$work/local/auto-update.status" "status=skipped"
+  assert_file_contains "$work/local/auto-update.status" "dirty tree"
+}
+
+test_auto_update_skips_without_upstream() {
+  local work="$TMP/auto-no-upstream"
+
+  git init -b main "$work" >/dev/null
+  git -C "$work" config user.email test@example.com
+  git -C "$work" config user.name 'Test User'
+  mkdir -p "$work/scripts"
+  cp "$ROOT/scripts/auto-update.sh" "$work/scripts/auto-update.sh"
+  chmod +x "$work/scripts/auto-update.sh"
+  printf 'one\n' > "$work/README.md"
+  git -C "$work" add README.md scripts/auto-update.sh >/dev/null
+  git -C "$work" commit -m 'initial' >/dev/null
+
+  "$work/scripts/auto-update.sh" check >"$work/out"
+  assert_file_contains "$work/out" "auto-update: skipped"
+  assert_file_contains "$work/local/auto-update.status" "status=skipped"
+  assert_file_contains "$work/local/auto-update.status" "no upstream configured"
+}
+
+test_autoupdate_cron_install_and_uninstall() {
+  local cron_file="$TMP/autoupdate.cron"
+  local out
+
+  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >"$TMP/autoupdate-install"
+  assert_file_contains "$TMP/autoupdate-install" "cron installed (apply)"
+  assert_file_contains "$cron_file" "# oh-my-setting autoupdate:begin"
+  assert_file_contains "$cron_file" "auto-update.sh\" apply"
+
+  out="$(OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "status.sh missing cron trigger"
+
+  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/uninstall-autoupdate.sh" >"$TMP/autoupdate-uninstall"
+  assert_file_contains "$TMP/autoupdate-uninstall" "auto-update trigger: removed"
+  if grep -Fq "oh-my-setting autoupdate" "$cron_file"; then
+    fail "uninstall-autoupdate should remove cron marker block"
+  fi
+}
+
+test_autoupdate_install_dry_run_no_writes() {
+  local home_dir="$TMP/autoupdate-dry-home"
+  local cron_file="$TMP/autoupdate-dry.cron"
+
+  mkdir -p "$home_dir"
+  HOME="$home_dir" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron --dry-run >/dev/null
+  [ ! -e "$cron_file" ] || fail "install-autoupdate dry-run wrote cron file"
+  [ -z "$(find "$home_dir" -mindepth 1 -print -quit 2>/dev/null)" ] ||
+    fail "install-autoupdate dry-run wrote under HOME"
+}
+
+test_install_skills_detects_name_mismatch() {
+  local repo="$TMP/install-skills-mismatch"
+
+  mkdir -p "$repo/custom-skills/demo" "$repo/scripts"
+  cp "$ROOT/scripts/install-skills.sh" "$repo/scripts/install-skills.sh"
+  cat > "$repo/skills.manifest.json" <<'EOF'
+{
+  "skills": [
+    {
+      "name": "expected-name",
+      "source": "custom-skills/demo",
+      "enabled": true
+    }
+  ]
+}
+EOF
+  cat > "$repo/custom-skills/demo/SKILL.md" <<'EOF'
+---
+name: actual-name
+---
+EOF
+
+  if "$repo/scripts/install-skills.sh" >"$repo/out" 2>&1; then
+    fail "install-skills should fail on manifest/SKILL.md name mismatch"
+  fi
+  assert_file_contains "$repo/out" "name mismatch: expected-name"
+}
+
 test_apply_dry_run_has_no_writes
 test_apply_ml_dry_run_has_no_writes
 test_apply_ml_scaffolds_docs
@@ -1847,6 +2333,11 @@ test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty
 test_run_ledger_records_and_lists
 test_run_ledger_records_metrics
+test_github_source_profile_discover_and_fetch
+test_code_source_registry_fetches_registered_source
+test_research_runner_requires_registration
+test_research_runner_records_registered_run
+test_research_runner_dry_run_no_ledger
 test_run_ledger_metrics_sanitizes
 test_delegate_auto_verify_uses_check_contract
 test_project_doctor_ok_after_apply
@@ -1888,7 +2379,11 @@ test_delegate_apply_refuses_dirty_tree
 test_delegate_requires_provider
 test_agent_memory_append_show_and_rejects_sensitive
 test_agent_task_init_context_and_rejects_sensitive
+test_agent_task_loop_state_and_warnings
 test_agent_call_outbound_scrubber_blocks_private_path
+test_artifact_index_records_call
+test_artifact_index_prune
+test_agent_run_records_task_outcome
 test_agent_ml_context_digest
 test_delegate_auto_verify_prefers_ml_smoke
 test_agent_call_dry_run_attaches_shared_memory
@@ -1915,9 +2410,19 @@ test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply
 test_update_help_runs
+test_auto_update_help_runs
+test_template_help_runs
 test_uninstall_help_runs
 test_uninstall_dry_run_no_changes
 test_version_file_present
 test_status_shows_version
+test_status_shows_active_task_state
+test_status_shows_auto_update_state
+test_auto_update_check_detects_update
+test_auto_update_apply_skips_dirty_tree
+test_auto_update_skips_without_upstream
+test_autoupdate_cron_install_and_uninstall
+test_autoupdate_install_dry_run_no_writes
+test_install_skills_detects_name_mismatch
 
 echo "scripts-smoke: ok"
