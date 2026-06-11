@@ -36,7 +36,11 @@ each answer as an artifact.
 
 verdicts: inspect the latest review run's artifacts and print one line per
 provider — pass, fail, or incomplete (artifact has no exit section, e.g. the
-run died mid-flight). Exit 0 all pass, 1 any fail, 2 incomplete/undeterminable.
+run died mid-flight). For --debate runs each provider's FINAL round artifact
+is used. Exit 0 all pass, 1 any fail, 2 incomplete/undeterminable; 2 takes
+precedence over 1 (a died provider means the round must be re-run before any
+fail is meaningful). Dry-run artifacts have no exit section and therefore
+always read as incomplete.
 
 Options:
   --prompt TEXT        Review question/task. Required unless --ml is set.
@@ -81,17 +85,39 @@ if [ "${1:-}" = "verdicts" ]; then
   # wrapper-generated slugs, so ls -t parsing is safe here.
   latest="$(ls -t "$vdir"/[!_]*.md 2>/dev/null | head -n 1 || true)"
   [ -n "$latest" ] || { echo "error: no review artifacts in $vdir" >&2; exit 2; }
-  run_id="$(printf '%s' "$latest" | sed -E 's/.*-([0-9]{8}T[0-9]{6}Z-[0-9]+)\.md$/\1/')"
+  # Debate rounds append -rN to the run id; strip it for grouping.
+  run_id="$(printf '%s' "$latest" | sed -E 's/.*-([0-9]{8}T[0-9]{6}Z-[0-9]+)(-r[0-9]+)?\.md$/\1/')"
   [ "$run_id" != "$latest" ] || { echo "error: cannot parse run id from $(basename "$latest")" >&2; exit 2; }
 
   echo "run: $run_id"
-  overall=0
-  found=0
-  for f in "$vdir"/*-"$run_id".md; do
+  # Per provider, judge the FINAL artifact: highest debate round, else base.
+  declare -A vfile vround
+  for f in "$vdir"/*-"$run_id".md "$vdir"/*-"$run_id"-r[0-9]*.md; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"
     case "$base" in _synthesis-*) continue ;; esac
     provider="${base%%-*}"
+    # Round suffix sits strictly after the run id ("-rN.md"); a slug that
+    # happens to contain "-r2" must not be parsed as a round.
+    suf="${base#*-"$run_id"}"
+    r=0
+    case "$suf" in
+      -r[0-9]*.md)
+        r="${suf#-r}"
+        r="${r%.md}"
+        case "$r" in *[!0-9]*) r=0 ;; esac
+        ;;
+    esac
+    if [ -z "${vround[$provider]:-}" ] || [ "$r" -gt "${vround[$provider]}" ]; then
+      vround[$provider]="$r"
+      vfile[$provider]="$f"
+    fi
+  done
+
+  overall=0
+  found=0
+  for provider in $(printf '%s\n' "${!vfile[@]}" | sort); do
+    f="${vfile[$provider]}"
     found=$((found + 1))
     if ! grep -q '^## Exit' "$f"; then
       echo "$provider: incomplete (no exit section; run likely died — re-run the review)"
