@@ -60,6 +60,7 @@ codex에게 위임해줘: scripts/train.py에 입력 검증 추가.
 최근 ledger 10개 보여줘.
 Slurm job 12345 끝날 때까지 기다렸다가 digest해서 보고해줘.
 이 분자 데이터셋 split에 leakage 없는지 훈련 전에 확인해줘.
+이 실험을 run 전에 가설주도 형태로 정리해줘.
 ```
 
 메모리·핸드오프:
@@ -93,8 +94,9 @@ oh-my-setting 연결 해제해줘.              # 또는: 완전히 제거해줘
   이어감; task close 시 결론이 메모리로 승격.
 - **ML 가드레일** — 실험 run ledger(pre-flight `check.sh` 게이트, 중복 실행
   경고), 스캐폴딩되는 `ml_smoke.py` one-batch 계약, ML 특화 리뷰 게이트,
-  chem-bio 도메인 체크리스트(split/leakage, label, metric), 긴 로그
-  digest(`--wait`로 Slurm job 종료까지 대기), 머신/Slurm 스냅샷.
+  chem-bio 도메인 체크리스트(split/leakage, label, metric), 가설주도
+  research-method 루프(falsifiable 가설, metric 사전등록, baseline, anti-pattern
+  가드), 긴 로그 digest(`--wait`로 Slurm job 종료까지 대기), 머신/Slurm 스냅샷.
 - **프로젝트 템플릿 + doctor** — general/ml/slurm managed rule block과 모든
   agent가 같은 규칙을 보는지 검증하는 doctor.
 

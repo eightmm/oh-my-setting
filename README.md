@@ -62,6 +62,7 @@ Launch this training run through the run ledger, note "lr sweep".
 Show the last 10 ledger entries.
 Wait for Slurm job 12345 to finish, then digest it and report.
 Check this molecular dataset's split for leakage before I train.
+Frame this as a hypothesis-driven experiment before I launch the run.
 ```
 
 Memory and handoff:
@@ -97,8 +98,9 @@ Unlink oh-my-setting.                        # or: uninstall it completely
 - **ML guardrails** — experiment run ledger with a pre-flight `check.sh` gate
   and duplicate-run warning, scaffolded `ml_smoke.py` one-batch contract,
   ML-aware review gate, chem-bio domain checklist (splitting/leakage, labels,
-  metrics), long-log digester (`--wait` blocks until a Slurm job finishes),
-  machine/Slurm snapshots.
+  metrics), hypothesis-driven research-method loop (falsifiable hypothesis,
+  pre-registered metric, baseline, anti-pattern guard), long-log digester
+  (`--wait` blocks until a Slurm job finishes), machine/Slurm snapshots.
 - **Project templates + doctor** — managed rule blocks for general/ml/slurm
   projects and a doctor that verifies every agent sees the same rules.
 

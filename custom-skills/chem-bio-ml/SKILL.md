@@ -77,3 +77,5 @@ Before launching training or a Slurm job, confirm: dedup done, split policy
 written and domain-appropriate, label units/direction verified, metric chosen
 for the imbalance, baseline defined. Run the ML review gate
 (`multi-agent-review --ml`) when the change touches data, split, loss, or metric.
+For experiment design and what a result means, load `research-method`; this
+skill only governs domain correctness.

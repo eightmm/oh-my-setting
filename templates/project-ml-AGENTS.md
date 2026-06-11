@@ -60,6 +60,8 @@
   instead of restating defaults here.
 - For molecular/protein data, load the `chem-bio-ml` skill before deciding
   splits, labels, metrics, or featurization (leakage is silent here).
+- For experiment design and result interpretation, load the `research-method`
+  skill: falsifiable hypothesis, pre-registered metric, baseline, ledgered result.
 - Use `uv` for Python envs: `uv sync`, `uv add`, `uv run`.
 - Keep project env local at `.venv`; do not use global Python/pip unless confirmed.
 - Read machine specs from `~/.oh-my-setting/local/machine.md` when compute affects behavior.

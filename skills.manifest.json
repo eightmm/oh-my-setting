@@ -65,6 +65,12 @@
       "source": "custom-skills/chem-bio-ml",
       "enabled": true,
       "reason": "Domain guardrails for molecule/protein ML: splitting/leakage, label semantics, metrics, and featurization conventions."
+    },
+    {
+      "name": "research-method",
+      "source": "custom-skills/research-method",
+      "enabled": true,
+      "reason": "Hypothesis-driven experiment loop: falsifiable hypothesis, pre-registered metric, baseline, ledger-recorded result, anti-pattern guard."
     }
   ]
 }
