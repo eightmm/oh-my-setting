@@ -881,9 +881,18 @@ test_multi_agent_ask_hypothesis_preset() {
   if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
     --repo "$project" --artifact-dir "$artifact_dir" --providers codex --hypothesis \
     >/dev/null 2>"$project/herr"; then
-    fail "--hypothesis without --prompt should fail"
+    fail "--hypothesis without a prompt should fail"
   fi
-  assert_file_contains "$project/herr" "needs --prompt"
+  assert_file_contains "$project/herr" "needs a prompt"
+
+  # A positional prompt also satisfies --hypothesis (same PROMPT slot).
+  local pos="$TMP/ask-hypothesis-pos"
+  mkdir -p "$pos"
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$pos" --artifact-dir "$pos/artifacts" --providers codex --hypothesis \
+    "Hypothesis: x improves M. Plan: one subset run." >/dev/null ||
+    fail "--hypothesis with a positional prompt should run"
+  assert_one_artifact_contains "$pos/artifacts" 'codex-*.md' 'pre-registration design review'
 }
 
 test_multi_agent_ask_dry_run_no_repo() {

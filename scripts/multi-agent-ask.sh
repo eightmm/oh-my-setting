@@ -39,7 +39,8 @@ Options:
                        attack-the-design checklist (falsifiability, confounds,
                        baseline fairness, split/leakage, metric fit, variance)
                        into every advisor prompt. Pass the hypothesis and the
-                       planned experiment as --prompt. Use before expensive runs.
+                       planned experiment as the prompt (--prompt or positional).
+                       Use before expensive runs.
   --repo PATH          Git repo for optional context. Default: current directory.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
   --artifact-dir PATH  Artifact directory. Default: PWD/.oms/artifacts/ask.
@@ -191,7 +192,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
-  fail "--hypothesis needs --prompt with the hypothesis and the planned experiment"
+  fail "--hypothesis needs a prompt (--prompt or positional) with the hypothesis and the planned experiment"
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
