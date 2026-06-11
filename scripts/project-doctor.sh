@@ -174,8 +174,18 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
   fi
 
   # Structure drift (warn-level): the layout the ml rules promise must still
-  # hold mid-project, not only at scaffold time.
-  stray_py="$(find "$PROJECT_DIR" -maxdepth 1 -name '*.py' -type f ! -name 'setup.py' -printf '%f ' 2>/dev/null || true)"
+  # hold mid-project, not only at scaffold time. POSIX find/-print only —
+  # GNU-only primaries would silently skip the checks on BSD/macOS.
+  rel_names() {
+    while IFS= read -r p; do
+      printf '%s ' "${p#"$PROJECT_DIR"/}"
+    done
+  }
+
+  stray_py="$(find "$PROJECT_DIR" -maxdepth 1 -type f -name '*.py' \
+      ! -name 'setup.py' ! -name 'conftest.py' ! -name 'noxfile.py' \
+      ! -name 'tasks.py' ! -name 'dodo.py' \
+      -print 2>/dev/null | rel_names)" || stray_py=""
   if [ -n "$stray_py" ]; then
     warn "top-level python files (move into src/ or scripts/): $stray_py"
   else
@@ -184,9 +194,11 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
 
   stray_md="$(find "$PROJECT_DIR" -maxdepth 2 \( \
       -name '.git' -o -name '.venv' -o -name 'node_modules' -o -name 'docs' \
-    \) -prune -o -name '*.md' -type f \
+    \) -prune -o -type f -name '*.md' \
       ! -name 'README*.md' ! -name 'AGENTS.md' ! -name 'CLAUDE.md' ! -name 'PROJECT.md' \
-      -printf '%P ' 2>/dev/null || true)"
+      ! -name 'CONTRIBUTING.md' ! -name 'CHANGELOG.md' ! -name 'LICENSE.md' \
+      ! -name 'SECURITY.md' ! -name 'CODE_OF_CONDUCT.md' \
+      -print 2>/dev/null | rel_names)" || stray_md=""
   if [ -n "$stray_md" ]; then
     warn "markdown outside docs/ (move there): $stray_md"
   else
@@ -195,7 +207,8 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
 
   stray_nb="$(find "$PROJECT_DIR" -maxdepth 3 \( \
       -name '.git' -o -name '.venv' -o -name 'node_modules' -o -name 'notebooks' \
-    \) -prune -o -name '*.ipynb' -type f -printf '%P ' 2>/dev/null || true)"
+    \) -prune -o -type f -name '*.ipynb' \
+      -print 2>/dev/null | rel_names)" || stray_nb=""
   if [ -n "$stray_nb" ]; then
     warn "notebooks outside notebooks/ (move there): $stray_nb"
   else
@@ -207,18 +220,43 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
   fi
 
   if git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    tracked_ignored="$(git -C "$PROJECT_DIR" ls-files -- data outputs checkpoints wandb runs 2>/dev/null | head -3 || true)"
+    # Placeholder files (.gitkeep/.gitignore) are legitimate inside these dirs.
+    tracked_ignored="$(git -C "$PROJECT_DIR" ls-files -- data outputs checkpoints wandb runs 2>/dev/null |
+      grep -Ev '(^|/)\.git(keep|ignore)$' | head -3)" || tracked_ignored=""
     if [ -n "$tracked_ignored" ]; then
       warn "tracked files inside gitignored dirs (committed before ignore?): $(printf '%s' "$tracked_ignored" | tr '\n' ' ')"
     else
       ok "no tracked files inside data/outputs/checkpoints/wandb/runs"
     fi
 
-    big_tracked="$(git -C "$PROJECT_DIR" ls-files -z 2>/dev/null |
-      (cd "$PROJECT_DIR" && xargs -0 du -b 2>/dev/null || true) |
-      awk '$1 > 10*1024*1024 { print $2 }' | head -3 || true)"
+    # Big-file scan: plain bash loop — no xargs (empty input must scan
+    # nothing), no du (GNU-only, and directory totals would flag submodules),
+    # filenames with spaces/newlines preserved via -z. Bounded for monorepos.
+    big_tracked=""
+    big_count=0
+    scanned=0
+    max_scan="${OMS_DOCTOR_MAX_SCAN:-2000}"
+    while IFS= read -r -d '' p; do
+      scanned=$((scanned + 1))
+      if [ "$scanned" -gt "$max_scan" ]; then
+        warn "big-file scan stopped at $max_scan tracked files (OMS_DOCTOR_MAX_SCAN)"
+        break
+      fi
+      f="$PROJECT_DIR/$p"
+      if [ ! -f "$f" ]; then
+        continue
+      fi
+      sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')" || continue
+      if [ "${sz:-0}" -gt 10485760 ]; then
+        big_tracked="$big_tracked$p "
+        big_count=$((big_count + 1))
+        if [ "$big_count" -ge 3 ]; then
+          break
+        fi
+      fi
+    done < <(git -C "$PROJECT_DIR" ls-files -z 2>/dev/null || true)
     if [ -n "$big_tracked" ]; then
-      warn "tracked files over 10MB (data/checkpoints belong outside git): $(printf '%s' "$big_tracked" | tr '\n' ' ')"
+      warn "tracked files over 10MB (data/checkpoints belong outside git): $big_tracked"
     fi
   fi
 fi

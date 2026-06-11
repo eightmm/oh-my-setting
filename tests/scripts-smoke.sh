@@ -168,18 +168,27 @@ test_project_doctor_warns_structure_drift() {
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
   git -C "$project" init >/dev/null
 
+  # Exempt files and an empty index with big UNTRACKED data must stay quiet.
+  printf 'import pytest\n' > "$project/conftest.py"
+  printf '# changelog\n' > "$project/CHANGELOG.md"
+  mkdir -p "$project/data"
+  printf '' > "$project/data/.gitkeep"
+  git -C "$project" add -f data/.gitkeep >/dev/null
+  dd if=/dev/zero of="$project/data/huge-untracked.bin" bs=1 count=0 seek=20971520 2>/dev/null
+
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "clean scaffold should pass doctor"
-  if printf '%s' "$out" | grep -Eq "move into src/|move there"; then
-    fail "clean scaffold must not raise structure drift warnings"
+  if printf '%s' "$out" | grep -Eq "move into src/|move there|over 10MB|gitignored dirs"; then
+    fail "exempt files / untracked data must not raise drift warnings: $out"
   fi
 
   printf 'x = 1\n' > "$project/train_root.py"
   printf '# notes\n' > "$project/NOTES.md"
   printf '{}\n' > "$project/exp.ipynb"
   printf '[project]\nname = "x"\n' > "$project/pyproject.toml"
-  mkdir -p "$project/data"
   printf 'a,b\n' > "$project/data/x.csv"
   git -C "$project" add -f data/x.csv >/dev/null
+  dd if=/dev/zero of="$project/big model.ckpt" bs=1 count=0 seek=11534336 2>/dev/null
+  git -C "$project" add -f "big model.ckpt" >/dev/null
 
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "structure drift must warn, not fail"
@@ -188,6 +197,8 @@ test_project_doctor_warns_structure_drift() {
   printf '%s' "$out" | grep -Fq 'exp.ipynb' || fail "missing notebook warning"
   printf '%s' "$out" | grep -Fq 'src/ layout' || fail "missing src layout warning"
   printf '%s' "$out" | grep -Fq 'gitignored dirs' || fail "missing tracked-in-ignored warning"
+  printf '%s' "$out" | grep -Fq 'big model.ckpt' ||
+    fail "missing over-10MB warning (filename with space must survive)"
 }
 
 test_job_digest_log_mode() {
