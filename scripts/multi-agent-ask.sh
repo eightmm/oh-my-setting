@@ -22,6 +22,7 @@ INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 DEBATE=0
+HYPOTHESIS_PRESET=0
 DRY_RUN="${OH_MY_SETTING_ASK_DRY_RUN:-0}"
 
 usage() {
@@ -34,6 +35,11 @@ attached unless requested.
 
 Options:
   --prompt TEXT        Question/task. Required.
+  --hypothesis         Pre-registration design review: inject an
+                       attack-the-design checklist (falsifiability, confounds,
+                       baseline fairness, split/leakage, metric fit, variance)
+                       into every advisor prompt. Pass the hypothesis and the
+                       planned experiment as --prompt. Use before expensive runs.
   --repo PATH          Git repo for optional context. Default: current directory.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
   --artifact-dir PATH  Artifact directory. Default: PWD/.oms/artifacts/ask.
@@ -69,6 +75,19 @@ write_prompt() {
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Prefer concrete reasoning, tradeoffs, assumptions, and actionable recommendations.\n'
     printf 'If the question is underspecified, state the key assumptions and what would change the answer.\n\n'
+    if [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
+      printf 'This is a pre-registration design review. Attack the hypothesis and the\n'
+      printf 'experiment design before compute is spent. Check each item:\n'
+      printf -- '- Falsifiability: what concrete observation would disprove this? If none, say so.\n'
+      printf -- '- Smallest test: is there a cheaper experiment answering the same question?\n'
+      printf -- '- Single variable: which variables move together? Name the confounds.\n'
+      printf -- '- Baseline fairness: is the comparison against a tuned baseline on the same data and split?\n'
+      printf -- '- Split/leakage: does the evaluation split actually test the claimed generalization?\n'
+      printf -- '- Metric fit: does the metric measure the claim? What result would game it?\n'
+      printf -- '- Variance: can one seed/run distinguish the effect from noise? How many runs are needed?\n'
+      printf -- '- Prediction: is the expected direction and effect size stated BEFORE the run?\n'
+      printf 'Rank "this experiment cannot falsify the hypothesis" as the most severe finding.\n\n'
+    fi
     ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
     printf 'Question:\n%s\n\n' "$question"
     if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
@@ -113,6 +132,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--artifact-dir requires path"
       ARTIFACT_DIR="$2"
       shift 2
+      ;;
+    --hypothesis)
+      HYPOTHESIS_PRESET=1
+      shift
       ;;
     --repo-context)
       INCLUDE_STATUS=1
@@ -167,6 +190,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
+  fail "--hypothesis needs --prompt with the hypothesis and the planned experiment"
+fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
   REPO="$(cd "$REPO" && pwd)"

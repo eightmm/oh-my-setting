@@ -74,3 +74,9 @@ Do not launch a long/expensive run until question, falsifiable hypothesis,
 predicted outcome, single variable, baseline, and pre-registered success bar
 are all stated. If a result is being interpreted after the fact, check it
 against the anti-patterns above before acting on it.
+
+For a high-stakes run, have three models attack the design first:
+`multi-agent-ask.sh --hypothesis --prompt "<hypothesis + planned experiment>"`
+injects the falsifiability/confound/baseline/variance checklist into each
+advisor. It is the design-time counterpart to `multi-agent-review --ml`
+(which gates the diff at code time).

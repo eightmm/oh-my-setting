@@ -64,6 +64,7 @@ Show the last 10 ledger entries.
 Wait for Slurm job 12345 to finish, then digest it and report.
 Check this molecular dataset's split for leakage before I train.
 Frame this as a hypothesis-driven experiment before I launch the run.
+Have all three models attack this hypothesis and experiment design before I train.
 ```
 
 Memory and handoff:

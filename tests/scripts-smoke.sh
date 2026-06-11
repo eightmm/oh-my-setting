@@ -252,6 +252,21 @@ test_review_verdicts_subcommand() {
   if "$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/empty" >/dev/null 2>&1; then
     fail "empty dir should exit nonzero"
   fi
+
+  # Debate runs: judge each provider's FINAL round, not round 1; a slug that
+  # contains "-r9" must not be parsed as a round suffix.
+  mkdir -p "$dir/debate"
+  printf '# c\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' > "$dir/debate/codex-x-$run.md"
+  printf '# c\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' > "$dir/debate/codex-x-$run-r2.md"
+  printf '# c\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' > "$dir/debate/claude-x-$run.md"
+  printf '# c\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' > "$dir/debate/claude-x-$run-r1.md"
+  printf '# c\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' > "$dir/debate/antigravity-fix-r9-thing-$run.md"
+
+  out="$("$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/debate")" && rc=0 || rc=$?
+  [ "$rc" = "1" ] || fail "debate run with a final-round fail should exit 1, got $rc"
+  printf '%s' "$out" | grep -Fq 'codex: pass' || fail "codex must be judged on final round (r2 pass)"
+  printf '%s' "$out" | grep -Fq 'claude: fail' || fail "claude must be judged on final round (r1 fail)"
+  printf '%s' "$out" | grep -Fq 'antigravity: pass' || fail "slug containing -r9 must be treated as base artifact"
 }
 
 test_job_digest_log_mode() {
@@ -846,6 +861,30 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-review-failing-provider-*.md' '## Exit'
 }
 
+
+test_multi_agent_ask_hypothesis_preset() {
+  local project="$TMP/ask-hypothesis"
+  local artifact_dir="$project/artifacts"
+
+  mkdir -p "$project"
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --hypothesis \
+    --prompt "Hypothesis: scaffold split drops Pearson by 0.1 vs random. Plan: one seed, subset run." >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'pre-registration design review'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'Falsifiability'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'cannot falsify the hypothesis'
+
+  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --providers codex --hypothesis \
+    >/dev/null 2>"$project/herr"; then
+    fail "--hypothesis without --prompt should fail"
+  fi
+  assert_file_contains "$project/herr" "needs --prompt"
+}
 
 test_multi_agent_ask_dry_run_no_repo() {
   local project="$TMP/ask-no-repo"
@@ -1802,6 +1841,7 @@ test_multi_agent_review_secret_diff_skips_external
 test_multi_agent_review_no_diff_provider_subset
 test_multi_agent_review_rejects_unknown_provider
 test_multi_agent_review_single_provider_failure_exits
+test_multi_agent_ask_hypothesis_preset
 test_multi_agent_ask_dry_run_no_repo
 test_multi_agent_ask_repo_context_subset
 test_multi_agent_ask_secret_diff_skips_external
