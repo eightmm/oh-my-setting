@@ -366,11 +366,11 @@ test_run_ledger_warns_sensitive_command() {
   local project="$TMP/run-ledger-sensitive"
   make_committed_repo "$project"
 
-  # Absolute /home path in the command must warn (recorded in git-tracked
+  # Absolute /home path in the command argv must warn (recorded in git-tracked
   # ledger) but must not block the run.
-  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --note "train on /hom""e/u/secret" \
-    -- bash -c 'exit 0' >/dev/null 2>"$project/serr") ||
-    fail "sensitive note must warn, not block the run"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --note "lr sweep" \
+    -- bash -c 'true /hom''e/u/secret' >/dev/null 2>"$project/serr") ||
+    fail "sensitive command must warn, not block the run"
   assert_file_contains "$project/serr" "looks sensitive"
   [ -s "$project/docs/EXPERIMENTS.jsonl" ] || fail "run should still be recorded"
 
@@ -490,15 +490,16 @@ test_github_source_profile_discover_and_fetch() {
   assert_file_contains "$project/overwrite-err" "target exists"
 
   # A symlink target must be refused even with --force (open(wb) would follow
-  # it and write outside the intended path).
-  ln -s /tmp/oms-should-not-be-written "$project/linktarget.py"
+  # it and write outside the intended path). Keep the link target under $TMP.
+  local linkdest="$project/should-not-be-written"
+  ln -s "$linkdest" "$project/linktarget.py"
   if (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" fetch \
     --repo octo-user/flowfrag --path flowfrag/equivariant.py \
     --target linktarget.py --force >/dev/null 2>"$project/symlink-err"); then
     fail "github-source fetch must refuse a symlink target"
   fi
   assert_file_contains "$project/symlink-err" "symlink"
-  [ ! -e /tmp/oms-should-not-be-written ] || { rm -f /tmp/oms-should-not-be-written; fail "fetch wrote through the symlink"; }
+  [ ! -e "$linkdest" ] || fail "fetch wrote through the symlink"
 }
 
 test_code_source_registry_fetches_registered_source() {
