@@ -7,6 +7,7 @@ set -euo pipefail
 
 LEDGER=""
 NOTE=""
+METRICS_FILE=""
 GATE="${OMS_RUN_LEDGER_GATE:-1}"
 
 usage() {
@@ -23,10 +24,12 @@ else fast) and a failing gate aborts the launch. Identical earlier runs
 (same commit, same diff hash, same command) produce a warning.
 
 Options:
-  --note TEXT   Free-text note recorded with the run.
-  --file PATH   Ledger path. Default: docs/EXPERIMENTS.jsonl.
-  --no-gate     Skip the pre-flight scripts/check.sh gate.
-  -h, --help    Show this help.
+  --note TEXT     Free-text note recorded with the run.
+  --file PATH     Ledger path. Default: docs/EXPERIMENTS.jsonl.
+  --metrics PATH  After the run, fold scalar fields from this JSON file into
+                  the row's "metrics" so eval results are part of the record.
+  --no-gate       Skip the pre-flight scripts/check.sh gate.
+  -h, --help      Show this help.
 
 list [N]        Show the last N ledger rows (default 10).
 
@@ -62,9 +65,11 @@ for line in sys.stdin:
     r = json.loads(line)
     dirty = "+dirty" if r["dirty"] else ""
     note = ("  # " + r["note"]) if r.get("note") else ""
-    print("%s  exit=%d  %ds  sha=%s%s  %s%s" % (
+    m = r.get("metrics") or {}
+    metrics = ("  [" + " ".join("%s=%s" % (k, v) for k, v in m.items()) + "]") if m else ""
+    print("%s  exit=%d  %ds  sha=%s%s  %s%s%s" % (
         r["ts"], r["exit"], r["duration_s"], r["git_sha"], dirty,
-        " ".join(r["cmd"]), note))
+        " ".join(r["cmd"]), metrics, note))
 '
   exit 0
 fi
@@ -79,6 +84,11 @@ while [ "$#" -gt 0 ]; do
     --file)
       [ "$#" -ge 2 ] || fail "--file requires path"
       LEDGER="$2"
+      shift 2
+      ;;
+    --metrics)
+      [ "$#" -ge 2 ] || fail "--metrics requires path"
+      METRICS_FILE="$2"
       shift 2
       ;;
     --no-gate)
@@ -177,9 +187,9 @@ set -e
 
 duration_s=$(( $(date +%s) - start_s ))
 
-python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
+OMS_METRICS_FILE="$METRICS_FILE" python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
   "$status" "$duration_s" "$NOTE" "$@" <<'EOF' >> "$LEDGER"
-import json, sys
+import json, os, sys
 a = sys.argv[1:]
 row = {
     "ts": a[0],
@@ -192,6 +202,22 @@ row = {
     "note": a[7],
     "cmd": a[8:],
 }
+mf = os.environ.get("OMS_METRICS_FILE", "")
+if mf:
+    try:
+        with open(mf) as f:
+            data = json.load(f)
+    except Exception as e:
+        sys.stderr.write("ledger: metrics file unreadable (%s); row recorded without metrics\n" % e)
+    else:
+        if isinstance(data, dict):
+            # Scalars only: a ledger row is a summary, not a payload dump.
+            metrics = {k: v for k, v in data.items()
+                       if isinstance(v, (int, float, str, bool))}
+            if metrics:
+                row["metrics"] = metrics
+        else:
+            sys.stderr.write("ledger: metrics file is not a JSON object; ignored\n")
 print(json.dumps(row, ensure_ascii=False))
 EOF
 

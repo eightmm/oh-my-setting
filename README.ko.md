@@ -57,6 +57,7 @@ codex에게 위임해줘: scripts/train.py에 입력 검증 추가.
 
 ```text
 이 훈련을 run ledger 통해서 실행해줘, note는 "lr sweep".
+이 eval의 metrics.json을 ledger row에 기록해줘.
 최근 ledger 10개 보여줘.
 Slurm job 12345 끝날 때까지 기다렸다가 digest해서 보고해줘.
 이 분자 데이터셋 split에 leakage 없는지 훈련 전에 확인해줘.

@@ -59,6 +59,7 @@ Experiments (ML):
 
 ```text
 Launch this training run through the run ledger, note "lr sweep".
+Record this eval's metrics.json into the ledger row.
 Show the last 10 ledger entries.
 Wait for Slurm job 12345 to finish, then digest it and report.
 Check this molecular dataset's split for leakage before I train.

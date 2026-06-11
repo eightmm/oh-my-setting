@@ -62,6 +62,9 @@ Deciding the bar after seeing results is how noise becomes a "finding."
 
 - Keep negative and null results; they prune the search space and prevent
   re-running dead ends. The ledger is the lab notebook.
+- Record the outcome metric in the same row: have the run write a small JSON
+  of scalar metrics and pass it as `run-ledger.sh --metrics <file>`, so the
+  hypothesis's number lives with its command and commit.
 - A result without its config, seed, data version, and commit is not a result.
 - When a run overturns a prior conclusion, note which ledger row it supersedes.
 

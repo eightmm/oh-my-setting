@@ -232,6 +232,29 @@ test_run_ledger_records_and_lists() {
   printf '%s' "$out" | grep -Fq 'exit=3' || fail "ledger list missing failed run"
 }
 
+test_run_ledger_records_metrics() {
+  local project="$TMP/run-ledger-metrics"
+  make_committed_repo "$project"
+
+  printf '{"pearson": 0.71, "rmse": 0.83, "split": "scaffold", "note_obj": {"x": 1}}\n' \
+    > "$project/metrics.json"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics metrics.json -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "metrics run should exit 0"
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"metrics"'
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"pearson": 0.71'
+  # Nested objects are not scalars and must be dropped.
+  if grep -Fq 'note_obj' "$project/docs/EXPERIMENTS.jsonl"; then
+    fail "non-scalar metric fields must be dropped"
+  fi
+  out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 1)"
+  printf '%s' "$out" | grep -Fq 'pearson=0.71' || fail "ledger list should show metrics"
+
+  # A missing metrics file must not fail the run.
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics nope.json -- bash -c 'exit 0' >/dev/null 2>"$project/merr") ||
+    fail "missing metrics file should not fail the run"
+  assert_file_contains "$project/merr" "row recorded without metrics"
+}
+
 test_delegate_auto_verify_uses_check_contract() {
   local project="$TMP/delegate-auto-verify"
   local artifact_dir="$project/artifacts"
@@ -1612,6 +1635,7 @@ test_project_doctor_warns_missing_check
 test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty
 test_run_ledger_records_and_lists
+test_run_ledger_records_metrics
 test_delegate_auto_verify_uses_check_contract
 test_project_doctor_ok_after_apply
 test_project_doctor_detects_drift
