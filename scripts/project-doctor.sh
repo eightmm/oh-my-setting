@@ -221,8 +221,10 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
 
   if git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     # Placeholder files (.gitkeep/.gitignore) are legitimate inside these dirs.
+    # "|| true" INSIDE the substitution: head's early exit SIGPIPEs the
+    # upstream under pipefail, and an outer fallback would wipe the output.
     tracked_ignored="$(git -C "$PROJECT_DIR" ls-files -- data outputs checkpoints wandb runs 2>/dev/null |
-      grep -Ev '(^|/)\.git(keep|ignore)$' | head -3)" || tracked_ignored=""
+      grep -Ev '(^|/)\.git(keep|ignore)$' | head -3 || true)"
     if [ -n "$tracked_ignored" ]; then
       warn "tracked files inside gitignored dirs (committed before ignore?): $(printf '%s' "$tracked_ignored" | tr '\n' ' ')"
     else
@@ -243,8 +245,8 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
         break
       fi
       f="$PROJECT_DIR/$p"
-      if [ ! -f "$f" ]; then
-        continue
+      if [ -L "$f" ] || [ ! -f "$f" ]; then
+        continue  # symlinks would be measured by their target; skip
       fi
       sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')" || continue
       if [ "${sz:-0}" -gt 10485760 ]; then
