@@ -215,6 +215,9 @@ for it in items:
     [ -n "$REPO" ] || fail "--repo is required for fetch"
     [ -n "$PATH_IN_REPO" ] || fail "--path is required for fetch"
     [ -n "$TARGET" ] || fail "--target is required for fetch"
+    # Refuse symlinks even with --force: open(wb) would follow the link and
+    # write outside the intended path. -L catches broken symlinks that -e misses.
+    [ ! -L "$TARGET" ] || fail "target is a symlink; refusing to write through it: $TARGET"
     [ "$FORCE" -eq 1 ] || [ ! -e "$TARGET" ] || fail "target exists (use --force): $TARGET"
     PROVENANCE="${PROVENANCE:-.oms/code-sources.jsonl}"
     repo_json="$(mktemp)"
@@ -247,7 +250,9 @@ for it in items:
 import base64, json, sys
 src, target = sys.argv[1], sys.argv[2]
 data = json.load(open(src))
-if data.get("encoding") != "base64" or "content" not in data:
+if isinstance(data, list):
+    raise SystemExit("error: --path is a directory, not a file; give a file path")
+if not isinstance(data, dict) or data.get("encoding") != "base64" or "content" not in data:
     raise SystemExit("error: GitHub content response is not a base64 file")
 content = base64.b64decode(data["content"].encode())
 with open(target, "wb") as f:

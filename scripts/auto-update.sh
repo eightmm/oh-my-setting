@@ -196,6 +196,15 @@ if ! fetch_and_compare "$remote" "$remote_ref" "$upstream" >/dev/null; then
   exit 0
 fi
 
+# Re-check dirtiness right before pulling: edits may have landed since the
+# earlier check, and --ff-only still updates a non-conflicting dirty tree.
+if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+  local_commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  write_state skipped "tree became dirty before pull; auto-apply skipped" "$local_commit" "" "$upstream"
+  echo "auto-update: skipped (tree became dirty)"
+  exit 0
+fi
+
 old="$(git -C "$ROOT" rev-parse --short HEAD)"
 git -C "$ROOT" pull --ff-only
 new="$(git -C "$ROOT" rev-parse --short HEAD)"

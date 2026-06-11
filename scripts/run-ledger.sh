@@ -184,6 +184,16 @@ if [ "$GATE" = "1" ] && [ -x scripts/check.sh ]; then
   fi
 fi
 
+# The note and command line are written verbatim to the git-tracked ledger.
+# Warn (do not block — absolute paths are common and legitimate locally) when
+# they look sensitive, so secrets are not committed unnoticed.
+ledger_scan="$(mktemp)" || fail "mktemp failed"
+trap 'rm -f "$ledger_scan"' EXIT
+printf '%s\n%s\n' "$NOTE" "$*" > "$ledger_scan"
+if agent_memory_file_has_sensitive_content "$ledger_scan"; then
+  echo "warning: ledger note/command looks sensitive; it is recorded in git-tracked $LEDGER" >&2
+fi
+
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 start_s="$(date +%s)"
 

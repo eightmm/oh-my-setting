@@ -95,7 +95,7 @@ Description=oh-my-setting auto-update
 
 [Service]
 Type=oneshot
-ExecStart=$ROOT/scripts/auto-update.sh $MODE
+ExecStart="$ROOT/scripts/auto-update.sh" $MODE
 EOF
   cat > "$TIMER_FILE" <<'EOF'
 [Unit]

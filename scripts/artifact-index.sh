@@ -81,7 +81,10 @@ if [ "$ACTION" = "prune" ]; then
     exit 0
   fi
   tmp="$(mktemp)" || fail "mktemp failed"
-  tail -n "$LIMIT" "$INDEX_FILE" > "$tmp" && mv "$tmp" "$INDEX_FILE"
+  trap 'rm -f "$tmp"' EXIT
+  # In-place overwrite (not mv) so the index keeps its inode, permissions,
+  # and any symlink the user set up.
+  tail -n "$LIMIT" "$INDEX_FILE" > "$tmp" && cat "$tmp" > "$INDEX_FILE"
   echo "artifact-index: pruned $before -> $LIMIT rows"
   exit 0
 fi
