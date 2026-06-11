@@ -255,6 +255,51 @@ test_run_ledger_records_metrics() {
   assert_file_contains "$project/merr" "row recorded without metrics"
 }
 
+test_run_ledger_metrics_sanitizes() {
+  local project="$TMP/run-ledger-metrics-clean"
+  make_committed_repo "$project"
+  local ledger="$project/docs/EXPERIMENTS.jsonl"
+
+  # NaN/Infinity must be dropped so the row stays RFC-valid JSON.
+  printf '{"good": 0.5, "bad": NaN, "worse": Infinity}\n' > "$project/m1.json"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics m1.json -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "nan/inf metrics run should still succeed"
+  tail -n1 "$ledger" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' ||
+    fail "ledger row with nan/inf source must remain valid JSON"
+  tail -n1 "$ledger" | grep -Fq '"good": 0.5' || fail "finite metric should survive"
+  if tail -n1 "$ledger" | grep -Eq 'NaN|Infinity'; then
+    fail "non-finite floats must be dropped"
+  fi
+
+  # Control chars in string values must be stripped (no row-splitting).
+  printf '{"label": "a\\nb\\tc"}\n' > "$project/m2.json"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics m2.json -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "control-char metrics run should succeed"
+  [ "$(wc -l < "$ledger")" = "2" ] || fail "control chars must not split the ledger row"
+
+  # Sensitive-looking metric values must keep the row but drop metrics.
+  printf '{"path": "%s/u/secret.pt"}\n' "/hom""e" > "$project/m3.json"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics m3.json -- bash -c 'exit 0' >/dev/null 2>"$project/serr") ||
+    fail "sensitive metrics run should still record the row"
+  assert_file_contains "$project/serr" "sensitive-looking"
+  [ "$(wc -l < "$ledger")" = "3" ] || fail "row should still be recorded without metrics"
+  if tail -n1 "$ledger" | grep -Fq 'secret.pt'; then
+    fail "sensitive metric value must not reach the git-tracked ledger"
+  fi
+
+  # Oversized metrics file is skipped, row still recorded.
+  OMS_METRICS_MAX_BYTES=64 sh -c "printf '{\"k\": \"%s\"}\n' \"\$(head -c 200 < /dev/zero | tr '\\0' x)\"" > "$project/m4.json"
+  (cd "$project" && OMS_METRICS_MAX_BYTES=64 "$ROOT/scripts/run-ledger.sh" --metrics m4.json -- bash -c 'exit 0' >/dev/null 2>"$project/oerr") ||
+    fail "oversized metrics run should still record the row"
+  assert_file_contains "$project/oerr" "exceeds"
+
+  # Top-level JSON array (non-object) ignored, row recorded.
+  printf '[1, 2, 3]\n' > "$project/m5.json"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics m5.json -- bash -c 'exit 0' >/dev/null 2>"$project/aerr") ||
+    fail "array metrics run should still record the row"
+  assert_file_contains "$project/aerr" "not a JSON object"
+}
+
 test_delegate_auto_verify_uses_check_contract() {
   local project="$TMP/delegate-auto-verify"
   local artifact_dir="$project/artifacts"
@@ -1636,6 +1681,7 @@ test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty
 test_run_ledger_records_and_lists
 test_run_ledger_records_metrics
+test_run_ledger_metrics_sanitizes
 test_delegate_auto_verify_uses_check_contract
 test_project_doctor_ok_after_apply
 test_project_doctor_detects_drift

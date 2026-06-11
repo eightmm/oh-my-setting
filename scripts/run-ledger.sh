@@ -5,6 +5,10 @@ set -euo pipefail
 # timestamp, command, git SHA, dirty state, Slurm job id, exit code, duration.
 # The ledger is git-tracked agent memory: read it before proposing experiments.
 
+ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+# shellcheck source=scripts/lib/agent-memory-common.sh
+. "$ROOT_LIB/agent-memory-common.sh"
+
 LEDGER=""
 NOTE=""
 METRICS_FILE=""
@@ -66,7 +70,10 @@ for line in sys.stdin:
     dirty = "+dirty" if r["dirty"] else ""
     note = ("  # " + r["note"]) if r.get("note") else ""
     m = r.get("metrics") or {}
-    metrics = ("  [" + " ".join("%s=%s" % (k, v) for k, v in m.items()) + "]") if m else ""
+    def _clean(x):
+        s = str(x).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+        return s[:60]
+    metrics = ("  [" + " ".join("%s=%s" % (_clean(k), _clean(v)) for k, v in m.items()) + "]") if m else ""
     print("%s  exit=%d  %ds  sha=%s%s  %s%s%s" % (
         r["ts"], r["exit"], r["duration_s"], r["git_sha"], dirty,
         " ".join(r["cmd"]), metrics, note))
@@ -187,7 +194,63 @@ set -e
 
 duration_s=$(( $(date +%s) - start_s ))
 
-OMS_METRICS_FILE="$METRICS_FILE" python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
+# Sanitize metrics BEFORE building the row: finite scalars only, capped
+# count/length, control chars stripped, RFC-valid JSON. The sanitized string
+# is then secret-scrubbed (the ledger is git-tracked) and only attached if clean.
+METRICS_JSON=""
+if [ -n "$METRICS_FILE" ]; then
+  metrics_max_bytes="${OMS_METRICS_MAX_BYTES:-65536}"
+  if [ ! -f "$METRICS_FILE" ]; then
+    echo "ledger: metrics file not found; row recorded without metrics" >&2
+  elif [ "$(wc -c < "$METRICS_FILE" | tr -d ' ')" -gt "$metrics_max_bytes" ]; then
+    echo "ledger: metrics file exceeds ${metrics_max_bytes}B; row recorded without metrics" >&2
+  else
+    METRICS_JSON="$(OMS_METRICS_FILE="$METRICS_FILE" python3 <<'EOF'
+import json, math, os, sys
+mf = os.environ["OMS_METRICS_FILE"]
+try:
+    with open(mf) as f:
+        data = json.load(f)
+except Exception as e:
+    sys.stderr.write("ledger: metrics file unreadable (%s); row recorded without metrics\n" % e)
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.stderr.write("ledger: metrics file is not a JSON object; ignored\n")
+    sys.exit(0)
+MAX_KEYS = int(os.environ.get("OMS_METRICS_MAX_KEYS", "50"))
+MAX_STR = int(os.environ.get("OMS_METRICS_MAX_STR", "200"))
+out = {}
+for k, v in data.items():
+    if len(out) >= MAX_KEYS:
+        break
+    if isinstance(v, bool):
+        out[str(k)[:MAX_STR]] = v
+    elif isinstance(v, int):
+        out[str(k)[:MAX_STR]] = v
+    elif isinstance(v, float):
+        if math.isfinite(v):            # drop NaN/Inf -> RFC-valid JSON
+            out[str(k)[:MAX_STR]] = v
+    elif isinstance(v, str):
+        s = "".join(c for c in v if c >= " " and c != "\x7f")  # strip control/newline
+        out[str(k)[:MAX_STR]] = s[:MAX_STR]
+    # non-scalars dropped
+if out:
+    sys.stdout.write(json.dumps(out, ensure_ascii=False, allow_nan=False))
+EOF
+)" || METRICS_JSON=""
+    if [ -n "$METRICS_JSON" ]; then
+      ms_tmp="$(mktemp)"
+      printf '%s' "$METRICS_JSON" > "$ms_tmp"
+      if agent_memory_file_has_sensitive_content "$ms_tmp"; then
+        echo "ledger: metrics omitted because they contain sensitive-looking content" >&2
+        METRICS_JSON=""
+      fi
+      rm -f "$ms_tmp"
+    fi
+  fi
+fi
+
+OMS_METRICS_JSON="$METRICS_JSON" python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
   "$status" "$duration_s" "$NOTE" "$@" <<'EOF' >> "$LEDGER"
 import json, os, sys
 a = sys.argv[1:]
@@ -202,23 +265,10 @@ row = {
     "note": a[7],
     "cmd": a[8:],
 }
-mf = os.environ.get("OMS_METRICS_FILE", "")
-if mf:
-    try:
-        with open(mf) as f:
-            data = json.load(f)
-    except Exception as e:
-        sys.stderr.write("ledger: metrics file unreadable (%s); row recorded without metrics\n" % e)
-    else:
-        if isinstance(data, dict):
-            # Scalars only: a ledger row is a summary, not a payload dump.
-            metrics = {k: v for k, v in data.items()
-                       if isinstance(v, (int, float, str, bool))}
-            if metrics:
-                row["metrics"] = metrics
-        else:
-            sys.stderr.write("ledger: metrics file is not a JSON object; ignored\n")
-print(json.dumps(row, ensure_ascii=False))
+mj = os.environ.get("OMS_METRICS_JSON", "")
+if mj:
+    row["metrics"] = json.loads(mj)
+print(json.dumps(row, ensure_ascii=False, allow_nan=False))
 EOF
 
 echo "ledger: appended to $LEDGER (exit $status, ${duration_s}s)" >&2
