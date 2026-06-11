@@ -202,6 +202,16 @@ project_content() {
   printf '## Verification\n\n'
   printf -- '- Success criteria:\n'
   printf -- '- Required checks:\n\n'
+  if [ "$style" = "ml" ]; then
+    printf '## Experiment Pre-Registration\n\n'
+    printf 'Fill BEFORE each long/expensive run; see the research-method skill.\n\n'
+    printf -- '- Hypothesis (falsifiable):\n'
+    printf -- '- Metric + split:\n'
+    printf -- '- Success threshold (delta vs baseline):\n'
+    printf -- '- Baseline:\n'
+    printf -- '- Predicted outcome:\n'
+    printf -- '- Abandon condition:\n\n'
+  fi
   if [ "$add_slurm" = "1" ]; then
     printf '## Slurm\n\n'
     printf -- '- Partition/account:\n'

@@ -37,7 +37,9 @@ that decides what to run and what a result means.
 
 ## Pre-Register
 
-Before a long or expensive run, fix in PROJECT.md (or the task packet):
+Before a long or expensive run, fill the `## Experiment Pre-Registration`
+section in PROJECT.md (scaffolded on ml projects; the project doctor warns
+when the ledger has runs but the section is missing):
 
 - the metric and its split (domain-appropriate — see `chem-bio-ml`),
 - the success threshold (the δ that would count as real),

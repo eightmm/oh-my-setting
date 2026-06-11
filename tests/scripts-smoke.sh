@@ -218,6 +218,28 @@ test_project_doctor_warns_structure_drift() {
   fi
 }
 
+test_project_doctor_warns_unregistered_experiments() {
+  local project="$TMP/doctor-prereg"
+
+  mkdir -p "$project"
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+  git -C "$project" init >/dev/null
+
+  # Fresh ml scaffold has the section and no ledger: quiet.
+  assert_file_contains "$project/PROJECT.md" '## Experiment Pre-Registration'
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "fresh scaffold should pass"
+  if printf '%s' "$out" | grep -q 'no .## Experiment Pre-Registration'; then
+    fail "scaffolded section present: must not warn"
+  fi
+
+  # Ledger rows + PROJECT.md without the section (legacy project): warn.
+  sed -i '/^## Experiment Pre-Registration/,/^## Slurm\|^## Notes/{/^## Slurm\|^## Notes/!d}' "$project/PROJECT.md"
+  printf '{"ts":"2026-06-11T00:00:00Z","exit":0}\n' > "$project/docs/EXPERIMENTS.jsonl"
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "missing pre-reg should warn, not fail"
+  printf '%s' "$out" | grep -q 'Experiment Pre-Registration' ||
+    fail "ledger without pre-registration section must warn"
+}
+
 test_review_verdicts_subcommand() {
   local dir="$TMP/verdicts"
   local run="20260611T000000Z-42"
@@ -1819,6 +1841,7 @@ test_apply_ml_scaffolds_gitignore
 test_apply_ml_scaffolds_check_contract
 test_project_doctor_warns_missing_check
 test_project_doctor_warns_structure_drift
+test_project_doctor_warns_unregistered_experiments
 test_review_verdicts_subcommand
 test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty

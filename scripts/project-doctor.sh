@@ -219,6 +219,13 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
     warn "pyproject.toml without src/ layout; ml rules expect src/<package>/"
   fi
 
+  # Experiments are running (ledger has rows) but nothing is pre-registered:
+  # exactly when the research-method discipline starts to matter.
+  if [ -s "$PROJECT_DIR/docs/EXPERIMENTS.jsonl" ] && [ -f "$PROJECT_DIR/PROJECT.md" ] &&
+    ! grep -q '^## Experiment Pre-Registration' "$PROJECT_DIR/PROJECT.md"; then
+    warn "experiments in the ledger but PROJECT.md has no '## Experiment Pre-Registration' section (see research-method skill)"
+  fi
+
   if git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     # Placeholder files (.gitkeep/.gitignore) are legitimate inside these dirs.
     # "|| true" INSIDE the substitution: head's early exit SIGPIPEs the
