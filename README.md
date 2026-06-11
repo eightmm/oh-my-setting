@@ -103,7 +103,9 @@ Unlink oh-my-setting.                        # or: uninstall it completely
   pre-registered metric, baseline, anti-pattern guard), long-log digester
   (`--wait` blocks until a Slurm job finishes), machine/Slurm snapshots.
 - **Project templates + doctor** — managed rule blocks for general/ml/slurm
-  projects and a doctor that verifies every agent sees the same rules.
+  projects and a doctor that verifies every agent sees the same rules and
+  warns on ML structure drift (stray root files, markdown outside `docs/`,
+  notebooks outside `notebooks/`, missing `src/` layout, tracked data files).
 
 ## Notes
 

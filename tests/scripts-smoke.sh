@@ -161,6 +161,35 @@ test_project_doctor_warns_missing_check() {
     fail "doctor should warn about missing check.sh"
 }
 
+test_project_doctor_warns_structure_drift() {
+  local project="$TMP/doctor-drift"
+
+  mkdir -p "$project"
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+  git -C "$project" init >/dev/null
+
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "clean scaffold should pass doctor"
+  if printf '%s' "$out" | grep -Eq "move into src/|move there"; then
+    fail "clean scaffold must not raise structure drift warnings"
+  fi
+
+  printf 'x = 1\n' > "$project/train_root.py"
+  printf '# notes\n' > "$project/NOTES.md"
+  printf '{}\n' > "$project/exp.ipynb"
+  printf '[project]\nname = "x"\n' > "$project/pyproject.toml"
+  mkdir -p "$project/data"
+  printf 'a,b\n' > "$project/data/x.csv"
+  git -C "$project" add -f data/x.csv >/dev/null
+
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "structure drift must warn, not fail"
+  printf '%s' "$out" | grep -Fq 'train_root.py' || fail "missing stray-python warning"
+  printf '%s' "$out" | grep -Fq 'NOTES.md' || fail "missing markdown-outside-docs warning"
+  printf '%s' "$out" | grep -Fq 'exp.ipynb' || fail "missing notebook warning"
+  printf '%s' "$out" | grep -Fq 'src/ layout' || fail "missing src layout warning"
+  printf '%s' "$out" | grep -Fq 'gitignored dirs' || fail "missing tracked-in-ignored warning"
+}
+
 test_job_digest_log_mode() {
   local dir="$TMP/job-digest"
   mkdir -p "$dir"
@@ -1677,6 +1706,7 @@ test_apply_ml_scaffolds_docs
 test_apply_ml_scaffolds_gitignore
 test_apply_ml_scaffolds_check_contract
 test_project_doctor_warns_missing_check
+test_project_doctor_warns_structure_drift
 test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty
 test_run_ledger_records_and_lists

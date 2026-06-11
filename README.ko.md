@@ -99,7 +99,9 @@ oh-my-setting 연결 해제해줘.              # 또는: 완전히 제거해줘
   research-method 루프(falsifiable 가설, metric 사전등록, baseline, anti-pattern
   가드), 긴 로그 digest(`--wait`로 Slurm job 종료까지 대기), 머신/Slurm 스냅샷.
 - **프로젝트 템플릿 + doctor** — general/ml/slurm managed rule block과 모든
-  agent가 같은 규칙을 보는지 검증하는 doctor.
+  agent가 같은 규칙을 보는지 검증하는 doctor. ML 구조 drift도 경고한다
+  (root에 흩어진 파일, docs/ 밖 markdown, notebooks/ 밖 노트북, src/ 레이아웃
+  누락, git에 추적된 데이터 파일).
 
 ## 참고
 

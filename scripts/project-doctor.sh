@@ -16,6 +16,9 @@ Verify that all agent-facing files in a project give every agent the same view:
 - managed blocks match the current oh-my-setting templates (not stale)
 - PROJECT.md exists and has a State field
 - ml projects: docs/ scaffold and .gitignore entries present
+- ml projects: structure drift warnings (stray root *.py, markdown outside
+  docs/, notebooks outside notebooks/, missing src/ layout, tracked files in
+  gitignored dirs, tracked files over 10MB)
 
 Exit 0 when consistent (warnings allowed), 1 on drift/missing blocks.
 EOF
@@ -168,6 +171,55 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
     ok "verification contract present: scripts/check.sh"
   else
     warn "scripts/check.sh missing or not executable; re-run: apply-project-template.sh ml $PROJECT_DIR"
+  fi
+
+  # Structure drift (warn-level): the layout the ml rules promise must still
+  # hold mid-project, not only at scaffold time.
+  stray_py="$(find "$PROJECT_DIR" -maxdepth 1 -name '*.py' -type f ! -name 'setup.py' -printf '%f ' 2>/dev/null || true)"
+  if [ -n "$stray_py" ]; then
+    warn "top-level python files (move into src/ or scripts/): $stray_py"
+  else
+    ok "no stray top-level python files"
+  fi
+
+  stray_md="$(find "$PROJECT_DIR" -maxdepth 2 \( \
+      -name '.git' -o -name '.venv' -o -name 'node_modules' -o -name 'docs' \
+    \) -prune -o -name '*.md' -type f \
+      ! -name 'README*.md' ! -name 'AGENTS.md' ! -name 'CLAUDE.md' ! -name 'PROJECT.md' \
+      -printf '%P ' 2>/dev/null || true)"
+  if [ -n "$stray_md" ]; then
+    warn "markdown outside docs/ (move there): $stray_md"
+  else
+    ok "markdown files live under docs/"
+  fi
+
+  stray_nb="$(find "$PROJECT_DIR" -maxdepth 3 \( \
+      -name '.git' -o -name '.venv' -o -name 'node_modules' -o -name 'notebooks' \
+    \) -prune -o -name '*.ipynb' -type f -printf '%P ' 2>/dev/null || true)"
+  if [ -n "$stray_nb" ]; then
+    warn "notebooks outside notebooks/ (move there): $stray_nb"
+  else
+    ok "notebooks live under notebooks/"
+  fi
+
+  if [ -f "$PROJECT_DIR/pyproject.toml" ] && [ ! -d "$PROJECT_DIR/src" ]; then
+    warn "pyproject.toml without src/ layout; ml rules expect src/<package>/"
+  fi
+
+  if git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    tracked_ignored="$(git -C "$PROJECT_DIR" ls-files -- data outputs checkpoints wandb runs 2>/dev/null | head -3 || true)"
+    if [ -n "$tracked_ignored" ]; then
+      warn "tracked files inside gitignored dirs (committed before ignore?): $(printf '%s' "$tracked_ignored" | tr '\n' ' ')"
+    else
+      ok "no tracked files inside data/outputs/checkpoints/wandb/runs"
+    fi
+
+    big_tracked="$(git -C "$PROJECT_DIR" ls-files -z 2>/dev/null |
+      (cd "$PROJECT_DIR" && xargs -0 du -b 2>/dev/null || true) |
+      awk '$1 > 10*1024*1024 { print $2 }' | head -3 || true)"
+    if [ -n "$big_tracked" ]; then
+      warn "tracked files over 10MB (data/checkpoints belong outside git): $(printf '%s' "$big_tracked" | tr '\n' ' ')"
+    fi
   fi
 fi
 
