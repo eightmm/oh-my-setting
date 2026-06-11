@@ -11,6 +11,20 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Do not compress safety warnings, destructive confirmations, specs, or ambiguous steps.
 - If user asks for `normal mode` or more detail, expand for that conversation.
 
+## Language
+
+- Reply to the user in the language they wrote in; match it per conversation.
+- Everything durable stays English: code, comments, docstrings, identifiers,
+  commit messages, PR text, and script output (`echo`/`printf`/usage). These
+  are read by tools, tests, and the other agents — keep them machine-stable.
+- Reasoning/scratch work: English.
+- Exception — intentional bilingual data: keyword/trigger strings that must
+  match a non-English user prompt (e.g. intent-classification regexes, skill
+  trigger phrases) and example prompts in localized docs. Keep the surrounding
+  code and comments English.
+- Localized docs live in their own file (e.g. `README.ko.md`), never mixed
+  into the English source.
+
 ## Artifact Style
 
 - Commit messages: Conventional Commits; subject <= 50 chars; body only for non-obvious why, risk, or breaking change.
