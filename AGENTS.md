@@ -98,7 +98,8 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 ## Project Rules
 
 - Prefer project `AGENTS.md`/`CLAUDE.md` over global defaults.
-- Put language, ML, data, and HPC rules in project templates.
+- Put programming-language, ML, data, and HPC rules in project templates
+  (natural-language policy is global: see Language above).
 - Use `templates/project-general-AGENTS.md` for non-ML repos.
 - Use `templates/project-ml-AGENTS.md` for ML repos.
 - Use `templates/project-slurm-AGENTS.md` as an extra overlay for Slurm/HPC repos.
