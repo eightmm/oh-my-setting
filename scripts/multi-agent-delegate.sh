@@ -257,24 +257,27 @@ if [ "$DRY_RUN" = "1" ]; then
 else
   binary="$TO"
   [ "$TO" = "antigravity" ] && binary="agy"
-  command -v "$binary" >/dev/null 2>&1 || fail "command not found: $binary"
-
-  set +e
-  case "$TO" in
-    codex)
-      (cd "$worktree" && run_with_timeout codex exec --sandbox workspace-write - < "$prompt_file") >> "$artifact" 2>&1
-      worker_status=$?
-      ;;
-    claude)
-      (cd "$worktree" && run_with_timeout claude -p --permission-mode acceptEdits < "$prompt_file") >> "$artifact" 2>&1
-      worker_status=$?
-      ;;
-    antigravity)
-      (cd "$worktree" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file") >> "$artifact" 2>&1
-      worker_status=$?
-      ;;
-  esac
-  set -e
+  if ! command -v "$binary" >/dev/null 2>&1; then
+    printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
+    worker_status=127
+  else
+    set +e
+    case "$TO" in
+      codex)
+        (cd "$worktree" && run_with_timeout codex exec --sandbox workspace-write - < "$prompt_file") >> "$artifact" 2>&1
+        worker_status=$?
+        ;;
+      claude)
+        (cd "$worktree" && run_with_timeout claude -p --permission-mode acceptEdits < "$prompt_file") >> "$artifact" 2>&1
+        worker_status=$?
+        ;;
+      antigravity)
+        (cd "$worktree" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file") >> "$artifact" 2>&1
+        worker_status=$?
+        ;;
+    esac
+    set -e
+  fi
 fi
 
 # Capture the patch before running --verify so verification byproducts

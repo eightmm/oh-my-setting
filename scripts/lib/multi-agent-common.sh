@@ -332,9 +332,10 @@ run_provider() {
 
   if ! command -v "$binary" >/dev/null 2>&1; then
     printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
-    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 1 "$artifact" "" "$prompt_file" || true
+    printf '\n\n## Exit\n\n127\n' >> "$artifact"
+    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 127 "$artifact" "" "$prompt_file" || true
     echo "skipped: $provider missing ($binary) -> $artifact"
-    return 1
+    return 127
   fi
 
   set +e

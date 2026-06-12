@@ -1727,6 +1727,188 @@ test_agent_call_outbound_scrubber_blocks_private_path() {
   fi
 }
 
+
+test_agent_call_missing_cli_writes_exit_and_index() {
+  local project="$TMP/agent-call-missing-cli"
+  local artifact_dir="$project/artifacts"
+  local home_dir="$project/home"
+  local artifact
+  local rc=0
+
+  mkdir -p "$project" "$home_dir"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Assess missing provider" >"$project/out" 2>"$project/error" || rc=$?
+
+  [ "$rc" = "127" ] || fail "missing call provider should exit 127, got $rc"
+  artifact="$(find "$artifact_dir" -type f -name 'codex-assess-missing-provider-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "missing call provider should still write artifact"
+  assert_file_contains "$artifact" "SKIPPED: command not found: codex"
+  assert_file_contains "$artifact" "## Exit"
+  assert_file_contains "$artifact" "127"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 127'
+}
+
+
+test_agent_call_provider_nonzero_writes_exit_and_index() {
+  local project="$TMP/agent-call-provider-nonzero"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local artifact
+  local rc=0
+
+  mkdir -p "$project" "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "provider failed mid-run"
+exit 42
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Assess provider failure" >"$project/out" 2>"$project/error" || rc=$?
+
+  [ "$rc" = "42" ] || fail "agent-call should propagate provider exit 42, got $rc"
+  artifact="$(find "$artifact_dir" -type f -name 'codex-assess-provider-failure-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "provider failure should still write artifact"
+  assert_file_contains "$artifact" "provider failed mid-run"
+  assert_file_contains "$artifact" "## Exit"
+  assert_file_contains "$artifact" "42"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 42'
+}
+
+
+test_delegate_missing_cli_writes_exit_and_index() {
+  local project="$TMP/delegate-missing-cli"
+  local artifact_dir="$project/artifacts"
+  local home_dir="$project/home"
+  local artifact
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --prompt "Fix missing provider" >"$project/out" 2>"$project/error" || rc=$?
+
+  [ "$rc" = "1" ] || fail "delegate missing provider should exit 1, got $rc"
+  assert_file_contains "$project/out" "worker: codex exit 127"
+  artifact="$(find "$artifact_dir" -type f -name 'codex-fix-missing-provider-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "delegate missing provider should still write artifact"
+  assert_file_contains "$artifact" "SKIPPED: command not found: codex"
+  assert_file_contains "$artifact" "## Exit"
+  assert_file_contains "$artifact" "127"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 1'
+}
+
+
+test_agent_run_missing_cli_writes_exit_and_index() {
+  local project="$TMP/agent-run-missing-cli"
+  local artifact_dir="$project/artifacts"
+  local home_dir="$project/home"
+  local artifact
+  local rc=0
+
+  mkdir -p "$project" "$home_dir"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to claude \
+    --prompt "Assess missing provider routing" >"$project/out" 2>"$project/error" || rc=$?
+
+  [ "$rc" = "127" ] || fail "agent-run read missing provider should exit 127, got $rc"
+  assert_file_contains "$project/error" "resolved=read"
+  artifact="$(find "$artifact_dir" -type f -name 'claude-assess-missing-provider-routing-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "agent-run missing provider should still write routed artifact"
+  assert_file_contains "$artifact" "SKIPPED: command not found: claude"
+  assert_file_contains "$artifact" "## Exit"
+  assert_file_contains "$artifact" "127"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 127'
+}
+
+
+test_agent_run_prompt_file_routing() {
+  local project="$TMP/agent-run-prompt-file"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  printf 'Assess this plan from a file\n' > "$project/read-prompt.txt"
+  printf '파서 모듈을 수정해 주세요\n' > "$project/write-prompt.txt"
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt-file "$project/read-prompt.txt" >/dev/null 2>"$project/read-route"
+  assert_file_contains "$project/read-route" "resolved=read"
+  assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-from-a-file-*.md' 'independent read-only pass'
+
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to codex \
+    --prompt-file "$project/write-prompt.txt" >/dev/null 2>"$project/write-route"
+  assert_file_contains "$project/write-route" "resolved=write"
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' '파서 모듈을 수정해 주세요'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'delegated worker agent'
+}
+
+
+test_agent_run_write_worker_failure_records_task_outcome() {
+  local project="$TMP/agent-run-worker-fails"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local artifact
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --goal "Record failed delegated worker" \
+    --next "Inspect task outcome" >/dev/null
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "worker failed mid-run"
+exit 42
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --prompt "Implement failing helper" >"$project/out" 2>"$project/error" || rc=$?
+
+  [ "$rc" = "1" ] || fail "agent-run write worker failure should exit 1, got $rc"
+  assert_file_contains "$project/.oms/task/current.md" "agent-run write codex exit=1"
+  assert_file_contains "$project/.oms/task/current.md" "worker=codex exit 42"
+  artifact="$(find "$artifact_dir" -type f -name 'codex-implement-failing-helper-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "failing worker should still write artifact"
+  assert_file_contains "$artifact" "worker failed mid-run"
+  assert_file_contains "$artifact" "## Exit"
+  assert_file_contains "$artifact" "42"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 1'
+}
+
 test_agent_ml_context_digest() {
   local project="$TMP/ml-context"
   mkdir -p "$project/scripts" "$project/docs"
@@ -2679,10 +2861,16 @@ test_agent_memory_append_show_and_rejects_sensitive
 test_agent_task_init_context_and_rejects_sensitive
 test_agent_task_loop_state_and_warnings
 test_agent_call_outbound_scrubber_blocks_private_path
+test_agent_call_missing_cli_writes_exit_and_index
+test_agent_call_provider_nonzero_writes_exit_and_index
+test_delegate_missing_cli_writes_exit_and_index
+test_agent_run_missing_cli_writes_exit_and_index
 test_artifact_index_records_call
 test_artifact_index_prune
 test_artifact_index_rejects_extra_limit_arg
 test_agent_run_records_task_outcome
+test_agent_run_prompt_file_routing
+test_agent_run_write_worker_failure_records_task_outcome
 test_agent_ml_context_digest
 test_agent_ml_context_rejects_bad_max_bytes
 test_delegate_auto_verify_prefers_ml_smoke
