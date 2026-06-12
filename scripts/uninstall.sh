@@ -57,6 +57,19 @@ confirm() {
   esac
 }
 
+refuse_unsafe_purge_root() {
+  case "$ROOT" in
+    "$HOME"|/|"")
+      echo "error: refusing to purge $ROOT" >&2
+      exit 1
+      ;;
+  esac
+}
+
+if [ "$PURGE" = "1" ]; then
+  refuse_unsafe_purge_root
+fi
+
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/uninstall-autoupdate.sh"
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/unlink.sh"
 
@@ -77,12 +90,7 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 # Defensive: refuse to purge the user's $HOME or unrelated paths.
-case "$ROOT" in
-  "$HOME"|/|"")
-    echo "error: refusing to purge $ROOT" >&2
-    exit 1
-    ;;
-esac
+refuse_unsafe_purge_root
 
 cd /
 rm -rf "$ROOT"

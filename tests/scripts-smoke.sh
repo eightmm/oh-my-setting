@@ -36,6 +36,15 @@ assert_one_artifact_contains() {
   assert_file_contains "$file" "$text"
 }
 
+assert_symlink_to() {
+  local path="$1"
+  local target="$2"
+
+  [ -L "$path" ] || fail "$path should be a symlink"
+  [ "$(readlink "$path")" = "$target" ] ||
+    fail "$path should link to $target, got $(readlink "$path")"
+}
+
 
 setup_doctor_home() {
   local home_dir="$1"
@@ -2529,6 +2538,138 @@ test_agent_task_close_promotes_memory() {
 }
 
 
+test_link_round_trip_restores_existing_claude_file() {
+  local home_dir="$TMP/link-round-trip-home"
+  local target="$home_dir/.claude/CLAUDE.md"
+  local backup
+
+  mkdir -p "$(dirname "$target")"
+  printf 'original claude config\n' > "$target"
+
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+
+  backup="$(find "$home_dir/.claude" -maxdepth 1 -type f -name 'CLAUDE.md.backup.*' -print)"
+  [ "$(printf '%s\n' "$backup" | sed '/^$/d' | wc -l)" = "1" ] ||
+    fail "expected one CLAUDE.md backup, got: $backup"
+  assert_file_contains "$backup" "original claude config"
+  assert_symlink_to "$target" "$ROOT/AGENTS.md"
+
+  HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
+
+  [ -f "$target" ] || fail "CLAUDE.md backup was not restored as a file"
+  [ ! -L "$target" ] || fail "restored CLAUDE.md should not be a symlink"
+  [ "$(cat "$target")" = "original claude config" ] ||
+    fail "restored CLAUDE.md content changed"
+  [ -z "$(find "$home_dir/.claude" -maxdepth 1 -name 'CLAUDE.md.backup.*' -print)" ] ||
+    fail "restored CLAUDE.md backup should be consumed"
+}
+
+
+test_link_idempotent_does_not_create_second_backup() {
+  local home_dir="$TMP/link-idempotent-home"
+  local target="$home_dir/.claude/CLAUDE.md"
+  local count
+
+  mkdir -p "$(dirname "$target")"
+  printf 'original claude config\n' > "$target"
+
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+
+  count="$(find "$home_dir/.claude" -maxdepth 1 -type f -name 'CLAUDE.md.backup.*' -print | wc -l | tr -d ' ')"
+  [ "$count" = "1" ] || fail "expected one CLAUDE.md backup after two links, got $count"
+  assert_symlink_to "$target" "$ROOT/AGENTS.md"
+}
+
+
+test_link_skills_round_trip_restores_existing_skill_dir() {
+  local home_dir="$TMP/link-skill-round-trip-home"
+  local skill_name="spec-interview"
+  local target="$home_dir/.claude/skills/$skill_name"
+  local backup
+
+  mkdir -p "$target"
+  printf 'user skill data\n' > "$target/USER.txt"
+
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+
+  backup="$(find "$home_dir/.claude/skills" -maxdepth 1 -type d -name "$skill_name.backup.*" -print)"
+  [ "$(printf '%s\n' "$backup" | sed '/^$/d' | wc -l)" = "1" ] ||
+    fail "expected one $skill_name skill backup, got: $backup"
+  assert_file_contains "$backup/USER.txt" "user skill data"
+  assert_symlink_to "$target" "$ROOT/custom-skills/$skill_name"
+
+  HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
+
+  [ -d "$target" ] || fail "skill backup was not restored as a directory"
+  [ ! -L "$target" ] || fail "restored skill should not be a symlink"
+  assert_file_contains "$target/USER.txt" "user skill data"
+  [ -z "$(find "$home_dir/.claude/skills" -maxdepth 1 -name "$skill_name.backup.*" -print)" ] ||
+    fail "restored skill backup should be consumed"
+}
+
+
+test_uninstall_purge_guard_refuses_home_and_root() {
+  local home_dir="$TMP/uninstall-guard-home"
+  local home_script="$home_dir/scripts/uninstall.sh"
+  local root_script="/tmp/oms-uninstall-root-guard.$$"
+
+  mkdir -p "$home_dir/scripts"
+  cp "$ROOT/scripts/uninstall.sh" "$home_script"
+  chmod +x "$home_script"
+
+  if HOME="$home_dir" "$home_script" --purge --yes >"$home_dir/home-out" 2>"$home_dir/home-err"; then
+    fail "uninstall purge should refuse ROOT=HOME"
+  fi
+  assert_file_contains "$home_dir/home-err" "error: refusing to purge $home_dir"
+  [ -d "$home_dir" ] || fail "purge guard removed HOME"
+
+  cp "$ROOT/scripts/uninstall.sh" "$root_script"
+  chmod +x "$root_script"
+  if HOME="$home_dir" "$root_script" --purge --yes >"$home_dir/root-out" 2>"$home_dir/root-err"; then
+    rm -f "$root_script"
+    fail "uninstall purge should refuse ROOT=/"
+  fi
+  rm -f "$root_script"
+  assert_file_contains "$home_dir/root-err" "error: refusing to purge /"
+}
+
+
+test_backup_copies_all_config_targets() {
+  local home_dir="$TMP/backup-home"
+  local had_backups=0
+  local out
+  local backup_dir
+
+  [ -d "$ROOT/backups" ] && had_backups=1
+  mkdir -p "$home_dir/.codex/skills/demo" "$home_dir/.claude/skills/demo" \
+    "$home_dir/.gemini/antigravity/skills/demo" "$home_dir/.gemini" "$home_dir/.claude"
+  printf 'codex agents\n' > "$home_dir/.codex/AGENTS.md"
+  printf 'claude config\n' > "$home_dir/.claude/CLAUDE.md"
+  printf 'gemini agents\n' > "$home_dir/.gemini/AGENTS.md"
+  printf 'codex skill\n' > "$home_dir/.codex/skills/demo/SKILL.md"
+  printf 'claude skill\n' > "$home_dir/.claude/skills/demo/SKILL.md"
+  printf 'gemini skill\n' > "$home_dir/.gemini/antigravity/skills/demo/SKILL.md"
+
+  out="$(HOME="$home_dir" "$ROOT/scripts/backup.sh")"
+  backup_dir="$(printf '%s\n' "$out" | awk '/^backup: / { sub(/^backup: /, ""); print }')"
+  [ -n "$backup_dir" ] || fail "backup.sh did not print backup dir"
+  [ -d "$backup_dir" ] || fail "backup dir missing: $backup_dir"
+
+  assert_file_contains "$backup_dir/codex-AGENTS.md" "codex agents"
+  assert_file_contains "$backup_dir/claude-CLAUDE.md" "claude config"
+  assert_file_contains "$backup_dir/gemini-AGENTS.md" "gemini agents"
+  assert_file_contains "$backup_dir/codex-skills/demo/SKILL.md" "codex skill"
+  assert_file_contains "$backup_dir/claude-skills/demo/SKILL.md" "claude skill"
+  assert_file_contains "$backup_dir/gemini-skills/demo/SKILL.md" "gemini skill"
+
+  rm -rf "$backup_dir"
+  if [ "$had_backups" = "0" ]; then
+    rmdir "$ROOT/backups" 2>/dev/null || true
+  fi
+}
+
+
 test_link_and_unlink_with_home_override() {
   local home_dir="$TMP/link-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
@@ -2973,6 +3114,11 @@ test_truncation_survives_split_multibyte
 test_agent_task_append_preserves_backslashes
 test_memory_context_omits_sensitive_sections_cleanly
 test_memory_append_survives_stale_sensitive_source
+test_link_round_trip_restores_existing_claude_file
+test_link_idempotent_does_not_create_second_backup
+test_link_skills_round_trip_restores_existing_skill_dir
+test_uninstall_purge_guard_refuses_home_and_root
+test_backup_copies_all_config_targets
 test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply
