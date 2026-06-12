@@ -25,6 +25,7 @@ agent_task_init_file() {
   local now
 
   [ -f "$file" ] && return 0
+  agent_memory_ensure_oms_ignore_for_path "$file"
   mkdir -p "$(dirname "$file")"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   {

@@ -211,6 +211,7 @@ fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-$PWD/.oms/artifacts/ask}"
 
 load_user_tool_paths
+agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
 status_file="$(mktemp)" || fail "mktemp failed"

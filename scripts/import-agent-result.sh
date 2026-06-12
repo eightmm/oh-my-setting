@@ -104,9 +104,13 @@ fi
 case "$EXIT_CODE" in
   *[!0-9]*|"") fail "--exit must be a non-negative integer" ;;
 esac
+if agent_memory_file_has_sensitive_content "$RESULT_FILE"; then
+  echo "warning: imported result contains sensitive-looking content; review before sharing or promoting to memory" >&2
+fi
 
 REPO="$(cd "$REPO" && pwd)"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/$KIND}"
+agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
 slug="imported-result"
@@ -135,5 +139,5 @@ artifact="$ARTIFACT_DIR/$PROVIDER-$slug-$timestamp.import.md"
   printf '\n\n## Exit\n\n%s\n' "$EXIT_CODE"
 } > "$artifact"
 
-ma_append_artifact_index "$REPO" "$KIND-import" "$PROVIDER" "$EXIT_CODE" "$artifact" "" "$PROMPT_FILE" || true
+ma_append_artifact_index "$REPO" "$KIND-import" "$PROVIDER" "$EXIT_CODE" "$artifact" "" "$PROMPT_FILE" "" "$PROMPT_FILE" || true
 printf 'imported: %s -> %s\n' "$PROVIDER" "$artifact"

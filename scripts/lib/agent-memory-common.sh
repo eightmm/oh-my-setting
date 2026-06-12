@@ -28,6 +28,34 @@ agent_memory_summary_file() {
   printf '%s/summary.md\n' "$(agent_memory_dir "$file")"
 }
 
+agent_memory_ensure_oms_ignore() {
+  local repo="$1"
+  local oms_dir
+  local ignore
+
+  [ -n "$repo" ] || return 0
+  repo="$(cd "$repo" && pwd)" || return 0
+  oms_dir="$repo/.oms"
+  ignore="$oms_dir/.gitignore"
+  mkdir -p "$oms_dir"
+  [ -e "$ignore" ] && return 0
+  printf '*\n' > "$ignore"
+}
+
+agent_memory_ensure_oms_ignore_for_path() {
+  local path="$1"
+  local repo=""
+
+  case "$path" in
+    .oms|.oms/*) repo="$PWD" ;;
+    */.oms/*) repo="${path%/.oms/*}" ;;
+    */.oms) repo="${path%/.oms}" ;;
+    *) return 0 ;;
+  esac
+  [ -n "$repo" ] || return 0
+  agent_memory_ensure_oms_ignore "$repo"
+}
+
 # Bracket classes like [o] keep these literal patterns from matching their own
 # source line, so harness diffs stay reviewable. Do not "simplify" them away.
 agent_memory_sensitive_re() {
@@ -68,6 +96,7 @@ agent_memory_init_file() {
   local scope="$2"
 
   [ -f "$file" ] && return 0
+  agent_memory_ensure_oms_ignore_for_path "$file"
   mkdir -p "$(dirname "$file")"
   {
     printf '# Shared Agent Memory\n\n'
@@ -105,6 +134,7 @@ agent_memory_refresh_summary() {
   fi
 
   summary_file="$(agent_memory_summary_file "$memory_file")"
+  agent_memory_ensure_oms_ignore_for_path "$summary_file"
   mkdir -p "$(dirname "$summary_file")"
   tmp="$(agent_memory_mktemp)" || return 1
 
@@ -168,6 +198,7 @@ agent_memory_pin_file() {
   fi
 
   pins_file="$(agent_memory_pins_file "$memory_file")"
+  agent_memory_ensure_oms_ignore_for_path "$pins_file"
   mkdir -p "$(dirname "$pins_file")"
   if [ ! -f "$pins_file" ]; then
     {

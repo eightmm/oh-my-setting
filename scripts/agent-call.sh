@@ -124,6 +124,7 @@ REPO="$(cd "$REPO" && pwd)"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/call}"
 
 load_user_tool_paths
+agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
 prompt_file="$(mktemp)" || fail "mktemp failed"
