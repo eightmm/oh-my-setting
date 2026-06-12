@@ -45,6 +45,114 @@ assert_symlink_to() {
     fail "$path should link to $target, got $(readlink "$path")"
 }
 
+test_file_lock_acquire_release() {
+  local dir="$TMP/file-lock-happy"
+  local state="$dir/state.txt"
+
+  mkdir -p "$dir"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    oms_with_file_lock "$state" bash -c 'printf locked > "$1"' _ "$state"
+  )
+  assert_file_contains "$state" "locked"
+}
+
+test_file_lock_recovers_stale_mkdir_lock() {
+  local dir="$TMP/file-lock-stale"
+  local state="$dir/state.txt"
+  local lock_dir
+
+  mkdir -p "$dir"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    lock_dir="$(oms_file_lock_path_for_file "$state")"
+    mkdir -p "$lock_dir"
+    printf '999999999\n' > "$lock_dir/pid"
+    printf '1\n' > "$lock_dir/started"
+    printf 'stale\n' > "$lock_dir/owner"
+    OMS_LOCK_FORCE_MKDIR=1 OMS_LOCK_TIMEOUT=1 \
+      oms_with_file_lock "$state" bash -c 'printf recovered > "$1"' _ "$state"
+  )
+  assert_file_contains "$state" "recovered"
+}
+
+test_file_lock_contention_preserves_records() {
+  local dir="$TMP/file-lock-contention"
+  local append_file="$dir/append.txt"
+  local rewrite_file="$dir/rewrite.txt"
+  local n=30
+  local expected=$((n * 2))
+  local p1
+  local p2
+
+  mkdir -p "$dir"
+  : > "$append_file"
+  : > "$rewrite_file"
+  . "$ROOT/scripts/lib/file-lock.sh"
+
+  (
+    for i in $(seq 1 "$n"); do
+      oms_with_file_lock "$append_file" bash -c \
+        'printf "%s-%03d\n" "$2" "$3" >> "$1"' _ "$append_file" A "$i"
+    done
+  ) &
+  p1=$!
+  (
+    for i in $(seq 1 "$n"); do
+      oms_with_file_lock "$append_file" bash -c \
+        'printf "%s-%03d\n" "$2" "$3" >> "$1"' _ "$append_file" B "$i"
+    done
+  ) &
+  p2=$!
+  wait "$p1" || fail "append writer A failed"
+  wait "$p2" || fail "append writer B failed"
+
+  [ "$(wc -l < "$append_file" | tr -d ' ')" = "$expected" ] ||
+    fail "locked appends lost records"
+  [ "$(grep -Ec '^[AB]-[0-9][0-9][0-9]$' "$append_file")" = "$expected" ] ||
+    fail "locked appends produced malformed records"
+  [ "$(sort -u "$append_file" | wc -l | tr -d ' ')" = "$expected" ] ||
+    fail "locked appends produced duplicate records"
+
+  (
+    for i in $(seq 1 "$n"); do
+      oms_with_file_lock "$rewrite_file" bash -c '
+        file="$1"
+        prefix="$2"
+        i="$3"
+        tmp="$file.$$.$i"
+        cat "$file" > "$tmp"
+        printf "%s-%03d\n" "$prefix" "$i" >> "$tmp"
+        mv "$tmp" "$file"
+      ' _ "$rewrite_file" A "$i"
+    done
+  ) &
+  p1=$!
+  (
+    for i in $(seq 1 "$n"); do
+      oms_with_file_lock "$rewrite_file" bash -c '
+        file="$1"
+        prefix="$2"
+        i="$3"
+        tmp="$file.$$.$i"
+        cat "$file" > "$tmp"
+        printf "%s-%03d\n" "$prefix" "$i" >> "$tmp"
+        mv "$tmp" "$file"
+      ' _ "$rewrite_file" B "$i"
+    done
+  ) &
+  p2=$!
+  wait "$p1" || fail "rewrite writer A failed"
+  wait "$p2" || fail "rewrite writer B failed"
+
+  [ "$(wc -l < "$rewrite_file" | tr -d ' ')" = "$expected" ] ||
+    fail "locked rewrites lost records"
+  [ "$(grep -Ec '^[AB]-[0-9][0-9][0-9]$' "$rewrite_file")" = "$expected" ] ||
+    fail "locked rewrites produced malformed records"
+  [ "$(sort -u "$rewrite_file" | wc -l | tr -d ' ')" = "$expected" ] ||
+    fail "locked rewrites produced duplicate records"
+}
+
 
 setup_doctor_home() {
   local home_dir="$1"
@@ -3544,6 +3652,9 @@ EOF
   assert_file_contains "$repo/out" "name mismatch: expected-name"
 }
 
+test_file_lock_acquire_release
+test_file_lock_recovers_stale_mkdir_lock
+test_file_lock_contention_preserves_records
 test_apply_dry_run_has_no_writes
 test_apply_ml_dry_run_has_no_writes
 test_apply_ml_scaffolds_docs

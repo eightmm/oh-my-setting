@@ -1,6 +1,9 @@
 # shellcheck shell=bash
 # Shared harness memory helpers. Sourced, not executed.
 
+# shellcheck source=file-lock.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/file-lock.sh"
+
 agent_memory_project_file() {
   local repo="$1"
   repo="$(cd "$repo" && pwd)" || return 1
@@ -117,7 +120,7 @@ oms_classify_prompt_mode() {
   fi
 }
 
-agent_memory_init_file() {
+agent_memory_init_file_unlocked() {
   local file="$1"
   local scope="$2"
 
@@ -134,6 +137,13 @@ agent_memory_init_file() {
   } > "$file"
 }
 
+agent_memory_init_file() {
+  local file="$1"
+  local scope="$2"
+
+  oms_with_file_lock "$file" agent_memory_init_file_unlocked "$file" "$scope"
+}
+
 agent_memory_write_summary_header() {
   local file="$1"
   local scope="$2"
@@ -143,6 +153,15 @@ agent_memory_write_summary_header() {
     printf -- '- generated: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'Recent compact notes generated from shared.md. Keep this short for provider context.\n\n'
   } > "$file"
+}
+
+agent_memory_refresh_summary_write() {
+  local summary_file="$1"
+  local scope="$2"
+  local body_file="$3"
+
+  agent_memory_write_summary_header "$summary_file" "$scope"
+  cat "$body_file" >> "$summary_file"
 }
 
 agent_memory_refresh_summary() {
@@ -182,9 +201,22 @@ agent_memory_refresh_summary() {
     }
   ' "$memory_file" | tail -n "$max_items" > "$tmp"
 
-  agent_memory_write_summary_header "$summary_file" "$scope"
-  cat "$tmp" >> "$summary_file"
+  oms_with_file_lock "$summary_file" agent_memory_refresh_summary_write "$summary_file" "$scope" "$tmp"
   rm -f "$tmp"
+}
+
+agent_memory_append_file_unlocked() {
+  local memory_file="$1"
+  local scope="$2"
+  local agent="$3"
+  local note_file="$4"
+
+  agent_memory_init_file_unlocked "$memory_file" "$scope"
+  {
+    printf '## %s %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent"
+    cat "$note_file"
+    printf '\n\n'
+  } >> "$memory_file"
 }
 
 agent_memory_append_file() {
@@ -198,34 +230,20 @@ agent_memory_append_file() {
     return 3
   fi
 
-  agent_memory_init_file "$memory_file" "$scope"
-  {
-    printf '## %s %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent"
-    cat "$note_file"
-    printf '\n\n'
-  } >> "$memory_file"
+  oms_with_file_lock "$memory_file" agent_memory_append_file_unlocked "$memory_file" "$scope" "$agent" "$note_file"
   # The note is already written; a stale summary must not turn the append
   # into a failure (refresh prints its own warning).
   agent_memory_refresh_summary "$memory_file" "$scope" || true
 }
 
-agent_memory_pin_file() {
-  local memory_file="$1"
+agent_memory_pin_file_unlocked() {
   local scope="$2"
   local agent="$3"
   local note_file="$4"
-  local pins_file
+  local pins_file="$5"
   local line
   local chars="${OMS_AGENT_MEMORY_PIN_CHARS:-240}"
 
-  if agent_memory_file_has_sensitive_content "$note_file"; then
-    echo "error: memory pin contains sensitive-looking content; not appended" >&2
-    return 3
-  fi
-
-  pins_file="$(agent_memory_pins_file "$memory_file")"
-  agent_memory_ensure_oms_ignore_for_path "$pins_file"
-  mkdir -p "$(dirname "$pins_file")"
   if [ ! -f "$pins_file" ]; then
     {
       printf '# Pinned Agent Memory\n\n'
@@ -236,6 +254,24 @@ agent_memory_pin_file() {
 
   line="$(tr '\n' ' ' < "$note_file" | tr -s '[:space:]' ' ' | agent_memory_truncate_bytes "$chars")"
   printf -- '- %s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent" "$line" >> "$pins_file"
+}
+
+agent_memory_pin_file() {
+  local memory_file="$1"
+  local scope="$2"
+  local agent="$3"
+  local note_file="$4"
+  local pins_file
+
+  if agent_memory_file_has_sensitive_content "$note_file"; then
+    echo "error: memory pin contains sensitive-looking content; not appended" >&2
+    return 3
+  fi
+
+  pins_file="$(agent_memory_pins_file "$memory_file")"
+  agent_memory_ensure_oms_ignore_for_path "$pins_file"
+  mkdir -p "$(dirname "$pins_file")"
+  oms_with_file_lock "$pins_file" agent_memory_pin_file_unlocked "$memory_file" "$scope" "$agent" "$note_file" "$pins_file"
 }
 
 agent_memory_emit_full_section() {

@@ -20,7 +20,7 @@ agent_task_relpath() {
   esac
 }
 
-agent_task_init_file() {
+agent_task_init_file_unlocked() {
   local file="$1"
   local now
 
@@ -48,7 +48,13 @@ agent_task_init_file() {
   } > "$file"
 }
 
-agent_task_touch_updated() {
+agent_task_init_file() {
+  local file="$1"
+
+  oms_with_file_lock "$file" agent_task_init_file_unlocked "$file"
+}
+
+agent_task_touch_updated_unlocked() {
   local file="$1"
   local tmp
   local now
@@ -72,18 +78,19 @@ agent_task_touch_updated() {
   mv "$tmp" "$file"
 }
 
-agent_task_replace_section() {
+agent_task_touch_updated() {
+  local file="$1"
+
+  oms_with_file_lock "$file" agent_task_touch_updated_unlocked "$file"
+}
+
+agent_task_replace_section_unlocked() {
   local file="$1"
   local section="$2"
   local content_file="$3"
   local tmp
 
-  if agent_memory_file_has_sensitive_content "$content_file"; then
-    echo "error: task section contains sensitive-looking content; not updated" >&2
-    return 3
-  fi
-
-  agent_task_init_file "$file"
+  agent_task_init_file_unlocked "$file"
   tmp="$(agent_memory_mktemp)" || return 1
   awk -v section="$section" -v content_file="$content_file" '
     BEGIN {
@@ -123,7 +130,20 @@ agent_task_replace_section() {
     return 1
   }
   mv "$tmp" "$file"
-  agent_task_touch_updated "$file"
+  agent_task_touch_updated_unlocked "$file"
+}
+
+agent_task_replace_section() {
+  local file="$1"
+  local section="$2"
+  local content_file="$3"
+
+  if agent_memory_file_has_sensitive_content "$content_file"; then
+    echo "error: task section contains sensitive-looking content; not updated" >&2
+    return 3
+  fi
+
+  oms_with_file_lock "$file" agent_task_replace_section_unlocked "$file" "$section" "$content_file"
 }
 
 agent_task_section_value() {
@@ -148,7 +168,7 @@ agent_task_section_value() {
   ' "$file"
 }
 
-agent_task_upsert_loop_state() {
+agent_task_upsert_loop_state_unlocked() {
   local file="$1"
   local attempts="$2"
   local max_attempts="$3"
@@ -156,7 +176,7 @@ agent_task_upsert_loop_state() {
   local verify_level="$5"
   local content_file
 
-  agent_task_init_file "$file"
+  agent_task_init_file_unlocked "$file"
   [ -n "$attempts" ] || attempts="$(agent_task_section_value "$file" "## Loop State" attempts 2>/dev/null || true)"
   [ -n "$max_attempts" ] || max_attempts="$(agent_task_section_value "$file" "## Loop State" max_attempts 2>/dev/null || true)"
   [ -n "$diff_budget" ] || diff_budget="$(agent_task_section_value "$file" "## Loop State" diff_budget_lines 2>/dev/null || true)"
@@ -169,8 +189,18 @@ agent_task_upsert_loop_state() {
     [ -n "$diff_budget" ] && printf -- '- diff_budget_lines: %s\n' "$diff_budget"
     [ -n "$verify_level" ] && printf -- '- verification_level: %s\n' "$verify_level"
   } > "$content_file"
-  agent_task_replace_section "$file" "## Loop State" "$content_file"
+  agent_task_replace_section_unlocked "$file" "## Loop State" "$content_file"
   rm -f "$content_file"
+}
+
+agent_task_upsert_loop_state() {
+  local file="$1"
+  local attempts="$2"
+  local max_attempts="$3"
+  local diff_budget="$4"
+  local verify_level="$5"
+
+  oms_with_file_lock "$file" agent_task_upsert_loop_state_unlocked "$file" "$attempts" "$max_attempts" "$diff_budget" "$verify_level"
 }
 
 agent_task_loop_warnings() {
@@ -226,7 +256,7 @@ agent_task_loop_warnings() {
   fi
 }
 
-agent_task_append_bullet() {
+agent_task_append_bullet_unlocked() {
   local file="$1"
   local section="$2"
   local agent="$3"
@@ -235,12 +265,7 @@ agent_task_append_bullet() {
   local line
   local max_chars="${OMS_AGENT_TASK_NOTE_CHARS:-300}"
 
-  if agent_memory_file_has_sensitive_content "$content_file"; then
-    echo "error: task note contains sensitive-looking content; not appended" >&2
-    return 3
-  fi
-
-  agent_task_init_file "$file"
+  agent_task_init_file_unlocked "$file"
   line="$(tr '\n' ' ' < "$content_file" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//' | agent_memory_truncate_bytes "$max_chars")"
   [ -n "$line" ] || return 0
   line="- $(date -u +%Y-%m-%dT%H:%M:%SZ) [$agent] $line"
@@ -283,7 +308,21 @@ agent_task_append_bullet() {
   }
   mv "$tmp" "$file"
   rm -f "$line_file"
-  agent_task_touch_updated "$file"
+  agent_task_touch_updated_unlocked "$file"
+}
+
+agent_task_append_bullet() {
+  local file="$1"
+  local section="$2"
+  local agent="$3"
+  local content_file="$4"
+
+  if agent_memory_file_has_sensitive_content "$content_file"; then
+    echo "error: task note contains sensitive-looking content; not appended" >&2
+    return 3
+  fi
+
+  oms_with_file_lock "$file" agent_task_append_bullet_unlocked "$file" "$section" "$agent" "$content_file"
 }
 
 agent_task_file_has_sensitive_content() {

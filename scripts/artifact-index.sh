@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT_LIB/file-lock.sh"
+
 REPO="$PWD"
 INDEX_FILE=""
 ACTION="list"
@@ -103,6 +107,10 @@ INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 if [ "$ACTION" = "prune" ]; then
+  artifact_index_prune_locked() {
+  local before
+  local tmp
+
   before="$(wc -l < "$INDEX_FILE" | tr -d ' ')"
   if [ "$before" -le "$LIMIT" ] && [ "$PRUNE_FILES" -eq 0 ]; then
     echo "artifact-index: $before rows, within keep=$LIMIT; nothing pruned"
@@ -110,7 +118,6 @@ if [ "$ACTION" = "prune" ]; then
   fi
 
   tmp="$(mktemp)" || fail "mktemp failed"
-  trap 'rm -f "$tmp"' EXIT
 
   if [ "$before" -le "$LIMIT" ]; then
     cat "$INDEX_FILE" > "$tmp"
@@ -167,6 +174,7 @@ with open(kept_index) as f:
 
 orphans = []
 for dirpath, dirnames, filenames in os.walk(artifacts_root, followlinks=False):
+    dirnames[:] = [name for name in dirnames if not name.endswith(".lock")]
     for name in filenames:
         path = os.path.join(dirpath, name)
         try:
@@ -178,7 +186,7 @@ for dirpath, dirnames, filenames in os.walk(artifacts_root, followlinks=False):
         real = os.path.realpath(path)
         if not inside(real, artifacts_root):
             continue
-        if real == index_real or name in ("index.jsonl", ".gitignore"):
+        if real == index_real or name in ("index.jsonl", ".gitignore") or name.endswith(".lock"):
             continue
         if real not in referenced:
             orphans.append(path)
@@ -205,6 +213,10 @@ else:
     print(f"artifact-index: deleted {count} orphan file(s)")
 EOF
   fi
+  rm -f "$tmp"
+}
+
+  oms_with_file_lock "$INDEX_FILE" artifact_index_prune_locked
   exit 0
 fi
 

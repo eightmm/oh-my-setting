@@ -50,6 +50,13 @@ fail() {
   exit 2
 }
 
+run_ledger_append_row() {
+  local ledger="$1"
+  local row_file="$2"
+
+  cat "$row_file" >> "$ledger"
+}
+
 command -v python3 >/dev/null 2>&1 || fail "python3 is required for ledger rows"
 
 sha256_stream() {
@@ -206,7 +213,8 @@ fi
 # they look sensitive, so secrets are not committed unnoticed.
 ledger_scan="$(mktemp)" || fail "mktemp failed"
 ms_tmp=""
-trap 'rm -f "$ledger_scan" ${ms_tmp:+"$ms_tmp"}' EXIT
+row_tmp=""
+trap 'rm -f "$ledger_scan" ${ms_tmp:+"$ms_tmp"} ${row_tmp:+"$row_tmp"}' EXIT
 printf '%s\n%s\n' "$NOTE" "$*" > "$ledger_scan"
 if agent_memory_file_has_sensitive_content "$ledger_scan"; then
   echo "warning: ledger note/command looks sensitive; it is recorded in git-tracked $LEDGER" >&2
@@ -279,8 +287,9 @@ EOF
   fi
 fi
 
+row_tmp="$(mktemp)" || fail "mktemp failed"
 OMS_METRICS_JSON="$METRICS_JSON" python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
-  "$status" "$duration_s" "$NOTE" "$@" <<'EOF' >> "$LEDGER"
+  "$status" "$duration_s" "$NOTE" "$@" <<'EOF' > "$row_tmp"
 import json, os, sys
 a = sys.argv[1:]
 row = {
@@ -299,6 +308,7 @@ if mj:
     row["metrics"] = json.loads(mj)
 print(json.dumps(row, ensure_ascii=False, allow_nan=False))
 EOF
+oms_with_file_lock "$LEDGER" run_ledger_append_row "$LEDGER" "$row_tmp"
 
 echo "ledger: appended to $LEDGER (exit $status, ${duration_s}s)" >&2
 exit "$status"

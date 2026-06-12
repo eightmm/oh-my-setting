@@ -236,7 +236,7 @@ ma_append_artifact_index() {
   fi
   task_goal="$(ma_task_goal "$repo" | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200)"
 
-  python3 - "$index" "$kind" "$provider" "$exit_code" "$artifact_rel" "$patch_rel" "$prompt_hash" "$verify_exit" "$task_goal" "$source_rel" <<'EOF'
+  oms_with_file_lock "$index" python3 - "$index" "$kind" "$provider" "$exit_code" "$artifact_rel" "$patch_rel" "$prompt_hash" "$verify_exit" "$task_goal" "$source_rel" <<'EOF'
 import json, sys, time
 index, kind, provider, exit_code, artifact, patch, prompt_hash, verify_exit, task_goal, source = sys.argv[1:]
 row = {
