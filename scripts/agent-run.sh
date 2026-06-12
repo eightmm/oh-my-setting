@@ -81,16 +81,6 @@ prompt_text() {
   fi
 }
 
-agent_run_relpath() {
-  local repo="$1"
-  local path="$2"
-  repo="$(cd "$repo" && pwd)" || return 1
-  case "$path" in
-    "$repo"/*) printf '%s\n' "${path#"$repo"/}" ;;
-    *) printf '%s\n' "$(basename "$path")" ;;
-  esac
-}
-
 agent_run_record_task_outcome() {
   local repo="$1"
   local mode="$2"
@@ -115,8 +105,8 @@ agent_run_record_task_outcome() {
   verify="$(awk -F': ' '$1 == "verify" { v=$2 } END { print v }' "$output_file")"
   worker="$(awk -F': ' '$1 == "worker" { v=$2 } END { print v }' "$output_file")"
 
-  [ -n "$artifact" ] && artifact="$(agent_run_relpath "$repo" "$artifact" 2>/dev/null || printf '%s' "$(basename "$artifact")")"
-  [ -n "$patch" ] && patch="$(agent_run_relpath "$repo" "$patch" 2>/dev/null || printf '%s' "$(basename "$patch")")"
+  [ -n "$artifact" ] && artifact="$(agent_task_relpath "$repo" "$artifact" 2>/dev/null || printf '%s' "$(basename "$artifact")")"
+  [ -n "$patch" ] && patch="$(agent_task_relpath "$repo" "$patch" 2>/dev/null || printf '%s' "$(basename "$patch")")"
 
   note="agent-run $mode $provider exit=$status"
   [ -n "$worker" ] && note="$note; worker=$worker"

@@ -146,12 +146,16 @@ install_cron() {
     $0 == end { skip = 0; next }
     !skip { print }
   ' > "$tmp"
-  {
+  if ! {
     cat "$tmp"
     printf '%s\n' "$CRON_MARK_BEGIN"
     printf '%s\n' "$line"
     printf '%s\n' "$CRON_MARK_END"
-  } | write_cron
+  } | write_cron; then
+    rm -f "$tmp"
+    echo "error: failed to write crontab" >&2
+    exit 1
+  fi
   rm -f "$tmp"
   echo "auto-update trigger: cron installed ($MODE)"
 }

@@ -219,7 +219,7 @@ EOF
   fetch)
     [ -n "$NAME" ] || fail "fetch requires NAME"
     [ -f "$REGISTRY" ] || fail "registry not found: $REGISTRY"
-    spec="$(python3 - "$REGISTRY" "$NAME" "$TARGET" "$SRC_REF" <<'EOF'
+    if ! spec="$(python3 - "$REGISTRY" "$NAME" "$TARGET" "$SRC_REF" <<'EOF'
 import json, sys
 reg, name, target_override, ref_override = sys.argv[1:]
 data = json.load(open(reg))
@@ -234,7 +234,10 @@ if not repo or not path or not target:
     raise SystemExit("error: source requires repo, path, and target")
 print("\t".join([repo, path, target, ref]))
 EOF
-)"
+)"; then
+      exit 2
+    fi
+    [ -n "$spec" ] || fail "could not resolve source: $NAME"
     IFS=$'\t' read -r SRC_REPO SRC_PATH TARGET SRC_REF <<EOF
 $spec
 EOF

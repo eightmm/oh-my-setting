@@ -10,7 +10,7 @@ has_cmd() {
 }
 
 node_major() {
-  node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0
+  node -p "process.versions.node.split('.')[0]" 2>/dev/null | grep -E '^[0-9]+$' || echo 0
 }
 
 load_nvm() {

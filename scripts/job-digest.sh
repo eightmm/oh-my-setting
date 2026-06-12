@@ -40,11 +40,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --tail)
       [ "$#" -ge 2 ] || fail "--tail requires count"
+      case "$2" in *[!0-9]*|"") fail "--tail requires a positive integer" ;; esac
       TAIL_LINES="$2"
       shift 2
       ;;
     --patterns)
       [ "$#" -ge 2 ] || fail "--patterns requires count"
+      case "$2" in *[!0-9]*|"") fail "--patterns requires a positive integer" ;; esac
       PATTERN_LINES="$2"
       shift 2
       ;;

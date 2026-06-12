@@ -99,6 +99,11 @@ if ! "$ROOT/scripts/skill-doctor.sh"; then
   FAILED=1
 fi
 
+if ! "$ROOT/scripts/install-skills.sh" >/dev/null; then
+  echo "fail: skills.manifest.json out of sync (run scripts/install-skills.sh for details)"
+  FAILED=1
+fi
+
 if [ "$FAILED" -ne 0 ]; then
   echo "doctor: failed"
   exit 1

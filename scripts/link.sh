@@ -25,17 +25,7 @@ backup_if_needed() {
   fi
 }
 
-link_file() {
-  local source="$1"
-  local target="$2"
-
-  mkdir -p "$(dirname "$target")"
-  backup_if_needed "$target" "$source"
-  ln -sfn "$source" "$target"
-  echo "linked $target -> $source"
-}
-
-link_dir() {
+link_target() {
   local source="$1"
   local target="$2"
 
@@ -57,19 +47,19 @@ link_skills() {
     [ -d "$skill" ] || continue
     [ -f "$skill/SKILL.md" ] || continue
     name="$(basename "$skill")"
-    link_dir "$skill" "$target_root/$name"
+    link_target "$skill" "$target_root/$name"
   done
 }
 
 oms_ops_cleanup_legacy_links 0
 
-link_file "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
-link_file "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+link_target "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
+link_target "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
 # Antigravity global customizations root: rules at ~/.gemini/AGENTS.md,
 # skills under ~/.gemini/antigravity/skills.
-link_file "$ROOT/AGENTS.md" "$HOME/.gemini/AGENTS.md"
+link_target "$ROOT/AGENTS.md" "$HOME/.gemini/AGENTS.md"
 link_skills "$HOME/.codex/skills"
 link_skills "$HOME/.claude/skills"
 link_skills "$HOME/.gemini/antigravity/skills"
-link_dir "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
-link_dir "$ROOT/workflows" "$HOME/.oh-my-setting-workflows"
+link_target "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
+link_target "$ROOT/workflows" "$HOME/.oh-my-setting-workflows"

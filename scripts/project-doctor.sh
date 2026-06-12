@@ -159,7 +159,8 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
     warn "$missing_docs ml doc template(s) missing under docs/; re-run: apply-project-template.sh ml $PROJECT_DIR"
   fi
 
-  for entry in data/ outputs/ checkpoints/; do
+  # Keep in sync with ML_IGNORE_ENTRIES in apply-project-template.sh.
+  for entry in data/ outputs/ checkpoints/ wandb/ runs/ .venv/ .oms/; do
     if [ -f "$PROJECT_DIR/.gitignore" ] && grep -qxF "$entry" "$PROJECT_DIR/.gitignore"; then
       ok ".gitignore covers $entry"
     else

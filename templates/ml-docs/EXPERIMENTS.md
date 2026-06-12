@@ -1,6 +1,7 @@
 # EXPERIMENTS
 
-Append-only run log. One entry per experiment. Newest on top.
+Append-only narrative run log. One entry per experiment. Newest on top.
+Distinct from docs/EXPERIMENTS.jsonl, the machine ledger written by run-ledger.
 
 Each entry: ID, date, hypothesis, config diff, result, conclusion, wandb link.
 

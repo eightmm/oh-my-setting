@@ -189,6 +189,14 @@ trap cleanup EXIT
   printf '\nWhen done, report: changed files, what you verified, what you did not verify, and any blockers.\n'
 } > "$prompt_file"
 
+# Pre-flight: fail before any worker runs, so no work is wasted. Untracked
+# files are fine: git apply fails on collision anyway, and the artifact dir
+# itself lives untracked inside the repo.
+if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 0 ] \
+  && [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
+  fail "refusing --apply: main tree has uncommitted changes"
+fi
+
 slug_src="$PROMPT"
 [ -n "$slug_src" ] || slug_src="$(head -c 200 "$BRIEF_FILE")"
 slug="$(slugify "$slug_src")"
@@ -290,7 +298,9 @@ fi
 printf '\n\n## Exit\n\n%s\n' "$worker_status" >> "$artifact"
 
 applied=0
-if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 0 ]; then
+if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 1 ]; then
+  echo "apply skipped: dry run" >&2
+elif [ "$APPLY" = 1 ]; then
   if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
     echo "apply skipped: worker or verify failed" >&2
   elif [ ! -s "$patch_file" ]; then
@@ -298,10 +308,12 @@ if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 0 ]; then
   elif [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
     # Untracked files are fine: git apply fails on collision anyway, and the
     # artifact dir itself lives untracked inside the repo.
-    fail "refusing --apply: main tree has uncommitted changes"
-  else
-    git -C "$REPO" apply --binary "$patch_file"
+    # Warn instead of fail: the worker already ran, so still record and report.
+    echo "apply skipped: main tree has uncommitted changes" >&2
+  elif git -C "$REPO" apply --binary "$patch_file"; then
     applied=1
+  else
+    echo "apply failed: patch did not apply cleanly; review $patch_file" >&2
   fi
 fi
 
