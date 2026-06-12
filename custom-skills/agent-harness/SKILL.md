@@ -105,8 +105,9 @@ Every provider call/delegation appends a compact row to
 `.oms/artifacts/index.jsonl`. Use `artifact-index.sh latest`, `list`, or
 `failures` when resuming work or looking for the latest provider result; the
 index is append-only, so `artifact-index.sh prune [N]` trims it to the most
-recent N rows. When an active task exists, `agent-run.sh` also appends a
-one-line outcome with artifact and patch paths to `## Current State`.
+recent N rows, and `prune [N] --files` also removes unreferenced regular files
+under `.oms/artifacts/`. When an active task exists, `agent-run.sh` also appends
+a one-line outcome with artifact and patch paths to `## Current State`.
 
 When the current agent must not send repo context to another external provider,
 use the same commands with `--export-only`. This writes provider-specific prompt

@@ -2124,6 +2124,8 @@ test_artifact_index_records_call() {
 test_artifact_index_prune() {
   local project="$TMP/artifact-index-prune"
   local index="$project/.oms/artifacts/index.jsonl"
+  local out
+  local perms
 
   mkdir -p "$project/.oms/artifacts"
   for i in $(seq 1 10); do
@@ -2140,12 +2142,90 @@ test_artifact_index_prune() {
   # Under the keep count: no-op, exit 0.
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 100)" || fail "prune within keep should exit 0"
   printf '%s' "$out" | grep -Fq 'nothing pruned' || fail "prune within keep should be a no-op"
+  TMPDIR=/nonexistent-oms-tmp "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 100 >/dev/null ||
+    fail "prune no-op without --files must not require TMPDIR"
 
   # Prune is an in-place overwrite: file permissions survive.
   chmod 640 "$index"
   "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 2 >/dev/null
   perms="$(stat -c '%a' "$index" 2>/dev/null || stat -f '%Lp' "$index" 2>/dev/null)"
   [ "$perms" = "640" ] || fail "prune must preserve file permissions (got $perms)"
+}
+
+
+test_artifact_index_prune_files_deletes_only_orphans() {
+  local project="$TMP/artifact-index-prune-files"
+  local index="$project/.oms/artifacts/index.jsonl"
+  local outside="$project/outside.md"
+  local out
+
+  mkdir -p "$project/.oms/artifacts/call" "$project/.oms/artifacts/delegate"
+  printf 'old artifact\n' > "$project/.oms/artifacts/call/old.md"
+  printf 'old patch\n' > "$project/.oms/artifacts/delegate/old.patch"
+  printf 'kept artifact\n' > "$project/.oms/artifacts/call/kept.md"
+  printf 'keep me\n' > "$project/.oms/artifacts/.gitignore"
+  printf 'outside\n' > "$outside"
+  ln -s "$outside" "$project/.oms/artifacts/call/outside-link.md"
+  cat > "$index" <<'EOF'
+{"ts":"2026-06-11T00:00:01Z","kind":"delegate","provider":"codex","exit":0,"artifact":".oms/artifacts/call/old.md","patch":".oms/artifacts/delegate/old.patch"}
+{"ts":"2026-06-11T00:00:02Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/kept.md"}
+EOF
+
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files)"
+  printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/call/old.md' ||
+    fail "prune --files should print deleted artifact"
+  printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/delegate/old.patch' ||
+    fail "prune --files should print deleted patch"
+  printf '%s' "$out" | grep -Fq 'deleted 2 orphan file(s)' ||
+    fail "prune --files should print final delete count"
+  assert_not_exists "$project/.oms/artifacts/call/old.md"
+  assert_not_exists "$project/.oms/artifacts/delegate/old.patch"
+  assert_file_contains "$project/.oms/artifacts/call/kept.md" "kept artifact"
+  assert_file_contains "$project/.oms/artifacts/.gitignore" "keep me"
+  assert_file_contains "$outside" "outside"
+  [ -L "$project/.oms/artifacts/call/outside-link.md" ] ||
+    fail "prune --files must not remove symlinks"
+}
+
+test_artifact_index_prune_files_dry_run_deletes_nothing() {
+  local project="$TMP/artifact-index-prune-files-dry"
+  local index="$project/.oms/artifacts/index.jsonl"
+  local out
+
+  mkdir -p "$project/.oms/artifacts/call"
+  printf 'old artifact\n' > "$project/.oms/artifacts/call/old.md"
+  printf 'kept artifact\n' > "$project/.oms/artifacts/call/kept.md"
+  cat > "$index" <<'EOF'
+{"ts":"2026-06-11T00:00:01Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/old.md"}
+{"ts":"2026-06-11T00:00:02Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/kept.md"}
+EOF
+
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files --dry-run)"
+  printf '%s' "$out" | grep -Fq 'would delete: .oms/artifacts/call/old.md' ||
+    fail "dry-run should print would-delete artifact"
+  printf '%s' "$out" | grep -Fq 'would delete 1 orphan file(s)' ||
+    fail "dry-run should print final would-delete count"
+  assert_file_contains "$project/.oms/artifacts/call/old.md" "old artifact"
+  assert_file_contains "$project/.oms/artifacts/call/kept.md" "kept artifact"
+  [ "$(wc -l < "$index")" = "2" ] || fail "dry-run must not rewrite the index"
+}
+
+test_artifact_index_prune_files_ignores_paths_outside_artifacts() {
+  local project="$TMP/artifact-index-prune-files-outside"
+  local index="$project/.oms/artifacts/index.jsonl"
+  local outside="$project/outside.md"
+
+  mkdir -p "$project/.oms/artifacts/call"
+  printf 'outside\n' > "$outside"
+  printf 'kept artifact\n' > "$project/.oms/artifacts/call/kept.md"
+  cat > "$index" <<'EOF'
+{"ts":"2026-06-11T00:00:01Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/../outside.md"}
+{"ts":"2026-06-11T00:00:02Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/kept.md"}
+EOF
+
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files >/dev/null
+  assert_file_contains "$outside" "outside"
+  assert_file_contains "$project/.oms/artifacts/call/kept.md" "kept artifact"
 }
 
 test_agent_run_records_task_outcome() {
@@ -3087,6 +3167,9 @@ test_delegate_missing_cli_writes_exit_and_index
 test_agent_run_missing_cli_writes_exit_and_index
 test_artifact_index_records_call
 test_artifact_index_prune
+test_artifact_index_prune_files_deletes_only_orphans
+test_artifact_index_prune_files_dry_run_deletes_nothing
+test_artifact_index_prune_files_ignores_paths_outside_artifacts
 test_artifact_index_rejects_extra_limit_arg
 test_agent_run_records_task_outcome
 test_agent_run_prompt_file_routing

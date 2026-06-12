@@ -7,6 +7,8 @@ ACTION="list"
 ACTION_SET=0
 LIMIT=""
 LIMIT_SET=0
+PRUNE_FILES=0
+DRY_RUN=0
 
 usage() {
   cat <<'EOF'
@@ -20,11 +22,14 @@ Commands:
   latest         Show the most recent row.
   failures [N]   Show the last N non-zero-exit rows.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
-                 append-only, so prune it when it grows.
+                 append-only, so prune it when it grows. Add --files to delete
+                 unreferenced regular files under REPO/.oms/artifacts.
 
 Options:
   --repo PATH    Repo/directory. Default: PWD.
   --file PATH    Index path. Default: REPO/.oms/artifacts/index.jsonl.
+  --files        With prune, delete orphaned artifact/patch files.
+  --dry-run      With prune --files, print file deletions without changing files.
   -h, --help     Show help.
 EOF
 }
@@ -45,6 +50,14 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--file requires path"
       INDEX_FILE="$2"
       shift 2
+      ;;
+    --files)
+      PRUNE_FILES=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
       ;;
     list|latest|failures|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
@@ -69,6 +82,12 @@ done
 if [ "$ACTION" = "latest" ] && [ "$LIMIT_SET" -eq 1 ]; then
   fail "unknown argument: $LIMIT"
 fi
+if [ "$PRUNE_FILES" -eq 1 ] && [ "$ACTION" != "prune" ]; then
+  fail "--files is only valid with prune"
+fi
+if [ "$DRY_RUN" -eq 1 ] && { [ "$ACTION" != "prune" ] || [ "$PRUNE_FILES" -eq 0 ]; }; then
+  fail "--dry-run is only valid with prune --files"
+fi
 if [ "$LIMIT_SET" -eq 0 ]; then
   [ "$ACTION" = "prune" ] && LIMIT="1000" || LIMIT="20"
 fi
@@ -84,16 +103,107 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 if [ "$ACTION" = "prune" ]; then
   before="$(wc -l < "$INDEX_FILE" | tr -d ' ')"
-  if [ "$before" -le "$LIMIT" ]; then
+  if [ "$before" -le "$LIMIT" ] && [ "$PRUNE_FILES" -eq 0 ]; then
     echo "artifact-index: $before rows, within keep=$LIMIT; nothing pruned"
     exit 0
   fi
+
   tmp="$(mktemp)" || fail "mktemp failed"
   trap 'rm -f "$tmp"' EXIT
-  # In-place overwrite (not mv) so the index keeps its inode, permissions,
-  # and any symlink the user set up.
-  tail -n "$LIMIT" "$INDEX_FILE" > "$tmp" && cat "$tmp" > "$INDEX_FILE"
-  echo "artifact-index: pruned $before -> $LIMIT rows"
+
+  if [ "$before" -le "$LIMIT" ]; then
+    cat "$INDEX_FILE" > "$tmp"
+    echo "artifact-index: $before rows, within keep=$LIMIT; nothing pruned"
+  else
+    tail -n "$LIMIT" "$INDEX_FILE" > "$tmp"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "artifact-index: would prune $before -> $LIMIT rows"
+    else
+      # In-place overwrite (not mv) so the index keeps its inode, permissions,
+      # and any symlink the user set up.
+      cat "$tmp" > "$INDEX_FILE"
+      echo "artifact-index: pruned $before -> $LIMIT rows"
+    fi
+  fi
+
+  if [ "$PRUNE_FILES" -eq 1 ]; then
+    python3 - "$REPO" "$INDEX_FILE" "$tmp" "$DRY_RUN" <<'EOF'
+import json, os, stat, sys
+
+repo, index_file, kept_index, dry = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+artifacts_root = os.path.realpath(os.path.join(repo, ".oms", "artifacts"))
+index_real = os.path.realpath(index_file)
+
+
+def inside(path, root):
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def resolve_index_path(value):
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = value if os.path.isabs(value) else os.path.join(repo, value)
+    real = os.path.realpath(candidate)
+    if not inside(real, artifacts_root):
+        return None
+    return real
+
+
+referenced = set()
+with open(kept_index) as f:
+    for line in f:
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        for key in ("artifact", "patch", "source"):
+            resolved = resolve_index_path(row.get(key))
+            if resolved:
+                referenced.add(resolved)
+
+orphans = []
+for dirpath, dirnames, filenames in os.walk(artifacts_root, followlinks=False):
+    for name in filenames:
+        path = os.path.join(dirpath, name)
+        try:
+            st = os.stat(path, follow_symlinks=False)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        real = os.path.realpath(path)
+        if not inside(real, artifacts_root):
+            continue
+        if real == index_real or name in ("index.jsonl", ".gitignore"):
+            continue
+        if real not in referenced:
+            orphans.append(path)
+
+count = 0
+for path in sorted(orphans):
+    rel = os.path.relpath(path, repo)
+    if dry:
+        print(f"would delete: {rel}")
+    else:
+        try:
+            st = os.stat(path, follow_symlinks=False)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        os.unlink(path)
+        print(f"deleted: {rel}")
+    count += 1
+
+if dry:
+    print(f"artifact-index: would delete {count} orphan file(s)")
+else:
+    print(f"artifact-index: deleted {count} orphan file(s)")
+EOF
+  fi
   exit 0
 fi
 
