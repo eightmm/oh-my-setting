@@ -1328,11 +1328,7 @@ test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir() {
 test_multi_agent_review_rejects_bad_synthesize_provider() {
   local repo="$TMP/review-bad-synth"
 
-  mkdir -p "$repo"
-  git -C "$repo" init >/dev/null
-  printf 'x\n' > "$repo/file.txt"
-  git -C "$repo" add file.txt >/dev/null
-  git -C "$repo" commit -m init >/dev/null
+  make_committed_repo "$repo"
 
   if "$ROOT/scripts/multi-agent-review.sh" --synthesize nope --prompt q \
       --repo "$repo" --no-diff --dry-run >/dev/null 2>"$repo/error"; then
