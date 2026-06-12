@@ -59,7 +59,12 @@ if [ "${1:-}" = "list" ]; then
 fi
 
 if [ "$MODE" = "list" ]; then
+  [ "$#" -le 1 ] || fail "unknown argument: $2"
   N="${1:-10}"
+  case "$N" in
+    *[!0-9]*|"") fail "N must be a positive integer" ;;
+  esac
+  [ "$N" -gt 0 ] || fail "N must be a positive integer"
   LEDGER="${LEDGER:-docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
   tail -n "$N" "$LEDGER" |

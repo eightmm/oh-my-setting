@@ -3,6 +3,11 @@ set -euo pipefail
 
 DIR="${1:-$PWD}"
 
+if [ "$#" -gt 1 ]; then
+  echo "error: too many arguments" >&2
+  exit 2
+fi
+
 exists_any() {
   local pattern
   for pattern in "$@"; do

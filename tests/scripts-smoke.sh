@@ -1233,6 +1233,35 @@ test_multi_agent_review_rejects_unknown_provider() {
   [ ! -e "$project/outside-review-bad-provider" ] || fail "provider path traversal should not write outside artifact dir"
 }
 
+test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir() {
+  local dir="$TMP/ask-bad-provider"
+
+  if "$ROOT/scripts/multi-agent-ask.sh" --prompt q --providers nope \
+      --artifact-dir "$dir" --dry-run >/dev/null 2>"$TMP/ask-bad-provider.err"; then
+    fail "ask should reject unknown provider"
+  fi
+
+  assert_file_contains "$TMP/ask-bad-provider.err" "unsupported provider"
+  assert_not_exists "$dir"
+}
+
+test_multi_agent_review_rejects_bad_synthesize_provider() {
+  local repo="$TMP/review-bad-synth"
+
+  mkdir -p "$repo"
+  git -C "$repo" init >/dev/null
+  printf 'x\n' > "$repo/file.txt"
+  git -C "$repo" add file.txt >/dev/null
+  git -C "$repo" commit -m init >/dev/null
+
+  if "$ROOT/scripts/multi-agent-review.sh" --synthesize nope --prompt q \
+      --repo "$repo" --no-diff --dry-run >/dev/null 2>"$repo/error"; then
+    fail "review should reject bad synthesize provider"
+  fi
+
+  assert_file_contains "$repo/error" "--synthesize provider must be codex, claude, antigravity, or agy"
+}
+
 test_multi_agent_review_single_provider_failure_exits() {
   local project="$TMP/review-provider-failure"
   local artifact_dir="$project/artifacts"
@@ -1722,6 +1751,45 @@ EOF
     fail "digest header must be the first output line (ledger rows leaked before header)"
   awk '/## Recent Experiments/{f=1} f && /exit=0/{found=1} END{exit !found}' "$project/context" ||
     fail "ledger row must appear inside Recent Experiments section"
+}
+
+test_agent_ml_context_rejects_bad_max_bytes() {
+  local repo="$TMP/ml-context-bad-bytes"
+
+  mkdir -p "$repo"
+  printf 'import torch\n' > "$repo/train.py"
+
+  if "$ROOT/scripts/agent-ml-context.sh" --repo "$repo" --max-bytes nope \
+      >/dev/null 2>"$repo/error"; then
+    fail "agent-ml-context should reject non-integer --max-bytes"
+  fi
+
+  assert_file_contains "$repo/error" "--max-bytes must be a positive integer"
+}
+
+test_artifact_index_rejects_extra_limit_arg() {
+  local repo="$TMP/artifact-index-extra"
+
+  mkdir -p "$repo/.oms/artifacts"
+  printf '{"exit":0}\n' > "$repo/.oms/artifacts/index.jsonl"
+
+  if "$ROOT/scripts/artifact-index.sh" --repo "$repo" list 1 2 \
+      >/dev/null 2>"$repo/error"; then
+    fail "artifact-index should reject extra positional args"
+  fi
+
+  assert_file_contains "$repo/error" "unknown argument: 2"
+}
+
+test_project_doctor_rejects_extra_arg() {
+  local project="$TMP/doctor-extra"
+
+  mkdir -p "$project"
+  if "$ROOT/scripts/project-doctor.sh" "$project" extra >/dev/null 2>"$project/error"; then
+    fail "project-doctor should reject extra positional args"
+  fi
+
+  assert_file_contains "$project/error" "too many arguments"
 }
 
 test_delegate_auto_verify_prefers_ml_smoke() {
@@ -2547,6 +2615,7 @@ test_apply_ml_scaffolds_check_contract
 test_project_doctor_warns_missing_check
 test_project_doctor_warns_structure_drift
 test_project_doctor_warns_unregistered_experiments
+test_project_doctor_rejects_extra_arg
 test_review_verdicts_subcommand
 test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty
@@ -2582,6 +2651,7 @@ test_multi_agent_review_base_ref_diff
 test_multi_agent_review_invalid_base_fails
 test_multi_agent_review_synthesize_dry_run
 test_multi_agent_review_synthesize_provider_override
+test_multi_agent_review_rejects_bad_synthesize_provider
 test_multi_agent_review_ml_preset
 test_multi_agent_review_default_prompt_requires_ml
 test_multi_agent_debate_prompt_fences_external_output
@@ -2590,6 +2660,7 @@ test_multi_agent_review_excludes_private_status
 test_multi_agent_review_secret_diff_skips_external
 test_multi_agent_review_no_diff_provider_subset
 test_multi_agent_review_rejects_unknown_provider
+test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir
 test_multi_agent_review_single_provider_failure_exits
 test_multi_agent_ask_hypothesis_preset
 test_multi_agent_ask_dry_run_no_repo
@@ -2610,8 +2681,10 @@ test_agent_task_loop_state_and_warnings
 test_agent_call_outbound_scrubber_blocks_private_path
 test_artifact_index_records_call
 test_artifact_index_prune
+test_artifact_index_rejects_extra_limit_arg
 test_agent_run_records_task_outcome
 test_agent_ml_context_digest
+test_agent_ml_context_rejects_bad_max_bytes
 test_delegate_auto_verify_prefers_ml_smoke
 test_agent_call_dry_run_attaches_shared_memory
 test_agent_run_auto_read_routes_to_call

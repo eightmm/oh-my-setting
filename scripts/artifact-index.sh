@@ -4,6 +4,7 @@ set -euo pipefail
 REPO="$PWD"
 INDEX_FILE=""
 ACTION="list"
+ACTION_SET=0
 LIMIT=""
 LIMIT_SET=0
 
@@ -46,7 +47,10 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     list|latest|failures|prune)
+      [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
+      [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
+      ACTION_SET=1
       shift
       ;;
     -h|--help)
@@ -54,6 +58,7 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
+      [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       LIMIT="$1"
       LIMIT_SET=1
       shift
@@ -61,6 +66,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$ACTION" = "latest" ] && [ "$LIMIT_SET" -eq 1 ]; then
+  fail "unknown argument: $LIMIT"
+fi
 if [ "$LIMIT_SET" -eq 0 ]; then
   [ "$ACTION" = "prune" ] && LIMIT="1000" || LIMIT="20"
 fi

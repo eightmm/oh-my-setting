@@ -102,6 +102,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-show}"
+case "$ACTION" in
+  append|pin) ;;
+  *)
+    [ -z "$TEXT" ] || { echo "error: unknown argument: $TEXT" >&2; usage >&2; exit 2; }
+    ;;
+esac
 if [ -z "$MEMORY_FILE" ]; then
   if [ "$SCOPE" = "global" ]; then
     MEMORY_FILE="$(agent_memory_global_file)"

@@ -31,6 +31,12 @@ case "${1:-}" in
     ;;
 esac
 
+[ "$#" -le 1 ] || {
+  echo "error: too many arguments" >&2
+  usage >&2
+  exit 2
+}
+
 [ -d "$PROJECT_DIR" ] || {
   echo "error: not a directory: $PROJECT_DIR" >&2
   exit 2

@@ -61,6 +61,17 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$MAX_BYTES" in
+  *[!0-9]*|"")
+    echo "error: --max-bytes must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+[ "$MAX_BYTES" -gt 0 ] || {
+  echo "error: --max-bytes must be a positive integer" >&2
+  exit 2
+}
+
 REPO="$(cd "$REPO" && pwd)"
 LEDGER="${LEDGER:-$REPO/docs/EXPERIMENTS.jsonl}"
 

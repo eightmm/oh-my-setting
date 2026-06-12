@@ -23,6 +23,14 @@ case "${1:-}" in
     ;;
 esac
 
+case "$BASE_STYLE" in
+  auto|general|ml|slurm) ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+
 has_slurm_runtime() {
   command -v sbatch >/dev/null 2>&1 ||
     command -v srun >/dev/null 2>&1 ||

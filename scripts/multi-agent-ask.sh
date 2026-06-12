@@ -69,6 +69,24 @@ Environment:
 EOF
 }
 
+validate_provider_list() {
+  local provider
+  local provider_list
+  local total=0
+
+  IFS=',' read -r -a provider_list <<< "$PROVIDERS"
+  for provider in "${provider_list[@]}"; do
+    provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
+    [ -n "$provider" ] || continue
+    case "$provider" in
+      codex|claude|antigravity|agy) ;;
+      *) fail "unsupported provider: $provider" ;;
+    esac
+    total=$((total + 1))
+  done
+  [ "$total" -gt 0 ] || fail "no providers selected"
+}
+
 write_prompt() {
   local output="$1"
   local repo="$2"
@@ -204,6 +222,7 @@ if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
   fail "--hypothesis needs a prompt (--prompt or positional) with the hypothesis and the planned experiment"
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
+validate_provider_list
 if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
   REPO="$(cd "$REPO" && pwd)"
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"

@@ -155,6 +155,12 @@ fetch_and_compare() {
   fi
 }
 
+[ "$#" -le 1 ] || {
+  echo "error: too many arguments" >&2
+  usage >&2
+  exit 2
+}
+
 case "$MODE" in
   -h|--help)
     usage

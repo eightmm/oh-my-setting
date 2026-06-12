@@ -189,6 +189,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-show}"
+case "$ACTION" in
+  append) ;;
+  *)
+    [ -z "$TEXT" ] || { echo "error: unknown argument: $TEXT" >&2; usage >&2; exit 2; }
+    ;;
+esac
 [ -n "$TASK_FILE" ] || TASK_FILE="$(agent_task_project_file "$REPO")"
 
 require_uint() {

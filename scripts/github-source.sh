@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ACTION=""
+ACTION_SET=0
 USER_NAME=""
 REPO=""
 QUERY=""
@@ -69,7 +70,9 @@ json_text() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     profile|discover|fetch)
+      [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
+      ACTION_SET=1
       shift
       ;;
     --user)

@@ -69,10 +69,12 @@ done
   usage >&2
   exit 2
 }
+[ "${#ARGS[@]}" -le 2 ] || fail "too many arguments"
 
 JOB_ID=""
 LOG_FILE=""
 if [ -f "${ARGS[0]}" ]; then
+  [ "${#ARGS[@]}" -eq 1 ] || fail "too many arguments"
   LOG_FILE="${ARGS[0]}"
 elif printf '%s' "${ARGS[0]}" | grep -Eq '^[0-9]+(_[0-9]+)?$'; then
   JOB_ID="${ARGS[0]}"

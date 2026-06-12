@@ -6,6 +6,7 @@ REPO_DIR="$PWD"
 REGISTRY=""
 GLOBAL=0
 ACTION="list"
+ACTION_SET=0
 NAME=""
 SRC_REPO=""
 SRC_PATH=""
@@ -74,7 +75,10 @@ resolve_registry() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     path|list|show|add|fetch)
+      [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
+      [ -z "$NAME" ] || fail "unknown argument: $1"
       ACTION="$1"
+      ACTION_SET=1
       shift
       ;;
     --repo-dir)
