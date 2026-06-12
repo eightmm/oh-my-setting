@@ -36,6 +36,21 @@ assert_one_artifact_contains() {
   assert_file_contains "$file" "$text"
 }
 
+
+setup_doctor_home() {
+  local home_dir="$1"
+
+  mkdir -p "$home_dir"
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+}
+
+run_doctor_for_project() {
+  local project="$1"
+  local home_dir="$2"
+
+  (cd "$project" && HOME="$home_dir" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")
+}
+
 test_apply_dry_run_has_no_writes() {
   local project="$TMP/dry-run-new"
 
@@ -808,6 +823,71 @@ test_oms_self_ignore_created_for_harness_paths() {
   [ "$(wc -l < "$project/.oms/.gitignore")" = "$before" ] ||
     fail ".oms/.gitignore should not grow when memory/task paths are created"
   [ "$(cat "$project/.oms/.gitignore")" = "*" ] || fail ".oms/.gitignore changed after re-entry"
+}
+
+
+test_doctor_warns_bad_harness_index_json() {
+  local project="$TMP/doctor-harness-bad-json"
+  local home_dir="$TMP/doctor-home-bad-json"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms/artifacts"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf 'artifact\n' > "$project/.oms/artifacts/ok.md"
+  printf '{"kind":"call","artifact":".oms/artifacts/ok.md"}\nnot-json\n' \
+    > "$project/.oms/artifacts/index.jsonl"
+
+  out="$(run_doctor_for_project "$project" "$home_dir")" ||
+    fail "doctor warnings must not fail: $out"
+  printf '%s' "$out" | grep -Fq '# harness state' || fail "missing harness section"
+  printf '%s' "$out" | grep -Fq 'warn: artifact index has 1 invalid JSON line(s)' ||
+    fail "missing bad JSON warning"
+  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+}
+
+
+test_doctor_warns_missing_oms_gitignore() {
+  local project="$TMP/doctor-harness-no-gitignore"
+  local home_dir="$TMP/doctor-home-no-gitignore"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms"
+
+  out="$(run_doctor_for_project "$project" "$home_dir")" ||
+    fail "missing .oms/.gitignore must not fail: $out"
+  printf '%s' "$out" | grep -Fq 'warn: .oms/.gitignore missing (re-run any harness command)' ||
+    fail "missing .oms/.gitignore warning"
+  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+}
+
+
+test_doctor_clean_harness_state_has_no_warnings() {
+  local project="$TMP/doctor-harness-clean"
+  local home_dir="$TMP/doctor-home-clean"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms/artifacts" "$project/.oms/task" "$project/.oms/memory"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf 'artifact\n' > "$project/.oms/artifacts/ok.md"
+  printf 'patch\n' > "$project/.oms/artifacts/ok.patch"
+  printf 'Current clean task\n' > "$project/.oms/task/current.md"
+  printf 'Clean memory note\n' > "$project/.oms/memory/shared.md"
+  printf '{"kind":"call","artifact":".oms/artifacts/ok.md","patch":".oms/artifacts/ok.patch"}\n' \
+    > "$project/.oms/artifacts/index.jsonl"
+
+  out="$(run_doctor_for_project "$project" "$home_dir")" ||
+    fail "clean harness state should pass: $out"
+  printf '%s' "$out" | grep -Fq '# harness state' || fail "missing harness section"
+  printf '%s' "$out" | grep -Fq 'ok: artifact index JSONL' || fail "missing JSONL ok"
+  printf '%s' "$out" | grep -Fq 'ok: artifact index references' || fail "missing reference ok"
+  printf '%s' "$out" | grep -Fq 'ok: harness task/memory sensitive scan' ||
+    fail "missing sensitive scan ok"
+  if printf '%s' "$out" | grep -Fq 'warn:'; then
+    fail "clean harness state should not warn: $out"
+  fi
 }
 
 
@@ -2823,6 +2903,9 @@ test_detect_ml_code_text_is_ml
 test_detect_ignores_common_generated_dirs
 test_apply_and_remove_valid_block
 test_oms_self_ignore_created_for_harness_paths
+test_doctor_warns_bad_harness_index_json
+test_doctor_warns_missing_oms_gitignore
+test_doctor_clean_harness_state_has_no_warnings
 test_multi_agent_export_only_and_import_result
 test_multi_agent_review_export_only_skips_cli
 test_import_warns_sensitive_result_but_succeeds

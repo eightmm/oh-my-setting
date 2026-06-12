@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
 
+# shellcheck source=scripts/lib/agent-memory-common.sh
+. "$ROOT/scripts/lib/agent-memory-common.sh"
+
 load_user_tool_paths() {
   export PATH="$HOME/.local/bin:$PATH"
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -57,6 +60,137 @@ check_custom_skills() {
   done
 }
 
+harness_relpath() {
+  local project_dir="$1"
+  local path="$2"
+
+  case "$path" in
+    "$project_dir"/*) printf '%s\n' "${path#"$project_dir"/}" ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+}
+
+check_harness_artifact_index() {
+  local project_dir="$1"
+  local index="$project_dir/.oms/artifacts/index.jsonl"
+  local stats
+  local bad
+  local stale
+
+  if [ ! -f "$index" ]; then
+    echo "ok: artifact index absent"
+    return 0
+  fi
+
+  command -v python3 >/dev/null 2>&1 || return 0
+  stats="$(python3 - "$project_dir" "$index" <<'PY'
+import json
+import os
+import sys
+
+repo, index = sys.argv[1:]
+bad = 0
+stale = 0
+
+with open(index, "r", encoding="utf-8") as f:
+    for line in f:
+        try:
+            row = json.loads(line)
+        except Exception:
+            bad += 1
+            continue
+        if not isinstance(row, dict):
+            continue
+        for key in ("artifact", "patch"):
+            value = row.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            path = value if os.path.isabs(value) else os.path.join(repo, value)
+            if not os.path.exists(path):
+                stale += 1
+
+print(f"{bad} {stale}")
+PY
+)" || {
+    echo "warn: artifact index audit failed"
+    return 0
+  }
+
+  read -r bad stale <<< "$stats"
+  if [ "${bad:-0}" -gt 0 ]; then
+    echo "warn: artifact index has $bad invalid JSON line(s)"
+  else
+    echo "ok: artifact index JSONL"
+  fi
+
+  if [ "${stale:-0}" -gt 0 ]; then
+    echo "warn: artifact index has $stale stale artifact/patch reference(s)"
+  else
+    echo "ok: artifact index references"
+  fi
+}
+
+check_harness_sensitive_files() {
+  local project_dir="$1"
+  local oms_dir="$project_dir/.oms"
+  local file
+  local rel
+  local sensitive=0
+
+  file="$oms_dir/task/current.md"
+  if [ -f "$file" ] && agent_memory_file_has_sensitive_content "$file"; then
+    rel="$(harness_relpath "$project_dir" "$file")"
+    echo "warn: sensitive-looking harness state: $rel"
+    sensitive=$((sensitive + 1))
+  fi
+
+  if [ -d "$oms_dir/memory" ]; then
+    while IFS= read -r -d '' file; do
+      if agent_memory_file_has_sensitive_content "$file"; then
+        rel="$(harness_relpath "$project_dir" "$file")"
+        echo "warn: sensitive-looking harness state: $rel"
+        sensitive=$((sensitive + 1))
+      fi
+    done < <(find "$oms_dir/memory" -maxdepth 1 -type f -print0 2>/dev/null)
+  fi
+
+  if [ "$sensitive" -eq 0 ]; then
+    echo "ok: harness task/memory sensitive scan"
+  fi
+}
+
+check_harness_state() {
+  local project_dir="${OMS_DOCTOR_PROJECT_DIR:-}"
+  local oms_dir
+
+  if [ -z "$project_dir" ]; then
+    [ -d "$PWD/.oms" ] || return 0
+    project_dir="$PWD"
+  fi
+
+  if ! project_dir="$(cd "$project_dir" 2>/dev/null && pwd)"; then
+    echo "warn: harness project dir unavailable: ${OMS_DOCTOR_PROJECT_DIR:-$PWD}"
+    return 0
+  fi
+
+  oms_dir="$project_dir/.oms"
+  printf '\n# harness state\n'
+  if [ ! -d "$oms_dir" ]; then
+    echo "ok: no .oms harness state"
+    return 0
+  fi
+
+  echo "ok: harness state $oms_dir"
+  if [ -f "$oms_dir/.gitignore" ]; then
+    echo "ok: .oms/.gitignore"
+  else
+    echo "warn: .oms/.gitignore missing (re-run any harness command)"
+  fi
+
+  check_harness_artifact_index "$project_dir"
+  check_harness_sensitive_files "$project_dir"
+}
+
 load_user_tool_paths
 
 case "$REQUIRE_TOOLS" in
@@ -103,6 +237,8 @@ if ! "$ROOT/scripts/install-skills.sh" >/dev/null; then
   echo "fail: skills.manifest.json out of sync (run scripts/install-skills.sh for details)"
   FAILED=1
 fi
+
+check_harness_state
 
 if [ "$FAILED" -ne 0 ]; then
   echo "doctor: failed"
