@@ -85,11 +85,16 @@ if [ "${1:-}" = "verdicts" ]; then
   shift
   vdir="${1:-$PWD/.oms/artifacts/review}"
   [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
-  # "|| true" inside: head's early exit must not wipe the captured output
-  # under pipefail. [!_]* skips _synthesis-*; export/import handoff artifacts
-  # hold no provider review to judge; artifact names are wrapper-generated
-  # slugs, so ls -t parsing is safe here.
-  latest="$(ls -t "$vdir"/[!_]*.md 2>/dev/null | grep -Ev '\.(export|import)\.md$' | head -n 1 || true)"
+  # [!_]* skips _synthesis-*; export/import handoff artifacts hold no provider
+  # review to judge; artifact names are wrapper-generated slugs, so ls -t
+  # parsing is safe here. "|| true": an empty dir must not trip pipefail.
+  latest="$(
+    ls -t "$vdir"/[!_]*.md 2>/dev/null | while IFS= read -r f; do
+      case "$f" in *.export.md|*.import.md) continue ;; esac
+      printf '%s\n' "$f"
+      break
+    done || true
+  )"
   [ -n "$latest" ] || { echo "error: no review artifacts in $vdir" >&2; exit 2; }
   # Debate rounds append -rN to the run id; strip it for grouping.
   run_id="$(printf '%s' "$latest" | sed -E 's/.*-([0-9]{8}T[0-9]{6}Z-[0-9]+)(-r[0-9]+)?\.md$/\1/')"
