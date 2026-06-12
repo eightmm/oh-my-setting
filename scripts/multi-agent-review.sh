@@ -24,6 +24,7 @@ INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 DEBATE=0
+EXPORT_ONLY=0
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 usage() {
@@ -61,6 +62,10 @@ Options:
                        sees the others' previous findings, critiques them, and
                        revises its own. Debate rounds exchange findings only;
                        the diff is attached to round-1 prompts only.
+  --export-only        Write provider prompt artifacts and do not call CLIs.
+                       Use when the current agent may not send repo context to
+                       another external provider. Import answers later with
+                       import-agent-result.sh.
   --synthesize [P]     After provider reviews, run a synthesis pass with
                        provider P (codex|claude|antigravity). Default: claude.
   --print-timeout DUR  Timeout for print mode wait. Default: 5m.
@@ -81,9 +86,10 @@ if [ "${1:-}" = "verdicts" ]; then
   vdir="${1:-$PWD/.oms/artifacts/review}"
   [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
   # "|| true" inside: head's early exit must not wipe the captured output
-  # under pipefail. [!_]* skips _synthesis-*; artifact names are
-  # wrapper-generated slugs, so ls -t parsing is safe here.
-  latest="$(ls -t "$vdir"/[!_]*.md 2>/dev/null | head -n 1 || true)"
+  # under pipefail. [!_]* skips _synthesis-*; export/import handoff artifacts
+  # hold no provider review to judge; artifact names are wrapper-generated
+  # slugs, so ls -t parsing is safe here.
+  latest="$(ls -t "$vdir"/[!_]*.md 2>/dev/null | grep -Ev '\.(export|import)\.md$' | head -n 1 || true)"
   [ -n "$latest" ] || { echo "error: no review artifacts in $vdir" >&2; exit 2; }
   # Debate rounds append -rN to the run id; strip it for grouping.
   run_id="$(printf '%s' "$latest" | sed -E 's/.*-([0-9]{8}T[0-9]{6}Z-[0-9]+)(-r[0-9]+)?\.md$/\1/')"
@@ -259,6 +265,10 @@ while [ "$#" -gt 0 ]; do
       fi
       shift
       ;;
+    --export-only)
+      EXPORT_ONLY=1
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -312,10 +322,18 @@ trap cleanup EXIT
 
 if [ "$NO_DIFF" -eq 0 ]; then
   ma_safe_status "$REPO" > "$status_file"
-  if ! ma_safe_diff "$REPO" > "$diff_file"; then
-    echo "external review skipped: sensitive-looking diff content detected" >&2
-    exit 3
-  fi
+  diff_rc=0
+  ma_safe_diff "$REPO" > "$diff_file" || diff_rc=$?
+  case "$diff_rc" in
+    0) ;;
+    3)
+      echo "external review skipped: sensitive-looking diff content detected" >&2
+      exit 3
+      ;;
+    *)
+      fail "git diff failed for $REPO"
+      ;;
+  esac
 else
   : > "$diff_file"
 fi
@@ -327,9 +345,15 @@ slug="$(slugify "$PROMPT")"
 [ -n "$slug" ] || slug="review"
 declare -a pids artifacts provider_names alive last_arts
 
-ma_run_round1
+if [ "$EXPORT_ONLY" -eq 1 ]; then
+  ma_export_round1
+else
+  ma_run_round1
+fi
 
-if [ "$DEBATE" -gt 0 ]; then
+if [ "$EXPORT_ONLY" -eq 1 ] && [ "$DEBATE" -gt 0 ]; then
+  echo "export-only: debate rounds skipped until imported answers exist" >&2
+elif [ "$DEBATE" -gt 0 ]; then
   debate_dir="$(mktemp -d)" || fail "mktemp failed"
   ma_run_debate_rounds
 fi
@@ -337,7 +361,9 @@ fi
 synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
 ma_write_synthesis "$synth_file"
 
-if [ -n "$SYNTHESIZE" ]; then
+if [ "$EXPORT_ONLY" -eq 1 ] && [ -n "$SYNTHESIZE" ]; then
+  echo "export-only: synthesis provider call skipped" >&2
+elif [ -n "$SYNTHESIZE" ]; then
   synth_prompt_file="$(mktemp)" || fail "mktemp failed"
   {
     printf 'You are the synthesis reviewer. Below are independent reviews of the same diff.\n'
@@ -385,6 +411,13 @@ if [ -n "$SYNTHESIZE" ]; then
     fi
   fi
   rm -f "$synth_prompt_file"
+fi
+
+if [ "$EXPORT_ONLY" -eq 1 ]; then
+  echo "summary: exported $total provider prompt(s)"
+  echo "artifacts: $ARTIFACT_DIR"
+  echo "synthesis: $synth_file"
+  exit 0
 fi
 
 ma_quorum_exit

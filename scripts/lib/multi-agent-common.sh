@@ -250,6 +250,7 @@ ma_safe_status() {
   git -C "$repo" status --short -- "${MA_SAFE_PATHS[@]}"
 }
 
+# Returns 0 on success, 1 on git failure, 3 on sensitive-looking content.
 ma_safe_diff() {
   local repo="$1"
   local base
@@ -264,7 +265,7 @@ ma_safe_diff() {
 
   if contains_sensitive_content "$tmp"; then
     rm -f "$tmp"
-    return 1
+    return 3
   fi
 
   cat "$tmp"
@@ -361,10 +362,60 @@ run_provider() {
   return "$status"
 }
 
+ma_export_round1() {
+  local provider artifact provider_list
+  ok=0
+  total=0
+  artifacts=()
+  provider_names=()
+  alive=()
+  last_arts=()
+
+  # Export artifacts are pasted into external providers by hand, so they must
+  # pass the same outbound gate as a direct CLI call (run_provider).
+  if ! ma_validate_outbound_prompt "$prompt_file"; then
+    echo "export blocked: no export artifacts were written" >&2
+    exit 3
+  fi
+
+  IFS=',' read -r -a provider_list <<< "$PROVIDERS"
+  for provider in "${provider_list[@]}"; do
+    provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
+    [ -n "$provider" ] || continue
+    case "$provider" in
+      codex|claude|antigravity|agy) ;;
+      *) fail "unsupported provider: $provider" ;;
+    esac
+    total=$((total + 1))
+    artifact="$ARTIFACT_DIR/$provider-$slug-$timestamp.export.md"
+    {
+      printf '# %s %s export\n\n' "$provider" "$MA_KIND"
+      printf -- '- exported: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      if [ "${MA_SHOW_REPO:-0}" = "1" ]; then
+        printf -- '- repo: %s\n' "$(ma_repo_label "${REPO:-}")"
+      fi
+      printf '\n## Prompt\n\n'
+      cat "$prompt_file"
+      printf '\n\n## Output\n\n'
+      printf 'EXPORTED: paste the Prompt section into %s, then import the answer with import-agent-result.sh.\n' "$provider"
+      printf '\n\n## Exit\n\n0\n'
+    } > "$artifact"
+    ma_append_artifact_index "${REPO:-}" "${MA_KIND}-export" "$provider" 0 "$artifact" "" "$prompt_file" || true
+    echo "exported: $provider -> $artifact"
+    ok=$((ok + 1))
+    artifacts+=("$artifact")
+    provider_names+=("$provider")
+    alive+=(1)
+    last_arts+=("$artifact")
+  done
+
+  [ "$total" -gt 0 ] || fail "no providers selected"
+}
+
 # Round 1: fan out the same prompt to all providers in parallel.
 # Sets: ok, total, pids, artifacts, provider_names, alive, last_arts.
 ma_run_round1() {
-  local provider artifact i
+  local provider artifact i provider_list
   ok=0
   total=0
   pids=()

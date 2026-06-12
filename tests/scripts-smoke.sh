@@ -784,6 +784,84 @@ test_apply_and_remove_valid_block() {
   fi
 }
 
+
+test_multi_agent_export_only_and_import_result() {
+  local project="$TMP/export-import"
+  local artifact_dir="$project/artifacts"
+  local export_artifact
+  local import_artifact
+
+  make_committed_repo "$project"
+  OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude \
+    --repo-context \
+    --export-only \
+    --prompt "Assess handoff mode" >"$project/export-out"
+
+  assert_file_contains "$project/export-out" "exported: claude ->"
+  export_artifact="$(find "$artifact_dir" -type f -name 'claude-assess-handoff-mode-*.export.md' | head -n 1)"
+  [ -n "$export_artifact" ] || fail "missing export artifact"
+  assert_file_contains "$export_artifact" "EXPORTED: paste the Prompt section into claude"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "ask-export"'
+
+  printf 'Answer:\nImported answer\nTradeoffs:\nnone\nRisks:\nnone\nRecommendation:\nuse export\n' > "$project/claude-result.md"
+  "$ROOT/scripts/import-agent-result.sh" \
+    --repo "$project" \
+    --kind ask \
+    --provider claude \
+    --prompt-file "$export_artifact" \
+    --file "$project/claude-result.md" >"$project/import-out"
+
+  assert_file_contains "$project/import-out" "imported: claude ->"
+  import_artifact="$(find "$project/.oms/artifacts/ask" -type f -name 'claude-*.import.md' | head -n 1)"
+  [ -n "$import_artifact" ] || fail "missing import artifact"
+  assert_file_contains "$import_artifact" "Imported answer"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "ask-import"'
+}
+
+test_multi_agent_review_export_only_skips_cli() {
+  local project="$TMP/review-export-only"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+  printf 'changed\n' >> "$project/file.txt"
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,antigravity \
+    --export-only \
+    --prompt "Review export mode" >"$project/out"
+
+  assert_file_contains "$project/out" "summary: exported 2 provider prompt(s)"
+  assert_one_artifact_contains "$artifact_dir" 'codex-review-export-mode-*.export.md' "EXPORTED: paste the Prompt section into codex"
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-review-export-mode-*.export.md' "EXPORTED: paste the Prompt section into antigravity"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "review-export"'
+}
+
+test_multi_agent_export_only_blocks_sensitive_prompt() {
+  local project="$TMP/export-scrub"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+  if OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude \
+    --export-only \
+    --prompt "Assess private path /hom""e/jaemin/secret" \
+    >"$project/out" 2>"$project/error"; then
+    fail "sensitive prompt should block export"
+  fi
+
+  assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
+  assert_file_contains "$project/error" "export blocked"
+  if find "$artifact_dir" -type f -name '*.export.md' 2>/dev/null | grep -q .; then
+    fail "blocked export should write no export artifacts"
+  fi
+}
+
 test_multi_agent_review_dry_run_artifacts() {
   local project="$TMP/review"
   local artifact_dir="$project/artifacts"
@@ -2126,6 +2204,7 @@ test_auto_update_help_runs() {
   "$ROOT/scripts/artifact-index.sh" --help >/dev/null
   "$ROOT/scripts/github-source.sh" --help >/dev/null
   "$ROOT/scripts/code-source.sh" --help >/dev/null
+  "$ROOT/scripts/import-agent-result.sh" --help >/dev/null
   "$ROOT/scripts/research-runner.sh" --help >/dev/null
   "$ROOT/scripts/auto-update.sh" --help >/dev/null
   "$ROOT/scripts/install-autoupdate.sh" --help >/dev/null
@@ -2390,6 +2469,9 @@ test_detect_ml_filename_is_ml
 test_detect_ml_code_text_is_ml
 test_detect_ignores_common_generated_dirs
 test_apply_and_remove_valid_block
+test_multi_agent_export_only_and_import_result
+test_multi_agent_review_export_only_skips_cli
+test_multi_agent_export_only_blocks_sensitive_prompt
 test_multi_agent_review_dry_run_artifacts
 test_multi_agent_review_base_ref_diff
 test_multi_agent_review_invalid_base_fails

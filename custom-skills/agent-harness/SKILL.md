@@ -108,6 +108,21 @@ index is append-only, so `artifact-index.sh prune [N]` trims it to the most
 recent N rows. When an active task exists, `agent-run.sh` also appends a
 one-line outcome with artifact and patch paths to `## Current State`.
 
+When the current agent must not send repo context to another external provider,
+use the same commands with `--export-only`. This writes provider-specific prompt
+artifacts but does not call Codex, Claude Code, or Antigravity. Run the exported
+prompt wherever policy allows, then import the answer back into the same artifact
+index:
+
+```bash
+~/.oh-my-setting/scripts/multi-agent-review.sh --repo . --diff --providers claude --export-only --prompt "Review this change."
+~/.oh-my-setting/scripts/import-agent-result.sh --kind review --provider claude --prompt-file .oms/artifacts/review/claude-...export.md --file claude-answer.md
+```
+
+This export/import path is provider-neutral and should behave the same from
+Codex, Claude Code, and Antigravity sessions because the current agent only
+writes or reads local artifacts.
+
 `agent-run.sh` attaches compact shared memory, the active task packet, and an
 ML context digest for detected ML repos by default. Use `--no-memory`,
 `--no-task`, or `--no-ml-context` to omit those layers. Set

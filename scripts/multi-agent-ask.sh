@@ -23,6 +23,7 @@ INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 DEBATE=0
 HYPOTHESIS_PRESET=0
+EXPORT_ONLY=0
 DRY_RUN="${OH_MY_SETTING_ASK_DRY_RUN:-0}"
 
 usage() {
@@ -53,6 +54,10 @@ Options:
                        sees the others' previous answers, critiques them, and
                        revises its own. Debate rounds exchange answers only;
                        repo context is attached to round-1 prompts only.
+  --export-only        Write provider prompt artifacts and do not call CLIs.
+                       Use when the current agent may not send repo context to
+                       another external provider. Import answers later with
+                       import-agent-result.sh.
   --print-timeout DUR  Timeout for print mode wait. Default: 5m.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
@@ -167,6 +172,10 @@ while [ "$#" -gt 0 ]; do
       esac
       shift 2
       ;;
+    --export-only)
+      EXPORT_ONLY=1
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -222,10 +231,18 @@ else
   : > "$status_file"
 fi
 if [ "$INCLUDE_DIFF" -eq 1 ]; then
-  if ! ma_safe_diff "$REPO" > "$diff_file"; then
-    echo "external ask skipped: sensitive-looking diff content detected" >&2
-    exit 3
-  fi
+  diff_rc=0
+  ma_safe_diff "$REPO" > "$diff_file" || diff_rc=$?
+  case "$diff_rc" in
+    0) ;;
+    3)
+      echo "external ask skipped: sensitive-looking diff content detected" >&2
+      exit 3
+      ;;
+    *)
+      fail "git diff failed for $REPO"
+      ;;
+  esac
 else
   : > "$diff_file"
 fi
@@ -237,14 +254,27 @@ slug="$(slugify "$PROMPT")"
 [ -n "$slug" ] || slug="ask"
 declare -a pids artifacts provider_names alive last_arts
 
-ma_run_round1
+if [ "$EXPORT_ONLY" -eq 1 ]; then
+  ma_export_round1
+else
+  ma_run_round1
+fi
 
-if [ "$DEBATE" -gt 0 ]; then
+if [ "$EXPORT_ONLY" -eq 1 ] && [ "$DEBATE" -gt 0 ]; then
+  echo "export-only: debate rounds skipped until imported answers exist" >&2
+elif [ "$DEBATE" -gt 0 ]; then
   debate_dir="$(mktemp -d)" || fail "mktemp failed"
   ma_run_debate_rounds
 fi
 
 synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
 ma_write_synthesis "$synth_file"
+
+if [ "$EXPORT_ONLY" -eq 1 ]; then
+  echo "summary: exported $total provider prompt(s)"
+  echo "artifacts: $ARTIFACT_DIR"
+  echo "synthesis: $synth_file"
+  exit 0
+fi
 
 ma_quorum_exit
