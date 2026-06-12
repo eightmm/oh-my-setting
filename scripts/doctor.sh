@@ -38,6 +38,15 @@ check_optional_cmd() {
   fi
 }
 
+check_bash_version() {
+  local major="${BASH_VERSINFO[0]:-0}"
+  if [ "$major" -lt 4 ]; then
+    echo "warn: bash 4+ recommended; current bash is ${BASH_VERSION:-unknown}"
+  else
+    echo "ok: bash ${BASH_VERSION:-unknown}"
+  fi
+}
+
 check_path() {
   if [ -e "$1" ] || [ -L "$1" ]; then
     echo "ok: $1"
@@ -210,6 +219,8 @@ check_cmd claude
 check_cmd codex
 check_cmd agy
 check_cmd gh
+
+check_bash_version
 
 check_optional_cmd timeout
 check_optional_cmd sbatch

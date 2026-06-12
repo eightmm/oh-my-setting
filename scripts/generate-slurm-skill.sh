@@ -92,7 +92,7 @@ mkdir -p "$(dirname "$OUT")"
 
 {
   printf '# Local Slurm Cluster\n\n'
-  printf 'Generated: %s\n' "$(date -Iseconds)"
+  printf 'Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'Host: %s\n' "$(hostname 2>/dev/null || true)"
   printf 'User: %s\n\n' "${USER:-unknown}"
 

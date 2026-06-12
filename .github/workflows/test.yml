@@ -18,3 +18,44 @@ jobs:
         run: bash scripts/install-skills.sh
       - name: scripts smoke
         run: bash tests/scripts-smoke.sh
+
+  portability-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash syntax
+        run: |
+          for f in install.sh scripts/*.sh scripts/lib/*.sh tests/scripts-smoke.sh; do
+            bash -n "$f"
+          done
+      - name: detect project style fixture
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/app"
+          printf 'import torch\n' > "$tmp/app/model.py"
+          [ "$(scripts/detect-project-style.sh "$tmp/app")" = "ml" ]
+      - name: apply template and project doctor
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          scripts/apply-project-template.sh general "$tmp/project" >/dev/null
+          scripts/project-doctor.sh "$tmp/project"
+      - name: job digest log fixture
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          printf 'step 1 loss: 0.5\nTraceback (most recent call last):\n  File "t.py", line 1\nRuntimeError: CUDA out of memory\n' > "$tmp/run.log"
+          scripts/job-digest.sh "$tmp/run.log" > "$tmp/digest.md"
+          grep -Fq 'CUDA out of memory' "$tmp/digest.md"
+          grep -Fq '## Last traceback' "$tmp/digest.md"
+      - name: run ledger list fixture
+        run: |
+          repo="$PWD"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/project/docs"
+          printf '{"ts":"2026-06-12T00:00:00Z","exit":0,"duration_s":1,"git_sha":"abc1234","dirty":0,"cmd":["echo","ok"]}\n' > "$tmp/project/docs/EXPERIMENTS.jsonl"
+          (cd "$tmp/project" && "$repo/scripts/run-ledger.sh" list 1) > "$tmp/list.txt"
+          grep -Fq 'echo ok' "$tmp/list.txt"
+

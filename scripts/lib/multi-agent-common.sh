@@ -193,6 +193,17 @@ ma_task_goal() {
   awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null || true
 }
 
+ma_sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  fi
+}
+
 ma_append_artifact_index() {
   local repo="$1"
   local kind="$2"
@@ -220,8 +231,8 @@ ma_append_artifact_index() {
   [ -n "$artifact" ] && artifact_rel="$(ma_artifact_relpath "$repo" "$artifact" 2>/dev/null || printf '%s' "$(basename "$artifact")")"
   [ -n "$patch_file" ] && patch_rel="$(ma_artifact_relpath "$repo" "$patch_file" 2>/dev/null || printf '%s' "$(basename "$patch_file")")"
   [ -n "$source_artifact" ] && source_rel="$(ma_artifact_relpath "$repo" "$source_artifact" 2>/dev/null || printf '%s' "$(basename "$source_artifact")")"
-  if [ -n "$prompt_file" ] && [ -f "$prompt_file" ] && command -v sha256sum >/dev/null 2>&1; then
-    prompt_hash="$(sha256sum "$prompt_file" | awk '{print $1}')"
+  if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
+    prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
   fi
   task_goal="$(ma_task_goal "$repo" | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200)"
 
