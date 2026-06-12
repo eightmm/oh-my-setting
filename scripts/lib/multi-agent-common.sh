@@ -431,14 +431,17 @@ ma_export_round1() {
 }
 
 # Round 1: fan out the same prompt to all providers in parallel.
-# Sets: ok, total, pids, artifacts, provider_names, alive, last_arts.
+# Sets: ok, total, pids, artifacts, provider_names, alive, last_arts,
+# dropped, dropped_names.
 ma_run_round1() {
   local provider artifact i provider_list
   ok=0
   total=0
+  dropped=0
   pids=()
   artifacts=()
   provider_names=()
+  dropped_names=()
 
   IFS=',' read -r -a provider_list <<< "$PROVIDERS"
   for provider in "${provider_list[@]}"; do
@@ -545,6 +548,8 @@ ma_run_debate_rounds() {
       else
         # Drop failed provider from later rounds; keep its last good answer.
         alive[i]=0
+        dropped=$((dropped + 1))
+        dropped_names+=("${provider_names[i]}")
       fi
     done
   done
@@ -579,7 +584,12 @@ ma_write_synthesis() {
 }
 
 ma_quorum_exit() {
-  echo "summary: $ok/$total providers succeeded"
+  if [ "${dropped:-0}" -gt 0 ]; then
+    echo "summary: $ok/$total providers succeeded ($dropped dropped during debate)"
+    echo "note: debate dropped providers: ${dropped_names[*]}; their last successful round's answer was used for synthesis" >&2
+  else
+    echo "summary: $ok/$total providers succeeded"
+  fi
   echo "artifacts: $ARTIFACT_DIR"
   echo "synthesis: $synth_file"
   if [ "$ok" -eq 0 ]; then

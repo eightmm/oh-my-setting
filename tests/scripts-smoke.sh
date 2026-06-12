@@ -1375,6 +1375,127 @@ EOF
 }
 
 
+
+write_fake_debate_provider() {
+  local bin_dir="$1"
+  local provider="$2"
+  local fail_round2="$3"
+  local fail_round1="${4:-0}"
+  local binary="$provider"
+  local label
+
+  [ "$provider" = "antigravity" ] && binary="agy"
+  label="$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]')"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/$binary" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+prompt="\$(cat)"
+round=1
+case "\$prompt" in
+  *"This is debate round 2."*) round=2 ;;
+  *"This is debate round 3."*) round=3 ;;
+esac
+if [ "$fail_round1" = "1" ] && [ "\$round" = "1" ]; then
+  echo "$label ROUND1 FAILURE"
+  exit 42
+fi
+if [ "$fail_round2" = "1" ] && [ "\$round" = "2" ]; then
+  echo "$label ROUND2 FAILURE"
+  exit 42
+fi
+printf 'Answer:\n%s ROUND%s ANSWER\nRecommendation:\nuse %s round %s\n' "$label" "\$round" "$label" "\$round"
+EOF
+  chmod +x "$bin_dir/$binary"
+}
+
+test_multi_agent_ask_debate_tracks_dropout() {
+  local project="$TMP/ask-debate-dropout"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local synth
+  local rc=0
+
+  mkdir -p "$project" "$home_dir"
+  write_fake_debate_provider "$bin_dir" codex 0
+  write_fake_debate_provider "$bin_dir" claude 1
+  write_fake_debate_provider "$bin_dir" antigravity 0
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,claude,antigravity \
+    --no-memory --no-task --no-ml-context \
+    --debate 1 \
+    --prompt "Debate dropout coverage" >"$project/out" 2>"$project/err" || rc=$?
+
+  [ "$rc" = "0" ] || fail "dropout debate should exit 0, got $rc"
+  assert_one_artifact_contains "$artifact_dir" 'codex-debate-dropout-coverage-*-r2.md' 'CODEX ROUND2 ANSWER'
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-debate-dropout-coverage-*-r2.md' 'ANTIGRAVITY ROUND2 ANSWER'
+  assert_one_artifact_contains "$artifact_dir" 'claude-debate-dropout-coverage-*-r2.md' 'CLAUDE ROUND2 FAILURE'
+  synth="$(find "$artifact_dir" -type f -name '_synthesis-debate-dropout-coverage-*.md' | head -n 1)"
+  [ -n "$synth" ] || fail "missing dropout synthesis"
+  assert_file_contains "$synth" 'CLAUDE ROUND1 ANSWER'
+  if grep -Fq 'CLAUDE ROUND2 FAILURE' "$synth"; then
+    fail "synthesis must use dropped provider's last successful answer"
+  fi
+  assert_file_contains "$project/out" 'summary: 3/3 providers succeeded (1 dropped during debate)'
+  assert_file_contains "$project/err" "note: debate dropped providers: claude; their last successful round's answer was used for synthesis"
+}
+
+test_multi_agent_ask_debate_skips_after_dropouts() {
+  local project="$TMP/ask-debate-skip"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  mkdir -p "$project" "$home_dir"
+  write_fake_debate_provider "$bin_dir" codex 0
+  write_fake_debate_provider "$bin_dir" claude 1
+  write_fake_debate_provider "$bin_dir" antigravity 1
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,claude,antigravity \
+    --no-memory --no-task --no-ml-context \
+    --debate 2 \
+    --prompt "Debate skip after dropouts" >"$project/out" 2>"$project/err" || rc=$?
+
+  [ "$rc" = "0" ] || fail "degraded debate should complete, got $rc"
+  assert_file_contains "$project/err" 'debate round 3 skipped: fewer than two active providers'
+  assert_file_contains "$project/out" 'summary: 3/3 providers succeeded (2 dropped during debate)'
+}
+
+test_multi_agent_ask_all_round1_failures_exit() {
+  local project="$TMP/ask-all-fail"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  mkdir -p "$project" "$home_dir"
+  write_fake_debate_provider "$bin_dir" codex 0 1
+  write_fake_debate_provider "$bin_dir" claude 0 1
+  write_fake_debate_provider "$bin_dir" antigravity 0 1
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,claude,antigravity \
+    --no-memory --no-task --no-ml-context \
+    --prompt "All providers fail" >"$project/out" 2>"$project/err" || rc=$?
+
+  [ "$rc" = "1" ] || fail "all round-1 failures should exit 1, got $rc"
+  assert_file_contains "$project/err" 'warning: no external ask providers succeeded'
+  assert_file_contains "$project/out" 'summary: 0/3 providers succeeded'
+}
+
 test_multi_agent_ask_hypothesis_preset() {
   local project="$TMP/ask-hypothesis"
   local artifact_dir="$project/artifacts"
@@ -3193,6 +3314,9 @@ test_multi_agent_review_no_diff_provider_subset
 test_multi_agent_review_rejects_unknown_provider
 test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir
 test_multi_agent_review_single_provider_failure_exits
+test_multi_agent_ask_debate_tracks_dropout
+test_multi_agent_ask_debate_skips_after_dropouts
+test_multi_agent_ask_all_round1_failures_exit
 test_multi_agent_ask_hypothesis_preset
 test_multi_agent_ask_dry_run_no_repo
 test_multi_agent_ask_repo_context_subset
