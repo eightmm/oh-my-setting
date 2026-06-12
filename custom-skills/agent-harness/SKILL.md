@@ -122,6 +122,12 @@ index:
 ~/.oh-my-setting/scripts/import-agent-result.sh --kind review --provider claude --prompt-file .oms/artifacts/review/claude-...export.md --file claude-answer.md
 ```
 
+Single-provider read calls use the same handoff path: pass `--export-only` to
+`agent-run.sh --mode read` or `agent-call.sh`, then import with
+`import-agent-result.sh --kind call --provider PROVIDER --prompt-file
+.oms/artifacts/call/PROVIDER-...export.md --file answer.md`. Write delegation
+cannot be exported; it needs the isolated worktree worker.
+
 This export/import path is provider-neutral and should behave the same from
 Codex, Claude Code, and Antigravity sessions because the current agent only
 writes or reads local artifacts.

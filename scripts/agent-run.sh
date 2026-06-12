@@ -18,6 +18,7 @@ KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
+EXPORT_ONLY=0
 DRY_RUN="${OH_MY_SETTING_AGENT_RUN_DRY_RUN:-0}"
 
 usage() {
@@ -44,6 +45,9 @@ Options:
   --no-memory          Do not attach shared harness memory.
   --no-task            Do not attach the active task handoff packet.
   --no-ml-context      Do not attach the compact ML context digest.
+  --export-only        Read mode only: write the provider prompt artifact and
+                       do not call CLI. Import the answer later with
+                       import-agent-result.sh.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write artifacts without calling provider CLIs.
   -h, --help           Show help.
@@ -188,6 +192,10 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_ML_CONTEXT=0
       shift
       ;;
+    --export-only)
+      EXPORT_ONLY=1
+      shift
+      ;;
     --print-timeout)
       [ "$#" -ge 2 ] || { echo "error: --print-timeout requires duration" >&2; exit 2; }
       OMS_MULTI_AGENT_PRINT_TIMEOUT="$2"
@@ -238,6 +246,10 @@ if [ "$MODE" = "auto" ]; then
 fi
 
 echo "agent-run: mode=$MODE resolved=$resolved_mode to=$TO" >&2
+if [ "$EXPORT_ONLY" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
+  echo "error: delegate work cannot be exported; a worktree worker is required" >&2
+  exit 2
+fi
 if [ "$INCLUDE_TASK" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
   agent_task_loop_warnings "$REPO" "$(agent_task_project_file "$REPO")" >&2 || true
 fi
@@ -253,6 +265,7 @@ if [ "$resolved_mode" = "read" ]; then
   [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
   [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
   [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
+  [ "$EXPORT_ONLY" -eq 1 ] && cmd+=(--export-only)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   agent_run_exec_and_record read "$TO" "${cmd[@]}"
 else

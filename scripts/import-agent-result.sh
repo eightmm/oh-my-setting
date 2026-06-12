@@ -22,7 +22,7 @@ by the multi-agent harness. Use this after --export-only prompts are pasted into
 Codex, Claude Code, or Antigravity outside the current policy boundary.
 
 Options:
-  --kind KIND          ask, review, or delegate. Required.
+  --kind KIND          ask, review, delegate, or call. Required.
   --provider NAME      codex, claude, antigravity, or agy. Required.
   --file PATH          File containing the provider answer. Required.
   --prompt-file PATH   Exported prompt artifact or prompt text file to include.
@@ -86,9 +86,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$KIND" in
-  ask|review|delegate) ;;
+  ask|review|delegate|call) ;;
   "") fail "--kind is required" ;;
-  *) fail "--kind must be ask, review, or delegate" ;;
+  *) fail "--kind must be ask, review, delegate, or call" ;;
 esac
 case "$PROVIDER" in
   codex|claude|antigravity|agy) ;;

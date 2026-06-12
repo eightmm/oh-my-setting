@@ -2124,6 +2124,129 @@ EOF
 }
 
 
+test_agent_call_export_only_writes_artifact_and_index() {
+  local project="$TMP/agent-call-export"
+  local artifact_dir="$project/artifacts"
+  local home_dir="$project/home"
+  local artifact
+
+  mkdir -p "$project" "$home_dir"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --export-only \
+    --prompt "Assess export handoff" >"$project/out"
+
+  assert_file_contains "$project/out" "exported: codex ->"
+  artifact="$(find "$artifact_dir" -type f -name 'codex-assess-export-handoff-*.export.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "missing call export artifact"
+  assert_file_contains "$artifact" "# codex call export"
+  assert_file_contains "$artifact" "## Prompt"
+  assert_file_contains "$artifact" "Assess export handoff"
+  assert_file_contains "$artifact" "EXPORTED: paste the Prompt section into codex"
+  assert_file_contains "$artifact" "## Exit"
+  assert_file_contains "$artifact" "0"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call-export"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"provider": "codex"'
+}
+
+test_agent_call_export_only_blocks_sensitive_without_artifacts() {
+  local project="$TMP/agent-call-export-sensitive"
+  local artifact_dir="$project/artifacts"
+  local rc=0
+
+  mkdir -p "$project"
+  "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --export-only \
+    --prompt "Assess private path /hom""e/jaemin/secret" \
+    >"$project/out" 2>"$project/error" || rc=$?
+
+  [ "$rc" = "3" ] || fail "sensitive export should exit 3, got $rc"
+  assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
+  assert_file_contains "$project/error" "export blocked"
+  if find "$artifact_dir" -type f -name '*.md' 2>/dev/null | grep -q .; then
+    fail "blocked call export should write no artifacts"
+  fi
+}
+
+test_import_call_result_indexes_call_import() {
+  local project="$TMP/import-call"
+  local artifact_dir="$project/artifacts"
+  local export_artifact
+  local import_artifact
+  local source_rel
+
+  mkdir -p "$project"
+  "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to claude \
+    --export-only \
+    --prompt "Assess import call" >/dev/null
+
+  export_artifact="$(find "$artifact_dir" -type f -name 'claude-assess-import-call-*.export.md' | head -n 1)"
+  [ -n "$export_artifact" ] || fail "missing call export artifact for import"
+  printf 'Answer:\nImported call answer\n' > "$project/answer.md"
+
+  "$ROOT/scripts/import-agent-result.sh" \
+    --repo "$project" \
+    --kind call \
+    --provider claude \
+    --prompt-file "$export_artifact" \
+    --file "$project/answer.md" >"$project/import-out"
+
+  assert_file_contains "$project/import-out" "imported: claude ->"
+  import_artifact="$(find "$project/.oms/artifacts/call" -type f -name 'claude-*.import.md' | head -n 1)"
+  [ -n "$import_artifact" ] || fail "missing call import artifact"
+  assert_file_contains "$import_artifact" "Imported call answer"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call-import"'
+  source_rel="${export_artifact#"$project"/}"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" "\"source\": \"$source_rel\""
+}
+
+test_agent_run_export_only_read_and_write_modes() {
+  local project="$TMP/agent-run-export"
+  local artifact_dir="$project/artifacts"
+  local home_dir="$project/home"
+  local artifact
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to claude \
+    --mode read \
+    --export-only \
+    --prompt "Assess run export" >"$project/read-out" 2>"$project/read-err"
+
+  assert_file_contains "$project/read-err" "resolved=read"
+  assert_file_contains "$project/read-out" "exported: claude ->"
+  artifact="$(find "$artifact_dir" -type f -name 'claude-assess-run-export-*.export.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "missing agent-run call export artifact"
+  assert_file_contains "$artifact" "EXPORTED: paste the Prompt section into claude"
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call-export"'
+
+  HOME="$home_dir" "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --mode write \
+    --export-only \
+    --prompt "Implement run export" >"$project/write-out" 2>"$project/write-err" || rc=$?
+
+  [ "$rc" = "2" ] || fail "agent-run write export should exit 2, got $rc"
+  assert_file_contains "$project/write-err" "delegate work cannot be exported; a worktree worker is required"
+}
+
 test_delegate_missing_cli_writes_exit_and_index() {
   local project="$TMP/delegate-missing-cli"
   local artifact_dir="$project/artifacts"

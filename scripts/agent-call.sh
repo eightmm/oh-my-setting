@@ -16,6 +16,7 @@ ARTIFACT_DIR=""
 INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
+EXPORT_ONLY=0
 DRY_RUN="${OH_MY_SETTING_CALL_DRY_RUN:-0}"
 
 usage() {
@@ -34,6 +35,8 @@ Options:
   --no-memory          Do not attach shared harness memory.
   --no-task            Do not attach the active task handoff packet.
   --no-ml-context      Do not attach the compact ML context digest.
+  --export-only        Write the provider prompt artifact and do not call CLI.
+                       Import the answer later with import-agent-result.sh.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt artifact without calling the CLI.
   -h, --help           Show help.
@@ -81,6 +84,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-ml-context)
       INCLUDE_ML_CONTEXT=0
+      shift
+      ;;
+    --export-only)
+      EXPORT_ONLY=1
       shift
       ;;
     --print-timeout)
@@ -151,6 +158,30 @@ slug="$(slugify "$slug_src")"
 [ -n "$slug" ] || slug="call"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
+
+if [ "$EXPORT_ONLY" -eq 1 ]; then
+  if ! ma_validate_outbound_prompt "$prompt_file"; then
+    echo "export blocked: no export artifacts were written" >&2
+    exit 3
+  fi
+
+  artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.export.md"
+  {
+    printf '# %s %s export\n\n' "$TO" "$MA_KIND"
+    printf -- '- exported: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ "${MA_SHOW_REPO:-0}" = "1" ]; then
+      printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
+    fi
+    printf '\n## Prompt\n\n'
+    cat "$prompt_file"
+    printf '\n\n## Output\n\n'
+    printf 'EXPORTED: paste the Prompt section into %s, then import the answer with import-agent-result.sh.\n' "$TO"
+    printf '\n\n## Exit\n\n0\n'
+  } > "$artifact"
+  ma_append_artifact_index "$REPO" "call-export" "$TO" 0 "$artifact" "" "$prompt_file" || true
+  echo "exported: $TO -> $artifact"
+  exit 0
+fi
 
 if run_provider "$TO" "$prompt_file" "$artifact"; then
   echo "artifact: $artifact"
