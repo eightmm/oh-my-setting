@@ -25,6 +25,7 @@ INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 DEBATE=0
 EXPORT_ONLY=0
+GATE=0
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 usage() {
@@ -62,6 +63,9 @@ Options:
                        sees the others' previous findings, critiques them, and
                        revises its own. Debate rounds exchange findings only;
                        the diff is attached to round-1 prompts only.
+  --gate               Require each reviewer to end with GATE: pass or
+                       GATE: fail, then print verdicts and exit with the gate
+                       status. Review mode only.
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
@@ -79,30 +83,46 @@ Environment:
 EOF
 }
 
-# Verdict inspection for gate loops: one line per provider from the latest
-# run group, with died-mid-run detection (artifact without an exit section).
-if [ "${1:-}" = "verdicts" ]; then
-  shift
-  vdir="${1:-$PWD/.oms/artifacts/review}"
+write_gate_instruction() {
+  cat <<'EOF'
+
+Gate verdict:
+End your response with exactly one final line: GATE: pass or GATE: fail.
+The final line must contain only that exact GATE text, with no punctuation or formatting.
+Use GATE: pass only if this change is ready to proceed with no blocking findings.
+Use GATE: fail if any blocking bug, regression, missing test, unclear contract, or unsafe operation remains.
+Do not put any text after the final GATE line.
+EOF
+}
+
+review_verdicts() {
+  local vdir="$1"
+  local forced_run_id="${2:-}"
+  local latest run_id base provider suf r f verdict overall found
+  declare -A vfile vround
+
   [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
-  # [!_]* skips _synthesis-*; export/import handoff artifacts hold no provider
-  # review to judge; artifact names are wrapper-generated slugs, so ls -t
-  # parsing is safe here. "|| true": an empty dir must not trip pipefail.
-  latest="$(
-    ls -t "$vdir"/[!_]*.md 2>/dev/null | while IFS= read -r f; do
-      case "$f" in *.export.md|*.import.md) continue ;; esac
-      printf '%s\n' "$f"
-      break
-    done || true
-  )"
-  [ -n "$latest" ] || { echo "error: no review artifacts in $vdir" >&2; exit 2; }
-  # Debate rounds append -rN to the run id; strip it for grouping.
-  run_id="$(printf '%s' "$latest" | sed -E 's/.*-([0-9]{8}T[0-9]{6}Z-[0-9]+)(-r[0-9]+)?\.md$/\1/')"
-  [ "$run_id" != "$latest" ] || { echo "error: cannot parse run id from $(basename "$latest")" >&2; exit 2; }
+  if [ -n "$forced_run_id" ]; then
+    run_id="$forced_run_id"
+  else
+    # [!_]* skips _synthesis-*; export/import handoff artifacts hold no provider
+    # review to judge; artifact names are wrapper-generated slugs, so ls -t
+    # parsing is safe here. "|| true": an empty dir must not trip pipefail.
+    latest="$(
+      ls -t "$vdir"/[!_]*.md 2>/dev/null | while IFS= read -r f; do
+        case "$f" in *.export.md|*.import.md) continue ;; esac
+        printf '%s\n' "$f"
+        break
+      done || true
+    )"
+    [ -n "$latest" ] || { echo "error: no review artifacts in $vdir" >&2; exit 2; }
+    # Debate rounds append -rN to the run id; strip it for grouping.
+    run_id="$(printf '%s' "$latest" | sed -E 's/.*-([0-9]{8}T[0-9]{6}Z-[0-9]+)(-r[0-9]+)?\.md$/\1/')"
+    [ "$run_id" != "$latest" ] || { echo "error: cannot parse run id from $(basename "$latest")" >&2; exit 2; }
+  fi
 
   echo "run: $run_id"
   # Per provider, judge the FINAL artifact: highest debate round, else base.
-  declare -A vfile vround
   for f in "$vdir"/*-"$run_id".md "$vdir"/*-"$run_id"-r[0-9]*.md; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"
@@ -153,6 +173,13 @@ if [ "${1:-}" = "verdicts" ]; then
   done
   [ "$found" -gt 0 ] || { echo "error: no provider artifacts for run $run_id" >&2; exit 2; }
   exit "$overall"
+}
+
+# Verdict inspection for gate loops: one line per provider from the latest
+# run group, with died-mid-run detection (artifact without an exit section).
+if [ "${1:-}" = "verdicts" ]; then
+  shift
+  review_verdicts "${1:-$PWD/.oms/artifacts/review}"
 fi
 
 validate_provider_list() {
@@ -276,6 +303,10 @@ while [ "$#" -gt 0 ]; do
       esac
       shift 2
       ;;
+    --gate)
+      GATE=1
+      shift
+      ;;
     --synthesize)
       SYNTHESIZE="claude"
       if [ "$#" -ge 2 ] && [ "${2#-}" = "$2" ]; then
@@ -365,6 +396,10 @@ else
 fi
 
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$diff_file" "$status_file"
+if [ "$GATE" -eq 1 ]; then
+  write_gate_instruction >> "$prompt_file"
+  MA_DEBATE_GATE_INSTRUCTION="$(write_gate_instruction)"
+fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 slug="$(slugify "$PROMPT")"
@@ -444,6 +479,11 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
   echo "artifacts: $ARTIFACT_DIR"
   echo "synthesis: $synth_file"
   exit 0
+fi
+
+if [ "$GATE" -eq 1 ]; then
+  ma_print_run_summary
+  review_verdicts "$ARTIFACT_DIR" "$timestamp"
 fi
 
 ma_quorum_exit

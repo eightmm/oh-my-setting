@@ -505,6 +505,9 @@ write_debate_prompt() {
     printf -- '\n--- end external provider output ---\n\n'
     printf 'Return exactly these sections:\n'
     printf '%s\n' "$MA_DEBATE_SECTIONS"
+    if [ -n "${MA_DEBATE_GATE_INSTRUCTION:-}" ]; then
+      printf '%s\n' "$MA_DEBATE_GATE_INSTRUCTION"
+    fi
   } > "$output"
 }
 
@@ -583,7 +586,7 @@ ma_write_synthesis() {
   } > "$synth_file"
 }
 
-ma_quorum_exit() {
+ma_print_run_summary() {
   if [ "${dropped:-0}" -gt 0 ]; then
     echo "summary: $ok/$total providers succeeded ($dropped dropped during debate)"
     echo "note: debate dropped providers: ${dropped_names[*]}; their last successful round's answer was used for synthesis" >&2
@@ -592,6 +595,10 @@ ma_quorum_exit() {
   fi
   echo "artifacts: $ARTIFACT_DIR"
   echo "synthesis: $synth_file"
+}
+
+ma_quorum_exit() {
+  ma_print_run_summary
   if [ "$ok" -eq 0 ]; then
     echo "warning: no external $MA_KIND providers succeeded" >&2
     exit 1

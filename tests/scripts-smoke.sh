@@ -955,6 +955,135 @@ test_multi_agent_review_export_only_skips_cli() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "review-export"'
 }
 
+
+write_fake_review_gate_provider() {
+  local bin_dir="$1"
+  local provider="$2"
+  local gate="$3"
+  local binary="$provider"
+
+  [ "$provider" = "antigravity" ] && binary="agy"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/$binary" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf 'Findings:\nNo findings\nRisks:\nnone\nMissing tests:\nnone\nRecommendation:\nproceed\n'
+case "$gate" in
+  pass|fail) printf 'GATE: %s\n' "$gate" ;;
+  omit) ;;
+  *) exit 64 ;;
+esac
+EOF
+  chmod +x "$bin_dir/$binary"
+}
+
+test_multi_agent_review_gate_all_pass() {
+  local project="$TMP/review-gate-pass"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  write_fake_review_gate_provider "$bin_dir" antigravity pass
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude,antigravity \
+    --no-diff \
+    --ml \
+    --debate 1 \
+    --gate \
+    --prompt "Gate all pass" >"$project/out"
+
+  assert_file_contains "$project/out" 'antigravity: pass'
+  assert_file_contains "$project/out" 'claude: pass'
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-gate-all-pass-*-r2.md' 'Gate verdict:'
+  assert_one_artifact_contains "$artifact_dir" 'claude-gate-all-pass-*-r2.md' 'GATE: pass or GATE: fail.'
+}
+
+test_multi_agent_review_gate_fail_exits() {
+  local project="$TMP/review-gate-fail"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  write_fake_review_gate_provider "$bin_dir" antigravity fail
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude,antigravity \
+    --no-diff \
+    --gate \
+    --prompt "Gate with fail" >"$project/out" 2>"$project/err" && rc=0 || rc=$?
+
+  [ "$rc" = "1" ] || fail "gate fail should exit 1, got $rc"
+  assert_file_contains "$project/out" 'antigravity: fail'
+  assert_file_contains "$project/out" 'claude: pass'
+}
+
+test_multi_agent_review_gate_missing_exits() {
+  local project="$TMP/review-gate-missing"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  write_fake_review_gate_provider "$bin_dir" claude omit
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude \
+    --no-diff \
+    --gate \
+    --prompt "Gate missing verdict" >"$project/out" 2>"$project/err" && rc=0 || rc=$?
+
+  [ "$rc" = "2" ] || fail "missing gate verdict should exit 2, got $rc"
+  assert_file_contains "$project/out" 'claude: no-verdict'
+}
+
+test_multi_agent_review_gate_export_only() {
+  local project="$TMP/review-gate-export"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+echo called >"$HOME/codex-called"
+exit 55
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OH_MY_SETTING_REVIEW_DRY_RUN=0 \
+    "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --no-diff \
+    --gate \
+    --export-only \
+    --prompt "Gate export only" >"$project/out"
+
+  assert_file_contains "$project/out" 'summary: exported 1 provider prompt(s)'
+  assert_one_artifact_contains "$artifact_dir" 'codex-gate-export-only-*.export.md' 'Gate verdict:'
+  assert_one_artifact_contains "$artifact_dir" 'codex-gate-export-only-*.export.md' 'GATE: pass or GATE: fail.'
+  assert_not_exists "$home_dir/codex-called"
+}
+
 test_import_warns_sensitive_result_but_succeeds() {
   local project="$TMP/import-sensitive-warning"
   local result="$project/result.md"
@@ -3295,6 +3424,10 @@ test_doctor_warns_missing_oms_gitignore
 test_doctor_clean_harness_state_has_no_warnings
 test_multi_agent_export_only_and_import_result
 test_multi_agent_review_export_only_skips_cli
+test_multi_agent_review_gate_all_pass
+test_multi_agent_review_gate_fail_exits
+test_multi_agent_review_gate_missing_exits
+test_multi_agent_review_gate_export_only
 test_import_warns_sensitive_result_but_succeeds
 test_import_index_links_source_prompt
 test_multi_agent_export_only_blocks_sensitive_prompt
