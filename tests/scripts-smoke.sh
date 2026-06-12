@@ -2392,6 +2392,55 @@ test_agent_run_read_priority_routing() {
   assert_file_contains "$project/route3" "resolved=write"
 }
 
+test_shared_prompt_mode_classifier_table() {
+  local expected
+  local prompt
+  local got
+
+  while IFS='|' read -r expected prompt; do
+    [ -n "$expected" ] || continue
+    got="$(bash -c '. "$1"; oms_classify_prompt_mode "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$prompt")"
+    [ "$got" = "$expected" ] || fail "prompt mode for [$prompt]: got $got, want $expected"
+  done <<'EOF'
+read|Review the latest fix and report findings
+read|Explain why the check failed
+write|Fix the failing parser test
+write|Refactor the parser module
+read|수정 사항을 검토해줘
+write|파서 모듈을 수정해줘
+read|review the fix
+read|Proceed when ready
+EOF
+}
+
+test_shared_ml_smoke_detection_table() {
+  local dir="$TMP/shared-ml-smoke"
+  local check_sh="$dir/check.sh"
+  local label
+
+  mkdir -p "$dir"
+  for label in 'ml-smoke)' '(ml-smoke)' '"ml-smoke")' 'fast|ml-smoke)'; do
+    printf 'case "${1:-fast}" in
+  %s echo smoke ;;
+esac
+' "$label" > "$check_sh"
+    bash -c '. "$1"; oms_check_sh_has_ml_smoke "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$check_sh" ||
+      fail "ml-smoke label not detected: $label"
+  done
+
+  cat > "$check_sh" <<'EOF'
+#!/usr/bin/env bash
+# ml-smoke later
+case "${1:-fast}" in
+  fast) echo fast ;;
+esac
+EOF
+  if bash -c '. "$1"; oms_check_sh_has_ml_smoke "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$check_sh"; then
+    fail "comment-only ml-smoke mention must not match"
+  fi
+}
+
+
 test_scrubber_blocks_credential_variants() {
   local f="$TMP/scrub-variants"
   local s
@@ -3184,6 +3233,8 @@ test_scrubber_passes_harness_sources
 test_scrubber_blocks_env_style_token
 test_scrubber_no_function_name_bypass
 test_agent_run_read_priority_routing
+test_shared_prompt_mode_classifier_table
+test_shared_ml_smoke_detection_table
 test_scrubber_blocks_credential_variants
 test_review_diff_side_blocks_env_token
 test_run_ledger_gate_blocks_failing_check

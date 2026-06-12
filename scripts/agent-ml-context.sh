@@ -124,7 +124,7 @@ append_file_list "Likely Config Files" \
 printf '\n## Verification Contract\n\n' >> "$tmp"
 if [ -x "$REPO/scripts/check.sh" ]; then
   printf -- '- scripts/check.sh exists and is executable\n' >> "$tmp"
-  if grep -Eq '(^|[[:space:]("|'\''])ml-smoke("|'\'')?\)' "$REPO/scripts/check.sh"; then
+  if oms_check_sh_has_ml_smoke "$REPO/scripts/check.sh"; then
     printf -- '- preferred ML smoke: bash scripts/check.sh ml-smoke\n' >> "$tmp"
   fi
   printf -- '- fallback fast check: bash scripts/check.sh fast\n' >> "$tmp"

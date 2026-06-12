@@ -191,7 +191,7 @@ if [ "$GATE" = "1" ] && [ -x scripts/check.sh ]; then
   # Mode is implemented only when a case label exists; a comment or usage
   # mention must not select it. Labels may be quoted, parenthesized, or in
   # an alternation: ml-smoke), (ml-smoke), "ml-smoke"), fast|ml-smoke).
-  if grep -Eq '(^|[[:space:]("|'\''])ml-smoke("|'\'')?\)' scripts/check.sh; then
+  if oms_check_sh_has_ml_smoke scripts/check.sh; then
     gate_mode="ml-smoke"
   fi
   echo "ledger: pre-flight gate: bash scripts/check.sh $gate_mode (skip with --no-gate)" >&2
