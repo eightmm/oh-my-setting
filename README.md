@@ -50,6 +50,7 @@ Review and advice (three local models in parallel):
 
 ```text
 Run a multi-agent review of the current diff.
+Run a gated multi-agent review of this diff — pass or fail.
 Run the ML pre-training review gate on this diff.
 Export a Claude review prompt for this diff instead of calling Claude directly.
 Import this Claude answer back into the artifact index.
@@ -105,7 +106,7 @@ or skill. Nothing here is meant to be run by hand.
 | Project | Start router + spec interview | Detects empty/existing/ongoing state, interviews in stages, confirms `PROJECT.md` before any code is written |
 | Project | Templates (`apply-project-template.sh`) | Managed rule blocks for general/ml/slurm projects; ml adds a docs scaffold, `check.sh` verification contract, and `ml_smoke.py` one-batch contract |
 | Project | Project doctor (`project-doctor.sh`) | Verifies every agent sees the same rules, spec state, and scaffold; warns on ML structure drift (stray root files, tracked data, missing `src/` layout) |
-| Multi-agent | Review (`multi-agent-review.sh`) | Three local models review the diff in parallel; ML pre-training gate (`--ml`), debate rounds, per-finding verdicts |
+| Multi-agent | Review (`multi-agent-review.sh`) | Three local models review the diff in parallel; ML pre-training gate (`--ml`), debate rounds, per-finding verdicts, and `--gate` one-command pass/fail verdict |
 | Multi-agent | Ask (`multi-agent-ask.sh`) | Same question to all three models for independent opinions; optional debate rounds and hypothesis design-attack preset |
 | Multi-agent | Delegate (`multi-agent-delegate.sh`) | Runs a write task in an isolated git worktree, verifies it there, returns a reviewable patch; `--apply` only on a clean tree |
 | Multi-agent | Single-agent router (`agent-run.sh`) | Routes one prompt to one provider: read-only questions to a call, write tasks to a delegate worktree |

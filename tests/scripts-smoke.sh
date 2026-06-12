@@ -2371,6 +2371,42 @@ test_artifact_index_records_call() {
   printf '%s' "$out" | grep -Fq 'call  codex  exit=0' || fail "artifact-index latest missing call row"
 }
 
+test_artifact_index_latest_run_groups_rows() {
+  local project="$TMP/artifact-index-latest-run"
+  local index="$project/.oms/artifacts/index.jsonl"
+  local out
+
+  mkdir -p "$project/.oms/artifacts/review" "$project/.oms/artifacts/delegate"
+  cat > "$index" <<'EOF'
+{"ts":"2026-06-11T00:00:01Z","kind":"review","provider":"codex","exit":0,"artifact":".oms/artifacts/review/codex-old-20260611T000001Z-10.md"}
+{"ts":"2026-06-11T00:00:02Z","kind":"review","provider":"codex","exit":1,"artifact":".oms/artifacts/review/codex-new-20260611T000002Z-20.md"}
+{"ts":"2026-06-11T00:00:03Z","kind":"review","provider":"codex","exit":0,"artifact":".oms/artifacts/review/codex-new-20260611T000002Z-20-r2.md"}
+{"ts":"2026-06-11T00:00:04Z","kind":"review","provider":"claude","exit":0,"artifact":".oms/artifacts/review/claude-new-20260611T000002Z-20.md"}
+{"ts":"2026-06-11T00:00:05Z","kind":"review","provider":"antigravity","exit":2,"artifact":".oms/artifacts/review/antigravity-slug-r9-20260611T000002Z-20.md"}
+{"ts":"2026-06-11T00:00:06Z","kind":"delegate","provider":"codex","exit":0,"verify_exit":0,"artifact":".oms/artifacts/delegate/codex-new-20260611T000002Z-20.md","patch":".oms/artifacts/delegate/codex-new-20260611T000002Z-20.patch"}
+EOF
+
+  out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest-run)"
+  printf '%s' "$out" | grep -Fq 'run: 20260611T000002Z-20  kind=delegate,review  debate_round=2' ||
+    fail "latest-run missing grouped header: $out"
+  printf '%s' "$out" | grep -Fq 'review  codex  exit=0  artifact=.oms/artifacts/review/codex-new-20260611T000002Z-20-r2.md' ||
+    fail "latest-run should keep final codex debate row"
+  printf '%s' "$out" | grep -Fq 'review  claude  exit=0' || fail "latest-run missing claude row"
+  printf '%s' "$out" | grep -Fq 'review  antigravity  exit=2' || fail "latest-run missing antigravity row"
+  printf '%s' "$out" | grep -Fq 'delegate  codex  exit=0  verify=0' ||
+    fail "latest-run missing delegate verify exit"
+  printf '%s' "$out" | grep -Fq 'patch=.oms/artifacts/delegate/codex-new-20260611T000002Z-20.patch' ||
+    fail "latest-run missing delegate patch"
+  if printf '%s' "$out" | grep -Fq 'codex-new-20260611T000002Z-20.md  patch='; then
+    fail "base codex review row should not override round-2 row"
+  fi
+
+  printf '{"ts":"2026-06-11T00:00:07Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/unparseable.md"}\n' >> "$index"
+  out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest-run)"
+  printf '%s' "$out" | grep -Fq 'call  codex  exit=0  artifact=.oms/artifacts/call/unparseable.md' ||
+    fail "latest-run should list unparseable artifact row individually"
+}
+
 test_artifact_index_prune() {
   local project="$TMP/artifact-index-prune"
   local index="$project/.oms/artifacts/index.jsonl"

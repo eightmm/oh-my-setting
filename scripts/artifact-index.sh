@@ -12,7 +12,7 @@ DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Usage: artifact-index.sh [options] [list|latest|failures|prune] [N]
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|prune] [N]
 
 Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.
@@ -20,6 +20,7 @@ Inspect the harness artifact index. Provider artifacts still live under
 Commands:
   list [N]       Show the last N rows (default 20).
   latest         Show the most recent row.
+  latest-run     Show a compact summary for the most recent run id.
   failures [N]   Show the last N non-zero-exit rows.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
                  append-only, so prune it when it grows. Add --files to delete
@@ -59,7 +60,7 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=1
       shift
       ;;
-    list|latest|failures|prune)
+    list|latest|latest-run|failures|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
@@ -79,7 +80,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ "$ACTION" = "latest" ] && [ "$LIMIT_SET" -eq 1 ]; then
+if { [ "$ACTION" = "latest" ] || [ "$ACTION" = "latest-run" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
   fail "unknown argument: $LIMIT"
 fi
 if [ "$PRUNE_FILES" -eq 1 ] && [ "$ACTION" != "prune" ]; then
@@ -208,7 +209,8 @@ EOF
 fi
 
 python3 - "$INDEX_FILE" "$ACTION" "$LIMIT" <<'EOF'
-import json, sys
+import json, os, re, sys
+
 path, action, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 rows = []
 with open(path) as f:
@@ -220,11 +222,9 @@ with open(path) as f:
         if action == "failures" and int(r.get("exit", 0)) == 0:
             continue
         rows.append(r)
-if action == "latest":
-    rows = rows[-1:]
-else:
-    rows = rows[-limit:]
-for r in rows:
+
+
+def format_row(r):
     parts = [
         r.get("ts", ""),
         str(r.get("kind", "")),
@@ -239,5 +239,93 @@ for r in rows:
         parts.append("patch=%s" % r["patch"])
     if r.get("task_goal"):
         parts.append("goal=%s" % str(r["task_goal"])[:80])
-    print("  ".join(parts))
+    return "  ".join(parts)
+
+
+RUN_RE = re.compile(r".*-([0-9]{8}T[0-9]{6}Z-[0-9]+)(?:-r([0-9]+))?\.md$")
+
+
+def run_info(row):
+    artifact = row.get("artifact")
+    if not isinstance(artifact, str) or not artifact:
+        return None
+    match = RUN_RE.match(os.path.basename(artifact))
+    if not match:
+        return None
+    return match.group(1), int(match.group(2) or 0)
+
+
+def run_sort_ts(run_id):
+    stamp = run_id.split("-", 1)[0]
+    date, time_z = stamp.split("T", 1)
+    time = time_z.rstrip("Z")
+    return "%s-%s-%sT%s:%s:%sZ" % (
+        date[:4], date[4:6], date[6:8], time[:2], time[2:4], time[4:6]
+    )
+
+
+def latest_run(rows):
+    groups = []
+    by_run = {}
+    order = 0
+    for row in rows:
+        order += 1
+        parsed = run_info(row)
+        if not parsed:
+            groups.append({
+                "sort": (str(row.get("ts", "")), order),
+                "run_id": None,
+                "rows": [(order, row)],
+                "round": 0,
+            })
+            continue
+        run_id, round_no = parsed
+        run_ts = run_sort_ts(run_id)
+        group = by_run.get(run_id)
+        if not group:
+            group = {
+                "sort": (run_ts, order),
+                "run_id": run_id,
+                "rows": [],
+                "round": 0,
+            }
+            by_run[run_id] = group
+            groups.append(group)
+        group["rows"].append((order, row))
+        group["round"] = max(group["round"], round_no)
+        group["sort"] = max(group["sort"], (run_ts, order))
+
+    if not groups:
+        return
+
+    group = max(groups, key=lambda g: g["sort"])
+    if not group["run_id"]:
+        for _, row in group["rows"]:
+            print(format_row(row))
+        return
+
+    selected = {}
+    for order, row in group["rows"]:
+        parsed = run_info(row)
+        round_no = parsed[1] if parsed else 0
+        key = (str(row.get("kind", "")), str(row.get("provider", "")))
+        prev = selected.get(key)
+        if not prev or (round_no, order) >= prev[0]:
+            selected[key] = ((round_no, order), row)
+
+    kinds = ",".join(sorted({str(r.get("kind", "")) for _, r in group["rows"] if r.get("kind")}))
+    print("run: %s  kind=%s  debate_round=%s" % (group["run_id"], kinds, group["round"]))
+    for key in sorted(selected):
+        print(format_row(selected[key][1]))
+
+
+if action == "latest-run":
+    latest_run(rows)
+    sys.exit(0)
+if action == "latest":
+    rows = rows[-1:]
+else:
+    rows = rows[-limit:]
+for r in rows:
+    print(format_row(r))
 EOF
