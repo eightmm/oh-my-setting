@@ -20,6 +20,8 @@ has_code_text() {
   if command -v rg >/dev/null 2>&1; then
     # Search from inside DIR so exclude globs match project-relative paths,
     # not absolute path segments (e.g. a project located under /tmp).
+    # detect-project-style.sh and doctor.sh are excluded because this repo's
+    # own copies contain the ML/Slurm keyword lists and would self-match.
     (cd "$DIR" && rg -q "$1" . \
       -g '*.py' -g '*.sh' -g '*.yaml' -g '*.yml' -g '*.toml' \
       -g '!scripts/detect-project-style.sh' \
