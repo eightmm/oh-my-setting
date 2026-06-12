@@ -84,5 +84,5 @@ against the anti-patterns above before acting on it.
 For a high-stakes run, have three models attack the design first:
 `multi-agent-ask.sh --hypothesis --prompt "<hypothesis + planned experiment>"`
 injects the falsifiability/confound/baseline/variance checklist into each
-advisor. It is the design-time counterpart to `multi-agent-review --ml`
+advisor. It is the design-time counterpart to `multi-agent-review.sh --ml`
 (which gates the diff at code time).

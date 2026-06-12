@@ -93,13 +93,20 @@ Prefer the shared wrapper when this repo is installed:
 ```
 
 Use `--base origin/main` for branch/PR review and `--synthesize` to append a
-model-written synthesis to the summary artifact.
+model-written synthesis to the summary artifact. For a one-provider review,
+prefer `agent-run.sh --mode read`; it records task outcomes and routes
+read/write automatically.
 
 The wrapper sends the same question and same sanitized diff/status context to
 `codex`, `claude`, and `antigravity`, writes one artifact per model under
 `.oms/artifacts/review/`, and reports unavailable or failed providers. It does
 not specialize prompts per model; the goal is three independent perspectives on
 the same question.
+
+When policy forbids sending repo context to an external provider, use
+`--export-only`; run the exported prompt where allowed, then import the answer
+with `import-agent-result.sh`. To recover a recent run, use
+`artifact-index.sh latest` or `artifact-index.sh failures`.
 
 If the wrapper is unavailable, run equivalent local CLI calls manually with the
 same prompt and sanitized diff. Use read-only/non-interactive flags where

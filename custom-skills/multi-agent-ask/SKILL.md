@@ -16,7 +16,9 @@ connectors, or plugin connector tools.
 Use for conceptual questions, design tradeoffs, planning, alternatives, or
 "ask codex/claude/antigravity" requests that are not primarily code review.
 
-For code diff review, use `multi-agent-review` instead.
+For code diff review, use `multi-agent-review` instead. For a one-provider
+question, prefer `agent-run.sh`; it records task outcomes and routes read/write
+automatically.
 
 ## Automatic Context Selection
 
@@ -74,6 +76,11 @@ Optional sanitized diff:
 ```
 
 Artifacts are written under `.oms/artifacts/ask/`.
+
+When policy forbids sending repo context to an external provider, use
+`--export-only`; run the exported prompt where allowed, then import the answer
+with `import-agent-result.sh`. To recover a recent run, use
+`artifact-index.sh latest` or `artifact-index.sh failures`.
 
 ## Output
 

@@ -61,7 +61,14 @@ EOF
 
 The worker runs non-interactively in a detached git worktree: it cannot touch
 the main tree, commit, or push. Output lands in `.oms/artifacts/delegate/` as
-a log plus a `.patch` against HEAD.
+a log plus a `.patch` against HEAD. For a one-provider write task, prefer
+`agent-run.sh --mode write`; it records task outcomes and routes read/write
+automatically.
+
+When policy forbids sending repo context to an external provider, use the
+ask/review wrappers with `--export-only`; run the exported prompt where allowed,
+then import the answer with `import-agent-result.sh`. To recover a recent run,
+use `artifact-index.sh latest` or `artifact-index.sh failures`.
 
 ## After the Worker Returns
 
