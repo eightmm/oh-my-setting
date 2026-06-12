@@ -352,7 +352,10 @@ run_provider() {
   set +e
   case "$provider" in
     codex)
-      run_with_timeout codex exec --sandbox read-only - < "$prompt_file" >> "$artifact" 2>&1
+      # --skip-git-repo-check: read-only ask/review/call may run in any
+      # directory (sandbox is already read-only); without it codex refuses
+      # outside a trusted git repo.
+      run_with_timeout codex exec --sandbox read-only --skip-git-repo-check - < "$prompt_file" >> "$artifact" 2>&1
       status=$?
       ;;
     claude)
