@@ -129,7 +129,8 @@ agent_run_exec_and_record() {
   local output_file
   local status
 
-  output_file="$(mktemp)" || exit 1
+  output_file="$(agent_memory_mktemp)" || exit 1
+  trap 'rm -f "$output_file"' EXIT
   set +e
   "$@" > "$output_file"
   status=$?
@@ -137,6 +138,7 @@ agent_run_exec_and_record() {
   cat "$output_file"
   agent_run_record_task_outcome "$REPO" "$mode" "$provider" "$status" "$output_file"
   rm -f "$output_file"
+  trap - EXIT
   return "$status"
 }
 

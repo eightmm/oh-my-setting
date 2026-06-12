@@ -16,6 +16,8 @@ Check for or apply oh-my-setting updates.
 Modes:
   check   Fetch the configured upstream and record whether an update exists.
   apply   Apply only fast-forward updates; skips dirty/diverged checkouts.
+          Re-runs link.sh, but intentionally skips tool (re)installation;
+          use update.sh when install-tools.sh should be covered too.
   status  Print the last recorded auto-update state.
 
 Environment:

@@ -188,7 +188,8 @@ fi
 # Warn (do not block — absolute paths are common and legitimate locally) when
 # they look sensitive, so secrets are not committed unnoticed.
 ledger_scan="$(mktemp)" || fail "mktemp failed"
-trap 'rm -f "$ledger_scan"' EXIT
+ms_tmp=""
+trap 'rm -f "$ledger_scan" ${ms_tmp:+"$ms_tmp"}' EXIT
 printf '%s\n%s\n' "$NOTE" "$*" > "$ledger_scan"
 if agent_memory_file_has_sensitive_content "$ledger_scan"; then
   echo "warning: ledger note/command looks sensitive; it is recorded in git-tracked $LEDGER" >&2
@@ -249,13 +250,14 @@ if out:
 EOF
 )" || METRICS_JSON=""
     if [ -n "$METRICS_JSON" ]; then
-      ms_tmp="$(mktemp)"
+      ms_tmp="$(mktemp)" || fail "mktemp failed"
       printf '%s' "$METRICS_JSON" > "$ms_tmp"
       if agent_memory_file_has_sensitive_content "$ms_tmp"; then
         echo "ledger: metrics omitted because they contain sensitive-looking content" >&2
         METRICS_JSON=""
       fi
       rm -f "$ms_tmp"
+      ms_tmp=""
     fi
   fi
 fi
