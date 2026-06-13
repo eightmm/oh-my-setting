@@ -141,8 +141,22 @@ if [ "$(printf '%s' "$note" | wc -c | tr -d ' ')" -gt "$max_chars" ]; then
 fi
 
 note_file="$(mktemp)" || fail "mktemp failed"
-cleanup() { rm -f "$note_file"; }
+cleanup_done=0
+cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
+  rm -f "$note_file"
+}
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$code"
+}
 trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 printf '%s\n' "$note" > "$note_file"
 if agent_memory_file_has_sensitive_content "$note_file"; then
   fail "pre-registration contains sensitive-looking content"

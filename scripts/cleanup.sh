@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY_RUN=1
 # shellcheck source=scripts/lib/agent-install-state.sh
 . "$ROOT/scripts/lib/agent-install-state.sh"
+# shellcheck source=scripts/lib/harness-residue.sh
+. "$ROOT/scripts/lib/harness-residue.sh"
 
 usage() {
   cat <<'EOF'
@@ -47,9 +49,17 @@ fi
 
 oms_ops_cleanup_legacy_links "$DRY_RUN"
 
+repo_dir=""
+if git -C "$PWD" rev-parse --git-dir >/dev/null 2>&1; then
+  repo_dir="$PWD"
+fi
+oms_harness_cleanup_residue "$repo_dir" "$DRY_RUN"
+
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '\ncleanup: %s removable item(s) found\n' "$OMS_OPS_WOULD_REMOVE"
+  total=$((OMS_OPS_WOULD_REMOVE + OMS_HARNESS_RESIDUE_WOULD_REMOVE))
+  printf '\ncleanup: %s removable item(s) found\n' "$total"
 else
-  printf '\ncleanup: removed %s item(s)\n' "$OMS_OPS_REMOVED"
+  total=$((OMS_OPS_REMOVED + OMS_HARNESS_RESIDUE_REMOVED))
+  printf '\ncleanup: removed %s item(s)\n' "$total"
   "$ROOT/scripts/skill-doctor.sh"
 fi

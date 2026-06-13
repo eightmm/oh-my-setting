@@ -165,7 +165,7 @@ run_doctor_for_project() {
   local project="$1"
   local home_dir="$2"
 
-  (cd "$project" && HOME="$home_dir" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")
+  (cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")
 }
 
 test_apply_dry_run_has_no_writes() {
@@ -1007,6 +1007,31 @@ test_doctor_clean_harness_state_has_no_warnings() {
   fi
 }
 
+
+
+test_doctor_reports_crash_residue_warnings() {
+  local project="$TMP/doctor-harness-residue"
+  local home_dir="$TMP/doctor-home-residue"
+  local runtime="$home_dir/runtime"
+  local lock_dir="$runtime/oh-my-setting/locks/dead.lock"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms/artifacts/call" "$lock_dir"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf 'orphan\n' > "$project/.oms/artifacts/call/orphan.md"
+  printf '999999999\n' > "$lock_dir/pid"
+
+  out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
+    fail "doctor residue warnings must not fail: $out"
+  printf '%s' "$out" | grep -Fq 'warn: 1 dead harness lock dir(s)' ||
+    fail "missing dead lock warning: $out"
+  printf '%s' "$out" | grep -Fq 'warn: 1 unindexed artifact file(s)' ||
+    fail "missing unindexed artifact warning: $out"
+  printf '%s' "$out" | grep -Fq 'hint: run cleanup.sh --apply to remove safe harness residue' ||
+    fail "missing cleanup hint: $out"
+  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+}
 
 test_multi_agent_export_only_and_import_result() {
   local project="$TMP/export-import"
@@ -3411,6 +3436,72 @@ test_cleanup_dry_run_and_apply() {
   assert_file_contains "$home_dir/apply" "skill-doctor: ok"
 }
 
+
+test_cleanup_prunes_stale_worktree_registration() {
+  local project="$TMP/cleanup-stale-worktree"
+  local home_dir="$TMP/cleanup-stale-home"
+  local stale="$TMP/cleanup-stale-wt"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  git -C "$project" worktree add --detach "$stale" HEAD >/dev/null 2>&1
+  rm -rf "$stale"
+
+  (cd "$project" && HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$project/cleanup.out")
+  if git -C "$project" worktree list --porcelain | grep -Fq "$stale"; then
+    fail "cleanup should prune stale worktree registration"
+  fi
+  assert_file_contains "$project/cleanup.out" "pruned: 1 stale git worktree registration(s)"
+}
+
+test_cleanup_removes_dead_lock_only() {
+  local home_dir="$TMP/cleanup-lock-home"
+  local runtime="$home_dir/runtime"
+  local lock_root="$runtime/oh-my-setting/locks"
+  local dead_lock="$lock_root/dead.lock"
+  local live_lock="$lock_root/live.lock"
+
+  mkdir -p "$dead_lock" "$live_lock"
+  printf '999999999\n' > "$dead_lock/pid"
+  printf '%s\n' "$$" > "$live_lock/pid"
+
+  HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/cleanup.out"
+  assert_not_exists "$dead_lock"
+  [ -d "$live_lock" ] || fail "cleanup should leave live lock dir"
+  assert_file_contains "$home_dir/cleanup.out" "removed: $dead_lock (dead harness lock)"
+}
+
+test_agent_call_term_removes_tmp_prompt() {
+  local project="$TMP/agent-call-term"
+  local bin_dir="$project/bin"
+  local tmp_dir="$project/tmp"
+  local home_dir="$project/home"
+  local pid
+  local status=0
+
+  mkdir -p "$project" "$bin_dir" "$tmp_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+while :; do sleep 1; done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" TMPDIR="$tmp_dir" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/agent-call.sh" --to codex --repo "$project" --prompt "Wait for TERM" \
+    >"$project/out" 2>"$project/err" &
+  pid=$!
+  for _ in $(seq 1 50); do
+    [ "$(find "$tmp_dir" -type f | wc -l | tr -d ' ')" -gt 0 ] && break
+    sleep 0.1
+  done
+  kill -TERM "$pid"
+  wait "$pid" || status=$?
+  [ "$status" -eq 143 ] || fail "agent-call TERM should exit 143, got $status"
+  [ "$(find "$tmp_dir" -type f | wc -l | tr -d ' ')" = "0" ] ||
+    fail "agent-call TERM should remove temp prompt file"
+}
+
 test_update_help_runs() {
   "$ROOT/scripts/update.sh" --help >/dev/null
 }
@@ -3593,15 +3684,17 @@ test_auto_update_skips_without_upstream() {
 
 test_autoupdate_cron_install_and_uninstall() {
   local cron_file="$TMP/autoupdate.cron"
+  local config_home="$TMP/autoupdate-config"
   local out
 
+  mkdir -p "$config_home"
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >"$TMP/autoupdate-install"
   assert_file_contains "$TMP/autoupdate-install" "cron installed (apply)"
   assert_file_contains "$cron_file" "# oh-my-setting autoupdate:begin"
   assert_file_contains "$cron_file" "auto-update.sh\" apply"
 
-  out="$(OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
+  out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
   printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "status.sh missing cron trigger"
 
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
@@ -3692,6 +3785,7 @@ test_oms_self_ignore_created_for_harness_paths
 test_doctor_warns_bad_harness_index_json
 test_doctor_warns_missing_oms_gitignore
 test_doctor_clean_harness_state_has_no_warnings
+test_doctor_reports_crash_residue_warnings
 test_multi_agent_export_only_and_import_result
 test_multi_agent_review_export_only_skips_cli
 test_multi_agent_review_gate_all_pass
@@ -3783,6 +3877,9 @@ test_backup_copies_all_config_targets
 test_link_and_unlink_with_home_override
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply
+test_cleanup_prunes_stale_worktree_registration
+test_cleanup_removes_dead_lock_only
+test_agent_call_term_removes_tmp_prompt
 test_update_help_runs
 test_auto_update_help_runs
 test_template_help_runs

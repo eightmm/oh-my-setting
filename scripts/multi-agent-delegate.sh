@@ -4,6 +4,9 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/multi-agent-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/multi-agent-common.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/harness-residue.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/harness-residue.sh"
 
 MA_KIND="delegate"
 
@@ -158,11 +161,16 @@ load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
+oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null
 prompt_file="$(mktemp)" || fail "mktemp failed"
-worktree_parent="$(mktemp -d)" || fail "mktemp failed"
+worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-delegate.XXXXXX")" || fail "mktemp failed"
 worktree="$worktree_parent/wt"
 worktree_created=0
+cleanup_done=0
+oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
 cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
   rm -f "$prompt_file"
   if [ "$worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
@@ -171,7 +179,17 @@ cleanup() {
     rm -rf "$worktree_parent"
   fi
 }
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  ma_kill_jobs
+  cleanup
+  exit "$code"
+}
 trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 
 {
   printf 'You are %s, a delegated worker agent.\n' "$TO"
@@ -264,15 +282,21 @@ else
     set +e
     case "$TO" in
       codex)
-        (cd "$worktree" && run_with_timeout codex exec --sandbox workspace-write - < "$prompt_file") >> "$artifact" 2>&1
+        (cd "$worktree" && run_with_timeout codex exec --sandbox workspace-write - < "$prompt_file") >> "$artifact" 2>&1 &
+        worker_pid="$!"
+        wait "$worker_pid"
         worker_status=$?
         ;;
       claude)
-        (cd "$worktree" && run_with_timeout claude -p --permission-mode acceptEdits < "$prompt_file") >> "$artifact" 2>&1
+        (cd "$worktree" && run_with_timeout claude -p --permission-mode acceptEdits < "$prompt_file") >> "$artifact" 2>&1 &
+        worker_pid="$!"
+        wait "$worker_pid"
         worker_status=$?
         ;;
       antigravity)
-        (cd "$worktree" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file") >> "$artifact" 2>&1
+        (cd "$worktree" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file") >> "$artifact" 2>&1 &
+        worker_pid="$!"
+        wait "$worker_pid"
         worker_status=$?
         ;;
     esac
@@ -292,7 +316,9 @@ if [ -n "$VERIFY_CMD" ]; then
     printf 'DRY RUN: verify skipped.\n' >> "$artifact"
   else
     set +e
-    (cd "$worktree" && bash -c "$VERIFY_CMD") >> "$artifact" 2>&1
+    (cd "$worktree" && bash -c "$VERIFY_CMD") >> "$artifact" 2>&1 &
+    verify_pid="$!"
+    wait "$verify_pid"
     verify_status=$?
     set -e
     printf '\n- verify exit: %s\n' "$verify_status" >> "$artifact"

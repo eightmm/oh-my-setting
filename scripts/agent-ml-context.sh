@@ -81,8 +81,22 @@ if [ "$style" != "ml" ] && [ "$FORCE" -ne 1 ]; then
 fi
 
 tmp="$(mktemp)" || exit 1
-cleanup() { rm -f "$tmp"; }
+cleanup_done=0
+cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
+  rm -f "$tmp"
+}
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$code"
+}
 trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 
 append_file_list() {
   local title="$1"

@@ -119,7 +119,22 @@ oms_with_file_lock_mkdir() {
   owner_id="$$.$(date +%s).${RANDOM:-0}"
   (
     oms_file_lock_mkdir_acquire "$state_file" "$lock_dir" "$timeout" "$owner_id" || exit $?
-    trap 'oms_file_lock_mkdir_release "$lock_dir" "$owner_id"' EXIT HUP INT TERM
+    lock_cleanup_done=0
+    oms_file_lock_cleanup() {
+      [ "$lock_cleanup_done" = 0 ] || return 0
+      lock_cleanup_done=1
+      oms_file_lock_mkdir_release "$lock_dir" "$owner_id"
+    }
+    oms_file_lock_cleanup_signal() {
+      local code="$1"
+      trap - EXIT HUP INT TERM
+      oms_file_lock_cleanup
+      exit "$code"
+    }
+    trap oms_file_lock_cleanup EXIT
+    trap 'oms_file_lock_cleanup_signal 129' HUP
+    trap 'oms_file_lock_cleanup_signal 130' INT
+    trap 'oms_file_lock_cleanup_signal 143' TERM
     "$@"
   )
 }

@@ -135,8 +135,23 @@ agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
 prompt_file="$(mktemp)" || fail "mktemp failed"
-cleanup() { rm -f "$prompt_file"; }
+cleanup_done=0
+cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
+  rm -f "$prompt_file"
+}
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  ma_kill_jobs
+  cleanup
+  exit "$code"
+}
 trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 
 {
   printf 'You are %s, called by an agent harness for an independent read-only pass.\n' "$TO"

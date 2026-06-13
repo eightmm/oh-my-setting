@@ -7,6 +7,8 @@ REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
 
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/harness-residue.sh
+. "$ROOT/scripts/lib/harness-residue.sh"
 
 load_user_tool_paths() {
   export PATH="$HOME/.local/bin:$PATH"
@@ -168,6 +170,43 @@ check_harness_sensitive_files() {
   fi
 }
 
+check_harness_residue() {
+  local project_dir="$1"
+  local stale_worktrees=0
+  local dead_locks=0
+  local temp_dirs=0
+  local unindexed=0
+  local residue=0
+
+  if git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+    stale_worktrees="$(oms_harness_count_stale_worktrees "$project_dir")"
+  fi
+  dead_locks="$(oms_harness_lock_residue_count)"
+  temp_dirs="$(oms_harness_tmp_residue_count)"
+  unindexed="$(oms_harness_count_unindexed_artifacts "$project_dir")"
+
+  if [ "${stale_worktrees:-0}" -gt 0 ]; then
+    echo "warn: $stale_worktrees stale git worktree registration(s)"
+    residue=1
+  fi
+  if [ "${dead_locks:-0}" -gt 0 ]; then
+    echo "warn: $dead_locks dead harness lock dir(s)"
+    residue=1
+  fi
+  if [ "${temp_dirs:-0}" -gt 0 ]; then
+    echo "warn: $temp_dirs dead harness temp dir(s)"
+    residue=1
+  fi
+  if [ "${unindexed:-0}" -gt 0 ]; then
+    echo "warn: $unindexed unindexed artifact file(s) (run artifact-index.sh prune --files)"
+  fi
+  if [ "$residue" -eq 1 ]; then
+    echo "hint: run cleanup.sh --apply to remove safe harness residue"
+  else
+    echo "ok: no crash residue detected"
+  fi
+}
+
 check_harness_state() {
   local project_dir="${OMS_DOCTOR_PROJECT_DIR:-}"
   local oms_dir
@@ -198,6 +237,7 @@ check_harness_state() {
 
   check_harness_artifact_index "$project_dir"
   check_harness_sensitive_files "$project_dir"
+  check_harness_residue "$project_dir"
 }
 
 load_user_tool_paths

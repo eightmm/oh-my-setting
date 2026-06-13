@@ -73,6 +73,27 @@ slugify() {
     cut -c1-48
 }
 
+ma_kill_jobs() {
+  local pid
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done <<EOF
+$(jobs -pr)
+EOF
+}
+
+ma_wait_stdin_file() {
+  local input_file="$1"
+  local cmd_pid
+  shift
+
+  "$@" < "$input_file" &
+  cmd_pid="$!"
+  wait "$cmd_pid"
+}
+
 run_with_timeout() {
   if command -v timeout >/dev/null 2>&1; then
     timeout "${OMS_MULTI_AGENT_TIMEOUT:-5m}" "$@"
@@ -355,15 +376,15 @@ run_provider() {
       # --skip-git-repo-check: read-only ask/review/call may run in any
       # directory (sandbox is already read-only); without it codex refuses
       # outside a trusted git repo.
-      run_with_timeout codex exec --sandbox read-only --skip-git-repo-check - < "$prompt_file" >> "$artifact" 2>&1
+      ma_wait_stdin_file "$prompt_file" run_with_timeout codex exec --sandbox read-only --skip-git-repo-check - >> "$artifact" 2>&1
       status=$?
       ;;
     claude)
-      run_with_timeout claude --permission-mode plan -p < "$prompt_file" >> "$artifact" 2>&1
+      ma_wait_stdin_file "$prompt_file" run_with_timeout claude --permission-mode plan -p >> "$artifact" 2>&1
       status=$?
       ;;
     antigravity|agy)
-      run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file" >> "$artifact" 2>&1
+      ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" >> "$artifact" 2>&1
       status=$?
       ;;
     *)

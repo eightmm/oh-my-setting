@@ -237,13 +237,26 @@ status_file="$(mktemp)" || fail "mktemp failed"
 diff_file="$(mktemp)" || fail "mktemp failed"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 debate_dir=""
+cleanup_done=0
 cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
   rm -f "$status_file" "$diff_file" "$prompt_file"
   if [ -n "$debate_dir" ]; then
     rm -rf "$debate_dir"
   fi
 }
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  ma_kill_jobs
+  cleanup
+  exit "$code"
+}
 trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 
 if [ "$INCLUDE_STATUS" -eq 1 ]; then
   ma_safe_status "$REPO" > "$status_file"

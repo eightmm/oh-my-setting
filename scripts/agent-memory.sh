@@ -119,7 +119,22 @@ fi
 # Lazily created: read-only actions (path, show) must not depend on a
 # writable TMPDIR. Library temp files land here too once created.
 OMS_MEMORY_TMPDIR=""
-trap 'if [ -n "$OMS_MEMORY_TMPDIR" ]; then rm -rf "$OMS_MEMORY_TMPDIR"; fi' EXIT
+cleanup_done=0
+cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
+  if [ -n "$OMS_MEMORY_TMPDIR" ]; then rm -rf "$OMS_MEMORY_TMPDIR"; fi
+}
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 ensure_tmpdir() {
   [ -n "$OMS_MEMORY_TMPDIR" ] && return 0
   OMS_MEMORY_TMPDIR="$(mktemp -d)" || exit 1

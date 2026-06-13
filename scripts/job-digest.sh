@@ -93,7 +93,22 @@ if [ "$WAIT" = "1" ]; then
   # invalid/unknown-job-id error (job purged from the queue). Any other rc!=0
   # is a transient controller failure -> keep waiting, never fake completion.
   q_err="$(mktemp)" || fail "mktemp failed"
-  trap 'rm -f "$q_err"' EXIT
+  cleanup_done=0
+  cleanup() {
+    [ "$cleanup_done" = 0 ] || return 0
+    cleanup_done=1
+    rm -f "$q_err"
+  }
+  cleanup_signal() {
+    local code="$1"
+    trap - EXIT HUP INT TERM
+    cleanup
+    exit "$code"
+  }
+  trap cleanup EXIT
+  trap 'cleanup_signal 129' HUP
+  trap 'cleanup_signal 130' INT
+  trap 'cleanup_signal 143' TERM
   while :; do
     set +e
     q_out="$(squeue -h -j "$JOB_ID" 2>"$q_err")"

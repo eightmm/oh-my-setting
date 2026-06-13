@@ -80,10 +80,22 @@ REF_DIR="$(mktemp -d)" || {
   echo "error: mktemp failed" >&2
   exit 2
 }
+cleanup_done=0
 cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
   rm -rf "$REF_DIR"
 }
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$code"
+}
 trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 
 # Generate reference blocks from current templates in a throwaway project.
 reference_block() {

@@ -214,7 +214,22 @@ fi
 ledger_scan="$(mktemp)" || fail "mktemp failed"
 ms_tmp=""
 row_tmp=""
-trap 'rm -f "$ledger_scan" ${ms_tmp:+"$ms_tmp"} ${row_tmp:+"$row_tmp"}' EXIT
+cleanup_done=0
+cleanup() {
+  [ "$cleanup_done" = 0 ] || return 0
+  cleanup_done=1
+  rm -f "$ledger_scan" ${ms_tmp:+"$ms_tmp"} ${row_tmp:+"$row_tmp"}
+}
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 printf '%s\n%s\n' "$NOTE" "$*" > "$ledger_scan"
 if agent_memory_file_has_sensitive_content "$ledger_scan"; then
   echo "warning: ledger note/command looks sensitive; it is recorded in git-tracked $LEDGER" >&2

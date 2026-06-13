@@ -147,7 +147,22 @@ case "$ACTION" in
     [ -n "$USER_NAME" ] || fail "could not determine GitHub user"
     profile_json="$(mktemp)"
     repos_json="$(mktemp)"
-    trap 'rm -f "$profile_json" "$repos_json"' EXIT
+    cleanup_done=0
+    cleanup() {
+      [ "$cleanup_done" = 0 ] || return 0
+      cleanup_done=1
+      rm -f "$profile_json" "$repos_json"
+    }
+    cleanup_signal() {
+      local code="$1"
+      trap - EXIT HUP INT TERM
+      cleanup
+      exit "$code"
+    }
+    trap cleanup EXIT
+    trap 'cleanup_signal 129' HUP
+    trap 'cleanup_signal 130' INT
+    trap 'cleanup_signal 143' TERM
     gh api "users/$USER_NAME" > "$profile_json"
     if ! gh repo list "$USER_NAME" --limit "$LIMIT" --json name,description,primaryLanguage,repositoryTopics,pushedAt,url > "$repos_json" 2>/dev/null; then
       printf '[]\n' > "$repos_json"
@@ -226,7 +241,22 @@ for it in items:
     repo_json="$(mktemp)"
     content_json="$(mktemp)"
     commit_json="$(mktemp)"
-    trap 'rm -f "$repo_json" "$content_json" "$commit_json"' EXIT
+    cleanup_done=0
+    cleanup() {
+      [ "$cleanup_done" = 0 ] || return 0
+      cleanup_done=1
+      rm -f "$repo_json" "$content_json" "$commit_json"
+    }
+    cleanup_signal() {
+      local code="$1"
+      trap - EXIT HUP INT TERM
+      cleanup
+      exit "$code"
+    }
+    trap cleanup EXIT
+    trap 'cleanup_signal 129' HUP
+    trap 'cleanup_signal 130' INT
+    trap 'cleanup_signal 143' TERM
     if [ -z "$REF" ]; then
       gh api "repos/$REPO" > "$repo_json"
       REF="$(json_text default_branch < "$repo_json")"

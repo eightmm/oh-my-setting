@@ -111,23 +111,54 @@ agent_run_record_task_outcome() {
   rm -f "$note_file"
 }
 
+agent_run_kill_jobs() {
+  local pid
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done <<EOF
+$(jobs -pr)
+EOF
+}
+
 agent_run_exec_and_record() {
   local mode="$1"
   local provider="$2"
   shift 2
   local output_file
   local status
+  local cmd_pid
 
   output_file="$(agent_memory_mktemp)" || exit 1
-  trap 'rm -f "$output_file"' EXIT
+  cleanup_done=0
+  agent_run_cleanup_output() {
+    [ "$cleanup_done" = 0 ] || return 0
+    cleanup_done=1
+    rm -f "$output_file"
+  }
+  agent_run_cleanup_output_signal() {
+    local code="$1"
+    trap - EXIT HUP INT TERM
+    agent_run_kill_jobs
+    agent_run_cleanup_output
+    exit "$code"
+  }
+  trap agent_run_cleanup_output EXIT
+  trap 'agent_run_cleanup_output_signal 129' HUP
+  trap 'agent_run_cleanup_output_signal 130' INT
+  trap 'agent_run_cleanup_output_signal 143' TERM
   set +e
-  "$@" > "$output_file"
+  "$@" > "$output_file" &
+  cmd_pid="$!"
+  wait "$cmd_pid"
   status=$?
   set -e
   cat "$output_file"
   agent_run_record_task_outcome "$REPO" "$mode" "$provider" "$status" "$output_file"
   rm -f "$output_file"
-  trap - EXIT
+  cleanup_done=1
+  trap - EXIT HUP INT TERM
   return "$status"
 }
 
