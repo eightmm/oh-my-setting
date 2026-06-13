@@ -2999,6 +2999,71 @@ test_scrubber_blocks_credential_variants() {
   fi
 }
 
+
+test_scrubber_blocks_outbound_secret_shapes() {
+  local f="$TMP/scrub-outbound-shapes"
+  local s
+
+  printf '%s%s%s\n' 'https://user' ':pass-value' '@example.com/repo.git' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block URL userinfo"
+
+  printf '%s%s.%s.%s\n' 'ey' 'JhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9' 'abcdefghijklmnopqrst' 'uvwxyzABCDEFGHIJKLMN' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block JWT-shaped value"
+
+  for s in \
+    "gh""o_abcdefghijklmnopqrstuvwxyz0123456789" \
+    "gh""u_abcdefghijklmnopqrstuvwxyz0123456789" \
+    "gh""s_abcdefghijklmnopqrstuvwxyz0123456789" \
+    "gh""r_abcdefghijklmnopqrstuvwxyz0123456789" \
+    "github""_pat_abcdefghijklmnopqrstuvwxyz_0123456789_abcdefghijklmnopqrstuvwxyz"; do
+    printf '%s\n' "$s" > "$f"
+    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+      fail "scrubber should block GitHub token family"
+  done
+
+  printf '%s%s%s\n' 'np' 'm_' 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJ' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block npm token"
+
+  printf '%s%s%s\n' 'AI' 'za' 'abcdefghijklmnopqrstuvwxyzABCDE1234' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block GCP API key"
+
+  printf '%s%s%s\n' 'https://hoo' 'ks.slack.com/services/' 'T000/B000/abcdefghijklmnopqrstuvwxyz' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block Slack webhook"
+
+  printf '%s%s%s\n' 'https://discord' 'app.com/api/webhooks/' '123456789012345678/abcdefghijklmnopqrstuvwxyz' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block Discord webhook"
+
+  printf '%s %s %s %s %s %s\n' 'machine' 'example.com' 'login' 'deploy' 'password' 'not-for-sharing' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scrubber should block netrc grammar"
+}
+
+test_scrubber_allows_common_clean_text() {
+  local f="$TMP/scrub-clean-text"
+
+  cat > "$f" <<'EOF'
+https://example.com/org/repo.git
+git@github.com:org/repo.git
+the word password appears here without a value assignment
+max_tokens: 512
+EOF
+  printf '%s%s.%s.%s\n' 'ey' 'J' 'short' 'short' >> "$f"
+  if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
+    fail "ordinary clean text should pass the scrubber"
+  fi
+
+  printf '%s%s%s\n' 'https://user' ':********' '@example.com/repo.git' > "$f"
+  if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
+    fail "placeholder-only URL password should pass the scrubber"
+  fi
+}
+
 test_review_diff_side_blocks_env_token() {
   local diff="$TMP/env-token.diff"
   printf '+GITHUB_TOK%s=ghx-not-real\n' "EN" > "$diff"
@@ -3857,6 +3922,8 @@ test_agent_run_read_priority_routing
 test_shared_prompt_mode_classifier_table
 test_shared_ml_smoke_detection_table
 test_scrubber_blocks_credential_variants
+test_scrubber_blocks_outbound_secret_shapes
+test_scrubber_allows_common_clean_text
 test_review_diff_side_blocks_env_token
 test_run_ledger_gate_blocks_failing_check
 test_run_ledger_gate_mention_falls_back_to_fast
