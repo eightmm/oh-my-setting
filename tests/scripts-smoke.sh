@@ -4137,6 +4137,91 @@ EOF
   assert_file_contains "$repo/out" "name mismatch: expected-name"
 }
 
+test_session_handoff_claude_digest() {
+  local home="$TMP/sh-claude-home"
+  local cwd="/proj/demo-app"
+  local proj="$home/projects/-proj-demo-app"
+  local sess="$proj/aaaaaaaa-1111-2222-3333-444444444444.jsonl"
+  local out
+
+  mkdir -p "$proj"
+  {
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"<local-command-caveat>noise</local-command-caveat>"}}'
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"build the widget feature"}}'
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Edit","input":{"file_path":"/proj/demo-app/widget.py"}}]}}'
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}'
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"now add tests"}}'
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done: widget plus tests"}]}}'
+  } > "$sess"
+
+  out="$(OMS_CLAUDE_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd" --out "$home/digest.md" 2>/dev/null)"
+  [ -f "$out" ] || fail "claude handoff digest not written"
+  assert_file_contains "$out" "build the widget feature"
+  assert_file_contains "$out" "now add tests"
+  assert_file_contains "$out" "widget.py (1 edits)"
+  assert_file_contains "$out" "done: widget plus tests"
+  # Slash-command caveat noise must not become the goal.
+  if grep -Fq "local-command-caveat" "$out"; then
+    fail "claude digest leaked command-caveat noise"
+  fi
+  # tool_result-only turns are not real user prose.
+  if grep -Fq '"tool_result"' "$out"; then
+    fail "claude digest leaked tool_result content"
+  fi
+}
+
+test_session_handoff_codex_digest() {
+  local home="$TMP/sh-codex-home"
+  local cwd="/proj/codex-app"
+  local sess="$home/sessions/2026/06/01/rollout-2026-06-01T00-00-00-deadbeef.jsonl"
+  local out
+
+  mkdir -p "$(dirname "$sess")"
+  {
+    printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"deadbeef\",\"cwd\":\"$cwd\"}}"
+    printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message","message":"refactor the parser"}}'
+    printf '%s\n' '{"type":"event_msg","payload":{"type":"agent_message","message":"thinking"}}'
+    printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"parser refactored and tested"}}'
+  } > "$sess"
+
+  out="$(OMS_CODEX_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent codex --cwd "$cwd" --out "$home/digest.md" 2>/dev/null)"
+  [ -f "$out" ] || fail "codex handoff digest not written"
+  assert_file_contains "$out" "refactor the parser"
+  assert_file_contains "$out" "parser refactored and tested"
+}
+
+test_session_handoff_antigravity_prompts_only() {
+  local home="$TMP/sh-agy-home"
+  local cwd="/proj/agy-app"
+  local hist="$home/antigravity-cli/history.jsonl"
+  local out
+
+  mkdir -p "$(dirname "$hist")"
+  {
+    printf '%s\n' "{\"display\":\"first agy prompt\",\"timestamp\":1,\"workspace\":\"$cwd\",\"conversationId\":\"c1\"}"
+    printf '%s\n' "{\"display\":\"second agy prompt\",\"timestamp\":2,\"workspace\":\"$cwd\",\"conversationId\":\"c1\"}"
+    printf '%s\n' '{"display":"other project","timestamp":3,"workspace":"/elsewhere","conversationId":"c2"}'
+  } > "$hist"
+
+  out="$(OMS_GEMINI_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent antigravity --cwd "$cwd" --out "$home/digest.md" 2>/dev/null)"
+  [ -f "$out" ] || fail "antigravity handoff digest not written"
+  assert_file_contains "$out" "first agy prompt"
+  assert_file_contains "$out" "second agy prompt"
+  assert_file_contains "$out" "assistant output not available"
+  if grep -Fq "other project" "$out"; then
+    fail "antigravity digest leaked a non-matching workspace"
+  fi
+}
+
+test_session_handoff_unknown_agent_fails() {
+  if "$ROOT/scripts/session-handoff.sh" capture --agent bogus >/dev/null 2>&1; then
+    fail "unknown agent should fail"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4298,5 +4383,9 @@ test_auto_update_skips_without_upstream
 test_autoupdate_cron_install_and_uninstall
 test_autoupdate_install_dry_run_no_writes
 test_install_skills_detects_name_mismatch
+test_session_handoff_claude_digest
+test_session_handoff_codex_digest
+test_session_handoff_antigravity_prompts_only
+test_session_handoff_unknown_agent_fails
 
 echo "scripts-smoke: ok"

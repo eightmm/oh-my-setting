@@ -147,6 +147,30 @@ verification contract hints, and recent `docs/EXPERIMENTS.jsonl` rows. Delegated
 workers prefer `bash scripts/check.sh ml-smoke` when the project is detected as
 ML and that mode exists; otherwise they fall back to `fast`.
 
+## Session Handoff
+
+Shared memory and the task packet are forward-looking and curated. When you
+instead need to hand a PRIOR session from one agent to another — "continue what
+Codex was doing", "pick up my last Claude session" — distill that session's
+transcript into a compact digest. Raw transcripts are huge and tool-noisy, so
+the digest captures goal, recent user turns, files touched, and the last
+assistant summary. Extraction is mechanical (no model call): fast, free, and
+deterministic.
+
+- Digests land in `.oms/handoffs/` (git-ignored) and are local artifacts; the
+  content is scanned and you are warned if it looks sensitive. Loading a digest
+  into another agent is an explicit step you take.
+- Source sessions: Claude (`~/.claude/projects/<cwd>/<id>.jsonl`, full),
+  Codex (`~/.codex/.../rollout-*.jsonl`, goal/turns/last reply), Antigravity
+  (`~/.gemini/antigravity-cli/history.jsonl`, prompts only — assistant output
+  is not recoverable from history).
+
+```bash
+~/.oh-my-setting/scripts/session-handoff.sh capture --agent codex --cwd .
+~/.oh-my-setting/scripts/session-handoff.sh list
+~/.oh-my-setting/scripts/session-handoff.sh show <file>   # print to feed another agent
+```
+
 ## Output
 
 Report which provider was called, the artifact path, and the useful conclusion.
