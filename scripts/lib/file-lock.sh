@@ -139,6 +139,95 @@ oms_with_file_lock_mkdir() {
   )
 }
 
+oms_try_file_lock_mkdir_acquire() {
+  local lock_dir="$1"
+  local timeout="$2"
+  local owner_id="$3"
+  local now
+  local stale_dir
+
+  while :; do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$lock_dir/pid"
+      printf '%s\n' "$(date +%s)" > "$lock_dir/started"
+      printf '%s\n' "$owner_id" > "$lock_dir/owner"
+      return 0
+    fi
+
+    now="$(date +%s)"
+    if oms_file_lock_mkdir_stale "$lock_dir" "$timeout" "$now"; then
+      stale_dir="$lock_dir.stale.$$"
+      if mv "$lock_dir" "$stale_dir" 2>/dev/null; then
+        rm -rf "$stale_dir"
+        continue
+      fi
+    fi
+
+    return 75
+  done
+}
+
+oms_try_file_lock_mkdir() {
+  local lock_dir="$2"
+  local timeout="$3"
+  local owner_id
+  shift 3
+
+  owner_id="$$.$(date +%s).${RANDOM:-0}"
+  (
+    oms_try_file_lock_mkdir_acquire "$lock_dir" "$timeout" "$owner_id" || exit $?
+    lock_cleanup_done=0
+    oms_file_lock_cleanup() {
+      [ "$lock_cleanup_done" = 0 ] || return 0
+      lock_cleanup_done=1
+      oms_file_lock_mkdir_release "$lock_dir" "$owner_id"
+    }
+    oms_file_lock_cleanup_signal() {
+      local code="$1"
+      trap - EXIT HUP INT TERM
+      oms_file_lock_cleanup
+      exit "$code"
+    }
+    trap oms_file_lock_cleanup EXIT
+    trap 'oms_file_lock_cleanup_signal 129' HUP
+    trap 'oms_file_lock_cleanup_signal 130' INT
+    trap 'oms_file_lock_cleanup_signal 143' TERM
+    "$@"
+  )
+}
+
+oms_try_file_lock() {
+  local state_file="$1"
+  local timeout
+  local lock_path
+  local lock_parent
+  shift
+
+  [ -n "$state_file" ] || {
+    echo "error: lock target is required" >&2
+    return 2
+  }
+  [ "$#" -gt 0 ] || {
+    echo "error: lock command is required for $state_file" >&2
+    return 2
+  }
+
+  timeout="$(oms_file_lock_timeout)"
+  lock_path="$(oms_file_lock_path_for_file "$state_file")"
+  lock_parent="$(dirname "$lock_path")"
+  mkdir -p "$lock_parent"
+
+  if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then
+    (
+      exec 9>"$lock_path" || exit 75
+      flock -n 9 || exit 75
+      "$@"
+    )
+  else
+    oms_try_file_lock_mkdir "$state_file" "$lock_path" "$timeout" "$@"
+  fi
+}
+
 oms_with_file_lock() {
   local state_file="$1"
   local timeout

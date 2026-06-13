@@ -6,6 +6,8 @@ MODE="${1:-check}"
 STATE_FILE="${OH_MY_SETTING_AUTO_UPDATE_STATE:-$ROOT/local/auto-update.status}"
 LOG_FILE="${OH_MY_SETTING_AUTO_UPDATE_LOG:-$ROOT/local/auto-update.log}"
 SKIP_DOCTOR="${OH_MY_SETTING_AUTO_UPDATE_SKIP_DOCTOR:-0}"
+# Stable per-checkout target; file-lock.sh maps this path into runtime lock storage.
+APPLY_LOCK_TARGET="$ROOT/local/auto-update.apply"
 
 usage() {
   cat <<'EOF'
@@ -155,6 +157,85 @@ fetch_and_compare() {
   fi
 }
 
+auto_update_apply_locked() {
+  local remote="$1"
+  local remote_ref="$2"
+  local upstream="$3"
+  local old_short
+  local new_short
+  local new_full
+  local local_full
+  local remote_full
+  local pull_text
+  local pull_status
+  local pull_detail
+  local link_status
+  local doctor_status=0
+  local state_message
+
+  if ! fetch_and_compare "$remote" "$remote_ref" "$upstream" >/dev/null; then
+    print_status
+    return 0
+  fi
+
+  # Re-check dirtiness right before pulling: edits may have landed since the
+  # earlier check, and --ff-only still updates a non-conflicting dirty tree.
+  if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+    local_full="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+    write_state skipped "tree became dirty before pull; auto-apply skipped" "$local_full" "" "$upstream"
+    echo "auto-update: skipped (tree became dirty)"
+    return 0
+  fi
+
+  old_short="$(git -C "$ROOT" rev-parse --short HEAD)"
+  set +e
+  pull_text="$(git -C "$ROOT" pull --ff-only 2>&1)"
+  pull_status=$?
+  set -e
+  [ -z "$pull_text" ] || printf '%s\n' "$pull_text"
+  if [ "$pull_status" -ne 0 ]; then
+    pull_detail="$pull_text"
+    pull_detail="${pull_detail//$'\r'/ }"
+    pull_detail="${pull_detail//$'\n'/ }"
+    [ -n "$pull_detail" ] || pull_detail="git pull --ff-only exited $pull_status"
+    local_full="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+    remote_full="$(git -C "$ROOT" rev-parse "$remote_ref" 2>/dev/null || true)"
+    write_state failed "pull failed: $pull_detail" "$local_full" "$remote_full" "$upstream"
+    echo "auto-update: failed (pull failed: $pull_detail)" >&2
+    return "$pull_status"
+  fi
+
+  new_short="$(git -C "$ROOT" rev-parse --short HEAD)"
+  new_full="$(git -C "$ROOT" rev-parse HEAD)"
+  remote_full="$(git -C "$ROOT" rev-parse "$remote_ref" 2>/dev/null || true)"
+
+  set +e
+  "$ROOT/scripts/link.sh"
+  link_status=$?
+  set -e
+  if [ "$link_status" -ne 0 ]; then
+    write_state failed "post-update link failed at $new_short; install may be half-linked" "$new_full" "$remote_full" "$upstream"
+    echo "auto-update: failed (post-update link failed at $new_short; install may be half-linked)" >&2
+    return "$link_status"
+  fi
+
+  if [ "$SKIP_DOCTOR" != "1" ]; then
+    set +e
+    "$ROOT/scripts/doctor.sh"
+    doctor_status=$?
+    set -e
+  fi
+
+  state_message="updated: $old_short -> $new_short"
+  if [ "$doctor_status" -ne 0 ]; then
+    state_message="$state_message (doctor reported warnings)"
+    echo "auto-update: doctor reported warnings after apply" >&2
+  fi
+
+  write_state applied "$state_message" "$new_full" "$remote_full" "$upstream"
+  echo "auto-update: applied ($old_short -> $new_short)"
+}
+
 [ "$#" -le 1 ] || {
   echo "error: too many arguments" >&2
   usage >&2
@@ -199,28 +280,17 @@ if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
   exit 0
 fi
 
-if ! fetch_and_compare "$remote" "$remote_ref" "$upstream" >/dev/null; then
-  print_status
-  exit 0
-fi
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
 
-# Re-check dirtiness right before pulling: edits may have landed since the
-# earlier check, and --ff-only still updates a non-conflicting dirty tree.
-if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+set +e
+oms_try_file_lock "$APPLY_LOCK_TARGET" auto_update_apply_locked "$remote" "$remote_ref" "$upstream"
+apply_status=$?
+set -e
+if [ "$apply_status" = "75" ]; then
   local_commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
-  write_state skipped "tree became dirty before pull; auto-apply skipped" "$local_commit" "" "$upstream"
-  echo "auto-update: skipped (tree became dirty)"
+  write_state skipped "another auto-update run is in progress" "$local_commit" "" "$upstream"
+  echo "auto-update: skipped (another run in progress)"
   exit 0
 fi
-
-old="$(git -C "$ROOT" rev-parse --short HEAD)"
-git -C "$ROOT" pull --ff-only
-new="$(git -C "$ROOT" rev-parse --short HEAD)"
-
-"$ROOT/scripts/link.sh"
-if [ "$SKIP_DOCTOR" != "1" ]; then
-  "$ROOT/scripts/doctor.sh"
-fi
-
-write_state applied "updated: $old -> $new" "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse "$remote_ref")" "$upstream"
-echo "auto-update: applied ($old -> $new)"
+exit "$apply_status"

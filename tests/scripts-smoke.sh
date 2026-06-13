@@ -2100,6 +2100,76 @@ make_committed_repo() {
     commit -m init >/dev/null
 }
 
+write_auto_update_fixture_scripts() {
+  local repo="$1"
+  local link_mode="${2:-ok}"
+  local doctor_mode="${3:-ok}"
+
+  mkdir -p "$repo/scripts/lib"
+  cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
+  chmod +x "$repo/scripts/auto-update.sh"
+
+  case "$link_mode" in
+    ok)
+      cat > "$repo/scripts/link.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mkdir -p "$HOME/.oms-test"
+ln -sfn "$root/README.md" "$HOME/.oms-test/readme"
+printf 'linked\n' > "$HOME/.oms-test/linked"
+EOF
+      ;;
+    fail)
+      cat > "$repo/scripts/link.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "link failed intentionally" >&2
+exit 7
+EOF
+      ;;
+    *) fail "unknown fixture link mode: $link_mode" ;;
+  esac
+  chmod +x "$repo/scripts/link.sh"
+
+  case "$doctor_mode" in
+    ok)
+      cat > "$repo/scripts/doctor.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "doctor ok"
+EOF
+      ;;
+    fail)
+      cat > "$repo/scripts/doctor.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "doctor warning" >&2
+exit 8
+EOF
+      ;;
+    *) fail "unknown fixture doctor mode: $doctor_mode" ;;
+  esac
+  chmod +x "$repo/scripts/doctor.sh"
+}
+
+setup_auto_update_fixture() {
+  local origin="$1"
+  local seed="$2"
+  local work="$3"
+
+  git init --bare "$origin" >/dev/null
+  git init -b main "$seed" >/dev/null
+  git -C "$seed" config user.email test@example.com
+  git -C "$seed" config user.name 'Test User'
+  write_auto_update_fixture_scripts "$seed" ok ok
+  printf 'local/\n' > "$seed/.gitignore"
+  printf 'one\n' > "$seed/README.md"
+  git -C "$seed" add .gitignore README.md scripts >/dev/null
+  git -C "$seed" commit -m 'initial' >/dev/null
+  git -C "$seed" remote add origin "$origin"
+  git -C "$seed" push -u origin main >/dev/null
+  git clone --branch main "$origin" "$work" >/dev/null 2>&1
+}
+
 test_delegate_dry_run() {
   local project="$TMP/delegate-dry"
   local artifact_dir="$project/artifacts"
@@ -3872,6 +3942,119 @@ test_auto_update_apply_skips_dirty_tree() {
   assert_file_contains "$work/local/auto-update.status" "dirty tree"
 }
 
+test_auto_update_apply_records_link_failure() {
+  local origin="$TMP/auto-link-fail-origin.git"
+  local seed="$TMP/auto-link-fail-seed"
+  local work="$TMP/auto-link-fail-work"
+  local home_dir="$TMP/auto-link-fail-home"
+  local rc=0
+  local new_full
+  local new_short
+
+  setup_auto_update_fixture "$origin" "$seed" "$work"
+  write_auto_update_fixture_scripts "$seed" fail ok
+  printf 'two\n' >> "$seed/README.md"
+  git -C "$seed" add README.md scripts >/dev/null
+  git -C "$seed" commit -m 'link fails' >/dev/null
+  git -C "$seed" push origin main >/dev/null
+
+  "$work/scripts/auto-update.sh" check >"$TMP/auto-link-fail-check-out"
+  assert_file_contains "$work/local/auto-update.status" "status=update_available"
+
+  mkdir -p "$home_dir"
+  HOME="$home_dir" "$work/scripts/auto-update.sh" apply >"$TMP/auto-link-fail-apply-out" 2>"$TMP/auto-link-fail-apply-err" || rc=$?
+  [ "$rc" != "0" ] || fail "link failure apply should exit nonzero"
+  new_full="$(git -C "$work" rev-parse HEAD)"
+  new_short="$(git -C "$work" rev-parse --short HEAD)"
+  assert_file_contains "$work/local/auto-update.status" "status=failed"
+  assert_file_contains "$work/local/auto-update.status" "post-update link failed at $new_short; install may be half-linked"
+  assert_file_contains "$work/local/auto-update.status" "local=$new_full"
+  if grep -Fq "status=update_available" "$work/local/auto-update.status"; then
+    fail "link failure left stale update_available state"
+  fi
+}
+
+
+test_auto_update_apply_records_applied_with_doctor_warning() {
+  local origin="$TMP/auto-doctor-fail-origin.git"
+  local seed="$TMP/auto-doctor-fail-seed"
+  local work="$TMP/auto-doctor-fail-work"
+  local home_dir="$TMP/auto-doctor-fail-home"
+
+  setup_auto_update_fixture "$origin" "$seed" "$work"
+  write_auto_update_fixture_scripts "$seed" ok fail
+  printf 'two\n' >> "$seed/README.md"
+  git -C "$seed" add README.md scripts >/dev/null
+  git -C "$seed" commit -m 'doctor warns' >/dev/null
+  git -C "$seed" push origin main >/dev/null
+
+  mkdir -p "$home_dir"
+  HOME="$home_dir" "$work/scripts/auto-update.sh" apply >"$TMP/auto-doctor-fail-out" 2>"$TMP/auto-doctor-fail-err" ||
+    fail "doctor warning should not fail apply"
+  assert_file_contains "$work/local/auto-update.status" "status=applied"
+  assert_file_contains "$work/local/auto-update.status" "doctor reported warnings"
+  assert_file_contains "$TMP/auto-doctor-fail-out" "auto-update: applied"
+  assert_symlink_to "$home_dir/.oms-test/readme" "$work/README.md"
+}
+
+
+test_auto_update_apply_lock_contention_skips_without_pull() {
+  local origin="$TMP/auto-lock-origin.git"
+  local seed="$TMP/auto-lock-seed"
+  local work="$TMP/auto-lock-work"
+  local runtime="$TMP/auto-lock-runtime"
+  local home_dir="$TMP/auto-lock-home"
+  local lock_dir
+  local old_full
+
+  setup_auto_update_fixture "$origin" "$seed" "$work"
+  printf 'two\n' >> "$seed/README.md"
+  git -C "$seed" add README.md >/dev/null
+  git -C "$seed" commit -m 'update' >/dev/null
+  git -C "$seed" push origin main >/dev/null
+
+  old_full="$(git -C "$work" rev-parse HEAD)"
+  mkdir -p "$runtime" "$home_dir"
+  . "$work/scripts/lib/file-lock.sh"
+  lock_dir="$(XDG_RUNTIME_DIR="$runtime" HOME="$home_dir" oms_file_lock_path_for_file "$work/local/auto-update.apply")"
+  mkdir -p "$lock_dir"
+  printf '%s\n' "$$" > "$lock_dir/pid"
+  printf '%s\n' "$(date +%s)" > "$lock_dir/started"
+  printf 'held\n' > "$lock_dir/owner"
+
+  XDG_RUNTIME_DIR="$runtime" HOME="$home_dir" OMS_LOCK_FORCE_MKDIR=1 \
+    "$work/scripts/auto-update.sh" apply >"$TMP/auto-lock-out" 2>"$TMP/auto-lock-err"
+  assert_file_contains "$TMP/auto-lock-out" "auto-update: skipped (another run in progress)"
+  assert_file_contains "$work/local/auto-update.status" "status=skipped"
+  assert_file_contains "$work/local/auto-update.status" "another auto-update run is in progress"
+  [ "$(git -C "$work" rev-parse HEAD)" = "$old_full" ] ||
+    fail "lock contention apply should not pull"
+}
+
+
+test_auto_update_apply_happy_path_records_applied() {
+  local origin="$TMP/auto-apply-origin.git"
+  local seed="$TMP/auto-apply-seed"
+  local work="$TMP/auto-apply-work"
+  local home_dir="$TMP/auto-apply-home"
+
+  setup_auto_update_fixture "$origin" "$seed" "$work"
+  printf 'two\n' >> "$seed/README.md"
+  git -C "$seed" add README.md >/dev/null
+  git -C "$seed" commit -m 'update' >/dev/null
+  git -C "$seed" push origin main >/dev/null
+
+  mkdir -p "$home_dir"
+  HOME="$home_dir" "$work/scripts/auto-update.sh" apply >"$TMP/auto-apply-out" ||
+    fail "happy apply should pass"
+  assert_file_contains "$work/local/auto-update.status" "status=applied"
+  assert_file_contains "$work/local/auto-update.status" "updated:"
+  assert_file_contains "$TMP/auto-apply-out" "auto-update: applied"
+  assert_symlink_to "$home_dir/.oms-test/readme" "$work/README.md"
+  assert_file_contains "$work/README.md" "two"
+}
+
+
 test_auto_update_skips_without_upstream() {
   local work="$TMP/auto-no-upstream"
 
@@ -4107,6 +4290,10 @@ test_status_shows_active_task_state
 test_status_shows_auto_update_state
 test_auto_update_check_detects_update
 test_auto_update_apply_skips_dirty_tree
+test_auto_update_apply_records_link_failure
+test_auto_update_apply_records_applied_with_doctor_warning
+test_auto_update_apply_lock_contention_skips_without_pull
+test_auto_update_apply_happy_path_records_applied
 test_auto_update_skips_without_upstream
 test_autoupdate_cron_install_and_uninstall
 test_autoupdate_install_dry_run_no_writes
