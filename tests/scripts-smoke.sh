@@ -496,6 +496,9 @@ case "${1:-}" in
   -s)
     printf 'Exit status: %s\n' "${TSP_STUB_EXIT:-0}"
     ;;
+  -k)
+    exit 0
+    ;;
   -r)
     printf 'removed %s\n' "$2"
     ;;
@@ -552,6 +555,8 @@ test_tsp_queue_forwards_basic_subcommands() {
 
   TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" cancel 77 >/dev/null
   TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" logs 77 >"$dir/logs"
+  # cancel must stop a running job (-k), not only drop a queued one (-r).
+  assert_file_contains "$dir/tsp.log" "-k 77"
   assert_file_contains "$dir/tsp.log" "-r 77"
   assert_file_contains "$dir/tsp.log" "-c 77"
   assert_file_contains "$dir/logs" "log for 77"

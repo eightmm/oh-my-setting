@@ -24,9 +24,9 @@ Subcommands:
   list
       Show the tsp queue table.
   cancel <id>
-      Remove one queued job with tsp -r <id>.
+      Stop a running job and remove it (tsp -k then tsp -r).
   cancel --all
-      Remove listed tsp jobs with tsp -r per id, then clear finished rows with tsp -C.
+      Stop and remove every listed job (tsp -k/-r per id), then clear finished rows with tsp -C.
   wait [<id>]
       Wait for a job (or last enqueued job) and record a run-ledger row.
   logs <id>
@@ -253,12 +253,17 @@ cmd_cancel() {
     tsp | awk 'NR > 1 && $1 ~ /^[0-9]+$/ {print $1}' |
       while IFS= read -r job_id; do
         [ -n "$job_id" ] || continue
+        # -k stops a running job; -r removes a still-queued one. A running
+        # job ignores -r, so try both per id.
+        tsp -k "$job_id" >/dev/null 2>&1 || true
         tsp -r "$job_id" >/dev/null 2>&1 || true
       done
     tsp -C
     return
   fi
   require_id "$1"
+  # -r alone leaves a running job running; kill it first, then drop from queue.
+  tsp -k "$1" >/dev/null 2>&1 || true
   tsp -r "$1"
 }
 
