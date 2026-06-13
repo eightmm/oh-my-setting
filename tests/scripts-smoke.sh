@@ -478,6 +478,145 @@ EOF
   [ "$(cat "$dir/poll")" -ge 5 ] || fail "wait loop must retry non-job errors and stop only on invalid-job-id"
 }
 
+
+write_fake_tsp() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/tsp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${TSP_STUB_LOG:?}"
+case "${1:-}" in
+  -S)
+    exit 0
+    ;;
+  -w)
+    exit 0
+    ;;
+  -s)
+    printf 'Exit status: %s\n' "${TSP_STUB_EXIT:-0}"
+    ;;
+  -r)
+    printf 'removed %s\n' "$2"
+    ;;
+  -c)
+    printf 'log for %s\n' "$2"
+    ;;
+  -C)
+    printf 'cleared\n'
+    ;;
+  -L)
+    printf '%s\n' "${TSP_STUB_ID:-41}"
+    ;;
+  --)
+    printf '%s\n' "${TSP_STUB_ID:-41}"
+    ;;
+  "")
+    printf 'ID State Output\n%s finished job\n' "${TSP_STUB_ID:-41}"
+    ;;
+  *)
+    echo "unexpected tsp args: $*" >&2
+    exit 2
+    ;;
+esac
+EOF
+  chmod +x "$bin/tsp"
+}
+
+test_tsp_queue_enqueue_slots_and_label() {
+  local dir="$TMP/tsp-enqueue"
+  local bin="$dir/bin"
+  local out
+
+  mkdir -p "$dir"
+  write_fake_tsp "$bin"
+  out="$(TSP_STUB_LOG="$dir/tsp.log" TSP_STUB_ID=42 \
+    OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" enqueue --label train-a --slots 1 -- bash -c 'exit 0')"
+  [ "$out" = "42" ] || fail "enqueue should print tsp id"
+  assert_file_contains "$dir/tsp.log" "-S 1"
+  assert_file_contains "$dir/tsp.log" "-L train-a -- bash -c exit 0"
+}
+
+test_tsp_queue_forwards_basic_subcommands() {
+  local dir="$TMP/tsp-forward"
+  local bin="$dir/bin"
+  local out
+
+  mkdir -p "$dir"
+  write_fake_tsp "$bin"
+  out="$(TSP_STUB_LOG="$dir/tsp.log" TSP_STUB_ID=77 \
+    OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" list)"
+  printf '%s' "$out" | grep -Fq '77 finished job' || fail "list should forward to tsp"
+
+  TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" cancel 77 >/dev/null
+  TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" logs 77 >"$dir/logs"
+  assert_file_contains "$dir/tsp.log" "-r 77"
+  assert_file_contains "$dir/tsp.log" "-c 77"
+  assert_file_contains "$dir/logs" "log for 77"
+}
+
+test_tsp_queue_wait_records_ledger() {
+  local project="$TMP/tsp-wait"
+  local bin="$project/bin"
+
+  make_committed_repo "$project"
+  write_fake_tsp "$bin"
+  (cd "$project" && TSP_STUB_LOG="$project/tsp.log" TSP_STUB_ID=44 \
+    OMS_TSP_STATE_DIR="$project/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" enqueue --ledger-note queued-note -- bash -c 'exit 0' >/dev/null)
+  (cd "$project" && TSP_STUB_LOG="$project/tsp.log" TSP_STUB_ID=44 TSP_STUB_EXIT=0 \
+    OMS_TSP_STATE_DIR="$project/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" wait 44 >/dev/null)
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"note": "queued-note"'
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"cmd": ["bash", "-c", "exit 0"]'
+  assert_file_contains "$project/tsp.log" "-w 44"
+  assert_file_contains "$project/tsp.log" "-s 44"
+}
+
+test_tsp_queue_missing_tsp_fallback_records_ledger() {
+  local project="$TMP/tsp-fallback"
+  local out
+  local job_id
+
+  make_committed_repo "$project"
+  out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 \
+    OMS_TSP_FALLBACK_DIR="$project/fallback" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" enqueue --ledger-note fallback-note -- bash -c 'echo fallback-ok' 2>"$project/enqueue.err")"
+  job_id="$out"
+  [ -n "$job_id" ] || fail "fallback enqueue should print pid"
+  assert_file_contains "$project/enqueue.err" "degraded fallback active"
+  (cd "$project" && OMS_TSP_FORCE_FALLBACK=1 \
+    OMS_TSP_FALLBACK_DIR="$project/fallback" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" wait "$job_id" >/dev/null 2>"$project/wait.err")
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"note": "fallback-note"'
+  assert_one_artifact_contains "$project/fallback" 'job.*.log' "fallback-ok"
+}
+
+test_tsp_queue_secret_guard_blocks_enqueue() {
+  local dir="$TMP/tsp-guard"
+  local bin="$dir/bin"
+  local bad_name
+  local bad_val
+  local rc
+
+  mkdir -p "$dir"
+  write_fake_tsp "$bin"
+  bad_name="API_""TOK""EN"
+  bad_val="inline-value-12345"
+  set +e
+  TSP_STUB_LOG="$dir/tsp.log" OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" enqueue -- env "$bad_name=$bad_val" bash -c true >/dev/null 2>"$dir/error"
+  rc=$?
+  set -e
+  [ "$rc" = "3" ] || fail "secret guard should exit 3, got $rc"
+  assert_file_contains "$dir/error" "pass credentials via environment or files"
+  if [ -s "$dir/tsp.log" ]; then
+    fail "secret guard must not queue the command"
+  fi
+}
+
 test_run_ledger_records_and_lists() {
   local project="$TMP/run-ledger"
   make_committed_repo "$project"
@@ -3825,6 +3964,11 @@ test_project_doctor_rejects_extra_arg
 test_review_verdicts_subcommand
 test_job_digest_log_mode
 test_job_digest_wait_polls_until_empty
+test_tsp_queue_enqueue_slots_and_label
+test_tsp_queue_forwards_basic_subcommands
+test_tsp_queue_wait_records_ledger
+test_tsp_queue_missing_tsp_fallback_records_ledger
+test_tsp_queue_secret_guard_blocks_enqueue
 test_run_ledger_records_and_lists
 test_run_ledger_warns_sensitive_command
 test_run_ledger_records_metrics

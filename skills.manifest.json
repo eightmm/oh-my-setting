@@ -56,6 +56,12 @@
       "reason": "Generate and use local Slurm cluster context for HPC workflows."
     },
     {
+      "name": "tsp-queue",
+      "source": "custom-skills/tsp-queue",
+      "enabled": true,
+      "reason": "Queue single-workstation GPU jobs with tsp/task-spooler and ledger-recorded completion."
+    },
+    {
       "name": "ml-training",
       "source": "custom-skills/ml-training",
       "enabled": true,

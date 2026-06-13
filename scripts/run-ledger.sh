@@ -238,10 +238,17 @@ fi
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 start_s="$(date +%s)"
 
-set +e
-"$@"
-status=$?
-set -e
+if [ -n "${OMS_RUN_LEDGER_STATUS_OVERRIDE:-}" ]; then
+  case "$OMS_RUN_LEDGER_STATUS_OVERRIDE" in
+    *[!0-9]*|"") fail "OMS_RUN_LEDGER_STATUS_OVERRIDE must be a non-negative integer" ;;
+  esac
+  status="$OMS_RUN_LEDGER_STATUS_OVERRIDE"
+else
+  set +e
+  "$@"
+  status=$?
+  set -e
+fi
 
 duration_s=$(( $(date +%s) - start_s ))
 
