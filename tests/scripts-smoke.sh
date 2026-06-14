@@ -4461,6 +4461,59 @@ test_experiment_board_unknown_subcommand_fails() {
   fi
 }
 
+# Build a repo with a base commit and a patch of `branch` vs main on file.txt.
+make_patch_repo() {
+  local repo="$1"
+  local branch_content="$2"
+  make_committed_repo "$repo"
+  git -C "$repo" checkout -q -b feat
+  printf '%s' "$branch_content" > "$repo/file.txt"
+  git -C "$repo" -c user.email=t@e -c user.name=t commit -qam change
+  git -C "$repo" diff main feat > "$repo/change.patch"
+  git -C "$repo" checkout -q main
+  git -C "$repo" branch -q -D feat
+}
+
+test_patch_admit_admits_clean_patch() {
+  local repo="$TMP/admit-clean"
+  local SH="$ROOT/scripts/patch-admit.sh"
+  make_patch_repo "$repo" $'base\nmore\n'
+  ( "$SH" --patch "$repo/change.patch" --repo "$repo" >/dev/null 2>&1 ) ||
+    fail "clean patch should be admitted (exit 0)"
+  local r
+  r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
+  [ -n "$r" ] || fail "no admission report written"
+  assert_file_contains "$r" "Patch admission: ADMIT"
+  assert_file_contains "$r" "apply: PASS"
+}
+
+test_patch_admit_rejects_stale_patch() {
+  local repo="$TMP/admit-stale"
+  local SH="$ROOT/scripts/patch-admit.sh"
+  make_patch_repo "$repo" $'base\nmore\n'
+  # Move the base so the patch no longer applies.
+  printf 'moved\n' > "$repo/file.txt"
+  git -C "$repo" -c user.email=t@e -c user.name=t commit -qam move
+  if ( "$SH" --patch "$repo/change.patch" --repo "$repo" >/dev/null 2>&1 ); then
+    fail "stale patch should be rejected (nonzero)"
+  fi
+}
+
+test_patch_admit_rejects_failed_verify() {
+  local repo="$TMP/admit-verify"
+  local SH="$ROOT/scripts/patch-admit.sh"
+  make_patch_repo "$repo" $'base\nmore\n'
+  if ( "$SH" --patch "$repo/change.patch" --repo "$repo" --verify 'exit 5' >/dev/null 2>&1 ); then
+    fail "failed verify should reject the patch"
+  fi
+}
+
+test_patch_admit_requires_patch() {
+  if "$ROOT/scripts/patch-admit.sh" --repo "$TMP" >/dev/null 2>&1; then
+    fail "patch-admit should require --patch"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4637,5 +4690,9 @@ test_run_reconcile_unknown_subcommand_fails
 test_experiment_board_lifecycle_and_duplicate_guard
 test_experiment_board_stale_reclaim
 test_experiment_board_unknown_subcommand_fails
+test_patch_admit_admits_clean_patch
+test_patch_admit_rejects_stale_patch
+test_patch_admit_rejects_failed_verify
+test_patch_admit_requires_patch
 
 echo "scripts-smoke: ok"

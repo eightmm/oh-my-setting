@@ -147,6 +147,26 @@ verification contract hints, and recent `docs/EXPERIMENTS.jsonl` rows. Delegated
 workers prefer `bash scripts/check.sh ml-smoke` when the project is detected as
 ML and that mode exists; otherwise they fall back to `fast`.
 
+## Admitting Delegated Patches
+
+A worker patch from `multi-agent-delegate.sh` can be stale (its base moved),
+partial, or pass only under the worker's own assumptions. Before landing one on
+the main tree, run it through the admission gate: it applies the patch in a
+throwaway worktree off the current HEAD and runs a checks ladder — applies
+cleanly (not stale) → changed shell files parse → the verification contract
+passes — then emits a verdict and a report. Exit is nonzero unless every gate
+passes, so it composes with `&&`.
+
+```bash
+~/.oh-my-setting/scripts/patch-admit.sh --patch .oms/artifacts/delegate/<worker>.patch \
+  && git apply --binary .oms/artifacts/delegate/<worker>.patch
+~/.oh-my-setting/scripts/patch-admit.sh --patch <p> --verify "bash tests/scripts-smoke.sh" --ml
+```
+
+The report (changed files, ladder, verify tail) lands under
+`.oms/artifacts/admit/`. Use it as the trust boundary between delegation and
+applying the result.
+
 ## Session Handoff
 
 Shared memory and the task packet are forward-looking and curated. When you
