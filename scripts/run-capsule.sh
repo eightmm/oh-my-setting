@@ -211,7 +211,6 @@ configs_json() {
 }
 
 outputs_json() {
-  local o
   # Hash outputs up to a size cap so a checkpoint can be traced back to its
   # producing run (see `whence`). Multi-GB files are recorded path+size+mtime
   # only, with hashed=false, to avoid an expensive full read.

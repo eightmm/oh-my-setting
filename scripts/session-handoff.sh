@@ -129,7 +129,7 @@ PY
       return 0
     fi
   done <<EOF
-$(find "$CODEX_HOME/sessions" "$CODEX_HOME/archived_sessions" -type f -name 'rollout-*.jsonl' 2>/dev/null | xargs -r ls -t 2>/dev/null)
+$(find "$CODEX_HOME/sessions" "$CODEX_HOME/archived_sessions" -type f -name 'rollout-*.jsonl' -exec ls -1t {} + 2>/dev/null)
 EOF
   fail "no codex session matched cwd: $cwd"
 }
@@ -438,7 +438,7 @@ slug_id() {
 cmd_list() {
   local dir="$ROOT/.oms/handoffs"
   [ -d "$dir" ] || { echo "no handoffs captured"; return 0; }
-  find "$dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null | xargs -r ls -t 2>/dev/null
+  find "$dir" -maxdepth 1 -type f -name '*.md' -exec ls -1t {} + 2>/dev/null
 }
 
 cmd_show() {

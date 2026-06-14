@@ -28,7 +28,6 @@ RESULT=""
 NEXT=""
 JOB=""
 REASON=""
-NOTE=""
 FORCE=0
 SHOW_ALL=0
 SCAN_FILE=""
@@ -230,7 +229,7 @@ cmd_finish() {
   parse_args "$@"
   [ -n "$ID" ] || fail "finish requires --id"
   require_active
-  append_event done
+  append_event "done"
   echo "done: $ID" >&2
 }
 

@@ -112,7 +112,7 @@ record() {
 }
 
 # --- Gate 1: applies cleanly to current HEAD (staleness check) --------------
-apply_check_out="$(git -C "$REPO" apply --check --binary "$PATCH" 2>&1)" && apply_ok=1 || apply_ok=0
+if git -C "$REPO" apply --check --binary "$PATCH" >/dev/null 2>&1; then apply_ok=1; else apply_ok=0; fi
 if [ "$apply_ok" = 1 ]; then
   record "apply" "PASS" "patch applies cleanly to $base_sha"
 else
