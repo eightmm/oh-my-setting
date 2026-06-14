@@ -30,6 +30,7 @@ Usage: oms-run.sh new [--note TEXT]
        oms-run.sh show <run_id>
        oms-run.sh ls [N]
        oms-run.sh diff <run_id_a> <run_id_b>
+       oms-run.sh validate [--dir DIR]
 
 The run spine: a canonical run_id and an append-only join index
 (.oms/runs/index.jsonl) over the independent run tools.
@@ -41,6 +42,8 @@ link    Append one join row {run_id, ts, tool, event, path, detail}.
 show    Join and print every indexed record for a run id.
 ls      Summarize the most recent runs (default 10).
 diff    Compare two runs' capsules: commit, env, config, seeds, metric deltas.
+validate Check every .oms/**/*.jsonl parses and report schema versions; nonzero
+         on any malformed line. The guard against silent JSONL/schema drift.
 
 This is read/append only — it never launches or mutates a run. The heavy
 records stay in each tool's own file; the index is a rebuildable cache.
@@ -236,12 +239,57 @@ for k in sorted(set(ma) | set(mb)):
 PY
 }
 
+cmd_validate() {
+  local dir=".oms"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dir) [ "$#" -ge 2 ] || fail "--dir requires a path"; dir="$2"; shift 2 ;;
+      *) fail "unknown validate argument: $1" ;;
+    esac
+  done
+  [ -d "$dir" ] || { echo "validate: no $dir directory"; return 0; }
+  OMS_DIR="$dir" python3 <<'PY'
+import glob, json, os, sys
+root = os.environ["OMS_DIR"]
+files = sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
+bad = 0
+total = 0
+for f in files:
+    lines = 0
+    errors = 0
+    schemas = set()
+    for i, line in enumerate(open(f, encoding="utf-8", errors="replace"), 1):
+        if not line.strip():
+            continue
+        lines += 1
+        try:
+            r = json.loads(line)
+        except Exception as e:
+            errors += 1
+            print("BAD   %s:%d  %s" % (f, i, e))
+            continue
+        if isinstance(r, dict) and "schema" in r:
+            schemas.add(r["schema"])
+    total += 1
+    tag = "ok   " if errors == 0 else "FAIL "
+    sver = (" schema=%s" % ",".join(str(s) for s in sorted(schemas))) if schemas else ""
+    print("%s %s  (%d rows%s)" % (tag, f, lines, sver))
+    if errors:
+        bad += 1
+if total == 0:
+    print("validate: no .jsonl records found")
+print("validate: %d file(s), %d with errors" % (total, bad), file=sys.stderr)
+sys.exit(1 if bad else 0)
+PY
+}
+
 case "${1:-}" in
   new) shift; cmd_new "$@" ;;
   link) shift; cmd_link "$@" ;;
   show) shift; cmd_show "$@" ;;
   ls) shift; cmd_ls "$@" ;;
   diff) shift; cmd_diff "$@" ;;
+  validate) shift; cmd_validate "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;
   *) fail "unknown subcommand: $1" ;;

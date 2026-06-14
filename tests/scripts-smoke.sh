@@ -4596,6 +4596,20 @@ test_oms_run_unknown_subcommand_fails() {
   fi
 }
 
+test_oms_run_validate_detects_malformed_jsonl() {
+  local d="$TMP/oms-run-validate"
+  local SH="$ROOT/scripts/oms-run.sh"
+
+  mkdir -p "$d/.oms/runs"
+  printf '%s\n' '{"schema":1,"run_id":"r","tool":"t","event":"e"}' > "$d/.oms/runs/spine.jsonl"
+  ( cd "$d" && "$SH" validate --dir "$d/.oms" >/dev/null 2>&1 ) ||
+    fail "validate should pass on well-formed jsonl"
+  printf '%s\n' 'this is not json{' >> "$d/.oms/runs/spine.jsonl"
+  if ( cd "$d" && "$SH" validate --dir "$d/.oms" >/dev/null 2>&1 ); then
+    fail "validate should fail on a malformed jsonl line"
+  fi
+}
+
 test_oms_run_diff_compares_capsules() {
   local d="$TMP/oms-run-diff"
   local spine="$d/.oms/runs/spine.jsonl"
@@ -4809,5 +4823,6 @@ test_oms_run_spine_links_and_joins
 test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
 test_oms_run_diff_compares_capsules
+test_oms_run_validate_detects_malformed_jsonl
 
 echo "scripts-smoke: ok"
