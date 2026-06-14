@@ -154,6 +154,23 @@ print(json.dumps(env))
 PY
 }
 
+# Save a RECONSTRUCTABLE env lock into the bundle (fingerprint != rebuildable):
+# the project's uv.lock if present, else a frozen package list. reproduce can
+# then point at it to recreate the environment.
+save_env_lock() {
+  local bundle="$1"
+  if [ -f uv.lock ]; then
+    cp uv.lock "$bundle/env.uv.lock" 2>/dev/null || true
+  elif command -v uv >/dev/null 2>&1 && uv pip freeze >"$bundle/env.freeze.txt" 2>/dev/null \
+       && [ -s "$bundle/env.freeze.txt" ]; then
+    :
+  elif python3 -m pip freeze >"$bundle/env.freeze.txt" 2>/dev/null && [ -s "$bundle/env.freeze.txt" ]; then
+    :
+  else
+    rm -f "$bundle/env.freeze.txt" 2>/dev/null || true
+  fi
+}
+
 capture_git_json() {
   # cwd-relative git provenance; writes uncommitted.diff into $1 when dirty.
   local bundle="$1"
@@ -254,6 +271,7 @@ cmd_run() {
   local git_json env_json cfg_json out_json
   git_json="$(capture_git_json "$bundle")"
   env_json="$(capture_env_json)"
+  save_env_lock "$bundle"
   cfg_json="$(configs_json)"
   out_json="$(outputs_json)"
 
@@ -404,6 +422,10 @@ if commit not in ("none", "no-commit", ""):
     print("git checkout %s" % commit)
 if g.get("diff_file"):
     print("git apply %s/%s   # restore uncommitted changes at capture time" % (bundle, g["diff_file"]))
+if os.path.exists(os.path.join(bundle, "env.uv.lock")):
+    print("uv sync --frozen   # from %s/env.uv.lock" % bundle)
+elif os.path.exists(os.path.join(bundle, "env.freeze.txt")):
+    print("uv pip install -r %s/env.freeze.txt   # or: pip install -r ..." % bundle)
 print("# env at capture: python=%s torch=%s cuda=%s" % (e.get("python"), e.get("torch"), e.get("cuda")))
 if cap.get("seeds"):
     print("# seeds: %s" % ", ".join(cap["seeds"]))
@@ -445,13 +467,24 @@ def line(ok, label, want, got):
 line(g.get("commit_full") == cur_commit, "commit", g.get("commit_full"), cur_commit)
 line((g.get("diff_sha256") or "") == cur_diff, "uncommitted-diff",
      g.get("diff_sha256") or "(clean)", cur_diff or "(clean)")
-# Env drift is informational only (does not fail verify).
-try:
-    import platform
-    cur_py = platform.python_version()
-except Exception:
-    cur_py = "?"
-print("note python: capsule=%s current=%s" % (e.get("python"), cur_py))
+# Env drift is informational only (WARN, does not fail verify) — the silent
+# repro-killer for protein-ligand stacks (torch/CUDA/driver skew).
+import platform, subprocess
+def probe(code):
+    try:
+        out = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=20)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+cur = {
+    "python": platform.python_version(),
+    "torch": probe("import torch;print(torch.__version__)"),
+    "cuda": probe("import torch;print(torch.version.cuda)"),
+}
+for k in ("python", "torch", "cuda"):
+    want, got = e.get(k), cur.get(k)
+    tag = "ok   " if want == got else "WARN "
+    print("%s env-%s: capsule=%s current=%s" % (tag, k, want, got))
 sys.exit(1 if drift else 0)
 PY
 }

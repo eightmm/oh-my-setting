@@ -4252,9 +4252,16 @@ test_run_capsule_captures_and_reproduces() {
   printf '%s' "$repro" | grep -Fq "git checkout" || fail "reproduce missing checkout"
   printf '%s' "$repro" | grep -Fq "uncommitted.diff" || fail "reproduce missing diff apply"
 
+  # Env is captured reconstructably (lock or freeze) and reproduce points at it.
+  [ -f "$runs/$id/env.uv.lock" ] || [ -f "$runs/$id/env.freeze.txt" ] ||
+    fail "no reconstructable env lock saved"
+  printf '%s' "$repro" | grep -Eq 'uv sync|pip install' || fail "reproduce missing env recreate step"
+
   # verify: clean against the same tree, drift after a change.
-  ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ) ||
+  local vout
+  vout="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" 2>&1)" ||
     fail "verify should pass on the unchanged tree"
+  printf '%s' "$vout" | grep -Fq "env-python" || fail "verify missing env-drift report"
   printf 'changed\n' >> "$proj/file.txt"
   if ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ); then
     fail "verify should report drift after a change"
