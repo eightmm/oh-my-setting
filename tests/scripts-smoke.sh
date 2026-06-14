@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d /tmp/oms-tests.XXXXXX)"
 
+# Hermetic, environment-deterministic test runs: ignore the host's git config
+# (CI has none, dev machines vary — this is exactly what hid the
+# default-branch / no-identity bugs), pin a committer identity and a stable
+# locale/timezone. Tests must not depend on ambient host state.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME="oms-test" GIT_AUTHOR_EMAIL="test@example.com"
+export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
+export LC_ALL=C LANG=C TZ=UTC
+
 cleanup() {
   rm -rf "$TMP"
 }
