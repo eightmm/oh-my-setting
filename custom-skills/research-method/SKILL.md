@@ -110,6 +110,19 @@ The board records intent; `run-ledger`/`run-capsule` record what actually ran;
 `run-reconcile` writes back the job's terminal state. Claim → run (capsule) →
 reconcile → finish.
 
+Tie one experiment's records together with a run id. Mint it once and export
+it; the tools then auto-link their records into a shared join index, and
+`oms-run.sh show` joins them back. The tools stay independent — the run id is
+just a foreign key, not an orchestrator.
+
+```bash
+id=$(~/.oh-my-setting/scripts/oms-run.sh new --note "scaffold split"); export OMS_RUN_ID="$id"
+~/.oh-my-setting/scripts/experiment-board.sh claim --id scaffold --hypothesis "scaffold helps"
+~/.oh-my-setting/scripts/run-capsule.sh run --config c.yaml -- uv run python train.py
+~/.oh-my-setting/scripts/oms-run.sh show "$id"   # board + capsule + ledger for this run
+~/.oh-my-setting/scripts/oms-run.sh ls
+```
+
 ## Stop
 
 Do not launch a long/expensive run until question, falsifiable hypothesis,

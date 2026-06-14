@@ -152,6 +152,11 @@ PY
   SCAN_FILE=""
   oms_with_file_lock "$BOARD" board_append "$BOARD" "$row_tmp"
   rm -f "$row_tmp"
+  # Thin-spine join: link this lifecycle event to the active run id when set.
+  if [ -n "${OMS_RUN_ID:-}" ]; then
+    "$ROOT/scripts/oms-run.sh" link --tool experiment-board --event "$status" \
+      --detail "$ID" >/dev/null 2>&1 || true
+  fi
 }
 
 cmd_claim() {

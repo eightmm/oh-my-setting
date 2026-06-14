@@ -332,5 +332,11 @@ print(json.dumps(row, ensure_ascii=False, allow_nan=False))
 EOF
 oms_with_file_lock "$LEDGER" run_ledger_append_row "$LEDGER" "$row_tmp"
 
+# Thin-spine join: link this ledger row to the active run id when set.
+if [ -n "${OMS_RUN_ID:-}" ]; then
+  "$ROOT_LIB/../oms-run.sh" link --tool run-ledger --event append \
+    --path "$LEDGER" --detail "exit $status" >/dev/null 2>&1 || true
+fi
+
 echo "ledger: appended to $LEDGER (exit $status, ${duration_s}s)" >&2
 exit "$status"

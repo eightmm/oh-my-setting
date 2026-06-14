@@ -4514,6 +4514,54 @@ test_patch_admit_requires_patch() {
   fi
 }
 
+test_oms_run_spine_links_and_joins() {
+  local d="$TMP/oms-run-spine"
+  local index="$d/.oms/runs/spine.jsonl"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local id
+
+  mkdir -p "$d"
+  id="$(cd "$d" && OMS_RUN_INDEX="$index" "$SH" new --note start 2>/dev/null)"
+  [ -n "$id" ] || fail "new printed no run id"
+  OMS_RUN_INDEX="$index" OMS_RUN_ID="$id" "$SH" link --tool run-ledger --event append \
+    --path x.jsonl >/dev/null 2>&1 || fail "link failed"
+  OMS_RUN_INDEX="$index" OMS_RUN_ID="$id" "$SH" link --tool run-capsule --event capture \
+    --path c.json >/dev/null 2>&1 || fail "link failed"
+
+  local out
+  out="$(OMS_RUN_INDEX="$index" "$SH" show "$id" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq "run-ledger" || fail "show missing ledger link"
+  printf '%s' "$out" | grep -Fq "run-capsule" || fail "show missing capsule link"
+  OMS_RUN_INDEX="$index" "$SH" ls 2>/dev/null | grep -Fq "$id" || fail "ls missing run"
+
+  # Unknown run id -> nonzero.
+  if OMS_RUN_INDEX="$index" "$SH" show no-such-run >/dev/null 2>&1; then
+    fail "show of unknown run should fail"
+  fi
+}
+
+test_oms_run_auto_link_from_capsule() {
+  local d="$TMP/oms-run-autolink"
+  local spine="$d/.oms/runs/spine.jsonl"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local id
+
+  make_committed_repo "$d"
+  id="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
+  ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$id" \
+    "$ROOT/scripts/run-capsule.sh" run --no-ledger -- bash -c 'echo hi' >/dev/null 2>&1 ) ||
+    fail "capsule run failed"
+  # The capsule auto-linked itself into the spine for this run id.
+  OMS_RUN_INDEX="$spine" "$SH" show "$id" 2>/dev/null | grep -Fq "run-capsule" ||
+    fail "capsule did not auto-link into the run spine"
+}
+
+test_oms_run_unknown_subcommand_fails() {
+  if "$ROOT/scripts/oms-run.sh" bogus >/dev/null 2>&1; then
+    fail "unknown subcommand should fail"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4694,5 +4742,8 @@ test_patch_admit_admits_clean_patch
 test_patch_admit_rejects_stale_patch
 test_patch_admit_rejects_failed_verify
 test_patch_admit_requires_patch
+test_oms_run_spine_links_and_joins
+test_oms_run_auto_link_from_capsule
+test_oms_run_unknown_subcommand_fails
 
 echo "scripts-smoke: ok"

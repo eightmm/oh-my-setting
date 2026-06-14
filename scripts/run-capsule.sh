@@ -344,6 +344,12 @@ PY
       echo "capsule: companion ledger row failed (capsule still saved)" >&2
   fi
 
+  # Thin-spine join: link this capsule to the active run id when one is set.
+  if [ -n "${OMS_RUN_ID:-}" ]; then
+    "$ROOT/scripts/oms-run.sh" link --tool run-capsule --event capture \
+      --path "$bundle/capsule.json" --detail "exit $status" >/dev/null 2>&1 || true
+  fi
+
   echo "capsule: $bundle/capsule.json (exit $status, ${duration_s}s)" >&2
   printf '%s\n' "$id"
   exit "$status"
