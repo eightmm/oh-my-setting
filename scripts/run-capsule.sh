@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
+# shellcheck source=scripts/lib/oms-common.sh
+. "$ROOT_LIB/oms-common.sh"
 
 RUNS_DIR="${OMS_RUNS_DIR:-$PWD/.oms/runs}"
 SCHEMA=1
@@ -81,23 +83,6 @@ trap cleanup EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
-
-sha256_stream() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
-  elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 | awk '{print $NF}'
-  else
-    fail "sha256 command is required (sha256sum, shasum, or openssl)"
-  fi
-}
-
-sha256_file() {
-  [ -f "$1" ] || return 1
-  sha256_stream < "$1"
-}
 
 runs_index() {
   printf '%s/index.jsonl\n' "$RUNS_DIR"
@@ -190,7 +175,7 @@ capture_git_json() {
         { git diff --cached; git diff; } > "$bundle/uncommitted.diff" 2>/dev/null || true
       fi
       if [ -s "$bundle/uncommitted.diff" ]; then
-        diff_sha="$(sha256_file "$bundle/uncommitted.diff" | cut -c1-16)"
+        diff_sha="$(oms_sha256_file "$bundle/uncommitted.diff" | cut -c1-16)"
         diff_rel="uncommitted.diff"
       else
         rm -f "$bundle/uncommitted.diff"
@@ -217,7 +202,7 @@ configs_json() {
   for c in "${CONFIGS[@]:-}"; do
     [ -n "$c" ] || continue
     [ -f "$c" ] || { echo "capsule: config not found, skipped: $c" >&2; continue; }
-    sha="$(sha256_file "$c" | cut -c1-32)"
+    sha="$(oms_sha256_file "$c" | cut -c1-32)"
     [ "$first" = 1 ] || out="$out,"
     out="$out$(OMS_P="$c" OMS_S="$sha" python3 -c 'import json,os;print(json.dumps({"path":os.environ["OMS_P"],"sha256":os.environ["OMS_S"]}))')"
     first=0
@@ -424,7 +409,7 @@ cmd_whence() {
   [ -f "$1" ] || fail "no such file: $1"
   [ -d "$RUNS_DIR" ] || fail "no capsules under $RUNS_DIR"
   local want
-  want="$(sha256_file "$1")" || fail "could not hash $1"
+  want="$(oms_sha256_file "$1")" || fail "could not hash $1"
   OMS_WANT="$want" OMS_TARGET="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" \
     python3 - "$RUNS_DIR" <<'PY'
 import glob, json, os, sys
@@ -490,9 +475,9 @@ cmd_verify() {
     cur_commit="$(git rev-parse HEAD 2>/dev/null || echo 'no-commit')"
     if [ "$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')" -gt 0 ]; then
       if git rev-parse --verify HEAD >/dev/null 2>&1; then
-        cur_diff="$(git diff HEAD | sha256_stream | cut -c1-16)"
+        cur_diff="$(git diff HEAD | oms_sha256_stream | cut -c1-16)"
       else
-        cur_diff="$( { git diff --cached; git diff; } | sha256_stream | cut -c1-16)"
+        cur_diff="$( { git diff --cached; git diff; } | oms_sha256_stream | cut -c1-16)"
       fi
     fi
   fi

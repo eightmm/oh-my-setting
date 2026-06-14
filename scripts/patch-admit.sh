@@ -16,6 +16,8 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/agent-memory-common.sh"
 # shellcheck source=scripts/lib/harness-residue.sh
 . "$ROOT_LIB/harness-residue.sh"
+# shellcheck source=scripts/lib/oms-common.sh
+. "$ROOT_LIB/oms-common.sh"
 
 REPO="$PWD"
 PATCH=""
@@ -53,12 +55,6 @@ EOF
 fail() {
   echo "error: $*" >&2
   exit 2
-}
-
-sha256_stream() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
-  else cat >/dev/null; echo nohash; fi
 }
 
 cleanup() {
@@ -102,7 +98,8 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REP
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
 
 base_sha="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo 'no-commit')"
-patch_sha="$(sha256_stream < "$PATCH" 2>/dev/null | cut -c1-16 || echo 'nohash')"
+patch_sha="$(oms_sha256_stream < "$PATCH" 2>/dev/null | cut -c1-16)"
+[ -n "$patch_sha" ] || patch_sha="nohash"
 
 # Verdict accumulator.
 ladder=""

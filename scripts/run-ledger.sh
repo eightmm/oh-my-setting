@@ -8,6 +8,8 @@ set -euo pipefail
 ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
+# shellcheck source=scripts/lib/oms-common.sh
+. "$ROOT_LIB/oms-common.sh"
 
 LEDGER=""
 NOTE=""
@@ -58,18 +60,6 @@ run_ledger_append_row() {
 }
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required for ledger rows"
-
-sha256_stream() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
-  elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 | awk '{print $NF}'
-  else
-    fail "sha256 command is required (sha256sum, shasum, or openssl)"
-  fi
-}
 
 MODE="run"
 if [ "${1:-}" = "list" ]; then
@@ -158,9 +148,9 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
     # HEAD-relative so staged-only changes get distinct hashes too; a repo
     # with no commits yet has no HEAD, so hash index + worktree instead.
     if git rev-parse --verify HEAD >/dev/null 2>&1; then
-      dirty_hash="$(git diff HEAD | sha256_stream | cut -c1-16)"
+      dirty_hash="$(git diff HEAD | oms_sha256_stream | cut -c1-16)"
     else
-      dirty_hash="$( (git diff --cached; git diff) | sha256_stream | cut -c1-16)"
+      dirty_hash="$( (git diff --cached; git diff) | oms_sha256_stream | cut -c1-16)"
     fi
   fi
 fi
