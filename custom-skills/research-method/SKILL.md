@@ -128,6 +128,14 @@ id=$(~/.oh-my-setting/scripts/oms-run.sh new --note "scaffold split"); export OM
 isolated?" — by joining two runs' capsules: it shows commit/env/config/seed
 differences alongside the metric deltas (e.g. `metric:auc … Δ +0.08`).
 
+Trace a checkpoint back to the run that produced it (capsule hashes `--output`
+files up to a size cap):
+
+```bash
+~/.oh-my-setting/scripts/run-capsule.sh run --output ckpt/best.pt -- uv run python train.py
+~/.oh-my-setting/scripts/run-capsule.sh whence ckpt/best.pt   # -> producing run id + commit/config/env
+```
+
 ## Stop
 
 Do not launch a long/expensive run until question, falsifiable hypothesis,

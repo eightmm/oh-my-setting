@@ -4287,6 +4287,33 @@ test_run_capsule_unknown_subcommand_fails() {
   fi
 }
 
+test_run_capsule_whence_traces_checkpoint() {
+  local proj="$TMP/capsule-whence"
+  local runs="$proj/.oms/runs"
+  local id
+
+  make_committed_repo "$proj"
+  printf 'fake-weights\n' > "$proj/model.pt"
+  id="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
+    "$ROOT/scripts/run-capsule.sh" run --output model.pt --no-ledger \
+    -- bash -c 'echo trained' 2>/dev/null)"
+  [ -n "$id" ] || fail "capsule run printed no id"
+  assert_file_contains "$runs/$id/capsule.json" '"sha256"'
+
+  # whence traces the checkpoint back to its producing run.
+  local out
+  out="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
+    "$ROOT/scripts/run-capsule.sh" whence model.pt 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq "$id" || fail "whence did not find the producing run"
+
+  # An unrelated file has no producing run.
+  printf 'unrelated\n' > "$proj/other.pt"
+  if ( cd "$proj" && OMS_RUNS_DIR="$runs" \
+    "$ROOT/scripts/run-capsule.sh" whence other.pt >/dev/null 2>&1 ); then
+    fail "whence should fail for a file no run produced"
+  fi
+}
+
 test_data_manifest_check_and_leakage() {
   local d="$TMP/data-manifest"
   local md="$d/.oms/manifests"
@@ -4765,6 +4792,7 @@ test_session_handoff_unknown_agent_fails
 test_run_capsule_captures_and_reproduces
 test_run_capsule_propagates_exit_and_runs_once
 test_run_capsule_unknown_subcommand_fails
+test_run_capsule_whence_traces_checkpoint
 test_data_manifest_check_and_leakage
 test_data_manifest_csv_column
 test_data_manifest_unknown_subcommand_fails

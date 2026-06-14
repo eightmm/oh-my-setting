@@ -31,6 +31,7 @@ usage() {
 Usage: run-capsule.sh run [options] -- <command...>
        run-capsule.sh list [N]
        run-capsule.sh show <id>
+       run-capsule.sh whence <file>
        run-capsule.sh reproduce <id>
        run-capsule.sh verify <id>
 
@@ -49,6 +50,7 @@ run options:
 
 list [N]           Show the last N capsules (default 10).
 show <id>          Print the capsule JSON.
+whence <file>      Print which run produced a checkpoint/output file (by sha).
 reproduce <id>     Print the exact checkout + env + command to recreate the run.
 verify <id>        Compare the current tree/env to the capsule; nonzero on drift.
 
@@ -225,17 +227,29 @@ configs_json() {
 
 outputs_json() {
   local o
-  OMS_OUTPUTS="$(printf '%s\n' "${OUTPUTS[@]:-}")" python3 <<'PY'
-import json, os
+  # Hash outputs up to a size cap so a checkpoint can be traced back to its
+  # producing run (see `whence`). Multi-GB files are recorded path+size+mtime
+  # only, with hashed=false, to avoid an expensive full read.
+  OMS_OUTPUTS="$(printf '%s\n' "${OUTPUTS[@]:-}")" \
+  OMS_HASH_MAX="${OMS_CAPSULE_HASH_MAX:-536870912}" python3 <<'PY'
+import hashlib, json, os
+cap = int(os.environ.get("OMS_HASH_MAX", "536870912"))
 rows = []
 for p in os.environ.get("OMS_OUTPUTS", "").splitlines():
     if not p:
         continue
-    row = {"path": p, "exists": os.path.exists(p)}
+    row = {"path": p, "exists": os.path.exists(p), "hashed": False}
     try:
         st = os.stat(p)
         row["size"] = st.st_size
         row["mtime"] = int(st.st_mtime)
+        if os.path.isfile(p) and st.st_size <= cap:
+            h = hashlib.sha256()
+            with open(p, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            row["sha256"] = h.hexdigest()
+            row["hashed"] = True
     except OSError:
         pass
     rows.append(row)
@@ -404,6 +418,38 @@ cmd_show() {
   cat "$(capsule_path "$1")"
 }
 
+# Reverse provenance: which run produced this checkpoint/output file?
+cmd_whence() {
+  [ "$#" -eq 1 ] || fail "whence requires a file path"
+  [ -f "$1" ] || fail "no such file: $1"
+  [ -d "$RUNS_DIR" ] || fail "no capsules under $RUNS_DIR"
+  local want
+  want="$(sha256_file "$1")" || fail "could not hash $1"
+  OMS_WANT="$want" OMS_TARGET="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" \
+    python3 - "$RUNS_DIR" <<'PY'
+import glob, json, os, sys
+want = os.environ["OMS_WANT"]
+target = os.environ["OMS_TARGET"]
+hits = []
+for cap in glob.glob(os.path.join(sys.argv[1], "*", "capsule.json")):
+    try:
+        c = json.load(open(cap))
+    except Exception:
+        continue
+    for o in c.get("outputs", []):
+        if o.get("sha256") == want or (
+            os.path.abspath(o.get("path", "")) == target and not o.get("hashed")
+        ):
+            hits.append((c.get("id"), c.get("ts"), o.get("path"),
+                         "sha" if o.get("sha256") == want else "path"))
+if not hits:
+    sys.stderr.write("no run produced this file (no matching output sha)\n")
+    sys.exit(1)
+for run_id, ts, path, how in hits:
+    print("%s  %s  (%s match: %s)" % (run_id, ts, how, path))
+PY
+}
+
 cmd_reproduce() {
   [ "$#" -eq 1 ] || fail "reproduce requires <id>"
   local p
@@ -493,6 +539,7 @@ case "${1:-}" in
   run) shift; cmd_run "$@" ;;
   list) shift; cmd_list "$@" ;;
   show) shift; cmd_show "$@" ;;
+  whence) shift; cmd_whence "$@" ;;
   reproduce) shift; cmd_reproduce "$@" ;;
   verify) shift; cmd_verify "$@" ;;
   -h|--help) usage ;;
