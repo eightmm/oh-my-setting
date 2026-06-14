@@ -4145,6 +4145,28 @@ test_autoupdate_install_dry_run_no_writes() {
     fail "install-autoupdate dry-run wrote under HOME"
 }
 
+test_check_gate_hard_fails_without_shellcheck() {
+  # The gate must FAIL (not silently skip) when shellcheck is absent — the
+  # exact false-confidence that hid a session of red CI.
+  local out
+  # Point the gate at a nonexistent shellcheck binary so it hits the
+  # missing-tool path deterministically (no PATH surgery, no recursion).
+  out="$(OMS_SHELLCHECK_BIN=__oms_absent_shellcheck__ "$ROOT/scripts/check.sh" 2>&1)" && \
+    fail "check.sh must exit nonzero when shellcheck is missing"
+  printf '%s' "$out" | grep -Fq "shellcheck is not installed" ||
+    fail "check.sh missing-tool message absent: $out"
+}
+
+test_install_hooks_writes_pre_push() {
+  local repo="$TMP/install-hooks"
+  mkdir -p "$repo/scripts"
+  git -C "$repo" init -b main >/dev/null
+  cp "$ROOT/scripts/install-hooks.sh" "$repo/scripts/install-hooks.sh"
+  ( cd "$repo" && bash scripts/install-hooks.sh >/dev/null ) || fail "install-hooks failed"
+  [ -x "$repo/.git/hooks/pre-push" ] || fail "pre-push hook not installed/executable"
+  grep -Fq 'scripts/check.sh' "$repo/.git/hooks/pre-push" || fail "hook does not call check.sh"
+}
+
 test_install_skills_detects_name_mismatch() {
   local repo="$TMP/install-skills-mismatch"
 
@@ -4912,6 +4934,8 @@ test_auto_update_skips_without_upstream
 test_autoupdate_cron_install_and_uninstall
 test_autoupdate_install_dry_run_no_writes
 test_install_skills_detects_name_mismatch
+test_check_gate_hard_fails_without_shellcheck
+test_install_hooks_writes_pre_push
 test_session_handoff_claude_digest
 test_session_handoff_codex_digest
 test_session_handoff_antigravity_prompts_only
