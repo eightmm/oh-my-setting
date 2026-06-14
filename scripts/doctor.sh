@@ -141,6 +141,39 @@ PY
   fi
 }
 
+check_harness_run_state() {
+  local project_dir="$1"
+  local oms_dir="$project_dir/.oms"
+  local bad
+
+  command -v python3 >/dev/null 2>&1 || return 0
+  bad="$(python3 - "$oms_dir" <<'PY'
+import glob, json, os, sys
+oms = sys.argv[1]
+# Run-tool JSONL state written this family of tools (spine, experiments,
+# reconcile, capsule/run index). Manifests are *.json (single object).
+targets = []
+targets += glob.glob(os.path.join(oms, "runs", "*.jsonl"))
+targets += glob.glob(os.path.join(oms, "experiments.jsonl"))
+bad = 0
+for f in targets:
+    try:
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.strip():
+                    json.loads(line)
+    except Exception:
+        bad += 1
+print(bad)
+PY
+)" || { echo "warn: run-state audit failed"; return 0; }
+  if [ "${bad:-0}" -gt 0 ]; then
+    echo "warn: $bad run-state JSONL file(s) have malformed lines (run oms-run.sh validate)"
+  else
+    echo "ok: run-state JSONL"
+  fi
+}
+
 check_harness_sensitive_files() {
   local project_dir="$1"
   local oms_dir="$project_dir/.oms"
@@ -236,6 +269,7 @@ check_harness_state() {
   fi
 
   check_harness_artifact_index "$project_dir"
+  check_harness_run_state "$project_dir"
   check_harness_sensitive_files "$project_dir"
   check_harness_residue "$project_dir"
 }

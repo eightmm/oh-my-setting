@@ -1177,6 +1177,30 @@ test_doctor_reports_crash_residue_warnings() {
   printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
 }
 
+test_doctor_reports_malformed_run_state() {
+  local project="$TMP/doctor-run-state"
+  local home_dir="$TMP/doctor-home-run-state"
+  local runtime="$home_dir/runtime"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms/runs"
+  printf '*\n' > "$project/.oms/.gitignore"
+  # A clean spine first: doctor reports ok.
+  printf '%s\n' '{"schema":1,"run_id":"r","tool":"t","event":"new"}' > "$project/.oms/runs/spine.jsonl"
+  out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
+    fail "doctor must not fail on clean run-state: $out"
+  printf '%s' "$out" | grep -Fq 'ok: run-state JSONL' || fail "missing clean run-state line: $out"
+
+  # Corrupt it: doctor warns (and still passes).
+  printf '%s\n' 'NOT JSON{' >> "$project/.oms/runs/spine.jsonl"
+  out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
+    fail "doctor run-state warning must not fail: $out"
+  printf '%s' "$out" | grep -Fq 'run-state JSONL file(s) have malformed lines' ||
+    fail "missing malformed run-state warning: $out"
+  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+}
+
 test_multi_agent_export_only_and_import_result() {
   local project="$TMP/export-import"
   local artifact_dir="$project/artifacts"
@@ -4760,6 +4784,7 @@ test_doctor_warns_bad_harness_index_json
 test_doctor_warns_missing_oms_gitignore
 test_doctor_clean_harness_state_has_no_warnings
 test_doctor_reports_crash_residue_warnings
+test_doctor_reports_malformed_run_state
 test_multi_agent_export_only_and_import_result
 test_multi_agent_review_export_only_skips_cli
 test_multi_agent_review_gate_all_pass
