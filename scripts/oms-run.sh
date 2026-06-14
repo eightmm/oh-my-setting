@@ -29,6 +29,7 @@ Usage: oms-run.sh new [--note TEXT]
        oms-run.sh link --tool NAME --event NAME [--path PATH] [--run-id ID] [--detail TEXT]
        oms-run.sh show <run_id>
        oms-run.sh ls [N]
+       oms-run.sh diff <run_id_a> <run_id_b>
 
 The run spine: a canonical run_id and an append-only join index
 (.oms/runs/index.jsonl) over the independent run tools.
@@ -39,6 +40,7 @@ link    Append one join row {run_id, ts, tool, event, path, detail}.
         run_id defaults to $OMS_RUN_ID.
 show    Join and print every indexed record for a run id.
 ls      Summarize the most recent runs (default 10).
+diff    Compare two runs' capsules: commit, env, config, seeds, metric deltas.
 
 This is read/append only — it never launches or mutates a run. The heavy
 records stay in each tool's own file; the index is a rebuildable cache.
@@ -166,11 +168,80 @@ for rid in order[-n:]:
 PY
 }
 
+cmd_diff() {
+  [ "$#" -eq 2 ] || fail "diff requires two run ids"
+  [ -f "$INDEX" ] || fail "no run index at $INDEX"
+  OMS_A="$1" OMS_B="$2" python3 - "$INDEX" <<'PY'
+import json, os, sys
+
+index = sys.argv[1]
+a_id, b_id = os.environ["OMS_A"], os.environ["OMS_B"]
+
+def capsule_path(run_id):
+    p = None
+    for line in open(index, encoding="utf-8", errors="replace"):
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get("run_id") == run_id and r.get("tool") == "run-capsule" and r.get("path"):
+            p = r["path"]  # last capsule wins
+    return p
+
+def load(run_id):
+    p = capsule_path(run_id)
+    if not p or not os.path.exists(p):
+        return None, p
+    try:
+        return json.load(open(p)), p
+    except Exception:
+        return None, p
+
+a, pa = load(a_id)
+b, pb = load(b_id)
+if a is None or b is None:
+    miss = a_id if a is None else b_id
+    sys.stderr.write("no capsule found for run %s (path=%s)\n" %
+                     (miss, pa if a is None else pb))
+    sys.exit(2)
+
+def line(label, va, vb):
+    same = "==" if va == vb else "!="
+    print("%-16s %s  %s  |  %s" % (label, same, va, vb))
+
+print("diff: %s  vs  %s" % (a_id, b_id))
+ga, gb = a.get("git", {}), b.get("git", {})
+line("commit", ga.get("commit_short"), gb.get("commit_short"))
+line("dirty", ga.get("dirty"), gb.get("dirty"))
+ea, eb = a.get("env", {}), b.get("env", {})
+for k in ("python", "torch", "cuda"):
+    line(k, ea.get(k), eb.get(k))
+line("seeds", ",".join(a.get("seeds", [])) or "-", ",".join(b.get("seeds", [])) or "-")
+
+# config files by path -> sha
+ca = {c["path"]: c.get("sha256") for c in a.get("configs", [])}
+cb = {c["path"]: c.get("sha256") for c in b.get("configs", [])}
+for path in sorted(set(ca) | set(cb)):
+    line("cfg:" + os.path.basename(path), ca.get(path, "-"), cb.get(path, "-"))
+
+# numeric metric deltas
+ma = (a.get("result") or {}).get("metrics") or {}
+mb = (b.get("result") or {}).get("metrics") or {}
+for k in sorted(set(ma) | set(mb)):
+    va, vb = ma.get(k), mb.get(k)
+    delta = ""
+    if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+        delta = "  (Δ %+g)" % (vb - va)
+    print("%-16s    %s  |  %s%s" % ("metric:" + k, va, vb, delta))
+PY
+}
+
 case "${1:-}" in
   new) shift; cmd_new "$@" ;;
   link) shift; cmd_link "$@" ;;
   show) shift; cmd_show "$@" ;;
   ls) shift; cmd_ls "$@" ;;
+  diff) shift; cmd_diff "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;
   *) fail "unknown subcommand: $1" ;;

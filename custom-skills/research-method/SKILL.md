@@ -121,7 +121,12 @@ id=$(~/.oh-my-setting/scripts/oms-run.sh new --note "scaffold split"); export OM
 ~/.oh-my-setting/scripts/run-capsule.sh run --config c.yaml -- uv run python train.py
 ~/.oh-my-setting/scripts/oms-run.sh show "$id"   # board + capsule + ledger for this run
 ~/.oh-my-setting/scripts/oms-run.sh ls
+~/.oh-my-setting/scripts/oms-run.sh diff <run_a> <run_b>   # commit/env/config/seed + metric deltas
 ```
+
+`diff` answers the actual research question — "did my change help, and was it
+isolated?" — by joining two runs' capsules: it shows commit/env/config/seed
+differences alongside the metric deltas (e.g. `metric:auc … Δ +0.08`).
 
 ## Stop
 

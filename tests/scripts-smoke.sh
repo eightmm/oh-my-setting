@@ -4562,6 +4562,34 @@ test_oms_run_unknown_subcommand_fails() {
   fi
 }
 
+test_oms_run_diff_compares_capsules() {
+  local d="$TMP/oms-run-diff"
+  local spine="$d/.oms/runs/spine.jsonl"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local cap="$ROOT/scripts/run-capsule.sh"
+  local a b out
+
+  make_committed_repo "$d"
+  printf '{"auc": 0.74}\n' > "$d/mA.json"
+  printf '{"auc": 0.82}\n' > "$d/mB.json"
+  a="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
+  ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$a" \
+    "$cap" run --seed 1 --metrics mA.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run A failed"
+  b="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
+  ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$b" \
+    "$cap" run --seed 2 --metrics mB.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run B failed"
+
+  out="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" "$b" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq "metric:auc" || fail "diff missing metric line"
+  printf '%s' "$out" | grep -Fq "0.08" || fail "diff missing metric delta"
+  printf '%s' "$out" | grep -Fq "seeds" || fail "diff missing seeds line"
+
+  # Missing capsule -> nonzero.
+  if ( cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" no-such-run >/dev/null 2>&1 ); then
+    fail "diff with an unknown run should fail"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4745,5 +4773,6 @@ test_patch_admit_requires_patch
 test_oms_run_spine_links_and_joins
 test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
+test_oms_run_diff_compares_capsules
 
 echo "scripts-smoke: ok"
