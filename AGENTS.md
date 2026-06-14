@@ -89,6 +89,23 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Do not hide failures; prefer explicit errors over silent fallback.
 - Verify by ladder when risk warrants it: syntax -> focused interface test -> broader test.
 
+## Run Provenance & Coordination
+
+When the oh-my-setting harness is present, prefer its run tools over ad-hoc
+launches so work is reproducible and not duplicated across agents:
+
+- Claim an experiment on the study board (`experiment-board.sh`) before a
+  long/expensive run; it refuses a duplicate already-active claim.
+- Wrap a run worth reproducing in `run-capsule.sh` (commit + diff + env/seed +
+  result); use the run ledger for lightweight rows. Mint one `OMS_RUN_ID`
+  (`oms-run.sh new`) so the tools join under one run.
+- For ML data, check `data-manifest.sh leakage` before training when splits exist.
+- Reconcile long Slurm jobs (`run-reconcile.sh`) into shared state at session
+  start when work may have finished while away.
+- Admit a delegated patch through `patch-admit.sh` before applying it.
+- Do not put secrets in commands, notes, or metrics — outbound context is
+  scrubbed and these records are agent-shared.
+
 ## Test Strategy
 
 - Prefer behavior/interface tests over tiny per-function tests.
