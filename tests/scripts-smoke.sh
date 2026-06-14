@@ -4222,6 +4222,64 @@ test_session_handoff_unknown_agent_fails() {
   fi
 }
 
+test_run_capsule_captures_and_reproduces() {
+  local proj="$TMP/capsule-basic"
+  local runs="$proj/.oms/runs"
+  local id
+
+  make_committed_repo "$proj"
+  printf 'dirty\n' >> "$proj/file.txt"           # make the tree dirty
+  printf '{"accuracy": 0.9}\n' > "$proj/metrics.json"
+  printf 'seed: 7\n' > "$proj/config.yaml"
+
+  id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_AGENT=claude \
+    "$ROOT/scripts/run-capsule.sh" run --note cap --config config.yaml \
+    --output file.txt --seed 7 --metrics metrics.json --no-ledger \
+    -- bash -c 'echo trained' 2>/dev/null)"
+  [ -n "$id" ] || fail "capsule run printed no id"
+  local cap="$runs/$id/capsule.json"
+  [ -f "$cap" ] || fail "capsule.json not written"
+  [ -f "$runs/$id/uncommitted.diff" ] || fail "dirty diff not captured"
+  assert_file_contains "$cap" '"schema": 1'
+  assert_file_contains "$cap" '"accuracy": 0.9'
+  assert_file_contains "$cap" '"seed'
+  assert_file_contains "$cap" 'config.yaml'
+  assert_file_contains "$runs/$id/output.log" "trained"
+
+  # reproduce prints the exact checkout + diff-apply for the captured state.
+  local repro
+  repro="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" reproduce "$id")"
+  printf '%s' "$repro" | grep -Fq "git checkout" || fail "reproduce missing checkout"
+  printf '%s' "$repro" | grep -Fq "uncommitted.diff" || fail "reproduce missing diff apply"
+
+  # verify: clean against the same tree, drift after a change.
+  ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ) ||
+    fail "verify should pass on the unchanged tree"
+  printf 'changed\n' >> "$proj/file.txt"
+  if ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ); then
+    fail "verify should report drift after a change"
+  fi
+}
+
+test_run_capsule_propagates_exit_and_runs_once() {
+  local proj="$TMP/capsule-exit"
+  local runs="$proj/.oms/runs"
+  local rc=0
+
+  make_committed_repo "$proj"
+  ( cd "$proj" && OMS_RUNS_DIR="$runs" \
+    "$ROOT/scripts/run-capsule.sh" run --no-ledger \
+    -- bash -c 'echo x >> marker; exit 7' >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" = "7" ] || fail "capsule should propagate the command exit code (got $rc)"
+  [ "$(wc -l < "$proj/marker" | tr -d ' ')" = "1" ] || fail "command must run exactly once"
+}
+
+test_run_capsule_unknown_subcommand_fails() {
+  if "$ROOT/scripts/run-capsule.sh" bogus >/dev/null 2>&1; then
+    fail "unknown subcommand should fail"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4387,5 +4445,8 @@ test_session_handoff_claude_digest
 test_session_handoff_codex_digest
 test_session_handoff_antigravity_prompts_only
 test_session_handoff_unknown_agent_fails
+test_run_capsule_captures_and_reproduces
+test_run_capsule_propagates_exit_and_runs_once
+test_run_capsule_unknown_subcommand_fails
 
 echo "scripts-smoke: ok"

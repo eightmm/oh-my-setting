@@ -73,6 +73,23 @@ Deciding the bar after seeing results is how noise becomes a "finding."
   with its command and commit.
 - A result without its config, seed, data version, and commit is not a result.
 - When a run overturns a prior conclusion, note which ledger row it supersedes.
+- For a run you may need to reproduce exactly, wrap it in a capsule instead of a
+  bare ledger row. `run-capsule.sh` records the commit, the *uncommitted diff*,
+  config/env/seed/output fingerprints, the captured output log, and the result
+  under `.oms/runs/<id>/` (git-ignored), and still writes the companion ledger
+  row. Later, `run-capsule.sh reproduce <id>` prints the exact checkout + diff
+  apply + command, and `verify <id>` flags drift between the capsule and the
+  current tree. This matters most when several agents mutate the tree between
+  runs — the bare commit no longer identifies what actually ran.
+
+```bash
+~/.oh-my-setting/scripts/run-capsule.sh run --note "baseline" \
+  --config config.yaml --seed 7 --metrics metrics.json --output ckpt/last.pt \
+  -- uv run python train.py
+~/.oh-my-setting/scripts/run-capsule.sh list
+~/.oh-my-setting/scripts/run-capsule.sh reproduce <id>
+~/.oh-my-setting/scripts/run-capsule.sh verify <id>
+```
 
 ## Stop
 
