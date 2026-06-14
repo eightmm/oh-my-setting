@@ -4280,6 +4280,64 @@ test_run_capsule_unknown_subcommand_fails() {
   fi
 }
 
+test_data_manifest_check_and_leakage() {
+  local d="$TMP/data-manifest"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+
+  mkdir -p "$d"
+  printf 'a\nb\nc\n' > "$d/train.txt"
+  printf 'd\ne\n' > "$d/val.txt"
+
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name ds \
+    --split train=train.txt --split val=val.txt >/dev/null ) || fail "create failed"
+  [ -f "$md/ds.json" ] || fail "manifest not written"
+
+  # Clean: check passes, no leakage.
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name ds >/dev/null ) ||
+    fail "check should pass on unchanged splits"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name ds >/dev/null ) ||
+    fail "leakage should be clean on disjoint splits"
+
+  # Drift: change an ID set -> check fails.
+  printf 'a\nb\nZ\n' > "$d/train.txt"
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name ds >/dev/null ); then
+    fail "check should report drift after ID set change"
+  fi
+
+  # Leakage: shared ID across splits -> leakage fails.
+  printf 'a\nb\nc\n' > "$d/train.txt"
+  printf 'd\ne\na\n' > "$d/val.txt"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name leak \
+    --split train=train.txt --split val=val.txt >/dev/null ) || fail "create leak failed"
+  local out
+  out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name leak 2>&1 )" && \
+    fail "leakage should exit nonzero on overlap"
+  printf '%s' "$out" | grep -Fq "LEAKAGE" || fail "leakage output missing LEAKAGE marker"
+}
+
+test_data_manifest_csv_column() {
+  local d="$TMP/data-manifest-csv"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+
+  mkdir -p "$d"
+  printf 'id,label\nx1,1\nx2,0\n' > "$d/train.csv"
+  printf 'id,label\nx3,1\n' > "$d/test.csv"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name c --id-column id \
+    --split train=train.csv --split test=test.csv >/dev/null ) || fail "csv create failed"
+  # Changing only the label column must NOT count as drift (ID set is stable).
+  printf 'id,label\nx1,0\nx2,1\n' > "$d/train.csv"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name c >/dev/null ) ||
+    fail "label-only change must not be drift when keyed by id column"
+}
+
+test_data_manifest_unknown_subcommand_fails() {
+  if "$ROOT/scripts/data-manifest.sh" bogus >/dev/null 2>&1; then
+    fail "unknown subcommand should fail"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4448,5 +4506,8 @@ test_session_handoff_unknown_agent_fails
 test_run_capsule_captures_and_reproduces
 test_run_capsule_propagates_exit_and_runs_once
 test_run_capsule_unknown_subcommand_fails
+test_data_manifest_check_and_leakage
+test_data_manifest_csv_column
+test_data_manifest_unknown_subcommand_fails
 
 echo "scripts-smoke: ok"

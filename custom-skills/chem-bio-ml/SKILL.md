@@ -27,6 +27,17 @@ both train and test, so the metric reports memorization, not generalization.
 - Fit scalers, feature selection, thresholds, and imputation on train only.
 - Deduplicate (canonical SMILES / sequence hash) BEFORE splitting.
 
+Give these guardrails teeth: fingerprint the splits and assert no ID overlap
+before training, and detect silent split drift between runs. Use a cluster/
+scaffold/target ID as the key (the unit you split on), not the row.
+
+```bash
+~/.oh-my-setting/scripts/data-manifest.sh create --name pl-v1 --id-column cluster_id \
+  --split train=splits/train.csv --split val=splits/val.csv --split test=splits/test.csv
+~/.oh-my-setting/scripts/data-manifest.sh leakage --name pl-v1   # nonzero if any split shares an ID
+~/.oh-my-setting/scripts/data-manifest.sh check   --name pl-v1   # nonzero if a split's ID set drifted
+```
+
 If the split policy is not written in PROJECT.md, ask before training.
 
 ## Labels And Targets
