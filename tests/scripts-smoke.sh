@@ -2115,7 +2115,10 @@ test_multi_agent_ask_rejects_bad_debate_count() {
 make_committed_repo() {
   local project="$1"
   mkdir -p "$project"
-  git -C "$project" init >/dev/null
+  # -b main so tests are branch-deterministic: CI has no init.defaultBranch,
+  # where plain `git init` yields 'master' and make_patch_repo's `git diff main`
+  # would fatal.
+  git -C "$project" init -b main >/dev/null
   printf 'base\n' > "$project/file.txt"
   git -C "$project" add file.txt
   git -C "$project" \
