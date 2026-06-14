@@ -4338,6 +4338,73 @@ test_data_manifest_unknown_subcommand_fails() {
   fi
 }
 
+# Stub sacct/squeue: terminal states for given ids, RUNNING otherwise.
+write_fake_slurm() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/sacct" <<'EOF'
+#!/usr/bin/env bash
+jid=""; prev=""
+for a in "$@"; do [ "$prev" = "-j" ] && jid="$a"; prev="$a"; done
+case "$jid" in
+  3001) echo "COMPLETED|0:0|00:10:00" ;;
+  3002) echo "FAILED|1:0|00:02:00" ;;
+  *) : ;;
+esac
+EOF
+  cat > "$bin/squeue" <<'EOF'
+#!/usr/bin/env bash
+jid=""; prev=""
+for a in "$@"; do [ "$prev" = "-j" ] && jid="$a"; prev="$a"; done
+case "$jid" in 3003) echo "RUNNING" ;; esac
+EOF
+  chmod +x "$bin/sacct" "$bin/squeue"
+}
+
+test_run_reconcile_records_terminal_jobs() {
+  local d="$TMP/reconcile"
+  local bin="$d/bin"
+  local SH="$ROOT/scripts/run-reconcile.sh"
+
+  mkdir -p "$d"
+  write_fake_slurm "$bin"
+  {
+    printf '%s\n' '{"ts":"t","slurm_job_id":"3001","exit":0,"note":"A","cmd":["a"]}'
+    printf '%s\n' '{"ts":"t","slurm_job_id":"3002","exit":0,"note":"B","cmd":["b"]}'
+    printf '%s\n' '{"ts":"t","slurm_job_id":"3003","exit":0,"note":"C","cmd":["c"]}'
+    printf '%s\n' '{"ts":"t","slurm_job_id":"","exit":0,"note":"local","cmd":["d"]}'
+  } > "$d/ledger.jsonl"
+
+  local env_pfx=(
+    "OMS_SACCT_CMD=$bin/sacct" "OMS_SQUEUE_CMD=$bin/squeue"
+    "OMS_RECONCILE_LEDGER=$d/ledger.jsonl"
+    "OMS_RECONCILE_FILE=$d/.oms/runs/reconcile.jsonl"
+    "OMS_RECONCILE_DIGEST_DIR=$d/dg"
+  )
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply >"$d/out" 2>&1 ) || fail "apply failed"
+  assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"job_id": "3001"'
+  assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"state": "COMPLETED"'
+  assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"job_id": "3002"'
+  assert_file_contains "$d/.oms/runs/reconcile.jsonl" '"state": "FAILED"'
+  # 3003 is RUNNING -> must NOT be reconciled; empty id is ignored.
+  if grep -Fq '"job_id": "3003"' "$d/.oms/runs/reconcile.jsonl"; then
+    fail "running job must not be reconciled"
+  fi
+
+  # Idempotent: a second apply reconciles nothing new.
+  local before after
+  before="$(wc -l < "$d/.oms/runs/reconcile.jsonl")"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply >/dev/null 2>&1 ) || fail "second apply failed"
+  after="$(wc -l < "$d/.oms/runs/reconcile.jsonl")"
+  [ "$before" = "$after" ] || fail "reconcile is not idempotent"
+}
+
+test_run_reconcile_unknown_subcommand_fails() {
+  if "$ROOT/scripts/run-reconcile.sh" bogus >/dev/null 2>&1; then
+    fail "unknown subcommand should fail"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4509,5 +4576,7 @@ test_run_capsule_unknown_subcommand_fails
 test_data_manifest_check_and_leakage
 test_data_manifest_csv_column
 test_data_manifest_unknown_subcommand_fails
+test_run_reconcile_records_terminal_jobs
+test_run_reconcile_unknown_subcommand_fails
 
 echo "scripts-smoke: ok"

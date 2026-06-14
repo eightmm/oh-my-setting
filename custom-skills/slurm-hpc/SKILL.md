@@ -38,3 +38,22 @@ scontrol show node <node>
 sacct -j <job_id>
 scancel <job_id>
 ```
+
+## Reconciling Async Jobs
+
+A long Slurm job outlives the agent session that launched it. The run ledger
+records the launch (with `slurm_job_id`), but not the terminal state, so
+"is it done? did it OOM?" goes stale and agents relaunch duplicates. Reconcile
+recorded jobs against `sacct`/`squeue` and write the outcome back so the next
+agent — any of the three — sees ground truth.
+
+```bash
+~/.oh-my-setting/scripts/run-reconcile.sh scan            # current state per tracked job id
+~/.oh-my-setting/scripts/run-reconcile.sh apply --memory  # record FINISHED jobs + note to shared memory
+~/.oh-my-setting/scripts/run-reconcile.sh list
+```
+
+It only records terminal jobs (COMPLETED/FAILED/TIMEOUT/OOM/…), is idempotent
+(skips already-reconciled ids), and saves a `job-digest` summary per job under
+`.oms/runs/reconcile/`. Run it on session start when work may have finished
+while you were away.
