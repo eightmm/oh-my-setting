@@ -233,7 +233,10 @@ mb = (b.get("result") or {}).get("metrics") or {}
 for k in sorted(set(ma) | set(mb)):
     va, vb = ma.get(k), mb.get(k)
     delta = ""
-    if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+    if (
+        isinstance(va, (int, float)) and not isinstance(va, bool)
+        and isinstance(vb, (int, float)) and not isinstance(vb, bool)
+    ):
         delta = "  (Δ %+g)" % (vb - va)
     print("%-16s    %s  |  %s%s" % ("metric:" + k, va, vb, delta))
 PY

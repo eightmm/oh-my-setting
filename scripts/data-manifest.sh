@@ -232,8 +232,13 @@ cmd_check() {
   ID_COLUMN="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("id_column",""))' "$p")"
   ID_INDEX="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("id_index",""))' "$p")"
 
-  local drift=0 label file cur want_sha want_idsha got_sha got_idsha
-  while IFS=$'\t' read -r label file want_sha want_idsha; do
+  local drift=0 split_json label file cur want_sha want_idsha got_sha got_idsha
+  while IFS= read -r split_json; do
+    [ -n "$split_json" ] || continue
+    label="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["label"])')"
+    file="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
+    want_sha="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["sha256"])')"
+    want_idsha="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id_sha256"])')"
     [ -n "$label" ] || continue
     if [ ! -f "$file" ]; then
       echo "DRIFT $label: file missing ($file)"
@@ -256,7 +261,10 @@ $(python3 -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
 for s in m.get("splits", []):
-    print("\t".join([s["label"], s["file"], s["sha256"], s["id_sha256"]]))
+    print(json.dumps({
+        "label": s["label"], "file": s["file"],
+        "sha256": s["sha256"], "id_sha256": s["id_sha256"],
+    }, ensure_ascii=False))
 ' "$p")
 EOF
   [ "$drift" = 0 ] || exit 1
@@ -272,17 +280,27 @@ cmd_leakage() {
 
   local tmpdir
   tmpdir="$(mktemp -d)" || fail "mktemp failed"
-  local label file
-  while IFS=$'\t' read -r label file; do
+  local split_json label file idx
+  idx=0
+  while IFS= read -r split_json; do
+    [ -n "$split_json" ] || continue
+    label="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["label"])')"
+    file="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
     [ -n "$label" ] || continue
-    [ -f "$file" ] || { echo "leakage: split file missing, skipped: $file" >&2; continue; }
-    emit_ids "$file" | sort -u > "$tmpdir/$label.ids"
+    if [ ! -f "$file" ]; then
+      echo "leakage: split file missing, skipped: $file" >&2
+      idx=$((idx + 1))
+      continue
+    fi
+    printf '%s' "$label" > "$tmpdir/$idx.label"
+    emit_ids "$file" | sort -u > "$tmpdir/$idx.ids"
+    idx=$((idx + 1))
   done <<EOF
 $(python3 -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
 for s in m.get("splits", []):
-    print("\t".join([s["label"], s["file"]]))
+    print(json.dumps({"label": s["label"], "file": s["file"]}, ensure_ascii=False))
 ' "$p")
 EOF
 
@@ -295,7 +313,8 @@ EOF
       [ -f "$a" ] && [ -f "$b" ] || continue
       overlap="$(comm -12 "$a" "$b" | wc -l | tr -d ' ')"
       local la lb
-      la="$(basename "$a" .ids)"; lb="$(basename "$b" .ids)"
+      la="$(cat "$tmpdir/$(basename "$a" .ids).label")"
+      lb="$(cat "$tmpdir/$(basename "$b" .ids).label")"
       if [ "$overlap" -gt 0 ]; then
         echo "LEAKAGE $la ∩ $lb: $overlap shared ID(s)"
         found=1

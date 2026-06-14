@@ -93,6 +93,42 @@ board_append() {
   cat "$row_file" >> "$file"
 }
 
+claim_append() {
+  local file="$1"
+  local row_file="$2"
+  local id="$3"
+  local cur status owner ts stale age
+
+  cur="$(current_record "$id")"
+  if [ -n "$cur" ]; then
+    status="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status", ""))')"
+    owner="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("owner", ""))')"
+    ts="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ts", ""))')"
+    if [ "$status" = "claimed" ] || [ "$status" = "running" ]; then
+      stale=0
+      if [ "$FORCE" != 1 ]; then
+        # Stale recovery: a claim (not yet running) older than TTL is reclaimable.
+        if [ "$status" = "claimed" ]; then
+          age="$(OMS_TS="$ts" python3 -c '
+import calendar,os,time
+try:
+    t=calendar.timegm(time.strptime(os.environ["OMS_TS"],"%Y-%m-%dT%H:%M:%SZ"))
+    print(int(time.time()-t))
+except Exception:
+    print(-1)')"
+          [ "$age" -ge "$CLAIM_TTL" ] 2>/dev/null && stale=1
+        fi
+        if [ "$stale" = 0 ]; then
+          echo "experiment-board: '$id' already $status (owner: $owner). Use --force or pick a new --id." >&2
+          exit 4
+        fi
+        echo "experiment-board: reclaiming stale claim '$id' (was $owner, $status)" >&2
+      fi
+    fi
+  fi
+  cat "$row_file" >> "$file"
+}
+
 # Emit the derived current record for one id as JSON (or empty if unknown).
 current_record() {
   local id="$1"
@@ -150,8 +186,14 @@ PY
     echo "experiment-board: warning: event looks sensitive; recorded locally under .oms" >&2
   fi
   SCAN_FILE=""
-  oms_with_file_lock "$BOARD" board_append "$BOARD" "$row_tmp"
+  local lock_rc=0
+  if [ "$status" = "claimed" ]; then
+    oms_with_file_lock "$BOARD" claim_append "$BOARD" "$row_tmp" "$ID" || lock_rc=$?
+  else
+    oms_with_file_lock "$BOARD" board_append "$BOARD" "$row_tmp" || lock_rc=$?
+  fi
   rm -f "$row_tmp"
+  [ "$lock_rc" = 0 ] || exit "$lock_rc"
   # Thin-spine join: link this lifecycle event to the active run id when set.
   if [ -n "${OMS_RUN_ID:-}" ]; then
     "$ROOT/scripts/oms-run.sh" link --tool experiment-board --event "$status" \
@@ -165,35 +207,6 @@ cmd_claim() {
   [ -n "$ID" ] || ID="$(slugify "$HYPOTHESIS")"
   [ -n "$ID" ] || fail "could not derive an id; pass --id"
 
-  local cur status owner ts
-  cur="$(current_record "$ID")"
-  if [ -n "$cur" ]; then
-    status="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status",""))')"
-    owner="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("owner",""))')"
-    ts="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ts",""))')"
-    if [ "$status" = "claimed" ] || [ "$status" = "running" ]; then
-      local stale=0
-      if [ "$FORCE" != 1 ]; then
-        # Stale recovery: a claim (not yet running) older than TTL is reclaimable.
-        if [ "$status" = "claimed" ]; then
-          local age
-          age="$(OMS_TS="$ts" python3 -c '
-import calendar,os,time
-try:
-    t=calendar.timegm(time.strptime(os.environ["OMS_TS"],"%Y-%m-%dT%H:%M:%SZ"))
-    print(int(time.time()-t))
-except Exception:
-    print(-1)')"
-          [ "$age" -ge "$CLAIM_TTL" ] 2>/dev/null && stale=1
-        fi
-        if [ "$stale" = 0 ]; then
-          echo "experiment-board: '$ID' already $status (owner: $owner). Use --force or pick a new --id." >&2
-          exit 4
-        fi
-        echo "experiment-board: reclaiming stale claim '$ID' (was $owner, $status)" >&2
-      fi
-    fi
-  fi
   append_event claimed
   echo "claimed: $ID (owner $AGENT_LABEL)" >&2
   printf '%s\n' "$ID"

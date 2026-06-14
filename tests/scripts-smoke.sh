@@ -4366,6 +4366,28 @@ test_data_manifest_csv_column() {
     fail "label-only change must not be drift when keyed by id column"
 }
 
+
+test_data_manifest_hostile_split_values() {
+  local d="$TMP/data-manifest-hostile"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+  local label=$'train/odd\tA\nB'
+  local file=$'-split a=b\tc\nn.txt'
+
+  mkdir -p "$d"
+  printf 'a\nb\n' > "$d/$file"
+  printf 'c\nd\n' > "$d/val.txt"
+
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name weird \
+    --split "$label=$file" --split val=val.txt >/dev/null ) ||
+    fail "hostile split create failed"
+  python3 -m json.tool "$md/weird.json" >/dev/null || fail "manifest must be valid JSON"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name weird >/dev/null ) ||
+    fail "hostile split check should round-trip"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name weird >/dev/null ) ||
+    fail "hostile split leakage should not misparse labels or paths"
+}
+
 test_data_manifest_unknown_subcommand_fails() {
   if "$ROOT/scripts/data-manifest.sh" bogus >/dev/null 2>&1; then
     fail "unknown subcommand should fail"
@@ -4487,6 +4509,56 @@ test_experiment_board_stale_reclaim() {
   OMS_EXPERIMENT_BOARD="$board" OMS_EXPERIMENT_CLAIM_TTL=0 OMS_AGENT=codex \
     "$SH" claim --id e --hypothesis h >/dev/null 2>&1 ||
     fail "stale claim should be reclaimable"
+}
+
+
+test_experiment_board_claim_is_atomic() {
+  local d="$TMP/exp-claim-race"
+  local board="$d/.oms/experiments.jsonl"
+  local SH="$ROOT/scripts/experiment-board.sh"
+  local holder
+  local -a pids=()
+  local i p rc ok blocked other lines
+
+  mkdir -p "$d"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    oms_with_file_lock "$board" bash -c 'printf locked > "$1"; sleep 2' _ "$d/lock-held"
+  ) &
+  holder=$!
+  for i in $(seq 1 50); do
+    [ -f "$d/lock-held" ] && break
+    sleep 0.05
+  done
+  [ -f "$d/lock-held" ] || fail "claim race lock holder did not start"
+
+  for i in $(seq 1 10); do
+    (
+      set +e
+      OMS_EXPERIMENT_BOARD="$board" OMS_AGENT="agent-$i" \
+        "$SH" claim --id race --hypothesis "same hypothesis" \
+        >"$d/out.$i" 2>"$d/err.$i"
+      printf '%s\n' "$?" > "$d/rc.$i"
+    ) &
+    pids+=("$!")
+  done
+  wait "$holder" || fail "claim race lock holder failed"
+  for p in "${pids[@]}"; do wait "$p" || true; done
+
+  ok=0; blocked=0; other=0
+  for i in $(seq 1 10); do
+    rc="$(cat "$d/rc.$i")"
+    case "$rc" in
+      0) ok=$((ok + 1)) ;;
+      4) blocked=$((blocked + 1)) ;;
+      *) other=$((other + 1)) ;;
+    esac
+  done
+  [ "$ok" = 1 ] || fail "exactly one concurrent claim should win, got $ok"
+  [ "$blocked" = 9 ] || fail "nine concurrent claims should be blocked, got $blocked"
+  [ "$other" = 0 ] || fail "unexpected claim exit count: $other"
+  lines="$(wc -l < "$board" | tr -d ' ')"
+  [ "$lines" = 1 ] || fail "atomic claim should append one event, got $lines"
 }
 
 test_experiment_board_unknown_subcommand_fails() {
@@ -4618,8 +4690,8 @@ test_oms_run_diff_compares_capsules() {
   local a b out
 
   make_committed_repo "$d"
-  printf '{"auc": 0.74}\n' > "$d/mA.json"
-  printf '{"auc": 0.82}\n' > "$d/mB.json"
+  printf '{"auc": 0.74, "ok": false, "label": "old", "empty": null}\n' > "$d/mA.json"
+  printf '{"auc": 0.82, "ok": true, "label": "new", "empty": null}\n' > "$d/mB.json"
   a="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
   ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$a" \
     "$cap" run --seed 1 --metrics mA.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run A failed"
@@ -4631,6 +4703,10 @@ test_oms_run_diff_compares_capsules() {
   printf '%s' "$out" | grep -Fq "metric:auc" || fail "diff missing metric line"
   printf '%s' "$out" | grep -Fq "0.08" || fail "diff missing metric delta"
   printf '%s' "$out" | grep -Fq "seeds" || fail "diff missing seeds line"
+  printf '%s\n' "$out" | grep -F "metric:ok" > "$d/okline" || fail "diff missing bool metric"
+  if grep -Fq "(Δ" "$d/okline"; then
+    fail "bool metrics must not be treated as numeric deltas"
+  fi
 
   # Missing capsule -> nonzero.
   if ( cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" no-such-run >/dev/null 2>&1 ); then
@@ -4809,11 +4885,13 @@ test_run_capsule_unknown_subcommand_fails
 test_run_capsule_whence_traces_checkpoint
 test_data_manifest_check_and_leakage
 test_data_manifest_csv_column
+test_data_manifest_hostile_split_values
 test_data_manifest_unknown_subcommand_fails
 test_run_reconcile_records_terminal_jobs
 test_run_reconcile_unknown_subcommand_fails
 test_experiment_board_lifecycle_and_duplicate_guard
 test_experiment_board_stale_reclaim
+test_experiment_board_claim_is_atomic
 test_experiment_board_unknown_subcommand_fails
 test_patch_admit_admits_clean_patch
 test_patch_admit_rejects_stale_patch
