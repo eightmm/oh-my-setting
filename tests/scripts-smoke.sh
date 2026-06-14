@@ -4405,6 +4405,62 @@ test_run_reconcile_unknown_subcommand_fails() {
   fi
 }
 
+test_experiment_board_lifecycle_and_duplicate_guard() {
+  local d="$TMP/exp-board"
+  local board="$d/.oms/experiments.jsonl"
+  local SH="$ROOT/scripts/experiment-board.sh"
+  local id rc
+
+  mkdir -p "$d"
+  id="$(OMS_EXPERIMENT_BOARD="$board" OMS_AGENT=claude "$SH" claim \
+    --hypothesis "scaffold split helps" --baseline "random" 2>/dev/null)"
+  [ -n "$id" ] || fail "claim printed no id"
+
+  # Duplicate claim by another agent is refused (exit 4), owner preserved.
+  rc=0
+  OMS_EXPERIMENT_BOARD="$board" OMS_AGENT=codex "$SH" claim \
+    --hypothesis "scaffold split helps" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = "4" ] || fail "duplicate claim should exit 4 (got $rc)"
+
+  OMS_EXPERIMENT_BOARD="$board" "$SH" start --id "$id" --job 9001 >/dev/null 2>&1 ||
+    fail "start failed"
+  OMS_EXPERIMENT_BOARD="$board" "$SH" finish --id "$id" --result "AUC up" >/dev/null 2>&1 ||
+    fail "finish failed"
+
+  # Active list hides the finished experiment; --all shows it, owner = claimer.
+  local active all
+  active="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list 2>/dev/null)"
+  printf '%s' "$active" | grep -Fq "$id" && fail "finished experiment must not be active"
+  all="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list --all 2>/dev/null)"
+  printf '%s' "$all" | grep -Fq "$id" || fail "--all must show finished experiment"
+  printf '%s' "$all" | grep -Fq "owner=claude" || fail "owner must stay the claimer"
+}
+
+test_experiment_board_stale_reclaim() {
+  local d="$TMP/exp-stale"
+  local board="$d/.oms/experiments.jsonl"
+  local SH="$ROOT/scripts/experiment-board.sh"
+
+  mkdir -p "$d"
+  OMS_EXPERIMENT_BOARD="$board" OMS_AGENT=claude "$SH" claim --id e --hypothesis h \
+    >/dev/null 2>&1 || fail "first claim failed"
+  # Fresh claim is blocked...
+  if OMS_EXPERIMENT_BOARD="$board" OMS_EXPERIMENT_CLAIM_TTL=86400 OMS_AGENT=codex \
+    "$SH" claim --id e --hypothesis h >/dev/null 2>&1; then
+    fail "fresh duplicate claim should be blocked"
+  fi
+  # ...but a stale claim (TTL 0) is reclaimable.
+  OMS_EXPERIMENT_BOARD="$board" OMS_EXPERIMENT_CLAIM_TTL=0 OMS_AGENT=codex \
+    "$SH" claim --id e --hypothesis h >/dev/null 2>&1 ||
+    fail "stale claim should be reclaimable"
+}
+
+test_experiment_board_unknown_subcommand_fails() {
+  if "$ROOT/scripts/experiment-board.sh" bogus >/dev/null 2>&1; then
+    fail "unknown subcommand should fail"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -4578,5 +4634,8 @@ test_data_manifest_csv_column
 test_data_manifest_unknown_subcommand_fails
 test_run_reconcile_records_terminal_jobs
 test_run_reconcile_unknown_subcommand_fails
+test_experiment_board_lifecycle_and_duplicate_guard
+test_experiment_board_stale_reclaim
+test_experiment_board_unknown_subcommand_fails
 
 echo "scripts-smoke: ok"

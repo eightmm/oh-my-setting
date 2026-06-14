@@ -91,6 +91,25 @@ Deciding the bar after seeing results is how noise becomes a "finding."
 ~/.oh-my-setting/scripts/run-capsule.sh verify <id>
 ```
 
+## Coordinating Across Agents
+
+When several agents run experiments on the same project, claim before you run so
+two of them don't burn GPU on the same idea. The study board is the shared
+intent layer above the ledger: it tracks the hypothesis, owner, lifecycle, and
+result, and refuses a duplicate claim (with stale-claim recovery if the owner
+went away).
+
+```bash
+~/.oh-my-setting/scripts/experiment-board.sh claim --hypothesis "scaffold split helps" --baseline random
+~/.oh-my-setting/scripts/experiment-board.sh start  --id scaffold-split-helps --job <slurm_id>
+~/.oh-my-setting/scripts/experiment-board.sh finish --id scaffold-split-helps --result "AUC 0.82 vs 0.74" --next "try cluster split"
+~/.oh-my-setting/scripts/experiment-board.sh list            # active claims
+```
+
+The board records intent; `run-ledger`/`run-capsule` record what actually ran;
+`run-reconcile` writes back the job's terminal state. Claim → run (capsule) →
+reconcile → finish.
+
 ## Stop
 
 Do not launch a long/expensive run until question, falsifiable hypothesis,
