@@ -292,7 +292,10 @@ check_cmd uv
 check_cmd claude
 check_cmd codex
 check_cmd agy
-check_cmd gh
+# gh is optional: only the GitHub-source / git-cli-workflow features need it,
+# and compute clusters routinely lack it (like the slurm tools below). Those
+# features fail loudly on their own when gh is absent.
+check_optional_cmd gh
 
 check_bash_version
 
