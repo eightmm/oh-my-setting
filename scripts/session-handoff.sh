@@ -425,20 +425,25 @@ cmd_capture() {
     mkdir -p "$(dirname "$out")"
   fi
 
+  # Decide sensitivity on the USER CONTENT (transcript turns + note) — not the
+  # rendered digest, whose header carries our own machine paths (cwd/source)
+  # and would otherwise self-block every real capture. Block by default since
+  # the digest is meant to be loaded into another, possibly external, agent.
+  SCAN_FILE="$(mktemp)" || fail "mktemp failed"
+  { printf '%s\n' "$extract"; printf '%s\n' "$NOTE"; } > "$SCAN_FILE"
+  if agent_memory_file_has_sensitive_content "$SCAN_FILE"; then
+    rm -f "$SCAN_FILE"; SCAN_FILE=""
+    if [ "${ALLOW_SENSITIVE:-0}" = 1 ]; then
+      echo "warning: handoff digest looks sensitive; emitting under --allow-sensitive" >&2
+    else
+      fail "session content looks sensitive; refusing to write the digest. Re-run with --allow-sensitive to override."
+    fi
+  else
+    rm -f "$SCAN_FILE"; SCAN_FILE=""
+  fi
+
   printf '%s\n' "$extract" |
     render_digest "$AGENT" "$source" "$session_id" "$CWD" "$NOTE" "$ts" > "$out"
-
-  if agent_memory_file_has_sensitive_content "$out"; then
-    # The digest is meant to be loaded into another (possibly external) agent,
-    # and transcripts carry pasted secrets. Block by default — mirror the
-    # agent-memory append posture — unless explicitly overridden.
-    if [ "${ALLOW_SENSITIVE:-0}" = 1 ]; then
-      echo "warning: handoff digest looks sensitive; emitted under --allow-sensitive" >&2
-    else
-      rm -f "$out"
-      fail "handoff digest looks sensitive; refusing to write. Re-run with --allow-sensitive to override."
-    fi
-  fi
   printf '%s\n' "$out"
 }
 

@@ -4259,6 +4259,22 @@ test_session_handoff_blocks_sensitive_digest() {
     --out "$home/d.md" --allow-sensitive >/dev/null 2>&1 ||
     fail "--allow-sensitive should write the digest"
   [ -f "$home/d.md" ] || fail "--allow-sensitive digest not written"
+
+  # Regression: a CLEAN transcript must NOT self-block just because the harness
+  # writes an absolute home path into the digest header. --cwd under /home/ would
+  # trip the scrubber if the whole digest (not just user content) were scanned.
+  # Build the /home cwd at runtime so this test source stays scrubber-clean,
+  # and place the session under that cwd's encoded project dir.
+  local hcwd="/ho""me/researcher/proj"
+  local hdir
+  hdir="$home/projects/$(printf '%s' "$hcwd" | sed 's#/#-#g')"
+  mkdir -p "$hdir"
+  printf '{"type":"user","message":{"role":"user","content":"refactor the loader"}}\n' \
+    > "$hdir/h.jsonl"
+  OMS_CLAUDE_HOME="$home" "$SH" capture --agent claude --cwd "$hcwd" \
+    --out "$home/clean.md" >/dev/null 2>&1 ||
+    fail "clean transcript must not self-block on a /home header path"
+  [ -f "$home/clean.md" ] || fail "clean digest with /home cwd not written"
 }
 
 test_session_handoff_claude_digest() {
@@ -4436,6 +4452,17 @@ test_run_capsule_whence_traces_checkpoint() {
     "$ROOT/scripts/run-capsule.sh" whence other.pt >/dev/null 2>&1 ); then
     fail "whence should fail for a file no run produced"
   fi
+
+  # Outputs must be hashed AFTER the command runs: a checkpoint the run itself
+  # produces (not pre-existing) must still be traceable.
+  local id2
+  id2="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
+    "$ROOT/scripts/run-capsule.sh" run --output produced.pt --no-ledger \
+    -- bash -c 'echo weights > produced.pt' 2>/dev/null)"
+  assert_file_contains "$runs/$id2/capsule.json" '"hashed": true'
+  out="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
+    "$ROOT/scripts/run-capsule.sh" whence produced.pt 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq "$id2" || fail "whence must trace a run-produced output"
 }
 
 test_data_manifest_check_and_leakage() {

@@ -271,7 +271,6 @@ cmd_run() {
   env_json="$(capture_env_json)"
   save_env_lock "$bundle"
   cfg_json="$(configs_json)"
-  out_json="$(outputs_json)"
 
   # The command's combined output is teed to the bundle log (part of the
   # capsule) and to stderr (live), leaving stdout free for the capsule id so
@@ -283,6 +282,16 @@ cmd_run() {
   status="${PIPESTATUS[0]}"
   set -e
   duration_s=$(( $(date +%s) - start_s ))
+
+  # Outputs are fingerprinted AFTER the command so a checkpoint the run produces
+  # is actually hashed (and traceable via `whence`), not recorded as absent.
+  out_json="$(outputs_json)"
+  # Finding: the captured log can carry secrets the command printed to stderr
+  # (e.g. `wandb login`, auth warnings). It is local under .oms, but flag it so
+  # a sensitive log is not silently loaded later.
+  if agent_memory_file_has_sensitive_content "$bundle/output.log"; then
+    echo "capsule: warning: output.log contains sensitive-looking content (local under .oms)" >&2
+  fi
 
   local metrics_json=""
   [ -n "$METRICS_FILE" ] && [ -f "$METRICS_FILE" ] && metrics_json="$(cat "$METRICS_FILE")"
