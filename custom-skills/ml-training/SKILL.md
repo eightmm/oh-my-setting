@@ -132,6 +132,26 @@ sh = cuet.SphericalHarmonics(irreps=..., normalize=True)
 # e3nn interop: cue.Irreps("O3", str(e3nn_irreps))
 ```
 
+**Verify symmetry, don't assume it.** One coordinate-dependent op (absolute
+linear layer, uncentered coords, global projection) silently breaks SE(3)
+equivariance — the model compiles and trains but fails under rotation. Add a
+unit test: apply a random rotation+translation, assert invariant outputs are
+unchanged and equivariant outputs (forces, vectors) rotate with it. Use float64
+for the check (bf16/fp16 tolerances mask real bugs). Caveat: if inputs are
+centered/Kabsch-aligned upstream, the test can pass on a non-equivariant model —
+test the raw network.
+
+```python
+def verify_equivariance(model, batch, atol=1e-5):
+    from scipy.spatial.transform import Rotation
+    R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float64)
+    t = torch.randn(1, 3, dtype=torch.float64)
+    rot = batch.clone(); rot.pos = batch.pos.double() @ R.T + t
+    a, b = model(batch), model(rot)
+    assert torch.allclose(a.energy, b.energy, atol=atol)          # invariant
+    assert torch.allclose(a.forces.double() @ R.T, b.forces, atol=atol)  # equivariant
+```
+
 ## Checkpoint
 
 Keys: `model_state_dict`, `optimizer_state_dicts`, `scheduler_state_dicts`, `epoch`, `step`, `metrics`.
