@@ -65,4 +65,28 @@ jobs:
           printf '{"ts":"2026-06-12T00:00:00Z","exit":0,"duration_s":1,"git_sha":"abc1234","dirty":0,"cmd":["echo","ok"]}\n' > "$tmp/project/docs/EXPERIMENTS.jsonl"
           (cd "$tmp/project" && "$repo/scripts/run-ledger.sh" list 1) > "$tmp/list.txt"
           grep -Fq 'echo ok' "$tmp/list.txt"
+      - name: run-tools fixture (BSD portability)
+        run: |
+          repo="$PWD"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@e
+          proj="$tmp/p"; mkdir -p "$proj"; cd "$proj"; git init -b main -q .
+          echo base > f; git add f; git commit -qm init
+          export OMS_RUNS_DIR="$proj/.oms/runs" OMS_RUN_INDEX="$proj/.oms/runs/spine.jsonl"
+          id="$("$repo/scripts/oms-run.sh" new)"; export OMS_RUN_ID="$id"
+          printf 'fake\n' > ckpt.pt
+          "$repo/scripts/run-capsule.sh" run --output ckpt.pt --no-ledger -- bash -c 'echo trained' >/dev/null
+          "$repo/scripts/run-capsule.sh" whence ckpt.pt >/dev/null   # exit 0 = traced to its run
+          "$repo/scripts/oms-run.sh" show "$id" | grep -Fq run-capsule
+          printf 'a\nb\nc\n' > train.txt; printf 'd\na\n' > val.txt
+          OMS_MANIFEST_DIR="$proj/.oms/manifests" "$repo/scripts/data-manifest.sh" create --name ds \
+            --split train=train.txt --split val=val.txt >/dev/null
+          if OMS_MANIFEST_DIR="$proj/.oms/manifests" "$repo/scripts/data-manifest.sh" leakage --name ds >/dev/null 2>&1; then
+            echo "expected leakage to be detected" >&2; exit 1
+          fi
+          OMS_EXPERIMENT_BOARD="$proj/.oms/experiments.jsonl" "$repo/scripts/experiment-board.sh" \
+            claim --id e --hypothesis h >/dev/null
+          "$repo/scripts/oms-run.sh" validate --dir "$proj/.oms" >/dev/null
 
