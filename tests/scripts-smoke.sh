@@ -3292,6 +3292,18 @@ test_scrubber_blocks_outbound_secret_shapes() {
   printf '%s %s %s %s %s %s\n' 'machine' 'example.com' 'login' 'deploy' 'password' 'not-for-sharing' > "$f"
   bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
     fail "scrubber should block netrc grammar"
+
+  # Bare provider tokens with no key= prefix (HuggingFace / GitLab / Stripe).
+  for s in \
+    "h""f_abcdefghijklmnopqrstuvwxyz0123456789" \
+    "glpa""t-abcdefghij1234567890ABCDEF" \
+    "sk_li""ve_abcdefghij0123456789ABCD" \
+    "sk_te""st_abcdefghij0123456789ABCD" \
+    "rk_li""ve_abcdefghij0123456789ABCD"; do
+    printf '%s\n' "$s" > "$f"
+    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+      fail "scrubber should block a bare provider credential (${s%%_*})"
+  done
 }
 
 test_scrubber_allows_common_clean_text() {
