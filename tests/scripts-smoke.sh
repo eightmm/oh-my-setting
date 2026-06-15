@@ -4157,6 +4157,33 @@ test_check_gate_hard_fails_without_shellcheck() {
     fail "check.sh missing-tool message absent: $out"
 }
 
+test_ci_status_reports_conclusion() {
+  local d="$TMP/ci-status" out
+  mkdir -p "$d/bin"
+  # Stub gh: a failed latest run -> ci-status must exit nonzero.
+  cat > "$d/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[{"status":"completed","conclusion":"failure","workflowName":"test","url":"http://x"}]'
+EOF
+  chmod +x "$d/bin/gh"
+  out="$(OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" main 2>&1)" && \
+    fail "ci-status must exit nonzero on a failed run"
+  printf '%s' "$out" | grep -Fq "failure" || fail "ci-status missing conclusion: $out"
+
+  # A successful latest run -> exit 0.
+  cat > "$d/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[{"status":"completed","conclusion":"success","workflowName":"test","url":"http://x"}]'
+EOF
+  OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" main >/dev/null 2>&1 ||
+    fail "ci-status should exit 0 on a successful run"
+
+  # Missing gh -> exit 2 (clear, not a silent pass).
+  if OMS_GH_BIN=__oms_absent_gh__ "$ROOT/scripts/ci-status.sh" main >/dev/null 2>&1; then
+    fail "ci-status should fail when gh is absent"
+  fi
+}
+
 test_install_hooks_writes_pre_push() {
   local repo="$TMP/install-hooks"
   mkdir -p "$repo/scripts"
@@ -4935,6 +4962,7 @@ test_autoupdate_cron_install_and_uninstall
 test_autoupdate_install_dry_run_no_writes
 test_install_skills_detects_name_mismatch
 test_check_gate_hard_fails_without_shellcheck
+test_ci_status_reports_conclusion
 test_install_hooks_writes_pre_push
 test_session_handoff_claude_digest
 test_session_handoff_codex_digest
