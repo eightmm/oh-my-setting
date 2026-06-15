@@ -177,8 +177,10 @@ the digest captures goal, recent user turns, files touched, and the last
 assistant summary. Extraction is mechanical (no model call): fast, free, and
 deterministic.
 
-- Digests land in `.oms/handoffs/` (git-ignored) and are local artifacts; the
-  content is scanned and you are warned if it looks sensitive. Loading a digest
+- Digests land in `.oms/handoffs/` (git-ignored) and are local artifacts. The
+  content is scanned; if it looks sensitive the capture is REFUSED by default
+  (transcripts carry pasted secrets and the digest is meant for another agent).
+  Override with `--allow-sensitive` only when you are sure. Loading a digest
   into another agent is an explicit step you take.
 - Source sessions: Claude (`~/.claude/projects/<cwd>/<id>.jsonl`, full),
   Codex (`~/.codex/.../rollout-*.jsonl`, goal/turns/last reply), Antigravity

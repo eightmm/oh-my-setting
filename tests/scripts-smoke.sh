@@ -4222,6 +4222,33 @@ EOF
   assert_file_contains "$repo/out" "name mismatch: expected-name"
 }
 
+test_session_handoff_blocks_sensitive_digest() {
+  local home="$TMP/sh-sensitive-home"
+  local cwd="/proj/sens-app"
+  local proj="$home/projects/-proj-sens-app"
+  local SH="$ROOT/scripts/session-handoff.sh"
+
+  mkdir -p "$proj"
+  # A user turn carrying a credential-shaped value, assembled at runtime so the
+  # test source itself stays scrubber-clean (split literal; plain var name).
+  local vector="AK""IAIOSFODNN7EXAMPLE"
+  printf '{"type":"user","message":{"role":"user","content":"deploy with %s"}}\n' \
+    "$vector" > "$proj/sess.jsonl"
+
+  # Default: refuse to write, nonzero exit, no file.
+  if ( OMS_CLAUDE_HOME="$home" "$SH" capture --agent claude --cwd "$cwd" \
+       --out "$home/d.md" >/dev/null 2>&1 ); then
+    fail "sensitive handoff digest must be refused by default"
+  fi
+  [ -f "$home/d.md" ] && fail "refused digest must not be left on disk"
+
+  # --allow-sensitive: writes it.
+  OMS_CLAUDE_HOME="$home" "$SH" capture --agent claude --cwd "$cwd" \
+    --out "$home/d.md" --allow-sensitive >/dev/null 2>&1 ||
+    fail "--allow-sensitive should write the digest"
+  [ -f "$home/d.md" ] || fail "--allow-sensitive digest not written"
+}
+
 test_session_handoff_claude_digest() {
   local home="$TMP/sh-claude-home"
   local cwd="/proj/demo-app"
@@ -4965,6 +4992,7 @@ test_check_gate_hard_fails_without_shellcheck
 test_ci_status_reports_conclusion
 test_install_hooks_writes_pre_push
 test_session_handoff_claude_digest
+test_session_handoff_blocks_sensitive_digest
 test_session_handoff_codex_digest
 test_session_handoff_antigravity_prompts_only
 test_session_handoff_unknown_agent_fails

@@ -39,6 +39,8 @@ capture options:
   --cwd PATH       Project dir to match (default: current dir).
   --note TEXT      Free-text note added to the digest header.
   --out FILE       Write digest here instead of the default handoffs dir.
+  --allow-sensitive  Write the digest even if it looks sensitive (default:
+                   refuse, since the digest is meant for another agent).
 
 Notes:
   - Extraction is mechanical; no model is called.
@@ -380,6 +382,7 @@ cmd_capture() {
       --cwd) [ "$#" -ge 2 ] || fail "--cwd requires a path"; CWD="$2"; shift 2 ;;
       --note) [ "$#" -ge 2 ] || fail "--note requires text"; NOTE="$2"; shift 2 ;;
       --out) [ "$#" -ge 2 ] || fail "--out requires a path"; OUT="$2"; shift 2 ;;
+      --allow-sensitive) ALLOW_SENSITIVE=1; shift ;;
       *) fail "unknown capture argument: $1" ;;
     esac
   done
@@ -426,7 +429,15 @@ cmd_capture() {
     render_digest "$AGENT" "$source" "$session_id" "$CWD" "$NOTE" "$ts" > "$out"
 
   if agent_memory_file_has_sensitive_content "$out"; then
-    echo "warning: handoff digest looks sensitive; review before loading it into another agent" >&2
+    # The digest is meant to be loaded into another (possibly external) agent,
+    # and transcripts carry pasted secrets. Block by default — mirror the
+    # agent-memory append posture — unless explicitly overridden.
+    if [ "${ALLOW_SENSITIVE:-0}" = 1 ]; then
+      echo "warning: handoff digest looks sensitive; emitted under --allow-sensitive" >&2
+    else
+      rm -f "$out"
+      fail "handoff digest looks sensitive; refusing to write. Re-run with --allow-sensitive to override."
+    fi
   fi
   printf '%s\n' "$out"
 }
