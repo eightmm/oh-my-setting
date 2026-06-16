@@ -134,12 +134,18 @@ load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
-prompt_file="$(mktemp)" || fail "mktemp failed"
+# All temp files (the prompt and any library temps from ma_write_harness_context)
+# land in one trapped dir, so a TERM mid-run cannot leak a stray temp. Removing
+# the dir as a whole closes the race the previous rm -f "$prompt_file" left open
+# (helper temps created by agent_memory_mktemp went to bare TMPDIR and survived).
+call_tmpdir="$(mktemp -d)" || fail "mktemp failed"
+export OMS_LIB_TMPDIR="$call_tmpdir"
+prompt_file="$(mktemp "$call_tmpdir/prompt.XXXXXX")" || fail "mktemp failed"
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
-  rm -f "$prompt_file"
+  rm -rf "$call_tmpdir"
 }
 cleanup_signal() {
   local code="$1"
