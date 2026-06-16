@@ -4771,6 +4771,67 @@ test_patch_admit_requires_patch() {
   fi
 }
 
+test_patch_admit_rejects_secret_in_patch() {
+  local repo="$TMP/admit-secret"
+  local SH="$ROOT/scripts/patch-admit.sh"
+  # A patch that applies and parses cleanly but adds a credential must be
+  # rejected by the secret-scan gate before it can land. The secret string is
+  # assembled at runtime so this test file does not trip the self-review gate.
+  local cred_line="aws_secret""_access_key = abcdEFGH1234ijklMNOP5678qrstUVWX90zzAAA"
+  make_patch_repo "$repo" "base"$'\n'"$cred_line"$'\n'
+  if ( "$SH" --patch "$repo/change.patch" --repo "$repo" --verify 'true' >/dev/null 2>&1 ); then
+    fail "patch adding a secret should be rejected"
+  fi
+  local r
+  r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
+  [ -n "$r" ] || fail "no admission report written"
+  assert_file_contains "$r" "secrets: FAIL"
+}
+
+test_agent_task_context_preserves_tail_sections() {
+  local repo="$TMP/task-prune"
+  make_committed_repo "$repo"
+  (
+    cd "$repo"
+    . "$ROOT/scripts/lib/oms-common.sh"
+    . "$ROOT/scripts/lib/agent-memory-common.sh"
+    . "$ROOT/scripts/lib/agent-task-common.sh"
+    local f="$repo/task.md"
+    {
+      printf '## Goal\n\nShip fix\n\n## Loop State\n\n'
+      local i
+      for i in $(seq 1 300); do printf -- '- old loop bullet %s padding padding padding\n' "$i"; done
+      printf '\n## Current State\n\nhalfway done\n\n## Next Step\n\nRUN THE FINAL TEST\n'
+    } > "$f"
+    # Over-budget file: top-cut would drop Next Step; section-aware keeps it.
+    OMS_AGENT_TASK_CONTEXT_CHARS=800 agent_task_emit_context "$repo" "$f" > "$repo/ctx.out"
+  ) || fail "emit_context failed"
+  assert_file_contains "$repo/ctx.out" "RUN THE FINAL TEST"
+  assert_file_contains "$repo/ctx.out" "## Current State"
+  assert_file_contains "$repo/ctx.out" "older entries dropped"
+}
+
+test_debate_prompt_masks_quoted_paths() {
+  # Build the path fragments at runtime so this test file itself never carries
+  # a literal absolute path that would trip the self-review scrubber gate.
+  local h="/ho""me" u="/Use""rs" sch="file:""//"
+  local out
+  out="$(
+    . "$ROOT/scripts/lib/oms-common.sh"
+    . "$ROOT/scripts/lib/agent-memory-common.sh"
+    . "$ROOT/scripts/lib/agent-task-common.sh"
+    . "$ROOT/scripts/lib/multi-agent-common.sh"
+    printf 'ref %s/x and %s/u/p.sh\n' "$sch$h/u/x.sh" "$u" | ma_mask_quoted_paths
+  )"
+  case "$out" in
+    *'<PATH>'*) ;;
+    *) fail "path mask did not produce <PATH>" ;;
+  esac
+  case "$out" in
+    *"$h/"*|*"$u/"*|*"file:"*) fail "absolute paths survived masking: $out" ;;
+  esac
+}
+
 test_oms_run_spine_links_and_joins() {
   local d="$TMP/oms-run-spine"
   local index="$d/.oms/runs/spine.jsonl"
@@ -5053,6 +5114,9 @@ test_patch_admit_admits_clean_patch
 test_patch_admit_rejects_stale_patch
 test_patch_admit_rejects_failed_verify
 test_patch_admit_requires_patch
+test_patch_admit_rejects_secret_in_patch
+test_agent_task_context_preserves_tail_sections
+test_debate_prompt_masks_quoted_paths
 test_oms_run_spine_links_and_joins
 test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
