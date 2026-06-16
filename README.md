@@ -100,6 +100,7 @@ Maintenance:
 ```text
 Check the oh-my-setting install status.
 Update oh-my-setting and re-run its doctor.
+Fix duplicate skill-picker entries and clean legacy oh-my-setting links.
 Unlink oh-my-setting.                        # or: uninstall it completely
 ```
 
@@ -142,6 +143,7 @@ or skill. Nothing here is meant to be run by hand.
 | Maintenance | Verification gate (`check.sh`, `install-hooks.sh`) | One command runs the same checks as CI (shellcheck + smoke) and fails hard if a tool is missing — never a silent skip; `install-hooks.sh` wires it as a pre-push hook so red never reaches the remote |
 | Maintenance | CI status (`ci-status.sh`) | Prints the latest CI conclusion for the current branch and exits nonzero on a failed run, so a red push can't go unnoticed |
 | Maintenance | Install / update / doctor | One-line install symlinks the same rules and skills into all three agents; doctor checks links, tools, and manifest sync |
+| Maintenance | Skill hygiene (`skill-doctor.sh`, `cleanup.sh`) | Diagnoses duplicate/missing skill-picker entries across all three agents; cleanup removes only known legacy oms/backup symlinks (dry-run by default, never touches regular files or plugins) |
 | Maintenance | Auto-update (`auto-update.sh`) | systemd timer or cron; check-only or apply mode (fast-forward + relink) |
 | Maintenance | Backup / unlink / uninstall | Snapshot agent configs before changes; clean removal that restores what it replaced |
 
