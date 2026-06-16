@@ -167,7 +167,7 @@ wrong feature, not a missing one). Modality-specific guards below.
 - **Chirality/stereo**: many mol→graph converters drop chiral tags and bond
   stereo, forcing enantiomers with different activity onto identical graphs.
   Assert a featurized R/S pair produces distinct representations.
-- **Graph batching isolation**: PyG/DGL collate molecules into one disjoint
+- **Graph batching isolation**: PyG collates molecules into one disjoint
   graph. Any global op (global pooling, batch-level norm, global attention) that
   aggregates across the flat node tensor without slicing by the `batch` index
   silently leaks information between molecules in a batch. Unit-test: a
