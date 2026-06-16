@@ -114,6 +114,11 @@ main silent-failure source — the data looks unified but isn't comparable.
   not global AUC.
 - Always compare against a cheap baseline (fingerprint + RF/GBM, or sequence
   identity nearest-neighbor). A deep model that loses to it is not working.
+- **Report in original units.** Fit target scalers / log-transforms on train
+  only (see Splitting), persist them with the checkpoint, and apply — never
+  refit — at val/test/inference. Compute RMSE/MAE/R² AFTER inverse-transform;
+  error in scaled or log space is not the error you think it is. Assert the
+  inverse round-trips, and that pIC50↔IC50 direction matches the label.
 
 ## Negative Sets And Activity Cliffs
 
@@ -147,7 +152,12 @@ pick compounds to synthesize. Report which predictions are trustworthy.
 ## Featurization Conventions
 
 Common to all modalities: cache features keyed by (input hash + featurizer
-version) and invalidate on bump. Modality-specific guards below.
+version) and invalidate on bump. Use ONE canonical `featurize()` shared by train
+and inference — a second code path is how offline val looks great and deployment
+is garbage. Pin and record RDKit/ESM versions (descriptor/fingerprint
+definitions drift between versions) and seed conformer generation. Fail-fast on
+NaN/inf features (assert, never zero-fill — a silently zeroed descriptor is a
+wrong feature, not a missing one). Modality-specific guards below.
 
 ### Molecule
 
@@ -157,6 +167,11 @@ version) and invalidate on bump. Modality-specific guards below.
 - **Chirality/stereo**: many mol→graph converters drop chiral tags and bond
   stereo, forcing enantiomers with different activity onto identical graphs.
   Assert a featurized R/S pair produces distinct representations.
+- **Graph batching isolation**: PyG/DGL collate molecules into one disjoint
+  graph. Any global op (global pooling, batch-level norm, global attention) that
+  aggregates across the flat node tensor without slicing by the `batch` index
+  silently leaks information between molecules in a batch. Unit-test: a
+  molecule's output must be identical alone vs. inside a batch.
 
 ### Sequence
 
@@ -175,6 +190,13 @@ version) and invalidate on bump. Modality-specific guards below.
   Train-on-crystal / screen-on-RDKit-conformer is a silent OOD shift — if
   evaluating on generated conformers, report metric variance across an
   ETKDG+MMFF ensemble.
+- **Coordinate frame & augmentation (data pipeline)**: center coordinates (COM)
+  and apply per-sample random rotations during training, rotating any vector/
+  force targets consistently; assert a single unit convention (Å vs nm). Watch
+  for **ligand-frame leakage** — centering/orienting the pocket by the bound
+  ligand lets the model find the site at the origin, so it collapses on apo or
+  screening inputs. This guards the data frame; the SE(3) test in `ml-training`
+  guards the architecture — you need both.
 - **pLM↔structure residue alignment** (sequence+structure fusion): PDB files
   have missing residues, insertion codes (`82A`), and non-sequential numbering.
   Matching the i-th FASTA char to the i-th ATOM record silently pairs embeddings

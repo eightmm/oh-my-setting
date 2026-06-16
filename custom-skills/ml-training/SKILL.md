@@ -96,7 +96,35 @@ Key patterns:
 - **Barrier**: `dist.barrier()` before/after validation and checkpoint save
 - **Logging/wandb/tqdm**: rank 0 only
 - **Loss averaging**: `dist.all_reduce(loss, op=ReduceOp.SUM)` then `/ world_size`
+  — valid ONLY when every rank has the same number of valid elements; for
+  variable-size inputs use the element-weighted reduction below.
 - **Cleanup**: `dist.destroy_process_group()` in finally block
+
+## Loss Reduction & Masking (variable-size inputs)
+
+Chem-bio batches have variable atoms/residues/pairs and heavy padding. A plain
+`.mean()` silently weights the loss by structure size and lets padding or missing
+labels contribute gradients — curves look healthy while the model fits the wrong
+thing. Reduce explicitly against a declared denominator.
+
+- Declare the unit: per-`sample` / `atom` / `residue` / `pair` / `positive`.
+  Mask invalid/padded elements BEFORE reduction; never `.mean()` a padded tensor.
+- **Multitask/sparse labels**: build a `label_mask`; never fill missing labels
+  with 0 — the model regresses unmeasured targets toward 0 and corrupts the
+  measured heads. NaN→0 is a silent bug, not imputation.
+- **DDP**: normalize by total valid elements across ranks (all_reduce the count),
+  not per-rank batch count or `/ world_size` — else ranks holding smaller
+  structures dominate the gradient and training skews.
+- Pooling / readout / attention must be mask-weighted too (extends ESM
+  mask-pooling to graph readout and per-residue/atom losses).
+
+```python
+loss = (per_elem_loss * mask).sum()
+n = mask.sum()
+if world_size > 1:
+    dist.all_reduce(loss); dist.all_reduce(n)   # both SUM
+loss = loss / n.clamp(min=1)
+```
 
 ## Reusable Source Blocks
 
