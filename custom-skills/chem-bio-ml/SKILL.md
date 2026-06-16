@@ -1,11 +1,13 @@
 ---
 name: chem-bio-ml
 description: >
-  Chem-bio ML guardrails: molecule/protein data splitting and leakage,
-  domain metrics and their traps, featurization conventions (RDKit, sequence,
-  structure), and label semantics. Use when writing or reviewing models on
-  molecular, protein, or other chem-bio data — especially before training or
-  a pre-training review gate.
+  Chem-bio ML guardrails: intake standardization, molecule/protein splitting
+  and leakage, label semantics and public multi-source/assay harmonization,
+  domain metrics and their traps, negative-set bias and activity cliffs,
+  applicability domain and calibration, and featurization conventions (RDKit,
+  sequence, structure). Use when writing or reviewing models on molecular,
+  protein, or other chem-bio data — especially before training or a
+  pre-training review gate.
 ---
 
 Domain guardrails loaded on demand. The silent-failure modes here cost GPU
