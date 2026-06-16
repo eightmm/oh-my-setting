@@ -356,10 +356,71 @@ agent_task_emit_context() {
   [ -n "$updated" ] && printf -- '- updated: %s\n' "$updated"
   printf -- '- size: %s bytes (~%s tokens)\n\n' "$bytes" "$tokens"
   if [ "$bytes" -gt "$max_chars" ]; then
-    head -c "$max_chars" "$file"
-    printf '\n\n... active task truncated at %s chars; run agent-task.sh update/close to compact it.\n' "$max_chars"
+    agent_task_prune_for_budget "$file" "$max_chars"
+    printf '\n\n... active task compacted to ~%s chars (oldest Loop State/Last Failure/Verification bullets dropped first; Goal/Done Criteria/Verify/Decisions/Current State/Next Step preserved). Run agent-task.sh update/close to compact it.\n' "$max_chars"
   else
     cat "$file"
   fi
   printf '\n'
+}
+
+# Section-aware truncation. Plain `head -c` cut from the top, which silently
+# dropped the most actionable sections (Current State, Next Step, Decisions)
+# because they live at the bottom of the file. Instead, keep the priority
+# sections in full and spend the remaining budget on the accumulating sections
+# (Loop State, Last Failure, Verification) tail-first, so recent entries
+# survive and the handoff conclusion is never lost.
+agent_task_prune_for_budget() {
+  local file="$1"
+  local budget="$2"
+
+  awk -v budget="$budget" '
+    function is_priority(h) {
+      return (h == "## Goal" || h == "## Constraints" || h == "## Done Criteria" \
+        || h == "## Verify" || h == "## Decisions" || h == "## Current State" \
+        || h == "## Next Step")
+    }
+    /^## / { section = $0; order[++n] = section; idx[section] = n }
+    {
+      body[idx[section] "\t" (++count[section])] = $0
+      lines[section] = count[section]
+      if (section == "") preamble[++pre] = $0
+    }
+    END {
+      # Pass 1: priority sections (and the preamble before the first header)
+      # are always emitted in full; tally their byte cost.
+      used = 0
+      for (i = 1; i <= pre; i++) used += length(preamble[i]) + 1
+      for (k = 1; k <= n; k++) {
+        s = order[k]
+        if (!is_priority(s)) continue
+        for (j = 1; j <= lines[s]; j++) used += length(body[k "\t" j]) + 1
+      }
+      remaining = budget - used
+      if (remaining < 0) remaining = 0
+
+      # Emit in original file order. Priority sections print verbatim;
+      # accumulating sections keep as many trailing lines as fit.
+      for (i = 1; i <= pre; i++) print preamble[i]
+      for (k = 1; k <= n; k++) {
+        s = order[k]
+        print s
+        if (is_priority(s)) {
+          for (j = 2; j <= lines[s]; j++) print body[k "\t" j]
+          continue
+        }
+        # Find the largest tail [start..end] of body lines fitting remaining.
+        size = 0; start = lines[s] + 1
+        for (j = lines[s]; j >= 2; j--) {
+          cost = length(body[k "\t" j]) + 1
+          if (size + cost > remaining) break
+          size += cost; start = j
+        }
+        if (start > 2) print "  (... older entries dropped to fit context budget ...)"
+        for (j = start; j <= lines[s]; j++) print body[k "\t" j]
+        remaining -= size
+        if (remaining < 0) remaining = 0
+      }
+    }
+  ' "$file"
 }

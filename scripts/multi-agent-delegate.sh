@@ -340,10 +340,21 @@ elif [ "$APPLY" = 1 ]; then
     # artifact dir itself lives untracked inside the repo.
     # Warn instead of fail: the worker already ran, so still record and report.
     echo "apply skipped: main tree has uncommitted changes" >&2
-  elif git -C "$REPO" apply --binary "$patch_file"; then
-    applied=1
   else
-    echo "apply failed: patch did not apply cleanly; review $patch_file" >&2
+    # Landing gate: re-admit the patch in a throwaway worktree (applies cleanly,
+    # parses, carries no secrets, passes verification) before it touches the
+    # main tree. This catches stale patches and worker-environment illusions
+    # that the worker's own in-worktree verify cannot.
+    admit_script="$(ma_scripts_dir)/patch-admit.sh"
+    admit_args=(--patch "$patch_file" --repo "$REPO")
+    [ -n "$VERIFY_CMD" ] && admit_args+=(--verify "$VERIFY_CMD")
+    if [ -x "$admit_script" ] && ! bash "$admit_script" "${admit_args[@]}" >/dev/null; then
+      echo "apply skipped: patch-admit rejected the patch (see .oms/artifacts/admit/)" >&2
+    elif git -C "$REPO" apply --binary "$patch_file"; then
+      applied=1
+    else
+      echo "apply failed: patch did not apply cleanly; review $patch_file" >&2
+    fi
   fi
 fi
 
