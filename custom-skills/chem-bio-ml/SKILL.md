@@ -146,30 +146,41 @@ pick compounds to synthesize. Report which predictions are trustworthy.
 
 ## Featurization Conventions
 
+Common to all modalities: cache features keyed by (input hash + featurizer
+version) and invalidate on bump. Modality-specific guards below.
+
+### Molecule
+
 - **RDKit**: canonicalize SMILES; sanitize and skip/triage molecules that fail
   parsing rather than dropping silently; fix a fingerprint radius/size and
   record it; standardize tautomer/charge/salt with a stated protocol.
-- **Sequences / pLM embeddings**: record source + version (e.g. ESM variant);
-  pin max length and truncation policy; mask non-standard residues explicitly.
-  Mean-pool with the attention mask and EXCLUDE special tokens (BOS/EOS/CLS) —
-  pooling over padding or specials corrupts every vector. Assert truncation
-  (`len(seq) <= max_len`, else chunk/flag), run under `eval()`/`no_grad`, and
-  verify the embedding is invariant to batch composition (same seq → same vector
-  regardless of padding neighbors).
-- **pLM↔structure residue alignment**: PDB files have missing residues,
-  insertion codes (`82A`), and non-sequential numbering. Matching the i-th FASTA
-  char to the i-th ATOM record silently pairs embeddings with the wrong 3D
-  coordinates and trains on garbage without crashing. Align FASTA↔PDB sequence
-  (Biopython pairwise), assert high identity, and verify zero misalignment
-  around missing-density regions before fusing sequence and structure features.
 - **Chirality/stereo**: many mol→graph converters drop chiral tags and bond
   stereo, forcing enantiomers with different activity onto identical graphs.
   Assert a featurized R/S pair produces distinct representations.
-- **3D/structure**: record coordinate source (crystal vs predicted), protonation
-  and conformer protocol; keep equivariance assumptions explicit. Train-on-
-  crystal / screen-on-RDKit-conformer is a silent OOD shift — if evaluating on
-  generated conformers, report metric variance across an ETKDG+MMFF ensemble.
-- Cache features keyed by (input hash + featurizer version); invalidate on bump.
+
+### Sequence
+
+- **pLM embeddings**: record source + version (e.g. ESM variant); pin max length
+  and truncation policy; mask non-standard residues explicitly. Mean-pool with
+  the attention mask and EXCLUDE special tokens (BOS/EOS/CLS) — pooling over
+  padding or specials corrupts every vector. Assert truncation
+  (`len(seq) <= max_len`, else chunk/flag), run under `eval()`/`no_grad`, and
+  verify the embedding is invariant to batch composition (same seq → same vector
+  regardless of padding neighbors).
+
+### Structure
+
+- **3D coordinates**: record coordinate source (crystal vs predicted),
+  protonation and conformer protocol; keep equivariance assumptions explicit.
+  Train-on-crystal / screen-on-RDKit-conformer is a silent OOD shift — if
+  evaluating on generated conformers, report metric variance across an
+  ETKDG+MMFF ensemble.
+- **pLM↔structure residue alignment** (sequence+structure fusion): PDB files
+  have missing residues, insertion codes (`82A`), and non-sequential numbering.
+  Matching the i-th FASTA char to the i-th ATOM record silently pairs embeddings
+  with the wrong 3D coordinates and trains on garbage without crashing. Align
+  FASTA↔PDB sequence (Biopython pairwise), assert high identity, and verify zero
+  misalignment around missing-density regions before fusing the two.
 
 ## Reproducibility
 
