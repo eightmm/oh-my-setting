@@ -145,9 +145,10 @@ if [ "$apply_ok" = 1 ]; then
     git -C "$worktree" apply --binary "$PATCH" >/dev/null 2>&1 || true
     changed_files="$(git -C "$REPO" apply --numstat "$PATCH" 2>/dev/null | awk '{print $3}')"
 
-    # --- Gate 2: changed shell files parse (bash -n) ------------------------
+    # --- Gate 2: changed syntax-checked files parse -------------------------
     syntax_ok=1
-    syntax_detail="no shell files changed"
+    syntax_checked=0
+    syntax_detail="no syntax-checked files changed"
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       case "$f" in
@@ -158,13 +159,36 @@ if [ "$apply_ok" = 1 ]; then
               syntax_detail="bash -n failed: $f"
               break
             fi
-            syntax_detail="changed shell files parse"
+            syntax_checked=1
+          fi
+          ;;
+        *.py)
+          if [ -f "$worktree/$f" ] && command -v python3 >/dev/null 2>&1; then
+            if ! python3 -m py_compile "$worktree/$f" 2>/dev/null; then
+              syntax_ok=0
+              syntax_detail="python compile failed: $f"
+              break
+            fi
+            syntax_checked=1
+          fi
+          ;;
+        *.json)
+          if [ -f "$worktree/$f" ] && command -v python3 >/dev/null 2>&1; then
+            if ! python3 -m json.tool "$worktree/$f" >/dev/null 2>&1; then
+              syntax_ok=0
+              syntax_detail="json parse failed: $f"
+              break
+            fi
+            syntax_checked=1
           fi
           ;;
       esac
     done <<EOF
 $changed_files
 EOF
+    if [ "$syntax_ok" = 1 ] && [ "$syntax_checked" = 1 ]; then
+      syntax_detail="changed shell/python/json files parse"
+    fi
     [ "$syntax_ok" = 1 ] && record "syntax" "PASS" "$syntax_detail" \
       || record "syntax" "FAIL" "$syntax_detail"
 

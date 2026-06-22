@@ -161,6 +161,7 @@ ma_write_harness_context() {
   local include_task="$3"
   local include_ml="$4"
   local tmp
+  local warnings
 
   tmp="$(agent_memory_mktemp)" || return 0
   {
@@ -181,6 +182,15 @@ ma_write_harness_context() {
     printf -- '--- end harness context ---\n\n'
   fi
   rm -f "$tmp"
+
+  if [ "$include_task" -eq 1 ]; then
+    warnings="$(agent_task_loop_warnings "$repo" "$(agent_task_project_file "$repo")" 2>/dev/null || true)"
+    if [ -n "$warnings" ]; then
+      printf 'Active task warnings:\n'
+      printf '%s\n' "$warnings"
+      printf 'If these warnings apply, do not repeat the same approach. Revise the hypothesis, narrow scope, or report a blocker before continuing.\n\n'
+    fi
+  fi
 }
 
 # Manifest so a provider (and a human debugging context drift) can see what was

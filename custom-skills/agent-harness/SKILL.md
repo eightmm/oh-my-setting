@@ -77,6 +77,22 @@ moves across providers:
 same failure appears repeatedly, or the current git diff exceeds the task's
 line budget. The warning is advisory; the owning agent decides whether to stop
 and revise the hypothesis or continue.
+Provider prompts also receive the active loop warnings, so delegated workers can
+see the same "do not repeat the same approach" signal instead of only the host
+stderr warning.
+
+For live edits in the owning agent's tree, use `change-guard.sh` when scope
+drift or user edits are likely. It snapshots the current dirty files and
+declared path scope, then warns if a pre-existing dirty file changed or the diff
+escapes scope. It is advisory by default; `--strict` makes warnings fail.
+
+```bash
+~/.oh-my-setting/scripts/change-guard.sh --repo . --allow scripts/ begin
+~/.oh-my-setting/scripts/change-guard.sh --repo . check
+~/.oh-my-setting/scripts/change-guard.sh --repo . end
+~/.oh-my-setting/scripts/agent-task.sh --repo . update --constraint "allowed_paths: scripts/, README.md"
+~/.oh-my-setting/scripts/change-guard.sh --repo . --from-task begin
+```
 
 `close` archives the packet and promotes a one-line outcome (goal + next
 step) into project shared memory, so the next session starts from the
@@ -153,7 +169,7 @@ A worker patch from `multi-agent-delegate.sh` can be stale (its base moved),
 partial, or pass only under the worker's own assumptions. Before landing one on
 the main tree, run it through the admission gate: it applies the patch in a
 throwaway worktree off the current HEAD and runs a checks ladder — applies
-cleanly (not stale) → changed shell files parse → the verification contract
+cleanly (not stale) → changed shell/python/json files parse → the verification contract
 passes — then emits a verdict and a report. Exit is nonzero unless every gate
 passes, so it composes with `&&`.
 

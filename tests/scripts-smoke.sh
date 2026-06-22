@@ -1910,6 +1910,38 @@ test_multi_agent_ask_debate_skips_after_dropouts() {
   assert_file_contains "$project/out" 'summary: 3/3 providers succeeded (2 dropped during debate)'
 }
 
+test_multi_agent_prompt_injects_loop_warnings() {
+  local project="$TMP/ask-loop-warning"
+  local artifact_dir="$project/artifacts"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+
+  "$ROOT/scripts/agent-task.sh" \
+    --repo "$project" \
+    init \
+    --loop-attempts 2 \
+    --loop-max 2 \
+    --diff-budget 1 \
+    --last-failure "bash scripts/check.sh fast exit=1" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" update \
+    --last-failure "bash scripts/check.sh fast exit=1" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" update \
+    --last-failure "bash scripts/check.sh fast exit=1" >/dev/null
+  printf 'line one\nline two\n' >> "$project/file.txt"
+
+  HOME="$home_dir" OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex \
+    --prompt "Assess loop warnings" >/dev/null
+
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-loop-warnings-*.md' 'Active task warnings:'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-loop-warnings-*.md' 'warning: loop attempts exhausted: 2/2'
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-loop-warnings-*.md' 'do not repeat the same approach'
+}
+
 test_multi_agent_ask_all_round1_failures_exit() {
   local project="$TMP/ask-all-fail"
   local artifact_dir="$project/artifacts"
@@ -2419,6 +2451,56 @@ test_agent_task_loop_state_and_warnings() {
   assert_file_contains "$project/err" "warning: loop attempts exhausted: 3/3"
   assert_file_contains "$project/err" "warning: repeated last failure detected (3x): bash scripts/check.sh fast exit=1"
   assert_file_contains "$project/err" "warning: loop diff budget exceeded:"
+}
+
+test_change_guard_warns_scope_and_dirty_touch() {
+  local project="$TMP/change-guard"
+  local state="$project/.oms/guards/test.tsv"
+  local rc=0
+
+  make_committed_repo "$project"
+  printf 'user dirty\n' > "$project/dirty.txt"
+  git -C "$project" add dirty.txt
+  git -C "$project" commit -qm dirty-base
+  printf 'user edit\n' > "$project/dirty.txt"
+
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" --allow file.txt begin >/dev/null
+  printf 'agent touches dirty\n' > "$project/dirty.txt"
+  printf 'allowed change\n' > "$project/file.txt"
+  printf 'outside\n' > "$project/outside.txt"
+
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" check >"$project/out" || rc=$?
+  [ "$rc" = "0" ] || fail "advisory change-guard should exit 0"
+  assert_file_contains "$project/out" "pre-existing dirty file changed since guard begin: dirty.txt"
+  assert_file_contains "$project/out" "changed path outside declared scope: dirty.txt"
+  assert_file_contains "$project/out" "changed path outside declared scope: outside.txt"
+  if grep -Fq "changed path outside declared scope: file.txt" "$project/out"; then
+    fail "allowed path must not warn"
+  fi
+
+  if "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" --strict check >/dev/null 2>&1; then
+    fail "strict change-guard should fail on warnings"
+  fi
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" end >/dev/null
+  [ ! -f "$state" ] || fail "change-guard end should remove state"
+}
+
+test_change_guard_reads_allowed_paths_from_task() {
+  local project="$TMP/change-guard-task"
+  local state="$project/.oms/guards/test.tsv"
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --constraint "allowed_paths: file.txt, docs/" >/dev/null
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" --from-task begin >/dev/null
+  mkdir -p "$project/docs"
+  printf 'ok\n' > "$project/docs/note.md"
+  printf 'bad\n' > "$project/other.txt"
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" check >"$project/out"
+  if grep -Fq "changed path outside declared scope: docs/note.md" "$project/out"; then
+    fail "task allowed docs/ path must not warn"
+  fi
+  assert_file_contains "$project/out" "changed path outside declared scope: other.txt"
 }
 
 test_agent_call_outbound_scrubber_blocks_private_path() {
@@ -4788,6 +4870,50 @@ test_patch_admit_rejects_secret_in_patch() {
   assert_file_contains "$r" "secrets: FAIL"
 }
 
+test_patch_admit_rejects_python_syntax_error() {
+  local repo="$TMP/admit-python-syntax"
+  local SH="$ROOT/scripts/patch-admit.sh"
+  make_committed_repo "$repo"
+  git -C "$repo" checkout -q -b pybad
+  printf 'def broken(:\n    pass\n' > "$repo/bad.py"
+  git -C "$repo" add bad.py
+  git -C "$repo" commit -qm pybad
+  git -C "$repo" diff main pybad > "$repo/pybad.patch"
+  git -C "$repo" checkout -q main
+  git -C "$repo" branch -q -D pybad
+
+  if ( "$SH" --patch "$repo/pybad.patch" --repo "$repo" --verify true >/dev/null 2>&1 ); then
+    fail "python syntax error should reject the patch"
+  fi
+  local r
+  r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
+  [ -n "$r" ] || fail "no admission report written"
+  assert_file_contains "$r" "syntax: FAIL"
+  assert_file_contains "$r" "python compile failed: bad.py"
+}
+
+test_patch_admit_rejects_json_syntax_error() {
+  local repo="$TMP/admit-json-syntax"
+  local SH="$ROOT/scripts/patch-admit.sh"
+  make_committed_repo "$repo"
+  git -C "$repo" checkout -q -b jsonbad
+  printf '{ bad json\n' > "$repo/bad.json"
+  git -C "$repo" add bad.json
+  git -C "$repo" commit -qm jsonbad
+  git -C "$repo" diff main jsonbad > "$repo/jsonbad.patch"
+  git -C "$repo" checkout -q main
+  git -C "$repo" branch -q -D jsonbad
+
+  if ( "$SH" --patch "$repo/jsonbad.patch" --repo "$repo" --verify true >/dev/null 2>&1 ); then
+    fail "json syntax error should reject the patch"
+  fi
+  local r
+  r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
+  [ -n "$r" ] || fail "no admission report written"
+  assert_file_contains "$r" "syntax: FAIL"
+  assert_file_contains "$r" "json parse failed: bad.json"
+}
+
 test_agent_task_context_preserves_tail_sections() {
   local repo="$TMP/task-prune"
   make_committed_repo "$repo"
@@ -5000,6 +5126,7 @@ test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir
 test_multi_agent_review_single_provider_failure_exits
 test_multi_agent_ask_debate_tracks_dropout
 test_multi_agent_ask_debate_skips_after_dropouts
+test_multi_agent_prompt_injects_loop_warnings
 test_multi_agent_ask_all_round1_failures_exit
 test_multi_agent_ask_hypothesis_preset
 test_multi_agent_ask_dry_run_no_repo
@@ -5017,6 +5144,8 @@ test_delegate_requires_provider
 test_agent_memory_append_show_and_rejects_sensitive
 test_agent_task_init_context_and_rejects_sensitive
 test_agent_task_loop_state_and_warnings
+test_change_guard_warns_scope_and_dirty_touch
+test_change_guard_reads_allowed_paths_from_task
 test_agent_call_outbound_scrubber_blocks_private_path
 test_agent_call_missing_cli_writes_exit_and_index
 test_agent_call_provider_nonzero_writes_exit_and_index
@@ -5115,6 +5244,8 @@ test_patch_admit_rejects_stale_patch
 test_patch_admit_rejects_failed_verify
 test_patch_admit_requires_patch
 test_patch_admit_rejects_secret_in_patch
+test_patch_admit_rejects_python_syntax_error
+test_patch_admit_rejects_json_syntax_error
 test_agent_task_context_preserves_tail_sections
 test_debate_prompt_masks_quoted_paths
 test_oms_run_spine_links_and_joins

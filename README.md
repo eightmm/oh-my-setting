@@ -120,7 +120,8 @@ or skill. Nothing here is meant to be run by hand.
 | Multi-agent | Delegate (`multi-agent-delegate.sh`) | Runs a write task in an isolated git worktree, verifies it there, returns a reviewable patch; `--apply` only on a clean tree |
 | Multi-agent | Single-agent router (`agent-run.sh`) | Routes one prompt to one provider: read-only questions to a call, write tasks to a delegate worktree |
 | Multi-agent | Export/import handoff (`--export-only`, `import-agent-result.sh`) | Writes provider prompts as local artifacts when the session may not call other agent CLIs directly; answers are imported back into the same artifact index, passing the same outbound sensitive-content gate |
-| Multi-agent | Patch admission (`patch-admit.sh`) | Applies a delegated patch in a throwaway worktree and runs a checks ladder (applies cleanly → shell files parse → verification contract) before it lands; ADMIT/REJECT verdict |
+| Multi-agent | Change guard (`change-guard.sh`) | Snapshots the live dirty tree and warns when edits touch pre-existing dirty files or escape the declared path scope |
+| Multi-agent | Patch admission (`patch-admit.sh`) | Applies a delegated patch in a throwaway worktree and runs a checks ladder (applies cleanly → shell/python/json syntax parses → verification contract) before it lands; ADMIT/REJECT verdict |
 | Multi-agent | Artifact index (`artifact-index.sh`) | Every cross-agent run lands under `.oms/artifacts/` with a JSONL index — list, latest, prune |
 | Multi-agent | Safety rails (built-in) | Outbound prompts are scrubbed before any external CLI call (credentials, keys, machine/cluster details block the call); injected context is fenced; diffs are sanitized |
 | Code sources | Registry (`code-source.sh`) | Local registry of trusted reusable files (e.g. personal model blocks); fetch by name into the current project |
