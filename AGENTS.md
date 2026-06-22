@@ -40,6 +40,9 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Change only task-relevant lines. Match local style. Preserve unrelated/user changes.
 - Define success criteria for non-trivial work: step -> check.
 - Verify with the narrowest useful command. Report skipped/failed checks.
+- When asked to check, audit, or explain the current implementation, inspect the
+  relevant source files/scripts directly before answering. Do not rely only on
+  docs, status output, memory, or prior summaries.
 
 ## Instruction Priority
 

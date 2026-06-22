@@ -4,6 +4,8 @@
 - Read `PROJECT.md` first. If missing/draft/incomplete, interview and update it before coding.
 - Change only task-relevant lines.
 - Evidence before edit; inspect data path, loader, model, loss, metrics, tests.
+- Implementation checks require reading the relevant source files/scripts, not
+  only docs, status output, memory, or prior summaries.
 - No masking bugs with broad `try/except`, fallback `if`, silent `return None`, or zero padding.
 - Do not patch shape/data mismatches by padding/truncating unless spec requires it.
 - Python: use `uv sync/add/run`; local `.venv`.

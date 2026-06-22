@@ -5,6 +5,8 @@
 - Change only task-relevant lines.
 - New/vague work: interview -> spec -> confirm -> code.
 - Evidence before edit; no silent deps/toolchain changes.
+- Implementation checks require reading the relevant source files/scripts, not
+  only docs, status output, memory, or prior summaries.
 - No broad `try/except`, fallback `if`, silent `return None`, or masking failures.
 - Tests: behavior/interface first; narrow unit tests only for fragile pure logic.
 - Python, if used: prefer `uv sync/add/run`; local `.venv`.
