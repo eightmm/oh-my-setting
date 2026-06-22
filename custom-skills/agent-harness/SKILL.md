@@ -157,6 +157,9 @@ Every outbound provider prompt is scanned before the CLI is called.
 Sensitive-looking credentials, private keys, absolute machine paths, cluster
 details, raw logs, datasets, and checkpoints block the external call instead of
 being silently sent.
+For debate rounds, prior provider output is treated as untrusted quoted data:
+paths are masked and sensitive-looking lines are redacted before the quote is
+sent to the next provider.
 
 For ML repos, the digest comes from `agent-ml-context.sh`: entrypoint file names,
 verification contract hints, and recent `docs/EXPERIMENTS.jsonl` rows. Delegated

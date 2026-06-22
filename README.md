@@ -123,7 +123,7 @@ or skill. Nothing here is meant to be run by hand.
 | Multi-agent | Change guard (`change-guard.sh`) | Snapshots the live dirty tree and warns when edits touch pre-existing dirty files or escape the declared path scope |
 | Multi-agent | Patch admission (`patch-admit.sh`) | Applies a delegated patch in a throwaway worktree and runs a checks ladder (applies cleanly → shell/python/json syntax parses → verification contract) before it lands; ADMIT/REJECT verdict |
 | Multi-agent | Artifact index (`artifact-index.sh`) | Every cross-agent run lands under `.oms/artifacts/` with a JSONL index — list, latest, prune |
-| Multi-agent | Safety rails (built-in) | Outbound prompts are scrubbed before any external CLI call (credentials, keys, machine/cluster details block the call); injected context is fenced; diffs are sanitized |
+| Multi-agent | Safety rails (built-in) | Outbound prompts are scrubbed before any external CLI call (credentials, keys, machine/cluster details block the call); injected context is fenced; diffs and debate quotes are sanitized |
 | Code sources | Registry (`code-source.sh`) | Local registry of trusted reusable files (e.g. personal model blocks); fetch by name into the current project |
 | Code sources | GitHub fetch (`github-source.sh`) | Profile/discover/fetch via `gh`; no overwrite by default, provenance appended to `.oms/code-sources.jsonl` |
 | Experiments | Run ledger (`run-ledger.sh`) | Wraps training runs: pre-flight `check.sh` gate, duplicate-run warning, one JSONL row per run in `docs/EXPERIMENTS.jsonl`, `--metrics` records eval scalars |

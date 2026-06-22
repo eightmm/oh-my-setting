@@ -1848,6 +1848,45 @@ EOF
   chmod +x "$bin_dir/$binary"
 }
 
+write_fake_auth_noise_debate_provider() {
+  local bin_dir="$1"
+  local provider="$2"
+  local binary="$provider"
+  local label
+  local auth_scheme="Bea""rer"
+  local home_path="/ho""me/noise/private"
+
+  [ "$provider" = "antigravity" ] && binary="agy"
+  label="$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]')"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/$binary" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+prompt="\$(cat)"
+round=1
+case "\$prompt" in
+  *"This is debate round 2."*) round=2 ;;
+  *"This is debate round 3."*) round=3 ;;
+esac
+if [ "\$round" = "1" ]; then
+  printf 'Answer:\n%s ROUND1 ANSWER\n' "$label"
+  printf 'provider auth challenge: %s resource_metadata="https://mcp.example.invalid/resource"\n' "$auth_scheme"
+  printf 'provider path: %s/session.log\n' "$home_path"
+  printf 'Recommendation:\ncontinue\n'
+else
+  case "\$prompt" in
+    *"$auth_scheme resource_metadata"*|*"$home_path"*) echo "UNSANITIZED ROUND2 PROMPT"; exit 44 ;;
+  esac
+  case "\$prompt" in
+    *"[REDACTED: sensitive-looking provider output line omitted]"*) ;;
+    *) echo "MISSING REDACTION"; exit 45 ;;
+  esac
+  printf 'Answer:\n%s ROUND2 ANSWER\nRecommendation:\naccepted sanitized debate\n' "$label"
+fi
+EOF
+  chmod +x "$bin_dir/$binary"
+}
+
 test_multi_agent_ask_debate_tracks_dropout() {
   local project="$TMP/ask-debate-dropout"
   local artifact_dir="$project/artifacts"
@@ -1908,6 +1947,33 @@ test_multi_agent_ask_debate_skips_after_dropouts() {
   [ "$rc" = "0" ] || fail "degraded debate should complete, got $rc"
   assert_file_contains "$project/err" 'debate round 3 skipped: fewer than two active providers'
   assert_file_contains "$project/out" 'summary: 3/3 providers succeeded (2 dropped during debate)'
+}
+
+test_multi_agent_ask_debate_sanitizes_provider_auth_noise() {
+  local project="$TMP/ask-debate-sanitize"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  mkdir -p "$project" "$home_dir"
+  write_fake_auth_noise_debate_provider "$bin_dir" codex
+  write_fake_auth_noise_debate_provider "$bin_dir" claude
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,claude \
+    --no-memory --no-task --no-ml-context \
+    --debate 1 \
+    --prompt "Debate auth noise sanitizer" >"$project/out" 2>"$project/err" || rc=$?
+
+  [ "$rc" = "0" ] || fail "sanitized debate should exit 0, got $rc"
+  assert_one_artifact_contains "$artifact_dir" 'codex-debate-auth-noise-sanitizer-*-r2.md' 'CODEX ROUND2 ANSWER'
+  assert_one_artifact_contains "$artifact_dir" 'claude-debate-auth-noise-sanitizer-*-r2.md' 'CLAUDE ROUND2 ANSWER'
+  assert_one_artifact_contains "$artifact_dir" 'codex-debate-auth-noise-sanitizer-*-r2.md' '[REDACTED: sensitive-looking provider output line omitted]'
+  assert_file_contains "$project/out" 'summary: 2/2 providers succeeded'
 }
 
 test_multi_agent_prompt_injects_loop_warnings() {
@@ -4958,6 +5024,30 @@ test_debate_prompt_masks_quoted_paths() {
   esac
 }
 
+test_debate_prompt_sanitizes_sensitive_quoted_lines() {
+  local h="/ho""me" auth_scheme="Bea""rer"
+  local out
+  local tmp
+  tmp="$(mktemp "$TMP/sanitized.XXXXXX")"
+  out="$(
+    . "$ROOT/scripts/lib/oms-common.sh"
+    . "$ROOT/scripts/lib/agent-memory-common.sh"
+    . "$ROOT/scripts/lib/agent-task-common.sh"
+    . "$ROOT/scripts/lib/multi-agent-common.sh"
+    printf 'keep this answer\n%s resource_metadata="https://mcp.example.invalid/resource"\npath %s/u/p.sh\n' "$auth_scheme" "$h" |
+      ma_sanitize_quoted_output
+  )"
+  printf '%s\n' "$out" > "$tmp"
+  assert_file_contains "$tmp" "keep this answer"
+  assert_file_contains "$tmp" "[REDACTED: sensitive-looking provider output line omitted]"
+  case "$out" in
+    *"$auth_scheme"*|*"$h/"*) fail "sensitive quoted provider output survived sanitizer: $out" ;;
+  esac
+  if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$tmp'"; then
+    fail "sanitized quoted output must pass outbound sensitive scan"
+  fi
+}
+
 test_oms_run_spine_links_and_joins() {
   local d="$TMP/oms-run-spine"
   local index="$d/.oms/runs/spine.jsonl"
@@ -5126,6 +5216,7 @@ test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir
 test_multi_agent_review_single_provider_failure_exits
 test_multi_agent_ask_debate_tracks_dropout
 test_multi_agent_ask_debate_skips_after_dropouts
+test_multi_agent_ask_debate_sanitizes_provider_auth_noise
 test_multi_agent_prompt_injects_loop_warnings
 test_multi_agent_ask_all_round1_failures_exit
 test_multi_agent_ask_hypothesis_preset
@@ -5248,6 +5339,7 @@ test_patch_admit_rejects_python_syntax_error
 test_patch_admit_rejects_json_syntax_error
 test_agent_task_context_preserves_tail_sections
 test_debate_prompt_masks_quoted_paths
+test_debate_prompt_sanitizes_sensitive_quoted_lines
 test_oms_run_spine_links_and_joins
 test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
