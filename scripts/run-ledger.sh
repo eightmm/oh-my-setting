@@ -231,7 +231,18 @@ else
   # Gate is applicable (scripts/check.sh exists) but explicitly skipped: an
   # unsafe override. Demand a recorded justification rather than skip silently.
   [ -n "$REASON" ] || fail "skipping the applicable pre-flight gate requires --reason (or OMS_RUN_LEDGER_GATE_REASON); the override is recorded in the ledger"
-  echo "warning: UNSAFE pre-flight gate skip: $REASON" >&2
+  # gate_reason is human-authored audit text written to the git-tracked ledger.
+  # Unlike the command (which must be recorded verbatim), a secret here carries
+  # no information worth keeping, so block outright rather than warn -- and do
+  # not echo the raw reason, which would also leak it to terminal/CI logs.
+  reason_scan="$(mktemp)" || fail "mktemp failed"
+  printf '%s\n' "$REASON" > "$reason_scan"
+  if agent_memory_file_has_sensitive_content "$reason_scan"; then
+    rm -f "$reason_scan"
+    fail "gate skip --reason looks sensitive; use a clean audit reason (it is recorded in the git-tracked ledger)"
+  fi
+  rm -f "$reason_scan"
+  echo "warning: UNSAFE pre-flight gate skip recorded (reason in ledger)" >&2
   GATE_STATUS="skipped"
 fi
 
@@ -257,7 +268,7 @@ trap cleanup EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
-printf '%s\n%s\n%s\n' "$NOTE" "$REASON" "$*" > "$ledger_scan"
+printf '%s\n%s\n' "$NOTE" "$*" > "$ledger_scan"
 if agent_memory_file_has_sensitive_content "$ledger_scan"; then
   echo "warning: ledger note/command looks sensitive; it is recorded in git-tracked $LEDGER" >&2
 fi

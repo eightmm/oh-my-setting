@@ -721,22 +721,29 @@ test_run_ledger_scans_gate_reason() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
   chmod +x "$project/scripts/check.sh"
 
-  # A sensitive-looking reason is recorded in the git-tracked ledger, so it must
-  # trip the same sensitive-content scan as the note/command (warn, not block).
-  # Literals are split with '' so this test source stays clean of secrets (the
-  # self-review scan greps these very files).
+  # gate_reason is human audit text written to the git-tracked ledger: a
+  # secret-looking reason is blocked outright (the command does not run, no row
+  # is appended). Literals split with '' keep this test source clean of secrets.
   local reason='aws_secret_access_''key=EXAMPLEVALUE'
-  (cd "$project" && "$ROOT/scripts/run-ledger.sh" \
+  if (cd "$project" && "$ROOT/scripts/run-ledger.sh" \
     --no-gate --reason "$reason" \
-    -- bash -c 'exit 0' >/dev/null 2>"$project/err") ||
-    fail "sensitive gate reason should warn, not block"
+    -- bash -c 'touch ran' >/dev/null 2>"$project/err"); then
+    fail "sensitive gate reason must block, not run"
+  fi
   assert_file_contains "$project/err" "looks sensitive"
+  assert_not_exists "$project/ran"
+  assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
 
-  # The env-var form of the reason is scanned too.
-  (cd "$project" && OMS_RUN_LEDGER_GATE_REASON="$reason" \
-    "$ROOT/scripts/run-ledger.sh" --no-gate -- bash -c 'exit 0' >/dev/null 2>"$project/err2") ||
-    fail "sensitive env reason should warn, not block"
+  # The env-var form of the reason is blocked too, and the raw reason is not
+  # echoed back to stderr.
+  if (cd "$project" && OMS_RUN_LEDGER_GATE_REASON="$reason" \
+    "$ROOT/scripts/run-ledger.sh" --no-gate -- bash -c 'exit 0' >/dev/null 2>"$project/err2"); then
+    fail "sensitive env reason must block"
+  fi
   assert_file_contains "$project/err2" "looks sensitive"
+  if grep -Fq 'EXAMPLEVALUE' "$project/err2"; then
+    fail "raw reason must not be echoed to stderr"
+  fi
 }
 
 test_run_ledger_no_check_records_gate_none() {
