@@ -14,7 +14,9 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/agent-memory-common.sh"
 
 MANIFEST_DIR="${OMS_MANIFEST_DIR:-$PWD/.oms/manifests}"
-SCHEMA=1
+# schema 2 adds per-split key-column fingerprints (backward compatible: older
+# schema-1 manifests have no "keys" and are still read).
+SCHEMA=2
 
 NAME=""
 NOTE=""
@@ -108,8 +110,10 @@ fingerprint_split() {
   local label="$1"
   local file="$2"
   [ -f "$file" ] || fail "split file not found: $file"
+  local keys_nl=""
+  [ "${#KEY_COLUMNS[@]}" -gt 0 ] && keys_nl="$(printf '%s\n' "${KEY_COLUMNS[@]}")"
   OMS_LABEL="$label" OMS_FILE="$file" OMS_ID_COLUMN="$ID_COLUMN" \
-  OMS_ID_INDEX="$ID_INDEX" python3 <<'PY'
+  OMS_ID_INDEX="$ID_INDEX" OMS_KEYS="$keys_nl" python3 <<'PY'
 import csv, hashlib, json, os, sys
 
 label = os.environ["OMS_LABEL"]
@@ -148,14 +152,37 @@ else:
 
 uniq = sorted(set(ids))
 id_hash = hashlib.sha256("\n".join(uniq).encode()).hexdigest()
-print(json.dumps({
+
+# Fingerprint each recorded key column's value set. In chem-bio the key
+# assignment (scaffold/cluster/assay) IS the split contract, so a changed key
+# set must be detectable even when the ID set is stable. A missing column is
+# recorded as a sentinel so `check` reports it as drift rather than crashing.
+out = {
     "label": label,
     "file": path,
     "sha256": content.hexdigest(),
     "rows": len(ids),
     "unique_ids": len(uniq),
     "id_sha256": id_hash,
-}, ensure_ascii=False))
+}
+key_cols = [k for k in os.environ.get("OMS_KEYS", "").splitlines() if k]
+if key_cols:
+    with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+        sample = fh.read(4096); fh.seek(0)
+        delim = "\t" if "\t" in sample and sample.count("\t") >= sample.count(",") else ","
+        krows = list(csv.reader(fh, delimiter=delim))
+    kheader = krows[0] if krows else []
+    keys_out = {}
+    for k in key_cols:
+        if k in kheader:
+            ci = kheader.index(k)
+            kv = sorted({r[ci].strip() for r in krows[1:] if len(r) > ci and r[ci].strip()})
+            keys_out[k] = {"unique": len(kv),
+                           "sha256": hashlib.sha256("\n".join(kv).encode()).hexdigest()}
+        else:
+            keys_out[k] = {"unique": -1, "sha256": "<missing>"}
+    out["keys"] = keys_out
+print(json.dumps(out, ensure_ascii=False))
 PY
 }
 
@@ -275,17 +302,22 @@ cmd_check() {
   [ -n "$NAME" ] || fail "check requires --name"
   local p
   p="$(require_manifest "$NAME")"
-  # Restore the manifest's id-column/index so recompute matches capture.
+  # Restore the manifest's id-column/index and key columns so the recompute
+  # matches capture (key columns make fingerprint_split emit their hashes).
   ID_COLUMN="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("id_column",""))' "$p")"
   ID_INDEX="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("id_index",""))' "$p")"
+  KEY_COLUMNS=()
+  local k
+  while IFS= read -r k; do
+    [ -n "$k" ] && KEY_COLUMNS+=("$k")
+  done < <(python3 -c 'import json,sys
+for k in json.load(open(sys.argv[1])).get("leakage_keys", []): print(k)' "$p")
 
-  local drift=0 split_json label file cur want_sha want_idsha got_sha got_idsha
-  while IFS= read -r split_json; do
-    [ -n "$split_json" ] || continue
-    label="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["label"])')"
-    file="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
-    want_sha="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["sha256"])')"
-    want_idsha="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id_sha256"])')"
+  local drift=0 want_json label file cur verdict status msg
+  while IFS= read -r want_json; do
+    [ -n "$want_json" ] || continue
+    label="$(printf '%s' "$want_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["label"])')"
+    file="$(printf '%s' "$want_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
     [ -n "$label" ] || continue
     if [ ! -f "$file" ]; then
       echo "DRIFT $label: file missing ($file)"
@@ -293,26 +325,38 @@ cmd_check() {
       continue
     fi
     cur="$(fingerprint_split "$label" "$file")" || exit $?
-    got_sha="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin)["sha256"])')"
-    got_idsha="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id_sha256"])')"
-    if [ "$got_sha" = "$want_sha" ]; then
-      echo "ok    $label: unchanged"
-    elif [ "$got_idsha" = "$want_idsha" ]; then
-      echo "WARN  $label: file bytes changed but ID set is identical ($file)"
-    else
-      echo "DRIFT $label: ID set changed ($file)"
-      drift=1
-    fi
+    # Compare byte hash, then the logical ID set and every key-column set; a
+    # changed key set (e.g. a new scaffold/cluster assignment) is drift even
+    # when the ID set is stable.
+    verdict="$(OMS_WANT="$want_json" OMS_CUR="$cur" python3 <<'PY'
+import json, os
+w = json.loads(os.environ["OMS_WANT"]); c = json.loads(os.environ["OMS_CUR"])
+label, file = w["label"], w["file"]
+if c.get("sha256") == w.get("sha256"):
+    print("ok\tok    %s: unchanged" % label)
+    raise SystemExit
+reasons = []
+if c.get("id_sha256") != w.get("id_sha256"):
+    reasons.append("ID set")
+wk, ck = w.get("keys", {}), c.get("keys", {})
+for k in sorted(set(wk) | set(ck)):
+    if wk.get(k, {}).get("sha256") != ck.get(k, {}).get("sha256"):
+        reasons.append("key '%s'" % k)
+if reasons:
+    print("DRIFT\tDRIFT %s: %s changed (%s)" % (label, ", ".join(reasons), file))
+else:
+    print("WARN\tWARN  %s: file bytes changed but ID/key sets identical (%s)" % (label, file))
+PY
+)"
+    status="${verdict%%$'\t'*}"
+    msg="${verdict#*$'\t'}"
+    echo "$msg"
+    [ "$status" = "DRIFT" ] && drift=1
   done <<EOF
-$(python3 -c '
-import json, sys
+$(python3 -c 'import json, sys
 m = json.load(open(sys.argv[1]))
 for s in m.get("splits", []):
-    print(json.dumps({
-        "label": s["label"], "file": s["file"],
-        "sha256": s["sha256"], "id_sha256": s["id_sha256"],
-    }, ensure_ascii=False))
-' "$p")
+    print(json.dumps(s, ensure_ascii=False))' "$p")
 EOF
   [ "$drift" = 0 ] || exit 1
 }

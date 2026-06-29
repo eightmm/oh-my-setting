@@ -4912,6 +4912,32 @@ test_data_manifest_fail_closed_and_name() {
   fi
 }
 
+test_data_manifest_key_set_drift() {
+  local d="$TMP/data-manifest-keydrift"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+
+  mkdir -p "$d"
+  printf 'id,scaffold,y\nm1,s1,1\nm2,s2,0\n' > "$d/train.csv"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name c --id-column id \
+    --key-column scaffold --split train=train.csv >/dev/null ) || fail "create failed"
+  grep -Fq '"keys"' "$md/c.json" || fail "manifest should fingerprint key sets"
+
+  # Changing a non-key column (label) with the ID and scaffold sets stable: WARN, not drift.
+  printf 'id,scaffold,y\nm1,s1,0\nm2,s2,1\n' > "$d/train.csv"
+  local out
+  out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name c )" ||
+    fail "label-only change must not be drift"
+  printf '%s' "$out" | grep -Fq 'WARN' || fail "expected WARN for byte-only change"
+
+  # Changing the scaffold assignment (ID set still identical) IS drift.
+  printf 'id,scaffold,y\nm1,sX,0\nm2,s2,1\n' > "$d/train.csv"
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name c >"$d/out2" 2>&1 ); then
+    fail "changed key set must be reported as drift (nonzero)"
+  fi
+  grep -Fq "key 'scaffold'" "$d/out2" || fail "drift message should name the changed key"
+}
+
 test_data_manifest_hostile_split_values() {
   local d="$TMP/data-manifest-hostile"
   local md="$d/.oms/manifests"
@@ -5577,6 +5603,7 @@ test_data_manifest_check_and_leakage
 test_data_manifest_csv_column
 test_data_manifest_key_column_leakage
 test_data_manifest_fail_closed_and_name
+test_data_manifest_key_set_drift
 test_data_manifest_hostile_split_values
 test_data_manifest_unknown_subcommand_fails
 test_run_reconcile_records_terminal_jobs
