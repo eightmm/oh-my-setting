@@ -39,7 +39,11 @@ Options:
   --file PATH       Explicit task file path.
   --agent NAME      Agent label for appended notes. Default: agent.
   --goal TEXT       init/update: replace Goal.
-  --constraint TEXT update: append a Constraints bullet.
+  --constraint TEXT update: append a Constraints bullet. A bullet of the form
+                    "allowed_paths: src/, README.md" or
+                    "forbidden_paths: secrets/, *.lock" is read by
+                    change-guard.sh --from-task to scope live edits
+                    (deny beats allow).
   --done TEXT       update: append a Done Criteria bullet.
   --verify CMD      init/update: replace Verify.
   --loop-attempts N init/update: set Loop State attempts.

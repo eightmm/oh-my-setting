@@ -4938,6 +4938,34 @@ test_data_manifest_key_set_drift() {
   grep -Fq "key 'scaffold'" "$d/out2" || fail "drift message should name the changed key"
 }
 
+test_data_manifest_reads_schema1() {
+  local d="$TMP/data-manifest-schema1"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+
+  mkdir -p "$d"
+  printf 'a\nb\n' > "$d/train.txt"
+  printf 'c\n' > "$d/test.txt"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name c \
+    --split train=train.txt --split test=test.txt >/dev/null ) || fail "create failed"
+
+  # Downgrade the manifest to a pre-key-column schema-1 shape and confirm the
+  # current tool still reads it (check + leakage) without error.
+  python3 - "$md/c.json" <<'PY'
+import json, sys
+p = sys.argv[1]; m = json.load(open(p))
+m["schema"] = 1
+m.pop("leakage_keys", None)
+for s in m["splits"]:
+    s.pop("keys", None)
+json.dump(m, open(p, "w"))
+PY
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name c >/dev/null ) ||
+    fail "schema-1 manifest must still pass check"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name c >/dev/null ) ||
+    fail "schema-1 manifest must still run leakage"
+}
+
 test_data_manifest_hostile_split_values() {
   local d="$TMP/data-manifest-hostile"
   local md="$d/.oms/manifests"
@@ -5604,6 +5632,7 @@ test_data_manifest_csv_column
 test_data_manifest_key_column_leakage
 test_data_manifest_fail_closed_and_name
 test_data_manifest_key_set_drift
+test_data_manifest_reads_schema1
 test_data_manifest_hostile_split_values
 test_data_manifest_unknown_subcommand_fails
 test_run_reconcile_records_terminal_jobs

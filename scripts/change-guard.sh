@@ -179,8 +179,8 @@ cmd_begin() {
     done <<EOF
 $(parse_task_paths allowed_paths)
 EOF
-    while IFS= read -r allow; do
-      [ -n "$allow" ] && DENY_PATHS+=("$(normalize_path "$allow")")
+    while IFS= read -r deny; do
+      [ -n "$deny" ] && DENY_PATHS+=("$(normalize_path "$deny")")
     done <<EOF
 $(parse_task_paths forbidden_paths)
 EOF
@@ -191,8 +191,8 @@ EOF
     for allow in "${ALLOW_PATHS[@]}"; do
       printf 'allow\t%s\n' "$(normalize_path "$allow")"
     done
-    for allow in "${DENY_PATHS[@]:-}"; do
-      [ -n "$allow" ] && printf 'deny\t%s\n' "$(normalize_path "$allow")"
+    for deny in "${DENY_PATHS[@]:-}"; do
+      [ -n "$deny" ] && printf 'deny\t%s\n' "$(normalize_path "$deny")"
     done
     while IFS= read -r path; do
       [ -n "$path" ] || continue
