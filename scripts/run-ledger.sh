@@ -14,6 +14,7 @@ ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
 LEDGER=""
 NOTE=""
 METRICS_FILE=""
+REASON=""
 GATE="${OMS_RUN_LEDGER_GATE:-1}"
 
 usage() {
@@ -34,14 +35,22 @@ Options:
   --file PATH     Ledger path. Default: docs/EXPERIMENTS.jsonl.
   --metrics PATH  After the run, fold scalar fields from this JSON file into
                   the row's "metrics" so eval results are part of the record.
-  --no-gate       Skip the pre-flight scripts/check.sh gate.
+  --no-gate       Skip the pre-flight scripts/check.sh gate. Skipping an
+                  applicable gate is an UNSAFE override: it requires --reason
+                  and the skip is recorded in the ledger row.
+  --reason TEXT   Justification for an unsafe gate skip. Recorded in the row.
   -h, --help      Show this help.
 
 list [N]        Show the last N ledger rows (default 10).
 
+Each row records its gate decision: "passed", "skipped" (with reason),
+"recorded" (command already ran, e.g. a capsule re-record), or "none"
+(no executable scripts/check.sh).
+
 Environment:
-  OMS_RUN_LEDGER_GATE=0   Same as --no-gate.
-  OMS_RUN_LEDGER_DUP=0    Disable the duplicate-run warning.
+  OMS_RUN_LEDGER_GATE=0          Same as --no-gate.
+  OMS_RUN_LEDGER_GATE_REASON=..  Reason for an unsafe skip (same as --reason).
+  OMS_RUN_LEDGER_DUP=0           Disable the duplicate-run warning.
 
 The command line is recorded verbatim -- do not put secrets in arguments.
 EOF
@@ -116,6 +125,11 @@ while [ "$#" -gt 0 ]; do
       GATE=0
       shift
       ;;
+    --reason)
+      [ "$#" -ge 2 ] || fail "--reason requires text"
+      REASON="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -182,8 +196,17 @@ EOF
 fi
 
 # Pre-flight gate: never burn a run on a project whose own verification
-# contract fails. Fails loudly on unfilled contracts by design.
-if [ "$GATE" = "1" ] && [ -x scripts/check.sh ]; then
+# contract fails. Fails loudly on unfilled contracts by design. The decision
+# is recorded in the row so a skip can never pass silently.
+REASON="${REASON:-${OMS_RUN_LEDGER_GATE_REASON:-}}"
+GATE_STATUS="none"
+if [ -n "${OMS_RUN_LEDGER_STATUS_OVERRIDE:-}" ]; then
+  # The command already ran (e.g. a capsule re-record); a pre-flight gate is
+  # not applicable, so a skip here is not an unsafe override.
+  GATE_STATUS="recorded"
+elif [ ! -x scripts/check.sh ]; then
+  GATE_STATUS="none"
+elif [ "$GATE" = "1" ]; then
   gate_mode="fast"
   # Mode is implemented only when a case label exists; a comment or usage
   # mention must not select it. Labels may be quoted, parenthesized, or in
@@ -191,11 +214,18 @@ if [ "$GATE" = "1" ] && [ -x scripts/check.sh ]; then
   if oms_check_sh_has_ml_smoke scripts/check.sh; then
     gate_mode="ml-smoke"
   fi
-  echo "ledger: pre-flight gate: bash scripts/check.sh $gate_mode (skip with --no-gate)" >&2
+  echo "ledger: pre-flight gate: bash scripts/check.sh $gate_mode (skip with --no-gate --reason ...)" >&2
   if ! bash scripts/check.sh "$gate_mode" >&2; then
-    echo "error: pre-flight check failed; launch aborted (--no-gate to override)" >&2
+    echo "error: pre-flight check failed; launch aborted (--no-gate --reason ... to override)" >&2
     exit 3
   fi
+  GATE_STATUS="passed"
+else
+  # Gate is applicable (scripts/check.sh exists) but explicitly skipped: an
+  # unsafe override. Demand a recorded justification rather than skip silently.
+  [ -n "$REASON" ] || fail "skipping the applicable pre-flight gate requires --reason (or OMS_RUN_LEDGER_GATE_REASON); the override is recorded in the ledger"
+  echo "warning: UNSAFE pre-flight gate skip: $REASON" >&2
+  GATE_STATUS="skipped"
 fi
 
 # The note and command line are written verbatim to the git-tracked ledger.
@@ -300,7 +330,8 @@ EOF
 fi
 
 row_tmp="$(mktemp)" || fail "mktemp failed"
-OMS_METRICS_JSON="$METRICS_JSON" python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
+OMS_METRICS_JSON="$METRICS_JSON" OMS_GATE_STATUS="$GATE_STATUS" OMS_GATE_REASON="$REASON" \
+  python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
   "$status" "$duration_s" "$NOTE" "$@" <<'EOF' > "$row_tmp"
 import json, os, sys
 a = sys.argv[1:]
@@ -315,6 +346,10 @@ row = {
     "note": a[7],
     "cmd": a[8:],
 }
+row["gate"] = os.environ.get("OMS_GATE_STATUS", "none")
+reason = os.environ.get("OMS_GATE_REASON", "")
+if row["gate"] == "skipped" and reason:
+    row["gate_reason"] = reason
 mj = os.environ.get("OMS_METRICS_JSON", "")
 if mj:
     row["metrics"] = json.loads(mj)

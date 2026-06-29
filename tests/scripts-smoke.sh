@@ -676,6 +676,62 @@ test_run_ledger_records_and_lists() {
   printf '%s' "$out" | grep -Fq 'exit=3' || fail "ledger list missing failed run"
 }
 
+test_run_ledger_gate_skip_requires_reason() {
+  local project="$TMP/run-ledger-gate"
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  local led="docs/EXPERIMENTS.jsonl"
+
+  # Applicable gate that passes: row records gate "passed".
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "passing gate should allow the run"
+  assert_file_contains "$project/$led" '"gate": "passed"'
+
+  # Skipping an applicable gate without a reason must be refused.
+  if (cd "$project" && "$ROOT/scripts/run-ledger.sh" --no-gate -- bash -c 'exit 0' >/dev/null 2>"$project/e"); then
+    fail "unsafe gate skip without --reason must fail"
+  fi
+  assert_file_contains "$project/e" "requires --reason"
+
+  # Skipping with a reason is allowed and recorded in the row.
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --no-gate --reason "hotfix rerun" \
+    -- bash -c 'exit 0' >/dev/null 2>&1) || fail "gate skip with --reason should run"
+  assert_file_contains "$project/$led" '"gate": "skipped"'
+  assert_file_contains "$project/$led" '"gate_reason": "hotfix rerun"'
+
+  # A failing applicable gate still aborts the launch (exit 3).
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$project/scripts/check.sh"
+  if (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1); then
+    fail "failing gate must abort the launch"
+  fi
+}
+
+test_run_ledger_no_check_records_gate_none() {
+  local project="$TMP/run-ledger-nogate-none"
+  make_committed_repo "$project"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "run without check.sh should pass"
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"gate": "none"'
+}
+
+test_research_runner_no_gate_requires_reason() {
+  local project="$TMP/research-runner-gate"
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+
+  if (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+    --question q --hypothesis h --prediction p --baseline b \
+    --metric m --success s --change c --no-gate \
+    -- bash -c 'exit 0' >/dev/null 2>"$project/e"); then
+    fail "research-runner --no-gate without --reason must fail"
+  fi
+  assert_file_contains "$project/e" "reason"
+}
+
 test_run_ledger_warns_sensitive_command() {
   local project="$TMP/run-ledger-sensitive"
   make_committed_repo "$project"
@@ -3573,8 +3629,15 @@ EOF
   assert_not_exists "$project/launched"
   assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
 
-  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --no-gate -- bash -c 'exit 0' >/dev/null 2>&1) ||
-    fail "--no-gate should skip the failing gate"
+  # Bare --no-gate on an applicable gate is refused: the override must be justified.
+  if (cd "$project" && "$ROOT/scripts/run-ledger.sh" --no-gate -- bash -c 'exit 0' >/dev/null 2>&1); then
+    fail "--no-gate without --reason must not skip the gate"
+  fi
+  assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
+
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" --no-gate --reason "override the failing gate" \
+    -- bash -c 'exit 0' >/dev/null 2>&1) ||
+    fail "--no-gate --reason should skip the failing gate"
   [ -s "$project/docs/EXPERIMENTS.jsonl" ] || fail "no-gate run should append a ledger row"
 }
 
@@ -5233,6 +5296,9 @@ test_tsp_queue_wait_records_ledger
 test_tsp_queue_missing_tsp_fallback_records_ledger
 test_tsp_queue_secret_guard_blocks_enqueue
 test_run_ledger_records_and_lists
+test_run_ledger_gate_skip_requires_reason
+test_run_ledger_no_check_records_gate_none
+test_research_runner_no_gate_requires_reason
 test_run_ledger_warns_sensitive_command
 test_run_ledger_records_metrics
 test_github_source_profile_discover_and_fetch

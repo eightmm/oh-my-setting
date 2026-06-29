@@ -15,6 +15,7 @@ CHANGE=""
 METRICS_FILE=""
 LEDGER=""
 GATE=1
+REASON=""
 DRY_RUN=0
 
 usage() {
@@ -38,6 +39,8 @@ Options:
   --metrics PATH      Metrics JSON emitted by the command; passed to run-ledger.
   --file PATH         Ledger path. Default: docs/EXPERIMENTS.jsonl.
   --no-gate           Skip run-ledger's scripts/check.sh pre-flight gate.
+                      Unsafe override: requires --reason, recorded in the row.
+  --reason TEXT       Justification for an unsafe --no-gate skip.
   --dry-run           Validate and print the planned ledger note; do not run.
   -h, --help          Show help.
 
@@ -107,6 +110,11 @@ while [ "$#" -gt 0 ]; do
       GATE=0
       shift
       ;;
+    --reason)
+      [ "$#" -ge 2 ] || fail "--reason requires text"
+      REASON="$2"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -165,7 +173,10 @@ fi
 cmd=("$ROOT/scripts/run-ledger.sh" --note "$note")
 [ -n "$LEDGER" ] && cmd+=(--file "$LEDGER")
 [ -n "$METRICS_FILE" ] && cmd+=(--metrics "$METRICS_FILE")
-[ "$GATE" -eq 0 ] && cmd+=(--no-gate)
+if [ "$GATE" -eq 0 ]; then
+  need_text "--reason (required with --no-gate)" "$REASON"
+  cmd+=(--no-gate --reason "$REASON")
+fi
 cmd+=(-- "$@")
 
 if [ "$DRY_RUN" -eq 1 ]; then
