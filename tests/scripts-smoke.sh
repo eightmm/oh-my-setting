@@ -4798,6 +4798,37 @@ test_data_manifest_csv_column() {
 }
 
 
+test_data_manifest_key_column_leakage() {
+  local d="$TMP/data-manifest-key"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+
+  mkdir -p "$d"
+  # Disjoint IDs, but train and test share a Bemis-Murcko scaffold: exact-ID
+  # overlap is clean while scaffold-level leakage is real.
+  printf 'id,scaffold,y\nm1,c1ccccc1,1\nm2,C1CCCCC1,0\n' > "$d/train.csv"
+  printf 'id,scaffold,y\nm3,c1ccccc1,1\n' > "$d/test.csv"
+
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name c --id-column id \
+    --key-column scaffold --split train=train.csv --split test=test.csv >/dev/null ) ||
+    fail "key-column create failed"
+  grep -Fq '"leakage_keys"' "$md/c.json" || fail "manifest should record leakage_keys"
+
+  local out rc=0
+  out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name c )" || rc=$?
+  [ "$rc" = 1 ] || fail "scaffold leakage should exit 1"
+  printf '%s' "$out" | grep -Fq 'ok      train ∩ test: no overlap' ||
+    fail "exact-ID overlap should be clean"
+  printf '%s' "$out" | grep -Fq 'LEAKAGE[scaffold] train ∩ test: 1 shared key(s)' ||
+    fail "scaffold-level leakage must be flagged"
+
+  # A missing key column is rejected at create (cannot silently no-op).
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name bad --id-column id \
+    --key-column nope --split train=train.csv >/dev/null 2>&1 ); then
+    fail "unknown key-column must fail create"
+  fi
+}
+
 test_data_manifest_hostile_split_values() {
   local d="$TMP/data-manifest-hostile"
   local md="$d/.oms/manifests"
@@ -5460,6 +5491,7 @@ test_run_capsule_unknown_subcommand_fails
 test_run_capsule_whence_traces_checkpoint
 test_data_manifest_check_and_leakage
 test_data_manifest_csv_column
+test_data_manifest_key_column_leakage
 test_data_manifest_hostile_split_values
 test_data_manifest_unknown_subcommand_fails
 test_run_reconcile_records_terminal_jobs

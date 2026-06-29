@@ -22,6 +22,7 @@ ID_COLUMN=""
 ID_INDEX=""
 SHOW_EXAMPLES=0
 declare -a SPLITS=()
+declare -a KEY_COLUMNS=()
 SCAN_FILE=""
 cleanup_done=0
 
@@ -42,13 +43,19 @@ create options:
   --split LABEL=FILE Split file, e.g. --split train=train.txt. Repeatable.
   --id-column NAME   Treat files as CSV/TSV and use this header column as the ID.
   --id-index N       Use 0-based column N (CSV/TSV) as the ID.
+  --key-column NAME  Extra CSV/TSV header column to check for entity overlap on
+                     top of the ID (repeatable). Use for chem-bio leakage that
+                     exact-ID overlap misses: the project precomputes columns
+                     like inchikey, scaffold, uniprot, sequence_cluster, or
+                     assay_id, and this flags train/eval overlap on each.
   --note TEXT        Free-text note.
   (default: each non-empty line is one ID.)
 
 check    Recompute current split files; nonzero exit on any drift.
-leakage  Report ID overlap between splits; nonzero exit if any overlap.
-  --show-examples    Print up to 5 overlapping IDs (off by default; IDs may be
-                     sensitive).
+leakage  Report ID overlap between splits; nonzero exit if any overlap. Also
+         reports overlap on every recorded --key-column, tagged [key].
+  --show-examples    Print up to 5 overlapping IDs/keys (off by default; values
+                     may be sensitive).
 EOF
 }
 
@@ -182,6 +189,29 @@ cmd_create() {
   mkdir -p "$MANIFEST_DIR"
   agent_memory_ensure_oms_ignore_for_path "$MANIFEST_DIR" 2>/dev/null || true
 
+  # Key columns are looked up by CSV/TSV header name; validate they exist in
+  # every split before recording them, so leakage cannot silently no-op later.
+  if [ "${#KEY_COLUMNS[@]}" -gt 0 ]; then
+    local pair label file
+    for pair in "${SPLITS[@]}"; do
+      label="${pair%%=*}"; file="${pair#*=}"
+      [ -f "$file" ] || fail "split file not found: $file"
+      OMS_FILE="$file" OMS_KEYS="$(printf '%s\n' "${KEY_COLUMNS[@]}")" python3 <<'PY' || exit $?
+import csv, os, sys
+path = os.environ["OMS_FILE"]
+keys = [k for k in os.environ["OMS_KEYS"].splitlines() if k]
+with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+    sample = fh.read(4096); fh.seek(0)
+    delim = "\t" if "\t" in sample and sample.count("\t") >= sample.count(",") else ","
+    header = next(csv.reader(fh, delimiter=delim), [])
+missing = [k for k in keys if k not in header]
+if missing:
+    sys.stderr.write("error: key-column(s) %r not in header of %s\n" % (missing, path))
+    sys.exit(2)
+PY
+    done
+  fi
+
   local splits_json="["
   local first=1 entry label file pair
   for pair in "${SPLITS[@]}"; do
@@ -199,10 +229,13 @@ cmd_create() {
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   out="$(manifest_path "$NAME")"
   tmp="$(mktemp)" || fail "mktemp failed"
-  OMS_SPLITS="$splits_json" python3 - "$SCHEMA" "$NAME" "$ts" "$NOTE" \
+  local keys_nl=""
+  [ "${#KEY_COLUMNS[@]}" -gt 0 ] && keys_nl="$(printf '%s\n' "${KEY_COLUMNS[@]}")"
+  OMS_SPLITS="$splits_json" OMS_KEYS="$keys_nl" python3 - "$SCHEMA" "$NAME" "$ts" "$NOTE" \
     "$ID_COLUMN" "$ID_INDEX" > "$tmp" <<'PY'
 import json, os, sys
 a = sys.argv[1:]
+keys = [k for k in os.environ.get("OMS_KEYS", "").splitlines() if k]
 print(json.dumps({
     "schema": int(a[0]),
     "name": a[1],
@@ -210,6 +243,7 @@ print(json.dumps({
     "note": a[3],
     "id_column": a[4],
     "id_index": a[5],
+    "leakage_keys": keys,
     "splits": json.loads(os.environ["OMS_SPLITS"]),
 }, ensure_ascii=False, indent=2))
 PY
@@ -327,6 +361,68 @@ EOF
     done
   done
   rm -rf "$tmpdir"
+
+  # Entity overlap on recorded key columns (chem-bio leakage). Recomputed from
+  # the current files, like the ID overlap above. The project owns the chemistry
+  # (canonical SMILES -> inchikey/scaffold, sequence -> cluster); the harness
+  # only flags train/eval overlap on those precomputed columns.
+  local key_found=0
+  OMS_MANIFEST="$p" OMS_SHOW="$SHOW_EXAMPLES" python3 <<'PY' || key_found=$?
+import csv, json, os, sys
+
+m = json.load(open(os.environ["OMS_MANIFEST"]))
+keys = m.get("leakage_keys", [])
+if not keys:
+    sys.exit(0)
+splits = [(s["label"], s["file"]) for s in m.get("splits", [])]
+show = os.environ.get("OMS_SHOW") == "1"
+
+def column_values(path, key):
+    with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+        sample = fh.read(4096); fh.seek(0)
+        delim = "\t" if "\t" in sample and sample.count("\t") >= sample.count(",") else ","
+        rows = list(csv.reader(fh, delimiter=delim))
+    if not rows:
+        return set()
+    header = rows[0]
+    if key not in header:
+        return None
+    ci = header.index(key)
+    return {r[ci].strip() for r in rows[1:] if len(r) > ci and r[ci].strip()}
+
+found = 0
+for key in keys:
+    vals = {}
+    for label, path in splits:
+        if not os.path.isfile(path):
+            sys.stderr.write("leakage: split file missing, skipped: %s\n" % path)
+            continue
+        v = column_values(path, key)
+        if v is None:
+            sys.stderr.write("leakage: key-column %r not in header of %s; skipped\n" % (key, path))
+            continue
+        vals[label] = v
+    labels = list(vals)
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            la, lb = labels[i], labels[j]
+            overlap = vals[la] & vals[lb]
+            if overlap:
+                print("LEAKAGE[%s] %s ∩ %s: %d shared key(s)" % (key, la, lb, len(overlap)))
+                found = 1
+                if show:
+                    for x in sorted(overlap)[:5]:
+                        print("    " + x)
+            else:
+                print("ok[%s]      %s ∩ %s: no overlap" % (key, la, lb))
+sys.exit(1 if found else 0)
+PY
+  case "$key_found" in
+    0) ;;
+    1) found=1 ;;
+    *) fail "leakage: key-column check failed" ;;
+  esac
+
   [ "$found" = 0 ] || exit 1
 }
 
@@ -359,6 +455,7 @@ parse_common_args() {
       --id-index) [ "$#" -ge 2 ] || fail "--id-index requires N"
         case "$2" in *[!0-9]*|"") fail "--id-index must be a non-negative integer" ;; esac
         ID_INDEX="$2"; shift 2 ;;
+      --key-column) [ "$#" -ge 2 ] || fail "--key-column requires a name"; KEY_COLUMNS+=("$2"); shift 2 ;;
       --note) [ "$#" -ge 2 ] || fail "--note requires text"; NOTE="$2"; shift 2 ;;
       --show-examples) SHOW_EXAMPLES=1; shift ;;
       *) fail "unknown argument: $1" ;;

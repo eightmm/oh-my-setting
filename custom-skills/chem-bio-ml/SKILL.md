@@ -65,10 +65,16 @@ Give these guardrails teeth: fingerprint the splits and assert no ID overlap
 before training, and detect silent split drift between runs. Use a cluster/
 scaffold/target ID as the key (the unit you split on), not the row.
 
+Precompute chemistry keys (canonical SMILES -> inchikey/scaffold, sequence ->
+cluster) as columns, then pass each as `--key-column`: `leakage` flags
+train/eval overlap on every key, catching same-molecule/same-scaffold/same-
+target leakage that exact-ID overlap misses.
+
 ```bash
 ~/.oh-my-setting/scripts/data-manifest.sh create --name pl-v1 --id-column cluster_id \
+  --key-column inchikey --key-column scaffold --key-column uniprot_id \
   --split train=splits/train.csv --split val=splits/val.csv --split test=splits/test.csv
-~/.oh-my-setting/scripts/data-manifest.sh leakage --name pl-v1   # nonzero if any split shares an ID
+~/.oh-my-setting/scripts/data-manifest.sh leakage --name pl-v1   # nonzero on ID or any key overlap
 ~/.oh-my-setting/scripts/data-manifest.sh check   --name pl-v1   # nonzero if a split's ID set drifted
 ```
 
