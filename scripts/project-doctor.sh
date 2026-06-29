@@ -158,6 +158,21 @@ if [ -f "$PROJECT_DIR/PROJECT.md" ]; then
     warn "PROJECT.md state is draft; confirm spec before broad work"
   else
     ok "PROJECT.md state: $state"
+
+    # Past draft: the project contract (commands + verification) is supposed to
+    # be filled. Empty fields mean agents have no per-project success criteria
+    # to verify against -- enforce it where the contract lives (PROJECT.md), not
+    # in the template-synced managed block.
+    pm_field() {
+      grep -E "^- $1:" "$PROJECT_DIR/PROJECT.md" | head -n 1 |
+        sed -E "s/^- $1:[[:space:]]*//"
+    }
+    if [ -z "$(pm_field Setup)$(pm_field Test)$(pm_field Run)" ]; then
+      warn "PROJECT.md is past draft but ## Commands (Setup/Test/Run) are empty"
+    fi
+    if [ -z "$(pm_field 'Success criteria')" ]; then
+      warn "PROJECT.md is past draft but ## Verification 'Success criteria' is empty"
+    fi
   fi
 else
   fail "PROJECT.md missing; run: apply-project-template.sh auto $PROJECT_DIR"

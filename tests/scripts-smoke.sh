@@ -381,6 +381,35 @@ test_project_doctor_warns_unregistered_experiments() {
     fail "ledger without pre-registration section must warn"
 }
 
+test_project_doctor_warns_empty_contract_past_draft() {
+  local project="$TMP/doctor-contract"
+
+  mkdir -p "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+
+  # Fresh apply is draft: the contract warnings must stay silent.
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "fresh general apply should pass"
+  if printf '%s' "$out" | grep -q 'past draft but'; then
+    fail "draft PROJECT.md must not raise contract warnings"
+  fi
+
+  # Promote past draft while leaving commands/verification empty: warn.
+  sed -i 's/^- State: draft/- State: active/' "$project/PROJECT.md"
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "empty contract should warn, not fail"
+  printf '%s' "$out" | grep -Fq 'Commands (Setup/Test/Run) are empty' ||
+    fail "doctor should warn about empty commands"
+  printf '%s' "$out" | grep -Fq "'Success criteria' is empty" ||
+    fail "doctor should warn about empty success criteria"
+
+  # Fill the contract: warnings clear.
+  sed -i 's/^- Test:$/- Test: pytest/; s/^- Success criteria:$/- Success criteria: tests pass/' \
+    "$project/PROJECT.md"
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "filled contract should pass"
+  if printf '%s' "$out" | grep -q 'past draft but'; then
+    fail "filled contract must not warn: $out"
+  fi
+}
+
 test_review_verdicts_subcommand() {
   local dir="$TMP/verdicts"
   local run="20260611T000000Z-42"
@@ -2567,6 +2596,46 @@ test_change_guard_reads_allowed_paths_from_task() {
     fail "task allowed docs/ path must not warn"
   fi
   assert_file_contains "$project/out" "changed path outside declared scope: other.txt"
+}
+
+test_change_guard_forbidden_paths_deny_beats_allow() {
+  local project="$TMP/change-guard-deny"
+  local state="$project/.oms/guards/test.tsv"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts/lib"
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" \
+    --allow "scripts/" --deny "scripts/lib/" begin >/dev/null
+  printf 'ok\n' > "$project/scripts/tool.sh"
+  printf 'protected\n' > "$project/scripts/lib/core.sh"
+
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" check >"$project/out"
+  assert_file_contains "$project/out" "changed path in forbidden scope: scripts/lib/core.sh"
+  if grep -Fq "scripts/tool.sh" "$project/out"; then
+    fail "allowed non-denied path must not warn"
+  fi
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" end >/dev/null
+}
+
+test_change_guard_reads_forbidden_paths_from_task() {
+  local project="$TMP/change-guard-deny-task"
+  local state="$project/.oms/guards/test.tsv"
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --constraint "forbidden_paths: secrets/, *.lock" >/dev/null
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" --from-task begin >/dev/null
+  mkdir -p "$project/secrets"
+  printf 'x\n' > "$project/secrets/key.txt"
+  printf 'x\n' > "$project/deps.lock"
+  printf 'x\n' > "$project/app.py"
+
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" check >"$project/out"
+  assert_file_contains "$project/out" "changed path in forbidden scope: secrets/key.txt"
+  assert_file_contains "$project/out" "changed path in forbidden scope: deps.lock"
+  if grep -Fq "app.py" "$project/out"; then
+    fail "non-forbidden path must not warn when no allow list is set"
+  fi
 }
 
 test_agent_call_outbound_scrubber_blocks_private_path() {
@@ -5153,6 +5222,7 @@ test_apply_ml_scaffolds_check_contract
 test_project_doctor_warns_missing_check
 test_project_doctor_warns_structure_drift
 test_project_doctor_warns_unregistered_experiments
+test_project_doctor_warns_empty_contract_past_draft
 test_project_doctor_rejects_extra_arg
 test_review_verdicts_subcommand
 test_job_digest_log_mode
@@ -5237,6 +5307,8 @@ test_agent_task_init_context_and_rejects_sensitive
 test_agent_task_loop_state_and_warnings
 test_change_guard_warns_scope_and_dirty_touch
 test_change_guard_reads_allowed_paths_from_task
+test_change_guard_forbidden_paths_deny_beats_allow
+test_change_guard_reads_forbidden_paths_from_task
 test_agent_call_outbound_scrubber_blocks_private_path
 test_agent_call_missing_cli_writes_exit_and_index
 test_agent_call_provider_nonzero_writes_exit_and_index

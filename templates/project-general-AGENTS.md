@@ -17,18 +17,14 @@
 - Commit messages: Conventional Commits; subject <= 50 chars; body only for non-obvious why/risk.
 - Markdown/docs: short sections, bullets, direct commands; keep setup, safety, and specs explicit.
 
-## Project Commands
+## Project Commands And Contracts
 
-- Setup:
-- Test:
-- Lint/typecheck:
-- Run:
-- Build:
+The per-project contract lives in `PROJECT.md`, not here:
 
-## Project Contracts
+- Commands (Setup/Test/Run/Lint) -> `PROJECT.md` `## Commands`
+- Success criteria + required checks -> `PROJECT.md` `## Verification`
+- Public CLI/API/config, data/files, outputs/logs, do-not-touch -> `PROJECT.md`
+  `## Paths` and `## Notes`
 
-- Public CLI/API/config:
-- Data/files:
-- Outputs/logs:
-- Success criteria:
-- Do not touch:
+Once `PROJECT.md` is past `draft`, leaving Commands or Success criteria empty
+is flagged by `project-doctor.sh`. Fill them or mark `n/a` with a reason.

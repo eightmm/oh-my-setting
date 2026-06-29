@@ -14,6 +14,7 @@ STRICT=0
 FROM_TASK=0
 ACTION=""
 declare -a ALLOW_PATHS=()
+declare -a DENY_PATHS=()
 
 usage() {
   cat <<'EOF'
@@ -28,12 +29,16 @@ Options:
   --repo PATH       Git repo. Default: PWD.
   --file PATH       State file. Default: REPO/.oms/guards/change-guard.tsv.
   --allow PATH      Allowed changed path prefix or glob. Repeatable.
-  --from-task       Also read allowed_paths from the active task Constraints.
+  --deny PATH       Forbidden changed path prefix or glob. Repeatable.
+                    Deny beats allow: a denied path warns even if also allowed.
+  --from-task       Also read allowed_paths and forbidden_paths from the active
+                    task Constraints.
   --strict          Exit 1 when check finds warnings.
   -h, --help        Show help.
 
 Task scope format:
   agent-task.sh --repo . update --constraint "allowed_paths: scripts/, README.md"
+  agent-task.sh --repo . update --constraint "forbidden_paths: scripts/lib/, *.lock"
 EOF
 }
 
@@ -66,18 +71,20 @@ normalize_path() {
   printf '%s\n' "$path"
 }
 
-parse_task_allowed_paths() {
+parse_task_paths() {
+  # $1: constraint key (allowed_paths | forbidden_paths)
+  local key="$1"
   local task_file
   task_file="$(agent_task_project_file "$REPO")" || return 0
   [ -s "$task_file" ] || return 0
-  awk '
+  awk -v key="$key" '
     /^## Constraints$/ { in_section = 1; next }
     in_section == 1 && /^## / { in_section = 0 }
     in_section == 1 {
       line = $0
       sub(/^- [^[]*\[[^]]*\] /, "", line)
-      if (line ~ /(^|[[:space:]])allowed_paths:[[:space:]]*/) {
-        sub(/^.*allowed_paths:[[:space:]]*/, "", line)
+      if (line ~ ("(^|[[:space:]])" key ":[[:space:]]*")) {
+        sub("^.*" key ":[[:space:]]*", "", line)
         gsub(/,/, " ", line)
         print line
       }
@@ -126,13 +133,37 @@ path_allowed() {
   return 1
 }
 
+path_denied() {
+  local path="$1"
+  local deny
+  for deny in "${DENY_PATHS[@]:-}"; do
+    [ -n "$deny" ] || continue
+    case "$deny" in
+      *'*'*|*'?'*|*'['*)
+        # shellcheck disable=SC2254
+        case "$path" in
+          $deny) return 0 ;;
+        esac
+        ;;
+      *)
+        if [ "$path" = "$deny" ] || [ "${path#"$deny"/}" != "$path" ]; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
 load_state() {
   [ -f "$STATE_FILE" ] || fail "state file not found: $STATE_FILE"
   ALLOW_PATHS=()
+  DENY_PATHS=()
   while IFS=$'\t' read -r kind a _rest; do
     case "$kind" in
       repo) REPO="$a" ;;
       allow) ALLOW_PATHS+=("$a") ;;
+      deny) DENY_PATHS+=("$a") ;;
       dirty) : ;;
     esac
   done < "$STATE_FILE"
@@ -146,7 +177,12 @@ cmd_begin() {
     while IFS= read -r allow; do
       [ -n "$allow" ] && ALLOW_PATHS+=("$(normalize_path "$allow")")
     done <<EOF
-$(parse_task_allowed_paths)
+$(parse_task_paths allowed_paths)
+EOF
+    while IFS= read -r allow; do
+      [ -n "$allow" ] && DENY_PATHS+=("$(normalize_path "$allow")")
+    done <<EOF
+$(parse_task_paths forbidden_paths)
 EOF
   fi
   {
@@ -154,6 +190,9 @@ EOF
     printf 'head\t%s\n' "$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || printf 'no-head')"
     for allow in "${ALLOW_PATHS[@]}"; do
       printf 'allow\t%s\n' "$(normalize_path "$allow")"
+    done
+    for allow in "${DENY_PATHS[@]:-}"; do
+      [ -n "$allow" ] && printf 'deny\t%s\n' "$(normalize_path "$allow")"
     done
     while IFS= read -r path; do
       [ -n "$path" ] || continue
@@ -183,7 +222,10 @@ cmd_check() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     path="$(normalize_path "$path")"
-    if ! path_allowed "$path"; then
+    if path_denied "$path"; then
+      printf 'warning: changed path in forbidden scope: %s\n' "$path"
+      warnings=$((warnings + 1))
+    elif ! path_allowed "$path"; then
       printf 'warning: changed path outside declared scope: %s\n' "$path"
       warnings=$((warnings + 1))
     fi
@@ -227,6 +269,11 @@ while [ "$#" -gt 0 ]; do
     --allow)
       [ "$#" -ge 2 ] || fail "--allow requires path"
       ALLOW_PATHS+=("$(normalize_path "$2")")
+      shift 2
+      ;;
+    --deny)
+      [ "$#" -ge 2 ] || fail "--deny requires path"
+      DENY_PATHS+=("$(normalize_path "$2")")
       shift 2
       ;;
     --from-task)
