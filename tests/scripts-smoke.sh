@@ -701,11 +701,42 @@ test_run_ledger_gate_skip_requires_reason() {
   assert_file_contains "$project/$led" '"gate": "skipped"'
   assert_file_contains "$project/$led" '"gate_reason": "hotfix rerun"'
 
+  # The gate decision is visible in list output, including the skip reason.
+  out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5)"
+  printf '%s' "$out" | grep -Fq 'gate=passed' || fail "list should show gate=passed"
+  printf '%s' "$out" | grep -Fq 'gate=skipped(hotfix rerun)' ||
+    fail "list should show the skip reason"
+
   # A failing applicable gate still aborts the launch (exit 3).
   printf '#!/usr/bin/env bash\nexit 1\n' > "$project/scripts/check.sh"
   if (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1); then
     fail "failing gate must abort the launch"
   fi
+}
+
+test_run_ledger_scans_gate_reason() {
+  local project="$TMP/run-ledger-gate-reason-sensitive"
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+
+  # A sensitive-looking reason is recorded in the git-tracked ledger, so it must
+  # trip the same sensitive-content scan as the note/command (warn, not block).
+  # Literals are split with '' so this test source stays clean of secrets (the
+  # self-review scan greps these very files).
+  local reason='aws_secret_access_''key=EXAMPLEVALUE'
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" \
+    --no-gate --reason "$reason" \
+    -- bash -c 'exit 0' >/dev/null 2>"$project/err") ||
+    fail "sensitive gate reason should warn, not block"
+  assert_file_contains "$project/err" "looks sensitive"
+
+  # The env-var form of the reason is scanned too.
+  (cd "$project" && OMS_RUN_LEDGER_GATE_REASON="$reason" \
+    "$ROOT/scripts/run-ledger.sh" --no-gate -- bash -c 'exit 0' >/dev/null 2>"$project/err2") ||
+    fail "sensitive env reason should warn, not block"
+  assert_file_contains "$project/err2" "looks sensitive"
 }
 
 test_run_ledger_no_check_records_gate_none() {
@@ -5328,6 +5359,7 @@ test_tsp_queue_missing_tsp_fallback_records_ledger
 test_tsp_queue_secret_guard_blocks_enqueue
 test_run_ledger_records_and_lists
 test_run_ledger_gate_skip_requires_reason
+test_run_ledger_scans_gate_reason
 test_run_ledger_no_check_records_gate_none
 test_research_runner_no_gate_requires_reason
 test_run_ledger_warns_sensitive_command

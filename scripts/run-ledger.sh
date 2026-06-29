@@ -97,8 +97,15 @@ for line in sys.stdin:
         s = str(x).replace("\n", " ").replace("\r", " ").replace("\t", " ")
         return s[:60]
     metrics = ("  [" + " ".join("%s=%s" % (_clean(k), _clean(v)) for k, v in m.items()) + "]") if m else ""
-    print("%s  exit=%d  %ds  sha=%s%s  %s%s%s" % (
-        r["ts"], r["exit"], r["duration_s"], r["git_sha"], dirty,
+    g = r.get("gate")
+    if g == "skipped" and r.get("gate_reason"):
+        gate = "  gate=skipped(%s)" % _clean(r["gate_reason"])
+    elif g:
+        gate = "  gate=%s" % g
+    else:
+        gate = ""
+    print("%s  exit=%d  %ds%s  sha=%s%s  %s%s%s" % (
+        r["ts"], r["exit"], r["duration_s"], gate, r["git_sha"], dirty,
         " ".join(r["cmd"]), metrics, note))
 '
   exit 0
@@ -250,7 +257,7 @@ trap cleanup EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
-printf '%s\n%s\n' "$NOTE" "$*" > "$ledger_scan"
+printf '%s\n%s\n%s\n' "$NOTE" "$REASON" "$*" > "$ledger_scan"
 if agent_memory_file_has_sensitive_content "$ledger_scan"; then
   echo "warning: ledger note/command looks sensitive; it is recorded in git-tracked $LEDGER" >&2
 fi
