@@ -66,6 +66,15 @@ fail() {
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
+# Manifest names become a file path under MANIFEST_DIR; reject anything that
+# could escape it or write outside (this runs from agent-driven prompts).
+validate_manifest_name() {
+  case "$1" in
+    ""|.|..|*/*|*\\*|*..*|*[!A-Za-z0-9._-]*)
+      fail "manifest name must match [A-Za-z0-9._-]+ with no path separators or .." ;;
+  esac
+}
+
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
@@ -83,6 +92,7 @@ trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
 
 manifest_path() {
+  validate_manifest_name "$1"
   printf '%s/%s.json\n' "$MANIFEST_DIR" "$1"
 }
 
@@ -165,8 +175,11 @@ if col or idx != "":
     if not rows:
         sys.exit(0)
     if col:
-        header = rows[0]; ci = header.index(col) if col in header else -1
-        if ci < 0: sys.exit(0)
+        header = rows[0]
+        if col not in header:
+            sys.stderr.write("error: id-column %r not in header of %s\n" % (col, path))
+            sys.exit(2)
+        ci = header.index(col)
         body = rows[1:]
     else:
         ci = int(idx); body = rows
@@ -321,13 +334,15 @@ cmd_leakage() {
     label="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["label"])')"
     file="$(printf '%s' "$split_json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["file"])')"
     [ -n "$label" ] || continue
-    if [ ! -f "$file" ]; then
-      echo "leakage: split file missing, skipped: $file" >&2
-      idx=$((idx + 1))
-      continue
-    fi
+    # Fail closed: a leakage gate that silently skips an unreadable split could
+    # report "clean" while never checking it.
+    [ -f "$file" ] || { rm -rf "$tmpdir"; fail "leakage: recorded split file missing: $file"; }
     printf '%s' "$label" > "$tmpdir/$idx.label"
-    emit_ids "$file" | sort -u > "$tmpdir/$idx.ids"
+    if ! emit_ids "$file" > "$tmpdir/$idx.ids.raw"; then
+      rm -rf "$tmpdir"
+      fail "leakage: cannot extract IDs from $file (recorded id-column missing?)"
+    fi
+    sort -u "$tmpdir/$idx.ids.raw" > "$tmpdir/$idx.ids"
     idx=$((idx + 1))
   done <<EOF
 $(python3 -c '
@@ -394,13 +409,15 @@ found = 0
 for key in keys:
     vals = {}
     for label, path in splits:
+        # Fail closed (exit 2): never report a key "clean" by silently skipping
+        # a split whose file or key column went missing.
         if not os.path.isfile(path):
-            sys.stderr.write("leakage: split file missing, skipped: %s\n" % path)
-            continue
+            sys.stderr.write("leakage: recorded split file missing: %s\n" % path)
+            sys.exit(2)
         v = column_values(path, key)
         if v is None:
-            sys.stderr.write("leakage: key-column %r not in header of %s; skipped\n" % (key, path))
-            continue
+            sys.stderr.write("leakage: recorded key-column %r not in header of %s\n" % (key, path))
+            sys.exit(2)
         vals[label] = v
     labels = list(vals)
     for i in range(len(labels)):
@@ -461,6 +478,8 @@ parse_common_args() {
       *) fail "unknown argument: $1" ;;
     esac
   done
+  [ -z "$ID_COLUMN" ] || [ -z "$ID_INDEX" ] ||
+    fail "--id-column and --id-index are mutually exclusive"
 }
 
 case "${1:-}" in

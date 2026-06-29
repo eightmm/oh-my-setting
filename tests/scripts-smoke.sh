@@ -4860,6 +4860,51 @@ test_data_manifest_key_column_leakage() {
   fi
 }
 
+test_data_manifest_fail_closed_and_name() {
+  local d="$TMP/data-manifest-failclosed"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+
+  mkdir -p "$d"
+  printf 'id,scaffold,y\nm1,s1,1\nm2,s2,0\n' > "$d/train.csv"
+  printf 'id,scaffold,y\nm3,s3,1\n' > "$d/test.csv"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name c --id-column id \
+    --key-column scaffold --split train=train.csv --split test=test.csv >/dev/null ) ||
+    fail "create failed"
+
+  # A recorded split file that disappears must fail the leakage gate, not pass.
+  mv "$d/test.csv" "$d/test.csv.bak"
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name c >/dev/null 2>&1 ); then
+    fail "leakage must fail closed when a recorded split file is missing"
+  fi
+  mv "$d/test.csv.bak" "$d/test.csv"
+
+  # A recorded key column that disappears (header drift) must fail closed.
+  printf 'id,y\nm3,1\n' > "$d/test.csv"
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name c >/dev/null 2>&1 ); then
+    fail "leakage must fail closed when a recorded key column is gone"
+  fi
+
+  # A recorded id column that disappears must fail closed too.
+  printf 'scaffold,y\ns3,1\n' > "$d/test.csv"
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name c >/dev/null 2>&1 ); then
+    fail "leakage must fail closed when the recorded id column is gone"
+  fi
+
+  # Path-traversal / unsafe manifest names are rejected.
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name ../escape \
+    --split train=train.csv >/dev/null 2>&1 ); then
+    fail "create must reject a name with path traversal"
+  fi
+  [ ! -e "$d/.oms/escape.json" ] || fail "traversal name must not have written outside MANIFEST_DIR"
+
+  # --id-column and --id-index together are ambiguous and rejected.
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name c2 --id-column id --id-index 0 \
+    --split train=train.csv >/dev/null 2>&1 ); then
+    fail "--id-column and --id-index must be mutually exclusive"
+  fi
+}
+
 test_data_manifest_hostile_split_values() {
   local d="$TMP/data-manifest-hostile"
   local md="$d/.oms/manifests"
@@ -5524,6 +5569,7 @@ test_run_capsule_whence_traces_checkpoint
 test_data_manifest_check_and_leakage
 test_data_manifest_csv_column
 test_data_manifest_key_column_leakage
+test_data_manifest_fail_closed_and_name
 test_data_manifest_hostile_split_values
 test_data_manifest_unknown_subcommand_fails
 test_run_reconcile_records_terminal_jobs
