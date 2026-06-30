@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODE="${OH_MY_SETTING_AUTO_UPDATE_MODE:-apply}"
+MODE="${OH_MY_SETTING_AUTO_UPDATE_MODE:-check}"
 METHOD="${OH_MY_SETTING_AUTO_UPDATE_METHOD:-auto}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -16,12 +16,14 @@ usage() {
   cat <<'EOF'
 Usage: install-autoupdate.sh [--apply|--check-only] [--method auto|systemd|cron] [--dry-run] [-h|--help]
 
-Install a user-level oh-my-setting auto-update trigger. Default mode is apply:
-it updates only when the checkout is behind upstream and can fast-forward.
+Install a user-level oh-my-setting auto-update trigger. Default mode is
+check-only: it records when the checkout is behind upstream but does not
+relink. Pass --apply (or set the env) to fast-forward automatically when
+the checkout is behind and can fast-forward.
 
 Options:
-  --apply              Run auto-update.sh apply on the schedule. Default.
-  --check-only         Only fetch/check and record update availability.
+  --apply              Run auto-update.sh apply on the schedule (opt-in).
+  --check-only         Only fetch/check and record update availability. Default.
   --method METHOD      auto, systemd, or cron. Default: auto.
   --dry-run            Print what would be installed without writing.
   -h, --help           Show this help.

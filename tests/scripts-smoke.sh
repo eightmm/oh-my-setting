@@ -4446,6 +4446,17 @@ test_autoupdate_cron_install_and_uninstall() {
   local out
 
   mkdir -p "$config_home"
+  # Default mode is check-only: installing without --apply must not schedule a
+  # self-mutating apply run.
+  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron >"$TMP/autoupdate-default"
+  assert_file_contains "$TMP/autoupdate-default" "cron installed (check)"
+  if grep -Fq 'auto-update.sh" apply' "$cron_file"; then
+    fail "default auto-update trigger must be check-only, not apply"
+  fi
+  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
+
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >"$TMP/autoupdate-install"
   assert_file_contains "$TMP/autoupdate-install" "cron installed (apply)"

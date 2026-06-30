@@ -23,7 +23,7 @@ Environment:
   OH_MY_SETTING_GENERATE_SLURM=0   Skip Slurm snapshot generation.
   OH_MY_SETTING_INSTALL_TOOLS=0    Skip Node/uv/agent CLI installation.
   OH_MY_SETTING_AUTO_UPDATE=0      Skip auto-update trigger installation.
-  OH_MY_SETTING_AUTO_UPDATE_MODE=check  Install check-only trigger instead of apply.
+  OH_MY_SETTING_AUTO_UPDATE_MODE=apply  Auto-apply fast-forward updates (default: check-only).
   OH_MY_SETTING_REQUIRE_TOOLS=0    Do not fail doctor on missing CLIs.
   OH_MY_SETTING_DIR=/path/to/dir   Install location.
 EOF
