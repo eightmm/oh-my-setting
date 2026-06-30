@@ -14,9 +14,10 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/agent-memory-common.sh"
 
 MANIFEST_DIR="${OMS_MANIFEST_DIR:-$PWD/.oms/manifests}"
-# schema 2 adds per-split key-column fingerprints (backward compatible: older
-# schema-1 manifests have no "keys" and are still read).
-SCHEMA=2
+# schema 3 adds per-key (id -> key) mapping fingerprint + empty count; schema 2
+# added per-split key-column fingerprints. Older manifests (no "keys" or no
+# "pair_sha256") are still read; their absent fields are simply not compared.
+SCHEMA=3
 
 NAME=""
 NOTE=""
@@ -165,6 +166,9 @@ out = {
     "unique_ids": len(uniq),
     "id_sha256": id_hash,
 }
+def _sha(lines):
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
 key_cols = [k for k in os.environ.get("OMS_KEYS", "").splitlines() if k]
 if key_cols:
     with open(path, newline="", encoding="utf-8", errors="replace") as fh:
@@ -172,15 +176,36 @@ if key_cols:
         delim = "\t" if "\t" in sample and sample.count("\t") >= sample.count(",") else ","
         krows = list(csv.reader(fh, delimiter=delim))
     kheader = krows[0] if krows else []
+    # ID column for the (id -> key) mapping fingerprint, so a key set that is
+    # unchanged but reassigned across rows (e.g. scaffolds permuted) is still
+    # caught as drift. None when the ID is line-based (no column to pair on).
+    id_ci = None
+    if col and col in kheader:
+        id_ci = kheader.index(col)
+    elif idx != "":
+        id_ci = int(idx)
     keys_out = {}
     for k in key_cols:
-        if k in kheader:
-            ci = kheader.index(k)
-            kv = sorted({r[ci].strip() for r in krows[1:] if len(r) > ci and r[ci].strip()})
-            keys_out[k] = {"unique": len(kv),
-                           "sha256": hashlib.sha256("\n".join(kv).encode()).hexdigest()}
-        else:
+        if k not in kheader:
             keys_out[k] = {"unique": -1, "sha256": "<missing>"}
+            continue
+        kci = kheader.index(k)
+        vals, pairs, empty = [], [], 0
+        for r in krows[1:]:
+            kval = r[kci].strip() if len(r) > kci else ""
+            if kval:
+                vals.append(kval)
+            else:
+                empty += 1
+            if id_ci is not None and len(r) > id_ci and r[id_ci].strip():
+                pairs.append(r[id_ci].strip() + "\t" + kval)
+        uniqv = sorted(set(vals))
+        entry = {"unique": len(uniqv), "sha256": _sha(uniqv), "empty": empty}
+        # empty keys are legitimate (e.g. acyclic molecules have no Murcko
+        # scaffold); record the count for visibility rather than dropping silently.
+        if id_ci is not None:
+            entry["pair_sha256"] = _sha(sorted(pairs))
+        keys_out[k] = entry
     out["keys"] = keys_out
 print(json.dumps(out, ensure_ascii=False))
 PY
@@ -340,7 +365,13 @@ if c.get("id_sha256") != w.get("id_sha256"):
     reasons.append("ID set")
 wk, ck = w.get("keys", {}), c.get("keys", {})
 for k in sorted(set(wk) | set(ck)):
-    if wk.get(k, {}).get("sha256") != ck.get(k, {}).get("sha256"):
+    a, b = wk.get(k, {}), ck.get(k, {})
+    # drift on the key value set, or on the (id -> key) mapping when both sides
+    # recorded it (older manifests predate pair_sha256 -- don't false-positive).
+    sha_diff = a.get("sha256") != b.get("sha256")
+    pair_diff = ("pair_sha256" in a and "pair_sha256" in b
+                 and a["pair_sha256"] != b["pair_sha256"])
+    if sha_diff or pair_diff:
         reasons.append("key '%s'" % k)
 if reasons:
     print("DRIFT\tDRIFT %s: %s changed (%s)" % (label, ", ".join(reasons), file))

@@ -4938,6 +4938,43 @@ test_data_manifest_key_set_drift() {
   grep -Fq "key 'scaffold'" "$d/out2" || fail "drift message should name the changed key"
 }
 
+test_data_manifest_key_mapping_drift_and_empty() {
+  local d="$TMP/data-manifest-keymap"
+  local md="$d/.oms/manifests"
+  local SH="$ROOT/scripts/data-manifest.sh"
+
+  mkdir -p "$d"
+  # One row has an empty scaffold (legitimate: acyclic molecule has no Murcko scaffold).
+  printf 'id,scaffold\nm1,sA\nm2,sB\nm3,\n' > "$d/train.csv"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name c --id-column id \
+    --key-column scaffold --split train=train.csv >/dev/null ) || fail "create failed"
+  # Empty key value is recorded, not dropped silently.
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))
+e=m["splits"][0]["keys"]["scaffold"]["empty"]
+sys.exit(0 if e==1 else 1)' "$md/c.json" || fail "empty key count should be recorded (expected 1)"
+
+  # Permute the scaffold assignment (m1<->m2): the value SET {sA,sB} is identical
+  # but the id->scaffold mapping changed. Must be drift, not WARN.
+  printf 'id,scaffold\nm1,sB\nm2,sA\nm3,\n' > "$d/train.csv"
+  if ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name c >"$d/out" 2>&1 ); then
+    fail "permuted id->key mapping must be reported as drift"
+  fi
+  grep -Fq "key 'scaffold'" "$d/out" || fail "drift should name the remapped key"
+
+  # A manifest predating pair_sha256 (keys recorded, no pair field) must not
+  # false-drift on an unchanged file.
+  printf 'id,scaffold\nm1,sA\nm2,sB\nm3,\n' > "$d/train.csv"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" create --name old --id-column id \
+    --key-column scaffold --split train=train.csv >/dev/null ) || fail "create failed"
+  python3 -c 'import json,sys
+p=sys.argv[1]; m=json.load(open(p))
+for s in m["splits"]:
+    for kv in s.get("keys",{}).values(): kv.pop("pair_sha256",None)
+json.dump(m,open(p,"w"))' "$md/old.json"
+  ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name old >/dev/null ) ||
+    fail "manifest without pair_sha256 must not false-drift on unchanged file"
+}
+
 test_data_manifest_reads_schema1() {
   local d="$TMP/data-manifest-schema1"
   local md="$d/.oms/manifests"
@@ -5632,6 +5669,7 @@ test_data_manifest_csv_column
 test_data_manifest_key_column_leakage
 test_data_manifest_fail_closed_and_name
 test_data_manifest_key_set_drift
+test_data_manifest_key_mapping_drift_and_empty
 test_data_manifest_reads_schema1
 test_data_manifest_hostile_split_values
 test_data_manifest_unknown_subcommand_fails
