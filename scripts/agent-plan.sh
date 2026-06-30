@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 ROOT="$(cd "$ROOT" && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
 
 REPO="$PWD"
 PLAN_FILE=""
@@ -40,11 +42,13 @@ Commands:
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
          [--verify CMD]
-  claim  --id ID --provider NAME [--ttl TEXT]   Mark a task claimed by a worker.
+  claim  --id ID --provider NAME [--ttl TEXT]   Claim a ready task for a worker.
   start  --id ID                     Mark a claimed task running.
-  finish --id ID [--artifact PATH] [--patch PATH]   Mark a task done.
+  review --id ID [--artifact PATH] [--patch PATH]   Move a claimed/running task to review.
+  finish --id ID [--artifact PATH] [--patch PATH]   Mark a task done (from claimed/running/review).
   block  --id ID --reason TEXT       Mark a task blocked.
-  reopen --id ID                     Return a task to ready.
+  release --id ID                    Requeue a claimed/running/review task to ready (worker died).
+  reopen --id ID                     Return a blocked task to ready.
   show   --id ID                     Print one task as JSON.
   list   [--state STATE]             List tasks (optionally by state).
   ready                              Print ids actionable now (deps done).
@@ -55,7 +59,8 @@ Commands:
                                      task; with --claim --provider, atomically
                                      claim it first (pull-work primitive).
 
-State: ready -> claimed -> running -> {review|done}; block -> blocked; reopen -> ready.
+State: ready -> claimed -> running -> review -> done. Any -> blocked (block);
+blocked -> ready (reopen); claimed/running/review -> ready (release).
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 EOF
 }
@@ -84,7 +89,7 @@ while [ "$#" -gt 0 ]; do
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
     --claim) CLAIM=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|add|claim|start|finish|block|reopen|show|list|ready|status|next|brief)
+    init|add|claim|start|review|finish|block|release|reopen|show|list|ready|status|next|brief)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -97,11 +102,16 @@ PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # All mutations and queries run in one python process: load -> act -> (write|print).
-OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
-OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
-OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
-OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
-OMS_VERIFY="$VERIFY" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
+# The whole load/decide/save section runs under a file lock so concurrent
+# `next --claim` from different agents cannot both win the same task (the write
+# itself is atomic, but the read-decide-write critical section is not).
+export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
+  OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
+  OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
+  OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
+  OMS_VERIFY="$VERIFY" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM"
+
+plan_run() {
 python3 <<'PY'
 import json, os, re, sys, tempfile
 
@@ -186,29 +196,44 @@ def get_task(i):
     if not t: die("no such task: %s" % i)
     return t
 
-if act in ("claim", "start", "finish", "block", "reopen", "show"):
+if act in ("claim", "start", "finish", "review", "block", "release", "reopen", "show"):
     i = require_id(); t = get_task(i)
     if act == "claim":
         prov = env("OMS_PROVIDER")
         if not prov: die("--provider is required for claim")
-        if t["state"] not in ("ready", "blocked"):
-            die("task %s is %s; only ready/blocked can be claimed" % (i, t["state"]))
+        # Only a ready task can be claimed; a blocked task must be reopened first.
+        if t["state"] != "ready":
+            die("task %s is %s; only a ready task can be claimed (reopen blocked first)" % (i, t["state"]))
         if not deps_done(d, t):
             pending = [x for x in t["depends"] if tasks.get(x, {}).get("state") != "done"]
             die("task %s has unfinished dependencies: %s" % (i, ", ".join(pending)))
-        t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"), reason="")
+        t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
+                 claimed_at=ts, reason="")
     elif act == "start":
         if t["state"] != "claimed": die("task %s is %s; claim it first" % (i, t["state"]))
         t["state"] = "running"
+    elif act == "review":
+        if t["state"] not in ("claimed", "running"):
+            die("task %s is %s; only a claimed/running task can go to review" % (i, t["state"]))
+        t.update(state="review", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
+                 patch=env("OMS_PATCH") or t.get("patch", ""))
     elif act == "finish":
+        # Done means the work landed; reach it only after it was in progress.
+        if t["state"] not in ("claimed", "running", "review"):
+            die("task %s is %s; finish only from claimed/running/review" % (i, t["state"]))
         t.update(state="done", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""))
     elif act == "block":
         r = env("OMS_REASON")
         if not r: die("--reason is required for block")
         t.update(state="blocked", reason=r)
+    elif act == "release":
+        # Requeue a claimed/running task (e.g. the worker died) back to ready.
+        if t["state"] not in ("claimed", "running", "review"):
+            die("task %s is %s; only a claimed/running/review task can be released" % (i, t["state"]))
+        t.update(state="ready", provider="", ttl="", claimed_at="", reason="")
     elif act == "reopen":
-        t.update(state="ready", provider="", ttl="", reason="")
+        t.update(state="ready", provider="", ttl="", claimed_at="", reason="")
     elif act == "show":
         print(json.dumps(t, ensure_ascii=False, indent=2)); sys.exit(0)
     t["updated"] = ts
@@ -232,7 +257,8 @@ if act == "next":
         prov = env("OMS_PROVIDER")
         if not prov:
             die("--claim requires --provider")
-        t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"), reason="")
+        t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
+                 claimed_at=ts, reason="")
         t["updated"] = ts
         save(d)
     print(brief_text(t))
@@ -273,6 +299,11 @@ if act == "status":
 
 die("unhandled action: %s" % act)
 PY
+}
 
 # Keep the plan dir out of git like the rest of .oms state.
+mkdir -p "$(dirname "$PLAN_FILE")"
 agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
+
+# Serialize the read-decide-write section against other agents.
+oms_with_file_lock "$PLAN_FILE" plan_run

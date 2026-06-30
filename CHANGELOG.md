@@ -11,7 +11,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   dependencies, path scope, and verify command; `ready`/`status` compute what is
   actionable now so work can be split across agents without collisions.
   `next`/`brief` emit a paste-able work brief; `next --claim --provider` is a
-  pull-work primitive (exit 3 when nothing is actionable).
+  pull-work primitive (exit 3 when nothing is actionable). All mutations and
+  `next --claim` run under a file lock so concurrent agents cannot both claim the
+  same task; adds `review`/`release` commands, a stricter lifecycle (finish only
+  from claimed/running/review; a blocked task must be reopened before claim), and
+  a `claimed_at` timestamp.
 - `multi-agent-delegate.sh --task-id` and artifact-index lineage: every index
   row now records `base_sha` and any `task_id`, surfaced in `artifact-index list`,
   so a run traces back to the plan subtask and commit it came from.

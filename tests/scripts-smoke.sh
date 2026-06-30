@@ -2677,6 +2677,46 @@ test_agent_plan_dag_and_ready() {
   "$SH" --repo "$d" status | grep -Fq 'done=1' || fail "status should report done=1"
 }
 
+test_agent_plan_lock_single_winner() {
+  local d="$TMP/agent-plan-race"
+  local SH="$ROOT/scripts/agent-plan.sh"
+  mkdir -p "$d"; git -C "$d" init -q .
+  "$SH" --repo "$d" init --goal race >/dev/null
+  "$SH" --repo "$d" add --id P1 --title one >/dev/null
+
+  # Two concurrent claims must not both win the same task (file lock guards the
+  # read-decide-write section; the loser gets exit 3 = nothing actionable).
+  "$SH" --repo "$d" next --claim --provider codex >"$d/a.out" 2>/dev/null &
+  "$SH" --repo "$d" next --claim --provider claude >"$d/b.out" 2>/dev/null &
+  wait
+  local winners
+  winners="$(cat "$d/a.out" "$d/b.out" | grep -c '^# Task P1:' || true)"
+  [ "$winners" = 1 ] || fail "exactly one worker should claim P1, got $winners"
+}
+
+test_agent_plan_lifecycle() {
+  local d="$TMP/agent-plan-life"
+  local SH="$ROOT/scripts/agent-plan.sh"
+  mkdir -p "$d"; git -C "$d" init -q .
+  "$SH" --repo "$d" init --goal life >/dev/null
+  "$SH" --repo "$d" add --id P1 --title one >/dev/null
+
+  # finish is not allowed straight from ready.
+  if "$SH" --repo "$d" finish --id P1 >/dev/null 2>&1; then
+    fail "finish from ready must be rejected"
+  fi
+  # release requeues a claimed task back to ready.
+  "$SH" --repo "$d" claim --id P1 --provider codex >/dev/null
+  "$SH" --repo "$d" show --id P1 | grep -Fq '"claimed_at"' || fail "claim should record claimed_at"
+  "$SH" --repo "$d" release --id P1 >/dev/null
+  [ "$("$SH" --repo "$d" ready)" = "P1" ] || fail "release should return P1 to ready"
+  # a blocked task cannot be claimed directly; it must be reopened.
+  "$SH" --repo "$d" block --id P1 --reason wait >/dev/null
+  if "$SH" --repo "$d" claim --id P1 --provider codex >/dev/null 2>&1; then
+    fail "claiming a blocked task must be rejected"
+  fi
+}
+
 test_delegate_task_id_lineage() {
   local d="$TMP/delegate-lineage"
   local idx
@@ -5693,6 +5733,8 @@ test_agent_task_init_context_and_rejects_sensitive
 test_agent_task_loop_state_and_warnings
 test_agent_plan_dag_and_ready
 test_agent_plan_next_and_brief
+test_agent_plan_lock_single_winner
+test_agent_plan_lifecycle
 test_delegate_task_id_lineage
 test_change_guard_warns_scope_and_dirty_touch
 test_change_guard_reads_allowed_paths_from_task
