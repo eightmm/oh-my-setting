@@ -35,6 +35,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   See `docs/RELEASE.md`.
 
 ### Changed
+- README "What's Inside" is now an eight-row capability table; the full
+  per-script catalog moved to `docs/COMPONENTS.md` (no scripts removed). The
+  task plan is grouped under "Agent state", not "Memory".
 - Auto-update trigger defaults to **check-only** (records availability) instead
   of auto-applying; opt in with `OH_MY_SETTING_AUTO_UPDATE_MODE=apply`.
 
