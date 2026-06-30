@@ -17,6 +17,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `project-doctor.sh`: flags an empty `## Commands`/`## Verification` once
   `PROJECT.md` is past draft.
 - `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, this changelog.
+- Tag-triggered `release` workflow: gates on `scripts/check.sh`, verifies the
+  tag matches `VERSION`, and publishes a GitHub Release with `install.sh`,
+  `install.sh.sha256`, and a `SHA256SUMS` manifest (`scripts/gen-checksums.sh`).
+  See `docs/RELEASE.md`.
 
 ### Changed
 - Auto-update trigger defaults to **check-only** (records availability) instead

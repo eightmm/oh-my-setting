@@ -1,0 +1,72 @@
+name: release
+
+# Cut a release by pushing a tag that matches the VERSION file, e.g.:
+#   git tag -a v0.3.1 -m v0.3.1 && git push origin v0.3.1
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Never publish a red tree: run the same gate as CI.
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: verification gate
+        run: bash scripts/check.sh
+
+      # The tag must match the VERSION file so the release is unambiguous.
+      - name: verify tag matches VERSION
+        run: |
+          want="v$(cat VERSION)"
+          if [ "$TAG" != "$want" ]; then
+            echo "error: tag $TAG does not match VERSION ($want)" >&2
+            exit 1
+          fi
+
+      - name: generate checksums
+        run: |
+          scripts/gen-checksums.sh > SHA256SUMS
+          sha256sum install.sh > install.sh.sha256
+          echo "== SHA256SUMS =="; cat SHA256SUMS
+
+      # Release notes: the matching CHANGELOG section if present, else auto.
+      - name: extract release notes
+        id: notes
+        run: |
+          ver="${TAG#v}"
+          awk -v v="$ver" '
+            $0 ~ ("^## \\[" v "\\]") {f=1; next}
+            f && /^## / {exit}
+            f {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md || true
+          if [ -s RELEASE_NOTES.md ]; then
+            echo "have_notes=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notes=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: create release
+        run: |
+          if [ "${{ steps.notes.outputs.have_notes }}" = "1" ]; then
+            gh release create "$TAG" install.sh install.sh.sha256 SHA256SUMS \
+              --title "$TAG" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$TAG" install.sh install.sh.sha256 SHA256SUMS \
+              --title "$TAG" --generate-notes
+          fi

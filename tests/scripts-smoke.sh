@@ -3430,7 +3430,9 @@ test_scrubber_passes_harness_sources() {
   # Self-review regression gate: anything that can enter diff/prompt context
   # must pass the outbound scrubber. Env examples and generated cluster refs
   # are excluded here exactly like MA_SAFE_PATHS excludes them from diffs.
-  (cd "$ROOT" && git ls-files -z -- . ':(exclude).env*' | xargs -0 cat) > "$bundle"
+  # .github/ is CI config, not agent payload, and its `${{ secrets.* }}` /
+  # GH_TOKEN references are indirections, not literal secrets — excluded too.
+  (cd "$ROOT" && git ls-files -z -- . ':(exclude).env*' ':(exclude,glob).github/**' | xargs -0 cat) > "$bundle"
   if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$bundle'"; then
     bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; grep -Ein \"\$(agent_memory_sensitive_re)\" '$bundle' | head -n 5" >&2 || true
     fail "harness sources must pass the outbound scrubber (self-review regression)"
@@ -4496,6 +4498,19 @@ test_check_gate_hard_fails_without_shellcheck() {
     fail "check.sh must exit nonzero when shellcheck is missing"
   printf '%s' "$out" | grep -Fq "shellcheck is not installed" ||
     fail "check.sh missing-tool message absent: $out"
+}
+
+test_gen_checksums_deterministic() {
+  local a b
+  a="$("$ROOT/scripts/gen-checksums.sh")" || fail "gen-checksums should succeed"
+  b="$("$ROOT/scripts/gen-checksums.sh")" || fail "gen-checksums should succeed"
+  [ "$a" = "$b" ] || fail "gen-checksums output must be deterministic"
+  printf '%s\n' "$a" | grep -Eq '  install\.sh$' || fail "should include install.sh"
+  printf '%s\n' "$a" | grep -Eq '  VERSION$' || fail "should include VERSION"
+  # Every line must be valid sha256sum format: 64 hex + two spaces + path.
+  if printf '%s\n' "$a" | grep -Evq '^[0-9a-f]{64}  '; then
+    fail "non-sha256 line in gen-checksums output"
+  fi
 }
 
 test_ci_status_reports_conclusion() {
@@ -5664,6 +5679,7 @@ test_autoupdate_cron_install_and_uninstall
 test_autoupdate_install_dry_run_no_writes
 test_install_skills_detects_name_mismatch
 test_check_gate_hard_fails_without_shellcheck
+test_gen_checksums_deterministic
 test_ci_status_reports_conclusion
 test_install_hooks_writes_pre_push
 test_session_handoff_claude_digest
