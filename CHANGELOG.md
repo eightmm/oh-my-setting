@@ -12,6 +12,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   actionable now so work can be split across agents without collisions.
   `next`/`brief` emit a paste-able work brief; `next --claim --provider` is a
   pull-work primitive (exit 3 when nothing is actionable).
+- `multi-agent-delegate.sh --task-id` and artifact-index lineage: every index
+  row now records `base_sha` and any `task_id`, surfaced in `artifact-index list`,
+  so a run traces back to the plan subtask and commit it came from.
 - `change-guard.sh`: `forbidden_paths` task constraint (deny beats allow),
   documented in `agent-task.sh` help.
 - `data-manifest.sh`: `--key-column` entity-overlap leakage (inchikey/scaffold/

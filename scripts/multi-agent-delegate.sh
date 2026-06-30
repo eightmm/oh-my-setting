@@ -22,6 +22,7 @@ KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
+TASK_ID=""
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
 usage() {
@@ -52,6 +53,8 @@ Options:
   --no-memory          Do not attach shared harness memory.
   --no-task            Do not attach the active task handoff packet.
   --no-ml-context      Do not attach the compact ML context digest.
+  --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
+                       artifact-index rows for lineage. [A-Za-z0-9._-]+.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt and empty patch without calling the CLI.
@@ -114,6 +117,14 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_ML_CONTEXT=0
       shift
       ;;
+    --task-id)
+      [ "$#" -ge 2 ] || fail "--task-id requires id"
+      case "$2" in
+        *[!A-Za-z0-9._-]*|"") fail "--task-id must match [A-Za-z0-9._-]+" ;;
+      esac
+      TASK_ID="$2"
+      shift 2
+      ;;
     --artifact-dir)
       [ "$#" -ge 2 ] || fail "--artifact-dir requires path"
       ARTIFACT_DIR="$2"
@@ -137,6 +148,10 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# Stamp every artifact-index row from this delegation with the plan/task id so
+# the run can be traced back to its subtask (ma_append_artifact_index reads it).
+[ -n "$TASK_ID" ] && export OMS_TASK_ID="$TASK_ID"
 
 case "$TO" in
   codex|claude|antigravity|agy) ;;

@@ -2677,6 +2677,25 @@ test_agent_plan_dag_and_ready() {
   "$SH" --repo "$d" status | grep -Fq 'done=1' || fail "status should report done=1"
 }
 
+test_delegate_task_id_lineage() {
+  local d="$TMP/delegate-lineage"
+  local idx
+  make_committed_repo "$d"
+
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --repo "$d" --to codex --task-id P1 --prompt "do x" --no-verify >/dev/null 2>&1 ||
+    fail "dry-run delegate with --task-id should succeed"
+  idx="$d/.oms/artifacts/index.jsonl"
+  assert_file_contains "$idx" '"task_id": "P1"'
+  assert_file_contains "$idx" '"base_sha"'
+
+  # An unsafe task id is rejected before anything runs.
+  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --repo "$d" --to codex --task-id '../x' --prompt y --no-verify >/dev/null 2>&1; then
+    fail "invalid --task-id must be rejected"
+  fi
+}
+
 test_agent_plan_next_and_brief() {
   local d="$TMP/agent-plan-next"
   local SH="$ROOT/scripts/agent-plan.sh"
@@ -5674,6 +5693,7 @@ test_agent_task_init_context_and_rejects_sensitive
 test_agent_task_loop_state_and_warnings
 test_agent_plan_dag_and_ready
 test_agent_plan_next_and_brief
+test_delegate_task_id_lineage
 test_change_guard_warns_scope_and_dirty_touch
 test_change_guard_reads_allowed_paths_from_task
 test_change_guard_forbidden_paths_deny_beats_allow

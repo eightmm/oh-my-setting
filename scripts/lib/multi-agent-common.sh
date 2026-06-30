@@ -298,9 +298,14 @@ ma_append_artifact_index() {
     prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
   fi
   task_goal="$(ma_task_goal "$repo" | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200)"
+  # Lineage: the commit the run was based on, and the optional plan/task id
+  # (OMS_TASK_ID) that triggered it. Both let a row be traced back to its work.
+  local base_sha=""
+  base_sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)"
 
+  OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
   oms_with_file_lock "$index" python3 - "$index" "$kind" "$provider" "$exit_code" "$artifact_rel" "$patch_rel" "$prompt_hash" "$verify_exit" "$task_goal" "$source_rel" <<'EOF'
-import json, sys, time
+import json, os, re, sys, time
 index, kind, provider, exit_code, artifact, patch, prompt_hash, verify_exit, task_goal, source = sys.argv[1:]
 row = {
     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -308,6 +313,12 @@ row = {
     "provider": provider,
     "exit": int(exit_code),
 }
+base_sha = os.environ.get("OMS_INDEX_BASE_SHA", "")
+if base_sha:
+    row["base_sha"] = base_sha
+task_id = os.environ.get("OMS_INDEX_TASK_ID", "")
+if task_id and re.match(r"^[A-Za-z0-9._-]+$", task_id):
+    row["task_id"] = task_id
 if artifact:
     row["artifact"] = artifact
 if patch:

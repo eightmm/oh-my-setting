@@ -245,6 +245,10 @@ def format_row(r):
     ]
     if "verify_exit" in r:
         parts.append("verify=%s" % r.get("verify_exit"))
+    if r.get("task_id"):
+        parts.append("task=%s" % r["task_id"])
+    if r.get("base_sha"):
+        parts.append("base=%s" % r["base_sha"])
     if r.get("artifact"):
         parts.append("artifact=%s" % r["artifact"])
     if r.get("patch"):

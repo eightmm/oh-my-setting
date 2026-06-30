@@ -117,12 +117,12 @@ or skill. Nothing here is meant to be run by hand.
 | Project | Project doctor (`project-doctor.sh`) | Verifies every agent sees the same rules, spec state, and scaffold; warns on ML structure drift (stray root files, tracked data, missing `src/` layout) |
 | Multi-agent | Review (`multi-agent-review.sh`) | Three local models review the diff in parallel; ML pre-training gate (`--ml`), debate rounds, per-finding verdicts, and `--gate` one-command pass/fail verdict |
 | Multi-agent | Ask (`multi-agent-ask.sh`) | Same question to all three models for independent opinions; optional debate rounds and hypothesis design-attack preset |
-| Multi-agent | Delegate (`multi-agent-delegate.sh`) | Runs a write task in an isolated git worktree, verifies it there, returns a reviewable patch; `--apply` only on a clean tree |
+| Multi-agent | Delegate (`multi-agent-delegate.sh`) | Runs a write task in an isolated git worktree, verifies it there, returns a reviewable patch; `--apply` only on a clean tree; `--task-id` stamps the run for plan lineage |
 | Multi-agent | Single-agent router (`agent-run.sh`) | Routes one prompt to one provider: read-only questions to a call, write tasks to a delegate worktree |
 | Multi-agent | Export/import handoff (`--export-only`, `import-agent-result.sh`) | Writes provider prompts as local artifacts when the session may not call other agent CLIs directly; answers are imported back into the same artifact index, passing the same outbound sensitive-content gate |
 | Multi-agent | Change guard (`change-guard.sh`) | Snapshots the live dirty tree and warns when edits touch pre-existing dirty files, escape the declared `allowed_paths`, or hit a `forbidden_paths` entry (deny beats allow); reads both from the active task |
 | Multi-agent | Patch admission (`patch-admit.sh`) | Applies a delegated patch in a throwaway worktree and runs a checks ladder (applies cleanly → shell/python/json syntax parses → verification contract) before it lands; ADMIT/REJECT verdict |
-| Multi-agent | Artifact index (`artifact-index.sh`) | Every cross-agent run lands under `.oms/artifacts/` with a JSONL index — list, latest, prune |
+| Multi-agent | Artifact index (`artifact-index.sh`) | Every cross-agent run lands under `.oms/artifacts/` with a JSONL index — list, latest, prune; each row carries `base_sha` and any `task_id` for run→task lineage |
 | Multi-agent | Safety rails (built-in) | Outbound prompts are scrubbed before any external CLI call (credentials, keys, machine/cluster details block the call); injected context is fenced; diffs and debate quotes are sanitized |
 | Code sources | Registry (`code-source.sh`) | Local registry of trusted reusable files (e.g. personal model blocks); fetch by name into the current project |
 | Code sources | GitHub fetch (`github-source.sh`) | Profile/discover/fetch via `gh`; no overwrite by default, provenance appended to `.oms/code-sources.jsonl` |
