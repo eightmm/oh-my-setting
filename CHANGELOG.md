@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `agent-plan.sh`: shared subtask DAG (`.oms/plan/tasks.json`) with per-task
   dependencies, path scope, and verify command; `ready`/`status` compute what is
   actionable now so work can be split across agents without collisions.
+  `next`/`brief` emit a paste-able work brief; `next --claim --provider` is a
+  pull-work primitive (exit 3 when nothing is actionable).
 - `change-guard.sh`: `forbidden_paths` task constraint (deny beats allow),
   documented in `agent-task.sh` help.
 - `data-manifest.sh`: `--key-column` entity-overlap leakage (inchikey/scaffold/

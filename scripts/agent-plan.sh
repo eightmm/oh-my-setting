@@ -29,6 +29,7 @@ ALLOWED=""
 FORBIDDEN=""
 VERIFY=""
 STATE_FILTER=""
+CLAIM=0
 
 usage() {
   cat <<'EOF'
@@ -48,6 +49,11 @@ Commands:
   list   [--state STATE]             List tasks (optionally by state).
   ready                              Print ids actionable now (deps done).
   status                             Human-readable summary.
+  brief  --id ID                     Print a paste-able work brief for a task.
+  next   [--provider NAME] [--claim] [--ttl TEXT]
+                                     Print the brief for the next actionable
+                                     task; with --claim --provider, atomically
+                                     claim it first (pull-work primitive).
 
 State: ready -> claimed -> running -> {review|done}; block -> blocked; reopen -> ready.
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
@@ -76,8 +82,9 @@ while [ "$#" -gt 0 ]; do
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
+    --claim) CLAIM=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|add|claim|start|finish|block|reopen|show|list|ready|status)
+    init|add|claim|start|finish|block|reopen|show|list|ready|status|next|brief)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -94,7 +101,7 @@ OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
 OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
 OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
 OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
-OMS_VERIFY="$VERIFY" OMS_STATE_FILTER="$STATE_FILTER" \
+OMS_VERIFY="$VERIFY" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
 python3 <<'PY'
 import json, os, re, sys, tempfile
 
@@ -139,6 +146,15 @@ def require_id():
 
 def deps_done(d, t):
     return all(d["tasks"].get(x, {}).get("state") == "done" for x in t.get("depends", []))
+
+def brief_text(t):
+    lines = ["# Task %s: %s" % (t["id"], t["title"]), "state: %s" % t["state"]]
+    lines.append("depends: %s" % (", ".join(t.get("depends", [])) or "(none)"))
+    lines.append("allowed_paths: %s" % (", ".join(t.get("allowed_paths", [])) or "(unrestricted)"))
+    if t.get("forbidden_paths"):
+        lines.append("forbidden_paths: %s" % ", ".join(t["forbidden_paths"]))
+    lines.append("verify: %s" % (t.get("verify") or "(none)"))
+    return "\n".join(lines)
 
 d = load()
 tasks = d["tasks"]
@@ -200,6 +216,27 @@ if act in ("claim", "start", "finish", "block", "reopen", "show"):
 
 # Read-only queries.
 ordered = sorted(tasks.values(), key=lambda t: t.get("created", ""))
+
+if act == "brief":
+    i = require_id()
+    print(brief_text(get_task(i)))
+    sys.exit(0)
+
+if act == "next":
+    candidates = [t for t in ordered if t["state"] == "ready" and deps_done(d, t)]
+    if not candidates:
+        sys.stderr.write("plan: no actionable task\n")
+        sys.exit(3)
+    t = candidates[0]
+    if env("OMS_CLAIM") == "1":
+        prov = env("OMS_PROVIDER")
+        if not prov:
+            die("--claim requires --provider")
+        t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"), reason="")
+        t["updated"] = ts
+        save(d)
+    print(brief_text(t))
+    sys.exit(0)
 
 if act == "ready":
     for t in ordered:

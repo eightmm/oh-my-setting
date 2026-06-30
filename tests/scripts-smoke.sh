@@ -2677,6 +2677,40 @@ test_agent_plan_dag_and_ready() {
   "$SH" --repo "$d" status | grep -Fq 'done=1' || fail "status should report done=1"
 }
 
+test_agent_plan_next_and_brief() {
+  local d="$TMP/agent-plan-next"
+  local SH="$ROOT/scripts/agent-plan.sh"
+  local out rc
+  mkdir -p "$d"; git -C "$d" init -q .
+
+  "$SH" --repo "$d" init --goal demo >/dev/null
+  "$SH" --repo "$d" add --id P1 --title registry --allowed "scripts/" \
+    --forbidden "install.sh" --verify "echo ok" >/dev/null
+  "$SH" --repo "$d" add --id P2 --title schema --depends P1 >/dev/null
+
+  # brief renders scope + verify.
+  out="$("$SH" --repo "$d" brief --id P1)"
+  printf '%s' "$out" | grep -Fq 'allowed_paths: scripts/' || fail "brief missing allowed_paths"
+  printf '%s' "$out" | grep -Fq 'forbidden_paths: install.sh' || fail "brief missing forbidden_paths"
+
+  # next --claim atomically claims the first actionable task.
+  out="$("$SH" --repo "$d" next --claim --provider codex)"
+  printf '%s' "$out" | grep -Fq '# Task P1' || fail "next should return P1 brief"
+  "$SH" --repo "$d" show --id P1 | grep -Fq '"state": "claimed"' ||
+    fail "next --claim should leave P1 claimed"
+
+  # P2 still blocked by unfinished P1: no actionable task -> exit 3.
+  rc=0
+  "$SH" --repo "$d" next >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "next with no actionable task should exit 3, got $rc"
+
+  # --claim without --provider is an error.
+  "$SH" --repo "$d" finish --id P1 >/dev/null
+  if "$SH" --repo "$d" next --claim >/dev/null 2>&1; then
+    fail "next --claim without --provider must fail"
+  fi
+}
+
 test_change_guard_warns_scope_and_dirty_touch() {
   local project="$TMP/change-guard"
   local state="$project/.oms/guards/test.tsv"
@@ -5639,6 +5673,7 @@ test_agent_memory_append_show_and_rejects_sensitive
 test_agent_task_init_context_and_rejects_sensitive
 test_agent_task_loop_state_and_warnings
 test_agent_plan_dag_and_ready
+test_agent_plan_next_and_brief
 test_change_guard_warns_scope_and_dirty_touch
 test_change_guard_reads_allowed_paths_from_task
 test_change_guard_forbidden_paths_deny_beats_allow
