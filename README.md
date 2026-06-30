@@ -140,6 +140,7 @@ or skill. Nothing here is meant to be run by hand.
 | Experiments | Domain skills | `ml-training` (optimizer/LR/DDP defaults), `chem-bio-ml` (splits, leakage, metrics), `research-method` (falsifiable-hypothesis loop), `slurm-hpc` |
 | Memory | Shared memory (`agent-memory.sh`) | Compact cross-agent facts in `.oms/memory/`; sensitive content is rejected at write time |
 | Memory | Task handoff (`agent-task.sh`) | Active task packet in `.oms/task/current.md` so any of the three agents continues the same work; closing promotes the outcome into memory |
+| Memory | Task plan (`agent-plan.sh`) | Shared subtask DAG in `.oms/plan/tasks.json` with dependencies, path scope, and verify per task; `ready` computes what is actionable now so work can be split across agents without collisions |
 | Memory | Session handoff (`session-handoff.sh`) | Distills a prior agent session transcript (Claude/Codex/Antigravity) into a compact digest another agent can pick up; mechanical, no model call |
 | Maintenance | Verification gate (`check.sh`, `install-hooks.sh`) | One command runs the same checks as CI (shellcheck + smoke) and fails hard if a tool is missing — never a silent skip; `install-hooks.sh` wires it as a pre-push hook so red never reaches the remote |
 | Maintenance | CI status (`ci-status.sh`) | Prints the latest CI conclusion for the current branch and exits nonzero on a failed run, so a red push can't go unnoticed |

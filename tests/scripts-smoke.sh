@@ -2642,6 +2642,41 @@ test_agent_task_loop_state_and_warnings() {
   assert_file_contains "$project/err" "warning: loop diff budget exceeded:"
 }
 
+test_agent_plan_dag_and_ready() {
+  local d="$TMP/agent-plan"
+  local SH="$ROOT/scripts/agent-plan.sh"
+  local out
+  mkdir -p "$d"; git -C "$d" init -q .
+
+  "$SH" --repo "$d" init --goal demo >/dev/null || fail "plan init failed"
+  "$SH" --repo "$d" add --id P1 --title registry >/dev/null || fail "add P1 failed"
+  "$SH" --repo "$d" add --id P2 --title schema --depends P1 >/dev/null || fail "add P2 failed"
+
+  if "$SH" --repo "$d" add --id P3 --title x --depends NOPE >/dev/null 2>&1; then
+    fail "unknown dependency must be rejected"
+  fi
+  if "$SH" --repo "$d" add --id '../x' --title bad >/dev/null 2>&1; then
+    fail "unsafe task id must be rejected"
+  fi
+  if "$SH" --repo "$d" add --id P1 --title dup >/dev/null 2>&1; then
+    fail "duplicate task id must be rejected"
+  fi
+
+  out="$("$SH" --repo "$d" ready)"
+  [ "$out" = "P1" ] || fail "only P1 should be ready, got: $out"
+
+  # A dependent task cannot be claimed until its dependency is done.
+  if "$SH" --repo "$d" claim --id P2 --provider codex >/dev/null 2>&1; then
+    fail "claiming P2 with unfinished dep P1 must fail"
+  fi
+  "$SH" --repo "$d" claim --id P1 --provider codex >/dev/null || fail "claim P1 failed"
+  "$SH" --repo "$d" finish --id P1 >/dev/null || fail "finish P1 failed"
+
+  out="$("$SH" --repo "$d" ready)"
+  [ "$out" = "P2" ] || fail "P2 should be ready after P1 done, got: $out"
+  "$SH" --repo "$d" status | grep -Fq 'done=1' || fail "status should report done=1"
+}
+
 test_change_guard_warns_scope_and_dirty_touch() {
   local project="$TMP/change-guard"
   local state="$project/.oms/guards/test.tsv"
@@ -5603,6 +5638,7 @@ test_delegate_requires_provider
 test_agent_memory_append_show_and_rejects_sensitive
 test_agent_task_init_context_and_rejects_sensitive
 test_agent_task_loop_state_and_warnings
+test_agent_plan_dag_and_ready
 test_change_guard_warns_scope_and_dirty_touch
 test_change_guard_reads_allowed_paths_from_task
 test_change_guard_forbidden_paths_deny_beats_allow
