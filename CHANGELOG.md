@@ -7,6 +7,28 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `scripts/oms` dispatcher, symlinked to `~/.local/bin/oms`: `oms <tool>`
+  invokes any harness script by name from any of the three agent CLIs
+  (`run` aliases `oms-run`); `oms list` prints every tool with its one-line
+  purpose. Linked/unlinked/doctored with the install.
+- `oms-run.sh new` writes a repo-scoped `.oms/runs/CURRENT` pointer and
+  `oms-run.sh current` resolves the effective run id; `link` and the
+  run-ledger/run-capsule/experiment-board auto-links fall back to a fresh
+  CURRENT when `OMS_RUN_ID` is unset, so a second agent process joins the
+  active run without env plumbing. Stale pointers expire
+  (`OMS_RUN_CURRENT_TTL`, default 86400 s) instead of misjoining.
+- Agent identity: `oms_detect_agent` (explicit `OMS_AGENT` > CLI env markers >
+  generic "agent") now attributes memory notes, task bullets, board claims,
+  capsules, and reconcile rows; spine link rows carry a new `agent` field
+  (`link --agent` overrides; `show`/`timeline` display it).
+- Delegate workers receive `OMS_STATE_REPO` — agent-memory/task/plan resolve
+  to the primary repo's shared `.oms` instead of the empty throwaway
+  worktree — and `OMS_AGENT=<provider>` for attribution.
+- `agent-run.sh --task-id`/`--plan-task`, forwarded to the delegate for plan
+  lineage and lifecycle coupling.
+- AGENTS.md "Run Provenance & Coordination" is now a capability catalog with
+  the `oms` invocation path; the agent-harness skill documents the plan DAG.
+
 - `agent-plan.sh`: shared subtask DAG (`.oms/plan/tasks.json`) with per-task
   dependencies, path scope, and verify command; `ready`/`status` compute what is
   actionable now so work can be split across agents without collisions.
@@ -33,6 +55,29 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   tag matches `VERSION`, and publishes a GitHub Release with `install.sh`,
   `install.sh.sha256`, and a `SHA256SUMS` manifest (`scripts/gen-checksums.sh`).
   See `docs/RELEASE.md`.
+
+### Fixed
+- Run-cluster state (spine, default ledger, capsules, board, manifests,
+  reconcile) anchors to the git worktree root instead of `$PWD`, so a
+  subdirectory invocation no longer forks a second `.oms`; every run tool now
+  also drops the `.oms/.gitignore` guard on first write.
+- File locks live in a fixed `~/.cache/oh-my-setting/locks`: an interactive
+  and a cron/ssh agent no longer compute different lock dirs (via
+  `XDG_RUNTIME_DIR`) for the same state file, which defeated mutual exclusion.
+- `doctor.sh` certifies symlink identity, not existence: a config or skill
+  link resolving to a foreign/stale target fails as "linked elsewhere"
+  (regular files where a link is expected also fail).
+- bash 3.2: `declare -A` in the skill-doctor duplicate check aborted the whole
+  check on macOS; replaced with a portable dedup.
+- Provider namespace is canonical: `agy` normalizes to `antigravity` in
+  `agent-run.sh` and `agent-plan.sh` claims; unknown provider names are
+  rejected instead of polluting the board.
+- Verify commands in `multi-agent-delegate.sh` and the review `--gate`
+  backstop are bounded by `OMS_MULTI_AGENT_VERIFY_TIMEOUT` (default 10m); a
+  hung test suite fails the run instead of wedging it forever.
+- Antigravity read passes run in an isolated detached-HEAD worktree (or a
+  scratch dir outside git): agy has no file-write-blocking flag, so stray
+  writes are discarded instead of reaching the caller's tree.
 
 ### Changed
 - README "What's Inside" is now an eight-row capability table; the full

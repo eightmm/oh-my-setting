@@ -11,6 +11,12 @@ Goal: keep agent state portable across Codex, Claude Code, and Antigravity, and
 let the current agent call one provider explicitly when useful. The owning
 agent decides whether the request is read-only advice or a write task.
 
+Every command below can also be invoked as `oms <tool>` (dispatcher on PATH,
+e.g. `oms agent-memory --repo . show`); `oms list` prints the full catalog.
+State is attributed to the calling agent: set `OMS_AGENT` (codex, claude,
+antigravity) in the CLI's env, or rely on auto-detection (Claude Code) and
+the worker env injected by delegation.
+
 ## Shared Memory
 
 - Use harness memory for stable preferences, recurring workflows, project
@@ -98,6 +104,25 @@ escapes scope. It is advisory by default; `--strict` makes warnings fail.
 step) into project shared memory, so the next session starts from the
 conclusion. Disable with `OMS_AGENT_TASK_CLOSE_MEMORY=0`.
 
+## Task Plan (shared subtask DAG)
+
+Where the task packet holds ONE active work item, `agent-plan.sh` holds a DAG
+of subtasks that can be split across the three agents: dependencies, path
+scope, and a verify command per task, with a
+ready -> claimed -> running -> review -> done lifecycle under a file lock.
+
+```bash
+~/.oh-my-setting/scripts/agent-plan.sh --repo . add --id t1 --title "Fix parser" --verify "bash scripts/check.sh fast"
+~/.oh-my-setting/scripts/agent-plan.sh --repo . ready
+~/.oh-my-setting/scripts/agent-plan.sh --repo . next --claim --provider codex
+~/.oh-my-setting/scripts/agent-plan.sh --repo . reclaim            # requeue expired claims (dead workers)
+~/.oh-my-setting/scripts/agent-plan.sh --repo . finish --id t1
+```
+
+Provider names are canonical (`agy` normalizes to `antigravity`; unknown names
+are rejected). `multi-agent-delegate.sh --plan-task ID` couples a delegation to
+a plan task: released on failure, review/done on success.
+
 ## Individual Agent Runs
 
 Use `agent-run.sh` as the single entrypoint for one provider. In `--mode auto`,
@@ -115,7 +140,9 @@ Read mode writes artifacts to `.oms/artifacts/call/`. Write mode runs the worker
 in an isolated git worktree and writes artifacts/patches to
 `.oms/artifacts/delegate/`; the worker cannot commit or push. Use `--apply` only
 when the owning agent has decided the returned patch should be applied and the
-main tree is clean.
+main tree is clean. Workers receive `OMS_STATE_REPO` (so agent-memory/task/plan
+resolve to the primary repo's shared `.oms`, not the empty throwaway worktree)
+and `OMS_AGENT=<provider>` for attribution.
 
 Every provider call/delegation appends a compact row to
 `.oms/artifacts/index.jsonl`. Use `artifact-index.sh latest`, `latest-run`,

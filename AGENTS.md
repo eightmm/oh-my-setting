@@ -94,18 +94,29 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 
 ## Run Provenance & Coordination
 
-When the oh-my-setting harness is present, prefer its run tools over ad-hoc
-launches so work is reproducible and not duplicated across agents:
+When the oh-my-setting harness is installed, prefer its tools over ad-hoc
+launches so work is reproducible and not duplicated across agents. Invoke a
+tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh`;
+`oms list` prints the full catalog, `docs/COMPONENTS.md` the details.
 
-- Claim an experiment on the study board (`experiment-board.sh`) before a
+- Shared state — all three agents read/write the same repo-local `.oms/`:
+  shared memory (`oms agent-memory`), active task packet (`oms agent-task`),
+  subtask DAG (`oms agent-plan`: `ready`, `next --claim --provider NAME`,
+  `reclaim`).
+- Cross-agent work: route one provider through `oms agent-run --to NAME`
+  (read-only pass vs isolated write worktree); admit a delegated patch through
+  `oms patch-admit` before applying it.
+- Claim an experiment on the study board (`oms experiment-board`) before a
   long/expensive run; it refuses a duplicate already-active claim.
-- Wrap a run worth reproducing in `run-capsule.sh` (commit + diff + env/seed +
-  result); use the run ledger for lightweight rows. Mint one `OMS_RUN_ID`
-  (`oms-run.sh new`) so the tools join under one run.
-- For ML data, check `data-manifest.sh leakage` before training when splits exist.
-- Reconcile long Slurm jobs (`run-reconcile.sh`) into shared state at session
+- Wrap a run worth reproducing in `oms run-capsule` (commit + diff + env/seed +
+  result); use the run ledger (`oms run-ledger`) for lightweight rows. Mint one
+  run id (`oms run new`); other shells join it via `oms run current`, and
+  `oms run timeline` answers "what happened in this repo".
+- For ML data, check `oms data-manifest leakage` before training when splits exist.
+- Reconcile long Slurm jobs (`oms run-reconcile`) into shared state at session
   start when work may have finished while away.
-- Admit a delegated patch through `patch-admit.sh` before applying it.
+- Set `OMS_AGENT` (codex|claude|antigravity) in the CLI's env for state
+  attribution; Claude Code is auto-detected and spawned workers inherit it.
 - Do not put secrets in commands, notes, or metrics — outbound context is
   scrubbed and these records are agent-shared.
 
