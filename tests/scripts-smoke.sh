@@ -1289,7 +1289,8 @@ test_doctor_reports_crash_residue_warnings() {
   local project="$TMP/doctor-harness-residue"
   local home_dir="$TMP/doctor-home-residue"
   local runtime="$home_dir/runtime"
-  local lock_dir="$runtime/oh-my-setting/locks/dead.lock"
+  # Locks live in a fixed per-user dir (never XDG_RUNTIME_DIR); see file-lock.sh.
+  local lock_dir="$home_dir/.cache/oh-my-setting/locks/dead.lock"
   local out
 
   setup_doctor_home "$home_dir"
@@ -4232,7 +4233,8 @@ test_cleanup_prunes_stale_worktree_registration() {
 test_cleanup_removes_dead_lock_only() {
   local home_dir="$TMP/cleanup-lock-home"
   local runtime="$home_dir/runtime"
-  local lock_root="$runtime/oh-my-setting/locks"
+  # Locks live in a fixed per-user dir (never XDG_RUNTIME_DIR); see file-lock.sh.
+  local lock_root="$home_dir/.cache/oh-my-setting/locks"
   local dead_lock="$lock_root/dead.lock"
   local live_lock="$lock_root/live.lock"
 
@@ -6005,6 +6007,207 @@ test_multi_agent_review_warns_untracked_files() {
   fi
 }
 
+test_run_state_anchors_to_git_root_from_subdir() {
+  local project="$TMP/run-state-git-root"
+  local id
+
+  make_committed_repo "$project"
+  mkdir -p "$project/sub"
+
+  id="$(cd "$project/sub" && env -u OMS_RUN_ID "$ROOT/scripts/oms-run.sh" new 2>/dev/null)"
+  [ -f "$project/.oms/runs/spine.jsonl" ] || fail "spine should land at the git root, not the subdir"
+  [ -f "$project/.oms/.gitignore" ] || fail "first run-tool write should drop the .oms/.gitignore guard"
+  assert_not_exists "$project/sub/.oms"
+  (cd "$project/sub" && "$ROOT/scripts/oms-run.sh" show "$id" >/dev/null 2>&1) ||
+    fail "show should resolve the same spine from a subdirectory"
+
+  (cd "$project/sub" && "$ROOT/scripts/experiment-board.sh" claim --id e1 --hypothesis h >/dev/null 2>&1) ||
+    fail "board claim should work from a subdirectory"
+  [ -f "$project/.oms/experiments.jsonl" ] || fail "board should land at the git root, not the subdir"
+  assert_not_exists "$project/sub/.oms"
+}
+
+test_file_lock_dir_is_stable_across_xdg() {
+  local with_xdg
+  local without_xdg
+
+  with_xdg="$(XDG_RUNTIME_DIR="$TMP/xdg-runtime" bash -c ". '$ROOT/scripts/lib/file-lock.sh'; oms_file_lock_dir")"
+  without_xdg="$(env -u XDG_RUNTIME_DIR bash -c ". '$ROOT/scripts/lib/file-lock.sh'; oms_file_lock_dir")"
+  [ "$with_xdg" = "$without_xdg" ] ||
+    fail "lock dir must not depend on XDG_RUNTIME_DIR ($with_xdg vs $without_xdg)"
+}
+
+test_oms_run_link_records_calling_agent() {
+  local d="$TMP/oms-run-agent"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local id
+
+  mkdir -p "$d"
+  id="$(cd "$d" && OMS_AGENT=codex "$SH" new 2>/dev/null)"
+  (cd "$d" && "$SH" show "$id" 2>/dev/null | grep -Fq "agent=codex") ||
+    fail "spine rows should record the calling agent from OMS_AGENT"
+
+  # The generic fallback is not an identity and must not be stamped.
+  id="$(cd "$d" && env -u OMS_AGENT -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX "$SH" new 2>/dev/null)"
+  if (cd "$d" && "$SH" show "$id" 2>/dev/null | grep -Fq "agent="); then
+    fail "spine rows should omit the agent field when no identity is known"
+  fi
+}
+
+test_agent_plan_normalizes_provider() {
+  local project="$TMP/plan-provider"
+
+  make_committed_repo "$project"
+  (cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title "one" >/dev/null)
+  (cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider agy >/dev/null)
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["tasks"]["t1"]["provider"] == "antigravity" else 1)
+' "$project/.oms/plan/tasks.json" || fail "claim should canonicalize agy to antigravity"
+
+  (cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t2 --title "two" >/dev/null)
+  if (cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t2 --provider gpt5 >/dev/null 2>&1); then
+    fail "claim must reject an unknown provider name"
+  fi
+}
+
+test_oms_run_current_pointer_joins_and_expires() {
+  local d="$TMP/oms-run-current"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local id
+  local cur
+
+  mkdir -p "$d"
+  id="$(cd "$d" && env -u OMS_RUN_ID "$SH" new 2>/dev/null)"
+  cur="$(cd "$d" && env -u OMS_RUN_ID "$SH" current 2>/dev/null)" ||
+    fail "current should resolve the freshly minted run"
+  [ "$cur" = "$id" ] || fail "current should print the freshly minted run id"
+
+  # A second process with no OMS_RUN_ID in its env joins via CURRENT.
+  (cd "$d" && env -u OMS_RUN_ID "$SH" link --tool probe --event join >/dev/null 2>&1) ||
+    fail "link should fall back to the fresh CURRENT pointer"
+  (cd "$d" && "$SH" show "$id" 2>/dev/null | grep -Fq "join") ||
+    fail "the fallback link should join the minted run"
+
+  # A stale pointer must not misjoin later work.
+  awk '{print $1, $2 - 999999}' "$d/.oms/runs/CURRENT" > "$d/.oms/runs/CURRENT.tmp"
+  mv "$d/.oms/runs/CURRENT.tmp" "$d/.oms/runs/CURRENT"
+  if (cd "$d" && env -u OMS_RUN_ID "$SH" current >/dev/null 2>&1); then
+    fail "a stale CURRENT pointer must expire"
+  fi
+  if (cd "$d" && env -u OMS_RUN_ID "$SH" link --tool probe --event late >/dev/null 2>&1); then
+    fail "link must not join through a stale CURRENT pointer"
+  fi
+}
+
+test_oms_dispatcher_lists_and_dispatches() {
+  local bin="$TMP/oms-dispatch-bin"
+  local d="$TMP/oms-dispatch-repo"
+  local out
+
+  mkdir -p "$bin" "$d"
+  ln -sfn "$ROOT/scripts/oms" "$bin/oms"
+
+  # Capture first: grep -q on a live pipe SIGPIPEs the dispatcher under
+  # pipefail as soon as the match is found.
+  out="$("$bin/oms" list)" || fail "oms list should succeed"
+  printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
+  "$bin/oms" run-ledger --help >/dev/null 2>&1 || fail "oms should dispatch run-ledger via its symlink"
+  (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run should alias oms-run"
+  if "$bin/oms" no-such-tool >/dev/null 2>&1; then
+    fail "oms must reject an unknown tool"
+  fi
+  if "$bin/oms" ../oms >/dev/null 2>&1; then
+    fail "oms must reject path-like tool names"
+  fi
+}
+
+test_doctor_detects_foreign_config_link() {
+  local project="$TMP/doctor-foreign-link"
+  local home_dir="$TMP/doctor-home-foreign-link"
+  local out
+  local rc=0
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project"
+  # A live link resolving to a foreign file used to pass as "ok" via [ -e ];
+  # existence is not parity — the agent would run different rules.
+  printf 'not the harness rules\n' > "$home_dir/foreign.md"
+  ln -sfn "$home_dir/foreign.md" "$home_dir/.claude/CLAUDE.md"
+
+  out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "doctor must fail when a config link resolves to a foreign file"
+  printf '%s' "$out" | grep -Fq "linked elsewhere: $home_dir/.claude/CLAUDE.md" ||
+    fail "doctor should diagnose the foreign link target"
+}
+
+test_verify_timeout_bounds_hung_verify() {
+  local out
+
+  command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || return 0
+  out="$(bash -c "
+    . '$ROOT/scripts/lib/agent-memory-common.sh'
+    . '$ROOT/scripts/lib/multi-agent-common.sh'
+    OMS_MULTI_AGENT_VERIFY_TIMEOUT=1s run_verify_with_timeout bash -c 'sleep 30'
+    echo exit=\$?
+  " 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq "exit=124" || fail "a hung verify should fail with timeout exit 124"
+}
+
+test_delegate_worker_receives_state_env() {
+  local project="$TMP/delegate-state-env"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'state_repo=%s agent=%s\n' "${OMS_STATE_REPO:-}" "${OMS_AGENT:-}" > worker-env.txt
+echo "worker done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts" \
+    --no-verify \
+    --prompt "Report harness env" >/dev/null 2>&1 ||
+    fail "stub delegation should succeed"
+  assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'agent=codex'
+  assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'delegate-state-env'
+}
+
+test_agy_read_pass_cannot_write_repo() {
+  local project="$TMP/agy-read-iso"
+  local home_dir="$TMP/agy-read-iso-home"
+  local bin_dir="$TMP/agy-read-iso-bin"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # agy has no write-blocking flag; the harness isolates read passes instead.
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+echo "pwned" > escaped-write.txt
+echo "agy answer"
+EOF
+  chmod +x "$bin_dir/agy"
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
+    --to antigravity --repo "$project" --prompt "isolation probe" \
+    --no-memory --no-task --no-ml-context >/dev/null 2>&1 ||
+    fail "agy read pass should succeed with the stub CLI"
+  assert_not_exists "$project/escaped-write.txt"
+  assert_one_artifact_contains "$project/.oms/artifacts/call" 'antigravity-*.md' 'agy answer'
+  [ "$(git -C "$project" worktree list | wc -l)" -eq 1 ] ||
+    fail "agy read isolation must clean up its worktree"
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -6238,5 +6441,15 @@ test_scrubber_blocks_hpc_cluster_paths
 test_doctor_fails_broken_config_symlink
 test_agent_state_lands_at_git_root_from_subdir
 test_multi_agent_review_warns_untracked_files
+test_run_state_anchors_to_git_root_from_subdir
+test_file_lock_dir_is_stable_across_xdg
+test_oms_run_link_records_calling_agent
+test_agent_plan_normalizes_provider
+test_oms_run_current_pointer_joins_and_expires
+test_oms_dispatcher_lists_and_dispatches
+test_doctor_detects_foreign_config_link
+test_verify_timeout_bounds_hung_verify
+test_delegate_worker_receives_state_env
+test_agy_read_pass_cannot_write_repo
 
 echo "scripts-smoke: ok"
