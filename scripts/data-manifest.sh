@@ -367,7 +367,9 @@ wk, ck = w.get("keys", {}), c.get("keys", {})
 for k in sorted(set(wk) | set(ck)):
     a, b = wk.get(k, {}), ck.get(k, {})
     # drift on the key value set, or on the (id -> key) mapping when both sides
-    # recorded it (older manifests predate pair_sha256 -- don't false-positive).
+    # recorded it (older manifests predate pair_sha256 -- no false positive).
+    # No apostrophes in this heredoc: it sits inside $(...) and bash 3.2
+    # (macOS) quote-scans heredoc bodies there, so an odd quote breaks bash -n.
     sha_diff = a.get("sha256") != b.get("sha256")
     pair_diff = ("pair_sha256" in a and "pair_sha256" in b
                  and a["pair_sha256"] != b["pair_sha256"])
