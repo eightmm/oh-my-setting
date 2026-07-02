@@ -234,6 +234,11 @@ write_prompt() {
     if [ "$NO_DIFF" -eq 0 ]; then
       printf 'Git status:\n'
       cat "$status_file"
+      if grep -q '^??' "$status_file"; then
+        # Untracked files never appear in the diff; without this note an
+        # all-new-file change reads as an empty diff and gets a false pass.
+        printf '\nNote: untracked (??) files above are NOT in the diff; their content was not provided. If they are the subject of this review, say so instead of "No findings".\n'
+      fi
       printf '\nDiff:\n'
       cat "$diff_file"
       printf '\n'
@@ -404,6 +409,9 @@ if [ "$NO_DIFF" -eq 0 ]; then
       fail "git diff failed for $REPO"
       ;;
   esac
+  if grep -q '^??' "$status_file"; then
+    echo "warning: untracked files are listed in status but their content is not in the diff (git add -N <file> to include new files)" >&2
+  fi
 else
   : > "$diff_file"
 fi

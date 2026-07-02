@@ -50,7 +50,12 @@ check_bash_version() {
 }
 
 check_path() {
-  if [ -e "$1" ] || [ -L "$1" ]; then
+  # -L before -e: a dangling symlink "exists" as a link but resolves to
+  # nothing — exactly the breakage that silently strips an agent's rules.
+  if [ -L "$1" ] && [ ! -e "$1" ]; then
+    echo "broken link: $1 -> $(readlink "$1")"
+    FAILED=1
+  elif [ -e "$1" ]; then
     echo "ok: $1"
   else
     echo "missing: $1"

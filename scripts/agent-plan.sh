@@ -96,7 +96,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
-REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
+REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

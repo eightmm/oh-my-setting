@@ -6,7 +6,7 @@
 
 agent_task_project_file() {
   local repo="$1"
-  repo="$(cd "$repo" && pwd)" || return 1
+  repo="$(oms_repo_root "$repo")" || return 1
   printf '%s/.oms/task/current.md\n' "$repo"
 }
 

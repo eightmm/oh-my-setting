@@ -103,7 +103,13 @@ ma_wait_stdin_file() {
 run_with_timeout() {
   if command -v timeout >/dev/null 2>&1; then
     timeout "${OMS_MULTI_AGENT_TIMEOUT:-5m}" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    # macOS coreutils installs GNU timeout as gtimeout.
+    gtimeout "${OMS_MULTI_AGENT_TIMEOUT:-5m}" "$@"
   else
+    # Callers merge stderr into the artifact, so the missing guard is visible
+    # there instead of silently running a hung provider CLI forever.
+    echo "warning: no timeout/gtimeout binary; provider call runs unbounded" >&2
     "$@"
   fi
 }
@@ -375,7 +381,7 @@ extract_output() {
 ma_mask_quoted_paths() {
   sed -E \
     -e 's#file://[^[:space:])"'\''`]*#<PATH>#g' \
-    -e 's#(/home|/Users)/[^[:space:])"'\''`]*#<PATH>#g'
+    -e 's#(/home|/Users|/scratch|/lustre|/gpfs|/beegfs)/[^[:space:])"'\''`]*#<PATH>#g'
 }
 
 # Sanitize quoted provider output before re-sending it in debate rounds.

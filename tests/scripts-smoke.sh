@@ -5633,6 +5633,109 @@ test_oms_run_diff_compares_capsules() {
   fi
 }
 
+test_run_with_timeout_warns_when_unbounded() {
+  local out="$TMP/rwt-out"
+  local err="$TMP/rwt-err"
+
+  # With no timeout/gtimeout on PATH the call must still run, but the missing
+  # wall-clock guard must be visible on stderr (call sites merge it into the
+  # artifact), never a silent unbounded hang.
+  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; PATH='' run_with_timeout echo fallback-ran" \
+    >"$out" 2>"$err" || fail "run_with_timeout without a timeout binary should still run the command"
+  assert_file_contains "$out" "fallback-ran"
+  assert_file_contains "$err" "runs unbounded"
+}
+
+test_scrubber_blocks_json_quoted_secret() {
+  local f="$TMP/scrub-json-secret"
+
+  printf '"%s": "hunter2"\n' 'passw''ord' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "JSON-quoted credential key should be blocked"
+
+  printf "'%s': 'abc12345'\n" 'api_k''ey' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "single-quoted credential key should be blocked"
+}
+
+test_scrubber_blocks_hpc_cluster_paths() {
+  local f="$TMP/scrub-hpc-path"
+
+  printf 'checkpoint at /scra%s/u1234/run7/best.pt\n' 'tch' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "scra""tch cluster path should be blocked"
+
+  printf 'dataset at /lus%s/fs1/u1234/data\n' 'tre' > "$f"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "lus""tre cluster path should be blocked"
+
+  printf 'benign paths: /data/train.csv and /mnt/disk0/cache\n' > "$f"
+  if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
+    fail "common local data paths must pass the scrubber"
+  fi
+}
+
+test_doctor_fails_broken_config_symlink() {
+  local project="$TMP/doctor-broken-link"
+  local home_dir="$TMP/doctor-home-broken-link"
+  local out
+  local rc=0
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project"
+  # A config link whose target vanished (moved/renamed checkout) used to pass
+  # as "ok" via [ -L ]; it must fail as the exact breakage doctor exists for.
+  ln -sfn "$home_dir/missing-target" "$home_dir/.claude/CLAUDE.md"
+
+  out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "doctor must fail on a dangling config symlink"
+  printf '%s' "$out" | grep -Fq "broken link: $home_dir/.claude/CLAUDE.md" ||
+    fail "doctor should diagnose the dangling symlink as a broken link"
+}
+
+test_agent_state_lands_at_git_root_from_subdir() {
+  local project="$TMP/state-git-root"
+  local home_dir="$TMP/state-git-root-home"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/sub" "$home_dir"
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project/sub" append --agent codex --text "state should join at the repo root" >/dev/null
+  [ -f "$project/.oms/memory/shared.md" ] || fail "memory should land at the git root, not the subdir"
+  assert_not_exists "$project/sub/.oms"
+
+  (cd "$project/sub" && "$ROOT/scripts/agent-plan.sh" init --goal "root goal" >/dev/null)
+  [ -f "$project/.oms/plan/tasks.json" ] || fail "plan should land at the git root, not the subdir"
+  assert_not_exists "$project/sub/.oms"
+}
+
+test_multi_agent_review_warns_untracked_files() {
+  local project="$TMP/review-untracked"
+  local clean="$TMP/review-tracked-only"
+  local err="$TMP/review-untracked-err"
+
+  make_committed_repo "$project"
+  printf 'brand new module\n' > "$project/new_module.py"
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts" \
+    --prompt "Review new module" >/dev/null 2>"$err"
+  assert_file_contains "$err" "untracked files are listed in status"
+  assert_one_artifact_contains "$project/artifacts" 'codex-review-new-module-*.md' 'NOT in the diff'
+
+  # Tracked-only change: no untracked noise, no warning.
+  make_committed_repo "$clean"
+  printf 'changed\n' > "$clean/file.txt"
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$clean" \
+    --artifact-dir "$TMP/review-tracked-only-arts" \
+    --prompt "Review tracked change" >/dev/null 2>"$err"
+  if grep -Fq "untracked files are listed in status" "$err"; then
+    fail "tracked-only diff should not warn about untracked files"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -5854,5 +5957,11 @@ test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
 test_oms_run_diff_compares_capsules
 test_oms_run_validate_detects_malformed_jsonl
+test_run_with_timeout_warns_when_unbounded
+test_scrubber_blocks_json_quoted_secret
+test_scrubber_blocks_hpc_cluster_paths
+test_doctor_fails_broken_config_symlink
+test_agent_state_lands_at_git_root_from_subdir
+test_multi_agent_review_warns_untracked_files
 
 echo "scripts-smoke: ok"
