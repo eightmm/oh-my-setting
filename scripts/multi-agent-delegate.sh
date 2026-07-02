@@ -23,6 +23,7 @@ INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 TASK_ID=""
+REPAIR=0
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
 usage() {
@@ -47,6 +48,13 @@ Options:
                        "bash scripts/check.sh ml-smoke" when available, else
                        "bash scripts/check.sh fast".
   --no-verify          Skip the default scripts/check.sh verification.
+  --repair N           On worker or verify failure, re-run the same worker in
+                       the same worktree up to N times (1-3), feeding back the
+                       original brief, its rejected patch, and the failing
+                       verify output tail. Missing-CLI and outbound-gate
+                       failures are never retried. Each round adds another
+                       OMS_MULTI_AGENT_TIMEOUT of wall-clock budget.
+                       Default: 0 (one-shot).
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
   --keep-worktree      Keep the worktree for manual inspection.
@@ -96,6 +104,14 @@ while [ "$#" -gt 0 ]; do
     --no-verify)
       NO_VERIFY=1
       shift
+      ;;
+    --repair)
+      [ "$#" -ge 2 ] || fail "--repair requires round count"
+      case "$2" in
+        0|1|2|3) REPAIR="$2" ;;
+        *) fail "--repair must be 0-3" ;;
+      esac
+      shift 2
       ;;
     --apply)
       APPLY=1
@@ -178,6 +194,8 @@ mkdir -p "$ARTIFACT_DIR"
 
 oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null
 prompt_file="$(mktemp)" || fail "mktemp failed"
+repair_prompt_file="$prompt_file.repair"
+verify_out="$prompt_file.verify"
 worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-delegate.XXXXXX")" || fail "mktemp failed"
 worktree="$worktree_parent/wt"
 worktree_created=0
@@ -186,7 +204,7 @@ oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
-  rm -f "$prompt_file"
+  rm -f "$prompt_file" "$repair_prompt_file" "$verify_out"
   if [ "$worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
   fi
@@ -283,6 +301,92 @@ fi
   printf '\n\n## Output\n\n'
 } > "$artifact"
 
+# Runs the worker CLI in the worktree on a prompt file; output is appended to
+# the artifact. Sets worker_status.
+run_worker() {
+  local prompt="$1"
+  local worker_pid
+
+  worker_status=0
+  set +e
+  case "$TO" in
+    codex)
+      (cd "$worktree" && run_with_timeout codex exec --sandbox workspace-write - < "$prompt") >> "$artifact" 2>&1 &
+      worker_pid="$!"
+      wait "$worker_pid"
+      worker_status=$?
+      ;;
+    claude)
+      (cd "$worktree" && run_with_timeout claude -p --permission-mode acceptEdits < "$prompt") >> "$artifact" 2>&1 &
+      worker_pid="$!"
+      wait "$worker_pid"
+      worker_status=$?
+      ;;
+    antigravity)
+      (cd "$worktree" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt") >> "$artifact" 2>&1 &
+      worker_pid="$!"
+      wait "$worker_pid"
+      worker_status=$?
+      ;;
+  esac
+  set -e
+}
+
+# Capture the patch before running --verify so verification byproducts
+# (caches, build output) do not leak into the patch.
+capture_patch() {
+  git -C "$worktree" add -A
+  git -C "$worktree" diff --cached --binary > "$patch_file"
+}
+
+# Runs VERIFY_CMD in the worktree; output goes to the artifact and is kept in
+# $verify_out for repair prompts. Sets verify_status.
+run_verify() {
+  local verify_pid
+
+  : > "$verify_out"
+  set +e
+  (cd "$worktree" && bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
+  verify_pid="$!"
+  wait "$verify_pid"
+  verify_status=$?
+  set -e
+  cat "$verify_out" >> "$artifact"
+  printf '\n- verify exit: %s\n' "$verify_status" >> "$artifact"
+}
+
+# Repair brief: the original task plus the failure evidence, addressed to the
+# same worker continuing in the same worktree.
+write_repair_prompt() {
+  local output="$1"
+
+  {
+    printf 'You are %s, a delegated worker agent, continuing your own previous attempt.\n' "$TO"
+    printf 'Work only inside the current directory; it is the same isolated git worktree and it still contains your changes.\n'
+    printf 'Your previous attempt did not pass. Fix it in place; do not start over unless necessary.\n'
+    printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
+    printf 'Do not run git commit, git push, or change git config.\n'
+    printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
+    printf '## Original Brief\n\n'
+    if [ -n "$BRIEF_FILE" ]; then
+      cat "$BRIEF_FILE"
+    else
+      printf '%s\n' "$PROMPT"
+    fi
+    if [ "$worker_status" -ne 0 ]; then
+      printf '\n## Previous Worker Exit\n\n- exit %s (interrupted or timed out; finish the remaining work)\n' "$worker_status"
+    fi
+    printf '\n## Your Previous Patch (captured, not accepted yet)\n\n'
+    head -c 20000 "$patch_file"
+    if [ -n "$VERIFY_CMD" ] && [ "$verify_status" -ne 0 ]; then
+      printf '\n## Failing Verification\n\n- command: %s\n- exit: %s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status"
+      tail -c 4000 "$verify_out"
+      printf '\n'
+    fi
+    printf '\nWhen done, report: changed files, what you verified, what you did not verify, and any blockers.\n'
+  } > "$output"
+}
+
 worker_status=0
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
@@ -294,35 +398,11 @@ else
     printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
     worker_status=127
   else
-    set +e
-    case "$TO" in
-      codex)
-        (cd "$worktree" && run_with_timeout codex exec --sandbox workspace-write - < "$prompt_file") >> "$artifact" 2>&1 &
-        worker_pid="$!"
-        wait "$worker_pid"
-        worker_status=$?
-        ;;
-      claude)
-        (cd "$worktree" && run_with_timeout claude -p --permission-mode acceptEdits < "$prompt_file") >> "$artifact" 2>&1 &
-        worker_pid="$!"
-        wait "$worker_pid"
-        worker_status=$?
-        ;;
-      antigravity)
-        (cd "$worktree" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt_file") >> "$artifact" 2>&1 &
-        worker_pid="$!"
-        wait "$worker_pid"
-        worker_status=$?
-        ;;
-    esac
-    set -e
+    run_worker "$prompt_file"
   fi
 fi
 
-# Capture the patch before running --verify so verification byproducts
-# (caches, build output) do not leak into the patch.
-git -C "$worktree" add -A
-git -C "$worktree" diff --cached --binary > "$patch_file"
+capture_patch
 
 verify_status=0
 if [ -n "$VERIFY_CMD" ]; then
@@ -330,14 +410,42 @@ if [ -n "$VERIFY_CMD" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     printf 'DRY RUN: verify skipped.\n' >> "$artifact"
   else
-    set +e
-    (cd "$worktree" && bash -c "$VERIFY_CMD") >> "$artifact" 2>&1 &
-    verify_pid="$!"
-    wait "$verify_pid"
-    verify_status=$?
-    set -e
-    printf '\n- verify exit: %s\n' "$verify_status" >> "$artifact"
+    run_verify
   fi
+fi
+
+# Bounded repair: on worker/verify failure, re-invoke the same worker in the
+# same worktree with the failure fed back so it can correct its own attempt.
+# A missing CLI (127) is not repairable, and a repair prompt that trips the
+# outbound gate stops the loop — re-sending secret-laden context is futile.
+repair_used=0
+if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ]; then
+  while [ "$repair_used" -lt "$REPAIR" ] && { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
+    repair_used=$((repair_used + 1))
+    write_repair_prompt "$repair_prompt_file"
+    if ! ma_validate_outbound_prompt "$repair_prompt_file"; then
+      printf '\n\n## Repair %s\n\nSKIPPED: repair context contains sensitive-looking content; repair stopped.\n' "$repair_used" >> "$artifact"
+      echo "repair $repair_used blocked: sensitive outbound context" >&2
+      break
+    fi
+    # Restore the worktree to the captured patch state: undo tracked-file
+    # mutations from verify and drop its untracked byproducts, so the next
+    # capture_patch cannot sweep verification residue into the patch.
+    git -C "$worktree" checkout -- . 2>/dev/null || true
+    git -C "$worktree" clean -fd >/dev/null 2>&1 || true
+    {
+      printf '\n\n## Repair %s\n\n### Prompt\n\n' "$repair_used"
+      cat "$repair_prompt_file"
+      printf '\n\n### Output\n\n'
+    } >> "$artifact"
+    run_worker "$repair_prompt_file"
+    capture_patch
+    if [ -n "$VERIFY_CMD" ]; then
+      printf '\n\n## Verify (repair %s)\n\n- command: %s\n\n' "$repair_used" "$VERIFY_CMD" >> "$artifact"
+      run_verify
+    fi
+    echo "repair $repair_used: worker exit $worker_status, verify exit $verify_status"
+  done
 fi
 
 printf '\n\n## Exit\n\n%s\n' "$worker_status" >> "$artifact"
@@ -382,6 +490,9 @@ ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patc
 echo "worker: $TO exit $worker_status"
 if [ -n "$VERIFY_CMD" ]; then
   echo "verify: exit $verify_status"
+fi
+if [ "$REPAIR" -gt 0 ]; then
+  echo "repair: $repair_used/$REPAIR round(s) used"
 fi
 echo "artifact: $artifact"
 echo "patch: $patch_file"

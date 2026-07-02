@@ -5633,6 +5633,68 @@ test_oms_run_diff_compares_capsules() {
   fi
 }
 
+test_delegate_repair_retries_failed_verify() {
+  local project="$TMP/delegate-repair"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # First invocation writes a broken file; the repair prompt (recognizable by
+  # its continuation preamble) makes the stub fix it, so verify passes on
+  # round two only.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+prompt="$(cat)"
+if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
+  printf 'fixed\n' > delegated.txt
+  echo "worker repaired"
+else
+  printf 'broken\n' > delegated.txt
+  echo "worker first try"
+fi
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --verify "grep -q fixed delegated.txt" \
+    --repair 2 \
+    --prompt "Create fixed file" >"$project/out" 2>&1 || rc=$?
+  [ "$rc" = "0" ] || fail "repair round should recover the delegation, got exit $rc"
+  assert_file_contains "$project/out" "repair: 1/2 round(s) used"
+  assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.md' '## Repair 1'
+  assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.md' 'worker repaired'
+  assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.patch' 'fixed'
+
+  # Default stays one-shot: same failing first attempt, no repair, exit 1.
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts-oneshot" \
+    --verify "grep -q fixed delegated.txt" \
+    --prompt "Create fixed file" >"$project/out-oneshot" 2>&1 || rc=$?
+  [ "$rc" = "1" ] || fail "one-shot delegation with failing verify should exit 1, got $rc"
+  if grep -rFq '## Repair' "$project/artifacts-oneshot"; then
+    fail "no repair rounds expected without --repair"
+  fi
+
+  # Bounds are validated up front.
+  rc=0
+  "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --repo "$project" --repair 5 --prompt "x" \
+    >/dev/null 2>"$project/err-bounds" || rc=$?
+  [ "$rc" = "2" ] || fail "--repair 5 should be rejected with exit 2, got $rc"
+  assert_file_contains "$project/err-bounds" "--repair must be 0-3"
+}
+
 test_run_with_timeout_warns_when_unbounded() {
   local out="$TMP/rwt-out"
   local err="$TMP/rwt-err"
@@ -5957,6 +6019,7 @@ test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
 test_oms_run_diff_compares_capsules
 test_oms_run_validate_detects_malformed_jsonl
+test_delegate_repair_retries_failed_verify
 test_run_with_timeout_warns_when_unbounded
 test_scrubber_blocks_json_quoted_secret
 test_scrubber_blocks_hpc_cluster_paths

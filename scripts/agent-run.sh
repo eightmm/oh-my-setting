@@ -13,6 +13,7 @@ MODE="auto"
 ARTIFACT_DIR=""
 VERIFY_CMD=""
 NO_VERIFY=0
+REPAIR=0
 APPLY=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
@@ -39,6 +40,8 @@ Options:
   --artifact-dir PATH  Override artifact directory.
   --verify CMD         Write mode only: verification command in worker worktree.
   --no-verify          Write mode only: skip default scripts/check.sh verification.
+  --repair N           Write mode only: re-run the worker up to N times (1-3)
+                       on worker/verify failure with the failure fed back.
   --apply              Write mode only: apply returned patch when worker and
                        verify pass and the main tree is clean.
   --keep-worktree      Write mode only: keep worker worktree.
@@ -203,6 +206,11 @@ while [ "$#" -gt 0 ]; do
       NO_VERIFY=1
       shift
       ;;
+    --repair)
+      [ "$#" -ge 2 ] || { echo "error: --repair requires round count" >&2; exit 2; }
+      REPAIR="$2"
+      shift 2
+      ;;
     --apply)
       APPLY=1
       shift
@@ -309,6 +317,7 @@ else
   [ -n "$ARTIFACT_DIR" ] && cmd+=(--artifact-dir "$ARTIFACT_DIR")
   [ -n "$VERIFY_CMD" ] && cmd+=(--verify "$VERIFY_CMD")
   [ "$NO_VERIFY" -eq 1 ] && cmd+=(--no-verify)
+  [ "${REPAIR:-0}" != "0" ] && cmd+=(--repair "$REPAIR")
   [ "$APPLY" -eq 1 ] && cmd+=(--apply)
   [ "$KEEP_WORKTREE" -eq 1 ] && cmd+=(--keep-worktree)
   [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
