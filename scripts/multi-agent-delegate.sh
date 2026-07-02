@@ -329,7 +329,9 @@ fi
 } > "$artifact"
 
 # Runs the worker CLI in the worktree on a prompt file; output is appended to
-# the artifact. Sets worker_status.
+# the artifact. Sets worker_status. OMS_STATE_REPO points harness state tools
+# (agent-memory/task/plan) at the primary repo's .oms — the throwaway worktree
+# has none — and OMS_AGENT attributes any worker-written notes to the provider.
 run_worker() {
   local prompt="$1"
   local worker_pid
@@ -338,19 +340,19 @@ run_worker() {
   set +e
   case "$TO" in
     codex)
-      (cd "$worktree" && run_with_timeout codex exec --sandbox workspace-write - < "$prompt") >> "$artifact" 2>&1 &
+      (cd "$worktree" && OMS_STATE_REPO="$REPO" OMS_AGENT="$TO" run_with_timeout codex exec --sandbox workspace-write - < "$prompt") >> "$artifact" 2>&1 &
       worker_pid="$!"
       wait "$worker_pid"
       worker_status=$?
       ;;
     claude)
-      (cd "$worktree" && run_with_timeout claude -p --permission-mode acceptEdits < "$prompt") >> "$artifact" 2>&1 &
+      (cd "$worktree" && OMS_STATE_REPO="$REPO" OMS_AGENT="$TO" run_with_timeout claude -p --permission-mode acceptEdits < "$prompt") >> "$artifact" 2>&1 &
       worker_pid="$!"
       wait "$worker_pid"
       worker_status=$?
       ;;
     antigravity)
-      (cd "$worktree" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt") >> "$artifact" 2>&1 &
+      (cd "$worktree" && OMS_STATE_REPO="$REPO" OMS_AGENT="$TO" run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$prompt") >> "$artifact" 2>&1 &
       worker_pid="$!"
       wait "$worker_pid"
       worker_status=$?
@@ -373,7 +375,7 @@ run_verify() {
 
   : > "$verify_out"
   set +e
-  (cd "$worktree" && bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
+  (cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
   verify_pid="$!"
   wait "$verify_pid"
   verify_status=$?

@@ -512,8 +512,16 @@ elif [ -n "$SYNTHESIZE" ]; then
           synth_status=$?
           ;;
         antigravity|agy)
-          run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$synth_prompt_file" >> "$synth_file" 2>&1
-          synth_status=$?
+          # Isolated read pass: see ma_agy_read_dir.
+          synth_agy_dir="$(ma_agy_read_dir "$REPO")" || synth_agy_dir=""
+          if [ -n "$synth_agy_dir" ]; then
+            (cd "$synth_agy_dir" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" < "$synth_prompt_file") >> "$synth_file" 2>&1
+            synth_status=$?
+            ma_agy_read_cleanup "$REPO" "$synth_agy_dir"
+          else
+            printf 'SKIPPED: could not create isolation dir for agy read pass\n' >> "$synth_file"
+            synth_status=1
+          fi
           ;;
       esac
       set -e
@@ -549,7 +557,7 @@ if [ "$GATE" -eq 1 ]; then
         printf '## Output\n\n'
       } > "$gate_verify_artifact"
       set +e
-      (cd "$REPO" && bash -c "$VERIFY_CMD") >> "$gate_verify_artifact" 2>&1
+      (cd "$REPO" && run_verify_with_timeout bash -c "$VERIFY_CMD") >> "$gate_verify_artifact" 2>&1
       gate_verify_exit=$?
       set -e
       printf '\n\n## Exit\n\n%s\n' "$gate_verify_exit" >> "$gate_verify_artifact"

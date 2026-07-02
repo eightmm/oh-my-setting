@@ -114,6 +114,58 @@ run_with_timeout() {
   fi
 }
 
+# agy has no file-write-blocking flag: --sandbox restricts the terminal, not
+# file writes — unlike codex --sandbox read-only and claude plan mode. Read
+# passes billed as read-only therefore run from an isolated directory: a
+# detached HEAD worktree when the repo is git (same tree view, writes
+# discarded), else an empty scratch dir. Write workers keep their own
+# delegate worktree and must not use this.
+# Prints the directory to run in; empty output means isolation failed.
+ma_agy_read_dir() {
+  local repo="${1:-}"
+  local base
+
+  base="$(mktemp -d "${TMPDIR:-/tmp}/oms-agy-read.XXXXXX")" || return 1
+  if [ -n "$repo" ] && git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
+     git -C "$repo" worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
+    printf '%s/tree\n' "$base"
+  else
+    printf '%s\n' "$base"
+  fi
+}
+
+ma_agy_read_cleanup() {
+  local repo="${1:-}"
+  local dir="$2"
+  local base="$dir"
+
+  [ -n "$dir" ] || return 0
+  case "$dir" in
+    */tree)
+      base="${dir%/tree}"
+      if [ -n "$repo" ]; then
+        git -C "$repo" worktree remove --force "$dir" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+  rm -rf "$base"
+}
+
+# Verification commands (test suites) get their own, longer wall clock than
+# provider calls; a hung verify otherwise wedges the delegation or review gate
+# indefinitely. GNU timeout exits 124 on expiry, which callers already treat
+# as a normal nonzero verify failure.
+run_verify_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-10m}" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-10m}" "$@"
+  else
+    echo "warning: no timeout/gtimeout binary; verify command runs unbounded" >&2
+    "$@"
+  fi
+}
+
 ma_git_diff_base() {
   local repo="$1"
   if [ -n "${BASE_REF:-}" ]; then
@@ -480,8 +532,17 @@ run_provider() {
       status=$?
       ;;
     antigravity|agy)
-      ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}" >> "$artifact" 2>&1
-      status=$?
+      # Isolated read pass: see ma_agy_read_dir.
+      local agy_dir
+      agy_dir="$(ma_agy_read_dir "${REPO:-}")" || agy_dir=""
+      if [ -n "$agy_dir" ]; then
+        (cd "$agy_dir" && ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}") >> "$artifact" 2>&1
+        status=$?
+        ma_agy_read_cleanup "${REPO:-}" "$agy_dir"
+      else
+        printf 'SKIPPED: could not create isolation dir for agy read pass\n' >> "$artifact"
+        status=1
+      fi
       ;;
     *)
       printf 'SKIPPED: unsupported provider: %s\n' "$provider" >> "$artifact"
