@@ -23,6 +23,7 @@ INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 TASK_ID=""
+PLAN_TASK_ID=""
 REPAIR=0
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
@@ -63,6 +64,11 @@ Options:
   --no-ml-context      Do not attach the compact ML context digest.
   --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
                        artifact-index rows for lineage. [A-Za-z0-9._-]+.
+  --plan-task ID       Couple this delegation to an agent-plan.sh task: on
+                       worker/verify failure (or an outbound-gate block) the
+                       claim is released back to ready; on success the task
+                       moves to review with the artifact and patch (or to done
+                       when --apply landed the patch). Implies --task-id ID.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt and empty patch without calling the CLI.
@@ -141,6 +147,14 @@ while [ "$#" -gt 0 ]; do
       TASK_ID="$2"
       shift 2
       ;;
+    --plan-task)
+      [ "$#" -ge 2 ] || fail "--plan-task requires id"
+      case "$2" in
+        *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;;
+      esac
+      PLAN_TASK_ID="$2"
+      shift 2
+      ;;
     --artifact-dir)
       [ "$#" -ge 2 ] || fail "--artifact-dir requires path"
       ARTIFACT_DIR="$2"
@@ -167,7 +181,19 @@ done
 
 # Stamp every artifact-index row from this delegation with the plan/task id so
 # the run can be traced back to its subtask (ma_append_artifact_index reads it).
+[ -n "$PLAN_TASK_ID" ] && [ -z "$TASK_ID" ] && TASK_ID="$PLAN_TASK_ID"
 [ -n "$TASK_ID" ] && export OMS_TASK_ID="$TASK_ID"
+
+# Plan lifecycle coupling for --plan-task. Failures release the claim so the
+# task never sticks in claimed/running when the worker dies or is rejected.
+plan_transition() {
+  local action="$1"
+  shift
+  [ -n "$PLAN_TASK_ID" ] || return 0
+  [ "$DRY_RUN" != "1" ] || return 0
+  "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" "$action" --id "$PLAN_TASK_ID" "$@" ||
+    echo "warning: plan $action failed for task $PLAN_TASK_ID" >&2
+}
 
 case "$TO" in
   codex|claude|antigravity|agy) ;;
@@ -271,6 +297,7 @@ if ! ma_validate_outbound_prompt "$prompt_file"; then
   echo "blocked: $TO sensitive outbound context -> $artifact"
   echo "artifact: $artifact"
   echo "patch: $patch_file"
+  plan_transition release
   exit 3
 fi
 git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
@@ -506,5 +533,11 @@ if [ "$KEEP_WORKTREE" = 1 ]; then
 fi
 
 if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+  plan_transition release
   exit 1
+fi
+if [ "$applied" = 1 ]; then
+  plan_transition finish --artifact "$artifact" --patch "$patch_file"
+else
+  plan_transition review --artifact "$artifact" --patch "$patch_file"
 fi

@@ -5633,6 +5633,90 @@ test_oms_run_diff_compares_capsules() {
   fi
 }
 
+test_agent_plan_reclaim_requeues_stale_claim() {
+  local d="$TMP/plan-reclaim"
+  local SH="$ROOT/scripts/agent-plan.sh"
+  local out
+
+  mkdir -p "$d"
+  "$SH" --repo "$d" init --goal "reclaim test" >/dev/null
+  "$SH" --repo "$d" add --id t1 --title "stale claim" >/dev/null
+  "$SH" --repo "$d" add --id t2 --title "fresh claim" >/dev/null
+  "$SH" --repo "$d" add --id t3 --title "stale running" >/dev/null
+  "$SH" --repo "$d" add --id t4 --title "in review" >/dev/null
+  "$SH" --repo "$d" claim --id t1 --provider codex --ttl 0 >/dev/null
+  "$SH" --repo "$d" claim --id t2 --provider codex --ttl 9999 >/dev/null
+  "$SH" --repo "$d" claim --id t3 --provider codex --ttl 0 >/dev/null
+  "$SH" --repo "$d" start --id t3 >/dev/null
+  "$SH" --repo "$d" claim --id t4 --provider codex --ttl 0 >/dev/null
+  "$SH" --repo "$d" review --id t4 >/dev/null
+
+  out="$("$SH" --repo "$d" reclaim)"
+  printf '%s' "$out" | grep -Fq "reclaimed t1" || fail "expired claimed task should be reclaimed"
+  printf '%s' "$out" | grep -Fq "reclaimed 1 task(s)" || fail "only the expired claimed task should be reclaimed by default"
+  "$SH" --repo "$d" show --id t1 | grep -Fq '"state": "ready"' || fail "t1 should be requeued to ready"
+  "$SH" --repo "$d" show --id t2 | grep -Fq '"state": "claimed"' || fail "a fresh claim must stay claimed"
+  "$SH" --repo "$d" show --id t3 | grep -Fq '"state": "running"' || fail "running must require --include-running"
+  "$SH" --repo "$d" show --id t4 | grep -Fq '"state": "review"' || fail "review must never be reclaimed"
+
+  out="$("$SH" --repo "$d" reclaim --include-running)"
+  printf '%s' "$out" | grep -Fq "reclaimed t3" || fail "--include-running should reclaim the stale running task"
+
+  if "$SH" --repo "$d" reclaim --ttl abc >/dev/null 2>"$d/err"; then
+    fail "non-numeric reclaim --ttl must be rejected"
+  fi
+  assert_file_contains "$d/err" "must be an integer"
+}
+
+test_delegate_plan_task_lifecycle() {
+  local project="$TMP/delegate-plan-task"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local PLAN="$ROOT/scripts/agent-plan.sh"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'done\n' > delegated.txt
+echo "worker done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  "$PLAN" --repo "$project" init --goal "plan-task coupling" >/dev/null
+  "$PLAN" --repo "$project" add --id ok.task --title "succeeds" >/dev/null
+  "$PLAN" --repo "$project" add --id bad.task --title "fails verify" >/dev/null
+  "$PLAN" --repo "$project" claim --id ok.task --provider codex >/dev/null
+  "$PLAN" --repo "$project" claim --id bad.task --provider codex >/dev/null
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --repo "$project" \
+    --artifact-dir "$project/artifacts" \
+    --plan-task ok.task \
+    --prompt "Create delegated file" >/dev/null 2>&1
+  "$PLAN" --repo "$project" show --id ok.task > "$project/ok.json"
+  grep -Fq '"state": "review"' "$project/ok.json" || fail "successful delegation should move the plan task to review"
+  grep -Fq 'artifacts' "$project/ok.json" || fail "review transition should record the artifact path"
+
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --repo "$project" \
+    --artifact-dir "$project/artifacts" \
+    --plan-task bad.task \
+    --verify "false" \
+    --prompt "Create delegated file badly" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = "1" ] || fail "failing verify should exit 1, got $rc"
+  "$PLAN" --repo "$project" show --id bad.task > "$project/bad.json"
+  grep -Fq '"state": "ready"' "$project/bad.json" || fail "failed delegation should release the plan claim"
+
+  grep -Fq '"task_id": "ok.task"' "$project/.oms/artifacts/index.jsonl" ||
+    fail "--plan-task should stamp task_id lineage on artifact-index rows"
+}
+
 test_multi_agent_review_gate_verify_backstop() {
   local project="$TMP/review-gate-verify"
   local artifact_dir="$project/artifacts"
@@ -6082,6 +6166,8 @@ test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
 test_oms_run_diff_compares_capsules
 test_oms_run_validate_detects_malformed_jsonl
+test_agent_plan_reclaim_requeues_stale_claim
+test_delegate_plan_task_lifecycle
 test_multi_agent_review_gate_verify_backstop
 test_delegate_repair_retries_failed_verify
 test_run_with_timeout_warns_when_unbounded
