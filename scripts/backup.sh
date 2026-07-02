@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Snapshot the agent config files oh-my-setting replaces into backups/<timestamp>.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date +%Y%m%d%H%M%S)"
 DEST="$ROOT/backups/$STAMP"

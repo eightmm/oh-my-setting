@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Symlink rules, skills, prompts/workflows, and the oms dispatcher into all three agent CLIs.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date +%Y%m%d%H%M%S)"
 # shellcheck source=scripts/lib/agent-install-state.sh
@@ -63,3 +65,5 @@ link_skills "$HOME/.claude/skills"
 link_skills "$HOME/.gemini/antigravity/skills"
 link_target "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
 link_target "$ROOT/workflows" "$HOME/.oh-my-setting-workflows"
+# The one-name dispatcher: `oms <tool>` from any agent CLI, no script paths.
+link_target "$ROOT/scripts/oms" "$HOME/.local/bin/oms"

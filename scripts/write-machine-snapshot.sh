@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Write local/machine.md — a hardware/tooling snapshot agents read for local context.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${OH_MY_SETTING_MACHINE_SNAPSHOT:-$ROOT/local/machine.md}"
 HOST_LABEL="${OH_MY_SETTING_HOST_LABEL:-local}"

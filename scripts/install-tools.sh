@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Install the tool CLIs the harness expects (node via nvm, provider CLIs).
+
 NODE_VERSION="${OH_MY_SETTING_NODE_VERSION:-lts/*}"
 NVM_VERSION="${OH_MY_SETTING_NVM_VERSION:-v0.40.3}"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"

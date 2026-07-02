@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One stable entrypoint so any agent CLI (Codex, Claude Code, Antigravity)
+# can invoke harness tools by name — `oms run-ledger ...` — without
+# memorizing script paths. link.sh puts this on PATH at ~/.local/bin/oms;
+# the checkout is resolved from the dispatcher's own symlink target, so a
+# dev checkout and an install each dispatch to their own scripts.
+
+# macOS readlink has no -f; walk the link chain by hand (bash 3.2 safe).
+resolve_self() {
+  local src="$1"
+  local dir
+
+  while [ -L "$src" ]; do
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  printf '%s\n' "$src"
+}
+
+SCRIPTS_DIR="$(cd "$(dirname "$(resolve_self "${BASH_SOURCE[0]}")")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage: oms <tool> [args...]
+       oms list
+       oms help
+
+Dispatch to an oh-my-setting harness tool by name: `oms run-ledger --help`
+runs run-ledger.sh from the install this dispatcher belongs to. `list`
+prints every tool with its one-line description; docs/COMPONENTS.md in the
+install describes each subsystem.
+EOF
+}
+
+# One-line purpose of a tool: the first line of its header comment block
+# (before any code line), else the first description line under its usage()
+# Usage: block. Blank when a script has neither.
+describe() {
+  local desc
+
+  desc="$(awk '
+    NR <= 2 { next }
+    /^# shellcheck/ { next }
+    /^#/ { sub(/^#+ ?/, ""); print; exit }
+    /^[[:space:]]*$/ { next }
+    { exit }
+  ' "$1")"
+  if [ -z "$desc" ]; then
+    desc="$(awk '
+      /^Usage:/ { in_usage = 1; next }
+      in_usage && /^EOF$/ { exit }
+      in_usage && NF && !/^[[:space:]]/ { print; exit }
+    ' "$1")"
+  fi
+  printf '%s\n' "$desc"
+}
+
+cmd_list() {
+  local f
+  local name
+
+  for f in "$SCRIPTS_DIR"/*.sh; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f" .sh)"
+    printf '%-26s %s\n' "$name" "$(describe "$f")"
+  done
+}
+
+case "${1:-}" in
+  ""|-h|--help)
+    usage
+    exit 0
+    ;;
+  help)
+    usage
+    echo
+    cmd_list
+    exit 0
+    ;;
+  list)
+    cmd_list
+    exit 0
+    ;;
+esac
+
+TOOL="$1"
+shift
+case "$TOOL" in
+  *[!A-Za-z0-9._-]*)
+    echo "error: invalid tool name: $TOOL" >&2
+    exit 2
+    ;;
+esac
+TOOL="${TOOL%.sh}"
+# `oms run new|current|show|timeline ...` reads better than `oms oms-run`.
+[ "$TOOL" = "run" ] && TOOL="oms-run"
+TARGET="$SCRIPTS_DIR/$TOOL.sh"
+if [ ! -f "$TARGET" ]; then
+  echo "error: unknown tool: $TOOL (run: oms list)" >&2
+  exit 2
+fi
+exec bash "$TARGET" "$@"

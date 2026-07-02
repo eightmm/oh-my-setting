@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Classify a repo as ml or general so templates and verify contracts match.
+
 DIR="${1:-$PWD}"
 
 if [ "$#" -gt 1 ]; then

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Remove the symlinks link.sh created and restore the backups they replaced.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 
@@ -95,3 +97,4 @@ unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AG
 unlink_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
 unlink_and_restore "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
 unlink_and_restore "$HOME/.oh-my-setting-workflows" "$ROOT/workflows"
+unlink_and_restore "$HOME/.local/bin/oms" "$ROOT/scripts/oms"

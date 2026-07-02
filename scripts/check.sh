@@ -21,7 +21,9 @@ if ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
 fi
 
 echo "== shellcheck =="
-"$SHELLCHECK" -x -S warning install.sh scripts/*.sh tests/*.sh
+# scripts/oms is named explicitly: the dispatcher has no .sh extension, so
+# the glob alone would silently skip it.
+"$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh tests/*.sh
 
 echo "== smoke =="
 bash tests/scripts-smoke.sh

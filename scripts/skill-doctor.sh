@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Diagnose duplicate or missing skill entries across all three agents' skill roots.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-install-state.sh
 . "$ROOT/scripts/lib/agent-install-state.sh"
