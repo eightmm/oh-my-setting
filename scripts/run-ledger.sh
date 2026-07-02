@@ -11,6 +11,10 @@ ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
 
+# Anchored to the git worktree root so the default ledger does not fork per
+# subdirectory. --file overrides stay verbatim.
+STATE_ROOT="$(oms_repo_root "$PWD")"
+
 LEDGER=""
 NOTE=""
 METRICS_FILE=""
@@ -90,7 +94,7 @@ if [ "$MODE" = "list" ]; then
     *[!0-9]*|"") fail "N must be a positive integer" ;;
   esac
   [ "$N" -gt 0 ] || fail "N must be a positive integer"
-  LEDGER="${LEDGER:-docs/EXPERIMENTS.jsonl}"
+  LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
   tail -n "$N" "$LEDGER" |
     python3 -c '
@@ -137,7 +141,7 @@ if [ "$MODE" = "top" ]; then
   done
   [ -n "$METRIC" ] || fail "top requires --metric KEY"
   [ "$N" -gt 0 ] || fail "N must be a positive integer"
-  LEDGER="${LEDGER:-docs/EXPERIMENTS.jsonl}"
+  LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
   OMS_METRIC="$METRIC" OMS_DIRECTION="$DIRECTION" OMS_N="$N" OMS_ALL="$INCLUDE_ALL" \
     python3 - "$LEDGER" <<'EOF'
@@ -225,7 +229,7 @@ done
   exit 2
 }
 
-LEDGER="${LEDGER:-docs/EXPERIMENTS.jsonl}"
+LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
 mkdir -p "$(dirname "$LEDGER")"
 
 git_sha="none"
@@ -445,7 +449,7 @@ EOF
 oms_with_file_lock "$LEDGER" run_ledger_append_row "$LEDGER" "$row_tmp"
 
 # Thin-spine join: link this ledger row to the active run id when set.
-if [ -n "${OMS_RUN_ID:-}" ]; then
+if oms_effective_run_id "$STATE_ROOT" >/dev/null 2>&1; then
   "$ROOT_LIB/../oms-run.sh" link --tool run-ledger --event append \
     --path "$LEDGER" --detail "exit $status" >/dev/null 2>&1 || true
 fi

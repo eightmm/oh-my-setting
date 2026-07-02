@@ -5,11 +5,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 
-REPO="$PWD"
+# OMS_STATE_REPO: set by multi-agent-delegate.sh for worktree workers so they
+# read the primary repo's shared state instead of the throwaway checkout's.
+REPO="${OMS_STATE_REPO:-$PWD}"
 SCOPE="project"
 MEMORY_FILE=""
 ACTION=""
-AGENT="agent"
+AGENT="$(oms_detect_agent)"
 TEXT=""
 USE_STDIN=0
 FULL=0

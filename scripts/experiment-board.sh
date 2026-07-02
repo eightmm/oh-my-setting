@@ -15,11 +15,15 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/agent-memory-common.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT_LIB/file-lock.sh"
+# shellcheck source=scripts/lib/oms-common.sh
+. "$ROOT_LIB/oms-common.sh"
 
-BOARD="${OMS_EXPERIMENT_BOARD:-.oms/experiments.jsonl}"
+# Anchored to the git worktree root so the board does not fork per subdirectory.
+STATE_ROOT="$(oms_repo_root "$PWD")"
+BOARD="${OMS_EXPERIMENT_BOARD:-$STATE_ROOT/.oms/experiments.jsonl}"
 CLAIM_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}"
 SCHEMA=1
-AGENT_LABEL="${OMS_AGENT:-agent}"
+AGENT_LABEL="$(oms_detect_agent)"
 
 ID=""
 HYPOTHESIS=""
@@ -54,7 +58,8 @@ abort   Mark aborted with an optional reason.
 list    Show active experiments (claimed/running); --all includes finished.
 show    Print the full event history for one experiment.
 
-Without --owner, the owner is $OMS_AGENT (default "agent").
+Without --owner, the owner is the detected calling agent: $OMS_AGENT when
+set, else the CLI's own env markers, else "agent".
 EOF
 }
 
@@ -194,7 +199,7 @@ PY
   rm -f "$row_tmp"
   [ "$lock_rc" = 0 ] || exit "$lock_rc"
   # Thin-spine join: link this lifecycle event to the active run id when set.
-  if [ -n "${OMS_RUN_ID:-}" ]; then
+  if oms_effective_run_id "$STATE_ROOT" >/dev/null 2>&1; then
     "$ROOT/scripts/oms-run.sh" link --tool experiment-board --event "$status" \
       --detail "$ID" >/dev/null 2>&1 || true
   fi

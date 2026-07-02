@@ -14,6 +14,8 @@ ARTIFACT_DIR=""
 VERIFY_CMD=""
 NO_VERIFY=0
 REPAIR=0
+TASK_ID=""
+PLAN_TASK=""
 APPLY=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
@@ -42,6 +44,10 @@ Options:
   --no-verify          Write mode only: skip default scripts/check.sh verification.
   --repair N           Write mode only: re-run the worker up to N times (1-3)
                        on worker/verify failure with the failure fed back.
+  --task-id ID         Write mode only: stamp this run's artifacts with a
+                       plan/task id (forwarded to multi-agent-delegate.sh).
+  --plan-task ID       Write mode only: couple the delegation to an
+                       agent-plan.sh task (forwarded; implies --task-id).
   --apply              Write mode only: apply returned patch when worker and
                        verify pass and the main tree is clean.
   --keep-worktree      Write mode only: keep worker worktree.
@@ -211,6 +217,16 @@ while [ "$#" -gt 0 ]; do
       REPAIR="$2"
       shift 2
       ;;
+    --task-id)
+      [ "$#" -ge 2 ] || { echo "error: --task-id requires id" >&2; exit 2; }
+      TASK_ID="$2"
+      shift 2
+      ;;
+    --plan-task)
+      [ "$#" -ge 2 ] || { echo "error: --plan-task requires id" >&2; exit 2; }
+      PLAN_TASK="$2"
+      shift 2
+      ;;
     --apply)
       APPLY=1
       shift
@@ -266,6 +282,9 @@ case "$TO" in
   "") echo "error: --to is required" >&2; exit 2 ;;
   *) echo "error: unsupported provider: $TO" >&2; exit 2 ;;
 esac
+# Canonicalize aliases so artifacts, plan claims, and worker records all carry
+# the same provider name.
+TO="$(oms_normalize_provider "$TO")"
 
 case "$MODE" in
   auto|read|write) ;;
@@ -317,6 +336,8 @@ else
   [ -n "$ARTIFACT_DIR" ] && cmd+=(--artifact-dir "$ARTIFACT_DIR")
   [ -n "$VERIFY_CMD" ] && cmd+=(--verify "$VERIFY_CMD")
   [ "$NO_VERIFY" -eq 1 ] && cmd+=(--no-verify)
+  [ -n "$TASK_ID" ] && cmd+=(--task-id "$TASK_ID")
+  [ -n "$PLAN_TASK" ] && cmd+=(--plan-task "$PLAN_TASK")
   [ "${REPAIR:-0}" != "0" ] && cmd+=(--repair "$REPAIR")
   [ "$APPLY" -eq 1 ] && cmd+=(--apply)
   [ "$KEEP_WORKTREE" -eq 1 ] && cmd+=(--keep-worktree)

@@ -15,7 +15,9 @@ ROOT="$(cd "$ROOT" && pwd)"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
 
-REPO="$PWD"
+# OMS_STATE_REPO: set by multi-agent-delegate.sh for worktree workers so they
+# read the primary repo's shared state instead of the throwaway checkout's.
+REPO="${OMS_STATE_REPO:-$PWD}"
 PLAN_FILE=""
 ACTION=""
 ID=""
@@ -107,6 +109,10 @@ done
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
+if [ -n "$PROVIDER" ]; then
+  PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
+    fail "unknown provider: use codex, claude, or antigravity (agy)"
+fi
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 

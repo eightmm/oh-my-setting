@@ -15,7 +15,9 @@ ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
 
-RUNS_DIR="${OMS_RUNS_DIR:-$PWD/.oms/runs}"
+# Anchored to the git worktree root so capsules do not fork per subdirectory.
+STATE_ROOT="$(oms_repo_root "$PWD")"
+RUNS_DIR="${OMS_RUNS_DIR:-$STATE_ROOT/.oms/runs}"
 SCHEMA=1
 
 NOTE=""
@@ -298,7 +300,7 @@ cmd_run() {
 
   OMS_GIT="$git_json" OMS_ENV="$env_json" OMS_CFG="$cfg_json" OMS_OUT="$out_json" \
   OMS_METRICS="$metrics_json" OMS_SEEDS="$(printf '%s\n' "${SEEDS[@]:-}")" \
-  python3 - "$SCHEMA" "$id" "$ts" "${OMS_AGENT:-unknown}" "$PWD" "$NOTE" \
+  python3 - "$SCHEMA" "$id" "$ts" "$(oms_detect_agent)" "$PWD" "$NOTE" \
     "$status" "$duration_s" "${SLURM_JOB_ID:-}" "$@" <<'PY' > "$bundle/capsule.json"
 import json, os, sys
 a = sys.argv[1:]
@@ -370,7 +372,7 @@ PY
   fi
 
   # Thin-spine join: link this capsule to the active run id when one is set.
-  if [ -n "${OMS_RUN_ID:-}" ]; then
+  if oms_effective_run_id "$STATE_ROOT" >/dev/null 2>&1; then
     "$ROOT/scripts/oms-run.sh" link --tool run-capsule --event capture \
       --path "$bundle/capsule.json" --detail "exit $status" >/dev/null 2>&1 || true
   fi

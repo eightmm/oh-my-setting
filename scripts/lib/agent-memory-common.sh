@@ -18,6 +18,33 @@ oms_repo_root() {
   fi
 }
 
+# Best-effort identity of the agent CLI running this process, for attribution
+# of notes, claims, and spine rows. Order: explicit OMS_AGENT > markers the
+# CLIs export to their subprocesses > generic "agent". Harness-spawned workers
+# are reliable: the spawning side exports OMS_AGENT=<provider> for them.
+oms_detect_agent() {
+  if [ -n "${OMS_AGENT:-}" ]; then
+    printf '%s\n' "$OMS_AGENT"
+  elif [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]; then
+    printf 'claude\n'
+  elif [ -n "${CODEX_SANDBOX:-}" ]; then
+    printf 'codex\n'
+  else
+    printf 'agent\n'
+  fi
+}
+
+# Canonical provider namespace shared by the plan board, the router, and the
+# delegate. Accepts the aliases users type; prints the canonical name or fails,
+# so board/artifact records never fork into "agy" vs "antigravity".
+oms_normalize_provider() {
+  case "${1:-}" in
+    codex|claude|antigravity) printf '%s\n' "$1" ;;
+    agy) printf 'antigravity\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 agent_memory_project_file() {
   local repo="$1"
   repo="$(oms_repo_root "$repo")" || return 1
