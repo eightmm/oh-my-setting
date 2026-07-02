@@ -5633,6 +5633,69 @@ test_oms_run_diff_compares_capsules() {
   fi
 }
 
+test_multi_agent_review_gate_verify_backstop() {
+  local project="$TMP/review-gate-verify"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir" "$project/scripts"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  write_fake_review_gate_provider "$bin_dir" antigravity pass
+  cat > "$project/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "contract broken"
+exit 1
+EOF
+  chmod +x "$project/scripts/check.sh"
+
+  # All reviewers self-report pass, but the project's own check fails: the
+  # mechanical backstop must force the gate to fail.
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude,antigravity \
+    --no-diff \
+    --gate \
+    --prompt "Gate verify backstop" >"$project/out" 2>&1 || rc=$?
+  [ "$rc" = "1" ] || fail "failing mechanical verify must force gate fail, got $rc"
+  assert_file_contains "$project/out" "gate auto-verify: bash scripts/check.sh fast"
+  assert_file_contains "$project/out" "gate verify: fail (exit 1)"
+  assert_file_contains "$project/out" "claude: pass"
+  assert_one_artifact_contains "$artifact_dir" '_verify-gate-verify-backstop-*.md' 'contract broken'
+
+  # Passing contract + passing reviewers -> gate passes.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts-pass" \
+    --providers claude,antigravity \
+    --no-diff \
+    --gate \
+    --prompt "Gate verify backstop" >"$project/out-pass" 2>&1 || rc=$?
+  [ "$rc" = "0" ] || fail "verify pass + reviewer pass should exit 0, got $rc"
+  assert_file_contains "$project/out-pass" "gate verify: pass"
+
+  # --no-verify keeps the old self-report-only behavior.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$project/scripts/check.sh"
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts-noverify" \
+    --providers claude,antigravity \
+    --no-diff \
+    --gate \
+    --no-verify \
+    --prompt "Gate verify backstop" >"$project/out-noverify" 2>&1 || rc=$?
+  [ "$rc" = "0" ] || fail "--no-verify should skip the backstop, got $rc"
+  if grep -Fq "gate verify:" "$project/out-noverify"; then
+    fail "--no-verify must not run the gate verify backstop"
+  fi
+}
+
 test_delegate_repair_retries_failed_verify() {
   local project="$TMP/delegate-repair"
   local artifact_dir="$project/artifacts"
@@ -6019,6 +6082,7 @@ test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
 test_oms_run_diff_compares_capsules
 test_oms_run_validate_detects_malformed_jsonl
+test_multi_agent_review_gate_verify_backstop
 test_delegate_repair_retries_failed_verify
 test_run_with_timeout_warns_when_unbounded
 test_scrubber_blocks_json_quoted_secret

@@ -26,6 +26,8 @@ INCLUDE_ML_CONTEXT=1
 DEBATE=0
 EXPORT_ONLY=0
 GATE=0
+VERIFY_CMD=""
+NO_VERIFY=0
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 usage() {
@@ -66,6 +68,14 @@ Options:
   --gate               Require each reviewer to end with GATE: pass or
                        GATE: fail, then print verdicts and exit with the gate
                        status. Review mode only.
+  --verify CMD         Gate mode: run CMD in the repo after the reviews; a
+                       non-zero exit forces the gate to fail regardless of
+                       reviewer verdicts (a GATE: pass self-report cannot
+                       pass a diff that fails the project's own checks).
+                       Default when --gate is set and scripts/check.sh is
+                       executable: "bash scripts/check.sh fast" (ml-smoke
+                       with --ml when available).
+  --no-verify          Gate mode: skip the default scripts/check.sh backstop.
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
@@ -126,7 +136,9 @@ review_verdicts() {
   for f in "$vdir"/*-"$run_id".md "$vdir"/*-"$run_id"-r[0-9]*.md; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"
-    case "$base" in _synthesis-*) continue ;; esac
+    # Skip run-level artifacts (_synthesis-*, _verify-*): they are not
+    # provider reviews and carry no GATE verdict.
+    case "$base" in _*) continue ;; esac
     provider="${base%%-*}"
     # Round suffix sits strictly after the run id ("-rN.md"); a slug that
     # happens to contain "-r2" must not be parsed as a round.
@@ -312,6 +324,15 @@ while [ "$#" -gt 0 ]; do
       GATE=1
       shift
       ;;
+    --verify)
+      [ "$#" -ge 2 ] || fail "--verify requires command"
+      VERIFY_CMD="$2"
+      shift 2
+      ;;
+    --no-verify)
+      NO_VERIFY=1
+      shift
+      ;;
     --synthesize)
       SYNTHESIZE="claude"
       if [ "$#" -ge 2 ] && [ "${2#-}" = "$2" ]; then
@@ -365,6 +386,17 @@ if [ -n "$BASE_REF" ]; then
     fail "invalid --base ref: $BASE_REF"
 fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/review}"
+
+# Mechanical gate backstop: default to the project's own check contract so a
+# GATE: pass self-report alone cannot pass a diff that fails the checks.
+if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "$REPO/scripts/check.sh" ]; then
+  if [ "$ML_PRESET" -eq 1 ] && oms_check_sh_has_ml_smoke "$REPO/scripts/check.sh"; then
+    VERIFY_CMD="bash scripts/check.sh ml-smoke"
+  else
+    VERIFY_CMD="bash scripts/check.sh fast"
+  fi
+  echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
+fi
 
 load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
@@ -504,7 +536,40 @@ fi
 
 if [ "$GATE" -eq 1 ]; then
   ma_print_run_summary
-  review_verdicts "$ARTIFACT_DIR" "$timestamp"
+  gate_verify_exit=0
+  if [ -n "$VERIFY_CMD" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "gate verify: skipped (dry run)"
+    else
+      gate_verify_artifact="$ARTIFACT_DIR/_verify-$slug-$timestamp.md"
+      {
+        printf '# gate verify\n\n'
+        printf -- '- command: %s\n' "$VERIFY_CMD"
+        printf -- '- started: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '## Output\n\n'
+      } > "$gate_verify_artifact"
+      set +e
+      (cd "$REPO" && bash -c "$VERIFY_CMD") >> "$gate_verify_artifact" 2>&1
+      gate_verify_exit=$?
+      set -e
+      printf '\n\n## Exit\n\n%s\n' "$gate_verify_exit" >> "$gate_verify_artifact"
+      ma_append_artifact_index "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" || true
+      if [ "$gate_verify_exit" -eq 0 ]; then
+        echo "gate verify: pass"
+      else
+        echo "gate verify: fail (exit $gate_verify_exit) -> $gate_verify_artifact"
+      fi
+    fi
+  fi
+  verdict_rc=0
+  ( review_verdicts "$ARTIFACT_DIR" "$timestamp" ) || verdict_rc=$?
+  # Mechanical failure beats reviewer consensus; a died provider (2) still
+  # takes precedence so the round gets re-run first.
+  if [ "$verdict_rc" -eq 0 ] && [ "$gate_verify_exit" -ne 0 ]; then
+    echo "gate: fail (mechanical verify failed despite reviewer pass)"
+    exit 1
+  fi
+  exit "$verdict_rc"
 fi
 
 ma_quorum_exit
