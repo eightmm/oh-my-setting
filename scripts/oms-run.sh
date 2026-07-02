@@ -30,6 +30,7 @@ Usage: oms-run.sh new [--note TEXT]
        oms-run.sh show <run_id>
        oms-run.sh ls [N]
        oms-run.sh diff <run_id_a> <run_id_b>
+       oms-run.sh timeline [--since ISO8601|--today] [--limit N]
        oms-run.sh validate [--dir DIR]
 
 The run spine: a canonical run_id and an append-only join index
@@ -42,6 +43,10 @@ link    Append one join row {run_id, ts, tool, event, path, detail}.
 show    Join and print every indexed record for a run id.
 ls      Summarize the most recent runs (default 10).
 diff    Compare two runs' capsules: commit, env, config, seeds, metric deltas.
+timeline Merge every .oms/**/*.jsonl stream plus the run ledger into one
+         time-ordered "what did the agents do" view (default last 50 rows;
+         --today or --since ISO8601 to window it). Cross-stream answer to
+         "what happened in this repo", not just one run id.
 validate Check every .oms/**/*.jsonl parses and report schema versions; nonzero
          on any malformed line. The guard against silent JSONL/schema drift.
 
@@ -242,6 +247,69 @@ for k in sorted(set(ma) | set(mb)):
 PY
 }
 
+cmd_timeline() {
+  local since=""
+  local limit=50
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --today) since="$(date -u +%Y-%m-%dT00:00:00Z)"; shift ;;
+      --since) [ "$#" -ge 2 ] || fail "--since requires an ISO8601 UTC timestamp"; since="$2"; shift 2 ;;
+      --limit) [ "$#" -ge 2 ] || fail "--limit requires N"; limit="$2"; shift 2 ;;
+      *) fail "unknown timeline argument: $1" ;;
+    esac
+  done
+  case "$limit" in *[!0-9]*|"") fail "--limit must be a positive integer" ;; esac
+  OMS_SINCE="$since" OMS_LIMIT="$limit" OMS_TL_LEDGER="${OMS_LEDGER:-docs/EXPERIMENTS.jsonl}" python3 <<'PY'
+import glob, json, os
+since = os.environ["OMS_SINCE"]
+limit = int(os.environ["OMS_LIMIT"])
+ledger = os.environ["OMS_TL_LEDGER"]
+files = sorted(glob.glob(os.path.join(".oms", "**", "*.jsonl"), recursive=True))
+if os.path.isfile(ledger):
+    files.append(ledger)
+events = []
+for f in files:
+    if f == ledger:
+        stream = "ledger"
+    else:
+        stream = os.path.relpath(f, ".oms")[: -len(".jsonl")]
+    for line in open(f, encoding="utf-8", errors="replace"):
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(r, dict):
+            continue
+        ts = r.get("ts") or r.get("reconciled_at") or ""
+        if not ts or (since and ts < since):
+            continue
+        parts = []
+        for key in ("kind", "tool", "event", "provider", "status", "id",
+                    "run_id", "job_id", "exit", "verify_exit", "gate",
+                    "detail", "note", "task_id"):
+            v = r.get(key)
+            if v in (None, ""):
+                continue
+            parts.append("%s=%s" % (key, str(v).replace("\n", " ")[:60]))
+        cmd = r.get("cmd")
+        if isinstance(cmd, list) and cmd:
+            parts.append("cmd=%s" % " ".join(str(c) for c in cmd)[:60])
+        events.append((ts, stream, " ".join(parts)))
+events.sort(key=lambda e: e[0])
+shown = events[-limit:]
+dropped = len(events) - len(shown)
+if not events:
+    print("timeline: no events%s" % ((" since " + since) if since else ""))
+else:
+    if dropped > 0:
+        print("(%d earlier event(s) omitted; raise --limit)" % dropped)
+    for ts, stream, desc in shown:
+        print("%s  %-16s %s" % (ts, stream, desc))
+PY
+}
+
 cmd_validate() {
   local dir=".oms"
   while [ "$#" -gt 0 ]; do
@@ -292,6 +360,7 @@ case "${1:-}" in
   show) shift; cmd_show "$@" ;;
   ls) shift; cmd_ls "$@" ;;
   diff) shift; cmd_diff "$@" ;;
+  timeline) shift; cmd_timeline "$@" ;;
   validate) shift; cmd_validate "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;

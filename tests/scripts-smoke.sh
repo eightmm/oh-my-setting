@@ -5633,6 +5633,66 @@ test_oms_run_diff_compares_capsules() {
   fi
 }
 
+test_run_ledger_top_ranks_metrics() {
+  local d="$TMP/ledger-top"
+  local SH="$ROOT/scripts/run-ledger.sh"
+  local ledger="$d/EXPERIMENTS.jsonl"
+  local out
+  local rc=0
+
+  mkdir -p "$d"
+  cat > "$ledger" <<'EOF'
+{"ts":"2026-01-01T00:00:00Z","git_sha":"aaa1111","dirty":0,"dirty_hash":"","slurm_job_id":"","exit":0,"duration_s":10,"note":"baseline","cmd":["train","--lr","1e-3"],"metrics":{"auc":0.71,"loss":0.40}}
+{"ts":"2026-01-02T00:00:00Z","git_sha":"bbb2222","dirty":0,"dirty_hash":"","slurm_job_id":"","exit":0,"duration_s":10,"note":"best","cmd":["train","--lr","3e-4"],"metrics":{"auc":0.83,"loss":0.31}}
+{"ts":"2026-01-03T00:00:00Z","git_sha":"ccc3333","dirty":0,"dirty_hash":"","slurm_job_id":"","exit":1,"duration_s":10,"note":"crashed","cmd":["train","--lr","1e-2"],"metrics":{"auc":0.99}}
+{"ts":"2026-01-04T00:00:00Z","git_sha":"ddd4444","dirty":0,"dirty_hash":"","slurm_job_id":"","exit":0,"duration_s":10,"note":"strval","cmd":["train"],"metrics":{"auc":"bad"}}
+EOF
+
+  out="$("$SH" top --metric auc --file "$ledger")"
+  printf '%s\n' "$out" | head -n 1 | grep -Fq "auc=0.83" || fail "top should rank the best exit-0 run first"
+  if printf '%s' "$out" | grep -Fq "0.99"; then
+    fail "failed runs must be excluded without --all"
+  fi
+
+  out="$("$SH" top --metric auc --all --file "$ledger")"
+  printf '%s\n' "$out" | head -n 1 | grep -Fq "auc=0.99" || fail "--all should include failed runs"
+
+  out="$("$SH" top --metric loss --min --file "$ledger" 1)"
+  printf '%s\n' "$out" | head -n 1 | grep -Fq "loss=0.31" || fail "--min should rank the lowest loss first"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = "1" ] || fail "N should cap the ranked table"
+
+  "$SH" top --metric nope --file "$ledger" >/dev/null 2>"$d/err" || rc=$?
+  [ "$rc" = "3" ] || fail "a missing metric should exit 3, got $rc"
+  assert_file_contains "$d/err" "no ledger rows"
+}
+
+test_oms_run_timeline_merges_streams() {
+  local d="$TMP/timeline"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local out
+
+  mkdir -p "$d/.oms/runs" "$d/.oms/artifacts" "$d/docs"
+  printf '{"run_id":"r1","ts":"2026-01-01T01:00:00Z","tool":"oms-run","event":"new"}\n' > "$d/.oms/runs/spine.jsonl"
+  printf '{"ts":"2026-01-01T02:00:00Z","kind":"delegate","provider":"codex","exit":0,"task_id":"t1"}\n' > "$d/.oms/artifacts/index.jsonl"
+  printf '{"ts":"2026-01-01T03:00:00Z","git_sha":"abc","dirty":0,"exit":0,"duration_s":5,"note":"tl run","cmd":["train"]}\n' > "$d/docs/EXPERIMENTS.jsonl"
+
+  out="$(cd "$d" && "$SH" timeline)"
+  printf '%s' "$out" | grep -Fq "runs/spine" || fail "timeline should include the spine stream"
+  printf '%s' "$out" | grep -Fq "artifacts/index" || fail "timeline should include the artifact index stream"
+  printf '%s' "$out" | grep -Fq "ledger" || fail "timeline should include the run ledger"
+  printf '%s\n' "$out" | head -n 1 | grep -Fq "01:00:00Z" || fail "timeline should be time-ordered (oldest first)"
+  printf '%s\n' "$out" | tail -n 1 | grep -Fq "03:00:00Z" || fail "the newest event should print last"
+
+  out="$(cd "$d" && "$SH" timeline --since 2026-01-01T02:30:00Z)"
+  if printf '%s' "$out" | grep -Fq "spine"; then
+    fail "--since should filter out earlier events"
+  fi
+  printf '%s' "$out" | grep -Fq "ledger" || fail "--since should keep later events"
+
+  out="$(cd "$d" && "$SH" timeline --limit 1)"
+  printf '%s' "$out" | grep -Fq "omitted" || fail "--limit should report omitted earlier events"
+}
+
 test_agent_plan_reclaim_requeues_stale_claim() {
   local d="$TMP/plan-reclaim"
   local SH="$ROOT/scripts/agent-plan.sh"
@@ -6166,6 +6226,8 @@ test_oms_run_auto_link_from_capsule
 test_oms_run_unknown_subcommand_fails
 test_oms_run_diff_compares_capsules
 test_oms_run_validate_detects_malformed_jsonl
+test_run_ledger_top_ranks_metrics
+test_oms_run_timeline_merges_streams
 test_agent_plan_reclaim_requeues_stale_claim
 test_delegate_plan_task_lifecycle
 test_multi_agent_review_gate_verify_backstop

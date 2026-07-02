@@ -21,6 +21,7 @@ usage() {
   cat <<'EOF'
 Usage: run-ledger.sh [options] -- <command...>
        run-ledger.sh list [N]
+       run-ledger.sh top --metric KEY [--min|--max] [--all] [--file PATH] [N]
 
 Run a command and append a row to the experiment ledger
 (default: docs/EXPERIMENTS.jsonl). Exit code mirrors the command.
@@ -42,6 +43,10 @@ Options:
   -h, --help      Show this help.
 
 list [N]        Show the last N ledger rows (default 10).
+top             Rank runs by a recorded metric ("best run for val_auc"):
+                rows with a finite numeric metrics[KEY], sorted --max
+                (default; use --min for losses), top N (default 10).
+                Failed runs (exit != 0) are excluded unless --all.
 
 Each row records its gate decision: "passed", "skipped" (with reason),
 "recorded" (command already ran, e.g. a capsule re-record), or "none"
@@ -71,10 +76,12 @@ run_ledger_append_row() {
 command -v python3 >/dev/null 2>&1 || fail "python3 is required for ledger rows"
 
 MODE="run"
-if [ "${1:-}" = "list" ]; then
-  MODE="list"
-  shift
-fi
+case "${1:-}" in
+  list|top)
+    MODE="$1"
+    shift
+    ;;
+esac
 
 if [ "$MODE" = "list" ]; then
   [ "$#" -le 1 ] || fail "unknown argument: $2"
@@ -108,6 +115,68 @@ for line in sys.stdin:
         r["ts"], r["exit"], r["duration_s"], gate, r["git_sha"], dirty,
         " ".join(r["cmd"]), metrics, note))
 '
+  exit 0
+fi
+
+if [ "$MODE" = "top" ]; then
+  METRIC=""
+  DIRECTION="max"
+  INCLUDE_ALL=0
+  N=10
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --metric) [ "$#" -ge 2 ] || fail "--metric requires a key"; METRIC="$2"; shift 2 ;;
+      --min) DIRECTION="min"; shift ;;
+      --max) DIRECTION="max"; shift ;;
+      --all) INCLUDE_ALL=1; shift ;;
+      --file) [ "$#" -ge 2 ] || fail "--file requires path"; LEDGER="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *[!0-9]*) fail "unknown top argument: $1" ;;
+      *) N="$1"; shift ;;
+    esac
+  done
+  [ -n "$METRIC" ] || fail "top requires --metric KEY"
+  [ "$N" -gt 0 ] || fail "N must be a positive integer"
+  LEDGER="${LEDGER:-docs/EXPERIMENTS.jsonl}"
+  [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
+  OMS_METRIC="$METRIC" OMS_DIRECTION="$DIRECTION" OMS_N="$N" OMS_ALL="$INCLUDE_ALL" \
+    python3 - "$LEDGER" <<'EOF'
+import json, math, os, sys
+metric = os.environ["OMS_METRIC"]
+direction = os.environ["OMS_DIRECTION"]
+n = int(os.environ["OMS_N"])
+include_all = os.environ["OMS_ALL"] == "1"
+rows = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        r = json.loads(line)
+    except Exception:
+        continue
+    if not isinstance(r, dict):
+        continue
+    v = (r.get("metrics") or {}).get(metric)
+    # bools are ints in python; a metric leaderboard wants real numbers only
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        continue
+    if not include_all and r.get("exit") != 0:
+        continue
+    rows.append((v, r))
+if not rows:
+    hint = "" if include_all else " and exit==0 (use --all to include failed runs)"
+    sys.stderr.write("top: no ledger rows with a finite numeric metric %r%s\n" % (metric, hint))
+    sys.exit(3)
+rows.sort(key=lambda x: x[0], reverse=(direction == "max"))
+def _clean(x):
+    s = str(x).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    return s[:60]
+for i, (v, r) in enumerate(rows[:n], 1):
+    dirty = "+dirty" if r.get("dirty") else ""
+    note = ("  # " + _clean(r["note"])) if r.get("note") else ""
+    exit_tag = ("  exit=%s" % r.get("exit")) if include_all else ""
+    print("%2d  %s=%s  %s%s  sha=%s%s  %s%s" % (
+        i, metric, v, r.get("ts"), exit_tag, r.get("git_sha"), dirty,
+        _clean(" ".join(r.get("cmd") or [])), note))
+EOF
   exit 0
 fi
 
