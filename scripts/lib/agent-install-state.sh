@@ -124,7 +124,10 @@ oms_ops_check_skill_root() {
   local total=0
   local issues=0
   local backup
-  declare -A first_seen=()
+  local prev
+  # Newline-delimited "name<TAB>path" records: bash 3.2 (macOS) has no
+  # associative arrays, and `declare -A` aborts the whole check under set -e.
+  local first_seen=""
 
   printf '## %s\n\n' "$label"
 
@@ -149,14 +152,16 @@ oms_ops_check_skill_root() {
     fi
 
     total=$((total + 1))
-    if [ -n "${first_seen[$name]+set}" ]; then
+    prev="$(printf '%s' "$first_seen" | awk -F'\t' -v n="$name" '$1 == n { print $2; exit }')"
+    if [ -n "$prev" ]; then
       printf 'duplicate skill name: %s\n' "$name"
-      printf '  first: %s\n' "${first_seen[$name]}"
+      printf '  first: %s\n' "$prev"
       printf '  also:  %s\n' "$file"
       OMS_OPS_FAILED=1
       issues=1
     else
-      first_seen[$name]="$file"
+      first_seen="${first_seen}${name}$(printf '\t')${file}
+"
     fi
   done < <(find -L "$root" -mindepth 2 -maxdepth 2 -name SKILL.md -type f -print0 2>/dev/null)
 

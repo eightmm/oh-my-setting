@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Verify the install: symlink identity, tools, skills, and manifest sync for all three agent CLIs.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
@@ -50,10 +52,19 @@ check_bash_version() {
 }
 
 check_path() {
+  # Optional $2: the exact symlink target this install expects. Existence
+  # alone is not parity — a link resolving to a foreign/stale file means this
+  # agent runs different rules while doctor would report ok.
   # -L before -e: a dangling symlink "exists" as a link but resolves to
   # nothing — exactly the breakage that silently strips an agent's rules.
   if [ -L "$1" ] && [ ! -e "$1" ]; then
     echo "broken link: $1 -> $(readlink "$1")"
+    FAILED=1
+  elif [ -L "$1" ] && [ -n "${2:-}" ] && [ "$(readlink "$1")" != "$2" ]; then
+    echo "linked elsewhere: $1 -> $(readlink "$1") (expected $2)"
+    FAILED=1
+  elif [ ! -L "$1" ] && [ -e "$1" ] && [ -n "${2:-}" ]; then
+    echo "not a symlink: $1 (expected link to $2)"
     FAILED=1
   elif [ -e "$1" ]; then
     echo "ok: $1"
@@ -72,7 +83,13 @@ check_custom_skills() {
     [ -d "$skill" ] || continue
     [ -f "$skill/SKILL.md" ] || continue
     name="$(basename "$skill")"
-    check_path "$target_root/$name/SKILL.md"
+    if [ -L "$target_root/$name" ]; then
+      # Symlink install: certify the link points at THIS checkout's skill,
+      # not a shadowed copy from another install.
+      check_path "$target_root/$name" "$skill"
+    else
+      check_path "$target_root/$name/SKILL.md"
+    fi
   done
 }
 
@@ -313,14 +330,15 @@ check_optional_cmd scancel
 
 check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"
-check_path "$HOME/.codex/AGENTS.md"
-check_path "$HOME/.claude/CLAUDE.md"
-check_path "$HOME/.gemini/AGENTS.md"
+check_path "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
+check_path "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
+check_path "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
 check_custom_skills "$HOME/.codex/skills"
 check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.gemini/antigravity/skills"
-check_path "$HOME/.oh-my-setting-prompts"
-check_path "$HOME/.oh-my-setting-workflows"
+check_path "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
+check_path "$HOME/.oh-my-setting-workflows" "$ROOT/workflows"
+check_path "$HOME/.local/bin/oms" "$ROOT/scripts/oms"
 
 if ! "$ROOT/scripts/skill-doctor.sh"; then
   FAILED=1
