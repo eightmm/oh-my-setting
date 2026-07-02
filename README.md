@@ -56,6 +56,7 @@ Export a Claude review prompt for this diff instead of calling Claude directly.
 Import this Claude answer back into the artifact index.
 Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
+Delegate this to codex with up to 2 repair rounds if verification fails.
 Admit codex's patch — run the checks ladder before applying it.
 ```
 
@@ -73,6 +74,8 @@ Experiments (ML):
 Launch this training run through the run ledger, note "lr sweep".
 Record this eval's metrics.json into the ledger row.
 Show the last 10 ledger entries.
+Show the top runs by val_auc.
+Show today's harness timeline — what did the agents do here?
 Wait for Slurm job 12345 to finish, then digest it and report.
 Capture this run in a reproducibility capsule with config.yaml and seed 7.
 Which run produced ckpt/best.pt?
@@ -92,6 +95,7 @@ Memory and handoff:
 Remember for this repo: run scripts/check.sh fast before claiming done.
 Pin for this repo: current task is the dataloader refactor.
 Show the active task packet.
+Reclaim expired agent claims on the shared plan.
 Hand off my last Codex session here so you can continue it.
 ```
 
