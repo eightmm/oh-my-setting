@@ -15,8 +15,11 @@ oms_file_lock_timeout() {
 # "<file>.lock" litters git-tracked dirs (e.g. docs/EXPERIMENTS.jsonl), and a
 # released flock file cannot be unlinked safely (unlink lets two holders
 # coexist on different inodes). Keyed by absolute path via cksum.
+# Deliberately NOT under XDG_RUNTIME_DIR: an interactive session (set) and a
+# cron/ssh session (unset) would compute different lock dirs for the same
+# state file, and both could enter the same critical section.
 oms_file_lock_dir() {
-  printf '%s\n' "${XDG_RUNTIME_DIR:-$HOME/.cache}/oh-my-setting/locks"
+  printf '%s\n' "$HOME/.cache/oh-my-setting/locks"
 }
 
 oms_file_lock_path_for_file() {

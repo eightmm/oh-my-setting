@@ -13,7 +13,9 @@ ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
 
-MANIFEST_DIR="${OMS_MANIFEST_DIR:-$PWD/.oms/manifests}"
+# Anchored to the git worktree root so manifests do not fork per subdirectory.
+STATE_ROOT="$(oms_repo_root "$PWD")"
+MANIFEST_DIR="${OMS_MANIFEST_DIR:-$STATE_ROOT/.oms/manifests}"
 # schema 3 adds per-key (id -> key) mapping fingerprint + empty count; schema 2
 # added per-split key-column fingerprints. Older manifests (no "keys" or no
 # "pair_sha256") are still read; their absent fields are simply not compared.

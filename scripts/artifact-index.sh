@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
-# shellcheck source=scripts/lib/file-lock.sh
-. "$ROOT_LIB/file-lock.sh"
+# shellcheck source=scripts/lib/agent-memory-common.sh
+. "$ROOT_LIB/agent-memory-common.sh"
 
 REPO="$PWD"
 INDEX_FILE=""
@@ -101,7 +101,8 @@ case "$LIMIT" in
 esac
 [ "$LIMIT" -gt 0 ] || fail "N must be a positive integer"
 
-REPO="$(cd "$REPO" && pwd)"
+# Anchor to the git worktree root so the index does not fork per subdirectory.
+REPO="$(oms_repo_root "$REPO")"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 [ -s "$INDEX_FILE" ] || fail "no artifact index at $INDEX_FILE"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"

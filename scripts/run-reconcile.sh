@@ -10,16 +10,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
-# shellcheck source=scripts/lib/file-lock.sh
-. "$ROOT_LIB/file-lock.sh"
+# shellcheck source=scripts/lib/agent-memory-common.sh
+. "$ROOT_LIB/agent-memory-common.sh"
 
-LEDGER="${OMS_RECONCILE_LEDGER:-docs/EXPERIMENTS.jsonl}"
-RECONCILE_FILE="${OMS_RECONCILE_FILE:-.oms/runs/reconcile.jsonl}"
-DIGEST_DIR="${OMS_RECONCILE_DIGEST_DIR:-.oms/runs/reconcile}"
+# Anchored to the git worktree root so reconcile state does not fork per
+# subdirectory. Env overrides stay verbatim.
+STATE_ROOT="$(oms_repo_root "$PWD")"
+LEDGER="${OMS_RECONCILE_LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
+RECONCILE_FILE="${OMS_RECONCILE_FILE:-$STATE_ROOT/.oms/runs/reconcile.jsonl}"
+DIGEST_DIR="${OMS_RECONCILE_DIGEST_DIR:-$STATE_ROOT/.oms/runs/reconcile}"
 SACCT="${OMS_SACCT_CMD:-sacct}"
 SQUEUE="${OMS_SQUEUE_CMD:-squeue}"
 WRITE_MEMORY=0
-AGENT_LABEL="${OMS_AGENT:-agent}"
+AGENT_LABEL="$(oms_detect_agent)"
 
 usage() {
   cat <<'EOF'
@@ -155,6 +158,7 @@ cmd_apply() {
   local jid info state exit_code elapsed source ts digest_path row_tmp
   local n_done=0 n_pending=0
   mkdir -p "$(dirname "$RECONCILE_FILE")" "$DIGEST_DIR"
+  agent_memory_ensure_oms_ignore_for_path "$RECONCILE_FILE" 2>/dev/null || true
   while IFS= read -r jid; do
     [ -n "$jid" ] || continue
     if already_reconciled "$jid"; then
