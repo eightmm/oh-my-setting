@@ -38,6 +38,7 @@ Common actions:
 ```bash
 ~/.oh-my-setting/scripts/agent-memory.sh --repo . show
 ~/.oh-my-setting/scripts/agent-memory.sh --repo . context
+~/.oh-my-setting/scripts/agent-memory.sh --repo . search --text pgvector   # recall by entry, not full cat
 ~/.oh-my-setting/scripts/agent-memory.sh --repo . append --agent codex --text "Prefer scripts/check.sh fast before done."
 ~/.oh-my-setting/scripts/agent-memory.sh --repo . pin --agent codex --text "Current task: keep agent-run as the single provider entrypoint."
 ~/.oh-my-setting/scripts/agent-memory.sh --global append --agent claude --text "User prefers compact Korean status."
@@ -121,7 +122,10 @@ ready -> claimed -> running -> review -> done lifecycle under a file lock.
 
 Provider names are canonical (`agy` normalizes to `antigravity`; unknown names
 are rejected). `multi-agent-delegate.sh --plan-task ID` couples a delegation to
-a plan task: released on failure, review/done on success.
+a plan task: released on failure, review/done on success. Without an explicit
+`--prompt`/`--brief-file` it hydrates the worker brief from the task, and
+without `--verify` it uses the task's stored verify command — so
+`multi-agent-delegate.sh --to codex --plan-task ID` is a complete one-liner.
 
 ## Individual Agent Runs
 

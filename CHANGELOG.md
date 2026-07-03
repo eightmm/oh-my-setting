@@ -56,7 +56,30 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `install.sh.sha256`, and a `SHA256SUMS` manifest (`scripts/gen-checksums.sh`).
   See `docs/RELEASE.md`.
 
+- `oms-run.sh close [id]` + `ls --open`: mark a run terminal and list
+  open-vs-closed runs; close also clears a `CURRENT` pointer naming the run so
+  later tool events stop auto-joining a finished run.
+- `oms-run.sh timeline --agent NAME` / `--tool NAME`: filter the merged
+  cross-stream timeline by who or which tool (case-insensitive substring).
+- `experiment-board.sh list --stale` / `--owner NAME`: surface TTL-expired
+  (reclaimable) claims and filter by claimer, instead of staleness only
+  showing up at the next claim collision.
+- `agent-memory.sh search PATTERN` (`--agent` author filter): recall over
+  shared memory and pins by entry, replacing `show` cat-ing the whole file.
+- `multi-agent-delegate.sh --plan-task ID` without `--prompt`/`--brief-file`
+  hydrates the worker brief from the task, and without `--verify` uses the
+  task's stored verify command — `delegate --to codex --plan-task t3` is now
+  a complete one-liner.
+
 ### Fixed
+- `patch-admit.sh` records each admission in the artifact index, so the report
+  survives `artifact-index.sh prune --files` (which deletes unreferenced files
+  under `.oms/artifacts/`); and it now fails closed when a patch modifies its
+  own verifier (e.g. rewriting `scripts/check.sh` to self-certify), overridable
+  with `--allow-verifier-change`.
+- `change-guard.sh check` includes changes committed after `begin` (diffs the
+  stored begin-HEAD against HEAD), so an agent that commits no longer escapes
+  the allow/deny path scope; the stored begin-head is finally read.
 - Run-cluster state (spine, default ledger, capsules, board, manifests,
   reconcile) anchors to the git worktree root instead of `$PWD`, so a
   subdirectory invocation no longer forks a second `.oms`; every run tool now

@@ -6208,6 +6208,169 @@ EOF
     fail "agy read isolation must clean up its worktree"
 }
 
+test_patch_admit_report_survives_prune() {
+  local project="$TMP/admit-index"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" commit -q -m "add check"
+  printf 'change\n' >> "$project/file.txt"
+  git -C "$project" diff > "$project/p.patch"
+  git -C "$project" checkout -q file.txt
+
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/p.patch" >/dev/null 2>&1 ) ||
+    fail "benign patch should ADMIT"
+  grep -Fq '"kind": "patch-admit"' "$project/.oms/artifacts/index.jsonl" ||
+    fail "admit run should be recorded in the artifact index"
+  local report
+  report="$(ls "$project"/.oms/artifacts/admit/*.md 2>/dev/null | head -1)"
+  [ -n "$report" ] || fail "admit report should exist"
+  ( cd "$project" && "$ROOT/scripts/artifact-index.sh" prune 100 --files >/dev/null 2>&1 )
+  [ -f "$report" ] || fail "indexed admit report must survive prune --files"
+}
+
+test_patch_admit_rejects_verifier_change() {
+  local project="$TMP/admit-verifier"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" commit -q -m "add check"
+  # A patch that rewrites the verifier itself would self-certify.
+  printf '#!/usr/bin/env bash\necho pwned\nexit 0\n' > "$project/scripts/check.sh"
+  git -C "$project" diff > "$project/evil.patch"
+  git -C "$project" checkout -q scripts/check.sh
+
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/evil.patch" >/dev/null 2>&1 ); then
+    fail "a patch modifying its own verifier must be REJECTED"
+  fi
+  grep -lFq 'verifier: FAIL' "$project"/.oms/artifacts/admit/*.md >/dev/null 2>&1 ||
+    fail "report should record the verifier integrity gate failure"
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/evil.patch" --allow-verifier-change >/dev/null 2>&1 ) ||
+    fail "--allow-verifier-change should admit the same patch"
+}
+
+test_change_guard_catches_committed_escape() {
+  local project="$TMP/guard-committed"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/change-guard.sh" --allow in-scope/ begin >/dev/null )
+  mkdir -p "$project/out-of-scope"
+  printf 'x\n' > "$project/out-of-scope/f.txt"
+  git -C "$project" add out-of-scope/f.txt
+  git -C "$project" commit -q -m "sneak out-of-scope commit"
+
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" check 2>&1)" || true
+  printf '%s' "$out" | grep -Fq "outside declared scope: out-of-scope/f.txt" ||
+    fail "committed out-of-scope file must be caught by the scope check"
+  if ( cd "$project" && "$ROOT/scripts/change-guard.sh" --strict check >/dev/null 2>&1 ); then
+    fail "--strict must fail when a committed change escapes scope"
+  fi
+}
+
+test_experiment_board_list_stale_and_owner() {
+  local project="$TMP/board-filters"
+
+  make_committed_repo "$project"
+  ( cd "$project" && OMS_AGENT=codex "$ROOT/scripts/experiment-board.sh" claim --id fresh --hypothesis "fresh" >/dev/null 2>&1 )
+  ( cd "$project" && OMS_AGENT=claude "$ROOT/scripts/experiment-board.sh" claim --id old --hypothesis "old" >/dev/null 2>&1 )
+  OMS_ID=old python3 - "$project/.oms/experiments.jsonl" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+rows = [json.loads(l) for l in open(path) if l.strip()]
+for r in rows:
+    if r.get("id") == os.environ["OMS_ID"]:
+        r["ts"] = "2026-01-01T00:00:00Z"
+open(path, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
+PY
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/experiment-board.sh" list)"
+  printf '%s' "$out" | grep -q "old .*STALE" || fail "an aged claim should be tagged STALE"
+  printf '%s' "$out" | grep "fresh" | grep -q "STALE" && fail "a fresh claim must not be STALE"
+  [ "$(cd "$project" && "$ROOT/scripts/experiment-board.sh" list --stale | grep -c .)" -eq 1 ] ||
+    fail "--stale should show only the stale claim"
+  ( cd "$project" && "$ROOT/scripts/experiment-board.sh" list --owner codex ) | grep -q fresh ||
+    fail "--owner codex should show codex's claim"
+}
+
+test_oms_run_close_and_ls_open() {
+  local d="$TMP/oms-run-close"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local id
+
+  mkdir -p "$d"
+  id="$(cd "$d" && env -u OMS_RUN_ID "$SH" new 2>/dev/null)"
+  ( cd "$d" && env -u OMS_RUN_ID "$SH" ls 2>/dev/null | grep -Fq "open" ) ||
+    fail "a fresh run should list as open"
+  ( cd "$d" && env -u OMS_RUN_ID "$SH" close --note finished >/dev/null 2>&1 ) ||
+    fail "close should succeed"
+  [ ! -f "$d/.oms/runs/CURRENT" ] || fail "close should clear a CURRENT naming this run"
+  ( cd "$d" && "$SH" ls 2>/dev/null | grep -Fq "closed" ) ||
+    fail "a closed run should list as closed"
+  if ( cd "$d" && "$SH" ls --open 2>/dev/null | grep -Fq "$id" ); then
+    fail "ls --open must hide a closed run"
+  fi
+}
+
+test_oms_run_timeline_filters() {
+  local d="$TMP/oms-run-tl-filter"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local id
+
+  mkdir -p "$d"
+  id="$(cd "$d" && OMS_AGENT=codex "$SH" new 2>/dev/null)"
+  ( cd "$d" && OMS_AGENT=antigravity "$SH" link --run-id "$id" --tool run-ledger --event append >/dev/null 2>&1 )
+  ( cd "$d" && "$SH" timeline --agent antigravity 2>/dev/null | grep -Fq "agent=antigravity" ) ||
+    fail "timeline --agent should include matching rows"
+  if ( cd "$d" && "$SH" timeline --agent codex 2>/dev/null | grep -Fq "agent=antigravity" ); then
+    fail "timeline --agent should exclude non-matching rows"
+  fi
+  ( cd "$d" && "$SH" timeline --tool run-ledger 2>/dev/null | grep -Fq "run-ledger" ) ||
+    fail "timeline --tool should include matching rows"
+}
+
+test_delegate_plan_task_hydrates_brief_and_verify() {
+  local project="$TMP/delegate-hydrate"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 \
+      --title "Fix the frobnicator" --verify "echo custom-verify-marker" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
+
+  local out
+  out="$(cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --plan-task t1 2>&1)" || fail "plan-task dry-run should succeed"
+  printf '%s' "$out" | grep -Fq "plan-verify: echo custom-verify-marker" ||
+    fail "verify should be hydrated from the plan task"
+  assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'Fix the frobnicator'
+}
+
+test_agent_memory_search() {
+  local project="$TMP/mem-search"
+
+  make_committed_repo "$project"
+  ( cd "$project" && OMS_AGENT=codex "$ROOT/scripts/agent-memory.sh" append --text "decided to use pgvector for embeddings" >/dev/null )
+  ( cd "$project" && OMS_AGENT=claude "$ROOT/scripts/agent-memory.sh" append --text "prefer sqlite for local cache" >/dev/null )
+  ( cd "$project" && OMS_AGENT=codex "$ROOT/scripts/agent-memory.sh" pin --text "pinned: pgvector chosen" >/dev/null )
+
+  [ "$(cd "$project" && "$ROOT/scripts/agent-memory.sh" search --text pgvector 2>/dev/null | grep -c pgvector)" -eq 2 ] ||
+    fail "search should match both the shared note and the pin"
+  ( cd "$project" && "$ROOT/scripts/agent-memory.sh" search --text sqlite --agent claude 2>/dev/null | grep -q sqlite ) ||
+    fail "search --agent should match the author's entry"
+  if ( cd "$project" && "$ROOT/scripts/agent-memory.sh" search --text sqlite --agent codex >/dev/null 2>&1 ); then
+    fail "search --agent should exclude other authors"
+  fi
+  if ( cd "$project" && "$ROOT/scripts/agent-memory.sh" search --text nomatchxyz >/dev/null 2>&1 ); then
+    fail "a search miss must exit nonzero"
+  fi
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -6451,5 +6614,13 @@ test_doctor_detects_foreign_config_link
 test_verify_timeout_bounds_hung_verify
 test_delegate_worker_receives_state_env
 test_agy_read_pass_cannot_write_repo
+test_patch_admit_report_survives_prune
+test_patch_admit_rejects_verifier_change
+test_change_guard_catches_committed_escape
+test_experiment_board_list_stale_and_owner
+test_oms_run_close_and_ls_open
+test_oms_run_timeline_filters
+test_delegate_plan_task_hydrates_brief_and_verify
+test_agent_memory_search
 
 echo "scripts-smoke: ok"
