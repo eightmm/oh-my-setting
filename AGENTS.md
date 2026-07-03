@@ -99,13 +99,16 @@ launches so work is reproducible and not duplicated across agents. Invoke a
 tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh`;
 `oms list` prints the full catalog, `docs/COMPONENTS.md` the details.
 
+- `oms state` (repo-state) is the read-only dashboard: what task/plan/board/
+  runs/artifacts are active, stale, or open. Run it first when resuming a repo.
 - Shared state — all three agents read/write the same repo-local `.oms/`:
-  shared memory (`oms agent-memory`), active task packet (`oms agent-task`),
-  subtask DAG (`oms agent-plan`: `ready`, `next --claim --provider NAME`,
-  `reclaim`).
+  shared memory (`oms agent-memory`, incl. `search`), active task packet
+  (`oms agent-task`), subtask DAG (`oms agent-plan`: `ready`,
+  `next --claim --provider NAME`, `touch` to heartbeat a long claim, `reclaim`).
 - Cross-agent work: route one provider through `oms agent-run --to NAME`
-  (read-only pass vs isolated write worktree); admit a delegated patch through
-  `oms patch-admit` before applying it.
+  (read-only pass vs isolated write worktree); land a delegated patch through
+  `oms patch-land` (clean-tree → admission gate → apply → record), or gate it
+  alone with `oms patch-admit`.
 - Claim an experiment on the study board (`oms experiment-board`) before a
   long/expensive run; it refuses a duplicate already-active claim.
 - Wrap a run worth reproducing in `oms run-capsule` (commit + diff + env/seed +

@@ -116,6 +116,7 @@ ready -> claimed -> running -> review -> done lifecycle under a file lock.
 ~/.oh-my-setting/scripts/agent-plan.sh --repo . add --id t1 --title "Fix parser" --verify "bash scripts/check.sh fast"
 ~/.oh-my-setting/scripts/agent-plan.sh --repo . ready
 ~/.oh-my-setting/scripts/agent-plan.sh --repo . next --claim --provider codex
+~/.oh-my-setting/scripts/agent-plan.sh --repo . touch --id t1      # heartbeat a long claim so it is not reclaimed
 ~/.oh-my-setting/scripts/agent-plan.sh --repo . reclaim            # requeue expired claims (dead workers)
 ~/.oh-my-setting/scripts/agent-plan.sh --repo . finish --id t1
 ```
@@ -203,19 +204,23 @@ A worker patch from `multi-agent-delegate.sh` can be stale (its base moved),
 partial, or pass only under the worker's own assumptions. Before landing one on
 the main tree, run it through the admission gate: it applies the patch in a
 throwaway worktree off the current HEAD and runs a checks ladder — applies
-cleanly (not stale) → changed shell/python/json files parse → the verification contract
-passes — then emits a verdict and a report. Exit is nonzero unless every gate
-passes, so it composes with `&&`.
+cleanly (not stale) → changed shell/python/json files parse → the patch does not
+modify its own verifier → the verification contract passes — then emits a verdict
+and a report. Exit is nonzero unless every gate passes, so it composes with `&&`.
+
+Prefer `patch-land.sh` to actually land a patch: it runs the admission gate,
+then (only on ADMIT and a clean tree) applies the patch, records the land in the
+artifact index, and optionally finishes the coupled plan task. Use bare
+`patch-admit.sh` only to gate without landing.
 
 ```bash
-~/.oh-my-setting/scripts/patch-admit.sh --patch .oms/artifacts/delegate/<worker>.patch \
-  && git apply --binary .oms/artifacts/delegate/<worker>.patch
+~/.oh-my-setting/scripts/patch-land.sh --patch .oms/artifacts/delegate/<worker>.patch --plan-task t3
 ~/.oh-my-setting/scripts/patch-admit.sh --patch <p> --verify "bash tests/scripts-smoke.sh" --ml
 ```
 
 The report (changed files, ladder, verify tail) lands under
-`.oms/artifacts/admit/`. Use it as the trust boundary between delegation and
-applying the result.
+`.oms/artifacts/admit/` and is recorded in the artifact index. Use it as the
+trust boundary between delegation and applying the result.
 
 ## Session Handoff
 

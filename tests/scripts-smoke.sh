@@ -6351,6 +6351,134 @@ test_delegate_plan_task_hydrates_brief_and_verify() {
   assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'Fix the frobnicator'
 }
 
+test_agent_plan_touch_prevents_reclaim() {
+  local project="$TMP/plan-touch"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
+  OMS_ID=t1 python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["tasks"][os.environ["OMS_ID"]]["claimed_at"] = "2026-01-01T00:00:00Z"
+json.dump(d, open(p, "w"))
+PY
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" touch --id t1 >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" reclaim --ttl 60 >/dev/null 2>&1 )
+  [ "$(python3 -c "import json;print(json.load(open('$project/.oms/plan/tasks.json'))['tasks']['t1']['state'])")" = "claimed" ] ||
+    fail "touch should refresh claimed_at so a live worker is not reclaimed"
+}
+
+test_experiment_board_touch_clears_stale() {
+  local project="$TMP/board-touch"
+
+  make_committed_repo "$project"
+  ( cd "$project" && OMS_AGENT=codex "$ROOT/scripts/experiment-board.sh" claim --id e1 --hypothesis h >/dev/null 2>&1 )
+  python3 - "$project/.oms/experiments.jsonl" <<'PY'
+import json, sys
+p = sys.argv[1]
+rows = [json.loads(l) for l in open(p) if l.strip()]
+for r in rows:
+    r["ts"] = "2026-01-01T00:00:00Z"
+open(p, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
+PY
+  ( cd "$project" && "$ROOT/scripts/experiment-board.sh" list --stale ) | grep -q e1 ||
+    fail "aged claim should be stale before touch"
+  ( cd "$project" && OMS_AGENT=codex "$ROOT/scripts/experiment-board.sh" touch --id e1 >/dev/null 2>&1 )
+  if ( cd "$project" && "$ROOT/scripts/experiment-board.sh" list --stale ) | grep -q e1; then
+    fail "touch should clear the stale flag"
+  fi
+  ( cd "$project" && "$ROOT/scripts/experiment-board.sh" list ) | grep e1 | grep -q "owner=codex" ||
+    fail "touch must preserve the original owner"
+}
+
+test_patch_land_admits_then_applies() {
+  local project="$TMP/patch-land"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" commit -q -m "add check"
+  printf 'landed\n' >> "$project/file.txt"
+  git -C "$project" diff > "$project/ok.patch"
+  git -C "$project" checkout -q file.txt
+
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/ok.patch" >/dev/null 2>&1 ) ||
+    fail "a clean-tree benign patch should land"
+  grep -Fq landed "$project/file.txt" || fail "patch-land should apply the patch to the tree"
+  grep -Fq '"kind": "patch-land"' "$project/.oms/artifacts/index.jsonl" ||
+    fail "patch-land should record the land in the artifact index"
+
+  # Dirty tree is refused.
+  git -C "$project" checkout -q file.txt
+  git -C "$project" reset -q --hard HEAD
+  printf 'dirty\n' >> "$project/file.txt"
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/ok.patch" >/dev/null 2>&1 ); then
+    fail "patch-land must refuse a dirty main tree"
+  fi
+  git -C "$project" checkout -q file.txt
+
+  # A verifier-touching patch is rejected by admission and never applied.
+  printf 'echo pwned\n' >> "$project/scripts/check.sh"
+  git -C "$project" diff > "$project/evil.patch"
+  git -C "$project" checkout -q scripts/check.sh
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/evil.patch" >/dev/null 2>&1 ); then
+    fail "patch-land must not land a patch the admission gate rejects"
+  fi
+  if grep -Fq pwned "$project/scripts/check.sh"; then
+    fail "rejected patch must not touch the tree"
+  fi
+}
+
+test_patch_land_finishes_plan_task() {
+  local project="$TMP/patch-land-plan"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
+  printf 'work\n' >> "$project/file.txt"
+  git -C "$project" diff > "$project/p.patch"
+  git -C "$project" checkout -q file.txt
+
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/p.patch" --plan-task t1 --verify "true" >/dev/null 2>&1 ) ||
+    fail "patch-land --plan-task should land"
+  [ "$(python3 -c "import json;print(json.load(open('$project/.oms/plan/tasks.json'))['tasks']['t1']['state'])")" = "done" ] ||
+    fail "a successful land should finish the coupled plan task"
+}
+
+test_repo_state_reflects_seeded_state() {
+  local project="$TMP/repo-state"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "ship it" >/dev/null 2>&1 )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id a1 --title "ready one" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id a2 --title "claimed one" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id a2 --provider codex >/dev/null )
+  OMS_ID=a2 python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["tasks"][os.environ["OMS_ID"]]["claimed_at"] = "2026-01-01T00:00:00Z"
+json.dump(d, open(p, "w"))
+PY
+
+  local text
+  text="$(cd "$project" && "$ROOT/scripts/repo-state.sh")"
+  printf '%s' "$text" | grep -Fq "goal: ship it" || fail "repo-state should show the active task goal"
+  printf '%s' "$text" | grep -Fq "actionable now: a1" || fail "repo-state should list actionable tasks"
+  printf '%s' "$text" | grep -Fq "STALE claims: a2" || fail "repo-state should flag stale plan claims"
+
+  # --json is valid and carries the same facts, and it is invocable via oms state.
+  ( cd "$project" && "$ROOT/scripts/repo-state.sh" --json ) |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["plan"]["stale"], "stale missing"; assert "a1" in d["plan"]["actionable"], "actionable missing"' ||
+    fail "repo-state --json should be valid and carry plan facts"
+  ( cd "$project" && "$ROOT/scripts/oms" state ) >/dev/null 2>&1 ||
+    fail "oms state alias should dispatch to repo-state"
+}
+
 test_agent_memory_search() {
   local project="$TMP/mem-search"
 
@@ -6621,6 +6749,11 @@ test_experiment_board_list_stale_and_owner
 test_oms_run_close_and_ls_open
 test_oms_run_timeline_filters
 test_delegate_plan_task_hydrates_brief_and_verify
+test_agent_plan_touch_prevents_reclaim
+test_experiment_board_touch_clears_stale
+test_patch_land_admits_then_applies
+test_patch_land_finishes_plan_task
+test_repo_state_reflects_seeded_state
 test_agent_memory_search
 
 echo "scripts-smoke: ok"

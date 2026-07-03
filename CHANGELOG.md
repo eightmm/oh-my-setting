@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `repo-state.sh` (`oms state`): one read-only dashboard over all shared `.oms`
+  state — active task goal/next, plan tasks by state with stale claims flagged,
+  experiment board active/stale, current + open runs, latest artifact rows, and
+  change-guard status; `--json` for machines. Answers "what is active, stale,
+  or open here?" in one command instead of cat-ing five files.
+- `patch-land.sh` (`oms patch-land`): the one mutating step that composes the
+  trust boundary — clean-tree check → `patch-admit` ADMIT gate → `git apply` →
+  land row in the artifact index → optional `--plan-task` finish. Nothing lands
+  unless admission passes and the tree is clean.
+- Claim heartbeat: `agent-plan.sh touch --id` and `experiment-board.sh touch
+  --id` refresh a live claim's timestamp so a still-running worker is not
+  reclaimed / flagged stale mid-run (the reclaim/stale TTL clock restarts).
 - `scripts/oms` dispatcher, symlinked to `~/.local/bin/oms`: `oms <tool>`
   invokes any harness script by name from any of the three agent CLIs
   (`run` aliases `oms-run`); `oms list` prints every tool with its one-line
