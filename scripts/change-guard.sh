@@ -13,6 +13,7 @@ STATE_FILE=""
 STRICT=0
 FROM_TASK=0
 ACTION=""
+BEGIN_HEAD=""
 declare -a ALLOW_PATHS=()
 declare -a DENY_PATHS=()
 
@@ -22,8 +23,9 @@ Usage: change-guard.sh [options] <begin|check|end|status>
 
 Advisory guard for live agent edits. It snapshots the current dirty workspace,
 then warns if pre-existing dirty files were changed or the current diff escapes
-the declared path scope. Exit is 0 by default; pass --strict to make warnings
-fail.
+the declared path scope. Commits made after begin are included: check also
+diffs the begin-HEAD against the current HEAD, so committing does not bypass
+the scope. Exit is 0 by default; pass --strict to make warnings fail.
 
 Options:
   --repo PATH       Git repo. Default: PWD.
@@ -98,6 +100,12 @@ changed_paths() {
   {
     git -C "$REPO" diff --name-only HEAD -- 2>/dev/null || git -C "$REPO" diff --name-only -- 2>/dev/null || true
     git -C "$REPO" ls-files --others --exclude-standard 2>/dev/null || true
+    # Committed changes since begin: an agent that commits mid-guard must not
+    # escape the allow/deny scope check by moving its edits out of the diff.
+    if [ -n "$BEGIN_HEAD" ] && [ "$BEGIN_HEAD" != "no-head" ] &&
+       git -C "$REPO" rev-parse --verify --quiet "$BEGIN_HEAD" >/dev/null 2>&1; then
+      git -C "$REPO" diff --name-only "$BEGIN_HEAD" HEAD -- 2>/dev/null || true
+    fi
   } |
     sed '/^\.oms\//d' |
     sort -u
@@ -159,9 +167,11 @@ load_state() {
   [ -f "$STATE_FILE" ] || fail "state file not found: $STATE_FILE"
   ALLOW_PATHS=()
   DENY_PATHS=()
+  BEGIN_HEAD=""
   while IFS=$'\t' read -r kind a _rest; do
     case "$kind" in
       repo) REPO="$a" ;;
+      head) BEGIN_HEAD="$a" ;;
       allow) ALLOW_PATHS+=("$a") ;;
       deny) DENY_PATHS+=("$a") ;;
       dirty) : ;;
@@ -208,8 +218,15 @@ EOF
 cmd_check() {
   local warnings=0
   local path old_sha new_sha
+  local current_head
 
   load_state
+  current_head="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || printf 'no-head')"
+  if [ -n "$BEGIN_HEAD" ] && [ "$BEGIN_HEAD" != "no-head" ] && [ "$current_head" != "$BEGIN_HEAD" ]; then
+    # Informational, not a warning: in-scope committed work is legitimate.
+    # The committed files still go through the scope checks below.
+    echo "note: HEAD moved since guard begin ($BEGIN_HEAD -> $current_head); committed changes are included in the scope check"
+  fi
   while IFS=$'\t' read -r kind path old_sha; do
     [ "$kind" = "dirty" ] || continue
     new_sha="$(sha_for_path "$path")"

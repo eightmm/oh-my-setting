@@ -18,11 +18,14 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/harness-residue.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
+# shellcheck source=scripts/lib/multi-agent-common.sh
+. "$ROOT_LIB/multi-agent-common.sh"
 
 REPO="$PWD"
 PATCH=""
 VERIFY=""
 ML=0
+ALLOW_VERIFIER_CHANGE=0
 KEEP_WORKTREE=0
 REPORT=""
 worktree_parent=""
@@ -45,10 +48,13 @@ Options:
   --ml           Prefer the ml-smoke verification mode when auto-detecting.
   --report FILE  Write the admission report here (default: .oms/artifacts/admit/).
   --keep-worktree  Keep the worktree for inspection.
+  --allow-verifier-change  Admit a patch that modifies the verify command's
+                 own files (normally rejected: it could self-certify).
   -h, --help     Show this help.
 
 Ladder: patch applies cleanly (not stale) -> changed shell files parse
-(bash -n) -> verification command passes. Exit 0 only if every gate passes.
+(bash -n) -> patch does not modify its own verifier -> verification command
+passes. Exit 0 only if every gate passes.
 EOF
 }
 
@@ -86,6 +92,7 @@ while [ "$#" -gt 0 ]; do
     --ml) ML=1; shift ;;
     --report) [ "$#" -ge 2 ] || fail "--report requires a path"; REPORT="$2"; shift 2 ;;
     --keep-worktree) KEEP_WORKTREE=1; shift ;;
+    --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -200,8 +207,29 @@ EOF
       fi
       VERIFY="bash scripts/check.sh $verify_mode"
     fi
-    if [ -n "$VERIFY" ]; then
-      if verify_out="$(cd "$worktree" && bash -c "$VERIFY" 2>&1)"; then
+
+    # --- Gate 3a: the patch must not modify its own verifier ----------------
+    # Gate 3 runs VERIFY inside the PATCHED worktree, so a patch that rewrites
+    # the verify entrypoint (e.g. scripts/check.sh -> exit 0) would certify
+    # itself. Flag any changed file that appears verbatim in the verify
+    # command; --allow-verifier-change is the explicit override.
+    verifier_hit=""
+    if [ -n "$VERIFY" ] && [ "$ALLOW_VERIFIER_CHANGE" = 0 ]; then
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case " $VERIFY " in
+          *" $f "*|*" ./$f "*) verifier_hit="$f"; break ;;
+        esac
+      done <<EOF
+$changed_files
+EOF
+    fi
+    if [ -n "$verifier_hit" ]; then
+      record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change)"
+      record "verify" "SKIP" "not run: verifier integrity gate failed"
+    elif [ -n "$VERIFY" ]; then
+      record "verifier" "PASS" "patch leaves the verify command's files untouched"
+      if verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
         record "verify" "PASS" "$VERIFY"
       else
         record "verify" "FAIL" "$VERIFY"
@@ -247,6 +275,12 @@ mkdir -p "$(dirname "$REPORT")"
     printf '\n## Verify output (tail)\n\n```\n%s\n```\n' "$(printf '%s' "$verify_out" | tail -n 40)"
   fi
 } > "$REPORT"
+
+# Index the admission so the audit trail survives `artifact-index.sh prune
+# --files` (which removes unreferenced files under .oms/artifacts/).
+admit_exit=1
+[ "$verdict" = "ADMIT" ] && admit_exit=0
+ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" || true
 
 echo "patch-admit: $verdict ($REPORT)" >&2
 printf '%s\n' "$verdict"
