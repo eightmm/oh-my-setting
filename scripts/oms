@@ -98,8 +98,9 @@ case "$TOOL" in
     ;;
 esac
 TOOL="${TOOL%.sh}"
-# `oms run new|current|show|timeline ...` reads better than `oms oms-run`.
-[ "$TOOL" = "run" ] && TOOL="oms-run"
+# Short aliases for the two most-typed tools.
+[ "$TOOL" = "run" ] && TOOL="oms-run"     # oms run new|current|show|timeline ...
+[ "$TOOL" = "state" ] && TOOL="repo-state" # oms state
 TARGET="$SCRIPTS_DIR/$TOOL.sh"
 if [ ! -f "$TARGET" ]; then
   echo "error: unknown tool: $TOOL (run: oms list)" >&2

@@ -33,6 +33,7 @@ NEXT=""
 JOB=""
 REASON=""
 FORCE=0
+TOUCH_APPEND=0
 SHOW_ALL=0
 STALE_ONLY=0
 OWNER_FILTER=""
@@ -43,6 +44,7 @@ usage() {
   cat <<'EOF'
 Usage: experiment-board.sh claim  --hypothesis TEXT [--id ID] [--baseline TEXT] [--owner NAME] [--force]
        experiment-board.sh start  --id ID [--job JOBID]
+       experiment-board.sh touch  --id ID
        experiment-board.sh finish --id ID [--result TEXT] [--next TEXT]
        experiment-board.sh abort  --id ID [--reason TEXT]
        experiment-board.sh list   [--all] [--stale] [--owner NAME]
@@ -55,6 +57,8 @@ claim   Register an intended experiment (status=claimed). Refuses an id that is
         already claimed/running unless the claim is stale (older than
         OMS_EXPERIMENT_CLAIM_TTL, default 1d) or --force is given.
 start   Mark an experiment running, optionally attaching a Slurm/queue job id.
+touch   Heartbeat a claimed/running experiment: re-stamp its timestamp so a
+        live owner's claim is not treated as stale/reclaimable mid-run.
 finish  Mark done with an optional result summary and next-step decision.
 abort   Mark aborted with an optional reason.
 list    Show active experiments (claimed/running); --all includes finished.
@@ -195,9 +199,11 @@ PY
   fi
   SCAN_FILE=""
   local lock_rc=0
-  if [ "$status" = "claimed" ]; then
+  if [ "$status" = "claimed" ] && [ "$TOUCH_APPEND" != 1 ]; then
     oms_with_file_lock "$BOARD" claim_append "$BOARD" "$row_tmp" "$ID" || lock_rc=$?
   else
+    # touch re-stamps an already-owned claim; the duplicate-claim guard would
+    # (correctly) reject a fresh claim of the same id, so bypass it here.
     oms_with_file_lock "$BOARD" board_append "$BOARD" "$row_tmp" || lock_rc=$?
   fi
   rm -f "$row_tmp"
@@ -232,6 +238,23 @@ cmd_start() {
   require_active
   append_event running
   echo "running: $ID${JOB:+ (job $JOB)}" >&2
+}
+
+cmd_touch() {
+  parse_args "$@"
+  [ -n "$ID" ] || fail "touch requires --id"
+  local cur status
+  cur="$(current_record "$ID")"
+  [ -n "$cur" ] || fail "no such experiment: $ID"
+  status="$(printf '%s' "$cur" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status",""))')"
+  case "$status" in
+    claimed|running) ;;
+    *) fail "touch: $ID is $status; only a claimed/running experiment can be touched" ;;
+  esac
+  # Re-stamp the current status with a fresh ts so the stale/reclaim clock
+  # restarts for a live owner. Replay keeps the original owner/hypothesis.
+  TOUCH_APPEND=1 append_event "$status"
+  echo "touched: $ID ($status)" >&2
 }
 
 cmd_finish() {
@@ -364,6 +387,7 @@ parse_args() {
 case "${1:-}" in
   claim) shift; cmd_claim "$@" ;;
   start) shift; cmd_start "$@" ;;
+  touch) shift; cmd_touch "$@" ;;
   finish) shift; cmd_finish "$@" ;;
   abort) shift; cmd_abort "$@" ;;
   list) shift; cmd_list "$@" ;;

@@ -47,6 +47,8 @@ Commands:
          [--verify CMD]
   claim  --id ID --provider NAME [--ttl TEXT]   Claim a ready task for a worker.
   start  --id ID                     Mark a claimed task running.
+  touch  --id ID                     Heartbeat a claimed/running task: refresh
+                                     claimed_at so a live worker is not reclaimed.
   review --id ID [--artifact PATH] [--patch PATH]   Move a claimed/running task to review.
   finish --id ID [--artifact PATH] [--patch PATH]   Mark a task done (from claimed/running/review).
   block  --id ID --reason TEXT       Mark a task blocked.
@@ -100,7 +102,7 @@ while [ "$#" -gt 0 ]; do
     --claim) CLAIM=1; shift ;;
     --include-running) INCLUDE_RUNNING=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|add|claim|start|review|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief)
+    init|add|claim|start|touch|review|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -212,9 +214,15 @@ def get_task(i):
     if not t: die("no such task: %s" % i)
     return t
 
-if act in ("claim", "start", "finish", "review", "block", "release", "reopen", "show"):
+if act in ("claim", "start", "finish", "review", "block", "release", "reopen", "show", "touch"):
     i = require_id(); t = get_task(i)
-    if act == "claim":
+    if act == "touch":
+        # Heartbeat: a live worker refreshes claimed_at so reclaim's TTL clock
+        # restarts and it is not mistaken for a dead worker mid-run.
+        if t["state"] not in ("claimed", "running"):
+            die("task %s is %s; only a claimed/running task can be touched" % (i, t["state"]))
+        t["claimed_at"] = ts
+    elif act == "claim":
         prov = env("OMS_PROVIDER")
         if not prov: die("--provider is required for claim")
         # Only a ready task can be claimed; a blocked task must be reopened first.
