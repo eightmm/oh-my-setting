@@ -99,8 +99,13 @@ launches so work is reproducible and not duplicated across agents. Invoke a
 tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh`;
 `oms list` prints the full catalog, `docs/COMPONENTS.md` the details.
 
-- `oms state` (repo-state) is the read-only dashboard: what task/plan/board/
-  runs/artifacts are active, stale, or open. Run it first when resuming a repo.
+- `oms init` seeds `.oms/` and prints a next-actions checklist when you land in
+  a fresh repo; `oms state` (repo-state) is the read-only dashboard: active
+  task/plan/board, in-flight delegations, open runs, latest CI, and unresolved
+  failures. Run one of these first when starting or resuming a repo.
+- Before retrying a command that may be a known dead end, `oms fail-ledger
+  check --cmd "..."`; record a new dead end with `record`. `oms gc` (dry-run by
+  default) reclaims aged `.oms/` state.
 - Shared state — all three agents read/write the same repo-local `.oms/`:
   shared memory (`oms agent-memory`, incl. `search`), active task packet
   (`oms agent-task`), subtask DAG (`oms agent-plan`: `ready`,

@@ -128,6 +128,22 @@ a plan task: released on failure, review/done on success. Without an explicit
 without `--verify` it uses the task's stored verify command — so
 `multi-agent-delegate.sh --to codex --plan-task ID` is a complete one-liner.
 
+## Failure Memory, Liveness, GC, Onboarding
+
+- `oms init` seeds `.oms/` and prints a next-actions checklist for a fresh repo;
+  `oms state` is the read-only dashboard (now also: in-flight delegations with
+  live-vs-orphan pid, latest CI conclusion, unresolved failures).
+- `fail-ledger.sh` is durable cross-session failure memory. Before retrying a
+  command that may be a known dead end, `check --cmd "..."` (exit 3 if it is a
+  known-unresolved failure); `record --cmd ... --exit N --summary ...` a new
+  one; `resolve --fingerprint FP` when fixed. Sensitive commands are refused.
+- `multi-agent-delegate` writes a `.oms/delegations/<id>.json` liveness marker
+  while a worker runs (removed on exit); `oms state` shows live workers and
+  flags dead-pid orphans. No polling/daemon.
+- `oms gc` (dry-run by default, `--apply` to act, `--days N`) reclaims aged
+  transient `.oms/` state; it never touches open runs, the active task, or
+  unresolved failures.
+
 ## Role Profiles
 
 A role is a reusable worker persona (a reviewer, a refactorer, a test-writer)

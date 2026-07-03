@@ -6617,6 +6617,122 @@ test_agent_role_and_delegate_injection() {
   assert_one_artifact_contains "$project/plan-arts" 'codex-*.md' 'STRICT-API-REVIEWER'
 }
 
+test_fail_ledger_records_checks_resolves() {
+  local project="$TMP/fail-ledger"
+  local SH="$ROOT/scripts/fail-ledger.sh"
+
+  make_committed_repo "$project"
+  ( cd "$project" && OMS_AGENT=codex "$SH" record --cmd "uv run pytest -k foo" --exit 1 --summary "ModuleNotFoundError" >/dev/null 2>&1 )
+  ( cd "$project" && OMS_AGENT=claude "$SH" record --cmd "uv run pytest -k foo" --exit 1 >/dev/null 2>&1 )
+  # A known unresolved failure makes check exit nonzero for any agent.
+  if ( cd "$project" && "$SH" check --cmd "uv run pytest -k foo" >/dev/null 2>&1 ); then
+    fail "check must flag a known unresolved failure"
+  fi
+  ( cd "$project" && "$SH" list | grep -q "count=2" ) || fail "the same command must dedupe to one fingerprint"
+  local fp
+  fp="$(cd "$project" && "$SH" list | awk '{print $1; exit}')"
+  ( cd "$project" && "$SH" resolve --fingerprint "$fp" >/dev/null 2>&1 )
+  ( cd "$project" && "$SH" check --cmd "uv run pytest -k foo" >/dev/null 2>&1 ) ||
+    fail "resolve must clear the warning"
+  # An unseen command passes; a sensitive command is refused. The literal is
+  # split with '' so this test source stays clean of a real-looking secret
+  # (the harness-source scrubber self-review scans tests/ too).
+  ( cd "$project" && "$SH" check --cmd "echo never" >/dev/null 2>&1 ) || fail "unseen command must pass"
+  local secret_cmd='export aws_secret_access_''key=EXAMPLEVALUE1234567'
+  if ( cd "$project" && "$SH" record --cmd "$secret_cmd" --exit 1 >/dev/null 2>&1 ); then
+    fail "a sensitive-looking command must be refused"
+  fi
+}
+
+test_ci_status_record_and_state() {
+  local project="$TMP/ci-record"
+  local bin="$TMP/ci-record-bin"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[{"status":"completed","conclusion":"failure","workflowName":"test","headSha":"deadbeef1234","url":"https://x/1"}]'
+EOF
+  chmod +x "$bin/gh"
+  ( cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) && \
+    fail "ci-status record should exit nonzero on a failing run"
+  [ -f "$project/.oms/ci.jsonl" ] || fail "record should write .oms/ci.jsonl"
+  grep -Fq '"conclusion": "failure"' "$project/.oms/ci.jsonl" || fail "the failure conclusion should be recorded"
+  # Dedupe: same sha+conclusion is not re-appended.
+  ( cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
+  [ "$(grep -c '' "$project/.oms/ci.jsonl")" -eq 1 ] || fail "identical CI result must not be re-appended"
+  ( cd "$project" && "$ROOT/scripts/repo-state.sh" ) | grep -Fq "## CI" || fail "oms state should surface CI"
+}
+
+test_delegation_liveness_in_state() {
+  local project="$TMP/deleg-live"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/delegations"
+  printf '{"schema":1,"id":"d1","provider":"codex","role":"","pid":999999,"started_at":"2026-01-01T00:00:00Z","state":"running","worktree":"/x"}\n' \
+    > "$project/.oms/delegations/d1.json"
+  printf '{"schema":1,"id":"d2","provider":"claude","role":"","pid":%s,"started_at":"2026-01-02T00:00:00Z","state":"running","worktree":"/y"}\n' "$$" \
+    > "$project/.oms/delegations/d2.json"
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/repo-state.sh")"
+  printf '%s' "$out" | grep -Eq "d1.*ORPHAN" || fail "a dead-pid delegation must be flagged as ORPHAN"
+  printf '%s' "$out" | grep -Eq "d2.*live" || fail "a live-pid delegation must show as live"
+}
+
+test_gc_reclaims_safely() {
+  local project="$TMP/gc"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/delegations" "$project/.oms/task/archive" "$project/.oms/runs/oldrun"
+  printf '{"schema":1,"id":"d1","pid":999999,"state":"running"}\n' > "$project/.oms/delegations/d1.json"
+  printf '{"schema":1,"id":"d2","pid":%s,"state":"running"}\n' "$$" > "$project/.oms/delegations/d2.json"
+  printf 'x\n' > "$project/.oms/task/archive/current-old.md"
+  printf '{}' > "$project/.oms/runs/oldrun/capsule.json"
+  touch -t 202601010000 "$project/.oms/task/archive/current-old.md" "$project/.oms/runs/oldrun"
+
+  # Dry-run changes nothing.
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 >/dev/null 2>&1 )
+  [ -f "$project/.oms/delegations/d1.json" ] || fail "dry-run must not delete anything"
+  # Apply reclaims the orphan/old, keeps the live delegation.
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  [ ! -f "$project/.oms/delegations/d1.json" ] || fail "gc --apply should remove the dead-pid delegation"
+  [ -f "$project/.oms/delegations/d2.json" ] || fail "gc must keep a live delegation"
+  [ ! -f "$project/.oms/task/archive/current-old.md" ] || fail "gc should remove an aged task archive"
+  [ ! -d "$project/.oms/runs/oldrun" ] || fail "gc should remove an aged capsule"
+}
+
+test_oms_init_seeds_and_guides() {
+  local project="$TMP/oms-init"
+
+  make_committed_repo "$project"
+  printf 'import torch\n' > "$project/model.py"
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/oms-init.sh")"
+  [ -f "$project/.oms/.gitignore" ] || fail "init should create the .oms/.gitignore guard"
+  [ -f "$project/.oms/memory/shared.md" ] || fail "init should seed shared memory"
+  printf '%s' "$out" | grep -Fq "ML repo" || fail "init should tailor the checklist to an ML repo"
+  printf '%s' "$out" | grep -Fq "oms state" || fail "init should point at oms state"
+  # Idempotent: a second run must not error.
+  ( cd "$project" && "$ROOT/scripts/oms-init.sh" >/dev/null 2>&1 ) || fail "init must be idempotent"
+}
+
+test_oms_run_validate_flags_schema_drift() {
+  local project="$TMP/validate-drift"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/runs"
+  printf '{"schema":1,"run_id":"r","tool":"t","event":"new"}\n' > "$project/.oms/runs/spine.jsonl"
+  ( cd "$project" && "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 ) ||
+    fail "a clean schema-1 spine should validate"
+  # A row below the family's expected schema is drift (nonzero + DRIFT tag).
+  printf '{"schema":0,"run_id":"r2","tool":"t","event":"new"}\n' >> "$project/.oms/runs/spine.jsonl"
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)" && \
+    fail "schema drift must make validate exit nonzero"
+  printf '%s' "$out" | grep -Fq "DRIFT" || fail "validate should tag the drifted family"
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -6879,5 +6995,11 @@ test_experiment_board_reclaim_transfers_owner
 test_oms_run_ls_open_filters_before_slice
 test_delegate_plan_task_hydrates_from_subdir
 test_agent_role_and_delegate_injection
+test_fail_ledger_records_checks_resolves
+test_ci_status_record_and_state
+test_delegation_liveness_in_state
+test_gc_reclaims_safely
+test_oms_init_seeds_and_guides
+test_oms_run_validate_flags_schema_drift
 
 echo "scripts-smoke: ok"

@@ -7,6 +7,28 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Failure memory (`fail-ledger.sh`): durable `.oms/failures.jsonl` fingerprint
+  ledger so the three agents stop repeating the same failing command across
+  sessions — `record`/`check` (exit 3 on a known-unresolved failure)/`resolve`/
+  `list`; sensitive commands refused. Surfaced in `oms state`.
+- Delegation liveness: `multi-agent-delegate` writes `.oms/delegations/<id>.json`
+  while a worker is in flight and removes it on exit; `oms state` shows live
+  workers and flags dead-pid orphans (no daemon — the launcher is the writer).
+- `ci-status.sh record`: appends the latest CI conclusion to `.oms/ci.jsonl`
+  (deduped by sha); `oms state` shows the latest conclusion for HEAD's branch.
+- `oms init` (`oms-init.sh`): seeds the `.oms/` skeleton + `.gitignore`
+  (idempotent) and prints a next-actions checklist tailored to the detected
+  project type — a first move for an agent landing in a fresh repo.
+- `oms gc` (`gc.sh`): `--dry-run` by default; reclaims aged transient state
+  (orphaned delegation markers, archived task packets, capsules of non-open
+  runs, resolved failure rows) and delegates artifacts to `artifact-index
+  prune`; never touches open runs, the active task, unresolved failures, or the
+  append-only board.
+- `oms-run validate` now walks every `.oms/**/*.jsonl` family and flags schema
+  drift (rows below a family's expected schema) — the one place a future schema
+  bump is signalled — in addition to the parse check.
+
+### Added (earlier since 0.3.0)
 - Role profiles (`agent-role.sh`): named, reusable worker personas as markdown
   in `.oms/roles/<name>.md` (global fallback `~/.oh-my-setting/local/roles`);
   `list`/`show`/`resolve`/`init`. `multi-agent-delegate.sh --role NAME` prepends
