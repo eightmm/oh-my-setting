@@ -32,6 +32,7 @@ DEPENDS=""
 ALLOWED=""
 FORBIDDEN=""
 VERIFY=""
+ROLE=""
 STATE_FILTER=""
 CLAIM=0
 INCLUDE_RUNNING=0
@@ -44,7 +45,7 @@ Commands:
   init   --goal TEXT                 Create/replace the plan with a goal.
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
-         [--verify CMD]
+         [--verify CMD] [--role NAME]
   claim  --id ID --provider NAME [--ttl TEXT]   Claim a ready task for a worker.
   start  --id ID                     Mark a claimed task running.
   touch  --id ID                     Heartbeat a claimed/running task: refresh
@@ -96,6 +97,7 @@ while [ "$#" -gt 0 ]; do
     --patch) [ "$#" -ge 2 ] || fail "--patch requires path"; PATCH="$2"; shift 2 ;;
     --depends) [ "$#" -ge 2 ] || fail "--depends requires list"; DEPENDS="$2"; shift 2 ;;
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires list"; ALLOWED="$2"; shift 2 ;;
+    --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
@@ -126,7 +128,7 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
-  OMS_VERIFY="$VERIFY" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
+  OMS_VERIFY="$VERIFY" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
   OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING"
 
 plan_run() {
@@ -182,6 +184,8 @@ def brief_text(t):
     if t.get("forbidden_paths"):
         lines.append("forbidden_paths: %s" % ", ".join(t["forbidden_paths"]))
     lines.append("verify: %s" % (t.get("verify") or "(none)"))
+    if t.get("role"):
+        lines.append("role: %s" % t["role"])
     return "\n".join(lines)
 
 d = load()
@@ -204,6 +208,7 @@ if act == "add":
         "allowed_paths": split_list(env("OMS_ALLOWED")),
         "forbidden_paths": split_list(env("OMS_FORBIDDEN")),
         "verify": env("OMS_VERIFY"),
+        "role": env("OMS_ROLE"),
         "provider": "", "ttl": "", "artifact": "", "patch": "", "reason": "",
         "created": ts, "updated": ts,
     }
