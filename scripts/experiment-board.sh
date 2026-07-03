@@ -161,8 +161,10 @@ for line in open(board, encoding="utf-8", errors="replace"):
     for k, v in e.items():
         if v == "" or v is None:
             continue
-        if k == "owner" and "owner" in cur:
-            continue  # owner is the claimer; later events do not reassign it
+        # Only a (re)claim reassigns the owner; a stale reclaim by a new agent
+        # must take ownership. touch/start/finish/abort keep the current owner.
+        if k == "owner" and "owner" in cur and e.get("status") != "claimed":
+            continue
         cur[k] = v
     cur["status"] = e.get("status", cur.get("status"))
 if cur:
@@ -316,8 +318,8 @@ for line in open(board, encoding="utf-8", errors="replace"):
     for k, v in e.items():
         if v == "" or v is None:
             continue
-        if k == "owner" and "owner" in cur[i]:
-            continue  # owner is the claimer; later events do not reassign it
+        if k == "owner" and "owner" in cur[i] and e.get("status") != "claimed":
+            continue  # only a (re)claim reassigns owner; later events keep it
         cur[i][k] = v
     cur[i]["status"] = e.get("status", cur[i].get("status"))
 for i in order:

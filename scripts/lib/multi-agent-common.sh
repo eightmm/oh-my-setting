@@ -13,6 +13,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-memory-common.sh"
 # shellcheck source=agent-task-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-task-common.sh"
+# shellcheck source=harness-residue.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-residue.sh"
 
 MA_SAFE_PATHS=(
   .
@@ -125,11 +127,16 @@ ma_agy_read_dir() {
   local repo="${1:-}"
   local base
 
-  base="$(mktemp -d "${TMPDIR:-/tmp}/oms-agy-read.XXXXXX")" || return 1
+  # Prefix is oh-my-setting-* and the dir is marked so a worktree leaked by a
+  # signal (Ctrl-C mid-call) is still reclaimable by cleanup.sh / doctor, the
+  # same residue path delegate and patch-admit use.
+  base="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-agy-read.XXXXXX")" || return 1
   if [ -n "$repo" ] && git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
      git -C "$repo" worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
+    oms_harness_mark_tmpdir "$base" "$repo" "$base/tree" 2>/dev/null || true
     printf '%s/tree\n' "$base"
   else
+    oms_harness_mark_tmpdir "$base" "$repo" "" 2>/dev/null || true
     printf '%s\n' "$base"
   fi
 }

@@ -223,10 +223,11 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     runs[rid]["events"].append("%s/%s" % (r.get("tool"), r.get("event")))
     if r.get("tool") == "oms-run" and r.get("event") == "close":
         runs[rid]["closed"] = True
-for rid in order[-n:]:
+# Apply the open filter BEFORE taking the last N, else a window full of closed
+# runs would hide older still-open ones.
+selected = [rid for rid in order if not (open_only and runs[rid]["closed"])]
+for rid in selected[-n:]:
     d = runs[rid]
-    if open_only and d["closed"]:
-        continue
     status = "closed" if d["closed"] else "open"
     print("%s  %-6s tools=[%s]  events=%d  last=%s" % (
         rid, status, ",".join(sorted(d["tools"])), len(d["events"]), d.get("last")))

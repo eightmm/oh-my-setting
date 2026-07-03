@@ -14,6 +14,8 @@ REPO="$PWD"
 TO=""
 PROMPT=""
 BRIEF_FILE=""
+ROLE=""
+role_file=""
 VERIFY_CMD=""
 NO_VERIFY=0
 ARTIFACT_DIR=""
@@ -40,6 +42,9 @@ never commits or pushes.
 Options:
   --to PROVIDER        Worker: codex, claude, or antigravity. Required.
   --prompt TEXT        Short task brief.
+  --role NAME          Prepend a reusable role profile (agent-role.sh:
+                       .oms/roles/NAME.md, global fallback) to the worker brief.
+                       Overrides a plan task's role field.
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
   --repo PATH          Git repo to work on. Default: current directory.
@@ -99,6 +104,11 @@ while [ "$#" -gt 0 ]; do
     --brief-file)
       [ "$#" -ge 2 ] || fail "--brief-file requires path"
       BRIEF_FILE="$2"
+      shift 2
+      ;;
+    --role)
+      [ "$#" -ge 2 ] || fail "--role requires a name"
+      ROLE="$2"
       shift 2
       ;;
     --repo)
@@ -214,6 +224,9 @@ fi
 
 REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
+# Normalize to the git worktree root so --plan-task hydration and every
+# $REPO/.oms/... path agree with agent-plan.sh regardless of the invoking cwd.
+REPO="$(oms_repo_root "$REPO")"
 git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
@@ -225,8 +238,11 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
 if [ -n "$PLAN_TASK_ID" ]; then
   if [ -z "$BRIEF_FILE" ] && [ -z "$PROMPT" ]; then
     plan_brief_file="$(mktemp)" || fail "mktemp failed"
-    "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" brief --id "$PLAN_TASK_ID" > "$plan_brief_file" ||
+    # The EXIT trap is not installed yet, so clean the temp before failing.
+    if ! "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" brief --id "$PLAN_TASK_ID" > "$plan_brief_file"; then
+      rm -f "$plan_brief_file"
       fail "could not hydrate brief from plan task $PLAN_TASK_ID"
+    fi
     BRIEF_FILE="$plan_brief_file"
   fi
   if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -f "$REPO/.oms/plan/tasks.json" ]; then
@@ -243,6 +259,26 @@ PY
       echo "plan-verify: $VERIFY_CMD (from task $PLAN_TASK_ID)"
     fi
   fi
+  # A plan task can name a role; --role wins over it.
+  if [ -z "$ROLE" ] && [ -f "$REPO/.oms/plan/tasks.json" ]; then
+    plan_role="$(OMS_PLAN_ID="$PLAN_TASK_ID" python3 - "$REPO/.oms/plan/tasks.json" 2>/dev/null <<'PY' || true
+import json, os, sys
+t = json.load(open(sys.argv[1])).get("tasks", {}).get(os.environ["OMS_PLAN_ID"], {})
+r = t.get("role", "")
+if r:
+    print(r)
+PY
+)"
+    [ -n "$plan_role" ] && ROLE="$plan_role"
+  fi
+fi
+
+# Resolve a role profile (repo .oms/roles first, then global) and prepend it to
+# the worker brief so the same reusable role can drive any provider.
+if [ -n "$ROLE" ]; then
+  role_file="$("$(ma_scripts_dir)/agent-role.sh" --repo "$REPO" --name "$ROLE" resolve 2>/dev/null)" ||
+    fail "no role profile '$ROLE' (create one with agent-role.sh --name $ROLE init)"
+  echo "role: $ROLE ($role_file)"
 fi
 
 load_user_tool_paths
@@ -290,6 +326,11 @@ trap 'cleanup_signal 143' TERM
   printf 'Do not run git commit, git push, or change git config.\n'
   printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
+  if [ -n "$role_file" ]; then
+    printf '## Role\n\n'
+    cat "$role_file"
+    printf '\n\n'
+  fi
   printf '## Brief\n\n'
   if [ -n "$BRIEF_FILE" ]; then
     cat "$BRIEF_FILE"

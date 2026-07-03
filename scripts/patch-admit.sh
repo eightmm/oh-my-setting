@@ -149,8 +149,14 @@ if [ "$apply_ok" = 1 ]; then
   oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
   if git -C "$REPO" worktree add --quiet --detach "$worktree" HEAD >/dev/null 2>&1; then
     worktree_created=1
-    git -C "$worktree" apply --binary "$PATCH" >/dev/null 2>&1 || true
-    changed_files="$(git -C "$REPO" apply --numstat "$PATCH" 2>/dev/null | awk '{print $3}')"
+    # The apply into the worktree must succeed, otherwise the syntax/verify
+    # gates below would run against the UNPATCHED tree and pass vacuously. Gate
+    # 1 only checks apply against HEAD; the worktree tree state can still differ.
+    if git -C "$worktree" apply --binary "$PATCH" >/dev/null 2>&1; then
+    # git apply --numstat is TAB-delimited (add<TAB>del<TAB>path); split on the
+    # tab so a path containing spaces is not truncated (which would silently
+    # skip its syntax/verifier check).
+    changed_files="$(git -C "$REPO" apply --numstat "$PATCH" 2>/dev/null | awk -F '\t' '{print $3}')"
 
     # --- Gate 2: changed syntax-checked files parse -------------------------
     syntax_ok=1
@@ -211,18 +217,37 @@ EOF
     # --- Gate 3a: the patch must not modify its own verifier ----------------
     # Gate 3 runs VERIFY inside the PATCHED worktree, so a patch that rewrites
     # the verify entrypoint (e.g. scripts/check.sh -> exit 0) would certify
-    # itself. Flag any changed file that appears verbatim in the verify
-    # command; --allow-verifier-change is the explicit override.
+    # itself. Flag a changed file if VERIFY names it (by path or basename, so
+    # `cd scripts && bash check.sh` and absolute spellings do not bypass it) or
+    # if it is a common build entrypoint whose edit silently changes what
+    # "verify" does. --allow-verifier-change is the explicit override.
     verifier_hit=""
-    if [ -n "$VERIFY" ] && [ "$ALLOW_VERIFIER_CHANGE" = 0 ]; then
-      while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        case " $VERIFY " in
-          *" $f "*|*" ./$f "*) verifier_hit="$f"; break ;;
-        esac
-      done <<EOF
-$changed_files
-EOF
+    if [ -n "$VERIFY" ] && [ "$ALLOW_VERIFIER_CHANGE" = 0 ] && command -v python3 >/dev/null 2>&1; then
+      verifier_hit="$(OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" python3 - <<'PY'
+import os
+try:
+    import shlex
+    toks = shlex.split(os.environ["OMS_VERIFY"])
+except Exception:
+    toks = os.environ["OMS_VERIFY"].split()
+named = set()
+for t in toks:
+    if "/" in t or "." in t:
+        named.add(t)
+        named.add(t.lstrip("./"))
+        named.add(os.path.basename(t))
+ENTRY = {"check.sh", "Makefile", "makefile", "GNUmakefile", "package.json",
+         "pyproject.toml", "tox.ini", "noxfile.py", "conftest.py",
+         "setup.py", "setup.cfg", "justfile", "Justfile"}
+for f in os.environ["OMS_CHANGED"].splitlines():
+    f = f.strip()
+    if not f:
+        continue
+    if f in named or os.path.basename(f) in named or os.path.basename(f) in ENTRY:
+        print(f)
+        break
+PY
+)"
     fi
     if [ -n "$verifier_hit" ]; then
       record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change)"
@@ -236,6 +261,9 @@ EOF
       fi
     else
       record "verify" "SKIP" "no --verify and no scripts/check.sh"
+    fi
+    else
+      record "apply-worktree" "FAIL" "patch did not apply to the admission worktree (tree state differs from HEAD)"
     fi
   else
     record "worktree" "FAIL" "could not create admission worktree"

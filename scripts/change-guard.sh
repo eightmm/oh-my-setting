@@ -198,8 +198,8 @@ EOF
   {
     printf 'repo\t%s\n' "$REPO"
     printf 'head\t%s\n' "$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || printf 'no-head')"
-    for allow in "${ALLOW_PATHS[@]}"; do
-      printf 'allow\t%s\n' "$(normalize_path "$allow")"
+    for allow in "${ALLOW_PATHS[@]:-}"; do
+      [ -n "$allow" ] && printf 'allow\t%s\n' "$(normalize_path "$allow")"
     done
     for deny in "${DENY_PATHS[@]:-}"; do
       [ -n "$deny" ] && printf 'deny\t%s\n' "$(normalize_path "$deny")"

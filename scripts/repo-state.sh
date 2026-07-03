@@ -165,8 +165,8 @@ if brows:
         for k, v in e.items():
             if v in ("", None):
                 continue
-            if k == "owner" and "owner" in cur[i]:
-                continue
+            if k == "owner" and "owner" in cur[i] and e.get("status") != "claimed":
+                continue  # only a (re)claim reassigns owner
             cur[i][k] = v
         cur[i]["status"] = e.get("status", cur[i].get("status"))
     for i in order:

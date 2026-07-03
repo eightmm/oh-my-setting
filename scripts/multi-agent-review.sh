@@ -109,7 +109,9 @@ review_verdicts() {
   local vdir="$1"
   local forced_run_id="${2:-}"
   local latest run_id base provider suf r f verdict overall found
-  declare -A vfile vround
+  # bash 3.2 has no associative arrays; track one "provider<TAB>round<TAB>file"
+  # record per candidate and pick the highest round per provider at the end.
+  local vrecords="" providers
 
   [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
   if [ -n "$forced_run_id" ]; then
@@ -151,16 +153,18 @@ review_verdicts() {
         case "$r" in *[!0-9]*) r=0 ;; esac
         ;;
     esac
-    if [ -z "${vround[$provider]:-}" ] || [ "$r" -gt "${vround[$provider]}" ]; then
-      vround[$provider]="$r"
-      vfile[$provider]="$f"
-    fi
+    vrecords="$vrecords$provider	$r	$f
+"
   done
 
   overall=0
   found=0
-  for provider in $(printf '%s\n' "${!vfile[@]}" | sort); do
-    f="${vfile[$provider]}"
+  providers="$(printf '%s' "$vrecords" | awk -F '\t' 'NF>=3{print $1}' | sort -u)"
+  for provider in $providers; do
+    # Highest round wins for this provider (final debate artifact).
+    f="$(printf '%s' "$vrecords" | awk -F '\t' -v p="$provider" \
+      '$1==p && $2+0>=mr {mr=$2+0; file=$3} END{print file}')"
+    [ -n "$f" ] || continue
     found=$((found + 1))
     if ! grep -q '^## Exit' "$f"; then
       echo "$provider: incomplete (no exit section; run likely died — re-run the review)"
