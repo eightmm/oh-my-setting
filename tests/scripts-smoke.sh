@@ -6499,6 +6499,124 @@ test_agent_memory_search() {
   fi
 }
 
+test_patch_admit_verifier_cd_bypass_caught() {
+  local project="$TMP/admit-cdbypass"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" commit -q -m "add check"
+  printf 'echo pwned\n' >> "$project/scripts/check.sh"
+  git -C "$project" diff > "$project/evil.patch"
+  git -C "$project" checkout -q scripts/check.sh
+
+  # A cd-into-subdir verifier spelling must not bypass the integrity gate.
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/evil.patch" \
+        --verify "cd scripts && bash check.sh" >/dev/null 2>&1 ); then
+    fail "cd-spelled verifier change must still be REJECTED"
+  fi
+}
+
+test_patch_admit_syntax_checks_spaced_path() {
+  local project="$TMP/admit-space"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/sub dir"
+  printf 'ok\n' > "$project/sub dir/x.sh"
+  git -C "$project" add "sub dir/x.sh"
+  git -C "$project" commit -q -m "add spaced"
+  printf 'if then fi oops (\n' >> "$project/sub dir/x.sh"
+  git -C "$project" diff > "$project/space.patch"
+  git -C "$project" checkout -q "sub dir/x.sh"
+
+  # The broken .sh with a space in its path must be syntax-checked and rejected,
+  # not skipped by whitespace-split numstat parsing.
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/space.patch" --verify true >/dev/null 2>&1 ); then
+    fail "a broken shell file with a spaced path must be caught by syntax gate"
+  fi
+}
+
+test_experiment_board_reclaim_transfers_owner() {
+  local d="$TMP/board-reown"
+  local board="$d/.oms/experiments.jsonl"
+  local SH="$ROOT/scripts/experiment-board.sh"
+
+  mkdir -p "$d"
+  OMS_EXPERIMENT_BOARD="$board" OMS_AGENT=alice "$SH" claim --id e --hypothesis A >/dev/null 2>&1
+  OMS_EXPERIMENT_BOARD="$board" OMS_EXPERIMENT_CLAIM_TTL=0 OMS_AGENT=bob "$SH" claim --id e --hypothesis B >/dev/null 2>&1
+  OMS_EXPERIMENT_BOARD="$board" "$SH" list | grep e | grep -q "owner=bob" ||
+    fail "a stale reclaim must transfer ownership to the reclaiming agent"
+  # A non-claim event (start) must keep the owner.
+  OMS_EXPERIMENT_BOARD="$board" OMS_AGENT=bob "$SH" start --id e >/dev/null 2>&1
+  OMS_EXPERIMENT_BOARD="$board" "$SH" list | grep e | grep -q "owner=bob" ||
+    fail "start must not change the owner"
+}
+
+test_oms_run_ls_open_filters_before_slice() {
+  local d="$TMP/ls-open-window"
+  local sp="$d/.oms/runs/spine.jsonl"
+  local SH="$ROOT/scripts/oms-run.sh"
+  local i
+
+  mkdir -p "$d/.oms/runs"
+  printf '{"run_id":"run0","ts":"2026-01-01T00:00:00Z","tool":"oms-run","event":"new"}\n' > "$sp"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    printf '{"run_id":"run%s","ts":"2026-01-02T00:00:%02dZ","tool":"oms-run","event":"new"}\n' "$i" "$i" >> "$sp"
+    printf '{"run_id":"run%s","ts":"2026-01-02T00:01:%02dZ","tool":"oms-run","event":"close"}\n' "$i" "$i" >> "$sp"
+  done
+  OMS_RUN_INDEX="$sp" "$SH" ls --open | grep -q "run0" ||
+    fail "ls --open must show an old open run even behind a full window of closed runs"
+}
+
+test_delegate_plan_task_hydrates_from_subdir() {
+  local project="$TMP/deleg-subdir"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/src"
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title "Fix X" --verify "echo VERIFYMARK" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
+
+  local out
+  out="$(cd "$project/src" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --plan-task t1 2>&1)" || fail "subdir plan-task dry-run should succeed"
+  printf '%s' "$out" | grep -Fq "plan-verify: echo VERIFYMARK" ||
+    fail "verify must hydrate from the plan task even when run from a subdirectory"
+}
+
+test_agent_role_and_delegate_injection() {
+  local project="$TMP/role-inject"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-role.sh" --name reviewer init >/dev/null )
+  printf '# Role: reviewer\n\nBe a STRICT-API-REVIEWER. Output GATE.\n' > "$project/.oms/roles/reviewer.md"
+  [ "$(cd "$project" && "$ROOT/scripts/agent-role.sh" list)" = "reviewer" ] ||
+    fail "agent-role list should show the created role"
+  ( cd "$project" && "$ROOT/scripts/agent-role.sh" --name reviewer resolve >/dev/null ) ||
+    fail "agent-role resolve should find the role"
+
+  # --role injects a Role section into the worker brief.
+  ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --role reviewer --prompt "review the diff" >/dev/null 2>&1 ) ||
+    fail "delegate --role should succeed"
+  assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'STRICT-API-REVIEWER'
+
+  # Unknown role fails fast.
+  if ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --role nope --prompt x >/dev/null 2>&1 ); then
+    fail "an unknown --role must be rejected"
+  fi
+
+  # A plan task's role field is auto-injected via --plan-task (isolated dir).
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title "review it" --role reviewer >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
+  ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --plan-task t1 --artifact-dir "$project/plan-arts" >/dev/null 2>&1 ) ||
+    fail "plan-task with role should succeed"
+  assert_one_artifact_contains "$project/plan-arts" 'codex-*.md' 'STRICT-API-REVIEWER'
+}
+
 test_file_lock_acquire_release
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
@@ -6755,5 +6873,11 @@ test_patch_land_admits_then_applies
 test_patch_land_finishes_plan_task
 test_repo_state_reflects_seeded_state
 test_agent_memory_search
+test_patch_admit_verifier_cd_bypass_caught
+test_patch_admit_syntax_checks_spaced_path
+test_experiment_board_reclaim_transfers_owner
+test_oms_run_ls_open_filters_before_slice
+test_delegate_plan_task_hydrates_from_subdir
+test_agent_role_and_delegate_injection
 
 echo "scripts-smoke: ok"

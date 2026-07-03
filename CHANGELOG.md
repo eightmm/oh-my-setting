@@ -7,6 +7,41 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Role profiles (`agent-role.sh`): named, reusable worker personas as markdown
+  in `.oms/roles/<name>.md` (global fallback `~/.oh-my-setting/local/roles`);
+  `list`/`show`/`resolve`/`init`. `multi-agent-delegate.sh --role NAME` prepends
+  the profile to the worker brief, and an `agent-plan` task's new `role` field is
+  auto-injected when delegated via `--plan-task` — so the same reviewer /
+  refactorer / test-writer role can drive any of the three providers.
+
+### Fixed
+- `patch-admit.sh`: a worktree apply failure was swallowed (`|| true`), so the
+  syntax/verify gates could pass against the UNPATCHED tree — now recorded as an
+  `apply-worktree` FAIL and the gates are skipped. numstat parsing split on
+  whitespace (paths with spaces escaped the syntax gate) — now tab-delimited.
+  The verifier-integrity gate was bypassable with `cd`/absolute `--verify`
+  spellings — now matches by path and basename and also protects common build
+  entrypoints (Makefile, package.json, pyproject.toml, …).
+- bash 3.2: `multi-agent-review.sh` used `declare -A` (verdicts/`--gate` died on
+  macOS) — replaced with newline-delimited records; `change-guard.sh begin`
+  aborted under `set -u` with no `--allow` (unguarded array expansion) — fixed.
+- `experiment-board.sh`: a stale-claim reclaim kept the dead original owner
+  (broke `--owner` and attribution) — a (re)claim now reassigns the owner while
+  touch/start/finish keep it.
+- `multi-agent-common.sh`: an agy isolated read worktree leaked on
+  INT/TERM/HUP — its temp dir is now residue-marked (prefix `oh-my-setting-*`)
+  so `cleanup.sh`/doctor reclaim a signal-leaked worktree.
+- `multi-agent-delegate.sh`: `REPO` is normalized to the git worktree root, so
+  `--plan-task` verify hydration no longer silently drops when run from a
+  subdirectory; the hydrated-brief temp file no longer leaks on a hydration
+  failure.
+- `oms-run.sh ls --open`: applied the open filter before taking the last N,
+  hiding older still-open runs — now filters first, then slices.
+- CI (`test.yml`): added a static bash-4ism gate (`declare -A`/`mapfile`/case-
+  conversion) and put `scripts/oms` under shellcheck and macOS `bash -n`, since
+  `bash -n` alone let runtime-only bash-4 constructs slip past.
+
+### Added (earlier)
 - `repo-state.sh` (`oms state`): one read-only dashboard over all shared `.oms`
   state — active task goal/next, plan tasks by state with stale claims flagged,
   experiment board active/stale, current + open runs, latest artifact rows, and

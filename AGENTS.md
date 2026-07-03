@@ -106,7 +106,9 @@ tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh
   (`oms agent-task`), subtask DAG (`oms agent-plan`: `ready`,
   `next --claim --provider NAME`, `touch` to heartbeat a long claim, `reclaim`).
 - Cross-agent work: route one provider through `oms agent-run --to NAME`
-  (read-only pass vs isolated write worktree); land a delegated patch through
+  (read-only pass vs isolated write worktree); give the worker a reusable
+  persona with `oms multi-agent-delegate --role NAME` (roles live in
+  `.oms/roles/`, managed by `oms agent-role`); land a delegated patch through
   `oms patch-land` (clean-tree → admission gate → apply → record), or gate it
   alone with `oms patch-admit`.
 - Claim an experiment on the study board (`oms experiment-board`) before a

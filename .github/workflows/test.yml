@@ -24,7 +24,20 @@ jobs:
       - name: install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck
-        run: shellcheck -x -S warning install.sh scripts/*.sh tests/*.sh
+        run: shellcheck -x -S warning install.sh scripts/oms scripts/*.sh tests/*.sh
+      - name: bash 3.2 compat (no bash-4isms)
+        # bash -n on macOS only checks parse; declare -A / mapfile / case-
+        # conversion parse fine on bash 3.2 and fail at RUNTIME, so they slip
+        # past. Catch them statically. Comment lines are excluded.
+        run: |
+          hits="$(grep -rnE 'declare[[:space:]]+-A|mapfile|readarray|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' \
+            install.sh scripts/oms scripts/*.sh scripts/lib/*.sh tests/*.sh \
+            | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+          if [ -n "$hits" ]; then
+            echo "bash-4-only constructs found (must be bash 3.2 compatible):" >&2
+            echo "$hits" >&2
+            exit 1
+          fi
 
   smoke:
     runs-on: ubuntu-latest
@@ -41,7 +54,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: bash syntax
         run: |
-          for f in install.sh scripts/*.sh scripts/lib/*.sh tests/scripts-smoke.sh; do
+          for f in install.sh scripts/oms scripts/*.sh scripts/lib/*.sh tests/scripts-smoke.sh; do
             bash -n "$f"
           done
       - name: detect project style fixture

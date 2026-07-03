@@ -128,6 +128,26 @@ a plan task: released on failure, review/done on success. Without an explicit
 without `--verify` it uses the task's stored verify command — so
 `multi-agent-delegate.sh --to codex --plan-task ID` is a complete one-liner.
 
+## Role Profiles
+
+A role is a reusable worker persona (a reviewer, a refactorer, a test-writer)
+kept as markdown in `.oms/roles/<name>.md` (global fallback
+`~/.oh-my-setting/local/roles`). It is data, not an orchestrator: the owning
+agent chooses a role and injects it into a delegated worker. The same role
+drives any of the three providers. To run several workers by role, the
+orchestrator delegates once per (role, task) — heavier isolated workers via the
+harness, or lighter native sub-agents where the current CLI supports them.
+
+```bash
+~/.oh-my-setting/scripts/agent-role.sh --repo . --name reviewer init   # scaffold
+~/.oh-my-setting/scripts/agent-role.sh --repo . list
+~/.oh-my-setting/scripts/multi-agent-delegate.sh --to codex --role reviewer --prompt "review the diff"
+~/.oh-my-setting/scripts/agent-plan.sh --repo . add --id t1 --title "review" --role reviewer  # task carries the role
+```
+
+`--role` on delegate wins over a plan task's `role` field; an unknown role name
+fails fast.
+
 ## Individual Agent Runs
 
 Use `agent-run.sh` as the single entrypoint for one provider. In `--mode auto`,
