@@ -34,6 +34,8 @@ JOB=""
 REASON=""
 FORCE=0
 SHOW_ALL=0
+STALE_ONLY=0
+OWNER_FILTER=""
 SCAN_FILE=""
 cleanup_done=0
 
@@ -43,7 +45,7 @@ Usage: experiment-board.sh claim  --hypothesis TEXT [--id ID] [--baseline TEXT] 
        experiment-board.sh start  --id ID [--job JOBID]
        experiment-board.sh finish --id ID [--result TEXT] [--next TEXT]
        experiment-board.sh abort  --id ID [--reason TEXT]
-       experiment-board.sh list   [--all]
+       experiment-board.sh list   [--all] [--stale] [--owner NAME]
        experiment-board.sh show   --id ID
 
 Shared experiment study board so agents do not duplicate runs. Events are
@@ -56,6 +58,8 @@ start   Mark an experiment running, optionally attaching a Slurm/queue job id.
 finish  Mark done with an optional result summary and next-step decision.
 abort   Mark aborted with an optional reason.
 list    Show active experiments (claimed/running); --all includes finished.
+        Claims older than the TTL are tagged STALE (reclaimable); --stale
+        shows only those, --owner NAME filters by claim owner.
 show    Print the full event history for one experiment.
 
 Without --owner, the owner is the detected calling agent: $OMS_AGENT when
@@ -249,10 +253,30 @@ cmd_abort() {
 cmd_list() {
   parse_args "$@"
   [ -f "$BOARD" ] || { echo "no experiments"; return 0; }
-  OMS_ALL="$SHOW_ALL" python3 - "$BOARD" <<'PY'
-import json, os, sys
+  OMS_ALL="$SHOW_ALL" OMS_STALE="$STALE_ONLY" OMS_OWNER="$OWNER_FILTER" \
+    OMS_TTL="$CLAIM_TTL" python3 - "$BOARD" <<'PY'
+import calendar, json, os, sys, time
 board = sys.argv[1]
 show_all = os.environ.get("OMS_ALL") == "1"
+stale_only = os.environ.get("OMS_STALE") == "1"
+owner_filter = os.environ.get("OMS_OWNER", "")
+try:
+    ttl = int(os.environ.get("OMS_TTL", "86400"))
+except ValueError:
+    ttl = 86400
+now = time.time()
+
+def is_stale(r):
+    # Same rule as claim's stale recovery: only a claimed (not yet running)
+    # entry older than the TTL is reclaimable.
+    if r.get("status") != "claimed":
+        return False
+    try:
+        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False
+    return now - t >= ttl
+
 cur = {}
 order = []
 for line in open(board, encoding="utf-8", errors="replace"):
@@ -278,9 +302,15 @@ for i in order:
     st = r.get("status", "?")
     if not show_all and st in ("done", "aborted"):
         continue
+    stale = is_stale(r)
+    if stale_only and not stale:
+        continue
+    if owner_filter and r.get("owner", "") != owner_filter:
+        continue
     hyp = (r.get("hypothesis", "") or "")[:60]
     job = (" job=%s" % r["job"]) if r.get("job") else ""
-    print("%-40s %-8s owner=%s%s  %s" % (i, st, r.get("owner", "?"), job, hyp))
+    tag = " STALE" if stale else ""
+    print("%-40s %-8s owner=%s%s%s  %s" % (i, st, r.get("owner", "?"), job, tag, hyp))
 PY
 }
 
@@ -322,9 +352,10 @@ parse_args() {
       --next) [ "$#" -ge 2 ] || fail "--next requires text"; NEXT="$2"; shift 2 ;;
       --job) [ "$#" -ge 2 ] || fail "--job requires an id"; JOB="$2"; shift 2 ;;
       --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
-      --owner) [ "$#" -ge 2 ] || fail "--owner requires a name"; AGENT_LABEL="$2"; shift 2 ;;
+      --owner) [ "$#" -ge 2 ] || fail "--owner requires a name"; AGENT_LABEL="$2"; OWNER_FILTER="$2"; shift 2 ;;
       --force) FORCE=1; shift ;;
       --all) SHOW_ALL=1; shift ;;
+      --stale) STALE_ONLY=1; shift ;;
       *) fail "unknown argument: $1" ;;
     esac
   done

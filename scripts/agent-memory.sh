@@ -12,6 +12,9 @@ SCOPE="project"
 MEMORY_FILE=""
 ACTION=""
 AGENT="$(oms_detect_agent)"
+# Separate from AGENT (which defaults to the detected agent): only set when
+# --agent is passed, so `search` filters by author only on explicit request.
+AGENT_SEARCH=""
 TEXT=""
 USE_STDIN=0
 FULL=0
@@ -33,8 +36,8 @@ Options:
   --repo PATH       Project repo/directory for project memory. Default: PWD.
   --global          Use global harness memory instead of project memory.
   --file PATH       Use an explicit shared memory source file.
-  --agent NAME      Agent label for appended notes. Default: agent.
-  --text TEXT       Note text for append/pin.
+  --agent NAME      Agent label for appended notes / search author filter.
+  --text TEXT       Note text for append/pin; search pattern for search.
   --stdin           Read append/pin note from stdin.
   --full            context: emit full source tail instead of compact view.
   -h, --help        Show help.
@@ -47,6 +50,9 @@ Commands:
   append            Append a source note and refresh summary.md.
   pin               Append a short note to pins.md.
   compact           Regenerate summary.md from source memory.
+  search PATTERN    Print memory + pins entries matching PATTERN (case-
+                    insensitive, over header and body); --agent filters by
+                    the entry's author. Scales recall past cat-ing show.
 EOF
 }
 
@@ -69,6 +75,7 @@ while [ "$#" -gt 0 ]; do
     --agent)
       [ "$#" -ge 2 ] || { echo "error: --agent requires name" >&2; exit 2; }
       AGENT="$2"
+      AGENT_SEARCH="$2"
       shift 2
       ;;
     --text)
@@ -84,7 +91,7 @@ while [ "$#" -gt 0 ]; do
       FULL=1
       shift
       ;;
-    path|show|context|init|append|pin|compact)
+    path|show|context|init|append|pin|compact|search)
       ACTION="$1"
       shift
       ;;
@@ -105,7 +112,7 @@ done
 
 ACTION="${ACTION:-show}"
 case "$ACTION" in
-  append|pin) ;;
+  append|pin|search) ;;
   *)
     [ -z "$TEXT" ] || { echo "error: unknown argument: $TEXT" >&2; usage >&2; exit 2; }
     ;;
@@ -195,6 +202,52 @@ case "$ACTION" in
     ensure_tmpdir
     agent_memory_refresh_summary "$MEMORY_FILE" "$SCOPE"
     echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
+    ;;
+  search)
+    [ -n "$TEXT" ] || { echo "error: search requires --text PATTERN (or a positional pattern)" >&2; exit 2; }
+    command -v python3 >/dev/null 2>&1 || { echo "error: python3 required for search" >&2; exit 2; }
+    # Scan the source log and pins for '## <ts> <agent>' entry blocks whose
+    # header or body matches; --agent filters by the entry author. Matches go
+    # to stdout, the hit count to stderr, and exit is nonzero on no match so
+    # an empty search is distinguishable from a miss.
+    OMS_Q="$TEXT" OMS_AGENT_FILTER="$AGENT_SEARCH" \
+      python3 - "$MEMORY_FILE" "$(agent_memory_pins_file "$MEMORY_FILE")" <<'PY'
+import os, re, sys
+q = os.environ["OMS_Q"].lower()
+agent_filter = os.environ.get("OMS_AGENT_FILTER", "")
+# shared.md/summary.md entries are '## <ts> <agent>' blocks; pins.md entries
+# are one-line '- <ts> [<agent>] <text>' bullets. Handle both.
+hdr = re.compile(r"^## (\S+) (.*)$")
+pin = re.compile(r"^- (\S+) \[([^\]]+)\] (.*)$")
+shown = 0
+for src in sys.argv[1:]:
+    if not src or not os.path.isfile(src):
+        continue
+    blocks = []
+    cur = None
+    for raw in open(src, encoding="utf-8", errors="replace"):
+        line = raw.rstrip("\n")
+        mp = pin.match(line)
+        if mp:
+            blocks.append({"agent": mp.group(2).strip(), "lines": [line]})
+            cur = None
+            continue
+        mh = hdr.match(line)
+        if mh:
+            cur = {"agent": mh.group(2).strip(), "lines": [line]}
+            blocks.append(cur)
+        elif cur is not None:
+            cur["lines"].append(line)
+    for b in blocks:
+        if agent_filter and b["agent"] != agent_filter:
+            continue
+        body = "\n".join(b["lines"]).strip()
+        if q in body.lower():
+            sys.stdout.write(body + "\n\n")
+            shown += 1
+sys.stderr.write("memory: %d match(es) for \"%s\"\n" % (shown, os.environ["OMS_Q"]))
+sys.exit(0 if shown else 1)
+PY
     ;;
   *)
     echo "error: unknown command: $ACTION" >&2

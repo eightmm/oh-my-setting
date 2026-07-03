@@ -24,6 +24,7 @@ INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 TASK_ID=""
 PLAN_TASK_ID=""
+plan_brief_file=""
 REPAIR=0
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
@@ -69,6 +70,9 @@ Options:
                        claim is released back to ready; on success the task
                        moves to review with the artifact and patch (or to done
                        when --apply landed the patch). Implies --task-id ID.
+                       Without --prompt/--brief-file the task's stored brief
+                       becomes the worker prompt, and without --verify the
+                       task's verify command becomes the contract.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt and empty patch without calling the CLI.
@@ -204,8 +208,8 @@ esac
 
 if [ -n "$BRIEF_FILE" ]; then
   [ -f "$BRIEF_FILE" ] || fail "brief file not found: $BRIEF_FILE"
-elif [ -z "$PROMPT" ]; then
-  fail "--prompt or --brief-file is required"
+elif [ -z "$PROMPT" ] && [ -z "$PLAN_TASK_ID" ]; then
+  fail "--prompt, --brief-file, or --plan-task is required"
 fi
 
 REPO="$(cd "$REPO" && pwd)"
@@ -213,6 +217,33 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REP
 git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
+
+# --plan-task without an explicit brief/verify hydrates both from the plan:
+# the task's stored brief becomes the worker prompt and its verify command
+# becomes the verification contract, so `delegate --to codex --plan-task t3`
+# is complete on its own.
+if [ -n "$PLAN_TASK_ID" ]; then
+  if [ -z "$BRIEF_FILE" ] && [ -z "$PROMPT" ]; then
+    plan_brief_file="$(mktemp)" || fail "mktemp failed"
+    "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" brief --id "$PLAN_TASK_ID" > "$plan_brief_file" ||
+      fail "could not hydrate brief from plan task $PLAN_TASK_ID"
+    BRIEF_FILE="$plan_brief_file"
+  fi
+  if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -f "$REPO/.oms/plan/tasks.json" ]; then
+    plan_verify="$(OMS_PLAN_ID="$PLAN_TASK_ID" python3 - "$REPO/.oms/plan/tasks.json" 2>/dev/null <<'PY' || true
+import json, os, sys
+t = json.load(open(sys.argv[1])).get("tasks", {}).get(os.environ["OMS_PLAN_ID"], {})
+v = t.get("verify", "")
+if v:
+    print(v)
+PY
+)"
+    if [ -n "$plan_verify" ]; then
+      VERIFY_CMD="$plan_verify"
+      echo "plan-verify: $VERIFY_CMD (from task $PLAN_TASK_ID)"
+    fi
+  fi
+fi
 
 load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
@@ -231,6 +262,7 @@ cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
   rm -f "$prompt_file" "$repair_prompt_file" "$verify_out"
+  [ -z "$plan_brief_file" ] || rm -f "$plan_brief_file"
   if [ "$worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
   fi

@@ -36,9 +36,10 @@ Usage: oms-run.sh new [--note TEXT]
        oms-run.sh current
        oms-run.sh link --tool NAME --event NAME [--path PATH] [--run-id ID] [--detail TEXT] [--agent NAME]
        oms-run.sh show <run_id>
-       oms-run.sh ls [N]
+       oms-run.sh ls [N] [--open]
+       oms-run.sh close [run_id] [--note TEXT]
        oms-run.sh diff <run_id_a> <run_id_b>
-       oms-run.sh timeline [--since ISO8601|--today] [--limit N]
+       oms-run.sh timeline [--since ISO8601|--today] [--limit N] [--agent NAME] [--tool NAME]
        oms-run.sh validate [--dir DIR]
 
 The run spine: a canonical run_id and an append-only join index
@@ -54,12 +55,17 @@ link    Append one join row {run_id, ts, tool, event, path, detail, agent}.
         run_id defaults to $OMS_RUN_ID; agent defaults to the detected
         calling agent CLI ($OMS_AGENT, else CLI env markers).
 show    Join and print every indexed record for a run id.
-ls      Summarize the most recent runs (default 10).
+ls      Summarize the most recent runs (default 10) with open/closed status;
+        --open lists only runs without a close event.
+close   Append a terminal close event (id defaults to the effective run id)
+        and clear a CURRENT pointer naming this run, so later tool events
+        stop auto-joining a finished run.
 diff    Compare two runs' capsules: commit, env, config, seeds, metric deltas.
 timeline Merge every .oms/**/*.jsonl stream plus the run ledger into one
          time-ordered "what did the agents do" view (default last 50 rows;
-         --today or --since ISO8601 to window it). Cross-stream answer to
-         "what happened in this repo", not just one run id.
+         --today or --since ISO8601 to window it; --agent/--tool filter by
+         case-insensitive substring). Cross-stream answer to "what happened
+         in this repo", not just one run id.
 validate Check every .oms/**/*.jsonl parses and report schema versions; nonzero
          on any malformed line. The guard against silent JSONL/schema drift.
 
@@ -184,13 +190,20 @@ PY
 }
 
 cmd_ls() {
-  [ "$#" -le 1 ] || fail "ls takes at most N"
-  local n="${1:-10}"
-  case "$n" in *[!0-9]*|"") fail "N must be a positive integer" ;; esac
+  local n=10
+  local open_only=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --open) open_only=1; shift ;;
+      *[!0-9]*|"") fail "ls takes at most N and --open" ;;
+      *) n="$1"; shift ;;
+    esac
+  done
   [ -f "$INDEX" ] || { echo "no runs"; return 0; }
-  OMS_N="$n" python3 - "$INDEX" <<'PY'
+  OMS_N="$n" OMS_OPEN="$open_only" python3 - "$INDEX" <<'PY'
 import json, os, sys
 n = int(os.environ["OMS_N"])
+open_only = os.environ.get("OMS_OPEN") == "1"
 runs = {}
 order = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
@@ -202,17 +215,45 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if not rid:
         continue
     if rid not in runs:
-        runs[rid] = {"first": r.get("ts"), "tools": set(), "events": []}
+        runs[rid] = {"first": r.get("ts"), "tools": set(), "events": [], "closed": False}
         order.append(rid)
     runs[rid]["last"] = r.get("ts")
     if r.get("tool"):
         runs[rid]["tools"].add(r["tool"])
     runs[rid]["events"].append("%s/%s" % (r.get("tool"), r.get("event")))
+    if r.get("tool") == "oms-run" and r.get("event") == "close":
+        runs[rid]["closed"] = True
 for rid in order[-n:]:
     d = runs[rid]
-    print("%s  tools=[%s]  events=%d  last=%s" % (
-        rid, ",".join(sorted(d["tools"])), len(d["events"]), d.get("last")))
+    if open_only and d["closed"]:
+        continue
+    status = "closed" if d["closed"] else "open"
+    print("%s  %-6s tools=[%s]  events=%d  last=%s" % (
+        rid, status, ",".join(sorted(d["tools"])), len(d["events"]), d.get("last")))
 PY
+}
+
+cmd_close() {
+  local note=""
+  local run_id=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --note) [ "$#" -ge 2 ] || fail "--note requires text"; note="$2"; shift 2 ;;
+      --run-id) [ "$#" -ge 2 ] || fail "--run-id requires a value"; run_id="$2"; shift 2 ;;
+      -*) fail "unknown close argument: $1" ;;
+      *) [ -z "$run_id" ] || fail "close takes one run id"; run_id="$1"; shift ;;
+    esac
+  done
+  [ -n "$run_id" ] || run_id="$(oms_effective_run_id "$STATE_ROOT" 2>/dev/null || true)"
+  [ -n "$run_id" ] || fail "close requires a run id (argument, \$OMS_RUN_ID, or a fresh .oms/runs/CURRENT)"
+  cmd_link --run-id "$run_id" --tool oms-run --event close ${note:+--detail "$note"}
+  # Drop a CURRENT pointer naming this run so new tool events stop
+  # auto-joining a finished run for the rest of the pointer's TTL.
+  local current="$STATE_ROOT/.oms/runs/CURRENT"
+  if [ -f "$current" ] && [ "$(awk 'NR==1{print $1}' "$current")" = "$run_id" ]; then
+    rm -f "$current"
+  fi
+  echo "closed: $run_id" >&2
 }
 
 cmd_diff() {
@@ -289,21 +330,28 @@ PY
 cmd_timeline() {
   local since=""
   local limit=50
+  local agent_filter=""
+  local tool_filter=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --today) since="$(date -u +%Y-%m-%dT00:00:00Z)"; shift ;;
       --since) [ "$#" -ge 2 ] || fail "--since requires an ISO8601 UTC timestamp"; since="$2"; shift 2 ;;
       --limit) [ "$#" -ge 2 ] || fail "--limit requires N"; limit="$2"; shift 2 ;;
+      --agent) [ "$#" -ge 2 ] || fail "--agent requires a name"; agent_filter="$2"; shift 2 ;;
+      --tool) [ "$#" -ge 2 ] || fail "--tool requires a name"; tool_filter="$2"; shift 2 ;;
       *) fail "unknown timeline argument: $1" ;;
     esac
   done
   case "$limit" in *[!0-9]*|"") fail "--limit must be a positive integer" ;; esac
   OMS_SINCE="$since" OMS_LIMIT="$limit" OMS_TL_ROOT="$STATE_ROOT/.oms" \
+    OMS_TL_AGENT="$agent_filter" OMS_TL_TOOL="$tool_filter" \
     OMS_TL_LEDGER="${OMS_LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}" python3 <<'PY'
 import glob, json, os
 since = os.environ["OMS_SINCE"]
 limit = int(os.environ["OMS_LIMIT"])
 root = os.environ["OMS_TL_ROOT"]
+agent_f = os.environ.get("OMS_TL_AGENT", "").lower()
+tool_f = os.environ.get("OMS_TL_TOOL", "").lower()
 ledger = os.environ["OMS_TL_LEDGER"]
 files = sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
 if os.path.isfile(ledger):
@@ -325,6 +373,10 @@ for f in files:
             continue
         ts = r.get("ts") or r.get("reconciled_at") or ""
         if not ts or (since and ts < since):
+            continue
+        if agent_f and agent_f not in str(r.get("agent", "")).lower():
+            continue
+        if tool_f and tool_f not in str(r.get("tool", "")).lower():
             continue
         parts = []
         for key in ("kind", "tool", "event", "agent", "provider", "status", "id",
@@ -398,6 +450,7 @@ PY
 case "${1:-}" in
   new) shift; cmd_new "$@" ;;
   current) shift; cmd_current "$@" ;;
+  close) shift; cmd_close "$@" ;;
   link) shift; cmd_link "$@" ;;
   show) shift; cmd_show "$@" ;;
   ls) shift; cmd_ls "$@" ;;
