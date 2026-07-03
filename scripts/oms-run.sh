@@ -416,8 +416,17 @@ cmd_validate() {
   OMS_DIR="$dir" python3 <<'PY'
 import glob, json, os, sys
 root = os.environ["OMS_DIR"]
+# Current schema each JSONL family should be at. When a writer bumps its
+# schema, bump the expected value here and validate flags any lingering
+# old-schema rows as drift (the single place a migration is signalled). Keyed
+# by the file's basename so it applies wherever the family lives.
+EXPECTED = {
+    "spine.jsonl": 1, "reconcile.jsonl": 1, "experiments.jsonl": 1,
+    "failures.jsonl": 1, "ci.jsonl": 1,
+}
 files = sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
 bad = 0
+drift = 0
 total = 0
 for f in files:
     lines = 0
@@ -436,15 +445,20 @@ for f in files:
         if isinstance(r, dict) and "schema" in r:
             schemas.add(r["schema"])
     total += 1
-    tag = "ok   " if errors == 0 else "FAIL "
+    exp = EXPECTED.get(os.path.basename(f))
+    stale = sorted(s for s in schemas if isinstance(s, int) and exp is not None and s < exp)
+    tag = "ok   " if errors == 0 and not stale else "FAIL " if errors else "DRIFT"
     sver = (" schema=%s" % ",".join(str(s) for s in sorted(schemas))) if schemas else ""
-    print("%s %s  (%d rows%s)" % (tag, f, lines, sver))
+    extra = (" (expected %d; migrate rows at %s)" % (exp, ",".join(str(s) for s in stale))) if stale else ""
+    print("%s %s  (%d rows%s)%s" % (tag, f, lines, sver, extra))
     if errors:
         bad += 1
+    elif stale:
+        drift += 1
 if total == 0:
     print("validate: no .jsonl records found")
-print("validate: %d file(s), %d with errors" % (total, bad), file=sys.stderr)
-sys.exit(1 if bad else 0)
+print("validate: %d file(s), %d with errors, %d with schema drift" % (total, bad, drift), file=sys.stderr)
+sys.exit(1 if (bad or drift) else 0)
 PY
 }
 

@@ -217,6 +217,67 @@ state["artifacts"] = {
     ],
 }
 
+# --- Unresolved failures (fail-ledger) --------------------------------------
+fail_rows = read_jsonl(oms("failures.jsonl"))
+fagg, forder = {}, []
+for r in fail_rows:
+    fp = r.get("fingerprint")
+    if not fp:
+        continue
+    if fp not in fagg:
+        fagg[fp] = {"count": 0, "resolved": False, "last": None}
+        forder.append(fp)
+    if r.get("event") == "resolved":
+        fagg[fp]["resolved"] = True
+        fagg[fp]["count"] = 0
+    elif r.get("event") == "fail":
+        fagg[fp]["count"] += 1
+        fagg[fp]["resolved"] = False
+        fagg[fp]["last"] = r
+open_fails = []
+for fp in forder:
+    d = fagg[fp]
+    if d["resolved"] or d["count"] == 0:
+        continue
+    last = d["last"] or {}
+    open_fails.append({"fingerprint": fp, "count": d["count"],
+                       "summary": (last.get("summary") or last.get("cmd", ""))[:80]})
+state["failures"] = {"open": open_fails[-5:], "open_total": len(open_fails)}
+
+# --- Latest CI conclusion for HEAD's branch ---------------------------------
+ci = {"present": False}
+ci_rows = read_jsonl(oms("ci.jsonl"))
+if ci_rows:
+    ci["present"] = True
+    last = ci_rows[-1]
+    ci.update({k: last.get(k) for k in ("branch", "sha", "status", "conclusion", "url")})
+state["ci"] = ci
+
+# --- In-flight delegations (liveness files) ---------------------------------
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+delegations = []
+deleg_dir = oms("delegations")
+if os.path.isdir(deleg_dir):
+    import glob as _glob
+    for f in sorted(_glob.glob(os.path.join(deleg_dir, "*.json"))):
+        try:
+            d = json.load(open(f, encoding="utf-8"))
+        except Exception:
+            continue
+        # Same-host liveness: a leftover file whose pid is gone is a crashed
+        # orphan (only meaningful when the record was written on this host).
+        alive = pid_alive(d.get("pid"))
+        delegations.append({"id": d.get("id"), "provider": d.get("provider"),
+                            "role": d.get("role", ""), "started_at": d.get("started_at"),
+                            "live": alive})
+state["delegations"] = delegations
+
 # --- Change-guard active? ---------------------------------------------------
 state["change_guard"] = {"active": os.path.isfile(oms("guards", "change-guard.tsv"))}
 
@@ -268,6 +329,27 @@ else:
         line("  current: none")
     if r["open"]:
         line("  open: %s" % ", ".join(r["open"]))
+
+    dl = state["delegations"]
+    if dl:
+        line("\n## In-flight delegations")
+        for e in dl:
+            tag = "live" if e["live"] else "ORPHAN (dead pid)"
+            line("  %s %s%s  %s  [%s]" % (
+                e.get("provider", "?"), ("role=%s " % e["role"]) if e.get("role") else "",
+                e.get("id", "?"), e.get("started_at", "?"), tag))
+
+    ci = state["ci"]
+    if ci["present"]:
+        line("\n## CI (%s)" % (ci.get("branch") or "?"))
+        line("  %s %s  %s" % (ci.get("status") or "?", ci.get("conclusion") or "?",
+                              (ci.get("sha") or "")[:12]))
+
+    fl = state["failures"]
+    if fl["open_total"] > 0:
+        line("\n## Unresolved failures (%d)" % fl["open_total"])
+        for e in fl["open"]:
+            line("  %s  x%d  %s" % (e["fingerprint"], e["count"], e["summary"]))
 
     a = state["artifacts"]
     line("\n## Artifacts (%d total)" % a["total"])

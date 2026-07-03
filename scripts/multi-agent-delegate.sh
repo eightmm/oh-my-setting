@@ -16,6 +16,7 @@ PROMPT=""
 BRIEF_FILE=""
 ROLE=""
 role_file=""
+liveness_file=""
 VERIFY_CMD=""
 NO_VERIFY=0
 ARTIFACT_DIR=""
@@ -299,6 +300,9 @@ cleanup() {
   cleanup_done=1
   rm -f "$prompt_file" "$repair_prompt_file" "$verify_out"
   [ -z "$plan_brief_file" ] || rm -f "$plan_brief_file"
+  # Remove the liveness marker; a leftover file means the process died without
+  # cleanup (a crashed orphan), which oms state / gc can then flag by dead pid.
+  [ -z "$liveness_file" ] || rm -f "$liveness_file"
   if [ "$worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
   fi
@@ -375,6 +379,27 @@ if ! ma_validate_outbound_prompt "$prompt_file"; then
 fi
 git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
+
+# Liveness marker so another agent (or `oms state`) can see this worker is
+# in flight, not hung or dead. The launching process is the only writer;
+# cleanup removes it on normal exit, so a leftover file with a dead pid is a
+# crashed orphan. No daemon, no heartbeat thread.
+if [ "$DRY_RUN" != "1" ]; then
+  liveness_file="$REPO/.oms/delegations/$timestamp.json"
+  mkdir -p "$(dirname "$liveness_file")"
+  agent_memory_ensure_oms_ignore_for_path "$liveness_file" 2>/dev/null || true
+  OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_PID="$$" \
+    OMS_DL_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_DL_WT="$worktree" \
+    OMS_DL_TASK="${PLAN_TASK_ID:-}" python3 - > "$liveness_file" <<'PY'
+import json, os
+print(json.dumps({
+    "schema": 1, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
+    "role": os.environ.get("OMS_DL_ROLE", ""), "pid": int(os.environ["OMS_DL_PID"]),
+    "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
+    "worktree": os.environ["OMS_DL_WT"], "task_id": os.environ.get("OMS_DL_TASK", ""),
+}, ensure_ascii=False))
+PY
+fi
 
 # Verification contract: default to the project's check.sh when present.
 if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -x "$worktree/scripts/check.sh" ]; then
