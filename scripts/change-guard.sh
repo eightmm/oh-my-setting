@@ -174,15 +174,17 @@ load_state() {
       head) BEGIN_HEAD="$a" ;;
       allow) ALLOW_PATHS+=("$a") ;;
       deny) DENY_PATHS+=("$a") ;;
+      pid|started) : ;;
       dirty) : ;;
     esac
   done < "$STATE_FILE"
 }
 
 cmd_begin() {
-  local path allow
+  local path allow tmp_state
   mkdir -p "$(dirname "$STATE_FILE")"
   agent_memory_ensure_oms_ignore_for_path "$STATE_FILE" 2>/dev/null || true
+  tmp_state="$(mktemp "$STATE_FILE.XXXXXX")" || fail "mktemp failed"
   if [ "$FROM_TASK" -eq 1 ]; then
     while IFS= read -r allow; do
       [ -n "$allow" ] && ALLOW_PATHS+=("$(normalize_path "$allow")")
@@ -198,6 +200,11 @@ EOF
   {
     printf 'repo\t%s\n' "$REPO"
     printf 'head\t%s\n' "$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || printf 'no-head')"
+    # Owner liveness: the begin process itself is short-lived (an agent's shell
+    # tool call), so a pid is only recorded when the caller opts in with
+    # OMS_GUARD_PID. Staleness otherwise falls back to started + TTL.
+    [ -n "${OMS_GUARD_PID:-}" ] && printf 'pid\t%s\n' "$OMS_GUARD_PID"
+    printf 'started\t%s\n' "$(date +%s)"
     for allow in "${ALLOW_PATHS[@]:-}"; do
       [ -n "$allow" ] && printf 'allow\t%s\n' "$(normalize_path "$allow")"
     done
@@ -211,7 +218,10 @@ EOF
     done <<EOF
 $(dirty_paths)
 EOF
-  } > "$STATE_FILE"
+  } > "$tmp_state"
+  # Atomic: a crash mid-snapshot must not leave a truncated state file that
+  # check would silently under-enforce.
+  mv -f "$tmp_state" "$STATE_FILE"
   echo "change-guard: snapshot $STATE_FILE"
 }
 
@@ -264,8 +274,25 @@ cmd_end() {
 }
 
 cmd_status() {
+  local pid started now ttl tag
   if [ -f "$STATE_FILE" ]; then
-    echo "change-guard: active ($STATE_FILE)"
+    # Stale detection: dead opt-in owner pid, else started + TTL. An abandoned
+    # guard (crashed session) must not read as a live one forever.
+    pid="$(awk -F'\t' '$1=="pid"{print $2; exit}' "$STATE_FILE")"
+    started="$(awk -F'\t' '$1=="started"{print $2; exit}' "$STATE_FILE")"
+    tag=""
+    if [ -n "$pid" ]; then
+      kill -0 "$pid" 2>/dev/null || tag=" STALE (owner pid $pid dead; run: change-guard.sh end)"
+    else
+      ttl="${OMS_GUARD_TTL:-86400}"
+      case "$ttl" in *[!0-9]*|"") ttl=86400 ;; esac
+      case "$started" in *[!0-9]*|"") started="" ;; esac
+      now="$(date +%s)"
+      if [ -n "$started" ] && [ $((now - started)) -gt "$ttl" ]; then
+        tag=" STALE (began $(( (now - started) / 3600 ))h ago > ttl ${ttl}s; run: change-guard.sh end)"
+      fi
+    fi
+    echo "change-guard: active ($STATE_FILE)$tag"
   else
     echo "change-guard: inactive ($STATE_FILE)"
   fi

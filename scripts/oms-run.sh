@@ -98,7 +98,10 @@ cmd_new() {
   local host gitshort rand id
   host="$(hostname -s 2>/dev/null || echo host)"
   gitshort="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
-  rand="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo "$$")"
+  rand="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  # The id is the primary key for the whole run lineage; a bare pid collides
+  # across hosts/reboots, so the fallback still mixes pid+time+$RANDOM.
+  [ -n "$rand" ] || rand="$(printf '%s.%s.%s' "$$" "$(date +%s)" "$RANDOM" | cksum | awk '{printf "%06x", $1 % 16777216}')"
   id="$(date -u +%Y%m%dT%H%M%SZ)-$host-$gitshort-$rand"
   # Record the mint itself so `show` works even before any tool links.
   OMS_RUN_ID="$id" cmd_link --tool oms-run --event new ${note:+--detail "$note"} >/dev/null
@@ -107,7 +110,12 @@ cmd_new() {
   # OMS_RUN_CURRENT_TTL (see oms_effective_run_id).
   mkdir -p "$STATE_ROOT/.oms/runs"
   agent_memory_ensure_oms_ignore_for_path "$STATE_ROOT/.oms/runs" 2>/dev/null || true
-  printf '%s %s\n' "$id" "$(date +%s)" > "$STATE_ROOT/.oms/runs/CURRENT"
+  # tmp+mv: the pointer is read locklessly by every auto-linking tool, so a
+  # torn write here would misjoin or drop run lineage.
+  local cur_tmp
+  cur_tmp="$(mktemp "$STATE_ROOT/.oms/runs/CURRENT.XXXXXX")" || fail "mktemp failed"
+  printf '%s %s\n' "$id" "$(date +%s)" > "$cur_tmp"
+  mv -f "$cur_tmp" "$STATE_ROOT/.oms/runs/CURRENT"
   printf '%s\n' "$id"
 }
 

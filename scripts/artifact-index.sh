@@ -128,9 +128,24 @@ if [ "$ACTION" = "prune" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "artifact-index: would prune $before -> $LIMIT rows"
     else
-      # In-place overwrite (not mv) so the index keeps its inode, permissions,
-      # and any symlink the user set up.
-      cat "$tmp" > "$INDEX_FILE"
+      # Atomic replace at the symlink TARGET: a truncate-then-write here left
+      # a corrupt index if the prune was killed mid-write. Resolving realpath
+      # keeps a user-symlinked index working, and the mode is copied over.
+      # $tmp itself must survive for the --files step below.
+      python3 - "$INDEX_FILE" "$tmp" <<'EOF' || fail "atomic index replace failed"
+import os, shutil, sys, tempfile
+index, kept = sys.argv[1], sys.argv[2]
+real = os.path.realpath(index)
+fd, tmp2 = tempfile.mkstemp(dir=os.path.dirname(real))
+try:
+    with os.fdopen(fd, "wb") as out, open(kept, "rb") as src:
+        shutil.copyfileobj(src, out)
+    shutil.copymode(real, tmp2)
+    os.replace(tmp2, real)
+except Exception:
+    os.unlink(tmp2)
+    raise
+EOF
       echo "artifact-index: pruned $before -> $LIMIT rows"
     fi
   fi

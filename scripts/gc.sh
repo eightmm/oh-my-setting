@@ -31,11 +31,14 @@ Options:
   --apply       Actually remove.
   -h, --help    Show help.
 
-Swept (older than --days): orphaned delegation markers (dead pid), archived
-task packets, run capsules of runs that are NOT open, resolved failure rows;
-artifact index/files are delegated to artifact-index prune. Never touches open
-runs, the active task, unresolved failures, or active experiment claims. The
-append-only experiment board is left intact.
+Swept (older than --days): orphaned delegation markers (dead pid; a coupled
+claimed/running plan task is released back to ready), archived task packets,
+stale open runs (no spine event in --days; a close event is appended), run
+capsules of runs that are NOT open, abandoned change-guards (dead owner pid
+or aged snapshot), resolved failure rows; artifact index/files are delegated
+to artifact-index prune. Never touches live runs, the active task, unresolved
+failures, active experiment claims, or plan tasks in review. The append-only
+experiment board is left intact.
 EOF
 }
 
@@ -72,14 +75,37 @@ note_remove() {  # note_remove KIND PATH
 
 # 1) Orphaned delegation markers: a dead pid means a crashed worker. A live
 #    pid is an in-flight delegation and is never swept (regardless of age).
+#    A marker carrying a plan task_id is the only record joining the dead
+#    worker to its still-claimed plan task, so release the task in the same
+#    sweep — otherwise the claim lingers until the reclaim TTL.
 if [ -d "$OMS/delegations" ]; then
   for f in "$OMS/delegations"/*.json; do
     [ -e "$f" ] || continue
-    pid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pid",""))' "$f" 2>/dev/null || true)"
+    info="$(python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+print("%s\t%s" % (d.get("pid", ""), d.get("task_id", "")))' "$f" 2>/dev/null || true)"
+    pid="$(printf '%s' "$info" | cut -f1)"
+    task_id="$(printf '%s' "$info" | cut -f2)"
     alive=0
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
     if [ "$alive" = 0 ]; then
       note_remove "orphan-delegation" "$f"
+      if [ -n "$task_id" ]; then
+        task_state="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>/dev/null |
+          python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+        # Only claimed/running are dead-worker states; review holds a finished
+        # artifact awaiting a reviewer and must not be requeued here.
+        case "$task_state" in
+          claimed|running)
+            printf -- '- orphan-delegation-plan: task %s (%s) -> ready\n' "$task_id" "$task_state"
+            removed=$((removed + 1))
+            if [ "$DRY_RUN" = 0 ]; then
+              "$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" release --id "$task_id" >/dev/null 2>&1 ||
+                echo "warning: gc: could not release plan task $task_id" >&2
+            fi
+            ;;
+        esac
+      fi
     fi
   done
 fi
@@ -94,8 +120,56 @@ $(find "$OMS/task/archive" -maxdepth 1 -type f -name '*.md' -mtime +"$DAYS" 2>/d
 EOF
 fi
 
+# 2.5) Stale open runs: nothing in the harness calls `oms-run close`
+#    automatically, so without this an abandoned run stays open forever and
+#    permanently protects its capsule from step 3. A run whose LAST spine
+#    event is older than --days is over; append a terminal close event.
+if [ -f "$OMS/runs/spine.jsonl" ]; then
+  stale_open="$(OMS_DAYS="$DAYS" python3 - "$OMS/runs/spine.jsonl" <<'PY'
+import json, os, sys, time
+cutoff = time.time() - int(os.environ["OMS_DAYS"]) * 86400
+last, closed, order = {}, set(), []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        r = json.loads(line)
+    except Exception:
+        continue
+    rid = r.get("run_id")
+    if not rid:
+        continue
+    if rid not in last:
+        order.append(rid)
+    try:
+        ts = time.mktime(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        ts = None
+    if ts is not None and ts > last.get(rid, 0):
+        last[rid] = ts
+    if r.get("tool") == "oms-run" and r.get("event") == "close":
+        closed.add(rid)
+for rid in order:
+    if rid not in closed and last.get(rid) and last[rid] < cutoff:
+        print(rid)
+PY
+)"
+  for rid in $stale_open; do
+    printf -- '- stale-run-close: %s\n' "$rid"
+    removed=$((removed + 1))
+    if [ "$DRY_RUN" = 0 ]; then
+      OMS_RUN_INDEX="$OMS/runs/spine.jsonl" \
+        "$ROOT/scripts/oms-run.sh" close --run-id "$rid" --note "gc: no event in ${DAYS}d" >/dev/null 2>&1 ||
+        echo "warning: gc: could not close run $rid" >&2
+    fi
+  done
+fi
+
 # 3) Run capsules older than --days whose run is NOT open (open = no close event
-#    on the spine). Never GC a capsule for a run still in flight.
+#    on the spine). Never GC a capsule for a run still in flight. In apply mode
+#    step 2.5 has already closed stale runs, so their capsules reclaim here;
+#    a dry run reports the close and the capsule sweep of the NEXT gc.
 open_ids=""
 if [ -f "$OMS/runs/spine.jsonl" ]; then
   open_ids="$(OMS_RUN_INDEX="$OMS/runs/spine.jsonl" "$ROOT/scripts/oms-run.sh" ls --open 2>/dev/null | awk '{print $1}')"
@@ -175,6 +249,29 @@ PY
     if [ "$DRY_RUN" = 0 ]; then
       printf '%s' "$compacted" > "$fail_ledger"
     fi
+  fi
+fi
+
+# 4.5) Abandoned change-guards: a guard whose opt-in owner pid is dead, or
+#    whose snapshot is older than --days, is a corpse from a crashed session —
+#    without this it reads as "Change-guard: ACTIVE" in repo-state forever.
+guard_file="$OMS/guards/change-guard.tsv"
+if [ -f "$guard_file" ]; then
+  guard_pid="$(awk -F'\t' '$1=="pid"{print $2; exit}' "$guard_file")"
+  guard_started="$(awk -F'\t' '$1=="started"{print $2; exit}' "$guard_file")"
+  case "$guard_started" in *[!0-9]*) guard_started="" ;; esac
+  guard_dead=0
+  if [ -n "$guard_pid" ]; then
+    kill -0 "$guard_pid" 2>/dev/null || guard_dead=1
+  elif [ -n "$guard_started" ]; then
+    now_s="$(date +%s)"
+    [ $((now_s - guard_started)) -gt $((DAYS * 86400)) ] && guard_dead=1
+  else
+    # Pre-liveness snapshot format: fall back to file age.
+    [ -n "$(find "$guard_file" -mtime +"$DAYS" 2>/dev/null)" ] && guard_dead=1
+  fi
+  if [ "$guard_dead" = 1 ]; then
+    note_remove "stale-change-guard" "$guard_file"
   fi
 fi
 

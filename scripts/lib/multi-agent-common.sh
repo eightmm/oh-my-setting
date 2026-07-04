@@ -102,18 +102,50 @@ ma_wait_stdin_file() {
   wait "$cmd_pid"
 }
 
-run_with_timeout() {
+# Run "$@" under a wall clock. SIGTERM alone is not a bound — a CLI that traps
+# or ignores it survives the timeout — so pass --kill-after (SIGKILL
+# escalation) when the binary supports it (GNU coreutils does; busybox may
+# not, probed once per process). With no timeout binary at all the guard
+# silently degrades to nothing, so OMS_REQUIRE_TIMEOUT=1 turns that into a
+# refusal instead of a warning.
+ma_run_bounded() {
+  local wall="$1"
+  local label="$2"
+  local tbin=""
+  shift 2
+
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${OMS_MULTI_AGENT_TIMEOUT:-5m}" "$@"
+    tbin=timeout
   elif command -v gtimeout >/dev/null 2>&1; then
     # macOS coreutils installs GNU timeout as gtimeout.
-    gtimeout "${OMS_MULTI_AGENT_TIMEOUT:-5m}" "$@"
+    tbin=gtimeout
+  fi
+  if [ -n "$tbin" ]; then
+    if [ -z "${OMS_MA_TIMEOUT_HAS_KILL_AFTER:-}" ]; then
+      if "$tbin" --kill-after 1 5 true >/dev/null 2>&1; then
+        OMS_MA_TIMEOUT_HAS_KILL_AFTER=1
+      else
+        OMS_MA_TIMEOUT_HAS_KILL_AFTER=0
+      fi
+    fi
+    if [ "$OMS_MA_TIMEOUT_HAS_KILL_AFTER" = 1 ]; then
+      "$tbin" --kill-after "${OMS_MULTI_AGENT_KILL_AFTER:-15}" "$wall" "$@"
+    else
+      "$tbin" "$wall" "$@"
+    fi
+  elif [ "${OMS_REQUIRE_TIMEOUT:-0}" = 1 ]; then
+    echo "error: no timeout/gtimeout binary and OMS_REQUIRE_TIMEOUT=1; refusing unbounded $label call" >&2
+    return 127
   else
     # Callers merge stderr into the artifact, so the missing guard is visible
     # there instead of silently running a hung provider CLI forever.
-    echo "warning: no timeout/gtimeout binary; provider call runs unbounded" >&2
+    echo "warning: no timeout/gtimeout binary; $label call runs unbounded (set OMS_REQUIRE_TIMEOUT=1 to refuse)" >&2
     "$@"
   fi
+}
+
+run_with_timeout() {
+  ma_run_bounded "${OMS_MULTI_AGENT_TIMEOUT:-5m}" provider "$@"
 }
 
 # agy has no file-write-blocking flag: --sandbox restricts the terminal, not
@@ -163,14 +195,7 @@ ma_agy_read_cleanup() {
 # indefinitely. GNU timeout exits 124 on expiry, which callers already treat
 # as a normal nonzero verify failure.
 run_verify_with_timeout() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-10m}" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-10m}" "$@"
-  else
-    echo "warning: no timeout/gtimeout binary; verify command runs unbounded" >&2
-    "$@"
-  fi
+  ma_run_bounded "${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-10m}" verify "$@"
 }
 
 ma_git_diff_base() {

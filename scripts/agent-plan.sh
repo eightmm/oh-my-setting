@@ -36,6 +36,7 @@ ROLE=""
 STATE_FILTER=""
 CLAIM=0
 INCLUDE_RUNNING=0
+INCLUDE_REVIEW=0
 
 usage() {
   cat <<'EOF'
@@ -54,13 +55,17 @@ Commands:
   finish --id ID [--artifact PATH] [--patch PATH]   Mark a task done (from claimed/running/review).
   block  --id ID --reason TEXT       Mark a task blocked.
   release --id ID                    Requeue a claimed/running/review task to ready (worker died).
-  reclaim [--ttl SECONDS] [--include-running]
+  reclaim [--ttl SECONDS] [--include-running] [--include-review]
                                      Requeue claimed tasks whose TTL since
                                      claimed_at expired (dead-worker recovery).
                                      A numeric per-task ttl wins over --ttl
                                      (default 3600). running needs the opt-in
-                                     flag; review is never reclaimed (it holds
-                                     a finished artifact awaiting a reviewer).
+                                     flag. review holds a finished artifact
+                                     awaiting a reviewer, so it is only
+                                     reclaimed with --include-review, ages from
+                                     its updated timestamp, and defaults to a
+                                     longer TTL (86400) unless --ttl is given;
+                                     its artifact/patch fields are kept.
   reopen --id ID                     Return a blocked task to ready.
   show   --id ID                     Print one task as JSON.
   list   [--state STATE]             List tasks (optionally by state).
@@ -103,6 +108,7 @@ while [ "$#" -gt 0 ]; do
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
     --claim) CLAIM=1; shift ;;
     --include-running) INCLUDE_RUNNING=1; shift ;;
+    --include-review) INCLUDE_REVIEW=1; shift ;;
     -h|--help) usage; exit 0 ;;
     init|add|claim|start|touch|review|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
@@ -129,7 +135,7 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
   OMS_VERIFY="$VERIFY" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
-  OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING"
+  OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW"
 
 plan_run() {
 python3 <<'PY'
@@ -273,9 +279,12 @@ ordered = sorted(tasks.values(), key=lambda t: t.get("created", ""))
 
 if act == "reclaim":
     # Dead-worker recovery: claim/next store provider+ttl+claimed_at, and this
-    # is the consumer. Only ages out claimed (and, opted in, running) tasks;
-    # review holds a finished artifact awaiting a reviewer, so TTL expiry there
-    # means "waiting on reviewer", not "dead worker".
+    # is the consumer. Only ages out claimed (and, opted in, running) tasks by
+    # default. review holds a finished artifact awaiting a reviewer, so TTL
+    # expiry there means "waiting on reviewer", not "dead worker" — reclaiming
+    # it is a separate opt-in with its own clock (updated = when it entered
+    # review) and a longer default TTL, and keeps artifact/patch so the
+    # finished work is not lost.
     import datetime
     def parse_ts(s):
         try:
@@ -287,26 +296,38 @@ if act == "reclaim":
     if raw_ttl and not raw_ttl.isdigit():
         die("reclaim --ttl must be an integer number of seconds")
     default_ttl = int(raw_ttl) if raw_ttl else 3600
+    review_ttl = int(raw_ttl) if raw_ttl else 86400
     states = {"claimed"}
     if env("OMS_INCLUDE_RUNNING") == "1":
         states.add("running")
+    if env("OMS_INCLUDE_REVIEW") == "1":
+        states.add("review")
     reclaimed = 0
     for t in ordered:
         if t["state"] not in states:
             continue
-        anchor = parse_ts(t.get("claimed_at", "")) or parse_ts(t.get("updated", ""))
+        if t["state"] == "review":
+            anchor = parse_ts(t.get("updated", ""))
+        else:
+            anchor = parse_ts(t.get("claimed_at", "")) or parse_ts(t.get("updated", ""))
         if anchor is None:
             continue
         t_ttl = t.get("ttl", "")
-        ttl_s = int(t_ttl) if isinstance(t_ttl, str) and t_ttl.isdigit() else default_ttl
+        if t["state"] == "review":
+            ttl_s = review_ttl
+        elif isinstance(t_ttl, str) and t_ttl.isdigit():
+            ttl_s = int(t_ttl)
+        else:
+            ttl_s = default_ttl
         age = int((now - anchor).total_seconds())
         if age < ttl_s:
             continue
         prov = t.get("provider", "") or "?"
+        was = t["state"]
         t.update(state="ready", provider="", ttl="", claimed_at="", reason="")
         t["updated"] = ts
         reclaimed += 1
-        print("plan: reclaimed %s (age %ss > ttl %ss, was @%s)" % (t["id"], age, ttl_s, prov))
+        print("plan: reclaimed %s from %s (age %ss > ttl %ss, was @%s)" % (t["id"], was, age, ttl_s, prov))
     if reclaimed:
         save(d)
     print("plan: reclaimed %d task(s)" % reclaimed)

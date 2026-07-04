@@ -18,6 +18,7 @@ ROOT_LIB="$ROOT/scripts/lib"
 
 REPO="$PWD"
 AS_JSON=0
+REFRESH_CI=0
 
 usage() {
   cat <<'EOF'
@@ -32,9 +33,13 @@ Options:
   --repo PATH   Repo to inspect (default: current directory; anchored to the
                 git worktree root).
   --json        Emit a single JSON object instead of the text view.
+  --refresh-ci  Best-effort `ci-status record` first (needs gh) so the CI
+                section reflects the latest run instead of the last recording.
   -h, --help    Show this help.
 
-Read-only: this never writes, claims, or launches anything.
+Read-only: this never writes, claims, or launches anything (--refresh-ci is
+the one opt-in exception: it appends the latest CI conclusion to .oms/ci.jsonl
+before reading).
 EOF
 }
 
@@ -47,6 +52,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --json) AS_JSON=1; shift ;;
+    --refresh-ci) REFRESH_CI=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -55,19 +61,29 @@ done
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 
+# ci-status has a `record` mode but nothing calls it automatically; this is
+# the read-side wiring so "oms state --refresh-ci" is one command, not two.
+if [ "$REFRESH_CI" = 1 ]; then
+  (cd "$REPO" && "$ROOT/scripts/ci-status.sh" record >/dev/null 2>&1) || true
+fi
+
 OMS_RS_REPO="$REPO" \
 OMS_RS_JSON="$AS_JSON" \
 OMS_RS_PLAN_TTL="${OMS_PLAN_CLAIM_TTL:-3600}" \
+OMS_RS_REVIEW_TTL="${OMS_PLAN_REVIEW_TTL:-86400}" \
 OMS_RS_BOARD_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}" \
 OMS_RS_RUN_TTL="${OMS_RUN_CURRENT_TTL:-86400}" \
+OMS_RS_GUARD_TTL="${OMS_GUARD_TTL:-86400}" \
 python3 <<'PY'
 import calendar, json, os, time
 
 repo = os.environ["OMS_RS_REPO"]
 as_json = os.environ["OMS_RS_JSON"] == "1"
 plan_ttl = int(os.environ["OMS_RS_PLAN_TTL"])
+review_ttl = int(os.environ["OMS_RS_REVIEW_TTL"])
 board_ttl = int(os.environ["OMS_RS_BOARD_TTL"])
 run_ttl = int(os.environ["OMS_RS_RUN_TTL"])
+guard_ttl = int(os.environ["OMS_RS_GUARD_TTL"])
 now = time.time()
 
 
@@ -119,7 +135,7 @@ if os.path.isfile(tf):
 state["task"] = task
 
 # --- Plan DAG: counts by state, stale claims --------------------------------
-plan = {"present": False, "by_state": {}, "stale": [], "actionable": []}
+plan = {"present": False, "by_state": {}, "stale": [], "stale_review": [], "actionable": []}
 pf = oms("plan", "tasks.json")
 if os.path.isfile(pf):
     try:
@@ -143,6 +159,12 @@ if os.path.isfile(pf):
                     ttl = int(raw_ttl)
                 if e is not None and now - e >= ttl:
                     plan["stale"].append({"id": i, "provider": t.get("provider", "")})
+            # Stale review: reclaim never touches review, so an abandoned
+            # reviewer strands the task silently unless it is flagged here.
+            if st == "review":
+                e = epoch(t.get("updated", ""))
+                if e is not None and now - e >= review_ttl:
+                    plan["stale_review"].append({"id": i, "provider": t.get("provider", "")})
             # Actionable: ready with all deps done.
             if st == "ready" and all(d in done_ids for d in t.get("depends", [])):
                 plan["actionable"].append(i)
@@ -279,7 +301,24 @@ if os.path.isdir(deleg_dir):
 state["delegations"] = delegations
 
 # --- Change-guard active? ---------------------------------------------------
-state["change_guard"] = {"active": os.path.isfile(oms("guards", "change-guard.tsv"))}
+guard = {"active": False, "stale": False}
+gf = oms("guards", "change-guard.tsv")
+if os.path.isfile(gf):
+    guard["active"] = True
+    gpid = gstarted = ""
+    for raw in open(gf, encoding="utf-8", errors="replace"):
+        parts = raw.rstrip("\n").split("\t")
+        if len(parts) >= 2 and parts[0] == "pid" and not gpid:
+            gpid = parts[1]
+        if len(parts) >= 2 and parts[0] == "started" and not gstarted:
+            gstarted = parts[1]
+    # Stale: dead opt-in owner pid, else started + TTL (the begin process is
+    # short-lived, so age is the default liveness signal).
+    if gpid:
+        guard["stale"] = not pid_alive(gpid)
+    elif gstarted.isdigit():
+        guard["stale"] = now - int(gstarted) > guard_ttl
+state["change_guard"] = guard
 
 if as_json:
     print(json.dumps(state, ensure_ascii=False, indent=2))
@@ -308,6 +347,9 @@ else:
             line("  actionable now: %s" % ", ".join(p["actionable"]))
         if p["stale"]:
             line("  STALE claims: %s" % ", ".join("%s(%s)" % (s["id"], s["provider"]) for s in p["stale"]))
+        if p["stale_review"]:
+            line("  STALE review (reviewer gone? reclaim --include-review): %s"
+                 % ", ".join(s["id"] for s in p["stale_review"]))
     else:
         line("\n## Plan: none")
 
@@ -358,5 +400,6 @@ else:
                                      row.get("provider", "") or "-", row.get("exit", "?")))
 
     if state["change_guard"]["active"]:
-        line("\n## Change-guard: ACTIVE")
+        tag = " (STALE — abandoned? end it: change-guard.sh end)" if state["change_guard"]["stale"] else ""
+        line("\n## Change-guard: ACTIVE%s" % tag)
 PY
