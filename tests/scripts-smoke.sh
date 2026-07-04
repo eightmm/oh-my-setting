@@ -163,6 +163,105 @@ test_file_lock_contention_preserves_records() {
 }
 
 
+test_file_lock_mkdir_contention_preserves_records() {
+  local dir="$TMP/file-lock-mkdir-contention"
+  local append_file="$dir/append.txt"
+  local n=20
+  local expected=$((n * 2))
+  local p1
+  local p2
+
+  # Same two-writer race as above but forced onto the mkdir fallback — the
+  # branch every flock-less host (stock macOS) actually runs. Without this the
+  # fallback's acquire loop is only ever tested single-process.
+  mkdir -p "$dir"
+  : > "$append_file"
+  . "$ROOT/scripts/lib/file-lock.sh"
+
+  (
+    export OMS_LOCK_FORCE_MKDIR=1
+    for i in $(seq 1 "$n"); do
+      oms_with_file_lock "$append_file" bash -c \
+        'printf "%s-%03d\n" "$2" "$3" >> "$1"' _ "$append_file" A "$i"
+    done
+  ) &
+  p1=$!
+  (
+    export OMS_LOCK_FORCE_MKDIR=1
+    for i in $(seq 1 "$n"); do
+      oms_with_file_lock "$append_file" bash -c \
+        'printf "%s-%03d\n" "$2" "$3" >> "$1"' _ "$append_file" B "$i"
+    done
+  ) &
+  p2=$!
+  wait "$p1" || fail "mkdir-lock writer A failed"
+  wait "$p2" || fail "mkdir-lock writer B failed"
+
+  [ "$(wc -l < "$append_file" | tr -d ' ')" = "$expected" ] ||
+    fail "mkdir-locked appends lost records"
+  [ "$(grep -Ec '^[AB]-[0-9][0-9][0-9]$' "$append_file")" = "$expected" ] ||
+    fail "mkdir-locked appends produced malformed records"
+  [ "$(sort -u "$append_file" | wc -l | tr -d ' ')" = "$expected" ] ||
+    fail "mkdir-locked appends produced duplicate records"
+}
+
+test_delegate_kill9_recovery_via_gc() {
+  local project="$TMP/delegate-kill9"
+  local bin="$project/bin"
+  local home_dir="$project/home"
+  local dpid
+  local i
+
+  # A SIGKILLed delegate cannot run its EXIT trap: the liveness marker and the
+  # plan claim both survive the crash. gc is the recovery path — it must sweep
+  # the orphan marker AND release the coupled plan task in one pass.
+  make_committed_repo "$project"
+  mkdir -p "$bin" "$home_dir"
+  cat > "$bin/codex" <<EOF
+#!/usr/bin/env bash
+cat > /dev/null
+echo \$\$ > "$project/worker.pid"
+sleep 60
+EOF
+  chmod +x "$bin/codex"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal kill9 >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+
+  HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/multi-agent-delegate.sh" \
+    --to codex --repo "$project" --plan-task t1 --no-verify \
+    >"$project/out" 2>"$project/err" &
+  dpid=$!
+  # Wait for the liveness marker, then SIGKILL the delegate mid-worker.
+  for i in $(seq 1 100); do
+    [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] && break
+    kill -0 "$dpid" 2>/dev/null || fail "delegate died before writing its liveness marker: $(cat "$project/err")"
+    sleep 0.2
+  done
+  [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] ||
+    fail "delegate never wrote a liveness marker"
+  kill -9 "$dpid" 2>/dev/null || true
+  wait "$dpid" 2>/dev/null || true
+  if [ -f "$project/worker.pid" ]; then
+    kill -9 "$(cat "$project/worker.pid")" 2>/dev/null || true
+  fi
+  # Give the worker's pid a moment to die so gc's kill -0 sees an orphan.
+  sleep 1
+
+  [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] ||
+    fail "SIGKILL should leave the orphan marker behind (that is the point)"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
+    fail "plan task should still be claimed after the crash"
+
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  [ -z "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] ||
+    fail "gc should sweep the orphan marker"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "ready"' ||
+    fail "gc should release the crashed worker's plan task"
+  # Leaked delegate worktree is residue, not state; prune it for a clean TMP.
+  git -C "$project" worktree prune >/dev/null 2>&1 || true
+}
+
 setup_doctor_home() {
   local home_dir="$1"
 
@@ -6717,6 +6816,275 @@ test_oms_init_seeds_and_guides() {
   ( cd "$project" && "$ROOT/scripts/oms-init.sh" >/dev/null 2>&1 ) || fail "init must be idempotent"
 }
 
+test_gc_closes_stale_open_run() {
+  local project="$TMP/gc-run-close"
+
+  make_committed_repo "$project"
+  local rid
+  rid="$(cd "$project" && "$ROOT/scripts/oms-run.sh" new)"
+  # Backdate every spine event so the run reads as abandoned.
+  python3 - "$project/.oms/runs/spine.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+for r in rows:
+    r["ts"] = "2020-01-01T00:00:00Z"
+open(sys.argv[1], "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
+PY
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
+  printf '%s' "$out" | grep -Fq "stale-run-close: $rid" || fail "dry-run should report the stale open run"
+  ( cd "$project" && "$ROOT/scripts/oms-run.sh" ls --open | grep -Fq "$rid" ) ||
+    fail "dry-run must not close the run"
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  ( cd "$project" && "$ROOT/scripts/oms-run.sh" ls | grep -F "$rid" | grep -Fq "closed" ) ||
+    fail "gc --apply should append a close event for the stale run"
+}
+
+test_gc_releases_plan_task_of_dead_delegation() {
+  local project="$TMP/gc-plan-release"
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal "gc release" >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title "one" >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t2 --title "two" >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t2 --provider codex >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t2 --patch /tmp/p >/dev/null
+  mkdir -p "$project/.oms/delegations"
+  printf '{"schema":1,"id":"d1","pid":999999,"task_id":"t1"}\n' > "$project/.oms/delegations/d1.json"
+  printf '{"schema":1,"id":"d2","pid":999999,"task_id":"t2"}\n' > "$project/.oms/delegations/d2.json"
+
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "ready"' ||
+    fail "gc should release the claimed task of a dead delegation"
+  # review holds a finished artifact awaiting a reviewer; gc must not requeue it.
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t2 | grep -Fq '"state": "review"' ||
+    fail "gc must not release a task in review"
+  assert_not_exists "$project/.oms/delegations/d1.json"
+}
+
+test_gc_sweeps_stale_change_guard() {
+  local project="$TMP/gc-guard"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
+  [ -f "$project/.oms/guards/change-guard.tsv" ] || fail "guard snapshot missing"
+  # Fresh guard survives.
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  [ -f "$project/.oms/guards/change-guard.tsv" ] || fail "gc must keep a fresh guard"
+  # Backdate the started stamp: an abandoned guard is swept.
+  python3 - "$project/.oms/guards/change-guard.tsv" <<'PY'
+import sys
+p = sys.argv[1]
+lines = []
+for line in open(p):
+    if line.startswith("started\t"):
+        line = "started\t1000000000\n"
+    lines.append(line)
+open(p, "w").writelines(lines)
+PY
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply 2>&1)"
+  printf '%s' "$out" | grep -Fq "stale-change-guard" || fail "gc should report the stale guard"
+  assert_not_exists "$project/.oms/guards/change-guard.tsv"
+}
+
+test_change_guard_status_flags_stale() {
+  local project="$TMP/guard-stale-status"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
+  local out
+  out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . status)"
+  printf '%s' "$out" | grep -Fq "STALE" && fail "fresh guard must not read as stale"
+  out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo . status' "$ROOT/scripts/change-guard.sh")"
+  printf '%s' "$out" | grep -Fq "STALE" || fail "aged guard should read as stale with OMS_GUARD_TTL=0"
+  # A dead opt-in owner pid is stale regardless of age.
+  ( cd "$project" && OMS_GUARD_PID=999999 "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
+  out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . status)"
+  printf '%s' "$out" | grep -Fq "STALE" || fail "dead owner pid should read as stale"
+  ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . end >/dev/null )
+}
+
+test_patch_land_reject_records_and_resolves_fail_ledger() {
+  local project="$TMP/land-ledger"
+
+  make_committed_repo "$project"
+  printf 'change\n' >> "$project/file.txt"
+  ( cd "$project" && git diff > "$TMP/land-ledger.patch" && git checkout -- file.txt )
+  local rc=0
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$TMP/land-ledger.patch" --verify false ) \
+    >/dev/null 2>"$project/err1" || rc=$?
+  [ "$rc" = "1" ] || fail "rejected land should exit 1, got $rc"
+  ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list ) | grep -Fq "patch-land REJECT" ||
+    fail "rejection should be recorded in the fail-ledger"
+  # Second attempt warns about the known rejection, then lands and resolves it.
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$TMP/land-ledger.patch" --verify true ) \
+    >"$project/out2" 2>"$project/err2" || fail "admissible retry should land"
+  assert_file_contains "$project/err2" "rejected before"
+  assert_file_contains "$project/out2" "LANDED"
+  ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) | grep -Fq "patch-land REJECT" &&
+    fail "successful land should resolve the recorded rejection"
+  assert_file_contains "$project/file.txt" "change"
+}
+
+test_patch_land_plan_task_supplies_patch() {
+  local project="$TMP/land-plan-patch"
+
+  make_committed_repo "$project"
+  printf 'from-plan\n' >> "$project/file.txt"
+  ( cd "$project" && git diff > "$TMP/land-plan.patch" && git checkout -- file.txt )
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal g >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t1 --patch "$TMP/land-plan.patch" >/dev/null
+
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t1 --verify true ) \
+    >"$project/out" 2>"$project/err" || fail "--plan-task with stored patch should land"
+  assert_file_contains "$project/err" "using patch from plan task t1"
+  assert_file_contains "$project/file.txt" "from-plan"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "done"' ||
+    fail "landed plan task should be done"
+  # Without a stored patch it must fail loudly, not guess.
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t2 --title T2 >/dev/null
+  local rc=0
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t2 ) >/dev/null 2>"$project/err2" || rc=$?
+  [ "$rc" = "2" ] || fail "--plan-task without stored patch should exit 2, got $rc"
+  assert_file_contains "$project/err2" "no stored patch path"
+}
+
+test_agent_plan_reclaim_include_review() {
+  local d="$TMP/plan-reclaim-review"
+  local SH="$ROOT/scripts/agent-plan.sh"
+
+  mkdir -p "$d"
+  "$SH" --repo "$d" init --goal "review reclaim" >/dev/null
+  "$SH" --repo "$d" add --id t1 --title one >/dev/null
+  "$SH" --repo "$d" claim --id t1 --provider codex >/dev/null
+  "$SH" --repo "$d" review --id t1 --patch /tmp/p.patch >/dev/null
+  # Fresh review is kept even with the flag (24h default TTL).
+  "$SH" --repo "$d" reclaim --include-review >/dev/null
+  "$SH" --repo "$d" show --id t1 | grep -Fq '"state": "review"' ||
+    fail "a fresh review must survive reclaim --include-review"
+  python3 - "$d/.oms/plan/tasks.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["tasks"]["t1"]["updated"] = "2020-01-01T00:00:00Z"
+json.dump(d, open(p, "w"))
+PY
+  # Aged review is only reclaimed with the opt-in flag.
+  "$SH" --repo "$d" reclaim >/dev/null
+  "$SH" --repo "$d" show --id t1 | grep -Fq '"state": "review"' ||
+    fail "default reclaim must never touch review"
+  local out
+  out="$("$SH" --repo "$d" reclaim --include-review)"
+  printf '%s' "$out" | grep -Fq "reclaimed t1 from review" || fail "aged review should be reclaimed with the flag"
+  "$SH" --repo "$d" show --id t1 | grep -Fq '"patch": "/tmp/p.patch"' ||
+    fail "reclaiming a review must keep its artifact/patch"
+}
+
+test_repo_state_flags_stale_review_and_guard() {
+  local project="$TMP/state-stale"
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal g >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t1 >/dev/null
+  python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["tasks"]["t1"]["updated"] = "2020-01-01T00:00:00Z"
+json.dump(d, open(p, "w"))
+PY
+  ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
+  local out
+  out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo .' "$ROOT/scripts/repo-state.sh")"
+  printf '%s' "$out" | grep -Fq "STALE review" || fail "repo-state should flag the stale review"
+  printf '%s' "$out" | grep -Fq "Change-guard: ACTIVE (STALE" || fail "repo-state should flag the stale guard"
+  ( cd "$project" && "$ROOT/scripts/repo-state.sh" --repo . --json ) |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["plan"]["stale_review"][0]["id"]=="t1"' ||
+    fail "stale review should be in the JSON view"
+}
+
+test_run_with_timeout_kill_after_defeats_term_trap() {
+  local out="$TMP/rwt-kill-out"
+  local rc=0
+
+  # A worker that ignores SIGTERM must still die: --kill-after escalates to
+  # SIGKILL, so the wall clock stays a real bound (GNU timeout exits 137).
+  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; \
+    OMS_MULTI_AGENT_TIMEOUT=1 OMS_MULTI_AGENT_KILL_AFTER=1 \
+    run_with_timeout bash -c 'trap \"\" TERM; sleep 30'" >"$out" 2>&1 || rc=$?
+  [ "$rc" = "137" ] || [ "$rc" = "124" ] || fail "TERM-immune worker should be killed (got rc=$rc)"
+  [ "$rc" = "137" ] || {
+    # 124 without kill-after support would mean the sleep is still alive.
+    command -v timeout >/dev/null 2>&1 && timeout --kill-after 1 5 true >/dev/null 2>&1 &&
+      fail "GNU timeout present but worker was not SIGKILLed (rc=$rc)"
+  }
+}
+
+test_run_with_timeout_require_refuses_unbounded() {
+  local err="$TMP/rwt-require-err"
+  local rc=0
+
+  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; \
+    OMS_REQUIRE_TIMEOUT=1 PATH='' run_with_timeout /bin/echo should-not-run" \
+    >"$TMP/rwt-require-out" 2>"$err" || rc=$?
+  [ "$rc" = "127" ] || fail "OMS_REQUIRE_TIMEOUT=1 without a timeout binary should refuse with 127, got $rc"
+  assert_file_contains "$err" "refusing unbounded"
+  grep -Fq "should-not-run" "$TMP/rwt-require-out" && fail "refused call must not run the command"
+  return 0
+}
+
+test_artifact_index_prune_atomic_keeps_symlink() {
+  local project="$TMP/prune-symlink"
+  local i
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/artifacts"
+  for i in 1 2 3 4 5; do
+    printf '{"ts":"2026-01-0%sT00:00:00Z","kind":"k","exit":0}\n' "$i" >> "$project/.oms/artifacts/real.jsonl"
+  done
+  ln -s real.jsonl "$project/.oms/artifacts/index.jsonl"
+  ( cd "$project" && "$ROOT/scripts/artifact-index.sh" prune 2 >/dev/null )
+  assert_symlink_to "$project/.oms/artifacts/index.jsonl" "real.jsonl"
+  [ "$(wc -l < "$project/.oms/artifacts/real.jsonl" | tr -d ' ')" = "2" ] ||
+    fail "prune should rewrite the symlink target to the kept rows"
+  assert_file_contains "$project/.oms/artifacts/real.jsonl" "2026-01-05"
+}
+
+test_oms_run_new_leaves_no_pointer_residue() {
+  local project="$TMP/run-pointer"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/oms-run.sh" new >/dev/null )
+  [ -f "$project/.oms/runs/CURRENT" ] || fail "new should write the CURRENT pointer"
+  # tmp+mv must not leave CURRENT.* temp files behind.
+  find "$project/.oms/runs" -maxdepth 1 -name 'CURRENT.*' | grep -q . &&
+    fail "atomic pointer write left temp residue"
+  return 0
+}
+
+test_repo_state_refresh_ci_records() {
+  local project="$TMP/state-refresh-ci"
+  local bin="$project/bin"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '[{"status":"completed","conclusion":"failure","workflowName":"test","headSha":"abc123","url":"http://x"}]\n'
+EOF
+  chmod +x "$bin/gh"
+  local out
+  out="$(cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/repo-state.sh" --repo . --refresh-ci)"
+  printf '%s' "$out" | grep -Fq "failure" || fail "--refresh-ci should surface the recorded CI conclusion"
+  assert_file_contains "$project/.oms/ci.jsonl" '"conclusion": "failure"'
+}
+
 test_oms_run_validate_flags_schema_drift() {
   local project="$TMP/validate-drift"
 
@@ -7001,5 +7369,20 @@ test_delegation_liveness_in_state
 test_gc_reclaims_safely
 test_oms_init_seeds_and_guides
 test_oms_run_validate_flags_schema_drift
+test_file_lock_mkdir_contention_preserves_records
+test_gc_closes_stale_open_run
+test_gc_releases_plan_task_of_dead_delegation
+test_gc_sweeps_stale_change_guard
+test_change_guard_status_flags_stale
+test_patch_land_reject_records_and_resolves_fail_ledger
+test_patch_land_plan_task_supplies_patch
+test_agent_plan_reclaim_include_review
+test_repo_state_flags_stale_review_and_guard
+test_run_with_timeout_kill_after_defeats_term_trap
+test_run_with_timeout_require_refuses_unbounded
+test_artifact_index_prune_atomic_keeps_symlink
+test_oms_run_new_leaves_no_pointer_residue
+test_repo_state_refresh_ci_records
+test_delegate_kill9_recovery_via_gc
 
 echo "scripts-smoke: ok"

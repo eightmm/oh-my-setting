@@ -48,6 +48,54 @@ jobs:
       - name: scripts smoke
         run: bash tests/scripts-smoke.sh
 
+  # The installer was the one path CI never executed: shellcheck+bash -n pass
+  # while a broken install.sh ships. Run the real install -> update ->
+  # uninstall lifecycle against a throwaway HOME, cloning from the checkout.
+  install-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # update.sh needs a pullable history, not a shallow single commit.
+          fetch-depth: 0
+      - name: install / update / uninstall lifecycle
+        run: |
+          set -euo pipefail
+          workspace="$PWD"
+          # PR checkouts are a detached HEAD; the install clone and the later
+          # ff-only pull both need a real branch to track.
+          git -C "$workspace" checkout -B ci-install-e2e
+          export HOME="$(mktemp -d)"
+          export OH_MY_SETTING_REPO_URL="$workspace"
+          export OH_MY_SETTING_INSTALL_TOOLS=0
+          export OH_MY_SETTING_GENERATE_SLURM=0
+          export OH_MY_SETTING_STAR_PROMPT=0
+          export OH_MY_SETTING_REQUIRE_TOOLS=0
+          # The autoupdate trigger registers with the HOST systemd/cron, which
+          # a throwaway-HOME fixture must not touch.
+          export OH_MY_SETTING_AUTO_UPDATE=0
+
+          echo "== install =="
+          bash install.sh
+          dest="$HOME/.oh-my-setting"
+          [ -d "$dest/.git" ] || { echo "install did not clone the checkout" >&2; exit 1; }
+          [ -L "$HOME/.claude/CLAUDE.md" ] || { echo "install did not link CLAUDE.md" >&2; exit 1; }
+          [ -f "$dest/local/machine.md" ] || echo "note: machine snapshot not generated"
+          "$dest/scripts/oms" list >/dev/null
+
+          echo "== update (new upstream commit) =="
+          git -C "$workspace" -c user.email=ci@example.com -c user.name=ci \
+            commit --allow-empty -m "ci: update fixture"
+          "$dest/scripts/update.sh" --no-tools
+          [ "$(git -C "$dest" rev-parse HEAD)" = "$(git -C "$workspace" rev-parse HEAD)" ] ||
+            { echo "update did not fast-forward to upstream HEAD" >&2; exit 1; }
+          [ -L "$HOME/.claude/CLAUDE.md" ] || { echo "update broke the CLAUDE.md link" >&2; exit 1; }
+
+          echo "== uninstall =="
+          "$dest/scripts/uninstall.sh" --yes --purge
+          [ ! -e "$HOME/.claude/CLAUDE.md" ] || { echo "uninstall left CLAUDE.md behind" >&2; exit 1; }
+          [ ! -d "$dest" ] || { echo "uninstall --purge left the checkout behind" >&2; exit 1; }
+
   portability-macos:
     runs-on: macos-latest
     steps:

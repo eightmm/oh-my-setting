@@ -7,6 +7,45 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Terminal-verb wiring — every create now has a crash-path close: `gc` appends
+  a close event to stale open runs (no spine event in `--days`; open runs no
+  longer protect their capsules from GC forever), releases the claimed/running
+  plan task coupled to a dead delegation marker (the two records describing
+  the same dead worker are finally joined), and sweeps abandoned change-guards.
+- `patch-land.sh` feeds the shared failure memory: a rejection is recorded in
+  the fail-ledger fingerprinted by patch content, a retry of a known-rejected
+  patch warns first, and a later successful land resolves the entry. The land
+  row append is no longer silently swallowed, and `--plan-task` alone reads
+  the patch path the plan task already stores.
+- `agent-plan reclaim --include-review`: opts an abandoned review back to
+  ready on its own clock (`updated`, default TTL 86400s), keeping
+  artifact/patch; `oms state` flags stale reviews (`OMS_PLAN_REVIEW_TTL`).
+- `change-guard.sh` liveness: snapshots stamp a start time (optional
+  `OMS_GUARD_PID`), `status` and `oms state` flag an abandoned guard STALE
+  (`OMS_GUARD_TTL`), and the snapshot write is atomic.
+- `repo-state.sh --refresh-ci`: opt-in `ci-status record` before reading, so
+  the CI section reflects the latest run in one command.
+- CI `install-e2e` job: the real `install.sh` → `update.sh` → `uninstall.sh`
+  lifecycle against a throwaway HOME — the installer path was previously only
+  linted, never executed.
+
+### Fixed
+- Crash-atomicity where the harness diverged from its own tmp+mv standard:
+  the `.oms/runs/CURRENT` pointer (read locklessly by every auto-linking
+  tool), the change-guard snapshot, and `artifact-index prune` (now an atomic
+  replace at the symlink target instead of truncate-in-place).
+- Provider/verify timeouts escalate to SIGKILL via `--kill-after` (a worker
+  that traps SIGTERM no longer survives the bound; probed for busybox), and
+  `OMS_REQUIRE_TIMEOUT=1` refuses to run unbounded when no timeout binary
+  exists instead of only warning.
+- Run-id entropy no longer degrades to a bare pid when `/dev/urandom` is
+  unreadable (pid+time+`$RANDOM` mix), and a failed urandom read no longer
+  yields an empty suffix.
+- Lock fallback under real contention and delegate SIGKILL recovery are now
+  covered by tests (`OMS_LOCK_FORCE_MKDIR` two-writer race; `kill -9` mid-
+  delegate → `gc` sweeps the orphan marker and releases the plan task).
+
+### Added (earlier)
 - Failure memory (`fail-ledger.sh`): durable `.oms/failures.jsonl` fingerprint
   ledger so the three agents stop repeating the same failing command across
   sessions — `record`/`check` (exit 3 on a known-unresolved failure)/`resolve`/
@@ -36,7 +75,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   auto-injected when delegated via `--plan-task` — so the same reviewer /
   refactorer / test-writer role can drive any of the three providers.
 
-### Fixed
+### Fixed (earlier)
 - `patch-admit.sh`: a worktree apply failure was swallowed (`|| true`), so the
   syntax/verify gates could pass against the UNPATCHED tree — now recorded as an
   `apply-worktree` FAIL and the gates are skipped. numstat parsing split on
