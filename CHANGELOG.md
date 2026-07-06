@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Skill router (`skill-router.sh` + `install-claude-hooks.sh`): a Claude Code
+  UserPromptSubmit hook that matches each prompt against new per-skill
+  `triggers` phrases (en+ko) in `skills.manifest.json` and injects a one-line
+  skill hint, so skills fire at task time instead of relying on recall.
+  Precision-first: max 2 suggestions per prompt, each skill hinted once per
+  session, silent on no match, system prompts (slash commands, notifications)
+  skipped, fail-open, `OMS_SKILL_ROUTER_OFF=1` kill switch. install/update
+  register it via an additive `~/.claude/settings.json` merge (backup +
+  idempotent + refuses invalid JSON; `OH_MY_SETTING_CLAUDE_HOOKS=0` opts out)
+  and uninstall removes only its own entry. Claude-only by nature; Codex and
+  Antigravity keep the skill picker plus a new AGENTS.md skill-consult rule.
 - Terminal-verb wiring — every create now has a crash-path close: `gc` appends
   a close event to stale open runs (no spine event in `--days`; open runs no
   longer protect their capsules from GC forever), releases the claimed/running

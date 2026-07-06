@@ -71,6 +71,11 @@ if [ "$PURGE" = "1" ]; then
 fi
 
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/uninstall-autoupdate.sh"
+if [ "$DRY_RUN" = "1" ]; then
+  echo "would remove claude skill-router hook from ~/.claude/settings.json"
+else
+  "$ROOT/scripts/install-claude-hooks.sh" --remove || true
+fi
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/unlink.sh"
 
 if [ "$PURGE" != "1" ]; then

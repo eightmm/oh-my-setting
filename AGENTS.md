@@ -62,6 +62,9 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Do not use MCP servers, app connectors, or plugin connector tools.
 - Prefer local files, shell commands, `git`, and `gh` CLI.
 - If a task seems to require MCP/connector access, state the missing local path or CLI command instead.
+- Before starting a task, check whether an installed skill covers it (skill
+  picker / skill hint); read and follow the skill instead of improvising the
+  workflow.
 
 ## Stop Conditions
 

@@ -7085,6 +7085,83 @@ EOF
   assert_file_contains "$project/.oms/ci.jsonl" '"conclusion": "failure"'
 }
 
+test_skill_router_matches_and_dedupes() {
+  local d="$TMP/skill-router"
+  local out
+
+  mkdir -p "$d"
+  # Trigger match (Korean commit phrasing) suggests the mapped skill once.
+  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r1"}' |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "git-cli-workflow" || fail "router should suggest git-cli-workflow"
+  # Same session: silent (once-per-session dedupe).
+  out="$(printf '{"prompt":"커밋해줘 한 번 더","session_id":"r1"}' |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  [ -z "$out" ] || fail "router must not repeat a suggestion within a session"
+  # New session: suggests again; multi-match caps at two skills.
+  out="$(printf '{"prompt":"slurm 잡 제출하고 leakage 확인해줘","session_id":"r2"}' |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "slurm-hpc" || fail "router should suggest slurm-hpc in a new session"
+  printf '%s' "$out" | grep -Fq "chem-bio-ml" || fail "router should include the second match"
+}
+
+test_skill_router_skips_system_prompts() {
+  local d="$TMP/skill-router-skip"
+  local out
+
+  mkdir -p "$d"
+  for p in '/commit' '<task-notification>x</task-notification>' '안녕하세요 좋은 아침' 'not-json'; do
+    out="$(printf '%s' "{\"prompt\":\"$p\",\"session_id\":\"s\"}" |
+      TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")" ||
+      fail "router must fail-open, got nonzero for: $p"
+    [ -z "$out" ] || fail "router should stay silent for: $p"
+  done
+  # Malformed payload: silent, exit 0.
+  out="$(printf 'garbage' | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")" ||
+    fail "router must fail-open on malformed payload"
+  [ -z "$out" ] || fail "router should stay silent on malformed payload"
+  # Kill switch.
+  out="$(printf '{"prompt":"커밋해줘","session_id":"k"}' |
+    TMPDIR="$d" OMS_SKILL_ROUTER_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+  [ -z "$out" ] || fail "OMS_SKILL_ROUTER_OFF=1 must silence the router"
+}
+
+test_install_claude_hooks_merge_and_remove() {
+  local d="$TMP/claude-hooks"
+  local s="$d/settings.json"
+
+  mkdir -p "$d"
+  cat > "$s" <<'EOF'
+{"model": "x", "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "echo user-router"}]}]}}
+EOF
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null   # idempotent
+  python3 - "$s" <<'PY' || fail "merge should add ours once and preserve existing hooks"
+import json, sys
+d = json.load(open(sys.argv[1]))
+ups = d["hooks"]["UserPromptSubmit"]
+assert len(ups) == 2, ups
+cmds = [h["command"] for e in ups for h in e["hooks"]]
+assert sum("skill-router.sh" in c for c in cmds) == 1
+assert any("user-router" in c for c in cmds)
+assert d["model"] == "x"
+PY
+  [ -f "$s.oms-bak" ] || fail "installer should back up settings before the first change"
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
+  python3 - "$s" <<'PY' || fail "remove should delete only the oh-my-setting entry"
+import json, sys
+d = json.load(open(sys.argv[1]))
+ups = d["hooks"]["UserPromptSubmit"]
+assert len(ups) == 1 and "user-router" in ups[0]["hooks"][0]["command"]
+PY
+  # Broken settings must refuse loudly, not clobber.
+  printf '{broken' > "$s"
+  if OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null 2>&1; then
+    fail "installer must refuse to touch invalid settings JSON"
+  fi
+  grep -Fq '{broken' "$s" || fail "installer must not modify a file it refused"
+}
+
 test_oms_run_validate_flags_schema_drift() {
   local project="$TMP/validate-drift"
 
@@ -7384,5 +7461,8 @@ test_artifact_index_prune_atomic_keeps_symlink
 test_oms_run_new_leaves_no_pointer_residue
 test_repo_state_refresh_ci_records
 test_delegate_kill9_recovery_via_gc
+test_skill_router_matches_and_dedupes
+test_skill_router_skips_system_prompts
+test_install_claude_hooks_merge_and_remove
 
 echo "scripts-smoke: ok"

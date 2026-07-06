@@ -80,6 +80,8 @@ jobs:
           dest="$HOME/.oh-my-setting"
           [ -d "$dest/.git" ] || { echo "install did not clone the checkout" >&2; exit 1; }
           [ -L "$HOME/.claude/CLAUDE.md" ] || { echo "install did not link CLAUDE.md" >&2; exit 1; }
+          grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" ||
+            { echo "install did not register the skill-router hook" >&2; exit 1; }
           [ -f "$dest/local/machine.md" ] || echo "note: machine snapshot not generated"
           "$dest/scripts/oms" list >/dev/null
 
@@ -94,6 +96,8 @@ jobs:
           echo "== uninstall =="
           "$dest/scripts/uninstall.sh" --yes --purge
           [ ! -e "$HOME/.claude/CLAUDE.md" ] || { echo "uninstall left CLAUDE.md behind" >&2; exit 1; }
+          ! grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" 2>/dev/null ||
+            { echo "uninstall left the skill-router hook registered" >&2; exit 1; }
           [ ! -d "$dest" ] || { echo "uninstall --purge left the checkout behind" >&2; exit 1; }
 
   portability-macos:

@@ -19,6 +19,7 @@ Options:
 
 Environment:
   OH_MY_SETTING_STAR_PROMPT=0      Skip the GitHub star prompt.
+  OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hook registration.
   OH_MY_SETTING_GENERATE_MACHINE=0 Skip machine snapshot generation.
   OH_MY_SETTING_GENERATE_SLURM=0   Skip Slurm snapshot generation.
   OH_MY_SETTING_INSTALL_TOOLS=0    Skip Node/uv/agent CLI installation.
@@ -123,6 +124,15 @@ else
 fi
 
 "$DEST/scripts/link.sh"
+
+# Claude Code skill-router hook (deterministic skill suggestions at prompt
+# time). Additive settings.json merge; Claude-only, non-fatal on failure.
+if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ]; then
+  "$DEST/scripts/install-claude-hooks.sh" ||
+    echo "warning: claude hook registration failed (install continues)" >&2
+else
+  echo "skipping claude hook registration: OH_MY_SETTING_CLAUDE_HOOKS=0"
+fi
 
 if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v sinfo >/dev/null 2>&1; }; then
   "$DEST/scripts/generate-slurm-skill.sh"

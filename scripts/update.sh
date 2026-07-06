@@ -68,6 +68,12 @@ fi
 
 "$ROOT/scripts/link.sh"
 
+# Refresh the Claude hook registration so a moved checkout path heals.
+if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ] && [ -x "$ROOT/scripts/install-claude-hooks.sh" ]; then
+  "$ROOT/scripts/install-claude-hooks.sh" ||
+    echo "warning: claude hook refresh failed (update continues)" >&2
+fi
+
 if [ "$SKIP_DOCTOR" != "1" ]; then
   "$ROOT/scripts/doctor.sh"
 fi

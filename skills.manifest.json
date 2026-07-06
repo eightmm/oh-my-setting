@@ -11,73 +11,197 @@
       "name": "git-cli-workflow",
       "source": "custom-skills/git-cli-workflow",
       "enabled": true,
-      "reason": "Use local git and gh CLI for repository, PR, issue, and CI work without MCP."
+      "reason": "Use local git and gh CLI for repository, PR, issue, and CI work without MCP.",
+      "triggers": [
+        "커밋해줘",
+        "커밋 해줘",
+        "PR 올려",
+        "PR 열어",
+        "푸시해줘",
+        "브랜치 정리",
+        "make a commit",
+        "open a pr",
+        "create a pull request",
+        "check ci",
+        "CI 확인"
+      ]
     },
     {
       "name": "oh-my-setting-ops",
       "source": "custom-skills/oh-my-setting-ops",
       "enabled": true,
-      "reason": "Let agents maintain the oh-my-setting install, cleanup legacy links, and run doctors from chat."
+      "reason": "Let agents maintain the oh-my-setting install, cleanup legacy links, and run doctors from chat.",
+      "triggers": [
+        "oh-my-setting",
+        "설치 상태",
+        "닥터 돌려",
+        "doctor 돌려",
+        "skill picker",
+        "스킬 중복"
+      ]
     },
     {
       "name": "agent-harness",
       "source": "custom-skills/agent-harness",
       "enabled": true,
-      "reason": "Share harness memory across agents and call one local agent CLI for a read-only independent pass."
+      "reason": "Share harness memory across agents and call one local agent CLI for a read-only independent pass.",
+      "triggers": [
+        "oms state",
+        "이어서 해줘",
+        "현재 상태 확인",
+        "다른 에이전트가",
+        "공유 메모리",
+        "shared memory",
+        "agent memory",
+        "핸드오프",
+        "handoff",
+        "fail-ledger",
+        "이미 실패한",
+        "stuck claim",
+        ".oms 정리",
+        "패치 적용",
+        "patch-land",
+        "세션 이어받"
+      ]
     },
     {
       "name": "spec-interview",
       "source": "custom-skills/spec-interview",
       "enabled": true,
-      "reason": "Interview and write a spec before coding unclear or broad requests."
+      "reason": "Interview and write a spec before coding unclear or broad requests.",
+      "triggers": [
+        "프로젝트 시작",
+        "새 프로젝트",
+        "new project",
+        "from scratch",
+        "스펙 정리",
+        "스펙부터",
+        "요구사항 정리"
+      ]
     },
     {
       "name": "multi-agent-review",
       "source": "custom-skills/multi-agent-review",
       "enabled": true,
-      "reason": "Use independent agent/reviewer lenses for high-risk changes."
+      "reason": "Use independent agent/reviewer lenses for high-risk changes.",
+      "triggers": [
+        "multi-agent review",
+        "교차 리뷰",
+        "크로스 리뷰",
+        "리뷰 게이트",
+        "review gate",
+        "독립 검증",
+        "다른 모델로 검증",
+        "council review"
+      ]
     },
     {
       "name": "multi-agent-ask",
       "source": "custom-skills/multi-agent-ask",
       "enabled": true,
-      "reason": "Ask Codex, Claude Code, and Antigravity the same conceptual question and synthesize perspectives."
+      "reason": "Ask Codex, Claude Code, and Antigravity the same conceptual question and synthesize perspectives.",
+      "triggers": [
+        "세 모델에게",
+        "세 모델에",
+        "cross-model",
+        "독립 의견",
+        "의견 물어봐",
+        "debate round"
+      ]
     },
     {
       "name": "multi-agent-delegate",
       "source": "custom-skills/multi-agent-delegate",
       "enabled": true,
-      "reason": "Delegate a scoped write task to another agent CLI in an isolated worktree and review the returned patch."
+      "reason": "Delegate a scoped write task to another agent CLI in an isolated worktree and review the returned patch.",
+      "triggers": [
+        "codex한테",
+        "codex에게",
+        "claude한테",
+        "agy한테",
+        "위임해줘",
+        "delegate to",
+        "have codex",
+        "맡겨줘"
+      ]
     },
     {
       "name": "slurm-hpc",
       "source": "custom-skills/slurm-hpc",
       "enabled": true,
-      "reason": "Generate and use local Slurm cluster context for HPC workflows."
+      "reason": "Generate and use local Slurm cluster context for HPC workflows.",
+      "triggers": [
+        "slurm",
+        "sbatch",
+        "srun",
+        "squeue",
+        "sacct",
+        "파티션",
+        "잡 제출",
+        "잡 돌려",
+        "큐 확인",
+        "클러스터"
+      ]
     },
     {
       "name": "tsp-queue",
       "source": "custom-skills/tsp-queue",
       "enabled": true,
-      "reason": "Queue single-workstation GPU jobs with tsp/task-spooler and ledger-recorded completion."
+      "reason": "Queue single-workstation GPU jobs with tsp/task-spooler and ledger-recorded completion.",
+      "triggers": [
+        "tsp",
+        "task-spooler",
+        "줄 세우",
+        "큐에 넣어",
+        "single-gpu box",
+        "단일 gpu"
+      ]
     },
     {
       "name": "ml-training",
       "source": "custom-skills/ml-training",
       "enabled": true,
-      "reason": "Load PyTorch training defaults (optimizer, scheduler, DDP, checkpoint) on demand instead of carrying them in global rules."
+      "reason": "Load PyTorch training defaults (optimizer, scheduler, DDP, checkpoint) on demand instead of carrying them in global rules.",
+      "triggers": [
+        "optimizer",
+        "lr 스케줄",
+        "learning rate schedule",
+        "ddp",
+        "학습 스크립트",
+        "training script",
+        "checkpoint 저장"
+      ]
     },
     {
       "name": "chem-bio-ml",
       "source": "custom-skills/chem-bio-ml",
       "enabled": true,
-      "reason": "Domain guardrails for molecule/protein ML: splitting/leakage, label semantics, metrics, and featurization conventions."
+      "reason": "Domain guardrails for molecule/protein ML: splitting/leakage, label semantics, metrics, and featurization conventions.",
+      "triggers": [
+        "leakage",
+        "scaffold split",
+        "inchikey",
+        "admet",
+        "분자 데이터",
+        "단백질",
+        "화합물",
+        "molecule",
+        "protein"
+      ]
     },
     {
       "name": "research-method",
       "source": "custom-skills/research-method",
       "enabled": true,
-      "reason": "Hypothesis-driven experiment loop: falsifiable hypothesis, pre-registered metric, baseline, ledger-recorded result, anti-pattern guard."
+      "reason": "Hypothesis-driven experiment loop: falsifiable hypothesis, pre-registered metric, baseline, ledger-recorded result, anti-pattern guard.",
+      "triggers": [
+        "가설",
+        "hypothesis",
+        "실험 설계",
+        "실험 계획",
+        "baseline 비교",
+        "ablation"
+      ]
     }
   ]
 }
