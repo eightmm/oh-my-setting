@@ -258,7 +258,15 @@ EOF
     fail "gc should sweep the orphan marker"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "ready"' ||
     fail "gc should release the crashed worker's plan task"
-  # Leaked delegate worktree is residue, not state; prune it for a clean TMP.
+  # The SIGKILLed delegate cannot clean its worktree tmpdir. Remove the leaked
+  # dir (matched by its residue marker pointing at THIS test repo) — otherwise
+  # the NEXT suite run's doctor residue check sees it and fails.
+  local leaked
+  for leaked in "${TMPDIR:-/tmp}"/oh-my-setting-delegate.*; do
+    [ -d "$leaked" ] || continue
+    grep -Fq "repo=$project" "$leaked/.oh-my-setting-tmp" 2>/dev/null || continue
+    rm -rf "$leaked"
+  done
   git -C "$project" worktree prune >/dev/null 2>&1 || true
 }
 
