@@ -92,6 +92,21 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Do not hide failures; prefer explicit errors over silent fallback.
 - Verify by ladder when risk warrants it: syntax -> focused interface test -> broader test.
 
+## Model Tiering
+
+- Session model = top tier. Never assume or hardcode a specific model name;
+  reason in relative tiers (fable > opus > sonnet > haiku).
+- Spawning subagents/workers: default one tier below the session model.
+  Mechanical work (search, formatting, bulk edits) may go two tiers down.
+- Judgment stays top-tier: review gates, verify/admit decisions, plan
+  approval, and final synthesis run at the session tier - never downgrade
+  the judge.
+- If an advisor model is configured, consult it before irreversible
+  decisions, after repeated failures, and before declaring done - instead of
+  escalating the whole session.
+- Cross-CLI workers (oms delegate/ask/review) follow the same tiers when the
+  tool exposes a tier or model option; otherwise leave the provider default.
+
 ## Run Provenance & Coordination
 
 When the oh-my-setting harness is installed, prefer its tools over ad-hoc
