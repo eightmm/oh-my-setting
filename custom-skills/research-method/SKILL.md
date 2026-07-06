@@ -5,9 +5,13 @@ description: >
   turn a question into a falsifiable hypothesis, design the smallest
   experiment that could disprove it, predict the outcome before running,
   compare against a baseline, and record the result — pass or fail. Use when
-  planning experiments, interpreting results, or deciding the next run.
-  Complements spec-interview (build), chem-bio-ml (domain correctness), and
-  the run ledger (history).
+  planning experiments, interpreting results, or deciding the next run; also
+  when coordinating runs across agents ("claim this experiment", "실험 겹치지
+  않게"), reproducing or comparing runs ("reproduce that run", "diff run A vs
+  B", "실험 재현", "런 비교"), or tracing an output back to its run ("which
+  run produced this checkpoint", run-capsule whence). Complements
+  spec-interview (build), chem-bio-ml (domain correctness), and the run
+  ledger (history).
 ---
 
 The loop that keeps experiments honest. Not domain knowledge (see

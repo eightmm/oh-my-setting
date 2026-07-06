@@ -93,9 +93,13 @@ Prefer the shared wrapper when this repo is installed:
 ```
 
 Use `--base origin/main` for branch/PR review and `--synthesize` to append a
-model-written synthesis to the summary artifact. For a one-provider review,
-prefer `agent-run.sh --mode read`; it records task outcomes and routes
-read/write automatically.
+model-written synthesis to the summary artifact. `--providers a,b` narrows the
+reviewer set and `--debate N` runs N rebuttal rounds where each reviewer sees
+the others' (sanitized) findings. Add `--verify CMD` as the mechanical
+backstop: the command runs locally and a failing verify fails the review even
+if every reviewer self-reports pass. For a one-provider review, prefer
+`agent-run.sh --mode read`; it records task outcomes and routes read/write
+automatically.
 
 The wrapper sends the same question and same sanitized diff/status context to
 `codex`, `claude`, and `antigravity`, writes one artifact per model under

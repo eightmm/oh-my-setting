@@ -95,7 +95,7 @@ Memory and handoff:
 Remember for this repo: run scripts/check.sh fast before claiming done.
 Pin for this repo: current task is the dataloader refactor.
 Show the active task packet.
-Reclaim expired agent claims on the shared plan.
+Reclaim expired agent claims (and abandoned reviews) on the shared plan.
 Hand off my last Codex session here so you can continue it.
 ```
 

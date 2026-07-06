@@ -2,9 +2,11 @@
 name: oh-my-setting-ops
 description: >
   Maintain an oh-my-setting install from chat. Use when the user asks to check
-  install status, update oh-my-setting, run doctor, clean legacy skill links,
-  fix duplicate skill picker entries, regenerate local snapshots, or explain
-  what the installed agent rules/scripts are doing.
+  install status, update oh-my-setting ("업데이트 해줘"), run doctor ("닥터
+  돌려줘", "설치 상태 확인"), clean legacy skill links, fix duplicate skill
+  picker entries, regenerate local snapshots, or explain what the installed
+  agent rules/scripts are doing. For the shared repo dashboard ("what's the
+  current state", "oms state") use agent-harness instead.
 ---
 
 Goal: the user asks in chat; the agent runs local scripts. Do not tell the user

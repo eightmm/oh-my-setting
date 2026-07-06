@@ -29,6 +29,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   lifecycle against a throwaway HOME — the installer path was previously only
   linted, never executed.
 
+### Changed
+- MD/trigger layer strengthened so skills actually fire at task time: skill
+  frontmatter descriptions now carry concrete "use when" phrases and Korean
+  user wordings (agent-harness enumerates its whole surface — state/resume,
+  fail-ledger, gc, patch-land, plan DAG, session handoff; git-cli, slurm-hpc,
+  ops, research-method, delegate follow). multi-agent-delegate's body
+  documents `--plan-task`/`--role`/`--repair`/`--no-verify` and routes the
+  post-worker path through patch-admit/patch-land. AGENTS.md reframes `oms
+  gc` as the crash-path recovery step and adds the new lifecycle levers
+  (`oms state --refresh-ci`, `reclaim --include-review`, patch-land ↔
+  fail-ledger, change-guard). Templates call tools via the `oms` dispatcher;
+  README.ko.md mirrors the EN condensed structure; timeout env knobs
+  documented in COMPONENTS.
+
 ### Fixed
 - Crash-atomicity where the harness diverged from its own tmp+mv standard:
   the `.oms/runs/CURRENT` pointer (read locklessly by every auto-linking

@@ -1,10 +1,18 @@
 ---
 name: agent-harness
 description: >
-  Use when the user asks about shared agent memory, cross-model harness state,
-  or calling one local agent CLI (Codex, Claude Code, or Antigravity) for an
-  independent read-only pass or isolated write task from the current agent
-  session.
+  Shared multi-agent harness state and coordination (Codex, Claude Code,
+  Antigravity). Use when the user asks about shared agent memory; resuming a
+  repo or checking what other agents did ("what's the current state",
+  "resume", "oms state", "이어서 해줘", "현재 상태 확인", "다른 에이전트가 뭐
+  했어"); splitting subtasks across agents (plan DAG, claim/reclaim, "작업
+  나눠서"); checking a known dead end before retrying a failed command
+  ("have we tried this before", fail-ledger, "이미 실패한 명령이야?");
+  reviewing or landing a delegated patch (patch-admit, patch-land, "패치
+  검토/적용해줘"); cleaning up stale harness state (oms gc, stuck claims,
+  orphaned delegations, ".oms 정리"); handing a prior session to another
+  agent ("continue what Codex was doing", "Codex 세션 이어받아"); or calling
+  one local agent CLI for a read-only pass or isolated write task.
 ---
 
 Goal: keep agent state portable across Codex, Claude Code, and Antigravity, and

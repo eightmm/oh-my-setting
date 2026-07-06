@@ -117,20 +117,32 @@ tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh
 - `oms init` seeds `.oms/` and prints a next-actions checklist when you land in
   a fresh repo; `oms state` (repo-state) is the read-only dashboard: active
   task/plan/board, in-flight delegations, open runs, latest CI, and unresolved
-  failures. Run one of these first when starting or resuming a repo.
+  failures, with stale claims/reviews/guards flagged. Run one of these first
+  when starting or resuming a repo; add `--refresh-ci` when resuming so the CI
+  line reflects the latest run, not the last recording.
 - Before retrying a command that may be a known dead end, `oms fail-ledger
-  check --cmd "..."`; record a new dead end with `record`. `oms gc` (dry-run by
-  default) reclaims aged `.oms/` state.
+  check --cmd "..."`; record a new dead end with `record`.
+- `oms gc` (dry-run by default) is the crash-path recovery step, not just disk
+  cleanup: it releases plan tasks claimed by dead workers, closes stale open
+  runs, sweeps abandoned change-guards, and reclaims aged `.oms/` state. When
+  `oms state` shows orphans or stuck claims, run gc (and `oms agent-plan
+  reclaim`) instead of hand-editing `.oms/` or redoing the work.
 - Shared state — all three agents read/write the same repo-local `.oms/`:
   shared memory (`oms agent-memory`, incl. `search`), active task packet
   (`oms agent-task`), subtask DAG (`oms agent-plan`: `ready`,
-  `next --claim --provider NAME`, `touch` to heartbeat a long claim, `reclaim`).
+  `next --claim --provider NAME`, `touch` to heartbeat a long claim, `reclaim`;
+  `reclaim --include-review` requeues an abandoned review, keeping its patch).
 - Cross-agent work: route one provider through `oms agent-run --to NAME`
   (read-only pass vs isolated write worktree); give the worker a reusable
   persona with `oms multi-agent-delegate --role NAME` (roles live in
   `.oms/roles/`, managed by `oms agent-role`); land a delegated patch through
   `oms patch-land` (clean-tree → admission gate → apply → record), or gate it
-  alone with `oms patch-admit`.
+  alone with `oms patch-admit`. `patch-land --plan-task ID` alone lands the
+  patch the task stores; rejections are remembered in the fail-ledger, so
+  never blindly re-land a patch it warns about.
+- Scope live edits with `oms change-guard` (`begin`/`check`/`end`) when user
+  edits or scope drift are likely; abandoned guards show stale in `oms state`
+  and are swept by gc.
 - Claim an experiment on the study board (`oms experiment-board`) before a
   long/expensive run; it refuses a duplicate already-active claim.
 - Wrap a run worth reproducing in `oms run-capsule` (commit + diff + env/seed +

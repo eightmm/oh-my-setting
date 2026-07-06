@@ -93,16 +93,17 @@
 - Root cause first: trace NaN, shape mismatch, metric jump, data error upstream.
 - Reproducible runs: command, config, seed, data version, commit, checkpoint.
 - Metrics contract: define metric before training; compare against baseline.
-- Research runs: prefer `~/.oh-my-setting/scripts/research-runner.sh ... -- <cmd>` for hypothesis-testing experiments; it pre-registers the claim and then calls the run ledger.
-- Run ledger: use `~/.oh-my-setting/scripts/run-ledger.sh -- <cmd>` for simple mechanical runs; read `docs/EXPERIMENTS.jsonl` before proposing new experiments.
-- Long logs/failed jobs: digest with `~/.oh-my-setting/scripts/job-digest.sh <logfile|jobid>` instead of reading raw logs.
+- Research runs: prefer `oms research-runner ... -- <cmd>` for hypothesis-testing experiments; it pre-registers the claim and then calls the run ledger.
+- Run ledger: use `oms run-ledger -- <cmd>` for simple mechanical runs; read `docs/EXPERIMENTS.jsonl` before proposing new experiments.
+- Long logs/failed jobs: digest with `oms job-digest <logfile|jobid>` instead of reading raw logs.
+- Coordination: `oms state` when resuming (open runs, claims, failures); claim long runs on `oms experiment-board`; check `oms data-manifest leakage` before training when splits exist.
 
 ## ML Safety Stop
 
 - Never infer label meaning, split policy, leakage boundary, or metric direction from file names alone.
 - Ask before using validation/test data for preprocessing fit, feature selection, normalization, threshold tuning, checkpoint choice, or early stopping.
 - Do not run long training unless data, dataloader, model, and loss smoke checks pass.
-- Before long training or Slurm submission, run the pre-training gate when available: `~/.oh-my-setting/scripts/multi-agent-review.sh --ml`.
+- Before long training or Slurm submission, run the pre-training gate when available: `oms multi-agent-review --ml`.
 
 ## Project Commands
 

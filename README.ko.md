@@ -55,6 +55,7 @@ Claude에 직접 호출하지 말고 이 diff용 review prompt만 export해줘.
 debate 1라운드로 세 모델에게 물어봐줘: vector DB와 pgvector 중 뭐가 맞을까?
 codex에게 위임해줘: scripts/train.py에 입력 검증 추가.
 검증 실패하면 repair 라운드 최대 2번까지 돌려서 codex에게 위임해줘.
+codex의 patch를 admit 게이트(checks ladder) 돌려서 적용해줘.
 ```
 
 재사용 코드 source:
@@ -74,7 +75,13 @@ flowfrag-equivariant를 이 프로젝트로 가져와줘.
 val_auc 기준 상위 run 보여줘.
 오늘 이 repo에서 에이전트들이 뭐 했는지 timeline 보여줘.
 Slurm job 12345 끝날 때까지 기다렸다가 digest해서 보고해줘.
+이 run을 config.yaml과 seed 7까지 재현 캡슐로 저장해줘.
+ckpt/best.pt는 어느 run에서 나온 거야?
+run A랑 run B를 비교해서 metric 차이 보여줘.
 이 분자 데이터셋 split에 leakage 없는지 훈련 전에 확인해줘.
+이 실험 board에 claim 걸어줘, 다른 에이전트가 중복 실행 못 하게.
+내 Slurm job들 reconcile해서 최종 상태를 shared memory에 기록해줘.
+이 훈련은 single-GPU 박스 큐에 넣어서 차례 기다리게 해줘.
 이 실험을 run 전에 가설주도 형태로 정리해줘.
 metric val_auc/scaffold 기준 registered research run으로 실행해줘.
 이 가설이랑 실험 설계를 훈련 전에 세 모델로 공격해줘.
@@ -86,7 +93,8 @@ metric val_auc/scaffold 기준 registered research run으로 실행해줘.
 이 repo에서는 완료 주장 전에 scripts/check.sh fast 돌린다는 걸 기억해줘.
 이 repo pin으로 저장해줘: 현재 작업은 dataloader 리팩터.
 active task packet 보여줘.
-공유 plan에서 만료된 claim 회수해줘.
+공유 plan에서 만료된 claim(방치된 review 포함) 회수해줘.
+내 마지막 Codex 세션 여기로 핸드오프해서 이어서 해줘.
 ```
 
 유지보수:
@@ -101,43 +109,29 @@ oh-my-setting 연결 해제해줘.              # 또는: 완전히 제거해줘
 ## 구성 요소
 
 아래 전부 코딩 agent가 필요할 때 알아서 호출해 쓴다 — 채팅으로 의도만 말하면
-agent가 맞는 스크립트나 skill을 고른다. 직접 실행할 일은 없다.
+agent가 맞는 스크립트나 skill을 고른다. 직접 실행할 일은 없다. 능력 그룹만
+요약하고, 스크립트별 전체 카탈로그는
+[docs/COMPONENTS.md](docs/COMPONENTS.md)에 있다.
 
-| 영역 | 기능 | 하는 일 |
-|---|---|---|
-| 프로젝트 | Start router + spec 인터뷰 | 빈 디렉토리/기존 repo/진행 중 상태를 감지하고 단계별 인터뷰로 `PROJECT.md`를 확정한 뒤에만 코드 작성 |
-| 프로젝트 | 템플릿 (`apply-project-template.sh`) | general/ml/slurm managed rule block; ml은 docs 스캐폴드, `check.sh` 검증 계약, `ml_smoke.py` one-batch 계약까지 |
-| 프로젝트 | Project doctor (`project-doctor.sh`) | 세 agent가 같은 규칙·spec 상태·스캐폴드를 보는지 검증; ML 구조 drift 경고 (root에 흩어진 파일, git 추적 데이터, `src/` 레이아웃 누락) |
-| Multi-agent | Review (`multi-agent-review.sh`) | 세 로컬 모델이 diff를 병렬 리뷰; ML pre-training 게이트(`--ml`), debate 라운드, finding별 verdict, `--gate` one-command pass/fail verdict — 프로젝트 `check.sh`를 실제 실행하는 `--verify` 백스톱이 있어 자기신고 pass만으로는 깨진 diff가 통과 못 함 |
-| Multi-agent | Ask (`multi-agent-ask.sh`) | 같은 질문을 세 모델에 보내 독립 의견 수집; debate 라운드와 가설 design-attack 프리셋 |
-| Multi-agent | Delegate (`multi-agent-delegate.sh`) | 격리된 git worktree에서 write 작업 실행·검증 후 리뷰 가능한 patch 회수; `--apply`는 clean tree에서만; `--repair N`은 verify 실패 tail과 거부된 patch를 같은 worker에 되먹여 bounded 자기수정; `--plan-task`는 plan task와 lifecycle 연동(실패 시 release, 성공 시 review/done) |
-| Multi-agent | 단일 agent 라우터 (`agent-run.sh`) | 프롬프트 하나를 한 provider로: 읽기 질문은 call, write 작업은 delegate worktree로 라우팅 |
-| Multi-agent | Export/import handoff (`--export-only`, `import-agent-result.sh`) | 세션에서 다른 agent CLI를 직접 호출할 수 없을 때 provider prompt를 로컬 artifact로 기록; 답변은 같은 artifact index로 import되며 동일한 outbound 민감정보 게이트를 통과 |
-| Multi-agent | Change guard (`change-guard.sh`) | live dirty tree를 snapshot하고, 기존 dirty file을 건드리거나 `allowed_paths`를 벗어나거나 `forbidden_paths`에 걸리면 경고 (deny가 allow보다 우선); 둘 다 활성 task에서 읽음 |
-| Multi-agent | Patch admission (`patch-admit.sh`) | delegated patch를 임시 worktree에 적용해 applies cleanly → shell/python/json syntax → verification contract ladder로 ADMIT/REJECT |
-| Multi-agent | Artifact index (`artifact-index.sh`) | 모든 cross-agent 실행이 `.oms/artifacts/` + JSONL index에 기록 — list, latest, prune |
-| Multi-agent | 안전장치 (내장) | 외부 CLI 호출 전 outbound prompt scrub (credential, key, 머신/cluster 상세 감지 시 호출 차단); 주입 context는 fence; diff와 debate quote는 sanitize |
-| 코드 source | Registry (`code-source.sh`) | 신뢰하는 재사용 파일(개인 model block 등) 로컬 registry; 이름으로 현재 프로젝트에 fetch |
-| 코드 source | GitHub fetch (`github-source.sh`) | `gh` 경유 profile/discover/fetch; 기본 overwrite 금지, provenance는 `.oms/code-sources.jsonl`에 기록 |
-| 실험 | Run ledger (`run-ledger.sh`) | 학습 실행 wrapper: pre-flight `check.sh` 게이트, 중복 실행 경고, run당 한 줄씩 `docs/EXPERIMENTS.jsonl`에 기록, `--metrics`로 eval 스칼라 저장; 각 row에 게이트 결정(passed/skipped/recorded/none) 기록, 적용 가능한 게이트 skip은 `--reason` 필수(기록·secret 스캔); `top --metric KEY`로 기록된 metric 기준 run 랭킹 |
-| 실험 | Research runner (`research-runner.sh`) | registered research run: 가설·사전등록 metric·baseline을 launch 전에 기록, 종료 후 verdict |
-| 실험 | Data manifest (`data-manifest.sh`) | 데이터셋 split fingerprint; `leakage`가 ID와 `--key-column`(inchikey/scaffold/cluster/assay — exact-ID로 못 잡는 chem-bio leakage) overlap을, `check`가 ID/key-set drift를 잡음(해시만 저장, raw row 미저장); split/컬럼 누락 시 fail-closed |
-| 실험 | Job digest (`job-digest.sh`) | 긴 로그나 Slurm job을 compact digest로 압축; `--wait`로 job 종료까지 대기 |
-| 실험 | ML context (`agent-ml-context.sh`) | spec·ledger tail·config를 담은 compact ML digest를 cross-agent 호출에 첨부 |
-| 실험 | Cluster 스냅샷 | 머신 스냅샷과 생성형 Slurm reference skill로 agent가 로컬 하드웨어·큐를 파악 |
-| 실험 | 도메인 skill | `ml-training`(optimizer/LR/DDP 기본값), `chem-bio-ml`(split, leakage, metric), `research-method`(falsifiable 가설 루프), `slurm-hpc` |
-| 메모리 | 공유 메모리 (`agent-memory.sh`) | `.oms/memory/`의 compact cross-agent 사실 저장; 민감 내용은 기록 시점에 거부 |
-| 메모리 | Task 핸드오프 (`agent-task.sh`) | `.oms/task/current.md` active task packet으로 세 agent 누구든 같은 작업을 이어감; close 시 결론이 메모리로 승격 |
-| 유지보수 | Install / update / doctor | 한 줄 설치로 같은 규칙·skill을 세 agent에 symlink; doctor가 링크·도구·manifest sync 검증 |
-| 유지보수 | Skill 위생 (`skill-doctor.sh`, `cleanup.sh`) | 세 agent의 skill picker 중복/누락 항목 진단; cleanup은 알려진 legacy oms/backup symlink만 제거(기본 dry-run, 일반 파일·플러그인은 건드리지 않음) |
-| 유지보수 | Auto-update (`auto-update.sh`) | systemd timer 또는 cron; check-only 또는 apply 모드 (fast-forward + relink) |
-| 유지보수 | Backup / unlink / uninstall | 변경 전 agent 설정 스냅샷; 교체했던 것을 복원하는 깔끔한 제거 |
+| 능력 | 무엇을 주나 |
+|---|---|
+| 프로젝트 부트스트랩 | Start router + 단계별 spec 인터뷰, general/ml/slurm 템플릿, `PROJECT.md` 게이트, 세 agent가 같은 규칙을 보는지 검증하는 project doctor |
+| Multi-agent 리뷰·위임 | 세 로컬 모델의 ask/review와 격리 worktree write 위임 — outbound 민감정보 scrub, run artifact/index, 변경 범위 guard, 적용 전 patch admission까지 |
+| Agent 상태·핸드오프 | 공유 메모리, active task packet, 작업 분할용 subtask plan DAG(`agent-plan`), 세션 transcript 핸드오프 — 전부 작성 agent로 attribution되고 repo root에 앵커되어 어느 하위 디렉토리에서든 하나의 상태를 봄 |
+| ML 실험 추적 | Run id, ledger, 재현 캡슐, 사전등록 research run, metric/verdict 기록 — 깨진 계약으로 run을 날리지 않게 하는 게이트 포함 |
+| ML 데이터·leakage | ID와 chem-bio key(scaffold/inchikey/cluster/assay) 기준으로 train/eval leakage와 split drift를 잡는 manifest; raw row는 저장 안 함 |
+| ML/HPC 지원 | Slurm job reconcile, 단일 머신 GPU 큐, 로그 digest, 로컬 하드웨어/클러스터 컨텍스트 ([docs/COMPONENTS.md](docs/COMPONENTS.md)) |
+| 재사용 코드 source | 신뢰 파일 로컬 registry + GitHub fetch ([docs/COMPONENTS.md](docs/COMPONENTS.md)) |
+| 유지보수·릴리스 | 설치/업데이트/doctor, pre-push 검증 게이트, 복원되는 cleanup/uninstall, tag 기반 릴리스 ([docs/RELEASE.md](docs/RELEASE.md)) |
 
 ## 참고
 
 - 로컬 우선: MCP server, app connector, plugin connector tool 사용 안 함.
+- 공유 하네스 쓰기는 파일별 lock을 쓴다; `OMS_LOCK_TIMEOUT`이 대기/stale 복구
+  시간(기본 `300`초)을 정한다.
 - 토큰, API key, private data, cluster/머신 상세는 commit하지 않는다.
-- agent가 실행하는 스크립트는 `~/.oh-my-setting/scripts/`에 있다 — 투명성과
+- agent가 실행하는 스크립트는 `~/.oh-my-setting/scripts/`에 있고 PATH의
+  dispatcher로 `oms <tool>`로도 부른다 (`oms list`가 카탈로그 출력) — 투명성과
   복구용 문서화일 뿐, 직접 실행할 일은 없다.
 
 ## Star

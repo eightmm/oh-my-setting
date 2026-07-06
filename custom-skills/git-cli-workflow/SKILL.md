@@ -3,7 +3,9 @@ name: git-cli-workflow
 description: >
   Local git and GitHub CLI workflow. Use for repository inspection, commits,
   branches, pull requests, issues, CI checks, and review feedback when MCP,
-  app connectors, or plugin connector tools are not used.
+  app connectors, or plugin connector tools are not used — e.g. "make a
+  commit", "open a PR", "check CI", "커밋해줘", "PR 올려줘", "푸시해줘",
+  "CI 확인해줘", "브랜치 정리".
 ---
 
 Default: local CLI first. No MCP, app connectors, or plugin connector tools.

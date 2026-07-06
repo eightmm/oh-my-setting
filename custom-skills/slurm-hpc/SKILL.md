@@ -3,7 +3,11 @@ name: slurm-hpc
 description: >
   Slurm/HPC workflow helper. Use when working on clusters, partitions, nodes,
   sbatch/srun jobs, GPU/CPU allocations, queues, logs, checkpoints, or any
-  resource-heavy command. Reads local cluster reference when generated.
+  resource-heavy command — e.g. "submit the job", "check the queue", "잡
+  돌려줘", "큐 확인", "GPU 몇 장", "학습 돌려줘" on a cluster; also digesting
+  a long job log (job-digest, "로그 요약") and reconciling finished Slurm
+  jobs into shared state (run-reconcile, sacct). Reads local cluster
+  reference when generated.
 ---
 
 Default: protect login nodes. Ask before expensive or unclear resource use.
