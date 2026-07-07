@@ -330,6 +330,9 @@ check_optional_cmd scancel
 
 check_path "$ROOT/AGENTS.md"
 check_path "$ROOT/skills.manifest.json"
+check_path "$ROOT/.agents/plugins/marketplace.json"
+check_path "$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json"
+check_path "$ROOT/plugins/oh-my-setting/hooks.json"
 check_path "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
 check_path "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
 check_path "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
@@ -347,6 +350,15 @@ fi
 if ! "$ROOT/scripts/install-skills.sh" >/dev/null; then
   echo "fail: skills.manifest.json out of sync (run scripts/install-skills.sh for details)"
   FAILED=1
+fi
+
+if command -v codex >/dev/null 2>&1; then
+  if codex plugin list --json 2>/dev/null |
+     python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+    echo "ok: codex plugin oh-my-setting"
+  else
+    echo "note: codex plugin oh-my-setting not installed (run scripts/install-codex-plugin.sh)"
+  fi
 fi
 
 check_harness_state

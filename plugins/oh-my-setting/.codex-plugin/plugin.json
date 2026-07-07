@@ -1,0 +1,31 @@
+{
+  "name": "oh-my-setting",
+  "version": "0.1.0",
+  "description": "Shared coding-agent harness hooks for Codex.",
+  "author": {
+    "name": "oh-my-setting"
+  },
+  "homepage": "https://github.com/eightmm/oh-my-setting",
+  "repository": "https://github.com/eightmm/oh-my-setting",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "hooks",
+    "agent-harness",
+    "skills"
+  ],
+  "interface": {
+    "displayName": "oh-my-setting",
+    "shortDescription": "Skill hints and guarded turn completion for Codex.",
+    "longDescription": "oh-my-setting adds local Codex hooks that route prompts to installed skills and guard high-risk coding turns so final answers state verification status.",
+    "developerName": "oh-my-setting",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use oh-my-setting harness guidance for this coding task."
+    ]
+  }
+}

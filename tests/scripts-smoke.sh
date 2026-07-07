@@ -7099,19 +7099,23 @@ EOF
 
 test_skill_router_matches_and_dedupes() {
   local d="$TMP/skill-router"
+  local project="$d/project"
   local out
 
-  mkdir -p "$d"
+  make_committed_repo "$project"
   # Trigger match (Korean commit phrasing) suggests the mapped skill once.
-  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r1"}' |
+  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "git-cli-workflow" || fail "router should suggest git-cli-workflow"
+  [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "route"'
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "release"'
   # Same session: silent (once-per-session dedupe).
-  out="$(printf '{"prompt":"커밋해줘 한 번 더","session_id":"r1"}' |
+  out="$(printf '{"prompt":"커밋해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   [ -z "$out" ] || fail "router must not repeat a suggestion within a session"
   # New session: suggests again; multi-match caps at two skills.
-  out="$(printf '{"prompt":"slurm 잡 제출하고 leakage 확인해줘","session_id":"r2"}' |
+  out="$(printf '{"prompt":"slurm 잡 제출하고 leakage 확인해줘","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "slurm-hpc" || fail "router should suggest slurm-hpc in a new session"
   printf '%s' "$out" | grep -Fq "chem-bio-ml" || fail "router should include the second match"
@@ -7138,6 +7142,49 @@ test_skill_router_skips_system_prompts() {
   [ -z "$out" ] || fail "OMS_SKILL_ROUTER_OFF=1 must silence the router"
 }
 
+test_turn_guard_blocks_unverified_dirty_task_once() {
+  local d="$TMP/turn-guard"
+  local project="$d/project"
+  local route_payload
+  local stop_payload
+  local out
+
+  make_committed_repo "$project"
+  printf 'change\n' >> "$project/file.txt"
+
+  route_payload="$(printf '{"prompt":"fix this and push까지 진행","session_id":"s1","turn_id":"t1","cwd":"%s"}' "$project")"
+  printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+
+  stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s1","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
+  out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
+  printf '%s' "$out" | grep -Fq '"decision": "block"' ||
+    fail "turn guard should block an unverified dirty task: $out"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "block_unverified"'
+
+  out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "turn guard should block at most once per turn"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_block_limit"'
+}
+
+test_turn_guard_allows_verified_task() {
+  local d="$TMP/turn-guard-verified"
+  local project="$d/project"
+  local route_payload
+  local stop_payload
+  local out
+
+  make_committed_repo "$project"
+  printf 'change\n' >> "$project/file.txt"
+
+  route_payload="$(printf '{"prompt":"fix this bug","session_id":"s2","turn_id":"t1","cwd":"%s"}' "$project")"
+  printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+
+  stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s2","turn_id":"t1","cwd":"%s","last_assistant_message":"Changed file.txt. Verified: bash scripts/check.sh."}' "$project")"
+  out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "turn guard should allow verified task: $out"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_verified"'
+}
+
 test_install_claude_hooks_merge_and_remove() {
   local d="$TMP/claude-hooks"
   local s="$d/settings.json"
@@ -7152,9 +7199,13 @@ EOF
 import json, sys
 d = json.load(open(sys.argv[1]))
 ups = d["hooks"]["UserPromptSubmit"]
+stop = d["hooks"]["Stop"]
 assert len(ups) == 2, ups
+assert len(stop) == 1, stop
 cmds = [h["command"] for e in ups for h in e["hooks"]]
 assert sum("skill-router.sh" in c for c in cmds) == 1
+stop_cmds = [h["command"] for e in stop for h in e["hooks"]]
+assert sum("turn-guard.sh" in c for c in stop_cmds) == 1
 assert any("user-router" in c for c in cmds)
 assert d["model"] == "x"
 PY
@@ -7165,6 +7216,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 ups = d["hooks"]["UserPromptSubmit"]
 assert len(ups) == 1 and "user-router" in ups[0]["hooks"][0]["command"]
+assert "Stop" not in d["hooks"]
 PY
   # Broken settings must refuse loudly, not clobber.
   printf '{broken' > "$s"
@@ -7172,6 +7224,33 @@ PY
     fail "installer must refuse to touch invalid settings JSON"
   fi
   grep -Fq '{broken' "$s" || fail "installer must not modify a file it refused"
+}
+
+test_install_codex_plugin_registers_marketplace() {
+  local d="$TMP/codex-plugin"
+  local bin="$d/bin"
+  local log="$d/codex.log"
+
+  mkdir -p "$bin"
+  cat > "$bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CODEX_LOG"
+if [ "$1 $2 $3" = "plugin marketplace list" ]; then
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$bin/codex"
+
+  CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
+  assert_file_contains "$log" "plugin marketplace list"
+  assert_file_contains "$log" "plugin marketplace add $ROOT"
+  assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
+
+  : > "$log"
+  CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
+  assert_file_contains "$log" "plugin remove oh-my-setting@oh-my-setting-local"
+  assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
 }
 
 test_oms_run_validate_flags_schema_drift() {
@@ -7475,6 +7554,9 @@ test_repo_state_refresh_ci_records
 test_delegate_kill9_recovery_via_gc
 test_skill_router_matches_and_dedupes
 test_skill_router_skips_system_prompts
+test_turn_guard_blocks_unverified_dirty_task_once
+test_turn_guard_allows_verified_task
 test_install_claude_hooks_merge_and_remove
+test_install_codex_plugin_registers_marketplace
 
 echo "scripts-smoke: ok"

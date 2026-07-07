@@ -1,0 +1,20 @@
+{
+  "name": "oh-my-setting-local",
+  "interface": {
+    "displayName": "oh-my-setting Local"
+  },
+  "plugins": [
+    {
+      "name": "oh-my-setting",
+      "source": {
+        "source": "local",
+        "path": "./plugins/oh-my-setting"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

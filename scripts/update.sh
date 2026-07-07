@@ -19,6 +19,7 @@ Options:
 Environment:
   OH_MY_SETTING_UPDATE_SKIP_TOOLS=1   Same as --no-tools.
   OH_MY_SETTING_UPDATE_SKIP_DOCTOR=1  Same as --no-doctor.
+  OH_MY_SETTING_CODEX_PLUGIN=0        Skip Codex plugin hook refresh.
   OH_MY_SETTING_AUTO_UPDATE=0         Skip auto-update trigger refresh.
 EOF
 }
@@ -72,6 +73,11 @@ fi
 if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ] && [ -x "$ROOT/scripts/install-claude-hooks.sh" ]; then
   "$ROOT/scripts/install-claude-hooks.sh" ||
     echo "warning: claude hook refresh failed (update continues)" >&2
+fi
+
+if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ] && [ -x "$ROOT/scripts/install-codex-plugin.sh" ]; then
+  "$ROOT/scripts/install-codex-plugin.sh" ||
+    echo "warning: codex plugin refresh failed (update continues)" >&2
 fi
 
 if [ "$SKIP_DOCTOR" != "1" ]; then

@@ -178,6 +178,21 @@ auto_update_trigger_status() {
   printf -- '- trigger: not installed\n'
 }
 
+codex_plugin_status() {
+  if ! command -v codex >/dev/null 2>&1; then
+    printf -- '- status: codex missing\n'
+    return 0
+  fi
+
+  if codex plugin list --json 2>/dev/null |
+     python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+    printf -- '- status: installed\n'
+  else
+    printf -- '- status: not installed\n'
+    printf -- '- command: %s/scripts/install-codex-plugin.sh\n' "$ROOT"
+  fi
+}
+
 load_user_tool_paths
 
 printf '# oh-my-setting status\n\n'
@@ -211,6 +226,9 @@ file_status "$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md"
 
 printf '\n## Active Task\n\n'
 active_task_status
+
+printf '\n## Codex Plugin\n\n'
+codex_plugin_status
 
 printf '\n## Auto Update\n\n'
 auto_update_status

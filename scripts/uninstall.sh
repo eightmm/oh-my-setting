@@ -72,9 +72,11 @@ fi
 
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/uninstall-autoupdate.sh"
 if [ "$DRY_RUN" = "1" ]; then
-  echo "would remove claude skill-router hook from ~/.claude/settings.json"
+  echo "would remove claude oh-my-setting hooks from ~/.claude/settings.json"
+  echo "would remove codex oh-my-setting plugin"
 else
   "$ROOT/scripts/install-claude-hooks.sh" --remove || true
+  "$ROOT/scripts/install-codex-plugin.sh" --remove || true
 fi
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/unlink.sh"
 

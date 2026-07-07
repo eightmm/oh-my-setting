@@ -96,6 +96,12 @@ Provider prompts also receive the active loop warnings, so delegated workers can
 see the same "do not repeat the same approach" signal instead of only the host
 stderr warning.
 
+Codex and Claude Code installs also get lightweight hook support when the user
+has not opted out: `skill-router.sh` records a hash-only workflow/risk route for
+normal prompts, and `turn-guard.sh` can block one final response when a guarded
+coding turn with repo changes or high risk omits verification status. Disable
+with `OMS_SKILL_ROUTER_OFF=1` or `OMS_TURN_GUARD_OFF=1` for a session.
+
 For live edits in the owning agent's tree, use `change-guard.sh` when scope
 drift or user edits are likely. It snapshots the current dirty files and
 declared path scope, then warns if a pre-existing dirty file changed or the diff

@@ -20,6 +20,7 @@ Options:
 Environment:
   OH_MY_SETTING_STAR_PROMPT=0      Skip the GitHub star prompt.
   OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hook registration.
+  OH_MY_SETTING_CODEX_PLUGIN=0     Skip Codex plugin hook registration.
   OH_MY_SETTING_GENERATE_MACHINE=0 Skip machine snapshot generation.
   OH_MY_SETTING_GENERATE_SLURM=0   Skip Slurm snapshot generation.
   OH_MY_SETTING_INSTALL_TOOLS=0    Skip Node/uv/agent CLI installation.
@@ -132,6 +133,13 @@ if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ]; then
     echo "warning: claude hook registration failed (install continues)" >&2
 else
   echo "skipping claude hook registration: OH_MY_SETTING_CLAUDE_HOOKS=0"
+fi
+
+if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ]; then
+  "$DEST/scripts/install-codex-plugin.sh" ||
+    echo "warning: codex plugin registration failed (install continues)" >&2
+else
+  echo "skipping codex plugin registration: OH_MY_SETTING_CODEX_PLUGIN=0"
 fi
 
 if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v sinfo >/dev/null 2>&1; }; then
