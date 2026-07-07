@@ -6694,7 +6694,11 @@ test_delegate_plan_task_hydrates_from_subdir() {
 
 test_agent_role_and_delegate_injection() {
   local project="$TMP/role-inject"
+  local empty_project="$TMP/role-empty"
 
+  make_committed_repo "$empty_project"
+  [ -z "$(cd "$empty_project" && "$ROOT/scripts/agent-role.sh" list)" ] ||
+    fail "agent-role list should be empty before roles exist"
   make_committed_repo "$project"
   ( cd "$project" && "$ROOT/scripts/agent-role.sh" --name reviewer init >/dev/null )
   printf '# Role: reviewer\n\nBe a STRICT-API-REVIEWER. Output GATE.\n' > "$project/.oms/roles/reviewer.md"

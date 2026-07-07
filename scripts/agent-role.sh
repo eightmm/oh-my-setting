@@ -82,8 +82,9 @@ glob_dir="$(roles_dir_global)"
 case "$ACTION" in
   list)
     {
-      [ -d "$proj_dir" ] && ls "$proj_dir"/*.md 2>/dev/null
-      [ -d "$glob_dir" ] && ls "$glob_dir"/*.md 2>/dev/null
+      [ -d "$proj_dir" ] && find "$proj_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
+      [ -d "$glob_dir" ] && find "$glob_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
+      true
     } | while IFS= read -r f; do
       [ -n "$f" ] || continue
       b="$(basename "$f")"
