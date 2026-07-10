@@ -51,6 +51,7 @@ write_state() {
     printf 'mode=%s\n' "$MODE"
     printf 'status=%s\n' "$status"
     printf 'message=%s\n' "$message"
+    printf 'source_root=%s\n' "$ROOT"
     [ -n "$local_commit" ] && printf 'local=%s\n' "$local_commit"
     [ -n "$remote_commit" ] && printf 'remote=%s\n' "$remote_commit"
     [ -n "$upstream" ] && printf 'upstream=%s\n' "$upstream"

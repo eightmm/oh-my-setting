@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-0}"
 SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
 
 usage() {
   cat <<'EOF'
@@ -45,6 +47,8 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+oms_install_require_owner "$ROOT" "update the install" || exit 1
 
 if [ ! -d "$ROOT/.git" ]; then
   echo "error: $ROOT is not a git checkout" >&2

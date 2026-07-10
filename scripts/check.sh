@@ -26,6 +26,7 @@ echo "== shellcheck =="
 "$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh tests/*.sh
 
 echo "== smoke =="
-bash tests/scripts-smoke.sh
+bash tests/harness-enhancements-smoke.sh
+bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
 
 echo "check: ok"

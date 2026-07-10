@@ -224,8 +224,15 @@ and `OMS_AGENT=<provider>` for attribution.
 Every provider call/delegation appends a compact row to
 `.oms/artifacts/index.jsonl`. Rows carry schema/event/operation/artifact IDs and
 optional run/task/delegation/parent lineage. Use `artifact-index.sh latest`,
-`latest-run`, `list`, `failures`, or `validate`; run `migrate` to upgrade legacy
-rows atomically and idempotently. Appends enforce high-water retention, while
+`latest-run`, `list`, `failures`, `unresolved`, or `validate`. Resolve a failed
+outcome explicitly with `artifact-index.sh resolve --event-id <event> [--reason
+<text>]`; this appends one idempotent resolution event and never auto-resolves
+a sibling provider failure. `oms state` replays retained outcomes as success,
+resolved, or unresolved. Run `migrate` to upgrade legacy rows atomically and
+idempotently. Appends and explicit pruning retain or evict target-resolution
+pairs atomically, so validation never accepts dangling lineage. `oms state`
+reports corrupt artifact rows explicitly instead of hiding
+them from counts. Appends enforce high-water retention, while
 `prune [N] --files` applies an orphan grace period so it cannot delete a file a
 provider is still writing. When an active task exists,
 `agent-run.sh` also appends

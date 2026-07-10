@@ -70,6 +70,12 @@ if [ "$PURGE" = "1" ]; then
   refuse_unsafe_purge_root
 fi
 
+# Preserve the standalone unsafe-purge guard before loading repo helpers: the
+# guard must still protect a copied script whose checkout is incomplete.
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
+oms_install_require_owner "$ROOT" "uninstall" || exit 1
+
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/uninstall-autoupdate.sh"
 if [ "$DRY_RUN" = "1" ]; then
   echo "would remove claude oh-my-setting hooks from ~/.claude/settings.json"

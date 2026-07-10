@@ -29,6 +29,11 @@ to run scripts manually unless a command is impossible from the current agent.
   regular files, or directories unless the user explicitly approves that
   separate scope.
 - After cleanup or update, rerun `doctor.sh` and report remaining warnings.
+- Update/uninstall/plugin removal must run from the canonical receipt owner;
+  foreign checkouts refuse before pulling or mutating global state. Use the
+  canonical root printed by `status.sh`.
+- Treat `Auto Update: stale` as historical state only; update/check again from
+  the canonical checkout before reporting current update health.
 - If the current session still shows stale skills, tell the user that the UI may
   cache skill lists until a new agent session starts.
 

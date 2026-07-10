@@ -234,7 +234,7 @@ if os.path.exists(index):
                 continue
             if not isinstance(row, dict):
                 continue
-            for key in ("artifact", "patch"):
+            for key in ("artifact", "patch", "source"):
                 value = row.get(key)
                 if not isinstance(value, str) or not value:
                     continue

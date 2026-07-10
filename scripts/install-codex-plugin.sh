@@ -46,6 +46,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+oms_install_require_owner "$ROOT" "modify the Codex plugin" || exit 1
+
 command -v codex >/dev/null 2>&1 || fail "codex command is required"
 [ -f "$MARKETPLACE_FILE" ] || fail "missing marketplace: $MARKETPLACE_FILE"
 [ -d "$MARKETPLACE_ROOT" ] || fail "missing marketplace root: $MARKETPLACE_ROOT"
@@ -174,14 +176,6 @@ if [ "$REMOVE" = "1" ]; then
   run_cmd codex plugin marketplace remove "$MARKETPLACE_NAME" || true
   echo "codex-plugin: removed $PLUGIN_NAME@$MARKETPLACE_NAME"
   exit 0
-fi
-
-receipt="$(oms_install_receipt_path)"
-if [ -f "$receipt" ]; then
-  owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null)" ||
-    fail "invalid install receipt: $receipt"
-  [ "$owner" = "$ROOT" ] ||
-    fail "this checkout is not the canonical install owner: $ROOT (owner: $owner)"
 fi
 
 current_root="$(marketplace_root || true)"

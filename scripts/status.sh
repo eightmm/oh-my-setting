@@ -98,6 +98,10 @@ auto_update_status() {
   local state_file="${OH_MY_SETTING_AUTO_UPDATE_STATE:-$INSTALL_ROOT/local/auto-update.status}"
   local status
   local value
+  local recorded_local
+  local recorded_root
+  local current_commit
+  local stale=0
 
   if [ ! -f "$state_file" ]; then
     printf -- '- status: not checked\n'
@@ -106,7 +110,21 @@ auto_update_status() {
   fi
 
   status="$(auto_update_value "$state_file" status)"
-  printf -- '- status: %s\n' "${status:-unknown}"
+  recorded_local="$(auto_update_value "$state_file" local)"
+  recorded_root="$(auto_update_value "$state_file" source_root)"
+  current_commit="$(git -C "$INSTALL_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$recorded_root" ]; then
+    [ "$(oms_install_physical_root "$recorded_root" 2>/dev/null || true)" = "$INSTALL_ROOT" ] || stale=1
+  fi
+  if [ -n "$recorded_local" ] && [ -n "$current_commit" ]; then
+    case "$current_commit" in "$recorded_local"*) ;; *) stale=1 ;; esac
+  fi
+  if [ "$stale" = "1" ]; then
+    printf -- '- status: stale\n'
+    printf -- '- recorded_status: %s\n' "${status:-unknown}"
+  else
+    printf -- '- status: %s\n' "${status:-unknown}"
+  fi
   for key in last_run mode upstream local remote message; do
     value="$(auto_update_value "$state_file" "$key")"
     [ -n "$value" ] || continue

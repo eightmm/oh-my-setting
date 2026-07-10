@@ -287,6 +287,8 @@ check_harness_artifact_index() {
   local stats
   local bad
   local stale
+  local schema1
+  local canonical_out
 
   if [ ! -f "$index" ]; then
     echo "ok: artifact index absent"
@@ -312,7 +314,7 @@ with open(index, "r", encoding="utf-8") as f:
             continue
         if not isinstance(row, dict):
             continue
-        for key in ("artifact", "patch"):
+        for key in ("artifact", "patch", "source"):
             value = row.get(key)
             if not isinstance(value, str) or not value:
                 continue
@@ -338,6 +340,27 @@ PY
     echo "warn: artifact index has $stale stale artifact/patch reference(s)"
   else
     echo "ok: artifact index references"
+  fi
+
+  schema1="$(python3 - "$index" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        row = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(row, dict) and row.get("schema") == 1:
+        print(1)
+        break
+PY
+)"
+  if [ "$schema1" = "1" ]; then
+    if canonical_out="$("$ROOT/scripts/artifact-index.sh" --repo "$project_dir" validate 2>&1)"; then
+      echo "ok: artifact index canonical validation"
+    else
+      echo "warn: artifact index canonical validation failed"
+      printf '%s\n' "$canonical_out" | sed -n '1,5p' | sed 's/^/  /'
+    fi
   fi
 }
 

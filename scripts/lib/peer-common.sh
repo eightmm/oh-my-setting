@@ -393,6 +393,7 @@ ma_append_artifact_index() {
   local verify_exit="${8:-}"
   local source_artifact="${9:-}"
   local index
+  local retention_helper
   local prompt_hash=""
   local task_goal=""
 
@@ -400,6 +401,7 @@ ma_append_artifact_index() {
   repo="$(cd "$repo" && pwd)" || return 0
   agent_memory_ensure_oms_ignore "$repo"
   index="${OMS_ARTIFACT_INDEX:-$repo/.oms/artifacts/index.jsonl}"
+  retention_helper="$(ma_scripts_dir)/lib/artifact-index-retention.py"
   mkdir -p "$(dirname "$index")"
   command -v python3 >/dev/null 2>&1 || return 0
 
@@ -416,9 +418,9 @@ ma_append_artifact_index() {
   OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
-  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" <<'EOF'
-import hashlib, json, os, re, shutil, sys, tempfile, time, uuid
-repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw = sys.argv[1:]
+  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$retention_helper" <<'EOF'
+import hashlib, json, os, re, runpy, shutil, sys, tempfile, time, uuid
+repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, retention_helper = sys.argv[1:]
 event_id = "evt_" + uuid.uuid4().hex
 
 def safe_id(value):
@@ -511,6 +513,7 @@ if keep > 0 and high >= keep:
     with open(index, "rb") as f:
         lines = f.readlines()
     if len(lines) > high:
+        lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
         real_index = os.path.realpath(index)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real_index))
         try:

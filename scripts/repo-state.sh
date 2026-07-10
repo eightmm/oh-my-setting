@@ -95,19 +95,29 @@ def epoch(ts):
 
 
 def read_jsonl(path):
+    return read_jsonl_checked(path)[0]
+
+
+def read_jsonl_checked(path):
     rows = []
+    invalid = 0
     if not os.path.isfile(path):
-        return rows
+        return rows, invalid
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
             except Exception:
+                invalid += 1
                 continue
-    return rows
+            if isinstance(row, dict):
+                rows.append(row)
+            else:
+                invalid += 1
+    return rows, invalid
 
 
 def oms(*parts):
@@ -230,13 +240,108 @@ if spine:
 state["runs"] = runs
 
 # --- Latest artifact-index rows ---------------------------------------------
-arts = read_jsonl(oms("artifacts", "index.jsonl"))
+arts, artifact_invalid_rows = read_jsonl_checked(oms("artifacts", "index.jsonl"))
+required_artifact_fields = {
+    "schema", "event_id", "operation_id", "artifact_id", "ts", "kind", "provider", "exit"
+}
+artifact_id_counts = {}
+for r in arts:
+    event_id = r.get("event_id")
+    if r.get("schema") == 1 and isinstance(event_id, str):
+        artifact_id_counts[event_id] = artifact_id_counts.get(event_id, 0) + 1
+
+
+def artifact_row_contract_valid(row):
+    # Legacy rows remain visible until `artifact-index migrate`; schema-1 rows
+    # are never allowed to false-green when their envelope is incomplete.
+    if row.get("schema") != 1:
+        return row.get("kind") != "artifact-resolution"
+    if required_artifact_fields - row.keys():
+        return False
+    for key in ("event_id", "operation_id", "artifact_id", "ts", "kind"):
+        if not isinstance(row.get(key), str) or not row.get(key):
+            return False
+    if not isinstance(row.get("provider"), str):
+        return False
+    exit_value = row.get("exit")
+    if isinstance(exit_value, bool) or not isinstance(exit_value, int) or exit_value < 0:
+        return False
+    return artifact_id_counts.get(row.get("event_id")) == 1
+
+
+contract_arts = []
+for row in arts:
+    if artifact_row_contract_valid(row):
+        contract_arts.append(row)
+    else:
+        artifact_invalid_rows += 1
+arts = contract_arts
+resolved_at = {}
+artifact_by_id = {r.get("event_id"): (i, r) for i, r in enumerate(arts)
+                  if r.get("schema") == 1}
+valid_resolution_indexes = set()
+for i, r in enumerate(arts):
+    if r.get("kind") != "artifact-resolution":
+        continue
+    target_id = r.get("resolves_event_id")
+    target_entry = artifact_by_id.get(target_id)
+    if (not target_entry or r.get("schema") != 1 or
+            artifact_id_counts.get(r.get("event_id")) != 1 or
+            r.get("parent_event_id") != target_id or
+            r.get("resolution") != "resolved"):
+        continue
+    target_i, target = target_entry
+    resolver_exit = r.get("exit")
+    target_exit = target.get("exit")
+    if (isinstance(resolver_exit, bool) or not isinstance(resolver_exit, int) or
+            isinstance(target_exit, bool) or not isinstance(target_exit, int)):
+        continue
+    resolver_ok = resolver_exit == 0
+    target_failed = target_exit > 0
+    if (resolver_ok and target_failed and target_i < i and target.get("schema") == 1 and
+            target.get("kind") != "artifact-resolution" and
+            r.get("operation_id") == target.get("operation_id") and
+            r.get("artifact_id") == target.get("artifact_id")):
+        resolved_at[target_id] = r.get("ts")
+        valid_resolution_indexes.add(i)
+for i, row in enumerate(arts):
+    if row.get("kind") == "artifact-resolution" and i not in valid_resolution_indexes:
+        artifact_invalid_rows += 1
+resolution_rows = [r for i, r in enumerate(arts) if i in valid_resolution_indexes]
+outcomes = [r for r in arts if r.get("kind") != "artifact-resolution"]
+arts = [r for i, r in enumerate(arts)
+        if r.get("kind") != "artifact-resolution" or i in valid_resolution_indexes]
+
+
+def artifact_status(row):
+    exit_value = row.get("exit")
+    if isinstance(exit_value, bool) or not isinstance(exit_value, int) or exit_value < 0:
+        return "unresolved"
+    failed = exit_value != 0
+    if not failed:
+        return "success"
+    return "resolved" if row.get("event_id") in resolved_at else "unresolved"
+
+
+artifact_counts = {"success": 0, "unresolved": 0, "resolved": 0}
+for row in outcomes:
+    artifact_counts[artifact_status(row)] += 1
+latest_artifacts = []
+for r in outcomes[-5:]:
+    item = {k: r.get(k) for k in ("ts", "kind", "provider", "exit", "event_id")
+            if r.get(k) not in (None, "")}
+    item["status"] = artifact_status(r)
+    if r.get("event_id") in resolved_at:
+        item["resolved_at"] = resolved_at[r.get("event_id")]
+    latest_artifacts.append(item)
 state["artifacts"] = {
     "total": len(arts),
-    "latest": [
-        {k: r.get(k) for k in ("ts", "kind", "provider", "exit") if r.get(k) not in (None, "")}
-        for r in arts[-5:]
-    ],
+    "invalid_rows": artifact_invalid_rows,
+    "healthy": artifact_invalid_rows == 0,
+    "outcomes_total": len(outcomes),
+    "resolution_events": len(resolution_rows),
+    "counts": artifact_counts,
+    "latest": latest_artifacts,
 }
 
 # --- Unresolved failures (fail-ledger) --------------------------------------
@@ -395,9 +500,15 @@ else:
 
     a = state["artifacts"]
     line("\n## Artifacts (%d total)" % a["total"])
+    if not a["healthy"]:
+        line("  CORRUPT invalid_rows=%d" % a["invalid_rows"])
+    line("  retained outcomes: %d  success=%d unresolved=%d resolved=%d" % (
+        a["outcomes_total"], a["counts"]["success"], a["counts"]["unresolved"],
+        a["counts"]["resolved"]))
     for row in a["latest"]:
-        line("  %s %s/%s exit=%s" % (row.get("ts", "?"), row.get("kind", "?"),
-                                     row.get("provider", "") or "-", row.get("exit", "?")))
+        line("  %s %s/%s exit=%s status=%s event=%s" % (
+            row.get("ts", "?"), row.get("kind", "?"), row.get("provider", "") or "-",
+            row.get("exit", "?"), row.get("status", "?"), row.get("event_id", "?")))
 
     if state["change_guard"]["active"]:
         tag = " (STALE — abandoned? end it: change-guard.sh end)" if state["change_guard"]["stale"] else ""

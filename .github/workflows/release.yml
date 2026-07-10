@@ -22,7 +22,7 @@ jobs:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Never publish a red tree: run the same gate as CI.
       - name: install shellcheck

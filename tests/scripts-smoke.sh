@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" != "1" ]; then
+  exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run-smoke-shard.sh" "$@"
+fi
+
+ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TMP="$(mktemp -d /tmp/oms-tests.XXXXXX)"
 
 source_oms_fingerprint() {
@@ -1499,6 +1503,25 @@ test_doctor_clean_harness_state_has_no_warnings() {
   if printf '%s' "$out" | grep -Fq 'warn:'; then
     fail "clean harness state should not warn: $out"
   fi
+}
+
+test_doctor_uses_canonical_artifact_validation() {
+  local project="$TMP/doctor-artifact-contract"
+  local home_dir="$TMP/doctor-artifact-contract-home"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms/artifacts"
+  printf '*\n' > "$project/.oms/.gitignore"
+  cat > "$project/.oms/artifacts/index.jsonl" <<'EOF'
+{"schema":1,"event_id":"evt_doctor_target","operation_id":"op_doctor","artifact_id":"sha256:doctor","ts":"2026-07-11T00:00:00Z","kind":"call","provider":"codex","exit":1}
+{"schema":1,"event_id":"evt_doctor_bad_resolution","operation_id":"op_wrong","artifact_id":"sha256:wrong","ts":"2026-07-11T00:00:01Z","kind":"artifact-resolution","provider":"codex","exit":0,"parent_event_id":"evt_doctor_target","resolves_event_id":"evt_doctor_target","resolution":"resolved"}
+EOF
+
+  out="$(run_doctor_for_project "$project" "$home_dir")" ||
+    fail "artifact validation warning should not fail doctor: $out"
+  printf '%s' "$out" | grep -Fq 'warn: artifact index canonical validation failed' ||
+    fail "doctor should surface canonical artifact contract failures"
 }
 
 
@@ -3593,7 +3616,8 @@ EOF
     fail "latest-run missing delegate verify exit"
   printf '%s' "$out" | grep -Fq 'patch=.oms/artifacts/delegate/codex-new-20260611T000002Z-20.patch' ||
     fail "latest-run missing delegate patch"
-  if printf '%s' "$out" | grep -Fq 'codex-new-20260611T000002Z-20.md  patch='; then
+  if printf '%s\n' "$out" | grep -F 'review  codex' |
+    grep -Fq 'codex-new-20260611T000002Z-20.md'; then
     fail "base codex review row should not override round-2 row"
   fi
 
@@ -4751,8 +4775,6 @@ mode=check
 status=update_available
 message=update available: abc1234 -> def5678
 upstream=origin/main
-local=abc1234
-remote=def5678
 EOF
 
   out="$(OH_MY_SETTING_AUTO_UPDATE_STATE="$state" "$ROOT/scripts/status.sh" 2>/dev/null)"
@@ -7985,6 +8007,7 @@ test_oms_run_validate_flags_schema_drift() {
   printf '%s' "$out" | grep -Fq "DRIFT" || fail "validate should tag the drifted family"
 }
 
+# SMOKE_TEST_CALLS_BEGIN
 test_poll_interval_adapts_to_elapsed_and_remaining
 test_file_lock_acquire_release
 test_file_lock_missing_poll_helper_falls_back
@@ -8038,6 +8061,7 @@ test_oms_self_ignore_created_for_harness_paths
 test_doctor_warns_bad_harness_index_json
 test_doctor_warns_missing_oms_gitignore
 test_doctor_clean_harness_state_has_no_warnings
+test_doctor_uses_canonical_artifact_validation
 test_doctor_reports_crash_residue_warnings
 test_doctor_reports_malformed_run_state
 test_peer_export_only_and_import_result
@@ -8297,5 +8321,6 @@ test_install_receipt_foreign_doctor_and_repair
 test_artifact_index_migrate_validate_and_idempotency
 test_artifact_prune_preserves_fresh_unindexed_file
 test_smoke_suite_does_not_mutate_source_oms
+# SMOKE_TEST_CALLS_END
 
 echo "scripts-smoke: ok"

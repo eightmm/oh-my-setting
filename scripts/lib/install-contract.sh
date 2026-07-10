@@ -65,6 +65,29 @@ except Exception:
 PY
 }
 
+oms_install_require_owner() {
+  local root="$1"
+  local action="${2:-mutate the install}"
+  local receipt="${3:-$(oms_install_receipt_path)}"
+  local owner
+  local physical_root
+
+  [ -f "$receipt" ] || return 0
+  owner="$(oms_install_receipt_owner "$receipt")" || {
+    echo "error: invalid install receipt: $receipt" >&2
+    return 1
+  }
+  physical_root="$(oms_install_physical_root "$root")" || {
+    echo "error: install checkout is unavailable: $root" >&2
+    return 1
+  }
+  if [ "$owner" != "$physical_root" ]; then
+    echo "error: refusing to $action from non-canonical checkout: $physical_root" >&2
+    echo "error: canonical install owner: $owner" >&2
+    return 1
+  fi
+}
+
 oms_install_tree_hash() {
   local tree="$1"
   python3 - "$tree" <<'PY'
