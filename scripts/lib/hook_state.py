@@ -126,6 +126,11 @@ VERIFY_RE = re.compile(
     r"|검증|테스트|확인|실행|통과|실패|미검증",
     re.IGNORECASE,
 )
+CHITCHAT_RE = re.compile(
+    r"^\s*(hi|hello|hey|thanks|thank you|안녕|안녕하세요|고마워|고맙|감사)\b",
+    re.IGNORECASE,
+)
+GOAL_RE = re.compile(r"^\s*(goal|objective|목표)\s*[:：]\s*(.+)$", re.IGNORECASE)
 
 
 def utc_now() -> str:
@@ -198,6 +203,10 @@ def session_hash(payload: dict[str, Any]) -> str:
 
 def session_state_path(hooks_dir: Path, payload: dict[str, Any]) -> Path:
     return hooks_dir / "sessions" / f"{session_hash(payload)}.json"
+
+
+def task_route_state_path(hooks_dir: Path, payload: dict[str, Any]) -> Path:
+    return hooks_dir / "sessions" / f"{session_hash(payload)}.task.json"
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -273,6 +282,163 @@ def classify_prompt(prompt: str) -> dict[str, Any]:
 def should_skip_prompt(prompt: str) -> bool:
     stripped = prompt.strip()
     return not stripped or stripped.startswith(SKIP_PREFIXES) or len(stripped) < 4
+
+
+def env_int(name: str, default: int, minimum: int = 0, maximum: int | None = None) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)) or default)
+    except ValueError:
+        value = default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def prompt_excerpt(prompt: str) -> str:
+    limit = env_int("OMS_AUTO_TASK_PROMPT_CHARS", 600, minimum=80, maximum=4000)
+    text = re.sub(r"\s+", " ", prompt.strip())
+    if len(text) > limit:
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return text
+
+
+def prompt_goal(prompt: str) -> str:
+    first = prompt.strip().splitlines()[0] if prompt.strip() else ""
+    match = GOAL_RE.match(first)
+    if match:
+        return prompt_excerpt(match.group(2))
+    return ""
+
+
+def active_task_file(repo: Path) -> Path:
+    return repo / ".oms" / "task" / "current.md"
+
+
+def agent_task_script() -> Path:
+    return Path(__file__).resolve().parent.parent / "agent-task.sh"
+
+
+def run_agent_task(repo: Path, args: list[str], stdin_text: str | None = None) -> int:
+    script = agent_task_script()
+    if not script.exists():
+        return 127
+    timeout = env_int("OMS_AUTO_TASK_TIMEOUT", 2, minimum=1, maximum=10)
+    try:
+        proc = subprocess.run(
+            [str(script), "--repo", str(repo), *args],
+            input=stdin_text,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+    return int(proc.returncode)
+
+
+def should_auto_task(prompt: str) -> bool:
+    if os.environ.get("OMS_AUTO_TASK_OFF") == "1" or os.environ.get("OMS_AUTO_TASK") == "0":
+        return False
+    return not bool(CHITCHAT_RE.match(prompt.strip()))
+
+
+def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> None:
+    if not should_auto_task(prompt):
+        return
+    repo = repo_root(payload_cwd(payload))
+    if repo is None:
+        return
+    try:
+        hooks_dir = ensure_oms(repo)
+        state_path = task_route_state_path(hooks_dir, payload)
+        prompt_hash = sha256_text(prompt)
+        turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
+        previous = load_state(state_path)
+        if previous.get("prompt_hash") == prompt_hash and previous.get("turn_id") == turn_id:
+            append_event(
+                repo,
+                payload,
+                action="auto_task",
+                status="deduped",
+                workflow=route["workflow"],
+                risk=route["risk"],
+                prompt_hash=prompt_hash,
+            )
+            return
+
+        excerpt = prompt_excerpt(prompt)
+        if not excerpt:
+            return
+        task_file = active_task_file(repo)
+        existed = task_file.exists() and task_file.stat().st_size > 0
+        agent = os.environ.get("OMS_AGENT") or "hook"
+        status = "appended" if existed else "created"
+
+        if not existed:
+            goal = prompt_goal(prompt) or f"Respond to user request: {excerpt}"
+            rc = run_agent_task(
+                repo,
+                ["init", "--goal", goal, "--next", "Respond to the latest user request."],
+            )
+            if rc != 0:
+                status = "timeout" if rc == 124 else "skipped_sensitive_or_error"
+                append_event(
+                    repo,
+                    payload,
+                    action="auto_task",
+                    status=status,
+                    workflow=route["workflow"],
+                    risk=route["risk"],
+                    prompt_hash=prompt_hash,
+                )
+                write_json_atomic(
+                    state_path,
+                    {
+                        "schema": 1,
+                        "updated_at": utc_now(),
+                        "session": session_hash(payload),
+                        "turn_id": turn_id,
+                        "prompt_hash": prompt_hash,
+                        "status": status,
+                    },
+                )
+                return
+
+        note = f"User prompt ({route['workflow']}/{route['risk']}): {excerpt}"
+        rc = run_agent_task(repo, ["append", "--agent", agent, "--stdin"], note + "\n")
+        if rc == 0:
+            run_agent_task(repo, ["update", "--next", "Respond to the latest user request."])
+        else:
+            status = "timeout" if rc == 124 else "skipped_sensitive_or_error"
+
+        write_json_atomic(
+            state_path,
+            {
+                "schema": 1,
+                "updated_at": utc_now(),
+                "session": session_hash(payload),
+                "turn_id": turn_id,
+                "prompt_hash": prompt_hash,
+                "status": status,
+            },
+        )
+        append_event(
+            repo,
+            payload,
+            action="auto_task",
+            status=status,
+            workflow=route["workflow"],
+            risk=route["risk"],
+            prompt_hash=prompt_hash,
+            task=".oms/task/current.md",
+        )
+    except Exception:
+        return
 
 
 def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> None:
@@ -357,6 +523,7 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     route = classify_prompt(prompt)
     route_state(payload, prompt, route)
+    auto_task_record(payload, prompt, route)
 
     lower = prompt.strip().lower()
     scored: list[tuple[int, str]] = []

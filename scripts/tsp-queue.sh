@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
+# shellcheck source=scripts/lib/poll.sh
+. "$ROOT_LIB/poll.sh"
 
 RUN_LEDGER="$ROOT/scripts/run-ledger.sh"
 STATE_DIR="${OMS_TSP_STATE_DIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/oh-my-setting/tsp-queue}"
@@ -395,6 +397,9 @@ fallback_wait() {
   local status_file
   local exit_code
   local f_status
+  local start
+  local now
+  local elapsed
 
   if [ -z "$job_id" ]; then
     job_id="$(fallback_last_id)"
@@ -405,8 +410,11 @@ fallback_wait() {
   # shellcheck disable=SC1090
   . "$FALLBACK_DIR/$job_id.meta"
   status_file="$f_status"
+  start="$(date +%s)"
   while kill -0 "$job_id" 2>/dev/null; do
-    sleep 1
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    oms_poll_sleep_labeled tsp-fallback "$elapsed" ""
   done
   [ -f "$status_file" ] || fail "fallback status not recorded for job: $job_id"
   exit_code="$(sed -n '1p' "$status_file")"

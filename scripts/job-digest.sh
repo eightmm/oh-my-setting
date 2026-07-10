@@ -5,11 +5,23 @@ set -euo pipefail
 # digest sized for agent context: error patterns, last traceback, tail.
 # Stateless: prints to stdout, no daemon, no state.
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$ROOT/scripts/lib/poll.sh" ]; then
+  # shellcheck source=scripts/lib/poll.sh
+  . "$ROOT/scripts/lib/poll.sh"
+else
+  oms_poll_int_or_default() {
+    case "$1" in *[!0-9]*|"") printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
+  }
+  oms_poll_log_next() { return 0; }
+fi
+
 TAIL_LINES=30
 PATTERN_LINES=40
 PATTERNS='Traceback|ERROR|Error:|error:|OOM|[Oo]ut of memory|CUDA|NCCL|NaN|nan loss|Killed|Segmentation fault|exitcode|srun: error'
 WAIT=0
-POLL_SECONDS="${OMS_JOB_DIGEST_POLL:-30}"
+POLL_SECONDS="$(oms_poll_int_or_default "${OMS_JOB_DIGEST_POLL:-30}" 30)"
+[ "$POLL_SECONDS" -ge 1 ] || POLL_SECONDS=1
 
 usage() {
   cat <<'EOF'
@@ -88,6 +100,7 @@ if [ "$WAIT" = "1" ]; then
   [ -n "$JOB_ID" ] || fail "--wait requires a slurm job id"
   command -v squeue >/dev/null 2>&1 || fail "--wait needs squeue (Slurm)"
   echo "job-digest: waiting for job $JOB_ID to leave the queue (poll ${POLL_SECONDS}s)" >&2
+  wait_start="$(date +%s)"
   # One captured query per poll. Done when the queue no longer knows the job:
   # either rc=0 with empty output (recent Slurm) or rc!=0 with an
   # invalid/unknown-job-id error (job purged from the queue). Any other rc!=0
@@ -121,6 +134,8 @@ if [ "$WAIT" = "1" ]; then
     else
       echo "job-digest: squeue query failed transiently (rc=$q_rc); retrying in ${POLL_SECONDS}s" >&2
     fi
+    wait_now="$(date +%s)"
+    oms_poll_log_next job-digest "$((wait_now - wait_start))" "$POLL_SECONDS" ""
     sleep "$POLL_SECONDS"
   done
   echo "job-digest: job $JOB_ID no longer queued; digesting" >&2

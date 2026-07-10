@@ -54,6 +54,26 @@ assert_symlink_to() {
     fail "$path should link to $target, got $(readlink "$path")"
 }
 
+test_poll_interval_adapts_to_elapsed_and_remaining() {
+  . "$ROOT/scripts/lib/poll.sh"
+
+  [ "$(oms_poll_interval_seconds 0 300)" = "1" ] ||
+    fail "new waits should poll quickly"
+  [ "$(oms_poll_interval_seconds 10 300)" = "2" ] ||
+    fail "short waits should back off to 2s"
+  [ "$(oms_poll_interval_seconds 60 300)" = "5" ] ||
+    fail "medium waits should back off to 5s"
+  [ "$(oms_poll_interval_seconds 180 300)" = "10" ] ||
+    fail "long waits should cap at 10s by default"
+  [ "$(oms_poll_interval_seconds 180 3)" = "3" ] ||
+    fail "remaining time should cap the poll interval"
+  [ "$(OMS_POLL_MAX_SECONDS=4 oms_poll_interval_seconds 180 300)" = "4" ] ||
+    fail "OMS_POLL_MAX_SECONDS should cap long waits"
+  out="$(OMS_POLL_VERBOSE=1 oms_poll_log_next unit 7 2 5 2>&1)"
+  printf '%s' "$out" | grep -Fq 'oh-my-setting poll: unit elapsed=7s next=2s remaining=5s' ||
+    fail "verbose poll log should include label, elapsed, next, and remaining"
+}
+
 test_file_lock_acquire_release() {
   local dir="$TMP/file-lock-happy"
   local state="$dir/state.txt"
@@ -64,6 +84,20 @@ test_file_lock_acquire_release() {
     oms_with_file_lock "$state" bash -c 'printf locked > "$1"' _ "$state"
   )
   assert_file_contains "$state" "locked"
+}
+
+test_file_lock_missing_poll_helper_falls_back() {
+  local dir="$TMP/file-lock-no-poll"
+  local lib="$dir/lib"
+  local state="$dir/state.txt"
+
+  mkdir -p "$lib"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$lib/file-lock.sh"
+  (
+    . "$lib/file-lock.sh"
+    OMS_LOCK_FORCE_MKDIR=1 oms_with_file_lock "$state" bash -c 'printf fallback > "$1"' _ "$state"
+  )
+  assert_file_contains "$state" "fallback"
 }
 
 test_file_lock_recovers_stale_mkdir_lock() {
@@ -630,6 +664,11 @@ case "\$n" in
 esac
 EOF
   chmod +x "$bin/squeue"
+  cat > "$bin/sleep" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/sleep.log"
+EOF
+  chmod +x "$bin/sleep"
 
   out="$(OMS_JOB_DIGEST_POLL=0 PATH="$bin:$PATH" "$ROOT/scripts/job-digest.sh" --wait 12345 "$dir/run.log" 2>"$dir/werr")" ||
     fail "--wait digest should succeed once the job leaves the queue"
@@ -639,6 +678,8 @@ EOF
   # Polled 5 times: queued, contact-error, invalid-user, not-found (all retry),
   # then invalid-job-id (done). Non-job errors must not fake completion.
   [ "$(cat "$dir/poll")" -ge 5 ] || fail "wait loop must retry non-job errors and stop only on invalid-job-id"
+  assert_file_contains "$dir/werr" "poll 1s"
+  assert_file_contains "$dir/sleep.log" "1"
 }
 
 
@@ -2497,6 +2538,7 @@ write_auto_update_fixture_scripts() {
   mkdir -p "$repo/scripts/lib"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   chmod +x "$repo/scripts/auto-update.sh"
 
   case "$link_mode" in
@@ -7332,6 +7374,44 @@ test_ml_review_includes_chem_bio_task_families() {
   assert_file_contains "$review" "knowledge-graph"
 }
 
+test_skill_router_auto_records_task_prompts() {
+  local d="$TMP/skill-router-auto-task"
+  local project="$d/project"
+  local payload
+  local before
+  local after
+
+  make_committed_repo "$project"
+
+  payload="$(printf '{"prompt":"고칠 부분 확인하고 있으면 수정해줘","session_id":"auto1","turn_id":"t1","cwd":"%s"}' "$project")"
+  printf '%s' "$payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  assert_file_contains "$project/.oms/task/current.md" "Respond to user request:"
+  assert_file_contains "$project/.oms/task/current.md" "User prompt (task/medium): 고칠 부분 확인하고 있으면 수정해줘"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "auto_task"'
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "created"'
+
+  payload="$(printf '{"prompt":"이어서 ablation 기록 자동화도 확인해줘","session_id":"auto1","turn_id":"t2","cwd":"%s"}' "$project")"
+  printf '%s' "$payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  assert_file_contains "$project/.oms/task/current.md" "이어서 ablation 기록 자동화도 확인해줘"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "appended"'
+
+  before="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
+  printf '%s' "$payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  after="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
+  [ "$before" = "$after" ] || fail "same turn/prompt should not append twice"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "deduped"'
+}
+
+test_skill_router_auto_task_can_be_disabled() {
+  local d="$TMP/skill-router-auto-task-off"
+  local project="$d/project"
+
+  make_committed_repo "$project"
+  printf '{"prompt":"fix this bug","session_id":"off1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  assert_not_exists "$project/.oms/task/current.md"
+}
+
 test_skill_router_skips_system_prompts() {
   local d="$TMP/skill-router-skip"
   local out
@@ -7480,7 +7560,9 @@ test_oms_run_validate_flags_schema_drift() {
   printf '%s' "$out" | grep -Fq "DRIFT" || fail "validate should tag the drifted family"
 }
 
+test_poll_interval_adapts_to_elapsed_and_remaining
 test_file_lock_acquire_release
+test_file_lock_missing_poll_helper_falls_back
 test_file_lock_recovers_stale_mkdir_lock
 test_file_lock_contention_preserves_records
 test_apply_dry_run_has_no_writes

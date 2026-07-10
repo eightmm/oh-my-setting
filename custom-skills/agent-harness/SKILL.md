@@ -98,9 +98,12 @@ stderr warning.
 
 Codex and Claude Code installs also get lightweight hook support when the user
 has not opted out: `skill-router.sh` records a hash-only workflow/risk route for
-normal prompts, and `turn-guard.sh` can block one final response when a guarded
-coding turn with repo changes or high risk omits verification status. Disable
-with `OMS_SKILL_ROUTER_OFF=1` or `OMS_TURN_GUARD_OFF=1` for a session.
+normal prompts and auto-creates/appends the active task packet from normal user
+prompts. The task writer still scans content and refuses sensitive-looking
+entries. `turn-guard.sh` can block one final response when a guarded coding turn
+with repo changes or high risk omits verification status. Disable with
+`OMS_SKILL_ROUTER_OFF=1`, `OMS_AUTO_TASK_OFF=1`, or `OMS_TURN_GUARD_OFF=1` for a
+session.
 
 For live edits in the owning agent's tree, use `change-guard.sh` when scope
 drift or user edits are likely. It snapshots the current dirty files and

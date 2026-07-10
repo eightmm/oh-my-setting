@@ -1,6 +1,15 @@
 # shellcheck shell=bash
 # Shared per-file inter-process locks. Sourced, not executed.
 
+OMS_FILE_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$OMS_FILE_LOCK_LIB_DIR/poll.sh" ]; then
+  # shellcheck source=scripts/lib/poll.sh
+  . "$OMS_FILE_LOCK_LIB_DIR/poll.sh"
+else
+  oms_poll_sleep_labeled() { sleep 1; }
+  oms_poll_sleep() { oms_poll_sleep_labeled wait "$@"; }
+fi
+
 oms_file_lock_timeout() {
   local timeout="${OMS_LOCK_TIMEOUT:-300}"
 
@@ -84,6 +93,8 @@ oms_file_lock_mkdir_acquire() {
   local owner_id="$4"
   local start
   local now
+  local elapsed
+  local remaining
   local stale_dir
 
   start="$(date +%s)"
@@ -96,6 +107,7 @@ oms_file_lock_mkdir_acquire() {
     fi
 
     now="$(date +%s)"
+    elapsed=$((now - start))
     if oms_file_lock_mkdir_stale "$lock_dir" "$timeout" "$now"; then
       stale_dir="$lock_dir.stale.$$"
       if mv "$lock_dir" "$stale_dir" 2>/dev/null; then
@@ -104,11 +116,12 @@ oms_file_lock_mkdir_acquire() {
       fi
     fi
 
-    if [ $((now - start)) -ge "$timeout" ]; then
+    if [ "$elapsed" -ge "$timeout" ]; then
       echo "error: could not acquire lock for $state_file after ${timeout}s: $lock_dir" >&2
       return 75
     fi
-    sleep 1
+    remaining=$((timeout - elapsed))
+    oms_poll_sleep_labeled file-lock-mkdir "$elapsed" "$remaining"
   done
 }
 
@@ -238,6 +251,8 @@ oms_with_file_lock() {
   local lock_parent
   local start
   local now
+  local elapsed
+  local remaining
   shift
 
   [ -n "$state_file" ] || {
@@ -263,11 +278,13 @@ oms_with_file_lock() {
       start="$(date +%s)"
       while ! flock -n 9; do
         now="$(date +%s)"
-        if [ $((now - start)) -ge "$timeout" ]; then
+        elapsed=$((now - start))
+        if [ "$elapsed" -ge "$timeout" ]; then
           echo "error: could not acquire lock for $state_file after ${timeout}s: $lock_path" >&2
           exit 75
         fi
-        sleep 1
+        remaining=$((timeout - elapsed))
+        oms_poll_sleep_labeled file-lock "$elapsed" "$remaining"
       done
       "$@"
     )
