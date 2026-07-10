@@ -283,6 +283,7 @@ fi
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$status_file" "$diff_file"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export OMS_OPERATION_ID="${OMS_OPERATION_ID:-ask-$timestamp}"
 slug="$(slugify "$PROMPT")"
 [ -n "$slug" ] || slug="ask"
 declare -a pids artifacts provider_names alive last_arts

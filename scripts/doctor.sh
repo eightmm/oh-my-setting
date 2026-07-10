@@ -3,14 +3,81 @@ set -euo pipefail
 
 # Verify the install: symlink identity, tools, skills, and manifest sync for all three agent CLIs.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
+REPAIR=0
 
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/harness-residue.sh
 . "$ROOT/scripts/lib/harness-residue.sh"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: doctor.sh [--repair] [-h|--help]
+
+Verify the canonical install. --repair relinks from the receipt owner, or
+from this checkout for a legacy install without a receipt. An invalid or
+unavailable receipt owner is never replaced automatically.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repair) REPAIR=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+RECEIPT="$(oms_install_receipt_path)"
+RECEIPT_STATE="missing"
+INSTALL_ROOT="$ROOT"
+if [ -f "$RECEIPT" ]; then
+  if INSTALL_ROOT="$(oms_install_receipt_owner "$RECEIPT")"; then
+    RECEIPT_STATE="valid"
+  else
+    RECEIPT_STATE="invalid"
+    INSTALL_ROOT="$ROOT"
+  fi
+fi
+
+repair_install() {
+  local repair_root="$INSTALL_ROOT"
+
+  if [ "$RECEIPT_STATE" = "invalid" ]; then
+    echo "error: refusing repair with invalid install receipt: $RECEIPT" >&2
+    echo "hint: choose the intended checkout and run its scripts/link.sh" >&2
+    return 1
+  fi
+  if [ "$RECEIPT_STATE" = "valid" ] &&
+     { [ ! -d "$repair_root" ] || [ ! -x "$repair_root/scripts/link.sh" ]; }; then
+    echo "error: refusing repair; receipt owner is unavailable: $repair_root" >&2
+    echo "hint: restore that checkout or run scripts/link.sh from the intended owner" >&2
+    return 1
+  fi
+  echo "repairing canonical links from: $repair_root"
+  "$repair_root/scripts/link.sh"
+  if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ] &&
+     [ -x "$repair_root/scripts/install-claude-hooks.sh" ]; then
+    "$repair_root/scripts/install-claude-hooks.sh"
+  fi
+  if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ] &&
+     [ -x "$repair_root/scripts/install-codex-plugin.sh" ] &&
+     command -v codex >/dev/null 2>&1 &&
+     codex plugin list --json 2>/dev/null |
+       python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+    "$repair_root/scripts/install-codex-plugin.sh"
+  fi
+}
+
+if [ "$REPAIR" = "1" ]; then
+  repair_install
+  exec "$ROOT/scripts/doctor.sh"
+fi
 
 load_user_tool_paths() {
   export PATH="$HOME/.local/bin:$PATH"
@@ -82,7 +149,7 @@ check_custom_skills() {
 
   while IFS= read -r source; do
     [ -n "$source" ] || continue
-    skill="$ROOT/$source"
+    skill="$INSTALL_ROOT/$source"
     name="$(basename "$skill")"
     if [ -L "$target_root/$name" ]; then
       # Symlink install: certify the link points at THIS checkout's skill,
@@ -100,7 +167,7 @@ check_custom_skills() {
     else
       check_path "$target_root/$name/SKILL.md"
     fi
-  done < <(python3 - "$ROOT/skills.manifest.json" <<'PY'
+  done < <(python3 - "$INSTALL_ROOT/skills.manifest.json" <<'PY'
 import json
 import sys
 for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
@@ -109,6 +176,99 @@ for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
         print(source)
 PY
 )
+}
+
+check_install_receipt() {
+  local recorded_commit
+  local current_commit
+  local recorded_plugin_hash
+  local current_plugin_hash
+
+  printf '\n# install ownership\n'
+  case "$RECEIPT_STATE" in
+    missing)
+      echo "note: legacy install has no receipt; expecting this checkout: $ROOT"
+      echo "hint: run scripts/link.sh to record canonical ownership"
+      ;;
+    invalid)
+      echo "invalid install receipt: $RECEIPT"
+      FAILED=1
+      ;;
+    valid)
+      echo "ok: install receipt $RECEIPT"
+      echo "canonical root: $INSTALL_ROOT"
+      if [ "$INSTALL_ROOT" != "$ROOT" ]; then
+        echo "note: current checkout is not canonical: $ROOT"
+      fi
+      if [ ! -d "$INSTALL_ROOT" ]; then
+        echo "missing: canonical install root $INSTALL_ROOT"
+        FAILED=1
+        return 0
+      fi
+      recorded_commit="$(oms_install_receipt_field commit "$RECEIPT" 2>/dev/null || true)"
+      current_commit="$(git -C "$INSTALL_ROOT" rev-parse HEAD 2>/dev/null || true)"
+      if [ -n "$recorded_commit" ] && [ -n "$current_commit" ] &&
+         [ "$recorded_commit" != "$current_commit" ]; then
+        echo "stale install receipt commit: $recorded_commit (source is $current_commit)"
+        FAILED=1
+      else
+        echo "ok: install receipt commit"
+      fi
+      recorded_plugin_hash="$(oms_install_receipt_field plugin.sha256 "$RECEIPT" 2>/dev/null || true)"
+      current_plugin_hash="$(oms_install_plugin_hash "$INSTALL_ROOT")"
+      if [ -n "$recorded_plugin_hash" ] && [ "$recorded_plugin_hash" != "$current_plugin_hash" ]; then
+        echo "stale install receipt plugin hash"
+        FAILED=1
+      else
+        echo "ok: install receipt plugin hash"
+      fi
+      ;;
+  esac
+}
+
+check_codex_plugin() {
+  local plugin_version
+  local marketplace_name
+  local cache
+  local expected_hash
+  local marker_hash=""
+  local marker_root=""
+  local actual_hash
+
+  command -v codex >/dev/null 2>&1 || return 0
+  if ! codex plugin list --json 2>/dev/null |
+       python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+    echo "note: codex plugin oh-my-setting not installed (run $INSTALL_ROOT/scripts/install-codex-plugin.sh)"
+    return 0
+  fi
+
+  plugin_version="$(oms_install_plugin_version "$INSTALL_ROOT")"
+  marketplace_name="$(python3 - "$INSTALL_ROOT/.agents/plugins/marketplace.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.load(fh)["name"])
+PY
+)"
+  cache="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$marketplace_name/oh-my-setting/$plugin_version"
+  expected_hash="$(oms_install_receipt_field plugin.sha256 "$RECEIPT" 2>/dev/null || oms_install_plugin_hash "$INSTALL_ROOT")"
+
+  if [ ! -d "$cache" ]; then
+    echo "note: codex plugin cache missing: $cache"
+    return 0
+  fi
+  [ ! -f "$cache/.oh-my-setting-source-sha256" ] ||
+    marker_hash="$(sed -n '1p' "$cache/.oh-my-setting-source-sha256")"
+  [ ! -f "$cache/.oh-my-setting-source-root" ] ||
+    marker_root="$(sed -n '1p' "$cache/.oh-my-setting-source-root")"
+  actual_hash="$(oms_install_tree_hash "$cache")"
+  if [ "$marker_root" != "$INSTALL_ROOT" ] ||
+     [ "$marker_hash" != "$expected_hash" ] ||
+     [ "$actual_hash" != "$expected_hash" ]; then
+    echo "note: stale codex plugin cache: $cache"
+    echo "hint: run $INSTALL_ROOT/scripts/install-codex-plugin.sh"
+  else
+    echo "ok: codex plugin oh-my-setting (cache parity)"
+  fi
 }
 
 harness_relpath() {
@@ -324,6 +484,8 @@ case "$REQUIRE_TOOLS" in
     ;;
 esac
 
+check_install_receipt
+
 check_cmd git
 check_cmd curl
 check_cmd node
@@ -346,38 +508,31 @@ check_optional_cmd squeue
 check_optional_cmd sinfo
 check_optional_cmd scancel
 
-check_path "$ROOT/AGENTS.md"
-check_path "$ROOT/skills.manifest.json"
-check_path "$ROOT/.agents/plugins/marketplace.json"
-check_path "$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json"
-check_path "$ROOT/plugins/oh-my-setting/hooks.json"
-check_path "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
-check_path "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
-check_path "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
+check_path "$INSTALL_ROOT/AGENTS.md"
+check_path "$INSTALL_ROOT/skills.manifest.json"
+check_path "$INSTALL_ROOT/.agents/plugins/marketplace.json"
+check_path "$INSTALL_ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json"
+check_path "$INSTALL_ROOT/plugins/oh-my-setting/hooks.json"
+check_path "$HOME/.codex/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
+check_path "$HOME/.claude/CLAUDE.md" "$INSTALL_ROOT/AGENTS.md"
+check_path "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
 check_custom_skills "$HOME/.codex/skills"
 check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.gemini/antigravity/skills"
-check_path "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
-check_path "$HOME/.oh-my-setting-workflows" "$ROOT/workflows"
-check_path "$HOME/.local/bin/oms" "$ROOT/scripts/oms"
+check_path "$HOME/.oh-my-setting-prompts" "$INSTALL_ROOT/prompts"
+check_path "$HOME/.oh-my-setting-workflows" "$INSTALL_ROOT/workflows"
+check_path "$HOME/.local/bin/oms" "$INSTALL_ROOT/scripts/oms"
 
 if ! "$ROOT/scripts/skill-doctor.sh"; then
   FAILED=1
 fi
 
-if ! "$ROOT/scripts/install-skills.sh" >/dev/null; then
+if ! "$INSTALL_ROOT/scripts/install-skills.sh" >/dev/null; then
   echo "fail: skills.manifest.json out of sync (run scripts/install-skills.sh for details)"
   FAILED=1
 fi
 
-if command -v codex >/dev/null 2>&1; then
-  if codex plugin list --json 2>/dev/null |
-     python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
-    echo "ok: codex plugin oh-my-setting"
-  else
-    echo "note: codex plugin oh-my-setting not installed (run scripts/install-codex-plugin.sh)"
-  fi
-fi
+check_codex_plugin
 
 check_harness_state
 

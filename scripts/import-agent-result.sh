@@ -119,6 +119,7 @@ if [ -n "$PROMPT_FILE" ]; then
 fi
 [ -n "$slug" ] || slug="imported-result"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export OMS_OPERATION_ID="${OMS_OPERATION_ID:-import-$timestamp}"
 artifact="$ARTIFACT_DIR/$PROVIDER-$slug-$timestamp.import.md"
 
 {

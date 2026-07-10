@@ -23,6 +23,10 @@ PATCH=""
 VERIFY=""
 ML=0
 PLAN_TASK=""
+PLAN_LEASE_ID=""
+PLAN_REVIEW_LEASE_ID=""
+PLAN_STATE=""
+PLAN_JSON=""
 ALLOW_VERIFIER_CHANGE=0
 
 usage() {
@@ -80,15 +84,35 @@ done
 REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 
+if [ -n "$PLAN_TASK" ]; then
+  PLAN_JSON="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$PLAN_TASK" 2>/dev/null)" ||
+    fail "cannot read plan task $PLAN_TASK"
+  PLAN_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))')" ||
+    fail "cannot read lease for plan task $PLAN_TASK"
+  PLAN_REVIEW_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("review_lease_id", ""))')" ||
+    fail "cannot read review lease for plan task $PLAN_TASK"
+  PLAN_STATE="$(printf '%s' "$PLAN_JSON" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')" ||
+    fail "cannot read state for plan task $PLAN_TASK"
+fi
+
 # --plan-task alone is enough when delegate already stamped the patch path on
 # the task: read it back instead of making the reviewer copy it by hand.
 if [ -z "$PATCH" ] && [ -n "$PLAN_TASK" ]; then
-  PATCH="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$PLAN_TASK" 2>/dev/null |
+  PATCH="$(printf '%s' "$PLAN_JSON" |
     python3 -c 'import json,sys;print(json.load(sys.stdin).get("patch",""))' 2>/dev/null || true)"
   [ -n "$PATCH" ] || fail "--patch omitted and plan task $PLAN_TASK has no stored patch path"
   echo "patch-land: using patch from plan task $PLAN_TASK: $PATCH" >&2
 fi
 [ -n "$PATCH" ] || fail "--patch is required (or --plan-task with a stored patch)"
+[ -z "$PLAN_TASK" ] || {
+  [ "$PLAN_STATE" = "review" ] ||
+    fail "plan task $PLAN_TASK is $PLAN_STATE, not review"
+  [ -n "$PLAN_LEASE_ID" ] && [ "$PLAN_REVIEW_LEASE_ID" = "$PLAN_LEASE_ID" ] ||
+    fail "plan task $PLAN_TASK has a stale review lease"
+}
 [ -f "$PATCH" ] || fail "patch not found: $PATCH"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
 
@@ -133,8 +157,26 @@ if ! "${admit_cmd[@]}" >/dev/null; then
   exit 1
 fi
 
+# Fence the reviewed claim immediately before the irreversible apply. A stale
+# reviewer cannot land after reclaim/re-claim because its captured lease no
+# longer matches, and landing tasks are not eligible for dead-worker reclaim.
+if [ -n "$PLAN_TASK" ]; then
+  land_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" land --id "$PLAN_TASK")
+  [ -n "$PLAN_LEASE_ID" ] && land_cmd+=(--lease-id "$PLAN_LEASE_ID")
+  if ! "${land_cmd[@]}" >/dev/null; then
+    echo "patch-land: plan task lease/state changed; not applied" >&2
+    exit 1
+  fi
+fi
+
 # --- Apply ------------------------------------------------------------------
 if ! git -C "$REPO" apply --binary "$PATCH"; then
+  if [ -n "$PLAN_TASK" ]; then
+    release_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$PLAN_TASK")
+    [ -n "$PLAN_LEASE_ID" ] && release_cmd+=(--lease-id "$PLAN_LEASE_ID")
+    "${release_cmd[@]}" >/dev/null 2>&1 ||
+      echo "warning: patch-land: apply failed and plan task could not be released" >&2
+  fi
   fail "admission passed but git apply failed (base moved?); tree unchanged"
 fi
 
@@ -160,8 +202,9 @@ fi
 
 # --- Optional plan lifecycle ------------------------------------------------
 if [ -n "$PLAN_TASK" ]; then
-  if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$PLAN_TASK" \
-       --patch "$PATCH" >/dev/null 2>&1; then
+  finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$PLAN_TASK" --patch "$PATCH")
+  [ -n "$PLAN_LEASE_ID" ] && finish_cmd+=(--lease-id "$PLAN_LEASE_ID")
+  if "${finish_cmd[@]}" >/dev/null 2>&1; then
     echo "patch-land: plan task $PLAN_TASK -> done" >&2
   else
     echo "warning: could not finish plan task $PLAN_TASK (wrong state?)" >&2

@@ -341,7 +341,7 @@ ma_artifact_relpath() {
   repo="$(cd "$repo" && pwd)" || return 1
   case "$path" in
     "$repo"/*) printf '%s\n' "${path#"$repo"/}" ;;
-    *) printf '%s\n' "$(basename "$path")" ;;
+    *) return 1 ;;
   esac
 }
 
@@ -364,6 +364,24 @@ ma_sha256_file() {
   fi
 }
 
+# Mark provider CLIs as harness children so their own prompt hooks cannot
+# mistake an internal brief for a new user task. Call only inside a subshell:
+# this intentionally changes the caller's exported environment.
+ma_export_child_env() {
+  local provider="$1"
+  local origin="$2"
+  local state_repo="${3:-}"
+  local call_id="${4:-}"
+  local parent_agent="${OMS_AGENT:-unknown}"
+
+  export OMS_HARNESS_CHILD=1
+  export OMS_HARNESS_ORIGIN="$origin"
+  export OMS_HARNESS_PARENT_AGENT="$parent_agent"
+  export OMS_AGENT="$provider"
+  [ -z "$state_repo" ] || export OMS_STATE_REPO="$state_repo"
+  [ -z "$call_id" ] || export OMS_HARNESS_CALL_ID="$call_id"
+}
+
 ma_append_artifact_index() {
   local repo="$1"
   local kind="$2"
@@ -375,9 +393,6 @@ ma_append_artifact_index() {
   local verify_exit="${8:-}"
   local source_artifact="${9:-}"
   local index
-  local artifact_rel=""
-  local patch_rel=""
-  local source_rel=""
   local prompt_hash=""
   local task_goal=""
 
@@ -388,9 +403,6 @@ ma_append_artifact_index() {
   mkdir -p "$(dirname "$index")"
   command -v python3 >/dev/null 2>&1 || return 0
 
-  [ -n "$artifact" ] && artifact_rel="$(ma_artifact_relpath "$repo" "$artifact" 2>/dev/null || printf '%s' "$(basename "$artifact")")"
-  [ -n "$patch_file" ] && patch_rel="$(ma_artifact_relpath "$repo" "$patch_file" 2>/dev/null || printf '%s' "$(basename "$patch_file")")"
-  [ -n "$source_artifact" ] && source_rel="$(ma_artifact_relpath "$repo" "$source_artifact" 2>/dev/null || printf '%s' "$(basename "$source_artifact")")"
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
   fi
@@ -401,35 +413,115 @@ ma_append_artifact_index() {
   base_sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)"
 
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
-  oms_with_file_lock "$index" python3 - "$index" "$kind" "$provider" "$exit_code" "$artifact_rel" "$patch_rel" "$prompt_hash" "$verify_exit" "$task_goal" "$source_rel" <<'EOF'
-import json, os, re, sys, time
-index, kind, provider, exit_code, artifact, patch, prompt_hash, verify_exit, task_goal, source = sys.argv[1:]
+  OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
+  OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
+  OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
+  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" <<'EOF'
+import hashlib, json, os, re, shutil, sys, tempfile, time, uuid
+repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw = sys.argv[1:]
+event_id = "evt_" + uuid.uuid4().hex
+
+def safe_id(value):
+    return value if value and re.match(r"^[A-Za-z0-9._:-]{1,160}$", value) else ""
+
+def file_hash(path):
+    if not path or not os.path.isfile(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def path_fields(label, raw):
+    if not raw:
+        return {}
+    path = os.path.abspath(raw)
+    real_repo = os.path.realpath(repo)
+    real = os.path.realpath(path)
+    try:
+        internal = os.path.commonpath([real_repo, real]) == real_repo
+    except ValueError:
+        internal = False
+    digest = file_hash(path)
+    if internal:
+        return {label: os.path.relpath(path, repo), label + "_sha256": digest} if digest else {label: os.path.relpath(path, repo)}
+    ext = {"name": os.path.basename(path), "owned": False}
+    if digest:
+        ext["sha256"] = digest
+    return {label + "_external": ext}
+
+operation_id = safe_id(os.environ.get("OMS_INDEX_OPERATION_ID", "")) or ("op_" + uuid.uuid4().hex)
+run_id = safe_id(os.environ.get("OMS_INDEX_RUN_ID", ""))
+if not run_id:
+    current = os.path.join(repo, ".oms", "runs", "CURRENT")
+    try:
+        parts = open(current, encoding="utf-8").read().split()
+        ttl = int(os.environ.get("OMS_RUN_CURRENT_TTL", "86400"))
+        if len(parts) > 1 and parts[1].isdigit() and time.time() - int(parts[1]) <= ttl:
+            run_id = safe_id(parts[0])
+    except (OSError, ValueError):
+        pass
+
 row = {
+    "schema": 1,
+    "event_id": event_id,
+    "operation_id": operation_id,
     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "kind": kind,
     "provider": provider,
     "exit": int(exit_code),
 }
+if run_id:
+    row["run_id"] = run_id
 base_sha = os.environ.get("OMS_INDEX_BASE_SHA", "")
 if base_sha:
     row["base_sha"] = base_sha
 task_id = os.environ.get("OMS_INDEX_TASK_ID", "")
-if task_id and re.match(r"^[A-Za-z0-9._-]+$", task_id):
+if safe_id(task_id):
     row["task_id"] = task_id
-if artifact:
-    row["artifact"] = artifact
-if patch:
-    row["patch"] = patch
+delegation_id = safe_id(os.environ.get("OMS_INDEX_DELEGATION_ID", ""))
+if delegation_id:
+    row["delegation_id"] = delegation_id
+parent_event_id = safe_id(os.environ.get("OMS_INDEX_PARENT_EVENT_ID", ""))
+if parent_event_id:
+    row["parent_event_id"] = parent_event_id
+row.update(path_fields("artifact", artifact_raw))
+row.update(path_fields("patch", patch_raw))
+row.update(path_fields("source", source_raw))
+primary_hash = file_hash(artifact_raw) or file_hash(patch_raw)
+row["artifact_id"] = "sha256:" + (primary_hash or hashlib.sha256(event_id.encode()).hexdigest())
 if prompt_hash:
     row["prompt_sha256"] = prompt_hash
-if source:
-    row["source"] = source
 if verify_exit:
     row["verify_exit"] = int(verify_exit)
 if task_goal:
     row["task_goal"] = task_goal
 with open(index, "a", encoding="utf-8") as f:
     f.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+
+# Amortized bounded retention. Explicit artifact-index prune remains the path
+# for stale-reference repair and orphan-file deletion.
+try:
+    keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
+    high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
+except ValueError:
+    keep, high = 1000, 1200
+if keep > 0 and high >= keep:
+    with open(index, "rb") as f:
+        lines = f.readlines()
+    if len(lines) > high:
+        real_index = os.path.realpath(index)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real_index))
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.writelines(lines[-keep:])
+            shutil.copymode(real_index, tmp)
+            os.replace(tmp, real_index)
+        except Exception:
+            try: os.unlink(tmp)
+            except OSError: pass
+            raise
 EOF
 }
 
@@ -563,11 +655,19 @@ run_provider() {
       # --skip-git-repo-check: read-only ask/review/call may run in any
       # directory (sandbox is already read-only); without it codex refuses
       # outside a trusted git repo.
-      ma_wait_stdin_file "$prompt_file" run_with_timeout codex exec --sandbox read-only --skip-git-repo-check - >> "$artifact" 2>&1
+      # Export in the current worker shell so ma_wait_stdin_file's background
+      # CLI remains visible to the caller's signal trap. Wrapping this in one
+      # more subshell makes TERM wait for the full provider timeout instead of
+      # killing the tracked job and cleaning the temporary prompt promptly.
+      ma_export_child_env "$provider" "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}"
+      ma_wait_stdin_file "$prompt_file" run_with_timeout codex exec --sandbox read-only --skip-git-repo-check - \
+        >> "$artifact" 2>&1
       status=$?
       ;;
     claude)
-      ma_wait_stdin_file "$prompt_file" run_with_timeout claude --permission-mode plan -p >> "$artifact" 2>&1
+      ma_export_child_env "$provider" "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}"
+      ma_wait_stdin_file "$prompt_file" run_with_timeout claude --permission-mode plan -p \
+        >> "$artifact" 2>&1
       status=$?
       ;;
     antigravity|agy)
@@ -575,7 +675,11 @@ run_provider() {
       local agy_dir
       agy_dir="$(ma_agy_read_dir "${REPO:-}")" || agy_dir=""
       if [ -n "$agy_dir" ]; then
-        (cd "$agy_dir" && ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}") >> "$artifact" 2>&1
+        (
+          ma_export_child_env "antigravity" "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}"
+          cd "$agy_dir"
+          ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}"
+        ) >> "$artifact" 2>&1
         status=$?
         ma_agy_read_cleanup "${REPO:-}" "$agy_dir"
       else

@@ -184,6 +184,31 @@ def repo_root(cwd: str) -> Path | None:
         return path
 
 
+def is_harness_child() -> bool:
+    return os.environ.get("OMS_HARNESS_CHILD") == "1"
+
+
+def hook_repo(payload: dict[str, Any]) -> Path | None:
+    """Resolve child events to primary state, never the delegated worktree."""
+    if is_harness_child():
+        state_repo = os.environ.get("OMS_STATE_REPO", "")
+        if state_repo:
+            return repo_root(state_repo)
+    return repo_root(payload_cwd(payload))
+
+
+def child_event_fields() -> dict[str, str]:
+    def safe(name: str, default: str) -> str:
+        value = os.environ.get(name, default)
+        return value if re.match(r"^[A-Za-z0-9._:-]{1,160}$", value) else default
+
+    return {
+        "origin": safe("OMS_HARNESS_ORIGIN", "unknown"),
+        "parent_agent": safe("OMS_HARNESS_PARENT_AGENT", "unknown"),
+        "call_id": safe("OMS_HARNESS_CALL_ID", "") if os.environ.get("OMS_HARNESS_CALL_ID") else "",
+    }
+
+
 def ensure_oms(repo: Path) -> Path:
     oms = repo / ".oms"
     oms.mkdir(parents=True, exist_ok=True)
@@ -315,6 +340,34 @@ def active_task_file(repo: Path) -> Path:
     return repo / ".oms" / "task" / "current.md"
 
 
+def task_metadata(path: Path) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if raw.startswith("## "):
+                break
+            match = re.match(r"^- ([a-z_]+):\s*(.*)$", raw)
+            if match:
+                metadata[match.group(1)] = match.group(2).strip()
+    except Exception:
+        return {}
+    return metadata
+
+
+def task_is_stale(metadata: dict[str, str]) -> bool:
+    ttl = env_int("OMS_AGENT_TASK_TTL", 604800, minimum=0, maximum=315360000)
+    if ttl == 0:
+        return True
+    value = metadata.get("last_activity") or metadata.get("updated") or ""
+    if not value:
+        return False
+    try:
+        then = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - then).total_seconds() >= ttl
+
+
 def agent_task_script() -> Path:
     return Path(__file__).resolve().parent.parent / "agent-task.sh"
 
@@ -342,6 +395,8 @@ def run_agent_task(repo: Path, args: list[str], stdin_text: str | None = None) -
 
 
 def should_auto_task(prompt: str) -> bool:
+    if is_harness_child():
+        return False
     if os.environ.get("OMS_AUTO_TASK_OFF") == "1" or os.environ.get("OMS_AUTO_TASK") == "0":
         return False
     return not bool(CHITCHAT_RE.match(prompt.strip()))
@@ -350,7 +405,7 @@ def should_auto_task(prompt: str) -> bool:
 def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> None:
     if not should_auto_task(prompt):
         return
-    repo = repo_root(payload_cwd(payload))
+    repo = hook_repo(payload)
     if repo is None:
         return
     try:
@@ -378,12 +433,46 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
         existed = task_file.exists() and task_file.stat().st_size > 0
         agent = os.environ.get("OMS_AGENT") or "hook"
         status = "appended" if existed else "created"
+        source_session = session_hash(payload)
+
+        if existed:
+            metadata = task_metadata(task_file)
+            task_status = metadata.get("status") or "active"
+            old_source = metadata.get("source_session") or ""
+            stale = task_is_stale(metadata)
+            # Session changes are not a task boundary: the packet exists to
+            # hand active work across sessions/providers. Rotate only on an
+            # explicit lifecycle boundary or deterministic inactivity TTL.
+            rotate = task_status in {"verified", "closed"} or stale
+            if rotate:
+                goal = prompt_goal(prompt) or f"Respond to user request: {excerpt}"
+                rc = run_agent_task(
+                    repo,
+                    ["rotate", "--goal", goal, "--source-session", source_session,
+                     "--next", "Respond to the latest user request."],
+                )
+                if rc != 0:
+                    status = "timeout" if rc == 124 else "skipped_sensitive_or_error"
+                    append_event(
+                        repo,
+                        payload,
+                        action="auto_task",
+                        status=status,
+                        workflow=route["workflow"],
+                        risk=route["risk"],
+                        prompt_hash=prompt_hash,
+                    )
+                    return
+                status = "rotated"
+            elif not old_source:
+                run_agent_task(repo, ["update", "--source-session", source_session])
 
         if not existed:
             goal = prompt_goal(prompt) or f"Respond to user request: {excerpt}"
             rc = run_agent_task(
                 repo,
-                ["init", "--goal", goal, "--next", "Respond to the latest user request."],
+                ["init", "--goal", goal, "--source-session", source_session,
+                 "--next", "Respond to the latest user request."],
             )
             if rc != 0:
                 status = "timeout" if rc == 124 else "skipped_sensitive_or_error"
@@ -442,7 +531,7 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
 
 
 def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> None:
-    repo = repo_root(payload_cwd(payload))
+    repo = hook_repo(payload)
     if repo is None:
         return
     hooks_dir = ensure_oms(repo)
@@ -517,6 +606,9 @@ def fresh_skill_names(payload: dict[str, Any], scored_names: list[str]) -> list[
 
 def cmd_route(args: argparse.Namespace) -> int:
     payload, _ = load_payload()
+    if is_harness_child():
+        append_event(hook_repo(payload), payload, action="ignored_child", status="route", **child_event_fields())
+        return 0
     prompt = str(payload.get("prompt") or "")
     if should_skip_prompt(prompt):
         return 0
@@ -593,7 +685,10 @@ def cmd_guard(_: argparse.Namespace) -> int:
     if os.environ.get("OMS_TURN_GUARD_OFF") == "1":
         return 0
     payload, _ = load_payload()
-    repo = repo_root(payload_cwd(payload))
+    repo = hook_repo(payload)
+    if is_harness_child():
+        append_event(repo, payload, action="ignored_child", status="turn_guard", **child_event_fields())
+        return 0
     if repo is None:
         return 0
     hooks_dir = ensure_oms(repo)

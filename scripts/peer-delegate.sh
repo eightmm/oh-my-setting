@@ -27,6 +27,7 @@ INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 TASK_ID=""
 PLAN_TASK_ID=""
+PLAN_LEASE_ID=""
 plan_brief_file=""
 REPAIR=0
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
@@ -206,8 +207,12 @@ plan_transition() {
   shift
   [ -n "$PLAN_TASK_ID" ] || return 0
   [ "$DRY_RUN" != "1" ] || return 0
-  "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" "$action" --id "$PLAN_TASK_ID" "$@" ||
-    echo "warning: plan $action failed for task $PLAN_TASK_ID" >&2
+  local -a lease_args=()
+  [ -z "$PLAN_LEASE_ID" ] || lease_args=(--lease-id "$PLAN_LEASE_ID")
+  if ! "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" "$action" --id "$PLAN_TASK_ID" "${lease_args[@]}" "$@"; then
+    echo "error: plan $action rejected for task $PLAN_TASK_ID (stale lease or invalid state)" >&2
+    return 1
+  fi
 }
 
 case "$TO" in
@@ -231,6 +236,16 @@ REPO="$(oms_repo_root "$REPO")"
 git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
+
+# Capture the claim's fencing token once. Every later transition and the
+# worker environment use this exact lease; reclaiming the task invalidates the
+# stale worker instead of allowing it to publish late results.
+if [ -n "$PLAN_TASK_ID" ] && [ "$DRY_RUN" != "1" ]; then
+  PLAN_LEASE_ID="$(
+    "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" show --id "$PLAN_TASK_ID" |
+      python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))'
+  )" || fail "could not read lease for plan task $PLAN_TASK_ID"
+fi
 
 # --plan-task without an explicit brief/verify hydrates both from the plan:
 # the task's stored brief becomes the worker prompt and its verify command
@@ -357,6 +372,8 @@ slug_src="$PROMPT"
 slug="$(slugify "$slug_src")"
 [ -n "$slug" ] || slug="delegate"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export OMS_OPERATION_ID="${OMS_OPERATION_ID:-delegate-$timestamp}"
+export OMS_DELEGATION_ID="${OMS_DELEGATION_ID:-$timestamp}"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
 patch_file="$ARTIFACT_DIR/$TO-$slug-$timestamp.patch"
 
@@ -390,13 +407,15 @@ if [ "$DRY_RUN" != "1" ]; then
   agent_memory_ensure_oms_ignore_for_path "$liveness_file" 2>/dev/null || true
   OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_PID="$$" \
     OMS_DL_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_DL_WT="$worktree" \
-    OMS_DL_TASK="${PLAN_TASK_ID:-}" python3 - > "$liveness_file" <<'PY'
+    OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
+    python3 - > "$liveness_file" <<'PY'
 import json, os
 print(json.dumps({
-    "schema": 1, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
+    "schema": 2, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
     "role": os.environ.get("OMS_DL_ROLE", ""), "pid": int(os.environ["OMS_DL_PID"]),
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
     "worktree": os.environ["OMS_DL_WT"], "task_id": os.environ.get("OMS_DL_TASK", ""),
+    "lease_id": os.environ.get("OMS_DL_LEASE", ""),
 }, ensure_ascii=False))
 PY
 fi
@@ -438,19 +457,34 @@ run_worker() {
   set +e
   case "$TO" in
     codex)
-      (cd "$worktree" && OMS_STATE_REPO="$REPO" OMS_AGENT="$TO" run_with_timeout codex exec --sandbox workspace-write - < "$prompt") >> "$artifact" 2>&1 &
+      (
+        ma_export_child_env "$TO" peer-delegate "$REPO" "$timestamp"
+        [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
+        cd "$worktree"
+        run_with_timeout codex exec --sandbox workspace-write - < "$prompt"
+      ) >> "$artifact" 2>&1 &
       worker_pid="$!"
       wait "$worker_pid"
       worker_status=$?
       ;;
     claude)
-      (cd "$worktree" && OMS_STATE_REPO="$REPO" OMS_AGENT="$TO" run_with_timeout claude -p --permission-mode acceptEdits < "$prompt") >> "$artifact" 2>&1 &
+      (
+        ma_export_child_env "$TO" peer-delegate "$REPO" "$timestamp"
+        [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
+        cd "$worktree"
+        run_with_timeout claude -p --permission-mode acceptEdits < "$prompt"
+      ) >> "$artifact" 2>&1 &
       worker_pid="$!"
       wait "$worker_pid"
       worker_status=$?
       ;;
     antigravity)
-      (cd "$worktree" && OMS_STATE_REPO="$REPO" OMS_AGENT="$TO" run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}" < "$prompt") >> "$artifact" 2>&1 &
+      (
+        ma_export_child_env "$TO" peer-delegate "$REPO" "$timestamp"
+        [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
+        cd "$worktree"
+        run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}" < "$prompt"
+      ) >> "$artifact" 2>&1 &
       worker_pid="$!"
       wait "$worker_pid"
       worker_status=$?
@@ -515,6 +549,7 @@ write_repair_prompt() {
 }
 
 worker_status=0
+plan_transition start
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
   echo "dry-run: $TO -> $artifact"

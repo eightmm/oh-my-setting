@@ -83,24 +83,33 @@ if [ -d "$OMS/delegations" ]; then
     [ -e "$f" ] || continue
     info="$(python3 -c 'import json,sys
 d = json.load(open(sys.argv[1]))
-print("%s\t%s" % (d.get("pid", ""), d.get("task_id", "")))' "$f" 2>/dev/null || true)"
+print("%s\t%s\t%s" % (d.get("pid", ""), d.get("task_id", ""), d.get("lease_id", "")))' "$f" 2>/dev/null || true)"
     pid="$(printf '%s' "$info" | cut -f1)"
     task_id="$(printf '%s' "$info" | cut -f2)"
+    marker_lease="$(printf '%s' "$info" | cut -f3)"
     alive=0
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
     if [ "$alive" = 0 ]; then
       note_remove "orphan-delegation" "$f"
       if [ -n "$task_id" ]; then
-        task_state="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>/dev/null |
-          python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+        task_info="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>/dev/null |
+          python3 -c 'import json,sys;d=json.load(sys.stdin);print("%s\t%s"%(d.get("state",""),d.get("lease_id","")))' 2>/dev/null || true)"
+        task_state="$(printf '%s' "$task_info" | cut -f1)"
+        task_lease="$(printf '%s' "$task_info" | cut -f2)"
         # Only claimed/running are dead-worker states; review holds a finished
         # artifact awaiting a reviewer and must not be requeued here.
         case "$task_state" in
           claimed|running)
+            if [ "$marker_lease" != "$task_lease" ]; then
+              printf -- '- orphan-delegation-plan: task %s lease changed; keep current claim\n' "$task_id"
+              continue
+            fi
             printf -- '- orphan-delegation-plan: task %s (%s) -> ready\n' "$task_id" "$task_state"
             removed=$((removed + 1))
             if [ "$DRY_RUN" = 0 ]; then
-              "$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" release --id "$task_id" >/dev/null 2>&1 ||
+              release_args=(--repo "$STATE_ROOT" release --id "$task_id")
+              [ -z "$marker_lease" ] || release_args+=(--lease-id "$marker_lease")
+              OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-plan.sh" "${release_args[@]}" >/dev/null 2>&1 ||
                 echo "warning: gc: could not release plan task $task_id" >&2
             fi
             ;;
@@ -275,10 +284,30 @@ if [ -f "$guard_file" ]; then
   fi
 fi
 
-# 5) Artifacts: delegate to the dedicated prune (keeps recent N rows + files).
-if [ -f "$OMS/artifacts/index.jsonl" ] && [ "$DRY_RUN" = 0 ]; then
-  ( cd "$STATE_ROOT" && "$ROOT/scripts/artifact-index.sh" prune 1000 --files >/dev/null 2>&1 ) || true
-  echo "- artifacts: pruned via artifact-index (keep 1000)"
+# 5) Artifacts: use the same planner in dry-run and apply mode. Provider
+# writers can spend minutes on a final-named file before indexing it, so GC
+# applies a grace period before treating an unindexed file as orphaned.
+if [ -f "$OMS/artifacts/index.jsonl" ]; then
+  artifact_keep="${OMS_ARTIFACT_INDEX_KEEP:-1000}"
+  artifact_grace="${OMS_ARTIFACT_ORPHAN_GRACE:-86400}"
+  artifact_args=(--repo "$STATE_ROOT" prune "$artifact_keep" --files)
+  [ "$DRY_RUN" = 0 ] || artifact_args+=(--dry-run)
+  artifact_out=""
+  if ! artifact_out="$(OMS_ARTIFACT_ORPHAN_GRACE="$artifact_grace" \
+      "$ROOT/scripts/artifact-index.sh" "${artifact_args[@]}" 2>&1)"; then
+    printf '%s\n' "$artifact_out" >&2
+    echo "error: gc: artifact maintenance failed" >&2
+    exit 1
+  fi
+  while IFS= read -r artifact_line; do
+    [ -z "$artifact_line" ] || printf -- '- artifacts: %s\n' "$artifact_line"
+  done <<< "$artifact_out"
+  artifact_changes="$(printf '%s\n' "$artifact_out" | python3 -c 'import re,sys
+s=sys.stdin.read(); n=0
+for a,b in re.findall(r"(?:would prune|pruned) (\d+) -> (\d+)",s): n += max(0,int(a)-int(b))
+for x in re.findall(r"(?:would delete|deleted) (\d+) orphan file",s): n += int(x)
+print(n)')"
+  removed=$((removed + artifact_changes))
 fi
 
 if [ "$removed" -eq 0 ]; then

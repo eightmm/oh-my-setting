@@ -20,11 +20,128 @@ agent_task_relpath() {
   esac
 }
 
+agent_task_new_id() {
+  printf 'task-%s-%s-%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" "$$" "${RANDOM:-0}"
+}
+
+agent_task_metadata_value() {
+  local file="$1"
+  local key="$2"
+
+  [ -s "$file" ] || return 1
+  awk -v key="$key" '
+    /^## / { exit found ? 0 : 1 }
+    {
+      pattern = "^- " key ":[[:space:]]*"
+      if ($0 ~ pattern) {
+        sub(pattern, "")
+        print
+        found = 1
+        exit 0
+      }
+    }
+    END { if (!found) exit 1 }
+  ' "$file"
+}
+
+agent_task_is_stale() {
+  local file="$1"
+  local ttl="${2:-${OMS_AGENT_TASK_TTL:-604800}}"
+  local value
+
+  case "$ttl" in *[!0-9]*|"") ttl=604800 ;; esac
+  value="$(agent_task_metadata_value "$file" last_activity 2>/dev/null || agent_task_metadata_value "$file" updated 2>/dev/null || true)"
+  [ -n "$value" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$value" "$ttl" <<'PY'
+import datetime, sys
+try:
+    then = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    ttl = int(sys.argv[2])
+except Exception:
+    raise SystemExit(1)
+age = (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds()
+raise SystemExit(0 if age >= ttl else 1)
+PY
+}
+
+agent_task_set_metadata_unlocked() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+
+  tmp="$(agent_memory_mktemp)" || return 1
+  awk -v key="$key" -v value="$value" '
+    BEGIN { found = 0; inserted = 0; before_sections = 1 }
+    before_sections == 1 {
+      pattern = "^- " key ":[[:space:]]*"
+      if ($0 ~ pattern) {
+        print "- " key ": " value
+        found = 1
+        next
+      }
+      if (($0 ~ /^## / || $0 ~ /^Short-lived handoff packet/) && found == 0) {
+        print "- " key ": " value
+        print ""
+        inserted = 1
+      }
+      if ($0 ~ /^## /) before_sections = 0
+    }
+    { print }
+    END {
+      if (found == 0 && inserted == 0) print "- " key ": " value
+    }
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv "$tmp" "$file"
+}
+
+agent_task_set_metadata() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+
+  oms_with_file_lock "$file" agent_task_set_metadata_unlocked "$file" "$key" "$value"
+}
+
+agent_task_ensure_metadata_unlocked() {
+  local file="$1"
+  local now
+  local value
+
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  value="$(agent_task_metadata_value "$file" created 2>/dev/null || true)"
+  [ -n "$value" ] || agent_task_set_metadata_unlocked "$file" created "$now"
+  value="$(agent_task_metadata_value "$file" updated 2>/dev/null || true)"
+  [ -n "$value" ] || agent_task_set_metadata_unlocked "$file" updated "$now"
+  value="$(agent_task_metadata_value "$file" task_id 2>/dev/null || true)"
+  [ -n "$value" ] || agent_task_set_metadata_unlocked "$file" task_id "$(agent_task_new_id)"
+  value="$(agent_task_metadata_value "$file" status 2>/dev/null || true)"
+  [ -n "$value" ] || agent_task_set_metadata_unlocked "$file" status active
+  if ! grep -Eq '^- source_session:' "$file" 2>/dev/null; then
+    agent_task_set_metadata_unlocked "$file" source_session "${OMS_AGENT_TASK_SOURCE_SESSION:-}"
+  fi
+  value="$(agent_task_metadata_value "$file" last_activity 2>/dev/null || true)"
+  if [ -z "$value" ]; then
+    value="$(agent_task_metadata_value "$file" updated 2>/dev/null || true)"
+    agent_task_set_metadata_unlocked "$file" last_activity "${value:-$now}"
+  fi
+  if ! grep -Eq '^- closed_at:' "$file" 2>/dev/null; then
+    agent_task_set_metadata_unlocked "$file" closed_at ""
+  fi
+}
+
 agent_task_init_file_unlocked() {
   local file="$1"
   local now
 
-  [ -f "$file" ] && return 0
+  if [ -f "$file" ]; then
+    agent_task_ensure_metadata_unlocked "$file"
+    return 0
+  fi
   agent_memory_ensure_oms_ignore_for_path "$file"
   mkdir -p "$(dirname "$file")"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -32,6 +149,11 @@ agent_task_init_file_unlocked() {
     printf '# Active Agent Task\n\n'
     printf -- '- created: %s\n' "$now"
     printf -- '- updated: %s\n' "$now"
+    printf -- '- task_id: %s\n' "$(agent_task_new_id)"
+    printf -- '- status: active\n'
+    printf -- '- source_session: %s\n' "${OMS_AGENT_TASK_SOURCE_SESSION:-}"
+    printf -- '- last_activity: %s\n' "$now"
+    printf -- '- closed_at:\n'
     printf -- '- owner: oh-my-setting agent harness\n\n'
     printf 'Short-lived handoff packet for Codex, Claude Code, and Antigravity.\n'
     printf 'Do not store secrets, credentials, private machine paths, cluster details, raw logs, datasets, or checkpoints here.\n\n'
@@ -56,32 +178,119 @@ agent_task_init_file() {
 
 agent_task_touch_updated_unlocked() {
   local file="$1"
-  local tmp
   local now
 
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  tmp="$(agent_memory_mktemp)" || return 1
-  awk -v now="$now" '
-    BEGIN { done = 0 }
-    /^- updated:/ {
-      print "- updated: " now
-      done = 1
-      next
-    }
-    { print }
-    END {
-      if (done == 0) {
-        print "- updated: " now
-      }
-    }
-  ' "$file" > "$tmp"
-  mv "$tmp" "$file"
+  agent_task_ensure_metadata_unlocked "$file"
+  agent_task_set_metadata_unlocked "$file" updated "$now"
+  agent_task_set_metadata_unlocked "$file" last_activity "$now"
 }
 
 agent_task_touch_updated() {
   local file="$1"
 
   oms_with_file_lock "$file" agent_task_touch_updated_unlocked "$file"
+}
+
+agent_task_set_status_unlocked() {
+  local file="$1"
+  local status="$2"
+  local now
+
+  agent_task_init_file_unlocked "$file"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  agent_task_set_metadata_unlocked "$file" status "$status"
+  if [ "$status" = closed ]; then
+    agent_task_set_metadata_unlocked "$file" closed_at "$now"
+  fi
+  agent_task_set_metadata_unlocked "$file" updated "$now"
+  agent_task_set_metadata_unlocked "$file" last_activity "$now"
+}
+
+agent_task_set_status() {
+  local file="$1"
+  local status="$2"
+
+  oms_with_file_lock "$file" agent_task_set_status_unlocked "$file" "$status"
+}
+
+agent_task_archive_unlocked() {
+  local file="$1"
+  local archive_dir
+  local archive_file
+  local task_id
+  local stamp
+  local suffix=0
+
+  [ -e "$file" ] || return 0
+  agent_task_ensure_metadata_unlocked "$file"
+  agent_task_set_status_unlocked "$file" closed
+  task_id="$(agent_task_metadata_value "$file" task_id 2>/dev/null || agent_task_new_id)"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive_dir="$(dirname "$file")/archive"
+  archive_file="$archive_dir/${task_id}-${stamp}.md"
+  mkdir -p "$archive_dir"
+  while [ -e "$archive_file" ]; do
+    suffix=$((suffix + 1))
+    archive_file="$archive_dir/${task_id}-${stamp}-${suffix}.md"
+  done
+  mv "$file" "$archive_file"
+  printf '%s\n' "$archive_file"
+}
+
+agent_task_archive() {
+  local file="$1"
+
+  oms_with_file_lock "$file" agent_task_archive_unlocked "$file"
+}
+
+agent_task_rotate_unlocked() {
+  local file="$1"
+  local archive_file=""
+
+  if [ -e "$file" ]; then
+    archive_file="$(agent_task_archive_unlocked "$file")" || return 1
+  fi
+  agent_task_init_file_unlocked "$file"
+  [ -z "$archive_file" ] || printf '%s\n' "$archive_file"
+}
+
+agent_task_rotate() {
+  local file="$1"
+
+  oms_with_file_lock "$file" agent_task_rotate_unlocked "$file"
+}
+
+agent_task_prune_current_state_unlocked() {
+  local file="$1"
+  local max="${OMS_AGENT_TASK_MAX_CURRENT_BULLETS:-100}"
+  local tmp
+
+  case "$max" in *[!0-9]*|"") max=100 ;; esac
+  [ "$max" -gt 0 ] || return 0
+  tmp="$(agent_memory_mktemp)" || return 1
+  awk -v max="$max" '
+    function flush(    i, count, skip) {
+      count = 0
+      for (i = 1; i <= n; i++) if (buf[i] ~ /^- /) count++
+      skip = count - max
+      for (i = 1; i <= n; i++) {
+        if (buf[i] ~ /^- / && skip > 0) { skip--; continue }
+        print buf[i]
+      }
+      delete buf
+      n = 0
+    }
+    $0 == "## Current State" { print; current = 1; n = 0; next }
+    current == 1 && /^## / { flush(); current = 0; print; next }
+    current == 1 { buf[++n] = $0; next }
+    { print }
+    END { if (current == 1) flush() }
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv "$tmp" "$file"
 }
 
 agent_task_replace_section_unlocked() {
@@ -308,6 +517,9 @@ agent_task_append_bullet_unlocked() {
   }
   mv "$tmp" "$file"
   rm -f "$line_file"
+  if [ "$section" = "## Current State" ]; then
+    agent_task_prune_current_state_unlocked "$file"
+  fi
   agent_task_touch_updated_unlocked "$file"
 }
 

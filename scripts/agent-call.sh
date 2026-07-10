@@ -178,6 +178,7 @@ slug_src="$PROMPT"
 slug="$(slugify "$slug_src")"
 [ -n "$slug" ] || slug="call"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export OMS_OPERATION_ID="${OMS_OPERATION_ID:-call-$timestamp}"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
 
 if [ "$EXPORT_ONLY" -eq 1 ]; then

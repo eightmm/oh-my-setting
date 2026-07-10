@@ -3,7 +3,21 @@ set -euo pipefail
 
 # Print install status: link identity, tools, active task, and update state.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
+
+RECEIPT="$(oms_install_receipt_path)"
+RECEIPT_STATE="missing"
+INSTALL_ROOT="$ROOT"
+if [ -f "$RECEIPT" ]; then
+  if INSTALL_ROOT="$(oms_install_receipt_owner "$RECEIPT")"; then
+    RECEIPT_STATE="valid"
+  else
+    RECEIPT_STATE="invalid"
+    INSTALL_ROOT="$ROOT"
+  fi
+fi
 
 load_user_tool_paths() {
   export PATH="$HOME/.local/bin:$PATH"
@@ -81,13 +95,13 @@ auto_update_value() {
 }
 
 auto_update_status() {
-  local state_file="${OH_MY_SETTING_AUTO_UPDATE_STATE:-$ROOT/local/auto-update.status}"
+  local state_file="${OH_MY_SETTING_AUTO_UPDATE_STATE:-$INSTALL_ROOT/local/auto-update.status}"
   local status
   local value
 
   if [ ! -f "$state_file" ]; then
     printf -- '- status: not checked\n'
-    printf -- '- command: %s/scripts/auto-update.sh check\n' "$ROOT"
+    printf -- '- command: %s/scripts/auto-update.sh check\n' "$INSTALL_ROOT"
     return 0
   fi
 
@@ -180,6 +194,14 @@ auto_update_trigger_status() {
 }
 
 codex_plugin_status() {
+  local plugin_version
+  local marketplace_name
+  local cache
+  local expected_hash
+  local actual_hash
+  local marker_hash=""
+  local marker_root=""
+
   if ! command -v codex >/dev/null 2>&1; then
     printf -- '- status: codex missing\n'
     return 0
@@ -187,10 +209,35 @@ codex_plugin_status() {
 
   if codex plugin list --json 2>/dev/null |
      python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
-    printf -- '- status: installed\n'
+    plugin_version="$(oms_install_plugin_version "$INSTALL_ROOT")"
+    marketplace_name="$(python3 - "$INSTALL_ROOT/.agents/plugins/marketplace.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.load(fh)["name"])
+PY
+)"
+    cache="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$marketplace_name/oh-my-setting/$plugin_version"
+    expected_hash="$(oms_install_receipt_field plugin.sha256 "$RECEIPT" 2>/dev/null || oms_install_plugin_hash "$INSTALL_ROOT")"
+    if [ -d "$cache" ]; then
+      actual_hash="$(oms_install_tree_hash "$cache")"
+      [ ! -f "$cache/.oh-my-setting-source-sha256" ] ||
+        marker_hash="$(sed -n '1p' "$cache/.oh-my-setting-source-sha256")"
+      [ ! -f "$cache/.oh-my-setting-source-root" ] ||
+        marker_root="$(sed -n '1p' "$cache/.oh-my-setting-source-root")"
+    else
+      actual_hash="missing"
+    fi
+    if [ "$actual_hash" = "$expected_hash" ] &&
+       [ "$marker_hash" = "$expected_hash" ] &&
+       [ "$marker_root" = "$INSTALL_ROOT" ]; then
+      printf -- '- status: installed (cache current)\n'
+    else
+      printf -- '- status: installed (cache stale)\n'
+      printf -- '- command: %s/scripts/install-codex-plugin.sh\n' "$INSTALL_ROOT"
+    fi
   else
     printf -- '- status: not installed\n'
-    printf -- '- command: %s/scripts/install-codex-plugin.sh\n' "$ROOT"
+    printf -- '- command: %s/scripts/install-codex-plugin.sh\n' "$INSTALL_ROOT"
   fi
 }
 
@@ -206,10 +253,33 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   printf -- '- commit: %s\n' "$(git -C "$ROOT" rev-parse --short HEAD)"
 fi
 
+printf '\n## Install Ownership\n\n'
+case "$RECEIPT_STATE" in
+  valid)
+    printf -- '- receipt: %s\n' "$RECEIPT"
+    printf -- '- canonical_root: %s\n' "$INSTALL_ROOT"
+    printf -- '- canonical_commit: %s\n' "$(oms_install_receipt_field commit "$RECEIPT")"
+    printf -- '- channel: %s\n' "$(oms_install_receipt_field channel "$RECEIPT")"
+    printf -- '- installed_at: %s\n' "$(oms_install_receipt_field installed_at "$RECEIPT")"
+    if [ "$INSTALL_ROOT" = "$ROOT" ]; then
+      printf -- '- current_checkout: canonical\n'
+    else
+      printf -- '- current_checkout: foreign but canonical install is recorded\n'
+    fi
+    ;;
+  invalid)
+    printf -- '- receipt: invalid (%s)\n' "$RECEIPT"
+    ;;
+  missing)
+    printf -- '- receipt: missing (legacy install)\n'
+    printf -- '- expected_root: %s\n' "$ROOT"
+    ;;
+esac
+
 printf '\n## Agent config links\n\n'
-link_status "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
-link_status "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
-link_status "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
+link_status "$HOME/.codex/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
+link_status "$HOME/.claude/CLAUDE.md" "$INSTALL_ROOT/AGENTS.md"
+link_status "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
 
 printf '\n## Required tools\n\n'
 for tool in git curl node npm uv claude codex agy gh; do
@@ -222,8 +292,8 @@ for tool in timeout sbatch srun squeue sinfo scancel; do
 done
 
 printf '\n## Snapshots\n\n'
-file_status "$ROOT/local/machine.md"
-file_status "$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md"
+file_status "$INSTALL_ROOT/local/machine.md"
+file_status "$INSTALL_ROOT/custom-skills/slurm-hpc/references/cluster.generated.md"
 
 printf '\n## Active Task\n\n'
 active_task_status

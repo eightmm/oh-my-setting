@@ -28,10 +28,11 @@ STATE=""
 NEXT_STEP=""
 TEXT=""
 USE_STDIN=0
+SOURCE_SESSION=""
 
 usage() {
   cat <<'EOF'
-Usage: agent-task.sh [options] [path|init|show|context|update|append|close]
+Usage: agent-task.sh [options] [path|init|show|context|status|update|append|verify|rotate|close]
 
 Maintain the active handoff packet shared by Codex, Claude Code, and
 Antigravity. Project task defaults to REPO/.oms/task/current.md.
@@ -59,6 +60,9 @@ Options:
   --decision TEXT   update: append a Decisions bullet.
   --state TEXT      init/update: replace Current State.
   --next TEXT       init/update: replace Next Step.
+  --source-session HASH
+                    init/update/rotate: hash-only source session id
+                    (16-64 lowercase hexadecimal characters).
   --text TEXT       append: append a Current State bullet.
   --stdin           Read append text from stdin.
   -h, --help        Show help.
@@ -68,8 +72,12 @@ Commands:
   init              Create the task file if missing and apply provided fields.
   show              Print task file if it exists. Default.
   context           Print provider context view.
+  status            Print task lifecycle metadata.
   update            Apply section updates.
   append            Append --text/--stdin to Current State.
+  verify            Mark the current task verified; --verification may record
+                    the evidence first.
+  rotate            Archive the current task and initialize a new active task.
   close             Archive current.md under .oms/task/archive/ and remove it.
 EOF
 }
@@ -166,6 +174,11 @@ while [ "$#" -gt 0 ]; do
       NEXT_STEP="$2"
       shift 2
       ;;
+    --source-session)
+      [ "$#" -ge 2 ] || { echo "error: --source-session requires hash" >&2; exit 2; }
+      SOURCE_SESSION="$2"
+      shift 2
+      ;;
     --text)
       [ "$#" -ge 2 ] || { echo "error: --text requires text" >&2; exit 2; }
       TEXT="$2"
@@ -175,7 +188,7 @@ while [ "$#" -gt 0 ]; do
       USE_STDIN=1
       shift
       ;;
-    path|init|show|context|update|append|close)
+    path|init|show|context|status|update|append|verify|rotate|close)
       ACTION="$1"
       shift
       ;;
@@ -219,6 +232,11 @@ require_uint() {
 require_uint "--loop-attempts" "$LOOP_ATTEMPTS"
 require_uint "--loop-max" "$LOOP_MAX"
 require_uint "--diff-budget" "$DIFF_BUDGET"
+if [ -n "$SOURCE_SESSION" ] && ! printf '%s\n' "$SOURCE_SESSION" | grep -Eq '^[0-9a-f]{16,64}$'; then
+  echo "error: --source-session must be a 16-64 character lowercase hexadecimal hash" >&2
+  exit 2
+fi
+export OMS_AGENT_TASK_SOURCE_SESSION="$SOURCE_SESSION"
 
 # Lazily created: read-only actions (path, show, context) must not depend
 # on a writable TMPDIR. Library temp files land here too once created.
@@ -290,6 +308,10 @@ apply_updates() {
   append_if_set "## Constraints" "$CONSTRAINT"
   append_if_set "## Done Criteria" "$DONE_CRITERIA"
   append_if_set "## Decisions" "$DECISION"
+  if [ -n "$SOURCE_SESSION" ]; then
+    agent_task_set_metadata "$TASK_FILE" source_session "$SOURCE_SESSION"
+    agent_task_touch_updated "$TASK_FILE"
+  fi
 }
 
 append_text() {
@@ -312,7 +334,12 @@ case "$ACTION" in
     ;;
   init)
     ensure_tmpdir
-    agent_task_init_file "$TASK_FILE"
+    if [ -s "$TASK_FILE" ] && [ -n "$GOAL" ]; then
+      archive_file="$(agent_task_rotate "$TASK_FILE")"
+      [ -z "$archive_file" ] || echo "task: archived $archive_file"
+    else
+      agent_task_init_file "$TASK_FILE"
+    fi
     apply_updates
     echo "task: initialized $TASK_FILE"
     ;;
@@ -326,6 +353,26 @@ case "$ACTION" in
   context)
     agent_task_emit_context "$REPO" "$TASK_FILE" || true
     ;;
+  status)
+    if [ ! -s "$TASK_FILE" ]; then
+      echo "status: none"
+      exit 0
+    fi
+    task_id="$(agent_task_metadata_value "$TASK_FILE" task_id 2>/dev/null || echo legacy)"
+    task_status="$(agent_task_metadata_value "$TASK_FILE" status 2>/dev/null || echo active)"
+    task_source="$(agent_task_metadata_value "$TASK_FILE" source_session 2>/dev/null || true)"
+    task_activity="$(agent_task_metadata_value "$TASK_FILE" last_activity 2>/dev/null || agent_task_metadata_value "$TASK_FILE" updated 2>/dev/null || true)"
+    task_closed="$(agent_task_metadata_value "$TASK_FILE" closed_at 2>/dev/null || true)"
+    if agent_task_is_stale "$TASK_FILE"; then
+      task_stale=yes
+    else
+      task_stale=no
+    fi
+    # One write avoids SIGPIPE under `set -o pipefail` when callers use
+    # `agent-task status | grep -q ...` and grep exits after an early match.
+    printf 'task_id: %s\nstatus: %s\nsource_session: %s\nlast_activity: %s\nclosed_at: %s\nstale: %s\n' \
+      "$task_id" "$task_status" "$task_source" "$task_activity" "$task_closed" "$task_stale"
+    ;;
   update)
     ensure_tmpdir
     agent_task_init_file "$TASK_FILE"
@@ -337,6 +384,20 @@ case "$ACTION" in
     agent_task_init_file "$TASK_FILE"
     append_text
     echo "task: appended $TASK_FILE"
+    ;;
+  verify)
+    [ -s "$TASK_FILE" ] || { echo "error: no active task ($TASK_FILE)" >&2; exit 2; }
+    ensure_tmpdir
+    apply_updates
+    agent_task_set_status "$TASK_FILE" verified
+    echo "task: verified $TASK_FILE"
+    ;;
+  rotate)
+    ensure_tmpdir
+    archive_file="$(agent_task_rotate "$TASK_FILE")"
+    apply_updates
+    [ -z "$archive_file" ] || echo "task: archived $archive_file"
+    echo "task: initialized $TASK_FILE"
     ;;
   close)
     if [ ! -e "$TASK_FILE" ]; then
@@ -360,10 +421,7 @@ case "$ACTION" in
         rm -f "$note_file"
       fi
     fi
-    archive_dir="$(dirname "$TASK_FILE")/archive"
-    archive_file="$archive_dir/current-$(date -u +%Y%m%dT%H%M%SZ).md"
-    mkdir -p "$archive_dir"
-    mv "$TASK_FILE" "$archive_file"
+    archive_file="$(agent_task_archive "$TASK_FILE")"
     echo "task: archived $archive_file"
     ;;
   *)

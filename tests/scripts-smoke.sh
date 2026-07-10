@@ -4,6 +4,44 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d /tmp/oms-tests.XXXXXX)"
 
+source_oms_fingerprint() {
+  if [ ! -d "$ROOT/.oms" ]; then
+    printf 'absent\n'
+    return
+  fi
+  python3 - "$ROOT/.oms" <<'PY'
+import hashlib
+import os
+import sys
+
+root = os.path.realpath(sys.argv[1])
+h = hashlib.sha256()
+for base, dirs, files in os.walk(root, followlinks=False):
+    symlink_dirs = [name for name in dirs if os.path.islink(os.path.join(base, name))]
+    dirs[:] = sorted(name for name in dirs if name not in symlink_dirs)
+    for name in sorted(files + symlink_dirs):
+        path = os.path.join(base, name)
+        rel = os.path.relpath(path, root).replace(os.sep, "/")
+        h.update(rel.encode())
+        h.update(b"\0")
+        if os.path.islink(path):
+            h.update(b"L")
+            h.update(os.readlink(path).encode())
+        else:
+            h.update(b"F")
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    h.update(chunk)
+        h.update(b"\0")
+print(h.hexdigest())
+PY
+}
+
+SOURCE_OMS_FINGERPRINT="$(source_oms_fingerprint)"
+TEST_HOME="$TMP/home"
+TEST_CWD="$TMP/cwd"
+mkdir -p "$TEST_HOME" "$TEST_CWD"
+
 # Hermetic, environment-deterministic test runs: ignore the host's git config
 # (CI has none, dev machines vary — this is exactly what hid the
 # default-branch / no-identity bugs), pin a committer identity and a stable
@@ -12,6 +50,9 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYST
 export GIT_AUTHOR_NAME="oms-test" GIT_AUTHOR_EMAIL="test@example.com"
 export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
 export LC_ALL=C LANG=C TZ=UTC
+export HOME="$TEST_HOME" XDG_CACHE_HOME="$TEST_HOME/.cache" NVM_DIR="$TEST_HOME/.nvm"
+export CODEX_HOME="$TEST_HOME/.codex"
+cd "$TEST_CWD"
 
 cleanup() {
   rm -rf "$TMP"
@@ -274,6 +315,16 @@ EOF
   done
   [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] ||
     fail "delegate never wrote a liveness marker"
+  if ! python3 - "$(find "$project/.oms/delegations" -name '*.json' | head -n 1)" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == 2
+assert d["task_id"] == "t1"
+assert d["lease_id"].startswith("lease_")
+PY
+  then
+    fail "delegation marker should carry the captured plan lease"
+  fi
   kill -9 "$dpid" 2>/dev/null || true
   wait "$dpid" 2>/dev/null || true
   if [ -f "$project/worker.pid" ]; then
@@ -284,8 +335,9 @@ EOF
 
   [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] ||
     fail "SIGKILL should leave the orphan marker behind (that is the point)"
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
-    fail "plan task should still be claimed after the crash"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 |
+    grep -Eq '"state": "(claimed|running)"' ||
+    fail "plan task should still hold the crashed worker lease"
 
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
   [ -z "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] ||
@@ -3601,7 +3653,8 @@ test_artifact_index_prune_files_deletes_only_orphans() {
 {"ts":"2026-06-11T00:00:02Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/kept.md"}
 EOF
 
-  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files)"
+  out="$(OMS_ARTIFACT_ORPHAN_GRACE=0 \
+    "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files)"
   printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/call/old.md' ||
     fail "prune --files should print deleted artifact"
   printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/delegate/old.patch' ||
@@ -3630,7 +3683,8 @@ test_artifact_index_prune_files_dry_run_deletes_nothing() {
 {"ts":"2026-06-11T00:00:02Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/kept.md"}
 EOF
 
-  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files --dry-run)"
+  out="$(OMS_ARTIFACT_ORPHAN_GRACE=0 \
+    "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files --dry-run)"
   printf '%s' "$out" | grep -Fq 'would delete: .oms/artifacts/call/old.md' ||
     fail "dry-run should print would-delete artifact"
   printf '%s' "$out" | grep -Fq 'would delete 1 orphan file(s)' ||
@@ -6810,6 +6864,7 @@ test_patch_land_finishes_plan_task() {
   printf 'work\n' >> "$project/file.txt"
   git -C "$project" diff > "$project/p.patch"
   git -C "$project" checkout -q file.txt
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" review --id t1 --patch "$project/p.patch" >/dev/null )
 
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/p.patch" --plan-task t1 --verify "true" >/dev/null 2>&1 ) ||
     fail "patch-land --plan-task should land"
@@ -7119,16 +7174,19 @@ PY
 
 test_gc_releases_plan_task_of_dead_delegation() {
   local project="$TMP/gc-plan-release"
+  local lease_t1
 
   make_committed_repo "$project"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal "gc release" >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title "one" >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  lease_t1="$("$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t2 --title "two" >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t2 --provider codex >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t2 --patch /tmp/p >/dev/null
   mkdir -p "$project/.oms/delegations"
-  printf '{"schema":1,"id":"d1","pid":999999,"task_id":"t1"}\n' > "$project/.oms/delegations/d1.json"
+  printf '{"schema":2,"id":"d1","pid":999999,"task_id":"t1","lease_id":"%s"}\n' "$lease_t1" > "$project/.oms/delegations/d1.json"
   printf '{"schema":1,"id":"d2","pid":999999,"task_id":"t2"}\n' > "$project/.oms/delegations/d2.json"
 
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
@@ -7138,6 +7196,29 @@ test_gc_releases_plan_task_of_dead_delegation() {
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t2 | grep -Fq '"state": "review"' ||
     fail "gc must not release a task in review"
   assert_not_exists "$project/.oms/delegations/d1.json"
+}
+
+test_gc_old_marker_cannot_release_new_lease() {
+  local project="$TMP/gc-stale-lease"
+  local sh="$ROOT/scripts/agent-plan.sh"
+  local old_lease
+
+  make_committed_repo "$project"
+  "$sh" --repo "$project" init --goal "stale marker" >/dev/null
+  "$sh" --repo "$project" add --id t1 --title "one" >/dev/null
+  "$sh" --repo "$project" claim --id t1 --provider codex --ttl 0 >/dev/null
+  old_lease="$("$sh" --repo "$project" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  "$sh" --repo "$project" reclaim >/dev/null
+  "$sh" --repo "$project" claim --id t1 --provider claude >/dev/null
+  mkdir -p "$project/.oms/delegations"
+  printf '{"schema":2,"id":"old","pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
+    "$old_lease" > "$project/.oms/delegations/old.json"
+
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null)
+  "$sh" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
+    fail "an old delegation marker must not release a newer claim"
+  assert_not_exists "$project/.oms/delegations/old.json"
 }
 
 test_gc_sweeps_stale_change_guard() {
@@ -7228,6 +7309,38 @@ test_patch_land_plan_task_supplies_patch() {
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t2 ) >/dev/null 2>"$project/err2" || rc=$?
   [ "$rc" = "2" ] || fail "--plan-task without stored patch should exit 2, got $rc"
   assert_file_contains "$project/err2" "no stored patch path"
+}
+
+test_patch_land_rejects_stale_review_patch_lease() {
+  local project="$TMP/land-stale-review-lease"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local rc=0
+
+  make_committed_repo "$project"
+  printf 'stale-work\n' >> "$project/file.txt"
+  (cd "$project" && git diff > "$TMP/land-stale-review.patch" && git checkout -- file.txt)
+  "$plan" --repo "$project" init --goal g >/dev/null
+  "$plan" --repo "$project" add --id t1 --title T >/dev/null
+  "$plan" --repo "$project" claim --id t1 --provider codex >/dev/null
+  "$plan" --repo "$project" review --id t1 --patch "$TMP/land-stale-review.patch" >/dev/null
+  "$plan" --repo "$project" reclaim --include-review --ttl 0 >/dev/null
+  "$plan" --repo "$project" claim --id t1 --provider claude >/dev/null
+
+  (cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t1 --verify true) \
+    >/dev/null 2>"$project/err" || rc=$?
+  [ "$rc" = 2 ] || fail "stale stored review patch should be rejected before admission"
+  assert_file_contains "$project/err" "not review"
+  rc=0
+  (cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t1 \
+    --patch "$TMP/land-stale-review.patch" --verify true) \
+    >/dev/null 2>"$project/explicit.err" || rc=$?
+  [ "$rc" = 2 ] || fail "explicit --patch must not bypass the stale review lease fence"
+  assert_file_contains "$project/explicit.err" "not review"
+  if grep -Fq stale-work "$project/file.txt"; then
+    fail "a re-claimed task must not land the previous review's stored patch"
+  fi
+  "$plan" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
+    fail "stale patch rejection must preserve the new claim"
 }
 
 test_agent_plan_reclaim_include_review() {
@@ -7660,6 +7773,202 @@ EOF
   assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
 }
 
+test_install_receipt_foreign_doctor_and_repair() {
+  local d="$TMP/install-receipt"
+  local home="$d/home"
+  local receipt="$d/config/oh-my-setting/install.json"
+  local foreign="$d/foreign"
+
+  mkdir -p "$home"
+  HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$ROOT/scripts/link.sh" >/dev/null
+  python3 - "$receipt" "$ROOT" <<'PY' || fail "link should atomically commit a canonical receipt"
+import json, os, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["schema"] == 1
+assert d["source_root"] == os.path.realpath(sys.argv[2])
+assert d["commit"]
+assert d["channel"]
+assert d["version"]
+assert d["installed_at"].endswith("Z")
+assert isinstance(d["dirty"], bool)
+assert d["plugin"]["name"] == "oh-my-setting"
+assert len(d["plugin"]["sha256"]) == 64
+PY
+  assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/AGENTS.md"
+
+  cp -a "$ROOT" "$foreign"
+  HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 "$foreign/scripts/doctor.sh" >"$d/doctor" ||
+    fail "a foreign checkout should validate the canonical receipt owner"
+  assert_file_contains "$d/doctor" "current checkout is not canonical"
+
+  ln -sfn "$foreign/AGENTS.md" "$home/.codex/AGENTS.md"
+  HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 "$foreign/scripts/doctor.sh" --repair >"$d/repair" ||
+    fail "doctor --repair should relink from the valid canonical owner"
+  assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/AGENTS.md"
+
+  HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$ROOT/scripts/unlink.sh" >/dev/null
+  assert_not_exists "$receipt"
+}
+
+test_skill_router_ignores_harness_child() {
+  local primary="$TMP/child-hook-primary"
+  local child="$TMP/child-hook-worktree"
+  local payload before after out
+
+  make_committed_repo "$primary"
+  mkdir -p "$child"
+  "$ROOT/scripts/agent-task.sh" --repo "$primary" init --goal "Parent task" >/dev/null
+  before="$(sha256sum "$primary/.oms/task/current.md" | awk '{print $1}')"
+  payload="$(printf '{"prompt":"fix this internal delegated task","session_id":"child-s","turn_id":"child-t","cwd":"%s"}' "$child")"
+  out="$(printf '%s' "$payload" |
+    OMS_HARNESS_CHILD=1 OMS_HARNESS_ORIGIN=peer-delegate \
+    OMS_STATE_REPO="$primary" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  after="$(sha256sum "$primary/.oms/task/current.md" | awk '{print $1}')"
+
+  [ -z "$out" ] || fail "a harness child hook should stay silent"
+  [ "$before" = "$after" ] || fail "a harness child must not mutate the parent task"
+  assert_not_exists "$child/.oms"
+  assert_file_contains "$primary/.oms/hooks/events.jsonl" '"action": "ignored_child"'
+  assert_file_contains "$primary/.oms/hooks/events.jsonl" '"origin": "peer-delegate"'
+}
+
+test_agent_plan_rejects_stale_lease_after_reclaim() {
+  local d="$TMP/plan-lease"
+  local sh="$ROOT/scripts/agent-plan.sh"
+  local old_lease new_lease
+
+  mkdir -p "$d"
+  "$sh" --repo "$d" init --goal "lease fencing" >/dev/null
+  "$sh" --repo "$d" add --id t1 --title "fenced" >/dev/null
+  "$sh" --repo "$d" claim --id t1 --provider codex --ttl 0 >/dev/null
+  old_lease="$("$sh" --repo "$d" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  [ -n "$old_lease" ] || fail "claim should issue a lease id"
+
+  "$sh" --repo "$d" reclaim >/dev/null
+  "$sh" --repo "$d" claim --id t1 --provider claude >/dev/null
+  new_lease="$("$sh" --repo "$d" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  [ "$old_lease" != "$new_lease" ] || fail "reclaim should fence the old lease"
+
+  if OMS_PLAN_LEASE_ID="$old_lease" OMS_HARNESS_CHILD=1 \
+    "$sh" --repo "$d" start --id t1 >/dev/null 2>"$d/err"; then
+    fail "a stale worker lease must not mutate a re-claimed task"
+  fi
+  assert_file_contains "$d/err" "lease mismatch"
+  OMS_PLAN_LEASE_ID="$new_lease" OMS_HARNESS_CHILD=1 \
+    "$sh" --repo "$d" start --id t1 >/dev/null
+  "$sh" --repo "$d" show --id t1 | grep -Fq '"state": "running"' ||
+    fail "the current lease should permit the transition"
+}
+
+test_agent_plan_reopen_only_from_blocked() {
+  local d="$TMP/plan-reopen-state"
+  local sh="$ROOT/scripts/agent-plan.sh"
+
+  mkdir -p "$d"
+  "$sh" --repo "$d" init --goal "reopen contract" >/dev/null
+  "$sh" --repo "$d" add --id t1 --title "ready" >/dev/null
+  if "$sh" --repo "$d" reopen --id t1 >/dev/null 2>"$d/err"; then
+    fail "reopen should reject a task that is not blocked"
+  fi
+  assert_file_contains "$d/err" "only a blocked task"
+  "$sh" --repo "$d" block --id t1 --reason "waiting" >/dev/null
+  "$sh" --repo "$d" reopen --id t1 >/dev/null
+  "$sh" --repo "$d" show --id t1 | grep -Fq '"state": "ready"' ||
+    fail "reopen should return a blocked task to ready"
+}
+
+test_agent_task_lifecycle_rotation_and_bounded_state() {
+  local d="$TMP/task-lifecycle"
+  local sh="$ROOT/scripts/agent-task.sh"
+  local task_id archive
+
+  mkdir -p "$d"
+  "$sh" --repo "$d" init --goal "first" \
+    --source-session 0123456789abcdef >/dev/null
+  task_id="$("$sh" --repo "$d" status | awk '$1=="task_id:"{print $2}')"
+  [ -n "$task_id" ] || fail "task init should assign a task id"
+  "$sh" --repo "$d" status | grep -Fq 'status: active' ||
+    fail "new tasks should be active"
+
+  for n in 1 2 3 4 5; do
+    OMS_AGENT_TASK_MAX_CURRENT_BULLETS=3 \
+      "$sh" --repo "$d" append --agent test --text "state-$n" >/dev/null
+  done
+  [ "$(awk '/^## Current State$/{f=1;next} /^## /{f=0} f&&/^- /{n++} END{print n+0}' "$d/.oms/task/current.md")" = 3 ] ||
+    fail "Current State should retain only the configured newest bullets"
+
+  "$sh" --repo "$d" verify --verification "checks passed" >/dev/null
+  "$sh" --repo "$d" status | grep -Fq 'status: verified' ||
+    fail "verify should mark lifecycle status"
+  "$sh" --repo "$d" init --goal "second" >/dev/null
+  archive="$(find "$d/.oms/task/archive" -type f -name "$task_id-*.md" | head -n 1)"
+  [ -n "$archive" ] || fail "a new explicit goal should archive the previous task by id"
+  assert_file_contains "$archive" '- status: closed'
+
+  python3 - "$d/.oms/task/current.md" <<'PY'
+import pathlib
+import re
+import sys
+
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+s = re.sub(r'^- last_activity:.*$', '- last_activity: 2020-01-01T00:00:00Z', s, flags=re.M)
+p.write_text(s)
+PY
+  OMS_AGENT_TASK_TTL=1 "$sh" --repo "$d" status | grep -Fq 'stale: yes' ||
+    fail "task status should expose TTL staleness"
+}
+
+test_artifact_index_migrate_validate_and_idempotency() {
+  local d="$TMP/artifact-migrate"
+  local index="$d/.oms/artifacts/index.jsonl"
+  local first second
+
+  mkdir -p "$d/.oms/artifacts"
+  printf 'legacy\n' > "$d/.oms/artifacts/legacy.md"
+  printf '%s\n' '{"ts":"2026-01-01T00:00:00Z","kind":"call","provider":"codex","exit":0,"artifact":"legacy.md"}' > "$index"
+  "$ROOT/scripts/artifact-index.sh" --repo "$d" migrate >/dev/null
+  "$ROOT/scripts/artifact-index.sh" --repo "$d" validate >/dev/null
+  python3 - "$index" <<'PY' || fail "migrate should add the schema-1 event envelope"
+import json, sys
+row = json.loads(open(sys.argv[1], encoding="utf-8").readline())
+assert row["schema"] == 1
+assert row["event_id"].startswith("evt_")
+assert row["operation_id"].startswith("op_")
+assert row["artifact_id"].startswith("sha256:")
+assert row["artifact"] == ".oms/artifacts/legacy.md"
+PY
+  first="$(sha256sum "$index" | awk '{print $1}')"
+  "$ROOT/scripts/artifact-index.sh" --repo "$d" migrate >/dev/null
+  second="$(sha256sum "$index" | awk '{print $1}')"
+  [ "$first" = "$second" ] || fail "artifact migration should be idempotent"
+}
+
+test_artifact_prune_preserves_fresh_unindexed_file() {
+  local d="$TMP/artifact-orphan-grace"
+
+  mkdir -p "$d/.oms/artifacts"
+  printf '%s\n' '{"schema":1,"event_id":"evt_a","operation_id":"op_a","ts":"2026-01-01T00:00:00Z","kind":"call","provider":"codex","exit":0}' > "$d/.oms/artifacts/index.jsonl"
+  printf 'still writing\n' > "$d/.oms/artifacts/fresh.md"
+  OMS_ARTIFACT_ORPHAN_GRACE=86400 \
+    "$ROOT/scripts/artifact-index.sh" --repo "$d" prune 1 --files >/dev/null
+  [ -f "$d/.oms/artifacts/fresh.md" ] ||
+    fail "artifact pruning must preserve fresh unindexed writer output"
+}
+
+test_smoke_suite_does_not_mutate_source_oms() {
+  local after
+  after="$(source_oms_fingerprint)"
+  [ "$SOURCE_OMS_FINGERPRINT" = "$after" ] ||
+    fail "smoke suite mutated the source checkout .oms state"
+}
+
 test_oms_run_validate_flags_schema_drift() {
   local project="$TMP/validate-drift"
 
@@ -7910,6 +8219,9 @@ test_oms_run_validate_detects_malformed_jsonl
 test_run_ledger_top_ranks_metrics
 test_oms_run_timeline_merges_streams
 test_agent_plan_reclaim_requeues_stale_claim
+test_agent_plan_rejects_stale_lease_after_reclaim
+test_agent_plan_reopen_only_from_blocked
+test_agent_task_lifecycle_rotation_and_bounded_state
 test_delegate_plan_task_lifecycle
 test_peer_review_gate_verify_backstop
 test_delegate_repair_retries_failed_verify
@@ -7957,10 +8269,12 @@ test_oms_run_validate_flags_schema_drift
 test_file_lock_mkdir_contention_preserves_records
 test_gc_closes_stale_open_run
 test_gc_releases_plan_task_of_dead_delegation
+test_gc_old_marker_cannot_release_new_lease
 test_gc_sweeps_stale_change_guard
 test_change_guard_status_flags_stale
 test_patch_land_reject_records_and_resolves_fail_ledger
 test_patch_land_plan_task_supplies_patch
+test_patch_land_rejects_stale_review_patch_lease
 test_agent_plan_reclaim_include_review
 test_repo_state_flags_stale_review_and_guard
 test_run_with_timeout_kill_after_defeats_term_trap
@@ -7974,9 +8288,14 @@ test_skill_router_routes_chem_bio_task_families
 test_chem_bio_skill_routes_all_references
 test_ml_review_includes_chem_bio_task_families
 test_skill_router_skips_system_prompts
+test_skill_router_ignores_harness_child
 test_turn_guard_blocks_unverified_dirty_task_once
 test_turn_guard_allows_verified_task
 test_install_claude_hooks_merge_and_remove
 test_install_codex_plugin_registers_marketplace
+test_install_receipt_foreign_doctor_and_repair
+test_artifact_index_migrate_validate_and_idempotency
+test_artifact_prune_preserves_fresh_unindexed_file
+test_smoke_suite_does_not_mutate_source_oms
 
 echo "scripts-smoke: ok"

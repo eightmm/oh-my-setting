@@ -4,12 +4,22 @@ set -euo pipefail
 # Install the repo-local oh-my-setting Codex plugin so Codex gets the same
 # prompt skill hints and Stop-hook turn guard as Claude Code.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 MARKETPLACE_FILE="${OMS_CODEX_MARKETPLACE_FILE:-$ROOT/.agents/plugins/marketplace.json}"
 MARKETPLACE_ROOT="${OMS_CODEX_MARKETPLACE_ROOT:-$ROOT}"
 PLUGIN_NAME="oh-my-setting"
 REMOVE=0
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
+
+if [ "${OMS_INSTALL_LOCK_HELD:-0}" != "1" ]; then
+  oms_with_file_lock "$(oms_install_receipt_path)" \
+    env OMS_INSTALL_LOCK_HELD=1 bash "$ROOT/scripts/install-codex-plugin.sh" "$@"
+  exit $?
+fi
 
 usage() {
   cat <<'EOF'
@@ -47,6 +57,17 @@ with open(sys.argv[1], encoding="utf-8") as fh:
 PY
 )" || fail "failed to read marketplace name"
 [ -n "$MARKETPLACE_NAME" ] || fail "marketplace name is empty"
+case "$MARKETPLACE_NAME" in
+  *[!A-Za-z0-9._-]*|"") fail "unsafe marketplace name: $MARKETPLACE_NAME" ;;
+esac
+
+PLUGIN_VERSION="$(oms_install_plugin_version "$ROOT")"
+PLUGIN_HASH="$(oms_install_plugin_hash "$ROOT")"
+case "$PLUGIN_VERSION" in
+  *[!A-Za-z0-9._+-]*|"") fail "unsafe plugin version: $PLUGIN_VERSION" ;;
+esac
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+PLUGIN_CACHE="$CODEX_HOME_DIR/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME/$PLUGIN_VERSION"
 
 run_cmd() {
   if [ "$DRY_RUN" = "1" ]; then
@@ -84,16 +105,51 @@ for plugin in data.get("installed", []):
 ' "$PLUGIN_NAME@$MARKETPLACE_NAME" 2>/dev/null || true
 }
 
+plugin_is_installed() {
+  codex plugin list --json 2>/dev/null |
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+target = sys.argv[1]
+sys.exit(0 if any(p.get("pluginId") == target and p.get("installed") for p in data.get("installed", [])) else 1)
+' "$PLUGIN_NAME@$MARKETPLACE_NAME" 2>/dev/null
+}
+
 write_source_marker() {
   [ "$DRY_RUN" = "1" ] && return 0
   local plugin_root
   plugin_root="${1:-}"
-  if [ -z "$plugin_root" ]; then
-    plugin_root="$(installed_plugin_root)"
+  if [ -z "$plugin_root" ] && plugin_is_installed && [ -d "$PLUGIN_CACHE" ]; then
+    plugin_root="$PLUGIN_CACHE"
   fi
+  [ -n "$plugin_root" ] || plugin_root="$(installed_plugin_root)"
   [ -n "$plugin_root" ] || return 0
   [ -d "$plugin_root" ] || return 0
-  printf '%s\n' "$ROOT" > "$plugin_root/.oh-my-setting-source-root" || true
+  # Never add cache metadata to the checked-in source tree.
+  [ "$(cd "$plugin_root" 2>/dev/null && pwd -P)" != "$ROOT/plugins/oh-my-setting" ] || return 0
+  oms_install_atomic_text "$ROOT" "$plugin_root/.oh-my-setting-source-root"
+  oms_install_atomic_text "$PLUGIN_HASH" "$plugin_root/.oh-my-setting-source-sha256"
+}
+
+refresh_stale_cache() {
+  local actual_hash
+
+  plugin_is_installed || return 0
+  [ -d "$PLUGIN_CACHE" ] || return 0
+  actual_hash="$(oms_install_tree_hash "$PLUGIN_CACHE")"
+  [ "$actual_hash" != "$PLUGIN_HASH" ] || return 0
+
+  echo "codex-plugin: refreshing stale cache for $PLUGIN_NAME@$PLUGIN_VERSION"
+  run_cmd codex plugin remove "$PLUGIN_NAME@$MARKETPLACE_NAME" || true
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "would remove cache: $PLUGIN_CACHE"
+  else
+    # Every path component above is fixed or restricted to a safe basename.
+    rm -rf "$PLUGIN_CACHE"
+  fi
 }
 
 install_plugin() {
@@ -120,6 +176,14 @@ if [ "$REMOVE" = "1" ]; then
   exit 0
 fi
 
+receipt="$(oms_install_receipt_path)"
+if [ -f "$receipt" ]; then
+  owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null)" ||
+    fail "invalid install receipt: $receipt"
+  [ "$owner" = "$ROOT" ] ||
+    fail "this checkout is not the canonical install owner: $ROOT (owner: $owner)"
+fi
+
 current_root="$(marketplace_root || true)"
 expected_a="$MARKETPLACE_FILE"
 expected_b="$ROOT"
@@ -140,6 +204,7 @@ else
   echo "codex-plugin: marketplace already registered ($MARKETPLACE_NAME)"
 fi
 
+refresh_stale_cache
 install_plugin
 if [ "$DRY_RUN" = "1" ]; then
   echo "codex-plugin: would install $PLUGIN_NAME@$MARKETPLACE_NAME"

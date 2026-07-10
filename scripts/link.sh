@@ -3,10 +3,14 @@ set -euo pipefail
 
 # Symlink rules, skills, prompts/workflows, and the oms dispatcher into all three agent CLIs.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STAMP="$(date +%Y%m%d%H%M%S)"
 # shellcheck source=scripts/lib/agent-install-state.sh
 . "$ROOT/scripts/lib/agent-install-state.sh"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
 
 backup_if_needed() {
   local target="$1"
@@ -18,7 +22,6 @@ backup_if_needed() {
     if [ "$current" = "$source" ]; then
       return 0
     fi
-    rm -f "$target"
     return 0
   fi
 
@@ -33,7 +36,7 @@ link_target() {
 
   mkdir -p "$(dirname "$target")"
   backup_if_needed "$target" "$source"
-  ln -sfn "$source" "$target"
+  oms_install_atomic_symlink "$source" "$target"
   echo "linked $target -> $source"
 }
 
@@ -93,21 +96,36 @@ PY
   done
 }
 
-if ! skill_validation="$("$ROOT/scripts/install-skills.sh" 2>&1)"; then
-  printf '%s\n' "$skill_validation" >&2
-  exit 1
-fi
-oms_ops_cleanup_legacy_links 0
+link_all() {
+  local skill_validation
+  local receipt
 
-link_target "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
-link_target "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
-# Antigravity global customizations root: rules at ~/.gemini/AGENTS.md,
-# skills under ~/.gemini/antigravity/skills.
-link_target "$ROOT/AGENTS.md" "$HOME/.gemini/AGENTS.md"
-link_skills "$HOME/.codex/skills"
-link_skills "$HOME/.claude/skills"
-link_skills "$HOME/.gemini/antigravity/skills"
-link_target "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
-link_target "$ROOT/workflows" "$HOME/.oh-my-setting-workflows"
-# The one-name dispatcher: `oms <tool>` from any agent CLI, no script paths.
-link_target "$ROOT/scripts/oms" "$HOME/.local/bin/oms"
+  if ! skill_validation="$("$ROOT/scripts/install-skills.sh" 2>&1)"; then
+    printf '%s\n' "$skill_validation" >&2
+    return 1
+  fi
+  oms_ops_cleanup_legacy_links 0
+
+  link_target "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
+  link_target "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+  # Antigravity global customizations root: rules at ~/.gemini/AGENTS.md,
+  # skills under ~/.gemini/antigravity/skills.
+  link_target "$ROOT/AGENTS.md" "$HOME/.gemini/AGENTS.md"
+  link_skills "$HOME/.codex/skills"
+  link_skills "$HOME/.claude/skills"
+  link_skills "$HOME/.gemini/antigravity/skills"
+  link_target "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
+  link_target "$ROOT/workflows" "$HOME/.oh-my-setting-workflows"
+  # The one-name dispatcher: `oms <tool>` from any agent CLI, no script paths.
+  link_target "$ROOT/scripts/oms" "$HOME/.local/bin/oms"
+
+  # This is the batch commit marker: interrupted relinks retain the previous
+  # owner and are diagnosed as drift rather than certifying a mixed install.
+  receipt="$(oms_install_receipt_path)"
+  oms_install_write_receipt "$ROOT" "$receipt"
+  echo "install receipt: $receipt"
+}
+
+# The receipt path is stable across checkouts, so concurrent link.sh runs for
+# the same HOME cannot interleave their global agent configuration.
+oms_with_file_lock "$(oms_install_receipt_path)" link_all

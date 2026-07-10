@@ -3,8 +3,12 @@ set -euo pipefail
 
 # Remove the symlinks link.sh created and restore the backups they replaced.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
 
 usage() {
   cat <<'EOF'
@@ -86,15 +90,42 @@ case "${1:-}" in
     ;;
 esac
 
-unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
-unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
-unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
-unlink_skills "$HOME/.codex/skills"
-unlink_skills "$HOME/.claude/skills"
-unlink_skills "$HOME/.gemini/antigravity/skills"
-# Legacy cleanup: pi support was removed from defaults; still unlink old installs.
-unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
-unlink_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
-unlink_and_restore "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
-unlink_and_restore "$HOME/.oh-my-setting-workflows" "$ROOT/workflows"
-unlink_and_restore "$HOME/.local/bin/oms" "$ROOT/scripts/oms"
+unlink_all() {
+  local receipt owner
+
+  unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
+  unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
+  unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
+  unlink_skills "$HOME/.codex/skills"
+  unlink_skills "$HOME/.claude/skills"
+  unlink_skills "$HOME/.gemini/antigravity/skills"
+  # Legacy cleanup: pi support was removed from defaults; still unlink old installs.
+  unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
+  unlink_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
+  unlink_and_restore "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
+  unlink_and_restore "$HOME/.oh-my-setting-workflows" "$ROOT/workflows"
+  unlink_and_restore "$HOME/.local/bin/oms" "$ROOT/scripts/oms"
+
+  receipt="$(oms_install_receipt_path)"
+  [ -f "$receipt" ] || return 0
+  owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null || true)"
+  if [ "$owner" != "$ROOT" ]; then
+    echo "keep: install receipt belongs to ${owner:-an invalid or unavailable owner}"
+    return 0
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "would remove install receipt $receipt"
+  else
+    rm -f "$receipt"
+    echo "removed install receipt $receipt"
+  fi
+}
+
+# Serialize uninstall against a concurrent relink. The receipt is removed only
+# when this checkout is the committed owner, so a foreign checkout cannot take
+# over or erase another installation's ownership record.
+if [ "$DRY_RUN" = "1" ]; then
+  unlink_all
+else
+  oms_with_file_lock "$(oms_install_receipt_path)" unlink_all
+fi

@@ -71,6 +71,9 @@ Common actions:
 ~/.oh-my-setting/scripts/agent-task.sh --repo . init --goal "Ship the focused fix" --verify "bash scripts/check.sh fast"
 ~/.oh-my-setting/scripts/agent-task.sh --repo . update --state "Patch drafted; tests still pending" --next "Run smoke tests"
 ~/.oh-my-setting/scripts/agent-task.sh --repo . append --agent codex --text "Review found one missing test."
+~/.oh-my-setting/scripts/agent-task.sh --repo . status
+~/.oh-my-setting/scripts/agent-task.sh --repo . verify --verification "bash scripts/check.sh fast passed"
+~/.oh-my-setting/scripts/agent-task.sh --repo . rotate --goal "Start the next focused task"
 ~/.oh-my-setting/scripts/agent-task.sh --repo . context
 ~/.oh-my-setting/scripts/agent-task.sh --repo . close
 ```
@@ -103,7 +106,9 @@ prompts. The task writer still scans content and refuses sensitive-looking
 entries. `turn-guard.sh` can block one final response when a guarded coding turn
 with repo changes or high risk omits verification status. Disable with
 `OMS_SKILL_ROUTER_OFF=1`, `OMS_AUTO_TASK_OFF=1`, or `OMS_TURN_GUARD_OFF=1` for a
-session.
+session. Provider subprocesses are marked as harness children; their hooks do
+not route, append tasks, or run the turn guard. They write only a hash-only
+`ignored_child` event to the primary state repo, never the delegated worktree.
 
 For live edits in the owning agent's tree, use `change-guard.sh` when scope
 drift or user edits are likely. It snapshots the current dirty files and
@@ -127,7 +132,9 @@ conclusion. Disable with `OMS_AGENT_TASK_CLOSE_MEMORY=0`.
 Where the task packet holds ONE active work item, `agent-plan.sh` holds a DAG
 of subtasks that can be split across the three agents: dependencies, path
 scope, and a verify command per task, with a
-ready -> claimed -> running -> review -> done lifecycle under a file lock.
+ready -> claimed -> running -> review -> landing -> done lifecycle under a
+file lock. Each claim gets a lease token. Harness workers capture it once;
+reclaim/re-claim invalidates stale workers and old GC markers.
 
 ```bash
 ~/.oh-my-setting/scripts/agent-plan.sh --repo . add --id t1 --title "Fix parser" --verify "bash scripts/check.sh fast"
@@ -155,8 +162,9 @@ without `--verify` it uses the task's stored verify command — so
   known-unresolved failure); `record --cmd ... --exit N --summary ...` a new
   one; `resolve --fingerprint FP` when fixed. Sensitive commands are refused.
 - `peer-delegate` writes a `.oms/delegations/<id>.json` liveness marker
-  while a worker runs (removed on exit); `oms state` shows live workers and
-  flags dead-pid orphans. No polling/daemon.
+  while a worker runs (removed on exit); it includes the task lease so GC can
+  release only the exact dead claim. `oms state` shows live workers and flags
+  dead-pid orphans. No polling/daemon.
 - `oms gc` (dry-run by default, `--apply` to act, `--days N`) reclaims aged
   transient `.oms/` state; it never touches open runs, the active task, or
   unresolved failures.
@@ -214,12 +222,12 @@ resolve to the primary repo's shared `.oms`, not the empty throwaway worktree)
 and `OMS_AGENT=<provider>` for attribution.
 
 Every provider call/delegation appends a compact row to
-`.oms/artifacts/index.jsonl`. Use `artifact-index.sh latest`, `latest-run`,
-`list`, or `failures` when resuming work or looking for the latest provider
-result; `latest-run` groups rows from the newest timestamp-PID run into a
-compact summary. The index is append-only, so `artifact-index.sh prune [N]`
-trims it to the most recent N rows, and `prune [N] --files` also removes
-unreferenced regular files under `.oms/artifacts/`. When an active task exists,
+`.oms/artifacts/index.jsonl`. Rows carry schema/event/operation/artifact IDs and
+optional run/task/delegation/parent lineage. Use `artifact-index.sh latest`,
+`latest-run`, `list`, `failures`, or `validate`; run `migrate` to upgrade legacy
+rows atomically and idempotently. Appends enforce high-water retention, while
+`prune [N] --files` applies an orphan grace period so it cannot delete a file a
+provider is still writing. When an active task exists,
 `agent-run.sh` also appends
 a one-line outcome with artifact and patch paths to `## Current State`.
 

@@ -10,9 +10,19 @@ set -euo pipefail
 # Codex gets equivalent hooks through install-codex-plugin.sh; this file only
 # manages Claude Code settings.json.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SETTINGS="${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 REMOVE=0
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
+
+if [ "${OMS_INSTALL_LOCK_HELD:-0}" != "1" ]; then
+  oms_with_file_lock "$(oms_install_receipt_path)" \
+    env OMS_INSTALL_LOCK_HELD=1 bash "$ROOT/scripts/install-claude-hooks.sh" "$@"
+  exit $?
+fi
 
 usage() {
   cat <<'EOF'
@@ -44,6 +54,13 @@ done
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$ROOT/scripts/skill-router.sh" ] || fail "skill-router.sh not found under $ROOT"
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
+
+if [ "$REMOVE" != "1" ] && [ -f "$(oms_install_receipt_path)" ]; then
+  owner="$(oms_install_receipt_owner "$(oms_install_receipt_path)" 2>/dev/null)" ||
+    fail "invalid install receipt: $(oms_install_receipt_path)"
+  [ "$owner" = "$ROOT" ] ||
+    fail "this checkout is not the canonical install owner: $ROOT (owner: $owner)"
+fi
 
 if [ "$REMOVE" = 1 ] && [ ! -f "$SETTINGS" ]; then
   echo "claude-hooks: nothing to remove ($SETTINGS absent)"

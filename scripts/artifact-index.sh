@@ -16,7 +16,7 @@ DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Usage: artifact-index.sh [options] [list|latest|latest-run|failures|prune] [N]
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|validate|migrate|prune] [N]
 
 Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.
@@ -26,6 +26,8 @@ Commands:
   latest         Show the most recent row.
   latest-run     Show a compact summary for the most recent run id.
   failures [N]   Show the last N non-zero-exit rows.
+  validate       Validate schema, lineage ids, paths, and references.
+  migrate        Idempotently upgrade legacy rows and recover unique basenames.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
                  append-only, so prune it when it grows. Add --files to delete
                  unreferenced regular files under REPO/.oms/artifacts.
@@ -34,7 +36,7 @@ Options:
   --repo PATH    Repo/directory. Default: PWD.
   --file PATH    Index path. Default: REPO/.oms/artifacts/index.jsonl.
   --files        With prune, delete orphaned artifact/patch files.
-  --dry-run      With prune --files, print file deletions without changing files.
+  --dry-run      With prune, print row/file changes without changing them.
   -h, --help     Show help.
 EOF
 }
@@ -64,7 +66,7 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=1
       shift
       ;;
-    list|latest|latest-run|failures|prune)
+    list|latest|latest-run|failures|validate|migrate|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
@@ -87,11 +89,14 @@ done
 if { [ "$ACTION" = "latest" ] || [ "$ACTION" = "latest-run" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
   fail "unknown argument: $LIMIT"
 fi
+if { [ "$ACTION" = "validate" ] || [ "$ACTION" = "migrate" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
+  fail "unknown argument: $LIMIT"
+fi
 if [ "$PRUNE_FILES" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--files is only valid with prune"
 fi
-if [ "$DRY_RUN" -eq 1 ] && { [ "$ACTION" != "prune" ] || [ "$PRUNE_FILES" -eq 0 ]; }; then
-  fail "--dry-run is only valid with prune --files"
+if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ]; then
+  fail "--dry-run is only valid with prune"
 fi
 if [ "$LIMIT_SET" -eq 0 ]; then
   [ "$ACTION" = "prune" ] && LIMIT="1000" || LIMIT="20"
@@ -106,6 +111,137 @@ REPO="$(oms_repo_root "$REPO")"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 [ -s "$INDEX_FILE" ] || fail "no artifact index at $INDEX_FILE"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+
+if [ "$ACTION" = "validate" ]; then
+  python3 - "$REPO" "$INDEX_FILE" <<'PY'
+import json, os, re, sys
+repo, index = sys.argv[1:]
+required = {"schema", "event_id", "operation_id", "artifact_id", "ts", "kind", "provider", "exit"}
+ids = set()
+errors = warnings = rows = 0
+for lineno, line in enumerate(open(index, encoding="utf-8", errors="replace"), 1):
+    if not line.strip():
+        continue
+    rows += 1
+    try:
+        row = json.loads(line)
+    except Exception as exc:
+        print(f"BAD line {lineno}: invalid JSON: {exc}")
+        errors += 1
+        continue
+    if not isinstance(row, dict):
+        print(f"BAD line {lineno}: row is not an object"); errors += 1; continue
+    missing = sorted(required - row.keys())
+    if missing:
+        print(f"BAD line {lineno}: missing {','.join(missing)}"); errors += 1
+    if row.get("schema") != 1:
+        print(f"BAD line {lineno}: schema={row.get('schema')!r}, expected 1"); errors += 1
+    eid = row.get("event_id")
+    if eid in ids:
+        print(f"BAD line {lineno}: duplicate event_id {eid}"); errors += 1
+    elif isinstance(eid, str):
+        ids.add(eid)
+    for key in ("artifact", "patch", "source"):
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        if not isinstance(value, str) or os.path.isabs(value) or value == ".." or value.startswith("../"):
+            print(f"BAD line {lineno}: unsafe {key} path"); errors += 1; continue
+        path = os.path.realpath(os.path.join(repo, value))
+        try:
+            inside = os.path.commonpath([os.path.realpath(repo), path]) == os.path.realpath(repo)
+        except ValueError:
+            inside = False
+        if not inside:
+            print(f"BAD line {lineno}: escaping {key} path"); errors += 1
+        elif not os.path.exists(path):
+            print(f"STALE line {lineno}: missing {key}={value}"); warnings += 1
+print(f"artifact-index: {rows} row(s), {errors} error(s), {warnings} stale reference(s)")
+sys.exit(1 if errors or warnings else 0)
+PY
+  exit $?
+fi
+
+if [ "$ACTION" = "migrate" ]; then
+  artifact_index_migrate_locked() {
+    python3 - "$REPO" "$INDEX_FILE" <<'PY'
+import hashlib, json, os, re, shutil, sys, tempfile
+repo, index = sys.argv[1:]
+root = os.path.join(repo, ".oms", "artifacts")
+all_files = {}
+for dirpath, _, files in os.walk(root):
+    for name in files:
+        all_files.setdefault(name, []).append(os.path.join(dirpath, name))
+
+def digest(path):
+    if not path or not os.path.isfile(path): return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""): h.update(chunk)
+    return h.hexdigest()
+
+def deterministic(prefix, row, lineno):
+    raw = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + f"#{lineno}"
+    return prefix + hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+def migrate_path(row, key):
+    value = row.get(key)
+    if not isinstance(value, str) or not value: return False
+    path = value if os.path.isabs(value) else os.path.join(repo, value)
+    real_repo = os.path.realpath(repo); real = os.path.realpath(path)
+    try: internal = os.path.commonpath([real_repo, real]) == real_repo
+    except ValueError: internal = False
+    if internal and os.path.exists(path):
+        rel = os.path.relpath(path, repo)
+        if row[key] != rel: row[key] = rel; return True
+        return False
+    matches = all_files.get(os.path.basename(value), [])
+    if len(matches) == 1:
+        row[key] = os.path.relpath(matches[0], repo)
+        return True
+    ext = {"name": os.path.basename(value), "owned": False, "legacy_unresolved": True}
+    h = digest(path)
+    if h: ext["sha256"] = h; ext.pop("legacy_unresolved", None)
+    row.pop(key, None); row[key + "_external"] = ext
+    return True
+
+rows = []; changed = legacy = 0
+for lineno, line in enumerate(open(index, encoding="utf-8", errors="replace"), 1):
+    if not line.strip(): continue
+    row = json.loads(line)
+    before = json.dumps(row, sort_keys=True, ensure_ascii=False)
+    was_legacy = row.get("schema") != 1
+    if was_legacy: legacy += 1
+    for key in ("artifact", "patch", "source"): migrate_path(row, key)
+    row["schema"] = 1
+    row.setdefault("event_id", deterministic("evt_legacy_", row, lineno))
+    legacy_op = ""
+    artifact = row.get("artifact", "")
+    m = re.search(r"([0-9]{8}T[0-9]{6}Z-[0-9]+)", os.path.basename(artifact))
+    if m: legacy_op = "op_legacy_" + m.group(1)
+    row.setdefault("operation_id", legacy_op or deterministic("op_legacy_", row, lineno))
+    primary = ""
+    for key in ("artifact", "patch"):
+        if row.get(key): primary = digest(os.path.join(repo, row[key])) or primary
+    row.setdefault("artifact_id", "sha256:" + (primary or hashlib.sha256(row["event_id"].encode()).hexdigest()))
+    if json.dumps(row, sort_keys=True, ensure_ascii=False) != before: changed += 1
+    rows.append(row)
+real = os.path.realpath(index)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        for row in rows: out.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+    shutil.copymode(real, tmp); os.replace(tmp, real)
+except Exception:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
+print(f"artifact-index: migrated {changed} row(s); legacy={legacy}; total={len(rows)}")
+PY
+  }
+  oms_with_file_lock "$INDEX_FILE" artifact_index_migrate_locked
+  exit 0
+fi
 
 if [ "$ACTION" = "prune" ]; then
   artifact_index_prune_locked() {
@@ -151,10 +287,16 @@ EOF
   fi
 
   if [ "$PRUNE_FILES" -eq 1 ]; then
-    python3 - "$REPO" "$INDEX_FILE" "$tmp" "$DRY_RUN" <<'EOF'
-import json, os, stat, sys
+    python3 - "$REPO" "$INDEX_FILE" "$tmp" "$DRY_RUN" "${OMS_ARTIFACT_ORPHAN_GRACE:-86400}" <<'EOF'
+import json, os, stat, sys, time
 
-repo, index_file, kept_index, dry = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+repo, index_file, kept_index, dry, grace_raw = sys.argv[1:]
+dry = dry == "1"
+try:
+    grace = max(0, int(grace_raw))
+except ValueError:
+    raise SystemExit("error: OMS_ARTIFACT_ORPHAN_GRACE must be a non-negative integer")
+now = time.time()
 artifacts_root = os.path.realpath(os.path.join(repo, ".oms", "artifacts"))
 index_real = os.path.realpath(index_file)
 
@@ -204,7 +346,7 @@ for dirpath, dirnames, filenames in os.walk(artifacts_root, followlinks=False):
             continue
         if real == index_real or name in ("index.jsonl", ".gitignore") or name.endswith(".lock"):
             continue
-        if real not in referenced:
+        if real not in referenced and now - st.st_mtime >= grace:
             orphans.append(path)
 
 count = 0
@@ -278,7 +420,15 @@ RUN_RE = re.compile(r".*-([0-9]{8}T[0-9]{6}Z-[0-9]+)(?:-r([0-9]+))?\.md$")
 
 
 def run_info(row):
+    operation = row.get("operation_id")
     artifact = row.get("artifact")
+    round_no = 0
+    if isinstance(artifact, str):
+        match = RUN_RE.match(os.path.basename(artifact))
+        if match:
+            round_no = int(match.group(2) or 0)
+    if isinstance(operation, str) and operation:
+        return operation, round_no
     if not isinstance(artifact, str) or not artifact:
         return None
     match = RUN_RE.match(os.path.basename(artifact))
@@ -312,7 +462,10 @@ def latest_run(rows):
             })
             continue
         run_id, round_no = parsed
-        run_ts = run_sort_ts(run_id)
+        try:
+            run_ts = run_sort_ts(run_id)
+        except Exception:
+            run_ts = str(row.get("ts", ""))
         group = by_run.get(run_id)
         if not group:
             group = {

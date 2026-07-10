@@ -138,6 +138,10 @@ tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh
   (`oms agent-task`), subtask DAG (`oms agent-plan`: `ready`,
   `next --claim --provider NAME`, `touch` to heartbeat a long claim, `reclaim`;
   `reclaim --include-review` requeues an abandoned review, keeping its patch).
+- Mark every provider subprocess as a harness child and preserve its captured
+  plan lease. Child hooks must not route, append tasks, run the turn guard, or
+  create `.oms` in a delegated worktree. A reclaimed lease must never be
+  refreshed from shared state by the stale worker.
 - Cross-agent work: route one provider through `oms agent-run --to NAME`
   (read-only pass vs isolated write worktree); give the worker a reusable
   persona with `oms peer-delegate --role NAME` (roles live in
@@ -146,6 +150,9 @@ tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh
   alone with `oms patch-admit`. `patch-land --plan-task ID` alone lands the
   patch the task stores; rejections are remembered in the fail-ledger, so
   never blindly re-land a patch it warns about.
+- Artifact rows use the schema-1 event envelope. Run `oms artifact-index
+  validate` after migration or repair; use `migrate` for legacy rows and `gc`
+  for bounded retention instead of editing the JSONL by hand.
 - Scope live edits with `oms change-guard` (`begin`/`check`/`end`) when user
   edits or scope drift are likely; abandoned guards show stale in `oms state`
   and are swept by gc.

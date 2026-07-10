@@ -37,6 +37,7 @@ STATE_FILTER=""
 CLAIM=0
 INCLUDE_RUNNING=0
 INCLUDE_REVIEW=0
+LEASE_ID="${OMS_PLAN_LEASE_ID:-}"
 
 usage() {
   cat <<'EOF'
@@ -48,11 +49,14 @@ Commands:
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
          [--verify CMD] [--role NAME]
   claim  --id ID --provider NAME [--ttl TEXT]   Claim a ready task for a worker.
-  start  --id ID                     Mark a claimed task running.
-  touch  --id ID                     Heartbeat a claimed/running task: refresh
+  start  --id ID [--lease-id TOKEN]  Mark a claimed task running.
+  touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
                                      claimed_at so a live worker is not reclaimed.
-  review --id ID [--artifact PATH] [--patch PATH]   Move a claimed/running task to review.
-  finish --id ID [--artifact PATH] [--patch PATH]   Mark a task done (from claimed/running/review).
+  review --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
+                                     Move a claimed/running task to review.
+  land   --id ID [--lease-id TOKEN]  Fence admitted claimed/running/review work while applying it.
+  finish --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
+                                     Mark a task done (from claimed/running/review/landing).
   block  --id ID --reason TEXT       Mark a task blocked.
   release --id ID                    Requeue a claimed/running/review task to ready (worker died).
   reclaim [--ttl SECONDS] [--include-running] [--include-review]
@@ -106,11 +110,12 @@ while [ "$#" -gt 0 ]; do
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
+    --lease-id) [ "$#" -ge 2 ] || fail "--lease-id requires value"; LEASE_ID="$2"; shift 2 ;;
     --claim) CLAIM=1; shift ;;
     --include-running) INCLUDE_RUNNING=1; shift ;;
     --include-review) INCLUDE_REVIEW=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|add|claim|start|touch|review|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief)
+    init|add|claim|start|touch|review|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -135,19 +140,20 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
   OMS_VERIFY="$VERIFY" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
-  OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW"
+  OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW" \
+  OMS_LEASE_ID="$LEASE_ID"
 
 plan_run() {
 python3 <<'PY'
-import json, os, re, sys, tempfile
+import json, os, re, secrets, sys, tempfile
 
-SCHEMA = 1
+SCHEMA = 2
 path = os.environ["OMS_PLAN_FILE"]
 act = os.environ["OMS_ACTION"]
 ts = os.environ["OMS_TS"]
 def env(k): return os.environ.get(k, "")
 
-STATES = {"ready", "claimed", "running", "review", "blocked", "done"}
+STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
 ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 def die(msg):
@@ -159,6 +165,10 @@ def load():
     with open(path, encoding="utf-8") as fh:
         d = json.load(fh)
     d.setdefault("tasks", {})
+    d["schema"] = SCHEMA
+    for task in d["tasks"].values():
+        task.setdefault("lease_epoch", 0)
+        task.setdefault("lease_id", "")
     return d
 
 def save(d):
@@ -182,6 +192,18 @@ def require_id():
 
 def deps_done(d, t):
     return all(d["tasks"].get(x, {}).get("state") == "done" for x in t.get("depends", []))
+
+def issue_lease(t):
+    t["lease_epoch"] = int(t.get("lease_epoch", 0)) + 1
+    t["lease_id"] = "lease_" + secrets.token_hex(16)
+
+def require_current_lease(t):
+    supplied = env("OMS_LEASE_ID")
+    current = t.get("lease_id", "")
+    if supplied and supplied != current:
+        die("task %s lease mismatch; worker is stale" % t["id"])
+    if env("OMS_HARNESS_CHILD") == "1" and current and not supplied:
+        die("task %s requires --lease-id for harness child mutation" % t["id"])
 
 def brief_text(t):
     lines = ["# Task %s: %s" % (t["id"], t["title"]), "state: %s" % t["state"]]
@@ -216,6 +238,7 @@ if act == "add":
         "verify": env("OMS_VERIFY"),
         "role": env("OMS_ROLE"),
         "provider": "", "ttl": "", "artifact": "", "patch": "", "reason": "",
+        "lease_epoch": 0, "lease_id": "", "review_lease_id": "",
         "created": ts, "updated": ts,
     }
     save(d); print("plan: added %s (%s)" % (i, title)); sys.exit(0)
@@ -225,13 +248,14 @@ def get_task(i):
     if not t: die("no such task: %s" % i)
     return t
 
-if act in ("claim", "start", "finish", "review", "block", "release", "reopen", "show", "touch"):
+if act in ("claim", "start", "finish", "review", "land", "block", "release", "reopen", "show", "touch"):
     i = require_id(); t = get_task(i)
     if act == "touch":
         # Heartbeat: a live worker refreshes claimed_at so reclaim's TTL clock
         # restarts and it is not mistaken for a dead worker mid-run.
         if t["state"] not in ("claimed", "running"):
             die("task %s is %s; only a claimed/running task can be touched" % (i, t["state"]))
+        require_current_lease(t)
         t["claimed_at"] = ts
     elif act == "claim":
         prov = env("OMS_PROVIDER")
@@ -242,33 +266,50 @@ if act in ("claim", "start", "finish", "review", "block", "release", "reopen", "
         if not deps_done(d, t):
             pending = [x for x in t["depends"] if tasks.get(x, {}).get("state") != "done"]
             die("task %s has unfinished dependencies: %s" % (i, ", ".join(pending)))
+        issue_lease(t)
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
                  claimed_at=ts, reason="")
     elif act == "start":
         if t["state"] != "claimed": die("task %s is %s; claim it first" % (i, t["state"]))
+        require_current_lease(t)
         t["state"] = "running"
     elif act == "review":
         if t["state"] not in ("claimed", "running"):
             die("task %s is %s; only a claimed/running task can go to review" % (i, t["state"]))
+        require_current_lease(t)
         t.update(state="review", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
-                 patch=env("OMS_PATCH") or t.get("patch", ""))
+                 patch=env("OMS_PATCH") or t.get("patch", ""),
+                 review_lease_id=t.get("lease_id", ""))
+    elif act == "land":
+        if t["state"] not in ("claimed", "running", "review"):
+            die("task %s is %s; only claimed/running/review work can enter landing" % (i, t["state"]))
+        require_current_lease(t)
+        if t["state"] == "review" and t.get("review_lease_id", "") != t.get("lease_id", ""):
+            die("task %s review patch lease mismatch; patch is stale" % i)
+        t["state"] = "landing"
     elif act == "finish":
         # Done means the work landed; reach it only after it was in progress.
-        if t["state"] not in ("claimed", "running", "review"):
-            die("task %s is %s; finish only from claimed/running/review" % (i, t["state"]))
+        if t["state"] not in ("claimed", "running", "review", "landing"):
+            die("task %s is %s; finish only from claimed/running/review/landing" % (i, t["state"]))
+        require_current_lease(t)
         t.update(state="done", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""))
     elif act == "block":
         r = env("OMS_REASON")
         if not r: die("--reason is required for block")
+        if t["state"] in ("claimed", "running", "review", "landing"):
+            require_current_lease(t)
         t.update(state="blocked", reason=r)
     elif act == "release":
         # Requeue a claimed/running task (e.g. the worker died) back to ready.
-        if t["state"] not in ("claimed", "running", "review"):
-            die("task %s is %s; only a claimed/running/review task can be released" % (i, t["state"]))
-        t.update(state="ready", provider="", ttl="", claimed_at="", reason="")
+        if t["state"] not in ("claimed", "running", "review", "landing"):
+            die("task %s is %s; only a claimed/running/review/landing task can be released" % (i, t["state"]))
+        require_current_lease(t)
+        t.update(state="ready", provider="", ttl="", claimed_at="", reason="", lease_id="")
     elif act == "reopen":
-        t.update(state="ready", provider="", ttl="", claimed_at="", reason="")
+        if t["state"] != "blocked":
+            die("task %s is %s; only a blocked task can be reopened" % (i, t["state"]))
+        t.update(state="ready", provider="", ttl="", claimed_at="", reason="", lease_id="")
     elif act == "show":
         print(json.dumps(t, ensure_ascii=False, indent=2)); sys.exit(0)
     t["updated"] = ts
@@ -324,7 +365,7 @@ if act == "reclaim":
             continue
         prov = t.get("provider", "") or "?"
         was = t["state"]
-        t.update(state="ready", provider="", ttl="", claimed_at="", reason="")
+        t.update(state="ready", provider="", ttl="", claimed_at="", reason="", lease_id="")
         t["updated"] = ts
         reclaimed += 1
         print("plan: reclaimed %s from %s (age %ss > ttl %ss, was @%s)" % (t["id"], was, age, ttl_s, prov))
@@ -348,6 +389,7 @@ if act == "next":
         prov = env("OMS_PROVIDER")
         if not prov:
             die("--claim requires --provider")
+        issue_lease(t)
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
                  claimed_at=ts, reason="")
         t["updated"] = ts
@@ -375,7 +417,7 @@ if act == "status":
     if d.get("goal"): print("goal: %s" % d["goal"])
     by = {}
     for t in tasks.values(): by[t["state"]] = by.get(t["state"], 0) + 1
-    order = ["ready", "claimed", "running", "review", "blocked", "done"]
+    order = ["ready", "claimed", "running", "review", "landing", "blocked", "done"]
     print("tasks: %d  [%s]" % (len(tasks),
         " ".join("%s=%d" % (s, by[s]) for s in order if by.get(s))))
     actionable = [t["id"] for t in ordered if t["state"] == "ready" and deps_done(d, t)]

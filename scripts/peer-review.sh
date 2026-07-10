@@ -465,6 +465,7 @@ if [ "$GATE" -eq 1 ]; then
 fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export OMS_OPERATION_ID="${OMS_OPERATION_ID:-review-$timestamp}"
 slug="$(slugify "$PROMPT")"
 [ -n "$slug" ] || slug="review"
 declare -a pids artifacts provider_names alive last_arts
@@ -514,18 +515,28 @@ elif [ -n "$SYNTHESIZE" ]; then
       set +e
       case "$SYNTHESIZE" in
         codex)
-          run_with_timeout codex exec --sandbox read-only - < "$synth_prompt_file" >> "$synth_file" 2>&1
+          (
+            ma_export_child_env codex peer-review-synthesis "$REPO" "$OMS_OPERATION_ID"
+            run_with_timeout codex exec --sandbox read-only - < "$synth_prompt_file"
+          ) >> "$synth_file" 2>&1
           synth_status=$?
           ;;
         claude)
-          run_with_timeout claude --permission-mode plan -p < "$synth_prompt_file" >> "$synth_file" 2>&1
+          (
+            ma_export_child_env claude peer-review-synthesis "$REPO" "$OMS_OPERATION_ID"
+            run_with_timeout claude --permission-mode plan -p < "$synth_prompt_file"
+          ) >> "$synth_file" 2>&1
           synth_status=$?
           ;;
         antigravity|agy)
           # Isolated read pass: see ma_agy_read_dir.
           synth_agy_dir="$(ma_agy_read_dir "$REPO")" || synth_agy_dir=""
           if [ -n "$synth_agy_dir" ]; then
-            (cd "$synth_agy_dir" && run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}" < "$synth_prompt_file") >> "$synth_file" 2>&1
+            (
+              ma_export_child_env antigravity peer-review-synthesis "$REPO" "$OMS_OPERATION_ID"
+              cd "$synth_agy_dir"
+              run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}" < "$synth_prompt_file"
+            ) >> "$synth_file" 2>&1
             synth_status=$?
             ma_agy_read_cleanup "$REPO" "$synth_agy_dir"
           else
