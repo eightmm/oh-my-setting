@@ -18,6 +18,8 @@ TO="${OMS_ADVISOR_PROVIDER:-}"
 PROMPT=""
 PROMPT_FILE=""
 INCLUDE_FAILURES=1
+STRATEGY="${OMS_ADVISOR_STRATEGY:-decision-advisor}"
+INCLUDE_STRATEGY=1
 PASSTHROUGH=()
 
 usage() {
@@ -37,6 +39,9 @@ Options:
                        Default: OMS_ADVISOR_PROVIDER, else the first
                        available provider that is not the caller (OMS_AGENT).
   --repo PATH          Repo for context and artifacts. Default: PWD.
+  --strategy NAME      Strategy/role profile (default: decision-advisor).
+                       Alias: --role NAME.
+  --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
   --no-memory          Do not attach shared harness memory.
   --no-task            Do not attach the active task handoff packet.
@@ -47,6 +52,7 @@ Options:
 
 Environment:
   OMS_ADVISOR_PROVIDER   Default advisor provider (overridden by --to).
+  OMS_ADVISOR_STRATEGY   Default strategy profile.
   OMS_AGENT              Caller identity; the default advisor avoids it.
 EOF
 }
@@ -72,6 +78,15 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--repo requires path"
       REPO="$2"
       shift 2
+      ;;
+    --strategy|--role)
+      [ "$#" -ge 2 ] || fail "$1 requires a name"
+      STRATEGY="$2"
+      shift 2
+      ;;
+    --no-strategy|--no-role)
+      INCLUDE_STRATEGY=0
+      shift
       ;;
     --no-failures)
       INCLUDE_FAILURES=0
@@ -108,6 +123,12 @@ elif [ -z "$PROMPT" ]; then
 fi
 [ -d "$REPO" ] || fail "repo not found: $REPO"
 REPO="$(cd "$REPO" && pwd)"
+
+strategy_file=""
+if [ "$INCLUDE_STRATEGY" -eq 1 ]; then
+  strategy_file="$("$SCRIPT_DIR/agent-role.sh" --repo "$REPO" --name "$STRATEGY" resolve)" ||
+    fail "advisor strategy not found: $STRATEGY"
+fi
 
 provider_cli_available() {
   case "$1" in
@@ -154,6 +175,11 @@ summary="$PROMPT"
 
 {
   printf 'Advisor request: %s\n\n' "$(printf '%s' "$summary" | head -c 120)"
+  if [ -n "$strategy_file" ]; then
+    printf '## Strategy profile: %s\n\n' "$STRATEGY"
+    cat "$strategy_file"
+    printf '\n\n'
+  fi
   printf 'You are the advisor for another coding agent at a decision point.\n'
   printf 'Be adversarial: your job is to catch the wrong branch before it is\n'
   printf 'taken, not to validate it. The caller consults you before\n'

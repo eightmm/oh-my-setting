@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Emit a deterministic SHA256SUMS manifest for the release-relevant tracked
-# files (installers, rules, scripts, skills, templates, plugins, and metadata).
+# files (installers, rules, scripts, skills, roles, templates, plugins, and
+# metadata).
 # Output is sorted by path so the same checkout always produces the same bytes,
 # and is suitable for `sha256sum -c`. Run from anywhere inside the checkout.
 
@@ -38,6 +39,7 @@ files="$(git ls-files \
   'scripts/lib/*.sh' \
   'scripts/lib/*.py' \
   'custom-skills/**' \
+  'roles/**' \
   'templates/**' \
   'plugins/**' \
   'prompts/**' \

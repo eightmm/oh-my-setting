@@ -7,7 +7,8 @@ set -euo pipefail
 # picks a role and injects it into a delegated worker's brief
 # (peer-delegate.sh --role NAME) or an agent-plan task's role field.
 # Repo roles live in .oms/roles/<name>.md; a global fallback lives under
-# ~/.oh-my-setting/local/roles so a role can be reused across repos.
+# ~/.oh-my-setting/local/roles so a role can be reused across repos. Bundled
+# provider-neutral defaults under ROOT/roles are the final fallback.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
@@ -23,8 +24,8 @@ usage() {
 Usage: agent-role.sh [options] <list|show|path|resolve|init>
 
 Manage named worker role profiles (.oms/roles/<name>.md; global fallback
-~/.oh-my-setting/local/roles/<name>.md). Roles are injected into a delegated
-worker brief with peer-delegate.sh --role NAME.
+~/.oh-my-setting/local/roles/<name>.md; bundled fallback ROOT/roles). Roles are
+injected into a delegated worker brief with peer-delegate.sh --role NAME.
 
 Options:
   --repo PATH   Repo for project-scoped roles (default: PWD, git-root anchored).
@@ -33,10 +34,10 @@ Options:
   -h, --help    Show help.
 
 Commands:
-  list      List available role names (repo then global; deduped).
-  show      Print the resolved role file (repo first, then global).
+  list      List available role names (repo, global, bundled; deduped).
+  show      Print the resolved role file (repo, then global, then bundled).
   path      Print where a role file lives for the chosen scope (may not exist).
-  resolve   Print the first existing role file path (repo then global);
+  resolve   Print the first existing role file path (repo, global, bundled);
             exit 3 if none. Used by peer-delegate.sh --role.
   init      Create a starter role file at the chosen scope if missing.
 EOF
@@ -52,6 +53,10 @@ roles_dir_project() {
 
 roles_dir_global() {
   printf '%s\n' "${OH_MY_SETTING_ROLES_DIR:-$HOME/.oh-my-setting/local/roles}"
+}
+
+roles_dir_bundled() {
+  printf '%s/roles\n' "$ROOT"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -78,12 +83,14 @@ esac
 
 proj_dir="$(roles_dir_project "$REPO" 2>/dev/null || true)"
 glob_dir="$(roles_dir_global)"
+bundled_dir="$(roles_dir_bundled)"
 
 case "$ACTION" in
   list)
     {
       [ -d "$proj_dir" ] && find "$proj_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
       [ -d "$glob_dir" ] && find "$glob_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
+      [ -d "$bundled_dir" ] && find "$bundled_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
       true
     } | while IFS= read -r f; do
       [ -n "$f" ] || continue
@@ -103,7 +110,11 @@ case "$ACTION" in
     resolved=""
     [ -n "$proj_dir" ] && [ -f "$proj_dir/$NAME.md" ] && resolved="$proj_dir/$NAME.md"
     [ -z "$resolved" ] && [ -f "$glob_dir/$NAME.md" ] && resolved="$glob_dir/$NAME.md"
-    [ -n "$resolved" ] || { echo "error: no role '$NAME' (looked in $proj_dir and $glob_dir)" >&2; exit 3; }
+    [ -z "$resolved" ] && [ -f "$bundled_dir/$NAME.md" ] && resolved="$bundled_dir/$NAME.md"
+    [ -n "$resolved" ] || {
+      echo "error: no role '$NAME' (looked in $proj_dir, $glob_dir, and $bundled_dir)" >&2
+      exit 3
+    }
     if [ "$ACTION" = "resolve" ]; then
       printf '%s\n' "$resolved"
     else

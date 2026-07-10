@@ -171,9 +171,10 @@ without `--verify` it uses the task's stored verify command — so
 
 ## Role Profiles
 
-A role is a reusable worker persona (a reviewer, a refactorer, a test-writer)
-kept as markdown in `.oms/roles/<name>.md` (global fallback
-`~/.oh-my-setting/local/roles`). It is data, not an orchestrator: the owning
+A role is a reusable worker strategy (advisor, auditor, implementer, reviewer,
+or test designer) kept as markdown in `.oms/roles/<name>.md` (global fallback
+`~/.oh-my-setting/local/roles`, then bundled defaults under `roles/`). It is
+data, not an orchestrator: the owning
 agent chooses a role and injects it into a delegated worker. The same role
 drives any of the three providers. To run several workers by role, the
 orchestrator delegates once per (role, task) — heavier isolated workers via the
@@ -188,6 +189,13 @@ harness, or lighter native sub-agents where the current CLI supports them.
 
 `--role` on delegate wins over a plan task's `role` field; an unknown role name
 fails fast.
+
+Native Codex subagents have no `--role` parameter. Resolve the same profile
+with `agent-role.sh --name NAME resolve`, read it, and prepend its full text to
+the native spawn message. Use the bundled mapping: `repo-auditor` for read-only
+exploration, `implementation-worker` for bounded edits, `test-designer` for
+test work, `patch-reviewer` for review, and `decision-advisor` for go/no-go
+judgment. The owning agent remains the judge and verifies the result.
 
 ## Individual Agent Runs
 
@@ -210,7 +218,7 @@ available provider that is not the caller (`OMS_ADVISOR_PROVIDER` or `--to`
 to pin). Artifacts land under `.oms/artifacts/advise/`.
 
 ```bash
-~/.oh-my-setting/scripts/advise.sh --prompt "Decision: land patch X now. Evidence: ... Options: ... Planned action: ..."
+~/.oh-my-setting/scripts/advise.sh --strategy decision-advisor --prompt "Decision: land patch X now. Evidence: ... Options: ... Planned action: ..."
 ```
 
 Read mode writes artifacts to `.oms/artifacts/call/`. Write mode runs the worker

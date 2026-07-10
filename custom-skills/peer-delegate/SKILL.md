@@ -74,8 +74,9 @@ Key flags beyond `--to`/`--brief-file`/`--verify`:
   brief hydrates from the task, `--verify` defaults to the task's stored
   verify command, and the task moves to review/done on success or is released
   on failure. `--to codex --plan-task t3` is a complete one-liner.
-- `--role NAME` — prepend a reusable worker persona from `.oms/roles/NAME.md`
-  (see `agent-role.sh`); wins over the plan task's `role` field.
+- `--role NAME` — prepend a reusable worker strategy from `.oms/roles/NAME.md`,
+  the global role store, or bundled defaults (see `agent-role.sh`); wins over
+  the plan task's `role` field.
 - `--repair N` — allow up to N verify-fail repair rounds (0-3): the worker
   gets the failing output back and retries before the delegation is failed.
 - `--no-verify` — skip verification (rarely right; the verify contract is what

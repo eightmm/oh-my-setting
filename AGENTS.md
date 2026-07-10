@@ -113,6 +113,29 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
   tiers when the tool exposes a tier or model option; otherwise leave the
   provider default.
 
+## Native Subagent Strategies
+
+Native Codex subagents use the same provider-neutral strategy profiles as the
+cross-CLI harness. Before spawning one, select exactly one profile and resolve
+it with `oms agent-role --repo . --name NAME resolve` (project override ->
+global override -> bundled default). Read the profile and prepend its full text
+to the native spawn message; native spawn APIs do not have a `--role` field.
+
+- Repository exploration or gap audit -> `repo-auditor`.
+- Bounded code change -> `implementation-worker`.
+- Test design or oracle review -> `test-designer`.
+- Diff or patch review -> `patch-reviewer`.
+- Irreversible decision or final go/no-go -> `decision-advisor`.
+
+The task message still needs concrete context, allowed paths, constraints,
+success criteria, and expected output; use
+`~/.oh-my-setting-prompts/native-subagent-brief.md` as the shape.
+Strategy text controls how the child works, not what task it owns.
+The parent remains the top-tier judge, verifies claims, and owns plan approval,
+landing, commit, push, release, and final synthesis. For a decision point, use
+the platform's native advisor with `decision-advisor` when available; otherwise
+run `oms advise --strategy decision-advisor`.
+
 ## Run Provenance & Coordination
 
 When the oh-my-setting harness is installed, prefer its tools over ad-hoc

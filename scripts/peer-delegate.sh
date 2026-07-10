@@ -44,8 +44,8 @@ never commits or pushes.
 Options:
   --to PROVIDER        Worker: codex, claude, or antigravity. Required.
   --prompt TEXT        Short task brief.
-  --role NAME          Prepend a reusable role profile (agent-role.sh:
-                       .oms/roles/NAME.md, global fallback) to the worker brief.
+  --role NAME          Prepend a reusable strategy profile (agent-role.sh:
+                       repo, global, then bundled fallback) to the worker brief.
                        Overrides a plan task's role field.
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
@@ -289,8 +289,8 @@ PY
   fi
 fi
 
-# Resolve a role profile (repo .oms/roles first, then global) and prepend it to
-# the worker brief so the same reusable role can drive any provider.
+# Resolve a role profile (repo, global, then bundled) and prepend it to the
+# worker brief so the same reusable strategy can drive any provider.
 if [ -n "$ROLE" ]; then
   role_file="$("$(ma_scripts_dir)/agent-role.sh" --repo "$REPO" --name "$ROLE" resolve 2>/dev/null)" ||
     fail "no role profile '$ROLE' (create one with agent-role.sh --name $ROLE init)"

@@ -3806,9 +3806,33 @@ test_advise_dry_run_composes_advisor_prompt() {
   artifact="$(find "$project/.oms/artifacts/advise" -type f -name 'codex-*.md' | head -n 1)"
   [ -n "$artifact" ] || fail "advise dry run should write artifact under .oms/artifacts/advise"
   assert_file_contains "$artifact" "VERDICT: proceed | revise | stop"
+  assert_file_contains "$artifact" "DECISION-ADVISOR-STRATEGY"
   assert_file_contains "$artifact" "Decision: land patch now. Evidence: smoke green."
   assert_file_contains "$artifact" "Known unresolved failures in this repo (fail-ledger)"
   assert_file_contains "$artifact" "DRY RUN: provider command skipped."
+
+  rm -rf "$project/.oms/artifacts/advise"
+  HOME="$home_dir" "$ROOT/scripts/advise.sh" \
+    --repo "$project" \
+    --to codex \
+    --strategy repo-auditor \
+    --prompt "Decision: inspect only" \
+    --dry-run >/dev/null
+  artifact="$(find "$project/.oms/artifacts/advise" -type f -name 'codex-*.md' | head -n 1)"
+  assert_file_contains "$artifact" "REPO-AUDITOR-STRATEGY"
+
+  rm -rf "$project/.oms/artifacts/advise"
+  HOME="$home_dir" "$ROOT/scripts/advise.sh" \
+    --repo "$project" \
+    --to codex \
+    --no-strategy \
+    --prompt "Decision: inspect without a strategy" \
+    --dry-run >/dev/null
+  artifact="$(find "$project/.oms/artifacts/advise" -type f -name 'codex-*.md' | head -n 1)"
+  assert_file_contains "$artifact" "Decision: inspect without a strategy"
+  if grep -Fq -- "-STRATEGY" "$artifact"; then
+    fail "advise --no-strategy should not inject a strategy profile"
+  fi
 }
 
 test_advise_no_failures_skips_ledger_section() {
@@ -5053,6 +5077,8 @@ test_gen_checksums_deterministic() {
     fail "should include marketplace metadata"
   printf '%s\n' "$a" | grep -Eq '  scripts/oms$' || fail "should include the oms dispatcher"
   printf '%s\n' "$a" | grep -Eq '  prompts/.+' || fail "should include installed prompts"
+  printf '%s\n' "$a" | grep -Eq '  roles/decision-advisor\.md$' ||
+    fail "should include bundled strategy profiles"
   printf '%s\n' "$a" | grep -Eq '  workflows/.+' || fail "should include installed workflows"
   # Every line must be valid sha256sum format: 64 hex + two spaces + path.
   if printf '%s\n' "$a" | grep -Evq '^[0-9a-f]{64}  '; then
@@ -7037,14 +7063,42 @@ test_delegate_plan_task_hydrates_from_subdir() {
 test_agent_role_and_delegate_injection() {
   local project="$TMP/role-inject"
   local empty_project="$TMP/role-empty"
+  local roles
 
   make_committed_repo "$empty_project"
-  [ -z "$(cd "$empty_project" && "$ROOT/scripts/agent-role.sh" list)" ] ||
-    fail "agent-role list should be empty before roles exist"
+  roles="$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+    "$ROOT/scripts/agent-role.sh" list)"
+  printf '%s\n' "$roles" | grep -Fxq decision-advisor ||
+    fail "agent-role list should include bundled decision-advisor"
+  printf '%s\n' "$roles" | grep -Fxq repo-auditor ||
+    fail "agent-role list should include bundled repo-auditor"
+  [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+    "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$ROOT/roles/decision-advisor.md" ] ||
+    fail "agent-role should fall back to bundled roles"
+  mkdir -p "$TMP/global-roles" "$empty_project/.oms/roles"
+  printf 'GLOBAL-ADVISOR\n' > "$TMP/global-roles/decision-advisor.md"
+  [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/global-roles" \
+    "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$TMP/global-roles/decision-advisor.md" ] ||
+    fail "global role should override the bundled default"
+  printf 'PROJECT-ADVISOR\n' > "$empty_project/.oms/roles/decision-advisor.md"
+  [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/global-roles" \
+    "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$empty_project/.oms/roles/decision-advisor.md" ] ||
+    fail "project role should override global and bundled defaults"
+  [ -f "$ROOT/prompts/native-subagent-brief.md" ] || fail "native subagent prompt template missing"
+  [ -f "$ROOT/prompts/decision-context.md" ] || fail "decision context prompt template missing"
+  grep -Fq 'Native Subagent Strategies' "$ROOT/AGENTS.md" ||
+    fail "global rules should route native Codex subagents through strategies"
+
+  ( cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+    OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --to codex --role implementation-worker --prompt "implement x" >/dev/null 2>&1 ) ||
+    fail "delegate should resolve a bundled role"
+  assert_one_artifact_contains "$empty_project/.oms/artifacts/delegate" 'codex-*.md' \
+    'IMPLEMENTATION-WORKER-STRATEGY'
   make_committed_repo "$project"
   ( cd "$project" && "$ROOT/scripts/agent-role.sh" --name reviewer init >/dev/null )
   printf '# Role: reviewer\n\nBe a STRICT-API-REVIEWER. Output GATE.\n' > "$project/.oms/roles/reviewer.md"
-  [ "$(cd "$project" && "$ROOT/scripts/agent-role.sh" list)" = "reviewer" ] ||
+  (cd "$project" && "$ROOT/scripts/agent-role.sh" list) | grep -Fxq reviewer ||
     fail "agent-role list should show the created role"
   ( cd "$project" && "$ROOT/scripts/agent-role.sh" --name reviewer resolve >/dev/null ) ||
     fail "agent-role resolve should find the role"
