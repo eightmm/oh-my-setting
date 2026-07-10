@@ -4461,6 +4461,21 @@ test_link_and_unlink_with_home_override() {
 }
 
 
+test_link_removes_dangling_owned_skill_links() {
+  local home_dir="$TMP/link-dangling"
+
+  mkdir -p "$home_dir/.codex/skills" "$home_dir/elsewhere"
+  ln -s "$ROOT/custom-skills/removed-skill" "$home_dir/.codex/skills/removed-skill"
+  ln -s "$home_dir/elsewhere/gone" "$home_dir/.codex/skills/foreign-dangling"
+
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+
+  [ ! -L "$home_dir/.codex/skills/removed-skill" ] ||
+    fail "dangling link owned by this checkout should be removed"
+  [ -L "$home_dir/.codex/skills/foreign-dangling" ] ||
+    fail "foreign dangling link should be preserved"
+}
+
 test_skill_doctor_detects_duplicate_names() {
   local home_dir="$TMP/skill-doctor-dup"
   mkdir -p "$home_dir/.codex/skills/a" "$home_dir/.codex/skills/b"
@@ -7823,6 +7838,7 @@ test_link_skills_round_trip_restores_existing_skill_dir
 test_uninstall_purge_guard_refuses_home_and_root
 test_backup_copies_all_config_targets
 test_link_and_unlink_with_home_override
+test_link_removes_dangling_owned_skill_links
 test_skill_doctor_detects_duplicate_names
 test_cleanup_dry_run_and_apply
 test_cleanup_prunes_stale_worktree_registration

@@ -43,6 +43,7 @@ link_skills() {
   local name
   local source
   local enabled_sources
+  local link
 
   mkdir -p "$target_root"
   oms_ops_clean_backup_skill_links "$target_root" 0
@@ -73,6 +74,21 @@ PY
     if [ -L "$target_root/$name" ] && [ "$(readlink "$target_root/$name")" = "$skill" ]; then
       rm -f "$target_root/$name"
       echo "unlinked disabled skill $target_root/$name"
+    fi
+  done
+
+  # Remove dangling links owned by this checkout: a renamed or deleted skill
+  # leaves its old link pointing at a custom-skills path that no longer
+  # exists. Foreign links (other targets) are preserved even when dangling.
+  for link in "$target_root"/*; do
+    [ -L "$link" ] || continue
+    case "$(readlink "$link")" in
+      "$ROOT/custom-skills/"*) ;;
+      *) continue ;;
+    esac
+    if [ ! -e "$link" ]; then
+      rm -f "$link"
+      echo "unlinked stale skill $link (target removed)"
     fi
   done
 }

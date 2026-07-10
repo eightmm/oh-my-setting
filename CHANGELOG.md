@@ -70,6 +70,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   documented in COMPONENTS.
 
 ### Fixed
+- `link.sh` now removes dangling skill links owned by the checkout (left
+  behind when a skill is renamed or removed), so renames like
+  `multi-agent-*` -> `peer-*` do not strand old links in agent skill dirs.
 - Crash-atomicity where the harness diverged from its own tmp+mv standard:
   the `.oms/runs/CURRENT` pointer (read locklessly by every auto-linking
   tool), the change-guard snapshot, and `artifact-index prune` (now an atomic
