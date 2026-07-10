@@ -13,8 +13,8 @@ ROOT="$(cd "$ROOT" && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
-# shellcheck source=scripts/lib/multi-agent-common.sh
-. "$ROOT_LIB/multi-agent-common.sh"
+# shellcheck source=scripts/lib/peer-common.sh
+. "$ROOT_LIB/peer-common.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
 

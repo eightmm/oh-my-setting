@@ -7,7 +7,7 @@ set -euo pipefail
 # current HEAD and run a checks ladder: it must still APPLY, parse, and pass the
 # project verification contract. Emit a compact admission report and a verdict;
 # exit nonzero unless every gate passes. This is the trust boundary between
-# multi-agent-delegate (which produces patches) and landing them.
+# peer-delegate (which produces patches) and landing them.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 ROOT="$(cd "$ROOT" && pwd)"
@@ -18,8 +18,8 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/harness-residue.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
-# shellcheck source=scripts/lib/multi-agent-common.sh
-. "$ROOT_LIB/multi-agent-common.sh"
+# shellcheck source=scripts/lib/peer-common.sh
+. "$ROOT_LIB/peer-common.sh"
 
 REPO="$PWD"
 PATCH=""

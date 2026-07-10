@@ -262,7 +262,7 @@ EOF
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T --verify true >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
 
-  HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/multi-agent-delegate.sh" \
+  HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" --plan-task t1 --no-verify \
     >"$project/out" 2>"$project/err" &
   dpid=$!
@@ -584,7 +584,7 @@ test_review_verdicts_subcommand() {
   printf '# antigravity review\n\n## Output\n\npartial output then death\n' \
     > "$dir/mixed/antigravity-x-$run.md"
 
-  out="$("$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/mixed")" && rc=0 || rc=$?
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/mixed")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "incomplete artifact should yield exit 2, got $rc"
   printf '%s' "$out" | grep -Fq 'codex: pass' || fail "missing codex pass"
   printf '%s' "$out" | grep -Fq 'claude: fail' || fail "missing claude fail"
@@ -593,14 +593,14 @@ test_review_verdicts_subcommand() {
   printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
     > "$dir/allpass/codex-x-$run.md"
   printf '# synthesis\n' > "$dir/allpass/_synthesis-x-$run.md"
-  out="$("$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/allpass")" && rc=0 || rc=$?
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/allpass")" && rc=0 || rc=$?
   [ "$rc" = "0" ] || fail "all-pass run should exit 0, got $rc"
   if printf '%s' "$out" | grep -q '_synthesis'; then
     fail "synthesis artifact must not be treated as a provider"
   fi
 
   mkdir -p "$dir/empty"
-  if "$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/empty" >/dev/null 2>&1; then
+  if "$ROOT/scripts/peer-review.sh" verdicts "$dir/empty" >/dev/null 2>&1; then
     fail "empty dir should exit nonzero"
   fi
 
@@ -613,7 +613,7 @@ test_review_verdicts_subcommand() {
   printf '# c\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' > "$dir/debate/claude-x-$run-r1.md"
   printf '# c\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' > "$dir/debate/antigravity-fix-r9-thing-$run.md"
 
-  out="$("$ROOT/scripts/multi-agent-review.sh" verdicts "$dir/debate")" && rc=0 || rc=$?
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/debate")" && rc=0 || rc=$?
   [ "$rc" = "1" ] || fail "debate run with a final-round fail should exit 1, got $rc"
   printf '%s' "$out" | grep -Fq 'codex: pass' || fail "codex must be judged on final round (r2 pass)"
   printf '%s' "$out" | grep -Fq 'claude: fail' || fail "claude must be judged on final round (r1 fail)"
@@ -1222,7 +1222,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -1231,7 +1231,7 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-run-*.md' 'check-contract-ran'
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -1366,7 +1366,7 @@ test_oms_self_ignore_created_for_harness_paths() {
   mkdir -p "$project"
   printf 'user-ignore\n' > "$project/.gitignore"
 
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$project/.oms/artifacts/ask" \
     --providers codex \
@@ -1500,14 +1500,14 @@ test_doctor_reports_malformed_run_state() {
   printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
 }
 
-test_multi_agent_export_only_and_import_result() {
+test_peer_export_only_and_import_result() {
   local project="$TMP/export-import"
   local artifact_dir="$project/artifacts"
   local export_artifact
   local import_artifact
 
   make_committed_repo "$project"
-  OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers claude \
@@ -1536,13 +1536,13 @@ test_multi_agent_export_only_and_import_result() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "ask-import"'
 }
 
-test_multi_agent_review_export_only_skips_cli() {
+test_peer_review_export_only_skips_cli() {
   local project="$TMP/review-export-only"
   local artifact_dir="$project/artifacts"
 
   make_committed_repo "$project"
   printf 'changed\n' >> "$project/file.txt"
-  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex,antigravity \
@@ -1578,7 +1578,7 @@ EOF
   chmod +x "$bin_dir/$binary"
 }
 
-test_multi_agent_review_gate_all_pass() {
+test_peer_review_gate_all_pass() {
   local project="$TMP/review-gate-pass"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -1589,7 +1589,7 @@ test_multi_agent_review_gate_all_pass() {
   write_fake_review_gate_provider "$bin_dir" claude pass
   write_fake_review_gate_provider "$bin_dir" antigravity pass
 
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers claude,antigravity \
@@ -1605,7 +1605,7 @@ test_multi_agent_review_gate_all_pass() {
   assert_one_artifact_contains "$artifact_dir" 'claude-gate-all-pass-*-r2.md' 'GATE: pass or GATE: fail.'
 }
 
-test_multi_agent_review_gate_fail_exits() {
+test_peer_review_gate_fail_exits() {
   local project="$TMP/review-gate-fail"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -1617,7 +1617,7 @@ test_multi_agent_review_gate_fail_exits() {
   write_fake_review_gate_provider "$bin_dir" claude pass
   write_fake_review_gate_provider "$bin_dir" antigravity fail
 
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers claude,antigravity \
@@ -1630,7 +1630,7 @@ test_multi_agent_review_gate_fail_exits() {
   assert_file_contains "$project/out" 'claude: pass'
 }
 
-test_multi_agent_review_gate_missing_exits() {
+test_peer_review_gate_missing_exits() {
   local project="$TMP/review-gate-missing"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -1641,7 +1641,7 @@ test_multi_agent_review_gate_missing_exits() {
   mkdir -p "$home_dir"
   write_fake_review_gate_provider "$bin_dir" claude omit
 
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers claude \
@@ -1653,7 +1653,7 @@ test_multi_agent_review_gate_missing_exits() {
   assert_file_contains "$project/out" 'claude: no-verdict'
 }
 
-test_multi_agent_review_gate_export_only() {
+test_peer_review_gate_export_only() {
   local project="$TMP/review-gate-export"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -1669,7 +1669,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OH_MY_SETTING_REVIEW_DRY_RUN=0 \
-    "$ROOT/scripts/multi-agent-review.sh" \
+    "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -1710,7 +1710,7 @@ test_import_index_links_source_prompt() {
   local source_rel
 
   make_committed_repo "$project"
-  OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers claude \
@@ -1733,12 +1733,12 @@ test_import_index_links_source_prompt() {
 }
 
 
-test_multi_agent_export_only_blocks_sensitive_prompt() {
+test_peer_export_only_blocks_sensitive_prompt() {
   local project="$TMP/export-scrub"
   local artifact_dir="$project/artifacts"
 
   make_committed_repo "$project"
-  if OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/multi-agent-ask.sh" \
+  if OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers claude \
@@ -1755,7 +1755,7 @@ test_multi_agent_export_only_blocks_sensitive_prompt() {
   fi
 }
 
-test_multi_agent_review_dry_run_artifacts() {
+test_peer_review_dry_run_artifacts() {
   local project="$TMP/review"
   local artifact_dir="$project/artifacts"
   local count
@@ -1770,7 +1770,7 @@ test_multi_agent_review_dry_run_artifacts() {
     commit -m init >/dev/null
   printf 'after\n' > "$project/file.txt"
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --prompt "Review current diff" >/dev/null
@@ -1780,12 +1780,12 @@ test_multi_agent_review_dry_run_artifacts() {
   assert_one_artifact_contains "$artifact_dir" 'codex-review-current-diff-*.md' 'DRY RUN'
   assert_one_artifact_contains "$artifact_dir" 'claude-review-current-diff-*.md' 'Question:'
   assert_one_artifact_contains "$artifact_dir" 'antigravity-review-current-diff-*.md' 'Diff:'
-  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' 'Multi-agent review synthesis'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' 'Peer review synthesis'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' '## codex'
 }
 
 
-test_multi_agent_review_base_ref_diff() {
+test_peer_review_base_ref_diff() {
   local project="$TMP/review-base-ref"
   local artifact_dir="$project/artifacts"
 
@@ -1804,7 +1804,7 @@ test_multi_agent_review_base_ref_diff() {
     -c user.name='Test User' \
     commit -m second >/dev/null
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --base HEAD~1 \
     --artifact-dir "$artifact_dir" \
@@ -1815,14 +1815,14 @@ test_multi_agent_review_base_ref_diff() {
   assert_one_artifact_contains "$artifact_dir" 'codex-review-base-ref-*.md' '+two'
 }
 
-test_multi_agent_review_invalid_base_fails() {
+test_peer_review_invalid_base_fails() {
   local project="$TMP/review-bad-base"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --base no-such-ref \
     --artifact-dir "$artifact_dir" \
@@ -1833,14 +1833,14 @@ test_multi_agent_review_invalid_base_fails() {
   assert_file_contains "$project/error" 'invalid --base ref'
 }
 
-test_multi_agent_review_synthesize_dry_run() {
+test_peer_review_synthesize_dry_run() {
   local project="$TMP/review-synthesize"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -1852,14 +1852,14 @@ test_multi_agent_review_synthesize_dry_run() {
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-mode-*.md' 'DRY RUN: synthesis pass skipped.'
 }
 
-test_multi_agent_review_synthesize_provider_override() {
+test_peer_review_synthesize_provider_override() {
   local project="$TMP/review-synthesize-codex"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -1870,7 +1870,7 @@ test_multi_agent_review_synthesize_provider_override() {
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-override-*.md' '## Synthesis (codex)'
 }
 
-test_multi_agent_debate_prompt_fences_external_output() {
+test_peer_debate_prompt_fences_external_output() {
   local project="$TMP/debate-fence"
   local artifact_dir="$project/artifacts"
   local artifact
@@ -1879,7 +1879,7 @@ test_multi_agent_debate_prompt_fences_external_output() {
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex,claude \
@@ -1897,7 +1897,7 @@ test_multi_agent_debate_prompt_fences_external_output() {
 }
 
 
-test_multi_agent_review_debate_dry_run() {
+test_peer_review_debate_dry_run() {
   local project="$TMP/review-debate"
   local artifact_dir="$project/artifacts"
   local count
@@ -1905,7 +1905,7 @@ test_multi_agent_review_debate_dry_run() {
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex,claude \
@@ -1920,7 +1920,7 @@ test_multi_agent_review_debate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-with-debate-*.md' 'debate rounds: 1'
 }
 
-test_multi_agent_review_ml_preset() {
+test_peer_review_ml_preset() {
   local project="$TMP/review-ml-preset"
   local artifact_dir="$project/artifacts"
 
@@ -1930,7 +1930,7 @@ test_multi_agent_review_ml_preset() {
   printf '%s\n' '# PROJECT.md' '- State: confirmed' '- Goal: Review cold-target DTI' '- Data manifest: dti-v1' > "$project/PROJECT.md"
   printf '%s\n' '{"schema":2,"name":"dti-v1","id_column":"pair_id","leakage_keys":["target_family"],"splits":[{"label":"train"},{"label":"test"}]}' > "$project/.oms/manifests/dti-v1.json"
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -1946,12 +1946,12 @@ test_multi_agent_review_ml_preset() {
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'dti-v1'
 }
 
-test_multi_agent_review_default_prompt_requires_ml() {
+test_peer_review_default_prompt_requires_ml() {
   local project="$TMP/review-no-prompt"
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$project/artifacts" \
     --no-diff >/dev/null 2>"$project/error"; then
@@ -1960,7 +1960,7 @@ test_multi_agent_review_default_prompt_requires_ml() {
   assert_file_contains "$project/error" '--prompt is required'
 }
 
-test_multi_agent_review_excludes_private_status() {
+test_peer_review_excludes_private_status() {
   local project="$TMP/review-private-status"
   local artifact_dir="$project/artifacts"
   local artifact
@@ -1976,7 +1976,7 @@ test_multi_agent_review_excludes_private_status() {
   printf 'changed\n' > "$project/file.txt"
   printf 'API_%s=not-real\n' 'KEY' > "$project/.env.local"
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -1990,7 +1990,7 @@ test_multi_agent_review_excludes_private_status() {
   fi
 }
 
-test_multi_agent_review_secret_diff_skips_external() {
+test_peer_review_secret_diff_skips_external() {
   local project="$TMP/review-secret-diff"
   local artifact_dir="$project/artifacts"
 
@@ -2004,7 +2004,7 @@ test_multi_agent_review_secret_diff_skips_external() {
     commit -m init >/dev/null
   printf 'api_%s = "not-real"\n' 'key' >> "$project/file.txt"
 
-  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --prompt "Review secret gate" >/dev/null 2>"$project/error"; then
@@ -2016,14 +2016,14 @@ test_multi_agent_review_secret_diff_skips_external() {
     fail "secret-like diff should not write provider artifacts"
 }
 
-test_multi_agent_review_no_diff_provider_subset() {
+test_peer_review_no_diff_provider_subset() {
   local project="$TMP/review-no-diff"
   local artifact_dir="$project/artifacts"
   local count
 
   mkdir -p "$project"
   git -C "$project" init >/dev/null
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers antigravity \
@@ -2037,14 +2037,14 @@ test_multi_agent_review_no_diff_provider_subset() {
 }
 
 
-test_multi_agent_review_rejects_unknown_provider() {
+test_peer_review_rejects_unknown_provider() {
   local project="$TMP/review-bad-provider"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  if OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers '../outside' \
@@ -2057,10 +2057,10 @@ test_multi_agent_review_rejects_unknown_provider() {
   [ ! -e "$project/outside-review-bad-provider" ] || fail "provider path traversal should not write outside artifact dir"
 }
 
-test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir() {
+test_peer_ask_rejects_unknown_provider_before_artifact_dir() {
   local dir="$TMP/ask-bad-provider"
 
-  if "$ROOT/scripts/multi-agent-ask.sh" --prompt q --providers nope \
+  if "$ROOT/scripts/peer-ask.sh" --prompt q --providers nope \
       --artifact-dir "$dir" --dry-run >/dev/null 2>"$TMP/ask-bad-provider.err"; then
     fail "ask should reject unknown provider"
   fi
@@ -2069,12 +2069,12 @@ test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir() {
   assert_not_exists "$dir"
 }
 
-test_multi_agent_review_rejects_bad_synthesize_provider() {
+test_peer_review_rejects_bad_synthesize_provider() {
   local repo="$TMP/review-bad-synth"
 
   make_committed_repo "$repo"
 
-  if "$ROOT/scripts/multi-agent-review.sh" --synthesize nope --prompt q \
+  if "$ROOT/scripts/peer-review.sh" --synthesize nope --prompt q \
       --repo "$repo" --no-diff --dry-run >/dev/null 2>"$repo/error"; then
     fail "review should reject bad synthesize provider"
   fi
@@ -2082,7 +2082,7 @@ test_multi_agent_review_rejects_bad_synthesize_provider() {
   assert_file_contains "$repo/error" "--synthesize provider must be codex, claude, antigravity, or agy"
 }
 
-test_multi_agent_review_single_provider_failure_exits() {
+test_peer_review_single_provider_failure_exits() {
   local project="$TMP/review-provider-failure"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -2096,7 +2096,7 @@ exit 42
 EOF
   chmod +x "$bin_dir/codex"
 
-  if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+  if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -2183,7 +2183,7 @@ EOF
   chmod +x "$bin_dir/$binary"
 }
 
-test_multi_agent_ask_debate_tracks_dropout() {
+test_peer_ask_debate_tracks_dropout() {
   local project="$TMP/ask-debate-dropout"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -2197,7 +2197,7 @@ test_multi_agent_ask_debate_tracks_dropout() {
   write_fake_debate_provider "$bin_dir" antigravity 0
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-ask.sh" \
+    "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex,claude,antigravity \
@@ -2219,7 +2219,7 @@ test_multi_agent_ask_debate_tracks_dropout() {
   assert_file_contains "$project/err" "note: debate dropped providers: claude; their last successful round's answer was used for synthesis"
 }
 
-test_multi_agent_ask_debate_skips_after_dropouts() {
+test_peer_ask_debate_skips_after_dropouts() {
   local project="$TMP/ask-debate-skip"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -2232,7 +2232,7 @@ test_multi_agent_ask_debate_skips_after_dropouts() {
   write_fake_debate_provider "$bin_dir" antigravity 1
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-ask.sh" \
+    "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex,claude,antigravity \
@@ -2245,7 +2245,7 @@ test_multi_agent_ask_debate_skips_after_dropouts() {
   assert_file_contains "$project/out" 'summary: 3/3 providers succeeded (2 dropped during debate)'
 }
 
-test_multi_agent_ask_debate_sanitizes_provider_auth_noise() {
+test_peer_ask_debate_sanitizes_provider_auth_noise() {
   local project="$TMP/ask-debate-sanitize"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -2257,7 +2257,7 @@ test_multi_agent_ask_debate_sanitizes_provider_auth_noise() {
   write_fake_auth_noise_debate_provider "$bin_dir" claude
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-ask.sh" \
+    "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex,claude \
@@ -2272,7 +2272,7 @@ test_multi_agent_ask_debate_sanitizes_provider_auth_noise() {
   assert_file_contains "$project/out" 'summary: 2/2 providers succeeded'
 }
 
-test_multi_agent_prompt_injects_loop_warnings() {
+test_peer_prompt_injects_loop_warnings() {
   local project="$TMP/ask-loop-warning"
   local artifact_dir="$project/artifacts"
   local home_dir="$project/home"
@@ -2293,7 +2293,7 @@ test_multi_agent_prompt_injects_loop_warnings() {
     --last-failure "bash scripts/check.sh fast exit=1" >/dev/null
   printf 'line one\nline two\n' >> "$project/file.txt"
 
-  HOME="$home_dir" OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  HOME="$home_dir" OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -2304,7 +2304,7 @@ test_multi_agent_prompt_injects_loop_warnings() {
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-loop-warnings-*.md' 'do not repeat the same approach'
 }
 
-test_multi_agent_ask_all_round1_failures_exit() {
+test_peer_ask_all_round1_failures_exit() {
   local project="$TMP/ask-all-fail"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -2317,7 +2317,7 @@ test_multi_agent_ask_all_round1_failures_exit() {
   write_fake_debate_provider "$bin_dir" antigravity 0 1
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-ask.sh" \
+    "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex,claude,antigravity \
@@ -2329,12 +2329,12 @@ test_multi_agent_ask_all_round1_failures_exit() {
   assert_file_contains "$project/out" 'summary: 0/3 providers succeeded'
 }
 
-test_multi_agent_ask_hypothesis_preset() {
+test_peer_ask_hypothesis_preset() {
   local project="$TMP/ask-hypothesis"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
@@ -2345,7 +2345,7 @@ test_multi_agent_ask_hypothesis_preset() {
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'Falsifiability'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'cannot falsify the hypothesis'
 
-  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" --artifact-dir "$artifact_dir" --providers codex --hypothesis \
     >/dev/null 2>"$project/herr"; then
     fail "--hypothesis without a prompt should fail"
@@ -2355,20 +2355,20 @@ test_multi_agent_ask_hypothesis_preset() {
   # A positional prompt also satisfies --hypothesis (same PROMPT slot).
   local pos="$TMP/ask-hypothesis-pos"
   mkdir -p "$pos"
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$pos" --artifact-dir "$pos/artifacts" --providers codex --hypothesis \
     "Hypothesis: x improves M. Plan: one subset run." >/dev/null ||
     fail "--hypothesis with a positional prompt should run"
   assert_one_artifact_contains "$pos/artifacts" 'codex-*.md' 'pre-registration design review'
 }
 
-test_multi_agent_ask_dry_run_no_repo() {
+test_peer_ask_dry_run_no_repo() {
   local project="$TMP/ask-no-repo"
   local artifact_dir="$project/artifacts"
   local count
 
   mkdir -p "$project"
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --artifact-dir "$artifact_dir" \
     --prompt "Compare two implementation options" >/dev/null
 
@@ -2377,10 +2377,10 @@ test_multi_agent_ask_dry_run_no_repo() {
   assert_one_artifact_contains "$artifact_dir" 'codex-compare-two-implementation-options-*.md' 'Repository context: omitted.'
   assert_one_artifact_contains "$artifact_dir" 'claude-compare-two-implementation-options-*.md' 'DRY RUN'
   assert_one_artifact_contains "$artifact_dir" 'antigravity-compare-two-implementation-options-*.md' 'Answer:'
-  assert_one_artifact_contains "$artifact_dir" '_synthesis-compare-two-implementation-options-*.md' 'Multi-agent ask synthesis'
+  assert_one_artifact_contains "$artifact_dir" '_synthesis-compare-two-implementation-options-*.md' 'Peer ask synthesis'
 }
 
-test_multi_agent_ask_repo_context_subset() {
+test_peer_ask_repo_context_subset() {
   local project="$TMP/ask-repo-context"
   local artifact_dir="$project/artifacts"
   local count
@@ -2396,7 +2396,7 @@ test_multi_agent_ask_repo_context_subset() {
   printf 'after\n' > "$project/file.txt"
   printf 'API_%s=not-real\n' 'KEY' > "$project/.env.local"
 
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --repo-context \
     --artifact-dir "$artifact_dir" \
@@ -2412,7 +2412,7 @@ test_multi_agent_ask_repo_context_subset() {
   fi
 }
 
-test_multi_agent_ask_secret_diff_skips_external() {
+test_peer_ask_secret_diff_skips_external() {
   local project="$TMP/ask-secret-diff"
   local artifact_dir="$project/artifacts"
 
@@ -2426,7 +2426,7 @@ test_multi_agent_ask_secret_diff_skips_external() {
     commit -m init >/dev/null
   printf 'api_%s = "not-real"\n' 'key' >> "$project/file.txt"
 
-  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --diff \
     --artifact-dir "$artifact_dir" \
@@ -2439,39 +2439,39 @@ test_multi_agent_ask_secret_diff_skips_external() {
     fail "secret-like ask diff should not write provider artifacts"
 }
 
-test_multi_agent_review_print_timeout() {
+test_peer_review_print_timeout() {
   local project="$TMP/review-timeout"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
   git -C "$project" init >/dev/null
 
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --print-timeout 10m \
     --prompt "Review with custom print timeout" >/dev/null
 }
 
-test_multi_agent_ask_print_timeout() {
+test_peer_ask_print_timeout() {
   local project="$TMP/ask-timeout"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
 
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --artifact-dir "$artifact_dir" \
     --print-timeout 10m \
     --prompt "Ask with custom print timeout" >/dev/null
 }
 
-test_multi_agent_ask_debate_dry_run() {
+test_peer_ask_debate_dry_run() {
   local project="$TMP/ask-debate"
   local artifact_dir="$project/artifacts"
   local count
 
   mkdir -p "$project"
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --artifact-dir "$artifact_dir" \
     --debate 1 \
     --prompt "Debate two options" >/dev/null
@@ -2485,12 +2485,12 @@ test_multi_agent_ask_debate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" '_synthesis-debate-two-options-*.md' '_final answer after debate_'
 }
 
-test_multi_agent_ask_debate_needs_two_providers() {
+test_peer_ask_debate_needs_two_providers() {
   local project="$TMP/ask-debate-single"
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project"
-  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
     --debate 1 \
@@ -2502,11 +2502,11 @@ test_multi_agent_ask_debate_needs_two_providers() {
   fi
 }
 
-test_multi_agent_ask_rejects_bad_debate_count() {
+test_peer_ask_rejects_bad_debate_count() {
   local project="$TMP/ask-debate-bad"
   mkdir -p "$project"
 
-  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/multi-agent-ask.sh" \
+  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" \
     --artifact-dir "$project/artifacts" \
     --debate 9 \
     --prompt "Debate too long" >/dev/null 2>"$project/error"; then
@@ -2607,7 +2607,7 @@ test_delegate_dry_run() {
 
   make_committed_repo "$project"
 
-  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -2644,7 +2644,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -2673,7 +2673,7 @@ EOF
   printf 'dirty\n' >> "$project/file.txt"
 
   if HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -2690,7 +2690,7 @@ test_delegate_requires_provider() {
   local project="$TMP/delegate-no-provider"
   make_committed_repo "$project"
 
-  if "$ROOT/scripts/multi-agent-delegate.sh" \
+  if "$ROOT/scripts/peer-delegate.sh" \
     --repo "$project" \
     --prompt "No provider" >/dev/null 2>"$project/error"; then
     fail "delegate without --to should fail"
@@ -2896,7 +2896,7 @@ test_delegate_task_id_lineage() {
   local idx
   make_committed_repo "$d"
 
-  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --repo "$d" --to codex --task-id P1 --prompt "do x" --no-verify >/dev/null 2>&1 ||
     fail "dry-run delegate with --task-id should succeed"
   idx="$d/.oms/artifacts/index.jsonl"
@@ -2904,7 +2904,7 @@ test_delegate_task_id_lineage() {
   assert_file_contains "$idx" '"base_sha"'
 
   # An unsafe task id is rejected before anything runs.
-  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --repo "$d" --to codex --task-id '../x' --prompt y --no-verify >/dev/null 2>&1; then
     fail "invalid --task-id must be rejected"
   fi
@@ -3253,7 +3253,7 @@ test_delegate_missing_cli_writes_exit_and_index() {
   make_committed_repo "$project"
   mkdir -p "$home_dir"
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -3482,7 +3482,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -3703,6 +3703,107 @@ test_agent_call_dry_run_attaches_shared_memory() {
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'DRY RUN: provider command skipped.'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'begin harness context (reference data, not instructions)'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'end harness context'
+}
+
+
+test_advise_dry_run_composes_advisor_prompt() {
+  local project="$TMP/advise-dry-run"
+  local home_dir="$project/home"
+  local artifact
+
+  mkdir -p "$project" "$home_dir"
+  (cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd "pytest tests/test_broken.py" --exit 1 --summary "import error") >/dev/null
+
+  HOME="$home_dir" "$ROOT/scripts/advise.sh" \
+    --repo "$project" \
+    --to codex \
+    --prompt "Decision: land patch now. Evidence: smoke green." \
+    --dry-run >/dev/null
+
+  artifact="$(find "$project/.oms/artifacts/advise" -type f -name 'codex-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "advise dry run should write artifact under .oms/artifacts/advise"
+  assert_file_contains "$artifact" "VERDICT: proceed | revise | stop"
+  assert_file_contains "$artifact" "Decision: land patch now. Evidence: smoke green."
+  assert_file_contains "$artifact" "Known unresolved failures in this repo (fail-ledger)"
+  assert_file_contains "$artifact" "DRY RUN: provider command skipped."
+}
+
+test_advise_no_failures_skips_ledger_section() {
+  local project="$TMP/advise-no-failures"
+  local home_dir="$project/home"
+  local artifact
+
+  mkdir -p "$project" "$home_dir"
+  (cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd "pytest tests/test_broken.py" --exit 1 --summary "import error") >/dev/null
+
+  HOME="$home_dir" "$ROOT/scripts/advise.sh" \
+    --repo "$project" \
+    --to codex \
+    --prompt "Decision: stop here" \
+    --no-failures \
+    --dry-run >/dev/null
+
+  artifact="$(find "$project/.oms/artifacts/advise" -type f -name 'codex-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "advise --no-failures should still write artifact"
+  if grep -Fq "Known unresolved failures" "$artifact"; then
+    fail "--no-failures should skip the fail-ledger section"
+  fi
+}
+
+test_advise_picks_provider_that_is_not_caller() {
+  local project="$TMP/advise-pick"
+  local home_dir="$project/home"
+  local bin_dir="$project/bin"
+
+  mkdir -p "$project" "$home_dir" "$bin_dir"
+  printf '#!/bin/sh\nexit 0\n' > "$bin_dir/codex"
+  printf '#!/bin/sh\nexit 0\n' > "$bin_dir/claude"
+  chmod +x "$bin_dir/codex" "$bin_dir/claude"
+
+  HOME="$home_dir" PATH="$bin_dir:$PATH" OMS_AGENT=claude "$ROOT/scripts/advise.sh" \
+    --repo "$project" \
+    --prompt "Decision: choose advisor" \
+    --dry-run >/dev/null
+
+  find "$project/.oms/artifacts/advise" -type f -name 'codex-*.md' | grep -q . ||
+    fail "default advisor should avoid the calling agent (claude -> codex)"
+
+  HOME="$home_dir" OMS_ADVISOR_PROVIDER=antigravity "$ROOT/scripts/advise.sh" \
+    --repo "$project" \
+    --prompt "Decision: pin advisor" \
+    --dry-run >/dev/null
+
+  find "$project/.oms/artifacts/advise" -type f -name 'antigravity-*.md' | grep -q . ||
+    fail "OMS_ADVISOR_PROVIDER should pin the advisor provider"
+}
+
+test_peer_shims_redirect_with_deprecation() {
+  local shim
+  local out
+  local err
+
+  for shim in multi-agent-ask multi-agent-review multi-agent-delegate; do
+    out="$TMP/shim-$shim.out"
+    err="$TMP/shim-$shim.err"
+    "$ROOT/scripts/$shim.sh" --help >"$out" 2>"$err" ||
+      fail "$shim.sh --help should exit 0 via shim"
+    grep -Fq "deprecated" "$err" || fail "$shim.sh should print deprecation note"
+    grep -Fq "peer-" "$out" || fail "$shim.sh should dispatch to its peer-* script"
+  done
+}
+
+test_peer_env_var_back_compat() {
+  local out
+
+  out="$(OMS_MULTI_AGENT_TIMEOUT=7m bash -c \
+    ". '$ROOT/scripts/lib/peer-common.sh'; printf '%s' \"\$OMS_PEER_TIMEOUT\"")"
+  [ "$out" = "7m" ] || fail "OMS_MULTI_AGENT_TIMEOUT should back-fill OMS_PEER_TIMEOUT, got: $out"
+
+  out="$(OMS_MULTI_AGENT_TIMEOUT=7m OMS_PEER_TIMEOUT=2m bash -c \
+    ". '$ROOT/scripts/lib/peer-common.sh'; printf '%s' \"\$OMS_PEER_TIMEOUT\"")"
+  [ "$out" = "2m" ] || fail "explicit OMS_PEER_TIMEOUT should win over legacy name, got: $out"
 }
 
 
@@ -3969,7 +4070,7 @@ EOF
 test_review_diff_side_blocks_env_token() {
   local diff="$TMP/env-token.diff"
   printf '+GITHUB_TOK%s=ghx-not-real\n' "EN" > "$diff"
-  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; contains_sensitive_content '$diff'" ||
+  bash -c ". '$ROOT/scripts/lib/peer-common.sh'; contains_sensitive_content '$diff'" ||
     fail "diff-side check should block env-style tokens"
 }
 
@@ -4319,15 +4420,15 @@ test_link_and_unlink_with_home_override() {
   local home_dir="$TMP/link-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
     "$home_dir/.pi/agent/skills" "$home_dir/.gemini" "$home_dir/old-skills"
-  ln -s "$home_dir/old-skills/multi-agent-ask" \
-    "$home_dir/.codex/skills/multi-agent-ask"
-  ln -s "$home_dir/old-skills/multi-agent-review" \
-    "$home_dir/.codex/skills/multi-agent-review.backup.legacy"
+  ln -s "$home_dir/old-skills/peer-ask" \
+    "$home_dir/.codex/skills/peer-ask"
+  ln -s "$home_dir/old-skills/peer-review" \
+    "$home_dir/.codex/skills/peer-review.backup.legacy"
   ln -s "$ROOT/custom-skills" "$home_dir/.codex/skills/oh-my-setting"
-  ln -s "$ROOT/custom-skills/multi-agent-ask" \
-    "$home_dir/.agents/skills/multi-agent-ask"
-  ln -s "$ROOT/custom-skills/multi-agent-review" \
-    "$home_dir/.pi/agent/skills/multi-agent-review"
+  ln -s "$ROOT/custom-skills/peer-ask" \
+    "$home_dir/.agents/skills/peer-ask"
+  ln -s "$ROOT/custom-skills/peer-review" \
+    "$home_dir/.pi/agent/skills/peer-review"
   ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
 
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
@@ -4337,17 +4438,17 @@ test_link_and_unlink_with_home_override() {
   [ -L "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not linked"
   [ -L "$home_dir/.gemini/antigravity/skills/spec-interview" ] ||
     fail "antigravity skills not linked"
-  [ "$(readlink "$home_dir/.codex/skills/multi-agent-ask")" = \
-    "$ROOT/custom-skills/multi-agent-ask" ] ||
+  [ "$(readlink "$home_dir/.codex/skills/peer-ask")" = \
+    "$ROOT/custom-skills/peer-ask" ] ||
     fail "stale skill symlink not replaced"
   if find "$home_dir/.codex/skills" -maxdepth 1 -name "*.backup.*" | grep -q .; then
     fail "backup skill symlink not cleaned"
   fi
   [ ! -e "$home_dir/.codex/skills/oh-my-setting" ] ||
     fail "legacy grouped skill symlink not removed"
-  [ ! -e "$home_dir/.agents/skills/multi-agent-ask" ] ||
+  [ ! -e "$home_dir/.agents/skills/peer-ask" ] ||
     fail "legacy .agents skill symlink not removed"
-  [ ! -e "$home_dir/.pi/agent/skills/multi-agent-review" ] ||
+  [ ! -e "$home_dir/.pi/agent/skills/peer-review" ] ||
     fail "legacy pi skill symlink not removed"
   [ ! -e "$home_dir/.gemini/GEMINI.md" ] ||
     fail "legacy gemini file not removed"
@@ -4385,23 +4486,23 @@ test_cleanup_dry_run_and_apply() {
   local home_dir="$TMP/cleanup-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
     "$home_dir/.pi/agent/skills" "$home_dir/.gemini"
-  ln -s "$ROOT/custom-skills/multi-agent-ask" \
-    "$home_dir/.codex/skills/multi-agent-ask.backup.legacy"
-  ln -s "$ROOT/custom-skills/multi-agent-review" \
-    "$home_dir/.agents/skills/multi-agent-review"
+  ln -s "$ROOT/custom-skills/peer-ask" \
+    "$home_dir/.codex/skills/peer-ask.backup.legacy"
+  ln -s "$ROOT/custom-skills/peer-review" \
+    "$home_dir/.agents/skills/peer-review"
   ln -s "$ROOT/custom-skills/spec-interview" \
     "$home_dir/.pi/agent/skills/spec-interview"
   ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --dry-run >"$home_dir/dry-run"
   assert_file_contains "$home_dir/dry-run" "cleanup: 4 removable item(s) found"
-  [ -e "$home_dir/.codex/skills/multi-agent-ask.backup.legacy" ] ||
+  [ -e "$home_dir/.codex/skills/peer-ask.backup.legacy" ] ||
     fail "dry-run removed backup symlink"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/apply"
-  [ ! -e "$home_dir/.codex/skills/multi-agent-ask.backup.legacy" ] ||
+  [ ! -e "$home_dir/.codex/skills/peer-ask.backup.legacy" ] ||
     fail "cleanup did not remove backup symlink"
-  [ ! -e "$home_dir/.agents/skills/multi-agent-review" ] ||
+  [ ! -e "$home_dir/.agents/skills/peer-review" ] ||
     fail "cleanup did not remove legacy .agents skill"
   [ ! -e "$home_dir/.pi/agent/skills/spec-interview" ] ||
     fail "cleanup did not remove legacy pi skill"
@@ -5757,7 +5858,7 @@ test_debate_prompt_masks_quoted_paths() {
     . "$ROOT/scripts/lib/oms-common.sh"
     . "$ROOT/scripts/lib/agent-memory-common.sh"
     . "$ROOT/scripts/lib/agent-task-common.sh"
-    . "$ROOT/scripts/lib/multi-agent-common.sh"
+    . "$ROOT/scripts/lib/peer-common.sh"
     printf 'ref %s/x and %s/u/p.sh\n' "$sch$h/u/x.sh" "$u" | ma_mask_quoted_paths
   )"
   case "$out" in
@@ -5778,7 +5879,7 @@ test_debate_prompt_sanitizes_sensitive_quoted_lines() {
     . "$ROOT/scripts/lib/oms-common.sh"
     . "$ROOT/scripts/lib/agent-memory-common.sh"
     . "$ROOT/scripts/lib/agent-task-common.sh"
-    . "$ROOT/scripts/lib/multi-agent-common.sh"
+    . "$ROOT/scripts/lib/peer-common.sh"
     printf 'keep this answer\n%s resource_metadata="https://mcp.example.invalid/resource"\npath %s/u/p.sh\n' "$auth_scheme" "$h" |
       ma_sanitize_quoted_output
   )"
@@ -6006,7 +6107,7 @@ EOF
   "$PLAN" --repo "$project" claim --id bad.task --provider codex >/dev/null
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" \
     --artifact-dir "$project/artifacts" \
     --plan-task ok.task \
@@ -6017,7 +6118,7 @@ EOF
 
   rc=0
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" \
     --artifact-dir "$project/artifacts" \
     --plan-task bad.task \
@@ -6031,7 +6132,7 @@ EOF
     fail "--plan-task should stamp task_id lineage on artifact-index rows"
 }
 
-test_multi_agent_review_gate_verify_backstop() {
+test_peer_review_gate_verify_backstop() {
   local project="$TMP/review-gate-verify"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -6051,7 +6152,7 @@ EOF
 
   # All reviewers self-report pass, but the project's own check fails: the
   # mechanical backstop must force the gate to fail.
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers claude,antigravity \
@@ -6067,7 +6168,7 @@ EOF
   # Passing contract + passing reviewers -> gate passes.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
   rc=0
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$project/artifacts-pass" \
     --providers claude,antigravity \
@@ -6080,7 +6181,7 @@ EOF
   # --no-verify keeps the old self-report-only behavior.
   printf '#!/usr/bin/env bash\nexit 1\n' > "$project/scripts/check.sh"
   rc=0
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/multi-agent-review.sh" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$project/artifacts-noverify" \
     --providers claude,antigravity \
@@ -6120,7 +6221,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -6136,7 +6237,7 @@ EOF
   # Default stays one-shot: same failing first attempt, no repair, exit 1.
   rc=0
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$project/artifacts-oneshot" \
@@ -6149,7 +6250,7 @@ EOF
 
   # Bounds are validated up front.
   rc=0
-  "$ROOT/scripts/multi-agent-delegate.sh" \
+  "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" --repair 5 --prompt "x" \
     >/dev/null 2>"$project/err-bounds" || rc=$?
   [ "$rc" = "2" ] || fail "--repair 5 should be rejected with exit 2, got $rc"
@@ -6163,7 +6264,7 @@ test_run_with_timeout_warns_when_unbounded() {
   # With no timeout/gtimeout on PATH the call must still run, but the missing
   # wall-clock guard must be visible on stderr (call sites merge it into the
   # artifact), never a silent unbounded hang.
-  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; PATH='' run_with_timeout echo fallback-ran" \
+  bash -c ". '$ROOT/scripts/lib/peer-common.sh'; PATH='' run_with_timeout echo fallback-ran" \
     >"$out" 2>"$err" || fail "run_with_timeout without a timeout binary should still run the command"
   assert_file_contains "$out" "fallback-ran"
   assert_file_contains "$err" "runs unbounded"
@@ -6233,14 +6334,14 @@ test_agent_state_lands_at_git_root_from_subdir() {
   assert_not_exists "$project/sub/.oms"
 }
 
-test_multi_agent_review_warns_untracked_files() {
+test_peer_review_warns_untracked_files() {
   local project="$TMP/review-untracked"
   local clean="$TMP/review-tracked-only"
   local err="$TMP/review-untracked-err"
 
   make_committed_repo "$project"
   printf 'brand new module\n' > "$project/new_module.py"
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$project/artifacts" \
     --prompt "Review new module" >/dev/null 2>"$err"
@@ -6250,7 +6351,7 @@ test_multi_agent_review_warns_untracked_files() {
   # Tracked-only change: no untracked noise, no warning.
   make_committed_repo "$clean"
   printf 'changed\n' > "$clean/file.txt"
-  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
+  OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$clean" \
     --artifact-dir "$TMP/review-tracked-only-arts" \
     --prompt "Review tracked change" >/dev/null 2>"$err"
@@ -6400,8 +6501,8 @@ test_verify_timeout_bounds_hung_verify() {
   command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || return 0
   out="$(bash -c "
     . '$ROOT/scripts/lib/agent-memory-common.sh'
-    . '$ROOT/scripts/lib/multi-agent-common.sh'
-    OMS_MULTI_AGENT_VERIFY_TIMEOUT=1s run_verify_with_timeout bash -c 'sleep 30'
+    . '$ROOT/scripts/lib/peer-common.sh'
+    OMS_PEER_VERIFY_TIMEOUT=1s run_verify_with_timeout bash -c 'sleep 30'
     echo exit=\$?
   " 2>/dev/null)"
   printf '%s' "$out" | grep -Fq "exit=124" || fail "a hung verify should fail with timeout exit 124"
@@ -6423,7 +6524,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/multi-agent-delegate.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
     --repo "$project" \
     --artifact-dir "$project/artifacts" \
@@ -6596,7 +6697,7 @@ test_delegate_plan_task_hydrates_brief_and_verify() {
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
 
   local out
-  out="$(cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  out="$(cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --plan-task t1 2>&1)" || fail "plan-task dry-run should succeed"
   printf '%s' "$out" | grep -Fq "plan-verify: echo custom-verify-marker" ||
     fail "verify should be hydrated from the plan task"
@@ -6831,7 +6932,7 @@ test_delegate_plan_task_hydrates_from_subdir() {
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
 
   local out
-  out="$(cd "$project/src" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  out="$(cd "$project/src" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --plan-task t1 2>&1)" || fail "subdir plan-task dry-run should succeed"
   printf '%s' "$out" | grep -Fq "plan-verify: echo VERIFYMARK" ||
     fail "verify must hydrate from the plan task even when run from a subdirectory"
@@ -6853,13 +6954,13 @@ test_agent_role_and_delegate_injection() {
     fail "agent-role resolve should find the role"
 
   # --role injects a Role section into the worker brief.
-  ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --role reviewer --prompt "review the diff" >/dev/null 2>&1 ) ||
     fail "delegate --role should succeed"
   assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'STRICT-API-REVIEWER'
 
   # Unknown role fails fast.
-  if ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  if ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --role nope --prompt x >/dev/null 2>&1 ); then
     fail "an unknown --role must be rejected"
   fi
@@ -6867,7 +6968,7 @@ test_agent_role_and_delegate_injection() {
   # A plan task's role field is auto-injected via --plan-task (isolated dir).
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title "review it" --role reviewer >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
-  ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/multi-agent-delegate.sh" \
+  ( cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --plan-task t1 --artifact-dir "$project/plan-arts" >/dev/null 2>&1 ) ||
     fail "plan-task with role should succeed"
   assert_one_artifact_contains "$project/plan-arts" 'codex-*.md' 'STRICT-API-REVIEWER'
@@ -7176,8 +7277,8 @@ test_run_with_timeout_kill_after_defeats_term_trap() {
 
   # A worker that ignores SIGTERM must still die: --kill-after escalates to
   # SIGKILL, so the wall clock stays a real bound (GNU timeout exits 137).
-  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; \
-    OMS_MULTI_AGENT_TIMEOUT=1 OMS_MULTI_AGENT_KILL_AFTER=1 \
+  bash -c ". '$ROOT/scripts/lib/peer-common.sh'; \
+    OMS_PEER_TIMEOUT=1 OMS_PEER_KILL_AFTER=1 \
     run_with_timeout bash -c 'trap \"\" TERM; sleep 30'" >"$out" 2>&1 || rc=$?
   [ "$rc" = "137" ] || [ "$rc" = "124" ] || fail "TERM-immune worker should be killed (got rc=$rc)"
   [ "$rc" = "137" ] || {
@@ -7191,7 +7292,7 @@ test_run_with_timeout_require_refuses_unbounded() {
   local err="$TMP/rwt-require-err"
   local rc=0
 
-  bash -c ". '$ROOT/scripts/lib/multi-agent-common.sh'; \
+  bash -c ". '$ROOT/scripts/lib/peer-common.sh'; \
     OMS_REQUIRE_TIMEOUT=1 PATH='' run_with_timeout /bin/echo should-not-run" \
     >"$TMP/rwt-require-out" 2>"$err" || rc=$?
   [ "$rc" = "127" ] || fail "OMS_REQUIRE_TIMEOUT=1 without a timeout binary should refuse with 127, got $rc"
@@ -7366,7 +7467,7 @@ test_chem_bio_skill_routes_all_references() {
 }
 
 test_ml_review_includes_chem_bio_task_families() {
-  local review="$ROOT/scripts/multi-agent-review.sh"
+  local review="$ROOT/scripts/peer-review.sh"
 
   assert_file_contains "$review" "cold-drug/cold-target/cold-both"
   assert_file_contains "$review" "reaction"
@@ -7615,45 +7716,45 @@ test_doctor_warns_missing_oms_gitignore
 test_doctor_clean_harness_state_has_no_warnings
 test_doctor_reports_crash_residue_warnings
 test_doctor_reports_malformed_run_state
-test_multi_agent_export_only_and_import_result
-test_multi_agent_review_export_only_skips_cli
-test_multi_agent_review_gate_all_pass
-test_multi_agent_review_gate_fail_exits
-test_multi_agent_review_gate_missing_exits
-test_multi_agent_review_gate_export_only
+test_peer_export_only_and_import_result
+test_peer_review_export_only_skips_cli
+test_peer_review_gate_all_pass
+test_peer_review_gate_fail_exits
+test_peer_review_gate_missing_exits
+test_peer_review_gate_export_only
 test_import_warns_sensitive_result_but_succeeds
 test_import_index_links_source_prompt
-test_multi_agent_export_only_blocks_sensitive_prompt
-test_multi_agent_review_dry_run_artifacts
-test_multi_agent_review_base_ref_diff
-test_multi_agent_review_invalid_base_fails
-test_multi_agent_review_synthesize_dry_run
-test_multi_agent_review_synthesize_provider_override
-test_multi_agent_review_rejects_bad_synthesize_provider
-test_multi_agent_review_ml_preset
-test_multi_agent_review_default_prompt_requires_ml
-test_multi_agent_debate_prompt_fences_external_output
-test_multi_agent_review_debate_dry_run
-test_multi_agent_review_excludes_private_status
-test_multi_agent_review_secret_diff_skips_external
-test_multi_agent_review_no_diff_provider_subset
-test_multi_agent_review_rejects_unknown_provider
-test_multi_agent_ask_rejects_unknown_provider_before_artifact_dir
-test_multi_agent_review_single_provider_failure_exits
-test_multi_agent_ask_debate_tracks_dropout
-test_multi_agent_ask_debate_skips_after_dropouts
-test_multi_agent_ask_debate_sanitizes_provider_auth_noise
-test_multi_agent_prompt_injects_loop_warnings
-test_multi_agent_ask_all_round1_failures_exit
-test_multi_agent_ask_hypothesis_preset
-test_multi_agent_ask_dry_run_no_repo
-test_multi_agent_ask_repo_context_subset
-test_multi_agent_ask_secret_diff_skips_external
-test_multi_agent_review_print_timeout
-test_multi_agent_ask_print_timeout
-test_multi_agent_ask_debate_dry_run
-test_multi_agent_ask_debate_needs_two_providers
-test_multi_agent_ask_rejects_bad_debate_count
+test_peer_export_only_blocks_sensitive_prompt
+test_peer_review_dry_run_artifacts
+test_peer_review_base_ref_diff
+test_peer_review_invalid_base_fails
+test_peer_review_synthesize_dry_run
+test_peer_review_synthesize_provider_override
+test_peer_review_rejects_bad_synthesize_provider
+test_peer_review_ml_preset
+test_peer_review_default_prompt_requires_ml
+test_peer_debate_prompt_fences_external_output
+test_peer_review_debate_dry_run
+test_peer_review_excludes_private_status
+test_peer_review_secret_diff_skips_external
+test_peer_review_no_diff_provider_subset
+test_peer_review_rejects_unknown_provider
+test_peer_ask_rejects_unknown_provider_before_artifact_dir
+test_peer_review_single_provider_failure_exits
+test_peer_ask_debate_tracks_dropout
+test_peer_ask_debate_skips_after_dropouts
+test_peer_ask_debate_sanitizes_provider_auth_noise
+test_peer_prompt_injects_loop_warnings
+test_peer_ask_all_round1_failures_exit
+test_peer_ask_hypothesis_preset
+test_peer_ask_dry_run_no_repo
+test_peer_ask_repo_context_subset
+test_peer_ask_secret_diff_skips_external
+test_peer_review_print_timeout
+test_peer_ask_print_timeout
+test_peer_ask_debate_dry_run
+test_peer_ask_debate_needs_two_providers
+test_peer_ask_rejects_bad_debate_count
 test_delegate_dry_run
 test_delegate_fake_worker_apply
 test_delegate_apply_refuses_dirty_tree
@@ -7671,6 +7772,11 @@ test_change_guard_reads_allowed_paths_from_task
 test_change_guard_forbidden_paths_deny_beats_allow
 test_change_guard_reads_forbidden_paths_from_task
 test_agent_call_outbound_scrubber_blocks_private_path
+test_advise_dry_run_composes_advisor_prompt
+test_advise_no_failures_skips_ledger_section
+test_advise_picks_provider_that_is_not_caller
+test_peer_shims_redirect_with_deprecation
+test_peer_env_var_back_compat
 test_agent_call_missing_cli_writes_exit_and_index
 test_agent_call_provider_nonzero_writes_exit_and_index
 test_delegate_missing_cli_writes_exit_and_index
@@ -7789,14 +7895,14 @@ test_run_ledger_top_ranks_metrics
 test_oms_run_timeline_merges_streams
 test_agent_plan_reclaim_requeues_stale_claim
 test_delegate_plan_task_lifecycle
-test_multi_agent_review_gate_verify_backstop
+test_peer_review_gate_verify_backstop
 test_delegate_repair_retries_failed_verify
 test_run_with_timeout_warns_when_unbounded
 test_scrubber_blocks_json_quoted_secret
 test_scrubber_blocks_hpc_cluster_paths
 test_doctor_fails_broken_config_symlink
 test_agent_state_lands_at_git_root_from_subdir
-test_multi_agent_review_warns_untracked_files
+test_peer_review_warns_untracked_files
 test_run_state_anchors_to_git_root_from_subdir
 test_file_lock_dir_is_stable_across_xdg
 test_oms_run_link_records_calling_agent

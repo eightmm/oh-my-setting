@@ -80,11 +80,13 @@
       ]
     },
     {
-      "name": "multi-agent-review",
-      "source": "custom-skills/multi-agent-review",
+      "name": "peer-review",
+      "source": "custom-skills/peer-review",
       "enabled": true,
       "reason": "Use independent agent/reviewer lenses for high-risk changes.",
       "triggers": [
+        "peer review",
+        "피어 리뷰",
         "multi-agent review",
         "교차 리뷰",
         "크로스 리뷰",
@@ -96,11 +98,12 @@
       ]
     },
     {
-      "name": "multi-agent-ask",
-      "source": "custom-skills/multi-agent-ask",
+      "name": "peer-ask",
+      "source": "custom-skills/peer-ask",
       "enabled": true,
       "reason": "Ask Codex, Claude Code, and Antigravity the same conceptual question and synthesize perspectives.",
       "triggers": [
+        "peer ask",
         "세 모델에게",
         "세 모델에",
         "cross-model",
@@ -110,11 +113,12 @@
       ]
     },
     {
-      "name": "multi-agent-delegate",
-      "source": "custom-skills/multi-agent-delegate",
+      "name": "peer-delegate",
+      "source": "custom-skills/peer-delegate",
       "enabled": true,
       "reason": "Delegate a scoped write task to another agent CLI in an isolated worktree and review the returned patch.",
       "triggers": [
+        "peer delegate",
         "codex한테",
         "codex에게",
         "claude한테",

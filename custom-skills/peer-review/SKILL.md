@@ -1,5 +1,5 @@
 ---
-name: multi-agent-review
+name: peer-review
 description: >
   Multi-agent review workflow for important code changes. Use when the user
   asks for independent verification, cross-agent review, council review, or
@@ -32,7 +32,7 @@ If available, prefer installed local agent CLIs:
 1. `codex`
 2. `claude`
 3. `antigravity` (`agy`)
-4. Otherwise run current-agent review and clearly say multi-agent tooling unavailable.
+4. Otherwise run current-agent review and clearly say peer review tooling unavailable.
 
 Do not install tools, authenticate CLIs, push branches, or use connector APIs
 unless the user asked for that action.
@@ -83,13 +83,13 @@ Prefer the shared wrapper when this repo is installed:
 ```bash
 # Covers tracked staged + unstaged changes. Use `git add -N <file>` first for
 # untracked files that are safe to include in external review.
-~/.oh-my-setting/scripts/multi-agent-review.sh \
+~/.oh-my-setting/scripts/peer-review.sh \
   --repo . \
   --prompt "Review the current uncommitted diff for bugs, regressions, missing tests, and unsafe operations."
 
 # ML pre-training gate: silent-ML-bug checklist (leakage, splits, loss,
 # eval mode, reproducibility, DDP). Use before long training or Slurm jobs.
-~/.oh-my-setting/scripts/multi-agent-review.sh --repo . --ml
+~/.oh-my-setting/scripts/peer-review.sh --repo . --ml
 ```
 
 Use `--base origin/main` for branch/PR review and `--synthesize` to append a
@@ -140,10 +140,10 @@ round of opinions, iterate until reviewers converge:
    NEW regressions, do not re-report accepted lower-severity items. Carry an
    explicit accepted-limitations list forward so the same heuristic trade-off
    is not re-raised every round.
-2. **Demand a verdict.** Run `multi-agent-review.sh --gate ...`; it adds
+2. **Demand a verdict.** Run `peer-review.sh --gate ...`; it adds
    the required `GATE: pass` / `GATE: fail` instruction, prints one verdict
    line per provider, and exits nonzero for fail, missing verdict, or
-   incomplete artifacts. `multi-agent-review.sh verdicts` still reads past
+   incomplete artifacts. `peer-review.sh verdicts` still reads past
    runs and imported artifacts.
 3. **Triage, do not auto-apply.** Treat each finding as a claim: confirm it
    against the code (reproduce the probe when given) before fixing. Reject

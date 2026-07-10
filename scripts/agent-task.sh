@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-task-common.sh
 . "$ROOT/scripts/lib/agent-task-common.sh"
 
-# OMS_STATE_REPO: set by multi-agent-delegate.sh for worktree workers so they
+# OMS_STATE_REPO: set by peer-delegate.sh for worktree workers so they
 # read the primary repo's shared state instead of the throwaway checkout's.
 REPO="${OMS_STATE_REPO:-$PWD}"
 TASK_FILE=""

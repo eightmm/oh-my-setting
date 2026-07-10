@@ -104,11 +104,14 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Judgment stays top-tier: review gates, verify/admit decisions, plan
   approval, and final synthesis run at the session tier - never downgrade
   the judge.
-- If an advisor model is configured, consult it before irreversible
-  decisions, after repeated failures, and before declaring done - instead of
-  escalating the whole session.
-- Cross-CLI workers (oms delegate/ask/review) follow the same tiers when the
-  tool exposes a tier or model option; otherwise leave the provider default.
+- Consult an advisor at decision points - before irreversible decisions,
+  after repeated failures, and before declaring done - instead of escalating
+  the whole session. In Claude Code prefer the native advisor when one is
+  configured; any agent can run `oms advise --prompt "<decision, evidence,
+  options, planned action>"` for an independent cross-CLI advisor verdict.
+- Cross-CLI workers (oms peer-delegate/peer-ask/peer-review) follow the same
+  tiers when the tool exposes a tier or model option; otherwise leave the
+  provider default.
 
 ## Run Provenance & Coordination
 
@@ -137,7 +140,7 @@ tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh
   `reclaim --include-review` requeues an abandoned review, keeping its patch).
 - Cross-agent work: route one provider through `oms agent-run --to NAME`
   (read-only pass vs isolated write worktree); give the worker a reusable
-  persona with `oms multi-agent-delegate --role NAME` (roles live in
+  persona with `oms peer-delegate --role NAME` (roles live in
   `.oms/roles/`, managed by `oms agent-role`); land a delegated patch through
   `oms patch-land` (clean-tree → admission gate → apply → record), or gate it
   alone with `oms patch-admit`. `patch-land --plan-task ID` alone lands the

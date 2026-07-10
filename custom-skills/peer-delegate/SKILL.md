@@ -1,5 +1,5 @@
 ---
-name: multi-agent-delegate
+name: peer-delegate
 description: >
   Delegate a write task to another local agent CLI (Codex, Claude Code, or
   Antigravity) from inside the current agent session. Use when the user says
@@ -56,7 +56,7 @@ brief="$(mktemp)" && cat > "$brief" <<'EOF'
 ## Task
 ...
 EOF
-~/.oh-my-setting/scripts/multi-agent-delegate.sh \
+~/.oh-my-setting/scripts/peer-delegate.sh \
   --to codex \
   --brief-file "$brief" \
   --verify "uv run pytest tests/"

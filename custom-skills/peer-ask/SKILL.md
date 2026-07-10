@@ -1,5 +1,5 @@
 ---
-name: multi-agent-ask
+name: peer-ask
 description: >
   Ask the same conceptual or planning question to Codex, Claude Code, and
   Antigravity, then synthesize the independent perspectives. Use when the user asks
@@ -16,7 +16,7 @@ connectors, or plugin connector tools.
 Use for conceptual questions, design tradeoffs, planning, alternatives, or
 "ask codex/claude/antigravity" requests that are not primarily code review.
 
-For code diff review, use `multi-agent-review` instead. For a one-provider
+For code diff review, use `peer-review` instead. For a one-provider
 question, prefer `agent-run.sh`; it records task outcomes and routes read/write
 automatically.
 
@@ -53,14 +53,14 @@ repo status matters, and `--diff` only when the diff is needed.
 ## CLI
 
 ```bash
-~/.oh-my-setting/scripts/multi-agent-ask.sh \
+~/.oh-my-setting/scripts/peer-ask.sh \
   --prompt "Compare RAG and fine-tuning tradeoffs for this project."
 ```
 
 Optional repo context:
 
 ```bash
-~/.oh-my-setting/scripts/multi-agent-ask.sh \
+~/.oh-my-setting/scripts/peer-ask.sh \
   --repo . \
   --repo-context \
   --prompt "Given this repo state, what are the next implementation risks?"
@@ -69,7 +69,7 @@ Optional repo context:
 Optional sanitized diff:
 
 ```bash
-~/.oh-my-setting/scripts/multi-agent-ask.sh \
+~/.oh-my-setting/scripts/peer-ask.sh \
   --repo . \
   --diff \
   --prompt "What design alternatives does this diff suggest?"

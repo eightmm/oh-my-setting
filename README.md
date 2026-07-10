@@ -49,8 +49,8 @@ Run the oh-my-setting project doctor.
 Review and advice (three local models in parallel):
 
 ```text
-Run a multi-agent review of the current diff.
-Run a gated multi-agent review of this diff — pass or fail.
+Run a peer review of the current diff.
+Run a gated peer review of this diff — pass or fail.
 Run the ML pre-training review gate on this diff.
 Export a Claude review prompt for this diff instead of calling Claude directly.
 Import this Claude answer back into the artifact index.

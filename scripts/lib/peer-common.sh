@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared helpers for multi-agent-ask.sh and multi-agent-review.sh.
+# Shared helpers for peer-ask.sh and peer-review.sh.
 # Sourced, not executed. Callers must set before use:
 #   MA_KIND              ask | review (artifact headers, messages)
 #   MA_SHOW_REPO         1 to include "- repo:" lines (review)
@@ -15,6 +15,13 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-task-common.sh"
 # shellcheck source=harness-residue.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-residue.sh"
+
+# Renamed 2026-07: OMS_MULTI_AGENT_* -> OMS_PEER_*. Honor the old names when
+# the new ones are unset so existing rules and CI configs keep working.
+: "${OMS_PEER_TIMEOUT:=${OMS_MULTI_AGENT_TIMEOUT:-}}"
+: "${OMS_PEER_VERIFY_TIMEOUT:=${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-}}"
+: "${OMS_PEER_KILL_AFTER:=${OMS_MULTI_AGENT_KILL_AFTER:-}}"
+: "${OMS_PEER_PRINT_TIMEOUT:=${OMS_MULTI_AGENT_PRINT_TIMEOUT:-}}"
 
 MA_SAFE_PATHS=(
   .
@@ -129,7 +136,7 @@ ma_run_bounded() {
       fi
     fi
     if [ "$OMS_MA_TIMEOUT_HAS_KILL_AFTER" = 1 ]; then
-      "$tbin" --kill-after "${OMS_MULTI_AGENT_KILL_AFTER:-15}" "$wall" "$@"
+      "$tbin" --kill-after "${OMS_PEER_KILL_AFTER:-15}" "$wall" "$@"
     else
       "$tbin" "$wall" "$@"
     fi
@@ -145,7 +152,7 @@ ma_run_bounded() {
 }
 
 run_with_timeout() {
-  ma_run_bounded "${OMS_MULTI_AGENT_TIMEOUT:-5m}" provider "$@"
+  ma_run_bounded "${OMS_PEER_TIMEOUT:-5m}" provider "$@"
 }
 
 # agy has no file-write-blocking flag: --sandbox restricts the terminal, not
@@ -195,7 +202,7 @@ ma_agy_read_cleanup() {
 # indefinitely. GNU timeout exits 124 on expiry, which callers already treat
 # as a normal nonzero verify failure.
 run_verify_with_timeout() {
-  ma_run_bounded "${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-10m}" verify "$@"
+  ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$@"
 }
 
 ma_git_diff_base() {
@@ -568,7 +575,7 @@ run_provider() {
       local agy_dir
       agy_dir="$(ma_agy_read_dir "${REPO:-}")" || agy_dir=""
       if [ -n "$agy_dir" ]; then
-        (cd "$agy_dir" && ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_MULTI_AGENT_PRINT_TIMEOUT:-5m}") >> "$artifact" 2>&1
+        (cd "$agy_dir" && ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}") >> "$artifact" 2>&1
         status=$?
         ma_agy_read_cleanup "${REPO:-}" "$agy_dir"
       else
@@ -775,7 +782,7 @@ ma_write_synthesis() {
   local synth_file="$1"
   local i
   {
-    printf '# Multi-agent %s synthesis\n\n' "$MA_KIND"
+    printf '# Peer %s synthesis\n\n' "$MA_KIND"
     printf -- '- generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if [ "${MA_SHOW_REPO:-0}" = "1" ]; then
       printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"

@@ -47,8 +47,8 @@ oh-my-setting project doctor 돌려줘.
 리뷰·자문 (세 로컬 모델 병렬):
 
 ```text
-현재 diff를 multi-agent review로 검토해줘.
-이 diff를 gated multi-agent review로 pass/fail 판정해줘.
+현재 diff를 peer review로 검토해줘.
+이 diff를 gated peer review로 pass/fail 판정해줘.
 이 diff에 ML pre-training 리뷰 게이트 돌려줘.
 Claude에 직접 호출하지 말고 이 diff용 review prompt만 export해줘.
 이 Claude 답변을 artifact index에 import해줘.

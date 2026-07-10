@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/multi-agent-common.sh
-. "$ROOT/scripts/lib/multi-agent-common.sh"
+# shellcheck source=scripts/lib/peer-common.sh
+. "$ROOT/scripts/lib/peer-common.sh"
 
 REPO="$PWD"
 KIND=""

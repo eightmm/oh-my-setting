@@ -139,11 +139,11 @@ ready -> claimed -> running -> review -> done lifecycle under a file lock.
 ```
 
 Provider names are canonical (`agy` normalizes to `antigravity`; unknown names
-are rejected). `multi-agent-delegate.sh --plan-task ID` couples a delegation to
+are rejected). `peer-delegate.sh --plan-task ID` couples a delegation to
 a plan task: released on failure, review/done on success. Without an explicit
 `--prompt`/`--brief-file` it hydrates the worker brief from the task, and
 without `--verify` it uses the task's stored verify command — so
-`multi-agent-delegate.sh --to codex --plan-task ID` is a complete one-liner.
+`peer-delegate.sh --to codex --plan-task ID` is a complete one-liner.
 
 ## Failure Memory, Liveness, GC, Onboarding
 
@@ -154,7 +154,7 @@ without `--verify` it uses the task's stored verify command — so
   command that may be a known dead end, `check --cmd "..."` (exit 3 if it is a
   known-unresolved failure); `record --cmd ... --exit N --summary ...` a new
   one; `resolve --fingerprint FP` when fixed. Sensitive commands are refused.
-- `multi-agent-delegate` writes a `.oms/delegations/<id>.json` liveness marker
+- `peer-delegate` writes a `.oms/delegations/<id>.json` liveness marker
   while a worker runs (removed on exit); `oms state` shows live workers and
   flags dead-pid orphans. No polling/daemon.
 - `oms gc` (dry-run by default, `--apply` to act, `--days N`) reclaims aged
@@ -174,7 +174,7 @@ harness, or lighter native sub-agents where the current CLI supports them.
 ```bash
 ~/.oh-my-setting/scripts/agent-role.sh --repo . --name reviewer init   # scaffold
 ~/.oh-my-setting/scripts/agent-role.sh --repo . list
-~/.oh-my-setting/scripts/multi-agent-delegate.sh --to codex --role reviewer --prompt "review the diff"
+~/.oh-my-setting/scripts/peer-delegate.sh --to codex --role reviewer --prompt "review the diff"
 ~/.oh-my-setting/scripts/agent-plan.sh --repo . add --id t1 --title "review" --role reviewer  # task carries the role
 ```
 
@@ -185,13 +185,24 @@ fails fast.
 
 Use `agent-run.sh` as the single entrypoint for one provider. In `--mode auto`,
 it routes read-only questions to `agent-call.sh` and write tasks to
-`multi-agent-delegate.sh`. The current/owning agent should override with
+`peer-delegate.sh`. The current/owning agent should override with
 `--mode read` or `--mode write` when intent is already clear.
 
 ```bash
 ~/.oh-my-setting/scripts/agent-run.sh --to codex --repo . --prompt "Assess this plan."
 ~/.oh-my-setting/scripts/agent-run.sh --to claude --repo . --prompt "Implement the focused fix described above."
 ~/.oh-my-setting/scripts/agent-run.sh --to antigravity --repo . --mode write --prompt "Refactor this helper and return a patch."
+```
+
+For a decision-point second opinion (before an irreversible decision, after
+repeated failures, before declaring done), use `advise.sh` instead of a raw
+call: it wraps `agent-call.sh` with an adversarial VERDICT/RISKS/MISSING/NEXT
+contract, attaches unresolved fail-ledger rows, and defaults to the first
+available provider that is not the caller (`OMS_ADVISOR_PROVIDER` or `--to`
+to pin). Artifacts land under `.oms/artifacts/advise/`.
+
+```bash
+~/.oh-my-setting/scripts/advise.sh --prompt "Decision: land patch X now. Evidence: ... Options: ... Planned action: ..."
 ```
 
 Read mode writes artifacts to `.oms/artifacts/call/`. Write mode runs the worker
@@ -219,7 +230,7 @@ prompt wherever policy allows, then import the answer back into the same artifac
 index:
 
 ```bash
-~/.oh-my-setting/scripts/multi-agent-review.sh --repo . --diff --providers claude --export-only --prompt "Review this change."
+~/.oh-my-setting/scripts/peer-review.sh --repo . --diff --providers claude --export-only --prompt "Review this change."
 ~/.oh-my-setting/scripts/import-agent-result.sh --kind review --provider claude --prompt-file .oms/artifacts/review/claude-...export.md --file claude-answer.md
 ```
 
@@ -253,7 +264,7 @@ ML and that mode exists; otherwise they fall back to `fast`.
 
 ## Admitting Delegated Patches
 
-A worker patch from `multi-agent-delegate.sh` can be stale (its base moved),
+A worker patch from `peer-delegate.sh` can be stale (its base moved),
 partial, or pass only under the worker's own assumptions. Before landing one on
 the main tree, run it through the admission gate: it applies the patch in a
 throwaway worktree off the current HEAD and runs a checks ladder — applies

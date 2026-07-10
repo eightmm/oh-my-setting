@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `advise.sh` (`oms advise`): agent-agnostic advisor pass at decision points
+  (before irreversible decisions, after repeated failures, before declaring
+  done). Composes an adversarial VERDICT/RISKS/MISSING/NEXT prompt, attaches
+  unresolved fail-ledger rows, defaults to the first available provider that
+  is not the caller (`OMS_ADVISOR_PROVIDER`/`--to` to pin), and routes through
+  `agent-call.sh` (read-only, scrubbed). Gives Codex and Antigravity the same
+  decision-point advisor Claude Code has natively.
+
 - Skill router (`skill-router.sh` + `install-claude-hooks.sh`): a Claude Code
   UserPromptSubmit hook that matches each prompt against new per-skill
   `triggers` phrases (en+ko) in `skills.manifest.json` and injects a one-line
@@ -41,6 +49,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   linted, never executed.
 
 ### Changed
+- Renamed the cross-CLI tool family `multi-agent-*` to `peer-*` to stop
+  colliding with generic in-app multi-agent features: `peer-ask.sh`,
+  `peer-review.sh`, `peer-delegate.sh`, `lib/peer-common.sh`, skills
+  `peer-ask`/`peer-review`/`peer-delegate`, and env vars `OMS_PEER_*`.
+  Back-compat: `multi-agent-*.sh` shims still dispatch to the new scripts
+  (with a deprecation note on stderr) and `OMS_MULTI_AGENT_*` env vars are
+  honored when the `OMS_PEER_*` names are unset.
 - MD/trigger layer strengthened so skills actually fire at task time: skill
   frontmatter descriptions now carry concrete "use when" phrases and Korean
   user wordings (agent-harness enumerates its whole surface — state/resume,

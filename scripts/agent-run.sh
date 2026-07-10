@@ -29,7 +29,7 @@ usage() {
 Usage: agent-run.sh --to PROVIDER (--prompt TEXT | --prompt-file PATH) [options]
 
 Single-agent harness entrypoint. It routes read-only questions to agent-call.sh
-and write tasks to multi-agent-delegate.sh. In --mode auto, routing is
+and write tasks to peer-delegate.sh. In --mode auto, routing is
 conservative and based on task wording; the owning agent may pass --mode read or
 --mode write when intent is already clear.
 
@@ -45,7 +45,7 @@ Options:
   --repair N           Write mode only: re-run the worker up to N times (1-3)
                        on worker/verify failure with the failure fed back.
   --task-id ID         Write mode only: stamp this run's artifacts with a
-                       plan/task id (forwarded to multi-agent-delegate.sh).
+                       plan/task id (forwarded to peer-delegate.sh).
   --plan-task ID       Write mode only: couple the delegation to an
                        agent-plan.sh task (forwarded; implies --task-id).
   --apply              Write mode only: apply returned patch when worker and
@@ -63,7 +63,7 @@ Options:
 
 Environment:
   OH_MY_SETTING_AGENT_RUN_DRY_RUN=1  Same as --dry-run.
-  OMS_MULTI_AGENT_TIMEOUT=5m         Provider wall-clock timeout (GNU timeout).
+  OMS_PEER_TIMEOUT=5m         Provider wall-clock timeout (GNU timeout).
 EOF
 }
 
@@ -253,8 +253,8 @@ while [ "$#" -gt 0 ]; do
       ;;
     --print-timeout)
       [ "$#" -ge 2 ] || { echo "error: --print-timeout requires duration" >&2; exit 2; }
-      OMS_MULTI_AGENT_PRINT_TIMEOUT="$2"
-      export OMS_MULTI_AGENT_PRINT_TIMEOUT
+      OMS_PEER_PRINT_TIMEOUT="$2"
+      export OMS_PEER_PRINT_TIMEOUT
       shift 2
       ;;
     --dry-run)
@@ -327,7 +327,7 @@ if [ "$resolved_mode" = "read" ]; then
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   agent_run_exec_and_record read "$TO" "${cmd[@]}"
 else
-  cmd=("$ROOT/scripts/multi-agent-delegate.sh" --to "$TO" --repo "$REPO")
+  cmd=("$ROOT/scripts/peer-delegate.sh" --to "$TO" --repo "$REPO")
   if [ -n "$PROMPT_FILE" ]; then
     cmd+=(--brief-file "$PROMPT_FILE")
   else

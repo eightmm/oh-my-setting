@@ -34,7 +34,7 @@ keys for warm-start, cold-entity, temporal, or prospective use.
    checklist as verification.
 6. Run `oms data-manifest check --name <manifest>` and
    `oms data-manifest leakage --name <manifest>` when split files exist, then
-   `oms multi-agent-review --ml` when data, split, loss, or metric changes.
+   `oms peer-review --ml` when data, split, loss, or metric changes.
 
 ## Reference Router
 

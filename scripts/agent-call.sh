@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR
-# shellcheck source=lib/multi-agent-common.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/multi-agent-common.sh"
+# shellcheck source=lib/peer-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/peer-common.sh"
 
 MA_KIND="call"
 MA_SHOW_REPO=1
@@ -24,7 +24,7 @@ usage() {
 Usage: agent-call.sh --to PROVIDER (--prompt TEXT | --prompt-file PATH) [options]
 
 Call one local agent CLI for a read-only independent pass. For write tasks, use
-multi-agent-delegate.sh so edits happen in an isolated worktree.
+peer-delegate.sh so edits happen in an isolated worktree.
 
 Options:
   --to PROVIDER        codex, claude, or antigravity. Required.
@@ -43,7 +43,7 @@ Options:
 
 Environment:
   OH_MY_SETTING_CALL_DRY_RUN=1    Same as --dry-run.
-  OMS_MULTI_AGENT_TIMEOUT=5m      Provider wall-clock timeout (GNU timeout).
+  OMS_PEER_TIMEOUT=5m      Provider wall-clock timeout (GNU timeout).
 EOF
 }
 
@@ -92,7 +92,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --print-timeout)
       [ "$#" -ge 2 ] || fail "--print-timeout requires duration"
-      OMS_MULTI_AGENT_PRINT_TIMEOUT="$2"
+      OMS_PEER_PRINT_TIMEOUT="$2"
       shift 2
       ;;
     --dry-run)

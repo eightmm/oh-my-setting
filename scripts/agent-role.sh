@@ -5,7 +5,7 @@ set -euo pipefail
 # small markdown file describing how a worker should act (a reviewer, a
 # refactorer, a test-writer). It is DATA, not an orchestrator: the owning agent
 # picks a role and injects it into a delegated worker's brief
-# (multi-agent-delegate.sh --role NAME) or an agent-plan task's role field.
+# (peer-delegate.sh --role NAME) or an agent-plan task's role field.
 # Repo roles live in .oms/roles/<name>.md; a global fallback lives under
 # ~/.oh-my-setting/local/roles so a role can be reused across repos.
 
@@ -24,7 +24,7 @@ Usage: agent-role.sh [options] <list|show|path|resolve|init>
 
 Manage named worker role profiles (.oms/roles/<name>.md; global fallback
 ~/.oh-my-setting/local/roles/<name>.md). Roles are injected into a delegated
-worker brief with multi-agent-delegate.sh --role NAME.
+worker brief with peer-delegate.sh --role NAME.
 
 Options:
   --repo PATH   Repo for project-scoped roles (default: PWD, git-root anchored).
@@ -37,7 +37,7 @@ Commands:
   show      Print the resolved role file (repo first, then global).
   path      Print where a role file lives for the chosen scope (may not exist).
   resolve   Print the first existing role file path (repo then global);
-            exit 3 if none. Used by multi-agent-delegate.sh --role.
+            exit 3 if none. Used by peer-delegate.sh --role.
   init      Create a starter role file at the chosen scope if missing.
 EOF
 }

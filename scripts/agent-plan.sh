@@ -15,7 +15,7 @@ ROOT="$(cd "$ROOT" && pwd)"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
 
-# OMS_STATE_REPO: set by multi-agent-delegate.sh for worktree workers so they
+# OMS_STATE_REPO: set by peer-delegate.sh for worktree workers so they
 # read the primary repo's shared state instead of the throwaway checkout's.
 REPO="${OMS_STATE_REPO:-$PWD}"
 PLAN_FILE=""
