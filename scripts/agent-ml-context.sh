@@ -14,10 +14,10 @@ usage() {
   cat <<'EOF'
 Usage: agent-ml-context.sh [options]
 
-Emit a compact ML project digest for provider prompts. It includes entrypoint
-file names, verification contract hints, and recent experiment ledger rows. It
-does not include raw data, checkpoints, wandb/tensorboard logs, or environment
-files.
+Emit a compact ML project digest for provider prompts. It includes sanitized
+PROJECT.md contract fields, data-manifest identifiers, entrypoint file names,
+verification hints, and recent experiment ledger rows. It does not include raw
+data, split paths, checkpoints, logs, or environment files.
 
 Options:
   --repo PATH       Repo/directory. Default: PWD.
@@ -125,6 +125,81 @@ append_file_list() {
   printf -- '- repo-path: omitted\n'
   printf -- '- policy: raw data, checkpoints, private env, wandb/tensorboard logs, and machine paths are omitted\n'
 } > "$tmp"
+
+printf '\n## Project Spec\n\n' >> "$tmp"
+if [ -f "$REPO/PROJECT.md" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$REPO/PROJECT.md" <<'PY' >> "$tmp"
+import re
+import sys
+
+allowed = {
+    "State", "Goal", "Type", "Scope", "Non-goals", "Success criteria",
+    "Required checks", "Baseline/metric", "Task type", "Prediction unit",
+    "Inference-time information boundary", "Entity IDs/standardization",
+    "Source snapshot/provenance", "Label/target definition",
+    "Label units/direction/censoring/replicates", "Negative provenance",
+    "Split policy", "Split/group keys", "Leakage risks",
+    "Train-only fitted transforms", "Data manifest",
+    "Calibration/applicability-domain plan",
+}
+path_like = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*://|"
+    r"(?:^|\s)(?:(?:\.\.?|~)?[/\\]|[A-Za-z]:[/\\])\S*|"
+    r"(?:^|\s)(?:data|datasets|splits|private|outputs|checkpoints|runs|wandb|mnt|home|tmp)[/\\]\S*|"
+    r"\.(?:csv|tsv|json|jsonl|parquet|arrow|h5|hdf5|pkl|pt|pth|ckpt|np[yz])(?:\s|$))",
+    re.IGNORECASE,
+)
+count = 0
+for raw in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    line = raw.rstrip("\r\n")
+    if not line.startswith("- ") or ":" not in line:
+        continue
+    key, value = line[2:].split(":", 1)
+    if key not in allowed:
+        continue
+    value = " ".join(value.strip().split())
+    if path_like.search(value):
+        value = "[redacted path-or-URL]"
+    output = f"- {key}: {value}"
+    print(output[:237] + "..." if len(output) > 240 else output)
+    count += 1
+    if count >= 30:
+        break
+PY
+  else
+    printf 'PROJECT.md fields omitted because python3 is unavailable.\n' >> "$tmp"
+  fi
+else
+  printf 'No PROJECT.md found.\n' >> "$tmp"
+fi
+
+printf '\n## Data Manifests\n\n' >> "$tmp"
+if command -v python3 >/dev/null 2>&1 && find "$REPO/.oms/manifests" -maxdepth 1 -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+  python3 - "$REPO/.oms/manifests" <<'PY' >> "$tmp"
+import json
+import pathlib
+import sys
+
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.json"))[:10]:
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    name = str(row.get("name", "unnamed"))[:80]
+    id_key = row.get("id_column") or row.get("id_index") or "unspecified"
+    keys = row.get("leakage_keys") or []
+    if isinstance(keys, dict):
+        keys = list(keys)
+    labels = []
+    for split in row.get("splits") or []:
+        if isinstance(split, dict) and split.get("label"):
+            labels.append(str(split["label"]))
+    print(f"- name={name} id={id_key} leakage_keys={','.join(map(str, keys)) or 'none'} splits={','.join(labels) or 'none'}")
+PY
+else
+  printf 'No data manifests found.\n' >> "$tmp"
+fi
 
 append_file_list "Likely ML Entry Points" \
   -name 'train.py' -o -name 'eval.py' -o -name 'evaluate.py' -o \

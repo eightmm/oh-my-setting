@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chem-Bio ML Guardrails"
+  short_description: "Validate chem-bio data, splits, labels, and evaluation"
+  default_prompt: "Use $chem-bio-ml to audit this chem-bio ML workflow for silent scientific errors."

@@ -517,6 +517,24 @@ test_project_doctor_warns_empty_contract_past_draft() {
   fi
 }
 
+test_project_doctor_warns_empty_ml_scientific_contract() {
+  local project="$TMP/doctor-ml-contract"
+  local out
+
+  mkdir -p "$project"
+  "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
+  assert_file_contains "$project/PROJECT.md" '- Prediction unit:'
+  assert_file_contains "$project/PROJECT.md" '- Inference-time information boundary:'
+  assert_file_contains "$project/PROJECT.md" '- Data manifest:'
+  assert_file_contains "$project/PROJECT.md" '- Calibration/applicability-domain plan:'
+
+  sed -i 's/^- State: draft/- State: active/; s/^- Test:$/- Test: bash scripts\/check.sh fast/; s/^- Success criteria:$/- Success criteria: checks pass/' \
+    "$project/PROJECT.md"
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "ML contract warning should not fail doctor"
+  printf '%s' "$out" | grep -Fq 'ML scientific contract fields are empty' ||
+    fail "doctor should warn about missing ML scientific contract fields"
+}
+
 test_review_verdicts_subcommand() {
   local dir="$TMP/verdicts"
   local run="20260611T000000Z-42"
@@ -1865,8 +1883,11 @@ test_multi_agent_review_ml_preset() {
   local project="$TMP/review-ml-preset"
   local artifact_dir="$project/artifacts"
 
-  mkdir -p "$project"
+  mkdir -p "$project/.oms/manifests"
   git -C "$project" init >/dev/null
+  printf 'import torch\n' > "$project/train.py"
+  printf '%s\n' '# PROJECT.md' '- State: confirmed' '- Goal: Review cold-target DTI' '- Data manifest: dti-v1' > "$project/PROJECT.md"
+  printf '%s\n' '{"schema":2,"name":"dti-v1","id_column":"pair_id","leakage_keys":["target_family"],"splits":[{"label":"train"},{"label":"test"}]}' > "$project/.oms/manifests/dti-v1.json"
 
   OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/multi-agent-review.sh" \
     --repo "$project" \
@@ -1879,6 +1900,9 @@ test_multi_agent_review_ml_preset() {
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'sampler.set_epoch'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'silent ML bugs'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'scaffold/sequence-identity split'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'chem-bio-ml'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'Review cold-target DTI'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'dti-v1'
 }
 
 test_multi_agent_review_default_prompt_requires_ml() {
@@ -3299,8 +3323,21 @@ EOF
 
 test_agent_ml_context_digest() {
   local project="$TMP/ml-context"
-  mkdir -p "$project/scripts" "$project/docs"
+  mkdir -p "$project/scripts" "$project/docs" "$project/.oms/manifests"
   printf 'import torch\n' > "$project/train.py"
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+- State: confirmed
+- Goal: Predict cold-target binding affinity
+- Success criteria: cold-target RMSE improves over baseline
+- Label/target definition: IC50: 10 nM
+- Split policy: train/validation/test by target family
+- Source snapshot/provenance: s3://private-bucket/train.csv
+- Data manifest: binding-v1
+EOF
+  cat > "$project/.oms/manifests/binding-v1.json" <<'EOF'
+{"schema":2,"name":"binding-v1","id_column":"pair_id","leakage_keys":["target_family","scaffold"],"splits":[{"label":"train","file":"private/train.csv"},{"label":"test","file":"private/test.csv"}]}
+EOF
   cat > "$project/scripts/check.sh" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-fast}" in
@@ -3317,6 +3354,18 @@ EOF
   assert_file_contains "$project/context" "train.py"
   assert_file_contains "$project/context" "preferred ML smoke: bash scripts/check.sh ml-smoke"
   assert_file_contains "$project/context" "exit=0"
+  assert_file_contains "$project/context" "Predict cold-target binding affinity"
+  assert_file_contains "$project/context" "Label/target definition: IC50: 10 nM"
+  assert_file_contains "$project/context" "Split policy: train/validation/test by target family"
+  assert_file_contains "$project/context" "binding-v1"
+  assert_file_contains "$project/context" "target_family,scaffold"
+  assert_file_contains "$project/context" "Source snapshot/provenance: [redacted path-or-URL]"
+  if grep -Fq 'private/train.csv' "$project/context"; then
+    fail "ML context must not expose split file paths"
+  fi
+  if grep -Fq 'private-bucket' "$project/context"; then
+    fail "ML context must not expose PROJECT.md storage URLs"
+  fi
   [ "$(head -n 1 "$project/context")" = "# ML Agent Context Digest" ] ||
     fail "digest header must be the first output line (ledger rows leaked before header)"
   awk '/## Recent Experiments/{f=1} f && /exit=0/{found=1} END{exit !found}' "$project/context" ||
@@ -4468,6 +4517,16 @@ EOF
   printf '%s' "$out" | grep -Fq -- '- goal: Ship loop hardening' || fail "status.sh missing task goal"
   printf '%s' "$out" | grep -Fq -- '- loop_attempts: 2' || fail "status.sh missing loop attempts"
   printf '%s' "$out" | grep -Fq -- '- verification_level: focused-test' || fail "status.sh missing verification level"
+
+  cat > "$task" <<'EOF'
+# Active Agent Task
+
+## Goal
+
+Task without a loop contract
+EOF
+  OH_MY_SETTING_TASK_FILE="$task" "$ROOT/scripts/status.sh" >/dev/null 2>&1 ||
+    fail "status.sh should succeed when optional loop fields are absent"
 }
 
 test_status_shows_auto_update_state() {
@@ -4744,6 +4803,19 @@ test_gen_checksums_deterministic() {
   [ "$a" = "$b" ] || fail "gen-checksums output must be deterministic"
   printf '%s\n' "$a" | grep -Eq '  install\.sh$' || fail "should include install.sh"
   printf '%s\n' "$a" | grep -Eq '  VERSION$' || fail "should include VERSION"
+  printf '%s\n' "$a" | grep -Eq '  custom-skills/chem-bio-ml/SKILL\.md$' ||
+    fail "should include custom skill content"
+  printf '%s\n' "$a" | grep -Eq '  templates/project-ml-AGENTS\.md$' ||
+    fail "should include installed templates"
+  printf '%s\n' "$a" | grep -Eq '  scripts/lib/hook_state\.py$' ||
+    fail "should include Python scripts"
+  printf '%s\n' "$a" | grep -Eq '  plugins/oh-my-setting/\.codex-plugin/plugin\.json$' ||
+    fail "should include plugin metadata"
+  printf '%s\n' "$a" | grep -Eq '  \.agents/plugins/marketplace\.json$' ||
+    fail "should include marketplace metadata"
+  printf '%s\n' "$a" | grep -Eq '  scripts/oms$' || fail "should include the oms dispatcher"
+  printf '%s\n' "$a" | grep -Eq '  prompts/.+' || fail "should include installed prompts"
+  printf '%s\n' "$a" | grep -Eq '  workflows/.+' || fail "should include installed workflows"
   # Every line must be valid sha256sum format: 64 hex + two spaces + path.
   if printf '%s\n' "$a" | grep -Evq '^[0-9a-f]{64}  '; then
     fail "non-sha256 line in gen-checksums output"
@@ -4792,6 +4864,7 @@ test_install_skills_detects_name_mismatch() {
 
   mkdir -p "$repo/custom-skills/demo" "$repo/scripts"
   cp "$ROOT/scripts/install-skills.sh" "$repo/scripts/install-skills.sh"
+  [ ! -f "$ROOT/scripts/validate-skills.py" ] || cp "$ROOT/scripts/validate-skills.py" "$repo/scripts/validate-skills.py"
   cat > "$repo/skills.manifest.json" <<'EOF'
 {
   "skills": [
@@ -4813,6 +4886,36 @@ EOF
     fail "install-skills should fail on manifest/SKILL.md name mismatch"
   fi
   assert_file_contains "$repo/out" "name mismatch: expected-name"
+}
+
+test_install_skills_detects_unlisted_and_broken_resources() {
+  local repo="$TMP/install-skills-resources"
+
+  mkdir -p "$repo/custom-skills/demo/references" "$repo/custom-skills/orphan" "$repo/scripts"
+  cp "$ROOT/scripts/install-skills.sh" "$repo/scripts/install-skills.sh"
+  [ ! -f "$ROOT/scripts/validate-skills.py" ] || cp "$ROOT/scripts/validate-skills.py" "$repo/scripts/validate-skills.py"
+  cat > "$repo/skills.manifest.json" <<'EOF'
+{"skills":[{"name":"demo","source":"custom-skills/demo","enabled":true}]}
+EOF
+  cat > "$repo/custom-skills/demo/SKILL.md" <<'EOF'
+---
+name: demo
+description: Demo skill.
+---
+Read [missing](references/missing.md).
+EOF
+  cat > "$repo/custom-skills/orphan/SKILL.md" <<'EOF'
+---
+name: orphan
+description: Unlisted skill.
+---
+EOF
+
+  if "$repo/scripts/install-skills.sh" >"$repo/out" 2>&1; then
+    fail "install-skills should reject unlisted skills and broken local references"
+  fi
+  assert_file_contains "$repo/out" "unlisted custom skill: custom-skills/orphan"
+  assert_file_contains "$repo/out" "missing local reference: custom-skills/demo/references/missing.md"
 }
 
 test_session_handoff_blocks_sensitive_digest() {
@@ -6824,6 +6927,10 @@ test_oms_init_seeds_and_guides() {
   [ -f "$project/.oms/memory/shared.md" ] || fail "init should seed shared memory"
   printf '%s' "$out" | grep -Fq "ML repo" || fail "init should tailor the checklist to an ML repo"
   printf '%s' "$out" | grep -Fq "oms state" || fail "init should point at oms state"
+  printf '%s' "$out" | grep -Fq "oms data-manifest check --name <manifest>" ||
+    fail "init should show a valid named manifest check command"
+  printf '%s' "$out" | grep -Fq "oms data-manifest leakage --name <manifest>" ||
+    fail "init should show a valid named leakage command"
   # Idempotent: a second run must not error.
   ( cd "$project" && "$ROOT/scripts/oms-init.sh" >/dev/null 2>&1 ) || fail "init must be idempotent"
 }
@@ -7110,15 +7217,119 @@ test_skill_router_matches_and_dedupes() {
   [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "route"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "release"'
-  # Same session: silent (once-per-session dedupe).
+  # A later turn in the same session may need the skill reminder again.
   out="$(printf '{"prompt":"커밋해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  [ -z "$out" ] || fail "router must not repeat a suggestion within a session"
+  printf '%s' "$out" | grep -Fq "git-cli-workflow" || fail "router should re-suggest a skill on a later turn"
+  # Duplicate delivery of the same hook event stays silent.
+  out="$(printf '{"prompt":"커밋해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  [ -z "$out" ] || fail "router must dedupe repeated delivery within one turn"
+  # Payloads without turn_id cannot safely persist a per-turn dedupe key.
+  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "git-cli-workflow" || fail "router should hint without turn_id"
+  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "git-cli-workflow" ||
+    fail "router must not suppress later identical prompts when turn_id is absent"
   # New session: suggests again; multi-match caps at two skills.
-  out="$(printf '{"prompt":"slurm 잡 제출하고 leakage 확인해줘","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
+  out="$(printf '{"prompt":"slurm 잡 제출하고 scaffold split 확인해줘","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "slurm-hpc" || fail "router should suggest slurm-hpc in a new session"
   printf '%s' "$out" | grep -Fq "chem-bio-ml" || fail "router should include the second match"
+}
+
+test_skill_router_routes_chem_bio_task_families() {
+  local d="$TMP/skill-router-chem-bio"
+  local project="$d/project"
+  local prompt
+  local out
+  local i=0
+
+  make_committed_repo "$project"
+  while IFS= read -r prompt; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"chem-bio-%s","turn_id":"t1","cwd":"%s"}' "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    printf '%s' "$out" | grep -Fq "chem-bio-ml" ||
+      fail "router should suggest chem-bio-ml for: $prompt"
+  done <<'EOF'
+RDKit SMILES standardization
+MMseqs2 sequence identity split
+DMS variant effect benchmark
+protein ligand docking cold target
+reaction yield retrosynthesis
+antibody developability peptide MHC
+CRISPR guide RNA off-target prediction
+single-cell perturbation Cell Painting
+biomedical knowledge graph link prediction
+molecular generation oracle
+quantum molecular force prediction
+spatial transcriptomics patient split
+metabolomics adduct annotation
+proteomics peptide protein inference
+ASO oligonucleotide design
+base editing prime editing off-target
+drug-drug interaction DDI prediction
+gene-disease association benchmark
+HTS toxicity pharmacokinetic model
+canonical SMILES string validation
+conformer ensemble generation
+molecular docking virtual screening
+protein generation and peptide generation
+epitope prediction for drug combination multi-omics
+genomic variant effect prediction
+EOF
+
+  while IFS= read -r prompt; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"chem-bio-negative-%s","turn_id":"t1","cwd":"%s"}' "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    if printf '%s' "$out" | grep -Fq "chem-bio-ml"; then
+      fail "router must not route unrelated prompt: $prompt"
+    fi
+  done <<'EOF'
+fix the shipping page
+debug memory leakage in React
+plan a high-protein meal
+recommend molecular gastronomy restaurants
+debug molecule.js rendering
+fix window docking behavior
+generate a portrait where everyone smiles
+EOF
+}
+
+test_chem_bio_skill_routes_all_references() {
+  local skill="$ROOT/custom-skills/chem-bio-ml/SKILL.md"
+  local ref
+
+  for ref in \
+    shared-data-evaluation.md \
+    small-molecule-property.md \
+    molecular-3d-physics.md \
+    protein-sequence-function.md \
+    protein-structure-variant.md \
+    interactions-complexes.md \
+    biologics-immunology.md \
+    nucleic-acids-gene-editing.md \
+    reactions-synthesis.md \
+    generative-design.md \
+    cellular-omics-phenotypic.md \
+    biomedical-networks.md; do
+    [ -f "$ROOT/custom-skills/chem-bio-ml/references/$ref" ] ||
+      fail "chem-bio-ml reference missing: $ref"
+    assert_file_contains "$skill" "references/$ref"
+  done
+}
+
+test_ml_review_includes_chem_bio_task_families() {
+  local review="$ROOT/scripts/multi-agent-review.sh"
+
+  assert_file_contains "$review" "cold-drug/cold-target/cold-both"
+  assert_file_contains "$review" "reaction"
+  assert_file_contains "$review" "single-cell"
+  assert_file_contains "$review" "knowledge-graph"
 }
 
 test_skill_router_skips_system_prompts() {
@@ -7281,6 +7492,7 @@ test_project_doctor_warns_missing_check
 test_project_doctor_warns_structure_drift
 test_project_doctor_warns_unregistered_experiments
 test_project_doctor_warns_empty_contract_past_draft
+test_project_doctor_warns_empty_ml_scientific_contract
 test_project_doctor_rejects_extra_arg
 test_review_verdicts_subcommand
 test_job_digest_log_mode
@@ -7447,6 +7659,7 @@ test_auto_update_skips_without_upstream
 test_autoupdate_cron_install_and_uninstall
 test_autoupdate_install_dry_run_no_writes
 test_install_skills_detects_name_mismatch
+test_install_skills_detects_unlisted_and_broken_resources
 test_check_gate_hard_fails_without_shellcheck
 test_gen_checksums_deterministic
 test_ci_status_reports_conclusion
@@ -7553,6 +7766,9 @@ test_oms_run_new_leaves_no_pointer_residue
 test_repo_state_refresh_ci_records
 test_delegate_kill9_recovery_via_gc
 test_skill_router_matches_and_dedupes
+test_skill_router_routes_chem_bio_task_families
+test_chem_bio_skill_routes_all_references
+test_ml_review_includes_chem_bio_task_families
 test_skill_router_skips_system_prompts
 test_turn_guard_blocks_unverified_dirty_task_once
 test_turn_guard_allows_verified_task

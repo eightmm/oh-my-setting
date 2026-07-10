@@ -152,7 +152,8 @@ tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh
   result); use the run ledger (`oms run-ledger`) for lightweight rows. Mint one
   run id (`oms run new`); other shells join it via `oms run current`, and
   `oms run timeline` answers "what happened in this repo".
-- For ML data, check `oms data-manifest leakage` before training when splits exist.
+- For ML data with registered splits, run `oms data-manifest check --name
+  <manifest>` and `oms data-manifest leakage --name <manifest>` before training.
 - Reconcile long Slurm jobs (`oms run-reconcile`) into shared state at session
   start when work may have finished while away.
 - Set `OMS_AGENT` (codex|claude|antigravity) in the CLI's env for state

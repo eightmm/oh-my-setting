@@ -60,8 +60,11 @@
 - Training defaults (optimizer, LR schedule, DDP, checkpoint format, CUDA env
   vars) live in the `ml-training` skill; load it for training setup work
   instead of restating defaults here.
-- For molecular/protein data, load the `chem-bio-ml` skill before deciding
-  splits, labels, metrics, or featurization (leakage is silent here).
+- For chemical, biological, or therapeutic data, load the `chem-bio-ml` skill
+  before deciding splits, labels, metrics, or featurization. It routes molecule,
+  protein, interaction, biologic, nucleic-acid/gene-editing, reaction,
+  generation, cellular/omics, imaging, and biomedical-network tasks to
+  domain-specific leakage guardrails.
 - For experiment design and result interpretation, load the `research-method`
   skill: falsifiable hypothesis, pre-registered metric, baseline, ledgered result.
 - Use `uv` for Python envs: `uv sync`, `uv add`, `uv run`.
@@ -96,7 +99,7 @@
 - Research runs: prefer `oms research-runner ... -- <cmd>` for hypothesis-testing experiments; it pre-registers the claim and then calls the run ledger.
 - Run ledger: use `oms run-ledger -- <cmd>` for simple mechanical runs; read `docs/EXPERIMENTS.jsonl` before proposing new experiments.
 - Long logs/failed jobs: digest with `oms job-digest <logfile|jobid>` instead of reading raw logs.
-- Coordination: `oms state` when resuming (open runs, claims, failures); claim long runs on `oms experiment-board`; check `oms data-manifest leakage` before training when splits exist.
+- Coordination: `oms state` when resuming (open runs, claims, failures); claim long runs on `oms experiment-board`; run `oms data-manifest check --name <manifest>` and `oms data-manifest leakage --name <manifest>` before training when registered splits exist.
 
 ## ML Safety Stop
 

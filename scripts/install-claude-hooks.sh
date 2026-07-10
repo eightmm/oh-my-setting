@@ -81,14 +81,14 @@ hooks = settings.setdefault("hooks", {})
 def ours(entry):
     for h in entry.get("hooks", []) if isinstance(entry, dict) else []:
         cmd = str(h.get("command", ""))
-        if "oh-my-setting" in cmd and any(mark in cmd for mark in MARKS):
+        if any(mark in cmd for mark in MARKS):
             return True
     return False
 
 def upsert(event, mark, cmd):
     entries = hooks.setdefault(event, [])
     existing = [e for e in entries if any(
-        mark in str(h.get("command", "")) and "oh-my-setting" in str(h.get("command", ""))
+        mark in str(h.get("command", ""))
         for h in e.get("hooks", []) if isinstance(e, dict)
     )]
     if existing:

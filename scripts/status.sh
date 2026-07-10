@@ -155,6 +155,7 @@ active_task_status() {
   [ -n "$value" ] && printf -- '- verification_level: %s\n' "$value"
   value="$(task_section_value "$task_file" "## Loop State" diff_budget_lines 2>/dev/null || true)"
   [ -n "$value" ] && printf -- '- diff_budget_lines: %s\n' "$value"
+  return 0
 }
 
 auto_update_trigger_status() {

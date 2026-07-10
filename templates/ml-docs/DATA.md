@@ -7,6 +7,7 @@ Data contract. Changes here invalidate checkpoints and baselines.
 - Origin (URL/path):
 - License:
 - Version / snapshot date:
+- Assay/protocol/organism/construct context:
 - Size (rows / GB):
 - Hash (sha256 of canonical file):
 
@@ -19,6 +20,10 @@ Data contract. Changes here invalidate checkpoints and baselines.
 ## Labels / Targets
 
 - Definition:
+- Units and direction:
+- Censoring / detection limits:
+- Replicate aggregation policy:
+- Negative source (measured inactive / decoy / unmeasured / other):
 - Class balance:
 - Known noise / ambiguity:
 
@@ -26,8 +31,12 @@ Data contract. Changes here invalidate checkpoints and baselines.
 
 - Train / Val / Test ratio:
 - Split policy (random / time / group / stratified):
+- Prediction and independent evaluation unit:
+- Standardized entity IDs:
+- Group keys (entity/pair/scaffold/family/assay/donor/time/etc.):
 - Seed:
 - Split file path:
+- Data manifest name:
 - Leakage boundary (what MUST NOT cross splits):
 
 ## Preprocessing
@@ -36,6 +45,7 @@ Data contract. Changes here invalidate checkpoints and baselines.
 - Steps (in order):
   1.
 - Stats fit on (train only? yes):
+- Other train-only fitted state (vocabulary/features/clusters/index/thresholds):
 - Normalization params location:
 
 ## Verification

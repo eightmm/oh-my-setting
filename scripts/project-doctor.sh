@@ -151,6 +151,16 @@ if [ "$styles_found" -eq 0 ]; then
 fi
 
 if [ -f "$PROJECT_DIR/PROJECT.md" ]; then
+  pm_field() {
+    awk -v prefix="- $1:" '
+      index($0, prefix) == 1 {
+        value = substr($0, length(prefix) + 1)
+        sub(/^[[:space:]]*/, "", value)
+        print value
+        exit
+      }
+    ' "$PROJECT_DIR/PROJECT.md"
+  }
   state="$(grep -E '^- State:' "$PROJECT_DIR/PROJECT.md" | head -n 1 | sed 's/^- State:[[:space:]]*//' || true)"
   if [ -z "$state" ]; then
     warn "PROJECT.md has no '- State:' field"
@@ -163,10 +173,6 @@ if [ -f "$PROJECT_DIR/PROJECT.md" ]; then
     # be filled. Empty fields mean agents have no per-project success criteria
     # to verify against -- enforce it where the contract lives (PROJECT.md), not
     # in the template-synced managed block.
-    pm_field() {
-      grep -E "^- $1:" "$PROJECT_DIR/PROJECT.md" | head -n 1 |
-        sed -E "s/^- $1:[[:space:]]*//"
-    }
     if [ -z "$(pm_field Setup)$(pm_field Test)$(pm_field Run)" ]; then
       warn "PROJECT.md is past draft but ## Commands (Setup/Test/Run) are empty"
     fi
@@ -179,6 +185,30 @@ else
 fi
 
 if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
+  if [ -n "${state:-}" ] && [ "$state" != "draft" ]; then
+    missing_ml=""
+    for field in \
+      'Prediction unit' \
+      'Inference-time information boundary' \
+      'Entity IDs/standardization' \
+      'Source snapshot/provenance' \
+      'Label/target definition' \
+      'Label units/direction/censoring/replicates' \
+      'Split policy' \
+      'Split/group keys' \
+      'Leakage risks' \
+      'Train-only fitted transforms' \
+      'Data manifest' \
+      'Calibration/applicability-domain plan'; do
+      [ -n "$(pm_field "$field")" ] || missing_ml="${missing_ml}${missing_ml:+, }$field"
+    done
+    if [ -n "$missing_ml" ]; then
+      warn "ML scientific contract fields are empty: $missing_ml (use n/a only when justified)"
+    else
+      ok "ML scientific contract fields are filled"
+    fi
+  fi
+
   missing_docs=0
   for src in "$ROOT"/templates/ml-docs/*.md; do
     [ -e "$src" ] || continue

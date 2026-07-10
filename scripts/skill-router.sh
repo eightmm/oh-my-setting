@@ -6,7 +6,7 @@ set -euo pipefail
 # this matches the prompt against the trigger phrases in skills.manifest.json
 # and prints a one-line hint (stdout becomes injected context). Precision over
 # recall: at most OMS_ROUTER_MAX suggestions per prompt, each skill suggested
-# at most once per session, silence on no match, and system-ish prompts
+# at most once per turn, silence on no match, and system-ish prompts
 # (tool notifications, slash commands) are skipped entirely. Fail-open: this
 # hook must never block a prompt.
 #

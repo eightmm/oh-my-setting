@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Emit a deterministic SHA256SUMS manifest for the release-relevant tracked
-# files (the installer, every shell script, the skills manifest, VERSION).
+# files (installers, rules, scripts, skills, templates, plugins, and metadata).
 # Output is sorted by path so the same checkout always produces the same bytes,
 # and is suitable for `sha256sum -c`. Run from anywhere inside the checkout.
 
@@ -28,9 +28,20 @@ sha256_of() {
 # Tracked release files only — deterministic and excludes local/untracked state.
 # LC_ALL=C keeps the sort stable across locales.
 files="$(git ls-files \
+  AGENTS.md \
+  CLAUDE.md \
+  '.agents/plugins/marketplace.json' \
   install.sh \
+  scripts/oms \
   'scripts/*.sh' \
+  'scripts/*.py' \
   'scripts/lib/*.sh' \
+  'scripts/lib/*.py' \
+  'custom-skills/**' \
+  'templates/**' \
+  'plugins/**' \
+  'prompts/**' \
+  'workflows/**' \
   skills.manifest.json \
   VERSION | LC_ALL=C sort)"
 

@@ -323,8 +323,15 @@ def fresh_skill_names(payload: dict[str, Any], scored_names: list[str]) -> list[
     names = scored_names[:max_n]
     session = str(payload.get("session_id") or payload.get("sessionId") or "nosession")[:64]
     safe = "".join(c for c in session if c.isalnum() or c in "-_") or "nosession"
+    turn = str(payload.get("turn_id") or payload.get("turnId") or "")[:64]
+    if not turn:
+        # Without a stable turn identifier, persistent dedupe would suppress an
+        # identical request in every later turn. Prefer a repeated hint over a
+        # false session-wide suppression.
+        return names
+    safe_turn = "".join(c for c in turn if c.isalnum() or c in "-_") or "noturn"
     state_dir = Path(os.environ.get("TMPDIR", "/tmp")) / f"oms-skill-router.{os.getuid()}"
-    state = state_dir / safe
+    state = state_dir / f"{safe}.{safe_turn}"
     seen: set[str] = set()
     try:
         seen = {line.strip() for line in state.read_text(encoding="utf-8").splitlines()}
@@ -379,7 +386,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             "oh-my-setting skill hint: this request may match installed skill(s): "
             + ", ".join(fresh)
             + ". If relevant, invoke via the Skill tool before proceeding; ignore if not."
-            + " (each skill hinted once per session)"
+            + " (each skill hinted once per turn)"
         )
     return 0
 

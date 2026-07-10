@@ -232,6 +232,7 @@ write_prompt() {
     if [ "$ML_PRESET" -eq 1 ]; then
       printf 'This is an ML pre-training review. ML bugs are usually silent: the code runs,\n'
       printf 'only the metrics are wrong. Check the diff against each item:\n'
+      printf 'For chem-bio work, apply the installed chem-bio-ml skill and read its shared plus task-family references when available.\n'
       printf -- '- Data leakage: val/test data used for fitting, normalization, feature selection, threshold tuning, checkpoint choice, or early stopping.\n'
       printf -- '- Split integrity: boundary changes, group/time leakage, seed-dependent splits.\n'
       printf -- '- Label/target or metric definition changes that silently break comparability with baselines.\n'
@@ -241,7 +242,12 @@ write_prompt() {
       printf -- '- Silent numerics: NaN/Inf paths, division by zero, dtype/precision changes.\n'
       printf -- '- DDP: sampler.set_epoch per epoch, rank-0-only side effects, metric all_reduce.\n'
       printf -- '- Config or preprocessing changes that invalidate existing checkpoints or baselines.\n'
-      printf -- '- Chem-bio (if molecular/protein data): random split instead of scaffold/sequence-identity split; near-duplicate leakage across the split; flipped or unlogged target (IC50/pIC50, Ki/Kd, ΔG sign); global metric hiding within-series ranking; missing cheap baseline.\n'
+      printf -- '- Chem-bio shared: wrong scientific unit or holdout key; standardization after dedup/split; assay/source conflicts; censoring, units, replicate, or negative provenance lost; missing cheap baseline, calibration, or applicability-domain slices.\n'
+      printf -- '- Molecule/protein/3D: random split instead of scaffold/sequence-identity split; scaffold/series or sequence/family/template leakage; stereochemistry, isoform/construct, residue alignment, conformer/frame, energy/force unit, or invariance errors.\n'
+      printf -- '- Interactions/biologics: warm pairs reported as novel entities; missing cold-drug/cold-target/cold-both results; bound-pose/template leakage; biased decoys; parent/clonotype/antigen or assay leakage.\n'
+      printf -- '- Nucleic acids/gene editing: overlapping guide/locus/transcript leakage; genome/annotation version drift; modifications collapsed to plain sequence; PAM/nuclease/cell-context confounding; unmeasured off-targets treated as negatives.\n'
+      printf -- '- Reaction/generation: patent, reaction-template, product, campaign, or time leakage; yield semantics lost; atom/stereo errors; memorization, oracle exploitation, survivor-only scoring, or missing synthesis/diversity constraints.\n'
+      printf -- '- Cellular/network: cell/well/site pseudoreplication; donor, plate, batch, perturbation, or time confounding; single-cell no-change baseline omitted; knowledge-graph inverse/entailed edge, text, degree, or future-snapshot leakage.\n'
       printf 'Rank silently-wrong-metrics bugs as the highest severity findings.\n\n'
     fi
     ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"

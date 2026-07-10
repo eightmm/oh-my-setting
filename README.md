@@ -121,7 +121,7 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 | Multi-agent review & delegation | Ask/review across three local models and delegate write tasks to isolated worktrees — with sensitive-prompt scrubbing, run artifacts/index, change-scope guards, and patch admission before anything lands |
 | Agent state & handoff | Shared memory, the active task packet, a subtask plan DAG (`agent-plan`) for splitting work across agents, and session-transcript handoff — all attributed to the writing agent and anchored at the repo root so every agent (from any subdirectory) sees one state |
 | ML experiment tracking | Run ids, ledger, reproducibility capsules, pre-registered research runs, and metric/verdict records — with a gate that won't burn a run on a failing contract |
-| ML data & leakage | Dataset-split manifests that flag train/eval leakage on IDs and chem-bio keys (scaffold/inchikey/cluster/assay) and detect split drift, never storing raw rows |
+| ML data & leakage | Dataset-split manifests that flag train/eval overlap on IDs and declared group keys (entity/pair/scaffold/family/assay/donor/batch/time), detect split drift, and never store raw rows |
 | ML/HPC support | Slurm job reconcile, a single-machine GPU queue, log digests, and local hardware/cluster context (see [docs/COMPONENTS.md](docs/COMPONENTS.md)) |
 | Reusable code sources | A local registry and GitHub fetch for trusted reusable files (see [docs/COMPONENTS.md](docs/COMPONENTS.md)) |
 | Maintenance & release | Install/update/doctor, a verification gate wired as a pre-push hook, cleanup/uninstall with restore, and a tag-driven release ([docs/RELEASE.md](docs/RELEASE.md)) |

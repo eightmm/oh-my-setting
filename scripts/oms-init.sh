@@ -78,7 +78,7 @@ else
   echo "- A plan exists: 'oms agent-plan ready' for actionable tasks."
 fi
 if [ "$style" = "ml" ]; then
-  echo "- ML repo: 'oms data-manifest leakage' before training when splits exist;"
+  echo "- ML repo: 'oms data-manifest check --name <manifest>' then 'oms data-manifest leakage --name <manifest>' before training when registered splits exist;"
   echo "  wrap runs in 'oms run-ledger' / 'oms run-capsule' and claim on 'oms experiment-board'."
 fi
 echo "- Reusable worker personas: 'oms agent-role list' (create with 'agent-role --name NAME init')."

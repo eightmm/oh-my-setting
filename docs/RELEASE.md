@@ -34,8 +34,10 @@ sha256sum -c install.sh.sha256
 bash install.sh
 ```
 
-`SHA256SUMS` covers the installer plus every tracked script and the skills
-manifest, so a clone can be audited against a release with `sha256sum -c`.
+`SHA256SUMS` covers installers, agent rules, tracked shell/Python scripts,
+custom skills and references, project templates, plugin metadata, the skills
+manifest, prompts/workflows, the `oms` dispatcher, and `VERSION`, so a clone can
+be audited with `sha256sum -c`.
 
 ## Channels
 

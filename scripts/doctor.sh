@@ -78,19 +78,37 @@ check_custom_skills() {
   local target_root="$1"
   local skill
   local name
+  local source
 
-  for skill in "$ROOT"/custom-skills/*; do
-    [ -d "$skill" ] || continue
-    [ -f "$skill/SKILL.md" ] || continue
+  while IFS= read -r source; do
+    [ -n "$source" ] || continue
+    skill="$ROOT/$source"
     name="$(basename "$skill")"
     if [ -L "$target_root/$name" ]; then
       # Symlink install: certify the link points at THIS checkout's skill,
       # not a shadowed copy from another install.
       check_path "$target_root/$name" "$skill"
+    elif [ -d "$target_root/$name" ]; then
+      # Copy fallback must preserve nested references and agent metadata too;
+      # checking SKILL.md alone can certify a partially installed skill.
+      if diff -qr "$skill" "$target_root/$name" >/dev/null 2>&1; then
+        echo "ok: $target_root/$name (copy parity)"
+      else
+        echo "copy differs: $target_root/$name (expected resource parity with $skill)"
+        FAILED=1
+      fi
     else
       check_path "$target_root/$name/SKILL.md"
     fi
-  done
+  done < <(python3 - "$ROOT/skills.manifest.json" <<'PY'
+import json
+import sys
+for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
+    source = str(skill.get("source", ""))
+    if skill.get("enabled") is True and source.startswith("custom-skills/"):
+        print(source)
+PY
+)
 }
 
 harness_relpath() {

@@ -15,6 +15,8 @@ Evaluation protocol. Locked — changes invalidate prior numbers.
 
 - Path:
 - Size:
+- Deployment population / generalization claim:
+- Holdout axes (entity/family/assay/source/time/context):
 - Frozen since (date / commit):
 - DO NOT touch during model selection.
 
@@ -33,8 +35,12 @@ uv run python scripts/eval.py --config configs/eval.yaml --ckpt <path>
 ## Reporting
 
 - Mean ± std over N seeds:
-- CI (bootstrap): yes/no
-- Per-class / per-subgroup breakdown: yes/no
+- Uncertainty unit (seed/fold/campaign/donor/etc.):
+- CI/bootstrap unit:
+- Per-class / per-subgroup breakdown:
+- In-domain vs out-of-domain slices:
+- Calibration / interval coverage:
+- Applicability-domain coverage and rejection policy:
 
 ## Regression Policy
 
