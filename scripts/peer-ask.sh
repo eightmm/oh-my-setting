@@ -303,6 +303,7 @@ fi
 
 synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
 ma_write_synthesis "$synth_file"
+ma_append_artifact_index "$REPO" ask-synthesis local 0 "$synth_file" || true
 
 if [ "$EXPORT_ONLY" -eq 1 ]; then
   echo "summary: exported $total provider prompt(s)"

@@ -485,6 +485,7 @@ fi
 
 synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
 ma_write_synthesis "$synth_file"
+synth_status=0
 
 if [ "$EXPORT_ONLY" -eq 1 ] && [ -n "$SYNTHESIZE" ]; then
   echo "export-only: synthesis provider call skipped" >&2
@@ -503,12 +504,14 @@ elif [ -n "$SYNTHESIZE" ]; then
     printf 'DRY RUN: synthesis pass skipped.\n' >> "$synth_file"
     echo "dry-run: synthesis ($SYNTHESIZE)"
   elif ! ma_validate_outbound_prompt "$synth_prompt_file"; then
+    synth_status=3
     printf 'SKIPPED: outbound synthesis context contains sensitive-looking content.\n' >> "$synth_file"
     echo "warning: synthesis skipped; sensitive-looking outbound context" >&2
   else
     synth_binary="$SYNTHESIZE"
     [ "$SYNTHESIZE" = "antigravity" ] && synth_binary="agy"
     if ! command -v "$synth_binary" >/dev/null 2>&1; then
+      synth_status=127
       printf 'SKIPPED: command not found: %s\n' "$synth_binary" >> "$synth_file"
       echo "warning: synthesis provider missing: $synth_binary" >&2
     else
@@ -555,6 +558,9 @@ elif [ -n "$SYNTHESIZE" ]; then
   fi
   rm -f "$synth_prompt_file"
 fi
+
+ma_append_artifact_index "$REPO" review-synthesis "${SYNTHESIZE:-local}" \
+  "$synth_status" "$synth_file" || true
 
 if [ "$EXPORT_ONLY" -eq 1 ]; then
   echo "summary: exported $total provider prompt(s)"

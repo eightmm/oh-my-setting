@@ -1925,6 +1925,8 @@ test_peer_review_synthesize_dry_run() {
 
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-mode-*.md' '## Synthesis (claude)'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-synthesize-mode-*.md' 'DRY RUN: synthesis pass skipped.'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "review-synthesis"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" 'artifacts/_synthesis-review-synthesize-mode-'
 }
 
 test_peer_review_synthesize_provider_override() {
@@ -2482,6 +2484,8 @@ test_peer_ask_repo_context_subset() {
   [ "$count" = "1" ] || fail "expected one ask artifact, got $count"
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-repo-state-*.md' 'Git status:'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-repo-state-*.md' 'file.txt'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "ask-synthesis"'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" 'artifacts/_synthesis-assess-repo-state-'
   if grep -R -Fq '.env.local' "$artifact_dir"; then
     fail "private .env.local path leaked into ask artifact"
   fi
