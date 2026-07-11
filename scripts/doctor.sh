@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
 REPAIR=0
+ORIGINAL_ARGS=("$@")
 
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
@@ -45,6 +46,12 @@ if [ -f "$RECEIPT" ]; then
   fi
 fi
 
+if [ "$RECEIPT_STATE" = "valid" ] && [ "$ROOT" != "$INSTALL_ROOT" ] &&
+   [ -x "$INSTALL_ROOT/scripts/doctor.sh" ]; then
+  echo "delegating doctor to canonical owner: $INSTALL_ROOT"
+  exec "$INSTALL_ROOT/scripts/doctor.sh" "${ORIGINAL_ARGS[@]}"
+fi
+
 repair_install() {
   local repair_root="$INSTALL_ROOT"
 
@@ -67,9 +74,7 @@ repair_install() {
   fi
   if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ] &&
      [ -x "$repair_root/scripts/install-codex-plugin.sh" ] &&
-     command -v codex >/dev/null 2>&1 &&
-     codex plugin list --json 2>/dev/null |
-       python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+     command -v codex >/dev/null 2>&1; then
     "$repair_root/scripts/install-codex-plugin.sh"
   fi
 }
@@ -235,10 +240,16 @@ check_codex_plugin() {
   local marker_root=""
   local actual_hash
 
+  if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "0" ]; then
+    echo "note: codex plugin check disabled (OH_MY_SETTING_CODEX_PLUGIN=0)"
+    return 0
+  fi
   command -v codex >/dev/null 2>&1 || return 0
   if ! codex plugin list --json 2>/dev/null |
-       python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
-    echo "note: codex plugin oh-my-setting not installed (run $INSTALL_ROOT/scripts/install-codex-plugin.sh)"
+       python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; sys.exit(0 if any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+    echo "fail: expected codex plugin not installed: oh-my-setting@oh-my-setting-local"
+    echo "hint: run $INSTALL_ROOT/scripts/install-codex-plugin.sh"
+    FAILED=1
     return 0
   fi
 
@@ -253,7 +264,8 @@ PY
   expected_hash="$(oms_install_receipt_field plugin.sha256 "$RECEIPT" 2>/dev/null || oms_install_plugin_hash "$INSTALL_ROOT")"
 
   if [ ! -d "$cache" ]; then
-    echo "note: codex plugin cache missing: $cache"
+    echo "fail: codex plugin cache missing: $cache"
+    FAILED=1
     return 0
   fi
   [ ! -f "$cache/.oh-my-setting-source-sha256" ] ||
@@ -264,8 +276,9 @@ PY
   if [ "$marker_root" != "$INSTALL_ROOT" ] ||
      [ "$marker_hash" != "$expected_hash" ] ||
      [ "$actual_hash" != "$expected_hash" ]; then
-    echo "note: stale codex plugin cache: $cache"
+    echo "fail: stale codex plugin cache: $cache"
     echo "hint: run $INSTALL_ROOT/scripts/install-codex-plugin.sh"
+    FAILED=1
   else
     echo "ok: codex plugin oh-my-setting (cache parity)"
   fi
@@ -531,14 +544,14 @@ check_optional_cmd squeue
 check_optional_cmd sinfo
 check_optional_cmd scancel
 
-check_path "$INSTALL_ROOT/AGENTS.md"
+check_path "$INSTALL_ROOT/rules/global-AGENTS.md"
 check_path "$INSTALL_ROOT/skills.manifest.json"
 check_path "$INSTALL_ROOT/.agents/plugins/marketplace.json"
 check_path "$INSTALL_ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json"
 check_path "$INSTALL_ROOT/plugins/oh-my-setting/hooks.json"
-check_path "$HOME/.codex/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
-check_path "$HOME/.claude/CLAUDE.md" "$INSTALL_ROOT/AGENTS.md"
-check_path "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
+check_path "$HOME/.codex/AGENTS.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
+check_path "$HOME/.claude/CLAUDE.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
+check_path "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
 check_custom_skills "$HOME/.codex/skills"
 check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.gemini/antigravity/skills"

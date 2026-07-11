@@ -1,7 +1,7 @@
 # ML Project Guidelines
 
 - Prefer local conventions over global defaults.
-- Read `PROJECT.md` first. If missing/draft/incomplete, interview and update it before coding.
+- Read `PROJECT.md` when it exists. Stop for spec work only when unresolved choices affect the requested change.
 - Change only task-relevant lines.
 - Evidence before edit; inspect data path, loader, model, loss, metrics, tests.
 - Implementation checks require reading the relevant source files/scripts, not
@@ -16,7 +16,10 @@
 - Commit messages: Conventional Commits; subject <= 50 chars; body only for non-obvious why/risk.
 - Markdown/docs: short sections, bullets, direct commands; keep setup, safety, and specs explicit.
 
-## ML Startup Workflow
+## ML Project Startup Workflow
+
+This workflow applies to project startup and broad/architecture-shaping ML work,
+not clear bounded maintenance.
 
 1. Skeleton: create missing standard directories only. No model, training, data processing, or dependency changes yet.
 2. Interview: clarify goal, users, non-goals, task type, data, metric, baseline, constraints, compute, and verification.

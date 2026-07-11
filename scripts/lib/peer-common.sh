@@ -88,12 +88,38 @@ slugify() {
     cut -c1-48
 }
 
+ma_descendant_pids() {
+  local parent="$1"
+  local child
+
+  while IFS= read -r child; do
+    child="${child//[[:space:]]/}"
+    [ -n "$child" ] || continue
+    ma_descendant_pids "$child"
+    printf '%s\n' "$child"
+  done <<EOF
+$(ps -eo pid=,ppid= | awk -v parent="$parent" '$2 == parent { print $1 }')
+EOF
+}
+
 ma_kill_jobs() {
   local pid
+  local child
+  local tree=()
 
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
+    tree=()
+    while IFS= read -r child; do
+      [ -n "$child" ] && tree+=("$child")
+    done <<EOF
+$(ma_descendant_pids "$pid")
+EOF
+    [ "${#tree[@]}" -eq 0 ] || kill -TERM "${tree[@]}" 2>/dev/null || true
     kill -TERM "$pid" 2>/dev/null || true
+    sleep 0.2
+    [ "${#tree[@]}" -eq 0 ] || kill -KILL "${tree[@]}" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
   done <<EOF
 $(jobs -pr)
 EOF

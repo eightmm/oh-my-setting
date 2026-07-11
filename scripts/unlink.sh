@@ -93,9 +93,14 @@ esac
 unlink_all() {
   local receipt owner
 
+  # Pre-split installs linked the repository overlay directly. Accept that
+  # owned target so an interrupted upgrade can still restore user backups.
   unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
   unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
   unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
+  unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
+  unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/rules/global-AGENTS.md"
+  unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
   unlink_skills "$HOME/.codex/skills"
   unlink_skills "$HOME/.claude/skills"
   unlink_skills "$HOME/.gemini/antigravity/skills"

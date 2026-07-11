@@ -26,8 +26,8 @@ usage() {
   cat <<'EOF'
 Usage: advise.sh (--prompt TEXT | --prompt-file PATH) [options]
 
-Consult an advisor agent at a decision point: before an irreversible
-decision, after repeated failures, or before declaring work done. Sends an
+Consult an advisor agent at a decision point: before an irreversible or
+high-risk decision, after repeated failures, or at a release go/no-go. Sends an
 adversarial-review prompt to one other local agent CLI (read-only pass via
 agent-call.sh) and prints its verdict. Include in the prompt: the decision,
 the evidence, the alternatives considered, and the planned next action.
@@ -183,8 +183,8 @@ summary="$PROMPT"
   printf 'You are the advisor for another coding agent at a decision point.\n'
   printf 'Be adversarial: your job is to catch the wrong branch before it is\n'
   printf 'taken, not to validate it. The caller consults you before\n'
-  printf 'irreversible decisions, after repeated failures, or before\n'
-  printf 'declaring work done.\n\n'
+  printf 'irreversible or high-risk decisions, after repeated failures, or\n'
+  printf 'at a release go/no-go. Routine completion does not require advice.\n\n'
   printf 'Respond with exactly these sections:\n'
   printf 'VERDICT: proceed | revise | stop\n'
   printf 'RISKS: flaws or risks in the plan, most severe first\n'

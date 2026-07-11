@@ -15,8 +15,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   verification, with deny precedence; artifact and liveness rows carry
   executor ID and soul hash provenance.
 - `advise.sh` (`oms advise`): agent-agnostic advisor pass at decision points
-  (before irreversible decisions, after repeated failures, before declaring
-  done). Composes an adversarial VERDICT/RISKS/MISSING/NEXT prompt, attaches
+  (before irreversible/high-risk decisions, after repeated failures, or at a
+  release go/no-go). Composes an adversarial VERDICT/RISKS/MISSING/NEXT prompt, attaches
   unresolved fail-ledger rows, defaults to the first available provider that
   is not the caller (`OMS_ADVISOR_PROVIDER`/`--to` to pin), and routes through
   `agent-call.sh` (read-only, scrubbed). Gives Codex and Antigravity the same
@@ -56,11 +56,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   linted, never executed.
 
 ### Changed
-- Reduced global `AGENTS.md` from a harness manual to a compact policy layer:
+- Reduced global `rules/global-AGENTS.md` from a harness manual to a compact policy layer:
   provider/model ladders, automatic worker-tier downgrades, and routine advisor
   calls are gone; ambiguous work alone triggers the spec gate, and detailed
   coordination routes through the `agent-harness` skill while parent judgment
   and executor scope fences stay.
+- Split install-wide rules from the repository `AGENTS.md` overlay so working on
+  oh-my-setting no longer injects the same global policy twice.
 - Removed unused legacy prompt/template placeholders, consolidated duplicate
   plugin hook wrappers, and marked standalone workflow files deprecated in
   favor of their maintained skills.
@@ -85,6 +87,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   documented in COMPONENTS.
 
 ### Fixed
+- Aligned advisor and spec gates across global rules, skills, templates, docs,
+  and prompts: routine completion and clear bounded changes no longer trigger
+  mandatory advisor/interview workflows.
+- Hardened install ownership and parity: foreign symlinks round-trip through
+  backup/restore, foreign doctor calls delegate to the canonical implementation,
+  plugin identity uses the full marketplace ID, stale/missing expected plugins
+  fail health checks, and auto-update refreshes hooks/plugins before reporting
+  success. Repeated relinks preserve restoration backups, scheduled updates keep
+  hook/plugin opt-outs, and unlink accepts pre-split global-rule links.
+- Signal cleanup now terminates the full provider subprocess tree, preventing a
+  cancelled read-only call from retaining output pipes until its timeout.
 - `link.sh` now removes dangling skill links owned by the checkout (left
   behind when a skill is renamed or removed), so renames like
   `multi-agent-*` -> `peer-*` do not strand old links in agent skill dirs.

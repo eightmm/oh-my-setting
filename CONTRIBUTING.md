@@ -2,7 +2,7 @@
 
 ## Before you push
 
-Run the same gate CI runs:
+Run the core gate shared with CI (CI also runs install E2E and macOS fixtures):
 
 ```bash
 bash scripts/check.sh

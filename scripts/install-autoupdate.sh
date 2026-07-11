@@ -11,6 +11,8 @@ TIMER_FILE="$SYSTEMD_DIR/oh-my-setting-autoupdate.timer"
 CRON_MARK_BEGIN="# oh-my-setting autoupdate:begin"
 CRON_MARK_END="# oh-my-setting autoupdate:end"
 CRON_FILE="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
+CLAUDE_HOOKS="${OH_MY_SETTING_CLAUDE_HOOKS:-1}"
+CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-1}"
 
 usage() {
   cat <<'EOF'
@@ -59,6 +61,10 @@ case "$METHOD" in
   auto|systemd|cron) ;;
   *) echo "error: method must be auto, systemd, or cron" >&2; exit 2 ;;
 esac
+case "$CLAUDE_HOOKS:$CODEX_PLUGIN" in
+  0:0|0:1|1:0|1:1) ;;
+  *) echo "error: hook/plugin opt-outs must be 0 or 1" >&2; exit 2 ;;
+esac
 
 systemd_available() {
   command -v systemctl >/dev/null 2>&1 &&
@@ -97,6 +103,8 @@ Description=oh-my-setting auto-update
 
 [Service]
 Type=oneshot
+Environment=OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS
+Environment=OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN
 ExecStart="$ROOT/scripts/auto-update.sh" $MODE
 EOF
   cat > "$TIMER_FILE" <<'EOF'
@@ -135,7 +143,7 @@ write_cron() {
 
 install_cron() {
   local line
-  line="17 6 * * * \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
+  line="17 6 * * * OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
 
   if [ "$DRY_RUN" = "1" ]; then
     printf 'would install cron trigger: %s\n' "$line"

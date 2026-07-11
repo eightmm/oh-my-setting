@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Repo verification gate — the SAME checks CI runs, in one command, so a local
-# pass means CI will pass. Crucially, a missing tool is a HARD FAILURE, never a
-# silent skip: a skipped shellcheck is exactly what let a whole session of red
-# CI go unnoticed. Wire it as a pre-push hook with scripts/install-hooks.sh.
+# Core repository gate shared with CI. CI additionally runs the real install
+# lifecycle and macOS portability fixtures. A missing tool is a HARD FAILURE,
+# never a silent skip. Wire this as a pre-push hook with scripts/install-hooks.sh.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -24,6 +23,9 @@ echo "== shellcheck =="
 # scripts/oms is named explicitly: the dispatcher has no .sh extension, so
 # the glob alone would silently skip it.
 "$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh tests/*.sh
+
+echo "== bash 3.2 static compatibility =="
+bash scripts/check-bash32.sh
 
 echo "== smoke =="
 bash tests/harness-enhancements-smoke.sh

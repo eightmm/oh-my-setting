@@ -80,8 +80,7 @@ if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ] && [ -x "$ROOT/scripts/install-c
 fi
 
 if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ] && [ -x "$ROOT/scripts/install-codex-plugin.sh" ]; then
-  "$ROOT/scripts/install-codex-plugin.sh" ||
-    echo "warning: codex plugin refresh failed (update continues)" >&2
+  "$ROOT/scripts/install-codex-plugin.sh"
 fi
 
 if [ "$SKIP_DOCTOR" != "1" ]; then

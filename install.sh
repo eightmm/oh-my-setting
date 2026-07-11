@@ -136,8 +136,7 @@ else
 fi
 
 if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ]; then
-  "$DEST/scripts/install-codex-plugin.sh" ||
-    echo "warning: codex plugin registration failed (install continues)" >&2
+  "$DEST/scripts/install-codex-plugin.sh"
 else
   echo "skipping codex plugin registration: OH_MY_SETTING_CODEX_PLUGIN=0"
 fi

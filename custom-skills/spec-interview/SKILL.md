@@ -1,21 +1,24 @@
 ---
 name: spec-interview
 description: >
-  Specification-first interview workflow. Use when starting, resuming, or
-  onboarding a project, feature, refactor, agent workflow, CLI, app, research
-  pipeline, or any vague build request. One entry point: detect the project
-  state first, then route to new-project interview+bootstrap, existing-repo
-  onboarding, or ongoing-work resume. Code only after the spec is confirmed;
-  the user never runs setup commands in a shell.
+  Specification-first interview workflow. Use when starting or onboarding a
+  project, resuming unresolved spec work, or planning a broad, ambiguous, or
+  architecture-shaping feature, refactor, workflow, CLI, app, or research
+  pipeline. Detect project state first, then interview only for decisions that
+  materially affect implementation. Clear bounded changes do not need a spec
+  interview; the user never runs setup commands in a shell.
 ---
 
-Default: no coding before confirmed spec.
+Default: no coding before the task-relevant contract is clear. Bounded changes
+with a clear local contract do not require an interview.
+
+Bounded changes with a clear local contract do not require an interview.
 
 ## Trigger
 
-Use when request is vague, new, broad, architecture-shaping, or says:
-`start`, `resume`, `continue`, `onboard`, `build`, `design`, `make`,
-`project`, `feature`, `spec`, `interview`.
+Use when the request is a new project, unresolved spec resume, vague, broad,
+architecture-shaping, or explicitly asks for a spec/interview. Do not trigger
+from generic words such as `feature`, `refactor`, `build`, or `make` alone.
 
 ## Start Router
 
@@ -26,13 +29,16 @@ never ask the user which case applies:
 |---|---|---|
 | New project | no oh-my-setting managed blocks, no/trivial source tree | full interview -> `PROJECT.md` -> confirm -> Project Bootstrap |
 | Existing repo, not onboarded | source files present; no managed blocks or no `PROJECT.md` | inspect code/configs/git first; apply template (`auto`); fill `PROJECT.md` from the code; interview only for gaps the code cannot answer; confirm; doctor |
-| Ongoing, `PROJECT.md` draft | managed blocks + `PROJECT.md` with `State: draft` | resume interview at Open decisions; confirm; finish any missing bootstrap step |
+| Ongoing, `PROJECT.md` draft | managed blocks + `PROJECT.md` with `State: draft` | inspect Open decisions; resume the interview only when they affect the requested change |
 | Ongoing, confirmed | managed blocks + `State: confirmed` | read `PROJECT.md` (Current Task, Verification), run project doctor, report status, propose next step — no interview unless spec and reality have drifted |
 
 Signals: `<!-- oh-my-setting:*:begin -->` blocks in `AGENTS.md`/`CLAUDE.md`,
 `PROJECT.md` `- State:` field, presence of tracked source files.
 
 ## Flow
+
+For clear bounded work, stop after read-only detection and proceed using the
+existing local contract. Otherwise:
 
 1. Stage 1 intent: ask goal, users/workflow, non-goals. No implementation.
 2. Stage 2 scope: ask interface/API/CLI, data/files, paths, constraints.
@@ -85,7 +91,8 @@ Must ask before coding if unclear:
 - destructive or expensive operations
 - Slurm/HPC resources for heavy jobs
 - acceptance criteria or verification
-- missing or draft `PROJECT.md` for project start
+- missing or draft `PROJECT.md` for a project start, or unresolved choices that
+  affect the requested change
 
 ## Output
 

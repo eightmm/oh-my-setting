@@ -31,6 +31,7 @@ sha256_of() {
 files="$(git ls-files \
   AGENTS.md \
   CLAUDE.md \
+  'rules/**' \
   '.agents/plugins/marketplace.json' \
   install.sh \
   scripts/oms \

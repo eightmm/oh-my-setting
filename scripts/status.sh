@@ -226,7 +226,7 @@ codex_plugin_status() {
   fi
 
   if codex plugin list --json 2>/dev/null |
-     python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="oh-my-setting" and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+     python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; sys.exit(0 if any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
     plugin_version="$(oms_install_plugin_version "$INSTALL_ROOT")"
     marketplace_name="$(python3 - "$INSTALL_ROOT/.agents/plugins/marketplace.json" <<'PY'
 import json, sys
@@ -295,9 +295,9 @@ case "$RECEIPT_STATE" in
 esac
 
 printf '\n## Agent config links\n\n'
-link_status "$HOME/.codex/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
-link_status "$HOME/.claude/CLAUDE.md" "$INSTALL_ROOT/AGENTS.md"
-link_status "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/AGENTS.md"
+link_status "$HOME/.codex/AGENTS.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
+link_status "$HOME/.claude/CLAUDE.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
+link_status "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
 
 printf '\n## Required tools\n\n'
 for tool in git curl node npm uv claude codex agy gh; do

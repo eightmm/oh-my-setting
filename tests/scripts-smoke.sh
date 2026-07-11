@@ -56,6 +56,7 @@ export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
 export LC_ALL=C LANG=C TZ=UTC
 export HOME="$TEST_HOME" XDG_CACHE_HOME="$TEST_HOME/.cache" NVM_DIR="$TEST_HOME/.nvm"
 export CODEX_HOME="$TEST_HOME/.codex"
+export OH_MY_SETTING_CODEX_PLUGIN=0
 cd "$TEST_CWD"
 
 cleanup() {
@@ -371,7 +372,8 @@ run_doctor_for_project() {
   local project="$1"
   local home_dir="$2"
 
-  (cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")
+  (cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$home_dir/runtime" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")
 }
 
 test_apply_dry_run_has_no_writes() {
@@ -2659,6 +2661,18 @@ EOF
     *) fail "unknown fixture doctor mode: $doctor_mode" ;;
   esac
   chmod +x "$repo/scripts/doctor.sh"
+
+  cat > "$repo/scripts/install-claude-hooks.sh" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$HOME/.oms-test"
+printf 'claude-hooks\n' >> "$HOME/.oms-test/refresh.log"
+EOF
+  cat > "$repo/scripts/install-codex-plugin.sh" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$HOME/.oms-test"
+printf 'codex-plugin\n' >> "$HOME/.oms-test/refresh.log"
+EOF
+  chmod +x "$repo/scripts/install-claude-hooks.sh" "$repo/scripts/install-codex-plugin.sh"
 }
 
 setup_auto_update_fixture() {
@@ -4404,7 +4418,7 @@ test_link_round_trip_restores_existing_claude_file() {
   [ "$(printf '%s\n' "$backup" | sed '/^$/d' | wc -l)" = "1" ] ||
     fail "expected one CLAUDE.md backup, got: $backup"
   assert_file_contains "$backup" "original claude config"
-  assert_symlink_to "$target" "$ROOT/AGENTS.md"
+  assert_symlink_to "$target" "$ROOT/rules/global-AGENTS.md"
 
   HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
 
@@ -4430,7 +4444,38 @@ test_link_idempotent_does_not_create_second_backup() {
 
   count="$(find "$home_dir/.claude" -maxdepth 1 -type f -name 'CLAUDE.md.backup.*' -print | wc -l | tr -d ' ')"
   [ "$count" = "1" ] || fail "expected one CLAUDE.md backup after two links, got $count"
-  assert_symlink_to "$target" "$ROOT/AGENTS.md"
+  assert_symlink_to "$target" "$ROOT/rules/global-AGENTS.md"
+}
+
+test_link_round_trip_restores_foreign_symlink() {
+  local home_dir="$TMP/link-foreign-symlink-home"
+  local foreign="$home_dir/foreign-agents.md"
+  local target="$home_dir/.codex/AGENTS.md"
+
+  mkdir -p "$(dirname "$target")"
+  printf 'foreign rules\n' > "$foreign"
+  ln -s "$foreign" "$target"
+
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  assert_symlink_to "$target" "$ROOT/rules/global-AGENTS.md"
+
+  HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
+  assert_symlink_to "$target" "$foreign"
+}
+
+test_unlink_restores_backup_from_legacy_global_link() {
+  local home_dir="$TMP/unlink-legacy-global-home"
+  local target="$home_dir/.claude/CLAUDE.md"
+  local original="$home_dir/original.md"
+
+  mkdir -p "$(dirname "$target")"
+  printf 'original rules\n' > "$original"
+  ln -s "$original" "$target.backup.20260711000000"
+  ln -s "$ROOT/AGENTS.md" "$target"
+
+  HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
+  assert_symlink_to "$target" "$original"
 }
 
 
@@ -4538,18 +4583,19 @@ test_link_and_unlink_with_home_override() {
   ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
 
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
 
-  [ -L "$home_dir/.codex/AGENTS.md" ] || fail "codex AGENTS.md not linked"
-  [ -L "$home_dir/.claude/CLAUDE.md" ] || fail "claude CLAUDE.md not linked"
-  [ -L "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not linked"
-  [ -L "$home_dir/.gemini/antigravity/skills/spec-interview" ] ||
-    fail "antigravity skills not linked"
+  assert_symlink_to "$home_dir/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
+  assert_symlink_to "$home_dir/.claude/CLAUDE.md" "$ROOT/rules/global-AGENTS.md"
+  assert_symlink_to "$home_dir/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
+  assert_symlink_to "$home_dir/.codex/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
+  assert_symlink_to "$home_dir/.claude/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
+  assert_symlink_to "$home_dir/.gemini/antigravity/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
   [ "$(readlink "$home_dir/.codex/skills/peer-ask")" = \
     "$ROOT/custom-skills/peer-ask" ] ||
     fail "stale skill symlink not replaced"
-  if find "$home_dir/.codex/skills" -maxdepth 1 -name "*.backup.*" | grep -q .; then
-    fail "backup skill symlink not cleaned"
-  fi
+  find "$home_dir/.codex/skills" -maxdepth 1 -name 'peer-ask.backup.*' | grep -q . ||
+    fail "foreign skill symlink should be backed up before replacement"
   [ ! -e "$home_dir/.codex/skills/oh-my-setting" ] ||
     fail "legacy grouped skill symlink not removed"
   [ ! -e "$home_dir/.agents/skills/peer-ask" ] ||
@@ -4561,6 +4607,7 @@ test_link_and_unlink_with_home_override() {
 
   HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
 
+  assert_symlink_to "$home_dir/.codex/skills/peer-ask" "$home_dir/old-skills/peer-ask"
   [ ! -e "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not unlinked"
   [ ! -e "$home_dir/.gemini/antigravity/skills/spec-interview" ] ||
     fail "antigravity skills not unlinked"
@@ -4680,16 +4727,19 @@ test_agent_call_term_removes_tmp_prompt() {
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
+printf '%s\n' "$$" > "$WORKER_PID_FILE"
 while :; do sleep 1; done
 EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" TMPDIR="$tmp_dir" PATH="$bin_dir:/usr/bin:/bin" \
+    WORKER_PID_FILE="$project/worker.pid" \
     "$ROOT/scripts/agent-call.sh" --to codex --repo "$project" --prompt "Wait for TERM" \
     >"$project/out" 2>"$project/err" &
   pid=$!
   for _ in $(seq 1 50); do
-    [ "$(find "$tmp_dir" -type f | wc -l | tr -d ' ')" -gt 0 ] && break
+    [ "$(find "$tmp_dir" -type f | wc -l | tr -d ' ')" -gt 0 ] &&
+      [ -s "$project/worker.pid" ] && break
     sleep 0.1
   done
   kill -TERM "$pid"
@@ -4697,6 +4747,10 @@ EOF
   [ "$status" -eq 143 ] || fail "agent-call TERM should exit 143, got $status"
   [ "$(find "$tmp_dir" -type f | wc -l | tr -d ' ')" = "0" ] ||
     fail "agent-call TERM should remove temp prompt file"
+  [ -s "$project/worker.pid" ] || fail "fake provider should record its pid"
+  if kill -0 "$(cat "$project/worker.pid")" 2>/dev/null; then
+    fail "agent-call TERM should not orphan the provider process"
+  fi
 }
 
 test_update_help_runs() {
@@ -4901,7 +4955,7 @@ test_auto_update_apply_records_link_failure() {
 }
 
 
-test_auto_update_apply_records_applied_with_doctor_warning() {
+test_auto_update_apply_records_doctor_failure() {
   local origin="$TMP/auto-doctor-fail-origin.git"
   local seed="$TMP/auto-doctor-fail-seed"
   local work="$TMP/auto-doctor-fail-work"
@@ -4915,11 +4969,11 @@ test_auto_update_apply_records_applied_with_doctor_warning() {
   git -C "$seed" push origin main >/dev/null
 
   mkdir -p "$home_dir"
-  HOME="$home_dir" "$work/scripts/auto-update.sh" apply >"$TMP/auto-doctor-fail-out" 2>"$TMP/auto-doctor-fail-err" ||
-    fail "doctor warning should not fail apply"
-  assert_file_contains "$work/local/auto-update.status" "status=applied"
-  assert_file_contains "$work/local/auto-update.status" "doctor reported warnings"
-  assert_file_contains "$TMP/auto-doctor-fail-out" "auto-update: applied"
+  local rc=0
+  HOME="$home_dir" "$work/scripts/auto-update.sh" apply >"$TMP/auto-doctor-fail-out" 2>"$TMP/auto-doctor-fail-err" || rc=$?
+  [ "$rc" = "8" ] || fail "doctor failure should fail apply with the doctor status"
+  assert_file_contains "$work/local/auto-update.status" "status=failed"
+  assert_file_contains "$work/local/auto-update.status" "doctor failed after apply"
   assert_symlink_to "$home_dir/.oms-test/readme" "$work/README.md"
 }
 
@@ -4971,12 +5025,15 @@ test_auto_update_apply_happy_path_records_applied() {
   git -C "$seed" push origin main >/dev/null
 
   mkdir -p "$home_dir"
-  HOME="$home_dir" "$work/scripts/auto-update.sh" apply >"$TMP/auto-apply-out" ||
+  HOME="$home_dir" OH_MY_SETTING_CODEX_PLUGIN=1 \
+    "$work/scripts/auto-update.sh" apply >"$TMP/auto-apply-out" ||
     fail "happy apply should pass"
   assert_file_contains "$work/local/auto-update.status" "status=applied"
   assert_file_contains "$work/local/auto-update.status" "updated:"
   assert_file_contains "$TMP/auto-apply-out" "auto-update: applied"
   assert_symlink_to "$home_dir/.oms-test/readme" "$work/README.md"
+  assert_file_contains "$home_dir/.oms-test/refresh.log" "claude-hooks"
+  assert_file_contains "$home_dir/.oms-test/refresh.log" "codex-plugin"
   assert_file_contains "$work/README.md" "two"
 }
 
@@ -5018,10 +5075,13 @@ test_autoupdate_cron_install_and_uninstall() {
     "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
 
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >"$TMP/autoupdate-install"
   assert_file_contains "$TMP/autoupdate-install" "cron installed (apply)"
   assert_file_contains "$cron_file" "# oh-my-setting autoupdate:begin"
   assert_file_contains "$cron_file" "auto-update.sh\" apply"
+  assert_file_contains "$cron_file" "OH_MY_SETTING_CLAUDE_HOOKS=0"
+  assert_file_contains "$cron_file" "OH_MY_SETTING_CODEX_PLUGIN=0"
 
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
   printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "status.sh missing cron trigger"
@@ -5065,6 +5125,8 @@ test_gen_checksums_deterministic() {
   [ "$a" = "$b" ] || fail "gen-checksums output must be deterministic"
   printf '%s\n' "$a" | grep -Eq '  install\.sh$' || fail "should include install.sh"
   printf '%s\n' "$a" | grep -Eq '  VERSION$' || fail "should include VERSION"
+  printf '%s\n' "$a" | grep -Eq '  rules/global-AGENTS\.md$' ||
+    fail "should include installed global rules"
   printf '%s\n' "$a" | grep -Eq '  custom-skills/chem-bio-ml/SKILL\.md$' ||
     fail "should include custom skill content"
   printf '%s\n' "$a" | grep -Eq '  templates/project-ml-AGENTS\.md$' ||
@@ -6618,6 +6680,28 @@ test_doctor_detects_foreign_config_link() {
     fail "doctor should diagnose the foreign link target"
 }
 
+test_doctor_rejects_same_name_foreign_plugin() {
+  local home_dir="$TMP/doctor-plugin-collision-home"
+  local bin_dir="$TMP/doctor-plugin-collision-bin"
+  local out="$TMP/doctor-plugin-collision-out"
+
+  mkdir -p "$home_dir" "$bin_dir"
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  printf '%s\n' '{"installed":[{"name":"oh-my-setting","pluginId":"oh-my-setting@foreign","installed":true}]}'
+fi
+EOF
+  chmod +x "$bin_dir/codex"
+
+  if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=1 "$ROOT/scripts/doctor.sh" >"$out" 2>&1; then
+    fail "doctor should reject a same-name plugin from a foreign marketplace"
+  fi
+  assert_file_contains "$out" "expected codex plugin not installed"
+}
+
 test_verify_timeout_bounds_hung_verify() {
   local out
 
@@ -7088,7 +7172,7 @@ test_agent_role_and_delegate_injection() {
     fail "project role should override global and bundled defaults"
   [ -f "$ROOT/prompts/native-subagent-brief.md" ] || fail "native subagent prompt template missing"
   [ -f "$ROOT/prompts/executor-soul.md" ] || fail "executor soul prompt template missing"
-  grep -Fq 'one bounded strategy profile' "$ROOT/AGENTS.md" ||
+  grep -Fq 'one bounded strategy profile' "$ROOT/rules/global-AGENTS.md" ||
     fail "global rules should route native subagents through one strategy profile"
 
   ( cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
@@ -7127,23 +7211,71 @@ test_agent_role_and_delegate_injection() {
 }
 
 test_global_rules_stay_compact_and_route_workflows() {
+  local global_rules="$ROOT/rules/global-AGENTS.md"
+  local heading
   local line_count
 
-  line_count="$(wc -l < "$ROOT/AGENTS.md" | tr -d ' ')"
+  [ -f "$global_rules" ] || fail "dedicated global rules file should exist"
+  line_count="$(wc -l < "$global_rules" | tr -d ' ')"
   [ "$line_count" -le 140 ] ||
     fail "global rules should stay compact (got $line_count lines)"
-  grep -Fq '## Multi-Agent Work' "$ROOT/AGENTS.md" ||
+  for heading in Communication Execution Safety 'Context and Tools' Specification Verification 'Multi-Agent Work' 'Project Rules'; do
+    [ "$(grep -Fxc "## $heading" "$global_rules")" = "1" ] ||
+      fail "global rules should contain exactly one $heading section"
+  done
+  grep -Fq 'destructive or irreversible work' "$global_rules" ||
+    fail "global rules should retain destructive-work confirmation"
+  grep -Fq 'Report every skipped, failed, or impossible check.' "$global_rules" ||
+    fail "global rules should retain explicit verification disclosure"
+  grep -Fq '## Multi-Agent Work' "$global_rules" ||
     fail "global rules should retain a compact multi-agent policy"
-  grep -Fq 'agent-harness' "$ROOT/AGENTS.md" ||
+  grep -Fq 'agent-harness' "$global_rules" ||
     fail "global rules should route detailed harness work to the skill"
-  grep -Fq 'task-scoped executor' "$ROOT/AGENTS.md" ||
+  grep -Fq 'task-scoped executor' "$global_rules" ||
     fail "global rules should retain the write-executor safety boundary"
-  if grep -Eq '^## (Model Tiering|Native Subagent Strategies|Run Provenance & Coordination)$' "$ROOT/AGENTS.md"; then
+  if grep -Eq '^## (Model Tiering|Native Subagent Strategies|Run Provenance & Coordination)$' "$global_rules"; then
     fail "procedural harness manuals should not live in global rules"
   fi
-  if grep -Fq 'fable > opus > sonnet > haiku' "$ROOT/AGENTS.md"; then
+  if grep -Fq 'fable > opus > sonnet > haiku' "$global_rules"; then
     fail "global rules should not hardcode provider-specific model ladders"
   fi
+  grep -Fq 'rules/global-AGENTS.md' "$ROOT/AGENTS.md" ||
+    fail "repo rules should point contributors to the global policy source"
+  grep -Fq 'scripts/check.sh' "$ROOT/AGENTS.md" ||
+    fail "repo rules should retain the project verification command"
+  if cmp -s "$ROOT/AGENTS.md" "$global_rules"; then
+    fail "repo and global rules must stay separate to avoid double injection"
+  fi
+}
+
+test_policy_layers_match_compact_global_rules() {
+  local file
+
+  for file in \
+    "$ROOT/custom-skills/agent-harness/SKILL.md" \
+    "$ROOT/docs/COMPONENTS.md" \
+    "$ROOT/scripts/advise.sh"; do
+    if grep -Eq 'before declaring (work )?done' "$file"; then
+      fail "$file should not require an advisor for routine completion"
+    fi
+    grep -Fq 'release go/no-go' "$file" ||
+      fail "$file should scope completion advice to release go/no-go"
+  done
+
+  grep -Fq 'Bounded changes with a clear local contract do not require an interview.' \
+    "$ROOT/custom-skills/spec-interview/SKILL.md" ||
+    fail "spec-interview should exempt clear bounded changes"
+  for file in \
+    "$ROOT/templates/project-general-AGENTS.md" \
+    "$ROOT/templates/project-ml-AGENTS.md"; do
+    grep -Fq 'unresolved choices affect the requested change' "$file" ||
+      fail "$file should gate only task-relevant unresolved spec choices"
+  done
+
+  grep -Fq 'Connectors are allowed when explicitly requested' "$ROOT/README.md" ||
+    fail "README should match the conditional connector policy"
+  grep -Fq '명시적으로 요청했거나' "$ROOT/README.ko.md" ||
+    fail "README.ko should match the conditional connector policy"
 }
 
 test_fail_ledger_records_checks_resolves() {
@@ -7897,19 +8029,27 @@ assert isinstance(d["dirty"], bool)
 assert d["plugin"]["name"] == "oh-my-setting"
 assert len(d["plugin"]["sha256"]) == 64
 PY
-  assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/AGENTS.md"
+  assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
 
   cp -a "$ROOT" "$foreign"
+  cat > "$foreign/scripts/skill-doctor.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "foreign skill doctor must not run" >&2
+exit 91
+EOF
+  chmod +x "$foreign/scripts/skill-doctor.sh"
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
-    OH_MY_SETTING_REQUIRE_TOOLS=0 "$foreign/scripts/doctor.sh" >"$d/doctor" ||
+    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$foreign/scripts/doctor.sh" >"$d/doctor" ||
     fail "a foreign checkout should validate the canonical receipt owner"
-  assert_file_contains "$d/doctor" "current checkout is not canonical"
+  assert_file_contains "$d/doctor" "delegating doctor to canonical owner"
 
   ln -sfn "$foreign/AGENTS.md" "$home/.codex/AGENTS.md"
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
-    OH_MY_SETTING_REQUIRE_TOOLS=0 "$foreign/scripts/doctor.sh" --repair >"$d/repair" ||
+    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$foreign/scripts/doctor.sh" --repair >"$d/repair" ||
     fail "doctor --repair should relink from the valid canonical owner"
-  assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/AGENTS.md"
+  assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
 
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
     "$ROOT/scripts/unlink.sh" >/dev/null
@@ -8247,6 +8387,8 @@ test_memory_context_omits_sensitive_sections_cleanly
 test_memory_append_survives_stale_sensitive_source
 test_link_round_trip_restores_existing_claude_file
 test_link_idempotent_does_not_create_second_backup
+test_link_round_trip_restores_foreign_symlink
+test_unlink_restores_backup_from_legacy_global_link
 test_link_skills_round_trip_restores_existing_skill_dir
 test_uninstall_purge_guard_refuses_home_and_root
 test_backup_copies_all_config_targets
@@ -8269,7 +8411,7 @@ test_status_shows_auto_update_state
 test_auto_update_check_detects_update
 test_auto_update_apply_skips_dirty_tree
 test_auto_update_apply_records_link_failure
-test_auto_update_apply_records_applied_with_doctor_warning
+test_auto_update_apply_records_doctor_failure
 test_auto_update_apply_lock_contention_skips_without_pull
 test_auto_update_apply_happy_path_records_applied
 test_auto_update_skips_without_upstream
@@ -8342,6 +8484,7 @@ test_agent_plan_normalizes_provider
 test_oms_run_current_pointer_joins_and_expires
 test_oms_dispatcher_lists_and_dispatches
 test_doctor_detects_foreign_config_link
+test_doctor_rejects_same_name_foreign_plugin
 test_verify_timeout_bounds_hung_verify
 test_delegate_worker_receives_state_env
 test_agy_read_pass_cannot_write_repo
@@ -8365,6 +8508,7 @@ test_oms_run_ls_open_filters_before_slice
 test_delegate_plan_task_hydrates_from_subdir
 test_agent_role_and_delegate_injection
 test_global_rules_stay_compact_and_route_workflows
+test_policy_layers_match_compact_global_rules
 test_fail_ledger_records_checks_resolves
 test_ci_status_record_and_state
 test_delegation_liveness_in_state

@@ -67,6 +67,11 @@ oms_ops_clean_backup_skill_links() {
 
   [ -d "$target_root" ] || return 0
   while IFS= read -r -d '' target; do
+    case "$target" in
+      *.backup.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+        continue
+        ;;
+    esac
     oms_ops_remove_symlink "$target" "backup skill symlink" "$dry_run"
   done < <(find "$target_root" -maxdepth 1 -type l -name '*.backup.*' -print0 2>/dev/null)
 }

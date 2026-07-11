@@ -22,6 +22,11 @@ backup_if_needed() {
     if [ "$current" = "$source" ]; then
       return 0
     fi
+    if [ "$source" = "$ROOT/rules/global-AGENTS.md" ] &&
+       [ "$current" = "$ROOT/AGENTS.md" ]; then
+      return 0
+    fi
+    mv "$target" "$target.backup.$STAMP"
     return 0
   fi
 
@@ -106,11 +111,11 @@ link_all() {
   fi
   oms_ops_cleanup_legacy_links 0
 
-  link_target "$ROOT/AGENTS.md" "$HOME/.codex/AGENTS.md"
-  link_target "$ROOT/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+  link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.codex/AGENTS.md"
+  link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.claude/CLAUDE.md"
   # Antigravity global customizations root: rules at ~/.gemini/AGENTS.md,
   # skills under ~/.gemini/antigravity/skills.
-  link_target "$ROOT/AGENTS.md" "$HOME/.gemini/AGENTS.md"
+  link_target "$ROOT/rules/global-AGENTS.md" "$HOME/.gemini/AGENTS.md"
   link_skills "$HOME/.codex/skills"
   link_skills "$HOME/.claude/skills"
   link_skills "$HOME/.gemini/antigravity/skills"

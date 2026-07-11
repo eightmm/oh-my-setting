@@ -26,18 +26,7 @@ jobs:
       - name: shellcheck
         run: shellcheck -x -S warning install.sh scripts/oms scripts/*.sh tests/*.sh
       - name: bash 3.2 compat (no bash-4isms)
-        # bash -n on macOS only checks parse; declare -A / mapfile / case-
-        # conversion parse fine on bash 3.2 and fail at RUNTIME, so they slip
-        # past. Catch them statically. Comment lines are excluded.
-        run: |
-          hits="$(grep -rnE 'declare[[:space:]]+-A|mapfile|readarray|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' \
-            install.sh scripts/oms scripts/*.sh scripts/lib/*.sh tests/*.sh \
-            | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
-          if [ -n "$hits" ]; then
-            echo "bash-4-only constructs found (must be bash 3.2 compatible):" >&2
-            echo "$hits" >&2
-            exit 1
-          fi
+        run: bash scripts/check-bash32.sh
 
   smoke-shard:
     runs-on: ubuntu-latest
@@ -90,6 +79,7 @@ jobs:
           export OH_MY_SETTING_GENERATE_SLURM=0
           export OH_MY_SETTING_STAR_PROMPT=0
           export OH_MY_SETTING_REQUIRE_TOOLS=0
+          export OH_MY_SETTING_CODEX_PLUGIN=0
           # The autoupdate trigger registers with the HOST systemd/cron, which
           # a throwaway-HOME fixture must not touch.
           export OH_MY_SETTING_AUTO_UPDATE=0
@@ -98,7 +88,18 @@ jobs:
           bash install.sh
           dest="$HOME/.oh-my-setting"
           [ -d "$dest/.git" ] || { echo "install did not clone the checkout" >&2; exit 1; }
-          [ -L "$HOME/.claude/CLAUDE.md" ] || { echo "install did not link CLAUDE.md" >&2; exit 1; }
+          for pair in \
+            "$HOME/.codex/AGENTS.md:$dest/rules/global-AGENTS.md" \
+            "$HOME/.claude/CLAUDE.md:$dest/rules/global-AGENTS.md" \
+            "$HOME/.gemini/AGENTS.md:$dest/rules/global-AGENTS.md" \
+            "$HOME/.codex/skills/agent-harness:$dest/custom-skills/agent-harness" \
+            "$HOME/.claude/skills/agent-harness:$dest/custom-skills/agent-harness" \
+            "$HOME/.gemini/antigravity/skills/agent-harness:$dest/custom-skills/agent-harness"; do
+            path="${pair%%:*}"
+            target="${pair#*:}"
+            [ -L "$path" ] && [ "$(readlink "$path")" = "$target" ] ||
+              { echo "install link mismatch: $path -> $target" >&2; exit 1; }
+          done
           grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" ||
             { echo "install did not register the skill-router hook" >&2; exit 1; }
           [ -f "$dest/local/machine.md" ] || echo "note: machine snapshot not generated"
@@ -110,11 +111,15 @@ jobs:
           "$dest/scripts/update.sh" --no-tools
           [ "$(git -C "$dest" rev-parse HEAD)" = "$(git -C "$workspace" rev-parse HEAD)" ] ||
             { echo "update did not fast-forward to upstream HEAD" >&2; exit 1; }
-          [ -L "$HOME/.claude/CLAUDE.md" ] || { echo "update broke the CLAUDE.md link" >&2; exit 1; }
+          [ "$(readlink "$HOME/.codex/AGENTS.md")" = "$dest/rules/global-AGENTS.md" ] || exit 1
+          [ "$(readlink "$HOME/.claude/CLAUDE.md")" = "$dest/rules/global-AGENTS.md" ] || exit 1
+          [ "$(readlink "$HOME/.gemini/AGENTS.md")" = "$dest/rules/global-AGENTS.md" ] || exit 1
 
           echo "== uninstall =="
           "$dest/scripts/uninstall.sh" --yes --purge
+          [ ! -e "$HOME/.codex/AGENTS.md" ] || { echo "uninstall left Codex AGENTS.md behind" >&2; exit 1; }
           [ ! -e "$HOME/.claude/CLAUDE.md" ] || { echo "uninstall left CLAUDE.md behind" >&2; exit 1; }
+          [ ! -e "$HOME/.gemini/AGENTS.md" ] || { echo "uninstall left Gemini AGENTS.md behind" >&2; exit 1; }
           ! grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" 2>/dev/null ||
             { echo "uninstall left the skill-router hook registered" >&2; exit 1; }
           [ ! -d "$dest" ] || { echo "uninstall --purge left the checkout behind" >&2; exit 1; }

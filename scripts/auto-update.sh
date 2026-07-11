@@ -26,6 +26,8 @@ Environment:
   OH_MY_SETTING_AUTO_UPDATE_STATE=/path  Override state file.
   OH_MY_SETTING_AUTO_UPDATE_LOG=/path    Override log file.
   OH_MY_SETTING_AUTO_UPDATE_SKIP_DOCTOR=1 Skip doctor after apply.
+  OH_MY_SETTING_CLAUDE_HOOKS=0          Skip Claude hook refresh.
+  OH_MY_SETTING_CODEX_PLUGIN=0          Skip Codex plugin refresh.
 EOF
 }
 
@@ -171,6 +173,7 @@ auto_update_apply_locked() {
   local pull_status
   local pull_detail
   local link_status
+  local refresh_status
   local doctor_status=0
   local state_message
 
@@ -220,6 +223,30 @@ auto_update_apply_locked() {
     return "$link_status"
   fi
 
+  if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ] &&
+     [ -x "$ROOT/scripts/install-claude-hooks.sh" ]; then
+    set +e
+    "$ROOT/scripts/install-claude-hooks.sh"
+    refresh_status=$?
+    set -e
+    if [ "$refresh_status" -ne 0 ]; then
+      write_state failed "claude hook refresh failed after apply" "$new_full" "$remote_full" "$upstream"
+      return "$refresh_status"
+    fi
+  fi
+
+  if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ] &&
+     [ -x "$ROOT/scripts/install-codex-plugin.sh" ]; then
+    set +e
+    "$ROOT/scripts/install-codex-plugin.sh"
+    refresh_status=$?
+    set -e
+    if [ "$refresh_status" -ne 0 ]; then
+      write_state failed "codex plugin refresh failed after apply" "$new_full" "$remote_full" "$upstream"
+      return "$refresh_status"
+    fi
+  fi
+
   if [ "$SKIP_DOCTOR" != "1" ]; then
     set +e
     "$ROOT/scripts/doctor.sh"
@@ -229,8 +256,9 @@ auto_update_apply_locked() {
 
   state_message="updated: $old_short -> $new_short"
   if [ "$doctor_status" -ne 0 ]; then
-    state_message="$state_message (doctor reported warnings)"
-    echo "auto-update: doctor reported warnings after apply" >&2
+    write_state failed "doctor failed after apply at $new_short" "$new_full" "$remote_full" "$upstream"
+    echo "auto-update: doctor failed after apply" >&2
+    return "$doctor_status"
   fi
 
   write_state applied "$state_message" "$new_full" "$remote_full" "$upstream"

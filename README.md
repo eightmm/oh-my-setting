@@ -129,7 +129,7 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 
 ## Notes
 
-- Local-first: no MCP servers, app connectors, or plugin connector tools.
+- Local-first: use local files and CLIs by default. Connectors are allowed when explicitly requested or local sources cannot answer reliably.
 - Shared harness writes use per-file locks; `OMS_LOCK_TIMEOUT` sets wait/stale recovery seconds (default `300`).
 - Never commit tokens, API keys, private data, or cluster/machine details.
 - The scripts the agent runs live in `~/.oh-my-setting/scripts/`, also

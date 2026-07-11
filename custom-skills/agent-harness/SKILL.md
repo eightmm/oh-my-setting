@@ -228,9 +228,9 @@ it routes read-only questions to `agent-call.sh` and write tasks to
 ~/.oh-my-setting/scripts/agent-run.sh --to antigravity --repo . --mode write --prompt "Refactor this helper and return a patch."
 ```
 
-For a decision-point second opinion (before an irreversible decision, after
-repeated failures, before declaring done), use `advise.sh` instead of a raw
-call: it wraps `agent-call.sh` with an adversarial VERDICT/RISKS/MISSING/NEXT
+For a decision-point second opinion (before an irreversible or high-risk
+decision, after repeated failures, or at a release go/no-go), use `advise.sh`
+instead of a raw call: it wraps `agent-call.sh` with an adversarial VERDICT/RISKS/MISSING/NEXT
 contract, attaches unresolved fail-ledger rows, and defaults to the first
 available provider that is not the caller (`OMS_ADVISOR_PROVIDER` or `--to`
 to pin). Artifacts land under `.oms/artifacts/advise/`.
