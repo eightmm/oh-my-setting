@@ -9,7 +9,7 @@ contains() { grep -Fq -- "$2" "$1" || fail "$1 missing: $2"; }
 
 make_repo() {
   mkdir -p "$1"
-  git -C "$1" init -q
+  git -C "$1" init -q -b main
   git -C "$1" config user.email test@example.com
   git -C "$1" config user.name test
   printf 'base\n' > "$1/file.txt"
