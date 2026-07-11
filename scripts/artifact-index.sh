@@ -279,6 +279,14 @@ for lineno, line in enumerate(open(index, encoding="utf-8", errors="replace"), 1
     exit_value = row.get("exit")
     if isinstance(exit_value, bool) or not isinstance(exit_value, int) or exit_value < 0:
         print(f"BAD line {lineno}: exit must be a non-negative integer"); errors += 1
+    executor_id = row.get("executor_id")
+    if executor_id is not None and (not isinstance(executor_id, str) or
+            not re.match(r"^[A-Za-z0-9._-]{1,160}$", executor_id)):
+        print(f"BAD line {lineno}: invalid executor_id"); errors += 1
+    soul_sha = row.get("soul_sha256")
+    if soul_sha is not None and (not isinstance(soul_sha, str) or
+            not re.match(r"^[0-9a-f]{64}$", soul_sha)):
+        print(f"BAD line {lineno}: invalid soul_sha256"); errors += 1
     eid = row.get("event_id")
     if eid in ids:
         print(f"BAD line {lineno}: duplicate event_id {eid}"); errors += 1

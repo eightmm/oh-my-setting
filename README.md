@@ -1,7 +1,7 @@
 # oh-my-setting
 
 One setup that gives Codex, Claude Code, and Antigravity the same rules,
-skills, and workflows on every machine. After install, everything is used by
+skills, and agent harness on every machine. After install, everything is used by
 talking to your coding agent — there is nothing to run in a terminal.
 
 [한국어](README.ko.md)
@@ -57,6 +57,7 @@ Import this Claude answer back into the artifact index.
 Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
 Delegate this to codex with up to 2 repair rounds if verification fails.
+Create a task-scoped executor soul for this work, freeze it, then delegate it.
 Admit codex's patch — run the checks ladder before applying it.
 ```
 

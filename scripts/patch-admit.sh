@@ -28,6 +28,10 @@ ML=0
 ALLOW_VERIFIER_CHANGE=0
 KEEP_WORKTREE=0
 REPORT=""
+PLAN_TASK=""
+EXECUTOR_ID=""
+SCOPE_ALLOWED=""
+SCOPE_FORBIDDEN=""
 worktree_parent=""
 worktree=""
 worktree_created=0
@@ -47,6 +51,8 @@ Options:
                  Default: scripts/check.sh <ml-smoke|fast> when present.
   --ml           Prefer the ml-smoke verification mode when auto-detecting.
   --report FILE  Write the admission report here (default: .oms/artifacts/admit/).
+  --plan-task ID  Enforce this agent-plan task's allowed/forbidden paths.
+  --executor ID   Enforce a frozen executor's scope and soul hash.
   --keep-worktree  Keep the worktree for inspection.
   --allow-verifier-change  Admit a patch that modifies the verify command's
                  own files (normally rejected: it could self-certify).
@@ -91,6 +97,8 @@ while [ "$#" -gt 0 ]; do
     --verify) [ "$#" -ge 2 ] || fail "--verify requires a command"; VERIFY="$2"; shift 2 ;;
     --ml) ML=1; shift ;;
     --report) [ "$#" -ge 2 ] || fail "--report requires a path"; REPORT="$2"; shift 2 ;;
+    --plan-task) [ "$#" -ge 2 ] || fail "--plan-task requires id"; PLAN_TASK="$2"; shift 2 ;;
+    --executor) [ "$#" -ge 2 ] || fail "--executor requires id"; EXECUTOR_ID="$2"; shift 2 ;;
     --keep-worktree) KEEP_WORKTREE=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -103,6 +111,31 @@ done
 REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
+
+if [ -n "$PLAN_TASK" ]; then
+  case "$PLAN_TASK" in *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;; esac
+  plan_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$PLAN_TASK")" || fail "cannot read plan task $PLAN_TASK"
+  SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("allowed_paths",[])))')"
+  SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
+  export OMS_TASK_ID="$PLAN_TASK"
+fi
+if [ -n "$EXECUTOR_ID" ]; then
+  case "$EXECUTOR_ID" in *[!A-Za-z0-9._-]*|"") fail "--executor must match [A-Za-z0-9._-]+" ;; esac
+  "$ROOT/scripts/agent-executor.sh" validate --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null ||
+    fail "executor $EXECUTOR_ID failed frozen validation"
+  executor_json="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" --id "$EXECUTOR_ID")"
+  executor_values="$(printf '%s' "$executor_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([",".join(d.get("allowed_paths",[])),",".join(d.get("forbidden_paths",[])),d.get("task_id",""),d.get("soul_sha256","")]))')"
+  executor_allowed="$(printf '%s' "$executor_values" | cut -f1)"
+  executor_forbidden="$(printf '%s' "$executor_values" | cut -f2)"
+  executor_task="$(printf '%s' "$executor_values" | cut -f3)"
+  executor_soul_sha="$(printf '%s' "$executor_values" | cut -f4)"
+  [ -z "$PLAN_TASK" ] || [ -z "$executor_task" ] || [ "$PLAN_TASK" = "$executor_task" ] ||
+    fail "executor task conflicts with --plan-task"
+  [ -z "$SCOPE_ALLOWED" ] || [ "$SCOPE_ALLOWED" = "$executor_allowed" ] || fail "executor allowed scope conflicts with plan task"
+  [ -z "$SCOPE_FORBIDDEN" ] || [ "$SCOPE_FORBIDDEN" = "$executor_forbidden" ] || fail "executor forbidden scope conflicts with plan task"
+  SCOPE_ALLOWED="$executor_allowed"; SCOPE_FORBIDDEN="$executor_forbidden"
+  export OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_SOUL_SHA256="$executor_soul_sha"
+fi
 
 base_sha="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo 'no-commit')"
 patch_sha="$(oms_sha256_stream < "$PATCH" 2>/dev/null | cut -c1-16)"
@@ -156,9 +189,43 @@ if [ "$apply_ok" = 1 ]; then
     # git apply --numstat is TAB-delimited (add<TAB>del<TAB>path); split on the
     # tab so a path containing spaces is not truncated (which would silently
     # skip its syntax/verifier check).
-    changed_files="$(git -C "$REPO" apply --numstat "$PATCH" 2>/dev/null | awk -F '\t' '{print $3}')"
+    # numstat names additions/destinations, while the applied worktree diff
+    # with rename detection disabled exposes deleted/renamed source paths.
+    # Union both so moving a forbidden file into an allowed path cannot hide
+    # the forbidden source side of the patch.
+    changed_files="$({
+      git -C "$REPO" apply --numstat "$PATCH" 2>/dev/null | awk -F '\t' '{print $3}'
+      git -C "$worktree" diff --name-only --no-renames HEAD -- 2>/dev/null
+    } | LC_ALL=C sort -u)"
 
-    # --- Gate 2: changed syntax-checked files parse -------------------------
+    # --- Gate 2: task/executor path scope ----------------------------------
+    scope_detail="$(OMS_CHANGED="$changed_files" OMS_ALLOWED="$SCOPE_ALLOWED" OMS_FORBIDDEN="$SCOPE_FORBIDDEN" python3 - <<'PY'
+import fnmatch, os, re
+changed=[x for x in os.environ.get("OMS_CHANGED","").splitlines() if x]
+def split(v): return [x for x in re.split(r"[,\s]+",v) if x]
+allowed, forbidden=split(os.environ.get("OMS_ALLOWED","")),split(os.environ.get("OMS_FORBIDDEN",""))
+def match(path, pattern):
+    if pattern in (".", "./"): return True
+    p=pattern[2:] if pattern.startswith("./") else pattern
+    if any(c in p for c in "*?["): return fnmatch.fnmatchcase(path,p)
+    p=p.rstrip("/")
+    return path == p or path.startswith(p + "/")
+bad=[]
+for path in changed:
+    if any(match(path,p) for p in forbidden): bad.append("forbidden: " + path); continue
+    if allowed and not any(match(path,p) for p in allowed): bad.append("outside allowed paths: " + path)
+print("; ".join(bad))
+PY
+)"
+    if [ -n "$scope_detail" ]; then
+      record "scope" "FAIL" "$scope_detail"
+    elif [ -n "$SCOPE_ALLOWED$SCOPE_FORBIDDEN" ]; then
+      record "scope" "PASS" "changed files satisfy task/executor scope"
+    else
+      record "scope" "SKIP" "no task/executor scope supplied"
+    fi
+
+    # --- Gate 3: changed syntax-checked files parse -------------------------
     syntax_ok=1
     syntax_checked=0
     syntax_detail="no syntax-checked files changed"

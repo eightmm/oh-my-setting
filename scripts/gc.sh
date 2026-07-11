@@ -35,7 +35,8 @@ Swept (older than --days): orphaned delegation markers (dead pid; a coupled
 claimed/running plan task is released back to ready), archived task packets,
 stale open runs (no spine event in --days; a close event is appended), run
 capsules of runs that are NOT open, abandoned change-guards (dead owner pid
-or aged snapshot), resolved failure rows; artifact index/files are delegated
+or aged snapshot), terminal/draft executor souls, resolved failure rows;
+artifact index/files are delegated
 to artifact-index prune. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
 experiment board is left intact.
@@ -65,6 +66,13 @@ mode="dry-run"; [ "$DRY_RUN" = 0 ] && mode="apply"
 echo "gc: $STATE_ROOT (older than ${DAYS}d, $mode)"
 
 removed=0
+executor_gc_args=(gc --repo "$STATE_ROOT" --days "$DAYS" --dry-run)
+[ "$DRY_RUN" = 1 ] || executor_gc_args=(gc --repo "$STATE_ROOT" --days "$DAYS" --apply)
+executor_gc_out="$("$ROOT/scripts/agent-executor.sh" "${executor_gc_args[@]}")"
+printf '%s\n' "$executor_gc_out"
+executor_changes="$(printf '%s\n' "$executor_gc_out" | awk '/^executor-gc: [0-9]+ (candidate|removed)/ {n=$2} END {print n+0}')"
+removed=$((removed + executor_changes))
+
 note_remove() {  # note_remove KIND PATH
   printf -- '- %s: %s\n' "$1" "$2"
   removed=$((removed + 1))
@@ -83,14 +91,28 @@ if [ -d "$OMS/delegations" ]; then
     [ -e "$f" ] || continue
     info="$(python3 -c 'import json,sys
 d = json.load(open(sys.argv[1]))
-print("%s\t%s\t%s" % (d.get("pid", ""), d.get("task_id", ""), d.get("lease_id", "")))' "$f" 2>/dev/null || true)"
+print("%s\t%s\t%s\t%s" % (d.get("pid", ""), d.get("task_id", ""), d.get("lease_id", ""), d.get("executor_id", "")))' "$f" 2>/dev/null || true)"
     pid="$(printf '%s' "$info" | cut -f1)"
     task_id="$(printf '%s' "$info" | cut -f2)"
     marker_lease="$(printf '%s' "$info" | cut -f3)"
+    executor_id="$(printf '%s' "$info" | cut -f4)"
     alive=0
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
     if [ "$alive" = 0 ]; then
       note_remove "orphan-delegation" "$f"
+      if [ -n "$executor_id" ]; then
+        executor_state="$("$ROOT/scripts/agent-executor.sh" show --repo "$STATE_ROOT" --id "$executor_id" 2>/dev/null |
+          python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+        if [ "$executor_state" = "running" ]; then
+          printf -- '- orphan-delegation-executor: %s running -> failed\n' "$executor_id"
+          removed=$((removed + 1))
+          if [ "$DRY_RUN" = 0 ]; then
+            "$ROOT/scripts/agent-executor.sh" fail --repo "$STATE_ROOT" --id "$executor_id" \
+              --reason "gc: delegation process is not alive" >/dev/null 2>&1 ||
+              echo "warning: gc: could not fail executor $executor_id" >&2
+          fi
+        fi
+      fi
       if [ -n "$task_id" ]; then
         task_info="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>/dev/null |
           python3 -c 'import json,sys;d=json.load(sys.stdin);print("%s\t%s"%(d.get("state",""),d.get("lease_id","")))' 2>/dev/null || true)"

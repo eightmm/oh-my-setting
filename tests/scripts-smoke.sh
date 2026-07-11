@@ -6332,6 +6332,7 @@ test_delegate_repair_retries_failed_verify() {
 #!/usr/bin/env bash
 prompt="$(cat)"
 if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
+  printf '%s' "$prompt" | grep -q 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
   printf 'fixed\n' > delegated.txt
   echo "worker repaired"
 else
@@ -6346,6 +6347,7 @@ EOF
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
+    --role implementation-worker \
     --verify "grep -q fixed delegated.txt" \
     --repair 2 \
     --prompt "Create fixed file" >"$project/out" 2>&1 || rc=$?
@@ -7085,7 +7087,7 @@ test_agent_role_and_delegate_injection() {
     "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$empty_project/.oms/roles/decision-advisor.md" ] ||
     fail "project role should override global and bundled defaults"
   [ -f "$ROOT/prompts/native-subagent-brief.md" ] || fail "native subagent prompt template missing"
-  [ -f "$ROOT/prompts/decision-context.md" ] || fail "decision context prompt template missing"
+  [ -f "$ROOT/prompts/executor-soul.md" ] || fail "executor soul prompt template missing"
   grep -Fq 'Native Subagent Strategies' "$ROOT/AGENTS.md" ||
     fail "global rules should route native Codex subagents through strategies"
 

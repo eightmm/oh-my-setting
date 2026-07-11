@@ -531,5 +531,6 @@ test_artifact_resolution_and_dashboard_statuses
 test_artifact_retention_corruption_and_source_tracking
 test_smoke_runner_tail_and_signal_cleanup
 test_install_owner_guards_and_stale_status
+"$ROOT/tests/executor-smoke.sh"
 
 echo "harness-enhancements-smoke: ok"

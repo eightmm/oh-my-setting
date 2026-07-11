@@ -1,5 +1,8 @@
 # Spec-First Workflow
 
+> Deprecated: use the installed `spec-interview` skill. This compatibility
+> file will be removed in the next minor release.
+
 Use for new projects, broad features, or unclear requests.
 
 1. Interview before code.

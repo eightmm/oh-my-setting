@@ -197,6 +197,24 @@ exploration, `implementation-worker` for bounded edits, `test-designer` for
 test work, `patch-reviewer` for review, and `decision-advisor` for go/no-go
 judgment. The owning agent remains the judge and verifies the result.
 
+## Task-Scoped Executor Souls
+
+For a bounded write executor, generate behavior separately from authority:
+
+1. Give a read-only soul-builder the installed `prompts/executor-soul.md`
+   template plus the bounded task; save only its behavior proposal.
+2. Run `oms agent-executor create --id ID --provider NAME --strategy NAME
+   --plan-task TASK --soul-file FILE`, then `validate` and `freeze`.
+3. Cross-CLI: `oms agent-run --to NAME --mode write --executor ID --prompt
+   TEXT`. Native Codex: prepend `oms agent-executor brief --id ID` in full to
+   the spawn message.
+
+The generated `.oms/executors/<id>/SOUL.md` is behavior; `meta.json` is the
+only authority for provider, mode, task/lease, base SHA, allowed/forbidden
+paths, and verify command. Frozen hashes are checked before use and on repair.
+Executors cannot recursively delegate. `oms gc` removes only aged
+draft/done/failed executors and preserves frozen/running ones.
+
 ## Individual Agent Runs
 
 Use `agent-run.sh` as the single entrypoint for one provider. In `--mode auto`,

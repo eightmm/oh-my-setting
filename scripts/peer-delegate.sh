@@ -16,6 +16,11 @@ PROMPT=""
 BRIEF_FILE=""
 ROLE=""
 role_file=""
+EXECUTOR_ID=""
+executor_brief_file=""
+EXECUTOR_SOUL_SHA=""
+executor_started=0
+executor_finalized=0
 liveness_file=""
 VERIFY_CMD=""
 NO_VERIFY=0
@@ -47,6 +52,8 @@ Options:
   --role NAME          Prepend a reusable strategy profile (agent-role.sh:
                        repo, global, then bundled fallback) to the worker brief.
                        Overrides a plan task's role field.
+  --executor ID        Use one frozen task-scoped executor soul. Mutually
+                       exclusive with --role; provider/task/lease are checked.
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
   --repo PATH          Git repo to work on. Default: current directory.
@@ -111,6 +118,12 @@ while [ "$#" -gt 0 ]; do
     --role)
       [ "$#" -ge 2 ] || fail "--role requires a name"
       ROLE="$2"
+      shift 2
+      ;;
+    --executor)
+      [ "$#" -ge 2 ] || fail "--executor requires an id"
+      case "$2" in *[!A-Za-z0-9._-]*|"") fail "--executor must match [A-Za-z0-9._-]+" ;; esac
+      EXECUTOR_ID="$2"
       shift 2
       ;;
     --repo)
@@ -237,6 +250,41 @@ git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
 
+if [ -n "$EXECUTOR_ID" ]; then
+  [ -z "$ROLE" ] || fail "--executor and --role are mutually exclusive"
+  executor_meta="$("$(ma_scripts_dir)/agent-executor.sh" show --repo "$REPO" --id "$EXECUTOR_ID")" ||
+    fail "cannot read executor $EXECUTOR_ID"
+  executor_values="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("provider",""),d.get("state",""),d.get("mode",""),d.get("plan_task",""),d.get("task_id",""),d.get("verify",""),d.get("soul_sha256","")]))')"
+  executor_provider="$(printf '%s' "$executor_values" | cut -f1)"
+  executor_state="$(printf '%s' "$executor_values" | cut -f2)"
+  executor_mode="$(printf '%s' "$executor_values" | cut -f3)"
+  executor_plan="$(printf '%s' "$executor_values" | cut -f4)"
+  executor_task="$(printf '%s' "$executor_values" | cut -f5)"
+  executor_verify="$(printf '%s' "$executor_values" | cut -f6)"
+  EXECUTOR_SOUL_SHA="$(printf '%s' "$executor_values" | cut -f7)"
+  [ "$executor_provider" = "$TO" ] || fail "executor provider is $executor_provider, not $TO"
+  [ "$executor_state" = "frozen" ] || fail "executor $EXECUTOR_ID is $executor_state, not frozen"
+  [ "$executor_mode" = "worktree-write" ] || fail "executor $EXECUTOR_ID mode is $executor_mode, not worktree-write"
+  if [ -n "$executor_plan" ]; then
+    [ -z "$PLAN_TASK_ID" ] || [ "$PLAN_TASK_ID" = "$executor_plan" ] || fail "--plan-task conflicts with executor"
+    PLAN_TASK_ID="$executor_plan"
+  fi
+  if [ -n "$executor_task" ]; then
+    [ -z "$TASK_ID" ] || [ "$TASK_ID" = "$executor_task" ] || fail "--task-id conflicts with executor"
+    TASK_ID="$executor_task"
+  fi
+  if [ -n "$executor_verify" ]; then
+    [ -z "$VERIFY_CMD" ] || [ "$VERIFY_CMD" = "$executor_verify" ] || fail "--verify conflicts with executor contract"
+    VERIFY_CMD="$executor_verify"
+  fi
+  executor_brief_file="$(mktemp)" || fail "mktemp failed"
+  if ! "$(ma_scripts_dir)/agent-executor.sh" brief --repo "$REPO" --id "$EXECUTOR_ID" > "$executor_brief_file"; then
+    rm -f "$executor_brief_file"
+    fail "executor $EXECUTOR_ID failed frozen validation"
+  fi
+  export OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_SOUL_SHA256="$EXECUTOR_SOUL_SHA"
+fi
+
 # Capture the claim's fencing token once. Every later transition and the
 # worker environment use this exact lease; reclaiming the task invalidates the
 # stale worker instead of allowing it to publish late results.
@@ -276,7 +324,7 @@ PY
     fi
   fi
   # A plan task can name a role; --role wins over it.
-  if [ -z "$ROLE" ] && [ -f "$REPO/.oms/plan/tasks.json" ]; then
+  if [ -z "$ROLE" ] && [ -z "$EXECUTOR_ID" ] && [ -f "$REPO/.oms/plan/tasks.json" ]; then
     plan_role="$(OMS_PLAN_ID="$PLAN_TASK_ID" python3 - "$REPO/.oms/plan/tasks.json" 2>/dev/null <<'PY' || true
 import json, os, sys
 t = json.load(open(sys.argv[1])).get("tasks", {}).get(os.environ["OMS_PLAN_ID"], {})
@@ -313,8 +361,14 @@ oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  if [ "$executor_started" = 1 ] && [ "$executor_finalized" = 0 ] && [ -n "$EXECUTOR_ID" ]; then
+    "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" \
+      --reason "delegation exited before executor finalization" >/dev/null 2>&1 || true
+    executor_finalized=1
+  fi
   rm -f "$prompt_file" "$repair_prompt_file" "$verify_out"
   [ -z "$plan_brief_file" ] || rm -f "$plan_brief_file"
+  [ -z "$executor_brief_file" ] || rm -f "$executor_brief_file"
   # Remove the liveness marker; a leftover file means the process died without
   # cleanup (a crashed orphan), which oms state / gc can then flag by dead pid.
   [ -z "$liveness_file" ] || rm -f "$liveness_file"
@@ -348,6 +402,11 @@ trap 'cleanup_signal 143' TERM
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'
     cat "$role_file"
+    printf '\n\n'
+  fi
+  if [ -n "$executor_brief_file" ]; then
+    printf '## Frozen Executor Soul\n\n'
+    cat "$executor_brief_file"
     printf '\n\n'
   fi
   printf '## Brief\n\n'
@@ -405,14 +464,16 @@ if [ "$DRY_RUN" != "1" ]; then
   liveness_file="$REPO/.oms/delegations/$timestamp.json"
   mkdir -p "$(dirname "$liveness_file")"
   agent_memory_ensure_oms_ignore_for_path "$liveness_file" 2>/dev/null || true
-  OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_PID="$$" \
+  OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="$EXECUTOR_ID" \
+    OMS_DL_SOUL_SHA="$EXECUTOR_SOUL_SHA" OMS_DL_PID="$$" \
     OMS_DL_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_DL_WT="$worktree" \
     OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
     python3 - > "$liveness_file" <<'PY'
 import json, os
 print(json.dumps({
     "schema": 2, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
-    "role": os.environ.get("OMS_DL_ROLE", ""), "pid": int(os.environ["OMS_DL_PID"]),
+    "role": os.environ.get("OMS_DL_ROLE", ""), "executor_id": os.environ.get("OMS_DL_EXECUTOR", ""),
+    "soul_sha256": os.environ.get("OMS_DL_SOUL_SHA", ""), "pid": int(os.environ["OMS_DL_PID"]),
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
     "worktree": os.environ["OMS_DL_WT"], "task_id": os.environ.get("OMS_DL_TASK", ""),
     "lease_id": os.environ.get("OMS_DL_LEASE", ""),
@@ -528,6 +589,12 @@ write_repair_prompt() {
     printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
     printf 'Do not run git commit, git push, or change git config.\n'
     printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
+    if [ -n "$role_file" ]; then
+      printf '## Role\n\n'; cat "$role_file"; printf '\n\n'
+    fi
+    if [ -n "$executor_brief_file" ]; then
+      printf '## Frozen Executor Soul\n\n'; cat "$executor_brief_file"; printf '\n\n'
+    fi
     printf '## Original Brief\n\n'
     if [ -n "$BRIEF_FILE" ]; then
       cat "$BRIEF_FILE"
@@ -549,6 +616,9 @@ write_repair_prompt() {
 }
 
 worker_status=0
+[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] ||
+  "$(ma_scripts_dir)/agent-executor.sh" start --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
+[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_started=1
 plan_transition start
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
@@ -633,6 +703,8 @@ elif [ "$APPLY" = 1 ]; then
     admit_script="$(ma_scripts_dir)/patch-admit.sh"
     admit_args=(--patch "$patch_file" --repo "$REPO")
     [ -n "$VERIFY_CMD" ] && admit_args+=(--verify "$VERIFY_CMD")
+    [ -n "$PLAN_TASK_ID" ] && admit_args+=(--plan-task "$PLAN_TASK_ID")
+    [ -n "$EXECUTOR_ID" ] && admit_args+=(--executor "$EXECUTOR_ID")
     if [ -x "$admit_script" ] && ! bash "$admit_script" "${admit_args[@]}" >/dev/null; then
       echo "apply skipped: patch-admit rejected the patch (see .oms/artifacts/admit/)" >&2
     elif git -C "$REPO" apply --binary "$patch_file"; then
@@ -668,9 +740,14 @@ if [ "$KEEP_WORKTREE" = 1 ]; then
 fi
 
 if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+  [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" --reason "worker or verify failed" >/dev/null || true
+  [ -z "$EXECUTOR_ID" ] || executor_finalized=1
   plan_transition release
   exit 1
 fi
+[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] ||
+  "$(ma_scripts_dir)/agent-executor.sh" "done" --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
+[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_finalized=1
 if [ "$applied" = 1 ]; then
   plan_transition finish --artifact "$artifact" --patch "$patch_file"
 else

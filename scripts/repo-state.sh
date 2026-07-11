@@ -26,8 +26,8 @@ Usage: repo-state.sh [--repo PATH] [--json]
 
 Print a read-only dashboard of the shared .oms state for a repo: the active
 task packet, plan tasks by state (stale claims flagged), the experiment board
-(active + stale), the current/open runs, the latest artifact-index rows, and
-whether a change-guard is active.
+(active + stale), task-scoped executors, the current/open runs, the latest
+artifact-index rows, and whether a change-guard is active.
 
 Options:
   --repo PATH   Repo to inspect (default: current directory; anchored to the
@@ -401,9 +401,28 @@ if os.path.isdir(deleg_dir):
         # orphan (only meaningful when the record was written on this host).
         alive = pid_alive(d.get("pid"))
         delegations.append({"id": d.get("id"), "provider": d.get("provider"),
-                            "role": d.get("role", ""), "started_at": d.get("started_at"),
+                            "role": d.get("role", ""), "executor_id": d.get("executor_id", ""),
+                            "soul_sha256": d.get("soul_sha256", ""), "started_at": d.get("started_at"),
                             "live": alive})
 state["delegations"] = delegations
+
+# --- Task-scoped executors -------------------------------------------------
+executors = []
+executor_dir = oms("executors")
+if os.path.isdir(executor_dir):
+    import glob as _executor_glob
+    for f in sorted(_executor_glob.glob(os.path.join(executor_dir, "*", "meta.json"))):
+        try:
+            d = json.load(open(f, encoding="utf-8"))
+        except Exception:
+            continue
+        executors.append({"id": d.get("executor_id", os.path.basename(os.path.dirname(f))),
+                          "state": d.get("state", "unknown"),
+                          "provider": d.get("provider", ""),
+                          "strategy": d.get("strategy", ""),
+                          "task_id": d.get("task_id", ""),
+                          "soul_sha256": d.get("soul_sha256", "")})
+state["executors"] = executors
 
 # --- Change-guard active? ---------------------------------------------------
 guard = {"active": False, "stale": False}
@@ -482,9 +501,19 @@ else:
         line("\n## In-flight delegations")
         for e in dl:
             tag = "live" if e["live"] else "ORPHAN (dead pid)"
-            line("  %s %s%s  %s  [%s]" % (
+            line("  %s %s%s%s  %s  [%s]" % (
                 e.get("provider", "?"), ("role=%s " % e["role"]) if e.get("role") else "",
+                ("executor=%s soul=%s " % (e["executor_id"], (e.get("soul_sha256") or "-")[:12])) if e.get("executor_id") else "",
                 e.get("id", "?"), e.get("started_at", "?"), tag))
+
+    executors = state["executors"]
+    if executors:
+        line("\n## Executors")
+        for e in executors:
+            line("  %-8s %s provider=%s strategy=%s task=%s soul=%s" % (
+                e.get("state", "?"), e.get("id", "?"), e.get("provider", "?") or "-",
+                e.get("strategy", "?") or "-", e.get("task_id", "") or "-",
+                (e.get("soul_sha256", "") or "-")[:12]))
 
     ci = state["ci"]
     if ci["present"]:

@@ -1,5 +1,8 @@
 # Slurm HPC Workflow
 
+> Deprecated: use the installed `slurm-hpc` skill. This compatibility file
+> will be removed in the next minor release.
+
 Use this workflow when Slurm commands are available on the machine.
 
 1. Inspect cluster state with `sinfo` and current jobs with `squeue -u "$USER"`.

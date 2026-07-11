@@ -1,6 +1,6 @@
 # oh-my-setting
 
-Codex, Claude Code, Antigravity에 같은 규칙·스킬·워크플로를 모든 머신에
+Codex, Claude Code, Antigravity에 같은 규칙·스킬·agent harness를 모든 머신에
 깔아주는 설정. 설치 후 모든 사용은 coding agent와의 대화로 이루어진다 —
 터미널에 직접 칠 명령이 없다.
 
@@ -55,6 +55,7 @@ Claude에 직접 호출하지 말고 이 diff용 review prompt만 export해줘.
 debate 1라운드로 세 모델에게 물어봐줘: vector DB와 pgvector 중 뭐가 맞을까?
 codex에게 위임해줘: scripts/train.py에 입력 검증 추가.
 검증 실패하면 repair 라운드 최대 2번까지 돌려서 codex에게 위임해줘.
+이 작업 전용 executor soul을 만들고 freeze한 다음 위임해줘.
 codex의 patch를 admit 게이트(checks ladder) 돌려서 적용해줘.
 ```
 

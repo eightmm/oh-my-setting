@@ -129,8 +129,15 @@ to the native spawn message; native spawn APIs do not have a `--role` field.
 
 The task message still needs concrete context, allowed paths, constraints,
 success criteria, and expected output; use
-`~/.oh-my-setting-prompts/native-subagent-brief.md` as the shape.
+`~/.oh-my-setting-prompts/executor-soul.md` as the shape for task-scoped
+executors, or `native-subagent-brief.md` for a one-off read-only child.
 Strategy text controls how the child works, not what task it owns.
+For a write executor, use a two-stage flow: ask a read-only soul-builder child
+for behavior-only text using `executor-soul.md`; create and freeze it with
+`oms agent-executor create|validate|freeze`; then prepend
+`oms agent-executor brief --id ID` to the executor spawn. `meta.json`, not the
+soul, owns provider, task lease, path scope, base commit, and verify command.
+Never let an executor widen those fields or recursively delegate.
 The parent remains the top-tier judge, verifies claims, and owns plan approval,
 landing, commit, push, release, and final synthesis. For a decision point, use
 the platform's native advisor with `decision-advisor` when available; otherwise
@@ -173,6 +180,10 @@ tool as `oms <tool>` (dispatcher on PATH) or `~/.oh-my-setting/scripts/<tool>.sh
   alone with `oms patch-admit`. `patch-land --plan-task ID` alone lands the
   patch the task stores; rejections are remembered in the fail-ledger, so
   never blindly re-land a patch it warns about.
+- Task-scoped write executors live under `.oms/executors/<id>/`: a generated
+  behavior proposal is validated and hash-frozen before `agent-run --executor`
+  or `peer-delegate --executor` uses it. The same frozen soul is re-injected
+  during repair, and patch admission enforces its plan scope.
 - Artifact rows use the schema-1 event envelope. Run `oms artifact-index
   validate` after migration or repair; use `migrate` for legacy rows and `gc`
   for bounded retention instead of editing the JSONL by hand.

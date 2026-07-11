@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/skill-router-hook.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" skill-router",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/turn-guard-hook.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" turn-guard",
             "timeout": 5
           }
         ]

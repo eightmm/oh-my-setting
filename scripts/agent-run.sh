@@ -16,6 +16,7 @@ NO_VERIFY=0
 REPAIR=0
 TASK_ID=""
 PLAN_TASK=""
+EXECUTOR_ID=""
 APPLY=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
@@ -48,6 +49,7 @@ Options:
                        plan/task id (forwarded to peer-delegate.sh).
   --plan-task ID       Write mode only: couple the delegation to an
                        agent-plan.sh task (forwarded; implies --task-id).
+  --executor ID        Write mode only: frozen task-scoped executor soul.
   --apply              Write mode only: apply returned patch when worker and
                        verify pass and the main tree is clean.
   --keep-worktree      Write mode only: keep worker worktree.
@@ -227,6 +229,12 @@ while [ "$#" -gt 0 ]; do
       PLAN_TASK="$2"
       shift 2
       ;;
+    --executor)
+      [ "$#" -ge 2 ] || { echo "error: --executor requires id" >&2; exit 2; }
+      case "$2" in *[!A-Za-z0-9._-]*|"") echo "error: --executor must match [A-Za-z0-9._-]+" >&2; exit 2 ;; esac
+      EXECUTOR_ID="$2"
+      shift 2
+      ;;
     --apply)
       APPLY=1
       shift
@@ -308,6 +316,10 @@ if [ "$EXPORT_ONLY" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
   echo "error: delegate work cannot be exported; a worktree worker is required" >&2
   exit 2
 fi
+if [ -n "$EXECUTOR_ID" ] && [ "$resolved_mode" != "write" ]; then
+  echo "error: executors require write mode" >&2
+  exit 2
+fi
 if [ "$INCLUDE_TASK" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
   agent_task_loop_warnings "$REPO" "$(agent_task_project_file "$REPO")" >&2 || true
 fi
@@ -338,6 +350,7 @@ else
   [ "$NO_VERIFY" -eq 1 ] && cmd+=(--no-verify)
   [ -n "$TASK_ID" ] && cmd+=(--task-id "$TASK_ID")
   [ -n "$PLAN_TASK" ] && cmd+=(--plan-task "$PLAN_TASK")
+  [ -n "$EXECUTOR_ID" ] && cmd+=(--executor "$EXECUTOR_ID")
   [ "${REPAIR:-0}" != "0" ] && cmd+=(--repair "$REPAIR")
   [ "$APPLY" -eq 1 ] && cmd+=(--apply)
   [ "$KEEP_WORKTREE" -eq 1 ] && cmd+=(--keep-worktree)

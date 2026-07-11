@@ -77,6 +77,9 @@ Key flags beyond `--to`/`--brief-file`/`--verify`:
 - `--role NAME` — prepend a reusable worker strategy from `.oms/roles/NAME.md`,
   the global role store, or bundled defaults (see `agent-role.sh`); wins over
   the plan task's `role` field.
+- `--executor ID` — use one task-scoped, hash-frozen executor soul. It is
+  mutually exclusive with `--role`; provider/task/lease/verify mismatches
+  fail before the worker runs, and repairs receive the same frozen soul.
 - `--repair N` — allow up to N verify-fail repair rounds (0-3): the worker
   gets the failing output back and retries before the delegation is failed.
 - `--no-verify` — skip verification (rarely right; the verify contract is what
@@ -97,7 +100,9 @@ use `artifact-index.sh latest` or `artifact-index.sh failures`.
    re-applies the patch in a throwaway worktree, runs the checks ladder and
    verify contract, applies only on ADMIT to a clean tree, and records the
    land. A rejection is remembered in the fail-ledger, so a later attempt to
-   land the same patch warns first. Use raw `--apply`/`git apply` only for
+   land the same patch warns first. Plan/executor allowed and forbidden paths
+   are enforced here, with forbidden paths taking precedence. Use raw
+   `--apply`/`git apply` only for
    trivial diffs you have fully read.
 4. Run the project's own checks after applying; the worker's `--verify` ran in
    the worktree, not the main tree.

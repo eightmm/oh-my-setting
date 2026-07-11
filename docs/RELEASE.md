@@ -36,7 +36,7 @@ bash install.sh
 
 `SHA256SUMS` covers installers, agent rules, tracked shell/Python scripts,
 custom skills and references, project templates, plugin metadata, the skills
-manifest, prompts/workflows, the `oms` dispatcher, and `VERSION`, so a clone can
+manifest, prompts, compatibility workflows, roles, the `oms` dispatcher, and `VERSION`, so a clone can
 be audited with `sha256sum -c`.
 
 ## Channels

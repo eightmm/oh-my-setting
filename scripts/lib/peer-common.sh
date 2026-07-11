@@ -417,6 +417,7 @@ ma_append_artifact_index() {
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
   OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
+  OMS_INDEX_EXECUTOR_ID="${OMS_EXECUTOR_ID:-}" OMS_INDEX_SOUL_SHA256="${OMS_SOUL_SHA256:-}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
   oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$retention_helper" <<'EOF'
 import hashlib, json, os, re, runpy, shutil, sys, tempfile, time, uuid
@@ -485,6 +486,12 @@ if safe_id(task_id):
 delegation_id = safe_id(os.environ.get("OMS_INDEX_DELEGATION_ID", ""))
 if delegation_id:
     row["delegation_id"] = delegation_id
+executor_id = safe_id(os.environ.get("OMS_INDEX_EXECUTOR_ID", ""))
+if executor_id:
+    row["executor_id"] = executor_id
+soul_sha256 = os.environ.get("OMS_INDEX_SOUL_SHA256", "")
+if re.match(r"^[0-9a-f]{64}$", soul_sha256):
+    row["soul_sha256"] = soul_sha256
 parent_event_id = safe_id(os.environ.get("OMS_INDEX_PARENT_EVENT_ID", ""))
 if parent_event_id:
     row["parent_event_id"] = parent_event_id

@@ -7,6 +7,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Task-scoped executor souls (`agent-executor.sh`): model-proposed behavior is
+  validated and hash-frozen while machine-owned metadata retains provider,
+  task lease, base commit, path scope, and verification authority. Native and
+  cross-CLI executors share the same brief; repair preserves the frozen soul.
+- Patch admission now enforces plan/executor allowed and forbidden paths before
+  verification, with deny precedence; artifact and liveness rows carry
+  executor ID and soul hash provenance.
 - `advise.sh` (`oms advise`): agent-agnostic advisor pass at decision points
   (before irreversible decisions, after repeated failures, before declaring
   done). Composes an adversarial VERDICT/RISKS/MISSING/NEXT prompt, attaches
@@ -49,6 +56,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   linted, never executed.
 
 ### Changed
+- Removed unused legacy prompt/template placeholders, consolidated duplicate
+  plugin hook wrappers, and marked standalone workflow files deprecated in
+  favor of their maintained skills.
 - Renamed the cross-CLI tool family `multi-agent-*` to `peer-*` to stop
   colliding with generic in-app multi-agent features: `peer-ask.sh`,
   `peer-review.sh`, `peer-delegate.sh`, `lib/peer-common.sh`, skills
