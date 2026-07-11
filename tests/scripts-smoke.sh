@@ -7088,8 +7088,8 @@ test_agent_role_and_delegate_injection() {
     fail "project role should override global and bundled defaults"
   [ -f "$ROOT/prompts/native-subagent-brief.md" ] || fail "native subagent prompt template missing"
   [ -f "$ROOT/prompts/executor-soul.md" ] || fail "executor soul prompt template missing"
-  grep -Fq 'Native Subagent Strategies' "$ROOT/AGENTS.md" ||
-    fail "global rules should route native Codex subagents through strategies"
+  grep -Fq 'one bounded strategy profile' "$ROOT/AGENTS.md" ||
+    fail "global rules should route native subagents through one strategy profile"
 
   ( cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
@@ -7124,6 +7124,26 @@ test_agent_role_and_delegate_injection() {
     --to codex --plan-task t1 --artifact-dir "$project/plan-arts" >/dev/null 2>&1 ) ||
     fail "plan-task with role should succeed"
   assert_one_artifact_contains "$project/plan-arts" 'codex-*.md' 'STRICT-API-REVIEWER'
+}
+
+test_global_rules_stay_compact_and_route_workflows() {
+  local line_count
+
+  line_count="$(wc -l < "$ROOT/AGENTS.md" | tr -d ' ')"
+  [ "$line_count" -le 140 ] ||
+    fail "global rules should stay compact (got $line_count lines)"
+  grep -Fq '## Multi-Agent Work' "$ROOT/AGENTS.md" ||
+    fail "global rules should retain a compact multi-agent policy"
+  grep -Fq 'agent-harness' "$ROOT/AGENTS.md" ||
+    fail "global rules should route detailed harness work to the skill"
+  grep -Fq 'task-scoped executor' "$ROOT/AGENTS.md" ||
+    fail "global rules should retain the write-executor safety boundary"
+  if grep -Eq '^## (Model Tiering|Native Subagent Strategies|Run Provenance & Coordination)$' "$ROOT/AGENTS.md"; then
+    fail "procedural harness manuals should not live in global rules"
+  fi
+  if grep -Fq 'fable > opus > sonnet > haiku' "$ROOT/AGENTS.md"; then
+    fail "global rules should not hardcode provider-specific model ladders"
+  fi
 }
 
 test_fail_ledger_records_checks_resolves() {
@@ -8344,6 +8364,7 @@ test_experiment_board_reclaim_transfers_owner
 test_oms_run_ls_open_filters_before_slice
 test_delegate_plan_task_hydrates_from_subdir
 test_agent_role_and_delegate_injection
+test_global_rules_stay_compact_and_route_workflows
 test_fail_ledger_records_checks_resolves
 test_ci_status_record_and_state
 test_delegation_liveness_in_state

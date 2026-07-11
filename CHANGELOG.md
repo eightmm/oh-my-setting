@@ -56,6 +56,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   linted, never executed.
 
 ### Changed
+- Reduced global `AGENTS.md` from a harness manual to a compact policy layer:
+  provider/model ladders, automatic worker-tier downgrades, and routine advisor
+  calls are gone; ambiguous work alone triggers the spec gate, and detailed
+  coordination routes through the `agent-harness` skill while parent judgment
+  and executor scope fences stay.
 - Removed unused legacy prompt/template placeholders, consolidated duplicate
   plugin hook wrappers, and marked standalone workflow files deprecated in
   favor of their maintained skills.
