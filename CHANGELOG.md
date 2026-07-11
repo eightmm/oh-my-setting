@@ -98,6 +98,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   hook/plugin opt-outs, and unlink accepts pre-split global-rule links.
 - Signal cleanup now terminates the full provider subprocess tree, preventing a
   cancelled read-only call from retaining output pipes until its timeout.
+- GC now counts an empty compacted failure ledger as zero instead of producing
+  a duplicate `0` value and an integer-comparison warning.
 - `link.sh` now removes dangling skill links owned by the checkout (left
   behind when a skill is renamed or removed), so renames like
   `multi-agent-*` -> `peer-*` do not strand old links in agent skill dirs.

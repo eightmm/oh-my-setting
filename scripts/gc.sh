@@ -273,7 +273,7 @@ if kept:
     sys.stdout.write("\n")
 PY
 )"
-  after="$(printf '%s' "$compacted" | grep -c '' 2>/dev/null || echo 0)"
+  after="$(printf '%s' "$compacted" | awk 'END { print NR + 0 }')"
   if [ "$after" -lt "$before" ]; then
     printf -- '- failures: compact %s -> %s rows\n' "$before" "$after"
     removed=$((removed + 1))

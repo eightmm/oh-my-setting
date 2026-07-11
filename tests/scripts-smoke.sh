@@ -7343,6 +7343,7 @@ test_delegation_liveness_in_state() {
 
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
+  local gc_err="$project/gc.err"
 
   make_committed_repo "$project"
   mkdir -p "$project/.oms/delegations" "$project/.oms/task/archive" "$project/.oms/runs/oldrun"
@@ -7350,17 +7351,23 @@ test_gc_reclaims_safely() {
   printf '{"schema":1,"id":"d2","pid":%s,"state":"running"}\n' "$$" > "$project/.oms/delegations/d2.json"
   printf 'x\n' > "$project/.oms/task/archive/current-old.md"
   printf '{}' > "$project/.oms/runs/oldrun/capsule.json"
+  printf '%s\n' \
+    '{"ts":"2020-01-01T00:00:00Z","fingerprint":"old","event":"fail"}' \
+    '{"ts":"2020-01-01T00:00:01Z","fingerprint":"old","event":"resolved"}' \
+    > "$project/.oms/failures.jsonl"
   touch -t 202601010000 "$project/.oms/task/archive/current-old.md" "$project/.oms/runs/oldrun"
 
   # Dry-run changes nothing.
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 >/dev/null 2>&1 )
   [ -f "$project/.oms/delegations/d1.json" ] || fail "dry-run must not delete anything"
   # Apply reclaims the orphan/old, keeps the live delegation.
-  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 0 --apply >/dev/null 2>"$gc_err" )
+  [ ! -s "$gc_err" ] || fail "gc should compact an all-resolved ledger without stderr: $(cat "$gc_err")"
   [ ! -f "$project/.oms/delegations/d1.json" ] || fail "gc --apply should remove the dead-pid delegation"
   [ -f "$project/.oms/delegations/d2.json" ] || fail "gc must keep a live delegation"
   [ ! -f "$project/.oms/task/archive/current-old.md" ] || fail "gc should remove an aged task archive"
   [ ! -d "$project/.oms/runs/oldrun" ] || fail "gc should remove an aged capsule"
+  [ ! -s "$project/.oms/failures.jsonl" ] || fail "gc should compact an all-resolved old ledger to empty"
 }
 
 test_oms_init_seeds_and_guides() {
