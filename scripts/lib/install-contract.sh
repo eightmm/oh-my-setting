@@ -26,7 +26,8 @@ try:
     root = row.get("source_root", "")
     plugin = row.get("plugin")
     required = ("commit", "channel", "version", "installed_at")
-    if row.get("schema") != 1 or not isinstance(root, str) or not os.path.isabs(root):
+    schema = row.get("schema")
+    if schema not in (1, 2) or not isinstance(root, str) or not os.path.isabs(root):
         raise ValueError("invalid receipt")
     if any(not isinstance(row.get(key), str) or not row.get(key) for key in required):
         raise ValueError("missing receipt metadata")
@@ -34,6 +35,26 @@ try:
         raise ValueError("missing plugin metadata")
     if any(not isinstance(plugin.get(key), str) or not plugin.get(key) for key in ("name", "version", "sha256")):
         raise ValueError("invalid plugin metadata")
+    if schema == 2:
+        components = row.get("components")
+        required_components = (
+            "tools", "claude_hooks", "codex_plugin", "auto_update",
+            "machine_snapshot", "slurm_snapshot",
+        )
+        if row.get("profile") not in ("minimal", "full", "custom"):
+            raise ValueError("invalid install profile")
+        if not isinstance(row.get("ref"), str) or not row.get("ref"):
+            raise ValueError("invalid install ref")
+        if not isinstance(row.get("previous_commit"), str):
+            raise ValueError("invalid previous commit")
+        if not isinstance(components, dict) or any(
+            not isinstance(components.get(key), bool) for key in required_components
+        ):
+            raise ValueError("invalid component profile")
+        if not isinstance(row.get("managed_targets"), list) or any(
+            not isinstance(value, str) or not value for value in row["managed_targets"]
+        ):
+            raise ValueError("invalid managed target inventory")
     print(os.path.realpath(root))
 except Exception:
     sys.exit(1)
@@ -145,19 +166,31 @@ oms_install_write_receipt() {
   local version="unknown"
   local plugin_version
   local plugin_hash
+  local previous_commit="${OMS_INSTALL_PREVIOUS_COMMIT:-}"
+  local profile="${OH_MY_SETTING_PROFILE:-custom}"
+  local install_ref="${OH_MY_SETTING_REF:-}"
 
   root="$(oms_install_physical_root "$root")" || return 1
+  case "$profile" in minimal|full|custom) ;; *) echo "error: invalid install profile: $profile" >&2; return 2 ;; esac
+  [ -n "$install_ref" ] || install_ref="unknown"
+  case "$previous_commit" in
+    "") ;;
+    *[!0-9a-fA-F]*) echo "error: invalid previous install commit" >&2; return 2 ;;
+  esac
   if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     commit="$(git -C "$root" rev-parse HEAD 2>/dev/null || printf unknown)"
     channel="$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || printf detached)"
     [ -z "$(git -C "$root" status --porcelain --untracked-files=normal 2>/dev/null)" ] || dirty="true"
   fi
   [ ! -f "$root/VERSION" ] || version="$(sed -n '1p' "$root/VERSION")"
+  [ "$install_ref" != "unknown" ] || install_ref="$channel"
   plugin_version="$(oms_install_plugin_version "$root")"
   plugin_hash="$(oms_install_plugin_hash "$root")"
 
   mkdir -p "$(dirname "$receipt")"
-  OMS_INSTALL_DIRTY="$dirty" python3 - \
+  OMS_INSTALL_DIRTY="$dirty" \
+    OMS_INSTALL_PROFILE="$profile" OMS_INSTALL_REF="$install_ref" \
+    OMS_INSTALL_PREVIOUS="$previous_commit" python3 - \
     "$receipt" "$root" "$commit" "$channel" "$version" \
     "$plugin_version" "$plugin_hash" <<'PY'
 import datetime
@@ -168,13 +201,34 @@ import sys
 
 receipt, root, commit, channel, version, plugin_version, plugin_hash = sys.argv[1:]
 row = {
-    "schema": 1,
+    "schema": 2,
     "source_root": root,
     "commit": commit,
     "channel": channel,
     "dirty": os.environ.get("OMS_INSTALL_DIRTY") == "true",
     "version": version,
+    "profile": os.environ.get("OMS_INSTALL_PROFILE", "custom"),
+    "ref": os.environ.get("OMS_INSTALL_REF", channel),
+    "previous_commit": os.environ.get("OMS_INSTALL_PREVIOUS", ""),
     "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    "components": {
+        "tools": os.environ.get("OH_MY_SETTING_INSTALL_TOOLS", "0") == "1",
+        "claude_hooks": os.environ.get("OH_MY_SETTING_CLAUDE_HOOKS", "1") == "1",
+        "codex_plugin": os.environ.get("OH_MY_SETTING_CODEX_PLUGIN", "0") == "1",
+        "auto_update": os.environ.get("OH_MY_SETTING_AUTO_UPDATE", "0") == "1",
+        "machine_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_MACHINE", "0") != "0",
+        "slurm_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_SLURM", "0") != "0",
+    },
+    "managed_targets": [
+        ".codex/AGENTS.md",
+        ".claude/CLAUDE.md",
+        ".gemini/AGENTS.md",
+        ".codex/skills",
+        ".claude/skills",
+        ".gemini/antigravity/skills",
+        ".oh-my-setting-prompts",
+        ".local/bin/oms",
+    ],
     "plugin": {
         "name": "oh-my-setting",
         "version": plugin_version,

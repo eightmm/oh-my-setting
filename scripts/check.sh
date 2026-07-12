@@ -29,6 +29,8 @@ echo "== bash 3.2 static compatibility =="
 bash scripts/check-bash32.sh
 
 echo "== smoke =="
+bash tests/release-contract-smoke.sh
+bash tests/update-v04-smoke.sh
 bash tests/harness-enhancements-smoke.sh
 bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
 

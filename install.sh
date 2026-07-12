@@ -3,6 +3,9 @@ set -euo pipefail
 
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
+INSTALLER_DEFAULT_REF="edge"
+REF="${OH_MY_SETTING_REF:-$INSTALLER_DEFAULT_REF}"
+PROFILE="${OH_MY_SETTING_PROFILE:-minimal}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-0}"
@@ -12,9 +15,10 @@ CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--full] [--tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--star] [--help]
+Usage: install.sh [--ref REF] [--full] [--tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--star] [--help]
 
 Options:
+  --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
   --full              Install provider tools, machine snapshot, and update timer.
   --tools             Install Node, uv, and provider CLIs.
   --auto-update       Install the check-only update timer.
@@ -26,6 +30,8 @@ Options:
 
 Environment:
   OH_MY_SETTING_STAR_PROMPT=1      Enable the GitHub star prompt.
+  OH_MY_SETTING_REF=edge|REF       Track edge or pin an exact Git ref.
+  OH_MY_SETTING_PROFILE=NAME       Receipt profile: minimal, full, or custom.
   OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hook registration.
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto  Skip, require, or auto-detect Codex plugin setup.
   OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
@@ -40,25 +46,36 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --ref)
+      [ "$#" -ge 2 ] || { echo "error: --ref requires a value" >&2; exit 2; }
+      REF="$2"
+      shift
+      ;;
     --full)
+      PROFILE=full
       INSTALL_TOOLS=1
       GENERATE_MACHINE=auto
       GENERATE_SLURM=auto
       AUTO_UPDATE=1
       ;;
     --tools)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
       INSTALL_TOOLS=1
       ;;
     --auto-update)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
       AUTO_UPDATE=1
       ;;
     --machine-snapshot)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
       GENERATE_MACHINE=1
       ;;
     --slurm-snapshot)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
       GENERATE_SLURM=1
       ;;
     --star)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
       STAR_PROMPT=1
       ;;
     --no-star)
@@ -77,6 +94,20 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+case "$PROFILE" in
+  minimal|full|custom) ;;
+  *) echo "error: OH_MY_SETTING_PROFILE must be minimal, full, or custom" >&2; exit 2 ;;
+esac
+case "$REF" in
+  edge) ;;
+  ""|-*|/*|*/|.*|*.|*..*|*//*|*/.*|*.lock|*.lock/*|*[!A-Za-z0-9._/-]*)
+    echo "error: unsafe OH_MY_SETTING_REF: $REF" >&2
+    exit 2
+    ;;
+esac
+
+export OH_MY_SETTING_REF="$REF"
+export OH_MY_SETTING_PROFILE="$PROFILE"
 export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"
 export OH_MY_SETTING_INSTALL_TOOLS="$INSTALL_TOOLS"
 export OH_MY_SETTING_GENERATE_MACHINE="$GENERATE_MACHINE"
@@ -132,11 +163,38 @@ load_user_tool_paths() {
 
 install_git_if_missing
 
-if [ -d "$DEST/.git" ]; then
-  git -C "$DEST" pull --ff-only
+if [ "$REF" = "edge" ]; then
+  if [ -d "$DEST/.git" ]; then
+    git -C "$DEST" fetch --prune origin
+    git -C "$DEST" remote set-head origin -a >/dev/null
+    remote_head="$(git -C "$DEST" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+    [ -n "$remote_head" ] || { echo "error: cannot resolve origin default branch" >&2; exit 1; }
+    edge_branch="${remote_head#origin/}"
+    if git -C "$DEST" show-ref --verify --quiet "refs/heads/$edge_branch"; then
+      git -C "$DEST" checkout "$edge_branch"
+    else
+      git -C "$DEST" checkout -b "$edge_branch" --track "$remote_head"
+    fi
+    git -C "$DEST" pull --ff-only origin "$edge_branch"
+  else
+    mkdir -p "$(dirname "$DEST")"
+    git clone "$REPO_URL" "$DEST"
+  fi
 else
-  mkdir -p "$(dirname "$DEST")"
-  git clone "$REPO_URL" "$DEST"
+  if [ ! -d "$DEST/.git" ]; then
+    mkdir -p "$(dirname "$DEST")"
+    git clone --no-checkout "$REPO_URL" "$DEST"
+  fi
+  git -C "$DEST" fetch --prune --tags origin
+  target="$(git -C "$DEST" rev-parse --verify --quiet "refs/tags/${REF}^{commit}" || true)"
+  if [ -z "$target" ]; then
+    target="$(git -C "$DEST" rev-parse --verify --quiet "origin/${REF}^{commit}" || true)"
+  fi
+  if [ -z "$target" ]; then
+    target="$(git -C "$DEST" rev-parse --verify --quiet "${REF}^{commit}" || true)"
+  fi
+  [ -n "$target" ] || { echo "error: cannot resolve install ref: $REF" >&2; exit 1; }
+  git -C "$DEST" checkout --detach "$target"
 fi
 
 # Continue from the updated checkout so old piped/local installers do not run stale logic.

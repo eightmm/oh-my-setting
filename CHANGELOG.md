@@ -6,7 +6,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+## [0.4.0] - Unreleased
+
 ### Added
+- Stable/edge installation channels: `--ref` and `OH_MY_SETTING_REF` can select
+  `edge`, a tag, branch, or commit. Release assets embed their exact release tag
+  and install to a detached commit, while the source installer explicitly
+  tracks the origin default branch in edge mode.
+- A strict release contract smoke test verifies version parity, the generated
+  pinned installer, release workflow wiring, and positive/negative checksum
+  validation. `gen-checksums.sh --verify` works with GNU `sha256sum` and BSD
+  `shasum`.
+- Transactional updates: schema-2 receipts persist the install ref, profile,
+  concrete components, managed targets, and previous successful commit.
+  `update --check` is read-only, link/doctor failures restore HEAD, links, and
+  receipt, and `update --rollback` returns to the prior success.
 - Task-scoped executor souls (`agent-executor.sh`): model-proposed behavior is
   validated and hash-frozen while machine-owned metadata retains provider,
   task lease, base commit, path scope, and verification authority. Native and
@@ -77,8 +91,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Reduced routine harness overhead: prompt hooks no longer create `.oms` or
   active task packets for read-only questions, automatic task recording now
   requires `OMS_AUTO_TASK=1`, `update.sh` refreshes provider tools only with
-  `--tools`, and `oms list` hides internal and deprecated implementation tools
-  while retaining direct compatibility dispatch.
+  `--tools`, and the `oms list` public allowlist now also enforces dispatch so
+  hidden install and hook scripts cannot be invoked by guessed filenames.
 - Narrowed multi-agent review activation to explicit cross-agent review,
   release gates, and requested ML pre-training gates. Generated project loaders
   now allow clear bounded changes without waiting on unrelated draft choices.
@@ -90,15 +104,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Split install-wide rules from the repository `AGENTS.md` overlay so working on
   oh-my-setting no longer injects the same global policy twice.
 - Removed unused legacy prompt/template placeholders, consolidated duplicate
-  plugin hook wrappers, and marked standalone workflow files deprecated in
-  favor of their maintained skills.
+  plugin hook wrappers, and removed standalone workflow files in favor of
+  their maintained skills.
 - Renamed the cross-CLI tool family `multi-agent-*` to `peer-*` to stop
   colliding with generic in-app multi-agent features: `peer-ask.sh`,
   `peer-review.sh`, `peer-delegate.sh`, `lib/peer-common.sh`, skills
   `peer-ask`/`peer-review`/`peer-delegate`, and env vars `OMS_PEER_*`.
-  Back-compat: `multi-agent-*.sh` shims still dispatch to the new scripts
-  (with a deprecation note on stderr) and `OMS_MULTI_AGENT_*` env vars are
-  honored when the `OMS_PEER_*` names are unset.
+  Version 0.4 removes the deprecated `multi-agent-*.sh` shims; legacy
+  `OMS_MULTI_AGENT_*` variables now fail explicitly with their `OMS_PEER_*`
+  replacements instead of silently changing timeout behavior.
+
 - MD/trigger layer strengthened so skills actually fire at task time: skill
   frontmatter descriptions now carry concrete "use when" phrases and Korean
   user wordings (agent-harness enumerates its whole surface — state/resume,
@@ -111,6 +126,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   fail-ledger, change-guard). Templates call tools via the `oms` dispatcher;
   README.ko.md mirrors the EN condensed structure; timeout env knobs
   documented in COMPONENTS.
+
+### Removed
+- Deprecated `workflows/{spec-first,slurm-hpc,new-server}.md`, their global
+  workflow link, and `multi-agent-{ask,review,delegate}.sh`. Upgrade cleanup
+  restores the newest user workflow backup and preserves foreign targets.
 
 ### Fixed
 - Aligned advisor and spec gates across global rules, skills, templates, docs,

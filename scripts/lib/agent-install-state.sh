@@ -61,6 +61,48 @@ oms_ops_remove_legacy_link() {
   fi
 }
 
+oms_ops_latest_backup() {
+  local target="$1"
+  local dir
+  local base
+
+  dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  find "$dir" -maxdepth 1 -name "$base.backup.*" -print 2>/dev/null |
+    LC_ALL=C sort |
+    tail -n 1
+}
+
+oms_ops_migrate_legacy_workflow_link() {
+  local target="$HOME/.oh-my-setting-workflows"
+  local dry_run="${1:-0}"
+  local current
+  local backup
+
+  [ -L "$target" ] || return 0
+  current="$(readlink "$target")"
+  oms_ops_legacy_source_matches "$current" "workflows" || return 0
+  backup="$(oms_ops_latest_backup "$target")"
+
+  if [ "$dry_run" = "1" ]; then
+    if [ -n "$backup" ]; then
+      printf 'would remove %s and restore %s\n' "$target" "$backup"
+    else
+      printf 'would remove %s\n' "$target"
+    fi
+    OMS_OPS_WOULD_REMOVE=$((OMS_OPS_WOULD_REMOVE + 1))
+    return 0
+  fi
+
+  rm -f "$target"
+  printf 'removed: %s (legacy oh-my-setting workflows link)\n' "$target"
+  OMS_OPS_REMOVED=$((OMS_OPS_REMOVED + 1))
+  if [ -n "$backup" ]; then
+    mv "$backup" "$target"
+    printf 'restored: %s from %s\n' "$target" "$backup"
+  fi
+}
+
 oms_ops_clean_backup_skill_links() {
   local target_root="$1"
   local dry_run="${2:-0}"
@@ -106,6 +148,7 @@ oms_ops_cleanup_legacy_links() {
   oms_ops_remove_legacy_link "$HOME/.claude/skills/oh-my-setting" "custom-skills" "$dry_run"
   oms_ops_remove_legacy_link "$HOME/.gemini/GEMINI.md" "AGENTS.md" "$dry_run"
   oms_ops_remove_legacy_link "$pi_agent_dir/AGENTS.md" "AGENTS.md" "$dry_run"
+  oms_ops_migrate_legacy_workflow_link "$dry_run"
   oms_ops_clean_legacy_skill_links "$HOME/.agents/skills" "$dry_run"
   oms_ops_clean_legacy_skill_links "$pi_agent_dir/skills" "$dry_run"
 }

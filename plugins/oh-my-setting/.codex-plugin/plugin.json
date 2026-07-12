@@ -1,6 +1,6 @@
 {
   "name": "oh-my-setting",
-  "version": "0.1.0+codex.20260711003313",
+  "version": "0.4.0",
   "description": "Shared coding-agent harness hooks for Codex.",
   "author": {
     "name": "oh-my-setting"

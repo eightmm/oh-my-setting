@@ -3923,31 +3923,37 @@ test_advise_picks_provider_that_is_not_caller() {
     fail "OMS_ADVISOR_PROVIDER should pin the advisor provider"
 }
 
-test_peer_shims_redirect_with_deprecation() {
+test_v04_removes_deprecated_peer_shims() {
   local shim
-  local out
-  local err
 
   for shim in multi-agent-ask multi-agent-review multi-agent-delegate; do
-    out="$TMP/shim-$shim.out"
-    err="$TMP/shim-$shim.err"
-    "$ROOT/scripts/$shim.sh" --help >"$out" 2>"$err" ||
-      fail "$shim.sh --help should exit 0 via shim"
-    grep -Fq "deprecated" "$err" || fail "$shim.sh should print deprecation note"
-    grep -Fq "peer-" "$out" || fail "$shim.sh should dispatch to its peer-* script"
+    assert_not_exists "$ROOT/scripts/$shim.sh"
   done
 }
 
-test_peer_env_var_back_compat() {
+test_peer_legacy_env_vars_fail_with_migration_error() {
+  local legacy
+  local replacement
   local out
+  local rc
 
-  out="$(OMS_MULTI_AGENT_TIMEOUT=7m bash -c \
-    ". '$ROOT/scripts/lib/peer-common.sh'; printf '%s' \"\$OMS_PEER_TIMEOUT\"")"
-  [ "$out" = "7m" ] || fail "OMS_MULTI_AGENT_TIMEOUT should back-fill OMS_PEER_TIMEOUT, got: $out"
+  for pair in \
+    'OMS_MULTI_AGENT_TIMEOUT OMS_PEER_TIMEOUT' \
+    'OMS_MULTI_AGENT_VERIFY_TIMEOUT OMS_PEER_VERIFY_TIMEOUT' \
+    'OMS_MULTI_AGENT_KILL_AFTER OMS_PEER_KILL_AFTER' \
+    'OMS_MULTI_AGENT_PRINT_TIMEOUT OMS_PEER_PRINT_TIMEOUT'; do
+    legacy="${pair%% *}"
+    replacement="${pair#* }"
+    rc=0
+    out="$(env "$legacy=legacy" bash -c ". '$ROOT/scripts/lib/peer-common.sh'" 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "$legacy should fail with exit 2, got $rc"
+    printf '%s' "$out" | grep -Fq "use $replacement" ||
+      fail "$legacy migration error should name $replacement: $out"
+  done
 
-  out="$(OMS_MULTI_AGENT_TIMEOUT=7m OMS_PEER_TIMEOUT=2m bash -c \
+  out="$(OMS_PEER_TIMEOUT=2m bash -c \
     ". '$ROOT/scripts/lib/peer-common.sh'; printf '%s' \"\$OMS_PEER_TIMEOUT\"")"
-  [ "$out" = "2m" ] || fail "explicit OMS_PEER_TIMEOUT should win over legacy name, got: $out"
+  [ "$out" = "2m" ] || fail "OMS_PEER_TIMEOUT should remain supported, got: $out"
 }
 
 
@@ -4489,6 +4495,53 @@ test_link_round_trip_restores_foreign_symlink() {
   assert_symlink_to "$target" "$foreign"
 }
 
+test_link_migrates_owned_workflow_link_and_preserves_foreign_target() {
+  local owned_home="$TMP/link-workflow-owned-home"
+  local foreign_home="$TMP/link-workflow-foreign-home"
+  local owned_target="$owned_home/.oh-my-setting-workflows"
+  local foreign_target="$foreign_home/.oh-my-setting-workflows"
+  local replacement="$owned_home/user-workflows"
+  local foreign="$foreign_home/foreign-workflows"
+
+  mkdir -p "$replacement" "$foreign"
+  printf 'user workflow\n' > "$replacement/README.md"
+  printf 'foreign workflow\n' > "$foreign/README.md"
+  ln -s "$replacement" "$owned_target.backup.20260711000000"
+  ln -s "$ROOT/workflows" "$owned_target"
+  ln -s "$foreign" "$foreign_target"
+
+  HOME="$owned_home" "$ROOT/scripts/link.sh" >/dev/null
+  assert_symlink_to "$owned_target" "$replacement"
+  assert_not_exists "$owned_target.backup.20260711000000"
+
+  HOME="$foreign_home" "$ROOT/scripts/link.sh" >/dev/null
+  assert_symlink_to "$foreign_target" "$foreign"
+}
+
+test_unlink_migrates_owned_workflow_link_and_preserves_foreign_target() {
+  local owned_home="$TMP/unlink-workflow-owned-home"
+  local foreign_home="$TMP/unlink-workflow-foreign-home"
+  local owned_target="$owned_home/.oh-my-setting-workflows"
+  local foreign_target="$foreign_home/.oh-my-setting-workflows"
+  local replacement="$owned_home/user-workflows"
+  local foreign="$foreign_home/foreign-workflows"
+
+  mkdir -p "$replacement" "$foreign"
+  ln -s "$replacement" "$owned_target.backup.20260711000000"
+  ln -s "$ROOT/workflows" "$owned_target"
+  ln -s "$foreign" "$foreign_target"
+
+  HOME="$owned_home" OH_MY_SETTING_DRY_RUN=1 "$ROOT/scripts/unlink.sh" >"$owned_home/dry-run"
+  assert_symlink_to "$owned_target" "$ROOT/workflows"
+  assert_file_contains "$owned_home/dry-run" "would remove $owned_target and restore"
+
+  HOME="$owned_home" "$ROOT/scripts/unlink.sh" >/dev/null
+  assert_symlink_to "$owned_target" "$replacement"
+
+  HOME="$foreign_home" "$ROOT/scripts/unlink.sh" >/dev/null
+  assert_symlink_to "$foreign_target" "$foreign"
+}
+
 test_unlink_restores_backup_from_legacy_global_link() {
   local home_dir="$TMP/unlink-legacy-global-home"
   local target="$home_dir/.claude/CLAUDE.md"
@@ -4787,14 +4840,15 @@ test_update_help_runs() {
 test_update_refreshes_tools_only_when_requested() {
   local project="$TMP/update-tools-opt-in"
   local bin="$project/bin"
-  local receipt="$project/install.json"
+  local receipt="$TMP/update-tools-opt-in-receipt.json"
   local marker="$project/tools-called"
+  local branch
 
   make_committed_repo "$project"
   mkdir -p "$project/scripts/lib" "$bin"
   cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
-  for script in link doctor install-autoupdate; do
+  for script in link doctor install-autoupdate uninstall-autoupdate install-claude-hooks; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
     chmod +x "$project/scripts/$script.sh"
   done
@@ -4811,6 +4865,12 @@ esac
 exec /usr/bin/git "$@"
 EOF
   chmod +x "$bin/git"
+  git -C "$project" add scripts bin
+  git -C "$project" commit -qm "test: install update fixture"
+  branch="$(git -C "$project" symbolic-ref --short HEAD)"
+  git -C "$project" remote add origin "$project"
+  git -C "$project" fetch -q origin "$branch"
+  git -C "$project" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null
   python3 - "$receipt" "$project" <<'PY'
 import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
@@ -4839,19 +4899,21 @@ PY
 test_update_auto_refreshes_only_installed_codex_plugin() {
   local project="$TMP/update-plugin-auto"
   local bin="$project/bin"
-  local receipt="$project/install.json"
+  local receipt="$TMP/update-plugin-auto-receipt.json"
   local marker="$project/plugin-called"
+  local branch
 
   make_committed_repo "$project"
   mkdir -p "$project/scripts/lib" "$bin"
   cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
-  for script in link doctor install-autoupdate install-tools; do
+  for script in link doctor install-autoupdate uninstall-autoupdate install-tools install-claude-hooks; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
     chmod +x "$project/scripts/$script.sh"
   done
-  cat > "$project/scripts/install-codex-plugin.sh" <<'EOF'
+cat > "$project/scripts/install-codex-plugin.sh" <<'EOF'
 #!/usr/bin/env bash
+[ "${1:-}" != "--remove" ] || exit 0
 touch "$OMS_TEST_PLUGIN_MARKER"
 EOF
   chmod +x "$project/scripts/install-codex-plugin.sh"
@@ -4873,6 +4935,12 @@ if [ "$1 $2 $3" = "plugin list --json" ]; then
 fi
 EOF
   chmod +x "$bin/git" "$bin/codex"
+  git -C "$project" add scripts bin
+  git -C "$project" commit -qm "test: plugin update fixture"
+  branch="$(git -C "$project" symbolic-ref --short HEAD)"
+  git -C "$project" remote add origin "$project"
+  git -C "$project" fetch -q origin "$branch"
+  git -C "$project" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null
   python3 - "$receipt" "$project" <<'PY'
 import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
@@ -5310,7 +5378,9 @@ test_gen_checksums_deterministic() {
   printf '%s\n' "$a" | grep -Eq '  prompts/.+' || fail "should include installed prompts"
   printf '%s\n' "$a" | grep -Eq '  roles/decision-advisor\.md$' ||
     fail "should include bundled strategy profiles"
-  printf '%s\n' "$a" | grep -Eq '  workflows/.+' || fail "should include installed workflows"
+  if printf '%s\n' "$a" | grep -Eq '  workflows/.+'; then
+    fail "removed workflows should not be checksummed"
+  fi
   # Every line must be valid sha256sum format: 64 hex + two spaces + path.
   if printf '%s\n' "$a" | grep -Evq '^[0-9a-f]{64}  '; then
     fail "non-sha256 line in gen-checksums output"
@@ -6834,6 +6904,11 @@ test_oms_dispatcher_lists_and_dispatches() {
   if "$bin/oms" ../oms >/dev/null 2>&1; then
     fail "oms must reject path-like tool names"
   fi
+  for hidden in skill-router turn-guard check-bash32 install-tools; do
+    rc=0
+    "$bin/oms" "$hidden" --help >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "oms should reject hidden tool $hidden with exit 2, got $rc"
+  done
 }
 
 test_doctor_detects_foreign_config_link() {
@@ -8326,13 +8401,18 @@ test_install_receipt_foreign_doctor_and_repair() {
   python3 - "$receipt" "$ROOT" <<'PY' || fail "link should atomically commit a canonical receipt"
 import json, os, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-assert d["schema"] == 1
+assert d["schema"] == 2
 assert d["source_root"] == os.path.realpath(sys.argv[2])
 assert d["commit"]
 assert d["channel"]
 assert d["version"]
 assert d["installed_at"].endswith("Z")
 assert isinstance(d["dirty"], bool)
+assert d["profile"] == "custom"
+assert d["ref"]
+assert d["previous_commit"] == ""
+assert all(isinstance(value, bool) for value in d["components"].values())
+assert ".local/bin/oms" in d["managed_targets"]
 assert d["plugin"]["name"] == "oh-my-setting"
 assert len(d["plugin"]["sha256"]) == 64
 PY

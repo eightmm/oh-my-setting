@@ -5,6 +5,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
+# shellcheck source=scripts/lib/agent-install-state.sh
+. "$ROOT/scripts/lib/agent-install-state.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
 # shellcheck source=scripts/lib/install-contract.sh
@@ -21,19 +23,6 @@ Set OH_MY_SETTING_DRY_RUN=1 to preview changes.
 EOF
 }
 
-latest_backup() {
-  local target="$1"
-  local dir
-  local base
-
-  dir="$(dirname "$target")"
-  base="$(basename "$target")"
-
-  find "$dir" -maxdepth 1 -name "$base.backup.*" -print 2>/dev/null |
-    LC_ALL=C sort |
-    tail -n 1
-}
-
 unlink_and_restore() {
   local target="$1"
   local source="$2"
@@ -44,7 +33,7 @@ unlink_and_restore() {
     return 0
   fi
 
-  backup="$(latest_backup "$target")"
+  backup="$(oms_ops_latest_backup "$target")"
 
   if [ "$DRY_RUN" = "1" ]; then
     if [ -n "$backup" ]; then
@@ -108,7 +97,7 @@ unlink_all() {
   unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
   unlink_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
   unlink_and_restore "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
-  unlink_and_restore "$HOME/.oh-my-setting-workflows" "$ROOT/workflows"
+  oms_ops_migrate_legacy_workflow_link "$DRY_RUN"
   unlink_and_restore "$HOME/.local/bin/oms" "$ROOT/scripts/oms"
 
   receipt="$(oms_install_receipt_path)"

@@ -10,6 +10,28 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+STRICT=0
+if [ "${1:-}" = "--verify" ]; then
+  [ "$#" -eq 2 ] || { echo "Usage: gen-checksums.sh --verify MANIFEST" >&2; exit 2; }
+  manifest="$2"
+  [ -f "$manifest" ] || { echo "error: checksum manifest not found: $manifest" >&2; exit 2; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c "$manifest"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -c "$manifest"
+  else
+    echo "error: need sha256sum or shasum" >&2
+    exit 2
+  fi
+  exit 0
+elif [ "${1:-}" = "--strict" ]; then
+  [ "$#" -eq 1 ] || { echo "Usage: gen-checksums.sh [--strict|--verify MANIFEST]" >&2; exit 2; }
+  STRICT=1
+elif [ "$#" -ne 0 ]; then
+  echo "Usage: gen-checksums.sh [--strict|--verify MANIFEST]" >&2
+  exit 2
+fi
+
 git rev-parse --git-dir >/dev/null 2>&1 || {
   echo "error: not a git checkout: $ROOT" >&2
   exit 2
@@ -44,7 +66,6 @@ files="$(git ls-files \
   'templates/**' \
   'plugins/**' \
   'prompts/**' \
-  'workflows/**' \
   skills.manifest.json \
   VERSION | LC_ALL=C sort)"
 
@@ -52,7 +73,11 @@ files="$(git ls-files \
 
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue  # allow verification while a tracked file is being removed
+  if [ ! -f "$f" ]; then
+    [ "$STRICT" = "0" ] && continue
+    echo "error: tracked release file is missing: $f" >&2
+    exit 2
+  fi
   sha256_of "$f"
 done <<EOF
 $files

@@ -8,23 +8,36 @@ talking to your coding agent — there is nothing to run in a terminal.
 
 ## Install
 
-The only shell step:
+To install the 0.4 code from `main` before its release tag is published, use
+the explicit edge channel:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --ref edge
 ```
 
-The default install is minimal: rules, skills, dispatcher, and provider hooks
+The 0.4 installer defaults to a minimal profile: rules, skills, dispatcher, and provider hooks
 for CLIs already present. It does not install provider CLIs, modify `.bashrc`,
 write a machine snapshot, register an update timer, or show a star prompt.
-For the former all-in-one setup:
+For the 0.4 edge all-in-one setup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --full
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --ref edge --full
 ```
 
 Open a new shell once if `--full` installed new CLIs. From here on, your agent
 runs everything.
+
+For a published stable release, use its GitHub Release installer. Starting
+with v0.4.0, the release tag is embedded so rerunning it cannot silently move
+to a future `main` commit:
+
+```bash
+curl -fsSL https://github.com/eightmm/oh-my-setting/releases/latest/download/install.sh | bash
+```
+
+`--ref v0.4.0` (or `OH_MY_SETTING_REF=v0.4.0`) pins any source installer to a
+tag; branches and commits are also accepted. See [the release contract](docs/RELEASE.md)
+and [0.4 migration notes](docs/MIGRATION-0.4.md).
 
 ## Start
 
@@ -115,6 +128,8 @@ Maintenance:
 ```text
 Check the oh-my-setting install status.
 Update oh-my-setting and re-run its doctor.
+Check for an update without applying it.
+Roll back the last successful oh-my-setting update.
 Fix duplicate skill-picker entries and clean legacy oh-my-setting links.
 Unlink oh-my-setting.                        # or: uninstall it completely
 ```

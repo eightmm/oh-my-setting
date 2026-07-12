@@ -16,12 +16,24 @@
 # shellcheck source=harness-residue.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-residue.sh"
 
-# Renamed 2026-07: OMS_MULTI_AGENT_* -> OMS_PEER_*. Honor the old names when
-# the new ones are unset so existing rules and CI configs keep working.
-: "${OMS_PEER_TIMEOUT:=${OMS_MULTI_AGENT_TIMEOUT:-}}"
-: "${OMS_PEER_VERIFY_TIMEOUT:=${OMS_MULTI_AGENT_VERIFY_TIMEOUT:-}}"
-: "${OMS_PEER_KILL_AFTER:=${OMS_MULTI_AGENT_KILL_AFTER:-}}"
-: "${OMS_PEER_PRINT_TIMEOUT:=${OMS_MULTI_AGENT_PRINT_TIMEOUT:-}}"
+# Removed in 0.4: fail explicitly so legacy CI does not silently run with
+# different timeout or termination behavior.
+if [ -n "${OMS_MULTI_AGENT_TIMEOUT+x}" ]; then
+  echo "error: OMS_MULTI_AGENT_TIMEOUT was removed; use OMS_PEER_TIMEOUT" >&2
+  exit 2
+fi
+if [ -n "${OMS_MULTI_AGENT_VERIFY_TIMEOUT+x}" ]; then
+  echo "error: OMS_MULTI_AGENT_VERIFY_TIMEOUT was removed; use OMS_PEER_VERIFY_TIMEOUT" >&2
+  exit 2
+fi
+if [ -n "${OMS_MULTI_AGENT_KILL_AFTER+x}" ]; then
+  echo "error: OMS_MULTI_AGENT_KILL_AFTER was removed; use OMS_PEER_KILL_AFTER" >&2
+  exit 2
+fi
+if [ -n "${OMS_MULTI_AGENT_PRINT_TIMEOUT+x}" ]; then
+  echo "error: OMS_MULTI_AGENT_PRINT_TIMEOUT was removed; use OMS_PEER_PRINT_TIMEOUT" >&2
+  exit 2
+fi
 
 MA_SAFE_PATHS=(
   .

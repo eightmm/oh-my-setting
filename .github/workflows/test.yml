@@ -41,6 +41,12 @@ jobs:
       - name: harness enhancement regressions
         if: matrix.shard == 1
         run: bash tests/harness-enhancements-smoke.sh
+      - name: release contract regressions
+        if: matrix.shard == 1
+        run: bash tests/release-contract-smoke.sh
+      - name: transactional update regressions
+        if: matrix.shard == 1
+        run: bash tests/update-v04-smoke.sh
       - name: scripts smoke
         run: bash tests/run-smoke-shard.sh --shard "${{ matrix.shard }}/4"
 

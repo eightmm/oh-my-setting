@@ -576,7 +576,6 @@ check_custom_skills "$HOME/.codex/skills"
 check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.gemini/antigravity/skills"
 check_path "$HOME/.oh-my-setting-prompts" "$INSTALL_ROOT/prompts"
-check_path "$HOME/.oh-my-setting-workflows" "$INSTALL_ROOT/workflows"
 check_path "$HOME/.local/bin/oms" "$INSTALL_ROOT/scripts/oms"
 
 if ! "$ROOT/scripts/skill-doctor.sh"; then

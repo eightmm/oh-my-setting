@@ -297,8 +297,15 @@ case "$RECEIPT_STATE" in
   valid)
     printf -- '- receipt: %s\n' "$RECEIPT"
     printf -- '- canonical_root: %s\n' "$INSTALL_ROOT"
+    printf -- '- receipt_schema: %s\n' "$(oms_install_receipt_field schema "$RECEIPT")"
     printf -- '- canonical_commit: %s\n' "$(oms_install_receipt_field commit "$RECEIPT")"
     printf -- '- channel: %s\n' "$(oms_install_receipt_field channel "$RECEIPT")"
+    value="$(oms_install_receipt_field profile "$RECEIPT" 2>/dev/null || true)"
+    [ -z "$value" ] || printf -- '- profile: %s\n' "$value"
+    value="$(oms_install_receipt_field ref "$RECEIPT" 2>/dev/null || true)"
+    [ -z "$value" ] || printf -- '- ref: %s\n' "$value"
+    value="$(oms_install_receipt_field previous_commit "$RECEIPT" 2>/dev/null || true)"
+    [ -z "$value" ] || printf -- '- rollback_commit: %s\n' "$value"
     printf -- '- installed_at: %s\n' "$(oms_install_receipt_field installed_at "$RECEIPT")"
     if [ "$INSTALL_ROOT" = "$ROOT" ]; then
       printf -- '- current_checkout: canonical\n'
