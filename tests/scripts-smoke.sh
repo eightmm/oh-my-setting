@@ -384,6 +384,16 @@ test_apply_dry_run_has_no_writes() {
   assert_not_exists "$project"
 }
 
+test_apply_loader_allows_clear_bounded_changes() {
+  local project="$TMP/loader-bounded"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  assert_file_contains "$project/AGENTS.md" "Clear bounded changes may proceed from local evidence."
+  if grep -Fq 'Project work starts only after it is filled and confirmed.' "$project/AGENTS.md"; then
+    fail "generated loader should not gate clear bounded work on PROJECT.md confirmation"
+  fi
+}
+
 test_apply_rejects_unclosed_managed_block() {
   local project="$TMP/apply-malformed"
   mkdir -p "$project"
@@ -4754,7 +4764,61 @@ EOF
 }
 
 test_update_help_runs() {
-  "$ROOT/scripts/update.sh" --help >/dev/null
+  local out
+  out="$("$ROOT/scripts/update.sh" --help)"
+  printf '%s' "$out" | grep -Fq -- '--tools' || fail "update help should expose opt-in tool refresh"
+}
+
+test_update_refreshes_tools_only_when_requested() {
+  local project="$TMP/update-tools-opt-in"
+  local bin="$project/bin"
+  local receipt="$project/install.json"
+  local marker="$project/tools-called"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts/lib" "$bin"
+  cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
+  for script in link doctor install-autoupdate; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
+    chmod +x "$project/scripts/$script.sh"
+  done
+  cat > "$project/scripts/install-tools.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$OMS_TEST_TOOLS_MARKER"
+EOF
+  chmod +x "$project/scripts/install-tools.sh"
+  cat > "$bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *' pull --ff-only') exit 0 ;;
+esac
+exec /usr/bin/git "$@"
+EOF
+  chmod +x "$bin/git"
+  python3 - "$receipt" "$project" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": 1,
+        "source_root": sys.argv[2],
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "channel": "main",
+        "version": "0.3.0",
+        "installed_at": "2026-07-12T00:00:00Z",
+        "plugin": {"name": "oh-my-setting", "version": "0.1.0", "sha256": "test"},
+    }, handle)
+PY
+
+  PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+    "$project/scripts/update.sh" --no-doctor >/dev/null
+  assert_not_exists "$marker"
+
+  PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+    "$project/scripts/update.sh" --tools --no-doctor >/dev/null
+  [ -f "$marker" ] || fail "update --tools should refresh provider tools"
 }
 
 test_auto_update_help_runs() {
@@ -6651,6 +6715,12 @@ test_oms_dispatcher_lists_and_dispatches() {
   # pipefail as soon as the match is found.
   out="$("$bin/oms" list)" || fail "oms list should succeed"
   printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
+  printf '%s' "$out" | grep -Eq '^agent-run ' || fail "oms list should include agent-run"
+  for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate; do
+    if printf '%s' "$out" | grep -Eq "^${hidden} "; then
+      fail "oms list should hide internal/deprecated tool: $hidden"
+    fi
+  done
   "$bin/oms" run-ledger --help >/dev/null 2>&1 || fail "oms should dispatch run-ledger via its symlink"
   (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run should alias oms-run"
   if "$bin/oms" no-such-tool >/dev/null 2>&1; then
@@ -7265,6 +7335,9 @@ test_policy_layers_match_compact_global_rules() {
   grep -Fq 'Bounded changes with a clear local contract do not require an interview.' \
     "$ROOT/custom-skills/spec-interview/SKILL.md" ||
     fail "spec-interview should exempt clear bounded changes"
+  [ "$(grep -Fxc 'Bounded changes with a clear local contract do not require an interview.' \
+    "$ROOT/custom-skills/spec-interview/SKILL.md")" = "1" ] ||
+    fail "spec-interview should state the bounded-change exemption once"
   for file in \
     "$ROOT/templates/project-general-AGENTS.md" \
     "$ROOT/templates/project-ml-AGENTS.md"; do
@@ -7854,32 +7927,44 @@ test_skill_router_auto_records_task_prompts() {
   make_committed_repo "$project"
 
   payload="$(printf '{"prompt":"고칠 부분 확인하고 있으면 수정해줘","session_id":"auto1","turn_id":"t1","cwd":"%s"}' "$project")"
-  printf '%s' "$payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_file_contains "$project/.oms/task/current.md" "Respond to user request:"
   assert_file_contains "$project/.oms/task/current.md" "User prompt (task/medium): 고칠 부분 확인하고 있으면 수정해줘"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "auto_task"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "created"'
 
   payload="$(printf '{"prompt":"이어서 ablation 기록 자동화도 확인해줘","session_id":"auto1","turn_id":"t2","cwd":"%s"}' "$project")"
-  printf '%s' "$payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_file_contains "$project/.oms/task/current.md" "이어서 ablation 기록 자동화도 확인해줘"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "appended"'
 
   before="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
-  printf '%s' "$payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   after="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
   [ "$before" = "$after" ] || fail "same turn/prompt should not append twice"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "deduped"'
 }
 
-test_skill_router_auto_task_can_be_disabled() {
-  local d="$TMP/skill-router-auto-task-off"
+test_skill_router_auto_task_is_opt_in() {
+  local d="$TMP/skill-router-auto-task-default"
   local project="$d/project"
 
   make_committed_repo "$project"
   printf '{"prompt":"fix this bug","session_id":"off1","turn_id":"t1","cwd":"%s"}' "$project" |
-    TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_not_exists "$project/.oms/task/current.md"
+}
+
+test_skill_router_plain_question_leaves_no_state() {
+  local d="$TMP/skill-router-plain-question"
+  local project="$d/project"
+  local out
+
+  make_committed_repo "$project"
+  out="$(printf '{"prompt":"explain slurm","session_id":"plain1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'slurm-hpc' || fail "plain question should still receive a skill hint"
+  assert_not_exists "$project/.oms"
 }
 
 test_skill_router_skips_system_prompts() {

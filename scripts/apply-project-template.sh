@@ -121,11 +121,12 @@ loader_content() {
   display_template="${display_template/#$HOME/~}"
 
   printf '# oh-my-setting Loader\n\n'
-  printf 'Read `PROJECT.md` first. Project work starts only after it is filled and confirmed.\n'
+  printf 'Read `PROJECT.md` when it exists. Resolve only draft choices that affect the requested work.\n'
   printf 'Then follow `%s` for shared `%s` rules.\n' "$display_template" "$style"
   printf 'Project rules override global defaults.\n\n'
   printf '## Local Agent Rules\n\n'
-  printf -- '- New/broad work or draft `PROJECT.md`: interview -> update `PROJECT.md` -> confirm -> code.\n'
+  printf -- '- New/broad work or task-relevant draft choices: interview -> update `PROJECT.md` -> confirm -> code.\n'
+  printf -- '- Clear bounded changes may proceed from local evidence.\n'
   printf -- '- New/major docs: interview -> concrete outline -> confirm -> write.\n'
   if [ "$style" = "ml" ]; then
     printf -- '- New ML project: create only the standard skeleton before the interview/spec gate.\n'
@@ -146,7 +147,7 @@ project_content() {
   fi
 
   printf '# PROJECT.md\n\n'
-  printf 'Project-specific spec. Work starts only after this file is filled and confirmed.\n\n'
+  printf 'Project-specific spec. Confirm unresolved choices before work that depends on them.\n\n'
   printf '## Status\n\n'
   printf -- '- State: draft\n'
   printf -- '- Last confirmed by:\n'

@@ -10,7 +10,8 @@ set -euo pipefail
 # (tool notifications, slash commands) are skipped entirely. Fail-open: this
 # hook must never block a prompt.
 #
-# Disable with OMS_SKILL_ROUTER_OFF=1. Claude Code installs this directly;
+# Automatic task recording is opt-in with OMS_AUTO_TASK=1. Disable the router
+# entirely with OMS_SKILL_ROUTER_OFF=1. Claude Code installs this directly;
 # Codex installs it through the repo-local oh-my-setting plugin.
 
 [ "${OMS_SKILL_ROUTER_OFF:-0}" = "1" ] && exit 0

@@ -1,13 +1,6 @@
 {
   "skills": [
     {
-      "name": "karpathy-guidelines",
-      "source": "curated",
-      "note": "Provided outside this repo (installed agent plugin); non-path sources are listed but not validated or linked by repo tooling.",
-      "enabled": true,
-      "reason": "Bias coding work toward simple, surgical, verified changes."
-    },
-    {
       "name": "git-cli-workflow",
       "source": "custom-skills/git-cli-workflow",
       "enabled": true,

@@ -9,9 +9,7 @@ description: >
   interview; the user never runs setup commands in a shell.
 ---
 
-Default: no coding before the task-relevant contract is clear. Bounded changes
-with a clear local contract do not require an interview.
-
+Default: no coding before the task-relevant contract is clear.
 Bounded changes with a clear local contract do not require an interview.
 
 ## Trigger

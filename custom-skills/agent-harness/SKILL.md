@@ -99,16 +99,15 @@ Provider prompts also receive the active loop warnings, so delegated workers can
 see the same "do not repeat the same approach" signal instead of only the host
 stderr warning.
 
-Codex and Claude Code installs also get lightweight hook support when the user
-has not opted out: `skill-router.sh` records a hash-only workflow/risk route for
-normal prompts and auto-creates/appends the active task packet from normal user
-prompts. The task writer still scans content and refuses sensitive-looking
-entries. `turn-guard.sh` can block one final response when a guarded coding turn
-with repo changes or high risk omits verification status. Disable with
-`OMS_SKILL_ROUTER_OFF=1`, `OMS_AUTO_TASK_OFF=1`, or `OMS_TURN_GUARD_OFF=1` for a
-session. Provider subprocesses are marked as harness children; their hooks do
-not route, append tasks, or run the turn guard. They write only a hash-only
-`ignored_child` event to the primary state repo, never the delegated worktree.
+Codex and Claude Code installs also get lightweight hook support:
+`skill-router.sh` emits matching skill hints and records route state only for
+guarded work. Automatic active-task recording is opt-in with `OMS_AUTO_TASK=1`;
+the task writer scans content and refuses sensitive-looking entries.
+`turn-guard.sh` can block one final response when guarded work with repo changes
+omits verification status. Disable hooks with `OMS_SKILL_ROUTER_OFF=1` or
+`OMS_TURN_GUARD_OFF=1`. Provider subprocesses do not route, append tasks, or run
+the turn guard; they write only a hash-only `ignored_child` event to the primary
+state repo, never the delegated worktree.
 
 For live edits in the owning agent's tree, use `change-guard.sh` when scope
 drift or user edits are likely. It snapshots the current dirty files and

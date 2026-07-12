@@ -1,10 +1,10 @@
 ---
 name: peer-review
 description: >
-  Multi-agent review workflow for important code changes. Use when the user
-  asks for independent verification, cross-agent review, council review, or
-  when a change touches high-risk surfaces such as APIs, auth, data pipelines,
-  model training, Slurm jobs, dependency/toolchain changes, or releases.
+  Multi-agent review workflow. Use when the user explicitly asks for
+  independent verification, cross-agent review, or council review, or when a
+  release go/no-go or explicitly requested ML pre-training gate needs several
+  independent reviewers. High-risk changes alone do not require this skill.
 ---
 
 Goal: get independent review signals, then synthesize evidence. Do not outsource judgment.
@@ -12,8 +12,9 @@ Use local CLI tools only. Do not use MCP servers, app connectors, or plugin conn
 
 ## When
 
-Use for high-risk diffs or explicit requests: `multi-agent review`, `cross-check`,
-`ask another agent`, `council`, `verify with codex/claude/antigravity`.
+Use for explicit requests: `multi-agent review`, `cross-check`, `ask another
+agent`, `council`, `verify with codex/claude/antigravity`; also use for a release
+go/no-go or explicitly requested ML pre-training gate.
 
 ## Reviewer Lenses
 

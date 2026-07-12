@@ -56,6 +56,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   linted, never executed.
 
 ### Changed
+- Reduced routine harness overhead: prompt hooks no longer create `.oms` or
+  active task packets for read-only questions, automatic task recording now
+  requires `OMS_AUTO_TASK=1`, `update.sh` refreshes provider tools only with
+  `--tools`, and `oms list` hides internal and deprecated implementation tools
+  while retaining direct compatibility dispatch.
+- Narrowed multi-agent review activation to explicit cross-agent review,
+  release gates, and requested ML pre-training gates. Generated project loaders
+  now allow clear bounded changes without waiting on unrelated draft choices.
 - Reduced global `rules/global-AGENTS.md` from a harness manual to a compact policy layer:
   provider/model ladders, automatic worker-tier downgrades, and routine advisor
   calls are gone; ambiguous work alone triggers the spec gate, and detailed

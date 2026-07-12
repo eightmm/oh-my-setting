@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-0}"
+SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-1}"
 SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 # shellcheck source=scripts/lib/install-contract.sh
@@ -10,16 +10,18 @@ AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 
 usage() {
   cat <<'EOF'
-Usage: update.sh [--no-tools] [--no-doctor] [-h|--help]
+Usage: update.sh [--tools] [--no-tools] [--no-doctor] [-h|--help]
 
 Update the local oh-my-setting checkout, refresh symlinks, and re-run doctor.
 
 Options:
-  --no-tools    Skip CLI tool reinstall step.
+  --tools       Refresh Node/uv/provider tools after updating.
+  --no-tools    Skip tool refresh (default; retained for compatibility).
   --no-doctor   Skip post-update doctor run.
 
 Environment:
-  OH_MY_SETTING_UPDATE_SKIP_TOOLS=1   Same as --no-tools.
+  OH_MY_SETTING_UPDATE_SKIP_TOOLS=0   Same as --tools.
+  OH_MY_SETTING_UPDATE_SKIP_TOOLS=1   Same as --no-tools (default).
   OH_MY_SETTING_UPDATE_SKIP_DOCTOR=1  Same as --no-doctor.
   OH_MY_SETTING_CODEX_PLUGIN=0        Skip Codex plugin hook refresh.
   OH_MY_SETTING_AUTO_UPDATE=0         Skip auto-update trigger refresh.
@@ -28,6 +30,10 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --tools)
+      SKIP_TOOLS=0
+      shift
+      ;;
     --no-tools)
       SKIP_TOOLS=1
       shift

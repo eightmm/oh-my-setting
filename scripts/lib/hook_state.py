@@ -285,7 +285,7 @@ def classify_prompt(prompt: str) -> dict[str, Any]:
     lower = prompt.lower()
     write = has_any(lower, WRITE_TERMS)
     read = has_any(lower, READ_TERMS)
-    if has_any(lower, RELEASE_TERMS):
+    if has_any(lower, RELEASE_TERMS) and (write or not read):
         workflow = "release"
     elif has_any(lower, ML_TERMS):
         workflow = "ml-experiment" if write else "research"
@@ -298,7 +298,7 @@ def classify_prompt(prompt: str) -> dict[str, Any]:
     else:
         workflow = "question"
 
-    high = has_any(lower, HIGH_RISK_TERMS) or workflow in {"release", "ml-experiment"}
+    high = (write and has_any(lower, HIGH_RISK_TERMS)) or workflow in {"release", "ml-experiment"}
     risk = "high" if high else "medium" if workflow in {"task", "review"} else "low"
     guard = workflow in {"task", "review", "ml-experiment", "release"}
     return {"workflow": workflow, "risk": risk, "guard": guard}
@@ -397,9 +397,9 @@ def run_agent_task(repo: Path, args: list[str], stdin_text: str | None = None) -
 def should_auto_task(prompt: str) -> bool:
     if is_harness_child():
         return False
-    if os.environ.get("OMS_AUTO_TASK_OFF") == "1" or os.environ.get("OMS_AUTO_TASK") == "0":
+    if os.environ.get("OMS_AUTO_TASK_OFF") == "1":
         return False
-    return not bool(CHITCHAT_RE.match(prompt.strip()))
+    return os.environ.get("OMS_AUTO_TASK") == "1" and not bool(CHITCHAT_RE.match(prompt.strip()))
 
 
 def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> None:
@@ -614,7 +614,8 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 0
 
     route = classify_prompt(prompt)
-    route_state(payload, prompt, route)
+    if route["guard"]:
+        route_state(payload, prompt, route)
     auto_task_record(payload, prompt, route)
 
     lower = prompt.strip().lower()
@@ -631,15 +632,16 @@ def cmd_route(args: argparse.Namespace) -> int:
     scored.sort()
     fresh = fresh_skill_names(payload, [name for _, name in scored if name])
     repo = repo_root(payload_cwd(payload))
-    append_event(
-        repo,
-        payload,
-        action="skill_hint",
-        status="hinted" if fresh else "deduped",
-        workflow=route["workflow"],
-        risk=route["risk"],
-        skills=fresh,
-    )
+    if route["guard"]:
+        append_event(
+            repo,
+            payload,
+            action="skill_hint",
+            status="hinted" if fresh else "deduped",
+            workflow=route["workflow"],
+            risk=route["risk"],
+            skills=fresh,
+        )
     if fresh:
         print(
             "oh-my-setting skill hint: this request may match installed skill(s): "
