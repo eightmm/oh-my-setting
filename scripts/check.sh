@@ -29,6 +29,10 @@ echo "== bash 3.2 static compatibility =="
 bash scripts/check-bash32.sh
 
 echo "== smoke =="
+bash tests/autonomy-hook-smoke.sh
+bash tests/autonomy-verification-smoke.sh
+bash tests/autonomy-failure-smoke.sh
+bash tests/autonomy-plan-run-smoke.sh
 bash tests/release-contract-smoke.sh
 bash tests/update-v04-smoke.sh
 bash tests/harness-enhancements-smoke.sh

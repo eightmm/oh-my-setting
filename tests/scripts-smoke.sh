@@ -2961,6 +2961,8 @@ test_agent_plan_dag_and_ready() {
     fail "claiming P2 with unfinished dep P1 must fail"
   fi
   "$SH" --repo "$d" claim --id P1 --provider codex >/dev/null || fail "claim P1 failed"
+  "$SH" --repo "$d" review --id P1 --artifact artifact.md --patch change.patch >/dev/null || fail "review P1 failed"
+  "$SH" --repo "$d" land --id P1 >/dev/null || fail "land P1 failed"
   "$SH" --repo "$d" finish --id P1 >/dev/null || fail "finish P1 failed"
 
   out="$("$SH" --repo "$d" ready)"
@@ -3055,6 +3057,8 @@ test_agent_plan_next_and_brief() {
   [ "$rc" = 3 ] || fail "next with no actionable task should exit 3, got $rc"
 
   # --claim without --provider is an error.
+  "$SH" --repo "$d" review --id P1 --artifact artifact.md --patch change.patch >/dev/null
+  "$SH" --repo "$d" land --id P1 >/dev/null
   "$SH" --repo "$d" finish --id P1 >/dev/null
   if "$SH" --repo "$d" next --claim >/dev/null 2>&1; then
     fail "next --claim without --provider must fail"
@@ -7275,7 +7279,7 @@ test_patch_land_finishes_plan_task() {
   printf 'work\n' >> "$project/file.txt"
   git -C "$project" diff > "$project/p.patch"
   git -C "$project" checkout -q file.txt
-  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" review --id t1 --patch "$project/p.patch" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" review --id t1 --artifact "$project/review.md" --patch "$project/p.patch" >/dev/null )
 
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/p.patch" --plan-task t1 --verify "true" >/dev/null 2>&1 ) ||
     fail "patch-land --plan-task should land"
@@ -7854,7 +7858,7 @@ test_patch_land_plan_task_supplies_patch() {
   "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal g >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t1 --patch "$TMP/land-plan.patch" >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t1 --artifact "$TMP/land-plan.md" --patch "$TMP/land-plan.patch" >/dev/null
 
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t1 --verify true ) \
     >"$project/out" 2>"$project/err" || fail "--plan-task with stored patch should land"
@@ -8518,7 +8522,7 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
   local task_id archive
 
   mkdir -p "$d"
-  "$sh" --repo "$d" init --goal "first" \
+  "$sh" --repo "$d" init --goal "first" --verify true \
     --source-session 0123456789abcdef >/dev/null
   task_id="$("$sh" --repo "$d" status | awk '$1=="task_id:"{print $2}')"
   [ -n "$task_id" ] || fail "task init should assign a task id"

@@ -19,7 +19,7 @@ ROOT_LIB="$ROOT/scripts/lib"
 
 STATE_ROOT="$(oms_repo_root "$PWD")"
 LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
-SCHEMA=1
+SCHEMA=2
 
 CMD=""
 EXIT_CODE=""
@@ -38,7 +38,9 @@ Usage: fail-ledger.sh record --cmd CMD --exit N [--kind K] [--summary TEXT]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
 Fingerprint = short hash of the normalized command (whitespace collapsed,
-long digit runs masked), so the same failing command dedupes across agents.
+long digit runs masked). Schema-2 failures also carry a content-free git state
+fingerprint, so an unchanged retry is blocked while a retry after edits is
+allowed with a warning. Legacy rows remain command-only and conservative.
 
 record   Append a failure for CMD (exit N). Bumps the fingerprint's count.
 check    Exit 3 (and print prior context) if CMD's fingerprint is a known
@@ -64,6 +66,46 @@ norm = re.sub(r"\s+", " ", cmd).strip()
 norm = re.sub(r"\d{8,}", "N", norm)   # timestamps / pids
 print(hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:16])
 PY
+}
+
+# Hash only git metadata and tracked diff bytes. The ledger never stores diff
+# content, file paths, host paths, or secrets.
+state_fingerprint() {
+  local head diff_hash untracked_hash
+
+  if ! git -C "$STATE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    printf 'non-git\n'
+    return 0
+  fi
+  head="$(git -C "$STATE_ROOT" rev-parse HEAD 2>/dev/null || printf 'unborn')"
+  diff_hash="$({
+    git -C "$STATE_ROOT" diff --binary HEAD -- 2>/dev/null || true
+    git -C "$STATE_ROOT" diff --cached --binary -- 2>/dev/null || true
+  } | oms_sha256_stream)"
+  untracked_hash="$(python3 - "$STATE_ROOT" <<'PY'
+import hashlib, os, subprocess, sys
+root = sys.argv[1]
+paths = subprocess.check_output(
+    ["git", "-C", root, "ls-files", "-z", "--others", "--exclude-standard"])
+h = hashlib.sha256()
+for raw in sorted(x for x in paths.split(b"\0") if x):
+    path = os.path.join(root, os.fsdecode(raw))
+    h.update(hashlib.sha256(raw).digest())
+    try:
+        info = os.lstat(path)
+        # Metadata makes creation/replacement/content writes visible without
+        # reading an unbounded dataset/checkpoint. Paths are hashed above and
+        # only this final aggregate digest reaches the ledger.
+        h.update(("M:%o:%d:%d" % (
+            info.st_mode, info.st_size,
+            getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
+        )).encode())
+    except OSError:
+        h.update(b"MISSING")
+print(h.hexdigest())
+PY
+)"
+  printf '%s:%s:%s\n' "$head" "$diff_hash" "$untracked_hash"
 }
 
 ledger_append() {
@@ -107,12 +149,14 @@ case "$ACTION" in
     row_tmp="$(mktemp)" || fail "mktemp failed"
     OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
       OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" \
+      OMS_STATE_FP="$(state_fingerprint)" \
       python3 - > "$row_tmp" <<'PY'
 import json, os
 row = {"schema": int(os.environ["OMS_SCHEMA"]), "event": "fail",
        "ts": os.environ["OMS_TS"], "agent": os.environ["OMS_AGENT_L"],
        "fingerprint": os.environ["OMS_FP"], "kind": os.environ["OMS_KIND"],
-       "cmd": os.environ["OMS_CMD"], "exit": int(os.environ["OMS_EXIT"])}
+       "cmd": os.environ["OMS_CMD"], "exit": int(os.environ["OMS_EXIT"]),
+       "state_fingerprint": os.environ["OMS_STATE_FP"]}
 if os.environ.get("OMS_SUMMARY"):
     row["summary"] = os.environ["OMS_SUMMARY"]
 print(json.dumps(row, ensure_ascii=False, allow_nan=False))
@@ -125,9 +169,10 @@ PY
     [ -n "$CMD" ] || fail "check requires --cmd"
     [ -f "$LEDGER" ] || exit 0
     fp="$(fingerprint_of "$CMD")"
-    OMS_FP="$fp" python3 - "$LEDGER" <<'PY'
+    OMS_FP="$fp" OMS_STATE_FP="$(state_fingerprint)" python3 - "$LEDGER" <<'PY'
 import json, os, sys
 fp = os.environ["OMS_FP"]
+current_state = os.environ["OMS_STATE_FP"]
 fails = 0
 last = None
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
@@ -145,6 +190,10 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         fails += 1
         last = r
 if fails > 0 and last is not None:
+    recorded_state = last.get("state_fingerprint")
+    if recorded_state and recorded_state != current_state:
+        sys.stderr.write("fail-ledger: %s failed before, but git state changed; retry allowed\n" % fp)
+        sys.exit(0)
     sys.stderr.write("fail-ledger: %s already failed %dx (last exit %s): %s\n" % (
         fp, fails, last.get("exit"), (last.get("summary") or last.get("cmd", ""))[:160]))
     sys.exit(3)

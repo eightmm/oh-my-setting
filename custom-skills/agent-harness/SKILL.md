@@ -30,6 +30,9 @@ Keep cross-agent work reproducible while the current agent remains the owner.
   not permission to mutate the main tree.
 - Provider subprocesses must remain harness children and must not recursively
   delegate or create state in their temporary worktree.
+- For a pre-authorized plan task, prefer `oms plan-run` over manually composing
+  claim, delegation, review, and landing. It executes one task only, stops in
+  review by default, and requires explicit `--land` for main-tree mutation.
 
 ## Route to One Reference
 
@@ -39,6 +42,8 @@ Read only the reference needed for the request:
   [state-memory.md](references/state-memory.md)
 - Plan DAG, fail ledger, liveness, reclaim, GC:
   [plans-recovery.md](references/plans-recovery.md)
+- Autonomous task intake, bounded progress, verification, and stopping:
+  [autonomy-loop.md](references/autonomy-loop.md)
 - Strategy roles and task-scoped executor souls:
   [roles-executors.md](references/roles-executors.md)
 - Provider calls, delegation, artifacts, export/import, patch landing:
@@ -57,6 +62,7 @@ oms state --repo . --refresh-ci
 oms agent-memory --repo . context
 oms agent-task --repo . status
 oms agent-plan --repo . ready
+oms plan-run --repo . --to codex --next       # one task -> review
 oms gc --repo .                 # dry-run
 oms artifact-index --repo . unresolved
 ```

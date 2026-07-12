@@ -19,6 +19,7 @@ LOOP_ATTEMPTS=""
 LOOP_MAX=""
 DIFF_BUDGET=""
 VERIFY_LEVEL=""
+SKIP_VERIFY_REASON=""
 LAST_FAILURE=""
 VERIFICATION_NOTE=""
 HYPOTHESIS=""
@@ -53,6 +54,9 @@ Options:
   --loop-max N      init/update: set Loop State max_attempts.
   --diff-budget N   init/update: set Loop State diff_budget_lines.
   --verify-level L  init/update: set Loop State verification_level.
+  --skip-verify-run REASON
+                    verify: do not run the stored command and record why.
+                    The task remains active and is not marked verified.
   --last-failure T  update: append a Last Failure bullet.
   --verification T  update: append a Verification bullet.
   --hypothesis T    update: append a Current State hypothesis bullet.
@@ -137,6 +141,11 @@ while [ "$#" -gt 0 ]; do
     --verify-level)
       [ "$#" -ge 2 ] || { echo "error: --verify-level requires text" >&2; exit 2; }
       VERIFY_LEVEL="$2"
+      shift 2
+      ;;
+    --skip-verify-run)
+      [ "$#" -ge 2 ] || { echo "error: --skip-verify-run requires reason" >&2; exit 2; }
+      SKIP_VERIFY_REASON="$2"
       shift 2
       ;;
     --last-failure)
@@ -389,6 +398,54 @@ case "$ACTION" in
     [ -s "$TASK_FILE" ] || { echo "error: no active task ($TASK_FILE)" >&2; exit 2; }
     ensure_tmpdir
     apply_updates
+    # A previous successful run must not survive a re-verification failure or
+    # explicit skip as a stale green status.
+    agent_task_set_status "$TASK_FILE" active
+    verify_cmd="$(awk '
+      $0 == "## Verify" { inside = 1; next }
+      inside && /^## / { exit }
+      inside && NF { print }
+    ' "$TASK_FILE")"
+    if [ -n "$SKIP_VERIFY_REASON" ]; then
+      note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || exit 1
+      {
+        printf 'command: %s\n' "${verify_cmd:-(none)}"
+        printf 'result: SKIPPED\n'
+        printf 'reason: %s\n' "$SKIP_VERIFY_REASON"
+        printf 'recorded_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      } > "$note_file"
+      agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
+      rm -f "$note_file"
+      echo "task: verification skipped; task remains active ($TASK_FILE)"
+      exit 0
+    fi
+    [ -n "$verify_cmd" ] || {
+      echo "error: task has no stored Verify command; set one with --verify or use --skip-verify-run REASON" >&2
+      exit 2
+    }
+    verify_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    verify_started_epoch="$(date +%s)"
+    verify_rc=0
+    set +e
+    (cd "$REPO" && bash -c "$verify_cmd")
+    verify_rc=$?
+    set -e
+    verify_finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    verify_finished_epoch="$(date +%s)"
+    note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || exit 1
+    {
+      printf 'command: %s\n' "$verify_cmd"
+      printf 'exit: %s\n' "$verify_rc"
+      printf 'started_at: %s\n' "$verify_started"
+      printf 'finished_at: %s\n' "$verify_finished"
+      printf 'duration_seconds: %s\n' "$((verify_finished_epoch - verify_started_epoch))"
+    } > "$note_file"
+    agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
+    rm -f "$note_file"
+    if [ "$verify_rc" -ne 0 ]; then
+      echo "task: verification failed (exit $verify_rc); task remains active ($TASK_FILE)" >&2
+      exit "$verify_rc"
+    fi
     agent_task_set_status "$TASK_FILE" verified
     echo "task: verified $TASK_FILE"
     ;;

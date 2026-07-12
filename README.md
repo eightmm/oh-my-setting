@@ -145,7 +145,7 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 |---|---|
 | Project bootstrap | Start router + staged spec interview, general/ml/slurm templates, `PROJECT.md` gate, and a project doctor that keeps all three agents in sync |
 | Multi-agent review & delegation | Ask/review across three local models and delegate write tasks to isolated worktrees — with sensitive-prompt scrubbing, run artifacts/index, change-scope guards, and patch admission before anything lands |
-| Agent state & handoff | Shared memory, the active task packet, a subtask plan DAG (`agent-plan`) for splitting work across agents, and session-transcript handoff — all attributed to the writing agent and anchored at the repo root so every agent (from any subdirectory) sees one state |
+| Agent state & autonomous handoff | Shared memory, mechanically verified task packets, a subtask DAG, and bounded `plan-run` execution that claims one scoped task, delegates in isolation, and stops in review unless landing is explicit — all anchored at the repo root |
 | ML experiment tracking | Run ids, ledger, reproducibility capsules, pre-registered research runs, and metric/verdict records — with a gate that won't burn a run on a failing contract |
 | ML data & leakage | Dataset-split manifests that flag train/eval overlap on IDs and declared group keys (entity/pair/scaffold/family/assay/donor/batch/time), detect split drift, and never store raw rows |
 | ML/HPC support | Slurm job reconcile, a single-machine GPU queue, log digests, and local hardware/cluster context (see [docs/COMPONENTS.md](docs/COMPONENTS.md)) |

@@ -278,8 +278,16 @@ def append_event(repo: Path | None, payload: dict[str, Any], **fields: Any) -> N
         return
 
 
+def term_matches(text: str, term: str) -> bool:
+    """Keep localized substring matching, but bound ASCII routing terms."""
+    if not term.isascii():
+        return term in text
+    pattern = r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])"
+    return re.search(pattern, text) is not None
+
+
 def has_any(text: str, terms: tuple[str, ...]) -> bool:
-    return any(term in text for term in terms)
+    return any(term_matches(text, term) for term in terms)
 
 
 def classify_prompt(prompt: str) -> dict[str, Any]:
@@ -337,6 +345,13 @@ def prompt_goal(prompt: str) -> str:
     return ""
 
 
+def prompt_has_content_after_goal(prompt: str) -> bool:
+    lines = prompt.strip().splitlines()
+    if not lines or not GOAL_RE.match(lines[0]):
+        return False
+    return any(line.strip() for line in lines[1:])
+
+
 def active_task_file(repo: Path) -> Path:
     return repo / ".oms" / "task" / "current.md"
 
@@ -353,6 +368,28 @@ def task_metadata(path: Path) -> dict[str, str]:
     except Exception:
         return {}
     return metadata
+
+
+def task_goal(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    in_goal = False
+    goal: list[str] = []
+    for raw in lines:
+        if raw == "## Goal":
+            in_goal = True
+            continue
+        if in_goal and raw.startswith("## "):
+            break
+        if in_goal and raw.strip():
+            goal.append(raw.strip())
+    return " ".join(goal)
+
+
+def normalized_goal(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).casefold()
 
 
 def task_is_stale(metadata: dict[str, str]) -> bool:
@@ -415,7 +452,7 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
         prompt_hash = sha256_text(prompt)
         turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
         previous = load_state(state_path)
-        if previous.get("prompt_hash") == prompt_hash and previous.get("turn_id") == turn_id:
+        if previous.get("prompt_hash") == prompt_hash:
             append_event(
                 repo,
                 payload,
@@ -430,6 +467,7 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
         excerpt = prompt_excerpt(prompt)
         if not excerpt:
             return
+        explicit_goal = prompt_goal(prompt)
         task_file = active_task_file(repo)
         existed = task_file.exists() and task_file.stat().st_size > 0
         agent = os.environ.get("OMS_AGENT") or "hook"
@@ -441,12 +479,43 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
             task_status = metadata.get("status") or "active"
             old_source = metadata.get("source_session") or ""
             stale = task_is_stale(metadata)
+            same_explicit_goal = bool(
+                explicit_goal
+                and normalized_goal(explicit_goal) == normalized_goal(task_goal(task_file))
+            )
+            if same_explicit_goal and not prompt_has_content_after_goal(prompt):
+                write_json_atomic(
+                    state_path,
+                    {
+                        "schema": 1,
+                        "updated_at": utc_now(),
+                        "session": session_hash(payload),
+                        "turn_id": turn_id,
+                        "prompt_hash": prompt_hash,
+                        "status": "deduped",
+                    },
+                )
+                append_event(
+                    repo,
+                    payload,
+                    action="auto_task",
+                    status="deduped",
+                    workflow=route["workflow"],
+                    risk=route["risk"],
+                    prompt_hash=prompt_hash,
+                    task=".oms/task/current.md",
+                )
+                return
             # Session changes are not a task boundary: the packet exists to
             # hand active work across sessions/providers. Rotate only on an
-            # explicit lifecycle boundary or deterministic inactivity TTL.
-            rotate = task_status in {"verified", "closed"} or stale
+            # explicit goal/lifecycle boundary or deterministic inactivity TTL.
+            rotate = (
+                task_status in {"verified", "closed"}
+                or stale
+                or bool(explicit_goal and not same_explicit_goal)
+            )
             if rotate:
-                goal = prompt_goal(prompt) or f"Respond to user request: {excerpt}"
+                goal = explicit_goal or f"Respond to user request: {excerpt}"
                 rc = run_agent_task(
                     repo,
                     ["rotate", "--goal", goal, "--source-session", source_session,

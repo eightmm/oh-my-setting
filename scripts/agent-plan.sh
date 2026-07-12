@@ -38,6 +38,7 @@ CLAIM=0
 INCLUDE_RUNNING=0
 INCLUDE_REVIEW=0
 LEASE_ID="${OMS_PLAN_LEASE_ID:-}"
+AS_JSON=0
 
 usage() {
   cat <<'EOF'
@@ -54,9 +55,9 @@ Commands:
                                      claimed_at so a live worker is not reclaimed.
   review --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
                                      Move a claimed/running task to review.
-  land   --id ID [--lease-id TOKEN]  Fence admitted claimed/running/review work while applying it.
+  land   --id ID [--lease-id TOKEN]  Fence admitted review work while applying it.
   finish --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
-                                     Mark a task done (from claimed/running/review/landing).
+                                     Mark a landed task done.
   block  --id ID --reason TEXT       Mark a task blocked.
   release --id ID                    Requeue a claimed/running/review task to ready (worker died).
   reclaim [--ttl SECONDS] [--include-running] [--include-review]
@@ -80,8 +81,10 @@ Commands:
                                      Print the brief for the next actionable
                                      task; with --claim --provider, atomically
                                      claim it first (pull-work primitive).
+         [--json]                    Emit the selected task as JSON for safe
+                                     composition by another harness command.
 
-State: ready -> claimed -> running -> review -> done. Any -> blocked (block);
+State: ready -> claimed -> running -> review -> landing -> done. Any -> blocked (block);
 blocked -> ready (reopen); claimed/running/review -> ready (release).
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 EOF
@@ -114,6 +117,7 @@ while [ "$#" -gt 0 ]; do
     --claim) CLAIM=1; shift ;;
     --include-running) INCLUDE_RUNNING=1; shift ;;
     --include-review) INCLUDE_REVIEW=1; shift ;;
+    --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
     init|add|claim|start|touch|review|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
@@ -141,7 +145,7 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
   OMS_VERIFY="$VERIFY" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
   OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW" \
-  OMS_LEASE_ID="$LEASE_ID"
+  OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON"
 
 plan_run() {
 python3 <<'PY'
@@ -281,16 +285,19 @@ if act in ("claim", "start", "finish", "review", "land", "block", "release", "re
                  patch=env("OMS_PATCH") or t.get("patch", ""),
                  review_lease_id=t.get("lease_id", ""))
     elif act == "land":
-        if t["state"] not in ("claimed", "running", "review"):
-            die("task %s is %s; only claimed/running/review work can enter landing" % (i, t["state"]))
+        if t["state"] != "review":
+            die("task %s is %s; only reviewed work can enter landing" % (i, t["state"]))
         require_current_lease(t)
-        if t["state"] == "review" and t.get("review_lease_id", "") != t.get("lease_id", ""):
+        if t.get("review_lease_id", "") != t.get("lease_id", ""):
             die("task %s review patch lease mismatch; patch is stale" % i)
+        if not t.get("artifact") or not t.get("patch"):
+            die("task %s review is missing artifact/patch evidence" % i)
         t["state"] = "landing"
     elif act == "finish":
-        # Done means the work landed; reach it only after it was in progress.
-        if t["state"] not in ("claimed", "running", "review", "landing"):
-            die("task %s is %s; finish only from claimed/running/review/landing" % (i, t["state"]))
+        # Done is a landing receipt, not a worker self-report. patch-land owns
+        # the review -> landing fence after mechanical admission succeeds.
+        if t["state"] != "landing":
+            die("task %s is %s; finish only after reviewed work enters landing" % (i, t["state"]))
         require_current_lease(t)
         t.update(state="done", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""))
@@ -394,7 +401,10 @@ if act == "next":
                  claimed_at=ts, reason="")
         t["updated"] = ts
         save(d)
-    print(brief_text(t))
+    if env("OMS_AS_JSON") == "1":
+        print(json.dumps(t, ensure_ascii=False, indent=2))
+    else:
+        print(brief_text(t))
     sys.exit(0)
 
 if act == "ready":

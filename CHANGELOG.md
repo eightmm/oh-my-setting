@@ -9,6 +9,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [0.4.0] - Unreleased
 
 ### Added
+- Bounded autonomous plan execution (`oms plan-run`): atomically claims one
+  scoped task, delegates it in an isolated worktree with bounded repair, and
+  stops in review unless `--land` explicitly sends it through `patch-land`.
+  Machine-readable plan claims, known-failure gating, signal-safe lease release,
+  and focused autonomy regressions keep the controller composable and fail-closed.
+- Active task verification now executes and records the mechanical command;
+  skipped or failed checks remain non-green. Plan tasks can reach `done` only
+  through reviewed artifact/patch evidence and the fenced landing transition.
+- Failure memory includes a content-free git-state fingerprint, allowing a
+  justified retry after tracked changes while blocking an unchanged dead end.
+- Prompt routing uses ASCII token boundaries for short English terms and rotates
+  auto-recorded task packets when a genuinely different explicit goal arrives.
 - Stable/edge installation channels: `--ref` and `OH_MY_SETTING_REF` can select
   `edge`, a tag, branch, or commit. Release assets embed their exact release tag
   and install to a detached commit, while the source installer explicitly

@@ -63,7 +63,7 @@ describe() {
 
 is_public_tool() {
   case "$1" in
-    apply-project-template|auto-update|change-guard|ci-status|cleanup|code-source|data-manifest|doctor|experiment-board|fail-ledger|gc|generate-slurm-skill|github-source|import-agent-result|install-autoupdate|job-digest|oms-init|oms-run|patch-admit|patch-land|peer-ask|peer-delegate|peer-review|project-doctor|remove-project-template|repo-state|research-runner|run-capsule|run-ledger|run-reconcile|session-handoff|status|tsp-queue|uninstall|uninstall-autoupdate|update|write-machine-snapshot|advise|agent-call|agent-executor|agent-memory|agent-plan|agent-role|agent-run|agent-task|artifact-index)
+    apply-project-template|auto-update|change-guard|ci-status|cleanup|code-source|data-manifest|doctor|experiment-board|fail-ledger|gc|generate-slurm-skill|github-source|import-agent-result|install-autoupdate|job-digest|oms-init|oms-run|patch-admit|patch-land|peer-ask|peer-delegate|peer-review|plan-run|project-doctor|remove-project-template|repo-state|research-runner|run-capsule|run-ledger|run-reconcile|session-handoff|status|tsp-queue|uninstall|uninstall-autoupdate|update|write-machine-snapshot|advise|agent-call|agent-executor|agent-memory|agent-plan|agent-role|agent-run|agent-task|artifact-index)
       return 0
       ;;
     *)

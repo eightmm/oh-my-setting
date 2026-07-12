@@ -114,6 +114,11 @@ if [ -n "$PLAN_TASK" ]; then
   PLAN_STATE="$(printf '%s' "$PLAN_JSON" |
     python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')" ||
     fail "cannot read state for plan task $PLAN_TASK"
+  if [ -z "$VERIFY" ]; then
+    VERIFY="$(printf '%s' "$PLAN_JSON" |
+      python3 -c 'import json,sys; print(json.load(sys.stdin).get("verify", ""))')" ||
+      fail "cannot read verify contract for plan task $PLAN_TASK"
+  fi
 fi
 
 # --plan-task alone is enough when delegate already stamped the patch path on
@@ -145,11 +150,15 @@ land_fingerprint_cmd() {
 }
 known_reject_fp=""
 check_out="$( (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$(land_fingerprint_cmd)") 2>&1 || true)"
+known_reject_fp="$(printf '%s\n' "$check_out" | awk '$1 == "fail-ledger:" && $2 ~ /^[0-9a-f]+$/ {print $2; exit}')"
 case "$check_out" in
   *"already failed"*)
     echo "warning: this exact patch was rejected before:" >&2
     echo "  $check_out" >&2
-    known_reject_fp="$(printf '%s' "$check_out" | awk '{print $2; exit}')"
+    ;;
+  *"failed before, but git state changed"*)
+    echo "warning: this exact patch was rejected before under a different git state; retrying:" >&2
+    echo "  $check_out" >&2
     ;;
 esac
 

@@ -682,7 +682,14 @@ fi
 
 printf '\n\n## Exit\n\n%s\n' "$worker_status" >> "$artifact"
 
+index_exit=0
+if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+  index_exit=1
+fi
+ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" || true
+
 applied=0
+plan_reviewed=0
 if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 1 ]; then
   echo "apply skipped: dry run" >&2
 elif [ "$APPLY" = 1 ]; then
@@ -690,36 +697,26 @@ elif [ "$APPLY" = 1 ]; then
     echo "apply skipped: worker or verify failed" >&2
   elif [ ! -s "$patch_file" ]; then
     echo "apply skipped: empty patch" >&2
-  elif [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
-    # Untracked files are fine: git apply fails on collision anyway, and the
-    # artifact dir itself lives untracked inside the repo.
-    # Warn instead of fail: the worker already ran, so still record and report.
-    echo "apply skipped: main tree has uncommitted changes" >&2
   else
-    # Landing gate: re-admit the patch in a throwaway worktree (applies cleanly,
-    # parses, carries no secrets, passes verification) before it touches the
-    # main tree. This catches stale patches and worker-environment illusions
-    # that the worker's own in-worktree verify cannot.
-    admit_script="$(ma_scripts_dir)/patch-admit.sh"
-    admit_args=(--patch "$patch_file" --repo "$REPO")
-    [ -n "$VERIFY_CMD" ] && admit_args+=(--verify "$VERIFY_CMD")
-    [ -n "$PLAN_TASK_ID" ] && admit_args+=(--plan-task "$PLAN_TASK_ID")
-    [ -n "$EXECUTOR_ID" ] && admit_args+=(--executor "$EXECUTOR_ID")
-    if [ -x "$admit_script" ] && ! bash "$admit_script" "${admit_args[@]}" >/dev/null; then
-      echo "apply skipped: patch-admit rejected the patch (see .oms/artifacts/admit/)" >&2
-    elif git -C "$REPO" apply --binary "$patch_file"; then
+    # patch-land is the single mutation boundary. For a plan task, first bind
+    # the reviewed artifact/patch to the current lease; patch-land then fences
+    # review -> landing -> done and records landing lineage/failure memory.
+    if [ -n "$PLAN_TASK_ID" ]; then
+      plan_transition review --artifact "$artifact" --patch "$patch_file"
+      plan_reviewed=1
+    fi
+    land_script="$(ma_scripts_dir)/patch-land.sh"
+    land_args=(--patch "$patch_file" --repo "$REPO")
+    [ -n "$VERIFY_CMD" ] && land_args+=(--verify "$VERIFY_CMD")
+    [ -n "$PLAN_TASK_ID" ] && land_args+=(--plan-task "$PLAN_TASK_ID")
+    [ -n "$EXECUTOR_ID" ] && land_args+=(--executor "$EXECUTOR_ID")
+    if bash "$land_script" "${land_args[@]}" >/dev/null; then
       applied=1
     else
-      echo "apply failed: patch did not apply cleanly; review $patch_file" >&2
+      echo "apply skipped: patch-land rejected the patch" >&2
     fi
   fi
 fi
-
-index_exit=0
-if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
-  index_exit=1
-fi
-ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" || true
 
 echo "worker: $TO exit $worker_status"
 if [ -n "$VERIFY_CMD" ]; then
@@ -749,7 +746,13 @@ fi
   "$(ma_scripts_dir)/agent-executor.sh" "done" --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_finalized=1
 if [ "$applied" = 1 ]; then
-  plan_transition finish --artifact "$artifact" --patch "$patch_file"
+  : # patch-land already recorded lineage and finished a coupled plan task.
+elif [ "$plan_reviewed" = 1 ]; then
+  : # A rejected landing deliberately remains in review for repair/inspection.
 else
   plan_transition review --artifact "$artifact" --patch "$patch_file"
+fi
+if [ "$APPLY" = 1 ] && [ "$DRY_RUN" != "1" ] && [ "$applied" = 0 ]; then
+  echo "error: worker succeeded but requested landing did not complete" >&2
+  exit 1
 fi

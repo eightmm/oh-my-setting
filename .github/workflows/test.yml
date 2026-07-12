@@ -41,6 +41,13 @@ jobs:
       - name: harness enhancement regressions
         if: matrix.shard == 1
         run: bash tests/harness-enhancements-smoke.sh
+      - name: bounded autonomy regressions
+        if: matrix.shard == 1
+        run: |
+          bash tests/autonomy-hook-smoke.sh
+          bash tests/autonomy-verification-smoke.sh
+          bash tests/autonomy-failure-smoke.sh
+          bash tests/autonomy-plan-run-smoke.sh
       - name: release contract regressions
         if: matrix.shard == 1
         run: bash tests/release-contract-smoke.sh
@@ -107,7 +114,7 @@ jobs:
           [ ! -e "$dest/local/machine.md" ] || { echo "minimal install generated machine snapshot" >&2; exit 1; }
           [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
             { echo "minimal install registered auto-update" >&2; exit 1; }
-          "$dest/scripts/oms" list >/dev/null
+          "$dest/scripts/oms" list | grep -Fq plan-run
 
           echo "== update (new upstream commit) =="
           git -C "$workspace" -c user.email=ci@example.com -c user.name=ci \

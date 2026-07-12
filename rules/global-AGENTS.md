@@ -26,6 +26,27 @@ Default: terse, explicit, low-token. Preserve meaning; remove fluff.
 - Define success criteria for non-trivial work as action -> check.
 - Prefer explicit failures over silent fallback.
 
+## Autonomous Progress
+
+- For non-trivial work, drive a bounded loop: orient -> contract -> act ->
+  verify -> recover or report. Do not stop after writing a plan when another
+  safe, in-scope action can make progress.
+- At task start or resume, inspect repository state and prior failures when the
+  harness is available. Reuse an active task/plan only when it still matches
+  the user's current objective.
+- Infer reversible details from local evidence and proceed. Pause only for new
+  authority, an irreversible/high-impact choice, or a task-relevant ambiguity
+  that changes the interface or result.
+- Use a plan DAG only for work with real dependencies or useful parallelism.
+  Execute at most one pre-authorized plan task per worker invocation; never run
+  an unbounded autonomous task loop.
+- Before retrying, compare the failure with the current code/state. If nothing
+  changed, alter the hypothesis or approach instead of repeating the same
+  command. Bound repair attempts and preserve failure evidence.
+- A provider claim, task status, artifact, or worktree-only check is not proof
+  of completion. Run the mechanical verification contract against the final
+  relevant tree and report every skipped or narrower check accurately.
+
 ## Safety
 
 - Ask before destructive or irreversible work.
