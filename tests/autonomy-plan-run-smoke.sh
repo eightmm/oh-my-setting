@@ -33,8 +33,8 @@ cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 prompt="$(cat)"
 [ -z "${CALL_LOG:-}" ] || printf 'call\n' >> "$CALL_LOG"
-case "$prompt" in
-  *"Task t2"*) printf 'two\n' > delegated2.txt ;;
+case "${OMS_TASK_ID:-}:$prompt" in
+  t2:*) printf 'two\n' > delegated2.txt ;;
   *) printf 'one\n' > delegated.txt ;;
 esac
 echo worker-ok

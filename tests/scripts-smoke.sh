@@ -5327,6 +5327,12 @@ test_autoupdate_cron_install_and_uninstall() {
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
   printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "status.sh missing cron trigger"
 
+  # A stale disabled unit file must not hide the active cron trigger.
+  mkdir -p "$config_home/systemd/user"
+  printf '[Timer]\nOnCalendar=daily\n' > "$config_home/systemd/user/oh-my-setting-autoupdate.timer"
+  out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "disabled systemd file hid active cron trigger"
+
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >"$TMP/autoupdate-uninstall"
   assert_file_contains "$TMP/autoupdate-uninstall" "auto-update trigger: removed"

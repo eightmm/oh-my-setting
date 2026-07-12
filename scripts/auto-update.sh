@@ -35,6 +35,27 @@ now_utc() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
 
+auto_update_receipt_field() {
+  local receipt="$1"
+  local key="$2"
+  [ -f "$receipt" ] || return 1
+  python3 - "$receipt" "$key" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    for part in sys.argv[2].split("."):
+        value = value[part]
+    if isinstance(value, bool):
+        print("true" if value else "false")
+    elif isinstance(value, (str, int, float)):
+        print(value)
+    else:
+        raise ValueError
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 log_msg() {
   mkdir -p "$(dirname "$LOG_FILE")"
   printf '%s %s\n' "$(now_utc)" "$*" >> "$LOG_FILE"
@@ -116,6 +137,61 @@ branch_upstream() {
 
   remote_branch="${merge_ref#refs/heads/}"
   printf '%s\t%s\t%s\n' "$remote" "refs/remotes/$remote/$remote_branch" "$remote/$remote_branch"
+}
+
+detached_receipt_update() {
+  local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
+  local schema ref current output status remote message upstream
+
+  [ -z "$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] || return 75
+  schema="$(auto_update_receipt_field "$receipt" schema 2>/dev/null || true)"
+  ref="$(auto_update_receipt_field "$receipt" ref 2>/dev/null || true)"
+  [ "$schema" = 2 ] && [ -n "$ref" ] || return 75
+  current="$(git -C "$ROOT" rev-parse HEAD)"
+  upstream="ref:$ref"
+
+  if [ "$MODE" = check ]; then
+    set +e
+    output="$($ROOT/scripts/update.sh --check 2>&1)"
+    status=$?
+    set -e
+    if [ "$status" -ne 0 ]; then
+      write_state failed "detached ref check failed: $output" "$current" "" "$upstream"
+      print_status
+      return "$status"
+    fi
+    remote="$(printf '%s\n' "$output" | awk '/^update-check: up_to_date /{print $3} /^update-check: available /{print $NF}' | tail -n 1)"
+    case "$output" in
+      *"update-check: available "*)
+        write_state update_available "update available: ${current:0:7} -> ${remote:0:7}" "$current" "$remote" "$upstream"
+        ;;
+      *)
+        write_state up_to_date "already up to date" "$current" "${remote:-$current}" "$upstream"
+        ;;
+    esac
+    print_status
+    return 0
+  fi
+
+  set +e
+  output="$($ROOT/scripts/update.sh --no-tools 2>&1)"
+  status=$?
+  set -e
+  [ -z "$output" ] || printf '%s\n' "$output"
+  remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$status" -ne 0 ]; then
+    write_state failed "detached ref apply failed" "$current" "$remote" "$upstream"
+    return "$status"
+  fi
+  if [ "$current" = "$remote" ]; then
+    message="already up to date"
+    write_state up_to_date "$message" "$remote" "$remote" "$upstream"
+  else
+    message="updated: ${current:0:7} -> ${remote:0:7}"
+    write_state applied "$message" "$remote" "$remote" "$upstream"
+  fi
+  print_status
+  return 0
 }
 
 fetch_and_compare() {
@@ -288,6 +364,11 @@ case "$MODE" in
 esac
 
 require_git_checkout
+set +e
+detached_receipt_update
+detached_status=$?
+set -e
+[ "$detached_status" = 75 ] || exit "$detached_status"
 upstream_info="$(branch_upstream)" || {
   print_status
   exit 0

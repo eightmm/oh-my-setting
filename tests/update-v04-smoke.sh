@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-v04-update.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+trap '[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -393,9 +393,50 @@ PY
     fail "signal rollback changed backup files"
 }
 
+test_detached_schema2_auto_update_check() {
+  local repo="$TMP/detached-auto"
+  local home="$TMP/detached-auto-home"
+  local receipt="$home/.config/oh-my-setting/install.json"
+  local commit
+
+  mkdir -p "$repo/scripts/lib" "$repo/local" "$home/.config/oh-my-setting"
+  cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
+  cat > "$repo/scripts/update.sh" <<'EOF'
+#!/usr/bin/env bash
+commit="$(git rev-parse HEAD)"
+echo "current: ${commit:0:7}"
+echo "update-check: up_to_date $commit"
+EOF
+  chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
+  git -C "$repo" init -q
+  git -C "$repo" checkout -qb main
+  git -C "$repo" add .
+  git -C "$repo" commit -qm "fixture: detached auto update"
+  commit="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" checkout -q --detach "$commit"
+  python3 - "$receipt" "$repo" "$commit" <<'PY'
+import json, sys
+json.dump({"schema": 2, "source_root": sys.argv[2], "commit": sys.argv[3],
+           "channel": "detached", "profile": "custom", "ref": "main",
+           "components": {}, "managed_targets": [], "plugin": {}},
+          open(sys.argv[1], "w"))
+PY
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$repo/scripts/auto-update.sh" check > "$TMP/detached-auto.out"
+  grep -Fq 'auto-update: up_to_date' "$TMP/detached-auto.out" ||
+    fail "detached schema-2 check did not use its receipt ref"
+  grep -Fq 'upstream: ref:main' "$TMP/detached-auto.out" ||
+    fail "detached schema-2 check lost its receipt ref"
+  if grep -Fq 'detached HEAD; auto-update skipped' "$repo/local/auto-update.status"; then
+    fail "detached schema-2 check was skipped"
+  fi
+}
+
 test_schema1_receipt_migrates_to_profiled_schema2
 test_update_rolls_back_and_supports_explicit_rollback
 test_doctor_failure_restores_previous_plugin_payload
 test_schema1_update_preserves_channel_pin_and_cron
 test_signal_during_doctor_rolls_back_transaction
+test_detached_schema2_auto_update_check
 echo "update-v04-smoke: ok"
