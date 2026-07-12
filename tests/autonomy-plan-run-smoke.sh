@@ -11,6 +11,9 @@ repo="$TMP/repo"
 bin="$TMP/bin"
 home="$TMP/home"
 mkdir -p "$repo" "$bin" "$home"
+# Keep provider discovery hermetic even when the invoking shell exports a real
+# NVM_DIR; peer-delegate intentionally loads that directory before execution.
+export NVM_DIR="$home/.nvm"
 git -C "$repo" init -q
 git -C "$repo" config user.email test@example.com
 git -C "$repo" config user.name Test

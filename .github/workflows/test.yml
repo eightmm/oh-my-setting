@@ -114,7 +114,8 @@ jobs:
           [ ! -e "$dest/local/machine.md" ] || { echo "minimal install generated machine snapshot" >&2; exit 1; }
           [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
             { echo "minimal install registered auto-update" >&2; exit 1; }
-          "$dest/scripts/oms" list | grep -Fq plan-run
+          "$dest/scripts/oms" list > "$HOME/oms-tools.txt"
+          grep -Fq plan-run "$HOME/oms-tools.txt"
 
           echo "== update (new upstream commit) =="
           git -C "$workspace" -c user.email=ci@example.com -c user.name=ci \
