@@ -1,25 +1,6 @@
 {
   "skills": [
     {
-      "name": "git-cli-workflow",
-      "source": "custom-skills/git-cli-workflow",
-      "enabled": true,
-      "reason": "Use local git and gh CLI for repository, PR, issue, and CI work without MCP.",
-      "triggers": [
-        "커밋해줘",
-        "커밋 해줘",
-        "PR 올려",
-        "PR 열어",
-        "푸시해줘",
-        "브랜치 정리",
-        "make a commit",
-        "open a pr",
-        "create a pull request",
-        "check ci",
-        "CI 확인"
-      ]
-    },
-    {
       "name": "oh-my-setting-ops",
       "source": "custom-skills/oh-my-setting-ops",
       "enabled": true,

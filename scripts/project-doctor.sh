@@ -210,16 +210,15 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
   fi
 
   missing_docs=0
-  for src in "$ROOT"/templates/ml-docs/*.md; do
-    [ -e "$src" ] || continue
-    if [ ! -f "$PROJECT_DIR/docs/$(basename "$src")" ]; then
+  for base in DATA.md MODEL.md EVALUATION.md EXPERIMENTS.md REPRODUCIBILITY.md; do
+    if [ ! -f "$PROJECT_DIR/docs/$base" ]; then
       missing_docs=$((missing_docs + 1))
     fi
   done
   if [ "$missing_docs" -eq 0 ]; then
-    ok "ml docs scaffold complete under docs/"
+    ok "core ml docs scaffold complete under docs/"
   else
-    warn "$missing_docs ml doc template(s) missing under docs/; re-run: apply-project-template.sh ml $PROJECT_DIR"
+    warn "$missing_docs core ml doc(s) missing under docs/; re-run: apply-project-template.sh ml $PROJECT_DIR"
   fi
 
   # Keep in sync with ML_IGNORE_ENTRIES in apply-project-template.sh.

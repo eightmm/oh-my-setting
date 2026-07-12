@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034 # sourced callers consume OMS_OPS_FAILED
 # shellcheck shell=bash
 
 # Shared checks and cleanup for installed agent links/skills.

@@ -14,8 +14,17 @@ The only shell step:
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-Open a new shell once if freshly installed CLIs are not found. From here on,
-your agent runs everything.
+The default install is minimal: rules, skills, dispatcher, and provider hooks
+for CLIs already present. It does not install provider CLIs, modify `.bashrc`,
+write a machine snapshot, register an update timer, or show a star prompt.
+For the former all-in-one setup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --full
+```
+
+Open a new shell once if `--full` installed new CLIs. From here on, your agent
+runs everything.
 
 ## Start
 
@@ -34,7 +43,8 @@ The agent detects the state and routes:
 - ongoing project → read `PROJECT.md`, run the doctor, report status and the
   next step
 
-No code is written before the spec is confirmed.
+Architecture-shaping work waits for the relevant specification decisions;
+clear bounded changes may proceed from inspected local contracts.
 
 ## What You Can Say
 

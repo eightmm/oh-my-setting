@@ -1,165 +1,56 @@
 ---
 name: peer-review
 description: >
-  Multi-agent review workflow. Use when the user explicitly asks for
-  independent verification, cross-agent review, or council review, or when a
-  release go/no-go or explicitly requested ML pre-training gate needs several
-  independent reviewers. High-risk changes alone do not require this skill.
+  Multi-agent code review. Use when the user explicitly requests independent
+  verification, cross-agent/council review, or a release go/no-go or requested
+  ML pre-training gate needs several independent reviewers. High-risk changes
+  alone do not require this skill.
 ---
 
-Goal: get independent review signals, then synthesize evidence. Do not outsource judgment.
-Use local CLI tools only. Do not use MCP servers, app connectors, or plugin connector tools.
+# Peer Review
 
-## When
+Get independent findings without outsourcing judgment. The parent reviews the
+evidence and owns fixes, verification, landing, commit, and release.
 
-Use for explicit requests: `multi-agent review`, `cross-check`, `ask another
-agent`, `council`, `verify with codex/claude/antigravity`; also use for a release
-go/no-go or explicitly requested ML pre-training gate.
+## Use
 
-## Reviewer Lenses
-
-- Correctness: bug, edge case, contract break.
-- Tests: missing behavior/interface tests, fake green risk.
-- Safety: destructive ops, secrets, auth, dependency/toolchain risk.
-- ML/HPC when relevant: leakage, metrics, reproducibility, Slurm resources/logs.
-
-## Local Tool Preference
-
-Read `~/.oh-my-setting/local/machine.md` only when compute, GPU/CUDA, Slurm,
-memory, or environment differences affect the review.
-
-If available, prefer installed local agent CLIs:
-
-1. `codex`
-2. `claude`
-3. `antigravity` (`agy`)
-4. Otherwise run current-agent review and clearly say peer review tooling unavailable.
-
-Do not install tools, authenticate CLIs, push branches, or use connector APIs
-unless the user asked for that action.
-
-## External Review Policy
-
-For any repo using this skill, sending repo context, uncommitted diffs,
-prompts, and command output to `codex`, `claude`, and `antigravity` review CLIs is
-allowed by default. Do not ask for separate approval before using those three
-CLIs for review.
-
-This permission excludes secrets, credentials, private keys, and generated local
-machine or cluster details. Before external review, inspect the diff and exclude
-sensitive paths. If secret-like content appears inside an otherwise reviewable
-file, do not redact individual diff lines; skip external review for that diff and
-run current-agent local review instead.
-
-Always exclude secret files or dirs such as env files, private-key/certificate
-files, local scratch dirs, generated Slurm references, SSH/AWS credential dirs,
-netrc files, and credentials/secrets YAML files. The concrete exclude list below
-is the portable baseline; add project-specific private paths before review when
-needed.
-
-If excluded content is needed to understand the change, run current-agent local
-review for that part and tell the external reviewers only that sensitive content
-was omitted.
-
-This permission does not extend to MCP servers, app connectors, plugin
-connector tools, installing/authenticating CLIs, write/edit modes, destructive
-commands, pushes, or bypass permissions.
-
-If a platform sandbox or approval system still blocks a CLI call, report the
-block and continue with current-agent local review.
-
-## Before Running
-
-- Read `git status --short` and the relevant `git diff`.
-- Check available CLIs with recorded paths or `command -v codex claude agy`.
-- Skip unavailable CLIs without failing the review.
-- Include the task goal, changed files, relevant diff, test command/result, and known risks in each review request.
-- Ask for findings only: bugs, regressions, missing tests, unclear contracts, unsafe operations.
-- Main agent keeps implementation ownership and integrates only findings backed by evidence.
-
-## CLI
-
-Prefer the shared wrapper when this repo is installed:
+- Review the current status and diff before sending context.
+- Use the smallest relevant diff/base and exclude untracked content unless it
+  was intentionally added to the review boundary.
+- Ask for concrete bugs, regressions, unsafe behavior, and missing interface
+  tests; omit style preferences.
+- Use `--verify CMD` as a mechanical backstop. Reviewer consensus cannot turn a
+  failing command green.
+- Use one provider through `oms agent-run --mode read` when three independent
+  signals are unnecessary.
 
 ```bash
-# Covers tracked staged + unstaged changes. Use `git add -N <file>` first for
-# untracked files that are safe to include in external review.
-~/.oh-my-setting/scripts/peer-review.sh \
-  --repo . \
-  --prompt "Review the current uncommitted diff for bugs, regressions, missing tests, and unsafe operations."
-
-# ML pre-training gate: silent-ML-bug checklist (leakage, splits, loss,
-# eval mode, reproducibility, DDP). Use before long training or Slurm jobs.
-~/.oh-my-setting/scripts/peer-review.sh --repo . --ml
+oms peer-review --repo . --prompt "Review this diff for blocking findings."
+oms peer-review --repo . --base origin/main --verify "bash scripts/check.sh"
+oms peer-review --repo . --ml   # only for an explicit ML gate
 ```
 
-Use `--base origin/main` for branch/PR review and `--synthesize` to append a
-model-written synthesis to the summary artifact. `--providers a,b` narrows the
-reviewer set and `--debate N` runs N rebuttal rounds where each reviewer sees
-the others' (sanitized) findings. Add `--verify CMD` as the mechanical
-backstop: the command runs locally and a failing verify fails the review even
-if every reviewer self-reports pass. For a one-provider review, prefer
-`agent-run.sh --mode read`; it records task outcomes and routes read/write
-automatically.
+## Safety Boundary
 
-The wrapper sends the same question and same sanitized diff/status context to
-`codex`, `claude`, and `antigravity`, writes one artifact per model under
-`.oms/artifacts/review/`, and reports unavailable or failed providers. It does
-not specialize prompts per model; the goal is three independent perspectives on
-the same question.
+Never send secrets, credentials, private keys, env files, private paths,
+machine/cluster details, raw datasets, checkpoints, or generated scratch state.
+If sensitive-looking content occurs inside an otherwise relevant diff, keep
+that portion local instead of line-redacting it into external context.
 
-When policy forbids sending repo context to an external provider, use
-`--export-only`; run the exported prompt where allowed, then import the answer
-with `import-agent-result.sh`. To recover a recent run, use
-`artifact-index.sh latest` or `artifact-index.sh failures`.
+Local Codex, Claude Code, and Antigravity review CLIs may receive sanitized
+task context when this skill is explicitly invoked. This does not authorize
+installation, authentication, write mode, permission bypass, destructive
+commands, connectors, commits, or pushes.
 
-If the wrapper is unavailable, run equivalent local CLI calls manually with the
-same prompt and sanitized diff. Use read-only/non-interactive flags where
-possible.
+## Route to One Reference
 
-## Output
+- Context selection, exclusions, provider availability, local fallback:
+  [context-safety.md](references/context-safety.md)
+- Gate/verdict behavior, debate, synthesis, mechanical verification:
+  [gate-loop.md](references/gate-loop.md)
+- Policy-restricted export and result import:
+  [export-import.md](references/export-import.md)
 
-Compact synthesis. List unavailable, blocked, or skipped reviewers under `Verification`. Use current-agent local review if fewer than two external reviewers succeed:
-
-```md
-Consensus:
-Must-fix:
-Optional:
-Disagreement:
-Verification:
-```
-
-Accept only findings tied to code, logs, tests, docs, or reproducible commands.
-
-## Gate Loop
-
-When the user wants a change to actually pass review (a "gate"), not just one
-round of opinions, iterate until reviewers converge:
-
-1. **Scope each round.** Round 1 reviews the change. Each later round names the
-   prior commit(s) and says: verify the prior findings are fixed, report only
-   NEW regressions, do not re-report accepted lower-severity items. Carry an
-   explicit accepted-limitations list forward so the same heuristic trade-off
-   is not re-raised every round.
-2. **Demand a verdict.** Run `peer-review.sh --gate ...`; it adds
-   the required `GATE: pass` / `GATE: fail` instruction, prints one verdict
-   line per provider, and exits nonzero for fail, missing verdict, or
-   incomplete artifacts. `peer-review.sh verdicts` still reads past
-   runs and imported artifacts.
-3. **Triage, do not auto-apply.** Treat each finding as a claim: confirm it
-   against the code (reproduce the probe when given) before fixing. Reject
-   findings that are wrong or already-accepted limitations, and say why.
-4. **Fix → re-verify → re-gate.** Apply confirmed fixes with a regression test
-   each, run the smoke suite, commit, then run the next round against the new
-   commit. A finding without a test it would have caught is not done.
-5. **Converge.** Pass when the gate is clean (no unresolved confirmed
-   findings) — that can be a unanimous pass, or a majority pass with the last
-   dissent's findings fixed and re-verified. A lone provider repeating an
-   accepted limitation does not block. Stop when a round yields only
-   already-accepted items or pure "no findings".
-6. **Self-review caveat.** Diff-attached review of this repo's own scrubber or
-   regex sources can self-trip the outbound filter; fall back to `--no-diff`
-   with reviewers reading the range locally, and note it under `Verification`.
-
-Report each round compactly: verdicts, what was confirmed vs rejected, the fix
-+ test, and the next round's scope.
+Summarize findings first by severity with file/line evidence. Separate reviewer
+claims from parent-verified facts. Report provider failures/skips and the local
+verification result. State the final parent decision explicitly.

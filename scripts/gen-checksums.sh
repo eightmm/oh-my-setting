@@ -52,6 +52,7 @@ files="$(git ls-files \
 
 while IFS= read -r f; do
   [ -n "$f" ] || continue
+  [ -f "$f" ] || continue  # allow verification while a tracked file is being removed
   sha256_of "$f"
 done <<EOF
 $files

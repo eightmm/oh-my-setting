@@ -56,6 +56,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   linted, never executed.
 
 ### Changed
+- Removed the redundant `git-cli-workflow` custom skill; global policy already
+  owns its complete local git/gh safety contract, and relinking removes stale
+  owned skill links from all three providers.
+- Converted `agent-harness` and `ml-training` into compact task routers with
+  one-level references. Corrected ML guidance for semantic optimizer grouping,
+  short schedules, unequal-count DDP gradients, portable DDP checkpoints, and
+  opt-in static graphs.
+- Minimal install is now the default: provider tools, `.bashrc` mutation,
+  machine snapshots, auto-update timers, and the star prompt require explicit
+  flags or `--full`; Codex plugin setup auto-detects an existing CLI. Standalone
+  doctor runs treat provider CLIs and an uninstalled Codex plugin as optional
+  unless strict checks are explicitly requested.
+- New ML scaffolds create five core docs by default; `--full-docs` retains the
+  complete 13-document scaffold and existing project files are never removed.
+- Routine `status.sh` reports local paths without launching provider CLIs;
+  `--verbose` opts into version and Codex plugin probes.
+- Expanded shell validation to shared libraries, plugin hooks, and generated
+  project checks; doctor now reports supported Bash 3.2 as healthy.
 - Reduced routine harness overhead: prompt hooks no longer create `.oms` or
   active task packets for read-only questions, automatic task recording now
   requires `OMS_AUTO_TASK=1`, `update.sh` refreshes provider tools only with

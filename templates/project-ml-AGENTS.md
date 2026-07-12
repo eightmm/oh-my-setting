@@ -79,8 +79,10 @@ not clear bounded maintenance.
 ## Docs
 
 - Keep `PROJECT.md` as the active spec gate; keep durable knowledge under `docs/`.
-- Standard ML docs are scaffolded on project init under `docs/`. Fill them as the project takes shape — do not delete unused ones, mark them "n/a" if truly irrelevant.
-- Scaffolded set: `SETUP.md`, `DATA.md`, `MODEL.md`, `TRAINING.md`, `EVALUATION.md`, `EXPERIMENTS.md`, `CHECKPOINTS.md`, `LOGGING.md`, `BENCHMARKS.md`, `REPRODUCIBILITY.md`, `CONFIGS.md`, `CHANGELOG.md`, `DEBUGGING.md`.
+- Core ML docs scaffolded by default: `DATA.md`, `MODEL.md`, `EVALUATION.md`,
+  `EXPERIMENTS.md`, and `REPRODUCIBILITY.md`. Create optional docs only when
+  the project needs them; use `apply-project-template.sh ml . --full-docs` for
+  the complete template set.
 - Use `docs/decisions/NNNN-title.md` for architecture/data/API decisions expensive to reverse.
 - Update docs when changing data format, model interface, config schema, checkpoint format, metric, or experiment protocol.
 - Version-pin chain: `DATA.md` <-> `MODEL.md` <-> `TRAINING.md` <-> `CHECKPOINTS.md`. Any bump invalidates downstream.
@@ -109,7 +111,9 @@ not clear bounded maintenance.
 - Never infer label meaning, split policy, leakage boundary, or metric direction from file names alone.
 - Ask before using validation/test data for preprocessing fit, feature selection, normalization, threshold tuning, checkpoint choice, or early stopping.
 - Do not run long training unless data, dataloader, model, and loss smoke checks pass.
-- Before long training or Slurm submission, run the pre-training gate when available: `oms peer-review --ml`.
+- Before long training or Slurm submission, run focused data/model/loss smoke
+  checks. Use `oms peer-review --ml` only for an explicit cross-agent or release
+  gate.
 
 ## Project Commands
 

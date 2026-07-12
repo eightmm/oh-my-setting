@@ -33,7 +33,7 @@ Usage: oms <tool> [args...]
 
 Dispatch to an oh-my-setting harness tool by name: `oms run-ledger --help`
 runs run-ledger.sh from the install this dispatcher belongs to. `list`
-prints every tool with its one-line description; docs/COMPONENTS.md in the
+prints public tools with one-line descriptions; docs/COMPONENTS.md in the
 install describes each subsystem.
 EOF
 }

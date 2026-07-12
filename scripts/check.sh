@@ -22,7 +22,8 @@ fi
 echo "== shellcheck =="
 # scripts/oms is named explicitly: the dispatcher has no .sh extension, so
 # the glob alone would silently skip it.
-"$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh tests/*.sh
+"$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh scripts/lib/*.sh \
+  plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
 
 echo "== bash 3.2 static compatibility =="
 bash scripts/check-bash32.sh

@@ -3,36 +3,64 @@ set -euo pipefail
 
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
-GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-auto}"
-GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
-INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
-STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-1}"
-AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
+GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
+GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
+INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-0}"
+STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
+AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-0}"
+CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--no-star] [--help]
+Usage: install.sh [--full] [--tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--star] [--help]
 
 Options:
-  --no-star   Skip the GitHub star prompt.
-  --help      Show this help.
+  --full              Install provider tools, machine snapshot, and update timer.
+  --tools             Install Node, uv, and provider CLIs.
+  --auto-update       Install the check-only update timer.
+  --machine-snapshot  Generate local machine metadata.
+  --slurm-snapshot    Generate local Slurm cluster metadata when available.
+  --star              Offer the optional GitHub star prompt.
+  --no-star           Skip the star prompt (compatibility; default).
+  --help              Show this help.
 
 Environment:
-  OH_MY_SETTING_STAR_PROMPT=0      Skip the GitHub star prompt.
+  OH_MY_SETTING_STAR_PROMPT=1      Enable the GitHub star prompt.
   OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hook registration.
-  OH_MY_SETTING_CODEX_PLUGIN=0     Skip Codex plugin hook registration.
-  OH_MY_SETTING_GENERATE_MACHINE=0 Skip machine snapshot generation.
-  OH_MY_SETTING_GENERATE_SLURM=0   Skip Slurm snapshot generation.
-  OH_MY_SETTING_INSTALL_TOOLS=0    Skip Node/uv/agent CLI installation.
-  OH_MY_SETTING_AUTO_UPDATE=0      Skip auto-update trigger installation.
+  OH_MY_SETTING_CODEX_PLUGIN=0|1|auto  Skip, require, or auto-detect Codex plugin setup.
+  OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
+  OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
+  OH_MY_SETTING_INSTALL_TOOLS=1    Install Node/uv/agent CLIs.
+  OH_MY_SETTING_AUTO_UPDATE=1      Install auto-update trigger.
   OH_MY_SETTING_AUTO_UPDATE_MODE=apply  Auto-apply fast-forward updates (default: check-only).
-  OH_MY_SETTING_REQUIRE_TOOLS=0    Do not fail doctor on missing CLIs.
+  OH_MY_SETTING_REQUIRE_TOOLS=1    Require every provider CLI during doctor.
   OH_MY_SETTING_DIR=/path/to/dir   Install location.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --full)
+      INSTALL_TOOLS=1
+      GENERATE_MACHINE=auto
+      GENERATE_SLURM=auto
+      AUTO_UPDATE=1
+      ;;
+    --tools)
+      INSTALL_TOOLS=1
+      ;;
+    --auto-update)
+      AUTO_UPDATE=1
+      ;;
+    --machine-snapshot)
+      GENERATE_MACHINE=1
+      ;;
+    --slurm-snapshot)
+      GENERATE_SLURM=1
+      ;;
+    --star)
+      STAR_PROMPT=1
+      ;;
     --no-star)
       STAR_PROMPT=0
       ;;
@@ -50,6 +78,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"
+export OH_MY_SETTING_INSTALL_TOOLS="$INSTALL_TOOLS"
+export OH_MY_SETTING_GENERATE_MACHINE="$GENERATE_MACHINE"
+export OH_MY_SETTING_GENERATE_SLURM="$GENERATE_SLURM"
+export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
+export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 
 run_as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -114,6 +147,7 @@ fi
 
 if [ "$INSTALL_TOOLS" = "1" ]; then
   "$DEST/scripts/install-tools.sh"
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
   load_user_tool_paths
 elif [ "$INSTALL_TOOLS" = "0" ]; then
   echo "skipping tool install: OH_MY_SETTING_INSTALL_TOOLS=0"
@@ -123,6 +157,22 @@ else
   echo "error: OH_MY_SETTING_INSTALL_TOOLS must be 0 or 1" >&2
   exit 2
 fi
+
+case "$CODEX_PLUGIN" in
+  auto)
+    if command -v codex >/dev/null 2>&1; then
+      CODEX_PLUGIN=1
+    else
+      CODEX_PLUGIN=0
+    fi
+    ;;
+  0|1) ;;
+  *)
+    echo "error: OH_MY_SETTING_CODEX_PLUGIN must be 0, 1, or auto" >&2
+    exit 2
+    ;;
+esac
+export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 
 "$DEST/scripts/link.sh"
 
@@ -135,7 +185,7 @@ else
   echo "skipping claude hook registration: OH_MY_SETTING_CLAUDE_HOOKS=0"
 fi
 
-if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ]; then
+if [ "$CODEX_PLUGIN" = "1" ]; then
   "$DEST/scripts/install-codex-plugin.sh"
 else
   echo "skipping codex plugin registration: OH_MY_SETTING_CODEX_PLUGIN=0"

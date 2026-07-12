@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-1}"
 SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
-AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
+AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-0}"
+CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 
@@ -23,8 +24,8 @@ Environment:
   OH_MY_SETTING_UPDATE_SKIP_TOOLS=0   Same as --tools.
   OH_MY_SETTING_UPDATE_SKIP_TOOLS=1   Same as --no-tools (default).
   OH_MY_SETTING_UPDATE_SKIP_DOCTOR=1  Same as --no-doctor.
-  OH_MY_SETTING_CODEX_PLUGIN=0        Skip Codex plugin hook refresh.
-  OH_MY_SETTING_AUTO_UPDATE=0         Skip auto-update trigger refresh.
+  OH_MY_SETTING_CODEX_PLUGIN=0|1|auto Skip, require, or refresh an installed Codex plugin.
+  OH_MY_SETTING_AUTO_UPDATE=1         Refresh the auto-update trigger.
 EOF
 }
 
@@ -56,6 +57,21 @@ done
 
 oms_install_require_owner "$ROOT" "update the install" || exit 1
 
+case "$CODEX_PLUGIN" in
+  auto)
+    if command -v codex >/dev/null 2>&1 &&
+       codex plugin list --json 2>/dev/null |
+         python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; sys.exit(0 if any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+      CODEX_PLUGIN=1
+    else
+      CODEX_PLUGIN=0
+    fi
+    ;;
+  0|1) ;;
+  *) echo "error: OH_MY_SETTING_CODEX_PLUGIN must be 0, 1, or auto" >&2; exit 2 ;;
+esac
+export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
+
 if [ ! -d "$ROOT/.git" ]; then
   echo "error: $ROOT is not a git checkout" >&2
   exit 1
@@ -75,6 +91,9 @@ fi
 
 if [ "$SKIP_TOOLS" != "1" ] && [ -x "$ROOT/scripts/install-tools.sh" ]; then
   "$ROOT/scripts/install-tools.sh"
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
+else
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 fi
 
 "$ROOT/scripts/link.sh"
@@ -85,7 +104,7 @@ if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ] && [ -x "$ROOT/scripts/install-c
     echo "warning: claude hook refresh failed (update continues)" >&2
 fi
 
-if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ] && [ -x "$ROOT/scripts/install-codex-plugin.sh" ]; then
+if [ "$CODEX_PLUGIN" = "1" ] && [ -x "$ROOT/scripts/install-codex-plugin.sh" ]; then
   "$ROOT/scripts/install-codex-plugin.sh"
 fi
 

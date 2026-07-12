@@ -765,6 +765,8 @@ ma_export_round1() {
       *) fail "unsupported provider: $provider" ;;
     esac
     total=$((total + 1))
+    # slug/timestamp are operation-scoped globals initialized by the caller.
+    # shellcheck disable=SC2154
     artifact="$ARTIFACT_DIR/$provider-$slug-$timestamp.export.md"
     {
       printf '# %s %s export\n\n' "$provider" "$MA_KIND"
@@ -895,6 +897,8 @@ ma_run_debate_rounds() {
       for j in "${active[@]}"; do
         [ "$j" != "$i" ] && others+=("${provider_names[j]}:${last_arts[j]}")
       done
+      # debate_dir is initialized by the owning ask/review operation.
+      # shellcheck disable=SC2154
       debate_prompt="$debate_dir/prompt-r$round-$p"
       write_debate_prompt "$debate_prompt" "$p" "$round" "${last_arts[i]}" "${others[@]}"
       artifact="$ARTIFACT_DIR/$p-$slug-$timestamp-r$round.md"

@@ -3,16 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STYLE="${1:-general}"
-PROJECT_DIR="${2:-$PWD}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
+ML_FULL_DOCS="${OH_MY_SETTING_ML_FULL_DOCS:-0}"
 BASE_STYLE="$STYLE"
 ADD_SLURM=0
 
 usage() {
   cat <<'EOF'
-Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir] [files...]
+Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir] [--full-docs] [files...]
 
 Apply oh-my-setting project rule blocks and scaffold PROJECT.md.
+ML projects create five core docs by default; --full-docs creates all templates.
 EOF
 }
 
@@ -29,6 +30,21 @@ case "$BASE_STYLE" in
     usage >&2
     exit 2
     ;;
+esac
+
+[ "$#" -eq 0 ] || shift
+PROJECT_DIR="$PWD"
+if [ "$#" -gt 0 ] && [ "$1" != "--full-docs" ]; then
+  PROJECT_DIR="$1"
+  shift
+fi
+if [ "${1:-}" = "--full-docs" ]; then
+  ML_FULL_DOCS=1
+  shift
+fi
+case "$ML_FULL_DOCS" in
+  0|1) ;;
+  *) echo "error: OH_MY_SETTING_ML_FULL_DOCS must be 0 or 1" >&2; exit 2 ;;
 esac
 
 has_slurm_runtime() {
@@ -104,9 +120,6 @@ if [ "$ADD_SLURM" = "1" ] && [ ! -f "$SLURM_TEMPLATE" ]; then
   echo "error: missing template $SLURM_TEMPLATE" >&2
   exit 1
 fi
-
-shift || true
-shift || true
 
 if [ "$#" -gt 0 ]; then
   FILES=("$@")
@@ -360,6 +373,12 @@ if [ "$BASE_STYLE" = "ml" ]; then
       for src in "$ML_DOCS_SRC"/*.md; do
         [ -e "$src" ] || continue
         base="$(basename "$src")"
+        if [ "$ML_FULL_DOCS" != "1" ]; then
+          case "$base" in
+            DATA.md|MODEL.md|EVALUATION.md|EXPERIMENTS.md|REPRODUCIBILITY.md) ;;
+            *) continue ;;
+          esac
+        fi
         dst="$DOCS_DIR/$base"
         if [ -e "$dst" ]; then
           echo "skip existing $dst"

@@ -4,6 +4,25 @@ set -euo pipefail
 # Print install status: link identity, tools, active task, and update state.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+VERBOSE=0
+
+usage() {
+  cat <<'EOF'
+Usage: status.sh [--verbose]
+
+Show install ownership, links, tool paths, snapshots, task, plugin, and update
+state. --verbose also runs tool version and Codex plugin probes.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --verbose) VERBOSE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 
@@ -23,7 +42,7 @@ load_user_tool_paths() {
   export PATH="$HOME/.local/bin:$PATH"
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
-  if [ -s "$NVM_DIR/nvm.sh" ]; then
+  if [ "$VERBOSE" = "1" ] && [ -s "$NVM_DIR/nvm.sh" ]; then
     # shellcheck disable=SC1091
     . "$NVM_DIR/nvm.sh"
     nvm use default >/dev/null 2>&1 || true
@@ -43,9 +62,11 @@ tool_version() {
 
 tool_status() {
   local name="$1"
-  local version
+  local version=""
   if command -v "$name" >/dev/null 2>&1; then
-    version="$(tool_version "$name")"
+    if [ "$VERBOSE" = "1" ]; then
+      version="$(tool_version "$name")"
+    fi
     if [ -n "$version" ]; then
       printf -- '- %s: %s (%s)\n' "$name" "$(command -v "$name")" "$version"
     else
@@ -317,7 +338,11 @@ printf '\n## Active Task\n\n'
 active_task_status
 
 printf '\n## Codex Plugin\n\n'
-codex_plugin_status
+if [ "$VERBOSE" = "1" ]; then
+  codex_plugin_status
+else
+  printf -- '- status: not probed (use --verbose)\n'
+fi
 
 printf '\n## Auto Update\n\n'
 auto_update_status

@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FAILED=0
-REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
+REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 REPAIR=0
 ORIGINAL_ARGS=("$@")
 
@@ -52,8 +52,15 @@ if [ "$RECEIPT_STATE" = "valid" ] && [ "$ROOT" != "$INSTALL_ROOT" ] &&
   exec "$INSTALL_ROOT/scripts/doctor.sh" "${ORIGINAL_ARGS[@]}"
 fi
 
+codex_plugin_installed() {
+  command -v codex >/dev/null 2>&1 &&
+    codex plugin list --json 2>/dev/null |
+      python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; sys.exit(0 if any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null
+}
+
 repair_install() {
   local repair_root="$INSTALL_ROOT"
+  local plugin_mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 
   if [ "$RECEIPT_STATE" = "invalid" ]; then
     echo "error: refusing repair with invalid install receipt: $RECEIPT" >&2
@@ -72,9 +79,9 @@ repair_install() {
      [ -x "$repair_root/scripts/install-claude-hooks.sh" ]; then
     "$repair_root/scripts/install-claude-hooks.sh"
   fi
-  if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "1" ] &&
-     [ -x "$repair_root/scripts/install-codex-plugin.sh" ] &&
-     command -v codex >/dev/null 2>&1; then
+  if [ -x "$repair_root/scripts/install-codex-plugin.sh" ] &&
+     { [ "$plugin_mode" = "1" ] ||
+       { [ "$plugin_mode" = "auto" ] && codex_plugin_installed; }; }; then
     "$repair_root/scripts/install-codex-plugin.sh"
   fi
 }
@@ -116,8 +123,9 @@ check_optional_cmd() {
 
 check_bash_version() {
   local major="${BASH_VERSINFO[0]:-0}"
-  if [ "$major" -lt 4 ]; then
-    echo "warn: bash 4+ recommended; current bash is ${BASH_VERSION:-unknown}"
+  if [ "$major" -lt 3 ]; then
+    echo "unsupported: bash 3.2+ required; current bash is ${BASH_VERSION:-unknown}"
+    FAILED=1
   else
     echo "ok: bash ${BASH_VERSION:-unknown}"
   fi
@@ -232,6 +240,7 @@ check_install_receipt() {
 }
 
 check_codex_plugin() {
+  local mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
   local plugin_version
   local marketplace_name
   local cache
@@ -240,13 +249,24 @@ check_codex_plugin() {
   local marker_root=""
   local actual_hash
 
-  if [ "${OH_MY_SETTING_CODEX_PLUGIN:-1}" = "0" ]; then
+  if [ "$mode" = "0" ]; then
     echo "note: codex plugin check disabled (OH_MY_SETTING_CODEX_PLUGIN=0)"
     return 0
   fi
+  case "$mode" in
+    1|auto) ;;
+    *)
+      echo "fail: OH_MY_SETTING_CODEX_PLUGIN must be 0, 1, or auto"
+      FAILED=1
+      return 0
+      ;;
+  esac
   command -v codex >/dev/null 2>&1 || return 0
-  if ! codex plugin list --json 2>/dev/null |
-       python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; sys.exit(0 if any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
+  if ! codex_plugin_installed; then
+    if [ "$mode" = "auto" ]; then
+      echo "note: optional codex plugin not installed"
+      return 0
+    fi
     echo "fail: expected codex plugin not installed: oh-my-setting@oh-my-setting-local"
     echo "hint: run $INSTALL_ROOT/scripts/install-codex-plugin.sh"
     FAILED=1
@@ -530,7 +550,7 @@ check_cmd uv
 check_cmd claude
 check_cmd codex
 check_cmd agy
-# gh is optional: only the GitHub-source / git-cli-workflow features need it,
+# gh is optional: only GitHub-source and explicit GitHub CLI workflows need it,
 # and compute clusters routinely lack it (like the slurm tools below). Those
 # features fail loudly on their own when gh is absent.
 check_optional_cmd gh

@@ -440,18 +440,32 @@ test_apply_ml_dry_run_has_no_writes() {
 
 test_apply_ml_scaffolds_docs() {
   local project="$TMP/ml-docs"
+  local full="$TMP/ml-docs-full"
   mkdir -p "$project/docs"
   printf 'user content\n' > "$project/docs/DATA.md"
 
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
 
-  [ -f "$project/docs/MODEL.md" ] || fail "ml docs not scaffolded: MODEL.md"
-  [ -f "$project/docs/TRAINING.md" ] || fail "ml docs not scaffolded: TRAINING.md"
+  for doc in DATA MODEL EVALUATION EXPERIMENTS REPRODUCIBILITY; do
+    [ -f "$project/docs/$doc.md" ] || fail "core ml doc not scaffolded: $doc.md"
+  done
+  [ ! -e "$project/docs/TRAINING.md" ] || fail "default ml scaffold should omit optional docs"
   [ -f "$project/docs/REPRODUCIBILITY.md" ] || fail "ml docs not scaffolded: REPRODUCIBILITY.md"
   assert_file_contains "$project/docs/DATA.md" "user content"
   if grep -Fq '## Schema' "$project/docs/DATA.md"; then
     fail "existing docs/DATA.md should not be overwritten"
   fi
+
+  "$ROOT/scripts/apply-project-template.sh" ml "$full" --full-docs >/dev/null
+  for doc in SETUP DATA MODEL TRAINING EVALUATION EXPERIMENTS CHECKPOINTS LOGGING BENCHMARKS REPRODUCIBILITY CONFIGS CHANGELOG DEBUGGING; do
+    [ -f "$full/docs/$doc.md" ] || fail "full ml doc not scaffolded: $doc.md"
+  done
+
+  local cwd_full="$TMP/ml-docs-full-cwd"
+  mkdir -p "$cwd_full"
+  (cd "$cwd_full" && "$ROOT/scripts/apply-project-template.sh" ml --full-docs >/dev/null)
+  [ -f "$cwd_full/docs/TRAINING.md" ] ||
+    fail "--full-docs should use cwd when project_dir is omitted"
 }
 
 test_apply_ml_scaffolds_gitignore() {
@@ -3990,7 +4004,8 @@ test_scrubber_passes_harness_sources() {
   # are excluded here exactly like MA_SAFE_PATHS excludes them from diffs.
   # .github/ is CI config, not agent payload, and its `${{ secrets.* }}` /
   # GH_TOKEN references are indirections, not literal secrets — excluded too.
-  (cd "$ROOT" && git ls-files -z -- . ':(exclude).env*' ':(exclude,glob).github/**' | xargs -0 cat) > "$bundle"
+  (cd "$ROOT" && git ls-files -z -- . ':(exclude).env*' ':(exclude,glob).github/**' |
+    while IFS= read -r -d '' file; do [ ! -f "$file" ] || cat "$file"; done) > "$bundle"
   if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$bundle'"; then
     bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; grep -Ein \"\$(agent_memory_sensitive_re)\" '$bundle' | head -n 5" >&2 || true
     fail "harness sources must pass the outbound scrubber (self-review regression)"
@@ -4821,6 +4836,71 @@ PY
   [ -f "$marker" ] || fail "update --tools should refresh provider tools"
 }
 
+test_update_auto_refreshes_only_installed_codex_plugin() {
+  local project="$TMP/update-plugin-auto"
+  local bin="$project/bin"
+  local receipt="$project/install.json"
+  local marker="$project/plugin-called"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts/lib" "$bin"
+  cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
+  for script in link doctor install-autoupdate install-tools; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
+    chmod +x "$project/scripts/$script.sh"
+  done
+  cat > "$project/scripts/install-codex-plugin.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$OMS_TEST_PLUGIN_MARKER"
+EOF
+  chmod +x "$project/scripts/install-codex-plugin.sh"
+  cat > "$bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *' pull --ff-only') exit 0 ;;
+esac
+exec /usr/bin/git "$@"
+EOF
+  cat > "$bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  if [ "${OMS_TEST_PLUGIN_INSTALLED:-0}" = "1" ]; then
+    printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'
+  else
+    printf '%s\n' '{"installed":[]}'
+  fi
+fi
+EOF
+  chmod +x "$bin/git" "$bin/codex"
+  python3 - "$receipt" "$project" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": 1,
+        "source_root": sys.argv[2],
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "channel": "main",
+        "version": "0.3.0",
+        "installed_at": "2026-07-12T00:00:00Z",
+        "plugin": {"name": "oh-my-setting", "version": "0.1.0", "sha256": "test"},
+    }, handle)
+PY
+
+  env -u OH_MY_SETTING_CODEX_PLUGIN \
+    PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_TEST_PLUGIN_MARKER="$marker" OH_MY_SETTING_CLAUDE_HOOKS=0 \
+    OH_MY_SETTING_AUTO_UPDATE=0 "$project/scripts/update.sh" --no-doctor >/dev/null
+  assert_not_exists "$marker"
+
+  env -u OH_MY_SETTING_CODEX_PLUGIN \
+    PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_TEST_PLUGIN_MARKER="$marker" OMS_TEST_PLUGIN_INSTALLED=1 \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+    "$project/scripts/update.sh" --no-doctor >/dev/null
+  [ -f "$marker" ] || fail "update auto mode should refresh an installed codex plugin"
+}
+
 test_auto_update_help_runs() {
   "$ROOT/scripts/artifact-index.sh" --help >/dev/null
   "$ROOT/scripts/github-source.sh" --help >/dev/null
@@ -4865,6 +4945,31 @@ test_status_shows_version() {
   local out
   out="$("$ROOT/scripts/status.sh" 2>/dev/null)"
   printf '%s' "$out" | grep -Eq '^- version: [0-9]' || fail "status.sh missing version line"
+}
+
+test_status_probes_provider_versions_only_when_verbose() {
+  local home_dir="$TMP/status-probe-home"
+  local bin_dir="$TMP/status-probe-bin"
+  local marker="$TMP/status-probe.log"
+  local tool
+
+  mkdir -p "$home_dir" "$bin_dir"
+  for tool in node npm uv claude codex agy gh; do
+    cat > "$bin_dir/$tool" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$0 $*" >> "$OMS_TEST_STATUS_MARKER"
+printf 'fake-version\n'
+EOF
+    chmod +x "$bin_dir/$tool"
+  done
+
+  HOME="$home_dir" NVM_DIR="$home_dir/no-nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_STATUS_MARKER="$marker" "$ROOT/scripts/status.sh" >/dev/null
+  assert_not_exists "$marker"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/no-nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_STATUS_MARKER="$marker" "$ROOT/scripts/status.sh" --verbose >/dev/null
+  [ -s "$marker" ] || fail "status --verbose should probe provider versions"
 }
 
 
@@ -6772,6 +6877,29 @@ EOF
   assert_file_contains "$out" "expected codex plugin not installed"
 }
 
+test_doctor_allows_missing_optional_plugin_by_default() {
+  local project="$TMP/doctor-optional-plugin-project"
+  local home_dir="$TMP/doctor-optional-plugin-home"
+  local bin_dir="$TMP/doctor-optional-plugin-bin"
+  local out="$TMP/doctor-optional-plugin-out"
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project" "$bin_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  printf '%s\n' '{"installed":[]}'
+fi
+EOF
+  chmod +x "$bin_dir/codex"
+
+  (cd "$project" && env -u OH_MY_SETTING_CODEX_PLUGIN \
+    HOME="$home_dir" CODEX_HOME="$home_dir/.codex" PATH="$bin_dir:/usr/bin:/bin" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh" >"$out") ||
+    fail "doctor should allow an uninstalled optional codex plugin by default"
+  assert_file_contains "$out" "optional codex plugin not installed"
+}
+
 test_verify_timeout_bounds_hung_verify() {
   local out
 
@@ -7318,6 +7446,48 @@ test_global_rules_stay_compact_and_route_workflows() {
   fi
 }
 
+test_large_skills_use_progressive_disclosure() {
+  local skill
+  local ref
+
+  skill="$ROOT/custom-skills/agent-harness/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 650 ] || fail "agent-harness router is too large"
+  for ref in state-memory plans-recovery roles-executors delegation-artifacts session-handoff; do
+    assert_file_contains "$skill" "references/$ref.md"
+    [ -f "$ROOT/custom-skills/agent-harness/references/$ref.md" ] || fail "missing agent-harness reference: $ref"
+  done
+
+  skill="$ROOT/custom-skills/ml-training/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 400 ] || fail "ml-training router is too large"
+  for ref in optimizer-schedule distributed loss-masking checkpoint equivariance; do
+    assert_file_contains "$skill" "references/$ref.md"
+    [ -f "$ROOT/custom-skills/ml-training/references/$ref.md" ] || fail "missing ml-training reference: $ref"
+  done
+  assert_file_contains "$ROOT/custom-skills/ml-training/references/distributed.md" 'world_size * local_loss_sum / global_valid_count'
+  assert_file_contains "$ROOT/custom-skills/ml-training/references/checkpoint.md" 'model.module if hasattr(model, "module") else model'
+  if grep -RFn 'static_graph=True' "$ROOT/custom-skills/ml-training" >/dev/null; then
+    fail "ml-training should not prescribe static_graph=True as a default"
+  fi
+
+  skill="$ROOT/custom-skills/spec-interview/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "spec-interview router is too large"
+  for ref in question-ui project-bootstrap spec-templates; do
+    assert_file_contains "$skill" "references/$ref.md"
+  done
+
+  skill="$ROOT/custom-skills/research-method/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "research-method router is too large"
+  for ref in run-provenance experiment-coordination design-review; do
+    assert_file_contains "$skill" "references/$ref.md"
+  done
+
+  skill="$ROOT/custom-skills/peer-review/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "peer-review router is too large"
+  for ref in context-safety gate-loop export-import; do
+    assert_file_contains "$skill" "references/$ref.md"
+  done
+}
+
 test_policy_layers_match_compact_global_rules() {
   local file
 
@@ -7795,28 +7965,28 @@ test_skill_router_matches_and_dedupes() {
   local out
 
   make_committed_repo "$project"
-  # Trigger match (Korean commit phrasing) suggests the mapped skill once.
-  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r1","turn_id":"t1","cwd":"%s"}' "$project" |
+  # Trigger match suggests the mapped skill once.
+  out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "git-cli-workflow" || fail "router should suggest git-cli-workflow"
+  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" || fail "router should suggest oh-my-setting-ops"
   [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "route"'
-  assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "release"'
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "task"'
   # A later turn in the same session may need the skill reminder again.
-  out="$(printf '{"prompt":"커밋해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
+  out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "git-cli-workflow" || fail "router should re-suggest a skill on a later turn"
+  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" || fail "router should re-suggest a skill on a later turn"
   # Duplicate delivery of the same hook event stays silent.
-  out="$(printf '{"prompt":"커밋해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
+  out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   [ -z "$out" ] || fail "router must dedupe repeated delivery within one turn"
   # Payloads without turn_id cannot safely persist a per-turn dedupe key.
-  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
+  out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "git-cli-workflow" || fail "router should hint without turn_id"
-  out="$(printf '{"prompt":"이 변경 커밋해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
+  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" || fail "router should hint without turn_id"
+  out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "git-cli-workflow" ||
+  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" ||
     fail "router must not suppress later identical prompts when turn_id is absent"
   # New session: suggests again; multi-match caps at two skills.
   out="$(printf '{"prompt":"slurm 잡 제출하고 scaffold split 확인해줘","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
@@ -8099,6 +8269,51 @@ EOF
   assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
 }
 
+test_doctor_auto_repairs_installed_codex_plugin() {
+  local d="$TMP/doctor-plugin-auto-repair"
+  local home="$d/home"
+  local receipt="$d/config/oh-my-setting/install.json"
+  local bin="$d/bin"
+  local log="$d/codex.log"
+  local version
+  local cache
+
+  mkdir -p "$home" "$bin"
+  HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$ROOT/scripts/link.sh" >/dev/null
+  version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+    "$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json")"
+  cache="$home/.codex/plugins/cache/oh-my-setting-local/oh-my-setting/$version"
+  mkdir -p "$cache"
+  printf 'stale\n' > "$cache/stale.txt"
+
+  cat > "$bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CODEX_LOG"
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'
+elif [ "$1 $2 $3" = "plugin marketplace list" ]; then
+  printf 'oh-my-setting-local %s\n' "$OMS_TEST_ROOT"
+elif [ "$1 $2" = "plugin add" ]; then
+  rm -rf "$OMS_TEST_CACHE"
+  mkdir -p "$OMS_TEST_CACHE"
+  cp -R "$OMS_TEST_ROOT/plugins/oh-my-setting/." "$OMS_TEST_CACHE/"
+  printf 'Installed plugin root: %s\n' "$OMS_TEST_CACHE"
+fi
+EOF
+  chmod +x "$bin/codex"
+
+  env -u OH_MY_SETTING_CODEX_PLUGIN \
+    HOME="$home" XDG_CONFIG_HOME="$d/config" CODEX_HOME="$home/.codex" \
+    OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_ROOT="$ROOT" OMS_TEST_CACHE="$cache" \
+    CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 "$ROOT/scripts/doctor.sh" --repair >"$d/out" ||
+    fail "doctor --repair should refresh an installed plugin in auto mode"
+  assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
+  assert_file_contains "$d/out" "ok: codex plugin oh-my-setting (cache parity)"
+  assert_not_exists "$cache/stale.txt"
+}
+
 test_install_receipt_foreign_doctor_and_repair() {
   local d="$TMP/install-receipt"
   local home="$d/home"
@@ -8320,324 +8535,6 @@ test_oms_run_validate_flags_schema_drift() {
 }
 
 # SMOKE_TEST_CALLS_BEGIN
-test_poll_interval_adapts_to_elapsed_and_remaining
-test_file_lock_acquire_release
-test_file_lock_missing_poll_helper_falls_back
-test_file_lock_recovers_stale_mkdir_lock
-test_file_lock_contention_preserves_records
-test_apply_dry_run_has_no_writes
-test_apply_ml_dry_run_has_no_writes
-test_apply_ml_scaffolds_docs
-test_apply_ml_scaffolds_gitignore
-test_apply_ml_scaffolds_check_contract
-test_project_doctor_warns_missing_check
-test_project_doctor_warns_structure_drift
-test_project_doctor_warns_unregistered_experiments
-test_project_doctor_warns_empty_contract_past_draft
-test_project_doctor_warns_empty_ml_scientific_contract
-test_project_doctor_rejects_extra_arg
-test_review_verdicts_subcommand
-test_job_digest_log_mode
-test_job_digest_wait_polls_until_empty
-test_tsp_queue_enqueue_slots_and_label
-test_tsp_queue_forwards_basic_subcommands
-test_tsp_queue_wait_records_ledger
-test_tsp_queue_missing_tsp_fallback_records_ledger
-test_tsp_queue_secret_guard_blocks_enqueue
-test_run_ledger_records_and_lists
-test_run_ledger_gate_skip_requires_reason
-test_run_ledger_scans_gate_reason
-test_run_ledger_no_check_records_gate_none
-test_research_runner_no_gate_requires_reason
-test_run_ledger_warns_sensitive_command
-test_run_ledger_records_metrics
-test_github_source_profile_discover_and_fetch
-test_code_source_registry_fetches_registered_source
-test_research_runner_requires_registration
-test_research_runner_records_registered_run
-test_research_runner_dry_run_no_ledger
-test_run_ledger_metrics_sanitizes
-test_delegate_auto_verify_uses_check_contract
-test_project_doctor_ok_after_apply
-test_project_doctor_detects_drift
-test_project_doctor_detects_missing_block
-test_project_doctor_detects_stale_block
-test_apply_rejects_unclosed_managed_block
-test_remove_rejects_unclosed_managed_block
-test_detect_configs_only_is_general
-test_detect_ml_filename_is_ml
-test_detect_ml_code_text_is_ml
-test_detect_ignores_common_generated_dirs
-test_apply_and_remove_valid_block
-test_oms_self_ignore_created_for_harness_paths
-test_doctor_warns_bad_harness_index_json
-test_doctor_warns_missing_oms_gitignore
-test_doctor_clean_harness_state_has_no_warnings
-test_doctor_uses_canonical_artifact_validation
-test_doctor_reports_crash_residue_warnings
-test_doctor_reports_malformed_run_state
-test_peer_export_only_and_import_result
-test_peer_review_export_only_skips_cli
-test_peer_review_gate_all_pass
-test_peer_review_gate_fail_exits
-test_peer_review_gate_missing_exits
-test_peer_review_gate_export_only
-test_import_warns_sensitive_result_but_succeeds
-test_import_index_links_source_prompt
-test_peer_export_only_blocks_sensitive_prompt
-test_peer_review_dry_run_artifacts
-test_peer_review_base_ref_diff
-test_peer_review_invalid_base_fails
-test_peer_review_synthesize_dry_run
-test_peer_review_synthesize_provider_override
-test_peer_review_rejects_bad_synthesize_provider
-test_peer_review_ml_preset
-test_peer_review_default_prompt_requires_ml
-test_peer_debate_prompt_fences_external_output
-test_peer_review_debate_dry_run
-test_peer_review_excludes_private_status
-test_peer_review_secret_diff_skips_external
-test_peer_review_no_diff_provider_subset
-test_peer_review_rejects_unknown_provider
-test_peer_ask_rejects_unknown_provider_before_artifact_dir
-test_peer_review_single_provider_failure_exits
-test_peer_ask_debate_tracks_dropout
-test_peer_ask_debate_skips_after_dropouts
-test_peer_ask_debate_sanitizes_provider_auth_noise
-test_peer_prompt_injects_loop_warnings
-test_peer_ask_all_round1_failures_exit
-test_peer_ask_hypothesis_preset
-test_peer_ask_dry_run_no_repo
-test_peer_ask_repo_context_subset
-test_peer_ask_secret_diff_skips_external
-test_peer_review_print_timeout
-test_peer_ask_print_timeout
-test_peer_ask_debate_dry_run
-test_peer_ask_debate_needs_two_providers
-test_peer_ask_rejects_bad_debate_count
-test_delegate_dry_run
-test_delegate_fake_worker_apply
-test_delegate_apply_refuses_dirty_tree
-test_delegate_requires_provider
-test_agent_memory_append_show_and_rejects_sensitive
-test_agent_task_init_context_and_rejects_sensitive
-test_agent_task_loop_state_and_warnings
-test_agent_plan_dag_and_ready
-test_agent_plan_next_and_brief
-test_agent_plan_lock_single_winner
-test_agent_plan_lifecycle
-test_delegate_task_id_lineage
-test_change_guard_warns_scope_and_dirty_touch
-test_change_guard_reads_allowed_paths_from_task
-test_change_guard_forbidden_paths_deny_beats_allow
-test_change_guard_reads_forbidden_paths_from_task
-test_agent_call_outbound_scrubber_blocks_private_path
-test_advise_dry_run_composes_advisor_prompt
-test_advise_no_failures_skips_ledger_section
-test_advise_picks_provider_that_is_not_caller
-test_peer_shims_redirect_with_deprecation
-test_peer_env_var_back_compat
-test_agent_call_missing_cli_writes_exit_and_index
-test_agent_call_provider_nonzero_writes_exit_and_index
-test_delegate_missing_cli_writes_exit_and_index
-test_agent_run_missing_cli_writes_exit_and_index
-test_artifact_index_records_call
-test_artifact_index_prune
-test_artifact_index_prune_files_deletes_only_orphans
-test_artifact_index_prune_files_dry_run_deletes_nothing
-test_artifact_index_prune_files_ignores_paths_outside_artifacts
-test_artifact_index_rejects_extra_limit_arg
-test_agent_run_records_task_outcome
-test_agent_run_prompt_file_routing
-test_agent_run_write_worker_failure_records_task_outcome
-test_agent_ml_context_digest
-test_agent_ml_context_rejects_bad_max_bytes
-test_delegate_auto_verify_prefers_ml_smoke
-test_agent_call_dry_run_attaches_shared_memory
-test_agent_run_auto_read_routes_to_call
-test_agent_run_auto_write_routes_to_delegate
-test_scrubber_passes_harness_sources
-test_scrubber_blocks_env_style_token
-test_scrubber_no_function_name_bypass
-test_agent_run_read_priority_routing
-test_shared_prompt_mode_classifier_table
-test_shared_ml_smoke_detection_table
-test_scrubber_blocks_credential_variants
-test_scrubber_blocks_outbound_secret_shapes
-test_scrubber_allows_common_clean_text
-test_review_diff_side_blocks_env_token
-test_run_ledger_gate_blocks_failing_check
-test_run_ledger_gate_mention_falls_back_to_fast
-test_run_ledger_no_commit_repo_with_staged_changes
-test_run_ledger_gate_detects_label_variants
-test_run_ledger_warns_duplicate_run
-test_agent_task_close_promotes_memory
-test_read_only_actions_need_no_tmpdir
-test_truncation_survives_split_multibyte
-test_agent_task_append_preserves_backslashes
-test_memory_context_omits_sensitive_sections_cleanly
-test_memory_append_survives_stale_sensitive_source
-test_link_round_trip_restores_existing_claude_file
-test_link_idempotent_does_not_create_second_backup
-test_link_round_trip_restores_foreign_symlink
-test_unlink_restores_backup_from_legacy_global_link
-test_link_skills_round_trip_restores_existing_skill_dir
-test_uninstall_purge_guard_refuses_home_and_root
-test_backup_copies_all_config_targets
-test_link_and_unlink_with_home_override
-test_link_removes_dangling_owned_skill_links
-test_skill_doctor_detects_duplicate_names
-test_cleanup_dry_run_and_apply
-test_cleanup_prunes_stale_worktree_registration
-test_cleanup_removes_dead_lock_only
-test_agent_call_term_removes_tmp_prompt
-test_update_help_runs
-test_auto_update_help_runs
-test_template_help_runs
-test_uninstall_help_runs
-test_uninstall_dry_run_no_changes
-test_version_file_present
-test_status_shows_version
-test_status_shows_active_task_state
-test_status_shows_auto_update_state
-test_auto_update_check_detects_update
-test_auto_update_apply_skips_dirty_tree
-test_auto_update_apply_records_link_failure
-test_auto_update_apply_records_doctor_failure
-test_auto_update_apply_lock_contention_skips_without_pull
-test_auto_update_apply_happy_path_records_applied
-test_auto_update_skips_without_upstream
-test_autoupdate_cron_install_and_uninstall
-test_autoupdate_install_dry_run_no_writes
-test_install_skills_detects_name_mismatch
-test_install_skills_detects_unlisted_and_broken_resources
-test_check_gate_hard_fails_without_shellcheck
-test_gen_checksums_deterministic
-test_ci_status_reports_conclusion
-test_install_hooks_writes_pre_push
-test_session_handoff_claude_digest
-test_session_handoff_blocks_sensitive_digest
-test_session_handoff_codex_digest
-test_session_handoff_antigravity_prompts_only
-test_session_handoff_unknown_agent_fails
-test_run_capsule_captures_and_reproduces
-test_run_capsule_propagates_exit_and_runs_once
-test_run_capsule_unknown_subcommand_fails
-test_run_capsule_whence_traces_checkpoint
-test_data_manifest_check_and_leakage
-test_data_manifest_csv_column
-test_data_manifest_key_column_leakage
-test_data_manifest_fail_closed_and_name
-test_data_manifest_key_set_drift
-test_data_manifest_key_mapping_drift_and_empty
-test_data_manifest_reads_schema1
-test_data_manifest_hostile_split_values
-test_data_manifest_unknown_subcommand_fails
-test_run_reconcile_records_terminal_jobs
-test_run_reconcile_unknown_subcommand_fails
-test_experiment_board_lifecycle_and_duplicate_guard
-test_experiment_board_stale_reclaim
-test_experiment_board_claim_is_atomic
-test_experiment_board_unknown_subcommand_fails
-test_patch_admit_admits_clean_patch
-test_patch_admit_rejects_stale_patch
-test_patch_admit_rejects_failed_verify
-test_patch_admit_requires_patch
-test_patch_admit_rejects_secret_in_patch
-test_patch_admit_rejects_python_syntax_error
-test_patch_admit_rejects_json_syntax_error
-test_agent_task_context_preserves_tail_sections
-test_debate_prompt_masks_quoted_paths
-test_debate_prompt_sanitizes_sensitive_quoted_lines
-test_oms_run_spine_links_and_joins
-test_oms_run_auto_link_from_capsule
-test_oms_run_unknown_subcommand_fails
-test_oms_run_diff_compares_capsules
-test_oms_run_validate_detects_malformed_jsonl
-test_run_ledger_top_ranks_metrics
-test_oms_run_timeline_merges_streams
-test_agent_plan_reclaim_requeues_stale_claim
-test_agent_plan_rejects_stale_lease_after_reclaim
-test_agent_plan_reopen_only_from_blocked
-test_agent_task_lifecycle_rotation_and_bounded_state
-test_delegate_plan_task_lifecycle
-test_peer_review_gate_verify_backstop
-test_delegate_repair_retries_failed_verify
-test_run_with_timeout_warns_when_unbounded
-test_scrubber_blocks_json_quoted_secret
-test_scrubber_blocks_hpc_cluster_paths
-test_doctor_fails_broken_config_symlink
-test_agent_state_lands_at_git_root_from_subdir
-test_peer_review_warns_untracked_files
-test_run_state_anchors_to_git_root_from_subdir
-test_file_lock_dir_is_stable_across_xdg
-test_oms_run_link_records_calling_agent
-test_agent_plan_normalizes_provider
-test_oms_run_current_pointer_joins_and_expires
-test_oms_dispatcher_lists_and_dispatches
-test_doctor_detects_foreign_config_link
-test_doctor_rejects_same_name_foreign_plugin
-test_verify_timeout_bounds_hung_verify
-test_delegate_worker_receives_state_env
-test_agy_read_pass_cannot_write_repo
-test_patch_admit_report_survives_prune
-test_patch_admit_rejects_verifier_change
-test_change_guard_catches_committed_escape
-test_experiment_board_list_stale_and_owner
-test_oms_run_close_and_ls_open
-test_oms_run_timeline_filters
-test_delegate_plan_task_hydrates_brief_and_verify
-test_agent_plan_touch_prevents_reclaim
-test_experiment_board_touch_clears_stale
-test_patch_land_admits_then_applies
-test_patch_land_finishes_plan_task
-test_repo_state_reflects_seeded_state
-test_agent_memory_search
-test_patch_admit_verifier_cd_bypass_caught
-test_patch_admit_syntax_checks_spaced_path
-test_experiment_board_reclaim_transfers_owner
-test_oms_run_ls_open_filters_before_slice
-test_delegate_plan_task_hydrates_from_subdir
-test_agent_role_and_delegate_injection
-test_global_rules_stay_compact_and_route_workflows
-test_policy_layers_match_compact_global_rules
-test_fail_ledger_records_checks_resolves
-test_ci_status_record_and_state
-test_delegation_liveness_in_state
-test_gc_reclaims_safely
-test_oms_init_seeds_and_guides
-test_oms_run_validate_flags_schema_drift
-test_file_lock_mkdir_contention_preserves_records
-test_gc_closes_stale_open_run
-test_gc_releases_plan_task_of_dead_delegation
-test_gc_old_marker_cannot_release_new_lease
-test_gc_sweeps_stale_change_guard
-test_change_guard_status_flags_stale
-test_patch_land_reject_records_and_resolves_fail_ledger
-test_patch_land_plan_task_supplies_patch
-test_patch_land_rejects_stale_review_patch_lease
-test_agent_plan_reclaim_include_review
-test_repo_state_flags_stale_review_and_guard
-test_run_with_timeout_kill_after_defeats_term_trap
-test_run_with_timeout_require_refuses_unbounded
-test_artifact_index_prune_atomic_keeps_symlink
-test_oms_run_new_leaves_no_pointer_residue
-test_repo_state_refresh_ci_records
-test_delegate_kill9_recovery_via_gc
-test_skill_router_matches_and_dedupes
-test_skill_router_routes_chem_bio_task_families
-test_chem_bio_skill_routes_all_references
-test_ml_review_includes_chem_bio_task_families
-test_skill_router_skips_system_prompts
-test_skill_router_ignores_harness_child
-test_turn_guard_blocks_unverified_dirty_task_once
-test_turn_guard_allows_verified_task
-test_install_claude_hooks_merge_and_remove
-test_install_codex_plugin_registers_marketplace
-test_install_receipt_foreign_doctor_and_repair
-test_artifact_index_migrate_validate_and_idempotency
-test_artifact_prune_preserves_fresh_unindexed_file
-test_smoke_suite_does_not_mutate_source_oms
 # SMOKE_TEST_CALLS_END
 
 echo "scripts-smoke: ok"

@@ -65,6 +65,7 @@ WRITE_TERMS = (
     "작성",
     "적용",
     "설치",
+    "업데이트",
     "진행",
 )
 REVIEW_TERMS = ("review", "audit", "검토", "리뷰")

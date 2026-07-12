@@ -24,7 +24,7 @@ jobs:
       - name: install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck
-        run: shellcheck -x -S warning install.sh scripts/oms scripts/*.sh tests/*.sh
+        run: shellcheck -x -S warning install.sh scripts/oms scripts/*.sh scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
       - name: bash 3.2 compat (no bash-4isms)
         run: bash scripts/check-bash32.sh
 
@@ -75,14 +75,9 @@ jobs:
           git -C "$workspace" checkout -B ci-install-e2e
           export HOME="$(mktemp -d)"
           export OH_MY_SETTING_REPO_URL="$workspace"
-          export OH_MY_SETTING_INSTALL_TOOLS=0
           export OH_MY_SETTING_GENERATE_SLURM=0
           export OH_MY_SETTING_STAR_PROMPT=0
           export OH_MY_SETTING_REQUIRE_TOOLS=0
-          export OH_MY_SETTING_CODEX_PLUGIN=0
-          # The autoupdate trigger registers with the HOST systemd/cron, which
-          # a throwaway-HOME fixture must not touch.
-          export OH_MY_SETTING_AUTO_UPDATE=0
 
           echo "== install =="
           bash install.sh
@@ -102,7 +97,10 @@ jobs:
           done
           grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" ||
             { echo "install did not register the skill-router hook" >&2; exit 1; }
-          [ -f "$dest/local/machine.md" ] || echo "note: machine snapshot not generated"
+          [ ! -e "$HOME/.bashrc" ] || { echo "minimal install modified .bashrc" >&2; exit 1; }
+          [ ! -e "$dest/local/machine.md" ] || { echo "minimal install generated machine snapshot" >&2; exit 1; }
+          [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
+            { echo "minimal install registered auto-update" >&2; exit 1; }
           "$dest/scripts/oms" list >/dev/null
 
           echo "== update (new upstream commit) =="
@@ -130,7 +128,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: bash syntax
         run: |
-          for f in install.sh scripts/oms scripts/*.sh scripts/lib/*.sh tests/*.sh; do
+          for f in install.sh scripts/oms scripts/*.sh scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh; do
             bash -n "$f"
           done
       - name: detect project style fixture
