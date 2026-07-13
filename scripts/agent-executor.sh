@@ -33,6 +33,7 @@ MODEL_CLASS=auto
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
+REASONING_EFFORT=auto
 GC_APPLY=0
 
 usage() {
@@ -67,6 +68,7 @@ Options:
   --model MODEL      Exact provider model.
   --fallback-model M Explicit one-shot capacity fallback model.
   --no-model-fallback Disable implicit class fallback.
+  --reasoning-effort E auto, low, medium, or high; frozen at create time.
   --reason TEXT      Failure reason for fail.
   --days N           Retention age for gc. Default: 30.
   --dry-run          Print executor gc removals without deleting (default).
@@ -100,6 +102,7 @@ while [ "$#" -gt 0 ]; do
     --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
     --no-model-fallback) NO_MODEL_FALLBACK=1; shift ;;
+    --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"; REASONING_EFFORT="$2"; shift 2 ;;
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
     --days) [ "$#" -ge 2 ] || fail "--days requires integer"; DAYS="$2"; shift 2 ;;
     --dry-run) GC_APPLY=0; shift ;;
@@ -113,6 +116,7 @@ case "$MODE" in read|worktree-write) ;; *) fail "--mode must be read or worktree
 oms_model_validate_class "$MODEL_CLASS" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 case "$DAYS" in *[!0-9]*|"") fail "--days must be a non-negative integer" ;; esac
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
@@ -203,6 +207,7 @@ PY
     fail "unknown strategy: $STRATEGY"
   export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
   export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+  export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
   export OMS_MODEL_ROLE="$STRATEGY" OMS_MODEL_OPERATION=delegate
   oms_model_prepare "$PROVIDER" || exit $?
   base_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
@@ -221,6 +226,8 @@ PY
     OMS_EXECUTOR_ALLOWED="$ALLOWED" OMS_EXECUTOR_FORBIDDEN="$FORBIDDEN" OMS_EXECUTOR_VERIFY="$VERIFY" \
     OMS_EXECUTOR_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_EXECUTOR_MODEL="$OMS_MODEL_PRIMARY" \
     OMS_EXECUTOR_FALLBACK_MODEL="$OMS_MODEL_FALLBACK" \
+    OMS_EXECUTOR_REASONING_EFFORT="$OMS_REASONING_RESOLVED" \
+    OMS_EXECUTOR_FALLBACK_REASONING_EFFORT="$OMS_REASONING_FALLBACK" \
     python3 <<'PY'
 import json, os, re, time
 def paths(raw):
@@ -241,6 +248,8 @@ d={"schema":1,"executor_id":os.environ["OMS_EXECUTOR_ID"],"state":"draft",
 "forbidden_paths":paths(os.environ["OMS_EXECUTOR_FORBIDDEN"]),"verify":os.environ["OMS_EXECUTOR_VERIFY"],
 "model_class":os.environ["OMS_EXECUTOR_MODEL_CLASS"],"model":os.environ["OMS_EXECUTOR_MODEL"],
 "fallback_model":os.environ["OMS_EXECUTOR_FALLBACK_MODEL"],
+"reasoning_effort":os.environ["OMS_EXECUTOR_REASONING_EFFORT"],
+"fallback_reasoning_effort":os.environ["OMS_EXECUTOR_FALLBACK_REASONING_EFFORT"],
 "soul_sha256":"","created_at":now,"updated_at":now,"reason":""}
 with open(os.environ["OMS_EXECUTOR_META"],"w",encoding="utf-8") as f: json.dump(d,f,indent=2,ensure_ascii=False)
 PY
@@ -351,6 +360,8 @@ print("provider: %s"%d["provider"]); print("mode: %s"%d["mode"])
 print("model_class: %s"%(d.get("model_class") or "(none)"))
 print("model: %s"%(d.get("model") or "(provider default)"))
 print("fallback_model: %s"%(d.get("fallback_model") or "(none)"))
+print("reasoning_effort: %s"%(d.get("reasoning_effort") or "(none)"))
+print("fallback_reasoning_effort: %s"%(d.get("fallback_reasoning_effort") or "(none)"))
 print("task_id: %s"%(d.get("task_id") or "(none)")); print("lease_id: %s"%(d.get("lease_id") or "(none)"))
 print("base_sha: %s"%(d.get("base_sha") or "(none)")); print("allowed_paths: %s"%values(d.get("allowed_paths",[])))
 print("forbidden_paths: %s"%(", ".join(d.get("forbidden_paths",[])) or "(none)"))

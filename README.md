@@ -82,6 +82,7 @@ Delegate this to codex: add input validation to scripts/train.py.
 Delegate this to codex with up to 2 repair rounds if verification fails.
 Create a task-scoped executor soul for this work, freeze it, then delegate it.
 Delegate this to codex with automatic model routing; use a deeper model only if the role requires it.
+Route reasoning effort automatically too; keep routine work low or medium and gates high.
 Admit codex's patch — run the checks ladder before applying it.
 ```
 

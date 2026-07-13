@@ -29,6 +29,7 @@ oms agent-executor --repo . freeze --id ex1
 ```
 
 `SOUL.md` controls behavior only. `meta.json` is authoritative for provider,
-resolved model class/model/fallback, mode, task/lease, base SHA,
+resolved model class/model/fallback, reasoning/fallback effort, mode,
+task/lease, base SHA,
 allowed/forbidden paths, and verification. The executor must not widen those
 fields or delegate again. Repair rounds reuse the same frozen soul and route.

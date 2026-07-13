@@ -16,6 +16,11 @@ retried. Provider/class mappings can be overridden with variables such as
 `OMS_MODEL_CODEX_FAST`, `OMS_MODEL_CLAUDE_BALANCED`, and
 `OMS_MODEL_ANTIGRAVITY_DEEP`.
 
+Reasoning effort follows the selected class by default: `fast=low`,
+`balanced=medium`, and `deep=high`. Use `--reasoning-effort` to override it for
+Codex or Claude. Antigravity exposes effort through its model variants rather
+than a separate flag, so select an explicit Low/Medium/High model there.
+
 Read mode cannot edit the repo. Write mode uses an isolated worktree and
 returns an artifact log plus patch; workers cannot commit or push. Outbound
 context is scanned and sensitive-looking content blocks the call.
@@ -25,7 +30,7 @@ Use `--export-only` for read calls/reviews when another provider must not be
 called directly, then import the answer with `oms import-agent-result`.
 
 Artifacts are indexed under `.oms/artifacts/index.jsonl`, including selected
-model class/model and fallback outcome. Inspect with:
+model class/model, reasoning effort, and fallback outcome. Inspect with:
 
 ```bash
 oms artifact-index --repo . latest

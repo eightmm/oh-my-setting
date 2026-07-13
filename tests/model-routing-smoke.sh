@@ -89,6 +89,14 @@ export OMS_MODEL_ANTIGRAVITY_FAST=agy-fast-x
 export OMS_MODEL_ANTIGRAVITY_BALANCED=agy-balanced-x
 export OMS_MODEL_ANTIGRAVITY_DEEP=agy-deep-x
 
+default_agy_balanced="$(
+  unset OMS_MODEL_ANTIGRAVITY_BALANCED
+  # shellcheck source=scripts/lib/model-routing.sh
+  . "$ROOT/scripts/lib/model-routing.sh"
+  oms_model_mapping antigravity balanced
+)"
+[ "$default_agy_balanced" = 'Gemini 3.5 Flash (Medium)' ] || fail "Antigravity balanced default should encode medium effort"
+
 reset_capture() {
   rm -f "$capture"/*
   unset FAIL_MODE PRIMARY_MODEL WRITE_FILE
@@ -96,6 +104,14 @@ reset_capture() {
 
 model_arg() {
   awk 'p{print;exit} $0=="-m" || $0=="--model"{p=1}' "$1"
+}
+
+effort_arg() {
+  awk '
+    p{print;exit}
+    $0=="--effort"{p=1;next}
+    $0=="-c"{getline; if ($0 ~ /^model_reasoning_effort=/) {print; exit}}
+  ' "$1"
 }
 
 CALL="$ROOT/scripts/agent-call.sh"
@@ -109,14 +125,37 @@ reset_capture
 [ "$(model_arg "$capture/codex.1.argv")" = codex-fast-x ] || fail "Codex fast mapping missing"
 grep -Fq '"model_class": "fast"' "$repo/.oms/artifacts/index.jsonl" || fail "model class not indexed"
 grep -Fq '"selected_model": "codex-fast-x"' "$repo/.oms/artifacts/index.jsonl" || fail "selected model not indexed"
+[ "$(effort_arg "$capture/codex.1.argv")" = 'model_reasoning_effort="low"' ] ||
+  fail "Codex fast route should use low reasoning"
+grep -Fq '"reasoning_effort": "low"' "$repo/.oms/artifacts/index.jsonl" || fail "reasoning effort not indexed"
 
 # Every provider receives its own mapped model flag.
 reset_capture
 "$CALL" --repo "$repo" --to claude --model-class balanced --prompt 'inspect routing' >/dev/null
 [ "$(model_arg "$capture/claude.1.argv")" = claude-balanced-x ] || fail "Claude balanced mapping missing"
+[ "$(effort_arg "$capture/claude.1.argv")" = medium ] || fail "Claude balanced route should use medium effort"
 reset_capture
 "$CALL" --repo "$repo" --to antigravity --model-class fast --prompt 'inspect routing' >/dev/null
 [ "$(model_arg "$capture/agy.1.argv")" = agy-fast-x ] || fail "Antigravity fast mapping missing"
+if grep -Fxq -- '--effort' "$capture/agy.1.argv"; then fail "Antigravity has no independent effort flag"; fi
+
+# Explicit effort overrides auto for providers that expose a supported control.
+reset_capture
+"$CALL" --repo "$repo" --to codex --model-class deep --reasoning-effort low \
+  --prompt 'explicit reasoning' >/dev/null
+[ "$(effort_arg "$capture/codex.1.argv")" = 'model_reasoning_effort="low"' ] ||
+  fail "explicit Codex effort missing"
+reset_capture
+rc=0
+"$CALL" --repo "$repo" --to antigravity --reasoning-effort high \
+  --prompt 'unsupported explicit reasoning' >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "Antigravity explicit effort should fail instead of being ignored"
+reset_capture
+rc=0
+"$CALL" --repo "$repo" --to codex --reasoning-effort extreme \
+  --prompt 'invalid reasoning' >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "invalid reasoning effort should fail"
+[ ! -f "$capture/codex.count" ] || fail "invalid effort must not call provider"
 
 # Invalid environment mappings fail before constructing a provider argv.
 reset_capture
@@ -132,6 +171,7 @@ reset_capture
 "$RUN" --repo "$repo" --to codex --mode read --model-class fast \
   --prompt 'inspect entrypoint routing' >/dev/null
 [ "$(model_arg "$capture/codex.1.argv")" = codex-fast-x ] || fail "agent-run did not forward model class"
+[ "$(effort_arg "$capture/codex.1.argv")" = 'model_reasoning_effort="low"' ] || fail "agent-run did not forward auto effort"
 
 # Capacity alone retries once on the next lower class and records the fallback.
 reset_capture
@@ -140,6 +180,8 @@ export FAIL_MODE=capacity PRIMARY_MODEL=codex-deep-x
 [ "$(cat "$capture/codex.count")" = 2 ] || fail "capacity fallback must make two attempts"
 [ "$(model_arg "$capture/codex.1.argv")" = codex-deep-x ] || fail "deep primary missing"
 [ "$(model_arg "$capture/codex.2.argv")" = codex-balanced-x ] || fail "deep fallback should use balanced"
+[ "$(effort_arg "$capture/codex.1.argv")" = 'model_reasoning_effort="high"' ] || fail "deep primary effort missing"
+[ "$(effort_arg "$capture/codex.2.argv")" = 'model_reasoning_effort="medium"' ] || fail "fallback effort should downgrade"
 tail -n 1 "$repo/.oms/artifacts/index.jsonl" | grep -Fq '"fallback_used": true' || fail "fallback use not indexed"
 tail -n 1 "$repo/.oms/artifacts/index.jsonl" | grep -Fq '"fallback_reason": "capacity"' || fail "fallback reason not indexed"
 
@@ -227,14 +269,20 @@ printf '# Specialization\n\nUse the bounded implementation strategy.\n' > "$repo
 "$EXECUTOR" brief --repo "$repo" --id routed-executor > "$repo/executor-brief.md"
 grep -Fq 'model_class: balanced' "$repo/executor-brief.md" || fail "executor class not frozen"
 grep -Fq 'model: codex-balanced-x' "$repo/executor-brief.md" || fail "executor model not frozen"
+grep -Fq 'reasoning_effort: medium' "$repo/executor-brief.md" || fail "executor effort not frozen"
 export OMS_MODEL_CODEX_BALANCED=codex-balanced-changed
 "$DELEGATE" --repo "$repo" --to codex --executor routed-executor \
   --prompt 'use frozen route' --no-verify >/dev/null
 [ "$(model_arg "$capture/codex.1.argv")" = codex-balanced-x ] || fail "executor route changed after creation"
+[ "$(effort_arg "$capture/codex.1.argv")" = 'model_reasoning_effort="medium"' ] || fail "executor effort changed after creation"
 rc=0
 "$DELEGATE" --repo "$repo" --to codex --executor routed-executor --model wrong-model \
   --prompt 'reject route override' --no-verify >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "executor should reject a conflicting model override"
+rc=0
+"$DELEGATE" --repo "$repo" --to codex --executor routed-executor --reasoning-effort high \
+  --prompt 'reject effort override' --no-verify >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "executor should reject a conflicting effort override"
 rc=0
 "$DELEGATE" --repo "$repo" --to codex --executor routed-executor --no-model-fallback \
   --prompt 'reject frozen fallback override' --no-verify >/dev/null 2>&1 || rc=$?
@@ -246,6 +294,11 @@ rc=0
   --fallback-model codex-backup --synthesize claude --prompt 'route synthesis' \
   --no-diff --dry-run >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "different synthesis provider should reject exact fallback"
+
+rc=0
+"$ROOT/scripts/peer-ask.sh" --providers codex,antigravity --reasoning-effort high \
+  --prompt 'reject mixed effort' --dry-run >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "multi-provider explicit effort should reject Antigravity"
 
 "$ROOT/scripts/artifact-index.sh" --repo "$repo" validate >/dev/null
 echo "model-routing-smoke: ok"

@@ -27,6 +27,7 @@ MODEL_CLASS=auto
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
+REASONING_EFFORT=auto
 LEASE_ID=""
 VERIFY=""
 FAIL_CMD=""
@@ -56,6 +57,7 @@ Options:
   --model MODEL   Exact provider model; disables implicit fallback.
   --fallback-model M  Explicit one-shot capacity fallback model.
   --no-model-fallback Disable implicit class fallback.
+  --reasoning-effort E  auto, low, medium, or high.
   --repo PATH     Target repo (default: current directory).
   --dry-run       Show the selected task and command without claiming/calling.
   -h, --help      Show help.
@@ -81,6 +83,7 @@ while [ "$#" -gt 0 ]; do
     --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
     --no-model-fallback) NO_MODEL_FALLBACK=1; shift ;;
+    --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"; REASONING_EFFORT="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -93,6 +96,7 @@ TO="$(oms_normalize_provider "$TO")" || fail "unknown provider: $TO"
 oms_model_validate_class "$MODEL_CLASS" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 case "$REPAIR" in *[!0-9]*|"") fail "--repair must be 0-3" ;; esac
 [ "$REPAIR" -le 3 ] || fail "--repair must be 0-3"
 if [ "$USE_NEXT" -eq 1 ] && [ -n "$TASK_ID" ]; then fail "use exactly one of --id or --next"; fi
@@ -170,7 +174,7 @@ TITLE="$(printf '%s' "$task_values" | cut -f4)"
 
 base="$(git -C "$REPO" rev-parse HEAD)"
 verify_hash="$(printf '%s' "$VERIFY" | oms_sha256_stream | cut -c1-16)"
-model_hash="$(printf '%s' "$MODEL_CLASS:$MODEL:$FALLBACK_MODEL:$NO_MODEL_FALLBACK" | oms_sha256_stream | cut -c1-16)"
+model_hash="$(printf '%s' "$MODEL_CLASS:$MODEL:$FALLBACK_MODEL:$NO_MODEL_FALLBACK:$REASONING_EFFORT" | oms_sha256_stream | cut -c1-16)"
 FAIL_CMD="plan-run task=$TASK_ID base=$base provider=$TO verify=$verify_hash model=$model_hash"
 set +e
 failure_check="$(cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$FAIL_CMD" 2>&1)"
@@ -202,6 +206,7 @@ delegate_cmd+=(--model-class "$MODEL_CLASS")
 [ -n "$MODEL" ] && delegate_cmd+=(--model "$MODEL")
 [ -n "$FALLBACK_MODEL" ] && delegate_cmd+=(--fallback-model "$FALLBACK_MODEL")
 [ "$NO_MODEL_FALLBACK" -eq 1 ] && delegate_cmd+=(--no-model-fallback)
+delegate_cmd+=(--reasoning-effort "$REASONING_EFFORT")
 output_file="$(agent_memory_mktemp)" || exit 1
 set +e
 "${delegate_cmd[@]}" >"$output_file" 2>&1 &

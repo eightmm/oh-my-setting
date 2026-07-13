@@ -6,6 +6,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- Automatic reasoning-effort routing alongside worker model classes:
+  `fast` uses low, `balanced` medium, and `deep` high effort. Codex receives a
+  `model_reasoning_effort` override, Claude receives `--effort`, and
+  Antigravity uses Low/Medium/High model variants because its CLI has no
+  independent effort flag. Capacity fallback lowers automatic effort with the
+  model tier; executor and artifact metadata freeze and record the route.
+
 ## [0.4.0] - Unreleased
 
 ### Added

@@ -44,6 +44,7 @@ Options:
   --model-class CLASS  Advisor model class (default: deep).
   --model MODEL        Exact advisor model.
   --fallback-model M   Explicit one-shot capacity fallback model.
+  --reasoning-effort E auto, low, medium, or high (default: auto/deep=high).
   --no-model-fallback  Disable implicit class fallback.
   --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
@@ -105,7 +106,7 @@ while [ "$#" -gt 0 ]; do
       PASSTHROUGH+=("$1" "$2")
       shift 2
       ;;
-    --model-class|--model|--fallback-model)
+    --model-class|--model|--fallback-model|--reasoning-effort)
       [ "$#" -ge 2 ] || fail "$1 requires value"
       PASSTHROUGH+=("$1" "$2")
       shift 2

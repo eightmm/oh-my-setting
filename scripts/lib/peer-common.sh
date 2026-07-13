@@ -465,6 +465,9 @@ ma_append_artifact_index() {
   OMS_INDEX_FALLBACK_MODEL="${OMS_MODEL_FALLBACK:-}" \
   OMS_INDEX_FALLBACK_USED="${OMS_MODEL_FALLBACK_USED:-0}" \
   OMS_INDEX_FALLBACK_REASON="${OMS_MODEL_FALLBACK_REASON:-}" \
+  OMS_INDEX_REASONING_EFFORT="${OMS_REASONING_RESOLVED:-}" \
+  OMS_INDEX_SELECTED_REASONING_EFFORT="${OMS_REASONING_SELECTED:-}" \
+  OMS_INDEX_FALLBACK_REASONING_EFFORT="${OMS_REASONING_FALLBACK:-}" \
   oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$retention_helper" <<'EOF'
 import hashlib, json, os, re, runpy, shutil, sys, tempfile, time, uuid
 repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, retention_helper = sys.argv[1:]
@@ -560,6 +563,15 @@ fallback_reason = os.environ.get("OMS_INDEX_FALLBACK_REASON", "")
 if fallback_reason in ("capacity", "capacity-no-fallback", "capacity-dirty-worktree"):
     row["fallback_reason"] = fallback_reason
 row["fallback_used"] = os.environ.get("OMS_INDEX_FALLBACK_USED", "0") == "1"
+reasoning_effort = os.environ.get("OMS_INDEX_REASONING_EFFORT", "")
+selected_reasoning_effort = os.environ.get("OMS_INDEX_SELECTED_REASONING_EFFORT", "")
+fallback_reasoning_effort = os.environ.get("OMS_INDEX_FALLBACK_REASONING_EFFORT", "")
+if reasoning_effort in ("low", "medium", "high"):
+    row["reasoning_effort"] = reasoning_effort
+if selected_reasoning_effort in ("low", "medium", "high"):
+    row["selected_reasoning_effort"] = selected_reasoning_effort
+if fallback_reasoning_effort in ("low", "medium", "high"):
+    row["fallback_reasoning_effort"] = fallback_reasoning_effort
 row.update(path_fields("artifact", artifact_raw))
 row.update(path_fields("patch", patch_raw))
 row.update(path_fields("source", source_raw))
@@ -675,9 +687,10 @@ ma_provider_attempt() {
   local output_file="$4"
   local workdir="$5"
   local model="$6"
-  local origin="$7"
-  local state_repo="$8"
-  local call_id="$9"
+  local effort="$7"
+  local origin="$8"
+  local state_repo="$9"
+  local call_id="${10}"
   local permission
   local -a cmd
 
@@ -685,6 +698,7 @@ ma_provider_attempt() {
     codex)
       cmd=(codex exec)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
+      cmd+=(-c "model_reasoning_effort=\"$effort\"")
       if [ "$access" = write ]; then
         cmd+=(--sandbox workspace-write -)
       else
@@ -696,6 +710,7 @@ ma_provider_attempt() {
       [ "$access" != write ] || permission=acceptEdits
       cmd=(claude)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
+      cmd+=(--effort "$effort")
       cmd+=(--permission-mode "$permission" -p)
       ;;
     antigravity|agy)
@@ -779,11 +794,12 @@ ma_run_routed_provider() {
     before="$(ma_worktree_fingerprint "$workdir")" || before=""
   fi
 
-  printf 'model-route: class=%s primary=%s fallback=%s\n' \
-    "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" >> "$artifact"
+  printf 'model-route: class=%s primary=%s fallback=%s effort=%s fallback_effort=%s\n' \
+    "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" \
+    "$OMS_REASONING_RESOLVED" "$OMS_REASONING_FALLBACK" >> "$artifact"
   status=0
   ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
-    "$OMS_MODEL_PRIMARY" "$origin" "$state_repo" "$call_id" || status=$?
+    "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
   cat "$attempt_file" >> "$artifact"
 
   if [ "$status" -ne 0 ] && oms_model_is_capacity_output "$attempt_file"; then
@@ -804,18 +820,20 @@ ma_run_routed_provider() {
 
     if [ "$OMS_MODEL_FALLBACK_USED" = 1 ]; then
       OMS_MODEL_SELECTED="$OMS_MODEL_FALLBACK"
+      OMS_REASONING_SELECTED="$OMS_REASONING_FALLBACK"
       printf '\nmodel-fallback: reason=capacity selected=%s\n' "$OMS_MODEL_SELECTED" >> "$artifact"
       : > "$attempt_file"
       status=0
       ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
-        "$OMS_MODEL_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
+        "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
       cat "$attempt_file" >> "$artifact"
     fi
   fi
 
-  export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
-  printf '\nmodel-result: selected=%s fallback_used=%s reason=%s\n' \
-    "$OMS_MODEL_SELECTED" "$OMS_MODEL_FALLBACK_USED" "${OMS_MODEL_FALLBACK_REASON:--}" >> "$artifact"
+  export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
+  printf '\nmodel-result: selected=%s effort=%s fallback_used=%s reason=%s\n' \
+    "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$OMS_MODEL_FALLBACK_USED" \
+    "${OMS_MODEL_FALLBACK_REASON:--}" >> "$artifact"
   rm -f "$attempt_file"
   if [ -n "$isolated_dir" ]; then
     ma_agy_read_cleanup "$state_repo" "$isolated_dir"

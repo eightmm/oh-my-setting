@@ -41,6 +41,8 @@ MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
 NO_MODEL_FALLBACK_EXPLICIT=0
+REASONING_EFFORT=auto
+REASONING_EFFORT_EXPLICIT=0
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
 usage() {
@@ -68,6 +70,7 @@ Options:
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
   --no-model-fallback  Disable implicit class fallback.
+  --reasoning-effort E auto, low, medium, or high. Auto follows model class.
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit
                        marks the delegation failed. Default: when the project
@@ -162,6 +165,12 @@ while [ "$#" -gt 0 ]; do
       NO_MODEL_FALLBACK=1
       NO_MODEL_FALLBACK_EXPLICIT=1
       shift
+      ;;
+    --reasoning-effort)
+      [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
+      REASONING_EFFORT="$2"
+      REASONING_EFFORT_EXPLICIT=1
+      shift 2
       ;;
     --verify)
       [ "$#" -ge 2 ] || fail "--verify requires command"
@@ -269,6 +278,7 @@ esac
 oms_model_validate_class "$MODEL_CLASS" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 
 if [ -n "$BRIEF_FILE" ]; then
   [ -f "$BRIEF_FILE" ] || fail "brief file not found: $BRIEF_FILE"
@@ -289,7 +299,7 @@ if [ -n "$EXECUTOR_ID" ]; then
   [ -z "$ROLE" ] || fail "--executor and --role are mutually exclusive"
   executor_meta="$("$(ma_scripts_dir)/agent-executor.sh" show --repo "$REPO" --id "$EXECUTOR_ID")" ||
     fail "cannot read executor $EXECUTOR_ID"
-  executor_values="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("provider",""),d.get("state",""),d.get("mode",""),d.get("plan_task",""),d.get("task_id",""),d.get("verify",""),d.get("soul_sha256",""),d.get("strategy",""),d.get("model_class",""),d.get("model",""),d.get("fallback_model","")]))')"
+  executor_values="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("provider",""),d.get("state",""),d.get("mode",""),d.get("plan_task",""),d.get("task_id",""),d.get("verify",""),d.get("soul_sha256",""),d.get("strategy",""),d.get("model_class",""),d.get("model",""),d.get("fallback_model",""),d.get("reasoning_effort",""),d.get("fallback_reasoning_effort","")]))')"
   executor_provider="$(printf '%s' "$executor_values" | cut -f1)"
   executor_state="$(printf '%s' "$executor_values" | cut -f2)"
   executor_mode="$(printf '%s' "$executor_values" | cut -f3)"
@@ -301,6 +311,8 @@ if [ -n "$EXECUTOR_ID" ]; then
   executor_model_class="$(printf '%s' "$executor_values" | cut -f9)"
   executor_model="$(printf '%s' "$executor_values" | cut -f10)"
   executor_fallback_model="$(printf '%s' "$executor_values" | cut -f11)"
+  executor_reasoning_effort="$(printf '%s' "$executor_values" | cut -f12)"
+  executor_fallback_reasoning_effort="$(printf '%s' "$executor_values" | cut -f13)"
   [ "$executor_provider" = "$TO" ] || fail "executor provider is $executor_provider, not $TO"
   [ "$executor_state" = "frozen" ] || fail "executor $EXECUTOR_ID is $executor_state, not frozen"
   [ "$executor_mode" = "worktree-write" ] || fail "executor $EXECUTOR_ID mode is $executor_mode, not worktree-write"
@@ -311,10 +323,16 @@ if [ -n "$EXECUTOR_ID" ]; then
     fail "--fallback-model conflicts with executor contract"
   [ "$NO_MODEL_FALLBACK_EXPLICIT" = 0 ] || [ -z "$executor_fallback_model" ] ||
     fail "--no-model-fallback conflicts with executor contract"
+  [ "$REASONING_EFFORT_EXPLICIT" = 0 ] || [ "$REASONING_EFFORT" = auto ] ||
+    [ -z "$executor_reasoning_effort" ] ||
+    [ "$REASONING_EFFORT" = "$executor_reasoning_effort" ] ||
+    fail "--reasoning-effort conflicts with executor contract"
   MODEL_CLASS="${executor_model_class:-auto}"
   MODEL="$executor_model"
   FALLBACK_MODEL="$executor_fallback_model"
   NO_MODEL_FALLBACK=1
+  REASONING_EFFORT="${executor_reasoning_effort:-auto}"
+  [ "$TO" != antigravity ] || REASONING_EFFORT=auto
   if [ -n "$executor_plan" ]; then
     [ -z "$PLAN_TASK_ID" ] || [ "$PLAN_TASK_ID" = "$executor_plan" ] || fail "--plan-task conflicts with executor"
     PLAN_TASK_ID="$executor_plan"
@@ -397,6 +415,8 @@ fi
 
 export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
+export OMS_REASONING_FALLBACK_EXPLICIT="${executor_fallback_reasoning_effort:-}"
 export OMS_MODEL_ROLE="${ROLE:-${executor_strategy:-}}" OMS_MODEL_OPERATION=delegate
 oms_model_prepare "$TO" || exit $?
 
@@ -523,6 +543,8 @@ if [ "$DRY_RUN" != "1" ]; then
     OMS_DL_SOUL_SHA="$EXECUTOR_SOUL_SHA" OMS_DL_PID="$$" \
     OMS_DL_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_DL_MODEL="$OMS_MODEL_PRIMARY" \
     OMS_DL_FALLBACK_MODEL="$OMS_MODEL_FALLBACK" \
+    OMS_DL_REASONING_EFFORT="$OMS_REASONING_RESOLVED" \
+    OMS_DL_FALLBACK_REASONING_EFFORT="$OMS_REASONING_FALLBACK" \
     OMS_DL_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_DL_WT="$worktree" \
     OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
     python3 - > "$liveness_file" <<'PY'
@@ -537,6 +559,8 @@ print(json.dumps({
     "model_class": os.environ.get("OMS_DL_MODEL_CLASS", ""),
     "model": os.environ.get("OMS_DL_MODEL", ""),
     "fallback_model": os.environ.get("OMS_DL_FALLBACK_MODEL", ""),
+    "reasoning_effort": os.environ.get("OMS_DL_REASONING_EFFORT", ""),
+    "fallback_reasoning_effort": os.environ.get("OMS_DL_FALLBACK_REASONING_EFFORT", ""),
 }, ensure_ascii=False))
 PY
 fi
@@ -584,10 +608,14 @@ run_worker() {
     route_selected="$OMS_MODEL_SELECTED"
     route_fallback_used="$OMS_MODEL_FALLBACK_USED"
     route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
+    route_reasoning="$OMS_REASONING_RESOLVED"
+    route_fallback_reasoning="$OMS_REASONING_FALLBACK"
+    route_selected_reasoning="$OMS_REASONING_SELECTED"
   elif [ "$OMS_MODEL_FALLBACK_USED" = 1 ]; then
     route_selected="$OMS_MODEL_SELECTED"
     route_fallback_used=1
     route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
+    route_selected_reasoning="$OMS_REASONING_SELECTED"
   elif [ -n "$OMS_MODEL_FALLBACK_REASON" ]; then
     route_selected="$OMS_MODEL_SELECTED"
     route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
@@ -601,7 +629,11 @@ run_worker() {
     OMS_MODEL_EXPLICIT="$OMS_MODEL_SELECTED"
     OMS_MODEL_FALLBACK_EXPLICIT=""
     OMS_MODEL_NO_FALLBACK=1
+    OMS_REASONING_EFFORT_REQUEST="$OMS_REASONING_SELECTED"
+    [ "$TO" != antigravity ] || OMS_REASONING_EFFORT_REQUEST=auto
+    OMS_REASONING_FALLBACK_EXPLICIT=""
     export OMS_MODEL_EXPLICIT OMS_MODEL_FALLBACK_EXPLICIT OMS_MODEL_NO_FALLBACK
+    export OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
   fi
 }
 
@@ -675,6 +707,9 @@ route_fallback=""
 route_selected=""
 route_fallback_used=0
 route_fallback_reason=""
+route_reasoning=""
+route_fallback_reasoning=""
+route_selected_reasoning=""
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] ||
   "$(ma_scripts_dir)/agent-executor.sh" start --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_started=1
@@ -749,8 +784,12 @@ if [ "$route_captured" = 1 ]; then
   OMS_MODEL_SELECTED="$route_selected"
   OMS_MODEL_FALLBACK_USED="$route_fallback_used"
   OMS_MODEL_FALLBACK_REASON="$route_fallback_reason"
+  OMS_REASONING_RESOLVED="$route_reasoning"
+  OMS_REASONING_FALLBACK="$route_fallback_reasoning"
+  OMS_REASONING_SELECTED="$route_selected_reasoning"
   export OMS_MODEL_RESOLVED_CLASS OMS_MODEL_PRIMARY OMS_MODEL_FALLBACK
   export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
+  export OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 fi
 
 printf '\n\n## Exit\n\n%s\n' "$worker_status" >> "$artifact"

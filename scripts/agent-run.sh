@@ -24,6 +24,7 @@ MODEL_CLASS=auto
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
+REASONING_EFFORT=auto
 APPLY=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
@@ -52,6 +53,7 @@ Options:
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
   --no-model-fallback  Disable implicit class fallback.
+  --reasoning-effort E auto, low, medium, or high.
   --artifact-dir PATH  Override artifact directory.
   --verify CMD         Write mode only: verification command in worker worktree.
   --no-verify          Write mode only: skip default scripts/check.sh verification.
@@ -236,6 +238,11 @@ while [ "$#" -gt 0 ]; do
       NO_MODEL_FALLBACK=1
       shift
       ;;
+    --reasoning-effort)
+      [ "$#" -ge 2 ] || { echo "error: --reasoning-effort requires value" >&2; exit 2; }
+      REASONING_EFFORT="$2"
+      shift 2
+      ;;
     --artifact-dir)
       [ "$#" -ge 2 ] || { echo "error: --artifact-dir requires path" >&2; exit 2; }
       ARTIFACT_DIR="$2"
@@ -332,6 +339,7 @@ TO="$(oms_normalize_provider "$TO")"
 oms_model_validate_class "$MODEL_CLASS" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 
 case "$MODE" in
   auto|read|write) ;;
@@ -379,6 +387,7 @@ if [ "$resolved_mode" = "read" ]; then
   [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
   [ -n "$FALLBACK_MODEL" ] && cmd+=(--fallback-model "$FALLBACK_MODEL")
   [ "$NO_MODEL_FALLBACK" -eq 1 ] && cmd+=(--no-model-fallback)
+  cmd+=(--reasoning-effort "$REASONING_EFFORT")
   [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
   [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
   [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
@@ -398,6 +407,7 @@ else
   [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
   [ -n "$FALLBACK_MODEL" ] && cmd+=(--fallback-model "$FALLBACK_MODEL")
   [ "$NO_MODEL_FALLBACK" -eq 1 ] && cmd+=(--no-model-fallback)
+  cmd+=(--reasoning-effort "$REASONING_EFFORT")
   [ -n "$VERIFY_CMD" ] && cmd+=(--verify "$VERIFY_CMD")
   [ "$NO_VERIFY" -eq 1 ] && cmd+=(--no-verify)
   [ -n "$TASK_ID" ] && cmd+=(--task-id "$TASK_ID")

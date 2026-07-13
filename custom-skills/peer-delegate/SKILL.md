@@ -85,6 +85,9 @@ Key flags beyond `--to`/`--brief-file`/`--verify`:
   class. Auto uses the role/operation; `--model` pins an exact provider model,
   `--fallback-model` supplies an explicit backup, and `--no-model-fallback`
   disables fallback. Capacity fallback is one-shot and blocked after writes.
+- `--reasoning-effort auto|low|medium|high` — override the class-derived
+  effort for Codex or Claude. Auto maps fast/balanced/deep to low/medium/high;
+  Antigravity reasoning is selected through the model variant instead.
 - `--repair N` — allow up to N verify-fail repair rounds (0-3): the worker
   gets the failing output back and retries before the delegation is failed.
 - `--no-verify` — skip verification (rarely right; the verify contract is what

@@ -14,6 +14,28 @@ oms_model_validate_name() {
   case "$value" in *$'\n'*|*$'\r'*|*$'\t'*) echo "error: model name contains control characters" >&2; return 2 ;; esac
 }
 
+oms_reasoning_validate() {
+  case "$1" in auto|low|medium|high) return 0 ;; esac
+  echo "error: reasoning effort must be auto, low, medium, or high" >&2
+  return 2
+}
+
+oms_reasoning_for_class() {
+  case "$1" in
+    fast) printf 'low\n' ;;
+    balanced) printf 'medium\n' ;;
+    deep) printf 'high\n' ;;
+  esac
+}
+
+oms_reasoning_from_model() {
+  case "$1" in
+    *"(Low)") printf 'low\n' ;;
+    *"(Medium)") printf 'medium\n' ;;
+    *"(High)") printf 'high\n' ;;
+  esac
+}
+
 oms_model_default() {
   local provider="$1"
   local class="$2"
@@ -25,7 +47,7 @@ oms_model_default() {
     claude:balanced) printf '%s\n' 'sonnet' ;;
     claude:deep) printf '%s\n' 'fable' ;;
     antigravity:fast) printf '%s\n' 'Gemini 3.5 Flash (Low)' ;;
-    antigravity:balanced) printf '%s\n' 'Gemini 3.5 Flash (High)' ;;
+    antigravity:balanced) printf '%s\n' 'Gemini 3.5 Flash (Medium)' ;;
     antigravity:deep) printf '%s\n' 'Gemini 3.1 Pro (High)' ;;
   esac
 }
@@ -79,13 +101,28 @@ oms_model_prepare() {
   local operation="${OMS_MODEL_OPERATION:-call}"
   local explicit="${OMS_MODEL_EXPLICIT:-}"
   local explicit_fallback="${OMS_MODEL_FALLBACK_EXPLICIT:-}"
+  local effort_requested="${OMS_REASONING_EFFORT_REQUEST:-auto}"
+  local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
   local resolved
   local next
+  local embedded_effort
 
   [ "$provider" != agy ] || provider=antigravity
   oms_model_validate_class "$requested" || return $?
   oms_model_validate_name "$explicit" || return $?
   oms_model_validate_name "$explicit_fallback" || return $?
+  oms_reasoning_validate "$effort_requested" || return $?
+  if [ -n "$effort_fallback_explicit" ]; then
+    oms_reasoning_validate "$effort_fallback_explicit" || return $?
+    [ "$effort_fallback_explicit" != auto ] || {
+      echo "error: explicit fallback reasoning effort cannot be auto" >&2
+      return 2
+    }
+  fi
+  if [ "$provider" = antigravity ] && [ "$effort_requested" != auto ]; then
+    echo "error: antigravity reasoning effort is selected by the model variant; use --model or --model-class" >&2
+    return 2
+  fi
 
   if [ "$requested" != auto ]; then
     resolved="$requested"
@@ -112,11 +149,35 @@ oms_model_prepare() {
   fi
   oms_model_validate_name "$OMS_MODEL_FALLBACK" || return $?
 
+  if [ "$effort_requested" = auto ]; then
+    OMS_REASONING_RESOLVED="$(oms_reasoning_for_class "$resolved")"
+  else
+    OMS_REASONING_RESOLVED="$effort_requested"
+  fi
+  OMS_REASONING_FALLBACK=""
+  if [ -n "$OMS_MODEL_FALLBACK" ]; then
+    OMS_REASONING_FALLBACK="$OMS_REASONING_RESOLVED"
+    if [ -n "$effort_fallback_explicit" ]; then
+      OMS_REASONING_FALLBACK="$effort_fallback_explicit"
+    elif [ "$effort_requested" = auto ] && [ -z "$explicit" ] && [ -z "$explicit_fallback" ]; then
+      next="$(oms_model_next_class "$resolved")"
+      [ -z "$next" ] || OMS_REASONING_FALLBACK="$(oms_reasoning_for_class "$next")"
+    fi
+  fi
+  if [ "$provider" = antigravity ] && [ "$effort_requested" = auto ]; then
+    embedded_effort="$(oms_reasoning_from_model "$OMS_MODEL_PRIMARY")"
+    [ -z "$embedded_effort" ] || OMS_REASONING_RESOLVED="$embedded_effort"
+    embedded_effort="$(oms_reasoning_from_model "$OMS_MODEL_FALLBACK")"
+    [ -z "$embedded_effort" ] || OMS_REASONING_FALLBACK="$embedded_effort"
+  fi
+  OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
+
   OMS_MODEL_SELECTED="$OMS_MODEL_PRIMARY"
   OMS_MODEL_FALLBACK_USED=0
   OMS_MODEL_FALLBACK_REASON=""
   export OMS_MODEL_RESOLVED_CLASS OMS_MODEL_PRIMARY OMS_MODEL_FALLBACK
   export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
+  export OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 }
 
 oms_model_is_capacity_output() {

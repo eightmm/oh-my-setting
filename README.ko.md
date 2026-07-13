@@ -78,6 +78,7 @@ codex에게 위임해줘: scripts/train.py에 입력 검증 추가.
 검증 실패하면 repair 라운드 최대 2번까지 돌려서 codex에게 위임해줘.
 이 작업 전용 executor soul을 만들고 freeze한 다음 위임해줘.
 역할에 맞춰 모델을 자동 라우팅해서 codex에게 위임해줘.
+추론 강도도 자동으로 맞춰서 일반 작업은 low/medium, 게이트는 high로 실행해줘.
 codex의 patch를 admit 게이트(checks ladder) 돌려서 적용해줘.
 ```
 

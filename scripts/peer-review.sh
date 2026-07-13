@@ -32,6 +32,7 @@ MODEL_CLASS=auto
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
+REASONING_EFFORT=auto
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 usage() {
@@ -65,6 +66,7 @@ Options:
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   Explicit fallback; requires exactly one provider.
   --no-model-fallback  Disable implicit class fallback.
+  --reasoning-effort E auto, low, medium, or high.
   --no-diff            Do not attach git diff/status context.
   --no-memory          Do not attach shared harness memory.
   --no-task            Do not attach the active task handoff packet.
@@ -325,6 +327,10 @@ while [ "$#" -gt 0 ]; do
     --no-model-fallback)
       NO_MODEL_FALLBACK=1; shift
       ;;
+    --reasoning-effort)
+      [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
+      REASONING_EFFORT="$2"; shift 2
+      ;;
     --no-diff)
       NO_DIFF=1
       shift
@@ -415,6 +421,7 @@ validate_provider_list
 oms_model_validate_class "$MODEL_CLASS" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } &&
    [ "$(printf '%s' "$PROVIDERS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" != 1 ]; then
   fail "--model/--fallback-model requires exactly one provider"
@@ -426,8 +433,15 @@ if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } && [ -n "$SYNTHESIZE" ]; the
   [ "$sole_provider" = "$SYNTHESIZE" ] ||
     fail "--model cannot be reused by a different synthesis provider"
 fi
+if [ "$REASONING_EFFORT" != auto ] && {
+     printf '%s' "$PROVIDERS" | tr ',' '\n' | grep -Eq '^[[:space:]]*(antigravity|agy)[[:space:]]*$' ||
+     [ "$SYNTHESIZE" = antigravity ] || [ "$SYNTHESIZE" = agy ];
+   }; then
+  fail "explicit reasoning effort is unavailable for Antigravity; select a Low/Medium/High model variant"
+fi
 export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 if [ "$GATE" -eq 1 ]; then
   export MA_MODEL_OPERATION=review-gate
 else
