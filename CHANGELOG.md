@@ -9,6 +9,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [0.4.0] - Unreleased
 
 ### Added
+- Provider-neutral worker model routing for `agent-call`, `agent-run`,
+  `peer-ask`, `peer-review`, `peer-delegate`, `plan-run`, and `advise`.
+  `fast`/`balanced`/`deep` classes map to each installed CLI, roles and
+  operations select a class automatically, and capacity errors permit at most
+  one lower-class retry. Exact models, mappings, and fallback policy remain
+  overridable; write fallback is blocked after any worktree mutation. Artifact
+  rows and delegation liveness retain the resolved route, while executor souls
+  freeze their model contract with provider/scope/verification metadata.
 - Bounded autonomous plan execution (`oms plan-run`): atomically claims one
   scoped task, delegates it in an isolated worktree with bounded repair, and
   stops in review unless `--land` explicitly sends it through `patch-land`.
@@ -109,8 +117,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   release gates, and requested ML pre-training gates. Generated project loaders
   now allow clear bounded changes without waiting on unrelated draft choices.
 - Reduced global `rules/global-AGENTS.md` from a harness manual to a compact policy layer:
-  provider/model ladders, automatic worker-tier downgrades, and routine advisor
-  calls are gone; ambiguous work alone triggers the spec gate, and detailed
+  prompt-level provider/model ladders and routine advisor calls are gone;
+  bounded model selection now lives in executable harness policy, ambiguous
+  work alone triggers the spec gate, and detailed
   coordination routes through the `agent-harness` skill while parent judgment
   and executor scope fences stay.
 - Split install-wide rules from the repository `AGENTS.md` overlay so working on

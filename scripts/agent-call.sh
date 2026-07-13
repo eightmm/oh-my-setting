@@ -17,6 +17,10 @@ INCLUDE_MEMORY=1
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=1
 EXPORT_ONLY=0
+MODEL_CLASS=auto
+MODEL=""
+FALLBACK_MODEL=""
+NO_MODEL_FALLBACK=0
 DRY_RUN="${OH_MY_SETTING_CALL_DRY_RUN:-0}"
 
 usage() {
@@ -32,6 +36,10 @@ Options:
   --prompt-file PATH   Prompt file to send.
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/call.
+  --model-class CLASS  auto, fast, balanced, or deep (default: auto/read=fast).
+  --model MODEL        Exact provider model; disables implicit fallback.
+  --fallback-model M   Explicit one-shot capacity fallback model.
+  --no-model-fallback  Disable implicit class fallback.
   --no-memory          Do not attach shared harness memory.
   --no-task            Do not attach the active task handoff packet.
   --no-ml-context      Do not attach the compact ML context digest.
@@ -73,6 +81,25 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--artifact-dir requires path"
       ARTIFACT_DIR="$2"
       shift 2
+      ;;
+    --model-class)
+      [ "$#" -ge 2 ] || fail "--model-class requires value"
+      MODEL_CLASS="$2"
+      shift 2
+      ;;
+    --model)
+      [ "$#" -ge 2 ] || fail "--model requires value"
+      MODEL="$2"
+      shift 2
+      ;;
+    --fallback-model)
+      [ "$#" -ge 2 ] || fail "--fallback-model requires value"
+      FALLBACK_MODEL="$2"
+      shift 2
+      ;;
+    --no-model-fallback)
+      NO_MODEL_FALLBACK=1
+      shift
       ;;
     --no-memory)
       INCLUDE_MEMORY=0
@@ -120,6 +147,12 @@ case "$TO" in
   *) fail "unsupported provider: $TO" ;;
 esac
 [ "$TO" = "agy" ] && TO="antigravity"
+oms_model_validate_class "$MODEL_CLASS" || exit $?
+oms_model_validate_name "$MODEL" || exit $?
+oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+export OMS_MODEL_OPERATION=call
 
 if [ -n "$PROMPT_FILE" ]; then
   [ -f "$PROMPT_FILE" ] || fail "prompt file not found: $PROMPT_FILE"

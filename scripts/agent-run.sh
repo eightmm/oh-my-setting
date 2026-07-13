@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-task-common.sh
 . "$ROOT/scripts/lib/agent-task-common.sh"
+# shellcheck source=scripts/lib/model-routing.sh
+. "$ROOT/scripts/lib/model-routing.sh"
 
 REPO="$PWD"
 TO=""
@@ -17,6 +19,11 @@ REPAIR=0
 TASK_ID=""
 PLAN_TASK=""
 EXECUTOR_ID=""
+ROLE=""
+MODEL_CLASS=auto
+MODEL=""
+FALLBACK_MODEL=""
+NO_MODEL_FALLBACK=0
 APPLY=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=1
@@ -40,6 +47,11 @@ Options:
   --prompt-file PATH   Prompt/task file to send.
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
   --mode MODE          auto, read, or write. Default: auto.
+  --role NAME          Write mode: reusable strategy profile.
+  --model-class CLASS  auto, fast, balanced, or deep.
+  --model MODEL        Exact provider model; disables implicit fallback.
+  --fallback-model M   Explicit one-shot capacity fallback model.
+  --no-model-fallback  Disable implicit class fallback.
   --artifact-dir PATH  Override artifact directory.
   --verify CMD         Write mode only: verification command in worker worktree.
   --no-verify          Write mode only: skip default scripts/check.sh verification.
@@ -200,6 +212,30 @@ while [ "$#" -gt 0 ]; do
       MODE="$2"
       shift 2
       ;;
+    --role)
+      [ "$#" -ge 2 ] || { echo "error: --role requires value" >&2; exit 2; }
+      ROLE="$2"
+      shift 2
+      ;;
+    --model-class)
+      [ "$#" -ge 2 ] || { echo "error: --model-class requires value" >&2; exit 2; }
+      MODEL_CLASS="$2"
+      shift 2
+      ;;
+    --model)
+      [ "$#" -ge 2 ] || { echo "error: --model requires value" >&2; exit 2; }
+      MODEL="$2"
+      shift 2
+      ;;
+    --fallback-model)
+      [ "$#" -ge 2 ] || { echo "error: --fallback-model requires value" >&2; exit 2; }
+      FALLBACK_MODEL="$2"
+      shift 2
+      ;;
+    --no-model-fallback)
+      NO_MODEL_FALLBACK=1
+      shift
+      ;;
     --artifact-dir)
       [ "$#" -ge 2 ] || { echo "error: --artifact-dir requires path" >&2; exit 2; }
       ARTIFACT_DIR="$2"
@@ -293,6 +329,9 @@ esac
 # Canonicalize aliases so artifacts, plan claims, and worker records all carry
 # the same provider name.
 TO="$(oms_normalize_provider "$TO")"
+oms_model_validate_class "$MODEL_CLASS" || exit $?
+oms_model_validate_name "$MODEL" || exit $?
+oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 
 case "$MODE" in
   auto|read|write) ;;
@@ -320,6 +359,10 @@ if [ -n "$EXECUTOR_ID" ] && [ "$resolved_mode" != "write" ]; then
   echo "error: executors require write mode" >&2
   exit 2
 fi
+if [ -n "$ROLE" ] && [ "$resolved_mode" != "write" ]; then
+  echo "error: --role requires write mode" >&2
+  exit 2
+fi
 if [ "$INCLUDE_TASK" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
   agent_task_loop_warnings "$REPO" "$(agent_task_project_file "$REPO")" >&2 || true
 fi
@@ -332,6 +375,10 @@ if [ "$resolved_mode" = "read" ]; then
     cmd+=(--prompt "$PROMPT")
   fi
   [ -n "$ARTIFACT_DIR" ] && cmd+=(--artifact-dir "$ARTIFACT_DIR")
+  cmd+=(--model-class "$MODEL_CLASS")
+  [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
+  [ -n "$FALLBACK_MODEL" ] && cmd+=(--fallback-model "$FALLBACK_MODEL")
+  [ "$NO_MODEL_FALLBACK" -eq 1 ] && cmd+=(--no-model-fallback)
   [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
   [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
   [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
@@ -346,6 +393,11 @@ else
     cmd+=(--prompt "$PROMPT")
   fi
   [ -n "$ARTIFACT_DIR" ] && cmd+=(--artifact-dir "$ARTIFACT_DIR")
+  [ -n "$ROLE" ] && cmd+=(--role "$ROLE")
+  cmd+=(--model-class "$MODEL_CLASS")
+  [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
+  [ -n "$FALLBACK_MODEL" ] && cmd+=(--fallback-model "$FALLBACK_MODEL")
+  [ "$NO_MODEL_FALLBACK" -eq 1 ] && cmd+=(--no-model-fallback)
   [ -n "$VERIFY_CMD" ] && cmd+=(--verify "$VERIFY_CMD")
   [ "$NO_VERIFY" -eq 1 ] && cmd+=(--no-verify)
   [ -n "$TASK_ID" ] && cmd+=(--task-id "$TASK_ID")

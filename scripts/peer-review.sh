@@ -28,6 +28,10 @@ EXPORT_ONLY=0
 GATE=0
 VERIFY_CMD=""
 NO_VERIFY=0
+MODEL_CLASS=auto
+MODEL=""
+FALLBACK_MODEL=""
+NO_MODEL_FALLBACK=0
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
 usage() {
@@ -57,6 +61,10 @@ Options:
                        Use e.g. --base origin/main for branch/PR review.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
+  --model-class CLASS  auto, fast, balanced, or deep.
+  --model MODEL        Exact model; requires exactly one provider.
+  --fallback-model M   Explicit fallback; requires exactly one provider.
+  --no-model-fallback  Disable implicit class fallback.
   --no-diff            Do not attach git diff/status context.
   --no-memory          Do not attach shared harness memory.
   --no-task            Do not attach the active task handoff packet.
@@ -302,6 +310,21 @@ while [ "$#" -gt 0 ]; do
       ARTIFACT_DIR="$2"
       shift 2
       ;;
+    --model-class)
+      [ "$#" -ge 2 ] || fail "--model-class requires value"
+      MODEL_CLASS="$2"; shift 2
+      ;;
+    --model)
+      [ "$#" -ge 2 ] || fail "--model requires value"
+      MODEL="$2"; shift 2
+      ;;
+    --fallback-model)
+      [ "$#" -ge 2 ] || fail "--fallback-model requires value"
+      FALLBACK_MODEL="$2"; shift 2
+      ;;
+    --no-model-fallback)
+      NO_MODEL_FALLBACK=1; shift
+      ;;
     --no-diff)
       NO_DIFF=1
       shift
@@ -389,6 +412,27 @@ if [ -z "$PROMPT" ] && [ "$ML_PRESET" -eq 1 ]; then
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 validate_provider_list
+oms_model_validate_class "$MODEL_CLASS" || exit $?
+oms_model_validate_name "$MODEL" || exit $?
+oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } &&
+   [ "$(printf '%s' "$PROVIDERS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" != 1 ]; then
+  fail "--model/--fallback-model requires exactly one provider"
+fi
+if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } && [ -n "$SYNTHESIZE" ]; then
+  sole_provider="$(printf '%s' "$PROVIDERS" | tr -d '[:space:]')"
+  [ "$sole_provider" != agy ] || sole_provider=antigravity
+  [ "$SYNTHESIZE" != agy ] || SYNTHESIZE=antigravity
+  [ "$sole_provider" = "$SYNTHESIZE" ] ||
+    fail "--model cannot be reused by a different synthesis provider"
+fi
+export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+if [ "$GATE" -eq 1 ]; then
+  export MA_MODEL_OPERATION=review-gate
+else
+  export MA_MODEL_OPERATION=review
+fi
 REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 if [ -n "$BASE_REF" ]; then
@@ -515,40 +559,10 @@ elif [ -n "$SYNTHESIZE" ]; then
       printf 'SKIPPED: command not found: %s\n' "$synth_binary" >> "$synth_file"
       echo "warning: synthesis provider missing: $synth_binary" >&2
     else
-      set +e
-      case "$SYNTHESIZE" in
-        codex)
-          (
-            ma_export_child_env codex peer-review-synthesis "$REPO" "$OMS_OPERATION_ID"
-            run_with_timeout codex exec --sandbox read-only - < "$synth_prompt_file"
-          ) >> "$synth_file" 2>&1
-          synth_status=$?
-          ;;
-        claude)
-          (
-            ma_export_child_env claude peer-review-synthesis "$REPO" "$OMS_OPERATION_ID"
-            run_with_timeout claude --permission-mode plan -p < "$synth_prompt_file"
-          ) >> "$synth_file" 2>&1
-          synth_status=$?
-          ;;
-        antigravity|agy)
-          # Isolated read pass: see ma_agy_read_dir.
-          synth_agy_dir="$(ma_agy_read_dir "$REPO")" || synth_agy_dir=""
-          if [ -n "$synth_agy_dir" ]; then
-            (
-              ma_export_child_env antigravity peer-review-synthesis "$REPO" "$OMS_OPERATION_ID"
-              cd "$synth_agy_dir"
-              run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}" < "$synth_prompt_file"
-            ) >> "$synth_file" 2>&1
-            synth_status=$?
-            ma_agy_read_cleanup "$REPO" "$synth_agy_dir"
-          else
-            printf 'SKIPPED: could not create isolation dir for agy read pass\n' >> "$synth_file"
-            synth_status=1
-          fi
-          ;;
-      esac
-      set -e
+      export OMS_MODEL_OPERATION=review-synthesis
+      synth_status=0
+      ma_run_routed_provider "$SYNTHESIZE" read "$synth_prompt_file" "$synth_file" "$REPO" \
+        peer-review-synthesis "$REPO" "$OMS_OPERATION_ID" || synth_status=$?
       if [ "$synth_status" -eq 0 ]; then
         echo "ok: synthesis ($SYNTHESIZE)"
       else

@@ -41,6 +41,10 @@ Options:
   --repo PATH          Repo for context and artifacts. Default: PWD.
   --strategy NAME      Strategy/role profile (default: decision-advisor).
                        Alias: --role NAME.
+  --model-class CLASS  Advisor model class (default: deep).
+  --model MODEL        Exact advisor model.
+  --fallback-model M   Explicit one-shot capacity fallback model.
+  --no-model-fallback  Disable implicit class fallback.
   --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
   --no-memory          Do not attach shared harness memory.
@@ -100,6 +104,15 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--print-timeout requires duration"
       PASSTHROUGH+=("$1" "$2")
       shift 2
+      ;;
+    --model-class|--model|--fallback-model)
+      [ "$#" -ge 2 ] || fail "$1 requires value"
+      PASSTHROUGH+=("$1" "$2")
+      shift 2
+      ;;
+    --no-model-fallback)
+      PASSTHROUGH+=("$1")
+      shift
       ;;
     -h|--help)
       usage
@@ -213,6 +226,7 @@ bash "$SCRIPT_DIR/agent-call.sh" \
   --to "$TO" \
   --repo "$REPO" \
   --artifact-dir "$REPO/.oms/artifacts/advise" \
+  --model-class deep \
   --prompt-file "$advisor_prompt" \
   ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} || status=$?
 exit "$status"

@@ -11,6 +11,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT/scripts/lib/oms-common.sh"
+# shellcheck source=scripts/lib/model-routing.sh
+. "$ROOT/scripts/lib/model-routing.sh"
 
 REPO="$PWD"
 TO=""
@@ -21,6 +23,10 @@ LAND=0
 RETRY_KNOWN=0
 DRY_RUN=0
 EXECUTOR_ID=""
+MODEL_CLASS=auto
+MODEL=""
+FALLBACK_MODEL=""
+NO_MODEL_FALLBACK=0
 LEASE_ID=""
 VERIFY=""
 FAIL_CMD=""
@@ -46,6 +52,10 @@ Options:
   --retry-known   Retry even when this exact task/base/provider/verify contract
                   is an unresolved known failure.
   --executor ID   Use a frozen task-scoped executor soul.
+  --model-class C auto, fast, balanced, or deep.
+  --model MODEL   Exact provider model; disables implicit fallback.
+  --fallback-model M  Explicit one-shot capacity fallback model.
+  --no-model-fallback Disable implicit class fallback.
   --repo PATH     Target repo (default: current directory).
   --dry-run       Show the selected task and command without claiming/calling.
   -h, --help      Show help.
@@ -67,6 +77,10 @@ while [ "$#" -gt 0 ]; do
     --land) LAND=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --executor) [ "$#" -ge 2 ] || fail "--executor requires ID"; EXECUTOR_ID="$2"; shift 2 ;;
+    --model-class) [ "$#" -ge 2 ] || fail "--model-class requires value"; MODEL_CLASS="$2"; shift 2 ;;
+    --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
+    --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
+    --no-model-fallback) NO_MODEL_FALLBACK=1; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -76,6 +90,9 @@ done
 
 [ -n "$TO" ] || fail "--to is required"
 TO="$(oms_normalize_provider "$TO")" || fail "unknown provider: $TO"
+oms_model_validate_class "$MODEL_CLASS" || exit $?
+oms_model_validate_name "$MODEL" || exit $?
+oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 case "$REPAIR" in *[!0-9]*|"") fail "--repair must be 0-3" ;; esac
 [ "$REPAIR" -le 3 ] || fail "--repair must be 0-3"
 if [ "$USE_NEXT" -eq 1 ] && [ -n "$TASK_ID" ]; then fail "use exactly one of --id or --next"; fi
@@ -153,7 +170,8 @@ TITLE="$(printf '%s' "$task_values" | cut -f4)"
 
 base="$(git -C "$REPO" rev-parse HEAD)"
 verify_hash="$(printf '%s' "$VERIFY" | oms_sha256_stream | cut -c1-16)"
-FAIL_CMD="plan-run task=$TASK_ID base=$base provider=$TO verify=$verify_hash"
+model_hash="$(printf '%s' "$MODEL_CLASS:$MODEL:$FALLBACK_MODEL:$NO_MODEL_FALLBACK" | oms_sha256_stream | cut -c1-16)"
+FAIL_CMD="plan-run task=$TASK_ID base=$base provider=$TO verify=$verify_hash model=$model_hash"
 set +e
 failure_check="$(cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$FAIL_CMD" 2>&1)"
 failure_check_rc=$?
@@ -180,6 +198,10 @@ delegate_script="${OMS_PLAN_RUN_DELEGATE:-$ROOT/scripts/peer-delegate.sh}"
 [ -x "$delegate_script" ] || fail "delegate command is not executable: $delegate_script"
 delegate_cmd=("$delegate_script" --repo "$REPO" --to "$TO" --plan-task "$TASK_ID" --repair "$REPAIR")
 [ -n "$EXECUTOR_ID" ] && delegate_cmd+=(--executor "$EXECUTOR_ID")
+delegate_cmd+=(--model-class "$MODEL_CLASS")
+[ -n "$MODEL" ] && delegate_cmd+=(--model "$MODEL")
+[ -n "$FALLBACK_MODEL" ] && delegate_cmd+=(--fallback-model "$FALLBACK_MODEL")
+[ "$NO_MODEL_FALLBACK" -eq 1 ] && delegate_cmd+=(--no-model-fallback)
 output_file="$(agent_memory_mktemp)" || exit 1
 set +e
 "${delegate_cmd[@]}" >"$output_file" 2>&1 &

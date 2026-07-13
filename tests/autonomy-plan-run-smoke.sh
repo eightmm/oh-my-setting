@@ -91,8 +91,9 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id uns
 call_log="$TMP/calls"
 base="$(git -C "$repo" rev-parse HEAD)"
 verify_hash="$(python3 -c 'import hashlib; print(hashlib.sha256(b"true").hexdigest()[:16])')"
+model_hash="$(python3 -c 'import hashlib; print(hashlib.sha256(b"auto:::0").hexdigest()[:16])')"
 (cd "$repo" && "$ROOT/scripts/fail-ledger.sh" record --kind plan-run \
-  --cmd "plan-run task=known base=$base provider=codex verify=$verify_hash" --exit 1 \
+  --cmd "plan-run task=known base=$base provider=codex verify=$verify_hash model=$model_hash" --exit 1 \
   --summary 'plan-run failed: task known on codex') >/dev/null 2>&1
 rc=0
 HOME="$home" CALL_LOG="$call_log" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id known >/dev/null 2>"$TMP/known.err" || rc=$?

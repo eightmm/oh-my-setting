@@ -15,6 +15,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-task-common.sh"
 # shellcheck source=harness-residue.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-residue.sh"
+# shellcheck source=model-routing.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/model-routing.sh"
 
 # Removed in 0.4: fail explicitly so legacy CI does not silently run with
 # different timeout or termination behavior.
@@ -457,6 +459,12 @@ ma_append_artifact_index() {
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_EXECUTOR_ID="${OMS_EXECUTOR_ID:-}" OMS_INDEX_SOUL_SHA256="${OMS_SOUL_SHA256:-}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
+  OMS_INDEX_MODEL_CLASS="${OMS_MODEL_RESOLVED_CLASS:-}" \
+  OMS_INDEX_REQUESTED_MODEL="${OMS_MODEL_PRIMARY:-}" \
+  OMS_INDEX_SELECTED_MODEL="${OMS_MODEL_SELECTED:-}" \
+  OMS_INDEX_FALLBACK_MODEL="${OMS_MODEL_FALLBACK:-}" \
+  OMS_INDEX_FALLBACK_USED="${OMS_MODEL_FALLBACK_USED:-0}" \
+  OMS_INDEX_FALLBACK_REASON="${OMS_MODEL_FALLBACK_REASON:-}" \
   oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$retention_helper" <<'EOF'
 import hashlib, json, os, re, runpy, shutil, sys, tempfile, time, uuid
 repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, retention_helper = sys.argv[1:]
@@ -533,6 +541,25 @@ if re.match(r"^[0-9a-f]{64}$", soul_sha256):
 parent_event_id = safe_id(os.environ.get("OMS_INDEX_PARENT_EVENT_ID", ""))
 if parent_event_id:
     row["parent_event_id"] = parent_event_id
+model_class = os.environ.get("OMS_INDEX_MODEL_CLASS", "")
+if model_class in ("fast", "balanced", "deep"):
+    row["model_class"] = model_class
+def bounded_model(name):
+    value = os.environ.get(name, "")
+    return value if value and len(value) <= 160 and not any(c in value for c in "\r\n\t") else ""
+requested_model = bounded_model("OMS_INDEX_REQUESTED_MODEL")
+selected_model = bounded_model("OMS_INDEX_SELECTED_MODEL")
+fallback_model = bounded_model("OMS_INDEX_FALLBACK_MODEL")
+if requested_model:
+    row["requested_model"] = requested_model
+if selected_model:
+    row["selected_model"] = selected_model
+if fallback_model:
+    row["fallback_model"] = fallback_model
+fallback_reason = os.environ.get("OMS_INDEX_FALLBACK_REASON", "")
+if fallback_reason in ("capacity", "capacity-no-fallback", "capacity-dirty-worktree"):
+    row["fallback_reason"] = fallback_reason
+row["fallback_used"] = os.environ.get("OMS_INDEX_FALLBACK_USED", "0") == "1"
 row.update(path_fields("artifact", artifact_raw))
 row.update(path_fields("patch", patch_raw))
 row.update(path_fields("source", source_raw))
@@ -641,6 +668,161 @@ ma_sanitize_quoted_output() {
   rm -f "$tmp"
 }
 
+ma_provider_attempt() {
+  local provider="$1"
+  local access="$2"
+  local prompt_file="$3"
+  local output_file="$4"
+  local workdir="$5"
+  local model="$6"
+  local origin="$7"
+  local state_repo="$8"
+  local call_id="$9"
+  local permission
+  local -a cmd
+
+  case "$provider" in
+    codex)
+      cmd=(codex exec)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      if [ "$access" = write ]; then
+        cmd+=(--sandbox workspace-write -)
+      else
+        cmd+=(--sandbox read-only --skip-git-repo-check -)
+      fi
+      ;;
+    claude)
+      permission=plan
+      [ "$access" != write ] || permission=acceptEdits
+      cmd=(claude)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      cmd+=(--permission-mode "$permission" -p)
+      ;;
+    antigravity|agy)
+      cmd=(agy)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      cmd+=(--print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}")
+      ;;
+    *) echo "error: unsupported provider: $provider" > "$output_file"; return 2 ;;
+  esac
+
+  (
+    ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id"
+    cd "$workdir" || exit 1
+    run_with_timeout "${cmd[@]}" < "$prompt_file"
+  ) > "$output_file" 2>&1 &
+  local pid="$!"
+  if wait "$pid"; then return 0; else return $?; fi
+}
+
+# Content fingerprint for the complete write surface. `git status` alone is
+# insufficient: changing and re-staging an already-staged path preserves its
+# porcelain status while changing its bytes.
+ma_worktree_fingerprint() {
+  local workdir="$1"
+  python3 - "$workdir" <<'PY'
+import hashlib, os, subprocess, sys
+
+repo = sys.argv[1]
+h = hashlib.sha256()
+h.update(subprocess.check_output([
+    "git", "-C", repo, "diff", "--binary", "--no-ext-diff", "HEAD", "--"
+]))
+raw = subprocess.check_output([
+    "git", "-C", repo, "ls-files", "--others", "--exclude-standard", "-z"
+])
+for rel in sorted(p for p in raw.split(b"\0") if p):
+    path = os.path.join(os.fsencode(repo), rel)
+    h.update(b"\0untracked\0" + rel + b"\0")
+    if os.path.islink(path):
+        h.update(b"link\0" + os.fsencode(os.readlink(path)))
+    else:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+print(h.hexdigest())
+PY
+}
+
+# Run one provider with a resolved model and at most one capacity-only fallback.
+# For write access the retry is allowed only when the first attempt left the
+# isolated worktree unchanged.
+ma_run_routed_provider() {
+  local provider="$1"
+  local access="$2"
+  local prompt_file="$3"
+  local artifact="$4"
+  local workdir="$5"
+  local origin="$6"
+  local state_repo="$7"
+  local call_id="$8"
+  local attempt_file
+  local before=""
+  local after=""
+  local status
+  local isolated_dir=""
+
+  [ "$provider" != agy ] || provider=antigravity
+  oms_model_prepare "$provider" || return $?
+  attempt_file="$(agent_memory_mktemp)" || return 1
+
+  if [ "$access" = read ] && [ "$provider" = antigravity ]; then
+    isolated_dir="$(ma_agy_read_dir "$state_repo")" || isolated_dir=""
+    if [ -z "$isolated_dir" ]; then
+      printf 'SKIPPED: could not create isolation dir for agy read pass\n' >> "$artifact"
+      rm -f "$attempt_file"
+      return 1
+    fi
+    workdir="$isolated_dir"
+  fi
+  if [ "$access" = write ]; then
+    before="$(ma_worktree_fingerprint "$workdir")" || before=""
+  fi
+
+  printf 'model-route: class=%s primary=%s fallback=%s\n' \
+    "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" >> "$artifact"
+  status=0
+  ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
+    "$OMS_MODEL_PRIMARY" "$origin" "$state_repo" "$call_id" || status=$?
+  cat "$attempt_file" >> "$artifact"
+
+  if [ "$status" -ne 0 ] && oms_model_is_capacity_output "$attempt_file"; then
+    if [ -z "$OMS_MODEL_FALLBACK" ]; then
+      OMS_MODEL_FALLBACK_REASON=capacity-no-fallback
+    elif [ "$access" = write ]; then
+      after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
+      if [ -z "$before" ] || [ "$after" != "$before" ]; then
+        OMS_MODEL_FALLBACK_REASON=capacity-dirty-worktree
+      else
+        OMS_MODEL_FALLBACK_USED=1
+        OMS_MODEL_FALLBACK_REASON=capacity
+      fi
+    else
+      OMS_MODEL_FALLBACK_USED=1
+      OMS_MODEL_FALLBACK_REASON=capacity
+    fi
+
+    if [ "$OMS_MODEL_FALLBACK_USED" = 1 ]; then
+      OMS_MODEL_SELECTED="$OMS_MODEL_FALLBACK"
+      printf '\nmodel-fallback: reason=capacity selected=%s\n' "$OMS_MODEL_SELECTED" >> "$artifact"
+      : > "$attempt_file"
+      status=0
+      ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
+        "$OMS_MODEL_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
+      cat "$attempt_file" >> "$artifact"
+    fi
+  fi
+
+  export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
+  printf '\nmodel-result: selected=%s fallback_used=%s reason=%s\n' \
+    "$OMS_MODEL_SELECTED" "$OMS_MODEL_FALLBACK_USED" "${OMS_MODEL_FALLBACK_REASON:--}" >> "$artifact"
+  rm -f "$attempt_file"
+  if [ -n "$isolated_dir" ]; then
+    ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+  fi
+  return "$status"
+}
+
 run_provider() {
   local provider="$1"
   local prompt_file="$2"
@@ -697,50 +879,11 @@ run_provider() {
     return 127
   fi
 
-  set +e
-  case "$provider" in
-    codex)
-      # --skip-git-repo-check: read-only ask/review/call may run in any
-      # directory (sandbox is already read-only); without it codex refuses
-      # outside a trusted git repo.
-      # Export in the current worker shell so ma_wait_stdin_file's background
-      # CLI remains visible to the caller's signal trap. Wrapping this in one
-      # more subshell makes TERM wait for the full provider timeout instead of
-      # killing the tracked job and cleaning the temporary prompt promptly.
-      ma_export_child_env "$provider" "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}"
-      ma_wait_stdin_file "$prompt_file" run_with_timeout codex exec --sandbox read-only --skip-git-repo-check - \
-        >> "$artifact" 2>&1
-      status=$?
-      ;;
-    claude)
-      ma_export_child_env "$provider" "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}"
-      ma_wait_stdin_file "$prompt_file" run_with_timeout claude --permission-mode plan -p \
-        >> "$artifact" 2>&1
-      status=$?
-      ;;
-    antigravity|agy)
-      # Isolated read pass: see ma_agy_read_dir.
-      local agy_dir
-      agy_dir="$(ma_agy_read_dir "${REPO:-}")" || agy_dir=""
-      if [ -n "$agy_dir" ]; then
-        (
-          ma_export_child_env "antigravity" "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}"
-          cd "$agy_dir"
-          ma_wait_stdin_file "$prompt_file" run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}"
-        ) >> "$artifact" 2>&1
-        status=$?
-        ma_agy_read_cleanup "${REPO:-}" "$agy_dir"
-      else
-        printf 'SKIPPED: could not create isolation dir for agy read pass\n' >> "$artifact"
-        status=1
-      fi
-      ;;
-    *)
-      printf 'SKIPPED: unsupported provider: %s\n' "$provider" >> "$artifact"
-      status=1
-      ;;
-  esac
-  set -e
+  OMS_MODEL_OPERATION="${MA_MODEL_OPERATION:-${MA_KIND:-call}}"
+  export OMS_MODEL_OPERATION
+  status=0
+  ma_run_routed_provider "$provider" read "$prompt_file" "$artifact" "${REPO:-$PWD}" \
+    "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}" || status=$?
 
   printf '\n\n## Exit\n\n%s\n' "$status" >> "$artifact"
   ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" "$status" "$artifact" "" "$prompt_file" || true

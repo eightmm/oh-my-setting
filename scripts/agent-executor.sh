@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/oms-common.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
+# shellcheck source=scripts/lib/model-routing.sh
+. "$ROOT/scripts/lib/model-routing.sh"
 
 REPO="${OMS_STATE_REPO:-$PWD}"
 ACTION=""
@@ -27,6 +29,10 @@ VERIFY=""
 SOUL_FILE=""
 REASON=""
 MODE="worktree-write"
+MODEL_CLASS=auto
+MODEL=""
+FALLBACK_MODEL=""
+NO_MODEL_FALLBACK=0
 GC_APPLY=0
 
 usage() {
@@ -57,6 +63,10 @@ Options:
   --verify CMD       Frozen verification command.
   --soul-file FILE   Model-generated behavioral specialization for create.
   --mode MODE        read or worktree-write. Default: worktree-write.
+  --model-class C    auto, fast, balanced, or deep; frozen at create time.
+  --model MODEL      Exact provider model.
+  --fallback-model M Explicit one-shot capacity fallback model.
+  --no-model-fallback Disable implicit class fallback.
   --reason TEXT      Failure reason for fail.
   --days N           Retention age for gc. Default: 30.
   --dry-run          Print executor gc removals without deleting (default).
@@ -86,6 +96,10 @@ while [ "$#" -gt 0 ]; do
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --soul-file) [ "$#" -ge 2 ] || fail "--soul-file requires file"; SOUL_FILE="$2"; shift 2 ;;
     --mode) [ "$#" -ge 2 ] || fail "--mode requires read|worktree-write"; MODE="$2"; shift 2 ;;
+    --model-class) [ "$#" -ge 2 ] || fail "--model-class requires value"; MODEL_CLASS="$2"; shift 2 ;;
+    --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
+    --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
+    --no-model-fallback) NO_MODEL_FALLBACK=1; shift ;;
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
     --days) [ "$#" -ge 2 ] || fail "--days requires integer"; DAYS="$2"; shift 2 ;;
     --dry-run) GC_APPLY=0; shift ;;
@@ -96,6 +110,9 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
 case "$MODE" in read|worktree-write) ;; *) fail "--mode must be read or worktree-write" ;; esac
+oms_model_validate_class "$MODEL_CLASS" || exit $?
+oms_model_validate_name "$MODEL" || exit $?
+oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 case "$DAYS" in *[!0-9]*|"") fail "--days must be a non-negative integer" ;; esac
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
@@ -184,6 +201,10 @@ PY
   fi
   role_file="$($ROOT/scripts/agent-role.sh --repo "$REPO" --name "$STRATEGY" resolve)" ||
     fail "unknown strategy: $STRATEGY"
+  export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+  export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+  export OMS_MODEL_ROLE="$STRATEGY" OMS_MODEL_OPERATION=delegate
+  oms_model_prepare "$PROVIDER" || exit $?
   base_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
   mkdir -p "$STATE"
   agent_memory_ensure_oms_ignore_for_path "$STATE" 2>/dev/null || true
@@ -198,6 +219,8 @@ PY
     OMS_EXECUTOR_STRATEGY="$STRATEGY" OMS_EXECUTOR_MODE="$MODE" OMS_EXECUTOR_TASK="$TASK_ID" \
     OMS_EXECUTOR_PLAN="$PLAN_TASK" OMS_EXECUTOR_LEASE="$lease_id" OMS_EXECUTOR_BASE="$base_sha" \
     OMS_EXECUTOR_ALLOWED="$ALLOWED" OMS_EXECUTOR_FORBIDDEN="$FORBIDDEN" OMS_EXECUTOR_VERIFY="$VERIFY" \
+    OMS_EXECUTOR_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_EXECUTOR_MODEL="$OMS_MODEL_PRIMARY" \
+    OMS_EXECUTOR_FALLBACK_MODEL="$OMS_MODEL_FALLBACK" \
     python3 <<'PY'
 import json, os, re, time
 def paths(raw):
@@ -216,6 +239,8 @@ d={"schema":1,"executor_id":os.environ["OMS_EXECUTOR_ID"],"state":"draft",
 "plan_task":os.environ["OMS_EXECUTOR_PLAN"],"lease_id":os.environ["OMS_EXECUTOR_LEASE"],
 "base_sha":os.environ["OMS_EXECUTOR_BASE"],"allowed_paths":paths(os.environ["OMS_EXECUTOR_ALLOWED"]),
 "forbidden_paths":paths(os.environ["OMS_EXECUTOR_FORBIDDEN"]),"verify":os.environ["OMS_EXECUTOR_VERIFY"],
+"model_class":os.environ["OMS_EXECUTOR_MODEL_CLASS"],"model":os.environ["OMS_EXECUTOR_MODEL"],
+"fallback_model":os.environ["OMS_EXECUTOR_FALLBACK_MODEL"],
 "soul_sha256":"","created_at":now,"updated_at":now,"reason":""}
 with open(os.environ["OMS_EXECUTOR_META"],"w",encoding="utf-8") as f: json.dump(d,f,indent=2,ensure_ascii=False)
 PY
@@ -323,6 +348,9 @@ def values(v): return ", ".join(v) if v else "(unrestricted)"
 print("\n## Frozen Executor Contract\n")
 print("executor_id: %s"%d["executor_id"]); print("soul_sha256: %s"%d["soul_sha256"])
 print("provider: %s"%d["provider"]); print("mode: %s"%d["mode"])
+print("model_class: %s"%(d.get("model_class") or "(none)"))
+print("model: %s"%(d.get("model") or "(provider default)"))
+print("fallback_model: %s"%(d.get("fallback_model") or "(none)"))
 print("task_id: %s"%(d.get("task_id") or "(none)")); print("lease_id: %s"%(d.get("lease_id") or "(none)"))
 print("base_sha: %s"%(d.get("base_sha") or "(none)")); print("allowed_paths: %s"%values(d.get("allowed_paths",[])))
 print("forbidden_paths: %s"%(", ".join(d.get("forbidden_paths",[])) or "(none)"))

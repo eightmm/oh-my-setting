@@ -35,6 +35,12 @@ PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
 plan_brief_file=""
 REPAIR=0
+MODEL_CLASS=auto
+MODEL_CLASS_EXPLICIT=0
+MODEL=""
+FALLBACK_MODEL=""
+NO_MODEL_FALLBACK=0
+NO_MODEL_FALLBACK_EXPLICIT=0
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
 usage() {
@@ -57,6 +63,11 @@ Options:
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
   --repo PATH          Git repo to work on. Default: current directory.
+  --model-class CLASS  auto, fast, balanced, or deep. Auto uses the role and
+                       defaults write workers to balanced.
+  --model MODEL        Exact provider model; disables implicit fallback.
+  --fallback-model M   Explicit one-shot capacity fallback model.
+  --no-model-fallback  Disable implicit class fallback.
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit
                        marks the delegation failed. Default: when the project
@@ -130,6 +141,27 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--repo requires path"
       REPO="$2"
       shift 2
+      ;;
+    --model-class)
+      [ "$#" -ge 2 ] || fail "--model-class requires value"
+      MODEL_CLASS="$2"
+      MODEL_CLASS_EXPLICIT=1
+      shift 2
+      ;;
+    --model)
+      [ "$#" -ge 2 ] || fail "--model requires value"
+      MODEL="$2"
+      shift 2
+      ;;
+    --fallback-model)
+      [ "$#" -ge 2 ] || fail "--fallback-model requires value"
+      FALLBACK_MODEL="$2"
+      shift 2
+      ;;
+    --no-model-fallback)
+      NO_MODEL_FALLBACK=1
+      NO_MODEL_FALLBACK_EXPLICIT=1
+      shift
       ;;
     --verify)
       [ "$#" -ge 2 ] || fail "--verify requires command"
@@ -234,6 +266,9 @@ case "$TO" in
   *) fail "unsupported provider: $TO" ;;
 esac
 [ "$TO" = "agy" ] && TO="antigravity"
+oms_model_validate_class "$MODEL_CLASS" || exit $?
+oms_model_validate_name "$MODEL" || exit $?
+oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 
 if [ -n "$BRIEF_FILE" ]; then
   [ -f "$BRIEF_FILE" ] || fail "brief file not found: $BRIEF_FILE"
@@ -254,7 +289,7 @@ if [ -n "$EXECUTOR_ID" ]; then
   [ -z "$ROLE" ] || fail "--executor and --role are mutually exclusive"
   executor_meta="$("$(ma_scripts_dir)/agent-executor.sh" show --repo "$REPO" --id "$EXECUTOR_ID")" ||
     fail "cannot read executor $EXECUTOR_ID"
-  executor_values="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("provider",""),d.get("state",""),d.get("mode",""),d.get("plan_task",""),d.get("task_id",""),d.get("verify",""),d.get("soul_sha256","")]))')"
+  executor_values="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("provider",""),d.get("state",""),d.get("mode",""),d.get("plan_task",""),d.get("task_id",""),d.get("verify",""),d.get("soul_sha256",""),d.get("strategy",""),d.get("model_class",""),d.get("model",""),d.get("fallback_model","")]))')"
   executor_provider="$(printf '%s' "$executor_values" | cut -f1)"
   executor_state="$(printf '%s' "$executor_values" | cut -f2)"
   executor_mode="$(printf '%s' "$executor_values" | cut -f3)"
@@ -262,9 +297,24 @@ if [ -n "$EXECUTOR_ID" ]; then
   executor_task="$(printf '%s' "$executor_values" | cut -f5)"
   executor_verify="$(printf '%s' "$executor_values" | cut -f6)"
   EXECUTOR_SOUL_SHA="$(printf '%s' "$executor_values" | cut -f7)"
+  executor_strategy="$(printf '%s' "$executor_values" | cut -f8)"
+  executor_model_class="$(printf '%s' "$executor_values" | cut -f9)"
+  executor_model="$(printf '%s' "$executor_values" | cut -f10)"
+  executor_fallback_model="$(printf '%s' "$executor_values" | cut -f11)"
   [ "$executor_provider" = "$TO" ] || fail "executor provider is $executor_provider, not $TO"
   [ "$executor_state" = "frozen" ] || fail "executor $EXECUTOR_ID is $executor_state, not frozen"
   [ "$executor_mode" = "worktree-write" ] || fail "executor $EXECUTOR_ID mode is $executor_mode, not worktree-write"
+  [ "$MODEL_CLASS_EXPLICIT" = 0 ] || [ "$MODEL_CLASS" = auto ] || [ "$MODEL_CLASS" = "$executor_model_class" ] ||
+    fail "--model-class conflicts with executor contract"
+  [ -z "$MODEL" ] || [ "$MODEL" = "$executor_model" ] || fail "--model conflicts with executor contract"
+  [ -z "$FALLBACK_MODEL" ] || [ "$FALLBACK_MODEL" = "$executor_fallback_model" ] ||
+    fail "--fallback-model conflicts with executor contract"
+  [ "$NO_MODEL_FALLBACK_EXPLICIT" = 0 ] || [ -z "$executor_fallback_model" ] ||
+    fail "--no-model-fallback conflicts with executor contract"
+  MODEL_CLASS="${executor_model_class:-auto}"
+  MODEL="$executor_model"
+  FALLBACK_MODEL="$executor_fallback_model"
+  NO_MODEL_FALLBACK=1
   if [ -n "$executor_plan" ]; then
     [ -z "$PLAN_TASK_ID" ] || [ "$PLAN_TASK_ID" = "$executor_plan" ] || fail "--plan-task conflicts with executor"
     PLAN_TASK_ID="$executor_plan"
@@ -344,6 +394,11 @@ if [ -n "$ROLE" ]; then
     fail "no role profile '$ROLE' (create one with agent-role.sh --name $ROLE init)"
   echo "role: $ROLE ($role_file)"
 fi
+
+export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+export OMS_MODEL_ROLE="${ROLE:-${executor_strategy:-}}" OMS_MODEL_OPERATION=delegate
+oms_model_prepare "$TO" || exit $?
 
 load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
@@ -466,6 +521,8 @@ if [ "$DRY_RUN" != "1" ]; then
   agent_memory_ensure_oms_ignore_for_path "$liveness_file" 2>/dev/null || true
   OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="$EXECUTOR_ID" \
     OMS_DL_SOUL_SHA="$EXECUTOR_SOUL_SHA" OMS_DL_PID="$$" \
+    OMS_DL_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_DL_MODEL="$OMS_MODEL_PRIMARY" \
+    OMS_DL_FALLBACK_MODEL="$OMS_MODEL_FALLBACK" \
     OMS_DL_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_DL_WT="$worktree" \
     OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
     python3 - > "$liveness_file" <<'PY'
@@ -477,6 +534,9 @@ print(json.dumps({
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
     "worktree": os.environ["OMS_DL_WT"], "task_id": os.environ.get("OMS_DL_TASK", ""),
     "lease_id": os.environ.get("OMS_DL_LEASE", ""),
+    "model_class": os.environ.get("OMS_DL_MODEL_CLASS", ""),
+    "model": os.environ.get("OMS_DL_MODEL", ""),
+    "fallback_model": os.environ.get("OMS_DL_FALLBACK_MODEL", ""),
 }, ensure_ascii=False))
 PY
 fi
@@ -512,46 +572,37 @@ fi
 # has none — and OMS_AGENT attributes any worker-written notes to the provider.
 run_worker() {
   local prompt="$1"
-  local worker_pid
-
   worker_status=0
-  set +e
-  case "$TO" in
-    codex)
-      (
-        ma_export_child_env "$TO" peer-delegate "$REPO" "$timestamp"
-        [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
-        cd "$worktree"
-        run_with_timeout codex exec --sandbox workspace-write - < "$prompt"
-      ) >> "$artifact" 2>&1 &
-      worker_pid="$!"
-      wait "$worker_pid"
-      worker_status=$?
-      ;;
-    claude)
-      (
-        ma_export_child_env "$TO" peer-delegate "$REPO" "$timestamp"
-        [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
-        cd "$worktree"
-        run_with_timeout claude -p --permission-mode acceptEdits < "$prompt"
-      ) >> "$artifact" 2>&1 &
-      worker_pid="$!"
-      wait "$worker_pid"
-      worker_status=$?
-      ;;
-    antigravity)
-      (
-        ma_export_child_env "$TO" peer-delegate "$REPO" "$timestamp"
-        [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
-        cd "$worktree"
-        run_with_timeout agy --print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}" < "$prompt"
-      ) >> "$artifact" 2>&1 &
-      worker_pid="$!"
-      wait "$worker_pid"
-      worker_status=$?
+  [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
+  ma_run_routed_provider "$TO" write "$prompt" "$artifact" "$worktree" \
+    peer-delegate "$REPO" "$timestamp" || worker_status=$?
+  if [ "$route_captured" = 0 ]; then
+    route_captured=1
+    route_class="$OMS_MODEL_RESOLVED_CLASS"
+    route_primary="$OMS_MODEL_PRIMARY"
+    route_fallback="$OMS_MODEL_FALLBACK"
+    route_selected="$OMS_MODEL_SELECTED"
+    route_fallback_used="$OMS_MODEL_FALLBACK_USED"
+    route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
+  elif [ "$OMS_MODEL_FALLBACK_USED" = 1 ]; then
+    route_selected="$OMS_MODEL_SELECTED"
+    route_fallback_used=1
+    route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
+  elif [ -n "$OMS_MODEL_FALLBACK_REASON" ]; then
+    route_selected="$OMS_MODEL_SELECTED"
+    route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
+  fi
+  case "$OMS_MODEL_FALLBACK_REASON:$worker_status" in
+    capacity:*|capacity-no-fallback:*|capacity-dirty-worktree:*)
+      [ "$worker_status" -eq 0 ] || route_capacity_terminal=1
       ;;
   esac
-  set -e
+  if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$worker_status" -eq 0 ]; then
+    OMS_MODEL_EXPLICIT="$OMS_MODEL_SELECTED"
+    OMS_MODEL_FALLBACK_EXPLICIT=""
+    OMS_MODEL_NO_FALLBACK=1
+    export OMS_MODEL_EXPLICIT OMS_MODEL_FALLBACK_EXPLICIT OMS_MODEL_NO_FALLBACK
+  fi
 }
 
 # Capture the patch before running --verify so verification byproducts
@@ -616,6 +667,14 @@ write_repair_prompt() {
 }
 
 worker_status=0
+route_captured=0
+route_capacity_terminal=0
+route_class=""
+route_primary=""
+route_fallback=""
+route_selected=""
+route_fallback_used=0
+route_fallback_reason=""
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] ||
   "$(ma_scripts_dir)/agent-executor.sh" start --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_started=1
@@ -651,7 +710,8 @@ fi
 # A missing CLI (127) is not repairable, and a repair prompt that trips the
 # outbound gate stops the loop — re-sending secret-laden context is futile.
 repair_used=0
-if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ]; then
+if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] &&
+   [ "$route_capacity_terminal" = 0 ]; then
   while [ "$repair_used" -lt "$REPAIR" ] && { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
     repair_used=$((repair_used + 1))
     write_repair_prompt "$repair_prompt_file"
@@ -678,6 +738,19 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ];
     fi
     echo "repair $repair_used: worker exit $worker_status, verify exit $verify_status"
   done
+fi
+
+# Preserve the first route contract in lineage even when a verification repair
+# continued on the already-selected fallback model.
+if [ "$route_captured" = 1 ]; then
+  OMS_MODEL_RESOLVED_CLASS="$route_class"
+  OMS_MODEL_PRIMARY="$route_primary"
+  OMS_MODEL_FALLBACK="$route_fallback"
+  OMS_MODEL_SELECTED="$route_selected"
+  OMS_MODEL_FALLBACK_USED="$route_fallback_used"
+  OMS_MODEL_FALLBACK_REASON="$route_fallback_reason"
+  export OMS_MODEL_RESOLVED_CLASS OMS_MODEL_PRIMARY OMS_MODEL_FALLBACK
+  export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
 fi
 
 printf '\n\n## Exit\n\n%s\n' "$worker_status" >> "$artifact"

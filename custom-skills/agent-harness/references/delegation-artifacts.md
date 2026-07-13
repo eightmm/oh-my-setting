@@ -7,6 +7,15 @@ oms agent-run --to claude --repo . --mode read --prompt "Assess this plan."
 oms agent-run --to codex --repo . --mode write --prompt "Implement the bounded fix."
 ```
 
+The harness resolves `auto` to `fast`, `balanced`, or `deep` from the operation
+and role, then maps that class to the provider CLI. Use `--model-class` to pin a
+class, `--model` for an exact model, `--fallback-model` for an explicit backup,
+or `--no-model-fallback` to disable fallback. Only a recognized capacity error
+may retry, at most once; a write attempt that changed its worktree is never
+retried. Provider/class mappings can be overridden with variables such as
+`OMS_MODEL_CODEX_FAST`, `OMS_MODEL_CLAUDE_BALANCED`, and
+`OMS_MODEL_ANTIGRAVITY_DEEP`.
+
 Read mode cannot edit the repo. Write mode uses an isolated worktree and
 returns an artifact log plus patch; workers cannot commit or push. Outbound
 context is scanned and sensitive-looking content blocks the call.
@@ -15,7 +24,8 @@ Use `--no-memory`, `--no-task`, or `--no-ml-context` to omit prompt layers.
 Use `--export-only` for read calls/reviews when another provider must not be
 called directly, then import the answer with `oms import-agent-result`.
 
-Artifacts are indexed under `.oms/artifacts/index.jsonl`. Inspect with:
+Artifacts are indexed under `.oms/artifacts/index.jsonl`, including selected
+model class/model and fallback outcome. Inspect with:
 
 ```bash
 oms artifact-index --repo . latest

@@ -79,7 +79,12 @@ Key flags beyond `--to`/`--brief-file`/`--verify`:
   the plan task's `role` field.
 - `--executor ID` — use one task-scoped, hash-frozen executor soul. It is
   mutually exclusive with `--role`; provider/task/lease/verify mismatches
-  fail before the worker runs, and repairs receive the same frozen soul.
+  fail before the worker runs, and repairs receive the same frozen soul and
+  model route.
+- `--model-class fast|balanced|deep|auto` — select a portable cost/capability
+  class. Auto uses the role/operation; `--model` pins an exact provider model,
+  `--fallback-model` supplies an explicit backup, and `--no-model-fallback`
+  disables fallback. Capacity fallback is one-shot and blocked after writes.
 - `--repair N` — allow up to N verify-fail repair rounds (0-3): the worker
   gets the failing output back and retries before the delegation is failed.
 - `--no-verify` — skip verification (rarely right; the verify contract is what

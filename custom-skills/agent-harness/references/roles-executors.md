@@ -22,12 +22,13 @@ Use a task-scoped executor soul only for substantial bounded write delegation:
 
 ```bash
 oms agent-executor --repo . create --id ex1 --provider codex \
-  --strategy implementation-worker --plan-task t1 --soul-file proposal.md
+  --strategy implementation-worker --plan-task t1 --model-class auto \
+  --soul-file proposal.md
 oms agent-executor --repo . validate --id ex1
 oms agent-executor --repo . freeze --id ex1
 ```
 
 `SOUL.md` controls behavior only. `meta.json` is authoritative for provider,
-mode, task/lease, base SHA, allowed/forbidden paths, and verification. The
-executor must not widen those fields or delegate again. Repair rounds reuse the
-same frozen soul.
+resolved model class/model/fallback, mode, task/lease, base SHA,
+allowed/forbidden paths, and verification. The executor must not widen those
+fields or delegate again. Repair rounds reuse the same frozen soul and route.
