@@ -49,7 +49,7 @@ Options:
                        Use before expensive runs.
   --repo PATH          Git repo for optional context. Default: current directory.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
-  --artifact-dir PATH  Artifact directory. Default: PWD/.oms/artifacts/ask.
+  --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/ask.
   --model-class CLASS  auto, fast, balanced, or deep.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   Explicit fallback; requires exactly one provider.
@@ -260,11 +260,11 @@ if [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
 else
   export MA_MODEL_OPERATION=ask
 fi
+REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
-  REPO="$(cd "$REPO" && pwd)"
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 fi
-ARTIFACT_DIR="${ARTIFACT_DIR:-$PWD/.oms/artifacts/ask}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/ask}"
 
 load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"

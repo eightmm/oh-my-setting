@@ -17,8 +17,9 @@ ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT_LIB/file-lock.sh"
 
-STATE_ROOT="$(oms_repo_root "$PWD")"
-LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
+REPO="${OMS_STATE_REPO:-$PWD}"
+STATE_ROOT=""
+LEDGER=""
 SCHEMA=2
 
 CMD=""
@@ -31,10 +32,10 @@ ACTION=""
 
 usage() {
   cat <<'EOF'
-Usage: fail-ledger.sh record --cmd CMD --exit N [--kind K] [--summary TEXT]
-       fail-ledger.sh check  --cmd CMD
-       fail-ledger.sh resolve --fingerprint FP
-       fail-ledger.sh list   [--unresolved]
+Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT]
+       fail-ledger.sh [--repo PATH] check  --cmd CMD
+       fail-ledger.sh [--repo PATH] resolve --fingerprint FP
+       fail-ledger.sh [--repo PATH] list   [--unresolved]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
 Fingerprint = short hash of the normalized command (whitespace collapsed,
@@ -121,6 +122,7 @@ while [ "$#" -gt 0 ]; do
     --kind) [ "$#" -ge 2 ] || fail "--kind requires text"; KIND="$2"; shift 2 ;;
     --summary) [ "$#" -ge 2 ] || fail "--summary requires text"; SUMMARY="$2"; shift 2 ;;
     --fingerprint) [ "$#" -ge 2 ] || fail "--fingerprint requires a value"; FINGERPRINT="$2"; shift 2 ;;
+    --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --unresolved) UNRESOLVED_ONLY=1; shift ;;
     record|check|resolve|list) ACTION="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -129,6 +131,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-list}"
+STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
+LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
 
 case "$ACTION" in
   record)

@@ -201,8 +201,17 @@ grep -Fq -- '- selected-model: codex-fast-x' "$export_artifact" ||
   fail "export artifact missing selected model"
 grep -Fq -- '- reasoning-effort: low' "$export_artifact" ||
   fail "export artifact missing reasoning effort"
-"$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers codex --model-class fast \
-  --prompt 'export peer route' --export-only >/dev/null
+peer_ask_caller="$TMP/peer-ask-caller"
+mkdir -p "$peer_ask_caller"
+(
+  cd "$peer_ask_caller"
+  "$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers codex --model-class fast \
+    --prompt 'export peer route' --export-only >/dev/null
+)
+[ ! -e "$peer_ask_caller/.oms" ] ||
+  fail "peer-ask --repo must not leave default artifacts in the caller directory"
+find "$repo/.oms/artifacts/ask" -type f -name '*export-peer-route*' | grep -q . ||
+  fail "peer-ask --repo should keep default artifacts under the state repo"
 tail -n 1 "$repo/.oms/artifacts/index.jsonl" | grep -Fq '"selected_model"' &&
   fail "local export synthesis must not inherit provider route provenance"
 

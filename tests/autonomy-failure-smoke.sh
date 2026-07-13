@@ -18,6 +18,19 @@ git -C "$repo" commit -qm base
 
 LEDGER="$repo/.oms/failures.jsonl"
 tool="$ROOT/scripts/fail-ledger.sh"
+caller="$TMP/caller"
+mkdir -p "$caller"
+(cd "$caller" && "$tool" --repo "$repo" record \
+  --cmd 'repo-scoped failure' --exit 1 --summary scoped) >/dev/null 2>&1
+grep -Fq 'repo-scoped failure' "$LEDGER" || fail "--repo should select the failure ledger state repo"
+[ ! -e "$caller/.oms" ] || fail "--repo must not create failure state in the caller directory"
+state_caller="$TMP/state-caller"
+mkdir -p "$state_caller"
+(cd "$state_caller" && OMS_STATE_REPO="$repo" "$tool" record \
+  --cmd 'environment-scoped failure' --exit 1 --summary scoped) >/dev/null 2>&1
+grep -Fq 'environment-scoped failure' "$LEDGER" ||
+  fail "OMS_STATE_REPO should select the failure ledger state repo"
+[ ! -e "$state_caller/.oms" ] || fail "OMS_STATE_REPO must not create caller-local failure state"
 (cd "$repo" && "$tool" record --cmd 'bash scripts/check.sh' --exit 1 --summary failed) >/dev/null 2>&1
 grep -Fq '"schema": 2' "$LEDGER" || fail "schema-2 failure row missing"
 grep -Eq '"state_fingerprint": "[0-9a-f]{40,64}:[0-9a-f]{64}:[0-9a-f]{64}"' "$LEDGER" ||

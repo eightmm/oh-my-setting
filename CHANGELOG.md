@@ -15,6 +15,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   model tier; executor and artifact metadata freeze and record the route.
 
 ### Fixed
+- `peer-ask --repo` now keeps its default artifacts under the selected state
+  repository instead of leaking them into the caller's working directory.
+- `fail-ledger` now accepts the documented `--repo` option and honors
+  `OMS_STATE_REPO`, matching the other shared harness state commands.
 - Removed the unused read-executor surface: executors are now write-worktree
   contracts only. `--mode worktree-write` remains an unadvertised compatibility
   no-op for existing callers; legacy `mode: read` metadata stays inspectable
