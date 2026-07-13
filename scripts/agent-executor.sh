@@ -63,7 +63,6 @@ Options:
   --forbidden LIST   Comma/space-separated forbidden project paths.
   --verify CMD       Frozen verification command.
   --soul-file FILE   Model-generated behavioral specialization for create.
-  --mode MODE        read or worktree-write. Default: worktree-write.
   --model-class C    auto, fast, balanced, or deep; frozen at create time.
   --model MODEL      Exact provider model.
   --fallback-model M Explicit one-shot capacity fallback model.
@@ -97,7 +96,15 @@ while [ "$#" -gt 0 ]; do
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires paths"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --soul-file) [ "$#" -ge 2 ] || fail "--soul-file requires file"; SOUL_FILE="$2"; shift 2 ;;
-    --mode) [ "$#" -ge 2 ] || fail "--mode requires read|worktree-write"; MODE="$2"; shift 2 ;;
+    --mode)
+      [ "$#" -ge 2 ] || fail "--mode requires worktree-write"
+      case "$2" in
+        worktree-write) MODE=worktree-write ;;
+        read) fail "read executors were removed; use agent-run --mode read" ;;
+        *) fail "--mode only accepts legacy-compatible worktree-write" ;;
+      esac
+      shift 2
+      ;;
     --model-class) [ "$#" -ge 2 ] || fail "--model-class requires value"; MODEL_CLASS="$2"; shift 2 ;;
     --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
@@ -112,7 +119,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
-case "$MODE" in read|worktree-write) ;; *) fail "--mode must be read or worktree-write" ;; esac
 oms_model_validate_class "$MODEL_CLASS" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
@@ -159,6 +165,13 @@ DIR="$STATE/$ID"
 META="$DIR/meta.json"
 DRAFT="$DIR/soul.draft.md"
 SOUL="$DIR/SOUL.md"
+
+require_worktree_write_mode() {
+  local stored_mode
+  stored_mode="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("mode",""))' "$META")"
+  [ "$stored_mode" = worktree-write ] ||
+    fail "legacy read executor is unsupported; inspect with show, retire with fail, and use agent-run --mode read"
+}
 
 if [ "$ACTION" = "create" ]; then
   [ -n "$PROVIDER" ] || fail "create requires --provider"
@@ -301,6 +314,7 @@ validate_plan_lease() {
 
 if [ "$ACTION" = "show" ]; then cat "$META"; exit 0; fi
 if [ "$ACTION" = "validate" ]; then
+  require_worktree_write_mode
   state="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("state",""))' "$META")"
   if [ "$state" = "draft" ]; then
     [ -s "$DRAFT" ] || fail "executor draft soul is empty"
@@ -331,6 +345,7 @@ PY
 }
 
 if [ "$ACTION" = "freeze" ]; then
+  require_worktree_write_mode
   state="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("state",""))' "$META")"
   if [ "$state" != "draft" ]; then validate_frozen; echo "executor: frozen $ID"; exit 0; fi
   "$0" validate --repo "$REPO" --id "$ID" >/dev/null
@@ -351,6 +366,7 @@ PY
 fi
 
 if [ "$ACTION" = "brief" ]; then
+  require_worktree_write_mode
   validate_frozen; validate_plan_lease
   cat "$SOUL"
   python3 - "$META" <<'PY'
@@ -375,7 +391,7 @@ PY
 fi
 
 case "$ACTION" in
-  start) validate_frozen; validate_plan_lease; oms_with_file_lock "$META.lock" update_state frozen running ;;
+  start) require_worktree_write_mode; validate_frozen; validate_plan_lease; oms_with_file_lock "$META.lock" update_state frozen running ;;
   done) validate_soul_hash; oms_with_file_lock "$META.lock" update_state running "done" ;;
   fail) validate_soul_hash; oms_with_file_lock "$META.lock" update_state frozen,running failed ;;
   *) fail "unsupported action: $ACTION" ;;

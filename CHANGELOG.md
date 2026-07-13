@@ -15,6 +15,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   model tier; executor and artifact metadata freeze and record the route.
 
 ### Fixed
+- Removed the unused read-executor surface: executors are now write-worktree
+  contracts only. `--mode worktree-write` remains an unadvertised compatibility
+  no-op for existing callers; legacy `mode: read` metadata stays inspectable
+  and retireable but cannot validate, start, or delegate.
 - Mixed read/write requests such as `review and fix` now route to an isolated
   write worker instead of stopping at a read-only pass.
 - Peer quorum lists reject duplicate providers after canonicalizing the `agy`

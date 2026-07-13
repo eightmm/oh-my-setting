@@ -12,7 +12,9 @@ Standard roles: `repo-auditor`, `implementation-worker`, `test-designer`,
 native subagent brief; the parent still supplies task, paths, constraints,
 success criteria, and expected output.
 
-Use a task-scoped executor soul only for substantial bounded write delegation:
+Use a task-scoped executor soul only for substantial bounded write delegation.
+Executors do not have a read mode; use `oms agent-run --mode read` for an
+independent read-only pass.
 
 1. Ask a read-only child to propose behavior using `prompts/executor-soul.md`.
 2. For a plan task, claim it with the intended provider first; executor creation
@@ -38,3 +40,7 @@ resolved model class/model/fallback, reasoning/fallback effort, mode,
 task/lease, base SHA,
 allowed/forbidden paths, and verification. The executor must not widen those
 fields or delegate again. Repair rounds reuse the same frozen soul and route.
+The mode is always `worktree-write`. The old explicit `--mode worktree-write`
+argument is accepted only for caller compatibility and is no longer advertised.
+Legacy `mode: read` rows remain available to `show` and `fail`, but validation
+and execution reject them with migration guidance.

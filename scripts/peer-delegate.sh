@@ -315,7 +315,8 @@ if [ -n "$EXECUTOR_ID" ]; then
   executor_fallback_reasoning_effort="$(printf '%s' "$executor_values" | cut -f13)"
   [ "$executor_provider" = "$TO" ] || fail "executor provider is $executor_provider, not $TO"
   [ "$executor_state" = "frozen" ] || fail "executor $EXECUTOR_ID is $executor_state, not frozen"
-  [ "$executor_mode" = "worktree-write" ] || fail "executor $EXECUTOR_ID mode is $executor_mode, not worktree-write"
+  [ "$executor_mode" = "worktree-write" ] ||
+    fail "legacy read executor is unsupported; retire it and use agent-run --mode read"
   [ "$MODEL_CLASS_EXPLICIT" = 0 ] || [ "$MODEL_CLASS" = auto ] || [ "$MODEL_CLASS" = "$executor_model_class" ] ||
     fail "--model-class conflicts with executor contract"
   [ -z "$MODEL" ] || [ "$MODEL" = "$executor_model" ] || fail "--model conflicts with executor contract"

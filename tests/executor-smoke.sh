@@ -90,14 +90,44 @@ PY
   [ "$rc" = 2 ] || fail "plan executor should match the claim provider"
   contains "$repo/provider.err" 'claim provider is claude'
 
+  "$tool" --help > "$repo/executor-help"
+  if grep -Eq -- '(^|[[:space:]])--mode([[:space:]=]|$)' "$repo/executor-help"; then
+    fail "executor help should not advertise a mode option"
+  fi
+  rc=0
   "$tool" create --repo "$repo" --id read1 --provider codex --mode read \
-    --strategy repo-auditor --soul-file "$repo/proposal.md" >/dev/null
-  "$tool" freeze --repo "$repo" --id read1 >/dev/null
+    --strategy repo-auditor --soul-file "$repo/proposal.md" >/dev/null 2>"$repo/read-create.err" || rc=$?
+  [ "$rc" = 2 ] || fail "read executor creation should be removed"
+  contains "$repo/read-create.err" 'read executors were removed'
+  [ ! -e "$repo/.oms/executors/read1" ] || fail "removed read executor should not create state"
+
+  # The former default mode remains accepted as an unadvertised compatibility
+  # no-op for existing automation, while all newly written metadata is fixed.
+  "$tool" create --repo "$repo" --id compat-mode --provider codex --mode worktree-write \
+    --strategy implementation-worker --soul-file "$repo/proposal.md" >/dev/null
+  "$tool" show --repo "$repo" --id compat-mode | grep -Fq '"mode": "worktree-write"' ||
+    fail "legacy worktree-write option changed metadata"
+
+  # Existing read metadata remains inspectable and retireable, but cannot be
+  # validated or executed through the write-only executor surface.
+  "$tool" freeze --repo "$repo" --id compat-mode >/dev/null
+  python3 - "$repo/.oms/executors/compat-mode/meta.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["mode"]="read"; json.dump(d, open(p,"w"), indent=2)
+PY
+  "$tool" show --repo "$repo" --id compat-mode >/dev/null
+  rc=0
+  "$tool" validate --repo "$repo" --id compat-mode >/dev/null 2>"$repo/legacy-read.err" || rc=$?
+  [ "$rc" = 2 ] || fail "legacy read executor should not validate"
+  contains "$repo/legacy-read.err" 'legacy read executor is unsupported'
   rc=0
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --repo "$repo" \
-    --to codex --executor read1 --prompt 'Do not write' >/dev/null 2>"$repo/read-delegate.err" || rc=$?
+    --to codex --executor compat-mode --prompt 'Do not write' >/dev/null 2>"$repo/read-delegate.err" || rc=$?
   [ "$rc" = 2 ] || fail "read executor should be rejected by write delegation"
-  contains "$repo/read-delegate.err" 'not worktree-write'
+  contains "$repo/read-delegate.err" 'legacy read executor is unsupported'
+  "$tool" fail --repo "$repo" --id compat-mode --reason retired >/dev/null
+  "$tool" show --repo "$repo" --id compat-mode | grep -Fq '"state": "failed"' ||
+    fail "legacy read executor should remain retireable"
 
   create_executor "$repo" base1 EXECUTOR-BASE-MARKER
   printf 'next\n' >> "$repo/file.txt"
