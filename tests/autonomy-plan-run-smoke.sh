@@ -25,6 +25,7 @@ set -euo pipefail
 case "${1:-}" in
   t1) grep -Fxq one delegated.txt ;;
   t2) grep -Fxq two delegated2.txt ;;
+  executor) grep -Fxq executor executor.txt ;;
   *) exit 2 ;;
 esac
 EOF
@@ -38,6 +39,7 @@ prompt="$(cat)"
 [ -z "${CALL_LOG:-}" ] || printf 'call\n' >> "$CALL_LOG"
 case "${OMS_TASK_ID:-}:$prompt" in
   t2:*) printf 'two\n' > delegated2.txt ;;
+  executor:*) printf 'executor\n' > executor.txt ;;
   *) printf 'one\n' > delegated.txt ;;
 esac
 echo worker-ok
@@ -74,6 +76,39 @@ grep -Fq 'state=done' "$TMP/land.out" || fail "land result missing"
 grep -Fxq two "$repo/delegated2.txt" || fail "plan-run --land did not apply patch"
 grep -Fq '"kind": "patch-land"' "$repo/.oms/artifacts/index.jsonl" || fail "landing lineage missing"
 
+# A plan-bound executor freezes an existing claim lease. plan-run must accept
+# that exact claimed task instead of requiring a new, incompatible lease.
+"$PLAN" --repo "$repo" add --id executor --title executor \
+  --allowed executor.txt --verify 'bash scripts/check.sh executor' >/dev/null
+"$PLAN" --repo "$repo" claim --id executor --provider codex >/dev/null
+printf '# Specialization\n\nImplement only the claimed executor task.\n' > "$repo/executor-soul.md"
+"$ROOT/scripts/agent-executor.sh" create --repo "$repo" --id plan-executor \
+  --provider codex --plan-task executor --soul-file "$repo/executor-soul.md" >/dev/null
+"$ROOT/scripts/agent-executor.sh" freeze --repo "$repo" --id plan-executor >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
+  --id executor --executor plan-executor >"$TMP/executor.out"
+grep -Fq 'state=review' "$TMP/executor.out" || fail "plan executor result missing"
+"$PLAN" --repo "$repo" show --id executor | grep -Fq '"state": "review"' ||
+  fail "plan executor did not preserve review"
+
+# A preflight refusal must not release a claim owned by a frozen executor; its
+# lease remains the authority for a corrected retry.
+"$PLAN" --repo "$repo" add --id executor-preflight --title executor-preflight >/dev/null
+"$PLAN" --repo "$repo" claim --id executor-preflight --provider codex >/dev/null
+preflight_lease="$($PLAN --repo "$repo" show --id executor-preflight | python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])')"
+"$ROOT/scripts/agent-executor.sh" create --repo "$repo" --id preflight-executor \
+  --provider codex --plan-task executor-preflight --soul-file "$repo/executor-soul.md" >/dev/null
+"$ROOT/scripts/agent-executor.sh" freeze --repo "$repo" --id preflight-executor >/dev/null
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
+  --id executor-preflight --executor preflight-executor >/dev/null 2>"$TMP/preflight.err" || rc=$?
+[ "$rc" = 2 ] || fail "unsafe executor preflight should fail"
+"$PLAN" --repo "$repo" show --id executor-preflight | python3 -c \
+  'import json,sys;d=json.load(sys.stdin); assert d["state"]=="claimed" and d["lease_id"]==sys.argv[1]' "$preflight_lease" ||
+  fail "preflight refusal released the executor-owned claim"
+"$ROOT/scripts/agent-executor.sh" validate --repo "$repo" --id preflight-executor >/dev/null ||
+  fail "preflight refusal invalidated the frozen executor"
+
 # Empty scope and missing verification fail closed and release the claim.
 "$PLAN" --repo "$repo" add --id unsafe --title unsafe >/dev/null
 if HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id unsafe >"$TMP/unsafe.out" 2>"$TMP/unsafe.err"; then
@@ -89,18 +124,29 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id uns
 # An unchanged failed task contract is not silently repeated.
 "$PLAN" --repo "$repo" add --id known --title known --allowed known.txt --verify true >/dev/null
 call_log="$TMP/calls"
-base="$(git -C "$repo" rev-parse HEAD)"
-verify_hash="$(python3 -c 'import hashlib; print(hashlib.sha256(b"true").hexdigest()[:16])')"
-model_hash="$(python3 -c 'import hashlib; print(hashlib.sha256(b"auto:::0:auto").hexdigest()[:16])')"
-(cd "$repo" && "$ROOT/scripts/fail-ledger.sh" record --kind plan-run \
-  --cmd "plan-run task=known base=$base provider=codex verify=$verify_hash model=$model_hash" --exit 1 \
-  --summary 'plan-run failed: task known on codex') >/dev/null 2>&1
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/failing-delegate"
+chmod +x "$TMP/failing-delegate"
+rc=0
+OMS_PLAN_RUN_DELEGATE="$TMP/failing-delegate" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id known >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "fixture plan-run failure should exit 1"
 rc=0
 HOME="$home" CALL_LOG="$call_log" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id known >/dev/null 2>"$TMP/known.err" || rc=$?
 [ "$rc" = 2 ] || fail "known unchanged failure should be refused with exit 2, got $rc"
 [ ! -e "$call_log" ] || fail "known unchanged failure called provider"
 grep -Fq 'known unchanged plan-run failure' "$TMP/known.err" || fail "known failure guidance missing"
 "$PLAN" --repo "$repo" show --id known | grep -Fq '"state": "ready"' || fail "known-failure refusal stranded claim"
+
+# A changed resolved route is a changed failure hypothesis even when the CLI
+# request remains --model-class auto.
+"$PLAN" --repo "$repo" add --id mapped --title mapped --allowed mapped.txt --verify true >/dev/null
+rc=0
+OMS_PLAN_RUN_DELEGATE="$TMP/failing-delegate" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id mapped >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "mapped fixture failure should exit 1"
+OMS_MODEL_CODEX_BALANCED=changed-balanced HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id mapped --dry-run >"$TMP/mapped.out" 2>"$TMP/mapped.err" ||
+  fail "changed resolved route should not match the old known failure"
 
 # TERM waits for child cleanup before releasing the exact lease.
 "$PLAN" --repo "$repo" add --id signal --title signal --allowed signal.txt --verify true >/dev/null

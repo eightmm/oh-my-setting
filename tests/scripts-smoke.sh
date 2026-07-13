@@ -4091,10 +4091,13 @@ test_shared_prompt_mode_classifier_table() {
     [ "$got" = "$expected" ] || fail "prompt mode for [$prompt]: got $got, want $expected"
   done <<'EOF'
 read|Review the latest fix and report findings
+write|Review and fix the parser
+write|Audit the repo and implement all necessary fixes
 read|Explain why the check failed
 write|Fix the failing parser test
 write|Refactor the parser module
 read|수정 사항을 검토해줘
+write|검토하고 수정해줘
 write|파서 모듈을 수정해줘
 read|review the fix
 read|Proceed when ready

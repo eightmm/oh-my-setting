@@ -73,6 +73,23 @@ PY
     'import json,sys;d=json.load(sys.stdin); assert d["strategy"]=="test-designer" and d["lease_id"].startswith("lease_") and d["allowed_paths"]==["src/"]' ||
     fail "executor should hydrate plan strategy, lease, and scope"
 
+  "$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id unclaimed --title unclaimed \
+    --allowed src/ --verify true >/dev/null
+  rc=0
+  "$tool" create --repo "$repo" --id unclaimed-executor --provider codex \
+    --plan-task unclaimed --soul-file "$repo/proposal.md" >/dev/null 2>"$repo/unclaimed.err" || rc=$?
+  [ "$rc" = 2 ] || fail "plan executor should require an active claim"
+  contains "$repo/unclaimed.err" 'must be claimed'
+
+  "$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id wrong-provider --title wrong-provider \
+    --allowed src/ --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$repo" claim --id wrong-provider --provider claude >/dev/null
+  rc=0
+  "$tool" create --repo "$repo" --id wrong-provider-executor --provider codex \
+    --plan-task wrong-provider --soul-file "$repo/proposal.md" >/dev/null 2>"$repo/provider.err" || rc=$?
+  [ "$rc" = 2 ] || fail "plan executor should match the claim provider"
+  contains "$repo/provider.err" 'claim provider is claude'
+
   "$tool" create --repo "$repo" --id read1 --provider codex --mode read \
     --strategy repo-auditor --soul-file "$repo/proposal.md" >/dev/null
   "$tool" freeze --repo "$repo" --id read1 >/dev/null

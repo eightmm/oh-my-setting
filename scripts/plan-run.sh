@@ -35,6 +35,7 @@ KNOWN_FAILURE_FP=""
 CHILD_PID=""
 KEEP_CLAIM=0
 CLAIMED=0
+EXECUTOR_PLAN_TASK=""
 
 usage() {
   cat <<'EOF'
@@ -106,6 +107,16 @@ case "$TASK_ID$EXECUTOR_ID" in *[!A-Za-z0-9._-]* ) fail "task/executor ids must 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 
+if [ -n "$EXECUTOR_ID" ]; then
+  executor_meta="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" --id "$EXECUTOR_ID")" ||
+    fail "cannot read executor $EXECUTOR_ID"
+  EXECUTOR_PLAN_TASK="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_task", ""))')"
+  if [ -n "$EXECUTOR_PLAN_TASK" ]; then
+    [ "$USE_NEXT" -eq 0 ] || fail "a plan-bound executor requires --id, not --next"
+    [ "$TASK_ID" = "$EXECUTOR_PLAN_TASK" ] || fail "executor is bound to plan task $EXECUTOR_PLAN_TASK"
+  fi
+fi
+
 release_claim() {
   local state current_lease
   [ "$CLAIMED" -eq 1 ] || return 0
@@ -114,7 +125,7 @@ release_claim() {
   [ -n "$task_json" ] || return 0
   state="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' 2>/dev/null || true)"
   current_lease="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' 2>/dev/null || true)"
-  case "$state" in claimed|running|review|landing) ;; *) return 0 ;; esac
+  case "$state" in claimed|running) ;; *) return 0 ;; esac
   [ "$current_lease" = "$LEASE_ID" ] || return 0
   "$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$TASK_ID" --lease-id "$LEASE_ID" >/dev/null 2>&1 || true
 }
@@ -156,8 +167,14 @@ if [ "$USE_NEXT" -eq 1 ]; then
 else
   task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$TASK_ID")" || exit $?
   state="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')"
-  [ "$state" = ready ] || fail "task $TASK_ID is $state, not ready"
-  if [ "$DRY_RUN" -eq 0 ]; then
+  if [ -n "$EXECUTOR_PLAN_TASK" ]; then
+    [ "$state" = claimed ] || fail "plan-bound executor task $TASK_ID is $state, not claimed"
+    task_provider="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))')"
+    [ "$task_provider" = "$TO" ] || fail "task $TASK_ID claim provider is $task_provider, not $TO"
+  else
+    [ "$state" = ready ] || fail "task $TASK_ID is $state, not ready"
+  fi
+  if [ "$DRY_RUN" -eq 0 ] && [ -z "$EXECUTOR_PLAN_TASK" ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" claim --id "$TASK_ID" --provider "$TO" >/dev/null
     CLAIMED=1
     task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$TASK_ID")"
@@ -174,8 +191,31 @@ TITLE="$(printf '%s' "$task_values" | cut -f4)"
 
 base="$(git -C "$REPO" rev-parse HEAD)"
 verify_hash="$(printf '%s' "$VERIFY" | oms_sha256_stream | cut -c1-16)"
-model_hash="$(printf '%s' "$MODEL_CLASS:$MODEL:$FALLBACK_MODEL:$NO_MODEL_FALLBACK:$REASONING_EFFORT" | oms_sha256_stream | cut -c1-16)"
-FAIL_CMD="plan-run task=$TASK_ID base=$base provider=$TO verify=$verify_hash model=$model_hash"
+contract_hash="$(printf '%s' "$task_json" | python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)
+keys=("id","title","brief","depends","allowed_paths","forbidden_paths","verify","role")
+stable={k:d.get(k) for k in keys}
+print(hashlib.sha256(json.dumps(stable,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()[:16])
+')"
+if [ -n "$EXECUTOR_ID" ]; then
+  route_contract="$(printf '%s' "$executor_meta" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+keys=("executor_id","provider","strategy","mode","plan_task","task_id","base_sha","allowed_paths","forbidden_paths","verify","model_class","model","fallback_model","reasoning_effort","fallback_reasoning_effort","soul_sha256")
+print("|".join(str(d.get(k,"")) for k in keys))
+')|request=$MODEL_CLASS:$MODEL:$FALLBACK_MODEL:$NO_MODEL_FALLBACK:$REASONING_EFFORT"
+else
+  task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))')"
+  export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+  export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+  export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT" OMS_REASONING_FALLBACK_EXPLICIT=""
+  export OMS_MODEL_ROLE="$task_role" OMS_MODEL_OPERATION=delegate
+  oms_model_prepare "$TO" || exit $?
+  route_contract="$OMS_MODEL_RESOLVED_CLASS:$OMS_MODEL_PRIMARY:$OMS_MODEL_FALLBACK:$OMS_REASONING_RESOLVED:$OMS_REASONING_FALLBACK"
+fi
+route_hash="$(printf '%s' "$route_contract" | oms_sha256_stream | cut -c1-16)"
+FAIL_CMD="plan-run task=$TASK_ID base=$base provider=$TO verify=$verify_hash contract=$contract_hash route=$route_hash"
 set +e
 failure_check="$(cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$FAIL_CMD" 2>&1)"
 failure_check_rc=$?

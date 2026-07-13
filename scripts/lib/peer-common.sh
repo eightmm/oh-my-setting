@@ -730,6 +730,34 @@ ma_provider_attempt() {
   if wait "$pid"; then return 0; else return $?; fi
 }
 
+# Return a canonical comma list with one independent entry per provider.
+# agy is an alias for antigravity, not another quorum member.
+ma_normalize_provider_list() {
+  local raw="$1"
+  local provider
+  local seen=","
+  local output=""
+  local -a provider_list
+
+  IFS=',' read -r -a provider_list <<< "$raw"
+  for provider in "${provider_list[@]}"; do
+    provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
+    [ -n "$provider" ] || continue
+    [ "$provider" != agy ] || provider=antigravity
+    case "$provider" in
+      codex|claude|antigravity) ;;
+      *) echo "error: unsupported provider: $provider" >&2; return 2 ;;
+    esac
+    case "$seen" in
+      *",$provider,"*) echo "error: duplicate provider: $provider" >&2; return 2 ;;
+    esac
+    seen="$seen$provider,"
+    if [ -n "$output" ]; then output="$output,$provider"; else output="$provider"; fi
+  done
+  [ -n "$output" ] || { echo "error: no providers selected" >&2; return 2; }
+  printf '%s\n' "$output"
+}
+
 # Content fingerprint for the complete write surface. `git status` alone is
 # insufficient: changing and re-staging an already-staged path preserves its
 # porcelain status while changing its bytes.
@@ -744,14 +772,20 @@ h.update(subprocess.check_output([
     "git", "-C", repo, "diff", "--binary", "--no-ext-diff", "HEAD", "--"
 ]))
 raw = subprocess.check_output([
-    "git", "-C", repo, "ls-files", "--others", "--exclude-standard", "-z"
+    "git", "-C", repo, "ls-files", "--others", "-z"
 ])
 for rel in sorted(p for p in raw.split(b"\0") if p):
     path = os.path.join(os.fsencode(repo), rel)
     h.update(b"\0untracked\0" + rel + b"\0")
+    try:
+        st = os.lstat(path)
+    except OSError:
+        h.update(b"missing\0")
+        continue
+    h.update(("mode:%o\0" % st.st_mode).encode())
     if os.path.islink(path):
         h.update(b"link\0" + os.fsencode(os.readlink(path)))
-    else:
+    elif os.path.isfile(path):
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
@@ -818,6 +852,17 @@ ma_run_routed_provider() {
       OMS_MODEL_FALLBACK_REASON=capacity
     fi
 
+    if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$access" = read ] && [ "$provider" = antigravity ]; then
+      ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+      isolated_dir="$(ma_agy_read_dir "$state_repo")" || isolated_dir=""
+      if [ -z "$isolated_dir" ]; then
+        OMS_MODEL_FALLBACK_USED=0
+        printf '\nmodel-fallback: skipped; could not recreate pristine agy isolation\n' >> "$artifact"
+      else
+        workdir="$isolated_dir"
+      fi
+    fi
+
     if [ "$OMS_MODEL_FALLBACK_USED" = 1 ]; then
       OMS_MODEL_SELECTED="$OMS_MODEL_FALLBACK"
       OMS_REASONING_SELECTED="$OMS_REASONING_FALLBACK"
@@ -849,6 +894,9 @@ run_provider() {
   local status
 
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  OMS_MODEL_OPERATION="${MA_MODEL_OPERATION:-${MA_KIND:-call}}"
+  export OMS_MODEL_OPERATION
+  oms_model_prepare "$provider" || return $?
 
   if ! ma_validate_outbound_prompt "$prompt_file"; then
     {
@@ -878,6 +926,9 @@ run_provider() {
   } > "$artifact"
 
   if [ "$DRY_RUN" = "1" ]; then
+    printf 'model-route: class=%s primary=%s fallback=%s effort=%s fallback_effort=%s\n' \
+      "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" \
+      "$OMS_REASONING_RESOLVED" "$OMS_REASONING_FALLBACK" >> "$artifact"
     printf 'DRY RUN: provider command skipped.\n' >> "$artifact"
     ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 0 "$artifact" "" "$prompt_file" || true
     echo "dry-run: $provider -> $artifact"
@@ -897,8 +948,6 @@ run_provider() {
     return 127
   fi
 
-  OMS_MODEL_OPERATION="${MA_MODEL_OPERATION:-${MA_KIND:-call}}"
-  export OMS_MODEL_OPERATION
   status=0
   ma_run_routed_provider "$provider" read "$prompt_file" "$artifact" "${REPO:-$PWD}" \
     "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}" || status=$?
@@ -937,6 +986,10 @@ ma_export_round1() {
       codex|claude|antigravity|agy) ;;
       *) fail "unsupported provider: $provider" ;;
     esac
+    [ "$provider" != agy ] || provider=antigravity
+    OMS_MODEL_OPERATION="${MA_MODEL_OPERATION:-${MA_KIND:-call}}"
+    export OMS_MODEL_OPERATION
+    oms_model_prepare "$provider" || return $?
     total=$((total + 1))
     # slug/timestamp are operation-scoped globals initialized by the caller.
     # shellcheck disable=SC2154
@@ -944,6 +997,9 @@ ma_export_round1() {
     {
       printf '# %s %s export\n\n' "$provider" "$MA_KIND"
       printf -- '- exported: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf -- '- model-class: %s\n' "$OMS_MODEL_RESOLVED_CLASS"
+      printf -- '- selected-model: %s\n' "$OMS_MODEL_PRIMARY"
+      [ -z "$OMS_REASONING_RESOLVED" ] || printf -- '- reasoning-effort: %s\n' "$OMS_REASONING_RESOLVED"
       if [ "${MA_SHOW_REPO:-0}" = "1" ]; then
         printf -- '- repo: %s\n' "$(ma_repo_label "${REPO:-}")"
       fi
@@ -951,6 +1007,7 @@ ma_export_round1() {
       cat "$prompt_file"
       printf '\n\n## Output\n\n'
       printf 'EXPORTED: paste the Prompt section into %s, then import the answer with import-agent-result.sh.\n' "$provider"
+      printf 'Preserve the selected model route recorded above during the manual call.\n'
       printf '\n\n## Exit\n\n0\n'
     } > "$artifact"
     ma_append_artifact_index "${REPO:-}" "${MA_KIND}-export" "$provider" 0 "$artifact" "" "$prompt_file" || true
@@ -963,6 +1020,11 @@ ma_export_round1() {
   done
 
   [ "$total" -gt 0 ] || fail "no providers selected"
+  # Provider route state belongs to each export row. Do not let the final
+  # provider leak into the local synthesis row written by the caller.
+  unset OMS_MODEL_RESOLVED_CLASS OMS_MODEL_PRIMARY OMS_MODEL_FALLBACK
+  unset OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
+  unset OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 }
 
 # Round 1: fan out the same prompt to all providers in parallel.

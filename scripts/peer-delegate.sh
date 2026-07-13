@@ -331,7 +331,11 @@ if [ -n "$EXECUTOR_ID" ]; then
   MODEL="$executor_model"
   FALLBACK_MODEL="$executor_fallback_model"
   NO_MODEL_FALLBACK=1
-  REASONING_EFFORT="${executor_reasoning_effort:-auto}"
+  if [ -n "$executor_reasoning_effort" ]; then
+    REASONING_EFFORT="$executor_reasoning_effort"
+  elif [ "$REASONING_EFFORT_EXPLICIT" = 0 ]; then
+    REASONING_EFFORT=auto
+  fi
   [ "$TO" != antigravity ] || REASONING_EFFORT=auto
   if [ -n "$executor_plan" ]; then
     [ -z "$PLAN_TASK_ID" ] || [ "$PLAN_TASK_ID" = "$executor_plan" ] || fail "--plan-task conflicts with executor"
@@ -759,7 +763,7 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
     # mutations from verify and drop its untracked byproducts, so the next
     # capture_patch cannot sweep verification residue into the patch.
     git -C "$worktree" checkout -- . 2>/dev/null || true
-    git -C "$worktree" clean -fd >/dev/null 2>&1 || true
+    git -C "$worktree" clean -fdx >/dev/null 2>&1 || true
     {
       printf '\n\n## Repair %s\n\n### Prompt\n\n' "$repair_used"
       cat "$repair_prompt_file"

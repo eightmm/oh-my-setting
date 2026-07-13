@@ -11,7 +11,10 @@ oms_model_validate_class() {
 oms_model_validate_name() {
   local value="$1"
   [ "${#value}" -le 160 ] || { echo "error: model name exceeds 160 characters" >&2; return 2; }
-  case "$value" in *$'\n'*|*$'\r'*|*$'\t'*) echo "error: model name contains control characters" >&2; return 2 ;; esac
+  if LC_ALL=C printf '%s' "$value" | grep -q '[[:cntrl:]]'; then
+    echo "error: model name contains control characters" >&2
+    return 2
+  fi
 }
 
 oms_reasoning_validate() {
@@ -166,9 +169,9 @@ oms_model_prepare() {
   fi
   if [ "$provider" = antigravity ] && [ "$effort_requested" = auto ]; then
     embedded_effort="$(oms_reasoning_from_model "$OMS_MODEL_PRIMARY")"
-    [ -z "$embedded_effort" ] || OMS_REASONING_RESOLVED="$embedded_effort"
+    OMS_REASONING_RESOLVED="$embedded_effort"
     embedded_effort="$(oms_reasoning_from_model "$OMS_MODEL_FALLBACK")"
-    [ -z "$embedded_effort" ] || OMS_REASONING_FALLBACK="$embedded_effort"
+    OMS_REASONING_FALLBACK="$embedded_effort"
   fi
   OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
 

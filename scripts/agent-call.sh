@@ -224,6 +224,7 @@ export OMS_OPERATION_ID="${OMS_OPERATION_ID:-call-$timestamp}"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
 
 if [ "$EXPORT_ONLY" -eq 1 ]; then
+  oms_model_prepare "$TO" || exit $?
   if ! ma_validate_outbound_prompt "$prompt_file"; then
     echo "export blocked: no export artifacts were written" >&2
     exit 3
@@ -233,6 +234,9 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
   {
     printf '# %s %s export\n\n' "$TO" "$MA_KIND"
     printf -- '- exported: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf -- '- model-class: %s\n' "$OMS_MODEL_RESOLVED_CLASS"
+    printf -- '- selected-model: %s\n' "$OMS_MODEL_PRIMARY"
+    [ -z "$OMS_REASONING_RESOLVED" ] || printf -- '- reasoning-effort: %s\n' "$OMS_REASONING_RESOLVED"
     if [ "${MA_SHOW_REPO:-0}" = "1" ]; then
       printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
     fi
@@ -240,6 +244,7 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
     cat "$prompt_file"
     printf '\n\n## Output\n\n'
     printf 'EXPORTED: paste the Prompt section into %s, then import the answer with import-agent-result.sh.\n' "$TO"
+    printf 'Preserve the selected model route recorded above during the manual call.\n'
     printf '\n\n## Exit\n\n0\n'
   } > "$artifact"
   ma_append_artifact_index "$REPO" "call-export" "$TO" 0 "$artifact" "" "$prompt_file" || true

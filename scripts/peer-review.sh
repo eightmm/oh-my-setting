@@ -209,21 +209,9 @@ if [ "${1:-}" = "verdicts" ]; then
 fi
 
 validate_provider_list() {
-  local provider
-  local provider_list
-  local total=0
-
-  IFS=',' read -r -a provider_list <<< "$PROVIDERS"
-  for provider in "${provider_list[@]}"; do
-    provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
-    [ -n "$provider" ] || continue
-    case "$provider" in
-      codex|claude|antigravity|agy) ;;
-      *) fail "unsupported provider: $provider" ;;
-    esac
-    total=$((total + 1))
-  done
-  [ "$total" -gt 0 ] || fail "no providers selected"
+  local normalized
+  normalized="$(ma_normalize_provider_list "$PROVIDERS")" || exit $?
+  PROVIDERS="$normalized"
 }
 
 write_prompt() {

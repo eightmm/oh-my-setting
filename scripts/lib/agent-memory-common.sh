@@ -142,17 +142,20 @@ oms_check_sh_has_ml_smoke() {
   grep -Eq '(^|[[:space:]("|'\''])ml-smoke("|'\'')?\)' "$check_sh_path"
 }
 
-# Read intent wins over write keywords ("review the fix" is a read), write
-# keywords are word-bounded ("committed changes" must not match "change"),
-# and anything ambiguous stays read — the conservative default.
+# Pure read intent wins over write nouns ("review the fix" is a read), but a
+# read request explicitly coordinated with an action ("review and fix") is a
+# write. Anything ambiguous stays read — the conservative default.
 oms_classify_prompt_mode() {
   local text="$1"
   local lower
   local read_re='(^|[^a-z])(review|assess|evaluate|analy[sz]e|explain|compare|inspect|audit|summari[sz]e|investigate|describe|why|what|how)([^a-z]|$)|검토|평가|분석|리뷰|설명|조사|비교'
   local write_re='(^|[^a-z])(add|implement|fix|change|modify|update|refactor|remove|delete|create|generate|write|apply|migrate|rename|scaffold|build|install)([^a-z]|$)|구현|수정|추가|변경|삭제|제거|고쳐|만들|작성|적용|리팩터|정리'
+  local mixed_write_re='(review|assess|evaluate|analy[sz]e|inspect|audit|investigate)([^a-z]|.)*(and|then)([^a-z]|.)*(add|implement|fix|change|modify|update|refactor|remove|delete|create|write|apply|build|install)|검토.*(하고|해서|후|및).*([[:space:]]|)(구현|수정|추가|변경|삭제|제거|고쳐|작성|적용|정리)'
   lower="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
 
-  if printf '%s' "$lower" | grep -Eq "$read_re"; then
+  if printf '%s' "$lower" | grep -Eq "$mixed_write_re"; then
+    printf 'write\n'
+  elif printf '%s' "$lower" | grep -Eq "$read_re"; then
     printf 'read\n'
   elif printf '%s' "$lower" | grep -Eq "$write_re"; then
     printf 'write\n'

@@ -14,6 +14,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   independent effort flag. Capacity fallback lowers automatic effort with the
   model tier; executor and artifact metadata freeze and record the route.
 
+### Fixed
+- Mixed read/write requests such as `review and fix` now route to an isolated
+  write worker instead of stopping at a read-only pass.
+- Peer quorum lists reject duplicate providers after canonicalizing the `agy`
+  alias, preventing one CLI from counting as multiple independent reviewers.
+- Capacity fallback now treats ignored files as worktree mutations, recreates
+  Antigravity read isolation before retrying, and removes ignored verification
+  byproducts before repair.
+- Dry-run and export-only passes validate their provider route and record the
+  selected model; unknown Antigravity variants no longer claim an inferred
+  reasoning effort that the CLI did not expose.
+- Plan-bound executors can run through `plan-run` against their exact claimed
+  provider and lease. Creation rejects invalid plan claims, signal cleanup
+  preserves review evidence, and known failures key on resolved contracts.
+- Legacy executor metadata without reasoning fields now honors an explicit
+  caller effort instead of silently replacing it with automatic effort.
+
 ## [0.4.0] - Unreleased
 
 ### Added

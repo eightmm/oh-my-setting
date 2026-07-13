@@ -15,12 +15,17 @@ success criteria, and expected output.
 Use a task-scoped executor soul only for substantial bounded write delegation:
 
 1. Ask a read-only child to propose behavior using `prompts/executor-soul.md`.
-2. Create metadata with provider, strategy, plan task, path scope, base commit,
+2. For a plan task, claim it with the intended provider first; executor creation
+   rejects an empty or different-provider lease.
+3. Create metadata with provider, strategy, plan task, path scope, base commit,
    and verify command.
-3. Validate and freeze the soul hash.
-4. Inject `oms agent-executor brief --id ID` into the write worker.
+4. Validate and freeze the soul hash.
+5. Inject `oms agent-executor brief --id ID` into the write worker. A
+   plan-bound executor runs with `oms plan-run --id TASK --executor ID`; it
+   cannot use `--next` because its task and lease are already frozen.
 
 ```bash
+oms agent-plan --repo . claim --id t1 --provider codex
 oms agent-executor --repo . create --id ex1 --provider codex \
   --strategy implementation-worker --plan-task t1 --model-class auto \
   --soul-file proposal.md
