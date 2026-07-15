@@ -239,6 +239,58 @@ check_install_receipt() {
   esac
 }
 
+check_snapshots() {
+  local machine_mode=0
+  local slurm_mode=0
+  local machine_path="${OH_MY_SETTING_MACHINE_SNAPSHOT:-$INSTALL_ROOT/local/machine.md}"
+  local slurm_path="${OH_MY_SETTING_SLURM_REF:-$INSTALL_ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"
+
+  [ "$RECEIPT_STATE" = valid ] || return 0
+  machine_mode="$(oms_install_receipt_mode machine_snapshot 0 "$RECEIPT")"
+  slurm_mode="$(oms_install_receipt_mode slurm_snapshot 0 "$RECEIPT")"
+  printf '\n# snapshots\n'
+  echo "machine snapshot mode: $machine_mode"
+  echo "Slurm snapshot mode: $slurm_mode"
+
+  case "$machine_mode" in
+    1|auto)
+      if OH_MY_SETTING_MACHINE_SNAPSHOT="$machine_path" \
+        "$INSTALL_ROOT/scripts/write-machine-snapshot.sh" --check >/dev/null 2>&1; then
+        echo "ok: machine snapshot"
+      else
+        echo "invalid or missing machine snapshot: $machine_path"
+        FAILED=1
+      fi
+      ;;
+  esac
+  case "$slurm_mode" in
+    1)
+      if OH_MY_SETTING_SLURM_REF="$slurm_path" \
+        "$INSTALL_ROOT/scripts/generate-slurm-skill.sh" --check >/dev/null 2>&1; then
+        echo "ok: Slurm snapshot"
+      else
+        echo "invalid or missing Slurm snapshot: $slurm_path"
+        FAILED=1
+      fi
+      ;;
+    auto)
+      if command -v sinfo >/dev/null 2>&1; then
+        if OH_MY_SETTING_SLURM_REF="$slurm_path" \
+          "$INSTALL_ROOT/scripts/generate-slurm-skill.sh" --check >/dev/null 2>&1; then
+          echo "ok: Slurm snapshot"
+        else
+          echo "invalid or missing Slurm snapshot while Slurm is available: $slurm_path"
+          FAILED=1
+        fi
+      elif [ -f "$slurm_path" ]; then
+        echo "note: retained Slurm snapshot; current host has no sinfo"
+      else
+        echo "ok: Slurm auto snapshot not applicable on this host"
+      fi
+      ;;
+  esac
+}
+
 check_codex_plugin() {
   local mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
   local plugin_version
@@ -541,6 +593,7 @@ case "$REQUIRE_TOOLS" in
 esac
 
 check_install_receipt
+check_snapshots
 
 check_cmd git
 check_cmd curl

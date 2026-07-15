@@ -72,6 +72,10 @@ Regenerate local snapshots:
 ~/.oh-my-setting/scripts/generate-slurm-skill.sh
 ```
 
+Both generators support `--dry-run` and `--check`, write atomically with mode
+`0600`, and are refreshed by `update.sh` when their receipt mode is `1` or
+`auto` (Slurm `auto` only runs when `sinfo` is available).
+
 ## Output
 
 Use compact prose. Include commands run and whether doctor/skill-doctor passed.

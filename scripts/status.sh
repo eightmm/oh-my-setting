@@ -344,8 +344,12 @@ for tool in timeout sbatch srun squeue sinfo scancel; do
 done
 
 printf '\n## Snapshots\n\n'
-file_status "$INSTALL_ROOT/local/machine.md"
-file_status "$INSTALL_ROOT/custom-skills/slurm-hpc/references/cluster.generated.md"
+if [ "$RECEIPT_STATE" = valid ]; then
+  printf -- '- machine_policy: %s\n' "$(oms_install_receipt_mode machine_snapshot 0 "$RECEIPT")"
+  printf -- '- slurm_policy: %s\n' "$(oms_install_receipt_mode slurm_snapshot 0 "$RECEIPT")"
+fi
+file_status "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$INSTALL_ROOT/local/machine.md}"
+file_status "${OH_MY_SETTING_SLURM_REF:-$INSTALL_ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"
 
 printf '\n## Active Task\n\n'
 active_task_status

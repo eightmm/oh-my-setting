@@ -35,6 +35,8 @@ Environment overrides persisted receipt components when explicitly set:
   OH_MY_SETTING_CLAUDE_HOOKS=0|1
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto
   OH_MY_SETTING_AUTO_UPDATE=0|1
+  OH_MY_SETTING_GENERATE_MACHINE=0|1|auto
+  OH_MY_SETTING_GENERATE_SLURM=0|1|auto
 EOF
 }
 
@@ -165,9 +167,13 @@ export OH_MY_SETTING_CLAUDE_HOOKS="$CLAUDE_HOOKS"
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
 OH_MY_SETTING_INSTALL_TOOLS="$(receipt_bool tools 0)"
-OH_MY_SETTING_GENERATE_MACHINE="$(receipt_bool machine_snapshot 0)"
-OH_MY_SETTING_GENERATE_SLURM="$(receipt_bool slurm_snapshot 0)"
+OH_MY_SETTING_GENERATE_MACHINE="$(oms_install_receipt_mode machine_snapshot 0 "$RECEIPT")"
+OH_MY_SETTING_GENERATE_SLURM="$(oms_install_receipt_mode slurm_snapshot 0 "$RECEIPT")"
 export OH_MY_SETTING_INSTALL_TOOLS OH_MY_SETTING_GENERATE_MACHINE OH_MY_SETTING_GENERATE_SLURM
+case "$OH_MY_SETTING_GENERATE_MACHINE:$OH_MY_SETTING_GENERATE_SLURM" in
+  0:0|0:1|0:auto|1:0|1:1|1:auto|auto:0|auto:1|auto:auto) ;;
+  *) echo "error: snapshot modes must be 0, 1, or auto" >&2; exit 2 ;;
+esac
 
 current="$(git -C "$ROOT" rev-parse HEAD)"
 current_short="$(git -C "$ROOT" rev-parse --short HEAD)"
@@ -282,7 +288,9 @@ for managed_path in \
   "$HOME/.codex/AGENTS.md" "$HOME/.claude/CLAUDE.md" "$HOME/.gemini/AGENTS.md" \
   "$HOME/.codex/skills" "$HOME/.claude/skills" "$HOME/.gemini/antigravity/skills" \
   "$HOME/.oh-my-setting-prompts" "$HOME/.oh-my-setting-workflows" \
-  "$HOME/.local/bin/oms" "$HOME/.claude/settings.json"; do
+  "$HOME/.local/bin/oms" "$HOME/.claude/settings.json" \
+  "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$ROOT/local/machine.md}" \
+  "${OH_MY_SETTING_SLURM_REF:-$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"; do
   snapshot_managed_target "$managed_path"
 done
 
@@ -339,6 +347,17 @@ reconcile_core() {
   elif command -v codex >/dev/null 2>&1; then
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null 2>&1 || return 1
   fi
+  case "$OH_MY_SETTING_GENERATE_MACHINE" in
+    1|auto) "$ROOT/scripts/write-machine-snapshot.sh" || return 1 ;;
+  esac
+  case "$OH_MY_SETTING_GENERATE_SLURM" in
+    1) "$ROOT/scripts/generate-slurm-skill.sh" || return 1 ;;
+    auto)
+      if command -v sinfo >/dev/null 2>&1; then
+        "$ROOT/scripts/generate-slurm-skill.sh" || return 1
+      fi
+      ;;
+  esac
   if [ "$SKIP_DOCTOR" != "1" ]; then "$ROOT/scripts/doctor.sh" || return 1; fi
 }
 
@@ -370,7 +389,7 @@ fi
 TRANSACTION_ACTIVE=0
 
 if [ "$SKIP_TOOLS" != "1" ]; then
-  "$ROOT/scripts/install-tools.sh"
+  "$ROOT/scripts/install-tools.sh" --upgrade
 fi
 if [ "$AUTO_UPDATE" = "1" ]; then
   "$ROOT/scripts/install-autoupdate.sh"

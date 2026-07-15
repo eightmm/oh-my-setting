@@ -21,7 +21,7 @@ Usage: tsp-queue.sh <subcommand> [options]
 Single-machine job queue wrapper for tsp (task-spooler).
 
 Subcommands:
-  enqueue [--label L] [--slots N] [--ledger-note NOTE] -- CMD...
+  enqueue [--label L] [--slots N] [--ledger-note NOTE] [--allow-noqueue] -- CMD...
       Set tsp slots (default 1), enqueue CMD, print the tsp job id.
   list
       Show the tsp queue table.
@@ -36,8 +36,9 @@ Subcommands:
   -h, --help
       Show this help.
 
-If tsp is missing, enqueue degrades to a nohup background run with no real
-queue or slot limiting. Fallback state lives under
+If tsp is missing, enqueue fails closed. Pass --allow-noqueue (or set
+OMS_TSP_ALLOW_FALLBACK=1) to explicitly accept a nohup background run with no
+real queue or slot limiting. Fallback state lives under
 ${XDG_RUNTIME_DIR:-$HOME/.cache}/oh-my-setting/tsp-fallback/.
 EOF
 }
@@ -185,6 +186,7 @@ cmd_enqueue() {
   local slots=1
   local note=""
   local job_id
+  local allow_noqueue="${OMS_TSP_ALLOW_FALLBACK:-0}"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -205,6 +207,10 @@ cmd_enqueue() {
         note="$2"
         shift 2
         ;;
+      --allow-noqueue)
+        allow_noqueue=1
+        shift
+        ;;
       --)
         shift
         break
@@ -218,6 +224,7 @@ cmd_enqueue() {
   scan_outbound "$note" "$@"
 
   if ! tsp_available; then
+    [ "$allow_noqueue" = 1 ] || fail "tsp is unavailable; install task-spooler or pass --allow-noqueue to accept unqueued execution"
     fallback_enqueue "$note" "$@"
     return
   fi

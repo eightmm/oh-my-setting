@@ -139,14 +139,15 @@ branch_upstream() {
   printf '%s\t%s\t%s\n' "$remote" "refs/remotes/$remote/$remote_branch" "$remote/$remote_branch"
 }
 
-detached_receipt_update() {
+receipt_transaction_update() {
   local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
-  local schema ref current output status remote message upstream
+  local schema ref owner current output status remote message upstream
 
-  [ -z "$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] || return 75
   schema="$(auto_update_receipt_field "$receipt" schema 2>/dev/null || true)"
   ref="$(auto_update_receipt_field "$receipt" ref 2>/dev/null || true)"
+  owner="$(auto_update_receipt_field "$receipt" source_root 2>/dev/null || true)"
   [ "$schema" = 2 ] && [ -n "$ref" ] || return 75
+  [ -n "$owner" ] && [ "$(cd "$owner" 2>/dev/null && pwd -P || true)" = "$(cd "$ROOT" && pwd -P)" ] || return 75
   current="$(git -C "$ROOT" rev-parse HEAD)"
   upstream="ref:$ref"
 
@@ -156,7 +157,7 @@ detached_receipt_update() {
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
-      write_state failed "detached ref check failed: $output" "$current" "" "$upstream"
+      write_state failed "receipt ref check failed: $output" "$current" "" "$upstream"
       print_status
       return "$status"
     fi
@@ -180,7 +181,7 @@ detached_receipt_update() {
   [ -z "$output" ] || printf '%s\n' "$output"
   remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ "$status" -ne 0 ]; then
-    write_state failed "detached ref apply failed" "$current" "$remote" "$upstream"
+    write_state failed "receipt ref apply failed" "$current" "$remote" "$upstream"
     return "$status"
   fi
   if [ "$current" = "$remote" ]; then
@@ -365,10 +366,10 @@ esac
 
 require_git_checkout
 set +e
-detached_receipt_update
-detached_status=$?
+receipt_transaction_update
+receipt_status=$?
 set -e
-[ "$detached_status" = 75 ] || exit "$detached_status"
+[ "$receipt_status" = 75 ] || exit "$receipt_status"
 upstream_info="$(branch_upstream)" || {
   print_status
   exit 0

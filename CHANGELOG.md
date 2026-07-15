@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Snapshot lifecycle contracts: machine and Slurm generators now support
+  `--dry-run`/`--check`, write private atomic schema-marked files, and report
+  broader local hardware context. Schema-2 receipts preserve `0`/`1`/`auto`
+  snapshot policy, and transactional updates refresh applicable snapshots.
+- `project-doctor --strict` for CI/release gates, including filled Slurm
+  partition/account, resource, log, and checkpoint requirements past draft.
+- Explicit `tsp-queue enqueue --allow-noqueue` opt-in for degraded background
+  execution when task-spooler is unavailable.
 - Slurm cluster references now capture all partition and node records, the
   current user's `sacctmgr` associations/accounts, QOS limits, and effective
   configured CPU, memory, and time defaults without inventing missing values.
@@ -18,6 +26,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   model tier; executor and artifact metadata freeze and record the route.
 
 ### Fixed
+- Receipt-owned branch and detached auto-updates now share `update.sh`'s
+  rollback transaction instead of maintaining a second half-linked path.
+- `update.sh --tools` now requests real provider CLI and uv upgrades instead of
+  silently accepting already-installed binaries.
 - `peer-ask --repo` now keeps its default artifacts under the selected state
   repository instead of leaking them into the caller's working directory.
 - `fail-ledger` now accepts the documented `--repo` option and honors

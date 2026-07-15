@@ -37,6 +37,7 @@ try:
         raise ValueError("invalid plugin metadata")
     if schema == 2:
         components = row.get("components")
+        component_modes = row.get("component_modes")
         required_components = (
             "tools", "claude_hooks", "codex_plugin", "auto_update",
             "machine_snapshot", "slurm_snapshot",
@@ -51,6 +52,12 @@ try:
             not isinstance(components.get(key), bool) for key in required_components
         ):
             raise ValueError("invalid component profile")
+        if component_modes is not None and (
+            not isinstance(component_modes, dict)
+            or any(component_modes.get(key) not in ("0", "1", "auto")
+                   for key in ("machine_snapshot", "slurm_snapshot"))
+        ):
+            raise ValueError("invalid component modes")
         if not isinstance(row.get("managed_targets"), list) or any(
             not isinstance(value, str) or not value for value in row["managed_targets"]
         ):
@@ -84,6 +91,24 @@ try:
 except Exception:
     sys.exit(1)
 PY
+}
+
+oms_install_receipt_mode() {
+  local key="$1"
+  local fallback="${2:-0}"
+  local receipt="${3:-$(oms_install_receipt_path)}"
+  local value
+
+  value="$(oms_install_receipt_field "component_modes.$key" "$receipt" 2>/dev/null || true)"
+  case "$value" in
+    0|1|auto) printf '%s\n' "$value"; return 0 ;;
+  esac
+  value="$(oms_install_receipt_field "components.$key" "$receipt" 2>/dev/null || true)"
+  case "$value" in
+    true) printf '1\n' ;;
+    false) printf '0\n' ;;
+    *) printf '%s\n' "$fallback" ;;
+  esac
 }
 
 oms_install_require_owner() {
@@ -172,6 +197,10 @@ oms_install_write_receipt() {
 
   root="$(oms_install_physical_root "$root")" || return 1
   case "$profile" in minimal|full|custom) ;; *) echo "error: invalid install profile: $profile" >&2; return 2 ;; esac
+  case "${OH_MY_SETTING_GENERATE_MACHINE:-0}:${OH_MY_SETTING_GENERATE_SLURM:-0}" in
+    0:0|0:1|0:auto|1:0|1:1|1:auto|auto:0|auto:1|auto:auto) ;;
+    *) echo "error: invalid snapshot component mode" >&2; return 2 ;;
+  esac
   [ -n "$install_ref" ] || install_ref="unknown"
   case "$previous_commit" in
     "") ;;
@@ -218,6 +247,10 @@ row = {
         "auto_update": os.environ.get("OH_MY_SETTING_AUTO_UPDATE", "0") == "1",
         "machine_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_MACHINE", "0") != "0",
         "slurm_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_SLURM", "0") != "0",
+    },
+    "component_modes": {
+        "machine_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_MACHINE", "0"),
+        "slurm_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_SLURM", "0"),
     },
     "managed_targets": [
         ".codex/AGENTS.md",

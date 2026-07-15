@@ -98,6 +98,10 @@ case "$PROFILE" in
   minimal|full|custom) ;;
   *) echo "error: OH_MY_SETTING_PROFILE must be minimal, full, or custom" >&2; exit 2 ;;
 esac
+case "$GENERATE_MACHINE:$GENERATE_SLURM" in
+  0:0|0:1|0:auto|1:0|1:1|1:auto|auto:0|auto:1|auto:auto) ;;
+  *) echo "error: snapshot modes must be 0, 1, or auto" >&2; exit 2 ;;
+esac
 case "$REF" in
   edge) ;;
   ""|-*|/*|*/|.*|*.|*..*|*//*|*/.*|*.lock|*.lock/*|*[!A-Za-z0-9._/-]*)

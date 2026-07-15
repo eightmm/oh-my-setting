@@ -873,6 +873,7 @@ test_tsp_queue_missing_tsp_fallback_records_ledger() {
 
   make_committed_repo "$project"
   out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 \
+    OMS_TSP_ALLOW_FALLBACK=1 \
     OMS_TSP_FALLBACK_DIR="$project/fallback" PATH="/usr/bin:/bin" \
     "$ROOT/scripts/tsp-queue.sh" enqueue --ledger-note fallback-note -- bash -c 'echo fallback-ok' 2>"$project/enqueue.err")"
   job_id="$out"

@@ -36,6 +36,7 @@ bash tests/autonomy-plan-run-smoke.sh
 bash tests/model-routing-smoke.sh
 bash tests/release-contract-smoke.sh
 bash tests/update-v04-smoke.sh
+bash tests/lifecycle-hardening-smoke.sh
 bash tests/harness-enhancements-smoke.sh
 bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
 

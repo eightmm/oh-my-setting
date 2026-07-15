@@ -2,13 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT_DIR="${1:-$PWD}"
+PROJECT_DIR="$PWD"
 FAILED=0
 WARNED=0
+STRICT=0
+PROJECT_DIR_SET=0
 
 usage() {
   cat <<'EOF'
-Usage: project-doctor.sh [project_dir]
+Usage: project-doctor.sh [--strict] [project_dir]
 
 Verify that all agent-facing files in a project give every agent the same view:
 
@@ -20,22 +22,24 @@ Verify that all agent-facing files in a project give every agent the same view:
   docs/, notebooks outside notebooks/, missing src/ layout, tracked files in
   gitignored dirs, tracked files over 10MB)
 
-Exit 0 when consistent (warnings allowed), 1 on drift/missing blocks.
+Exit 0 when consistent (warnings allowed), 1 on drift/missing blocks. --strict
+also makes warnings fail, for CI or release gates.
 EOF
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
-
-[ "$#" -le 1 ] || {
-  echo "error: too many arguments" >&2
-  usage >&2
-  exit 2
-}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --strict) STRICT=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      [ "$PROJECT_DIR_SET" = 0 ] || { echo "error: too many arguments" >&2; usage >&2; exit 2; }
+      PROJECT_DIR="$1"
+      PROJECT_DIR_SET=1
+      ;;
+  esac
+  shift
+done
 
 [ -d "$PROJECT_DIR" ] || {
   echo "error: not a directory: $PROJECT_DIR" >&2
@@ -333,11 +337,29 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
   fi
 fi
 
+if has_block "$agents_file" "slurm" || has_block "$claude_file" "slurm"; then
+  if [ -n "${state:-}" ] && [ "$state" != draft ]; then
+    missing_slurm=""
+    for field in 'Partition/account' 'CPU/GPU/memory/time' 'Logs/checkpoints'; do
+      [ -n "$(pm_field "$field")" ] || missing_slurm="${missing_slurm}${missing_slurm:+, }$field"
+    done
+    if [ -n "$missing_slurm" ]; then
+      warn "Slurm execution contract fields are empty: $missing_slurm (use n/a only when justified)"
+    else
+      ok "Slurm execution contract fields are filled"
+    fi
+  fi
+fi
+
 if [ "$FAILED" -ne 0 ]; then
   echo "project-doctor: failed"
   exit 1
 fi
 if [ "$WARNED" -ne 0 ]; then
+  if [ "$STRICT" = 1 ]; then
+    echo "project-doctor: failed (strict warnings)"
+    exit 1
+  fi
   echo "project-doctor: ok (with warnings)"
 else
   echo "project-doctor: ok"

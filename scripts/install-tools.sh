@@ -6,6 +6,24 @@ set -euo pipefail
 NODE_VERSION="${OH_MY_SETTING_NODE_VERSION:-lts/*}"
 NVM_VERSION="${OH_MY_SETTING_NVM_VERSION:-v0.40.3}"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+UPGRADE=0
+
+usage() {
+  cat <<'EOF'
+Usage: install-tools.sh [--upgrade] [-h|--help]
+
+Install missing harness tools. --upgrade also refreshes existing provider CLIs
+and uv; an existing nvm-managed Node is refreshed to the configured channel.
+EOF
+}
+
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+case "${1:-}" in
+  "") ;;
+  --upgrade) UPGRADE=1 ;;
+  -h|--help) usage; exit 0 ;;
+  *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
@@ -52,6 +70,12 @@ install_nvm() {
 
 ensure_node() {
   if has_cmd node && has_cmd npm && [ "$(node_major)" -ge 20 ]; then
+    if [ "$UPGRADE" = 1 ] && [ -s "$NVM_DIR/nvm.sh" ]; then
+      load_nvm
+      nvm install "$NODE_VERSION"
+      nvm alias default "$NODE_VERSION"
+      nvm use default
+    fi
     echo "ok: node $(node --version)"
     return 0
   fi
@@ -92,7 +116,7 @@ install_npm_global() {
   local package="$1"
   local binary="$2"
 
-  if has_cmd "$binary"; then
+  if has_cmd "$binary" && [ "$UPGRADE" != 1 ]; then
     echo "ok: $binary already installed"
     return 0
   fi
@@ -132,7 +156,7 @@ EOF
 }
 
 install_antigravity() {
-  if has_cmd agy; then
+  if has_cmd agy && { [ "$UPGRADE" != 1 ] || [ "${OH_MY_SETTING_UPGRADE_ANTIGRAVITY:-1}" = 0 ]; }; then
     echo "ok: agy already installed"
     return 0
   fi
@@ -161,6 +185,9 @@ ensure_uv() {
   export PATH="$HOME/.local/bin:$PATH"
 
   if has_cmd uv; then
+    if [ "$UPGRADE" = 1 ]; then
+      uv self update
+    fi
     echo "ok: uv $(uv --version)"
     return 0
   fi

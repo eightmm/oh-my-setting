@@ -8,6 +8,37 @@ OUT="${OH_MY_SETTING_SLURM_REF:-$ROOT/custom-skills/slurm-hpc/references/cluster
 RAW_DIR="${OH_MY_SETTING_SLURM_RAW_DIR:-$ROOT/local/slurm}"
 WRITE_RAW="${OH_MY_SETTING_SLURM_WRITE_RAW:-0}"
 CURRENT_USER="${USER:-$(id -un 2>/dev/null || printf 'unknown')}"
+MODE="write"
+
+usage() {
+  cat <<'EOF'
+Usage: generate-slurm-skill.sh [--check|--dry-run] [-h|--help]
+
+Write a private, atomic cluster reference. --dry-run prints without writing;
+--check validates the existing generated reference without querying Slurm.
+EOF
+}
+
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+case "${1:-}" in
+  "") ;;
+  --check) MODE=check ;;
+  --dry-run) MODE=dry-run ;;
+  -h|--help) usage; exit 0 ;;
+  *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+if [ "$MODE" = check ]; then
+  [ -f "$OUT" ] || { echo "error: Slurm snapshot missing: $OUT" >&2; exit 1; }
+  grep -Fqx 'Schema: 1' "$OUT" &&
+    grep -Eq '^Generated: [0-9]{4}-[0-9]{2}-[0-9]{2}T' "$OUT" &&
+    grep -Fq '## Effective Submission Defaults' "$OUT" || {
+      echo "error: invalid Slurm snapshot: $OUT" >&2
+      exit 1
+    }
+  echo "Slurm snapshot: ok ($OUT)"
+  exit 0
+fi
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
@@ -226,10 +257,9 @@ queue_summary() {
   fi
 }
 
-mkdir -p "$(dirname "$OUT")"
-
-{
+render_snapshot() {
   printf '# Local Slurm Cluster\n\n'
+  printf 'Schema: 1\n'
   printf 'Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'Host: %s\n' "$(hostname 2>/dev/null || true)"
   printf 'User: %s\n\n' "${USER:-unknown}"
@@ -263,6 +293,7 @@ mkdir -p "$(dirname "$OUT")"
   printf '\n'
 
   printf '## Current Queue\n\n'
+  printf 'Ephemeral view captured at generation time; re-query `squeue` before acting.\n\n'
   queue_summary
   printf '\n'
 
@@ -287,7 +318,20 @@ mkdir -p "$(dirname "$OUT")"
   printf -- '- Time default: %s\n' "${time_default:-(not configured)}"
   printf -- '- Log path:\n'
   printf -- '- Checkpoint path:\n'
-} > "$OUT"
+}
+
+if [ "$MODE" = dry-run ]; then
+  render_snapshot
+  exit 0
+fi
+
+mkdir -p "$(dirname "$OUT")"
+tmp_out="$(mktemp "$(dirname "$OUT")/.cluster.XXXXXX")" || exit 1
+trap 'rm -f "$tmp_out"' EXIT HUP INT TERM
+render_snapshot > "$tmp_out"
+chmod 600 "$tmp_out"
+mv -f "$tmp_out" "$OUT"
+trap - EXIT HUP INT TERM
 
 if [ "$WRITE_RAW" = "1" ]; then
   mkdir -p "$RAW_DIR"
