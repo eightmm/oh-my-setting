@@ -120,6 +120,15 @@ sys.exit(0 if any(p.get("pluginId") == target and p.get("installed") for p in da
 ' "$PLUGIN_NAME@$MARKETPLACE_NAME" 2>/dev/null
 }
 
+plugin_cache_is_current() {
+  local actual_hash
+
+  plugin_is_installed || return 1
+  [ -d "$PLUGIN_CACHE" ] || return 1
+  actual_hash="$(oms_install_tree_hash "$PLUGIN_CACHE")"
+  [ "$actual_hash" = "$PLUGIN_HASH" ]
+}
+
 write_source_marker() {
   [ "$DRY_RUN" = "1" ] && return 0
   local plugin_root
@@ -198,10 +207,15 @@ else
   echo "codex-plugin: marketplace already registered ($MARKETPLACE_NAME)"
 fi
 
-refresh_stale_cache
-install_plugin
-if [ "$DRY_RUN" = "1" ]; then
-  echo "codex-plugin: would install $PLUGIN_NAME@$MARKETPLACE_NAME"
+if plugin_cache_is_current; then
+  write_source_marker "$PLUGIN_CACHE"
+  echo "codex-plugin: already current $PLUGIN_NAME@$PLUGIN_VERSION"
 else
-  echo "codex-plugin: installed $PLUGIN_NAME@$MARKETPLACE_NAME"
+  refresh_stale_cache
+  install_plugin
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "codex-plugin: would install $PLUGIN_NAME@$MARKETPLACE_NAME"
+  else
+    echo "codex-plugin: installed $PLUGIN_NAME@$MARKETPLACE_NAME"
+  fi
 fi

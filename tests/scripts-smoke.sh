@@ -8433,6 +8433,39 @@ EOF
   assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
 }
 
+test_install_codex_plugin_skips_current_cache() {
+  local d="$TMP/codex-plugin-current"
+  local home="$d/home"
+  local bin="$d/bin"
+  local log="$d/codex.log"
+  local version
+  local cache
+
+  mkdir -p "$bin"
+  version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+    "$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json")"
+  cache="$home/.codex/plugins/cache/oh-my-setting-local/oh-my-setting/$version"
+  mkdir -p "$cache"
+  cp -R "$ROOT/plugins/oh-my-setting/." "$cache/"
+  cat > "$bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CODEX_LOG"
+if [ "$1 $2 $3" = "plugin marketplace list" ]; then
+  printf 'oh-my-setting-local %s\n' "$OMS_TEST_ROOT"
+elif [ "$1 $2 $3" = "plugin list --json" ]; then
+  printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'
+fi
+EOF
+  chmod +x "$bin/codex"
+
+  HOME="$home" CODEX_HOME="$home/.codex" CODEX_LOG="$log" OMS_TEST_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" > "$d/out"
+  assert_file_contains "$d/out" "already current"
+  if grep -Fq 'plugin add oh-my-setting@oh-my-setting-local' "$log"; then
+    fail "current Codex plugin cache must not be re-registered"
+  fi
+}
+
 test_doctor_auto_repairs_installed_codex_plugin() {
   local d="$TMP/doctor-plugin-auto-repair"
   local home="$d/home"
