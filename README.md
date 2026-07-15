@@ -8,36 +8,15 @@ talking to your coding agent — there is nothing to run in a terminal.
 
 ## Install
 
-To install the 0.4 code from `main` before its release tag is published, use
-the explicit edge channel:
+Install the latest version from `main`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --ref edge
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-The 0.4 installer defaults to a minimal profile: rules, skills, dispatcher, and provider hooks
-for CLIs already present. It does not install provider CLIs, modify `.bashrc`,
-write a machine snapshot, register an update timer, or show a star prompt.
-For the 0.4 edge all-in-one setup:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --ref edge --full
-```
-
-Open a new shell once if `--full` installed new CLIs. From here on, your agent
-runs everything.
-
-For a published stable release, use its GitHub Release installer. Starting
-with v0.4.0, the release tag is embedded so rerunning it cannot silently move
-to a future `main` commit:
-
-```bash
-curl -fsSL https://github.com/eightmm/oh-my-setting/releases/latest/download/install.sh | bash
-```
-
-`--ref v0.4.0` (or `OH_MY_SETTING_REF=v0.4.0`) pins any source installer to a
-tag; branches and commits are also accepted. See [the release contract](docs/RELEASE.md)
-and [0.4 migration notes](docs/MIGRATION-0.4.md).
+This installs the safe default profile and connects the providers already on
+the machine. After that, ask your coding agent to check, update, or customize
+the installation.
 
 ## Start
 
@@ -69,60 +48,21 @@ Apply the oh-my-setting ml template.        # or: general, slurm
 Run the oh-my-setting project doctor.
 ```
 
-Review and advice (three local models in parallel):
+Multi-agent work:
 
 ```text
 Run a peer review of the current diff.
-Run a gated peer review of this diff — pass or fail.
-Run the ML pre-training review gate on this diff.
-Export a Claude review prompt for this diff instead of calling Claude directly.
-Import this Claude answer back into the artifact index.
 Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
-Delegate this to codex with up to 2 repair rounds if verification fails.
-Create a task-scoped executor soul for this work, freeze it, then delegate it.
-Delegate this to codex with automatic model routing; use a deeper model only if the role requires it.
-Route reasoning effort automatically too; keep routine work low or medium and gates high.
-Admit codex's patch — run the checks ladder before applying it.
 ```
 
-Reusable code sources:
+ML and HPC:
 
 ```text
-Profile my GitHub and find reusable equivariant GNN code.
-Register flowfrag/equivariant.py as flowfrag-equivariant.
-Fetch flowfrag-equivariant into this project.
-```
-
-Experiments (ML):
-
-```text
-Launch this training run through the run ledger, note "lr sweep".
-Record this eval's metrics.json into the ledger row.
-Show the last 10 ledger entries.
-Show the top runs by val_auc.
-Show today's harness timeline — what did the agents do here?
-Wait for Slurm job 12345 to finish, then digest it and report.
-Capture this run in a reproducibility capsule with config.yaml and seed 7.
-Which run produced ckpt/best.pt?
-Diff run A against run B and show the metric deltas.
 Check this molecular dataset's split for leakage before I train.
-Claim this experiment on the board so the other agents don't rerun it.
-Reconcile my Slurm jobs and write their final state into shared memory.
-Queue this training run on the single-GPU box so it waits its turn.
 Frame this as a hypothesis-driven experiment before I launch the run.
-Launch this as a registered research run with metric val_auc/scaffold.
-Have all three models attack this hypothesis and experiment design before I train.
-```
-
-Memory and handoff:
-
-```text
-Remember for this repo: run scripts/check.sh fast before claiming done.
-Pin for this repo: current task is the dataloader refactor.
-Show the active task packet.
-Reclaim expired agent claims (and abandoned reviews) on the shared plan.
-Hand off my last Codex session here so you can continue it.
+Wait for Slurm job 12345, then digest its log and report.
+Queue this training run on the single-GPU box.
 ```
 
 Maintenance:
@@ -130,10 +70,6 @@ Maintenance:
 ```text
 Check the oh-my-setting install status.
 Update oh-my-setting and re-run its doctor.
-Check for an update without applying it.
-Roll back the last successful oh-my-setting update.
-Fix duplicate skill-picker entries and clean legacy oh-my-setting links.
-Unlink oh-my-setting.                        # or: uninstall it completely
 ```
 
 ## What's Inside
