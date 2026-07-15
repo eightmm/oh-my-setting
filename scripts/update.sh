@@ -77,6 +77,7 @@ RECEIPT="$(oms_install_receipt_path)"
 RECEIPT_SCHEMA="$(oms_install_receipt_field schema "$RECEIPT" 2>/dev/null || printf 1)"
 INSTALL_REF="$(oms_install_receipt_field ref "$RECEIPT" 2>/dev/null || true)"
 INSTALL_PROFILE="$(oms_install_receipt_field profile "$RECEIPT" 2>/dev/null || printf custom)"
+RECEIPT_PREVIOUS_COMMIT="$(oms_install_receipt_field previous_commit "$RECEIPT" 2>/dev/null || true)"
 [ -n "$INSTALL_REF" ] || {
   legacy_channel="$(oms_install_receipt_field channel "$RECEIPT" 2>/dev/null || true)"
   if [ "$legacy_channel" = "detached" ]; then
@@ -349,7 +350,11 @@ trap 'handle_update_signal INT' INT
 trap 'handle_update_signal TERM' TERM
 
 reconcile_core() {
-  export OMS_INSTALL_PREVIOUS_COMMIT="$current"
+  if [ "$ROLLBACK" != 1 ] && [ "$current" = "$target" ]; then
+    export OMS_INSTALL_PREVIOUS_COMMIT="$RECEIPT_PREVIOUS_COMMIT"
+  else
+    export OMS_INSTALL_PREVIOUS_COMMIT="$current"
+  fi
   "$ROOT/scripts/link.sh" || return 1
   if [ "$CLAUDE_HOOKS" = "1" ]; then "$ROOT/scripts/install-claude-hooks.sh" || return 1; else "$ROOT/scripts/install-claude-hooks.sh" --remove || return 1; fi
   if [ "$CODEX_PLUGIN" = "1" ]; then

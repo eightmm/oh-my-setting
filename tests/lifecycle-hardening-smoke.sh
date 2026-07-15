@@ -173,10 +173,17 @@ test_update_refreshes_snapshot_policy() {
   mkdir -p "$source/scripts/lib" "$(dirname "$receipt")"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
-  for script in link install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate doctor; do
+  for script in install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate doctor; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/$script.sh"
     chmod +x "$source/scripts/$script.sh"
   done
+  cat > "$source/scripts/link.sh" <<'EOF'
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/lib/install-contract.sh"
+oms_install_write_receipt "$ROOT" "$(oms_install_receipt_path)" >/dev/null
+EOF
+  chmod +x "$source/scripts/link.sh"
   cat > "$source/scripts/write-machine-snapshot.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'machine\n' >> "$OMS_TEST_SNAPSHOT_LOG"
@@ -228,6 +235,8 @@ PY
   if grep -Fq machine "$TMP/snapshot.log"; then
     fail "explicit machine snapshot disable did not override receipt auto mode"
   fi
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_commit"])' "$receipt")" = "$first" ] ||
+    fail "no-op reconciliation replaced the last real rollback commit"
 }
 
 test_receipt_preserves_snapshot_modes
