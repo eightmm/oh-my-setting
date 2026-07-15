@@ -220,6 +220,14 @@ PY
   if grep -Fq slurm "$TMP/snapshot.log"; then
     fail "Slurm auto snapshot ran without sinfo"
   fi
+  : > "$TMP/snapshot.log"
+  HOME="$home" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_SNAPSHOT_LOG="$TMP/snapshot.log" \
+    OH_MY_SETTING_GENERATE_MACHINE=0 OH_MY_SETTING_GENERATE_SLURM=1 \
+    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools --no-doctor >/dev/null
+  assert_contains "$TMP/snapshot.log" "slurm"
+  if grep -Fq machine "$TMP/snapshot.log"; then
+    fail "explicit machine snapshot disable did not override receipt auto mode"
+  fi
 }
 
 test_receipt_preserves_snapshot_modes
