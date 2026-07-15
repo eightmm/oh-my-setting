@@ -551,6 +551,8 @@ agent_task_emit_context() {
   local max_chars="${OMS_AGENT_TASK_CONTEXT_CHARS:-6000}"
   local updated
 
+  case "$max_chars" in *[!0-9]*|"") max_chars=6000 ;; esac
+
   [ -n "$file" ] || file="$(agent_task_project_file "$repo")"
   [ -s "$file" ] || return 1
   if agent_task_file_has_sensitive_content "$file"; then
@@ -569,70 +571,110 @@ agent_task_emit_context() {
   printf -- '- size: %s bytes (~%s tokens)\n\n' "$bytes" "$tokens"
   if [ "$bytes" -gt "$max_chars" ]; then
     agent_task_prune_for_budget "$file" "$max_chars"
-    printf '\n\n... active task compacted to ~%s chars (oldest Loop State/Last Failure/Verification bullets dropped first; Goal/Done Criteria/Verify/Decisions/Current State/Next Step preserved). Run agent-task.sh update/close to compact it.\n' "$max_chars"
   else
     cat "$file"
   fi
-  printf '\n'
 }
 
-# Section-aware truncation. Plain `head -c` cut from the top, which silently
-# dropped the most actionable sections (Current State, Next Step, Decisions)
-# because they live at the bottom of the file. Instead, keep the priority
-# sections in full and spend the remaining budget on the accumulating sections
-# (Loop State, Last Failure, Verification) tail-first, so recent entries
-# survive and the handoff conclusion is never lost.
+# Section-aware hard cap. Every retained section receives a bounded share, so a
+# giant Goal or Current State cannot crowd out Verify and Next Step. Accumulating
+# sections are sampled tail-first to keep their newest useful entries.
 agent_task_prune_for_budget() {
   local file="$1"
   local budget="$2"
 
-  awk -v budget="$budget" '
-    function is_priority(h) {
-      return (h == "## Goal" || h == "## Constraints" || h == "## Done Criteria" \
-        || h == "## Verify" || h == "## Decisions" || h == "## Current State" \
+  LC_ALL=C awk -v budget="$budget" '
+    function keep_tail(h) {
+      return (h == "## Verify" || h == "## Decisions" || h == "## Current State" \
         || h == "## Next Step")
     }
-    /^## / { section = $0; order[++n] = section; idx[section] = n }
+    function take_line(k, j, allowance,    line, cost, placeholder) {
+      line = body[k SUBSEP j]
+      if (line == "" || chosen[k SUBSEP j]) return allowance
+      cost = length(line) + 1
+      if (cost <= allowance) {
+        chosen[k SUBSEP j] = line
+        return allowance - cost
+      }
+      placeholder = "(... entry clipped ...)"
+      cost = length(placeholder) + 1
+      if (!section_has_content[k] && cost <= allowance) {
+        chosen[k SUBSEP j] = placeholder
+        section_has_content[k] = 1
+        return allowance - cost
+      }
+      return allowance
+    }
+    /^## / {
+      section = $0
+      if (!(section in idx)) {
+        order[++n] = section
+        idx[section] = n
+      }
+      next
+    }
     {
-      body[idx[section] "\t" (++count[section])] = $0
-      lines[section] = count[section]
-      if (section == "") preamble[++pre] = $0
+      if (section != "") body[idx[section] SUBSEP (++lines[idx[section]])] = $0
     }
     END {
-      # Pass 1: priority sections (and the preamble before the first header)
-      # are always emitted in full; tally their byte cost.
-      used = 0
-      for (i = 1; i <= pre; i++) used += length(preamble[i]) + 1
-      for (k = 1; k <= n; k++) {
-        s = order[k]
-        if (!is_priority(s)) continue
-        for (j = 1; j <= lines[s]; j++) used += length(body[k "\t" j]) + 1
+      marker = "... task context truncated; older entries dropped; newest entries retained ..."
+      if (budget <= 0) exit
+      if (length(marker) + 1 > budget) {
+        print substr(marker, 1, budget - 1)
+        exit
       }
-      remaining = budget - used
-      if (remaining < 0) remaining = 0
 
-      # Emit in original file order. Priority sections print verbatim;
-      # accumulating sections keep as many trailing lines as fit.
-      for (i = 1; i <= pre; i++) print preamble[i]
-      for (k = 1; k <= n; k++) {
-        s = order[k]
-        print s
-        if (is_priority(s)) {
-          for (j = 2; j <= lines[s]; j++) print body[k "\t" j]
-          continue
+      # Reserve the marker first, then required/actionable headings. The first
+      # four are admitted before optional policy headings under tiny budgets.
+      remaining = budget - length(marker) - 1
+      wanted[1] = "## Goal"; wanted[2] = "## Verify"
+      wanted[3] = "## Next Step"; wanted[4] = "## Current State"
+      wanted[5] = "## Decisions"; wanted[6] = "## Done Criteria"
+      wanted[7] = "## Constraints"
+      for (i = 1; i <= 7; i++) {
+        s = wanted[i]
+        if (!(s in idx)) continue
+        cost = length(s) + 2
+        if (cost <= remaining) {
+          emit[idx[s]] = 1
+          remaining -= cost
+          kept++
         }
-        # Find the largest tail [start..end] of body lines fitting remaining.
-        size = 0; start = lines[s] + 1
-        for (j = lines[s]; j >= 2; j--) {
-          cost = length(body[k "\t" j]) + 1
-          if (size + cost > remaining) break
-          size += cost; start = j
-        }
-        if (start > 2) print "  (... older entries dropped to fit context budget ...)"
-        for (j = start; j <= lines[s]; j++) print body[k "\t" j]
-        remaining -= size
-        if (remaining < 0) remaining = 0
       }
+
+      # A per-section quota prevents any single priority body from defeating
+      # the hard cap. Sparse packets simply emit below the maximum.
+      quota = kept ? int(remaining / kept) : 0
+      for (i = 1; i <= 7; i++) {
+        s = wanted[i]
+        k = idx[s]
+        if (!emit[k]) continue
+        allowance = quota
+        if (keep_tail(s)) {
+          for (j = lines[k]; j >= 1 && allowance > 0; j--) {
+            before = allowance
+            allowance = take_line(k, j, allowance)
+            if (allowance < before) section_has_content[k] = 1
+          }
+        } else {
+          for (j = 1; j <= lines[k] && allowance > 0; j++) {
+            before = allowance
+            allowance = take_line(k, j, allowance)
+            if (allowance < before) section_has_content[k] = 1
+          }
+        }
+      }
+
+      # Emit selected sections in their original order and the single stable
+      # truncation marker. Calculated costs include every emitted newline.
+      for (k = 1; k <= n; k++) {
+        if (!emit[k]) continue
+        print order[k]
+        print ""
+        for (j = 1; j <= lines[k]; j++)
+          if (chosen[k SUBSEP j] != "") print chosen[k SUBSEP j]
+      }
+      print marker
     }
   ' "$file"
 }

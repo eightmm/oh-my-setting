@@ -23,9 +23,6 @@
     "capabilities": [
       "Read",
       "Write"
-    ],
-    "defaultPrompt": [
-      "Use oh-my-setting harness guidance for this coding task."
     ]
   }
 }

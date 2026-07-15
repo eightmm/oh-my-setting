@@ -374,9 +374,18 @@ printf '# Specialization\n\nUse the bounded implementation strategy.\n' > "$repo
   --strategy implementation-worker --soul-file "$repo/executor-soul.md" >/dev/null
 "$EXECUTOR" freeze --repo "$repo" --id routed-executor >/dev/null
 "$EXECUTOR" brief --repo "$repo" --id routed-executor > "$repo/executor-brief.md"
-grep -Fq 'model_class: balanced' "$repo/executor-brief.md" || fail "executor class not frozen"
-grep -Fq 'model: codex-balanced-x' "$repo/executor-brief.md" || fail "executor model not frozen"
-grep -Fq 'reasoning_effort: medium' "$repo/executor-brief.md" || fail "executor effort not frozen"
+python3 - "$repo/.oms/executors/routed-executor/meta.json" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["model_class"] == "balanced"
+assert d["model"] == "codex-balanced-x"
+assert d["reasoning_effort"] == "medium"
+PY
+if grep -Eq '^(model_class|model|fallback_model|reasoning_effort|fallback_reasoning_effort|lease_id|base_sha|soul_sha256):' \
+    "$repo/executor-brief.md"; then
+  fail "machine-owned executor routing metadata should not enter the worker prompt"
+fi
+grep -Fq 'executor_id: routed-executor' "$repo/executor-brief.md" || fail "executor identity missing from brief"
 export OMS_MODEL_CODEX_BALANCED=codex-balanced-changed
 "$DELEGATE" --repo "$repo" --to codex --executor routed-executor \
   --prompt 'use frozen route' --no-verify >/dev/null

@@ -122,9 +122,10 @@ HIGH_RISK_TERMS = RELEASE_TERMS + (
     "훅",
     "플러그인",
 )
-VERIFY_RE = re.compile(
-    r"\b(verified|verification|not verified|not run|skipped|test|tests|passed|failed|checked)\b"
-    r"|검증|테스트|확인|실행|통과|실패|미검증",
+VERIFICATION_DISCLOSURE_RE = re.compile(
+    r"(?:\b(?:verification|verified|tests?|not verified)"
+    r"|(?:검증|테스트|미검증|검증하지 않음))"
+    r"\s*[:：]\s*\S",
     re.IGNORECASE,
 )
 CHITCHAT_RE = re.compile(
@@ -713,12 +714,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             skills=fresh,
         )
     if fresh:
-        print(
-            "oh-my-setting skill hint: this request may match installed skill(s): "
-            + ", ".join(fresh)
-            + ". If relevant, invoke via the Skill tool before proceeding; ignore if not."
-            + " (each skill hinted once per turn)"
-        )
+        print("oh-my-setting skill hint: " + ", ".join(fresh))
     return 0
 
 
@@ -753,6 +749,11 @@ def assistant_message(payload: dict[str, Any]) -> str:
     return ""
 
 
+def has_verification_disclosure(message: str) -> bool:
+    """Require an explicit verification-status field, not a keyword mention."""
+    return bool(VERIFICATION_DISCLOSURE_RE.search(message))
+
+
 def cmd_guard(_: argparse.Namespace) -> int:
     if os.environ.get("OMS_TURN_GUARD_OFF") == "1":
         return 0
@@ -774,12 +775,12 @@ def cmd_guard(_: argparse.Namespace) -> int:
     risk = str(state.get("risk") or "low")
     workflow = str(state.get("workflow") or "unknown")
     guard = bool(state.get("guard"))
-    should_guard = guard and (dirty or risk == "high" or os.environ.get("OMS_TURN_GUARD_STRICT") == "1")
+    should_guard = guard and (risk == "high" or os.environ.get("OMS_TURN_GUARD_STRICT") == "1")
     if not should_guard:
         append_event(repo, payload, action="turn_guard", status="allow", workflow=workflow, risk=risk, dirty=dirty)
         return 0
 
-    if VERIFY_RE.search(assistant_message(payload)):
+    if has_verification_disclosure(assistant_message(payload)):
         append_event(repo, payload, action="turn_guard", status="allow_verified", workflow=workflow, risk=risk, dirty=dirty)
         return 0
 
@@ -799,13 +800,10 @@ def cmd_guard(_: argparse.Namespace) -> int:
     write_json_atomic(state_path, state)
     append_event(repo, payload, action="turn_guard", status="block_unverified", workflow=workflow, risk=risk, dirty=dirty)
     reason = (
-        "oh-my-setting turn guard: this looks like a "
+        "oh-my-setting turn guard: high-risk "
         + workflow
-        + " turn with "
-        + risk
-        + " risk, but the final answer did not state verification. Continue briefly: "
-        "summarize changed files, run or mention the relevant verification if feasible, "
-        "or explicitly say not verified and why."
+        + " result lacks an explicit 'Verification:' or 'Not verified:' line. "
+        "Add one with the command/result or reason."
     )
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
     return 0

@@ -27,9 +27,10 @@ NO_MODEL_FALLBACK=0
 REASONING_EFFORT=auto
 APPLY=0
 KEEP_WORKTREE=0
-INCLUDE_MEMORY=1
-INCLUDE_TASK=1
-INCLUDE_ML_CONTEXT=1
+INCLUDE_MEMORY=0
+# -1 means mode-aware default: omit for reads, attach for writes.
+INCLUDE_TASK=-1
+INCLUDE_ML_CONTEXT=0
 EXPORT_ONLY=0
 DRY_RUN="${OH_MY_SETTING_AGENT_RUN_DRY_RUN:-0}"
 
@@ -67,9 +68,12 @@ Options:
   --apply              Write mode only: apply returned patch when worker and
                        verify pass and the main tree is clean.
   --keep-worktree      Write mode only: keep worker worktree.
-  --no-memory          Do not attach shared harness memory.
-  --no-task            Do not attach the active task handoff packet.
-  --no-ml-context      Do not attach the compact ML context digest.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task packet (write default).
+  --ml-context         Attach the compact ML context digest.
+  --no-memory          Disable --memory (compatibility).
+  --no-task            Disable task context.
+  --no-ml-context      Disable --ml-context (compatibility).
   --export-only        Read mode only: write the provider prompt artifact and
                        do not call CLI. Import the answer later with
                        import-agent-result.sh.
@@ -110,7 +114,7 @@ agent_run_record_task_outcome() {
   local note_file
 
   [ "${OMS_AGENT_RUN_TASK_OUTCOME:-1}" = "1" ] || return 0
-  [ "$INCLUDE_TASK" -eq 1 ] || return 0
+  [ "$INCLUDE_TASK" -ne 0 ] || return 0
   task_file="$(agent_task_project_file "$repo")" || return 0
   [ -s "$task_file" ] || return 0
 
@@ -290,12 +294,24 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_MEMORY=0
       shift
       ;;
+    --memory)
+      INCLUDE_MEMORY=1
+      shift
+      ;;
     --no-task)
       INCLUDE_TASK=0
       shift
       ;;
+    --task)
+      INCLUDE_TASK=1
+      shift
+      ;;
     --no-ml-context)
       INCLUDE_ML_CONTEXT=0
+      shift
+      ;;
+    --ml-context)
+      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --export-only)
@@ -371,7 +387,7 @@ if [ -n "$ROLE" ] && [ "$resolved_mode" != "write" ]; then
   echo "error: --role requires write mode" >&2
   exit 2
 fi
-if [ "$INCLUDE_TASK" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
+if [ "$INCLUDE_TASK" -ne 0 ] && [ "$resolved_mode" = "write" ]; then
   agent_task_loop_warnings "$REPO" "$(agent_task_project_file "$REPO")" >&2 || true
 fi
 
@@ -388,9 +404,9 @@ if [ "$resolved_mode" = "read" ]; then
   [ -n "$FALLBACK_MODEL" ] && cmd+=(--fallback-model "$FALLBACK_MODEL")
   [ "$NO_MODEL_FALLBACK" -eq 1 ] && cmd+=(--no-model-fallback)
   cmd+=(--reasoning-effort "$REASONING_EFFORT")
-  [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
-  [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
-  [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
+  [ "$INCLUDE_MEMORY" -eq 1 ] && cmd+=(--memory)
+  [ "$INCLUDE_TASK" -eq 1 ] && cmd+=(--task)
+  [ "$INCLUDE_ML_CONTEXT" -eq 1 ] && cmd+=(--ml-context)
   [ "$EXPORT_ONLY" -eq 1 ] && cmd+=(--export-only)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   agent_run_exec_and_record read "$TO" "${cmd[@]}"
@@ -416,9 +432,10 @@ else
   [ "${REPAIR:-0}" != "0" ] && cmd+=(--repair "$REPAIR")
   [ "$APPLY" -eq 1 ] && cmd+=(--apply)
   [ "$KEEP_WORKTREE" -eq 1 ] && cmd+=(--keep-worktree)
-  [ "$INCLUDE_MEMORY" -eq 0 ] && cmd+=(--no-memory)
+  [ "$INCLUDE_MEMORY" -eq 1 ] && cmd+=(--memory)
   [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
-  [ "$INCLUDE_ML_CONTEXT" -eq 0 ] && cmd+=(--no-ml-context)
+  [ "$INCLUDE_TASK" -ne 0 ] && cmd+=(--task)
+  [ "$INCLUDE_ML_CONTEXT" -eq 1 ] && cmd+=(--ml-context)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   agent_run_exec_and_record write "$TO" "${cmd[@]}"
 fi

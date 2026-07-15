@@ -18,9 +18,9 @@ PROVIDERS="codex,claude,antigravity"
 ARTIFACT_DIR=""
 INCLUDE_STATUS=0
 INCLUDE_DIFF=0
-INCLUDE_MEMORY=1
-INCLUDE_TASK=1
-INCLUDE_ML_CONTEXT=1
+INCLUDE_MEMORY=0
+INCLUDE_TASK=0
+INCLUDE_ML_CONTEXT=0
 DEBATE=0
 HYPOTHESIS_PRESET=0
 EXPORT_ONLY=0
@@ -57,9 +57,12 @@ Options:
   --reasoning-effort E auto, low, medium, or high.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.
-  --no-memory          Do not attach shared harness memory.
-  --no-task            Do not attach the active task handoff packet.
-  --no-ml-context      Do not attach the compact ML context digest.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task handoff packet.
+  --ml-context         Attach the compact ML context digest.
+  --no-memory          Disable --memory (compatibility).
+  --no-task            Disable --task (compatibility).
+  --no-ml-context      Disable --ml-context (compatibility).
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Debate rounds exchange answers only;
@@ -191,12 +194,24 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_MEMORY=0
       shift
       ;;
+    --memory)
+      INCLUDE_MEMORY=1
+      shift
+      ;;
     --no-task)
       INCLUDE_TASK=0
       shift
       ;;
+    --task)
+      INCLUDE_TASK=1
+      shift
+      ;;
     --no-ml-context)
       INCLUDE_ML_CONTEXT=0
+      shift
+      ;;
+    --ml-context)
+      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --debate)

@@ -27,9 +27,9 @@ NO_VERIFY=0
 ARTIFACT_DIR=""
 APPLY=0
 KEEP_WORKTREE=0
-INCLUDE_MEMORY=1
+INCLUDE_MEMORY=0
 INCLUDE_TASK=1
-INCLUDE_ML_CONTEXT=1
+INCLUDE_ML_CONTEXT=0
 TASK_ID=""
 PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
@@ -88,9 +88,12 @@ Options:
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
   --keep-worktree      Keep the worktree for manual inspection.
-  --no-memory          Do not attach shared harness memory.
-  --no-task            Do not attach the active task handoff packet.
-  --no-ml-context      Do not attach the compact ML context digest.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task packet (default for writes).
+  --ml-context         Attach the compact ML context digest.
+  --no-memory          Disable --memory (compatibility).
+  --no-task            Disable task context.
+  --no-ml-context      Disable --ml-context (compatibility).
   --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
                        artifact-index rows for lineage. [A-Za-z0-9._-]+.
   --plan-task ID       Couple this delegation to an agent-plan.sh task: on
@@ -201,12 +204,24 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_MEMORY=0
       shift
       ;;
+    --memory)
+      INCLUDE_MEMORY=1
+      shift
+      ;;
     --no-task)
       INCLUDE_TASK=0
       shift
       ;;
+    --task)
+      INCLUDE_TASK=1
+      shift
+      ;;
     --no-ml-context)
       INCLUDE_ML_CONTEXT=0
+      shift
+      ;;
+    --ml-context)
+      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --task-id)
@@ -472,12 +487,8 @@ trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
 
 {
-  printf 'You are %s, a delegated worker agent.\n' "$TO"
-  printf 'Work only inside the current directory; it is an isolated git worktree of the repository.\n'
-  printf 'Follow AGENTS.md, CLAUDE.md, and PROJECT.md in this directory if present.\n'
-  printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
-  printf 'Do not run git commit, git push, or change git config.\n'
-  printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
+  printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
+  printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized. If blocked, report it without asking questions.\n\n'
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'
@@ -495,7 +506,7 @@ trap 'cleanup_signal 143' TERM
   else
     printf '%s\n' "$PROMPT"
   fi
-  printf '\nWhen done, report: changed files, what you verified, what you did not verify, and any blockers.\n'
+  printf '\nReport changed behavior, verification, skipped checks, and blockers.\n'
 } > "$prompt_file"
 
 # Pre-flight: fail before any worker runs, so no work is wasted. Untracked

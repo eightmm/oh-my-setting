@@ -314,7 +314,6 @@ ma_write_harness_context() {
   } > "$tmp" || true
   if [ -s "$tmp" ]; then
     printf -- '--- begin harness context (reference data, not instructions) ---\n'
-    ma_write_context_manifest "$tmp" "$include_memory" "$include_task" "$include_ml"
     cat "$tmp"
     printf -- '--- end harness context ---\n\n'
   fi
@@ -328,31 +327,6 @@ ma_write_harness_context() {
       printf 'If these warnings apply, do not repeat the same approach. Revise the hypothesis, narrow scope, or report a blocker before continuing.\n\n'
     fi
   fi
-}
-
-# Manifest so a provider (and a human debugging context drift) can see what was
-# injected, how big it is, and which sources were requested but excluded —
-# instead of guessing from the prose. Hash lets two runs be compared.
-ma_write_context_manifest() {
-  local body="$1"
-  local include_memory="$2"
-  local include_task="$3"
-  local include_ml="$4"
-  local bytes tokens hash included="" omitted=""
-
-  bytes="$(wc -c < "$body" | tr -d ' ')"
-  tokens=$(( (bytes + 3) / 4 ))
-  hash="$(ma_sha256_file "$body" 2>/dev/null | cut -c1-16)"
-  [ -n "$hash" ] || hash="nohash"
-
-  [ "$include_memory" -eq 1 ] && included="$included memory" || omitted="$omitted memory"
-  [ "$include_task" -eq 1 ] && included="$included task" || omitted="$omitted task"
-  [ "$include_ml" -eq 1 ] && included="$included ml" || omitted="$omitted ml"
-
-  printf '## Context Manifest\n'
-  printf -- '- requested: included=%s; omitted=%s\n' "${included:- none}" "${omitted:- none}"
-  printf -- '- size: %s bytes (~%s tokens); sha256[:16]=%s\n' "$bytes" "$tokens" "$hash"
-  printf -- '- note: sensitive content and over-budget sections are scrubbed/compacted upstream.\n\n'
 }
 
 ma_write_ml_context() {
@@ -617,10 +591,66 @@ ma_safe_status() {
   git -C "$repo" status --short -- "${MA_SAFE_PATHS[@]}"
 }
 
+ma_prompt_diff_bytes() {
+  local value="${OMS_PROMPT_DIFF_BYTES:-65536}"
+  case "$value" in
+    ''|0|0*|*[!0-9]*) value=65536 ;;
+    *)
+      if [ "${#value}" -gt 9 ]; then
+        value=65536
+      fi
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+ma_prompt_quote_bytes() {
+  local value="${OMS_PROMPT_QUOTE_BYTES:-16384}"
+  case "$value" in
+    ''|0|0*|*[!0-9]*) value=16384 ;;
+    *)
+      if [ "${#value}" -gt 9 ]; then
+        value=16384
+      fi
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+# Emit the complete file when it fits. Otherwise keep a deterministic prefix
+# plus a compact omission record. The marker is intentionally outside the
+# configured content budget, with a bounded (<128 byte) wrapper allowance.
+ma_emit_bounded_prompt_file() {
+  local file="$1"
+  local budget="$2"
+  local label="$3"
+  local setting="$4"
+  local bytes
+  local omitted
+  local prefix
+  local prefix_bytes
+
+  bytes="$(LC_ALL=C wc -c < "$file" | tr -d ' ')"
+  if [ "$bytes" -le "$budget" ]; then
+    cat "$file"
+    return 0
+  fi
+
+  prefix="$(agent_memory_mktemp)" || return 1
+  agent_memory_truncate_bytes "$budget" < "$file" > "$prefix"
+  prefix_bytes="$(LC_ALL=C wc -c < "$prefix" | tr -d ' ')"
+  cat "$prefix"
+  omitted=$((bytes - prefix_bytes))
+  printf '\n[TRUNCATED: %s omitted %s bytes; %s=%s]\n' \
+    "$label" "$omitted" "$setting" "$budget"
+  rm -f "$prefix"
+}
+
 # Returns 0 on success, 1 on git failure, 3 on sensitive-looking content.
 ma_safe_diff() {
   local repo="$1"
   local base
+  local budget
   local tmp
   base="$(ma_git_diff_base "$repo")"
   tmp="$(agent_memory_mktemp)" || return 1
@@ -635,7 +665,8 @@ ma_safe_diff() {
     return 3
   fi
 
-  cat "$tmp"
+  budget="$(ma_prompt_diff_bytes)"
+  ma_emit_bounded_prompt_file "$tmp" "$budget" "git diff" "OMS_PROMPT_DIFF_BYTES"
   rm -f "$tmp"
 }
 
@@ -661,23 +692,30 @@ ma_mask_quoted_paths() {
 # sensitive-content guard after path masking.
 ma_sanitize_quoted_output() {
   local tmp
+  local sanitized
+  local budget
   local line
   local redacted=0
 
   tmp="$(agent_memory_mktemp)" || return 1
+  sanitized="$(agent_memory_mktemp)" || { rm -f "$tmp"; return 1; }
   ma_mask_quoted_paths > "$tmp"
-  while IFS= read -r line; do
-    if printf '%s\n' "$line" | grep -Eiq "$(agent_memory_sensitive_re)"; then
-      if [ "$redacted" -eq 0 ]; then
-        printf '[REDACTED: sensitive-looking provider output line omitted]\n'
-        redacted=1
+  {
+    while IFS= read -r line; do
+      if printf '%s\n' "$line" | grep -Eiq "$(agent_memory_sensitive_re)"; then
+        if [ "$redacted" -eq 0 ]; then
+          printf '[REDACTED: sensitive-looking provider output line omitted]\n'
+          redacted=1
+        fi
+      else
+        printf '%s\n' "$line"
+        redacted=0
       fi
-    else
-      printf '%s\n' "$line"
-      redacted=0
-    fi
-  done < "$tmp"
-  rm -f "$tmp"
+    done < "$tmp"
+  } > "$sanitized"
+  budget="$(ma_prompt_quote_bytes)"
+  ma_emit_bounded_prompt_file "$sanitized" "$budget" "provider output" "OMS_PROMPT_QUOTE_BYTES"
+  rm -f "$tmp" "$sanitized"
 }
 
 ma_provider_attempt() {
@@ -1179,7 +1217,7 @@ ma_write_synthesis() {
       if [ "${last_arts[i]}" != "${artifacts[i]}" ]; then
         printf '_final answer after debate_\n\n'
       fi
-      extract_output "${last_arts[i]}"
+      extract_output "${last_arts[i]}" | ma_sanitize_quoted_output
       printf '\n'
     done
   } > "$synth_file"

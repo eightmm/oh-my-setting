@@ -20,9 +20,9 @@ NO_DIFF=0
 BASE_REF=""
 SYNTHESIZE=""
 ML_PRESET=0
-INCLUDE_MEMORY=1
-INCLUDE_TASK=1
-INCLUDE_ML_CONTEXT=1
+INCLUDE_MEMORY=0
+INCLUDE_TASK=0
+INCLUDE_ML_CONTEXT=0
 DEBATE=0
 EXPORT_ONLY=0
 GATE=0
@@ -68,9 +68,12 @@ Options:
   --no-model-fallback  Disable implicit class fallback.
   --reasoning-effort E auto, low, medium, or high.
   --no-diff            Do not attach git diff/status context.
-  --no-memory          Do not attach shared harness memory.
-  --no-task            Do not attach the active task handoff packet.
-  --no-ml-context      Do not attach the compact ML context digest.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task handoff packet.
+  --ml-context         Attach the compact ML context digest.
+  --no-memory          Disable --memory (compatibility).
+  --no-task            Disable --task (compatibility).
+  --no-ml-context      Disable --ml-context (compatibility).
   --debate N           Add N debate rounds (1-3). Each round, every reviewer
                        sees the others' previous findings, critiques them, and
                        revises its own. Debate rounds exchange findings only;
@@ -228,25 +231,13 @@ write_prompt() {
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
     printf 'If there are no actionable findings, say "No findings".\n\n'
     if [ "$ML_PRESET" -eq 1 ]; then
-      printf 'This is an ML pre-training review. ML bugs are usually silent: the code runs,\n'
-      printf 'only the metrics are wrong. Check the diff against each item:\n'
-      printf 'For chem-bio work, apply the installed chem-bio-ml skill and read its shared plus task-family references when available.\n'
-      printf -- '- Data leakage: val/test data used for fitting, normalization, feature selection, threshold tuning, checkpoint choice, or early stopping.\n'
-      printf -- '- Split integrity: boundary changes, group/time leakage, seed-dependent splits.\n'
-      printf -- '- Label/target or metric definition changes that silently break comparability with baselines.\n'
-      printf -- '- Loss: sign, scale, reduction, masking of padded or invalid elements.\n'
-      printf -- '- Eval correctness: model.eval() and torch.no_grad() in validation/inference paths.\n'
-      printf -- '- Reproducibility: seeds, data versions, config capture, checkpoint save/load symmetry.\n'
-      printf -- '- Silent numerics: NaN/Inf paths, division by zero, dtype/precision changes.\n'
-      printf -- '- DDP: sampler.set_epoch per epoch, rank-0-only side effects, metric all_reduce.\n'
-      printf -- '- Config or preprocessing changes that invalidate existing checkpoints or baselines.\n'
-      printf -- '- Chem-bio shared: wrong scientific unit or holdout key; standardization after dedup/split; assay/source conflicts; censoring, units, replicate, or negative provenance lost; missing cheap baseline, calibration, or applicability-domain slices.\n'
-      printf -- '- Molecule/protein/3D: random split instead of scaffold/sequence-identity split; scaffold/series or sequence/family/template leakage; stereochemistry, isoform/construct, residue alignment, conformer/frame, energy/force unit, or invariance errors.\n'
-      printf -- '- Interactions/biologics: warm pairs reported as novel entities; missing cold-drug/cold-target/cold-both results; bound-pose/template leakage; biased decoys; parent/clonotype/antigen or assay leakage.\n'
-      printf -- '- Nucleic acids/gene editing: overlapping guide/locus/transcript leakage; genome/annotation version drift; modifications collapsed to plain sequence; PAM/nuclease/cell-context confounding; unmeasured off-targets treated as negatives.\n'
-      printf -- '- Reaction/generation: patent, reaction-template, product, campaign, or time leakage; yield semantics lost; atom/stereo errors; memorization, oracle exploitation, survivor-only scoring, or missing synthesis/diversity constraints.\n'
-      printf -- '- Cellular/network: cell/well/site pseudoreplication; donor, plate, batch, perturbation, or time confounding; single-cell no-change baseline omitted; knowledge-graph inverse/entailed edge, text, degree, or future-snapshot leakage.\n'
-      printf 'Rank silently-wrong-metrics bugs as the highest severity findings.\n\n'
+      printf 'This is an ML pre-training gate. Prioritize silent ML bugs and metric corruption:\n'
+      printf -- '- Data leakage/splits: fitting or selection on val/test; group, time, seed, preprocessing, or checkpoint leakage.\n'
+      printf -- '- Objective/eval: target and metric meaning, loss sign/scale/reduction/masks, eval mode, no-grad, NaN/Inf, dtype.\n'
+      printf -- '- Reproducibility/distribution: seeds, versions, checkpoint symmetry, sampler.set_epoch, rank-0 effects, metric reduction.\n'
+      printf -- '- Chem-bio core: scientific units, entity-aware holdouts, provenance, cheap baselines, calibration, and applicability slices; use chem-bio-ml references for the active family.\n'
+      printf -- '- Molecule/protein/3D/interactions: scaffold/sequence-identity split; family/template/pose/assay leakage; stereochemistry, construct, residue, frame, invariance; report cold-drug/cold-target/cold-both.\n'
+      printf -- '- reaction, generation, nucleic acid, single-cell, and knowledge-graph: template/patent/time/locus/donor/batch/inverse-edge leakage; validity, memorization, oracle, and no-change baselines.\n\n'
     fi
     ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
     printf 'Question:\n%s\n\n' "$question"
@@ -325,18 +316,31 @@ while [ "$#" -gt 0 ]; do
       ;;
     --ml)
       ML_PRESET=1
+      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --no-memory)
       INCLUDE_MEMORY=0
       shift
       ;;
+    --memory)
+      INCLUDE_MEMORY=1
+      shift
+      ;;
     --no-task)
       INCLUDE_TASK=0
       shift
       ;;
+    --task)
+      INCLUDE_TASK=1
+      shift
+      ;;
     --no-ml-context)
       INCLUDE_ML_CONTEXT=0
+      shift
+      ;;
+    --ml-context)
+      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --debate)

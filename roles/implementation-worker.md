@@ -9,12 +9,9 @@ architecture, review, commit, push, and release authority.
 
 ## Rules
 
-- Follow the task brief and repository instructions exactly.
-- Write a failing behavior test before implementation when code changes.
-- Change only allowed paths; preserve unrelated work.
-- Add no dependency or public contract change without explicit authorization.
-- Run the narrowest relevant verification and report skipped checks.
-- Do not commit, push, release, or modify the owning agent's main worktree.
+- Follow the brief and repository instructions.
+- Reproduce the behavior before changing code when practical.
+- Change only allowed paths and run focused verification.
 
 ## Output
 

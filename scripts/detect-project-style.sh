@@ -10,9 +10,9 @@ if [ "$#" -gt 1 ]; then
   exit 2
 fi
 
-exists_any() {
+exists_ml_entry() {
   local pattern
-  for pattern in "$@"; do
+  for pattern in train.py pretrain.py finetune.py infer.py inference.py; do
     if find "$DIR" -maxdepth 3 \( \
         -name ".git" -o -name ".venv" -o -name "node_modules" -o \
         -name "__pycache__" -o -name "tmp" -o -name "backups" \
@@ -23,35 +23,51 @@ exists_any() {
   return 1
 }
 
-has_code_text() {
+has_python_ml_import() {
+  local pattern='(^|[[:space:];])(from|import)[[:space:]]+(torch|tensorflow|jax|sklearn|pytorch_lightning|lightning)([.[:space:],]|$)'
+
   if command -v rg >/dev/null 2>&1; then
-    # Search from inside DIR so exclude globs match project-relative paths,
-    # not absolute path segments (e.g. a project located under /tmp).
-    # detect-project-style.sh and doctor.sh are excluded because this repo's
-    # own copies contain the ML/Slurm keyword lists and would self-match.
-    (cd "$DIR" && rg -q "$1" . \
-      -g '*.py' -g '*.sh' -g '*.yaml' -g '*.yml' -g '*.toml' \
-      -g '!scripts/detect-project-style.sh' \
-      -g '!scripts/doctor.sh' \
+    (cd "$DIR" && rg -q "$pattern" . -g '*.py' \
       -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
       -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null)
   else
     find "$DIR" -maxdepth 3 \( \
       -name ".git" -o -name ".venv" -o -name "node_modules" -o \
       -name "__pycache__" -o -name "tmp" -o -name "backups" \
-    \) -prune -o -type f \( -name '*.py' -o -name '*.sh' -o -name '*.yaml' -o -name '*.yml' -o -name '*.toml' \) \
-      ! -path '*/scripts/detect-project-style.sh' \
-      ! -path '*/scripts/doctor.sh' \
-      -exec grep -Eq "$1" {} \; -print -quit 2>/dev/null | grep -q .
+    \) -prune -o -type f -name '*.py' \
+      -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
+  fi
+}
+
+has_ml_dependency() {
+  local pattern="(^|[\"'[:space:]-])(torch|tensorflow|jax|scikit-learn|pytorch-lightning|lightning)(\\[[^]]+\\])?([\"'[:space:]]*([<>=~!:]|$)|[\"'])"
+
+  if command -v rg >/dev/null 2>&1; then
+    (cd "$DIR" && rg -q "$pattern" . \
+      -g 'requirements*.txt' -g 'pyproject.toml' -g 'setup.cfg' -g 'setup.py' \
+      -g 'environment*.yaml' -g 'environment*.yml' -g 'Pipfile' \
+      -g 'poetry.lock' -g 'uv.lock' \
+      -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
+      -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null)
+  else
+    find "$DIR" -maxdepth 3 \( \
+      -name ".git" -o -name ".venv" -o -name "node_modules" -o \
+      -name "__pycache__" -o -name "tmp" -o -name "backups" \
+    \) -prune -o -type f \( \
+      -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'setup.cfg' -o \
+      -name 'setup.py' -o -name 'environment*.yaml' -o -name 'environment*.yml' -o \
+      -name 'Pipfile' -o -name 'poetry.lock' -o -name 'uv.lock' \
+    \) -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
   fi
 }
 
 style="general"
 
-# configs/ and config.yaml alone are not ML signals; require ML filenames or ML code text.
-if exists_any "train.py" "infer.py" "inference.py" "dataset.py" "dataloader.py" "model.py"; then
+# Shell harnesses often quote ML commands as fixtures. Only executable ML entry
+# names, Python imports, and dependency declarations count as strong signals.
+if exists_ml_entry; then
   style="ml"
-elif has_code_text "torch|tensorflow|jax|sklearn|DataLoader|LightningModule|nn\\.Module"; then
+elif has_python_ml_import || has_ml_dependency; then
   style="ml"
 fi
 

@@ -38,6 +38,8 @@ bash tests/release-contract-smoke.sh
 bash tests/update-v04-smoke.sh
 bash tests/lifecycle-hardening-smoke.sh
 bash tests/harness-enhancements-smoke.sh
+bash tests/context-core-smoke.sh
+bash tests/prompt-budget-smoke.sh
 bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
 
 echo "check: ok"

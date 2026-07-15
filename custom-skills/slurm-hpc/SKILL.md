@@ -1,67 +1,30 @@
 ---
 name: slurm-hpc
 description: >
-  Slurm/HPC workflow helper. Use when working on clusters, partitions, nodes,
-  sbatch/srun jobs, GPU/CPU allocations, queues, logs, checkpoints, or any
-  resource-heavy command — e.g. "submit the job", "check the queue", "잡
-  돌려줘", "큐 확인", "GPU 몇 장", "학습 돌려줘" on a cluster; also digesting
-  a long job log (job-digest, "로그 요약") and reconciling finished Slurm
-  jobs into shared state (run-reconcile, sacct). Reads local cluster
-  reference when generated.
+  Slurm/HPC helper for cluster discovery, resource allocation, job submission,
+  queue/status checks, logs, checkpoints, and finished-job reconciliation.
 ---
 
-Default: protect login nodes. Ask before expensive or unclear resource use.
+# Slurm/HPC
 
-## Rules
+Protect login nodes. Ask before expensive or unclear allocations.
 
-- If Slurm commands exist, prefer `sbatch` for long jobs and allocated `srun` for interactive work.
-- Never run long/GPU/high-CPU jobs directly on login nodes.
-- Confirm partition, account, time, GPU/CPU/mem, output path before heavy jobs.
-- Job scripts should use `set -euo pipefail`, `cd "$SLURM_SUBMIT_DIR"`, and `%x-%j` logs.
-- Python jobs should use project-local commands, usually `uv run`.
-- Track job id, command, config, seed, commit, checkpoint, and log path.
+- Read `references/cluster.generated.md` when present before choosing partition,
+  account, QOS, GPU, CPU, memory, or time. Never guess missing cluster values.
+- Use `sbatch` for long jobs and allocated `srun` for interactive work. Never run
+  long, GPU, or high-CPU work directly on a login node.
+- Confirm resources, output path, and checkpoint behavior before submission.
+- Use project-local commands; record job id, command, config, seed, commit,
+  checkpoint, and log path.
 
-## Local Cluster Reference
+Route by intent:
 
-If present, read `references/cluster.generated.md` before suggesting partitions,
-nodes, GPU types, associations/accounts, QOS, limits, or default Slurm
-resources. Treat its effective submission defaults as copied cluster state;
-do not replace missing values with guesses.
+- Discover or submit: inspect the generated reference and native Slurm help as
+  needed.
+- Long log: `oms job-digest <log-or-job-id>`.
+- Finished or stale job state: `oms run-reconcile scan`, then
+  `oms run-reconcile apply --memory` for terminal jobs.
 
-If missing, ask the user to run:
-
-```bash
-~/.oh-my-setting/scripts/generate-slurm-skill.sh
-```
-
-## Useful Commands
-
-```bash
-sinfo
-squeue -u "$USER"
-scontrol show partition
-scontrol show node <node>
-sacctmgr show assoc user="$USER" -p
-sacctmgr show qos -p
-sacct -j <job_id>
-scancel <job_id>
-```
-
-## Reconciling Async Jobs
-
-A long Slurm job outlives the agent session that launched it. The run ledger
-records the launch (with `slurm_job_id`), but not the terminal state, so
-"is it done? did it OOM?" goes stale and agents relaunch duplicates. Reconcile
-recorded jobs against `sacct`/`squeue` and write the outcome back so the next
-agent — any of the three — sees ground truth.
-
-```bash
-~/.oh-my-setting/scripts/run-reconcile.sh scan            # current state per tracked job id
-~/.oh-my-setting/scripts/run-reconcile.sh apply --memory  # record FINISHED jobs + note to shared memory
-~/.oh-my-setting/scripts/run-reconcile.sh list
-```
-
-It only records terminal jobs (COMPLETED/FAILED/TIMEOUT/OOM/…), is idempotent
-(skips already-reconciled ids), and saves a `job-digest` summary per job under
-`.oms/runs/reconcile/`. Run it on session start when work may have finished
-while you were away.
+If no cluster reference exists and cluster-specific advice is needed, generate
+it with `oms generate-slurm-skill`. Keep generated machine/cluster details out
+of prompts, git, and shared state.

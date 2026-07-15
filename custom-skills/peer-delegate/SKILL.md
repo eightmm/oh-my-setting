@@ -1,126 +1,40 @@
 ---
 name: peer-delegate
 description: >
-  Delegate a write task to another local agent CLI (Codex, Claude Code, or
-  Antigravity) from inside the current agent session. Use when the user says
-  "have codex do it", "delegate to", "ask another agent to implement",
-  "codex한테 시켜", "위임해줘", "다른 에이전트한테 맡겨", or wants a second
-  agent to execute work in parallel — including working a shared plan task
-  (--plan-task) or driving the worker with a reusable persona (--role). The
-  worker runs in an isolated git worktree and returns a patch that should go
-  through patch-admit/patch-land before touching the main tree.
+  Delegate an explicitly requested write task to Codex, Claude Code, or
+  Antigravity in an isolated worktree and return a reviewable patch. Use for
+  "delegate to", "codex한테 시켜", "위임해줘", or parallel implementation.
 ---
 
-Goal: hand a well-scoped task to another agent, get back a reviewable patch.
-The current agent stays the owner: it writes the brief, reviews the diff, and
-decides whether to apply. Use local CLI tools only; no MCP or connectors.
+# Peer Delegate
 
-## When
+The current agent remains owner of scope, review, landing, verification,
+commit, and push. Use local provider CLIs only.
 
-- User explicitly asks to delegate ("codex한테 시켜", "have claude implement X").
-- Parallelizable side task while the current agent works on something else.
-- Small, well-specified units. Do not delegate broad refactors, dependency or
-  API changes, or anything destructive without explicit user confirmation.
+## Run
 
-## Brief Contract (required)
-
-The worker cannot see this conversation. Write the brief from it. Include all
-sections; thin briefs produce wrong patches.
-
-```md
-## Task
-One-sentence request.
-
-## Context
-Decisions and background from the conversation the worker needs: why this is
-being done, constraints already agreed, related prior changes.
-
-## Constraints
-Do-not-touch paths, style rules, no new dependencies, interface contracts.
-
-## Files
-Paths the worker is expected to change.
-
-## Success criteria
-What done looks like, concretely.
-```
-
-Save it to a temp file and pass with `--brief-file`. The worker also reads
-`AGENTS.md`/`CLAUDE.md`/`PROJECT.md` inside the worktree, so shared rules apply
-automatically; the brief only needs conversation-specific context.
-
-## CLI
+Use `oms agent-run --mode write` for normal delegation. Give the worker one
+bounded task with the conversation-specific context it cannot discover, allowed
+paths, constraints, observable success criteria, and a verification command.
+Repository rules are already visible in the isolated worktree.
 
 ```bash
-brief="$(mktemp)" && cat > "$brief" <<'EOF'
-## Task
-...
-EOF
-~/.oh-my-setting/scripts/peer-delegate.sh \
-  --to codex \
-  --brief-file "$brief" \
-  --verify "uv run pytest tests/"
+oms agent-run --to codex --mode write --role implementation-worker \
+  --prompt "Implement the bounded change." --verify "bash scripts/check.sh fast"
 ```
 
-The worker runs non-interactively in a detached git worktree: it cannot touch
-the main tree, commit, or push. Output lands in `.oms/artifacts/delegate/` as
-a log plus a `.patch` against HEAD. For a one-provider write task, prefer
-`agent-run.sh --mode write`; it records task outcomes and routes read/write
-automatically.
+Use `--plan-task ID` for an existing claimed plan task. Use `--executor ID` only
+for a substantial write with an already frozen task-scoped soul. Inspect
+`oms peer-delegate --help` for uncommon model, repair, or export flags instead
+of copying them into the prompt.
 
-Key flags beyond `--to`/`--brief-file`/`--verify`:
+## Land
 
-- `--plan-task ID` — couple the delegation to an `agent-plan.sh` task: the
-  brief hydrates from the task, `--verify` defaults to the task's stored
-  verify command, and the task moves to review/done on success or is released
-  on failure. `--to codex --plan-task t3` is a complete one-liner.
-- `--role NAME` — prepend a reusable worker strategy from `.oms/roles/NAME.md`,
-  the global role store, or bundled defaults (see `agent-role.sh`); wins over
-  the plan task's `role` field.
-- `--executor ID` — use one task-scoped, hash-frozen executor soul. It is
-  mutually exclusive with `--role`; provider/task/lease/verify mismatches
-  fail before the worker runs, and repairs receive the same frozen soul and
-  model route.
-- `--model-class fast|balanced|deep|auto` — select a portable cost/capability
-  class. Auto uses the role/operation; `--model` pins an exact provider model,
-  `--fallback-model` supplies an explicit backup, and `--no-model-fallback`
-  disables fallback. Capacity fallback is one-shot and blocked after writes.
-- `--reasoning-effort auto|low|medium|high` — override the class-derived
-  effort for Codex or Claude. Auto maps fast/balanced/deep to low/medium/high;
-  Antigravity reasoning is selected through the model variant instead.
-- `--repair N` — allow up to N verify-fail repair rounds (0-3): the worker
-  gets the failing output back and retries before the delegation is failed.
-- `--no-verify` — skip verification (rarely right; the verify contract is what
-  makes the patch trustworthy).
-- `--task-id ID` — stamp artifact-index rows for lineage without plan coupling.
+Read the worker artifact and patch. Apply accepted work through
+`oms patch-land --patch <path>` or `oms patch-land --plan-task ID`, then rerun
+verification on the final main tree. A worker result is evidence, not authority
+to mutate the main tree.
 
-When policy forbids sending repo context to an external provider, use the
-ask/review wrappers with `--export-only`; run the exported prompt where allowed,
-then import the answer with `import-agent-result.sh`. To recover a recent run,
-use `artifact-index.sh latest` or `artifact-index.sh failures`.
-
-## After the Worker Returns
-
-1. Read the artifact log: did the worker report blockers or unverified steps?
-2. Review the patch content before anything else.
-3. Land through the admission gate, not by hand: `patch-land.sh --patch <p>`
-   (or `--plan-task ID` alone — it reads the patch path the task stores). It
-   re-applies the patch in a throwaway worktree, runs the checks ladder and
-   verify contract, applies only on ADMIT to a clean tree, and records the
-   land. A rejection is remembered in the fail-ledger, so a later attempt to
-   land the same patch warns first. Plan/executor allowed and forbidden paths
-   are enforced here, with forbidden paths taking precedence. Use raw
-   `--apply`/`git apply` only for
-   trivial diffs you have fully read.
-4. Run the project's own checks after applying; the worker's `--verify` ran in
-   the worktree, not the main tree.
-5. Report to the user: what was delegated, worker/verify status, what was
-   applied, artifact paths.
-
-## Safety
-
-- Never use permission-bypass flags on the worker.
-- Worker failure or a refused question is a result, not an error to hide —
-  report the blocker and either refine the brief or do the work directly.
-- Do not chain --apply blindly in scripts; a human or the owning agent reviews
-  every patch.
+Report the provider, useful result, artifact/patch, landing decision, and any
+failed or skipped check. Never bypass permissions, recursively delegate, or
+silently broaden dependencies, public contracts, or destructive scope.

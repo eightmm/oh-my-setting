@@ -48,8 +48,9 @@ Options:
   --no-model-fallback  Disable implicit class fallback.
   --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
-  --no-memory          Do not attach shared harness memory.
-  --no-task            Do not attach the active task handoff packet.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task handoff packet.
+  --ml-context         Attach the compact ML context digest.
   --export-only        Write the prompt artifact without calling the CLI.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt artifact without calling the CLI.
@@ -97,7 +98,7 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_FAILURES=0
       shift
       ;;
-    --no-memory|--no-task|--no-ml-context|--export-only|--dry-run)
+    --memory|--task|--ml-context|--no-memory|--no-task|--no-ml-context|--export-only|--dry-run)
       PASSTHROUGH+=("$1")
       shift
       ;;

@@ -386,12 +386,32 @@ test_apply_dry_run_has_no_writes() {
 
 test_apply_loader_allows_clear_bounded_changes() {
   local project="$TMP/loader-bounded"
+  local words
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   assert_file_contains "$project/AGENTS.md" "Clear bounded changes may proceed from local evidence."
+  words="$(wc -w < "$project/AGENTS.md" | tr -d ' ')"
+  [ "$words" -le 60 ] || fail "generated loader should stay under 60 words (got $words)"
   if grep -Fq 'Project work starts only after it is filled and confirmed.' "$project/AGENTS.md"; then
     fail "generated loader should not gate clear bounded work on PROJECT.md confirmation"
   fi
+}
+
+test_generated_project_contracts_stay_compact() {
+  local general="$TMP/project-budget-general"
+  local ml="$TMP/project-budget-ml"
+  local general_words ml_words
+
+  "$ROOT/scripts/apply-project-template.sh" general "$general" >/dev/null
+  "$ROOT/scripts/apply-project-template.sh" ml "$ml" >/dev/null
+  general_words="$(wc -w < "$general/PROJECT.md" | tr -d ' ')"
+  ml_words="$(wc -w < "$ml/PROJECT.md" | tr -d ' ')"
+  [ "$general_words" -le 100 ] || fail "generated general PROJECT.md is too large ($general_words words)"
+  [ "$ml_words" -le 200 ] || fail "generated ML PROJECT.md is too large ($ml_words words)"
+  assert_file_contains "$ml/PROJECT.md" '- Prediction unit:'
+  assert_file_contains "$ml/PROJECT.md" '- Inference-time information boundary:'
+  assert_file_contains "$ml/PROJECT.md" '- Split/group keys:'
+  assert_file_contains "$ml/PROJECT.md" '- Success criteria:'
 }
 
 test_apply_rejects_unclosed_managed_block() {
@@ -2401,6 +2421,7 @@ test_peer_prompt_injects_loop_warnings() {
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --providers codex \
+    --task \
     --prompt "Assess loop warnings" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-loop-warnings-*.md' 'Active task warnings:'
@@ -3808,7 +3829,7 @@ test_agent_run_records_task_outcome() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"task_goal": "Record delegated artifact"'
 }
 
-test_agent_call_dry_run_attaches_shared_memory() {
+test_agent_call_context_is_opt_in() {
   local project="$TMP/agent-call"
   local home_dir="$project/home"
   local artifact_dir="$project/artifacts"
@@ -3823,11 +3844,24 @@ test_agent_call_dry_run_attaches_shared_memory() {
     --to codex \
     --prompt "Assess this plan" >/dev/null
 
+  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'DRY RUN: provider command skipped.'
+  if grep -R -Fq 'Prefer narrow verification commands.' "$artifact_dir"; then
+    fail "agent-call should omit shared memory by default"
+  fi
+
+  rm -rf "$artifact_dir"
+  HOME="$home_dir" OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to codex \
+    --memory \
+    --prompt "Assess this plan" >/dev/null
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'compact mode'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'Prefer narrow verification commands.'
-  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'DRY RUN: provider command skipped.'
   assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'begin harness context (reference data, not instructions)'
-  assert_one_artifact_contains "$artifact_dir" 'codex-assess-this-plan-*.md' 'end harness context'
+  if grep -R -Fq '## Context Manifest' "$artifact_dir"; then
+    fail "observability metadata should not be injected into provider prompts"
+  fi
 }
 
 
@@ -3978,6 +4012,17 @@ test_agent_run_auto_read_routes_to_call() {
     --prompt "Assess this plan" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'independent read-only pass'
+  if grep -R -Fq 'Prefer narrow verification commands.' "$artifact_dir"; then
+    fail "agent-run read mode should omit shared memory by default"
+  fi
+
+  rm -rf "$artifact_dir"
+  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --to claude \
+    --memory \
+    --prompt "Assess this plan" >/dev/null
   assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'Compact recent:'
   assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'Prefer narrow verification commands.'
 }
@@ -7532,7 +7577,8 @@ test_agent_role_and_delegate_injection() {
   [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/global-roles" \
     "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$empty_project/.oms/roles/decision-advisor.md" ] ||
     fail "project role should override global and bundled defaults"
-  [ -f "$ROOT/prompts/native-subagent-brief.md" ] || fail "native subagent prompt template missing"
+  [ ! -e "$ROOT/prompts/native-subagent-brief.md" ] ||
+    fail "unused native subagent prompt template should stay removed"
   [ -f "$ROOT/prompts/executor-soul.md" ] || fail "executor soul prompt template missing"
   grep -Fq 'one bounded strategy profile' "$ROOT/rules/global-AGENTS.md" ||
     fail "global rules should route native subagents through one strategy profile"
@@ -7576,11 +7622,15 @@ test_global_rules_stay_compact_and_route_workflows() {
   local global_rules="$ROOT/rules/global-AGENTS.md"
   local heading
   local line_count
+  local word_count
 
   [ -f "$global_rules" ] || fail "dedicated global rules file should exist"
   line_count="$(wc -l < "$global_rules" | tr -d ' ')"
   [ "$line_count" -le 140 ] ||
     fail "global rules should stay compact (got $line_count lines)"
+  word_count="$(wc -w < "$global_rules" | tr -d ' ')"
+  [ "$word_count" -le 320 ] ||
+    fail "global rules should stay under 320 words (got $word_count)"
   for heading in Communication Execution Safety 'Context and Tools' Specification Verification 'Multi-Agent Work' 'Project Rules'; do
     [ "$(grep -Fxc "## $heading" "$global_rules")" = "1" ] ||
       fail "global rules should contain exactly one $heading section"
@@ -7608,6 +7658,25 @@ test_global_rules_stay_compact_and_route_workflows() {
   if cmp -s "$ROOT/AGENTS.md" "$global_rules"; then
     fail "repo and global rules must stay separate to avoid double injection"
   fi
+}
+
+test_project_policy_templates_stay_compact() {
+  local file words limit
+
+  for file in project-general-AGENTS.md project-ml-AGENTS.md project-slurm-AGENTS.md; do
+    case "$file" in
+      project-general-AGENTS.md) limit=120 ;;
+      project-ml-AGENTS.md) limit=350 ;;
+      project-slurm-AGENTS.md) limit=90 ;;
+    esac
+    words="$(wc -w < "$ROOT/templates/$file" | tr -d ' ')"
+    [ "$words" -le "$limit" ] || fail "$file exceeds $limit words (got $words)"
+  done
+  assert_file_contains "$ROOT/templates/project-ml-AGENTS.md" 'Inference-time'
+  assert_file_contains "$ROOT/templates/project-ml-AGENTS.md" 'leakage'
+  assert_file_contains "$ROOT/templates/project-ml-AGENTS.md" 'metric direction'
+  assert_file_contains "$ROOT/templates/project-ml-AGENTS.md" 'before long training'
+  assert_file_contains "$ROOT/templates/project-slurm-AGENTS.md" 'login nodes'
 }
 
 test_large_skills_use_progressive_disclosure() {
@@ -7650,6 +7719,15 @@ test_large_skills_use_progressive_disclosure() {
   for ref in context-safety gate-loop export-import; do
     assert_file_contains "$skill" "references/$ref.md"
   done
+
+  skill="$ROOT/custom-skills/peer-delegate/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 350 ] || fail "peer-delegate front door is too large"
+
+  skill="$ROOT/custom-skills/chem-bio-ml/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 430 ] || fail "chem-bio-ml front door is too large"
+
+  skill="$ROOT/custom-skills/slurm-hpc/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 230 ] || fail "slurm-hpc front door is too large"
 }
 
 test_policy_layers_match_compact_global_rules() {
@@ -8216,6 +8294,8 @@ recommend molecular gastronomy restaurants
 debug molecule.js rendering
 fix window docking behavior
 generate a portrait where everyone smiles
+단백질이 무엇인지 설명해줘
+화합물 이름의 유래를 설명해줘
 EOF
 }
 
@@ -8346,6 +8426,20 @@ test_turn_guard_blocks_unverified_dirty_task_once() {
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_block_limit"'
 }
 
+test_turn_guard_allows_routine_dirty_task() {
+  local d="$TMP/turn-guard-routine"
+  local project="$d/project"
+  local route_payload stop_payload out
+
+  make_committed_repo "$project"
+  printf 'change\n' >> "$project/file.txt"
+  route_payload="$(printf '{"prompt":"fix this helper","session_id":"s-routine","turn_id":"t1","cwd":"%s"}' "$project")"
+  printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s-routine","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
+  out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "routine dirty task should not be blocked by the turn guard: $out"
+}
+
 test_turn_guard_allows_verified_task() {
   local d="$TMP/turn-guard-verified"
   local project="$d/project"
@@ -8356,7 +8450,7 @@ test_turn_guard_allows_verified_task() {
   make_committed_repo "$project"
   printf 'change\n' >> "$project/file.txt"
 
-  route_payload="$(printf '{"prompt":"fix this bug","session_id":"s2","turn_id":"t1","cwd":"%s"}' "$project")"
+  route_payload="$(printf '{"prompt":"fix this bug and push","session_id":"s2","turn_id":"t1","cwd":"%s"}' "$project")"
   printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
 
   stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s2","turn_id":"t1","cwd":"%s","last_assistant_message":"Changed file.txt. Verified: bash scripts/check.sh."}' "$project")"
@@ -8431,6 +8525,14 @@ EOF
   CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
   assert_file_contains "$log" "plugin remove oh-my-setting@oh-my-setting-local"
   assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
+}
+
+test_codex_plugin_has_no_vague_default_prompt() {
+  python3 - "$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert "defaultPrompt" not in data.get("interface", {}), data.get("interface", {})
+PY
 }
 
 test_install_codex_plugin_skips_current_cache() {

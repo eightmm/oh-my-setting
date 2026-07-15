@@ -13,9 +13,9 @@ TO=""
 PROMPT=""
 PROMPT_FILE=""
 ARTIFACT_DIR=""
-INCLUDE_MEMORY=1
-INCLUDE_TASK=1
-INCLUDE_ML_CONTEXT=1
+INCLUDE_MEMORY=0
+INCLUDE_TASK=0
+INCLUDE_ML_CONTEXT=0
 EXPORT_ONLY=0
 MODEL_CLASS=auto
 MODEL=""
@@ -42,9 +42,12 @@ Options:
   --fallback-model M   Explicit one-shot capacity fallback model.
   --no-model-fallback  Disable implicit class fallback.
   --reasoning-effort E auto, low, medium, or high (default: auto).
-  --no-memory          Do not attach shared harness memory.
-  --no-task            Do not attach the active task handoff packet.
-  --no-ml-context      Do not attach the compact ML context digest.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task handoff packet.
+  --ml-context         Attach the compact ML context digest.
+  --no-memory          Disable --memory (compatibility).
+  --no-task            Disable --task (compatibility).
+  --no-ml-context      Disable --ml-context (compatibility).
   --export-only        Write the provider prompt artifact and do not call CLI.
                        Import the answer later with import-agent-result.sh.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
@@ -112,12 +115,24 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_MEMORY=0
       shift
       ;;
+    --memory)
+      INCLUDE_MEMORY=1
+      shift
+      ;;
     --no-task)
       INCLUDE_TASK=0
       shift
       ;;
+    --task)
+      INCLUDE_TASK=1
+      shift
+      ;;
     --no-ml-context)
       INCLUDE_ML_CONTEXT=0
+      shift
+      ;;
+    --ml-context)
+      INCLUDE_ML_CONTEXT=1
       shift
       ;;
     --export-only)

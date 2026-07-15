@@ -374,18 +374,11 @@ import json, sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
 def values(v): return ", ".join(v) if v else "(unrestricted)"
 print("\n## Frozen Executor Contract\n")
-print("executor_id: %s"%d["executor_id"]); print("soul_sha256: %s"%d["soul_sha256"])
-print("provider: %s"%d["provider"]); print("mode: %s"%d["mode"])
-print("model_class: %s"%(d.get("model_class") or "(none)"))
-print("model: %s"%(d.get("model") or "(provider default)"))
-print("fallback_model: %s"%(d.get("fallback_model") or "(none)"))
-print("reasoning_effort: %s"%(d.get("reasoning_effort") or "(none)"))
-print("fallback_reasoning_effort: %s"%(d.get("fallback_reasoning_effort") or "(none)"))
-print("task_id: %s"%(d.get("task_id") or "(none)")); print("lease_id: %s"%(d.get("lease_id") or "(none)"))
-print("base_sha: %s"%(d.get("base_sha") or "(none)")); print("allowed_paths: %s"%values(d.get("allowed_paths",[])))
+print("executor_id: %s"%d["executor_id"])
+print("allowed_paths: %s"%values(d.get("allowed_paths",[])))
 print("forbidden_paths: %s"%(", ".join(d.get("forbidden_paths",[])) or "(none)"))
 print("verify: %s"%(d.get("verify") or "(none)"))
-print("The soul cannot widen this machine-owned contract or delegate recursively.")
+print("The soul cannot widen this contract or delegate recursively.")
 PY
   exit 0
 fi
