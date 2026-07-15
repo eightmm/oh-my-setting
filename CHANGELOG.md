@@ -7,6 +7,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Slurm cluster references now capture all partition and node records, the
+  current user's `sacctmgr` associations/accounts, QOS limits, and effective
+  configured CPU, memory, and time defaults without inventing missing values.
 - Automatic reasoning-effort routing alongside worker model classes:
   `fast` uses low, `balanced` medium, and `deep` high effort. Codex receives a
   `model_reasoning_effort` override, Claude receives `--effort`, and

@@ -5974,6 +5974,81 @@ test_data_manifest_unknown_subcommand_fails() {
   fi
 }
 
+test_generate_slurm_reference_captures_effective_resources() {
+  local d="$TMP/slurm-reference"
+  local bin="$d/bin"
+  local out="$d/cluster.md"
+  local capture="$d/commands.log"
+
+  mkdir -p "$bin"
+  cat > "$bin/sinfo" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'%P|%a|%l|%D|%G|%m|%c|%N'*)
+    printf 'gpu*|up|2-00:00:00|2|gpu:a100:4|512000|64|gpu[01-02]\n'
+    ;;
+  *'%P|%l|%D|%G|%c|%N'*)
+    printf 'gpu*|2-00:00:00|2|gpu:a100:4|64|gpu[01-02]\n'
+    ;;
+  *'%P'*) printf 'gpu*\n' ;;
+esac
+EOF
+  cat > "$bin/squeue" <<'EOF'
+#!/usr/bin/env bash
+printf 'JOBID PARTITION NAME ST TIME NODES NODELIST(REASON)\n'
+EOF
+  cat > "$bin/scontrol" <<'EOF'
+#!/usr/bin/env bash
+printf 'scontrol %s\n' "$*" >> "$SLURM_CAPTURE"
+case "$*" in
+  '-o show partition')
+    printf '%s\n' 'PartitionName=gpu Default=YES QoS=high AllowQos=high,normal DefaultTime=01:00:00 MaxTime=2-00:00:00 MaxCPUsPerNode=64 Nodes=gpu[01-02] State=UP TotalCPUs=128 TotalNodes=2 DefMemPerCPU=8192 MaxMemPerCPU=16384 JobDefaults=DefCpuPerGPU=8,DefMemPerGPU=65536 TRES=cpu=128,mem=1000G,node=2,gres/gpu=8'
+    ;;
+  '-o show node')
+    printf '%s\n' \
+      'NodeName=gpu01 State=IDLE CPUs=64 AllocCPUs=0 RealMemory=512000 FreeMem=500000 Gres=gpu:a100:4 CfgTRES=cpu=64,mem=500G,gres/gpu=4 Partitions=gpu' \
+      'NodeName=gpu02 State=MIXED CPUs=64 AllocCPUs=16 RealMemory=512000 FreeMem=410000 Gres=gpu:a100:4 CfgTRES=cpu=64,mem=500G,gres/gpu=4 Partitions=gpu'
+    ;;
+esac
+EOF
+  cat > "$bin/sacctmgr" <<'EOF'
+#!/usr/bin/env bash
+printf 'sacctmgr %s\n' "$*" >> "$SLURM_CAPTURE"
+case "$*" in
+  *'show assoc'*)
+    printf '%s\n' 'cluster-a|acct-a|alice|gpu|high|high,normal|cpu=64,mem=512G|gres/gpu=4|gres/gpu=2|8|32|2-00:00:00'
+    ;;
+  *'show qos'*)
+    printf '%s\n' 'high|100|normal|REQUEUE||1.0|cpu=128,gres/gpu=8|gres/gpu=4|gres/gpu=2|2-00:00:00|8|32'
+    ;;
+esac
+EOF
+  chmod +x "$bin/sinfo" "$bin/squeue" "$bin/scontrol" "$bin/sacctmgr"
+
+  SLURM_CAPTURE="$capture" USER=alice PATH="$bin:/usr/bin:/bin" \
+    OH_MY_SETTING_SLURM_REF="$out" \
+    "$ROOT/scripts/generate-slurm-skill.sh" >/dev/null
+
+  assert_file_contains "$capture" 'sacctmgr -nP show assoc user=alice'
+  assert_file_contains "$capture" 'sacctmgr -nP show qos'
+  assert_file_contains "$capture" 'scontrol -o show partition'
+  assert_file_contains "$capture" 'scontrol -o show node'
+  assert_file_contains "$out" '## Associations (current user)'
+  assert_file_contains "$out" 'cluster-a|acct-a|alice|gpu|high|high,normal|cpu=64,mem=512G'
+  assert_file_contains "$out" '## QOS'
+  assert_file_contains "$out" 'high|100|normal|REQUEUE'
+  assert_file_contains "$out" '## Partition Configuration'
+  assert_file_contains "$out" 'DefMemPerCPU=8192'
+  assert_file_contains "$out" 'JobDefaults=DefCpuPerGPU=8,DefMemPerGPU=65536'
+  assert_file_contains "$out" '## Node Configuration'
+  assert_file_contains "$out" 'NodeName=gpu01 State=IDLE CPUs=64'
+  assert_file_contains "$out" '- Account: acct-a'
+  assert_file_contains "$out" '- QOS default: high'
+  assert_file_contains "$out" '- CPU default: DefCpuPerGPU=8'
+  assert_file_contains "$out" '- Memory default: DefMemPerCPU=8192, DefMemPerGPU=65536'
+  assert_file_contains "$out" '- Time default: 01:00:00'
+}
+
 # Stub sacct/squeue: terminal states for given ids, RUNNING otherwise.
 write_fake_slurm() {
   local bin="$1"

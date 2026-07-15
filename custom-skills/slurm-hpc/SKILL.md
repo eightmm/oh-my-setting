@@ -24,7 +24,9 @@ Default: protect login nodes. Ask before expensive or unclear resource use.
 ## Local Cluster Reference
 
 If present, read `references/cluster.generated.md` before suggesting partitions,
-nodes, GPU types, limits, or default Slurm resources.
+nodes, GPU types, associations/accounts, QOS, limits, or default Slurm
+resources. Treat its effective submission defaults as copied cluster state;
+do not replace missing values with guesses.
 
 If missing, ask the user to run:
 
@@ -39,6 +41,8 @@ sinfo
 squeue -u "$USER"
 scontrol show partition
 scontrol show node <node>
+sacctmgr show assoc user="$USER" -p
+sacctmgr show qos -p
 sacct -j <job_id>
 scancel <job_id>
 ```
