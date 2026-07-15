@@ -36,8 +36,11 @@ test_checkout_runtime_is_current() {
   if grep -RFn 'actions/checkout@v4' "$ROOT/.github/workflows" >/dev/null; then
     fail "workflows still use the deprecated Node 20 checkout runtime"
   fi
-  [ "$(grep -Rh 'uses: actions/checkout@v7' "$ROOT/.github/workflows" | wc -l | tr -d ' ')" = "5" ] ||
-    fail "all five checkout steps should use actions/checkout@v7"
+  local checkout_count checkout_v7_count
+  checkout_count="$(grep -Rh 'uses: actions/checkout@' "$ROOT/.github/workflows" | wc -l | tr -d ' ')"
+  checkout_v7_count="$(grep -Rh 'uses: actions/checkout@v7' "$ROOT/.github/workflows" | wc -l | tr -d ' ')"
+  [ "$checkout_count" -gt 0 ] && [ "$checkout_count" = "$checkout_v7_count" ] ||
+    fail "every checkout step should use actions/checkout@v7"
 }
 
 test_smoke_shards_partition_every_definition() {

@@ -54,6 +54,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Legacy executor metadata without reasoning fields now honors an explicit
   caller effort instead of silently replacing it with automatic effort.
 
+### Removed
+- GitHub Release publication, release-only checksum tooling, documentation,
+  and CI contracts. Installation now uses the repository source channel; exact
+  tags, branches, or commits remain available through `--ref`.
+
 ## [0.4.0] - Unreleased
 
 ### Added
@@ -77,14 +82,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   justified retry after tracked changes while blocking an unchanged dead end.
 - Prompt routing uses ASCII token boundaries for short English terms and rotates
   auto-recorded task packets when a genuinely different explicit goal arrives.
-- Stable/edge installation channels: `--ref` and `OH_MY_SETTING_REF` can select
-  `edge`, a tag, branch, or commit. Release assets embed their exact release tag
-  and install to a detached commit, while the source installer explicitly
-  tracks the origin default branch in edge mode.
-- A strict release contract smoke test verifies version parity, the generated
-  pinned installer, release workflow wiring, and positive/negative checksum
-  validation. `gen-checksums.sh --verify` works with GNU `sha256sum` and BSD
-  `shasum`.
+- Source installation refs: `--ref` and `OH_MY_SETTING_REF` can select `edge`,
+  a tag, branch, or commit. The source installer follows the origin default
+  branch in edge mode and pins exact refs to detached commits.
 - Transactional updates: schema-2 receipts persist the install ref, profile,
   concrete components, managed targets, and previous successful commit.
   `update --check` is read-only, link/doctor failures restore HEAD, links, and
@@ -349,8 +349,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, this changelog.
 - Tag-triggered `release` workflow: gates on `scripts/check.sh`, verifies the
   tag matches `VERSION`, and publishes a GitHub Release with `install.sh`,
-  `install.sh.sha256`, and a `SHA256SUMS` manifest (`scripts/gen-checksums.sh`).
-  See `docs/RELEASE.md`.
+  `install.sh.sha256`, and a `SHA256SUMS` manifest. This historical publication
+  path was removed after the project switched to source-only distribution.
 
 - `oms-run.sh close [id]` + `ls --open`: mark a run terminal and list
   open-vs-closed runs; close also clears a `CURRENT` pointer naming the run so

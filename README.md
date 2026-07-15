@@ -88,7 +88,7 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 | ML data & leakage | Dataset-split manifests that flag train/eval overlap on IDs and declared group keys (entity/pair/scaffold/family/assay/donor/batch/time), detect split drift, and never store raw rows |
 | ML/HPC support | Slurm job reconcile, a single-machine GPU queue, log digests, and local hardware/cluster context (see [docs/COMPONENTS.md](docs/COMPONENTS.md)) |
 | Reusable code sources | A local registry and GitHub fetch for trusted reusable files (see [docs/COMPONENTS.md](docs/COMPONENTS.md)) |
-| Maintenance & release | Install/update/doctor, a verification gate wired as a pre-push hook, cleanup/uninstall with restore, and a tag-driven release ([docs/RELEASE.md](docs/RELEASE.md)) |
+| Maintenance | Install/update/doctor, a verification gate wired as a pre-push hook, and cleanup/uninstall with restore |
 
 ## Notes
 

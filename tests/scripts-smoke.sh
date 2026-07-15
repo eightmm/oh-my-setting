@@ -5414,38 +5414,6 @@ test_check_gate_hard_fails_without_shellcheck() {
     fail "check.sh missing-tool message absent: $out"
 }
 
-test_gen_checksums_deterministic() {
-  local a b
-  a="$("$ROOT/scripts/gen-checksums.sh")" || fail "gen-checksums should succeed"
-  b="$("$ROOT/scripts/gen-checksums.sh")" || fail "gen-checksums should succeed"
-  [ "$a" = "$b" ] || fail "gen-checksums output must be deterministic"
-  printf '%s\n' "$a" | grep -Eq '  install\.sh$' || fail "should include install.sh"
-  printf '%s\n' "$a" | grep -Eq '  VERSION$' || fail "should include VERSION"
-  printf '%s\n' "$a" | grep -Eq '  rules/global-AGENTS\.md$' ||
-    fail "should include installed global rules"
-  printf '%s\n' "$a" | grep -Eq '  custom-skills/chem-bio-ml/SKILL\.md$' ||
-    fail "should include custom skill content"
-  printf '%s\n' "$a" | grep -Eq '  templates/project-ml-AGENTS\.md$' ||
-    fail "should include installed templates"
-  printf '%s\n' "$a" | grep -Eq '  scripts/lib/hook_state\.py$' ||
-    fail "should include Python scripts"
-  printf '%s\n' "$a" | grep -Eq '  plugins/oh-my-setting/\.codex-plugin/plugin\.json$' ||
-    fail "should include plugin metadata"
-  printf '%s\n' "$a" | grep -Eq '  \.agents/plugins/marketplace\.json$' ||
-    fail "should include marketplace metadata"
-  printf '%s\n' "$a" | grep -Eq '  scripts/oms$' || fail "should include the oms dispatcher"
-  printf '%s\n' "$a" | grep -Eq '  prompts/.+' || fail "should include installed prompts"
-  printf '%s\n' "$a" | grep -Eq '  roles/decision-advisor\.md$' ||
-    fail "should include bundled strategy profiles"
-  if printf '%s\n' "$a" | grep -Eq '  workflows/.+'; then
-    fail "removed workflows should not be checksummed"
-  fi
-  # Every line must be valid sha256sum format: 64 hex + two spaces + path.
-  if printf '%s\n' "$a" | grep -Evq '^[0-9a-f]{64}  '; then
-    fail "non-sha256 line in gen-checksums output"
-  fi
-}
-
 test_ci_status_reports_conclusion() {
   local d="$TMP/ci-status" out
   mkdir -p "$d/bin"

@@ -57,4 +57,3 @@ documented for transparency and recovery.
 | Maintenance | Skill hygiene (`skill-doctor.sh`, `cleanup.sh`) | Diagnoses duplicate/missing skill-picker entries across all three agents; cleanup removes only known legacy oms/backup symlinks (dry-run by default, never touches regular files or plugins) |
 | Maintenance | Auto-update (`auto-update.sh`) | Optional systemd timer or cron; check-only mode unless apply is explicitly selected |
 | Maintenance | Backup / unlink / uninstall | Snapshot agent configs before changes; clean removal that restores what it replaced |
-| Release | Release workflow (`gen-checksums.sh`, `.github/workflows/release.yml`) | A `v*` tag gates on `check.sh`, requires VERSION/plugin/changelog parity, generates an installer pinned to that exact tag, verifies source and installer checksums, and publishes the immutable assets (see `docs/RELEASE.md`) |

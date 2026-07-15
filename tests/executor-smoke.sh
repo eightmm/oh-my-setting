@@ -247,7 +247,7 @@ test_scope() {
 }
 
 test_assets() {
-  local sums hook_root="$TMP/hook-root"
+  local hook_root="$TMP/hook-root"
   [ ! -e "$ROOT/custom-skills/.gitkeep" ] || fail "custom-skills gitkeep remains"
   [ ! -e "$ROOT/templates/AGENTS.md" ] || fail "legacy template remains"
   [ ! -e "$ROOT/prompts/decision-context.md" ] || fail "merged prompt remains"
@@ -269,12 +269,7 @@ test_assets() {
     "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" turn-guard
   contains "$TMP/router.capture" 'router-payload'
   contains "$TMP/guard.capture" 'guard-payload'
-  sums="$("$ROOT/scripts/gen-checksums.sh")"
-  printf '%s\n' "$sums" | grep -Fq scripts/agent-executor.sh || fail "executor not checksummed"
-  printf '%s\n' "$sums" | grep -Fq prompts/executor-soul.md || fail "executor prompt not checksummed"
-  if printf '%s\n' "$sums" | grep -Fq prompts/decision-context.md; then
-    fail "removed prompt checksummed"
-  fi
+  [ ! -e "$ROOT/scripts/gen-checksums.sh" ] || fail "obsolete release checksum tool remains"
 }
 
 test_executor_gc() {

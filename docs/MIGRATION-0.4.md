@@ -1,15 +1,13 @@
 # Migrating to 0.4
 
-Version 0.4 makes install intent explicit and treats release artifacts as
-immutable entrypoints.
+Version 0.4 makes install intent explicit and supports source refs as
+reproducible entrypoints.
 
 ## Choose a channel
 
-- Stable, after v0.4.0 is published: use
-  `https://github.com/eightmm/oh-my-setting/releases/latest/download/install.sh`.
-  Release installers from v0.4.0 onward are pinned to their own tag.
-- Edge: use the raw `main/install.sh` installer with `--ref edge`.
-- Reproducible pin: pass `--ref v0.4.0` (or a branch/commit) to either installer.
+- Current: use the raw `main/install.sh` installer. Its default `edge` channel
+  follows the repository's remote default branch.
+- Reproducible pin: pass an exact tag, branch, or commit with `--ref`.
 
 `--ref` overrides `OH_MY_SETTING_REF`; the environment overrides the embedded
 installer default. A pin is checked out detached at an exact commit. `edge`
@@ -54,26 +52,15 @@ silently changing timeout behavior. During relink/uninstall, an OMS-owned
 `~/.oh-my-setting-workflows` link is removed and its newest user backup is
 restored; foreign links and regular files are preserved.
 
-## Release integrity
+## Source install
 
-Release publication now requires all of the following:
-
-1. tag, `VERSION`, plugin version, and changelog section agree;
-2. the full repository gate passes;
-3. the generated installer contains the exact release tag;
-4. the source-tree manifest and installer checksum both verify before upload.
-
-Verify a downloaded release installer before execution:
+The public installation path follows the repository source. Pin an audited
+commit when reproducibility matters:
 
 ```bash
-curl -fsSLO https://github.com/eightmm/oh-my-setting/releases/download/v0.4.0/install.sh
-curl -fsSLO https://github.com/eightmm/oh-my-setting/releases/download/v0.4.0/install.sh.sha256
-sha256sum -c install.sh.sha256
-bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh
+bash install.sh --ref <commit>
 ```
-
-Until the v0.4.0 tag is published, use the source installer with explicit
-`--ref edge`; the current `latest` asset is from the previous release line.
 
 No `.oms` project data migration is required. Existing managed installs can
 switch channel by rerunning an installer with the desired `--ref`.
