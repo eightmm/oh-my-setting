@@ -56,6 +56,9 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   local before_receipt="$TMP/receipt-before"
 
   git clone -q "$ROOT" "$source"
+  # Pull-request checkouts are detached. Give the fixture an explicit default
+  # branch so update.sh can resolve edge through origin/HEAD.
+  git -C "$source" checkout -qB main
   # During development the root may be dirty; copy the transaction files so
   # this fixture always exercises the working implementation.
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
