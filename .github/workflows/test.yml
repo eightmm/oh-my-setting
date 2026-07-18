@@ -41,6 +41,9 @@ jobs:
       - name: harness enhancement regressions
         if: matrix.shard == 1
         run: bash tests/harness-enhancements-smoke.sh
+      - name: model capability regressions
+        if: matrix.shard == 1
+        run: bash tests/model-doctor-smoke.sh
       - name: bounded autonomy regressions
         if: matrix.shard == 1
         run: |
@@ -116,6 +119,7 @@ jobs:
             { echo "minimal install registered auto-update" >&2; exit 1; }
           "$dest/scripts/oms" list > "$HOME/oms-tools.txt"
           grep -Fq plan-run "$HOME/oms-tools.txt"
+          grep -Fq model-doctor "$HOME/oms-tools.txt"
 
           echo "== update (new upstream commit) =="
           git -C "$workspace" -c user.email=ci@example.com -c user.name=ci \
