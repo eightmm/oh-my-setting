@@ -69,6 +69,7 @@ Maintenance:
 
 ```text
 Check the oh-my-setting install status.
+Check the installed AI model routes and provider CLI compatibility.
 Update oh-my-setting and re-run its doctor.
 ```
 
@@ -88,7 +89,7 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 | ML data & leakage | Dataset-split manifests that flag train/eval overlap on IDs and declared group keys (entity/pair/scaffold/family/assay/donor/batch/time), detect split drift, and never store raw rows |
 | ML/HPC support | Slurm job reconcile, a single-machine GPU queue, log digests, and local hardware/cluster context (see [docs/COMPONENTS.md](docs/COMPONENTS.md)) |
 | Reusable code sources | A local registry and GitHub fetch for trusted reusable files (see [docs/COMPONENTS.md](docs/COMPONENTS.md)) |
-| Maintenance | Install/update/doctor, a verification gate wired as a pre-push hook, and cleanup/uninstall with restore |
+| Maintenance | Install/update/doctor, provider/model capability checks, a verification gate wired as a pre-push hook, and cleanup/uninstall with restore |
 
 ## Notes
 
