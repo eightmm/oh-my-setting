@@ -1,0 +1,28 @@
+name: agent-snapshot
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: build source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output=oh-my-setting-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oh-my-setting-source
+          path: oh-my-setting-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
