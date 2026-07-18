@@ -19,6 +19,9 @@ jobs:
           KEEP_TMP=1 bash tests/update-v04-smoke.sh > update-v04.log 2>&1
           rc=$?
           printf '%s\n' "$rc" > update-v04.exit
+          cp tests/update-v04-smoke.sh update-v04-smoke.sh
+          fail_out="$(find /tmp -path '*/fail.out' -type f -print -quit)"
+          if [ -n "$fail_out" ]; then cp "$fail_out" update-v04-fail.out; fi
           exit 0
       - name: upload diagnostic
         uses: actions/upload-artifact@v4
@@ -27,7 +30,9 @@ jobs:
           path: |
             update-v04.log
             update-v04.exit
-          if-no-files-found: error
+            update-v04-smoke.sh
+            update-v04-fail.out
+          if-no-files-found: warn
       - name: preserve regression status
         shell: bash
         run: test "$(cat update-v04.exit)" = 0
