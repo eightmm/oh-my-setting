@@ -1,0 +1,33 @@
+name: debug-update
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  update-v04:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: capture transactional update regression
+        id: regression
+        shell: bash
+        run: |
+          set +e
+          KEEP_TMP=1 bash tests/update-v04-smoke.sh > update-v04.log 2>&1
+          rc=$?
+          printf '%s\n' "$rc" > update-v04.exit
+          exit 0
+      - name: upload diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-v04-diagnostic
+          path: |
+            update-v04.log
+            update-v04.exit
+          if-no-files-found: error
+      - name: preserve regression status
+        shell: bash
+        run: test "$(cat update-v04.exit)" = 0
