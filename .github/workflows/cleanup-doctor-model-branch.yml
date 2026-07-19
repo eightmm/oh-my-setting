@@ -1,0 +1,30 @@
+name: cleanup-doctor-model-branch
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.repository == 'eightmm/oh-my-setting'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: remove merged branch and cleanup workflow
+        shell: bash
+        env:
+          BRANCH: agent/doctor-model-integration
+        run: |
+          set -euo pipefail
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/cleanup-doctor-model-branch.yml
+          git commit -m "chore: keep only main branch"
+          git push origin HEAD:main
