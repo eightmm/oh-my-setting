@@ -7,6 +7,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 REPAIR=0
+MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
+MODEL_DOCTOR_LIVE=0
+MODEL_DOCTOR_STRICT=0
+MODEL_DOCTOR_ARGS=()
 ORIGINAL_ARGS=("$@")
 
 # shellcheck source=scripts/lib/agent-memory-common.sh
@@ -18,17 +22,42 @@ ORIGINAL_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: doctor.sh [--repair] [-h|--help]
+Usage: doctor.sh [--repair] [--live-models] [--strict-diversity]
+                 [--no-model-doctor] [-h|--help]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
-from this checkout for a legacy install without a receipt. An invalid or
-unavailable receipt owner is never replaced automatically.
+from this checkout for a legacy install without a receipt. The local model
+doctor runs automatically when a provider CLI is installed. --live-models
+adds bounded account-visible catalog probes, while --strict-diversity requires
+at least two usable independent model families. An invalid or unavailable
+receipt owner is never replaced automatically.
+
+Environment:
+  OH_MY_SETTING_MODEL_DOCTOR=auto|0|1  Auto-detect, disable, or force the
+                                      local model capability check.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repair) REPAIR=1; shift ;;
+    --live-models)
+      MODEL_DOCTOR_MODE=1
+      MODEL_DOCTOR_LIVE=1
+      MODEL_DOCTOR_ARGS+=(--live-models)
+      shift
+      ;;
+    --strict-diversity)
+      MODEL_DOCTOR_MODE=1
+      MODEL_DOCTOR_STRICT=1
+      MODEL_DOCTOR_ARGS+=(--strict-diversity)
+      shift
+      ;;
+    --no-model-doctor)
+      MODEL_DOCTOR_MODE=0
+      MODEL_DOCTOR_ARGS+=(--no-model-doctor)
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -88,7 +117,7 @@ repair_install() {
 
 if [ "$REPAIR" = "1" ]; then
   repair_install
-  exec "$ROOT/scripts/doctor.sh"
+  exec "$ROOT/scripts/doctor.sh" "${MODEL_DOCTOR_ARGS[@]}"
 fi
 
 load_user_tool_paths() {
@@ -118,6 +147,43 @@ check_optional_cmd() {
     echo "ok: optional command $1"
   else
     echo "optional missing: command $1"
+  fi
+}
+
+model_doctor_applicable() {
+  case "$MODEL_DOCTOR_MODE" in
+    0) return 1 ;;
+    1) return 0 ;;
+    auto)
+      command -v codex >/dev/null 2>&1 ||
+        command -v claude >/dev/null 2>&1 ||
+        command -v agy >/dev/null 2>&1
+      ;;
+  esac
+}
+
+check_model_capabilities() {
+  local -a args=()
+  local output
+
+  model_doctor_applicable || return 0
+  printf '\n# model capabilities\n'
+  if [ ! -x "$INSTALL_ROOT/scripts/model-doctor.sh" ]; then
+    echo "missing: $INSTALL_ROOT/scripts/model-doctor.sh"
+    FAILED=1
+    return 0
+  fi
+  [ "$MODEL_DOCTOR_LIVE" = "0" ] || args+=(--live-models)
+  [ "$MODEL_DOCTOR_STRICT" = "0" ] || args+=(--strict-diversity)
+  if output="$("$INSTALL_ROOT/scripts/model-doctor.sh" "${args[@]}" 2>&1)"; then
+    printf '%s\n' "$output"
+  else
+    printf '%s\n' "$output"
+    if [ "$MODEL_DOCTOR_MODE" = "1" ]; then
+      FAILED=1
+    else
+      echo "warn: model capability check failed; set OH_MY_SETTING_MODEL_DOCTOR=1 to enforce"
+    fi
   fi
 }
 
@@ -591,6 +657,13 @@ case "$REQUIRE_TOOLS" in
     exit 2
     ;;
 esac
+case "$MODEL_DOCTOR_MODE" in
+  auto|0|1) ;;
+  *)
+    echo "error: OH_MY_SETTING_MODEL_DOCTOR must be auto, 0, or 1" >&2
+    exit 2
+    ;;
+esac
 
 check_install_receipt
 check_snapshots
@@ -616,6 +689,8 @@ check_optional_cmd srun
 check_optional_cmd squeue
 check_optional_cmd sinfo
 check_optional_cmd scancel
+
+check_model_capabilities
 
 check_path "$INSTALL_ROOT/rules/global-AGENTS.md"
 check_path "$INSTALL_ROOT/skills.manifest.json"
