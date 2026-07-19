@@ -18,7 +18,7 @@
       "name": "agent-harness",
       "source": "custom-skills/agent-harness",
       "enabled": true,
-      "reason": "Share harness memory across agents and call one local agent CLI for a read-only independent pass.",
+      "reason": "Share harness state, route provider/model work, verify capability and model-family diversity, and coordinate bounded multi-agent execution.",
       "triggers": [
         "oms state",
         "이어서 해줘",
@@ -35,7 +35,15 @@
         ".oms 정리",
         "패치 적용",
         "patch-land",
-        "세션 이어받"
+        "세션 이어받",
+        "model route",
+        "모델 라우팅",
+        "model capability",
+        "provider 호환성",
+        "reasoning effort",
+        "최신 모델",
+        "model doctor",
+        "strict diversity"
       ]
     },
     {

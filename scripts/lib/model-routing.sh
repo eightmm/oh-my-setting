@@ -46,9 +46,9 @@ oms_model_default() {
     codex:fast) printf '%s\n' 'gpt-5.6-luna' ;;
     codex:balanced) printf '%s\n' 'gpt-5.6-terra' ;;
     codex:deep) printf '%s\n' 'gpt-5.6-sol' ;;
-    claude:fast) printf '%s\n' 'haiku' ;;
-    claude:balanced) printf '%s\n' 'sonnet' ;;
-    claude:deep) printf '%s\n' 'fable' ;;
+    claude:fast) printf '%s\n' 'claude-haiku-4-5-20251001' ;;
+    claude:balanced) printf '%s\n' 'claude-sonnet-5' ;;
+    claude:deep) printf '%s\n' 'claude-fable-5' ;;
     antigravity:fast) printf '%s\n' 'Gemini 3.5 Flash (Low)' ;;
     antigravity:balanced) printf '%s\n' 'Gemini 3.5 Flash (Medium)' ;;
     antigravity:deep) printf '%s\n' 'Gemini 3.1 Pro (High)' ;;
