@@ -19,7 +19,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PATCH_BLOBS: fc1c3447963e46f6cd5eb4c42f912858992a2d7c 1222fb8d43b3bf80bbb86b3b38f04fcaf4464db8 b48867bd13fb878c47186b3b0924af9644b493da
+          PATCH_BLOBS: 642d9d2e8705a27fe109502cf9b74feff8256fdb 5c0910ba8cbeee0ca8e706d653c699b7281f9e14 5f4e9b247c9fae6c32dc94ba791283fbc433c958 dc7bef807dafccaa23bf6e0158595349943c73ab fc3fa9cf3109cf0fdc733f856a004d0b5748e7b6 786edeb51639c1d4efc92a2855ce31f9844ede00 de0f3825864b2a9b31a2c2c721c0761e08cf5180
         run: |
           set -euo pipefail
           : > /tmp/oms-improvements.patch
@@ -27,6 +27,7 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/git/blobs/$sha" --jq .content |
               tr -d '\n' | base64 -d >> /tmp/oms-improvements.patch
           done
+          test "$(git hash-object /tmp/oms-improvements.patch)" = a5e7307d9bc04bd033c1ed75d1c82d760f0a1bca
           git apply --check /tmp/oms-improvements.patch
           git apply /tmp/oms-improvements.patch
           rm -f .github/workflows/agent-snapshot.yml
