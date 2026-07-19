@@ -43,7 +43,9 @@ jobs:
         run: bash tests/harness-enhancements-smoke.sh
       - name: model capability regressions
         if: matrix.shard == 1
-        run: bash tests/model-doctor-smoke.sh
+        run: |
+          bash tests/model-doctor-smoke.sh
+          bash tests/doctor-model-capability-smoke.sh
       - name: bounded autonomy regressions
         if: matrix.shard == 1
         run: |
@@ -192,7 +194,7 @@ jobs:
           id="$("$repo/scripts/oms-run.sh" new)"; export OMS_RUN_ID="$id"
           printf 'fake\n' > ckpt.pt
           "$repo/scripts/run-capsule.sh" run --output ckpt.pt --no-ledger -- bash -c 'echo trained' >/dev/null
-          "$repo/scripts/run-capsule.sh" whence ckpt.pt >/dev/null   # exit 0 = traced to its run
+          "$repo/scripts/run-capsule.sh" whence ckpt.pt >/dev/null
           "$repo/scripts/oms-run.sh" show "$id" | grep -Fq run-capsule
           printf 'a\nb\nc\n' > train.txt; printf 'd\na\n' > val.txt
           OMS_MANIFEST_DIR="$proj/.oms/manifests" "$repo/scripts/data-manifest.sh" create --name ds \
