@@ -13,7 +13,11 @@ Run the local scripts for the user; do not send them to external connectors.
 1. Orient with `~/.oh-my-setting/scripts/status.sh` and use the canonical
    receipt owner it reports.
 2. Use `update.sh` for updates, `doctor.sh` for install health, and
-   `skill-doctor.sh` for duplicate/missing skill entries.
+   `skill-doctor.sh` for duplicate/missing skill entries. The standard doctor
+   automatically reports model/CLI capability drift when a provider is present;
+   use `--strict-diversity` or `--live-models` only when the task needs those
+   checks to become a blocking gate. `--no-model-doctor` is a recovery-only
+   escape hatch, not a normal operating mode.
 3. For legacy links, run `cleanup.sh --dry-run`, inspect its exact scope, then
    use `--apply` when cleanup is authorized. Never delete unrelated plugins,
    caches, regular files, or directories.
