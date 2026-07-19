@@ -35,6 +35,7 @@ bash tests/autonomy-failure-smoke.sh
 bash tests/autonomy-plan-run-smoke.sh
 bash tests/model-routing-smoke.sh
 bash tests/model-doctor-smoke.sh
+bash tests/doctor-model-capability-smoke.sh
 bash tests/update-v04-smoke.sh
 bash tests/lifecycle-hardening-smoke.sh
 bash tests/harness-enhancements-smoke.sh
