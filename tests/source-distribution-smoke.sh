@@ -10,6 +10,7 @@ fail() {
 
 for path in \
   .github/workflows/release.yml \
+  .github/workflows/agent-snapshot.yml \
   docs/RELEASE.md \
   scripts/gen-checksums.sh \
   tests/release-contract-smoke.sh; do

@@ -80,6 +80,10 @@ assert result["schema"] == 1
 assert result["ok"] is True
 assert [item["status"] for item in result["diversity"]] == ["independent"] * 3
 assert result["providers"][0]["routes"]["fast"]["model"] == "gpt-5.6-luna"
+claude = next(item for item in result["providers"] if item["provider"] == "claude")
+assert claude["routes"]["fast"]["model"] == "claude-haiku-4-5-20251001"
+assert claude["routes"]["balanced"]["model"] == "claude-sonnet-5"
+assert claude["routes"]["deep"]["model"] == "claude-fable-5"
 PY
 
 # Live probing verifies models where the provider offers an official catalog command.
@@ -117,6 +121,14 @@ rm "$bin/agy"
 bash "$DOCTOR" > "$TMP/partial.txt"
 grep -Fq "provider binary 'agy' is not installed" "$TMP/partial.txt" ||
   fail "partial install warning absent"
+bash "$DOCTOR" --json > "$TMP/partial.json"
+python3 - "$TMP/partial.json" <<'PY' || fail "missing provider counted in diversity"
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+for item in result["diversity"]:
+    assert [p["provider"] for p in item["participants"]] == ["codex", "claude"]
+    assert item["excluded"] == [{"provider": "antigravity", "reason": "not-installed"}]
+PY
 rc=0
 bash "$DOCTOR" --require-all > "$TMP/require-all.txt" 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "--require-all should fail on a missing provider"
@@ -125,6 +137,11 @@ bash "$DOCTOR" --require-all > "$TMP/require-all.txt" 2>&1 || rc=$?
 bash "$DOCTOR" --providers codex > "$TMP/single-provider.txt"
 grep -Fq 'fast: insufficient' "$TMP/single-provider.txt" ||
   fail "single-provider diversity should be insufficient"
+rc=0
+bash "$DOCTOR" --providers codex --strict-diversity > "$TMP/strict-single.txt" 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "strict diversity should fail with one usable provider"
+grep -Fq 'needs at least two usable providers' "$TMP/strict-single.txt" ||
+  fail "strict diversity diagnostic absent"
 
 # Alias normalization cannot create a duplicate quorum entry.
 rc=0

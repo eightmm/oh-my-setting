@@ -2,7 +2,7 @@
 name: agent-harness
 description: >
   Shared state and multi-agent coordination for resume, memory, plans, recovery,
-  roles/executors, provider delegation, patch landing, artifacts, and session
+  roles/executors, provider/model routing, patch landing, artifacts, and session
   handoff across Codex, Claude Code, and Antigravity.
 ---
 
@@ -30,6 +30,8 @@ Read only the reference needed:
 - Roles and executor souls: [roles-executors.md](references/roles-executors.md)
 - Provider calls, artifacts, export/import, landing:
   [delegation-artifacts.md](references/delegation-artifacts.md)
+- Model selection, capability checks, and quorum diversity:
+  [model-routing.md](references/model-routing.md)
 - Prior provider session: [session-handoff.md](references/session-handoff.md)
 
 For one provider pass, use `oms agent-run --mode read|write`; set the mode when

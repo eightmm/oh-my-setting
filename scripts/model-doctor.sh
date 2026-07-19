@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT=json-disabled
 LIVE_MODELS=0
 REQUIRE_ALL=0
+STRICT_DIVERSITY=0
 PROVIDERS="codex,claude,antigravity"
 TIMEOUT_SECONDS="${OMS_MODEL_DOCTOR_TIMEOUT_SECONDS:-20}"
 
@@ -28,6 +29,8 @@ Options:
   --json              Emit one schema-versioned JSON document.
   --live-models       Run bounded live model-list probes where supported.
   --require-all       Treat a missing codex, claude, or agy binary as failure.
+  --strict-diversity  Fail when fewer than two usable model families remain,
+                      or when any participating family is unknown.
   --providers CSV     Provider subset (codex, claude, antigravity/agy).
   --timeout SECONDS   Per-command timeout, 1..300 (default: 20).
   -h, --help          Show this help.
@@ -52,6 +55,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --require-all)
       REQUIRE_ALL=1
+      shift
+      ;;
+    --strict-diversity)
+      STRICT_DIVERSITY=1
       shift
       ;;
     --providers)
@@ -286,15 +293,16 @@ for provider in "${provider_values[@]}"; do
     "$listing_supported" "$listing_status" "$listing_exit" "$models_file"
 done
 
-python3 - "$ROWS" "$OUTPUT" "$LIVE_MODELS" "$REQUIRE_ALL" <<'PY'
+python3 - "$ROWS" "$OUTPUT" "$LIVE_MODELS" "$REQUIRE_ALL" "$STRICT_DIVERSITY" <<'PY'
 import json
 import re
 import sys
 from collections import defaultdict
 
-rows_path, output_mode, live_raw, require_raw = sys.argv[1:]
+rows_path, output_mode, live_raw, require_raw, strict_raw = sys.argv[1:]
 live = live_raw == "1"
 require_all = require_raw == "1"
+strict_diversity = strict_raw == "1"
 with open(rows_path, encoding="utf-8") as handle:
     providers = [json.loads(line) for line in handle if line.strip()]
 
@@ -318,6 +326,7 @@ def model_lines(path):
 warnings = []
 errors = []
 for provider in providers:
+    provider["usable"] = False
     name = provider["provider"]
     if not provider["installed"]:
         message = f"{name}: provider binary '{provider['binary']}' is not installed"
@@ -335,6 +344,12 @@ for provider in providers:
             f"{name}: installed CLI is missing required flags: "
             + ", ".join(provider["missing_flags"])
         )
+
+    provider["usable"] = (
+        provider["version_exit"] == 0
+        and provider["help_exit"] == 0
+        and not provider["missing_flags"]
+    )
 
     if not live:
         for route in provider["routes"].values():
@@ -368,15 +383,28 @@ for provider in providers:
                 f"{name}: configured {model_class} model is not in the live catalog: {model}"
             )
 
-# Provider identity alone is not an independence proof. Compare the underlying
-# configured family for every tier, including models surfaced through agy.
+# Provider identity alone is not an independence proof. Only providers that
+# are installed and expose the runtime contract participate. In live mode, a
+# route proven missing or whose catalog probe failed is excluded for that tier.
 diversity = []
 for model_class in ("fast", "balanced", "deep"):
     participants = []
+    excluded = []
     by_family = defaultdict(list)
     unknown = []
     for provider in providers:
         route = provider["routes"][model_class]
+        reason = None
+        if not provider["installed"]:
+            reason = "not-installed"
+        elif not provider["usable"]:
+            reason = "incompatible-cli"
+        elif live and route["availability"] in ("missing", "probe-failed"):
+            reason = route["availability"]
+        if reason:
+            excluded.append({"provider": provider["provider"], "reason": reason})
+            continue
+
         item = {
             "provider": provider["provider"],
             "model": route["model"],
@@ -393,9 +421,8 @@ for model_class in ("fast", "balanced", "deep"):
     }
     if len(participants) < 2:
         status = "insufficient"
-        warnings.append(
-            f"{model_class}: model-family diversity needs at least two providers"
-        )
+        message = f"{model_class}: model-family diversity needs at least two usable providers"
+        (errors if strict_diversity else warnings).append(message)
     elif duplicate_groups:
         status = "duplicate"
         for family, names in sorted(duplicate_groups.items()):
@@ -405,14 +432,20 @@ for model_class in ("fast", "balanced", "deep"):
             )
     elif unknown:
         status = "unknown"
-        warnings.append(
+        message = (
             f"{model_class}: model-family independence cannot be proven for "
             + ", ".join(unknown)
         )
+        (errors if strict_diversity else warnings).append(message)
     else:
         status = "independent"
     diversity.append(
-        {"model_class": model_class, "status": status, "participants": participants}
+        {
+            "model_class": model_class,
+            "status": status,
+            "participants": participants,
+            "excluded": excluded,
+        }
     )
 
 for provider in providers:
@@ -423,6 +456,7 @@ result = {
     "ok": not errors,
     "live_models": live,
     "require_all": require_all,
+    "strict_diversity": strict_diversity,
     "providers": providers,
     "diversity": diversity,
     "warnings": warnings,
@@ -461,7 +495,11 @@ else:
         families = ", ".join(
             f"{p['provider']}={p['family']}" for p in item["participants"]
         )
-        print(f"{item['model_class']}: {item['status']} ({families})")
+        excluded = ", ".join(
+            f"{p['provider']}:{p['reason']}" for p in item["excluded"]
+        )
+        suffix = f"; excluded={excluded}" if excluded else ""
+        print(f"{item['model_class']}: {item['status']} ({families}{suffix})")
 
     if warnings:
         print("\n## warnings")
