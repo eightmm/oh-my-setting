@@ -1,0 +1,19 @@
+name: integrate-adaptive-harness
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/adaptive-harness-v1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: await payload
+        run: echo 'payload will be attached before the pull request is opened'
