@@ -113,6 +113,33 @@ default_agy_balanced="$(
 )"
 [ "$default_agy_balanced" = 'Gemini 3.5 Flash (Medium)' ] || fail "Antigravity balanced default should encode medium effort"
 
+route_class() (
+  export OMS_MODEL_ROLE="$1"
+  export OMS_MODEL_OPERATION="$2"
+  export OMS_MODEL_CLASS_REQUEST="${3:-auto}"
+  export OMS_MODEL_EXPLICIT="" OMS_MODEL_FALLBACK_EXPLICIT=""
+  export OMS_REASONING_EFFORT_REQUEST=auto OMS_REASONING_FALLBACK_EXPLICIT=""
+  # shellcheck source=scripts/lib/model-routing.sh
+  . "$ROOT/scripts/lib/model-routing.sh"
+  oms_model_prepare codex
+  printf '%s\n' "$OMS_MODEL_RESOLVED_CLASS"
+)
+
+# Auto routing follows the current work phase. Roles are fallback hints only,
+# so a role cannot downgrade planning or inflate routine execution.
+[ "$(route_class repo-auditor decision)" = deep ] ||
+  fail "decision phase should override a fast role"
+[ "$(route_class decision-advisor delegate)" = balanced ] ||
+  fail "implementation phase should override a deep role"
+[ "$(route_class decision-advisor verify)" = fast ] ||
+  fail "verification phase should override a deep role"
+[ "$(route_class '' ask)" = balanced ] ||
+  fail "ordinary peer asks should use balanced routing"
+[ "$(route_class repo-auditor unknown)" = fast ] ||
+  fail "unknown phases should fall back to the role"
+[ "$(route_class repo-auditor decision fast)" = fast ] ||
+  fail "an explicit model class should override automatic phase routing"
+
 reset_capture() {
   rm -f "$capture"/*
   unset FAIL_MODE PRIMARY_MODEL WRITE_FILE

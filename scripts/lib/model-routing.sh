@@ -84,9 +84,9 @@ oms_model_role_class() {
 
 oms_model_operation_class() {
   case "$1" in
-    call|ask|read) printf 'fast\n' ;;
-    advise|decision|review-gate|review-synthesis|release) printf 'deep\n' ;;
-    *) printf 'balanced\n' ;;
+    call|read|run|execute|test|verify|check|triage) printf 'fast\n' ;;
+    ask|review|delegate|implement|implementation|write|repair) printf 'balanced\n' ;;
+    plan|planning|advise|decision|review-gate|review-synthesis|release) printf 'deep\n' ;;
   esac
 }
 
@@ -130,8 +130,9 @@ oms_model_prepare() {
   if [ "$requested" != auto ]; then
     resolved="$requested"
   else
-    resolved="$(oms_model_role_class "$role")"
-    [ -n "$resolved" ] || resolved="$(oms_model_operation_class "$operation")"
+    resolved="$(oms_model_operation_class "$operation")"
+    [ -n "$resolved" ] || resolved="$(oms_model_role_class "$role")"
+    [ -n "$resolved" ] || resolved=balanced
   fi
 
   OMS_MODEL_RESOLVED_CLASS="$resolved"

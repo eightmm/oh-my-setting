@@ -7613,6 +7613,10 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should route detailed harness work to the skill"
   grep -Fq 'task-scoped executor' "$global_rules" ||
     fail "global rules should retain the write-executor safety boundary"
+  grep -Fq 'harness and native workers by phase' "$global_rules" ||
+    fail "global rules should route harness and native subagents by phase"
+  grep -Fq 'Run commands/tests directly' "$global_rules" ||
+    fail "global rules should avoid model workers for routine command execution"
   if grep -Eq '^## (Model Tiering|Native Subagent Strategies|Run Provenance & Coordination)$' "$global_rules"; then
     fail "procedural harness manuals should not live in global rules"
   fi

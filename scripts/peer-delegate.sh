@@ -65,8 +65,8 @@ Options:
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
   --repo PATH          Git repo to work on. Default: current directory.
-  --model-class CLASS  auto, fast, balanced, or deep. Auto uses the role and
-                       defaults write workers to balanced.
+  --model-class CLASS  auto, fast, balanced, or deep. Auto follows the work
+                       phase, then the role; write workers default to balanced.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
   --no-model-fallback  Disable implicit class fallback.
