@@ -1,3 +1,4 @@
+# One-shot branch consolidation; this file removes itself after success.
 name: cleanup-stale-agent-branches
 
 on:
