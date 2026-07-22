@@ -1,99 +1,28 @@
-name: integrate-adaptive-harness
+name: consolidate-stale-agent-branches
 
 on:
   pull_request:
+    types: [reopened, synchronize]
 
 permissions:
   contents: write
 
 jobs:
-  integrate:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/adaptive-harness-v1'
+  cleanup:
+    if: github.repository == 'eightmm/oh-my-setting' && github.event.pull_request.head.ref == 'agent/adaptive-harness-v1'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-
-      - name: reconstruct payload and capture diagnostics
-        shell: bash
-        run: |
-          set -u
-          : > /tmp/adaptive-harness.b64
-          : > /tmp/payload-diagnostic.txt
-          for part in 00 01 02 03; do
-            wc -c ".oms-payload/chunk-$part" | tee -a /tmp/payload-diagnostic.txt
-            cat ".oms-payload/chunk-$part" >> /tmp/adaptive-harness.b64
-          done
-          for part in 04 05; do
-            wc -c ".oms-payload/chunk-$part" | tee -a /tmp/payload-diagnostic.txt
-            tr 'A-Za-z' 'N-ZA-Mn-za-m' < ".oms-payload/chunk-$part" >> /tmp/adaptive-harness.b64
-          done
-          wc -c /tmp/adaptive-harness.b64 | tee -a /tmp/payload-diagnostic.txt
-          sha256sum /tmp/adaptive-harness.b64 | tee -a /tmp/payload-diagnostic.txt
-          set +e
-          base64 -d /tmp/adaptive-harness.b64 > /tmp/adaptive-harness.patch.gz 2>> /tmp/payload-diagnostic.txt
-          decode_rc=$?
-          set -e
-          echo "decode_rc=$decode_rc" | tee -a /tmp/payload-diagnostic.txt
-          wc -c /tmp/adaptive-harness.patch.gz | tee -a /tmp/payload-diagnostic.txt
-          sha256sum /tmp/adaptive-harness.patch.gz | tee -a /tmp/payload-diagnostic.txt
-          cat /tmp/payload-diagnostic.txt
-
-      - name: upload payload diagnostic
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: adaptive-payload-diagnostic
-          path: |
-            /tmp/payload-diagnostic.txt
-            /tmp/adaptive-harness.b64
-            /tmp/adaptive-harness.patch.gz
-          if-no-files-found: warn
-          retention-days: 1
-
-      - name: verify and apply payload
+      - name: delete obsolete agent branches
         shell: bash
         run: |
           set -euo pipefail
-          test "$(wc -c < /tmp/adaptive-harness.b64 | tr -d ' ')" = 46332
-          echo '89d53cfdbe1d3fac7a4a4436caaa94248b7f94d48c7430456fc8e81c149185e4  /tmp/adaptive-harness.patch.gz' | sha256sum -c -
-          gzip -t /tmp/adaptive-harness.patch.gz
-          gzip -dc /tmp/adaptive-harness.patch.gz > /tmp/adaptive-harness.patch
-          echo '1ee0489f4f33d16cd0e5f9ea4ae79e62f7d2f386323176c9f2285b4edd4b6c7f  /tmp/adaptive-harness.patch' | sha256sum -c -
-          git apply --check /tmp/adaptive-harness.patch
-          git apply /tmp/adaptive-harness.patch
-          git rm -r .oms-payload .github/workflows/integrate-adaptive-harness.yml
-          git diff --check
-
-      - name: install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
-      - name: verify integrated tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          for file in install.sh scripts/oms scripts/*.sh scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh; do
-            bash -n "$file"
+          for branch in \
+            agent/ai-control-plane \
+            agent/loop-graph-engineering \
+            agent/adaptive-harness-v1; do
+            git push origin --delete "$branch" 2>/dev/null || true
           done
-          python3 -m py_compile scripts/lib/*.py
-          python3 scripts/validate-skills.py .
-          bash scripts/check-bash32.sh
-          shellcheck -x -S warning install.sh scripts/oms scripts/*.sh scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
-          bash tests/adaptive-harness-smoke.sh
-          bash tests/autonomy-hook-smoke.sh
-          bash tests/harness-enhancements-smoke.sh
-          bash tests/model-routing-smoke.sh
-          bash tests/context-core-smoke.sh
-          bash tests/source-distribution-smoke.sh
-
-      - name: commit integrated feature tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m 'feat: add adaptive evidence-driven harness'
-          git push origin HEAD:agent/adaptive-harness-v1
