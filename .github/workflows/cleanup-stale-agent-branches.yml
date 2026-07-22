@@ -1,0 +1,37 @@
+name: cleanup-stale-agent-branches
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.repository == 'eightmm/oh-my-setting' && github.event.head_commit.message == 'chore: consolidate stale agent branches'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: remove stale agent branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          for branch in \
+            agent/adaptive-harness-v1 \
+            agent/ai-control-plane \
+            agent/loop-graph-engineering; do
+            git push origin --delete "$branch" 2>/dev/null || true
+          done
+      - name: remove one-shot cleanup workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/cleanup-stale-agent-branches.yml
+          git commit -m 'chore: keep only main branch'
+          git push origin HEAD:main
