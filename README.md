@@ -46,6 +46,7 @@ Project:
 Start this project.
 Apply the oh-my-setting ml template.        # or: general, slurm
 Run the oh-my-setting project doctor.
+Keep the agent files out of this public repo's git history.
 ```
 
 Multi-agent work:
@@ -83,6 +84,7 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 | Capability | What it gives you |
 |---|---|
 | Project bootstrap | Start router + staged spec interview, general/ml/slurm templates, `PROJECT.md` gate, and a project doctor that keeps all three agents in sync |
+| Clean public repos | The per-project harness (`AGENTS.md`, `CLAUDE.md`, `PROJECT.md`) is hidden from git locally via `.git/info/exclude` — every agent still reads it, your commits and your `.gitignore` stay free of harness residue |
 | Multi-agent review & delegation | Ask/review across three local models and delegate write tasks to isolated worktrees — with sensitive-prompt scrubbing, run artifacts/index, change-scope guards, and patch admission before anything lands |
 | Agent state & autonomous handoff | Shared memory, mechanically verified task packets, a subtask DAG, and bounded `plan-run` execution that claims one scoped task, delegates in isolation, and stops in review unless landing is explicit — all anchored at the repo root |
 | ML experiment tracking | Run ids, ledger, reproducibility capsules, pre-registered research runs, and metric/verdict records — with a gate that won't burn a run on a failing contract |
@@ -96,6 +98,8 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 - Local-first: use local files and CLIs by default. Connectors are allowed when explicitly requested or local sources cannot answer reliably.
 - Shared harness writes use per-file locks; `OMS_LOCK_TIMEOUT` sets wait/stale recovery seconds (default `300`).
 - Never commit tokens, API keys, private data, or cluster/machine details.
+- The per-project agent files are local-only, so a fresh clone or `git clean -x`
+  will not have them: re-apply the template there (one sentence to your agent).
 - The scripts the agent runs live in `~/.oh-my-setting/scripts/`, also
   reachable as `oms <tool>` via the dispatcher on PATH (`oms list` prints the
   catalog) — documented for transparency and recovery, not for manual use.

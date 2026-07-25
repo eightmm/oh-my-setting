@@ -1,5 +1,28 @@
 # shellcheck shell=bash
-# Cross-cutting primitives shared by the run tools. Sourced, not executed.
+# Cross-cutting primitives shared by the run and worktree tools. Sourced, not
+# executed.
+
+# A fresh worktree checks out committed content only, so agent-facing files kept
+# local-only (project-private.sh) would be absent there and a worker would lose
+# the project rules. Copy them in — but only while the shared .git/info/exclude
+# still ignores them, since an unignored copy would be swept up by `git add -A`
+# and pollute the patch.
+# Locals are named wt_*/src_* on purpose: with `shellcheck -x`, a local named
+# `worktree` here makes every sourcing script's `MODE=worktree-write` look like
+# arithmetic (SC2100).
+oms_seed_local_agent_files() {
+  local src_repo="$1"
+  local wt_dir="$2"
+  local name
+
+  [ -d "$src_repo" ] && [ -d "$wt_dir" ] || return 0
+  for name in AGENTS.md CLAUDE.md GEMINI.md PROJECT.md; do
+    [ -f "$src_repo/$name" ] || continue
+    [ -e "$wt_dir/$name" ] && continue
+    git -C "$wt_dir" check-ignore -q "$name" 2>/dev/null || continue
+    cp "$src_repo/$name" "$wt_dir/$name" 2>/dev/null || true
+  done
+}
 
 # Effective run id for auto-linking: explicit OMS_RUN_ID wins; otherwise the
 # repo's .oms/runs/CURRENT pointer (written by oms-run.sh new) when it is

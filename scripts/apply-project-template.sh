@@ -2,18 +2,35 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STYLE="${1:-general}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 ML_FULL_DOCS="${OH_MY_SETTING_ML_FULL_DOCS:-0}"
-BASE_STYLE="$STYLE"
+PRIVATE="${OH_MY_SETTING_PRIVATE_AGENT_FILES:-1}"
 ADD_SLURM=0
+
+# --private/--no-private may appear anywhere, so strip them before the
+# positional style/dir/files parse below.
+KEPT_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-private) PRIVATE=0 ;;
+    --private) PRIVATE=1 ;;
+    *) KEPT_ARGS+=("$arg") ;;
+  esac
+done
+set -- ${KEPT_ARGS+"${KEPT_ARGS[@]}"}
+
+STYLE="${1:-general}"
+BASE_STYLE="$STYLE"
 
 usage() {
   cat <<'EOF'
-Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir] [--full-docs] [files...]
+Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir]
+                                 [--full-docs] [--no-private] [files...]
 
 Apply oh-my-setting project rule blocks and scaffold PROJECT.md.
 ML projects create five core docs by default; --full-docs creates all templates.
+The agent-facing files are hidden from git locally (see project-private.sh);
+--no-private, or OH_MY_SETTING_PRIVATE_AGENT_FILES=0, keeps them visible.
 EOF
 }
 
@@ -45,6 +62,10 @@ fi
 case "$ML_FULL_DOCS" in
   0|1) ;;
   *) echo "error: OH_MY_SETTING_ML_FULL_DOCS must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$PRIVATE" in
+  0|1) ;;
+  *) echo "error: OH_MY_SETTING_PRIVATE_AGENT_FILES must be 0 or 1" >&2; exit 2 ;;
 esac
 
 has_slurm_runtime() {
@@ -370,5 +391,26 @@ if [ "$BASE_STYLE" = "ml" ]; then
     if [ "$added" -gt 0 ]; then
       echo "updated $GITIGNORE: added $added ML entries"
     fi
+  fi
+fi
+
+# Keep the agent-facing files out of the project's git history (public repos
+# stay clean). Best effort: the rule blocks above are the contract, hiding is an
+# add-on, and project-doctor re-reports an exposed file later.
+if [ "$PRIVATE" = "1" ]; then
+  PRIVATE_ARGS=(--repo "$PROJECT_DIR" apply)
+  [ "$DRY_RUN" = "1" ] && PRIVATE_ARGS+=(--dry-run)
+  for f in "${FILES[@]}"; do
+    case "$f" in
+      AGENTS.md|CLAUDE.md|GEMINI.md|PROJECT.md) ;;  # already default entries
+      *[[:space:]]*|/*|*..*)
+        echo "note: cannot auto-hide $f; add it by hand to .git/info/exclude" ;;
+      *) PRIVATE_ARGS+=(--path "$f") ;;
+    esac
+  done
+  # A dry run never creates the project dir, so there is nothing to inspect.
+  if [ -d "$PROJECT_DIR" ]; then
+    "$ROOT/scripts/project-private.sh" "${PRIVATE_ARGS[@]}" ||
+      echo "warn: could not hide agent files from git; run: oms project-private status"
   fi
 fi

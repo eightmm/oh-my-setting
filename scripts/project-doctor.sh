@@ -18,6 +18,7 @@ view. Checks:
 - AGENTS.md and CLAUDE.md contain the same oh-my-setting managed blocks
 - managed blocks match the current oh-my-setting templates (not stale)
 - PROJECT.md exists and has a State field
+- git repos: the agent-facing files are hidden from git (project-private)
 - ml projects: docs/ scaffold and .gitignore entries present
 - ml projects: structure drift warnings (stray root *.py, markdown outside
   docs/, notebooks outside notebooks/, missing src/ layout, tracked files in
@@ -187,6 +188,24 @@ if [ -f "$PROJECT_DIR/PROJECT.md" ]; then
   fi
 else
   fail "PROJECT.md missing; run: apply-project-template.sh auto $PROJECT_DIR"
+fi
+
+# Agent-facing files should not leak into a project's git history: a public repo
+# has no reason to carry the harness loader. Warn-level — a project may commit
+# them deliberately, which project-private reports as "tracked", not "exposed".
+if git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  private_status="$("$ROOT/scripts/project-private.sh" --repo "$PROJECT_DIR" status 2>/dev/null || true)"
+  exposed_files="$(printf '%s\n' "$private_status" | awk '$1 == "exposed" { printf "%s ", $2 }')"
+  tracked_files="$(printf '%s\n' "$private_status" | awk '$1 == "tracked" { printf "%s ", $2 }')"
+  if [ -n "$exposed_files" ]; then
+    warn "agent files visible to git: ${exposed_files% }; run: oms project-private apply"
+  elif [ -n "$private_status" ]; then
+    if [ -n "$tracked_files" ]; then
+      ok "agent files hidden from git (committed on purpose: ${tracked_files% })"
+    else
+      ok "agent files hidden from git (.git/info/exclude, not committed)"
+    fi
+  fi
 fi
 
 if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then

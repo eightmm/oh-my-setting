@@ -182,6 +182,9 @@ if [ "$apply_ok" = 1 ]; then
   oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
   if git -C "$REPO" worktree add --quiet --detach "$worktree" HEAD >/dev/null 2>&1; then
     worktree_created=1
+    # Local-only agent files (project-private.sh) are not in HEAD; the verify
+    # command may read PROJECT.md, so seed them the same way delegate does.
+    oms_seed_local_agent_files "$REPO" "$worktree"
     # The apply into the worktree must succeed, otherwise the syntax/verify
     # gates below would run against the UNPATCHED tree and pass vacuously. Gate
     # 1 only checks apply against HEAD; the worktree tree state can still differ.

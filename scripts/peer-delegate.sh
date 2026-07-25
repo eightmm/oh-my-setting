@@ -7,6 +7,9 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/harness-residue.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/harness-residue.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/oms-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/oms-common.sh"
 
 MA_KIND="delegate"
 
@@ -546,6 +549,7 @@ if ! ma_validate_outbound_prompt "$prompt_file"; then
 fi
 git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
+oms_seed_local_agent_files "$REPO" "$worktree"
 
 # Liveness marker so another agent (or `oms state`) can see this worker is
 # in flight, not hung or dead. The launching process is the only writer;

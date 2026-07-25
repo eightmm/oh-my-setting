@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Local-only project harness (`project-private.sh`, `oms project-private`): the
+  agent-facing files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `PROJECT.md`, plus
+  `--path` extras) are listed in a managed block in `.git/info/exclude`, so a
+  public repo carries no harness residue and the project's own `.gitignore`
+  stays untouched. `apply-project-template` applies it by default
+  (`--no-private` / `OH_MY_SETTING_PRIVATE_AGENT_FILES=0` opts out),
+  `project-doctor` warns when an agent file is visible to git, `oms init`
+  points at the fix, and delegate/admission worktrees seed the local-only
+  copies so workers still read the project rules without those copies reaching
+  a patch. An already-tracked agent file is reported, never silently untracked
+  (`apply --untrack` stages that explicitly).
 - Machine-readable views for shared state: `fail-ledger list --json`,
   `experiment-board list --json`, and `oms-run timeline --json` emit schema-1
   JSON objects, and `repo-state --json` now declares `"schema": 1`.

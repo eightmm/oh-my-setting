@@ -44,6 +44,7 @@ agent가 상태를 감지해서 라우팅한다:
 이 프로젝트 시작하자.
 oh-my-setting ml 템플릿 적용해줘.        # 또는: general, slurm
 oh-my-setting project doctor 돌려줘.
+공개 repo니까 agent용 파일은 git에 안 올라가게 해줘.
 ```
 
 멀티에이전트 작업:
@@ -81,6 +82,7 @@ agent가 맞는 스크립트나 skill을 고른다. 직접 실행할 일은 없�
 | 능력 | 무엇을 주나 |
 |---|---|
 | 프로젝트 부트스트랩 | Start router + 단계별 spec 인터뷰, general/ml/slurm 템플릿, `PROJECT.md` 게이트, 세 agent가 같은 규칙을 보는지 검증하는 project doctor |
+| 깔끔한 공개 repo | 프로젝트별 하네스(`AGENTS.md`, `CLAUDE.md`, `PROJECT.md`)를 `.git/info/exclude`로 로컬에서만 숨긴다 — agent는 그대로 읽고, commit과 프로젝트 `.gitignore`에는 하네스 잔여물이 남지 않는다 |
 | Multi-agent 리뷰·위임 | 세 로컬 모델의 ask/review와 격리 worktree write 위임 — outbound 민감정보 scrub, run artifact/index, 변경 범위 guard, 적용 전 patch admission까지 |
 | Agent 상태·자율 핸드오프 | 공유 메모리, 실제 검증을 실행하는 task packet, subtask DAG, 범위가 고정된 task 하나만 claim·격리 위임하고 명시적 landing 전에는 review에서 멈추는 `plan-run` — 모두 repo root에 앵커됨 |
 | ML 실험 추적 | Run id, ledger, 재현 캡슐, 사전등록 research run, metric/verdict 기록 — 깨진 계약으로 run을 날리지 않게 하는 게이트 포함 |
@@ -95,6 +97,8 @@ agent가 맞는 스크립트나 skill을 고른다. 직접 실행할 일은 없�
 - 공유 하네스 쓰기는 파일별 lock을 쓴다; `OMS_LOCK_TIMEOUT`이 대기/stale 복구
   시간(기본 `300`초)을 정한다.
 - 토큰, API key, private data, cluster/머신 상세는 commit하지 않는다.
+- 프로젝트별 agent 파일은 로컬 전용이라 새로 clone하거나 `git clean -x`를 하면
+  사라진다. 그때는 그 체크아웃에서 템플릿을 다시 적용하면 된다 (한 문장 요청).
 - agent가 실행하는 스크립트는 `~/.oh-my-setting/scripts/`에 있고 PATH의
   dispatcher로 `oms <tool>`로도 부른다 (`oms list`가 카탈로그 출력) — 투명성과
   복구용 문서화일 뿐, 직접 실행할 일은 없다.

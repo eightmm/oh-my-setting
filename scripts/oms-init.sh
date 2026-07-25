@@ -58,6 +58,13 @@ if [ ! -f "$mem" ]; then
   mem_state="seeded"
 fi
 
+private_state="n/a"
+if git -C "$STATE_ROOT" rev-parse --git-dir >/dev/null 2>&1 &&
+  "$ROOT/scripts/project-private.sh" --repo "$STATE_ROOT" status 2>/dev/null |
+    grep -q '^exposed'; then
+  private_state="exposed"
+fi
+
 task_state="none"
 [ -s "$OMS/task/current.md" ] && task_state="active"
 plan_state="none"
@@ -82,4 +89,7 @@ if [ "$style" = "ml" ]; then
   echo "  wrap runs in 'oms run-ledger' / 'oms run-capsule' and claim on 'oms experiment-board'."
 fi
 echo "- Reusable worker personas: 'oms agent-role list' (create with 'agent-role --name NAME init')."
+if [ "$private_state" = "exposed" ]; then
+  echo "- Agent files (AGENTS.md/CLAUDE.md/PROJECT.md) are visible to git: 'oms project-private apply' keeps a public repo clean."
+fi
 echo "- Before claiming done: 'bash scripts/check.sh' (if present) or the project's verify."

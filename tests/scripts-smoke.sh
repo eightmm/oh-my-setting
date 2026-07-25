@@ -8942,6 +8942,173 @@ assert evs[0]["row"]["run_id"] == "r1", evs[0]
 ' || fail "timeline --json must emit schema-1 events with raw rows"
 }
 
+test_project_private_hides_agent_files_from_git() {
+  local project="$TMP/private-hide"
+  local out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+
+  # The whole point: the loader files exist for agents but git sees nothing.
+  [ -f "$project/AGENTS.md" ] || fail "AGENTS.md should exist on disk"
+  [ -f "$project/PROJECT.md" ] || fail "PROJECT.md should exist on disk"
+  out="$(git -C "$project" status --porcelain)"
+  [ -z "$out" ] || fail "agent files should be invisible to git, got: $out"
+  assert_file_contains "$project/.git/info/exclude" "AGENTS.md"
+  assert_file_contains "$project/.git/info/exclude" "PROJECT.md"
+  # The exclusion itself must not be committable either.
+  assert_not_exists "$project/.gitignore"
+
+  out="$("$ROOT/scripts/project-private.sh" --repo "$project" status)"
+  printf '%s' "$out" | grep -q '^hidden  *AGENTS.md$' ||
+    fail "status should report AGENTS.md hidden: $out"
+  printf '%s' "$out" | grep -Fq 'no agent files exposed' ||
+    fail "status summary should report nothing exposed: $out"
+  "$ROOT/scripts/project-private.sh" --repo "$project" status --check >/dev/null ||
+    fail "--check should pass once the agent files are hidden"
+}
+
+test_project_private_opt_out_leaves_files_visible() {
+  local project="$TMP/private-optout"
+  local out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" --no-private >/dev/null
+  out="$(git -C "$project" status --porcelain)"
+  printf '%s' "$out" | grep -Fq 'AGENTS.md' ||
+    fail "--no-private should leave AGENTS.md visible to git"
+
+  if "$ROOT/scripts/project-private.sh" --repo "$project" status --check >/dev/null; then
+    fail "--check should fail while agent files are exposed"
+  fi
+  out="$("$ROOT/scripts/project-private.sh" --repo "$project" status)"
+  printf '%s' "$out" | grep -q '^exposed  *AGENTS.md$' ||
+    fail "status should report AGENTS.md exposed: $out"
+}
+
+test_project_private_apply_is_idempotent_and_reversible() {
+  local project="$TMP/private-cycle"
+  local before after
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  before="$(wc -l < "$project/.git/info/exclude" | tr -d ' ')"
+  "$ROOT/scripts/project-private.sh" --repo "$project" apply >/dev/null
+  after="$(wc -l < "$project/.git/info/exclude" | tr -d ' ')"
+  [ "$before" = "$after" ] || fail "re-apply must not grow the exclude file"
+
+  "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
+  if grep -Fq 'oh-my-setting:private' "$project/.git/info/exclude"; then
+    fail "remove should delete the managed block"
+  fi
+  [ -f "$project/AGENTS.md" ] || fail "remove must not delete the agent files"
+  git -C "$project" status --porcelain | grep -Fq 'AGENTS.md' ||
+    fail "after remove the agent files become visible again"
+
+  # remove/apply cycles must not accumulate blank lines in the shared file.
+  "$ROOT/scripts/project-private.sh" --repo "$project" apply >/dev/null
+  "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
+  "$ROOT/scripts/project-private.sh" --repo "$project" apply >/dev/null
+  after="$(wc -l < "$project/.git/info/exclude" | tr -d ' ')"
+  [ "$before" = "$after" ] || fail "apply/remove cycles must keep the file stable"
+}
+
+test_project_private_leaves_tracked_agent_file_alone() {
+  local project="$TMP/private-tracked"
+  local out
+
+  make_committed_repo "$project"
+  printf '# committed on purpose\n' > "$project/AGENTS.md"
+  git -C "$project" add AGENTS.md
+  git -C "$project" -c user.email=t@example.com -c user.name=t commit -qm agents >/dev/null
+
+  out="$("$ROOT/scripts/project-private.sh" --repo "$project" apply)"
+  printf '%s' "$out" | grep -Fq 'tracked (left alone;' ||
+    fail "apply should report the tracked file instead of hiding it: $out"
+  git -C "$project" ls-files --error-unmatch AGENTS.md >/dev/null 2>&1 ||
+    fail "apply must never untrack a committed agent file on its own"
+  "$ROOT/scripts/project-private.sh" --repo "$project" status --check >/dev/null ||
+    fail "a deliberately tracked file is not an exposure"
+
+  out="$("$ROOT/scripts/project-private.sh" --repo "$project" apply --untrack)"
+  printf '%s' "$out" | grep -Fq 'untracked AGENTS.md' ||
+    fail "--untrack should stage the index removal: $out"
+  [ -f "$project/AGENTS.md" ] || fail "--untrack must keep the file on disk"
+  git -C "$project" diff --cached --name-only | grep -Fq 'AGENTS.md' ||
+    fail "--untrack should leave a staged deletion to commit"
+}
+
+test_project_private_rejects_misuse() {
+  local project="$TMP/private-misuse"
+  local plain="$TMP/private-nogit"
+
+  make_committed_repo "$project"
+  if "$ROOT/scripts/project-private.sh" --repo "$project" apply --path /etc/passwd >/dev/null 2>&1; then
+    fail "an absolute --path must be refused"
+  fi
+  if "$ROOT/scripts/project-private.sh" --repo "$project" apply --path ../escape.md >/dev/null 2>&1; then
+    fail "a --path escaping the repo must be refused"
+  fi
+  if "$ROOT/scripts/project-private.sh" --repo "$project" apply --json >/dev/null 2>&1; then
+    fail "--json outside status must be refused"
+  fi
+
+  # A malformed managed block must be repaired by hand, not silently rewritten.
+  printf '%s\nAGENTS.md\n' '# oh-my-setting:private:begin' >> "$project/.git/info/exclude"
+  if "$ROOT/scripts/project-private.sh" --repo "$project" status >/dev/null 2>&1; then
+    fail "an unterminated managed block must fail loudly"
+  fi
+
+  # Bootstrap applies the template before git init; that is not an error.
+  mkdir -p "$plain"
+  "$ROOT/scripts/project-private.sh" --repo "$plain" apply |
+    grep -Fq 'not a git repo yet' || fail "a non-git dir should be reported, not fatal"
+}
+
+test_project_doctor_flags_exposed_agent_files() {
+  local project="$TMP/private-doctor"
+  local out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" --no-private >/dev/null
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "exposed agent files should warn, not fail: $out"
+  printf '%s' "$out" | grep -Fq 'agent files visible to git' ||
+    fail "doctor should warn about agent files visible to git: $out"
+
+  "$ROOT/scripts/project-private.sh" --repo "$project" apply >/dev/null
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "doctor should pass once agent files are hidden: $out"
+  printf '%s' "$out" | grep -Fq 'agent files hidden from git' ||
+    fail "doctor should confirm the agent files are hidden: $out"
+}
+
+test_local_agent_files_reach_a_delegate_worktree() {
+  local project="$TMP/private-worktree"
+  local worktree="$TMP/private-worktree-wt"
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  git -C "$project" worktree add --quiet --detach "$worktree" HEAD >/dev/null 2>&1 ||
+    fail "worktree add failed"
+
+  # Fresh checkout of HEAD: the local-only files are absent until seeded.
+  assert_not_exists "$worktree/AGENTS.md"
+  (
+    # shellcheck source=scripts/lib/oms-common.sh
+    . "$ROOT/scripts/lib/oms-common.sh"
+    oms_seed_local_agent_files "$project" "$worktree"
+  )
+  assert_file_contains "$worktree/AGENTS.md" "oh-my-setting:general:begin"
+  assert_file_contains "$worktree/PROJECT.md" "# PROJECT.md"
+  # Seeded copies stay ignored, so they cannot leak into a delegated patch.
+  git -C "$worktree" add -A
+  if git -C "$worktree" diff --cached --name-only | grep -Fq 'AGENTS.md'; then
+    fail "seeded agent files must stay out of the patch"
+  fi
+  git -C "$project" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 
