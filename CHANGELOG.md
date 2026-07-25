@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms state` and `oms init` now cover the project harness itself, not only
+  `.oms` state: applied rule styles, `PROJECT.md` state, and any agent file
+  visible to git, with hand-written agent rules reported as `unmanaged` rather
+  than prompting for a template. `oms init` applies the git exclusion when a
+  repo got `git init` after its template (the order the bootstrap flow uses,
+  where the template step cannot), reports missing or half-applied rules ahead
+  of task/plan advice, and takes `--no-private`. `remove-project-template`
+  points at the exclusion it leaves behind.
 - Local-only project harness (`project-private.sh`, `oms project-private`): the
   agent-facing files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `PROJECT.md`, plus
   `--path` extras) are listed in a managed block in `.git/info/exclude`, so a

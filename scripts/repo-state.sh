@@ -67,8 +67,13 @@ if [ "$REFRESH_CI" = 1 ]; then
   (cd "$REPO" && "$ROOT/scripts/ci-status.sh" record >/dev/null 2>&1) || true
 fi
 
+# Privacy state comes from project-private itself (one source of truth for what
+# counts as tracked/hidden/exposed) rather than a second copy of the rules here.
+PRIVATE_JSON="$("$ROOT/scripts/project-private.sh" --repo "$REPO" status --json 2>/dev/null || true)"
+
 OMS_RS_REPO="$REPO" \
 OMS_RS_JSON="$AS_JSON" \
+OMS_RS_PRIVATE="$PRIVATE_JSON" \
 OMS_RS_PLAN_TTL="${OMS_PLAN_CLAIM_TTL:-3600}" \
 OMS_RS_REVIEW_TTL="${OMS_PLAN_REVIEW_TTL:-86400}" \
 OMS_RS_BOARD_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}" \
@@ -446,6 +451,57 @@ if os.path.isfile(gf):
         guard["stale"] = now - int(gstarted) > guard_ttl
 state["change_guard"] = guard
 
+# --- Project harness: the rules every agent reads before any .oms state ------
+# Presence and exposure only. Template freshness needs reference blocks
+# regenerated from the install, which is project-doctor's job, not a query's.
+harness = {"rules": "missing", "styles": [], "spec": "missing", "private": "n/a",
+           "exposed": []}
+seen_styles = []
+rule_files = []
+agent_files = []
+for name in ("AGENTS.md", "CLAUDE.md"):
+    path = os.path.join(repo, name)
+    if not os.path.isfile(path):
+        continue
+    agent_files.append(name)
+    styles = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("<!-- oh-my-setting:") and line.endswith(":begin -->"):
+                styles.append(line[len("<!-- oh-my-setting:"):-len(":begin -->")])
+    if styles:
+        rule_files.append(name)
+        for s in styles:
+            if s not in seen_styles:
+                seen_styles.append(s)
+if rule_files:
+    harness["rules"] = "present" if len(rule_files) == 2 else "partial"
+    harness["styles"] = seen_styles
+    harness["rule_files"] = rule_files
+elif agent_files:
+    # Hand-written agent rules (this repo's own AGENTS.md is one): report them,
+    # do not nag to overwrite them with a template.
+    harness["rules"] = "unmanaged"
+    harness["rule_files"] = agent_files
+spec_path = os.path.join(repo, "PROJECT.md")
+if os.path.isfile(spec_path):
+    harness["spec"] = "unset"
+    with open(spec_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("- State:"):
+                harness["spec"] = line[len("- State:"):].strip() or "unset"
+                break
+try:
+    private = json.loads(os.environ.get("OMS_RS_PRIVATE") or "{}")
+except Exception:
+    private = {}
+if private.get("git"):
+    harness["exposed"] = [e["path"] for e in private.get("entries", [])
+                          if e.get("state") == "exposed"]
+    harness["private"] = "exposed" if harness["exposed"] else "hidden"
+state["harness"] = harness
+
 if as_json:
     print(json.dumps(state, ensure_ascii=False, indent=2))
 else:
@@ -453,6 +509,27 @@ else:
         print(s)
 
     line("# repo-state: %s" % repo)
+
+    h = state["harness"]
+    if h["rules"] == "missing" and h["spec"] == "missing" and h["private"] != "exposed":
+        line("\n## Project harness: none (run: oms apply-project-template auto .)")
+    else:
+        line("\n## Project harness")
+        if h["rules"] == "present":
+            line("  rules: %s" % (", ".join(h["styles"]) or "none"))
+        elif h["rules"] == "unmanaged":
+            line("  rules: %s, hand-written (no oh-my-setting block)" %
+                 ", ".join(h.get("rule_files", [])))
+        elif h["rules"] == "partial":
+            line("  rules: %s in %s only (run: oms project-doctor .)" % (
+                ", ".join(h["styles"]) or "none", ", ".join(h.get("rule_files", []))))
+        else:
+            line("  rules: missing (run: oms apply-project-template auto .)")
+        line("  spec: PROJECT.md %s" % h["spec"])
+        if h["private"] == "exposed":
+            line("  git: %s visible to git (run: oms project-private apply)" %
+                 ", ".join(h["exposed"]))
+
     t = state["task"]
     if t["present"]:
         line("\n## Active task")

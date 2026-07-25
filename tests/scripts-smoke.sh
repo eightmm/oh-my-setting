@@ -9109,6 +9109,130 @@ test_local_agent_files_reach_a_delegate_worktree() {
   git -C "$project" worktree remove --force "$worktree" >/dev/null 2>&1 || true
 }
 
+test_oms_init_reports_missing_project_rules() {
+  local project="$TMP/init-rules"
+  local out
+
+  make_committed_repo "$project"
+  out="$("$ROOT/scripts/oms-init.sh" --repo "$project")" || fail "oms init should succeed"
+  printf '%s' "$out" | grep -Fq 'rules=missing' ||
+    fail "oms init should report missing project rules: $out"
+  printf '%s' "$out" | grep -Fq 'No project rules yet' ||
+    fail "oms init should name applying a template as the next action: $out"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  out="$("$ROOT/scripts/oms-init.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'rules=present' ||
+    fail "oms init should see applied rules: $out"
+  printf '%s' "$out" | grep -Fq 'spec=draft' ||
+    fail "oms init should report the PROJECT.md state: $out"
+
+  # A hand-written AGENTS.md is not an oh-my-setting harness.
+  local plain="$TMP/init-unmanaged"
+  make_committed_repo "$plain"
+  printf '# my own rules\n' > "$plain/AGENTS.md"
+  out="$("$ROOT/scripts/oms-init.sh" --repo "$plain")"
+  printf '%s' "$out" | grep -Fq 'rules=missing' ||
+    fail "a file without a managed block is not applied rules: $out"
+}
+
+test_oms_init_hides_agent_files_after_a_late_git_init() {
+  local project="$TMP/init-late-git"
+  local optout="$TMP/init-late-git-optout"
+  local out
+
+  # The canonical bootstrap order scaffolds first and runs git init after, so
+  # the template's own hiding step no-ops; oms init is the recovery point.
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  git -C "$project" init -b main >/dev/null
+  git -C "$project" status --porcelain | grep -Fq 'AGENTS.md' ||
+    fail "precondition: agent files should start exposed after a late git init"
+
+  out="$("$ROOT/scripts/oms-init.sh" --repo "$project")" || fail "oms init should succeed"
+  printf '%s' "$out" | grep -Fq 'hid the agent files from git' ||
+    fail "oms init should report hiding the agent files: $out"
+  out="$(git -C "$project" status --porcelain)"
+  [ -z "$out" ] || fail "oms init should leave nothing visible to git, got: $out"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$optout" >/dev/null
+  git -C "$optout" init -b main >/dev/null
+  "$ROOT/scripts/oms-init.sh" --repo "$optout" --no-private >/dev/null
+  git -C "$optout" status --porcelain | grep -Fq 'AGENTS.md' ||
+    fail "--no-private must leave the agent files visible"
+}
+
+test_repo_state_reports_the_project_harness() {
+  local project="$TMP/state-harness"
+  local out
+
+  make_committed_repo "$project"
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'Project harness: none' ||
+    fail "a repo with no harness should say so: $out"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'rules: general' ||
+    fail "state should report the applied styles: $out"
+  printf '%s' "$out" | grep -Fq 'spec: PROJECT.md draft' ||
+    fail "state should report the spec state: $out"
+  if printf '%s' "$out" | grep -Fq 'visible to git'; then
+    fail "hidden agent files should not be reported as visible"
+  fi
+
+  "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'visible to git (run: oms project-private apply)' ||
+    fail "state should surface exposed agent files: $out"
+
+  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+import json, sys
+h = json.load(sys.stdin)["harness"]
+assert h["rules"] == "present", h
+assert h["styles"] == ["general"], h
+assert h["spec"] == "draft", h
+assert h["private"] == "exposed", h
+assert "AGENTS.md" in h["exposed"], h
+' || fail "repo-state --json should carry the harness view"
+}
+
+test_repo_state_does_not_nag_about_hand_written_rules() {
+  local project="$TMP/state-unmanaged"
+  local out
+
+  make_committed_repo "$project"
+  printf '# hand-written rules\n' > "$project/AGENTS.md"
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'hand-written (no oh-my-setting block)' ||
+    fail "state should report hand-written agent rules as such: $out"
+  if printf '%s' "$out" | grep -Fq 'apply-project-template'; then
+    fail "state must not push a template onto a repo with its own agent rules"
+  fi
+  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+import json, sys
+h = json.load(sys.stdin)["harness"]
+assert h["rules"] == "unmanaged", h
+assert h["rule_files"] == ["AGENTS.md"], h
+' || fail "repo-state --json should mark hand-written rules unmanaged"
+}
+
+test_remove_project_template_reports_the_leftover_exclusion() {
+  local project="$TMP/remove-leftover"
+  local out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
+  printf '%s' "$out" | grep -Fq "'oms project-private remove' undoes that" ||
+    fail "removing the template should mention the leftover git exclusion: $out"
+
+  "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
+  out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
+  if printf '%s' "$out" | grep -Fq 'project-private remove'; then
+    fail "with no exclusion left there is nothing to report"
+  fi
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

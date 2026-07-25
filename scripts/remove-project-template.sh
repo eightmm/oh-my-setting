@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STYLE="${1:-all}"
 PROJECT_DIR="${2:-$PWD}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
@@ -110,3 +111,12 @@ remove_one() {
 for f in "${FILES[@]}"; do
   remove_one "$f"
 done
+
+# The managed rule blocks are gone but the files (and their local git exclusion)
+# stay. Say so, so nobody has to discover the leftover block by hand.
+if [ "$DRY_RUN" != "1" ] &&
+  git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1 &&
+  "$ROOT/scripts/project-private.sh" --repo "$PROJECT_DIR" status 2>/dev/null |
+    grep -qE '^(hidden|reserved)'; then
+  echo "note: the agent files stay hidden from git; 'oms project-private remove' undoes that"
+fi
