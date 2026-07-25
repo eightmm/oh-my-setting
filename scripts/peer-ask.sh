@@ -14,6 +14,7 @@ MA_DEBATE_SECTIONS=$'Answer:\nChanged from previous round:\nRemaining disagreeme
 
 REPO="$PWD"
 PROMPT=""
+THREAD_ID=""
 PROVIDERS="codex,claude,antigravity"
 ARTIFACT_DIR=""
 INCLUDE_STATUS=0
@@ -63,6 +64,8 @@ Options:
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).
+  --thread ID          Record every answer in a cross-agent thread and give the
+                       providers the conversation so far (agent-thread.sh).
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Debate rounds exchange answers only;
@@ -214,6 +217,11 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_ML_CONTEXT=1
       shift
       ;;
+    --thread)
+      [ "$#" -ge 2 ] || fail "--thread requires an id"
+      THREAD_ID="$2"
+      shift 2
+      ;;
     --debate)
       [ "$#" -ge 2 ] || fail "--debate requires round count"
       case "$2" in
@@ -333,6 +341,13 @@ else
 fi
 
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$status_file" "$diff_file"
+if [ -n "$THREAD_ID" ]; then
+  thread_prompt="$(agent_memory_mktemp)" || thread_prompt=""
+  if [ -n "$thread_prompt" ]; then
+    { ma_write_thread_context "$REPO" "$THREAD_ID"; cat "$prompt_file"; } > "$thread_prompt"
+    mv "$thread_prompt" "$prompt_file"
+  fi
+fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export OMS_OPERATION_ID="${OMS_OPERATION_ID:-ask-$timestamp}"
@@ -355,6 +370,23 @@ fi
 
 synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
 ma_write_synthesis "$synth_file"
+
+# One question, one turn per provider: the council becomes part of the same
+# conversation instead of a separate pile of artifacts.
+if [ -n "$THREAD_ID" ] && [ "$EXPORT_ONLY" -eq 0 ]; then
+  ask_turn="$(agent_memory_mktemp)" || ask_turn=""
+  if [ -n "$ask_turn" ]; then
+    printf '%s\n' "$PROMPT" > "$ask_turn"
+    ma_thread_append "$REPO" "$THREAD_ID" question "$ask_turn"
+    for ask_i in "${!provider_names[@]}"; do
+      [ "${alive[ask_i]}" = 1 ] || continue
+      extract_output "${last_arts[ask_i]}" | ma_sanitize_quoted_output > "$ask_turn" 2>/dev/null || true
+      ma_thread_append "$REPO" "$THREAD_ID" answer "$ask_turn" \
+        "${provider_names[ask_i]}" "" "${last_arts[ask_i]}"
+    done
+    rm -f "$ask_turn"
+  fi
+fi
 ma_append_artifact_index "$REPO" ask-synthesis local 0 "$synth_file" || true
 
 if [ "$EXPORT_ONLY" -eq 1 ]; then

@@ -24,7 +24,7 @@ GATE="${OMS_RUN_LEDGER_GATE:-1}"
 usage() {
   cat <<'EOF'
 Usage: run-ledger.sh [options] -- <command...>
-       run-ledger.sh list [N]
+       run-ledger.sh list [--json] [N]
        run-ledger.sh top --metric KEY [--min|--max] [--all] [--file PATH] [N]
 
 Run a command and append a row to the experiment ledger
@@ -46,7 +46,8 @@ Options:
   --reason TEXT   Justification for an unsafe gate skip. Recorded in the row.
   -h, --help      Show this help.
 
-list [N]        Show the last N ledger rows (default 10).
+list [--json] [N]  Show the last N ledger rows (default 10); --json emits a
+                schema-1 object.
 top             Rank runs by a recorded metric ("best run for val_auc"):
                 rows with a finite numeric metrics[KEY], sorted --max
                 (default; use --min for losses), top N (default 10).
@@ -88,6 +89,8 @@ case "${1:-}" in
 esac
 
 if [ "$MODE" = "list" ]; then
+  AS_JSON=0
+  if [ "${1:-}" = "--json" ]; then AS_JSON=1; shift; fi
   [ "$#" -le 1 ] || fail "unknown argument: $2"
   N="${1:-10}"
   case "$N" in
@@ -97,10 +100,15 @@ if [ "$MODE" = "list" ]; then
   LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
   tail -n "$N" "$LEDGER" |
-    python3 -c '
-import json, sys
+    OMS_RL_JSON="$AS_JSON" python3 -c '
+import json, os, sys
+as_json = os.environ.get("OMS_RL_JSON") == "1"
+rows = []
 for line in sys.stdin:
     r = json.loads(line)
+    if as_json:
+        rows.append(r)
+        continue
     dirty = "+dirty" if r["dirty"] else ""
     note = ("  # " + r["note"]) if r.get("note") else ""
     m = r.get("metrics") or {}
@@ -118,6 +126,8 @@ for line in sys.stdin:
     print("%s  exit=%d  %ds%s  sha=%s%s  %s%s%s" % (
         r["ts"], r["exit"], r["duration_s"], gate, r["git_sha"], dirty,
         " ".join(r["cmd"]), metrics, note))
+if as_json:
+    print(json.dumps({"schema": 1, "runs": rows}, ensure_ascii=False))
 '
   exit 0
 fi

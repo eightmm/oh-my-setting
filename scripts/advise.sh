@@ -35,6 +35,8 @@ the evidence, the alternatives considered, and the planned next action.
 Options:
   --prompt TEXT        Decision context to review.
   --prompt-file PATH   Decision context from a file.
+  --thread ID          Record the advice in a cross-agent thread and give the
+                       advisor the conversation so far (agent-thread.sh).
   --to PROVIDER        Advisor provider: codex, claude, or antigravity.
                        Default: OMS_ADVISOR_PROVIDER, else the first
                        available provider that is not the caller (OMS_AGENT).
@@ -101,6 +103,11 @@ while [ "$#" -gt 0 ]; do
     --memory|--task|--ml-context|--no-memory|--no-task|--no-ml-context|--export-only|--dry-run)
       PASSTHROUGH+=("$1")
       shift
+      ;;
+    --thread)
+      [ "$#" -ge 2 ] || fail "--thread requires an id"
+      PASSTHROUGH+=("$1" "$2")
+      shift 2
       ;;
     --print-timeout)
       [ "$#" -ge 2 ] || fail "--print-timeout requires duration"

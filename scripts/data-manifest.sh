@@ -36,7 +36,7 @@ usage() {
 Usage: data-manifest.sh create --name NAME --split LABEL=FILE [options]
        data-manifest.sh check --name NAME
        data-manifest.sh leakage --name NAME [--show-examples]
-       data-manifest.sh list
+       data-manifest.sh list [--json]
        data-manifest.sh show --name NAME
 
 Fingerprint dataset splits to catch data drift and train/eval leakage.
@@ -523,17 +523,34 @@ PY
 }
 
 cmd_list() {
-  [ -d "$MANIFEST_DIR" ] || { echo "no manifests"; return 0; }
-  local f
-  for f in "$MANIFEST_DIR"/*.json; do
-    [ -f "$f" ] || continue
-    python3 -c '
-import json, sys
-m = json.load(open(sys.argv[1]))
-splits = ",".join(s["label"] for s in m.get("splits", []))
-print("%-24s splits=[%s] ts=%s" % (m.get("name"), splits, m.get("ts")))
-' "$f"
-  done
+  local as_json=0
+  if [ "${1:-}" = "--json" ]; then as_json=1; shift; fi
+  [ "$#" -eq 0 ] || fail "list takes no arguments"
+  if [ ! -d "$MANIFEST_DIR" ]; then
+    if [ "$as_json" -eq 1 ]; then
+      echo '{"schema": 1, "manifests": []}'
+    else
+      echo "no manifests"
+    fi
+    return 0
+  fi
+  OMS_DM_DIR="$MANIFEST_DIR" OMS_DM_JSON="$as_json" python3 -c '
+import glob, json, os
+rows = []
+for path in sorted(glob.glob(os.path.join(os.environ["OMS_DM_DIR"], "*.json"))):
+    try:
+        m = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        continue
+    labels = [s.get("label") for s in m.get("splits", [])]
+    if os.environ.get("OMS_DM_JSON") == "1":
+        rows.append({"name": m.get("name"), "ts": m.get("ts"),
+                     "splits": labels, "path": path})
+    else:
+        print("%-24s splits=[%s] ts=%s" % (m.get("name"), ",".join(l or "" for l in labels), m.get("ts")))
+if os.environ.get("OMS_DM_JSON") == "1":
+    print(json.dumps({"schema": 1, "manifests": rows}, ensure_ascii=False))
+'
 }
 
 cmd_show() {
@@ -565,7 +582,7 @@ case "${1:-}" in
   create) shift; cmd_create "$@" ;;
   check) shift; cmd_check "$@" ;;
   leakage) shift; cmd_leakage "$@" ;;
-  list) shift; [ "$#" -eq 0 ] || fail "list takes no arguments"; cmd_list ;;
+  list) shift; cmd_list "$@" ;;
   show) shift; cmd_show "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;

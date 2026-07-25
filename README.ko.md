@@ -53,6 +53,7 @@ oh-my-setting project doctor 돌려줘.
 현재 diff를 peer review로 검토해줘.
 debate 1라운드로 세 모델에게 물어봐줘: vector DB와 pgvector 중 뭐가 맞을까?
 codex에게 위임해줘: scripts/train.py에 입력 검증 추가.
+이 split 정책 다른 에이전트한테도 물어보고 대화 이어서 기록해줘.
 ```
 
 ML·HPC:
@@ -83,6 +84,7 @@ agent가 맞는 스크립트나 skill을 고른다. 직접 실행할 일은 없�
 |---|---|
 | 프로젝트 부트스트랩 | Start router + 단계별 spec 인터뷰, general/ml/slurm 템플릿, `PROJECT.md` 게이트, 세 agent가 같은 규칙을 보는지 검증하는 project doctor |
 | 깔끔한 공개 repo | 프로젝트별 하네스(`AGENTS.md`, `CLAUDE.md`, `PROJECT.md`)를 `.git/info/exclude`로 로컬에서만 숨긴다 — agent는 그대로 읽고, commit과 프로젝트 `.gitignore`에는 하네스 잔여물이 남지 않는다 |
+| 에이전트 간 대화 | 작업 중에 다른 에이전트에게 묻고 그 맥락을 유지한다. 모든 provider가 읽고 이어 쓰는 공유 thread 하나로, codex·claude·antigravity가 서로의 답변 위에 쌓아 올린다 (일회성 질문이 아니라) |
 | Multi-agent 리뷰·위임 | 세 로컬 모델의 ask/review와 격리 worktree write 위임 — outbound 민감정보 scrub, run artifact/index, 변경 범위 guard, 적용 전 patch admission까지 |
 | Agent 상태·자율 핸드오프 | 공유 메모리, 실제 검증을 실행하는 task packet, subtask DAG, 범위가 고정된 task 하나만 claim·격리 위임하고 명시적 landing 전에는 review에서 멈추는 `plan-run` — 모두 repo root에 앵커됨 |
 | ML 실험 추적 | Run id, ledger, 재현 캡슐, 사전등록 research run, metric/verdict 기록 — 깨진 계약으로 run을 날리지 않게 하는 게이트 포함 |

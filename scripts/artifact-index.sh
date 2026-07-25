@@ -9,6 +9,7 @@ REPO="$PWD"
 INDEX_FILE=""
 ACTION="list"
 ACTION_SET=0
+AS_JSON=0
 LIMIT=""
 LIMIT_SET=0
 PRUNE_FILES=0
@@ -24,6 +25,7 @@ Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.
 
 Commands:
+  --json         list/latest/failures/unresolved: emit a schema-1 JSON object.
   list [N]       Show the last N rows (default 20).
   latest         Show the most recent row.
   latest-run     Show a compact summary for the most recent run id.
@@ -82,6 +84,10 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=1
       shift
       ;;
+    --json)
+      AS_JSON=1
+      shift
+      ;;
     list|latest|latest-run|failures|unresolved|resolve|validate|migrate|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
@@ -114,6 +120,10 @@ else
   [ -z "$TARGET_EVENT" ] || fail "--event-id is only valid with resolve"
   [ -z "$REASON" ] || fail "--reason is only valid with resolve"
 fi
+case "$ACTION" in
+  list|latest|latest-run|failures|unresolved) ;;
+  *) [ "$AS_JSON" -eq 0 ] || fail "--json is not supported by $ACTION" ;;
+esac
 if [ "$PRUNE_FILES" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--files is only valid with prune"
 fi
@@ -131,7 +141,15 @@ esac
 # Anchor to the git worktree root so the index does not fork per subdirectory.
 REPO="$(oms_repo_root "$REPO")"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
-[ -s "$INDEX_FILE" ] || fail "no artifact index at $INDEX_FILE"
+if [ ! -s "$INDEX_FILE" ]; then
+  # A machine consumer wants an empty view, not an error, when nothing has run
+  # yet; the human path keeps saying where it looked.
+  if [ "$AS_JSON" -eq 1 ]; then
+    printf '{"schema": 1, "action": "%s", "rows": []}\n' "$ACTION"
+    exit 0
+  fi
+  fail "no artifact index at $INDEX_FILE"
+fi
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 if [ "$ACTION" = "resolve" ]; then
@@ -568,10 +586,11 @@ EOF
   exit 0
 fi
 
-python3 - "$INDEX_FILE" "$ACTION" "$LIMIT" <<'EOF'
+python3 - "$INDEX_FILE" "$ACTION" "$LIMIT" "$AS_JSON" <<'EOF'
 import json, os, re, sys
 
 path, action, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+as_json = sys.argv[4] == "1"
 all_rows = []
 with open(path) as f:
     for line in f:
@@ -756,6 +775,11 @@ if action == "latest":
     rows = rows[-1:]
 else:
     rows = rows[-limit:]
+if as_json:
+    print(json.dumps({"schema": 1, "action": action,
+                      "rows": [dict(r, status=status(r)) for r in rows]},
+                     ensure_ascii=False))
+    sys.exit(0)
 for r in rows:
     print(format_row(r))
 EOF

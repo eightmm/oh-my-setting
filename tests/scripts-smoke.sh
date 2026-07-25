@@ -55,6 +55,12 @@ export GIT_AUTHOR_NAME="oms-test" GIT_AUTHOR_EMAIL="test@example.com"
 export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
 export LC_ALL=C LANG=C TZ=UTC
 export HOME="$TEST_HOME" XDG_CACHE_HOME="$TEST_HOME/.cache" NVM_DIR="$TEST_HOME/.nvm"
+# Harness residue (worktrees, lock dirs, delegate temp dirs) lives under
+# TMPDIR, and doctor/cleanup count what they find there. With the host's
+# shared /tmp, a stray oh-my-setting-* dir from a real run makes those tests
+# fail for reasons that have nothing to do with the change under test.
+export TMPDIR="$TMP/tmp"
+mkdir -p "$TMPDIR"
 export CODEX_HOME="$TEST_HOME/.codex"
 export OH_MY_SETTING_CODEX_PLUGIN=0
 cd "$TEST_CWD"
@@ -9230,6 +9236,253 @@ test_remove_project_template_reports_the_leftover_exclusion() {
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
   if printf '%s' "$out" | grep -Fq 'project-private remove'; then
     fail "with no exclusion left there is nothing to report"
+  fi
+}
+
+test_agent_thread_records_a_cross_agent_conversation() {
+  local project="$TMP/thread-basic"
+  local id out
+
+  make_committed_repo "$project"
+  id="$("$ROOT/scripts/agent-thread.sh" --repo "$project" new --topic "loader sharding")"
+  [ -n "$id" ] || fail "new should print a thread id"
+  [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$id" ] ||
+    fail "a new thread should become current"
+
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" append --role question \
+    --text "map-style or iterable?" >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" append --role answer \
+    --text "map-style; shard by file for streaming" --provider codex --model m1 >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" append --role answer \
+    --text "agree, but watch DDP worker duplication" --provider antigravity >/dev/null
+
+  # The point of a thread: one context that carries every provider's answer.
+  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" context)"
+  printf '%s' "$out" | grep -Fq 'map-style; shard by file' ||
+    fail "context should carry the first answer: $out"
+  printf '%s' "$out" | grep -Fq 'watch DDP worker duplication' ||
+    fail "context should carry the second provider's answer: $out"
+
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["schema"] == 1, d
+turns = d["turns"]
+assert [t["seq"] for t in turns] == [1, 2, 3, 4], turns
+assert turns[2]["provider"] == "codex", turns[2]
+assert turns[2]["model"] == "m1", turns[2]
+' || fail "thread show --json should expose ordered turns"
+}
+
+test_agent_thread_refuses_sensitive_turns() {
+  local project="$TMP/thread-sensitive"
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id t1 >/dev/null
+  # A turn is replayed into other providers' prompts, so it must be gated like
+  # shared memory is.
+  if "$ROOT/scripts/agent-thread.sh" --repo "$project" --id t1 append --role note \
+    --text "export api_ke""y=s""k-abcdefghijklmnopqr" >/dev/null 2>&1; then
+    fail "a secret-looking turn must be refused"
+  fi
+  if "$ROOT/scripts/agent-thread.sh" --repo "$project" --id t1 append --role note \
+    --text "results live in /hom""e/someone/private/run" >/dev/null 2>&1; then
+    fail "a private path must be refused"
+  fi
+  if "$ROOT/scripts/agent-thread.sh" --repo "$project" show --id ../escape >/dev/null 2>&1; then
+    fail "an id escaping the threads dir must be refused"
+  fi
+  [ "$(wc -l < "$project/.oms/threads/t1.jsonl" | tr -d ' ')" = "0" ] ||
+    fail "refused turns must not be written"
+}
+
+test_agent_thread_truncates_and_bounds_context() {
+  local project="$TMP/thread-budget"
+  local i out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id big >/dev/null
+  python3 -c 'print("y" * 9000)' > "$TMP/thread-big.txt"
+  OMS_THREAD_TURN_BYTES=200 "$ROOT/scripts/agent-thread.sh" --repo "$project" --id big \
+    append --role answer --text-file "$TMP/thread-big.txt" --provider codex >/dev/null
+  grep -Fq 'truncated: see artifact' "$project/.oms/threads/big.jsonl" ||
+    fail "an oversized turn should be truncated, not stored whole"
+
+  i=0
+  while [ "$i" -lt 6 ]; do
+    "$ROOT/scripts/agent-thread.sh" --repo "$project" --id big append --role note \
+      --text "turn number $i" >/dev/null
+    i=$((i + 1))
+  done
+  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" --id big context --turns 2)"
+  printf '%s' "$out" | grep -Fq 'turn number 5' ||
+    fail "context should keep the newest turns: $out"
+  if printf '%s' "$out" | grep -Fq 'turn number 0'; then
+    fail "context should drop older turns beyond --turns"
+  fi
+  printf '%s' "$out" | grep -Fq 'earlier turn(s) omitted' ||
+    fail "context should say how much it dropped: $out"
+}
+
+test_agent_call_threads_the_exchange() {
+  local project="$TMP/thread-call"
+  local artifact out
+
+  make_committed_repo "$project"
+  ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+    "$ROOT/scripts/agent-call.sh" --to codex --repo "$project" --thread work \
+    --prompt "first question" >/dev/null )
+  # Naming a thread is enough; it is created on first use.
+  [ -f "$project/.oms/threads/work.jsonl" ] || fail "--thread should create the thread"
+
+  ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+    "$ROOT/scripts/agent-call.sh" --to codex --repo "$project" --thread work \
+    --prompt "second question" >/dev/null )
+
+  artifact="$(ls -t "$project"/.oms/artifacts/call/*second-question*.md | head -1)"
+  # The whole point: the second call carries the first exchange.
+  grep -Fq 'begin conversation context' "$artifact" ||
+    fail "a threaded call should inject the prior turns"
+  grep -Fq 'first question' "$artifact" ||
+    fail "the injected context should contain the earlier question"
+
+  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" --id work show)"
+  printf '%s' "$out" | grep -Fq 'first question' ||
+    fail "the question should be recorded: $out"
+  printf '%s' "$out" | grep -Fq 'answer' ||
+    fail "the answer should be recorded: $out"
+}
+
+test_agent_consult_asks_a_peer_and_keeps_the_thread() {
+  local project="$TMP/consult-basic"
+  local out id
+
+  make_committed_repo "$project"
+  out="$(cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+    "$ROOT/scripts/agent-consult.sh" --repo "$project" "which split policy?" --quiet)" ||
+    fail "consult should succeed: $out"
+  printf '%s' "$out" | grep -Fq 'thread: ' || fail "consult should report its thread: $out"
+
+  id="$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)"
+  [ -n "$id" ] || fail "consult should leave a current thread"
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+import json, sys
+turns = json.load(sys.stdin)["turns"]
+roles = [t["role"] for t in turns]
+assert "question" in roles and "answer" in roles, roles
+answer = [t for t in turns if t["role"] == "answer"][0]
+# The peer must not be the caller: that is what makes it a second opinion.
+assert answer.get("provider") != "claude", answer
+' || fail "consult should record a question and a peer answer"
+
+  # A follow-up joins the same conversation instead of starting over.
+  ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+    "$ROOT/scripts/agent-consult.sh" --repo "$project" "and for the test split?" --quiet >/dev/null )
+  [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$id" ] ||
+    fail "a follow-up consult should stay in the same thread"
+}
+
+test_agent_consult_rejects_conflicting_targets() {
+  local project="$TMP/consult-misuse"
+
+  make_committed_repo "$project"
+  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --all --to codex "x" >/dev/null 2>&1; then
+    fail "--all and --to must be mutually exclusive"
+  fi
+  if "$ROOT/scripts/agent-consult.sh" --repo "$project" >/dev/null 2>&1; then
+    fail "a consult without a question must be refused"
+  fi
+  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --model-class huge "x" >/dev/null 2>&1; then
+    fail "an unknown model class must be refused"
+  fi
+}
+
+test_repo_state_and_gc_cover_threads() {
+  local project="$TMP/thread-lifecycle"
+  local out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id keep-open >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id keep-open append \
+    --role answer --text "stay" --provider codex >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id done-thread >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id done-thread close \
+    --summary "resolved" >/dev/null
+
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'Cross-agent threads' ||
+    fail "state should surface open threads: $out"
+  printf '%s' "$out" | grep -Fq 'keep-open' ||
+    fail "state should name the open thread: $out"
+  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+import json, sys
+t = json.load(sys.stdin)["threads"]
+assert t["open"] == 1, t
+assert [r["id"] for r in t["recent"]] == ["keep-open"], t
+' || fail "repo-state --json should carry the thread view"
+
+  # Closed threads age out; an open one is kept whatever its age.
+  touch -d "60 days ago" "$project/.oms/threads/done-thread.jsonl" \
+    "$project/.oms/threads/keep-open.jsonl"
+  "$ROOT/scripts/gc.sh" --repo "$project" --apply >/dev/null
+  [ -f "$project/.oms/threads/keep-open.jsonl" ] ||
+    fail "gc must never sweep an open thread"
+  [ ! -f "$project/.oms/threads/done-thread.jsonl" ] ||
+    fail "gc should sweep an aged closed thread"
+}
+
+test_machine_readable_views_cover_the_state_tools() {
+  local project="$TMP/json-coverage"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" status --json ) | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["schema"] == 1 and d["present"] is False, d
+' || fail "agent-task status --json should report an absent packet"
+
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "ship it" \
+    --verify "true" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" status --json ) | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["present"] is True and d["status"] == "active", d
+assert isinstance(d["stale"], bool), d
+' || fail "agent-task status --json should describe the active packet"
+  if ( cd "$project" && "$ROOT/scripts/agent-task.sh" show --json >/dev/null 2>&1 ); then
+    fail "--json outside status must be refused"
+  fi
+
+  ( cd "$project" && "$ROOT/scripts/run-capsule.sh" list --json ) | python3 -c '
+import json, sys
+assert json.load(sys.stdin) == {"schema": 1, "capsules": []}
+' || fail "run-capsule list --json should emit an empty schema-1 view"
+  ( cd "$project" && "$ROOT/scripts/data-manifest.sh" list --json ) | python3 -c '
+import json, sys
+assert json.load(sys.stdin) == {"schema": 1, "manifests": []}
+' || fail "data-manifest list --json should emit an empty schema-1 view"
+  ( cd "$project" && "$ROOT/scripts/session-handoff.sh" list --json ) | python3 -c '
+import json, sys
+assert json.load(sys.stdin) == {"schema": 1, "handoffs": []}
+' || fail "session-handoff list --json should emit an empty schema-1 view"
+
+  ( cd "$project" && "$ROOT/scripts/run-ledger.sh" -- true >/dev/null 2>&1 )
+  ( cd "$project" && "$ROOT/scripts/run-ledger.sh" list --json ) | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["schema"] == 1 and len(d["runs"]) == 1, d
+assert d["runs"][0]["exit"] == 0, d
+' || fail "run-ledger list --json should carry ledger rows"
+
+  ( cd "$project" && "$ROOT/scripts/artifact-index.sh" --repo "$project" list --json ) |
+    python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["schema"] == 1 and d["action"] == "list", d
+assert isinstance(d["rows"], list), d
+' || fail "artifact-index list --json should emit schema-1 rows"
+  if ( cd "$project" && "$ROOT/scripts/artifact-index.sh" validate --json >/dev/null 2>&1 ); then
+    fail "artifact-index --json must be refused where it means nothing"
   fi
 }
 

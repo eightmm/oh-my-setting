@@ -33,7 +33,7 @@ cleanup_done=0
 usage() {
   cat <<'EOF'
 Usage: run-capsule.sh run [options] -- <command...>
-       run-capsule.sh list [N]
+       run-capsule.sh list [--json] [N]
        run-capsule.sh show <id>
        run-capsule.sh whence <file>
        run-capsule.sh reproduce <id>
@@ -390,21 +390,37 @@ capsule_path() {
 }
 
 cmd_list() {
+  local as_json=0
+  if [ "${1:-}" = "--json" ]; then as_json=1; shift; fi
   [ "$#" -le 1 ] || fail "list takes at most N"
   local n="${1:-10}"
   case "$n" in *[!0-9]*|"") fail "N must be a positive integer" ;; esac
   local index
   index="$(runs_index)"
-  [ -f "$index" ] || { echo "no capsules recorded"; return 0; }
-  tail -n "$n" "$index" | python3 -c '
-import json, sys
+  if [ ! -f "$index" ]; then
+    if [ "$as_json" -eq 1 ]; then
+      echo '{"schema": 1, "capsules": []}'
+    else
+      echo "no capsules recorded"
+    fi
+    return 0
+  fi
+  tail -n "$n" "$index" | OMS_RC_JSON="$as_json" python3 -c '
+import json, os, sys
+as_json = os.environ.get("OMS_RC_JSON") == "1"
+rows = []
 for line in sys.stdin:
     try: r = json.loads(line)
     except Exception: continue
+    if as_json:
+        rows.append(r)
+        continue
     dirty = "+dirty" if r.get("dirty") else ""
     print("%s  %s  exit=%s  %ss  sha=%s%s  %s" % (
         r.get("id"), r.get("ts"), r.get("exit"), r.get("duration_s"),
         r.get("git_sha"), dirty, " ".join(r.get("command", []))))
+if as_json:
+    print(json.dumps({"schema": 1, "capsules": rows}, ensure_ascii=False))
 '
 }
 

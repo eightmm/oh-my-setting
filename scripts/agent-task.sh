@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # OMS_STATE_REPO: set by peer-delegate.sh for worktree workers so they
 # read the primary repo's shared state instead of the throwaway checkout's.
 REPO="${OMS_STATE_REPO:-$PWD}"
+AS_JSON=0
 TASK_FILE=""
 ACTION=""
 AGENT="$(oms_detect_agent)"
@@ -76,7 +77,7 @@ Commands:
   init              Create the task file if missing and apply provided fields.
   show              Print task file if it exists. Default.
   context           Print provider context view.
-  status            Print task lifecycle metadata.
+  status            Print task lifecycle metadata (--json for machines).
   update            Apply section updates.
   append            Append --text/--stdin to Current State.
   verify            Mark the current task verified; --verification may record
@@ -197,6 +198,10 @@ while [ "$#" -gt 0 ]; do
       USE_STDIN=1
       shift
       ;;
+    --json)
+      AS_JSON=1
+      shift
+      ;;
     path|init|show|context|status|update|append|verify|rotate|close)
       ACTION="$1"
       shift
@@ -217,6 +222,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-show}"
+if [ "$AS_JSON" -ne 0 ] && [ "$ACTION" != "status" ]; then
+  echo "error: --json is only supported by status" >&2
+  exit 2
+fi
+
 case "$ACTION" in
   append) ;;
   *)
@@ -364,7 +374,11 @@ case "$ACTION" in
     ;;
   status)
     if [ ! -s "$TASK_FILE" ]; then
-      echo "status: none"
+      if [ "$AS_JSON" -eq 1 ]; then
+        echo '{"schema": 1, "present": false}'
+      else
+        echo "status: none"
+      fi
       exit 0
     fi
     task_id="$(agent_task_metadata_value "$TASK_FILE" task_id 2>/dev/null || echo legacy)"
@@ -376,6 +390,22 @@ case "$ACTION" in
       task_stale=yes
     else
       task_stale=no
+    fi
+    if [ "$AS_JSON" -eq 1 ]; then
+      OMS_AT_ID="$task_id" OMS_AT_STATUS="$task_status" OMS_AT_SOURCE="$task_source" \
+      OMS_AT_ACTIVITY="$task_activity" OMS_AT_CLOSED="$task_closed" \
+      OMS_AT_STALE="$task_stale" python3 -c '
+import json, os
+print(json.dumps({
+    "schema": 1, "present": True,
+    "task_id": os.environ["OMS_AT_ID"],
+    "status": os.environ["OMS_AT_STATUS"],
+    "source_session": os.environ["OMS_AT_SOURCE"] or None,
+    "last_activity": os.environ["OMS_AT_ACTIVITY"] or None,
+    "closed_at": os.environ["OMS_AT_CLOSED"] or None,
+    "stale": os.environ["OMS_AT_STALE"] == "yes",
+}, ensure_ascii=False))'
+      exit 0
     fi
     # One write avoids SIGPIPE under `set -o pipefail` when callers use
     # `agent-task status | grep -q ...` and grep exits after an early match.

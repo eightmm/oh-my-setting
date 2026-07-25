@@ -30,7 +30,7 @@ Distill an agent CLI session into a portable handoff digest.
 
 Subcommands:
   capture   Read a session and write a digest to .oms/handoffs/.
-  list      List captured handoff digests (newest first).
+  list      List captured handoff digests (newest first); --json for machines.
   show FILE Print a captured digest to stdout.
 
 capture options:
@@ -452,8 +452,30 @@ slug_id() {
 }
 
 cmd_list() {
+  local as_json=0
+  if [ "${1:-}" = "--json" ]; then as_json=1; shift; fi
+  [ "$#" -eq 0 ] || fail "list takes no arguments"
   local dir="$ROOT/.oms/handoffs"
-  [ -d "$dir" ] || { echo "no handoffs captured"; return 0; }
+  if [ ! -d "$dir" ]; then
+    if [ "$as_json" -eq 1 ]; then
+      echo '{"schema": 1, "handoffs": []}'
+    else
+      echo "no handoffs captured"
+    fi
+    return 0
+  fi
+  if [ "$as_json" -eq 1 ]; then
+    OMS_SH_DIR="$dir" python3 -c '
+import glob, json, os
+rows = []
+for path in sorted(glob.glob(os.path.join(os.environ["OMS_SH_DIR"], "*.md")),
+                   key=os.path.getmtime, reverse=True):
+    rows.append({"path": path, "bytes": os.path.getsize(path),
+                 "mtime": int(os.path.getmtime(path))})
+print(json.dumps({"schema": 1, "handoffs": rows}, ensure_ascii=False))
+'
+    return 0
+  fi
   find "$dir" -maxdepth 1 -type f -name '*.md' -exec ls -1t {} + 2>/dev/null
 }
 
@@ -467,7 +489,7 @@ cmd_show() {
 
 case "${1:-}" in
   capture) shift; cmd_capture "$@" ;;
-  list) shift; [ "$#" -eq 0 ] || fail "list takes no arguments"; cmd_list ;;
+  list) shift; cmd_list "$@" ;;
   show) shift; cmd_show "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;

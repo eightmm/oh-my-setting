@@ -18,6 +18,9 @@ release, and synthesis.
 - Never write `.oms/` by hand; reading its state files directly is fine, but
   prefer `--json` output where a tool offers it. Use `oms gc` for stale state
   and `oms patch-land` for delegated changes.
+- Consult a peer mid-task when an independent view changes the next step:
+  `oms consult "question"` (`--all` for every peer). It is read-only, carries
+  the task context, and keeps the exchange in a thread.
 - Use advisors only for irreversible/high-risk decisions, repeated failures, or
   release go/no-go—not routine completion.
 - Provider workers remain harness children, cannot recursively delegate, and do
@@ -32,6 +35,8 @@ Read only the reference needed:
 - Roles and executor souls: [roles-executors.md](references/roles-executors.md)
 - Provider calls, artifacts, export/import, landing:
   [delegation-artifacts.md](references/delegation-artifacts.md)
+- Consulting peers mid-task and shared conversation threads:
+  [cross-agent-consultation.md](references/cross-agent-consultation.md)
 - Model selection, capability checks, and quorum diversity:
   [model-routing.md](references/model-routing.md)
 - Prior provider session: [session-handoff.md](references/session-handoff.md)

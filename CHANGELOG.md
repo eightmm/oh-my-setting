@@ -7,6 +7,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Cross-agent conversations (`agent-thread.sh`, `oms thread`) and one verb to
+  use them (`agent-consult.sh`, `oms consult`). Every cross-agent call used to
+  be one-shot — the peer answered into an artifact and the next call started
+  from nothing — so agents could not exchange context. A thread is an
+  append-only transcript in `.oms/threads/<id>.jsonl` that any provider reads
+  and extends: `oms consult "question"` picks a peer that is not the caller,
+  attaches the active task, shared memory, and the conversation so far, records
+  both turns, and prints the answer; `--all` asks every installed peer in
+  parallel into one thread. `--thread ID` also works on `agent-call`,
+  `agent-run`, `peer-ask`, `peer-delegate`, and `advise`, so council answers,
+  delegated patch outcomes, and advisor verdicts land in the same conversation.
+  Turns are budget-truncated and pass the shared sensitive-content gate before
+  they can be replayed into another provider's prompt. `oms state` lists open
+  threads and `oms gc` sweeps only closed ones.
+- Machine-readable views for the remaining state tools: `agent-task status
+  --json`, `artifact-index list|latest|failures|unresolved --json`,
+  `run-ledger list --json`, `run-capsule list --json`, `data-manifest list
+  --json`, and `session-handoff list --json`, all schema-1 and empty-state safe.
 - `oms state` and `oms init` now cover the project harness itself, not only
   `.oms` state: applied rule styles, `PROJECT.md` state, and any agent file
   visible to git, with hand-written agent rules reported as `unmanaged` rather

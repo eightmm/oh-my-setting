@@ -79,8 +79,9 @@ OMS_RS_REVIEW_TTL="${OMS_PLAN_REVIEW_TTL:-86400}" \
 OMS_RS_BOARD_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}" \
 OMS_RS_RUN_TTL="${OMS_RUN_CURRENT_TTL:-86400}" \
 OMS_RS_GUARD_TTL="${OMS_GUARD_TTL:-86400}" \
+OMS_RS_THREAD_TTL="${OMS_THREAD_CURRENT_TTL:-86400}" \
 python3 <<'PY'
-import calendar, json, os, time
+import calendar, glob, json, os, time
 
 repo = os.environ["OMS_RS_REPO"]
 as_json = os.environ["OMS_RS_JSON"] == "1"
@@ -89,6 +90,7 @@ review_ttl = int(os.environ["OMS_RS_REVIEW_TTL"])
 board_ttl = int(os.environ["OMS_RS_BOARD_TTL"])
 run_ttl = int(os.environ["OMS_RS_RUN_TTL"])
 guard_ttl = int(os.environ["OMS_RS_GUARD_TTL"])
+thread_ttl = int(os.environ["OMS_RS_THREAD_TTL"])
 now = time.time()
 
 
@@ -502,6 +504,39 @@ if private.get("git"):
     harness["private"] = "exposed" if harness["exposed"] else "hidden"
 state["harness"] = harness
 
+# --- Cross-agent threads: what the agents are actually discussing -----------
+threads = {"current": None, "open": 0, "recent": []}
+tdir = oms("threads")
+if os.path.isdir(tdir):
+    cur = os.path.join(tdir, "CURRENT")
+    if os.path.isfile(cur):
+        parts = open(cur, encoding="utf-8", errors="replace").read().split()
+        if parts:
+            minted = parts[1] if len(parts) > 1 and parts[1].isdigit() else None
+            fresh = minted is None or (now - int(minted)) <= thread_ttl
+            if fresh and os.path.isfile(os.path.join(tdir, parts[0] + ".jsonl")):
+                threads["current"] = parts[0]
+    rows_by_thread = []
+    for path in sorted(glob.glob(os.path.join(tdir, "*.jsonl"))):
+        rows = read_jsonl(path)
+        if not rows:
+            continue
+        tid = os.path.basename(path)[: -len(".jsonl")]
+        closed = any(r.get("role") == "closed" for r in rows)
+        providers = []
+        for r in rows:
+            p = r.get("provider")
+            if p and p not in providers:
+                providers.append(p)
+        rows_by_thread.append({
+            "id": tid, "turns": len(rows), "closed": closed,
+            "providers": providers, "last_ts": rows[-1].get("ts"),
+        })
+    rows_by_thread.sort(key=lambda t: t["last_ts"] or "", reverse=True)
+    threads["open"] = sum(1 for t in rows_by_thread if not t["closed"])
+    threads["recent"] = [t for t in rows_by_thread if not t["closed"]][:3]
+state["threads"] = threads
+
 if as_json:
     print(json.dumps(state, ensure_ascii=False, indent=2))
 else:
@@ -529,6 +564,17 @@ else:
         if h["private"] == "exposed":
             line("  git: %s visible to git (run: oms project-private apply)" %
                  ", ".join(h["exposed"]))
+
+    th = state["threads"]
+    if th["current"] or th["open"]:
+        line("\n## Cross-agent threads (%d open)" % th["open"])
+        for entry in th["recent"]:
+            line("  %s%-26s turns=%-3d %s" % (
+                "* " if entry["id"] == th["current"] else "  ",
+                entry["id"], entry["turns"],
+                ",".join(entry["providers"]) or "-"))
+        if th["current"]:
+            line("  resume: oms consult \"...\"  (joins %s)" % th["current"])
 
     t = state["task"]
     if t["present"]:

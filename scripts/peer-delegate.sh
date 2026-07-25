@@ -33,6 +33,7 @@ KEEP_WORKTREE=0
 INCLUDE_MEMORY=0
 INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=0
+THREAD_ID=""
 TASK_ID=""
 PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
@@ -97,6 +98,8 @@ Options:
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable task context.
   --no-ml-context      Disable --ml-context (compatibility).
+  --thread ID          Join a cross-agent thread: prior turns go into the
+                       worker brief and the outcome is appended (agent-thread.sh).
   --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
                        artifact-index rows for lineage. [A-Za-z0-9._-]+.
   --plan-task ID       Couple this delegation to an agent-plan.sh task: on
@@ -226,6 +229,11 @@ while [ "$#" -gt 0 ]; do
     --ml-context)
       INCLUDE_ML_CONTEXT=1
       shift
+      ;;
+    --thread)
+      [ "$#" -ge 2 ] || fail "--thread requires an id"
+      THREAD_ID="$2"
+      shift 2
       ;;
     --task-id)
       [ "$#" -ge 2 ] || fail "--task-id requires id"
@@ -493,6 +501,7 @@ trap 'cleanup_signal 143' TERM
   printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
   printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized. If blocked, report it without asking questions.\n\n'
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
+  ma_write_thread_context "$REPO" "$THREAD_ID"
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'
     cat "$role_file"
@@ -847,6 +856,28 @@ elif [ "$APPLY" = 1 ]; then
     else
       echo "apply skipped: patch-land rejected the patch" >&2
     fi
+  fi
+fi
+
+# Record the delegation in the thread so the next agent sees what this worker
+# did and whether it verified, not just that a patch file exists somewhere.
+if [ -n "$THREAD_ID" ]; then
+  thread_turn="$(agent_memory_mktemp)" || thread_turn=""
+  if [ -n "$thread_turn" ]; then
+    {
+      printf 'Delegated write task to %s: worker exit %s' "$TO" "$worker_status"
+      [ -z "$VERIFY_CMD" ] || printf ', verify exit %s' "$verify_status"
+      printf '.\n'
+      if [ -s "$patch_file" ]; then
+        printf 'Patch (not applied unless stated): %s\n' "$(ma_artifact_relpath "$REPO" "$patch_file")"
+      else
+        printf 'No changes were produced.\n'
+      fi
+      extract_output "$artifact" | ma_sanitize_quoted_output 2>/dev/null || true
+    } > "$thread_turn"
+    ma_thread_append "$REPO" "$THREAD_ID" answer "$thread_turn" "$TO" \
+      "${OMS_MODEL_SELECTED:-}" "$artifact"
+    rm -f "$thread_turn"
   fi
 fi
 

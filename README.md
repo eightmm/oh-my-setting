@@ -55,6 +55,7 @@ Multi-agent work:
 Run a peer review of the current diff.
 Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
+Ask another agent what it thinks about this split policy, and keep the thread.
 ```
 
 ML and HPC:
@@ -85,6 +86,7 @@ full per-script catalog is in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 |---|---|
 | Project bootstrap | Start router + staged spec interview, general/ml/slurm templates, `PROJECT.md` gate, and a project doctor that keeps all three agents in sync |
 | Clean public repos | The per-project harness (`AGENTS.md`, `CLAUDE.md`, `PROJECT.md`) is hidden from git locally via `.git/info/exclude` — every agent still reads it, your commits and your `.gitignore` stay free of harness residue |
+| Cross-agent conversation | Ask a peer mid-task and keep the exchange: one shared thread any provider can read and extend, so codex, claude, and antigravity build on each other's answers across calls and sessions instead of one-shot questions |
 | Multi-agent review & delegation | Ask/review across three local models and delegate write tasks to isolated worktrees — with sensitive-prompt scrubbing, run artifacts/index, change-scope guards, and patch admission before anything lands |
 | Agent state & autonomous handoff | Shared memory, mechanically verified task packets, a subtask DAG, and bounded `plan-run` execution that claims one scoped task, delegates in isolation, and stops in review unless landing is explicit — all anchored at the repo root |
 | ML experiment tracking | Run ids, ledger, reproducibility capsules, pre-registered research runs, and metric/verdict records — with a gate that won't burn a run on a failing contract |

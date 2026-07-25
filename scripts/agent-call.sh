@@ -16,6 +16,7 @@ ARTIFACT_DIR=""
 INCLUDE_MEMORY=0
 INCLUDE_TASK=0
 INCLUDE_ML_CONTEXT=0
+THREAD_ID=""
 EXPORT_ONLY=0
 MODEL_CLASS=auto
 MODEL=""
@@ -45,6 +46,8 @@ Options:
   --memory             Attach shared harness memory.
   --task               Attach the active task handoff packet.
   --ml-context         Attach the compact ML context digest.
+  --thread ID          Join a cross-agent thread: prior turns are injected and
+                       this exchange is appended (agent-thread.sh).
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).
@@ -135,6 +138,11 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_ML_CONTEXT=1
       shift
       ;;
+    --thread)
+      [ "$#" -ge 2 ] || fail "--thread requires an id"
+      THREAD_ID="$2"
+      shift 2
+      ;;
     --export-only)
       EXPORT_ONLY=1
       shift
@@ -221,6 +229,7 @@ trap 'cleanup_signal 143' TERM
   printf 'Do not modify files. Do not run git commit or git push.\n'
   printf 'Use the shared memory only as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n\n'
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
+  ma_write_thread_context "$REPO" "$THREAD_ID"
   printf 'Prompt:\n'
   if [ -n "$PROMPT_FILE" ]; then
     cat "$PROMPT_FILE"
@@ -267,7 +276,24 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# The question is recorded from the operator prompt, not the composed file, so
+# a thread stays a conversation instead of a pile of harness boilerplate.
+record_thread_exchange() {
+  local question
+  [ -n "$THREAD_ID" ] || return 0
+  question="$(agent_memory_mktemp)" || return 0
+  if [ -n "$PROMPT_FILE" ]; then
+    cat "$PROMPT_FILE" > "$question"
+  else
+    printf '%s\n' "$PROMPT" > "$question"
+  fi
+  ma_thread_record_exchange "$REPO" "$THREAD_ID" "$TO" "$OMS_MODEL_SELECTED" \
+    "$artifact" "$question"
+  rm -f "$question"
+}
+
 if run_provider "$TO" "$prompt_file" "$artifact"; then
+  record_thread_exchange
   echo "artifact: $artifact"
 else
   rc=$?

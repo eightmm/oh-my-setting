@@ -31,6 +31,7 @@ INCLUDE_MEMORY=0
 # -1 means mode-aware default: omit for reads, attach for writes.
 INCLUDE_TASK=-1
 INCLUDE_ML_CONTEXT=0
+THREAD_ID=""
 EXPORT_ONLY=0
 DRY_RUN="${OH_MY_SETTING_AGENT_RUN_DRY_RUN:-0}"
 
@@ -71,6 +72,8 @@ Options:
   --memory             Attach shared harness memory.
   --task               Attach the active task packet (write default).
   --ml-context         Attach the compact ML context digest.
+  --thread ID          Join a cross-agent thread: prior turns are injected and
+                       the exchange is appended (agent-thread.sh).
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable task context.
   --no-ml-context      Disable --ml-context (compatibility).
@@ -314,6 +317,11 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_ML_CONTEXT=1
       shift
       ;;
+    --thread)
+      [ "$#" -ge 2 ] || { echo "error: --thread requires an id" >&2; exit 2; }
+      THREAD_ID="$2"
+      shift 2
+      ;;
     --export-only)
       EXPORT_ONLY=1
       shift
@@ -407,6 +415,7 @@ if [ "$resolved_mode" = "read" ]; then
   [ "$INCLUDE_MEMORY" -eq 1 ] && cmd+=(--memory)
   [ "$INCLUDE_TASK" -eq 1 ] && cmd+=(--task)
   [ "$INCLUDE_ML_CONTEXT" -eq 1 ] && cmd+=(--ml-context)
+  [ -n "$THREAD_ID" ] && cmd+=(--thread "$THREAD_ID")
   [ "$EXPORT_ONLY" -eq 1 ] && cmd+=(--export-only)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   agent_run_exec_and_record read "$TO" "${cmd[@]}"
@@ -436,6 +445,7 @@ else
   [ "$INCLUDE_TASK" -eq 0 ] && cmd+=(--no-task)
   [ "$INCLUDE_TASK" -ne 0 ] && cmd+=(--task)
   [ "$INCLUDE_ML_CONTEXT" -eq 1 ] && cmd+=(--ml-context)
+  [ -n "$THREAD_ID" ] && cmd+=(--thread "$THREAD_ID")
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   agent_run_exec_and_record write "$TO" "${cmd[@]}"
 fi

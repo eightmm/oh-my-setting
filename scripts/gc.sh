@@ -35,7 +35,8 @@ Swept (older than --days): orphaned delegation markers (dead pid; a coupled
 claimed/running plan task is released back to ready), archived task packets,
 stale open runs (no spine event in --days; a close event is appended), run
 capsules of runs that are NOT open, abandoned change-guards (dead owner pid
-or aged snapshot), terminal/draft executor souls, resolved failure rows;
+or aged snapshot), terminal/draft executor souls, resolved failure rows, closed
+conversation threads;
 artifact index/files are delegated
 to artifact-index prune. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
@@ -304,6 +305,22 @@ if [ -f "$guard_file" ]; then
   if [ "$guard_dead" = 1 ]; then
     note_remove "stale-change-guard" "$guard_file"
   fi
+fi
+
+# 4b) Closed conversation threads older than --days. An open thread is never
+#     swept regardless of age: it is the only record of what the agents agreed,
+#     and the current pointer expires on its own TTL.
+if [ -d "$OMS/threads" ]; then
+  cutoff=$(( $(date +%s) - DAYS * 86400 ))
+  for f in "$OMS/threads"/*.jsonl; do
+    [ -e "$f" ] || continue
+    if ! grep -q '"role": *"closed"' "$f" 2>/dev/null; then
+      continue
+    fi
+    mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$f" 2>/dev/null || echo 0)"
+    [ "$mtime" -lt "$cutoff" ] || continue
+    note_remove "closed-thread" "$f"
+  done
 fi
 
 # 5) Artifacts: use the same planner in dry-run and apply mode. Provider

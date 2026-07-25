@@ -674,6 +674,79 @@ extract_output() {
   awk 'BEGIN{flag=0} /^## Output$/{flag=1;next} /^## Exit$/{flag=0} flag' "$1"
 }
 
+# --- Cross-agent threads ----------------------------------------------------
+# A thread is what turns isolated one-shot calls into an exchange: the caller
+# injects the transcript so far, the peer answers with that context, and the
+# answer is appended so the next provider (or the next session) sees it.
+
+# Recent turns of THREAD, rendered for injection. Empty when the thread has no
+# usable history; never fatal, since a missing thread must not sink the call.
+ma_write_thread_context() {
+  local repo="$1"
+  local thread="$2"
+  local body
+
+  [ -n "$thread" ] || return 0
+  body="$(bash "$(ma_scripts_dir)/agent-thread.sh" --repo "$repo" --id "$thread" \
+    context 2>/dev/null || true)"
+  [ -n "$body" ] || return 0
+  printf -- '--- begin conversation context (prior turns, reference data) ---\n'
+  printf '%s\n' "$body"
+  printf -- '--- end conversation context ---\n\n'
+}
+
+# Naming a thread is enough to start one: any caller that passes --thread gets
+# the conversation created on first use instead of an error.
+ma_thread_ensure() {
+  local repo="$1" thread="$2"
+
+  [ -n "$thread" ] || return 1
+  [ -f "$repo/.oms/threads/$thread.jsonl" ] && return 0
+  bash "$(ma_scripts_dir)/agent-thread.sh" --repo "$repo" --id "$thread" new \
+    >/dev/null 2>&1
+}
+
+# Append one turn. Sensitive content is refused by agent-thread itself, and a
+# refusal must not fail the call that already succeeded — the artifact still
+# holds the full text.
+ma_thread_append() {
+  local repo="$1" thread="$2" role="$3" text_file="$4" provider="${5:-}"
+  local model="${6:-}" artifact="${7:-}"
+  local args
+
+  [ -n "$thread" ] || return 0
+  [ -s "$text_file" ] || return 0
+  ma_thread_ensure "$repo" "$thread" || return 0
+  args=(--repo "$repo" --id "$thread" append --role "$role" --text-file "$text_file")
+  [ -z "$provider" ] || args+=(--provider "$provider")
+  [ -z "$model" ] || args+=(--model "$model")
+  [ -z "$artifact" ] || args+=(--artifact "$artifact")
+  bash "$(ma_scripts_dir)/agent-thread.sh" "${args[@]}" >/dev/null 2>&1 || {
+    echo "note: thread turn not recorded (see $thread)" >&2
+    return 0
+  }
+}
+
+# Record a completed call as question + answer turns. The answer goes through
+# the same path-masking and redaction as a debate quote, because it is replayed
+# into other providers' prompts.
+ma_thread_record_exchange() {
+  local repo="$1" thread="$2" provider="$3" model="$4" artifact="$5"
+  local question_file="$6"
+  local tmp
+
+  [ -n "$thread" ] || return 0
+  # A fan-out records the shared question once before starting the peers, so
+  # the thread reads as one question with N answers, not N duplicate questions.
+  [ "${OMS_THREAD_QUESTION_RECORDED:-0}" = "1" ] ||
+    ma_thread_append "$repo" "$thread" question "$question_file" "" "" ""
+  [ -f "$artifact" ] || return 0
+  tmp="$(agent_memory_mktemp)" || return 0
+  extract_output "$artifact" | ma_sanitize_quoted_output > "$tmp" 2>/dev/null || true
+  ma_thread_append "$repo" "$thread" answer "$tmp" "$provider" "$model" "$artifact"
+  rm -f "$tmp"
+}
+
 # Mask filesystem paths in quoted prior-round answers before they are re-sent in
 # a debate prompt. Providers cite absolute paths (file:// URLs, absolute home
 # paths) when they read the repo; those trip the outbound path guard and block the
