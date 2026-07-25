@@ -28,6 +28,7 @@ KIND="cmd"
 SUMMARY=""
 FINGERPRINT=""
 UNRESOLVED_ONLY=0
+AS_JSON=0
 ACTION=""
 
 usage() {
@@ -35,7 +36,7 @@ usage() {
 Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT]
        fail-ledger.sh [--repo PATH] check  --cmd CMD
        fail-ledger.sh [--repo PATH] resolve --fingerprint FP
-       fail-ledger.sh [--repo PATH] list   [--unresolved]
+       fail-ledger.sh [--repo PATH] list   [--unresolved] [--json]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
 Fingerprint = short hash of the normalized command (whitespace collapsed,
@@ -48,7 +49,7 @@ check    Exit 3 (and print prior context) if CMD's fingerprint is a known
          UNRESOLVED failure; exit 0 otherwise. Gate a retry with this.
 resolve  Mark a fingerprint fixed so it stops warning.
 list     One line per fingerprint (count, last exit, resolved); --unresolved
-         shows only still-failing ones.
+         shows only still-failing ones, --json emits a schema-1 JSON object.
 
 Never records sensitive-looking commands/summaries (blocked, like memory).
 EOF
@@ -124,6 +125,7 @@ while [ "$#" -gt 0 ]; do
     --fingerprint) [ "$#" -ge 2 ] || fail "--fingerprint requires a value"; FINGERPRINT="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --unresolved) UNRESOLVED_ONLY=1; shift ;;
+    --json) AS_JSON=1; shift ;;
     record|check|resolve|list) ACTION="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -131,6 +133,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-list}"
+[ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--json is only supported by list"
 STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
 LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
 
@@ -221,10 +224,18 @@ PY
     echo "fail-ledger: resolved $FINGERPRINT" >&2
     ;;
   list)
-    [ -f "$LEDGER" ] || { echo "no failures"; exit 0; }
-    OMS_UNRESOLVED="$UNRESOLVED_ONLY" python3 - "$LEDGER" <<'PY'
+    if [ ! -f "$LEDGER" ]; then
+      if [ "$AS_JSON" -eq 1 ]; then
+        echo '{"schema": 1, "failures": []}'
+      else
+        echo "no failures"
+      fi
+      exit 0
+    fi
+    OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" python3 - "$LEDGER" <<'PY'
 import json, os, sys
 unresolved_only = os.environ.get("OMS_UNRESOLVED") == "1"
+as_json = os.environ.get("OMS_JSON") == "1"
 agg = {}
 order = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
@@ -246,15 +257,31 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         agg[fp]["count"] += 1
         agg[fp]["last"] = r
         agg[fp]["resolved"] = False
+rows = []
 for fp in order:
     d = agg[fp]
     if unresolved_only and (d["resolved"] or d["count"] == 0):
         continue
     last = d["last"] or {}
-    tag = "resolved" if d["resolved"] else "OPEN"
-    print("%s  %-8s count=%d exit=%s  %s" % (
-        fp, tag, d["count"], last.get("exit", "-"),
-        (last.get("summary") or last.get("cmd", ""))[:80]))
+    rows.append({
+        "fingerprint": fp,
+        "resolved": d["resolved"],
+        "count": d["count"],
+        "exit": last.get("exit"),
+        "ts": last.get("ts"),
+        "kind": last.get("kind"),
+        "cmd": last.get("cmd"),
+        "summary": last.get("summary"),
+    })
+if as_json:
+    print(json.dumps({"schema": 1, "failures": rows}, ensure_ascii=False))
+else:
+    for r in rows:
+        tag = "resolved" if r["resolved"] else "OPEN"
+        print("%s  %-8s count=%d exit=%s  %s" % (
+            r["fingerprint"], tag, r["count"],
+            "-" if r["exit"] is None else r["exit"],
+            (r["summary"] or r["cmd"] or "")[:80]))
 PY
     ;;
   *)

@@ -25,7 +25,7 @@ contracts.
 
 - Use relevant skills; prefer local files, `rg`, shell, and `git`.
 - Batch independent calls and parallel file discovery; serialize dependencies.
-  Bound output, reuse unchanged results, and re-read after relevant state changes.
+  Bound output, reuse unchanged results, and re-read after state changes.
 
 ## Specification
 
@@ -48,12 +48,13 @@ contracts.
 - Route harness and native workers by phase: deep planning/gates, balanced
   implementation/review, fast routine analysis. Override mismatched inherited
   model/reasoning settings.
-- Run commands/tests directly; do not spawn agents merely to execute them.
+- Run commands/tests directly; never spawn agents merely to execute them.
   Delegate independent judgment or disjoint writes without duplicating work.
 - Use a task-scoped executor only for substantial writes. Workers cannot widen
   authority or recursively delegate.
 - Use advisors for irreversible decisions, repeated failures, or release gates.
-- Use `agent-harness` for detailed workflows; do not edit `.oms/` manually.
+- Use `agent-harness` for workflows; `oms list` catalogs tools.
+  Never edit `.oms/` manually.
 
 ## Project Rules
 

@@ -22,6 +22,9 @@
       "triggers": [
         "oms state",
         "이어서 해줘",
+        "resume",
+        "pick up where",
+        "continue where",
         "현재 상태 확인",
         "다른 에이전트가",
         "공유 메모리",
@@ -268,7 +271,12 @@
         "실험 설계",
         "실험 계획",
         "baseline 비교",
-        "ablation"
+        "ablation",
+        "data leakage",
+        "데이터 누수",
+        "누수 검사",
+        "train/test overlap",
+        "split leakage"
       ]
     }
   ]

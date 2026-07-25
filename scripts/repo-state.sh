@@ -32,7 +32,7 @@ artifact-index rows, and whether a change-guard is active.
 Options:
   --repo PATH   Repo to inspect (default: current directory; anchored to the
                 git worktree root).
-  --json        Emit a single JSON object instead of the text view.
+  --json        Emit a single JSON object (schema 1) instead of the text view.
   --refresh-ci  Best-effort `ci-status record` first (needs gh) so the CI
                 section reflects the latest run instead of the last recording.
   -h, --help    Show this help.
@@ -124,7 +124,9 @@ def oms(*parts):
     return os.path.join(repo, ".oms", *parts)
 
 
-state = {}
+# Machine consumers key on this the way artifact-index/model-doctor do;
+# bump it only with a deliberate output-contract change.
+state = {"schema": 1}
 
 # --- Active task packet: Goal + Next Step -----------------------------------
 task = {"present": False}

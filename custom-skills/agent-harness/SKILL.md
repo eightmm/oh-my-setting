@@ -12,10 +12,12 @@ The current agent owns scope, admission, final verification, commit, push,
 release, and synthesis.
 
 - On resume, run `oms state --repo .`; use `oms init` only for a fresh repo.
+- Discover tools with `oms list`; every tool answers `oms <tool> --help`.
 - Keep secrets, private paths, machine/cluster details, raw logs, datasets, and
   checkpoints out of prompts and shared state.
-- Do not edit `.oms/` manually. Use `oms gc` for stale state and
-  `oms patch-land` for delegated changes.
+- Never write `.oms/` by hand; reading its state files directly is fine, but
+  prefer `--json` output where a tool offers it. Use `oms gc` for stale state
+  and `oms patch-land` for delegated changes.
 - Use advisors only for irreversible/high-risk decisions, repeated failures, or
   release go/no-go—not routine completion.
 - Provider workers remain harness children, cannot recursively delegate, and do

@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Machine-readable views for shared state: `fail-ledger list --json`,
+  `experiment-board list --json`, and `oms-run timeline --json` emit schema-1
+  JSON objects, and `repo-state --json` now declares `"schema": 1`.
+- The `oms` dispatcher prints a `--help` recovery hint whenever a tool exits
+  with the misuse convention (exit 2), and `oms list` descriptions are joined
+  to the full first sentence of each tool's header instead of a truncated
+  first line.
+- Tool discoverability for agents: `agent-harness` and the global rules point
+  at `oms list`, `.oms` state files are documented as read-only-by-hand, and
+  the skill router gains English resume triggers plus generic data-leakage
+  triggers routing to `research-method` (with an `oms data-manifest` pointer
+  in its skill).
 - Snapshot lifecycle contracts: machine and Slurm generators now support
   `--dry-run`/`--check`, write private atomic schema-marked files, and report
   broader local hardware context. Schema-2 receipts preserve `0`/`1`/`auto`

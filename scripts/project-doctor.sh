@@ -12,7 +12,8 @@ usage() {
   cat <<'EOF'
 Usage: project-doctor.sh [--strict] [project_dir]
 
-Verify that all agent-facing files in a project give every agent the same view:
+Verify that all agent-facing files in a project give every agent the same
+view. Checks:
 
 - AGENTS.md and CLAUDE.md contain the same oh-my-setting managed blocks
 - managed blocks match the current oh-my-setting templates (not stale)

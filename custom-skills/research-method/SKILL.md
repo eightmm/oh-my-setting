@@ -28,7 +28,9 @@ correctness and `spec-interview` for build contracts.
 
 Do not launch a long or expensive run until the question, hypothesis,
 prediction, changed variable, baseline, metric/split, and success or abandonment
-threshold are explicit.
+threshold are explicit. Before training on a new or changed split, check it
+with `oms data-manifest leakage` / `check`; declare domain group keys per
+`chem-bio-ml` when applicable.
 
 ## Route to One Reference
 

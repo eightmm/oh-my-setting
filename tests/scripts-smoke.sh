@@ -8810,6 +8810,138 @@ test_oms_run_validate_flags_schema_drift() {
   printf '%s' "$out" | grep -Fq "DRIFT" || fail "validate should tag the drifted family"
 }
 
+test_oms_list_joins_full_first_sentence() {
+  local bin="$TMP/oms-desc-bin"
+  local out
+
+  mkdir -p "$bin"
+  ln -sfn "$ROOT/scripts/oms" "$bin/oms"
+  out="$("$bin/oms" list)" || fail "oms list should succeed"
+  # Header comments span lines; the catalog must show the whole first
+  # sentence, not the first physical comment line.
+  printf '%s\n' "$out" | grep -Eq '^advise .*agent-call\.sh\.$' ||
+    fail "advise description should join its full first sentence"
+  # Usage-fallback descriptions get the same sentence join + cut.
+  printf '%s\n' "$out" | grep -Eq '^agent-call .*read-only independent pass\.$' ||
+    fail "agent-call description should end at its first sentence"
+  if printf '%s\n' "$out" | grep -Eq '^agent-call .*write tasks'; then
+    fail "agent-call description should not leak the second sentence"
+  fi
+}
+
+test_oms_dispatcher_hints_help_on_misuse() {
+  local bin="$TMP/oms-hint-bin"
+  local d="$TMP/oms-hint-repo"
+  local err rc
+
+  mkdir -p "$bin"
+  make_committed_repo "$d"
+  ln -sfn "$ROOT/scripts/oms" "$bin/oms"
+  rc=0
+  err="$( (cd "$d" && "$bin/oms" agent-plan frobnicate) 2>&1 >/dev/null )" || rc=$?
+  [ "$rc" -eq 2 ] || fail "usage misuse through oms should exit 2, got $rc"
+  printf '%s' "$err" | grep -Fq "oms agent-plan --help" ||
+    fail "dispatcher should hint at --help on a usage error"
+  # Success paths stay hint-free.
+  err="$( (cd "$d" && "$bin/oms" repo-state) 2>&1 >/dev/null )" ||
+    fail "repo-state should succeed"
+  if printf '%s' "$err" | grep -Fq "hint:"; then
+    fail "dispatcher must not hint on success"
+  fi
+}
+
+test_repo_state_json_declares_schema() {
+  local project="$TMP/repo-state-schema"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/repo-state.sh" --json ) | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d.get("schema") == 1, "missing schema marker: %r" % d.get("schema")
+' || fail "repo-state --json must declare schema 1"
+}
+
+test_fail_ledger_list_json() {
+  local project="$TMP/fail-ledger-json"
+  local out
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
+      --cmd "bash scripts/check.sh" --exit 1 --summary "check failed" ) \
+    >/dev/null 2>&1 || fail "fail-ledger record should succeed"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --json)" ||
+    fail "fail-ledger list --json should succeed"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d.get("schema") == 1
+rows = d.get("failures")
+assert isinstance(rows, list) and rows, "expected one failure row"
+assert rows[0].get("fingerprint"), rows[0]
+assert rows[0].get("resolved") is False, rows[0]
+assert rows[0].get("count") == 1, rows[0]
+' || fail "fail-ledger list --json must emit schema-1 failure rows"
+  # --json stays a query flag; mutating actions refuse it.
+  if ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" record --json \
+      --cmd "x" --exit 1 ) >/dev/null 2>&1; then
+    fail "fail-ledger record must reject --json"
+  fi
+}
+
+test_experiment_board_list_json() {
+  local project="$TMP/board-json"
+  local out
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/experiment-board.sh" claim \
+      --id exp-1 --hypothesis "wider heads help" --owner tester ) \
+    >/dev/null 2>&1 || fail "board claim should succeed"
+  out="$(cd "$project" && "$ROOT/scripts/experiment-board.sh" list --json)" ||
+    fail "board list --json should succeed"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d.get("schema") == 1
+rows = d.get("experiments")
+assert isinstance(rows, list) and rows, "expected one experiment row"
+assert rows[0].get("id") == "exp-1", rows[0]
+assert rows[0].get("status") == "claimed", rows[0]
+assert rows[0].get("owner") == "tester", rows[0]
+assert isinstance(rows[0].get("stale"), bool), rows[0]
+' || fail "board list --json must emit schema-1 experiment rows"
+  out="$(cd "$project" && rm -f .oms/experiments.jsonl &&
+    "$ROOT/scripts/experiment-board.sh" list --json)" ||
+    fail "board list --json should succeed without a board"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d.get("schema") == 1 and d.get("experiments") == [], d
+' || fail "board list --json must emit an empty schema-1 view without a board"
+}
+
+test_oms_run_timeline_json() {
+  local project="$TMP/timeline-json"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/runs"
+  printf '{"schema":1,"run_id":"r1","tool":"t","event":"new","ts":"2026-07-23T00:00:00Z"}\n' \
+    > "$project/.oms/runs/spine.jsonl"
+  out="$(cd "$project" && "$ROOT/scripts/oms-run.sh" timeline --json)" ||
+    fail "timeline --json should succeed"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d.get("schema") == 1
+assert d.get("omitted") == 0, d
+evs = d.get("events")
+assert isinstance(evs, list) and len(evs) == 1, evs
+assert evs[0]["ts"] == "2026-07-23T00:00:00Z", evs[0]
+assert evs[0]["stream"] == "runs/spine", evs[0]
+assert evs[0]["row"]["run_id"] == "r1", evs[0]
+' || fail "timeline --json must emit schema-1 events with raw rows"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

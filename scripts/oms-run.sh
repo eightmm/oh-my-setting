@@ -39,7 +39,7 @@ Usage: oms-run.sh new [--note TEXT]
        oms-run.sh ls [N] [--open]
        oms-run.sh close [run_id] [--note TEXT]
        oms-run.sh diff <run_id_a> <run_id_b>
-       oms-run.sh timeline [--since ISO8601|--today] [--limit N] [--agent NAME] [--tool NAME]
+       oms-run.sh timeline [--since ISO8601|--today] [--limit N] [--agent NAME] [--tool NAME] [--json]
        oms-run.sh validate [--dir DIR]
 
 The run spine: a canonical run_id and an append-only join index
@@ -341,6 +341,7 @@ cmd_timeline() {
   local limit=50
   local agent_filter=""
   local tool_filter=""
+  local as_json=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --today) since="$(date -u +%Y-%m-%dT00:00:00Z)"; shift ;;
@@ -348,12 +349,13 @@ cmd_timeline() {
       --limit) [ "$#" -ge 2 ] || fail "--limit requires N"; limit="$2"; shift 2 ;;
       --agent) [ "$#" -ge 2 ] || fail "--agent requires a name"; agent_filter="$2"; shift 2 ;;
       --tool) [ "$#" -ge 2 ] || fail "--tool requires a name"; tool_filter="$2"; shift 2 ;;
+      --json) as_json=1; shift ;;
       *) fail "unknown timeline argument: $1" ;;
     esac
   done
   case "$limit" in *[!0-9]*|"") fail "--limit must be a positive integer" ;; esac
   OMS_SINCE="$since" OMS_LIMIT="$limit" OMS_TL_ROOT="$STATE_ROOT/.oms" \
-    OMS_TL_AGENT="$agent_filter" OMS_TL_TOOL="$tool_filter" \
+    OMS_TL_AGENT="$agent_filter" OMS_TL_TOOL="$tool_filter" OMS_TL_JSON="$as_json" \
     OMS_TL_LEDGER="${OMS_LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}" python3 <<'PY'
 import glob, json, os
 since = os.environ["OMS_SINCE"]
@@ -398,16 +400,21 @@ for f in files:
         cmd = r.get("cmd")
         if isinstance(cmd, list) and cmd:
             parts.append("cmd=%s" % " ".join(str(c) for c in cmd)[:60])
-        events.append((ts, stream, " ".join(parts)))
+        events.append((ts, stream, " ".join(parts), r))
 events.sort(key=lambda e: e[0])
 shown = events[-limit:]
 dropped = len(events) - len(shown)
-if not events:
+as_json = os.environ.get("OMS_TL_JSON") == "1"
+if as_json:
+    print(json.dumps({"schema": 1, "omitted": dropped, "events": [
+        {"ts": ts, "stream": stream, "row": r} for ts, stream, _, r in shown
+    ]}, ensure_ascii=False))
+elif not events:
     print("timeline: no events%s" % ((" since " + since) if since else ""))
 else:
     if dropped > 0:
         print("(%d earlier event(s) omitted; raise --limit)" % dropped)
-    for ts, stream, desc in shown:
+    for ts, stream, desc, _ in shown:
         print("%s  %-16s %s" % (ts, stream, desc))
 PY
 }

@@ -38,24 +38,52 @@ install describes each subsystem.
 EOF
 }
 
-# One-line purpose of a tool: the first line of its header comment block
-# (before any code line), else the first description line under its usage()
-# Usage: block. Blank when a script has neither.
+# One-line purpose of a tool: the first sentence of its header comment block
+# (before any code line), else of the description under its usage() Usage:
+# block. Blank when a script has neither. The block is joined before the
+# sentence cut so a description never ends mid-line; "e.g."/"i.e." do not
+# terminate the sentence.
 describe() {
   local desc
 
   desc="$(awk '
+    function first_sentence(text,  rest, off, i, prefix) {
+      rest = text
+      off = 0
+      while ((i = index(rest, ". ")) > 0) {
+        prefix = substr(text, 1, off + i)
+        if (prefix !~ /(e\.g|i\.e)\.$/) return prefix
+        off += i + 1
+        rest = substr(text, off + 1)
+      }
+      return text
+    }
     NR <= 2 { next }
     /^# shellcheck/ { next }
-    /^#/ { sub(/^#+ ?/, ""); print; exit }
+    /^#/ { sub(/^#+ ?/, ""); buf = buf (buf == "" ? "" : " ") $0; next }
+    buf != "" { exit }
     /^[[:space:]]*$/ { next }
     { exit }
+    END { if (buf != "") print first_sentence(buf) }
   ' "$1")"
   if [ -z "$desc" ]; then
     desc="$(awk '
+      function first_sentence(text,  rest, off, i, prefix) {
+        rest = text
+        off = 0
+        while ((i = index(rest, ". ")) > 0) {
+          prefix = substr(text, 1, off + i)
+          if (prefix !~ /(e\.g|i\.e)\.$/) return prefix
+          off += i + 1
+          rest = substr(text, off + 1)
+        }
+        return text
+      }
       /^Usage:/ { in_usage = 1; next }
       in_usage && /^EOF$/ { exit }
-      in_usage && NF && !/^[[:space:]]/ { print; exit }
+      in_usage && NF && !/^[[:space:]]/ { buf = buf (buf == "" ? "" : " ") $0; next }
+      in_usage && buf != "" { exit }
+      END { if (buf != "") print first_sentence(buf) }
     ' "$1")"
   fi
   printf '%s\n' "$desc"
@@ -123,4 +151,11 @@ if [ ! -f "$TARGET" ]; then
   echo "error: unknown tool: $TOOL (run: oms list)" >&2
   exit 2
 fi
-exec bash "$TARGET" "$@"
+RC=0
+bash "$TARGET" "$@" || RC=$?
+# Exit 2 is the harness misuse convention, so every tool gets one uniform
+# recovery hint here instead of per-script wording.
+if [ "$RC" -eq 2 ]; then
+  echo "hint: run \`oms $TOOL --help\` for usage" >&2
+fi
+exit "$RC"
