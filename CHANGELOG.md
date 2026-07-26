@@ -7,6 +7,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms consult` targets can name a tier or an exact model and may repeat a
+  provider, so a panel is several models rather than one per CLI:
+  `--to codex:deep --to codex:balanced --to claude:model=claude-opus-5` records
+  each answer separately, and `--all --tiers deep,balanced` spans providers and
+  tiers. Results are reported as "N targets answered, K independent model
+  families", and a panel whose answers all share a family says so — repetition
+  within one family is not corroboration.
+- Worker tiers follow the role before the phase: a `decision-advisor` invoked
+  under a `verify` phase resolved to the cheapest model, which is the wrong
+  model for the most consequential read. Precedence is now explicit class >
+  role > phase > default, role files can declare their own tier
+  (`oms-model-class: deep`), `agent-call`/`agent-run` take `--operation NAME` so
+  a caller declares the work phase instead of inheriting the calling script's
+  label, and the route line records which rule decided
+  (`class=deep (role)`).
 - Patch landing is now a recoverable transaction: `patch-land` writes an intent
   row to `.oms/landings.jsonl` (patch hash, base sha, task, lease) before the
   irreversible apply and a completion row after lineage and plan finish, so a
@@ -114,6 +129,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   model tier; executor and artifact metadata freeze and record the route.
 
 ### Fixed
+- Antigravity never received its prompt. `agy --print` takes the prompt as its
+  value (`--prompt` is an alias), so a prompt piped on stdin was ignored and the
+  next flag became the prompt — every antigravity answer was a reply to the
+  literal string `--sandbox`, in councils, reviews, and delegated writes alike.
+  The prompt is now passed as the flag value.
+- A landing no longer reports `complete` when its records did not land: a failed
+  lineage row or plan finish leaves `applied-pending-receipt`, which `oms state`
+  shows and `patch-land --recover` retries until both records exist.
+- `patch-land` rechecks the base commit and clean tree immediately before the
+  apply and refuses when either moved during admission, so what lands is the
+  combination that was verified.
+- Antigravity model routing follows the published benchmarks: 3.6 Flash wins
+  every coding and agentic suite against 3.1 Pro (SWE-Bench Pro, DeepSWE,
+  Terminal-Bench, MLE-Bench) at roughly twice the speed, and Pro keeps only a
+  narrow pure-reasoning lead, so all three tiers now use the 3.6 Flash variants.
 - `model-doctor --live-models` no longer reports every Antigravity route as
   missing: the CLI lists its catalog as slugs (`gemini-3.6-flash-low`) while
   naming the same model `Gemini 3.6 Flash (Low)` on `--model`, so the comparison

@@ -49,9 +49,15 @@ oms_model_default() {
     claude:fast) printf '%s\n' 'claude-haiku-4-5-20251001' ;;
     claude:balanced) printf '%s\n' 'claude-sonnet-5' ;;
     claude:deep) printf '%s\n' 'claude-fable-5' ;;
+    # Antigravity has no effort flag, so the tier IS the model variant. 3.6
+    # Flash wins every published coding and agentic benchmark against 3.1 Pro
+    # (SWE-Bench Pro, DeepSWE, Terminal-Bench, MLE-Bench) at roughly twice the
+    # speed; Pro keeps only a narrow lead on pure-reasoning sets (GPQA Diamond,
+    # HLE). This harness routes agentic work, so deep follows the coding
+    # evidence. Override per tier with OMS_MODEL_ANTIGRAVITY_DEEP etc.
     antigravity:fast) printf '%s\n' 'Gemini 3.6 Flash (Low)' ;;
     antigravity:balanced) printf '%s\n' 'Gemini 3.6 Flash (Medium)' ;;
-    antigravity:deep) printf '%s\n' 'Gemini 3.1 Pro (High)' ;;
+    antigravity:deep) printf '%s\n' 'Gemini 3.6 Flash (High)' ;;
   esac
 }
 
@@ -79,6 +85,23 @@ oms_model_role_class() {
     repo-auditor) printf 'fast\n' ;;
     implementation-worker|test-designer|patch-reviewer) printf 'balanced\n' ;;
     decision-advisor) printf 'deep\n' ;;
+  esac
+}
+
+# A custom role knows what tier it needs better than a name table does, so a
+# role file may declare it: `oms-model-class: deep` anywhere in the file.
+# Callers that already resolve the role file export the value; routing never
+# reads the filesystem itself.
+oms_model_class_from_role_file() {
+  local file="$1"
+  local value
+
+  [ -n "$file" ] && [ -f "$file" ] || return 1
+  value="$(sed -n 's/^[^A-Za-z0-9]*oms-model-class:[[:space:]]*\([a-z]*\).*/\1/p' "$file" |
+    sed -n '1p')"
+  case "$value" in
+    fast|balanced|deep) printf '%s\n' "$value" ;;
+    *) return 1 ;;
   esac
 }
 
@@ -127,15 +150,38 @@ oms_model_prepare() {
     return 2
   fi
 
+  # Why a tier was chosen is as operational as which one: a worker silently
+  # running on the cheapest model because nobody declared the phase looks
+  # identical to one deliberately routed there.
+  local reason
   if [ "$requested" != auto ]; then
     resolved="$requested"
+    reason=request
   else
-    resolved="$(oms_model_operation_class "$operation")"
-    [ -n "$resolved" ] || resolved="$(oms_model_role_class "$role")"
-    [ -n "$resolved" ] || resolved=balanced
+    # Phase stays the default signal: it is what the work actually is right
+    # now, so a role can neither downgrade a release gate nor inflate a routine
+    # check. The exception is a tier a role file states outright — that is an
+    # explicit choice by whoever wrote the role, not a guess from its name, and
+    # it is the one case where the persona knows better than the phase.
+    resolved="${OMS_MODEL_ROLE_CLASS:-}"
+    reason=role_file
+    if [ -z "$resolved" ]; then
+      resolved="$(oms_model_operation_class "$operation")"
+      reason=operation
+    fi
+    if [ -z "$resolved" ]; then
+      resolved="$(oms_model_role_class "$role")"
+      reason=role
+    fi
+    if [ -z "$resolved" ]; then
+      resolved=balanced
+      reason=default
+    fi
   fi
 
   OMS_MODEL_RESOLVED_CLASS="$resolved"
+  OMS_MODEL_CLASS_REASON="$reason"
+  export OMS_MODEL_CLASS_REASON
   if [ -n "$explicit" ]; then
     OMS_MODEL_PRIMARY="$explicit"
   else

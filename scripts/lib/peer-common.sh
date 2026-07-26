@@ -880,9 +880,14 @@ ma_provider_attempt() {
       cmd+=(--permission-mode "$permission" -p)
       ;;
     antigravity|agy)
+      # --print TAKES the prompt as its value here (--prompt is its alias), so
+      # a prompt piped on stdin is not read at all and the next flag becomes
+      # the prompt: every antigravity answer was a reply to the literal string
+      # "--sandbox". Pass the prompt as the flag value instead.
       cmd=(agy)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
-      cmd+=(--print --sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}")
+      cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}")
+      cmd+=(--print "$(cat "$prompt_file")")
       ;;
     *) echo "error: unsupported provider: $provider" > "$output_file"; return 2 ;;
   esac
@@ -994,8 +999,9 @@ ma_run_routed_provider() {
     before="$(ma_worktree_fingerprint "$workdir")" || before=""
   fi
 
-  printf 'model-route: class=%s primary=%s fallback=%s effort=%s fallback_effort=%s\n' \
-    "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" \
+  printf 'model-route: class=%s (%s) primary=%s fallback=%s effort=%s fallback_effort=%s\n' \
+    "$OMS_MODEL_RESOLVED_CLASS" "${OMS_MODEL_CLASS_REASON:-unknown}" \
+    "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" \
     "$OMS_REASONING_RESOLVED" "$OMS_REASONING_FALLBACK" >> "$artifact"
   status=0
   ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
@@ -1060,7 +1066,10 @@ run_provider() {
   local status
 
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  OMS_MODEL_OPERATION="${MA_MODEL_OPERATION:-${MA_KIND:-call}}"
+  # A phase the caller declared outranks the tool's own kind: without this the
+# label of the script (ask, call, review) decides the tier for every pass it
+# makes, so a deep question asked through agent-call routes as a plain call.
+OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
   export OMS_MODEL_OPERATION
   oms_model_prepare "$provider" || return $?
 
@@ -1092,8 +1101,9 @@ run_provider() {
   } > "$artifact"
 
   if [ "$DRY_RUN" = "1" ]; then
-    printf 'model-route: class=%s primary=%s fallback=%s effort=%s fallback_effort=%s\n' \
-      "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" \
+    printf 'model-route: class=%s (%s) primary=%s fallback=%s effort=%s fallback_effort=%s\n' \
+      "$OMS_MODEL_RESOLVED_CLASS" "${OMS_MODEL_CLASS_REASON:-unknown}" \
+      "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" \
       "$OMS_REASONING_RESOLVED" "$OMS_REASONING_FALLBACK" >> "$artifact"
     printf 'DRY RUN: provider command skipped.\n' >> "$artifact"
     ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 0 "$artifact" "" "$prompt_file" || true
@@ -1153,7 +1163,10 @@ ma_export_round1() {
       *) fail "unsupported provider: $provider" ;;
     esac
     [ "$provider" != agy ] || provider=antigravity
-    OMS_MODEL_OPERATION="${MA_MODEL_OPERATION:-${MA_KIND:-call}}"
+    # A phase the caller declared outranks the tool's own kind: without this the
+# label of the script (ask, call, review) decides the tier for every pass it
+# makes, so a deep question asked through agent-call routes as a plain call.
+OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
     export OMS_MODEL_OPERATION
     oms_model_prepare "$provider" || return $?
     total=$((total + 1))

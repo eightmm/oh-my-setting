@@ -9831,7 +9831,7 @@ test_state_validator_rejects_parseable_but_invalid_state() {
     fail "a spine row without run_id should be flagged: $out"
   printf '%s' "$out" | grep -Fq "unknown thread role 'bogus'" ||
     fail "an unknown thread role should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "is not one of abandoned, complete, intent" ||
+  printf '%s' "$out" | grep -Fq "event='weird' is not one of" ||
     fail "an unknown landing event should be flagged: $out"
   printf '%s' "$out" | grep -Fq "depends on missing task 'ghost'" ||
     fail "a dangling plan dependency should be flagged: $out"
@@ -9857,6 +9857,228 @@ test_state_validator_accepts_healthy_state() {
   rc=0
   "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "healthy state must not be reported invalid (exit $rc)"
+}
+
+test_antigravity_receives_the_prompt_it_is_given() {
+  local project="$TMP/agy-prompt"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local seen
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # agy's --print TAKES the prompt as its value (--prompt is an alias), so a
+  # prompt on stdin is dropped and the following flag becomes the prompt. This
+  # stub records what the CLI actually received.
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+prompt=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print|--prompt|-p) prompt="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s' "$prompt" > "$HOME/agy-received"
+echo "Sharding by file keeps streaming inputs balanced; seed the sampler per rank."
+echo "Evidence: the loader contract. Next: pin the seed in the training config."
+EOF
+  chmod +x "$bin_dir/agy"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/agent-call.sh" --to antigravity --repo "$project" \
+    --prompt "UNIQUE-PROMPT-MARKER which loader?" >/dev/null 2>&1 ||
+    fail "antigravity call should succeed"
+
+  seen="$(cat "$home_dir/agy-received" 2>/dev/null || true)"
+  printf '%s' "$seen" | grep -Fq 'UNIQUE-PROMPT-MARKER' ||
+    fail "antigravity must receive the composed prompt, got: $seen"
+  if printf '%s' "$seen" | grep -Fqx -- '--sandbox'; then
+    fail "the flag after --print must not become the prompt"
+  fi
+}
+
+test_consult_panel_asks_one_provider_at_several_tiers() {
+  local project="$TMP/consult-panel"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  for provider in codex agy; do
+    cat > "$bin_dir/$provider" <<'EOF'
+#!/usr/bin/env bash
+echo "Shard by file for streaming inputs and seed the sampler per rank so DDP"
+echo "workers never duplicate shards. Evidence: the loader contract. Next: pin"
+echo "the seed in the training config before the next run."
+EOF
+    chmod +x "$bin_dir/$provider"
+  done
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    --to codex:deep --to codex:balanced --to antigravity:deep \
+    "which loader?" --quiet 2>&1)" || fail "panel consult should succeed: $out"
+
+  printf '%s' "$out" | grep -Fq '3/3 target(s) answered, 2 independent model family(ies)' ||
+    fail "the panel should report answers and independent families: $out"
+
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+import json, sys
+turns = json.load(sys.stdin)["turns"]
+answers = [t for t in turns if t["role"] == "answer"]
+# One provider asked twice must produce two separately recorded answers, each
+# naming the model that produced it.
+models = sorted(a.get("model", "") for a in answers)
+assert len(answers) == 3, answers
+assert models == sorted(["gpt-5.6-sol", "gpt-5.6-terra", "Gemini 3.6 Flash (High)"]), models
+assert [t["role"] for t in turns].count("question") == 1, turns
+' || fail "each panel member should be recorded with its own model"
+}
+
+test_consult_panel_warns_when_answers_share_a_family() {
+  local project="$TMP/consult-family"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+echo "Shard by file for streaming inputs and seed the sampler per rank so DDP"
+echo "workers never duplicate shards. Evidence: the loader contract. Next: pin"
+echo "the seed in the training config before the next run."
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    --to codex:deep --to codex:fast "which loader?" --quiet 2>&1)" ||
+    fail "same-family panel should still succeed: $out"
+  printf '%s' "$out" | grep -Fq '1 independent model family' ||
+    fail "family count should collapse for one provider: $out"
+  printf '%s' "$out" | grep -Fq 'treat agreement as one opinion, not corroboration' ||
+    fail "same-family agreement must not be sold as corroboration: $out"
+
+  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
+    fail "an unknown tier in a target must be refused"
+  fi
+  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --tiers deep "x" >/dev/null 2>&1; then
+    fail "--tiers without --all must be refused"
+  fi
+}
+
+test_worker_tier_follows_the_role_before_the_phase() {
+  local out
+
+  # The phase is what the work actually is now, so a bundled role neither
+  # downgrades a gate nor inflates a routine check; the reason says which rule
+  # decided, which is the part that used to be invisible.
+  out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
+    OMS_MODEL_ROLE=repo-auditor OMS_MODEL_OPERATION=decision \
+      OMS_MODEL_CLASS_REQUEST=auto oms_model_prepare codex >/dev/null
+    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
+  [ "$out" = "deep operation" ] || fail "a cheap role must not downgrade a gate, got: $out"
+
+  out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
+    OMS_MODEL_OPERATION=advise OMS_MODEL_CLASS_REQUEST=auto oms_model_prepare codex >/dev/null
+    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
+  [ "$out" = "deep operation" ] || fail "phase should decide without a role, got: $out"
+
+  out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
+    OMS_MODEL_ROLE=decision-advisor OMS_MODEL_OPERATION=verify \
+      OMS_MODEL_CLASS_REQUEST=fast oms_model_prepare codex >/dev/null
+    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
+  [ "$out" = "fast request" ] || fail "an explicit class must still win, got: $out"
+
+  # A custom role carries its own tier so the name table is not the only source.
+  printf '# Strategy: Custom\n\n<!-- oms-model-class: deep -->\n' > "$TMP/custom-role.md"
+  out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
+    OMS_MODEL_ROLE_CLASS="$(oms_model_class_from_role_file "'"$TMP"'/custom-role.md")" \
+      OMS_MODEL_ROLE=unknown-role OMS_MODEL_OPERATION=verify \
+      OMS_MODEL_CLASS_REQUEST=auto oms_model_prepare codex >/dev/null
+    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
+  [ "$out" = "deep role_file" ] ||
+    fail "an explicitly declared role tier should outrank the phase, got: $out"
+}
+
+test_agent_call_declares_its_work_phase() {
+  local project="$TMP/phase-routing"
+  local artifact
+
+  make_committed_repo "$project"
+  # Without a declared phase every read pass is a plain call, which is the
+  # cheapest tier — fine for a lookup, wrong for a decision.
+  ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --to codex --repo "$project" --prompt "plain" >/dev/null )
+  artifact="$(ls -t "$project"/.oms/artifacts/call/*plain*.md | head -1)"
+  grep -Fq 'model-route: class=fast (operation)' "$artifact" ||
+    fail "an undeclared pass should route fast: $(grep -h '^model-route' "$artifact")"
+
+  ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --to codex --repo "$project" --operation advise --prompt "declared" >/dev/null )
+  artifact="$(ls -t "$project"/.oms/artifacts/call/*declared*.md | head -1)"
+  grep -Fq 'model-route: class=deep (operation)' "$artifact" ||
+    fail "a declared advise phase should route deep: $(grep -h '^model-route' "$artifact")"
+}
+
+test_patch_land_completes_only_when_its_records_land() {
+  local project="$TMP/landing-receipts"
+  local patch="$project/change.patch"
+  local out
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+  mkdir -p "$project/.oms/artifacts"
+  printf '*\n' > "$project/.oms/.gitignore"
+  : > "$project/.oms/artifacts/index.jsonl"
+  chmod 444 "$project/.oms/artifacts/index.jsonl"
+
+  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" ||
+    fail "the apply itself should still succeed: $out"
+  printf '%s' "$out" | grep -Fq 'records are incomplete' ||
+    fail "an unwritable lineage row must be reported: $out"
+  python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land with missing records must not be complete"
+import json, sys
+events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+assert events[-1] == "applied-pending-receipt", events
+PY
+  "$ROOT/scripts/repo-state.sh" --repo "$project" | grep -Fq 'Interrupted landings' ||
+    fail "a pending-receipt landing should stay visible in state"
+
+  chmod 644 "$project/.oms/artifacts/index.jsonl"
+  "$ROOT/scripts/patch-land.sh" --repo "$project" --recover >/dev/null 2>&1 ||
+    fail "recovery should finish the pending landing"
+  python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "recovery should complete it once the records land"
+import json, sys
+events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+assert events[-1] == "complete", events
+PY
+}
+
+test_patch_land_refuses_a_tree_that_moved_during_admission() {
+  local project="$TMP/landing-toctou"
+  local patch="$project/change.patch"
+  local out
+  local rc
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+
+  # Admission verifies a worktree built from this base; a concurrent writer
+  # moving HEAD means what would land was never the combination that passed.
+  rc=0
+  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" \
+    --verify "git -C $project -c user.email=t@example.com -c user.name=t commit --allow-empty -q -m concurrent" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "landing onto a moved tree should fail: $out"
+  printf '%s' "$out" | grep -Fq 'tree moved during admission' ||
+    fail "the refusal should name the race: $out"
+  [ "$(git -C "$project" status --porcelain -- file.txt)" = "" ] ||
+    fail "nothing should have been applied"
 }
 
 # SMOKE_TEST_CALLS_BEGIN

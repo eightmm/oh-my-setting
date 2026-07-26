@@ -449,6 +449,12 @@ export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 export OMS_REASONING_FALLBACK_EXPLICIT="${executor_fallback_reasoning_effort:-}"
 export OMS_MODEL_ROLE="${ROLE:-${executor_strategy:-}}" OMS_MODEL_OPERATION=delegate
+# A role file may declare the tier its work needs; the name table only knows
+# the bundled personas, so a custom role would otherwise fall back to balanced.
+if [ -n "$role_file" ]; then
+  OMS_MODEL_ROLE_CLASS="$(oms_model_class_from_role_file "$role_file" || true)"
+  export OMS_MODEL_ROLE_CLASS
+fi
 oms_model_prepare "$TO" || exit $?
 
 load_user_tool_paths

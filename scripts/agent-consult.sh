@@ -10,6 +10,12 @@ set -euo pipefail
 # --all it asks every installed peer in parallel and keeps every answer in the
 # same thread, so the next question starts from what all of them said.
 #
+# Targets may name a tier or an exact model, and may repeat a provider, so a
+# panel can be several models rather than one per CLI: --to codex:deep --to
+# codex:balanced asks the same CLI twice and records the answers separately.
+# Agreement is then reported by model family, because two answers from one
+# family are one opinion twice, not two independent opinions.
+#
 # Read-only by design: it never delegates writes. Use peer-delegate (or
 # agent-run --mode write) when the peer should produce a patch.
 
@@ -18,11 +24,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/peer-common.sh
 . "$SCRIPT_DIR/lib/peer-common.sh"
+# shellcheck source=scripts/lib/provider-registry.sh
+. "$SCRIPT_DIR/lib/provider-registry.sh"
 
 REPO="$PWD"
 PROMPT=""
 PROMPT_FILE=""
-TO=""
+TARGETS_EXPLICIT=()
+TIERS=""
 ALL=0
 THREAD_ID=""
 NEW_THREAD=0
@@ -45,9 +54,15 @@ Options:
   --prompt TEXT        The question. A bare argument works too.
   --prompt-file PATH   Read the question from a file.
   --repo PATH          Repo for context and state. Default: PWD.
-  --to PROVIDER        Ask this provider instead of the automatic pick.
+  --to TARGET          Ask this target instead of the automatic pick. Repeatable.
+                       TARGET is PROVIDER, PROVIDER:CLASS (fast|balanced|deep),
+                       or PROVIDER:model=NAME for an exact model. Repeating a
+                       provider with different tiers/models is allowed and each
+                       answer is recorded separately.
   --all                Ask every installed peer (not the caller) in parallel
                        and record all answers in the thread.
+  --tiers a,b          With --all: ask every peer once per named tier, so a
+                       panel spans both providers and model tiers.
   --thread ID          Use this thread. Default: the current one, created on
                        first use so a series of consults stays one conversation.
   --new-thread         Start a fresh thread even if one is current.
@@ -84,7 +99,14 @@ while [ "$#" -gt 0 ]; do
     --prompt) [ "$#" -ge 2 ] || fail "--prompt requires text"; PROMPT="$2"; shift 2 ;;
     --prompt-file) [ "$#" -ge 2 ] || fail "--prompt-file requires a path"; PROMPT_FILE="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
-    --to) [ "$#" -ge 2 ] || fail "--to requires a provider"; TO="$2"; shift 2 ;;
+    --to)
+      [ "$#" -ge 2 ] || fail "--to requires a target"
+      TARGETS_EXPLICIT+=("$2")
+      shift 2 ;;
+    --tiers)
+      [ "$#" -ge 2 ] || fail "--tiers requires a comma-separated list"
+      TIERS="$2"
+      shift 2 ;;
     --all) ALL=1; shift ;;
     --thread) [ "$#" -ge 2 ] || fail "--thread requires an id"; THREAD_ID="$2"; shift 2 ;;
     --new-thread) NEW_THREAD=1; shift ;;
@@ -112,7 +134,9 @@ elif [ -z "$PROMPT" ]; then
 fi
 [ -d "$REPO" ] || fail "repo not found: $REPO"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
-[ "$ALL" -eq 0 ] || [ -z "$TO" ] || fail "--all and --to are mutually exclusive"
+[ "$ALL" -eq 0 ] || [ "${#TARGETS_EXPLICIT[@]}" -eq 0 ] ||
+  fail "--all and --to are mutually exclusive"
+[ -z "$TIERS" ] || [ "$ALL" -eq 1 ] || fail "--tiers requires --all"
 case "$MODEL_CLASS" in
   auto) MODEL_CLASS=balanced ;;
   fast|balanced|deep) ;;
@@ -145,6 +169,45 @@ peers() {
   fi
 }
 
+# A target is provider[:class] or provider[:model=NAME]. Splitting it here
+# keeps every downstream step (call, artifact, thread turn, family accounting)
+# talking about the same resolved pair.
+target_provider() { printf '%s\n' "${1%%:*}"; }
+
+target_class() {
+  local spec="${1#*:}"
+  [ "$spec" != "$1" ] || { printf '\n'; return 0; }
+  case "$spec" in
+    model=*) printf '\n' ;;
+    fast|balanced|deep) printf '%s\n' "$spec" ;;
+    *) printf '\n' ;;
+  esac
+}
+
+target_model() {
+  local spec="${1#*:}"
+  [ "$spec" != "$1" ] || { printf '\n'; return 0; }
+  case "$spec" in
+    model=*) printf '%s\n' "${spec#model=}" ;;
+    *) printf '\n' ;;
+  esac
+}
+
+validate_target() {
+  local spec="${1#*:}"
+  local provider
+  provider="$(target_provider "$1")"
+  case "$provider" in
+    codex|claude|antigravity|agy) ;;
+    *) fail "unknown provider in target: $1" ;;
+  esac
+  [ "$spec" = "$1" ] && return 0
+  case "$spec" in
+    fast|balanced|deep|model=?*) ;;
+    *) fail "target must be PROVIDER, PROVIDER:fast|balanced|deep, or PROVIDER:model=NAME: $1" ;;
+  esac
+}
+
 THREAD_SH="$SCRIPT_DIR/agent-thread.sh"
 
 resolve_thread() {
@@ -167,13 +230,23 @@ resolve_thread() {
 
 thread="$(resolve_thread)" || fail "could not open a thread"
 
+# Runs one target and writes the artifact path it reported to $2, so a panel
+# that asks one provider twice still tracks each answer exactly instead of
+# guessing from the newest file on disk.
 call_one() {
-  local provider="$1"
-  local args
+  local target="$1"
+  local artifact_out="${2:-}"
+  local provider class model args rc=0 log
+
+  provider="$(target_provider "$target")"
+  class="$(target_class "$target")"
+  model="$(target_model "$target")"
+  [ -n "$class" ] || class="$MODEL_CLASS"
 
   args=("$SCRIPT_DIR/agent-call.sh" --to "$provider" --repo "$REPO"
         --artifact-dir "$REPO/.oms/artifacts/consult"
-        --model-class "$MODEL_CLASS" --thread "$thread")
+        --model-class "$class" --thread "$thread")
+  [ -z "$model" ] || args+=(--model "$model")
   [ "$INCLUDE_MEMORY" -eq 1 ] && args+=(--memory)
   [ "$INCLUDE_TASK" -eq 1 ] && args+=(--task)
   if [ -n "$PROMPT_FILE" ]; then
@@ -182,7 +255,19 @@ call_one() {
     args+=(--prompt "$PROMPT")
   fi
   args+=(${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"})
-  bash "${args[@]}"
+
+  log="$(agent_memory_mktemp)" || log=""
+  if [ -z "$log" ]; then
+    bash "${args[@]}"
+    return $?
+  fi
+  bash "${args[@]}" > "$log" 2>&1 || rc=$?
+  cat "$log"
+  if [ -n "$artifact_out" ]; then
+    sed -n 's/^artifact: //p' "$log" | sed -n '1p' > "$artifact_out"
+  fi
+  rm -f "$log"
+  return "$rc"
 }
 
 # One consult should not die because the first CLI is broken, unauthenticated,
@@ -236,10 +321,29 @@ consult_with_failover() {
 }
 
 targets=()
-if [ -n "$TO" ]; then
-  targets=("$TO")
+if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
+  for spec in "${TARGETS_EXPLICIT[@]}"; do
+    validate_target "$spec"
+    targets+=("$spec")
+  done
 elif [ "$ALL" -eq 1 ]; then
-  while IFS= read -r p; do [ -z "$p" ] || targets+=("$p"); done <<EOF
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ -n "$TIERS" ]; then
+      # Panel across providers and tiers: the same CLI answers once per tier.
+      IFS=',' read -r -a tier_list <<< "$TIERS"
+      for tier in "${tier_list[@]}"; do
+        [ -n "$tier" ] || continue
+        case "$tier" in
+          fast|balanced|deep) ;;
+          *) fail "--tiers accepts fast, balanced, or deep: $tier" ;;
+        esac
+        targets+=("$p:$tier")
+      done
+    else
+      targets+=("$p")
+    fi
+  done <<EOF
 $(peers)
 EOF
 else
@@ -264,9 +368,12 @@ if [ "${#targets[@]}" -gt 1 ]; then
     rm -f "$question_turn"
   fi
 fi
+artifact_dir_tmp="$(mktemp -d)" || fail "mktemp failed"
+trap 'rm -rf "$artifact_dir_tmp"' EXIT
+
 if [ "${#targets[@]}" -eq 1 ]; then
-  if [ -n "$TO" ]; then
-    call_one "${targets[0]}" || status=$?
+  if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
+    call_one "${targets[0]}" "$artifact_dir_tmp/0" || status=$?
   else
     # Auto-picked: fall back to one other peer if this one cannot answer.
     peer_list=()
@@ -281,11 +388,14 @@ else
   pids=()
   logs=()
   tmpdir="$(mktemp -d)" || fail "mktemp failed"
-  trap 'rm -rf "$tmpdir"' EXIT
+  trap 'rm -rf "$tmpdir" "$artifact_dir_tmp"' EXIT
+  index=0
   for p in "${targets[@]}"; do
-    call_one "$p" > "$tmpdir/$p.log" 2>&1 &
+    # Index the side files, not the target name: a panel repeats providers.
+    call_one "$p" "$artifact_dir_tmp/$index" > "$tmpdir/$index.log" 2>&1 &
     pids+=("$!")
-    logs+=("$tmpdir/$p.log")
+    logs+=("$tmpdir/$index.log")
+    index=$((index + 1))
   done
   i=0
   for pid in "${pids[@]}"; do
@@ -293,19 +403,40 @@ else
     [ "$QUIET" -eq 1 ] || cat "${logs[i]}"
     i=$((i + 1))
   done
-  # A council is only as good as the answers in it: say how many peers actually
-  # answered, so a non-answer is not silently counted as agreement.
+  # A council is only as good as the answers in it, and two answers from one
+  # model family are one opinion twice. Report both: how many targets really
+  # answered, and how many independent families those answers came from.
+  families=""
+  index=0
   for p in "${targets[@]}"; do
-    art="$(latest_artifact_for "$p")"
-    [ -n "$art" ] || continue
+    art=""
+    [ ! -f "$artifact_dir_tmp/$index" ] || art="$(cat "$artifact_dir_tmp/$index")"
+    index=$((index + 1))
+    [ -n "$art" ] && [ -f "$art" ] || continue
     q="$(ma_answer_quality "$art")"
-    if [ "$q" = "ok" ]; then
-      usable=$((usable + 1))
-    else
+    if [ "$q" != "ok" ]; then
       echo "consult: $p did not really answer ($q)" >&2
+      continue
     fi
+    usable=$((usable + 1))
+    selected="$(sed -n 's/^model-result: selected=\(.*\) effort=.*/\1/p' "$art" | sed -n '1p')"
+    family="$(oms_provider_model_family "$(target_provider "$p")" "$selected" 2>/dev/null || printf 'unknown')"
+    case "
+$families
+" in
+      *"
+$family
+"*) ;;
+      *) families="${families:+$families
+}$family" ;;
+    esac
   done
-  echo "consult: ${usable}/${#targets[@]} peer(s) answered"
+  family_count=0
+  [ -z "$families" ] || family_count="$(printf '%s\n' "$families" | grep -c .)"
+  echo "consult: ${usable}/${#targets[@]} target(s) answered, ${family_count} independent model family(ies)"
+  if [ "$usable" -gt 1 ] && [ "$family_count" -lt 2 ]; then
+    echo "consult: every answer came from one model family; treat agreement as one opinion, not corroboration" >&2
+  fi
 fi
 
 echo "thread: $thread"

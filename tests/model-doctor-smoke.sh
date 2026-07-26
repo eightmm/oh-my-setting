@@ -98,7 +98,7 @@ PY
 rc=0
 bash "$DOCTOR" --live-models > "$TMP/live.txt" 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "live model probe should pass for configured routes: $(tail -3 "$TMP/live.txt")"
-grep -Fq 'Gemini 3.1 Pro (High) [family=google, effort=high, availability=available]' "$TMP/live.txt" ||
+grep -Fq 'Gemini 3.6 Flash (High) [family=google, effort=high, availability=available]' "$TMP/live.txt" ||
   fail "Antigravity live model should be available"
 grep -Fq 'Gemini 3.6 Flash (Medium) [family=google, effort=medium, availability=available]' "$TMP/live.txt" ||
   fail "a configured model must match the catalog across notations"

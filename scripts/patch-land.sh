@@ -185,17 +185,31 @@ if [ "$RECOVER" = 1 ]; then
     fi
     # Applied content reverse-applies cleanly; unapplied content does not.
     if git -C "$REPO" apply --binary --reverse --check "$intent_patch" >/dev/null 2>&1; then
-      OMS_TASK_ID="$intent_task" ma_append_artifact_index "$REPO" patch-land "" 0 "" "$intent_patch" ||
+      rec_ok=1
+      if ! OMS_TASK_ID="$intent_task" ma_append_artifact_index "$REPO" patch-land "" 0 "" "$intent_patch"; then
+        rec_ok=0
         echo "warning: patch-land: recovery could not record lineage for $LANDING_ID" >&2
+      fi
       if [ -n "$intent_task" ]; then
         finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$intent_task" --patch "$intent_patch")
         [ -n "$intent_lease" ] && finish_cmd+=(--lease-id "$intent_lease")
-        "${finish_cmd[@]}" >/dev/null 2>&1 ||
-          echo "warning: patch-land: recovery could not finish plan task $intent_task" >&2
+        if ! "${finish_cmd[@]}" >/dev/null 2>&1; then
+          # Already finished by the interrupted run is success, not a failure.
+          if [ "$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$intent_task" 2>/dev/null |
+            sed -n 's/^[[:space:]]*"state":[[:space:]]*"\([a-z]*\)".*/\1/p' | sed -n '1p')" != "done" ]; then
+            rec_ok=0
+            echo "warning: patch-land: recovery could not finish plan task $intent_task" >&2
+          fi
+        fi
       fi
-      landing_append complete recovered=1
-      echo "patch-land: recovered $LANDING_ID (patch was applied)" >&2
-      recovered=$((recovered + 1))
+      if [ "$rec_ok" = 1 ]; then
+        landing_append complete recovered=1
+        echo "patch-land: recovered $LANDING_ID (patch was applied)" >&2
+        recovered=$((recovered + 1))
+      else
+        landing_append applied-pending-receipt reason=recovery-incomplete
+        echo "patch-land: $LANDING_ID still incomplete; records could not be written" >&2
+      fi
     else
       if [ -n "$intent_task" ]; then
         release_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$intent_task")
@@ -287,6 +301,10 @@ esac
 
 # Pre-flight: never apply onto a dirty tree — a half-applied patch on top of
 # unrelated edits is the mess this whole gate exists to avoid.
+# Admission verifies a throwaway worktree built from this base. If the main
+# tree moves between that check and the apply below, what lands was never the
+# combination that passed, so the base is captured here and rechecked.
+PRE_ADMIT_BASE="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')"
 if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
   fail "refusing to land: main tree has uncommitted changes"
 fi
@@ -324,6 +342,14 @@ fi
 # --- Apply ------------------------------------------------------------------
 # Intent first: from here on a crash is recoverable, because the record says
 # which patch was going onto which base for which task.
+post_admit_base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')"
+if [ "$post_admit_base" != "$PRE_ADMIT_BASE" ]; then
+  fail "tree moved during admission (base $PRE_ADMIT_BASE -> $post_admit_base); re-admit"
+fi
+if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
+  fail "tree became dirty during admission; re-admit against the current tree"
+fi
+
 LANDING_ID="land-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 landing_append intent \
   "patch=$PATCH" \
@@ -353,7 +379,9 @@ echo "patch-land: applied $PATCH" >&2
 # does not unwind the land, but it must be loud: a silent miss here makes the
 # lineage unanswerable exactly when something already went wrong.
 [ -n "$PLAN_TASK" ] && export OMS_TASK_ID="$PLAN_TASK"
+receipts_ok=1
 if ! ma_append_artifact_index "$REPO" patch-land "" 0 "" "$PATCH"; then
+  receipts_ok=0
   echo "warning: patch-land: patch applied but the land row could NOT be recorded" >&2
   echo "warning: patch-land: lineage for $PATCH is missing from .oms/artifacts/index.jsonl" >&2
 fi
@@ -371,11 +399,20 @@ if [ -n "$PLAN_TASK" ]; then
   if "${finish_cmd[@]}" >/dev/null 2>&1; then
     echo "patch-land: plan task $PLAN_TASK -> done" >&2
   else
+    receipts_ok=0
     echo "warning: could not finish plan task $PLAN_TASK (wrong state?)" >&2
   fi
 fi
 
-# Every write of this transaction is done; nothing is outstanding to recover.
-landing_append complete || true
+# Completion means every write landed, not just the apply. A missing lineage
+# row or an unfinished plan task keeps the transaction outstanding so
+# --recover retries it; otherwise the tree carries a change that state cannot
+# explain and nothing says so.
+if [ "$receipts_ok" = 1 ]; then
+  landing_append complete || true
+else
+  landing_append applied-pending-receipt reason=receipt-write-failed || true
+  echo "patch-land: applied, but its records are incomplete; run: oms patch-land --recover" >&2
+fi
 
 echo "LANDED"

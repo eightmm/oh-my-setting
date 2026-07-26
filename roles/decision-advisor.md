@@ -1,5 +1,7 @@
 # Strategy: Decision Advisor
 
+<!-- oms-model-class: deep -->
+
 DECISION-ADVISOR-STRATEGY
 
 ## Mandate

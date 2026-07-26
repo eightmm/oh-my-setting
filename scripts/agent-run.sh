@@ -32,6 +32,7 @@ INCLUDE_MEMORY=0
 INCLUDE_TASK=-1
 INCLUDE_ML_CONTEXT=0
 THREAD_ID=""
+OPERATION=""
 EXPORT_ONLY=0
 DRY_RUN="${OH_MY_SETTING_AGENT_RUN_DRY_RUN:-0}"
 
@@ -74,6 +75,9 @@ Options:
   --ml-context         Attach the compact ML context digest.
   --thread ID          Join a cross-agent thread: prior turns are injected and
                        the exchange is appended (agent-thread.sh).
+  --operation NAME     Declare the work phase so the tier follows the work
+                       (plan/advise/decision → deep, ask/review/implement →
+                       balanced, call/verify/check → fast).
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable task context.
   --no-ml-context      Disable --ml-context (compatibility).
@@ -322,6 +326,11 @@ while [ "$#" -gt 0 ]; do
       THREAD_ID="$2"
       shift 2
       ;;
+    --operation)
+      [ "$#" -ge 2 ] || { echo "error: --operation requires a name" >&2; exit 2; }
+      OPERATION="$2"
+      shift 2
+      ;;
     --export-only)
       EXPORT_ONLY=1
       shift
@@ -416,6 +425,7 @@ if [ "$resolved_mode" = "read" ]; then
   [ "$INCLUDE_TASK" -eq 1 ] && cmd+=(--task)
   [ "$INCLUDE_ML_CONTEXT" -eq 1 ] && cmd+=(--ml-context)
   [ -n "$THREAD_ID" ] && cmd+=(--thread "$THREAD_ID")
+  [ -n "$OPERATION" ] && cmd+=(--operation "$OPERATION")
   [ "$EXPORT_ONLY" -eq 1 ] && cmd+=(--export-only)
   [ "$DRY_RUN" = "1" ] && cmd+=(--dry-run)
   agent_run_exec_and_record read "$TO" "${cmd[@]}"

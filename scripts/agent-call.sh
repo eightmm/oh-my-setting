@@ -17,6 +17,7 @@ INCLUDE_MEMORY=0
 INCLUDE_TASK=0
 INCLUDE_ML_CONTEXT=0
 THREAD_ID=""
+OPERATION=""
 EXPORT_ONLY=0
 MODEL_CLASS=auto
 MODEL=""
@@ -48,6 +49,12 @@ Options:
   --ml-context         Attach the compact ML context digest.
   --thread ID          Join a cross-agent thread: prior turns are injected and
                        this exchange is appended (agent-thread.sh).
+  --operation NAME     Declare the work phase so the tier follows the work, not
+                       the calling script. Without it every read pass routes as
+                       a plain call (fast). Names: plan, advise, decision,
+                       review-gate, release (deep); ask, review, implement,
+                       repair (balanced); call, read, verify, check, triage
+                       (fast).
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).
@@ -143,6 +150,11 @@ while [ "$#" -gt 0 ]; do
       THREAD_ID="$2"
       shift 2
       ;;
+    --operation)
+      [ "$#" -ge 2 ] || fail "--operation requires a name"
+      OPERATION="$2"
+      shift 2
+      ;;
     --export-only)
       EXPORT_ONLY=1
       shift
@@ -184,7 +196,10 @@ oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
-export OMS_MODEL_OPERATION=call
+# The caller's declared phase wins over this tool's own kind; "call" remains
+# the tier for a pass that never said what kind of work it is.
+export OMS_MODEL_OPERATION="${OPERATION:-call}"
+[ -z "$OPERATION" ] || export OMS_MODEL_OPERATION_REQUEST="$OPERATION"
 
 if [ -n "$PROMPT_FILE" ]; then
   [ -f "$PROMPT_FILE" ] || fail "prompt file not found: $PROMPT_FILE"
