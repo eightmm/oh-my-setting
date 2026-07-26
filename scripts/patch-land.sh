@@ -7,6 +7,13 @@ set -euo pipefail
 # ADMIT gate -> git apply -> record a land row in the artifact index -> optional
 # agent-plan finish. Nothing lands unless admission passes and the tree is clean,
 # and the land is recorded so "which patch was applied for task X" is answerable.
+#
+# Apply, lineage, and plan completion are three writes that must all happen. A
+# crash between them left a modified tree with no lineage row and a task stuck
+# in landing, indistinguishable from "nothing happened". Each land therefore
+# writes an intent row to .oms/landings.jsonl before touching the tree and a
+# completion row after the last write; `--recover` finishes or abandons an
+# interrupted one, and `oms state` shows that one is outstanding.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 ROOT="$(cd "$ROOT" && pwd)"
@@ -29,6 +36,8 @@ PLAN_REVIEW_LEASE_ID=""
 PLAN_STATE=""
 PLAN_JSON=""
 ALLOW_VERIFIER_CHANGE=0
+RECOVER=0
+LANDING_ID=""
 
 usage() {
   cat <<'EOF'
@@ -49,6 +58,10 @@ Options:
   --executor ID    Enforce a frozen/running executor soul and scope.
   --allow-verifier-change  Forward to patch-admit: permit a patch that touches
                    its own verifier (normally rejected).
+  --recover        Finish or abandon landings interrupted by a crash: for each
+                   outstanding intent, check whether the patch is in the tree,
+                   then record the missing lineage and plan completion (or mark
+                   it abandoned). Idempotent; applies nothing new.
   -h, --help       Show this help.
 
 Sequence: main tree must be clean -> patch-admit returns ADMIT -> git apply
@@ -82,6 +95,7 @@ while [ "$#" -gt 0 ]; do
       case "$2" in *[!A-Za-z0-9._-]*|"") fail "--executor must match [A-Za-z0-9._-]+" ;; esac
       EXECUTOR_ID="$2"; shift 2 ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
+    --recover) RECOVER=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -89,6 +103,115 @@ done
 
 REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
+
+LANDINGS="$REPO/.oms/landings.jsonl"
+
+landing_append() {  # landing_append EVENT [KEY=VALUE...]
+  local event="$1"
+  shift
+  mkdir -p "$(dirname "$LANDINGS")"
+  agent_memory_ensure_oms_ignore "$REPO" 2>/dev/null || true
+  OMS_LD_EVENT="$event" OMS_LD_ID="$LANDING_ID" OMS_LD_FILE="$LANDINGS" \
+    python3 - "$@" <<'PY'
+import json, os, sys, time
+
+row = {
+    "schema": 1,
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "landing_id": os.environ["OMS_LD_ID"],
+    "event": os.environ["OMS_LD_EVENT"],
+}
+for pair in sys.argv[1:]:
+    key, _, value = pair.partition("=")
+    if key and value:
+        row[key] = value
+with open(os.environ["OMS_LD_FILE"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+PY
+}
+
+# Intents with no terminal row. Prints one JSON object per line, oldest first.
+landing_outstanding() {
+  [ -f "$LANDINGS" ] || return 0
+  OMS_LD_FILE="$LANDINGS" python3 <<'PY'
+import json, os
+
+intents = {}
+order = []
+done = set()
+with open(os.environ["OMS_LD_FILE"], encoding="utf-8", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        lid = row.get("landing_id")
+        if not lid:
+            continue
+        if row.get("event") == "intent":
+            if lid not in intents:
+                order.append(lid)
+            intents[lid] = row
+        elif row.get("event") in ("complete", "abandoned"):
+            done.add(lid)
+for lid in order:
+    if lid not in done:
+        print(json.dumps(intents[lid], ensure_ascii=False))
+PY
+}
+
+# Recovery is a bookkeeping pass, never a second apply: it decides from the
+# tree whether the interrupted land happened, then writes the records that the
+# crash skipped. Running it twice changes nothing the first run did not.
+if [ "$RECOVER" = 1 ]; then
+  recovered=0
+  abandoned=0
+  while IFS= read -r intent_row; do
+    [ -n "$intent_row" ] || continue
+    LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))')"
+    intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))')"
+    intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))')"
+    intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))')"
+    if [ -z "$intent_patch" ] || [ ! -f "$intent_patch" ]; then
+      echo "patch-land: landing $LANDING_ID has no readable patch; marking abandoned" >&2
+      landing_append abandoned reason=patch-missing
+      abandoned=$((abandoned + 1))
+      continue
+    fi
+    # Applied content reverse-applies cleanly; unapplied content does not.
+    if git -C "$REPO" apply --binary --reverse --check "$intent_patch" >/dev/null 2>&1; then
+      OMS_TASK_ID="$intent_task" ma_append_artifact_index "$REPO" patch-land "" 0 "" "$intent_patch" ||
+        echo "warning: patch-land: recovery could not record lineage for $LANDING_ID" >&2
+      if [ -n "$intent_task" ]; then
+        finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$intent_task" --patch "$intent_patch")
+        [ -n "$intent_lease" ] && finish_cmd+=(--lease-id "$intent_lease")
+        "${finish_cmd[@]}" >/dev/null 2>&1 ||
+          echo "warning: patch-land: recovery could not finish plan task $intent_task" >&2
+      fi
+      landing_append complete recovered=1
+      echo "patch-land: recovered $LANDING_ID (patch was applied)" >&2
+      recovered=$((recovered + 1))
+    else
+      if [ -n "$intent_task" ]; then
+        release_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$intent_task")
+        [ -n "$intent_lease" ] && release_cmd+=(--lease-id "$intent_lease")
+        "${release_cmd[@]}" >/dev/null 2>&1 || true
+      fi
+      landing_append abandoned reason=not-applied
+      echo "patch-land: landing $LANDING_ID never applied; released and marked abandoned" >&2
+      abandoned=$((abandoned + 1))
+    fi
+  done <<EOF
+$(landing_outstanding)
+EOF
+  echo "patch-land: recovery finished ($recovered recovered, $abandoned abandoned)"
+  exit 0
+fi
 
 if [ -n "$EXECUTOR_ID" ]; then
   "$ROOT/scripts/agent-executor.sh" validate --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null ||
@@ -199,7 +322,19 @@ if [ -n "$PLAN_TASK" ]; then
 fi
 
 # --- Apply ------------------------------------------------------------------
+# Intent first: from here on a crash is recoverable, because the record says
+# which patch was going onto which base for which task.
+LANDING_ID="land-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+landing_append intent \
+  "patch=$PATCH" \
+  "patch_sha=$(oms_sha256_file "$PATCH" 2>/dev/null || printf 'unknown')" \
+  "base_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')" \
+  "task=$PLAN_TASK" \
+  "lease=$PLAN_LEASE_ID" ||
+  echo "warning: patch-land: could not record the landing intent" >&2
+
 if ! git -C "$REPO" apply --binary "$PATCH"; then
+  landing_append abandoned reason=apply-failed || true
   if [ -n "$PLAN_TASK" ]; then
     release_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$PLAN_TASK")
     [ -n "$PLAN_LEASE_ID" ] && release_cmd+=(--lease-id "$PLAN_LEASE_ID")
@@ -239,5 +374,8 @@ if [ -n "$PLAN_TASK" ]; then
     echo "warning: could not finish plan task $PLAN_TASK (wrong state?)" >&2
   fi
 fi
+
+# Every write of this transaction is done; nothing is outstanding to recover.
+landing_append complete || true
 
 echo "LANDED"

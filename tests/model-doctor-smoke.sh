@@ -41,15 +41,21 @@ case "$provider:$*" in
     printf '%s\n' 'Usage: agy --model MODEL --print --sandbox --print-timeout DUR'
     ;;
   agy:models)
+    # Slug notation on purpose: the real CLI lists models this way while
+    # naming the same model "Gemini 3.6 Flash (Low)" on --model and in its own
+    # error output. A fixture in display notation hides that mismatch.
     cat <<'MODELS'
-Gemini 3.5 Flash (Low)
-Gemini 3.5 Flash (Medium)
-Gemini 3.5 Flash (High)
-Gemini 3.1 Pro (Low)
-Gemini 3.1 Pro (High)
-Claude Sonnet 4.6 (Thinking)
-Claude Opus 4.6 (Thinking)
-GPT-OSS 120B (Medium)
+gemini-3.6-flash-high
+gemini-3.6-flash-medium
+gemini-3.6-flash-low
+gemini-3.5-flash-high
+gemini-3.5-flash-medium
+gemini-3.5-flash-low
+gemini-3.1-pro-high
+gemini-3.1-pro-low
+claude-sonnet-4-6
+claude-opus-4-6-thinking
+gpt-oss-120b-medium
 MODELS
     ;;
   *)
@@ -87,9 +93,15 @@ assert claude["routes"]["deep"]["model"] == "claude-fable-5"
 PY
 
 # Live probing verifies models where the provider offers an official catalog command.
-bash "$DOCTOR" --live-models > "$TMP/live.txt"
+# Capture the status instead of letting set -e abort here: a regression in
+# catalog matching should name itself, not kill the suite silently.
+rc=0
+bash "$DOCTOR" --live-models > "$TMP/live.txt" 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "live model probe should pass for configured routes: $(tail -3 "$TMP/live.txt")"
 grep -Fq 'Gemini 3.1 Pro (High) [family=google, effort=high, availability=available]' "$TMP/live.txt" ||
   fail "Antigravity live model should be available"
+grep -Fq 'Gemini 3.6 Flash (Medium) [family=google, effort=medium, availability=available]' "$TMP/live.txt" ||
+  fail "a configured model must match the catalog across notations"
 grep -Fq 'codex: no stable model-list probe is registered' "$TMP/live.txt" ||
   fail "unsupported live catalog should be explicit"
 

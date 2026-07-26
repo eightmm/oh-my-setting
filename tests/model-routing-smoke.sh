@@ -111,7 +111,7 @@ default_agy_balanced="$(
   . "$ROOT/scripts/lib/model-routing.sh"
   oms_model_mapping antigravity balanced
 )"
-[ "$default_agy_balanced" = 'Gemini 3.5 Flash (Medium)' ] || fail "Antigravity balanced default should encode medium effort"
+[ "$default_agy_balanced" = 'Gemini 3.6 Flash (Medium)' ] || fail "Antigravity balanced default should encode medium effort"
 
 route_class() (
   export OMS_MODEL_ROLE="$1"

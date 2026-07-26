@@ -9726,6 +9726,139 @@ assert [a["provider"] for a in answers] == ["codex"], answers
 ' || fail "only the pinned peer should have answered"
 }
 
+test_patch_land_records_a_recoverable_transaction() {
+  local project="$TMP/landing-txn"
+  local patch="$project/change.patch"
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+
+  "$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" >/dev/null 2>&1 ||
+    fail "a clean patch should land"
+  python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land should be one intent and one completion"
+import json, sys
+events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+assert events == ["intent", "complete"], events
+PY
+  # Nothing outstanding after a clean land.
+  "$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1 |
+    grep -Fq '0 recovered, 0 abandoned' ||
+    fail "a completed land leaves nothing to recover"
+}
+
+test_patch_land_recovers_an_interrupted_land() {
+  local project="$TMP/landing-crash"
+  local patch="$project/change.patch"
+  local out
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+
+  # Crash between apply and the records that follow it: the tree moved, the
+  # lineage row and the completion never happened.
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-crash","event":"intent","patch":"%s","base_sha":"x","task":"","lease":""}\n' \
+    "$patch" > "$project/.oms/landings.jsonl"
+  git -C "$project" apply --binary "$patch"
+
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'Interrupted landings (1)' ||
+    fail "state should show the outstanding landing: $out"
+
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
+  printf '%s' "$out" | grep -Fq 'recovered land-crash' ||
+    fail "recovery should finish an applied landing: $out"
+  grep -Fq 'patch-land' "$project/.oms/artifacts/index.jsonl" ||
+    fail "recovery should record the missing lineage row"
+
+  # Idempotent: a second pass must not re-apply or re-record anything.
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
+  printf '%s' "$out" | grep -Fq '0 recovered, 0 abandoned' ||
+    fail "recovery must be idempotent: $out"
+  [ "$(grep -c 'patch-land' "$project/.oms/artifacts/index.jsonl")" = "1" ] ||
+    fail "recovery must not duplicate the lineage row"
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  if printf '%s' "$out" | grep -Fq 'Interrupted landings'; then
+    fail "a recovered landing should no longer be outstanding: $out"
+  fi
+}
+
+test_patch_land_abandons_a_landing_that_never_applied() {
+  local project="$TMP/landing-abandoned"
+  local patch="$project/change.patch"
+  local out
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-never","event":"intent","patch":"%s","base_sha":"x","task":"","lease":""}\n' \
+    "$patch" > "$project/.oms/landings.jsonl"
+
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
+  printf '%s' "$out" | grep -Fq 'never applied' ||
+    fail "recovery should mark an unapplied landing abandoned: $out"
+  # Recovery is bookkeeping: it must never apply the patch itself.
+  [ "$(git -C "$project" status --porcelain -- file.txt)" = "" ] ||
+    fail "recovery must not apply anything"
+}
+
+test_state_validator_rejects_parseable_but_invalid_state() {
+  local project="$TMP/validate-registry"
+  local out
+  local rc
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/runs" "$project/.oms/threads" "$project/.oms/plan"
+  # Every row below is valid JSON, which is all the validator used to check.
+  printf '{"schema":1,"run_id":"r1","tool":"t","event":"new"}\n{"schema":1,"tool":"t","event":"new"}\n' \
+    > "$project/.oms/runs/spine.jsonl"
+  printf '{"schema":1,"thread":"t1","seq":1,"role":"bogus","text":"x"}\n' \
+    > "$project/.oms/threads/t1.jsonl"
+  printf '{"schema":1,"landing_id":"l1","event":"weird"}\n' \
+    > "$project/.oms/landings.jsonl"
+  printf '{"tasks":{"a":{"state":"ready","depends":["ghost"]},"b":{"state":"nonsense"}}}\n' \
+    > "$project/.oms/plan/tasks.json"
+
+  rc=0
+  out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "invalid state should exit 1, got $rc"
+  printf '%s' "$out" | grep -Fq "missing required field 'run_id'" ||
+    fail "a spine row without run_id should be flagged: $out"
+  printf '%s' "$out" | grep -Fq "unknown thread role 'bogus'" ||
+    fail "an unknown thread role should be flagged: $out"
+  printf '%s' "$out" | grep -Fq "is not one of abandoned, complete, intent" ||
+    fail "an unknown landing event should be flagged: $out"
+  printf '%s' "$out" | grep -Fq "depends on missing task 'ghost'" ||
+    fail "a dangling plan dependency should be flagged: $out"
+  printf '%s' "$out" | grep -Fq "task b has unknown state 'nonsense'" ||
+    fail "an unknown plan state should be flagged: $out"
+}
+
+test_state_validator_accepts_healthy_state() {
+  local project="$TMP/validate-healthy"
+  local rc
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/runs" "$project/.oms/threads" "$project/.oms/plan"
+  printf '{"schema":1,"run_id":"r1","tool":"run-ledger","event":"new"}\n' \
+    > "$project/.oms/runs/spine.jsonl"
+  printf '{"schema":1,"thread":"t1","seq":1,"role":"question","text":"x"}\n' \
+    > "$project/.oms/threads/t1.jsonl"
+  printf '{"schema":1,"landing_id":"l1","event":"intent"}\n{"schema":1,"landing_id":"l1","event":"complete"}\n' \
+    > "$project/.oms/landings.jsonl"
+  printf '{"tasks":{"a":{"state":"done"},"b":{"state":"ready","depends":["a"]}}}\n' \
+    > "$project/.oms/plan/tasks.json"
+
+  rc=0
+  "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "healthy state must not be reported invalid (exit $rc)"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

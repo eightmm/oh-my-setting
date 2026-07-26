@@ -374,9 +374,20 @@ for provider in providers:
 
     discovered = model_lines(provider.get("_model_output_path"))
     provider["discovered_model_count"] = len(discovered)
+
+    # A CLI may print its catalog in a different notation than it accepts on
+    # --model: Antigravity lists `gemini-3.6-flash-low` but names the same model
+    # `Gemini 3.6 Flash (Low)` in its own error output, and both select it.
+    # Comparing raw strings therefore reported every configured route missing
+    # while the calls kept working.
+    def catalog_key(value):
+        return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+    discovered_keys = [catalog_key(line) for line in discovered]
     for model_class, route in provider["routes"].items():
         model = route["model"]
-        available = any(line == model or model in line for line in discovered)
+        key = catalog_key(model)
+        available = any(k == key or (key and key in k) for k in discovered_keys)
         route["availability"] = "available" if available else "missing"
         if not available:
             errors.append(

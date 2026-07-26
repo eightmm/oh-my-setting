@@ -437,8 +437,31 @@ root = os.environ["OMS_DIR"]
 # by the file's basename so it applies wherever the family lives.
 EXPECTED = {
     "spine.jsonl": 1, "reconcile.jsonl": 1, "experiments.jsonl": 1,
-    "failures.jsonl": 1, "ci.jsonl": 1,
+    "failures.jsonl": 1, "ci.jsonl": 1, "landings.jsonl": 1,
 }
+
+# Parsing is not validity. A row that is valid JSON but missing the key its
+# readers index on, or carrying a lifecycle value no writer produces, silently
+# disappears from derived views (oms state, the board, the spine) or misleads
+# coordination — and until now nothing said so. Each family declares the fields
+# its readers require and the closed sets they must come from.
+REQUIRED = {
+    "spine.jsonl": ("run_id", "tool", "event"),
+    "experiments.jsonl": ("id",),
+    "failures.jsonl": ("fingerprint",),
+    "ci.jsonl": ("sha", "status"),
+    "landings.jsonl": ("landing_id", "event"),
+    "reconcile.jsonl": ("job_id",),
+    "index.jsonl": ("kind",),
+}
+ENUMS = {
+    "experiments.jsonl": {"status": {"claimed", "running", "finished", "aborted"}},
+    "landings.jsonl": {"event": {"intent", "complete", "abandoned"}},
+}
+# Threads are per-conversation files, so they are matched by directory.
+THREAD_REQUIRED = ("thread", "seq", "role")
+THREAD_ROLES = {"topic", "question", "answer", "note", "decision", "summary", "closed"}
+PLAN_STATES = {"ready", "claimed", "review", "landing", "done", "failed", "blocked"}
 files = sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
 bad = 0
 drift = 0
@@ -446,6 +469,7 @@ total = 0
 for f in files:
     lines = 0
     errors = 0
+    invalid = []
     schemas = set()
     for i, line in enumerate(open(f, encoding="utf-8", errors="replace"), 1):
         if not line.strip():
@@ -459,20 +483,73 @@ for f in files:
             continue
         if isinstance(r, dict) and "schema" in r:
             schemas.add(r["schema"])
+        if not isinstance(r, dict):
+            continue
+        base = os.path.basename(f)
+        in_threads = os.path.basename(os.path.dirname(f)) == "threads"
+        required = THREAD_REQUIRED if in_threads else REQUIRED.get(base, ())
+        for key in required:
+            if r.get(key) in (None, ""):
+                invalid.append("%s:%d missing required field %r" % (f, i, key))
+        if in_threads and r.get("role") not in THREAD_ROLES and r.get("role"):
+            invalid.append("%s:%d unknown thread role %r" % (f, i, r.get("role")))
+        for key, allowed in ENUMS.get(base, {}).items():
+            value = r.get(key)
+            if value not in (None, "") and value not in allowed:
+                invalid.append("%s:%d %s=%r is not one of %s" % (
+                    f, i, key, value, ", ".join(sorted(allowed))))
     total += 1
     exp = EXPECTED.get(os.path.basename(f))
     stale = sorted(s for s in schemas if isinstance(s, int) and exp is not None and s < exp)
-    tag = "ok   " if errors == 0 and not stale else "FAIL " if errors else "DRIFT"
+    tag = "ok   " if errors == 0 and not stale and not invalid else \
+        "FAIL " if errors or invalid else "DRIFT"
     sver = (" schema=%s" % ",".join(str(s) for s in sorted(schemas))) if schemas else ""
     extra = (" (expected %d; migrate rows at %s)" % (exp, ",".join(str(s) for s in stale))) if stale else ""
     print("%s %s  (%d rows%s)%s" % (tag, f, lines, sver, extra))
-    if errors:
+    for message in invalid[:5]:
+        print("BAD   %s" % message)
+    if len(invalid) > 5:
+        print("BAD   %s: %d more invalid row(s)" % (f, len(invalid) - 5))
+    if errors or invalid:
         bad += 1
     elif stale:
         drift += 1
+# The plan is JSON, not JSONL, and it is the one file where a bad value stops
+# coordination outright: an unknown state is never actionable, and a dependency
+# on a task that does not exist can never be satisfied.
+plan_path = os.path.join(root, "plan", "tasks.json")
+if os.path.isfile(plan_path):
+    total += 1
+    plan_problems = []
+    try:
+        plan = json.load(open(plan_path, encoding="utf-8"))
+    except Exception as e:
+        plan_problems.append("%s: unparseable (%s)" % (plan_path, e))
+        plan = {}
+    tasks = plan.get("tasks", {}) if isinstance(plan, dict) else {}
+    for task_id, task in tasks.items() if isinstance(tasks, dict) else []:
+        if not isinstance(task, dict):
+            plan_problems.append("%s: task %s is not an object" % (plan_path, task_id))
+            continue
+        state_value = task.get("state")
+        if state_value not in PLAN_STATES:
+            plan_problems.append("%s: task %s has unknown state %r" % (
+                plan_path, task_id, state_value))
+        for dep in task.get("depends", []) or []:
+            if dep not in tasks:
+                plan_problems.append("%s: task %s depends on missing task %r" % (
+                    plan_path, task_id, dep))
+    if plan_problems:
+        bad += 1
+        for message in plan_problems[:5]:
+            print("BAD   %s" % message)
+    else:
+        print("ok    %s  (%d task(s))" % (plan_path, len(tasks)))
+
 if total == 0:
     print("validate: no .jsonl records found")
-print("validate: %d file(s), %d with errors, %d with schema drift" % (total, bad, drift), file=sys.stderr)
+print("validate: %d file(s), %d with errors or invalid rows, %d with schema drift" % (
+    total, bad, drift), file=sys.stderr)
 sys.exit(1 if (bad or drift) else 0)
 PY
 }

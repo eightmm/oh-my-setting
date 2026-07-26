@@ -7,6 +7,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Patch landing is now a recoverable transaction: `patch-land` writes an intent
+  row to `.oms/landings.jsonl` (patch hash, base sha, task, lease) before the
+  irreversible apply and a completion row after lineage and plan finish, so a
+  crash in between is visible instead of looking like nothing happened. `oms
+  state` lists interrupted landings, and `patch-land --recover` decides from the
+  tree whether the patch went in, records the lineage and plan completion the
+  crash skipped (or releases the task and marks it abandoned), and is idempotent
+  — it never applies anything itself.
+- `oms run validate` grew a family registry: beyond parsing and schema drift it
+  now checks the fields each reader indexes on (`run_id`, `landing_id`,
+  `fingerprint`, thread `seq`/`role`, …), closed lifecycle sets (landing events,
+  board status, thread roles), plan task states, and plan dependencies pointing
+  at tasks that do not exist — the failure mode where valid JSON silently
+  vanishes from derived views.
+- Antigravity routing moves to the current Flash generation (`Gemini 3.6 Flash
+  (Low)`/`(Medium)` for fast/balanced; deep stays `Gemini 3.1 Pro (High)`, the
+  strongest reasoning model the CLI exposes).
 - Verification that cannot go stale unnoticed: `agent-task verify` now binds a
   pass to a content-free fingerprint of the tree it passed on and to the
   contract that ran, `status` reports `verification: fresh|stale|none` (also in
@@ -97,6 +114,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   model tier; executor and artifact metadata freeze and record the route.
 
 ### Fixed
+- `model-doctor --live-models` no longer reports every Antigravity route as
+  missing: the CLI lists its catalog as slugs (`gemini-3.6-flash-low`) while
+  naming the same model `Gemini 3.6 Flash (Low)` on `--model`, so the comparison
+  now normalizes both sides. The smoke fixture printed display names and hid the
+  mismatch; it now uses the notation the real CLI emits.
 - Receipt-owned branch and detached auto-updates now share `update.sh`'s
   rollback transaction instead of maintaining a second half-linked path.
 - `update.sh --tools` now requests real provider CLI and uv upgrades instead of

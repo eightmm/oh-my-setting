@@ -49,8 +49,8 @@ oms_model_default() {
     claude:fast) printf '%s\n' 'claude-haiku-4-5-20251001' ;;
     claude:balanced) printf '%s\n' 'claude-sonnet-5' ;;
     claude:deep) printf '%s\n' 'claude-fable-5' ;;
-    antigravity:fast) printf '%s\n' 'Gemini 3.5 Flash (Low)' ;;
-    antigravity:balanced) printf '%s\n' 'Gemini 3.5 Flash (Medium)' ;;
+    antigravity:fast) printf '%s\n' 'Gemini 3.6 Flash (Low)' ;;
+    antigravity:balanced) printf '%s\n' 'Gemini 3.6 Flash (Medium)' ;;
     antigravity:deep) printf '%s\n' 'Gemini 3.1 Pro (High)' ;;
   esac
 }

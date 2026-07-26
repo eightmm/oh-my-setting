@@ -462,6 +462,26 @@ if os.path.isfile(gf):
         guard["stale"] = now - int(gstarted) > guard_ttl
 state["change_guard"] = guard
 
+# --- Interrupted landings ---------------------------------------------------
+# A land is three writes (apply, lineage, plan finish). An intent with no
+# terminal row means one of them never happened, which otherwise looks exactly
+# like "nothing was landed".
+landings = {"outstanding": []}
+for row in read_jsonl(oms("landings.jsonl")):
+    lid = row.get("landing_id")
+    if not lid:
+        continue
+    if row.get("event") == "intent":
+        landings.setdefault("_open", {})[lid] = row
+    elif row.get("event") in ("complete", "abandoned"):
+        landings.setdefault("_open", {}).pop(lid, None)
+for lid, row in (landings.pop("_open", {}) or {}).items():
+    landings["outstanding"].append({
+        "landing_id": lid, "ts": row.get("ts"), "task": row.get("task") or None,
+        "patch": row.get("patch"),
+    })
+state["landings"] = landings
+
 # --- Project harness: the rules every agent reads before any .oms state ------
 # Presence and exposure only. Template freshness needs reference blocks
 # regenerated from the install, which is project-doctor's job, not a query's.
@@ -659,6 +679,14 @@ else:
                                 (ci.get("sha") or "")[:12], stale_tag))
         if ci.get("fresh") is False:
             line("  refresh: oms state --refresh-ci")
+
+    ld = state["landings"]
+    if ld["outstanding"]:
+        line("\n## Interrupted landings (%d)" % len(ld["outstanding"]))
+        for entry in ld["outstanding"]:
+            line("  %s  %s%s" % (entry["landing_id"], entry["ts"] or "?",
+                                 ("  task=" + entry["task"]) if entry["task"] else ""))
+        line("  recover: oms patch-land --recover")
 
     fl = state["failures"]
     if fl["open_total"] > 0:
