@@ -16,6 +16,7 @@ REPO="$PWD"
 PROMPT=""
 THREAD_ID=""
 PROVIDERS="codex,claude,antigravity"
+TIERS=""
 ARTIFACT_DIR=""
 INCLUDE_STATUS=0
 INCLUDE_DIFF=0
@@ -50,6 +51,11 @@ Options:
                        Use before expensive runs.
   --repo PATH          Git repo for optional context. Default: current directory.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
+                       An entry may carry a tier (codex:deep) to pin that one.
+  --tiers a,b          Ask every provider once per named tier (fast, balanced,
+                       deep), turning the council into a panel across model
+                       tiers. Answers from one provider share a model family,
+                       which the reported family count makes explicit.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/ask.
   --model-class CLASS  auto, fast, balanced, or deep.
   --model MODEL        Exact model; requires exactly one provider.
@@ -87,7 +93,11 @@ EOF
 
 validate_provider_list() {
   local normalized
-  normalized="$(ma_normalize_provider_list "$PROVIDERS")" || exit $?
+  local expanded
+  # Tiers first, then normalize: expansion produces the targets, normalization
+  # canonicalizes the agy alias and rejects the same target twice.
+  expanded="$(ma_expand_targets "$PROVIDERS" "$TIERS")" || exit $?
+  normalized="$(ma_normalize_provider_list "$expanded")" || exit $?
   PROVIDERS="$normalized"
 }
 
@@ -149,6 +159,11 @@ while [ "$#" -gt 0 ]; do
     --repo)
       [ "$#" -ge 2 ] || fail "--repo requires path"
       REPO="$2"
+      shift 2
+      ;;
+    --tiers)
+      [ "$#" -ge 2 ] || fail "--tiers requires a comma-separated list"
+      TIERS="$2"
       shift 2
       ;;
     --providers)

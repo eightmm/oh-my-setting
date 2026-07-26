@@ -117,6 +117,9 @@ Options:
 
 Environment:
   OH_MY_SETTING_DELEGATE_DRY_RUN=1  Same as --dry-run.
+  OMS_WORKER_GUARD_OFF=1     Skip the check that the worker did not change the
+                             primary worktree, git config, remotes, refs, or
+                             hooks (detection only; it cannot prevent a write).
   OMS_PEER_TIMEOUT=5m        Worker wall-clock timeout (GNU timeout).
 EOF
 }
@@ -749,6 +752,15 @@ route_selected_reasoning=""
   "$(ma_scripts_dir)/agent-executor.sh" start --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_started=1
 plan_transition start
+
+# Snapshot the surfaces a worker is not supposed to touch. Scope enforcement
+# only inspects the patch it returns, so a write around the patch — the primary
+# worktree, git config, remotes, refs, hooks — was previously invisible.
+worker_guard_dir=""
+if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
+  worker_guard_dir="$worktree_parent/worker-guard"
+  oms_worker_surface_snapshot "$REPO" "$worker_guard_dir" || worker_guard_dir=""
+fi
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
   echo "dry-run: $TO -> $artifact"
@@ -808,6 +820,33 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
     fi
     echo "repair $repair_used: worker exit $worker_status, verify exit $verify_status"
   done
+fi
+
+# Compare the protected surfaces now that every worker round is done. A change
+# here is not a scope violation to be reported in a patch verdict: it means the
+# worker already wrote outside its worktree, so the run fails and the worktree
+# is kept for inspection.
+if [ -n "$worker_guard_dir" ]; then
+  worker_guard_changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir")"
+  if [ -n "$worker_guard_changed" ]; then
+    KEEP_WORKTREE=1
+    {
+      printf '\n\n## Worker authority violation\n\n'
+      printf -- '- changed outside the worktree: %s\n' "$worker_guard_changed"
+      printf -- '- worktree kept for inspection\n'
+    } >> "$artifact"
+    echo "error: $TO changed protected state outside its worktree: $worker_guard_changed" >&2
+    echo "error: worktree kept at $worktree; nothing from this run should be landed" >&2
+    (cd "$REPO" && "$(ma_scripts_dir)/fail-ledger.sh" record --kind delegate \
+      --cmd "peer-delegate --to $TO worker-authority" --exit 1 \
+      --summary "worker changed protected state: $worker_guard_changed") >/dev/null 2>&1 || true
+    ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" || true
+    [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
+      --id "$EXECUTOR_ID" --reason "worker changed protected state" >/dev/null 2>&1 || true
+    executor_finalized=1
+    plan_transition release
+    exit 1
+  fi
 fi
 
 # Preserve the first route contract in lineage even when a verification repair

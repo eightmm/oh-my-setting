@@ -7,6 +7,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Panels reach the canonical councils: `peer-ask` and `peer-review` take
+  `--tiers fast,balanced,deep` and accept a tier inside `--providers`
+  (`codex:deep`), so one council can span providers and model tiers. Each target
+  writes its own tier-labelled artifact, the same target twice is still refused
+  (the `agy` alias included), and both tools now report how many independent
+  model families answered — with a warning when they all share one, because
+  agreement inside a family is replication, not corroboration. Target parsing
+  and family accounting are shared with `oms consult` so the notation cannot
+  drift.
+- Worker authority is checked mechanically, not only stated in the brief.
+  `peer-delegate` fingerprints the surfaces a worker must not touch — the primary
+  worktree's tracked state, local git config, remotes, refs, and hooks — before
+  and after every worker round. A change fails the run, names the surface, keeps
+  the worktree as evidence, records the violation in the fail-ledger, and fails
+  the executor: patch scope only ever inspected the patch, so a worker writing
+  around it was invisible. This is detection, not a sandbox
+  (`OMS_WORKER_GUARD_OFF=1` opts out).
 - `oms consult` targets can name a tier or an exact model and may repeat a
   provider, so a panel is several models rather than one per CLI:
   `--to codex:deep --to codex:balanced --to claude:model=claude-opus-5` records

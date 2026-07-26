@@ -10081,6 +10081,224 @@ test_patch_land_refuses_a_tree_that_moved_during_admission() {
     fail "nothing should have been applied"
 }
 
+make_council_stubs() {  # make_council_stubs BIN_DIR
+  local bin_dir="$1"
+  local provider
+
+  mkdir -p "$bin_dir"
+  for provider in codex claude agy; do
+    cat > "$bin_dir/$provider" <<'EOF'
+#!/usr/bin/env bash
+echo "Verdict: the change is safe to land. Evidence: the loader contract pins the"
+echo "sampler seed per rank, so DDP workers cannot duplicate shards, and the diff"
+echo "touches only the file body. Risk: none beyond the missing regression test."
+echo "Next: run the smoke suite, then land it."
+EOF
+    chmod +x "$bin_dir/$provider"
+  done
+}
+
+test_peer_ask_panel_spans_providers_and_tiers() {
+  local project="$TMP/ask-panel"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  make_council_stubs "$bin_dir"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex,antigravity \
+    --tiers deep,balanced --prompt "is this safe?" 2>&1)" ||
+    fail "a tiered council should succeed: $out"
+
+  printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
+    fail "two providers at two tiers should be four calls: $out"
+  # Agreement across tiers of one CLI is replication; the count must say how
+  # many independent families actually answered.
+  printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||
+    fail "the council should report independent families: $out"
+
+  # Each target needs its own artifact, or a panel overwrites its own answers.
+  [ -f "$(ls "$project"/.oms/artifacts/ask/codex-deep-*.md 2>/dev/null | head -1)" ] ||
+    fail "the deep codex answer should have its own artifact"
+  [ -f "$(ls "$project"/.oms/artifacts/ask/codex-balanced-*.md 2>/dev/null | head -1)" ] ||
+    fail "the balanced codex answer should have its own artifact"
+  grep -Fq 'class=deep' "$(ls "$project"/.oms/artifacts/ask/codex-deep-*.md | head -1)" ||
+    fail "a target tier should drive that call's route"
+  grep -Fq 'class=balanced' "$(ls "$project"/.oms/artifacts/ask/codex-balanced-*.md | head -1)" ||
+    fail "the balanced target should route balanced"
+}
+
+test_peer_ask_panel_warns_on_one_family_and_rejects_repeats() {
+  local project="$TMP/ask-panel-family"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  make_council_stubs "$bin_dir"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex \
+    --tiers deep,balanced --prompt "is this safe?" 2>&1)" ||
+    fail "a single-provider panel should still succeed: $out"
+  printf '%s' "$out" | grep -Fq 'families: 1 independent model family(ies) answered' ||
+    fail "one provider at two tiers is one family: $out"
+  printf '%s' "$out" | grep -Fq 'treat agreement as replication, not corroboration' ||
+    fail "same-family agreement must be labelled: $out"
+
+  # The same target twice is one voice counted twice, whatever the spelling.
+  if "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers antigravity,agy \
+    --prompt x >/dev/null 2>&1; then
+    fail "the agy alias must not smuggle in a duplicate target"
+  fi
+  if "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex:deep,codex:deep \
+    --prompt x >/dev/null 2>&1; then
+    fail "an exactly repeated target must be refused"
+  fi
+  if "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex --tiers huge \
+    --prompt x >/dev/null 2>&1; then
+    fail "an unknown tier must be refused"
+  fi
+}
+
+test_peer_review_panel_reports_families() {
+  local project="$TMP/review-panel"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  make_council_stubs "$bin_dir"
+  printf 'base\nreviewed change\n' > "$project/file.txt"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --providers codex,antigravity \
+    --tiers deep,balanced --prompt "review this diff" 2>&1)" ||
+    fail "a tiered review should succeed: $out"
+  printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
+    fail "the review panel should run every target: $out"
+  printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||
+    fail "the review panel should report families: $out"
+}
+
+test_delegate_detects_a_worker_writing_outside_its_worktree() {
+  local project="$TMP/worker-guard"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+  local rc
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # Scope checks only inspect the returned patch, so a worker that edits the
+  # primary worktree by absolute path used to be invisible.
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+printf 'written by the worker\n' >> "$project/file.txt"
+echo "done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "a worker writing to the primary tree should fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'changed protected state outside its worktree: tracked' ||
+    fail "the violation should name the surface: $out"
+  printf '%s' "$out" | grep -Fq 'worktree kept at' ||
+    fail "the evidence worktree should be preserved: $out"
+
+  # Detection, not prevention: say so by leaving the write visible.
+  grep -Fq 'written by the worker' "$project/file.txt" ||
+    fail "the guard cannot prevent the write, only report it"
+}
+
+test_delegate_detects_git_config_and_hook_tampering() {
+  local project="$TMP/worker-guard-config"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+  local rc
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+git -C "$project" config --local oms.tampered yes
+printf '#!/bin/sh\nexit 0\n' > "$project/.git/hooks/pre-commit"
+chmod +x "$project/.git/hooks/pre-commit"
+echo "done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "config and hook tampering should fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'config' ||
+    fail "local git config changes should be named: $out"
+  printf '%s' "$out" | grep -Fq 'hooks' ||
+    fail "an installed hook should be named: $out"
+
+  # The refusal is durable memory, not just a message.
+  ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
+    grep -Fq 'worker changed protected state' ||
+    fail "the violation should be recorded in the fail-ledger"
+}
+
+test_delegate_worker_guard_can_be_turned_off() {
+  local project="$TMP/worker-guard-off"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+git -C "$project" config --local oms.tampered yes
+echo "done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_OFF=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify >/dev/null 2>&1 ||
+    fail "the guard must be escapable for a caller that accepts the risk"
+}
+
+test_delegate_leaves_a_well_behaved_worker_alone() {
+  local project="$TMP/worker-guard-clean"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # Edits only its own worktree, which is exactly what a worker should do.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'worker edit\n' >> file.txt
+echo "edited file.txt in the worktree"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || fail "a worktree-only worker should pass: $out"
+  if printf '%s' "$out" | grep -Fq 'changed protected state'; then
+    fail "a worker staying in its worktree must not be flagged: $out"
+  fi
+  [ -s "$(printf '%s' "$out" | sed -n 's/^patch: //p' | head -1)" ] ||
+    fail "the worker's work should still come back as a patch"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

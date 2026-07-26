@@ -24,8 +24,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/peer-common.sh
 . "$SCRIPT_DIR/lib/peer-common.sh"
-# shellcheck source=scripts/lib/provider-registry.sh
-. "$SCRIPT_DIR/lib/provider-registry.sh"
 
 REPO="$PWD"
 PROMPT=""

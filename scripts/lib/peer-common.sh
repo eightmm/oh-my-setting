@@ -17,6 +17,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-residue.sh"
 # shellcheck source=model-routing.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/model-routing.sh"
+# shellcheck source=provider-registry.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/provider-registry.sh"
 
 # Removed in 0.4: fail explicitly so legacy CI does not silently run with
 # different timeout or termination behavior.
@@ -905,25 +907,31 @@ ma_provider_attempt() {
 # agy is an alias for antigravity, not another quorum member.
 ma_normalize_provider_list() {
   local raw="$1"
+  local entry
   local provider
+  local class
+  local canonical
   local seen=","
   local output=""
   local -a provider_list
 
   IFS=',' read -r -a provider_list <<< "$raw"
-  for provider in "${provider_list[@]}"; do
-    provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
-    [ -n "$provider" ] || continue
-    [ "$provider" != agy ] || provider=antigravity
-    case "$provider" in
-      codex|claude|antigravity) ;;
-      *) echo "error: unsupported provider: $provider" >&2; return 2 ;;
-    esac
+  for entry in "${provider_list[@]}"; do
+    entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
+    [ -n "$entry" ] || continue
+    ma_target_validate "$entry" || return 2
+    provider="$(ma_target_provider "$entry")"
+    class="$(ma_target_class "$entry")"
+    # Canonicalize the agy alias before the duplicate check: the same CLI at
+    # the same tier is one voice however it was spelled. Different tiers of one
+    # provider are allowed — that is the panel — and family accounting is what
+    # keeps their agreement honest.
+    canonical="$provider${class:+:$class}"
     case "$seen" in
-      *",$provider,"*) echo "error: duplicate provider: $provider" >&2; return 2 ;;
+      *",$canonical,"*) echo "error: duplicate target: $canonical" >&2; return 2 ;;
     esac
-    seen="$seen$provider,"
-    if [ -n "$output" ]; then output="$output,$provider"; else output="$provider"; fi
+    seen="$seen$canonical,"
+    if [ -n "$output" ]; then output="$output,$canonical"; else output="$canonical"; fi
   done
   [ -n "$output" ] || { echo "error: no providers selected" >&2; return 2; }
   printf '%s\n' "$output"
@@ -1058,19 +1066,126 @@ ma_run_routed_provider() {
   return "$status"
 }
 
+# --- Council targets --------------------------------------------------------
+# A target is PROVIDER or PROVIDER:CLASS. Providers alone keep the historical
+# one-model-per-CLI council; a class turns the list into a panel that can ask
+# the same CLI at several tiers. Both consult and the councils split targets
+# here so the notation cannot drift between them.
+ma_target_provider() {
+  local provider="${1%%:*}"
+  [ "$provider" != agy ] || provider=antigravity
+  printf '%s\n' "$provider"
+}
+
+ma_target_class() {
+  local spec="${1#*:}"
+  [ "$spec" != "$1" ] || { printf '\n'; return 0; }
+  case "$spec" in
+    fast|balanced|deep) printf '%s\n' "$spec" ;;
+    *) printf '\n' ;;
+  esac
+}
+
+ma_target_validate() {
+  local spec="${1#*:}"
+  local provider
+  provider="$(ma_target_provider "$1")"
+  case "$provider" in
+    codex|claude|antigravity) ;;
+    *) echo "error: unsupported provider: $provider" >&2; return 2 ;;
+  esac
+  [ "$spec" = "$1" ] && return 0
+  case "$spec" in
+    fast|balanced|deep) ;;
+    *) echo "error: target tier must be fast, balanced, or deep: $1" >&2; return 2 ;;
+  esac
+}
+
+ma_target_label() {
+  printf '%s\n' "$(ma_target_provider "$1")${2:+-$2}"
+}
+
+# Expand a provider list across tiers: "codex,claude" + "deep,balanced" becomes
+# four targets. Without tiers the list passes through unchanged.
+ma_expand_targets() {
+  local providers="$1"
+  local tiers="$2"
+  local out=""
+  local provider tier
+  local -a provider_list tier_list
+
+  IFS=',' read -r -a provider_list <<< "$providers"
+  if [ -z "$tiers" ]; then
+    printf '%s\n' "$providers"
+    return 0
+  fi
+  IFS=',' read -r -a tier_list <<< "$tiers"
+  for provider in "${provider_list[@]}"; do
+    [ -n "$provider" ] || continue
+    for tier in "${tier_list[@]}"; do
+      tier="$(printf '%s' "$tier" | tr -d '[:space:]')"
+      [ -n "$tier" ] || continue
+      case "$tier" in
+        fast|balanced|deep) ;;
+        *) echo "error: --tiers accepts fast, balanced, or deep: $tier" >&2; return 2 ;;
+      esac
+      out="${out:+$out,}$provider:$tier"
+    done
+  done
+  printf '%s\n' "$out"
+}
+
+# How many independent model families answered. Two answers from one family are
+# the same opinion twice: a council that reports only a count invites reading
+# within-family replication as corroboration.
+ma_answered_families() {
+  local i provider selected family families=""
+
+  for i in "${!provider_names[@]}"; do
+    [ "${alive[i]}" = 1 ] || continue
+    provider="$(ma_target_provider "${provider_names[i]}")"
+    selected=""
+    [ ! -f "${last_arts[i]}" ] ||
+      selected="$(sed -n 's/^model-route: class=[^ ]* ([^)]*) primary=\(.*\) fallback=.*/\1/p' \
+        "${last_arts[i]}" | sed -n '1p')"
+    family="$(oms_provider_model_family "$provider" "$selected" 2>/dev/null || printf 'unknown')"
+    case "
+$families
+" in
+      *"
+$family
+"*) ;;
+      *) families="${families:+$families
+}$family" ;;
+    esac
+  done
+  [ -z "$families" ] && printf '0\n' || printf '%s\n' "$families" | grep -c .
+}
+
 run_provider() {
-  local provider="$1"
+  local target="$1"
   local prompt_file="$2"
   local artifact="$3"
   local started
   local status
+  local provider
+  local target_class
+
+  provider="$(ma_target_provider "$target")"
+  target_class="$(ma_target_class "$target")"
 
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # A phase the caller declared outranks the tool's own kind: without this the
-# label of the script (ask, call, review) decides the tier for every pass it
-# makes, so a deep question asked through agent-call routes as a plain call.
-OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
+  # label of the script (ask, call, review) decides the tier for every pass it
+  # makes, so a deep question asked through agent-call routes as a plain call.
+  OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
   export OMS_MODEL_OPERATION
+  # A target may carry its own tier (codex:deep), so one council can span model
+  # tiers, not just providers. The class applies to this call only.
+  if [ -n "$target_class" ]; then
+    OMS_MODEL_CLASS_REQUEST="$target_class"
+    export OMS_MODEL_CLASS_REQUEST
+  fi
   oms_model_prepare "$provider" || return $?
 
   if ! ma_validate_outbound_prompt "$prompt_file"; then
@@ -1223,12 +1338,11 @@ ma_run_round1() {
   for provider in "${provider_list[@]}"; do
     provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
     [ -n "$provider" ] || continue
-    case "$provider" in
-      codex|claude|antigravity|agy) ;;
-      *) fail "unsupported provider: $provider" ;;
-    esac
+    ma_target_validate "$provider" || exit $?
     total=$((total + 1))
-    artifact="$ARTIFACT_DIR/$provider-$slug-$timestamp.md"
+    # Label the artifact with the tier too, so a panel that asks one CLI twice
+    # does not write both answers to the same name.
+    artifact="$ARTIFACT_DIR/$(ma_target_label "$provider" "$(ma_target_class "$provider")")-$slug-$timestamp.md"
     run_provider "$provider" "$prompt_file" "$artifact" &
     pids+=("$!")
     artifacts+=("$artifact")
@@ -1376,7 +1490,16 @@ ma_print_run_summary() {
 }
 
 ma_quorum_exit() {
+  local families
+
   ma_print_run_summary
+  families="$(ma_answered_families)"
+  if [ "$ok" -gt 0 ]; then
+    echo "families: $families independent model family(ies) answered"
+    if [ "$ok" -gt 1 ] && [ "$families" -lt 2 ]; then
+      echo "warning: every answer came from one model family; treat agreement as replication, not corroboration" >&2
+    fi
+  fi
   if [ "$ok" -eq 0 ]; then
     echo "warning: no external $MA_KIND providers succeeded" >&2
     exit 1

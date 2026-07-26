@@ -109,3 +109,106 @@ PY
 )"
   printf '%s:%s:%s\n' "$head" "$diff_hash" "$untracked_hash"
 }
+
+# --- Worker authority detection ---------------------------------------------
+# "A worker cannot widen its authority" was prose in the brief and a scope check
+# on the returned patch. Neither notices a worker that reaches around the patch
+# entirely: editing the primary worktree by absolute path, rewriting local git
+# config, adding a remote, moving refs, or installing a hook. Those surfaces are
+# not supposed to change while a worker runs, so they can simply be fingerprinted
+# before and after. This is detection, not a sandbox: it says loudly that
+# something moved and keeps the evidence, and it cannot prevent the write.
+#
+# .oms is deliberately excluded: workers are given OMS_STATE_REPO so they can
+# append shared harness state, and the harness itself writes there during a run.
+oms_worker_surface_fingerprint() {
+  local repo="$1"
+  local git_dir
+
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'non-git\n'; return 0; }
+  git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
+  case "$git_dir" in
+    "") git_dir="$(git -C "$repo" rev-parse --git-dir)" ;;
+    /*) ;;
+    *) git_dir="$repo/$git_dir" ;;
+  esac
+  {
+    printf 'config\n'
+    git -C "$repo" config --local --list 2>/dev/null | LC_ALL=C sort
+    printf 'remotes\n'
+    git -C "$repo" remote -v 2>/dev/null | LC_ALL=C sort
+    printf 'refs\n'
+    git -C "$repo" show-ref 2>/dev/null | LC_ALL=C sort
+    git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
+    printf 'tracked\n'
+    git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | LC_ALL=C sort
+    printf 'hooks\n'
+    if [ -d "$git_dir/hooks" ]; then
+      find "$git_dir/hooks" -maxdepth 1 -type f ! -name '*.sample' -print 2>/dev/null |
+        LC_ALL=C sort |
+        while IFS= read -r hook; do
+          printf '%s %s\n' "$(basename "$hook")" "$(oms_sha256_file "$hook" 2>/dev/null || printf 'unreadable')"
+        done
+    fi
+  } | oms_sha256_stream
+}
+
+# Which surface moved, for a message that names the problem instead of just
+# reporting a hash mismatch.
+oms_worker_surface_diff() {
+  local repo="$1"
+  local before_dir="$2"
+  local changed=""
+  local name
+
+  for name in config remotes refs tracked hooks; do
+    [ -f "$before_dir/$name" ] || continue
+    if ! oms_worker_surface_capture_one "$repo" "$name" | cmp -s - "$before_dir/$name"; then
+      changed="${changed:+$changed, }$name"
+    fi
+  done
+  printf '%s\n' "$changed"
+}
+
+oms_worker_surface_capture_one() {
+  local repo="$1"
+  local name="$2"
+  local git_dir
+
+  git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
+  case "$git_dir" in
+    "") git_dir="$(git -C "$repo" rev-parse --git-dir 2>/dev/null || printf '')" ;;
+    /*) ;;
+    *) git_dir="$repo/$git_dir" ;;
+  esac
+  case "$name" in
+    config) git -C "$repo" config --local --list 2>/dev/null | LC_ALL=C sort ;;
+    remotes) git -C "$repo" remote -v 2>/dev/null | LC_ALL=C sort ;;
+    refs)
+      git -C "$repo" show-ref 2>/dev/null | LC_ALL=C sort
+      git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
+      ;;
+    tracked) git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | LC_ALL=C sort ;;
+    hooks)
+      if [ -n "$git_dir" ] && [ -d "$git_dir/hooks" ]; then
+        find "$git_dir/hooks" -maxdepth 1 -type f ! -name '*.sample' -print 2>/dev/null |
+          LC_ALL=C sort |
+          while IFS= read -r hook; do
+            printf '%s %s\n' "$(basename "$hook")" "$(oms_sha256_file "$hook" 2>/dev/null || printf 'unreadable')"
+          done
+      fi
+      ;;
+  esac
+}
+
+# Capture each surface separately so a later comparison can name what moved.
+oms_worker_surface_snapshot() {
+  local repo="$1"
+  local dir="$2"
+  local name
+
+  mkdir -p "$dir" || return 1
+  for name in config remotes refs tracked hooks; do
+    oms_worker_surface_capture_one "$repo" "$name" > "$dir/$name" 2>/dev/null || true
+  done
+}
