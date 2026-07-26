@@ -9486,6 +9486,246 @@ assert isinstance(d["rows"], list), d
   fi
 }
 
+test_task_verification_is_bound_to_repo_state() {
+  local project="$TMP/verify-freshness"
+  local out
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "make it work" \
+    --verify "true" >/dev/null )
+
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
+  printf '%s' "$out" | grep -Fq 'verification: none' ||
+    fail "an unverified task should report verification: none: $out"
+
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
+  printf '%s' "$out" | grep -Fq 'verification: fresh' ||
+    fail "a passing verify should be fresh: $out"
+
+  # The whole point: a green status must not survive a change to the tree it
+  # was green on.
+  printf 'changed\n' >> "$project/file.txt"
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
+  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+    fail "editing a tracked file should make verification stale: $out"
+
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
+  printf 'untracked\n' > "$project/new-file.txt"
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
+  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+    fail "a new untracked file should make verification stale: $out"
+
+  # A rewritten contract is a different contract, even with an unchanged tree.
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" update --verify "true # different" >/dev/null )
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
+  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+    fail "changing the verify command should make verification stale: $out"
+
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" status --json ) | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["verification"] == "stale", d
+' || fail "status --json should carry verification freshness"
+}
+
+test_task_close_refuses_a_false_green() {
+  local project="$TMP/close-gate"
+  local out
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "ship it" \
+    --verify "true" >/dev/null )
+
+  # Closing promotes "Closed task" into shared memory, so an unverified close
+  # hands the next session a false green.
+  if ( cd "$project" && "$ROOT/scripts/agent-task.sh" close >/dev/null 2>&1 ); then
+    fail "closing an unverified task with a verify contract must be refused"
+  fi
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
+  printf 'changed\n' >> "$project/file.txt"
+  if ( cd "$project" && "$ROOT/scripts/agent-task.sh" close >/dev/null 2>&1 ); then
+    fail "closing on a stale verification must be refused"
+  fi
+
+  # An explicit reason is the documented override, and it is recorded.
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" close --reason "abandoned for a different approach" >/dev/null ) ||
+    fail "--reason should allow closing without fresh verification"
+  out="$(cat "$project"/.oms/task/archive/*.md)"
+  printf '%s' "$out" | grep -Fq 'closed without fresh verification' ||
+    fail "the override should be recorded in the archived packet: $out"
+
+  # Re-verified tasks close without ceremony, and a packet with no verification
+  # contract is not gated at all.
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "second" --verify "true" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" close >/dev/null ) ||
+    fail "a freshly verified task should close"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "exploration only" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" close >/dev/null ) ||
+    fail "a task without a verify contract should still close"
+}
+
+test_repo_state_flags_ci_recorded_for_another_commit() {
+  local project="$TMP/ci-freshness"
+  local head old out
+
+  make_committed_repo "$project"
+  head="$(git -C "$project" rev-parse HEAD)"
+  old="0000000000000000000000000000000000000001"
+  mkdir -p "$project/.oms"
+  printf '{"schema":1,"ts":"2026-07-20T00:00:00Z","branch":"main","sha":"%s","status":"completed","conclusion":"success"}\n' \
+    "$old" > "$project/.oms/ci.jsonl"
+
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'STALE' ||
+    fail "CI recorded for another commit should be marked stale: $out"
+  printf '%s' "$out" | grep -Fq 'oms state --refresh-ci' ||
+    fail "state should name the refresh command: $out"
+  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+import json, sys
+ci = json.load(sys.stdin)["ci"]
+assert ci["fresh"] is False, ci
+assert ci["current_sha"], ci
+' || fail "repo-state --json should expose CI freshness"
+
+  printf '{"schema":1,"ts":"2026-07-21T00:00:00Z","branch":"main","sha":"%s","status":"completed","conclusion":"success"}\n' \
+    "$head" >> "$project/.oms/ci.jsonl"
+  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  if printf '%s' "$out" | grep -Fq 'STALE'; then
+    fail "CI recorded for HEAD must not be marked stale: $out"
+  fi
+  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["ci"]["fresh"] is True
+' || fail "CI for HEAD should be fresh"
+}
+
+test_answer_quality_separates_a_non_answer_from_an_answer() {
+  local dir="$TMP/answer-quality"
+  local verdict
+
+  mkdir -p "$dir"
+  # A provider can exit 0 and still not answer; only the body decides.
+  cat > "$dir/thin.md" <<'ARTIFACT'
+# codex call
+
+## Output
+
+model-route: class=deep primary=m fallback=n effort=high fallback_effort=medium
+Could you please provide more context on what you mean by `--sandbox`?
+
+## Exit
+
+0
+ARTIFACT
+  cat > "$dir/empty.md" <<'ARTIFACT'
+# codex call
+
+## Output
+
+model-route: class=deep primary=m fallback=n effort=high fallback_effort=medium
+
+## Exit
+
+0
+ARTIFACT
+  cat > "$dir/ok.md" <<'ARTIFACT'
+# codex call
+
+## Output
+
+model-route: class=deep primary=m fallback=n effort=high fallback_effort=medium
+Use map-style datasets when you need shuffling and shard by file for streaming
+inputs. Evidence: the loader contract in docs/DATA.md pins the sampler seed per
+rank, so DDP workers do not duplicate shards. Next action: pin the seed in the
+config before the next run.
+
+## Exit
+
+0
+ARTIFACT
+
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/thin.md'")"
+  [ "$verdict" = "thin" ] || fail "a clarifying question is a thin answer, got: $verdict"
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/empty.md'")"
+  [ "$verdict" = "empty" ] || fail "a body with only harness lines is empty, got: $verdict"
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/ok.md'")"
+  [ "$verdict" = "ok" ] || fail "a substantive answer should be ok, got: $verdict"
+}
+
+test_consult_falls_back_when_the_first_peer_does_not_answer() {
+  local project="$TMP/consult-failover"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # First peer exits 0 with a non-answer; the second one answers.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+echo "Could you clarify what you mean?"
+EOF
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+echo "Shard by file for streaming inputs and keep the sampler seeded per rank so"
+echo "DDP workers never duplicate shards. Evidence: the loader contract. Next:"
+echo "pin the seed in the training config before the next run."
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/agy"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    "which loader?" --quiet 2>&1)" || fail "consult should recover: $out"
+  printf '%s' "$out" | grep -Fq 'did not really answer (thin); asking antigravity' ||
+    fail "consult should report the fallback: $out"
+
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+import json, sys
+turns = json.load(sys.stdin)["turns"]
+roles = [t["role"] for t in turns]
+# One question, both attempts recorded, the non-answer labelled as such.
+assert roles.count("question") == 1, roles
+answers = [t for t in turns if t["role"] == "answer"]
+assert [a["provider"] for a in answers] == ["codex", "antigravity"], answers
+assert answers[0]["quality"] == "thin", answers[0]
+assert answers[1].get("quality") == "ok", answers[1]
+' || fail "the thread should record one question, a thin answer, and a real one"
+}
+
+test_consult_does_not_second_guess_a_pinned_peer() {
+  local project="$TMP/consult-pinned"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+echo "Could you clarify?"
+EOF
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+echo "should not be called"
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/agy"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" --to codex \
+    "which loader?" --quiet 2>&1)" || true
+  if printf '%s' "$out" | grep -Fq 'asking antigravity'; then
+    fail "an explicitly pinned peer must not be second-guessed: $out"
+  fi
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+import json, sys
+answers = [t for t in json.load(sys.stdin)["turns"] if t["role"] == "answer"]
+assert [a["provider"] for a in answers] == ["codex"], answers
+' || fail "only the pinned peer should have answered"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

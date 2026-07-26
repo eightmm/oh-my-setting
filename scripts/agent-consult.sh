@@ -16,6 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$SCRIPT_DIR/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/peer-common.sh
+. "$SCRIPT_DIR/lib/peer-common.sh"
 
 REPO="$PWD"
 PROMPT=""
@@ -66,6 +68,12 @@ EOF
 }
 
 fail() { echo "error: $*" >&2; exit 2; }
+
+# The artifact agent-call just wrote for this provider, newest first.
+latest_artifact_for() {
+  local provider="$1"
+  ls -t "$REPO/.oms/artifacts/consult/$provider-"*.md 2>/dev/null | sed -n '1p'
+}
 
 INCLUDE_MEMORY=1
 INCLUDE_TASK=1
@@ -177,6 +185,56 @@ call_one() {
   bash "${args[@]}"
 }
 
+# One consult should not die because the first CLI is broken, unauthenticated,
+# or answers nothing. Only for an automatic pick: a pinned --to is the caller's
+# explicit choice, and a scrubber block (exit 3) is a problem with the prompt,
+# not the provider, so neither is retried. Read-only only — never for writes.
+consult_with_failover() {
+  local first="$1"
+  local rc=0 quality next artifact
+  shift
+
+  call_one "$first" || rc=$?
+  artifact="$(latest_artifact_for "$first")"
+  quality="ok"
+  [ -z "$artifact" ] || quality="$(ma_answer_quality "$artifact")"
+  if [ "$rc" -eq 0 ] && [ "$quality" = "ok" ]; then
+    return 0
+  fi
+  if [ "$rc" -eq 3 ]; then
+    echo "consult: $first blocked by the outbound gate; not retrying another peer" >&2
+    return "$rc"
+  fi
+  next=""
+  for candidate in "$@"; do
+    [ "$candidate" = "$first" ] && continue
+    next="$candidate"
+    break
+  done
+  if [ -z "$next" ]; then
+    [ "$quality" = "ok" ] ||
+      echo "consult: $first did not really answer ($quality) and no other peer is installed" >&2
+    return "$rc"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "consult: $first failed (exit $rc); asking $next instead" >&2
+  else
+    echo "consult: $first did not really answer ($quality); asking $next instead" >&2
+  fi
+  # The question is already in the thread from the first attempt; a failover
+  # must not duplicate it.
+  export OMS_THREAD_QUESTION_RECORDED=1
+  rc=0
+  call_one "$next" || rc=$?
+  artifact="$(latest_artifact_for "$next")"
+  if [ "$rc" -eq 0 ] && [ -n "$artifact" ]; then
+    quality="$(ma_answer_quality "$artifact")"
+    [ "$quality" = "ok" ] ||
+      echo "consult: $next also did not really answer ($quality)" >&2
+  fi
+  return "$rc"
+}
+
 targets=()
 if [ -n "$TO" ]; then
   targets=("$TO")
@@ -194,6 +252,7 @@ fi
 # One consult per peer, in parallel: waiting for three serial calls is the
 # other reason mid-task consultation does not happen.
 status=0
+usable=0
 if [ "${#targets[@]}" -gt 1 ]; then
   question_turn="$(agent_memory_mktemp)" || question_turn=""
   if [ -n "$question_turn" ]; then
@@ -206,7 +265,18 @@ if [ "${#targets[@]}" -gt 1 ]; then
   fi
 fi
 if [ "${#targets[@]}" -eq 1 ]; then
-  call_one "${targets[0]}" || status=$?
+  if [ -n "$TO" ]; then
+    call_one "${targets[0]}" || status=$?
+  else
+    # Auto-picked: fall back to one other peer if this one cannot answer.
+    peer_list=()
+    while IFS= read -r peer_name; do
+      [ -z "$peer_name" ] || peer_list+=("$peer_name")
+    done <<EOF
+$(peers)
+EOF
+    consult_with_failover "${targets[0]}" ${peer_list[@]+"${peer_list[@]}"} || status=$?
+  fi
 else
   pids=()
   logs=()
@@ -223,6 +293,19 @@ else
     [ "$QUIET" -eq 1 ] || cat "${logs[i]}"
     i=$((i + 1))
   done
+  # A council is only as good as the answers in it: say how many peers actually
+  # answered, so a non-answer is not silently counted as agreement.
+  for p in "${targets[@]}"; do
+    art="$(latest_artifact_for "$p")"
+    [ -n "$art" ] || continue
+    q="$(ma_answer_quality "$art")"
+    if [ "$q" = "ok" ]; then
+      usable=$((usable + 1))
+    else
+      echo "consult: $p did not really answer ($q)" >&2
+    fi
+  done
+  echo "consult: ${usable}/${#targets[@]} peer(s) answered"
 fi
 
 echo "thread: $thread"

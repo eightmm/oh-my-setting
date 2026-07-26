@@ -80,6 +80,7 @@ OMS_RS_BOARD_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}" \
 OMS_RS_RUN_TTL="${OMS_RUN_CURRENT_TTL:-86400}" \
 OMS_RS_GUARD_TTL="${OMS_GUARD_TTL:-86400}" \
 OMS_RS_THREAD_TTL="${OMS_THREAD_CURRENT_TTL:-86400}" \
+OMS_RS_HEAD="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)" \
 python3 <<'PY'
 import calendar, glob, json, os, time
 
@@ -381,12 +382,20 @@ for fp in forder:
 state["failures"] = {"open": open_fails[-5:], "open_total": len(open_fails)}
 
 # --- Latest CI conclusion for HEAD's branch ---------------------------------
-ci = {"present": False}
+ci = {"present": False, "current_sha": None, "fresh": None}
 ci_rows = read_jsonl(oms("ci.jsonl"))
 if ci_rows:
     ci["present"] = True
     last = ci_rows[-1]
     ci.update({k: last.get(k) for k in ("branch", "sha", "status", "conclusion", "url")})
+    # A recorded conclusion is evidence about the commit it ran on. Without
+    # saying which commit that is relative to HEAD, an agent cites green CI for
+    # a revision that no longer exists in the working tree.
+    ci["current_sha"] = os.environ.get("OMS_RS_HEAD") or None
+    recorded = ci.get("sha") or ""
+    if ci["current_sha"] and recorded:
+        short = min(len(recorded), len(ci["current_sha"]))
+        ci["fresh"] = recorded[:short] == ci["current_sha"][:short]
 state["ci"] = ci
 
 # --- In-flight delegations (liveness files) ---------------------------------
@@ -643,8 +652,13 @@ else:
     ci = state["ci"]
     if ci["present"]:
         line("\n## CI (%s)" % (ci.get("branch") or "?"))
-        line("  %s %s  %s" % (ci.get("status") or "?", ci.get("conclusion") or "?",
-                              (ci.get("sha") or "")[:12]))
+        stale_tag = ""
+        if ci.get("fresh") is False:
+            stale_tag = "  STALE (HEAD is %s)" % (ci.get("current_sha") or "?")[:12]
+        line("  %s %s  %s%s" % (ci.get("status") or "?", ci.get("conclusion") or "?",
+                                (ci.get("sha") or "")[:12], stale_tag))
+        if ci.get("fresh") is False:
+            line("  refresh: oms state --refresh-ci")
 
     fl = state["failures"]
     if fl["open_total"] > 0:

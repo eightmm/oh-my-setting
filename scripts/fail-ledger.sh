@@ -70,44 +70,10 @@ print(hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:16])
 PY
 }
 
-# Hash only git metadata and tracked diff bytes. The ledger never stores diff
-# content, file paths, host paths, or secrets.
+# Content-free fingerprint of the working tree, shared with agent-task so both
+# use one definition of "did the repo change since then".
 state_fingerprint() {
-  local head diff_hash untracked_hash
-
-  if ! git -C "$STATE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    printf 'non-git\n'
-    return 0
-  fi
-  head="$(git -C "$STATE_ROOT" rev-parse HEAD 2>/dev/null || printf 'unborn')"
-  diff_hash="$({
-    git -C "$STATE_ROOT" diff --binary HEAD -- 2>/dev/null || true
-    git -C "$STATE_ROOT" diff --cached --binary -- 2>/dev/null || true
-  } | oms_sha256_stream)"
-  untracked_hash="$(python3 - "$STATE_ROOT" <<'PY'
-import hashlib, os, subprocess, sys
-root = sys.argv[1]
-paths = subprocess.check_output(
-    ["git", "-C", root, "ls-files", "-z", "--others", "--exclude-standard"])
-h = hashlib.sha256()
-for raw in sorted(x for x in paths.split(b"\0") if x):
-    path = os.path.join(root, os.fsdecode(raw))
-    h.update(hashlib.sha256(raw).digest())
-    try:
-        info = os.lstat(path)
-        # Metadata makes creation/replacement/content writes visible without
-        # reading an unbounded dataset/checkpoint. Paths are hashed above and
-        # only this final aggregate digest reaches the ledger.
-        h.update(("M:%o:%d:%d" % (
-            info.st_mode, info.st_size,
-            getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
-        )).encode())
-    except OSError:
-        h.update(b"MISSING")
-print(h.hexdigest())
-PY
-)"
-  printf '%s:%s:%s\n' "$head" "$diff_hash" "$untracked_hash"
+  oms_git_state_fingerprint "$STATE_ROOT"
 }
 
 ledger_append() {

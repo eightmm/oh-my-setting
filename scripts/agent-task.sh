@@ -21,6 +21,7 @@ LOOP_MAX=""
 DIFF_BUDGET=""
 VERIFY_LEVEL=""
 SKIP_VERIFY_REASON=""
+CLOSE_REASON=""
 LAST_FAILURE=""
 VERIFICATION_NOTE=""
 HYPOTHESIS=""
@@ -55,6 +56,8 @@ Options:
   --loop-max N      init/update: set Loop State max_attempts.
   --diff-budget N   init/update: set Loop State diff_budget_lines.
   --verify-level L  init/update: set Loop State verification_level.
+  --reason TEXT     close: close a task whose verification is missing or stale,
+                    recording why. Required for that case.
   --skip-verify-run REASON
                     verify: do not run the stored command and record why.
                     The task remains active and is not marked verified.
@@ -142,6 +145,11 @@ while [ "$#" -gt 0 ]; do
     --verify-level)
       [ "$#" -ge 2 ] || { echo "error: --verify-level requires text" >&2; exit 2; }
       VERIFY_LEVEL="$2"
+      shift 2
+      ;;
+    --reason)
+      [ "$#" -ge 2 ] || { echo "error: --reason requires text" >&2; exit 2; }
+      CLOSE_REASON="$2"
       shift 2
       ;;
     --skip-verify-run)
@@ -391,10 +399,11 @@ case "$ACTION" in
     else
       task_stale=no
     fi
+    task_verification="$(agent_task_verification_state "$TASK_FILE" "$REPO")"
     if [ "$AS_JSON" -eq 1 ]; then
       OMS_AT_ID="$task_id" OMS_AT_STATUS="$task_status" OMS_AT_SOURCE="$task_source" \
       OMS_AT_ACTIVITY="$task_activity" OMS_AT_CLOSED="$task_closed" \
-      OMS_AT_STALE="$task_stale" python3 -c '
+      OMS_AT_STALE="$task_stale" OMS_AT_VERIFICATION="$task_verification" python3 -c '
 import json, os
 print(json.dumps({
     "schema": 1, "present": True,
@@ -404,13 +413,15 @@ print(json.dumps({
     "last_activity": os.environ["OMS_AT_ACTIVITY"] or None,
     "closed_at": os.environ["OMS_AT_CLOSED"] or None,
     "stale": os.environ["OMS_AT_STALE"] == "yes",
+    "verification": os.environ["OMS_AT_VERIFICATION"],
 }, ensure_ascii=False))'
       exit 0
     fi
     # One write avoids SIGPIPE under `set -o pipefail` when callers use
     # `agent-task status | grep -q ...` and grep exits after an early match.
-    printf 'task_id: %s\nstatus: %s\nsource_session: %s\nlast_activity: %s\nclosed_at: %s\nstale: %s\n' \
-      "$task_id" "$task_status" "$task_source" "$task_activity" "$task_closed" "$task_stale"
+    printf 'task_id: %s\nstatus: %s\nverification: %s\nsource_session: %s\nlast_activity: %s\nclosed_at: %s\nstale: %s\n' \
+      "$task_id" "$task_status" "$task_verification" "$task_source" "$task_activity" \
+      "$task_closed" "$task_stale"
     ;;
   update)
     ensure_tmpdir
@@ -476,6 +487,12 @@ print(json.dumps({
       echo "task: verification failed (exit $verify_rc); task remains active ($TASK_FILE)" >&2
       exit "$verify_rc"
     fi
+    # Bind the pass to the tree it passed on and to the contract that ran, so a
+    # later edit downgrades this to stale instead of staying green forever.
+    agent_task_set_metadata "$TASK_FILE" verified_state \
+      "$(oms_git_state_fingerprint "$REPO" 2>/dev/null || printf 'unknown')"
+    agent_task_set_metadata "$TASK_FILE" verified_cmd_sha \
+      "$(printf '%s\n' "$verify_cmd" | oms_sha256_stream 2>/dev/null || printf '')"
     agent_task_set_status "$TASK_FILE" verified
     echo "task: verified $TASK_FILE"
     ;;
@@ -492,6 +509,27 @@ print(json.dumps({
       exit 0
     fi
     ensure_tmpdir
+    # A packet that declares a verification contract must not be archived (and
+    # promoted into shared memory as "Closed task") while that contract is
+    # unmet or stale: that is exactly the false-green the next session inherits.
+    close_verification="$(agent_task_verification_state "$TASK_FILE" "$REPO")"
+    if [ "$close_verification" != "fresh" ] &&
+      [ -n "$(agent_task_verify_command "$TASK_FILE")" ] &&
+      [ -z "$CLOSE_REASON" ]; then
+      case "$close_verification" in
+        stale) echo "error: verification is stale (the repo changed since it passed)" >&2 ;;
+        *) echo "error: task is not verified" >&2 ;;
+      esac
+      echo "run 'agent-task.sh verify', or close anyway with --reason TEXT" >&2
+      exit 2
+    fi
+    if [ -n "$CLOSE_REASON" ] && [ "$close_verification" != "fresh" ]; then
+      note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || exit 1
+      printf 'closed without fresh verification (%s): %s\n' \
+        "$close_verification" "$CLOSE_REASON" > "$note_file"
+      agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
+      rm -f "$note_file"
+    fi
     # Promote a one-line outcome into project shared memory so the next
     # session (any agent) starts from the conclusion, not from scratch.
     if [ "${OMS_AGENT_TASK_CLOSE_MEMORY:-1}" = "1" ]; then

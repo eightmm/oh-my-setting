@@ -25,6 +25,7 @@ TEXT_FILE=""
 PROVIDER=""
 MODEL=""
 ARTIFACT=""
+QUALITY=""
 SUMMARY=""
 MAX_BYTES="${OMS_THREAD_CONTEXT_BYTES:-6000}"
 MAX_TURNS="${OMS_THREAD_CONTEXT_TURNS:-12}"
@@ -66,6 +67,8 @@ Options:
   --provider P    Provider that produced the turn (append).
   --model M       Model that produced the turn (append).
   --artifact PATH Full-output artifact for this turn (append).
+  --quality Q     ok, thin, or empty: whether the peer actually answered
+                  (append). Non-ok turns are marked in context and show.
   --summary TEXT  Closing summary (close).
   --max-bytes N   Context byte budget (default: 6000, OMS_THREAD_CONTEXT_BYTES).
   --turns N       Context turn limit (default: 12, OMS_THREAD_CONTEXT_TURNS).
@@ -94,6 +97,13 @@ while [ "$#" -gt 0 ]; do
     --provider) [ "$#" -ge 2 ] || fail "--provider requires a value"; PROVIDER="$2"; shift 2 ;;
     --model) [ "$#" -ge 2 ] || fail "--model requires a value"; MODEL="$2"; shift 2 ;;
     --artifact) [ "$#" -ge 2 ] || fail "--artifact requires a path"; ARTIFACT="$2"; shift 2 ;;
+    --quality)
+      [ "$#" -ge 2 ] || fail "--quality requires a value"
+      case "$2" in
+        ok|thin|empty) QUALITY="$2" ;;
+        *) fail "--quality must be ok, thin, or empty" ;;
+      esac
+      shift 2 ;;
     --summary) [ "$#" -ge 2 ] || fail "--summary requires a value"; SUMMARY="$2"; shift 2 ;;
     --max-bytes) [ "$#" -ge 2 ] || fail "--max-bytes requires a value"; MAX_BYTES="$2"; shift 2 ;;
     --turns) [ "$#" -ge 2 ] || fail "--turns requires a value"; MAX_TURNS="$2"; shift 2 ;;
@@ -183,6 +193,7 @@ append_row() {
   OMS_TH_FILE="$file" OMS_TH_ID="$id" OMS_TH_ROLE="$role" \
   OMS_TH_TEXT_FILE="$text_file" OMS_TH_AGENT="$(oms_detect_agent)" \
   OMS_TH_PROVIDER="$PROVIDER" OMS_TH_MODEL="$MODEL" OMS_TH_ARTIFACT="$ARTIFACT" \
+  OMS_TH_QUALITY="$QUALITY" \
   OMS_TH_MAX="${OMS_THREAD_TURN_BYTES:-4000}" \
   python3 - <<'PY'
 import json, os, time
@@ -227,7 +238,7 @@ row = {
     "text": text,
 }
 for key, env in (("provider", "OMS_TH_PROVIDER"), ("model", "OMS_TH_MODEL"),
-                 ("artifact", "OMS_TH_ARTIFACT")):
+                 ("artifact", "OMS_TH_ARTIFACT"), ("quality", "OMS_TH_QUALITY")):
     value = os.environ.get(env) or ""
     if value:
         row[key] = value
@@ -332,8 +343,11 @@ kept = []
 used = 0
 for row in reversed(rows[-limit:]):
     who = row.get("provider") or row.get("agent") or "agent"
-    block = "### %s (%s, %s)\n%s\n" % (row.get("role", "note"), who,
-                                       row.get("ts", "?"), row.get("text", ""))
+    quality = row.get("quality")
+    tag = "" if quality in (None, "ok") else " [%s answer]" % quality
+    block = "### %s (%s, %s)%s\n%s\n" % (row.get("role", "note"), who,
+                                          row.get("ts", "?"), tag,
+                                          row.get("text", ""))
     size = len(block.encode("utf-8"))
     if kept and used + size > budget:
         break
@@ -386,6 +400,8 @@ with open(os.environ["OMS_TH_FILE"], encoding="utf-8", errors="replace") as f:
         print("\n## %s %s (%s)" % (row.get("seq", "?"), row.get("role", "note"), who))
         if row.get("model"):
             print("model: %s" % row["model"])
+        if row.get("quality") and row["quality"] != "ok":
+            print("quality: %s (did not really answer)" % row["quality"])
         if row.get("artifact"):
             print("artifact: %s" % row["artifact"])
         print(row.get("text", ""))

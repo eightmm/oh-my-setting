@@ -223,6 +223,7 @@ project_content() {
     printf -- '- Logs/checkpoints:\n\n'
   fi
   printf '## Notes\n\n'
+  printf -- '- Gotchas (non-obvious decisions an agent would get wrong):\n'
   printf -- '- Do not touch:\n'
   printf -- '- Risks:\n'
 }

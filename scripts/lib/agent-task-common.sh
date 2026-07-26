@@ -3,6 +3,8 @@
 
 # shellcheck source=agent-memory-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-memory-common.sh"
+# shellcheck source=oms-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/oms-common.sh"
 
 agent_task_project_file() {
   local repo="$1"
@@ -677,4 +679,47 @@ agent_task_prune_for_budget() {
       print marker
     }
   ' "$file"
+}
+
+# Verification freshness. A green `status: verified` only means something if the
+# repo has not moved since the check ran, and if the contract that ran is still
+# the contract in the packet. Prints: none (never verified), fresh, or stale.
+# Content-free: only fingerprints are compared, never diff content or paths.
+agent_task_verification_state() {
+  local file="$1"
+  local repo="$2"
+  local stored_state stored_cmd_sha current_state current_cmd_sha status
+
+  [ -s "$file" ] || { printf 'none\n'; return 0; }
+  status="$(agent_task_metadata_value "$file" status 2>/dev/null || printf 'active')"
+  stored_state="$(agent_task_metadata_value "$file" verified_state 2>/dev/null || true)"
+  if [ "$status" != "verified" ] || [ -z "$stored_state" ]; then
+    printf 'none\n'
+    return 0
+  fi
+  current_state="$(oms_git_state_fingerprint "$repo" 2>/dev/null || printf 'unknown')"
+  if [ "$stored_state" != "$current_state" ]; then
+    printf 'stale\n'
+    return 0
+  fi
+  # A rewritten Verify section is a different contract, so the old pass does
+  # not carry over even when no file changed.
+  stored_cmd_sha="$(agent_task_metadata_value "$file" verified_cmd_sha 2>/dev/null || true)"
+  if [ -n "$stored_cmd_sha" ]; then
+    current_cmd_sha="$(agent_task_verify_command "$file" | oms_sha256_stream 2>/dev/null || true)"
+    if [ -n "$current_cmd_sha" ] && [ "$stored_cmd_sha" != "$current_cmd_sha" ]; then
+      printf 'stale\n'
+      return 0
+    fi
+  fi
+  printf 'fresh\n'
+}
+
+# The verification contract stored in the packet (empty when there is none).
+agent_task_verify_command() {
+  awk '
+    $0 == "## Verify" { inside = 1; next }
+    inside && /^## / { exit }
+    inside && NF { print }
+  ' "$1"
 }

@@ -7,6 +7,28 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Verification that cannot go stale unnoticed: `agent-task verify` now binds a
+  pass to a content-free fingerprint of the tree it passed on and to the
+  contract that ran, `status` reports `verification: fresh|stale|none` (also in
+  `--json`), and `close` refuses a packet whose declared verification is missing
+  or stale unless `--reason TEXT` records why — closing promotes "Closed task"
+  into shared memory, so an unverified close hands the next session a false
+  green.
+- `oms state` marks CI recorded for a different commit as STALE with the
+  current HEAD and the refresh command (`ci.fresh`/`ci.current_sha` in `--json`),
+  instead of printing an old green conclusion with no indication it is old.
+- Cross-agent answers are checked mechanically before they count: `ma_answer_quality`
+  classifies a provider reply as ok, thin, or empty (a CLI can exit 0 and return
+  a banner or a clarifying question), threads label non-ok turns, `oms consult`
+  falls back to one other peer when an automatically picked one fails or does
+  not answer (never for a pinned `--to`, never after an outbound-gate block),
+  and `--all` reports how many peers actually answered.
+- `skill-doctor` rightsizes instruction files: it flags a `SKILL.md` over the
+  load budget (`OMS_SKILL_WORDS`, default 900) and references/ that no SKILL.md
+  links, so skills stay short routers into detail read only when relevant.
+  Generated `PROJECT.md` now leads its notes with gotchas — the non-obvious
+  decisions an agent would otherwise get wrong — rather than restating what the
+  repo already shows.
 - Cross-agent conversations (`agent-thread.sh`, `oms thread`) and one verb to
   use them (`agent-consult.sh`, `oms consult`). Every cross-agent call used to
   be one-shot — the peer answered into an artifact and the next call started

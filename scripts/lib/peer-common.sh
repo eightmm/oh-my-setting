@@ -674,6 +674,59 @@ extract_output() {
   awk 'BEGIN{flag=0} /^## Output$/{flag=1;next} /^## Exit$/{flag=0} flag' "$1"
 }
 
+# Did the provider actually answer? A CLI can exit 0 and still return nothing
+# usable — an empty body, a banner, or a clarifying question back at us. Exit
+# status alone cannot tell a council "3/3 succeeded" from "2 answers and one
+# non-answer", which is how a thin reply gets weighted like a real one.
+# Mechanical only: no model call, no semantic judgement.
+# Prints: ok | thin | empty.
+ma_answer_quality() {
+  local artifact="$1"
+  local tmp
+  local verdict
+
+  [ -f "$artifact" ] || { printf 'empty\n'; return 0; }
+  tmp="$(agent_memory_mktemp)" || { printf 'ok\n'; return 0; }
+  extract_output "$artifact" > "$tmp"
+  verdict="$(OMS_AQ_MIN="${OMS_ANSWER_MIN_BYTES:-160}" python3 - "$tmp" <<'PY'
+import os, re, sys
+
+try:
+    minimum = int(os.environ.get("OMS_AQ_MIN", "160"))
+except ValueError:
+    minimum = 160
+# Provider banners and harness route lines are not answer content.
+noise = re.compile(
+    r"^\s*(model-route:|model-result:|tokens used|\[REDACTED|OpenAI Codex|"
+    r"workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|"
+    r"reasoning summaries:|session id:|-{3,}$|user$|DRY RUN)")
+lines = []
+with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
+    for line in f:
+        line = line.rstrip()
+        if not line.strip() or noise.match(line):
+            continue
+        lines.append(line.strip())
+body = "\n".join(lines)
+if not body:
+    print("empty")
+    raise SystemExit(0)
+if len(body.encode("utf-8")) < minimum:
+    print("thin")
+    raise SystemExit(0)
+# A short reply that is mostly a question back at the caller is a non-answer:
+# the peer did not do the work, it asked us to.
+questions = sum(1 for line in lines if line.endswith("?"))
+if len(body.encode("utf-8")) < minimum * 4 and questions and questions * 2 >= len(lines):
+    print("thin")
+    raise SystemExit(0)
+print("ok")
+PY
+)"
+  rm -f "$tmp"
+  printf '%s\n' "${verdict:-ok}"
+}
+
 # --- Cross-agent threads ----------------------------------------------------
 # A thread is what turns isolated one-shot calls into an exchange: the caller
 # injects the transcript so far, the peer answers with that context, and the
@@ -711,7 +764,7 @@ ma_thread_ensure() {
 # holds the full text.
 ma_thread_append() {
   local repo="$1" thread="$2" role="$3" text_file="$4" provider="${5:-}"
-  local model="${6:-}" artifact="${7:-}"
+  local model="${6:-}" artifact="${7:-}" quality="${8:-}"
   local args
 
   [ -n "$thread" ] || return 0
@@ -721,6 +774,7 @@ ma_thread_append() {
   [ -z "$provider" ] || args+=(--provider "$provider")
   [ -z "$model" ] || args+=(--model "$model")
   [ -z "$artifact" ] || args+=(--artifact "$artifact")
+  [ -z "$quality" ] || args+=(--quality "$quality")
   bash "$(ma_scripts_dir)/agent-thread.sh" "${args[@]}" >/dev/null 2>&1 || {
     echo "note: thread turn not recorded (see $thread)" >&2
     return 0
@@ -743,7 +797,8 @@ ma_thread_record_exchange() {
   [ -f "$artifact" ] || return 0
   tmp="$(agent_memory_mktemp)" || return 0
   extract_output "$artifact" | ma_sanitize_quoted_output > "$tmp" 2>/dev/null || true
-  ma_thread_append "$repo" "$thread" answer "$tmp" "$provider" "$model" "$artifact"
+  ma_thread_append "$repo" "$thread" answer "$tmp" "$provider" "$model" "$artifact" \
+    "$(ma_answer_quality "$artifact")"
   rm -f "$tmp"
 }
 
