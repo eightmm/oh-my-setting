@@ -156,9 +156,16 @@ check_optional_cmd() {
 # narrow allow-list turns every antigravity answer into a non-answer that costs
 # a full provider call to discover. Cheap to check from the config, so check it
 # here rather than making the operator learn it from an empty council.
-# Comma-separated: an entry can be a multi-word command like "git diff".
-ANTIGRAVITY_READ_COMMANDS="cat,rg,git diff,git show,git ls-files"
-
+# Four permission namespaces, established by probing the CLI and reading the
+# request it recorded per step: `command` (run a shell command), `read_file`,
+# `write_file` (a directory target grants it recursively), and `unsandboxed`
+# (leave the sandbox — what a shell redirection actually needs). A `command`
+# target is matched against the whole command line, so a peer that runs
+# `pwd && ls -la` needs a rule covering that string: enumerating commands does
+# not converge, which is why this asks for command(*) instead of a list. That
+# is not the write authority it looks like — under `--sandbox`, which is how
+# this harness invokes agy, a granted command still cannot write outside the
+# sandbox without a separate `unsandboxed` rule.
 check_antigravity_permissions() {
   local settings="$HOME/.gemini/antigravity-cli/settings.json"
   local missing
@@ -168,7 +175,7 @@ check_antigravity_permissions() {
     echo "warn: antigravity has no $settings; headless consults will be denied every tool"
     return 0
   fi
-  missing="$(ANTIGRAVITY_SETTINGS="$settings" ANTIGRAVITY_READ_COMMANDS="$ANTIGRAVITY_READ_COMMANDS" python3 - <<'PY'
+  missing="$(ANTIGRAVITY_SETTINGS="$settings" python3 - <<'PY'
 import json, os, sys
 
 path = os.environ["ANTIGRAVITY_SETTINGS"]
@@ -178,32 +185,29 @@ try:
 except (OSError, ValueError):
     print("unreadable")
     sys.exit(0)
-granted = set()
-namespaces = set()
+granted = {}
 for rule in allow:
     if not isinstance(rule, str) or not rule.endswith(")") or "(" not in rule:
         continue
     namespace, _, target = rule[:-1].partition("(")
-    namespaces.add(namespace.strip())
-    if namespace.strip() == "command":
-        granted.add(target.strip())
-needed = [c.strip() for c in os.environ["ANTIGRAVITY_READ_COMMANDS"].split(",")
-          if c.strip()]
-# Rules match by command prefix, so "git" alone covers "git diff".
-missing = [c for c in needed
-           if c not in granted and c.split()[0] not in granted]
+    granted.setdefault(namespace.strip(), set()).add(target.strip())
+missing = []
 # Reading a file is its own permission, not a shell command: without it the CLI
 # denies its own Read tool and shell access alone does not save the call.
-if "read_file" not in namespaces:
-    missing.append("read_file(*) (file reads, not a shell command)")
+if "*" not in granted.get("read_file", ()):
+    missing.append("read_file(*) (file reads; a narrower path also works)")
+# A peer chains commands, and the rule is matched against the whole line, so a
+# curated list denies the first `cd x && rg y` and the answer is lost.
+if "*" not in granted.get("command", ()):
+    missing.append("command(*) (shell; --sandbox still blocks writes)")
 print(", ".join(missing))
 PY
 )"
   if [ "$missing" = "unreadable" ]; then
     echo "warn: antigravity settings $settings is not readable JSON"
   elif [ -n "$missing" ]; then
-    echo "warn: antigravity cannot run these in headless consults: $missing"
-    echo "warn: add command(<name>) entries under permissions.allow in $settings"
+    echo "warn: antigravity headless consults will be denied: $missing"
+    echo "warn: add these under permissions.allow in $settings"
   else
     echo "ok: antigravity headless read permissions"
   fi

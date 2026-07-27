@@ -25,7 +25,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   untouched), keeps it out of the answered and family counts, and quotes the
   provider's own reason so the operator knows what to fix. `doctor` reports the
   same thing before a call is spent, by checking whether antigravity's
-  allow-list covers the commands a repository read needs.
+  allow-list covers the commands a repository read needs. Probing the CLI
+  showed a curated command list cannot work — a `command` rule is matched
+  against the whole command line, so the first `cd x && rg y` a peer runs is
+  denied — while `command(*)` is not the write authority it appears to be:
+  under `--sandbox`, which is how this harness invokes agy, escaping to write
+  needs a separate `unsandboxed` rule. The check now asks for `command(*)` plus
+  `read_file(*)` instead of an unwinnable list of commands.
 
 ### Added
 - A second audit council was asked where the harness is incomplete *and* where

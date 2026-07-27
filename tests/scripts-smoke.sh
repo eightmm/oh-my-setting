@@ -379,7 +379,7 @@ setup_doctor_home() {
   cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
 {
   "permissions": {
-    "allow": ["command(cat)", "command(rg)", "command(git)", "read_file(*)"]
+    "allow": ["command(*)", "read_file(*)"]
   }
 }
 JSON
@@ -1553,12 +1553,14 @@ test_doctor_warns_when_antigravity_cannot_read_in_headless_mode() {
   printf '#!/bin/sh\nexit 0\n' > "$bin_dir/agy"
   chmod +x "$bin_dir/agy"
   # Headless antigravity cannot prompt, so a command outside permissions.allow
-  # is auto-denied and the call returns nothing. Discovering that from an empty
-  # council costs a full provider call; the config says it for free.
+  # is auto-denied and the call returns nothing. A curated list is not enough:
+  # the rule is matched against the whole command line, so the first chained
+  # command a peer runs is denied. Discovering that from an empty council costs
+  # a full provider call; the config says it for free.
   cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
 {
   "permissions": {
-    "allow": ["command(ls)"]
+    "allow": ["command(ls)", "command(git status)", "read_file(*)"]
   }
 }
 JSON
@@ -1567,8 +1569,10 @@ JSON
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a narrow antigravity allow-list is a warning, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'warn: antigravity cannot run these in headless consults' ||
+  printf '%s' "$out" | grep -Fq 'warn: antigravity headless consults will be denied' ||
     fail "the doctor should name the missing permissions: $out"
+  printf '%s' "$out" | grep -Fq 'command(*)' ||
+    fail "a curated command list does not survive a chained command: $out"
   printf '%s' "$out" | grep -Fq 'permissions.allow' ||
     fail "the warning should say where to fix it: $out"
   # Shell access is not enough: reading a file is a separate permission, and a
@@ -1576,7 +1580,7 @@ JSON
   cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
 {
   "permissions": {
-    "allow": ["command(cat)", "command(rg)", "command(git)"]
+    "allow": ["command(*)"]
   }
 }
 JSON
