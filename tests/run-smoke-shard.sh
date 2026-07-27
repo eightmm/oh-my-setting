@@ -14,6 +14,9 @@ Usage: run-smoke-shard.sh [--list] [--shard I/N] [--jobs N]
 
 Run every test_* function defined in scripts-smoke.sh. --shard selects one
 deterministic, 1-based round-robin partition. --jobs runs N shards in parallel.
+
+A passing run prints one line. Set OMS_VERBOSE=1 for the full test output; a
+failing run always prints everything.
 EOF
 }
 
@@ -42,6 +45,9 @@ while [ "$#" -gt 0 ]; do
     *) fail "unknown argument: $1" ;;
   esac
 done
+
+RUN_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/oms-smoke-suite.XXXXXX")"
+trap 'rm -f "$RUN_SCRIPT"' EXIT
 
 for value in "$SHARD" "$TOTAL"; do
   case "$value" in *[!0-9]*|"") fail "shard values must be positive integers" ;; esac
@@ -159,4 +165,24 @@ awk -v shard="$SHARD" -v total="$TOTAL" '
   END {
     if (!emitted) exit 3
   }
-' "$SUITE" | OMS_SMOKE_RUNNER_ACTIVE=1 OMS_TEST_ROOT="$ROOT" bash
+' "$SUITE" > "$RUN_SCRIPT"
+
+# Passing tests say nothing but "ok": the per-test chatter is only evidence for
+# a failure, and printing thousands of lines on every green run is context an
+# agent has to read and pay for. A failure prints everything.
+run_count="$(manifest | awk -v shard="$SHARD" -v total="$TOTAL" '(NR - 1) % total == shard - 1' | grep -c .)"
+run_log="$(mktemp "${TMPDIR:-/tmp}/oms-smoke-run.XXXXXX")"
+run_status=0
+OMS_SMOKE_RUNNER_ACTIVE=1 OMS_TEST_ROOT="$ROOT" bash "$RUN_SCRIPT" > "$run_log" 2>&1 || run_status=$?
+if [ "$run_status" -ne 0 ] || [ "${OMS_VERBOSE:-0}" = "1" ]; then
+  cat "$run_log"
+fi
+rm -f "$run_log" "$RUN_SCRIPT"
+if [ "$run_status" -eq 0 ]; then
+  if [ "$TOTAL" -eq 1 ]; then
+    echo "scripts-smoke: ok ($run_count tests)"
+  else
+    echo "scripts-smoke: ok (shard $SHARD/$TOTAL, $run_count tests)"
+  fi
+fi
+exit "$run_status"

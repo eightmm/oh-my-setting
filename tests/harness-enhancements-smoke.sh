@@ -390,7 +390,9 @@ test_second
 # SMOKE_TEST_CALLS_END
 echo done
 EOF
-  OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" --shard 2/2 > "$out"
+  # Which tests ran is verbose-mode evidence now: a passing run prints one
+  # summary line, so the partition has to be inspected with the output on.
+  OMS_VERBOSE=1 OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" --shard 2/2 > "$out"
   grep -Fq 'second' "$out" || fail "owning shard did not execute its test"
   if grep -Fq 'first' "$out"; then
     fail "legacy call block formatting caused cross-shard duplicate execution"

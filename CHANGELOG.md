@@ -7,6 +7,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The verification gate answers at feature level, not per line of chatter:
+  `scripts/check.sh` prints one `ok: <stage>` per suite and the smoke runner one
+  `scripts-smoke: ok (N tests)` per shard, so a green run is ~25 lines instead of
+  a few thousand. A failing stage still prints its full output, and
+  `OMS_VERBOSE=1` restores everything — the detail is evidence for a failure, not
+  something an agent should read (and pay for) on every pass.
 - Panels reach the canonical councils: `peer-ask` and `peer-review` take
   `--tiers fast,balanced,deep` and accept a tier inside `--providers`
   (`codex:deep`), so one council can span providers and model tiers. Each target
