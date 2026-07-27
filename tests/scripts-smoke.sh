@@ -10889,6 +10889,44 @@ test_delegate_says_the_worker_cannot_see_uncommitted_work() {
     fail "the patch reviewer needs to know which base it was written against"
 }
 
+test_delegate_refuses_to_nest_beyond_the_depth_cap() {
+  local project="$TMP/delegate-depth"
+  local bin="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin" "$home_dir"
+  printf '#!/usr/bin/env bash\ncat > /dev/null\necho worked\n' > "$bin/codex"
+  chmod +x "$bin/codex"
+
+  # Nesting multiplies: a worker that delegates can spawn workers that delegate.
+  # The project rules already said a worker does not do this; nothing enforced
+  # it, and a worker that tried simply succeeded.
+  out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_HARNESS_DELEGATE_DEPTH=1 \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --prompt "spawn from inside a worker" --no-verify 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "a worker must not spawn its own worker: $out"
+  printf '%s' "$out" | grep -Fq 'does not spawn its own workers' ||
+    fail "the refusal should say what to do instead: $out"
+  printf '%s' "$out" | grep -Fq 'oms consult' ||
+    fail "read-only help is still available and the message should say so: $out"
+
+  # A two-stage job can raise the cap on purpose, in one place.
+  rc=0
+  HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_HARNESS_DELEGATE_DEPTH=1 \
+    OMS_DELEGATE_MAX_DEPTH=2 "$ROOT/scripts/peer-delegate.sh" --to codex \
+    --repo "$project" --prompt "explicitly nested" --no-verify >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "an explicitly raised cap should allow one more level"
+
+  # And the top level is unaffected.
+  rc=0
+  HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --prompt "top level" --no-verify >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "an ordinary delegation must still run"
+}
+
 test_delegate_reports_a_worker_that_could_not_act() {
   local project="$TMP/delegate-blocked"
   local bin="$project/bin"

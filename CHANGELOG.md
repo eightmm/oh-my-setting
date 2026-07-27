@@ -32,6 +32,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and read back from the snapshot, rather than asked for twice: `agy models`
   started while a previous agy invocation is still exiting hangs until its
   timeout, so the second ask was intermittently no answer at all.
+- Delegation depth is enforced instead of merely written down. The project
+  rules said a worker does not recursively delegate; nothing checked it, and a
+  worker that tried simply succeeded. Depth is now counted and capped
+  (`OMS_DELEGATE_MAX_DEPTH`, default 1), because nesting multiplies: a worker
+  that delegates can spawn workers that delegate, and cost, worktrees, and the
+  number of things writing to one repository grow with the power, not the sum.
+  The refusal names the alternative — do the work, or report what needs
+  splitting so the caller fans out — and points at `oms consult`, which is
+  read-only, widens nothing, and stays available at any depth.
 - A model the account is not entitled to now falls back within its tier, the
   same way an unrecognised name does — both are availability problems, and
   dropping a tier is the answer to neither.

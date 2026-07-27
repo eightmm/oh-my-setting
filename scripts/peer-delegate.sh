@@ -341,6 +341,26 @@ git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
 
+# How deep this delegation sits. Nesting multiplies: a worker that delegates
+# can spawn workers that delegate, and the cost, the worktrees, and the number
+# of things writing to one repository all grow with the power, not the sum.
+# The project rules already said a worker does not recursively delegate; until
+# now nothing enforced it, and a worker that tried simply succeeded. The cap is
+# a number rather than a flat ban so a genuine two-stage job can raise it on
+# purpose, in one place, where the cost is visible.
+DELEGATE_DEPTH="${OMS_HARNESS_DELEGATE_DEPTH:-0}"
+case "$DELEGATE_DEPTH" in *[!0-9]*|"") DELEGATE_DEPTH=0 ;; esac
+DELEGATE_MAX_DEPTH="${OMS_DELEGATE_MAX_DEPTH:-1}"
+case "$DELEGATE_MAX_DEPTH" in *[!0-9]*|"") DELEGATE_MAX_DEPTH=1 ;; esac
+if [ "$((DELEGATE_DEPTH + 1))" -gt "$DELEGATE_MAX_DEPTH" ]; then
+  echo "error: delegation depth $((DELEGATE_DEPTH + 1)) exceeds OMS_DELEGATE_MAX_DEPTH=$DELEGATE_MAX_DEPTH" >&2
+  echo "error: a delegated worker does not spawn its own workers. Do the work, or" >&2
+  echo "error: report what needs splitting and let the caller fan out. Read-only" >&2
+  echo "error: help is still available: oms consult." >&2
+  exit 2
+fi
+export OMS_HARNESS_DELEGATE_DEPTH="$((DELEGATE_DEPTH + 1))"
+
 if [ -n "$EXECUTOR_ID" ]; then
   [ -z "$ROLE" ] || fail "--executor and --role are mutually exclusive"
   executor_meta="$("$(ma_scripts_dir)/agent-executor.sh" show --repo "$REPO" --id "$EXECUTOR_ID")" ||
@@ -646,6 +666,8 @@ fi
   printf '# %s delegate\n\n' "$TO"
   printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
+  [ "$OMS_HARNESS_DELEGATE_DEPTH" -le 1 ] ||
+    printf -- '- delegation depth: %s\n' "$OMS_HARNESS_DELEGATE_DEPTH"
   [ "${dirty_count:-0}" -eq 0 ] ||
     printf -- '- base: HEAD (%s file(s) uncommitted in the caller tree were NOT visible to the worker)\n' \
       "$dirty_count"
