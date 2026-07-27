@@ -76,6 +76,29 @@ oms_reasoning_for_class() {
   esac
 }
 
+# One step up the shared scale. For work whose cost of being wrong is not
+# another attempt: a release gate or an advisor pass is answered once and acted
+# on, unlike a call that can simply be repeated.
+oms_reasoning_step_up() {
+  case "$1" in
+    low) printf 'medium\n' ;;
+    medium) printf 'high\n' ;;
+    high) printf 'xhigh\n' ;;
+    xhigh) printf 'max\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# Operations that gate something irreversible. Everything else keeps the tier's
+# ordinary effort: spending the top of a scale on routine work is how a budget
+# disappears without anything getting better.
+oms_reasoning_wants_headroom() {
+  case "$1" in
+    advise|decision|release|review-gate) return 0 ;;
+  esac
+  return 1
+}
+
 oms_reasoning_from_model() {
   case "$1" in
     *"(Low)") printf 'low\n' ;;
@@ -308,6 +331,18 @@ oms_model_prepare() {
 
   if [ "$effort_requested" = auto ]; then
     OMS_REASONING_RESOLVED="$(oms_reasoning_for_class "$resolved")"
+    # A gate or an advisor pass gets one step more thinking where the chosen
+    # model has one, because that answer is acted on rather than retried.
+    if [ "${OMS_REASONING_NO_HEADROOM:-0}" != 1 ] &&
+      oms_reasoning_wants_headroom "$operation"; then
+      OMS_REASONING_RESOLVED="$(oms_reasoning_step_up "$OMS_REASONING_RESOLVED")"
+    fi
+    # Then fit it to the scale the selected model publishes. The fixed
+    # low/medium/high map predates knowing that scales differ per model, and an
+    # effort the model does not have is a failed call, not a slower one.
+    OMS_REASONING_RESOLVED="$(oms_capability_clamp_effort "$provider" \
+      "$OMS_REASONING_RESOLVED" "$OMS_MODEL_PRIMARY" 2>/dev/null ||
+      printf '%s' "$OMS_REASONING_RESOLVED")"
     OMS_REASONING_EXPLICIT=0
   else
     OMS_REASONING_RESOLVED="$effort_requested"

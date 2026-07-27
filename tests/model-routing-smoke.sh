@@ -594,5 +594,38 @@ claude_artifact="$(find "$repo/.oms/artifacts/call" -name '*rotated-model-name*.
 grep -Fq 'model-fallback: reason=model-unavailable selected=fable' "$claude_artifact" ||
   fail "the artifact must record which model actually answered"
 
+# --- effort follows the task, then the model's scale ------------------------
+# Routine work keeps the tier's ordinary effort; work that gates something
+# irreversible gets one step more thinking, but only as far as the chosen model
+# actually goes.
+export OMS_CAPABILITY_DIR="$cap_dir"
+# Antigravity carries its tier in the model variant, so the fixture has to be
+# named the way the real CLI names them or the effort is read from nothing.
+printf 'Probe Model (High)\tlow medium high\n' > "$cap_dir/antigravity.efforts"
+printf 'codex-deep-x\tlow medium high xhigh max ultra\n' > "$cap_dir/codex.efforts"
+
+effort_for() {
+  ( OMS_MODEL_OPERATION="$1" OMS_MODEL_CLASS_REQUEST=auto OMS_REASONING_EFFORT_REQUEST=auto
+    . "$ROOT/scripts/lib/model-routing.sh"
+    oms_model_prepare "$2" >/dev/null 2>&1
+    printf '%s' "$OMS_REASONING_RESOLVED" )
+}
+
+[ "$(effort_for review codex)" = medium ] ||
+  fail "ordinary work should keep its tier's effort, got $(effort_for review codex)"
+[ "$(effort_for release codex)" = xhigh ] ||
+  fail "a release gate should get headroom where the model has it, got $(effort_for release codex)"
+[ "$(effort_for advise codex)" = xhigh ] ||
+  fail "an advisor pass should get headroom, got $(effort_for advise codex)"
+# The same operation on a model whose scale stops at high must come back to
+# high rather than naming a step that model does not take.
+agy_clamped="$(OMS_MODEL_ANTIGRAVITY_DEEP='Probe Model (High)' effort_for release antigravity)"
+[ "$agy_clamped" = high ] ||
+  fail "headroom must clamp to the model's own scale, got '$agy_clamped'"
+[ "$(OMS_REASONING_NO_HEADROOM=1 effort_for release codex)" = high ] ||
+  fail "headroom should be switchable off"
+rm -f "$cap_dir/antigravity.efforts" "$cap_dir/codex.efforts"
+unset OMS_CAPABILITY_DIR
+
 "$ROOT/scripts/artifact-index.sh" --repo "$repo" validate >/dev/null
 echo "model-routing-smoke: ok"

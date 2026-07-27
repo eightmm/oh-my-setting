@@ -32,6 +32,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and read back from the snapshot, rather than asked for twice: `agy models`
   started while a previous agy invocation is still exiting hangs until its
   timeout, so the second ask was intermittently no answer at all.
+- Effort is chosen from the task and then fitted to the model, instead of a
+  fixed low/medium/high map. Work that gates something irreversible — an
+  advisor pass, a release, a review gate — takes one step more thinking,
+  because that answer is acted on rather than retried; everything else keeps
+  its tier's ordinary effort, since spending the top of a scale on routine work
+  is how a budget disappears without anything improving. The result is then
+  clamped to the scale the chosen model actually publishes, so the same release
+  gate runs at `xhigh` on codex and claude and comes back to `high` on
+  antigravity, whose scale stops there. `OMS_REASONING_NO_HEADROOM=1` turns the
+  escalation off.
 - A claude model name that stops resolving is recovered from instead of failing
   the tier. Claude Code publishes no catalog, so a pinned name cannot be checked
   before use — but it rejects an unknown one locally in about two seconds. Each
