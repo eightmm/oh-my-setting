@@ -97,6 +97,15 @@ oms_model_preferences() {
       printf '%s\n' 'Gemini 3.6 Flash (Medium)' 'Gemini 3.5 Flash (Medium)' ;;
     antigravity:deep)
       printf '%s\n' 'Gemini 3.6 Flash (High)' 'Gemini 3.5 Flash (High)' 'Gemini 3.1 Pro (High)' ;;
+    # Claude Code has no catalog to check a name against, so the pinned name
+    # goes first — it is what makes an artifact say which model actually ran —
+    # and the CLI's own public alias follows it. The alias always resolves to
+    # the current model of that tier, so a pinned name that rotates out is
+    # recovered from rather than fatal. Verified against the CLI: haiku and
+    # sonnet resolve, and it names opus/sonnet/fable as the public aliases.
+    claude:fast) printf '%s\n' 'claude-haiku-4-5-20251001' 'haiku' ;;
+    claude:balanced) printf '%s\n' 'claude-sonnet-5' 'sonnet' ;;
+    claude:deep) printf '%s\n' 'claude-fable-5' 'fable' ;;
     *) oms_model_default "$provider" "$class" ;;
   esac
 }
@@ -326,12 +335,45 @@ oms_model_prepare() {
   fi
   OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
 
+  OMS_MODEL_ALTERNATE=""
+  if [ -z "$explicit" ]; then
+    OMS_MODEL_ALTERNATE="$(oms_model_same_tier_alternative "$provider" "$resolved" \
+      "$OMS_MODEL_PRIMARY" || true)"
+  fi
+  export OMS_MODEL_ALTERNATE
   OMS_MODEL_SELECTED="$OMS_MODEL_PRIMARY"
   OMS_MODEL_FALLBACK_USED=0
   OMS_MODEL_FALLBACK_REASON=""
   export OMS_MODEL_RESOLVED_CLASS OMS_MODEL_PRIMARY OMS_MODEL_FALLBACK
   export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
   export OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
+}
+
+# The next candidate for the SAME tier. Dropping a tier is the answer to a busy
+# model; it is the wrong answer to a name the provider does not recognise,
+# where what is wanted is the same class of model under a name that still
+# resolves.
+oms_model_same_tier_alternative() {
+  local provider="$1" class="$2" current="$3"
+  local candidate
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [ "$candidate" != "$current" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done <<EOF
+$(oms_model_preferences "$provider" "$class")
+EOF
+  return 1
+}
+
+# A provider reporting that the model itself is unknown or unavailable, as
+# distinct from being busy. Claude Code answers this locally in a couple of
+# seconds, so the retry costs almost nothing.
+oms_model_is_unknown_model_output() {
+  local file="$1"
+  grep -Eiq "issue with the selected model|model.*(does not exist|may not exist)|unknown model|invalid model|model_not_found" "$file"
 }
 
 oms_model_is_capacity_output() {

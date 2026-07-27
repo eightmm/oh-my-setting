@@ -32,6 +32,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and read back from the snapshot, rather than asked for twice: `agy models`
   started while a previous agy invocation is still exiting hangs until its
   timeout, so the second ask was intermittently no answer at all.
+- A claude model name that stops resolving is recovered from instead of failing
+  the tier. Claude Code publishes no catalog, so a pinned name cannot be checked
+  before use — but it rejects an unknown one locally in about two seconds. Each
+  claude tier now carries the pinned name first, because that is what makes an
+  artifact say which model actually ran, and the CLI's own public alias
+  (`fable`, `sonnet`, `haiku`) as the same-tier alternative. Dropping a tier is
+  the answer to a busy model, not to a name the provider does not have.
 - `provider-permissions` turns the last human-only setup step into a harness
   tool. Codex and Claude Code take authority per invocation and need nothing;
   antigravity needs standing rules, and finding out which ones took a session

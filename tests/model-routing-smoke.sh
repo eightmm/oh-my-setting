@@ -44,6 +44,12 @@ for arg in "$@"; do
 done
 cat >/dev/null
 printf '%s\t%s\t%s\t%s\n' "$provider" "$count" "$model" "$PWD" >> "$CAPTURE_DIR/calls"
+if [ "${FAIL_MODE:-}" = unknown-model ] && [ "$count" -eq 1 ]; then
+  # Claude Code's own wording when a model name no longer resolves, decided
+  # locally without an API call.
+  echo "There's an issue with the selected model ($model). It may not exist or you may not have access to it." >&2
+  exit 1
+fi
 if [ "${FAIL_MODE:-}" = repair-stage-dirty ] && [ "$count" -eq 2 ]; then
   printf 'mutated\n' > routed.txt
   git add routed.txt
@@ -568,6 +574,25 @@ grep -Fq 'gpt-5.6-luna' "$TMP/permodel.err" ||
   fail "the rejection should name the model whose scale was exceeded: $(cat "$TMP/permodel.err")"
 rm -f "$cap_dir/codex.efforts"
 unset OMS_CAPABILITY_DIR
+
+# Claude Code publishes no catalog, so a pinned model name cannot be checked
+# before it is used — but it rejects an unknown one locally, in seconds. The
+# pinned name goes first because it is what makes the artifact say which model
+# ran; when it stops resolving, the tier's public alias is tried rather than
+# dropping to a cheaper tier the caller did not ask for.
+unset OMS_MODEL_CLAUDE_DEEP
+reset_capture
+export FAIL_MODE=unknown-model
+"$CALL" --repo "$repo" --to claude --model-class deep --prompt 'rotated model name' >/dev/null ||
+  fail "an unrecognised model name should be recovered from, not fatal"
+unset FAIL_MODE
+grep -Fxq 'claude-fable-5' "$capture/claude.1.argv" ||
+  fail "the pinned name must be tried first: $(cat "$capture/claude.1.argv")"
+grep -Fxq 'fable' "$capture/claude.2.argv" ||
+  fail "the retry should use the tier's alias, not a cheaper tier: $(cat "$capture/claude.2.argv")"
+claude_artifact="$(find "$repo/.oms/artifacts/call" -name '*rotated-model-name*.md' | head -n 1)"
+grep -Fq 'model-fallback: reason=model-unavailable selected=fable' "$claude_artifact" ||
+  fail "the artifact must record which model actually answered"
 
 "$ROOT/scripts/artifact-index.sh" --repo "$repo" validate >/dev/null
 echo "model-routing-smoke: ok"

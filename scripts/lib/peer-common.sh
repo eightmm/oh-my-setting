@@ -536,7 +536,8 @@ if selected_model:
 if fallback_model:
     row["fallback_model"] = fallback_model
 fallback_reason = os.environ.get("OMS_INDEX_FALLBACK_REASON", "")
-if fallback_reason in ("capacity", "capacity-no-fallback", "capacity-dirty-worktree"):
+if fallback_reason in ("capacity", "capacity-no-fallback", "capacity-dirty-worktree",
+                       "model-unavailable"):
     row["fallback_reason"] = fallback_reason
 row["fallback_used"] = os.environ.get("OMS_INDEX_FALLBACK_USED", "0") == "1"
 reasoning_effort = os.environ.get("OMS_INDEX_REASONING_EFFORT", "")
@@ -1062,6 +1063,31 @@ ma_run_routed_provider() {
   ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
     "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
   cat "$attempt_file" >> "$artifact"
+
+  # A name the provider does not recognise is not a busy model: the same tier
+  # under a name that still resolves is what is wanted, not a cheaper tier.
+  # Claude Code decides this locally in about two seconds, so the retry is
+  # nearly free — and without it, a pinned model rotating out of the catalog
+  # turns every call to that tier into a hard failure.
+  if [ "$status" -ne 0 ] && [ -n "${OMS_MODEL_ALTERNATE:-}" ] &&
+    oms_model_is_unknown_model_output "$attempt_file"; then
+    if [ "$access" = write ]; then
+      after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
+      [ -n "$before" ] && [ "$after" = "$before" ] || OMS_MODEL_ALTERNATE=""
+    fi
+    if [ -n "$OMS_MODEL_ALTERNATE" ]; then
+      OMS_MODEL_FALLBACK_USED=1
+      OMS_MODEL_FALLBACK_REASON="model-unavailable"
+      OMS_MODEL_SELECTED="$OMS_MODEL_ALTERNATE"
+      printf '\nmodel-fallback: reason=model-unavailable selected=%s\n' \
+        "$OMS_MODEL_SELECTED" >> "$artifact"
+      : > "$attempt_file"
+      status=0
+      ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
+        "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
+      cat "$attempt_file" >> "$artifact"
+    fi
+  fi
 
   if [ "$status" -ne 0 ] && oms_model_is_capacity_output "$attempt_file"; then
     if [ -z "$OMS_MODEL_FALLBACK" ]; then
