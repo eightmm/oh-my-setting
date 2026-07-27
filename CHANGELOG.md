@@ -32,6 +32,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and read back from the snapshot, rather than asked for twice: `agy models`
   started while a previous agy invocation is still exiting hangs until its
   timeout, so the second ask was intermittently no answer at all.
+- A model the account is not entitled to now falls back within its tier, the
+  same way an unrecognised name does — both are availability problems, and
+  dropping a tier is the answer to neither.
+- A request the provider declines is reported as a decline rather than a
+  generic failure: the artifact and the caller both say which provider and
+  model declined it. It is deliberately not re-sent to another model, and a
+  delegate spends no repair round on it. A decline is the provider's decision
+  about the request; machinery that keeps asking a different model until one
+  answers would be a way around that decision no matter what any individual
+  request happens to be.
 - Effort is chosen from the task and then fitted to the model, instead of a
   fixed low/medium/high map. Work that gates something irreversible — an
   advisor pass, a release, a review gate — takes one step more thinking,

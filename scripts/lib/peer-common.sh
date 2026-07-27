@@ -537,7 +537,7 @@ if fallback_model:
     row["fallback_model"] = fallback_model
 fallback_reason = os.environ.get("OMS_INDEX_FALLBACK_REASON", "")
 if fallback_reason in ("capacity", "capacity-no-fallback", "capacity-dirty-worktree",
-                       "model-unavailable"):
+                       "model-unavailable", "policy-declined"):
     row["fallback_reason"] = fallback_reason
 row["fallback_used"] = os.environ.get("OMS_INDEX_FALLBACK_USED", "0") == "1"
 reasoning_effort = os.environ.get("OMS_INDEX_REASONING_EFFORT", "")
@@ -1063,6 +1063,21 @@ ma_run_routed_provider() {
   ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
     "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
   cat "$attempt_file" >> "$artifact"
+
+  # A decline is the provider's decision about the request, not a fault to route
+  # around. Say so plainly and stop: re-sending the same request to another
+  # model until one answers would be a way past that decision, and a repair
+  # round would only reword it into the same wall.
+  if oms_model_is_policy_decline_output "$attempt_file"; then
+    OMS_MODEL_FALLBACK_REASON="policy-declined"
+    printf '\nmodel-result: declined by %s (%s); not retried on another model\n' \
+      "$provider" "$OMS_MODEL_SELECTED" >> "$artifact"
+    echo "note: $provider declined this request on $OMS_MODEL_SELECTED; it was not re-sent to another model" >&2
+    export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
+    [ "$access" != read ] || [ "$provider" != antigravity ] ||
+      ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+    return "$status"
+  fi
 
   # A name the provider does not recognise is not a busy model: the same tier
   # under a name that still resolves is what is wanted, not a cheaper tier.

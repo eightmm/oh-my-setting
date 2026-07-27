@@ -44,6 +44,14 @@ for arg in "$@"; do
 done
 cat >/dev/null
 printf '%s\t%s\t%s\t%s\n' "$provider" "$count" "$model" "$PWD" >> "$CAPTURE_DIR/calls"
+if [ "${FAIL_MODE:-}" = entitlement ] && [ "$count" -eq 1 ]; then
+  echo "This model is not available for your organization." >&2
+  exit 1
+fi
+if [ "${FAIL_MODE:-}" = declined ]; then
+  echo "Claude Code is unable to respond to this request, which appears to violate our Usage Policy." >&2
+  exit 1
+fi
 if [ "${FAIL_MODE:-}" = unknown-model ] && [ "$count" -eq 1 ]; then
   # Claude Code's own wording when a model name no longer resolves, decided
   # locally without an API call.
@@ -593,6 +601,32 @@ grep -Fxq 'fable' "$capture/claude.2.argv" ||
 claude_artifact="$(find "$repo/.oms/artifacts/call" -name '*rotated-model-name*.md' | head -n 1)"
 grep -Fq 'model-fallback: reason=model-unavailable selected=fable' "$claude_artifact" ||
   fail "the artifact must record which model actually answered"
+
+# A model the account is not entitled to is an availability problem: the same
+# tier under a name that resolves is the right answer.
+unset OMS_MODEL_CLAUDE_DEEP
+reset_capture
+export FAIL_MODE=entitlement
+"$CALL" --repo "$repo" --to claude --model-class deep --prompt 'entitlement route' >/dev/null ||
+  fail "a model the account cannot use should fall back within the tier"
+unset FAIL_MODE
+grep -Fxq 'fable' "$capture/claude.2.argv" ||
+  fail "the retry should use the tier alias: $(cat "$capture/claude.2.argv")"
+
+# A declined request is the provider deciding about the request. It is reported
+# and stops there: re-sending it to another model until one answers would be a
+# way around that decision, whatever the request happened to be.
+reset_capture
+export FAIL_MODE=declined
+rc=0
+"$CALL" --repo "$repo" --to claude --model-class deep --prompt 'declined route' >"$TMP/declined.out" 2>&1 || rc=$?
+unset FAIL_MODE
+[ "$rc" != 0 ] || fail "a declined request must not report success"
+[ "$(cat "$capture/claude.count")" = 1 ] ||
+  fail "a decline must not be re-sent to another model: $(cat "$capture/claude.count") attempts"
+declined_artifact="$(find "$repo/.oms/artifacts/call" -name '*declined-route*.md' | head -n 1)"
+grep -Fq 'declined by claude' "$declined_artifact" ||
+  fail "the artifact should say the provider declined, not just that it failed"
 
 # --- effort follows the task, then the model's scale ------------------------
 # Routine work keeps the tier's ordinary effort; work that gates something

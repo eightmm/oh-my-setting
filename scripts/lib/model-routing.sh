@@ -408,7 +408,18 @@ EOF
 # seconds, so the retry costs almost nothing.
 oms_model_is_unknown_model_output() {
   local file="$1"
-  grep -Eiq "issue with the selected model|model.*(does not exist|may not exist)|unknown model|invalid model|model_not_found" "$file"
+  grep -Eiq "issue with the selected model|model.*(does not exist|may not exist)|unknown model|invalid model|model_not_found|not (available|enabled) for (your|this) (account|organization|workspace)|do not have access to (this |that )?model" "$file"
+}
+
+# The provider declined the request itself, rather than failing to run it. This
+# is reported and never retried elsewhere: a decline is a decision by the
+# provider about the request, and machinery that re-sends it to a different
+# model until one complies would be a way around that decision regardless of
+# what any individual request happens to be. Naming it lets the caller see a
+# refusal instead of a mystery failure, and decide what to do.
+oms_model_is_policy_decline_output() {
+  local file="$1"
+  grep -Eiq "violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|\"?stop_reason\"?: ?\"?refusal" "$file"
 }
 
 oms_model_is_capacity_output() {

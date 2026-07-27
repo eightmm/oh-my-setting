@@ -690,6 +690,11 @@ run_worker() {
     route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
   fi
   case "$OMS_MODEL_FALLBACK_REASON:$worker_status" in
+    policy-declined:*)
+      # The provider declined the request. A repair round re-sends it, which is
+      # not repair — it is asking again until the answer changes.
+      route_capacity_terminal=1
+      ;;
     capacity:*|capacity-no-fallback:*|capacity-dirty-worktree:*|model-unavailable:*)
       # Both the pinned name and its alias failed, or the model is busy: either
       # way the brief is not the problem, so a repair round would only re-run
