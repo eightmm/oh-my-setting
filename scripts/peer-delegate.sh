@@ -586,6 +586,17 @@ git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
 oms_seed_local_agent_files "$REPO" "$worktree"
 
+# The worktree is built from HEAD, so the worker cannot see uncommitted work.
+# That is the right isolation, but it is silent, and a brief written about code
+# the caller is looking at on screen can describe something the worker will
+# never find — the whole round is then spent on a tree that does not have the
+# problem in it. Say the count once, here, and put it in the artifact so the
+# reviewer of the patch knows which base it was written against.
+dirty_count="$(git -C "$REPO" status --porcelain --untracked-files=no 2>/dev/null | grep -c . || true)"
+if [ "${dirty_count:-0}" -gt 0 ]; then
+  echo "note: $dirty_count file(s) differ from HEAD here; the worker sees HEAD, not your working tree" >&2
+fi
+
 # Liveness marker so another agent (or `oms state`) can see this worker is
 # in flight, not hung or dead. The launching process is the only writer;
 # cleanup removes it on normal exit, so a leftover file with a dead pid is a
@@ -635,6 +646,9 @@ fi
   printf '# %s delegate\n\n' "$TO"
   printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
+  [ "${dirty_count:-0}" -eq 0 ] ||
+    printf -- '- base: HEAD (%s file(s) uncommitted in the caller tree were NOT visible to the worker)\n' \
+      "$dirty_count"
   if [ "$KEEP_WORKTREE" = 1 ]; then
     printf -- '- worktree: %s\n\n' "$worktree"
   else
@@ -801,8 +815,10 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   if oms_worker_surface_snapshot "$REPO" "$worker_guard_dir"; then
     # A bounded scan must say it was bounded: silent truncation reads as full
     # coverage exactly where coverage matters.
-    if grep -q '^TRUNCATED' "$worker_guard_dir/files" 2>/dev/null; then
-      echo "note: worker guard scanned only the first ${OMS_WORKER_GUARD_MAX_FILES:-20000} untracked/ignored entries (OMS_WORKER_GUARD_MAX_FILES)" >&2
+    if grep -q '^TRUNCATED.*(ignored)' "$worker_guard_dir/files" 2>/dev/null; then
+      echo "note: worker guard stopped after ${OMS_WORKER_GUARD_MAX_FILES:-20000} entries; the rest are ignored files (caches, datasets). Every untracked source file was covered (OMS_WORKER_GUARD_MAX_FILES)" >&2
+    elif grep -q '^TRUNCATED' "$worker_guard_dir/files" 2>/dev/null; then
+      echo "warning: worker guard could not cover even the untracked files in ${OMS_WORKER_GUARD_MAX_FILES:-20000} entries; coverage is partial (raise OMS_WORKER_GUARD_MAX_FILES)" >&2
     fi
   else
     worker_guard_dir=""

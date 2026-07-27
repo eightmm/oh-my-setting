@@ -10506,11 +10506,14 @@ test_worker_guard_reports_a_bounded_scan() {
   printf 'a\n' > "$project/one.txt"
   printf 'b\n' > "$project/two.txt"
 
-  # A cap that hides how much it skipped reads as full coverage.
+  # A cap that hides how much it skipped reads as full coverage. Here the cap
+  # is too small to even reach the end of the untracked files, which is the
+  # serious case: coverage is genuinely partial, not merely short of the
+  # ignored churn.
   out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$project-bin:/usr/bin:/bin" \
     OMS_WORKER_GUARD_MAX_FILES=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" || fail "a bounded scan should not fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'scanned only the first 1 untracked/ignored entries' ||
+  printf '%s' "$out" | grep -Fq 'coverage is partial' ||
     fail "a truncated scan must say so: $out"
 }
 
@@ -10815,6 +10818,75 @@ test_provider_permissions_leaves_flag_driven_providers_alone() {
   out="$(PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" --check 2>&1)" ||
     fail "no antigravity means nothing to do: $out"
   printf '%s' "$out" | grep -Fq 'not installed' || fail "should say why there is nothing to do: $out"
+}
+
+test_worker_guard_spends_its_budget_on_untracked_before_ignored() {
+  local project="$TMP/guard-budget-order"
+  local snap="$TMP/guard-budget-order-snap"
+  local i
+  local changed
+  local files_line
+
+  make_committed_repo "$project"
+  printf 'junk/\n' > "$project/.gitignore"
+  git -C "$project" add .gitignore
+  git -C "$project" -c user.email=t@t -c user.name=t commit -qm "ignore junk"
+  # A real ML repo: an ignored tree with far more files than the budget, and a
+  # couple of genuinely new source files whose paths sort after it.
+  mkdir -p "$project/junk"
+  i=0
+  while [ "$i" -lt 30 ]; do
+    printf 'x\n' > "$project/junk/blob$i.bin"
+    i=$((i + 1))
+  done
+  printf 'new\n' > "$project/zz_new_source.py"
+
+  rm -rf "$snap"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_WORKER_GUARD_MAX_FILES=5 oms_worker_surface_snapshot "$project" "$snap" ) ||
+    fail "snapshot failed"
+  files_line="$(grep '^TRUNCATED' "$snap/files" || true)"
+  case "$files_line" in
+    *"(ignored)"*) ;;
+    *) fail "truncation should land in the ignored class, got: ${files_line:-<none>}" ;;
+  esac
+
+  # The point of the ordering: a stray write to an untracked source file is
+  # still caught, even though the scan stopped early.
+  printf 'new\nWORKER WROTE HERE\n' > "$project/zz_new_source.py"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_WORKER_GUARD_MAX_FILES=5 oms_worker_surface_diff "$project" "$snap" )"
+  case "$changed" in
+    *files*) ;;
+    *) fail "a change to an untracked source file must survive truncation, got: ${changed:-<none>}" ;;
+  esac
+}
+
+test_delegate_says_the_worker_cannot_see_uncommitted_work() {
+  local project="$TMP/delegate-dirty-base"
+  local bin="$project/bin"
+  local home_dir="$project/home"
+  local out
+  local artifact
+
+  make_committed_repo "$project"
+  mkdir -p "$bin" "$home_dir"
+  printf '#!/usr/bin/env bash\ncat > /dev/null\necho "did the work"\n' > "$bin/codex"
+  chmod +x "$bin/codex"
+  # The caller is mid-edit. The worktree is built from HEAD, so a brief written
+  # about what is on screen describes code the worker will never find.
+  printf 'base\nUNCOMMITTED WORK\n' > "$project/file.txt"
+
+  out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --prompt "change the thing" --no-verify 2>&1)" ||
+    fail "a dirty caller tree is a note, not a failure: $out"
+  printf '%s' "$out" | grep -Fq 'differ from HEAD' ||
+    fail "delegating from a dirty tree should say the worker sees HEAD: $out"
+
+  artifact="$(printf '%s' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
+  [ -f "$artifact" ] || fail "no artifact recorded: $out"
+  grep -Fq 'NOT visible to the worker' "$artifact" ||
+    fail "the patch reviewer needs to know which base it was written against"
 }
 
 test_delegate_reports_a_worker_that_could_not_act() {

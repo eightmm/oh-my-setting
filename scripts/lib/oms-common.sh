@@ -273,6 +273,12 @@ oms_worker_surface_capture_one() {
       # ignored tree is invisible to it. Enumerating with stat catches the
       # replacement without reading a single dataset byte. The walk is bounded:
       # a truncated scan says so instead of quietly covering less.
+      # Untracked-but-not-ignored paths are scanned first and ignored ones
+      # after, because the budget is spent in path order: a real ML repo whose
+      # ignored data/ and runs/ trees hold tens of thousands of files would
+      # otherwise eat the whole budget alphabetically and leave the handful of
+      # genuinely new source files — the ones a stray worker write would land
+      # in — unscanned. Truncation now only ever drops ignored churn.
       OMS_WG_REPO="$repo" OMS_WG_MAX="${OMS_WORKER_GUARD_MAX_FILES:-20000}" \
       OMS_WG_EXCLUDE="${OMS_WORKER_GUARD_EXCLUDE:-}" python3 - <<'PY'
 import hashlib, os, subprocess, sys
@@ -282,13 +288,22 @@ try:
     budget = int(os.environ.get("OMS_WG_MAX", "20000"))
 except ValueError:
     budget = 20000
-try:
-    raw = subprocess.check_output(
-        ["git", "-C", root, "ls-files", "-z", "--others"],
-        stderr=subprocess.DEVNULL)
-except Exception:
-    raise SystemExit(0)
-paths = sorted(p for p in raw.split(b"\0") if p)
+def listing(args):
+    try:
+        raw = subprocess.check_output(
+            ["git", "-C", root, "ls-files", "-z"] + args,
+            stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    return sorted(p for p in raw.split(b"\0") if p)
+
+
+untracked = listing(["--others", "--exclude-standard"])
+seen_untracked = set(untracked)
+ignored = [p for p in listing(["--others", "--ignored", "--exclude-standard"])
+           if p not in seen_untracked]
+paths = untracked + ignored
+first_ignored = len(untracked)
 count = 0
 # The harness writes this run's own artifacts and patch somewhere; when that is
 # inside the repo it is the harness moving, not the worker.
@@ -297,13 +312,17 @@ for extra in (os.environ.get("OMS_WG_EXCLUDE") or "").splitlines():
     extra = extra.strip().strip("/")
     if extra:
         excluded.append(extra)
-for rel in paths:
+for index, rel in enumerate(paths):
     name = os.fsdecode(rel)
     if any(name == prefix or name.startswith(prefix + "/") for prefix in excluded):
         continue
     count += 1
     if count > budget:
-        print("TRUNCATED after %d entries" % budget)
+        # Say which class was cut. "ignored" means every untracked source file
+        # was still covered; "untracked" means the budget is too small for this
+        # repository and the guard is genuinely partial.
+        klass = "ignored" if index >= first_ignored else "untracked"
+        print("TRUNCATED after %d entries (%s)" % (budget, klass))
         break
     full = os.path.join(root, name)
     try:

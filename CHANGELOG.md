@@ -27,6 +27,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the one command a person types, and everything after it is the agent's.
 
 ### Fixed
+- The worker guard was blind to new source files in any repository with a large
+  ignored tree. It spent its entry budget in path order, so a real project whose
+  `data/` and `runs/` hold tens of thousands of ignored files exhausted the cap
+  alphabetically and never reached the handful of untracked source files — the
+  exact places a stray worker write lands. Untracked-but-not-ignored paths are
+  now scanned first, so truncation can only ever drop ignored churn, and the
+  message says which class was cut: reaching the cap inside the ignored tree is
+  a note, failing to cover the untracked files is a warning that coverage is
+  partial.
+- `peer-delegate` says when the caller's tree is dirty. The worktree is built
+  from HEAD, which is the right isolation and was completely silent: a brief
+  written about code the caller has on screen can describe something the worker
+  will never find, and the whole round is spent against a tree that does not
+  contain the problem. The count is printed once and recorded in the artifact,
+  so whoever reviews the patch later knows which base it was written against.
 - `peer-delegate` no longer reports a worker that could not act as a clean run.
   A CLI denied a tool it cannot prompt for exits 0 having printed only its
   refusal, and the empty patch that follows looks exactly like honest work on an
