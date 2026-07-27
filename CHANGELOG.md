@@ -17,6 +17,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   *is* the sandbox boundary. A cold `uv run` needs `unsandboxed(uv)` only
   because uv's cache lives outside the worktree — a warm one, and every test
   the worker runs inside its worktree, needs nothing.
+  `--allow-toolchains` does the same for the package managers in a short
+  built-in list that are actually installed on the machine, so a second machine
+  reaches the same state without rediscovering it one denial at a time. `pip`
+  and `conda` (this setup uses uv), `docker` (its socket is root-equivalent),
+  and `make`, `node`, `git` (they write in-tree) stay out of that list even when
+  present.
 - The README and `oms help` now say plainly what was only implied: install is
   the one command a person types, and everything after it is the agent's.
 

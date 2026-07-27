@@ -10774,6 +10774,36 @@ PY
   [ "$rc" = 2 ] || fail "a wildcard sandbox escape should be refused: $out"
 }
 
+test_provider_permissions_toolchains_follow_the_machine() {
+  local dir="$TMP/provider-perms-toolchains"
+  local settings="$dir/settings.json"
+  local bin="$dir/bin"
+  local out
+
+  # Only tools this machine actually has: an escape granted to something that
+  # is not installed buys nothing and outlives the reason it was added.
+  mkdir -p "$dir" "$bin"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/agy"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/npm"
+  chmod +x "$bin/agy" "$bin/npm"
+
+  out="$(PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" --print \
+    --profile delegate --allow-toolchains --worktree-parent /tmp --settings "$settings" 2>&1)" ||
+    fail "print should succeed: $out"
+  printf '%s\n' "$out" | grep -Fxq 'unsandboxed(npm)' ||
+    fail "an installed package manager should be granted: $out"
+  if printf '%s\n' "$out" | grep -Fxq 'unsandboxed(cargo)'; then
+    fail "cargo is not on this PATH and must not be granted: $out"
+  fi
+  # Tools that write in-tree, contradict the uv policy, or hold root-equivalent
+  # access are out of the list regardless of being installed.
+  for excluded in pip conda docker make node git; do
+    if printf '%s\n' "$out" | grep -Fxq "unsandboxed($excluded)"; then
+      fail "$excluded must not be granted by --allow-toolchains: $out"
+    fi
+  done
+}
+
 test_provider_permissions_leaves_flag_driven_providers_alone() {
   local dir="$TMP/provider-perms-none"
   local bin="$dir/bin"

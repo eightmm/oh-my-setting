@@ -18,6 +18,18 @@ SETTINGS="${OMS_ANTIGRAVITY_SETTINGS:-$HOME/.gemini/antigravity-cli/settings.jso
 WORKTREE_PARENT="${TMPDIR:-/tmp}"
 ALLOW_COMMANDS=""
 ALLOW_FLAGS=""
+TOOLCHAINS=0
+
+# Package managers whose ordinary use writes outside the worktree — a registry
+# cache under $HOME — so a worker hits the sandbox on a cold cache and stops.
+# Deliberately short. Everything here can also run arbitrary code (`npm run`,
+# `cargo test`), so each entry is a real grant, justified by the tool being
+# unusable without it rather than by being convenient to have.
+# Not here on purpose: pip and conda (this setup uses uv, and granting them
+# would contradict that), docker (its socket is root on most machines), make
+# and node (they write in-tree; no cache to reach for), git (a worker writing
+# to the main repo's .git is the thing the worktree exists to prevent).
+OMS_TOOLCHAIN_COMMANDS="uv npm npx cargo pnpm yarn go poetry"
 
 fail() {
   echo "error: $*" >&2
@@ -49,6 +61,13 @@ Options:
                    sandbox. Repeatable, delegate profile only. Needed by tools
                    that write outside the worktree, e.g. `uv` (its cache lives
                    in $HOME, so a cold `uv run` is denied without this).
+  --allow-toolchains
+                   Grant unsandboxed() for the package managers in the built-in
+                   list that are installed on this machine (uv, npm, npx,
+                   cargo, pnpm, yarn, go, poetry). Nothing is granted for a tool
+                   that is absent. pip, conda, docker, make, node, and git are
+                   deliberately not in the list — see the comment in the script
+                   for why each one is out.
   --worktree-parent PATH
                    Where peer-delegate builds worktrees. Default: $TMPDIR, else
                    /tmp.
@@ -88,6 +107,10 @@ while [ "$#" -gt 0 ]; do
 }$2"
       ALLOW_FLAGS="$ALLOW_FLAGS --allow-command $2"
       shift 2 ;;
+    --allow-toolchains)
+      TOOLCHAINS=1
+      ALLOW_FLAGS="$ALLOW_FLAGS --allow-toolchains"
+      shift ;;
     --worktree-parent)
       [ "$#" -ge 2 ] || fail "--worktree-parent requires a path"
       WORKTREE_PARENT="$2"; shift 2 ;;
@@ -101,6 +124,24 @@ done
 
 if [ -n "$ALLOW_COMMANDS" ] && [ "$PROFILE" != delegate ]; then
   fail "--allow-command applies to --profile delegate; a consult peer never writes"
+fi
+if [ "$TOOLCHAINS" = 1 ]; then
+  [ "$PROFILE" = delegate ] ||
+    fail "--allow-toolchains applies to --profile delegate; a consult peer never builds"
+  # Only what this machine actually has: granting an escape to a tool that is
+  # not installed buys nothing and outlives the reason it was added.
+  for toolchain in $OMS_TOOLCHAIN_COMMANDS; do
+    command -v "$toolchain" >/dev/null 2>&1 || continue
+    case "
+$ALLOW_COMMANDS
+" in
+      *"
+$toolchain
+"*) continue ;;
+    esac
+    ALLOW_COMMANDS="${ALLOW_COMMANDS:+$ALLOW_COMMANDS
+}$toolchain"
+  done
 fi
 
 if ! command -v agy >/dev/null 2>&1; then
