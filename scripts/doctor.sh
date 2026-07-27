@@ -179,14 +179,23 @@ except (OSError, ValueError):
     print("unreadable")
     sys.exit(0)
 granted = set()
+namespaces = set()
 for rule in allow:
-    if isinstance(rule, str) and rule.startswith("command(") and rule.endswith(")"):
-        granted.add(rule[len("command("):-1].strip())
+    if not isinstance(rule, str) or not rule.endswith(")") or "(" not in rule:
+        continue
+    namespace, _, target = rule[:-1].partition("(")
+    namespaces.add(namespace.strip())
+    if namespace.strip() == "command":
+        granted.add(target.strip())
 needed = [c.strip() for c in os.environ["ANTIGRAVITY_READ_COMMANDS"].split(",")
           if c.strip()]
 # Rules match by command prefix, so "git" alone covers "git diff".
 missing = [c for c in needed
            if c not in granted and c.split()[0] not in granted]
+# Reading a file is its own permission, not a shell command: without it the CLI
+# denies its own Read tool and shell access alone does not save the call.
+if "read_file" not in namespaces:
+    missing.append("read_file(*) (file reads, not a shell command)")
 print(", ".join(missing))
 PY
 )"

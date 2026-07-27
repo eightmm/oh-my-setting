@@ -379,7 +379,7 @@ setup_doctor_home() {
   cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
 {
   "permissions": {
-    "allow": ["command(cat)", "command(rg)", "command(git)"]
+    "allow": ["command(cat)", "command(rg)", "command(git)", "read_file(*)"]
   }
 }
 JSON
@@ -1571,6 +1571,21 @@ JSON
     fail "the doctor should name the missing permissions: $out"
   printf '%s' "$out" | grep -Fq 'permissions.allow' ||
     fail "the warning should say where to fix it: $out"
+  # Shell access is not enough: reading a file is a separate permission, and a
+  # config that grants every command but no read_file still answers nothing.
+  cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
+{
+  "permissions": {
+    "allow": ["command(cat)", "command(rg)", "command(git)"]
+  }
+}
+JSON
+  out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
+    XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
+    fail "a missing read_file rule is a warning, not a failure: $out"
+  printf '%s' "$out" | grep -Fq 'read_file' ||
+    fail "the doctor should name the missing file-read permission: $out"
 }
 
 test_doctor_clean_harness_state_has_no_warnings() {
