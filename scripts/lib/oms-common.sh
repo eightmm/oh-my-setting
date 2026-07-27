@@ -119,8 +119,10 @@ PY
 # before and after. This is detection, not a sandbox: it says loudly that
 # something moved and keeps the evidence, and it cannot prevent the write.
 #
-# .oms is deliberately excluded: workers are given OMS_STATE_REPO so they can
-# append shared harness state, and the harness itself writes there during a run.
+# .oms is not compared byte-for-byte: workers are given OMS_STATE_REPO so they
+# can append shared harness state, and the harness itself writes there during a
+# run. But "may append" is not "may rewrite" — the append-only JSONL families
+# are checked for exactly that, and no state file may vanish.
 #
 # What this cannot see, by construction: a write that is undone before the
 # worker exits, anything the worker reads (inherited tokens, ssh agents), and
@@ -160,6 +162,60 @@ oms_worker_surface_fingerprint() {
 
 # Which surface moved, for a message that names the problem instead of just
 # reporting a hash mismatch.
+# Compare recorded shared state against the current tree. Unlike the other
+# surfaces this is not an equality check: appending is allowed, so only a
+# changed prefix, a shrunk file, or a disappearance counts.
+oms_worker_state_violations() {
+  local repo="$1"
+  local before="$2"
+
+  [ -f "$before" ] || return 0
+  OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" python3 - <<'PY'
+import hashlib, os
+
+root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
+problems = []
+with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
+    for line in f:
+        parts = line.rstrip("\n").split(" ")
+        if len(parts) < 2:
+            continue
+        rel, kind = parts[0], parts[1]
+        path = os.path.join(root, rel)
+        if not os.path.exists(path):
+            problems.append("%s was deleted" % rel)
+            continue
+        if kind != "APPEND" or len(parts) != 4:
+            continue
+        try:
+            size = int(parts[2])
+        except ValueError:
+            continue
+        expected = parts[3]
+        try:
+            now = os.path.getsize(path)
+        except OSError:
+            problems.append("%s became unreadable" % rel)
+            continue
+        if now < size:
+            problems.append("%s was truncated (%d -> %d bytes)" % (rel, size, now))
+            continue
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            remaining = size
+            while remaining > 0:
+                chunk = fh.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            problems.append("%s had existing rows rewritten" % rel)
+for problem in problems[:5]:
+    print(problem)
+PY
+}
+
 oms_worker_surface_diff() {
   local repo="$1"
   local before_dir="$2"
@@ -172,6 +228,11 @@ oms_worker_surface_diff() {
       changed="${changed:+$changed, }$name"
     fi
   done
+  # Shared state is compared by contract, not by equality: see above. The detail
+  # goes to a file because this function runs in a command substitution, where
+  # an exported variable would die with the subshell.
+  oms_worker_state_violations "$repo" "$before_dir/omsstate" > "$before_dir/state-detail"
+  [ ! -s "$before_dir/state-detail" ] || changed="${changed:+$changed, }shared-state"
   printf '%s\n' "$changed"
 }
 
@@ -243,6 +304,52 @@ for rel in paths:
         print("%s MISSING" % hashlib.sha256(rel).hexdigest())
 PY
       ;;
+    omsstate)
+      # Shared state is append-only by contract: every .oms JSONL family is
+      # written with >>. A worker that rewrites history there — dropping the
+      # failure that blocks its retry, forging a landing, editing a thread turn
+      # another agent will read as evidence — leaves a file whose existing bytes
+      # changed. Record each file's length and the hash of exactly those bytes;
+      # growth is legitimate, mutation of the prefix is not. Deletion of any
+      # state file is a violation regardless of family.
+      OMS_WG_REPO="$repo" python3 - <<'PY'
+import hashlib, os, sys
+
+root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
+if not os.path.isdir(root):
+    raise SystemExit(0)
+rows = []
+for base, dirs, files in os.walk(root):
+    dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(base, d)))
+    for name in sorted(files):
+        path = os.path.join(base, name)
+        rel = os.path.relpath(path, root).replace(os.sep, "/")
+        if os.path.islink(path):
+            rows.append("%s LINK" % rel)
+            continue
+        if not name.endswith(".jsonl"):
+            # Presence only: these are rewritten by the harness by design
+            # (plan transitions, executor lifecycle, run pointers).
+            rows.append("%s EXISTS" % rel)
+            continue
+        try:
+            size = os.path.getsize(path)
+            digest = hashlib.sha256()
+            with open(path, "rb") as f:
+                remaining = size
+                while remaining > 0:
+                    chunk = f.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    digest.update(chunk)
+            rows.append("%s APPEND %d %s" % (rel, size, digest.hexdigest()))
+        except OSError:
+            rows.append("%s UNREADABLE" % rel)
+for row in rows:
+    print(row)
+PY
+      ;;
     gitmeta)
       # Object-store wiring and repository metadata outside config/refs/hooks:
       # an added alternate silently widens where objects may come from, a graft
@@ -295,7 +402,7 @@ oms_worker_surface_snapshot() {
   local name
 
   mkdir -p "$dir" || return 1
-  for name in config remotes refs tracked files gitmeta hooks; do
+  for name in config remotes refs tracked files gitmeta hooks omsstate; do
     oms_worker_surface_capture_one "$repo" "$name" > "$dir/$name" 2>/dev/null || true
   done
 }

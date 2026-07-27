@@ -7,6 +7,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Shared `.oms` state is checked by its contract instead of being trusted
+  wholesale. Workers are handed `OMS_STATE_REPO` so they can append, so the
+  guard allows growth but records each JSONL family's length and the hash of
+  exactly those bytes: rewriting rows already there, truncating a ledger, or
+  deleting a state file fails the run and names the file and what happened
+  ("failures.jsonl was truncated (42 -> 3 bytes)"). This closes the last gap the
+  live council raised — erasing the failure that blocks a retry, or forging a
+  thread turn another agent reads as evidence, was previously invisible because
+  `.oms` was excluded entirely.
 - Worker-authority detection covers what a live four-model council said it
   missed: untracked and ignored content is compared by stat, so planting
   `sitecustomize.py` or swapping a file inside an ignored `.venv/` is caught

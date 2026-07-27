@@ -125,6 +125,9 @@ Environment:
 The worker-authority check compares the primary repo's tracked state, untracked
 and ignored files (by stat, not by reading them), local git config, remotes,
 refs, object-store/worktree/submodule metadata, and hooks around the worker.
+Shared .oms state is checked by its contract rather than by equality: workers
+may append to the JSONL families, but rewriting rows already there, truncating
+them, or deleting a state file is a violation.
 It is detection, not a sandbox: it cannot prevent a write, and it cannot see a
 write that is undone before the worker exits, anything the worker reads
 (inherited tokens, ssh agents), or anything it does outside the repository
@@ -872,9 +875,16 @@ if [ -n "$worker_guard_dir" ]; then
     {
       printf '\n\n## Worker authority violation\n\n'
       printf -- '- changed outside the worktree: %s\n' "$worker_guard_changed"
+      [ ! -s "$worker_guard_dir/state-detail" ] ||
+        printf -- '- shared state: %s\n' "$(tr '\n' ';' < "$worker_guard_dir/state-detail")"
       printf -- '- worktree kept for inspection\n'
     } >> "$artifact"
     echo "error: $TO changed protected state outside its worktree: $worker_guard_changed" >&2
+    if [ -s "$worker_guard_dir/state-detail" ]; then
+      while IFS= read -r detail; do
+        [ -z "$detail" ] || echo "error: shared state: $detail" >&2
+      done < "$worker_guard_dir/state-detail"
+    fi
     echo "error: worktree kept at $worktree; nothing from this run should be landed" >&2
     (cd "$REPO" && "$(ma_scripts_dir)/fail-ledger.sh" record --kind delegate \
       --cmd "peer-delegate --to $TO worker-authority" --exit 1 \

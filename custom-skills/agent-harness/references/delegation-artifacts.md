@@ -61,6 +61,9 @@ cause changes; consult the fail ledger before retrying.
 `peer-delegate` compares the primary repo's tracked state, untracked and ignored
 files (by stat), local git config, remotes, refs, object-store/worktree/submodule
 metadata, and hooks around each worker run, and fails the run when one moves.
+Shared `.oms` state is held to its append-only contract rather than compared for
+equality: appending is what workers are given `OMS_STATE_REPO` for, but rewriting
+existing rows, truncating a ledger, or deleting a state file is a violation.
 It is detection, not a sandbox, and these stay outside it:
 
 - A write undone before the worker exits. Before/after comparison cannot see a

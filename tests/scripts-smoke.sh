@@ -10386,6 +10386,82 @@ test_worker_guard_reports_a_bounded_scan() {
     fail "a truncated scan must say so: $out"
 }
 
+test_worker_guard_enforces_append_only_shared_state() {
+  local project="$TMP/guard-state"
+  local result
+
+  make_guard_repo "$project"
+  mkdir -p "$project/.oms/threads"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf '{"schema":1,"fingerprint":"abc","exit":1,"cmd":"pytest"}\n' \
+    > "$project/.oms/failures.jsonl"
+  printf '{"schema":1,"thread":"t1","seq":1,"role":"answer","text":"first"}\n' \
+    > "$project/.oms/threads/t1.jsonl"
+
+  # Workers are handed OMS_STATE_REPO precisely so they can append; that must
+  # keep working or the guard would break the contract it protects.
+  result="$(run_guarded_worker "$project" \
+    "printf '{\"schema\":1,\"fingerprint\":\"def\",\"exit\":1}\n' >> $project/.oms/failures.jsonl")"
+  [ "${result%%	*}" = 0 ] || fail "appending to shared state must stay allowed: $result"
+
+  # Rewriting rows already there is how a worker would erase the failure that
+  # blocks its retry, or forge a turn another agent reads as evidence.
+  local rewrite="$TMP/guard-state-rewrite"
+  make_guard_repo "$rewrite"
+  mkdir -p "$rewrite/.oms"
+  printf '*\n' > "$rewrite/.oms/.gitignore"
+  printf '{"schema":1,"fingerprint":"abc","exit":1,"cmd":"pytest"}\n' \
+    > "$rewrite/.oms/failures.jsonl"
+  result="$(run_guarded_worker "$rewrite" \
+    "printf '{\"schema\":1,\"fingerprint\":\"zzz\",\"exit\":0}\n' > $rewrite/.oms/failures.jsonl")"
+  [ "${result%%	*}" != 0 ] || fail "rewriting shared state should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'shared-state' ||
+    fail "the shared-state surface should be named: $result"
+  printf '%s' "$result" | grep -Fq 'failures.jsonl was truncated' ||
+    fail "the violation should name the file and what happened: $result"
+
+  local removed="$TMP/guard-state-deleted"
+  make_guard_repo "$removed"
+  mkdir -p "$removed/.oms"
+  printf '*\n' > "$removed/.oms/.gitignore"
+  printf '{"schema":1,"fingerprint":"abc","exit":1}\n' > "$removed/.oms/failures.jsonl"
+  result="$(run_guarded_worker "$removed" "rm -f $removed/.oms/failures.jsonl")"
+  [ "${result%%	*}" != 0 ] || fail "deleting shared state should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'was deleted' ||
+    fail "a deleted state file should be named: $result"
+}
+
+test_worker_guard_sees_submodule_and_worktree_metadata() {
+  local project="$TMP/guard-submodule"
+  local source="$TMP/guard-submodule-src"
+  local result
+
+  make_committed_repo "$source"
+  make_guard_repo "$project"
+  # A submodule keeps its own config, refs, and hooks under .git/modules, which
+  # the parent's status never shows.
+  ( cd "$project" && git -c protocol.file.allow=always -c user.email=t@example.com \
+    -c user.name=t submodule add -q "$source" vendor >/dev/null 2>&1 &&
+    git -c user.email=t@example.com -c user.name=t commit -qm submodule >/dev/null )
+  [ -d "$project/.git/modules/vendor" ] || fail "submodule fixture did not materialize"
+
+  result="$(run_guarded_worker "$project" \
+    "git -C $project/vendor config --local oms.tampered yes")"
+  [ "${result%%	*}" != 0 ] || fail "submodule config tampering should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+    fail "submodule metadata should be named: $result"
+
+  # A linked worktree is another checkout of the same repo, registered in the
+  # common git dir.
+  local wt="$TMP/guard-worktree"
+  make_guard_repo "$wt"
+  result="$(run_guarded_worker "$wt" \
+    "git -C $wt worktree add --detach $wt/../guard-worktree-extra HEAD")"
+  [ "${result%%	*}" != 0 ] || fail "registering a worktree should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+    fail "a new worktree registration should be named: $result"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 
