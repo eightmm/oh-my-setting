@@ -263,7 +263,11 @@ for provider in "${provider_values[@]}"; do
       listing_supported=1
       if [ "$LIVE_MODELS" -eq 1 ]; then
         listing_exit=0
-        run_capture "$TIMEOUT_SECONDS" "$models_file" "$binary" models || listing_exit=$?
+        # One reader for catalogs, shared with routing: agy prints lines, codex
+        # answers model/list on its app-server, and neither belongs spelled out
+        # twice.
+        oms_capability_probe_models "$provider" "$models_file" "$provider_dir/efforts" ||
+          listing_exit=$?
         if [ "$listing_exit" -eq 0 ]; then
           listing_status=ok
         else

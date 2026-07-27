@@ -107,11 +107,69 @@ oms_capability_run_bounded() {
   fi
 }
 
+# Read a provider's catalog into MODELS_OUT (one model per line) and, where the
+# source reports it, each model's own effort scale into EFFORTS_OUT
+# ("<model>\t<space separated efforts>"). Local sources only: no model call is
+# spent to find out which models exist.
+oms_capability_probe_models() {
+  local provider="$1" models_out="$2" efforts_out="$3"
+  local binary raw
+  binary="$(oms_provider_binary "$provider")"
+
+  case "$(oms_provider_model_listing_kind "$provider")" in
+    lines)
+      oms_capability_run_bounded 30 "$models_out" "$binary" models
+      ;;
+    codex-app-server)
+      # The app-server speaks JSON-RPC on stdio and answers model/list without
+      # starting a conversation, so this costs nothing but a local process.
+      raw="$(mktemp "${TMPDIR:-/tmp}/oms-cap-rpc.XXXXXX")" || return 1
+      {
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"oh-my-setting","title":"oh-my-setting","version":"1"}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}'
+        sleep "${OMS_CAPABILITY_RPC_WAIT:-10}"
+      } | oms_capability_run_bounded 40 "$raw" "$binary" app-server || true
+      OMS_CAP_RAW="$raw" OMS_CAP_MODELS="$models_out" OMS_CAP_EFFORTS="$efforts_out" python3 - <<'PY'
+import json, os
+
+models, efforts = [], []
+with open(os.environ["OMS_CAP_RAW"], encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        data = (msg.get("result") or {}).get("data")
+        if not isinstance(data, list):
+            continue
+        for entry in data:
+            name = entry.get("id") or entry.get("model")
+            if not name or entry.get("hidden"):
+                continue
+            models.append(name)
+            scale = [e.get("reasoningEffort") for e in entry.get("supportedReasoningEfforts") or []]
+            scale = [s for s in scale if s]
+            if scale:
+                efforts.append("%s\t%s" % (name, " ".join(scale)))
+if models:
+    with open(os.environ["OMS_CAP_MODELS"], "w", encoding="utf-8") as handle:
+        handle.write("\n".join(models) + "\n")
+    if efforts:
+        with open(os.environ["OMS_CAP_EFFORTS"], "w", encoding="utf-8") as handle:
+            handle.write("\n".join(efforts) + "\n")
+PY
+      rm -f "$raw"
+      ;;
+    *) return 1 ;;
+  esac
+  [ -s "$models_out" ]
+}
+
 # Probe one provider and write the snapshot. Bounded: two short CLI calls at
 # most, and a probe that fails leaves the declared defaults in place.
 oms_capability_refresh() {
   local provider="$1"
-  local binary flag help_file models_file tmp values detected mechanism dir
+  local binary flag help_file models_file tmp efforts_tmp values detected mechanism dir
   provider="$(oms_provider_normalize "$provider")" || return 2
   binary="$(oms_provider_binary "$provider")"
   mechanism="$(oms_provider_effort_mechanism "$provider")"
@@ -142,11 +200,17 @@ oms_capability_refresh() {
     if oms_provider_supports_model_listing "$provider" &&
       [ "${OMS_CAPABILITY_SKIP_MODELS:-0}" != 1 ]; then
       tmp="$(mktemp "${TMPDIR:-/tmp}/oms-cap-models.XXXXXX")" || tmp=""
-      if [ -n "$tmp" ]; then
-        if oms_capability_run_bounded 30 "$tmp" "$binary" models && [ -s "$tmp" ]; then
+      efforts_tmp="$(mktemp "${TMPDIR:-/tmp}/oms-cap-efforts.XXXXXX")" || efforts_tmp=""
+      if [ -n "$tmp" ] && [ -n "$efforts_tmp" ]; then
+        if oms_capability_probe_models "$provider" "$tmp" "$efforts_tmp"; then
           mv "$tmp" "$models_file"
+          if [ -s "$efforts_tmp" ]; then
+            mv "$efforts_tmp" "$dir/$provider.efforts"
+          else
+            rm -f "$efforts_tmp"
+          fi
         else
-          rm -f "$tmp"
+          rm -f "$tmp" "$efforts_tmp"
         fi
       fi
     fi
@@ -185,7 +249,7 @@ oms_capability_snapshot_current() {
 # An absent snapshot means the registry declaration stands.
 oms_capability_peek() {
   local provider="$1"
-  local file
+  local file union
   provider="$(oms_provider_normalize "$provider")" || return 2
   file="$(oms_capability_file "$provider")"
   oms_capability_snapshot_current "$provider" || file=""
@@ -204,6 +268,13 @@ oms_capability_peek() {
     OMS_CAP_EFFORT_MECHANISM="$(oms_provider_effort_mechanism "$provider")"
     OMS_CAP_EFFORT_VALUES="$(oms_provider_effort_values "$provider")"
   fi
+  # Where the catalog reports a scale per model, the provider's scale is the
+  # union of them: anything narrower would reject an effort one of its models
+  # takes, before there is a model to check it against. Codex needs this — its
+  # mechanism is invisible to --help, so the declaration alone stops at high
+  # while gpt-5.6-sol reaches ultra.
+  union="$(oms_capability_effort_union "$provider")"
+  [ -z "$union" ] || OMS_CAP_EFFORT_VALUES="$union"
   export OMS_CAP_PROVIDER OMS_CAP_EFFORT_MECHANISM OMS_CAP_EFFORT_VALUES
 }
 
@@ -242,6 +313,41 @@ oms_capability_model_available() {
   done <<EOF
 $catalog
 EOF
+  return 1
+}
+
+# Every effort any of a provider's models accepts, in scale order. Empty when
+# the catalog says nothing per model.
+oms_capability_effort_union() {
+  local provider="$1"
+  local file candidate out=""
+  file="$(oms_capability_cache_dir)/$provider.efforts"
+  [ -f "$file" ] || return 0
+  for candidate in low medium high xhigh max ultra; do
+    if cut -f2 "$file" | grep -qw -- "$candidate"; then
+      out="${out:+$out }$candidate"
+    fi
+  done
+  printf '%s\n' "$out"
+}
+
+# The effort scale of ONE model, where the catalog reports it. Codex publishes
+# a different scale per model — gpt-5.6-sol reaches ultra, gpt-5.5 stops at
+# xhigh — so a provider-wide answer is the wrong shape for it. Exit 1 means the
+# catalog knows nothing about this model's scale, not that it has none.
+oms_capability_model_efforts() {
+  local provider="$1" model="$2"
+  local file key line
+  provider="$(oms_provider_normalize "$provider")" || return 2
+  file="$(oms_capability_cache_dir)/$provider.efforts"
+  [ -f "$file" ] || return 1
+  key="$(oms_model_catalog_key "$model")"
+  while IFS="$(printf '\t')" read -r name scale; do
+    [ -n "$name" ] || continue
+    [ "$(oms_model_catalog_key "$name")" = "$key" ] || continue
+    printf '%s\n' "$scale"
+    return 0
+  done < "$file"
   return 1
 }
 

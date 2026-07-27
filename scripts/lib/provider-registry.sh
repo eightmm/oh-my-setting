@@ -79,10 +79,26 @@ oms_provider_help_args() {
   esac
 }
 
+# How a provider's catalog can be read locally, without spending a model call.
+# `lines`: a subcommand that prints one model per line.
+# `codex-app-server`: the JSON-RPC `model/list` method its app-server exposes,
+#   which also reports each model's own reasoning-effort scale.
+# `none`: no local source. Claude Code has no such command — its `--help`
+#   documents the aliases (fable, opus, sonnet) and nothing enumerates them.
+oms_provider_model_listing_kind() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    antigravity) printf 'lines\n' ;;
+    codex) printf 'codex-app-server\n' ;;
+    claude) printf 'none\n' ;;
+  esac
+}
+
 oms_provider_supports_model_listing() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?
-  [ "$provider" = antigravity ]
+  [ "$(oms_provider_model_listing_kind "$provider")" != none ]
 }
 
 # Family is the underlying model vendor, not the CLI carrying the request.

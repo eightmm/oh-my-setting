@@ -33,14 +33,19 @@ oms_model_validate_name() {
 # question, answered by oms_reasoning_provider_validate: claude takes xhigh and
 # max, and capping the vocabulary here put both permanently out of reach.
 oms_reasoning_validate() {
-  case "$1" in auto|low|medium|high|xhigh|max) return 0 ;; esac
-  echo "error: reasoning effort must be auto, low, medium, high, xhigh, or max" >&2
+  case "$1" in auto|low|medium|high|xhigh|max|ultra) return 0 ;; esac
+  echo "error: reasoning effort must be auto, low, medium, high, xhigh, max, or ultra" >&2
   return 2
 }
 
-# Does this provider take this effort, as of the last capability probe?
+# Does this provider take this effort, as of the last capability probe? MODEL
+# is optional: the scale is a property of the model where the catalog reports
+# one — codex publishes ultra for gpt-5.6-sol and stops at xhigh for gpt-5.5 —
+# and a provider-wide answer is only the fallback for sources that say nothing
+# per model.
 oms_reasoning_provider_validate() {
-  local provider="$1" effort="$2"
+  local provider="$1" effort="$2" model="${3:-}"
+  local scale=""
 
   [ "$effort" != auto ] || return 0
   oms_capability_peek "$provider" || return 2
@@ -50,10 +55,16 @@ oms_reasoning_provider_validate() {
       return 2
       ;;
   esac
-  case " $OMS_CAP_EFFORT_VALUES " in
+  [ -z "$model" ] || scale="$(oms_capability_model_efforts "$provider" "$model" 2>/dev/null || true)"
+  [ -n "$scale" ] || scale="$OMS_CAP_EFFORT_VALUES"
+  case " $scale " in
     *" $effort "*) return 0 ;;
   esac
-  echo "error: $provider does not accept reasoning effort '$effort' (it accepts: $OMS_CAP_EFFORT_VALUES)" >&2
+  if [ -n "$model" ] && [ "$scale" != "$OMS_CAP_EFFORT_VALUES" ]; then
+    echo "error: $provider model $model does not accept reasoning effort '$effort' (it accepts: $scale)" >&2
+  else
+    echo "error: $provider does not accept reasoning effort '$effort' (it accepts: $scale)" >&2
+  fi
   return 2
 }
 
@@ -127,7 +138,8 @@ oms_model_default() {
     claude:fast) printf '%s\n' 'claude-haiku-4-5-20251001' ;;
     claude:balanced) printf '%s\n' 'claude-sonnet-5' ;;
     claude:deep) printf '%s\n' 'claude-fable-5' ;;
-    # Antigravity has no effort flag, so the tier IS the model variant. 3.6
+    # The tier is carried by the model variant here — the CLI also takes
+    # --effort, which routing passes only when a caller names one outright. 3.6
     # Flash wins every published coding and agentic benchmark against 3.1 Pro
     # (SWE-Bench Pro, DeepSWE, Terminal-Bench, MLE-Bench) at roughly twice the
     # speed; Pro keeps only a narrow lead on pure-reasoning sets (GPQA Diamond,
@@ -269,6 +281,12 @@ oms_model_prepare() {
   fi
   [ -n "$OMS_MODEL_PRIMARY" ] || OMS_MODEL_PRIMARY="provider-default"
   oms_model_validate_name "$OMS_MODEL_PRIMARY" || return $?
+  # Re-check against the model that was actually chosen. The provider-level
+  # pass above only answers "is there a control"; codex publishes a different
+  # scale per model, so gpt-5.6-sol takes ultra and gpt-5.5 does not.
+  if [ "$effort_requested" != auto ] && [ "$OMS_MODEL_PRIMARY" != provider-default ]; then
+    oms_reasoning_provider_validate "$provider" "$effort_requested" "$OMS_MODEL_PRIMARY" || return $?
+  fi
 
   OMS_MODEL_FALLBACK=""
   if [ -n "$explicit_fallback" ]; then

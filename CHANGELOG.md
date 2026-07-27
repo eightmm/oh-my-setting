@@ -19,6 +19,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   exists, a tier picks the first of its candidates that the catalog actually
   has, so a retired model slides to the next one instead of failing the call; a
   model named outright by an operator is still used as given.
+- Codex has a local catalog after all: its app-server answers `model/list` over
+  JSON-RPC without starting a conversation, so enumerating models costs a local
+  process and no model call. It also reports each model's own reasoning-effort
+  scale, which turns out to differ per model — `gpt-5.6-sol` accepts `ultra`,
+  `gpt-5.6-luna` stops at `max`, `gpt-5.5` at `xhigh` — so effort is now
+  validated against the model that was actually chosen, and the provider-level
+  check uses the union of its models' scales. Both `model-doctor` and routing
+  read catalogs through one function; `codex models` (which is not a
+  subcommand) is gone. Claude Code has no catalog source and is reported as
+  unverified rather than assumed good.
 - `provider-permissions` turns the last human-only setup step into a harness
   tool. Codex and Claude Code take authority per invocation and need nothing;
   antigravity needs standing rules, and finding out which ones took a session

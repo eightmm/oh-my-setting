@@ -549,6 +549,24 @@ reset_capture
 grep -Fxq "$saved_agy_deep" "$capture/agy.1.argv" ||
   fail "an explicitly configured model must be used as given"
 rm -f "$cap_dir/antigravity.models"
+
+# An effort scale is a property of the model, not of the provider: codex
+# publishes ultra for its top model and stops lower on the others. A
+# provider-wide answer would either reject an effort the chosen model takes or
+# accept one it does not.
+printf 'gpt-5.6-sol\tlow medium high xhigh max ultra\n' > "$cap_dir/codex.efforts"
+printf 'gpt-5.6-luna\tlow medium high\n' >> "$cap_dir/codex.efforts"
+reset_capture
+"$CALL" --repo "$repo" --to codex --model-class deep --model gpt-5.6-sol \
+  --reasoning-effort ultra --prompt 'per-model effort' >/dev/null ||
+  fail "the top model's own scale should be honoured"
+rc=0
+"$CALL" --repo "$repo" --to codex --model-class fast --model gpt-5.6-luna \
+  --reasoning-effort ultra --prompt 'effort beyond this model' >/dev/null 2>"$TMP/permodel.err" || rc=$?
+[ "$rc" = 2 ] || fail "an effort past the chosen model's scale should be rejected"
+grep -Fq 'gpt-5.6-luna' "$TMP/permodel.err" ||
+  fail "the rejection should name the model whose scale was exceeded: $(cat "$TMP/permodel.err")"
+rm -f "$cap_dir/codex.efforts"
 unset OMS_CAPABILITY_DIR
 
 "$ROOT/scripts/artifact-index.sh" --repo "$repo" validate >/dev/null

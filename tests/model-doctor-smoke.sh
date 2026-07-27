@@ -10,6 +10,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 bin="$TMP/bin"
 mkdir -p "$bin"
 export PATH="$bin:/usr/bin:/bin"
+export OMS_CAPABILITY_RPC_WAIT=0
 export HOME="$TMP/home"
 mkdir -p "$HOME"
 
@@ -23,6 +24,15 @@ case "$provider:$*" in
     ;;
   codex:'exec --help')
     printf '%s\n' 'Usage: codex exec [--model MODEL] [--sandbox MODE]'
+    ;;
+  codex:app-server)
+    # The real app-server answers model/list over JSON-RPC on stdio, and each
+    # model carries its own reasoning-effort scale — gpt-5.6-sol reaches ultra
+    # where gpt-5.6-luna stops at max. A fixture that flattens that would hide
+    # the per-model check.
+    cat >/dev/null
+    printf '%s\n' '{"id":1,"result":{"userAgent":"fake"}}'
+    printf '%s\n' '{"id":2,"result":{"data":[{"id":"gpt-5.6-sol","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"},{"reasoningEffort":"max"},{"reasoningEffort":"ultra"}]},{"id":"gpt-5.6-terra","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}]},{"id":"gpt-5.6-luna","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"},{"reasoningEffort":"max"}]},{"id":"gpt-hidden","hidden":true,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]}]}}'
     ;;
   claude:--version)
     echo 'claude-code 9.9.0'
@@ -102,8 +112,13 @@ grep -Fq 'Gemini 3.6 Flash (High) [family=google, effort=high, availability=avai
   fail "Antigravity live model should be available"
 grep -Fq 'Gemini 3.6 Flash (Medium) [family=google, effort=medium, availability=available]' "$TMP/live.txt" ||
   fail "a configured model must match the catalog across notations"
-grep -Fq 'codex: no stable model-list probe is registered' "$TMP/live.txt" ||
-  fail "unsupported live catalog should be explicit"
+# Codex answers model/list on its app-server, so its routes are verified too.
+grep -Fq 'gpt-5.6-sol [family=openai, effort=high, availability=available]' "$TMP/live.txt" ||
+  fail "codex live models should be verified through the app-server catalog"
+# Claude Code has no catalog command at all, and that has to be said rather
+# than left looking like a verified route.
+grep -Fq 'claude: no stable model-list probe is registered' "$TMP/live.txt" ||
+  fail "a provider without a catalog source should be explicit"
 
 # A configured model missing from the account-visible catalog fails closed.
 rc=0
