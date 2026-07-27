@@ -14,6 +14,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/agent-task-common.sh
+. "$ROOT/scripts/lib/agent-task-common.sh"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
 
 REPO="$PWD"
 ACTION=""
@@ -77,7 +81,9 @@ Options:
   -h, --help      Show help.
 
 A stale current pointer expires after OMS_THREAD_CURRENT_TTL seconds
-(default 86400), so a new consult never silently joins last week's thread.
+(default 86400), and a pointer written under a different active task is not
+reused, so a new consult never silently joins last week's — or another task's —
+conversation.
 EOF
 }
 
@@ -131,11 +137,17 @@ thread_file() { printf '%s/%s.jsonl\n' "$THREADS" "$1"; }
 
 # The pointer is advisory: an expired or dangling one is simply not current.
 read_current() {
-  local id minted now
+  local id minted now owner
   [ -f "$CURRENT" ] || return 1
   id="$(awk 'NR==1{print $1}' "$CURRENT")"
   minted="$(awk 'NR==1{print $2}' "$CURRENT")"
+  owner="$(awk 'NR==1{print $3}' "$CURRENT")"
   [ -n "$id" ] || return 1
+  # A pointer left by another task is not this task's conversation. Pointers
+  # written before this field existed carry no owner and stay usable.
+  if [ -n "$owner" ] && [ "$owner" != "$(current_task_id)" ]; then
+    return 1
+  fi
   valid_id "$id" || return 1
   [ -f "$(thread_file "$id")" ] || return 1
   case "$minted" in *[!0-9]*|"") return 1 ;; esac
@@ -144,12 +156,19 @@ read_current() {
   printf '%s\n' "$id"
 }
 
+# The pointer records which task it belongs to: a thread is continuity for the
+# work that opened it, and inheriting last task's conversation would inject
+# unrelated context into a new one.
+current_task_id() {
+  agent_task_metadata_value "$STATE_ROOT/.oms/task/current.md" task_id 2>/dev/null || printf ''
+}
+
 write_current() {
   local tmp
   mkdir -p "$THREADS"
   agent_memory_ensure_oms_ignore "$STATE_ROOT" 2>/dev/null || true
   tmp="$(mktemp "$THREADS/.CURRENT.XXXXXX")" || fail "mktemp failed"
-  printf '%s %s\n' "$1" "$(date +%s)" > "$tmp"
+  printf '%s %s %s\n' "$1" "$(date +%s)" "$(current_task_id)" > "$tmp"
   mv "$tmp" "$CURRENT"
 }
 
@@ -184,12 +203,21 @@ require_thread() {
   printf '%s\n' "$id"
 }
 
+# The sequence number is read from the file and then written back, so two
+# panel members answering in parallel would both read the same maximum and both
+# claim it. Serialize the read-and-append the way every other shared writer in
+# the harness does.
 append_row() {
   local id="$1" role="$2" text_file="$3"
   local file
   file="$(thread_file "$id")"
   mkdir -p "$THREADS"
   agent_memory_ensure_oms_ignore "$STATE_ROOT" 2>/dev/null || true
+  oms_with_file_lock "$file" append_row_unlocked "$id" "$role" "$text_file" "$file"
+}
+
+append_row_unlocked() {
+  local id="$1" role="$2" text_file="$3" file="$4"
   OMS_TH_FILE="$file" OMS_TH_ID="$id" OMS_TH_ROLE="$role" \
   OMS_TH_TEXT_FILE="$text_file" OMS_TH_AGENT="$(oms_detect_agent)" \
   OMS_TH_PROVIDER="$PROVIDER" OMS_TH_MODEL="$MODEL" OMS_TH_ARTIFACT="$ARTIFACT" \

@@ -121,6 +121,11 @@ Environment:
   OMS_WORKER_GUARD_MAX_FILES=20000
                              Cap the untracked/ignored stat scan; a truncated
                              scan is reported, never silent.
+  OMS_WORKER_GUARD_STRICT=1  Fail on every changed surface. By default a change
+                             to untracked/ignored files or tracked content is
+                             reported but does not fail the run: it cannot be
+                             told apart from the user editing their own repo
+                             while the worker ran.
 
 The worker-authority check compares the primary repo's tracked state, untracked
 and ignored files (by stat, not by reading them), local git config, remotes,
@@ -870,6 +875,34 @@ fi
 # is kept for inspection.
 if [ -n "$worker_guard_dir" ]; then
   worker_guard_changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir")"
+  # Not every surface can be attributed. Nobody else edits git config, remotes,
+  # refs, hooks, object-store metadata, or rewrites append-only state while a
+  # delegation runs, so those are the worker. Untracked/ignored files and
+  # tracked content change whenever the user keeps working in their own repo,
+  # which is normal and constant — reporting those is useful, failing the run
+  # on them would make the guard fire on ordinary days. OMS_WORKER_GUARD_STRICT
+  # fails on everything, for unattended runs where nothing else touches the tree.
+  worker_guard_hard=""
+  worker_guard_soft=""
+  for guard_surface in $(printf '%s' "$worker_guard_changed" | tr ',' ' '); do
+    case "$guard_surface" in
+      files|tracked)
+        if [ "${OMS_WORKER_GUARD_STRICT:-0}" = "1" ]; then
+          worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface"
+        else
+          worker_guard_soft="${worker_guard_soft:+$worker_guard_soft, }$guard_surface"
+        fi
+        ;;
+      *) worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface" ;;
+    esac
+  done
+  if [ -n "$worker_guard_soft" ]; then
+    echo "warning: the repository changed outside the worktree during this run: $worker_guard_soft" >&2
+    echo "warning: this cannot be attributed to $TO — your own edits look the same. Review before landing." >&2
+    printf '\n\n## Repository changed during the run\n\n- surfaces: %s\n- not attributable to the worker; review the patch before landing\n' \
+      "$worker_guard_soft" >> "$artifact"
+  fi
+  worker_guard_changed="$worker_guard_hard"
   if [ -n "$worker_guard_changed" ]; then
     KEEP_WORKTREE=1
     {

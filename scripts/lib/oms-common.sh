@@ -254,7 +254,18 @@ oms_worker_surface_capture_one() {
       git -C "$repo" show-ref 2>/dev/null | LC_ALL=C sort
       git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
       ;;
-    tracked) git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | LC_ALL=C sort ;;
+    tracked)
+      # Status categories are not content: a file already marked ` M` stays
+      # ` M` however much a worker rewrites it, so an in-flight edit of the
+      # user's own uncommitted work would pass unnoticed. Hash the diff bytes.
+      git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | LC_ALL=C sort
+      printf 'worktree-diff %s\n' "$({
+        git -C "$repo" diff --binary HEAD -- 2>/dev/null || true
+      } | oms_sha256_stream)"
+      printf 'index-diff %s\n' "$({
+        git -C "$repo" diff --cached --binary -- 2>/dev/null || true
+      } | oms_sha256_stream)"
+      ;;
     files)
       # Untracked AND ignored content, by stat rather than by reading bytes.
       # `git status --ignored` collapses a fully ignored directory to one entry,

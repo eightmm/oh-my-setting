@@ -61,7 +61,9 @@ Options:
   --recover        Finish or abandon landings interrupted by a crash: for each
                    outstanding intent, check whether the patch is in the tree,
                    then record the missing lineage and plan completion (or mark
-                   it abandoned). Idempotent; applies nothing new.
+                   it abandoned). Idempotent; applies nothing new. A patch whose
+                   content changed since its intent is left untouched for manual
+                   recovery, and makes the command exit nonzero.
   -h, --help       Show this help.
 
 Sequence: main tree must be clean -> patch-admit returns ADMIT -> git apply
@@ -171,6 +173,7 @@ PY
 if [ "$RECOVER" = 1 ]; then
   recovered=0
   abandoned=0
+  needs_manual=0
   while IFS= read -r intent_row; do
     [ -n "$intent_row" ] || continue
     LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))')"
@@ -181,6 +184,18 @@ if [ "$RECOVER" = 1 ]; then
       echo "patch-land: landing $LANDING_ID has no readable patch; marking abandoned" >&2
       landing_append abandoned reason=patch-missing
       abandoned=$((abandoned + 1))
+      continue
+    fi
+    # Recovery decides from the tree whether THIS patch went in. A patch file
+    # that has changed since the intent cannot answer that question, and
+    # guessing either way writes a false record: leave it for a human.
+    intent_patch_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch_sha",""))')"
+    current_patch_sha="$(oms_sha256_file "$intent_patch" 2>/dev/null || printf 'unknown')"
+    if [ -n "$intent_patch_sha" ] && [ "$intent_patch_sha" != "unknown" ] &&
+      [ "$intent_patch_sha" != "$current_patch_sha" ]; then
+      echo "error: landing $LANDING_ID: the patch changed since the intent was recorded" >&2
+      echo "error: recorded $intent_patch_sha, now $current_patch_sha; recover this one by hand" >&2
+      needs_manual=$((needs_manual + 1))
       continue
     fi
     # Applied content reverse-applies cleanly; unapplied content does not.
@@ -223,7 +238,8 @@ if [ "$RECOVER" = 1 ]; then
   done <<EOF
 $(landing_outstanding)
 EOF
-  echo "patch-land: recovery finished ($recovered recovered, $abandoned abandoned)"
+  echo "patch-land: recovery finished ($recovered recovered, $abandoned abandoned, $needs_manual need manual recovery)"
+  [ "$needs_manual" -eq 0 ] || exit 1
   exit 0
 fi
 
@@ -351,13 +367,16 @@ if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
 fi
 
 LANDING_ID="land-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+# Fail closed: an unrecordable intent means a crash after the apply would be
+# indistinguishable from nothing having happened, which is the exact failure
+# the transaction exists to prevent. Refuse rather than apply blind.
 landing_append intent \
   "patch=$PATCH" \
   "patch_sha=$(oms_sha256_file "$PATCH" 2>/dev/null || printf 'unknown')" \
   "base_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')" \
   "task=$PLAN_TASK" \
   "lease=$PLAN_LEASE_ID" ||
-  echo "warning: patch-land: could not record the landing intent" >&2
+  fail "cannot record the landing intent in $LANDINGS; refusing to apply"
 
 if ! git -C "$REPO" apply --binary "$PATCH"; then
   landing_append abandoned reason=apply-failed || true

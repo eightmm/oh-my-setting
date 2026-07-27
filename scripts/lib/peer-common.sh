@@ -677,10 +677,11 @@ extract_output() {
 }
 
 # Did the provider actually answer? A CLI can exit 0 and still return nothing
-# usable — an empty body, a banner, or a clarifying question back at us. Exit
-# status alone cannot tell a council "3/3 succeeded" from "2 answers and one
-# non-answer", which is how a thin reply gets weighted like a real one.
-# Mechanical only: no model call, no semantic judgement.
+# usable — an empty body, a banner, or only a question back at us (which is what
+# a provider that never received the prompt produces). Exit status alone cannot
+# tell a council "3/3 succeeded" from "2 answers and one non-answer".
+# Deliberately not a length test: a concise correct answer is still an answer,
+# and rejecting one costs a second provider call for nothing.
 # Prints: ok | thin | empty.
 ma_answer_quality() {
   local artifact="$1"
@@ -690,13 +691,9 @@ ma_answer_quality() {
   [ -f "$artifact" ] || { printf 'empty\n'; return 0; }
   tmp="$(agent_memory_mktemp)" || { printf 'ok\n'; return 0; }
   extract_output "$artifact" > "$tmp"
-  verdict="$(OMS_AQ_MIN="${OMS_ANSWER_MIN_BYTES:-160}" python3 - "$tmp" <<'PY'
-import os, re, sys
+  verdict="$(python3 - "$tmp" <<'PY'
+import re, sys
 
-try:
-    minimum = int(os.environ.get("OMS_AQ_MIN", "160"))
-except ValueError:
-    minimum = 160
 # Provider banners and harness route lines are not answer content.
 noise = re.compile(
     r"^\s*(model-route:|model-result:|tokens used|\[REDACTED|OpenAI Codex|"
@@ -713,13 +710,19 @@ body = "\n".join(lines)
 if not body:
     print("empty")
     raise SystemExit(0)
-if len(body.encode("utf-8")) < minimum:
-    print("thin")
+# Length is not substance: a correct answer can be one sentence, and rejecting
+# it costs another provider call for nothing. Only two things are reliably not
+# answers — a body with nothing in it, and a reply that only asks the caller
+# something back, which is what a provider that never received the prompt does.
+size = len(body.encode("utf-8"))
+if size < 24:
+    print("empty")
     raise SystemExit(0)
-# A short reply that is mostly a question back at the caller is a non-answer:
-# the peer did not do the work, it asked us to.
+# Only-a-question is the shape a provider produces when it never received the
+# prompt. Checked before any length rule, because such replies are often short
+# and a short answer is not by itself a non-answer.
 questions = sum(1 for line in lines if line.endswith("?"))
-if len(body.encode("utf-8")) < minimum * 4 and questions and questions * 2 >= len(lines):
+if questions == len(lines):
     print("thin")
     raise SystemExit(0)
 print("ok")
@@ -1106,7 +1109,10 @@ ma_target_label() {
 }
 
 # Expand a provider list across tiers: "codex,claude" + "deep,balanced" becomes
-# four targets. Without tiers the list passes through unchanged.
+# four targets. Without tiers the list passes through unchanged. Expansion is
+# multiplicative and debate rounds multiply it again, so the total is capped:
+# three providers at three tiers with two debate rounds is 27 provider calls,
+# which is not a council, it is a bill.
 ma_expand_targets() {
   local providers="$1"
   local tiers="$2"
@@ -1132,7 +1138,26 @@ ma_expand_targets() {
       out="${out:+$out,}$provider:$tier"
     done
   done
+  ma_target_budget_check "$out" || return 2
   printf '%s\n' "$out"
+}
+
+# Refuse an expansion whose cost the caller probably did not intend.
+ma_target_budget_check() {
+  local targets="$1"
+  local count
+  local rounds="${DEBATE:-0}"
+  local total
+  local budget="${OMS_COUNCIL_MAX_CALLS:-12}"
+
+  count="$(printf '%s' "$targets" | tr ',' '\n' | grep -c .)"
+  total=$((count * (rounds + 1)))
+  case "$budget" in *[!0-9]*|"") budget=12 ;; esac
+  if [ "$total" -gt "$budget" ]; then
+    echo "error: this council would make $total provider calls ($count targets x $((rounds + 1)) rounds)" >&2
+    echo "error: narrow --providers/--tiers, or raise OMS_COUNCIL_MAX_CALLS (currently $budget)" >&2
+    return 2
+  fi
 }
 
 # How many independent model families answered. Two answers from one family are

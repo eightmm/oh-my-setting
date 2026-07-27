@@ -9653,6 +9653,23 @@ ARTIFACT
   [ "$verdict" = "empty" ] || fail "a body with only harness lines is empty, got: $verdict"
   verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/ok.md'")"
   [ "$verdict" = "ok" ] || fail "a substantive answer should be ok, got: $verdict"
+
+  # A correct answer can be one sentence. Calling that a non-answer would spend
+  # another provider call for nothing, so length alone must not decide.
+  cat > "$dir/concise.md" <<'ARTIFACT'
+# codex call
+
+## Output
+
+model-route: class=deep primary=m fallback=n effort=high fallback_effort=medium
+Use map-style datasets and shard by file.
+
+## Exit
+
+0
+ARTIFACT
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/concise.md'")"
+  [ "$verdict" = "ok" ] || fail "a concise answer is still an answer, got: $verdict"
 }
 
 test_consult_falls_back_when_the_first_peer_does_not_answer() {
@@ -10206,9 +10223,9 @@ EOF
 
   rc=0
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
-    --no-verify 2>&1)" || rc=$?
-  [ "$rc" != 0 ] || fail "a worker writing to the primary tree should fail the run: $out"
+    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "a worker writing to the primary tree should fail a strict run: $out"
   printf '%s' "$out" | grep -Fq 'changed protected state outside its worktree: tracked' ||
     fail "the violation should name the surface: $out"
   printf '%s' "$out" | grep -Fq 'worktree kept at' ||
@@ -10323,6 +10340,7 @@ run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>o
   printf '#!/usr/bin/env bash\n%s\necho done\n' "$body" > "$dir-bin/codex"
   chmod +x "$dir-bin/codex"
   out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$dir-bin:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT="${OMS_WORKER_GUARD_STRICT:-0}" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$dir" --to codex --prompt x \
     --no-verify 2>&1)" || rc=$?
   printf '%s\t%s' "$rc" "$out"
@@ -10334,18 +10352,22 @@ test_worker_guard_sees_planted_and_ignored_files() {
 
   make_guard_repo "$project"
   # A planted untracked file is executable later from the primary tree.
+  # Untracked churn cannot be attributed — the user editing their own repo looks
+  # identical — so it is reported, not failed, unless the caller asks for strict.
   result="$(run_guarded_worker "$project" "printf 'evil\n' > $project/sitecustomize.py")"
-  [ "${result%%	*}" != 0 ] || fail "a planted untracked file should fail the run"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: files' ||
-    fail "the untracked surface should be named: $result"
+  [ "${result%%	*}" = 0 ] || fail "unattributable churn must not fail an ordinary run: $result"
+  printf '%s' "$result" | grep -Fq 'changed outside the worktree during this run: files' ||
+    fail "the untracked surface should still be reported: $result"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" "printf 'evil2\n' > $project/sitecustomize2.py")"
+  [ "${result%%	*}" != 0 ] || fail "strict mode should fail on a planted file: $result"
 
   # git status collapses a fully ignored directory to one entry, so replacing a
   # file inside it is invisible there; the stat scan is what catches it.
   local swap="$TMP/guard-ignored"
   make_guard_repo "$swap"
-  result="$(run_guarded_worker "$swap" "printf 'tampered\n' > $swap/venv/bin/python")"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$swap" "printf 'tampered\n' > $swap/venv/bin/python")"
   [ "${result%%	*}" != 0 ] ||
-    fail "replacing a file inside an ignored directory should fail the run"
+    fail "replacing a file inside an ignored directory should fail a strict run"
   printf '%s' "$result" | grep -Fq 'outside its worktree: files' ||
     fail "an ignored-tree replacement should be named: $result"
 }
@@ -10517,6 +10539,116 @@ test_worker_guard_holds_shared_memory_to_the_contract() {
   [ "${result%%	*}" != 0 ] || fail "editing an existing memory note should fail the run: $result"
   printf '%s' "$result" | grep -Fq 'memory/shared.md had existing rows rewritten' ||
     fail "the violation should name shared.md and what happened: $result"
+}
+
+test_worker_guard_sees_an_edit_to_an_already_dirty_file() {
+  local project="$TMP/guard-dirty"
+  local result
+
+  make_guard_repo "$project"
+  # The user's own uncommitted work. git status says " M file.txt" before and
+  # after a worker rewrites it, so status categories cannot see this at all.
+  printf 'base\nEDITED BY USER\n' > "$project/file.txt"
+
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" \
+    "printf 'base\nCLOBBERED BY WORKER\n' > $project/file.txt")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "clobbering an already-dirty tracked file should fail a strict run: $result"
+  printf '%s' "$result" | grep -Fq 'outside its worktree: tracked' ||
+    fail "the tracked surface should catch a content change, not just its status: $result"
+}
+
+test_thread_appends_are_serialized() {
+  local project="$TMP/thread-race"
+  local i
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id race >/dev/null
+
+  # A consult panel appends answers concurrently; read-max-then-append without
+  # a lock hands two writers the same sequence number.
+  i=0
+  while [ "$i" -lt 12 ]; do
+    "$ROOT/scripts/agent-thread.sh" --repo "$project" --id race append \
+      --role note --text "turn $i" >/dev/null 2>&1 &
+    i=$((i + 1))
+  done
+  wait
+
+  python3 - "$project/.oms/threads/race.jsonl" <<'PY' || fail "concurrent appends must keep sequence numbers unique and contiguous"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+seqs = [r["seq"] for r in rows]
+assert len(rows) == 12, len(rows)
+assert sorted(seqs) == list(range(1, 13)), seqs
+PY
+}
+
+test_thread_pointer_does_not_cross_tasks() {
+  local project="$TMP/thread-owner"
+  local first
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "first task" >/dev/null )
+  first="$("$ROOT/scripts/agent-thread.sh" --repo "$project" new --topic "first" )"
+  [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$first" ] ||
+    fail "the thread should be current for the task that opened it"
+
+  # A different task must not inherit the previous task's conversation.
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" close --reason "moving on" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "second task" >/dev/null )
+  if "$ROOT/scripts/agent-thread.sh" --repo "$project" current >/dev/null 2>&1; then
+    fail "a new task must not inherit the previous task's thread"
+  fi
+}
+
+test_landing_refuses_to_apply_without_a_recorded_intent() {
+  local project="$TMP/landing-failclosed"
+  local patch="$project/change.patch"
+  local rc=0
+  local out
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+  : > "$project/.oms/landings.jsonl"
+  chmod 444 "$project/.oms/landings.jsonl"
+
+  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  chmod 644 "$project/.oms/landings.jsonl"
+  [ "$rc" != 0 ] || fail "an unrecordable intent must not apply: $out"
+  printf '%s' "$out" | grep -Fq 'refusing to apply' ||
+    fail "the refusal should say why: $out"
+  [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
+    fail "nothing should have been applied"
+}
+
+test_landing_recovery_refuses_a_changed_patch() {
+  local project="$TMP/landing-patchbound"
+  local patch="$project/change.patch"
+  local rc=0
+  local out
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+  # The intent names a patch whose content no longer matches: recovery cannot
+  # tell whether THIS patch landed, and guessing writes a false record.
+  printf '{"schema":1,"ts":"2026-07-27T00:00:00Z","landing_id":"l1","event":"intent","patch":"%s","patch_sha":"deadbeef","task":"","lease":""}\n' \
+    "$patch" > "$project/.oms/landings.jsonl"
+
+  out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "a changed patch should make recovery exit nonzero: $out"
+  printf '%s' "$out" | grep -Fq 'recover this one by hand' ||
+    fail "recovery should hand it to a human: $out"
+  # Neither outcome may be recorded: the transaction stays outstanding.
+  if grep -Eq '"event": ?"(complete|abandoned)"' "$project/.oms/landings.jsonl"; then
+    fail "recovery must not guess an outcome for a changed patch"
+  fi
 }
 
 # SMOKE_TEST_CALLS_BEGIN
