@@ -372,6 +372,17 @@ setup_doctor_home() {
 
   mkdir -p "$home_dir"
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  # A healthy install lets antigravity read a repository in headless mode; the
+  # doctor only checks this when agy is on PATH, so a clean fixture has to look
+  # healthy on a developer machine that has it installed.
+  mkdir -p "$home_dir/.gemini/antigravity-cli"
+  cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
+{
+  "permissions": {
+    "allow": ["command(cat)", "command(rg)", "command(git)"]
+  }
+}
+JSON
 }
 
 run_doctor_for_project() {
@@ -1530,6 +1541,37 @@ test_doctor_warns_missing_oms_gitignore() {
   printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
 }
 
+
+test_doctor_warns_when_antigravity_cannot_read_in_headless_mode() {
+  local project="$TMP/doctor-agy-perms"
+  local home_dir="$TMP/doctor-home-agy-perms"
+  local bin_dir="$TMP/doctor-agy-perms-bin"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project" "$bin_dir"
+  printf '#!/bin/sh\nexit 0\n' > "$bin_dir/agy"
+  chmod +x "$bin_dir/agy"
+  # Headless antigravity cannot prompt, so a command outside permissions.allow
+  # is auto-denied and the call returns nothing. Discovering that from an empty
+  # council costs a full provider call; the config says it for free.
+  cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
+{
+  "permissions": {
+    "allow": ["command(ls)"]
+  }
+}
+JSON
+
+  out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
+    XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
+    fail "a narrow antigravity allow-list is a warning, not a failure: $out"
+  printf '%s' "$out" | grep -Fq 'warn: antigravity cannot run these in headless consults' ||
+    fail "the doctor should name the missing permissions: $out"
+  printf '%s' "$out" | grep -Fq 'permissions.allow' ||
+    fail "the warning should say where to fix it: $out"
+}
 
 test_doctor_clean_harness_state_has_no_warnings() {
   local project="$TMP/doctor-harness-clean"
@@ -9670,6 +9712,48 @@ Use map-style datasets and shard by file.
 ARTIFACT
   verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/concise.md'")"
   [ "$verdict" = "ok" ] || fail "a concise answer is still an answer, got: $verdict"
+
+  # Antigravity exits 0 after auto-denying a tool it cannot prompt for, printing
+  # only its refusal. That text is declarative and long enough to pass every
+  # other rule here, so a live council counted it as an answer and reported two
+  # independent model families when one provider had spoken.
+  cat > "$dir/blocked.md" <<'ARTIFACT'
+# antigravity call
+
+## Output
+
+model-route: class=deep primary=m fallback=n effort=high fallback_effort=medium
+jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)).
+
+## Exit
+
+0
+ARTIFACT
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/blocked.md'")"
+  [ "$verdict" = "blocked" ] || fail "a CLI refusal is not an answer, got: $verdict"
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_block_reason '$dir/blocked.md'")"
+  case "$verdict" in
+    jetski:*) ;;
+    *) fail "the operator needs the provider's own reason, got: $verdict" ;;
+  esac
+
+  # An answer that discusses permissions is still an answer: the refusal rule
+  # fires only when the whole body is diagnostics.
+  cat > "$dir/about-permissions.md" <<'ARTIFACT'
+# codex call
+
+## Output
+
+model-route: class=deep primary=m fallback=n effort=high fallback_effort=medium
+error: permission denied is the failure you should expect here.
+Grant the worker read access in the delegation profile, then re-run the gate.
+
+## Exit
+
+0
+ARTIFACT
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/about-permissions.md'")"
+  [ "$verdict" = "ok" ] || fail "an answer about permissions is not a refusal, got: $verdict"
 }
 
 test_consult_falls_back_when_the_first_peer_does_not_answer() {

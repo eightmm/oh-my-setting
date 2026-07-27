@@ -71,8 +71,10 @@ Options:
   --provider P    Provider that produced the turn (append).
   --model M       Model that produced the turn (append).
   --artifact PATH Full-output artifact for this turn (append).
-  --quality Q     ok, thin, or empty: whether the peer actually answered
-                  (append). Non-ok turns are marked in context and show.
+  --quality Q     ok, thin, empty, or blocked: whether the peer actually
+                  answered (append); blocked means the CLI printed only its own
+                  reason for doing nothing (denied tool, no login). Non-ok turns
+                  are marked in context and show.
   --summary TEXT  Closing summary (close).
   --max-bytes N   Context byte budget (default: 6000, OMS_THREAD_CONTEXT_BYTES).
   --turns N       Context turn limit (default: 12, OMS_THREAD_CONTEXT_TURNS).
@@ -106,8 +108,8 @@ while [ "$#" -gt 0 ]; do
     --quality)
       [ "$#" -ge 2 ] || fail "--quality requires a value"
       case "$2" in
-        ok|thin|empty) QUALITY="$2" ;;
-        *) fail "--quality must be ok, thin, or empty" ;;
+        ok|thin|empty|blocked) QUALITY="$2" ;;
+        *) fail "--quality must be ok, thin, empty, or blocked" ;;
       esac
       shift 2 ;;
     --summary) [ "$#" -ge 2 ] || fail "--summary requires a value"; SUMMARY="$2"; shift 2 ;;

@@ -150,6 +150,56 @@ check_optional_cmd() {
   fi
 }
 
+# Antigravity's headless mode cannot prompt for a tool permission, so it
+# auto-denies anything outside permissions.allow and exits 0 having printed
+# only its refusal. Read-only consults ask peers to read the repository, so a
+# narrow allow-list turns every antigravity answer into a non-answer that costs
+# a full provider call to discover. Cheap to check from the config, so check it
+# here rather than making the operator learn it from an empty council.
+# Comma-separated: an entry can be a multi-word command like "git diff".
+ANTIGRAVITY_READ_COMMANDS="cat,rg,git diff,git show,git ls-files"
+
+check_antigravity_permissions() {
+  local settings="$HOME/.gemini/antigravity-cli/settings.json"
+  local missing
+
+  command -v agy >/dev/null 2>&1 || return 0
+  if [ ! -f "$settings" ]; then
+    echo "warn: antigravity has no $settings; headless consults will be denied every tool"
+    return 0
+  fi
+  missing="$(ANTIGRAVITY_SETTINGS="$settings" ANTIGRAVITY_READ_COMMANDS="$ANTIGRAVITY_READ_COMMANDS" python3 - <<'PY'
+import json, os, sys
+
+path = os.environ["ANTIGRAVITY_SETTINGS"]
+try:
+    with open(path, encoding="utf-8") as handle:
+        allow = json.load(handle).get("permissions", {}).get("allow", [])
+except (OSError, ValueError):
+    print("unreadable")
+    sys.exit(0)
+granted = set()
+for rule in allow:
+    if isinstance(rule, str) and rule.startswith("command(") and rule.endswith(")"):
+        granted.add(rule[len("command("):-1].strip())
+needed = [c.strip() for c in os.environ["ANTIGRAVITY_READ_COMMANDS"].split(",")
+          if c.strip()]
+# Rules match by command prefix, so "git" alone covers "git diff".
+missing = [c for c in needed
+           if c not in granted and c.split()[0] not in granted]
+print(", ".join(missing))
+PY
+)"
+  if [ "$missing" = "unreadable" ]; then
+    echo "warn: antigravity settings $settings is not readable JSON"
+  elif [ -n "$missing" ]; then
+    echo "warn: antigravity cannot run these in headless consults: $missing"
+    echo "warn: add command(<name>) entries under permissions.allow in $settings"
+  else
+    echo "ok: antigravity headless read permissions"
+  fi
+}
+
 model_doctor_applicable() {
   case "$MODEL_DOCTOR_MODE" in
     0) return 1 ;;
@@ -690,6 +740,7 @@ check_optional_cmd squeue
 check_optional_cmd sinfo
 check_optional_cmd scancel
 
+check_antigravity_permissions
 check_model_capabilities
 
 check_path "$INSTALL_ROOT/rules/global-AGENTS.md"

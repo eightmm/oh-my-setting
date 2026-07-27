@@ -295,8 +295,11 @@ consult_with_failover() {
     break
   done
   if [ -z "$next" ]; then
-    [ "$quality" = "ok" ] ||
+    if [ "$quality" != "ok" ]; then
       echo "consult: $first did not really answer ($quality) and no other peer is installed" >&2
+      [ "$quality" != blocked ] ||
+        echo "consult: $first said: $(ma_answer_block_reason "$artifact")" >&2
+    fi
     return "$rc"
   fi
   if [ "$rc" -ne 0 ]; then
@@ -414,6 +417,8 @@ else
     q="$(ma_answer_quality "$art")"
     if [ "$q" != "ok" ]; then
       echo "consult: $p did not really answer ($q)" >&2
+      [ "$q" != blocked ] ||
+        echo "consult: $p said: $(ma_answer_block_reason "$art")" >&2
       continue
     fi
     usable=$((usable + 1))

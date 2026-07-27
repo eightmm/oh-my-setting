@@ -682,7 +682,7 @@ extract_output() {
 # tell a council "3/3 succeeded" from "2 answers and one non-answer".
 # Deliberately not a length test: a concise correct answer is still an answer,
 # and rejecting one costs a second provider call for nothing.
-# Prints: ok | thin | empty.
+# Prints: ok | thin | empty | blocked.
 ma_answer_quality() {
   local artifact="$1"
   local tmp
@@ -710,6 +710,24 @@ body = "\n".join(lines)
 if not body:
     print("empty")
     raise SystemExit(0)
+# A CLI can exit 0 having printed only its own reason for doing nothing. That
+# text is long enough and declarative enough to pass every other test here, so
+# a council counted an antigravity permission refusal as a real answer and
+# reported two independent families when one provider had spoken. Matched only
+# when the WHOLE body is diagnostics: an answer that discusses permissions has
+# other lines and stays ok. "blocked" rather than "empty" because the fix is
+# the operator's (grant the tool, log in), not another retry.
+refusal = re.compile(
+    r"^(jetski: no output produced\b"
+    r"|add an allow-rule\b"
+    r"|alternatively, re-run with\b"
+    r"|.*\bcommand not found\b"
+    r"|(error|fatal)[: ].*\b(permission|not authenticated|not logged in|"
+    r"unauthorized|invalid api key|quota|rate limit)\b)",
+    re.IGNORECASE)
+if all(refusal.match(line) for line in lines):
+    print("blocked")
+    raise SystemExit(0)
 # Length is not substance: a correct answer can be one sentence, and rejecting
 # it costs another provider call for nothing. Only two things are reliably not
 # answers — a body with nothing in it, and a reply that only asks the caller
@@ -730,6 +748,18 @@ PY
 )"
   rm -f "$tmp"
   printf '%s\n' "${verdict:-ok}"
+}
+
+# The provider's own first words about why it produced nothing. A blocked call
+# is fixed by acting on that sentence, and an operator who only sees "did not
+# really answer" has to go find the artifact to learn what to do.
+ma_answer_block_reason() {
+  local artifact="$1"
+  [ -f "$artifact" ] || return 0
+  extract_output "$artifact" |
+    grep -v -E '^\s*(model-route:|model-result:|\s*$)' |
+    sed -n '1p' |
+    cut -c1-200
 }
 
 # --- Cross-agent threads ----------------------------------------------------

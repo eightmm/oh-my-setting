@@ -6,6 +6,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Fixed
+- A council counted a provider refusal as an answer. Antigravity's headless mode
+  cannot prompt for a tool permission, so it auto-denies anything outside
+  `permissions.allow`, exits 0, and prints only its own explanation — text
+  declarative and long enough to pass every answer-quality rule. The last live
+  audit therefore reported "2 answered, 2 independent model families" when one
+  provider had spoken. Answer quality now classifies a body that is *entirely*
+  CLI diagnostics as `blocked` (an answer that merely discusses permissions is
+  untouched), keeps it out of the answered and family counts, and quotes the
+  provider's own reason so the operator knows what to fix. `doctor` reports the
+  same thing before a call is spent, by checking whether antigravity's
+  allow-list covers the commands a repository read needs.
+
 ### Added
 - A second audit council was asked where the harness is incomplete *and* where
   it is over-built. Three integrity holes it found are fixed: the worker guard
