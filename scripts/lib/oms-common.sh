@@ -327,9 +327,13 @@ for base, dirs, files in os.walk(root):
         if os.path.islink(path):
             rows.append("%s LINK" % rel)
             continue
-        if not name.endswith(".jsonl"):
-            # Presence only: these are rewritten by the harness by design
-            # (plan transitions, executor lifecycle, run pointers).
+        # Append-only by contract: the JSONL families, plus the memory log and
+        # its pins. summary.md is derived from shared.md and regenerated, and
+        # plan/executor/run state is rewritten by the harness by design, so
+        # those are tracked by presence alone.
+        append_only = rel.endswith(".jsonl") or rel in (
+            "memory/shared.md", "memory/pins.md")
+        if not append_only:
             rows.append("%s EXISTS" % rel)
             continue
         try:

@@ -249,6 +249,11 @@ agent_memory_refresh_summary() {
   rm -f "$tmp"
 }
 
+# shared.md and pins.md are append-only, and that is a contract other parts of
+# the harness rely on: the worker-authority guard verifies that existing bytes
+# never change, so a worker cannot quietly rewrite what another agent recorded.
+# Never rewrite or trim these in place — a correction is another appended note,
+# and compaction belongs in the derived summary.md.
 agent_memory_append_file_unlocked() {
   local memory_file="$1"
   local scope="$2"

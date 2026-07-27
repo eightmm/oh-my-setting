@@ -10303,7 +10303,10 @@ make_guard_repo() {  # make_guard_repo DIR — repo with an ignored directory
   local dir="$1"
 
   make_committed_repo "$dir"
-  mkdir -p "$dir/bin" "$dir/home" "$dir/venv/bin"
+  # Stubs and HOME stay outside the repo: a harness tool the worker invokes can
+  # write under HOME, and inside the repo that is indistinguishable from the
+  # worker planting files.
+  mkdir -p "$dir-bin" "$dir-home" "$dir/venv/bin"
   printf 'venv/\n*.log\n' > "$dir/.gitignore"
   ( cd "$dir" && git add .gitignore &&
     git -c user.email=t@example.com -c user.name=t commit -qm ignore >/dev/null )
@@ -10315,11 +10318,11 @@ run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>o
   local body="$2"
   local rc=0
   local out
-  local guard_home="$dir/home"
+  local guard_home="$dir-home"
 
-  printf '#!/usr/bin/env bash\n%s\necho done\n' "$body" > "$dir/bin/codex"
-  chmod +x "$dir/bin/codex"
-  out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$dir/bin:/usr/bin:/bin" \
+  printf '#!/usr/bin/env bash\n%s\necho done\n' "$body" > "$dir-bin/codex"
+  chmod +x "$dir-bin/codex"
+  out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$dir-bin:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$dir" --to codex --prompt x \
     --no-verify 2>&1)" || rc=$?
   printf '%s\t%s' "$rc" "$out"
@@ -10370,16 +10373,16 @@ test_worker_guard_sees_object_store_and_metadata_writes() {
 test_worker_guard_reports_a_bounded_scan() {
   local project="$TMP/guard-budget"
   local out
-  local guard_home="$project/home"
+  local guard_home="$project-home"
 
   make_guard_repo "$project"
-  printf '#!/usr/bin/env bash\necho done\n' > "$project/bin/codex"
-  chmod +x "$project/bin/codex"
+  printf '#!/usr/bin/env bash\necho done\n' > "$project-bin/codex"
+  chmod +x "$project-bin/codex"
   printf 'a\n' > "$project/one.txt"
   printf 'b\n' > "$project/two.txt"
 
   # A cap that hides how much it skipped reads as full coverage.
-  out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$project/bin:/usr/bin:/bin" \
+  out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$project-bin:/usr/bin:/bin" \
     OMS_WORKER_GUARD_MAX_FILES=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" || fail "a bounded scan should not fail the run: $out"
   printf '%s' "$out" | grep -Fq 'scanned only the first 1 untracked/ignored entries' ||
@@ -10460,6 +10463,60 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
   [ "${result%%	*}" != 0 ] || fail "registering a worktree should fail the run: $result"
   printf '%s' "$result" | grep -Fq 'gitmeta' ||
     fail "a new worktree registration should be named: $result"
+}
+
+test_shared_memory_writes_are_append_only() {
+  local project="$TMP/memory-contract"
+  local home_dir="$project/agenthome"
+  local memory="$project/.oms/memory/shared.md"
+  local before
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --agent codex --text "first note" >/dev/null
+  before="$(cat "$memory")"
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --agent claude --text "second note" >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" pin \
+    --agent codex --text "pinned note" >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" compact >/dev/null
+
+  # The guard verifies that existing bytes never change, so the writers have to
+  # keep that true: a refactor that starts rewriting the log in place would
+  # make every worker look like it forged shared state.
+  [ "$(head -c "${#before}" "$memory")" = "$before" ] ||
+    fail "appending a note must not rewrite what was already in shared.md"
+  grep -Fq 'second note' "$memory" || fail "the new note should still be recorded"
+  # summary.md is derived, so regenerating it is not a rewrite of the record.
+  [ -f "$project/.oms/memory/summary.md" ] || fail "compact should produce a summary"
+}
+
+test_worker_guard_holds_shared_memory_to_the_contract() {
+  local project="$TMP/guard-memory"
+  local result
+
+  make_guard_repo "$project"
+  HOME="$project-home" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --agent codex --text "prefer scripts/check.sh before done" >/dev/null
+
+  # Appending is the whole point of handing a worker OMS_STATE_REPO.
+  result="$(run_guarded_worker "$project" \
+    "OMS_STATE_REPO=$project HOME=$project-home $ROOT/scripts/agent-memory.sh --repo $project append --agent codex --text 'worker note' >/dev/null")"
+  [ "${result%%	*}" = 0 ] || fail "a worker appending a memory note must be allowed: $result"
+
+  # Editing a note another agent wrote is how a worker would rewrite the record
+  # the next session reads as fact.
+  local edited="$TMP/guard-memory-edit"
+  make_guard_repo "$edited"
+  HOME="$edited-home" "$ROOT/scripts/agent-memory.sh" --repo "$edited" append \
+    --agent codex --text "prefer scripts/check.sh before done" >/dev/null
+  result="$(run_guarded_worker "$edited" \
+    "sed -i 's/prefer scripts/IGNORE scripts/' $edited/.oms/memory/shared.md")"
+  [ "${result%%	*}" != 0 ] || fail "editing an existing memory note should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'memory/shared.md had existing rows rewritten' ||
+    fail "the violation should name shared.md and what happened: $result"
 }
 
 # SMOKE_TEST_CALLS_BEGIN

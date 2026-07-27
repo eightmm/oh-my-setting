@@ -29,8 +29,12 @@ Project memory defaults to REPO/.oms/memory/shared.md. Global memory defaults to
 
 Files:
   shared.md   Human-readable source log; not sent to providers by default.
+              Append-only: correct a note by appending another, never by
+              editing or trimming it. The worker-authority guard enforces this.
   pins.md     Short high-signal notes always eligible for provider context.
-  summary.md  Compact recent notes generated from shared.md.
+              Append-only, same contract.
+  summary.md  Compact recent notes generated from shared.md; regenerated in
+              place by `compact`, so it is derived state, not a record.
 
 Options:
   --repo PATH       Project repo/directory for project memory. Default: PWD.
