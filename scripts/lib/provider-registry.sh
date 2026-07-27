@@ -38,6 +38,47 @@ oms_provider_required_flags() {
   esac
 }
 
+# How a provider takes its thinking control, and the scale it is declared to
+# accept. These are the starting point, not the answer: model-capability.sh
+# probes the installed CLI and the probe wins where it can see. `config` cannot
+# be probed — codex takes effort through `-c model_reasoning_effort=`, which no
+# help text advertises — so for that mechanism the declaration stands.
+oms_provider_effort_mechanism() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    codex) printf 'config\n' ;;
+    claude|antigravity) printf 'flag\n' ;;
+  esac
+}
+
+oms_provider_effort_flag() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    codex) printf -- '-c model_reasoning_effort\n' ;;
+    claude|antigravity) printf -- '--effort\n' ;;
+  esac
+}
+
+oms_provider_effort_values() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    codex|claude|antigravity) printf 'low medium high\n' ;;
+  esac
+}
+
+# Where the flag list lives: codex documents the run flags under its subcommand.
+oms_provider_help_args() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    codex) printf 'exec --help\n' ;;
+    claude|antigravity) printf -- '--help\n' ;;
+  esac
+}
+
 oms_provider_supports_model_listing() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?

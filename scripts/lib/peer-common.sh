@@ -930,6 +930,11 @@ ma_provider_attempt() {
       # repo wrote to the origin path, and the same worker without --add-dir
       # wrote to ~/.gemini/antigravity-cli/scratch.
       cmd+=(--add-dir "$workdir")
+      # The tier is normally carried by the model variant — "Gemini 3.6 Flash
+      # (High)" is the high-effort model — so the flag stays off the auto path
+      # and nothing is said twice. A caller who names an effort outright means
+      # it, and this CLI does take --effort, so pass it through.
+      [ "${OMS_REASONING_EXPLICIT:-0}" != 1 ] || cmd+=(--effort "$effort")
       cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}")
       cmd+=(--print "$(cat "$prompt_file")")
       ;;

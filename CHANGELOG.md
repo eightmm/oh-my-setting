@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Routing follows what each provider CLI can actually do, instead of asserting
+  it. Two assertions in the table had gone stale while the CLIs moved, and a
+  stale capability is not a harmless comment: antigravity was refused a
+  `--effort` control it has had for a while ("antigravity has no effort flag"),
+  and claude's `xhigh` and `max` were unreachable because the shared validator
+  stopped at `high`. A capability snapshot now records each CLI's thinking
+  mechanism, the scale it accepts, and its live model catalog; `model-doctor`
+  writes it as a by-product of the probes it already runs, and routing only
+  reads it — a route decision must not spawn a provider call. Where a catalog
+  exists, a tier picks the first of its candidates that the catalog actually
+  has, so a retired model slides to the next one instead of failing the call; a
+  model named outright by an operator is still used as given.
 - `provider-permissions` turns the last human-only setup step into a harness
   tool. Codex and Claude Code take authority per invocation and need nothing;
   antigravity needs standing rules, and finding out which ones took a session

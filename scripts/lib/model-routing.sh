@@ -1,6 +1,18 @@
 # shellcheck shell=bash
 # Provider-neutral model policy for local CLI workers. Callers set the request
 # through OMS_MODEL_* variables, then invoke oms_model_prepare for one provider.
+#
+# What a provider can do is read from the capability snapshot, never asserted
+# here: the tiers below are preferences, and whether a CLI takes a thinking
+# control at all is whatever the last probe saw. Routing only reads that
+# snapshot — it never probes — because deciding a route must not put a provider
+# call in front of the call the caller actually asked for.
+
+OMS_MODEL_ROUTING_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/provider-registry.sh
+. "$OMS_MODEL_ROUTING_LIB_DIR/provider-registry.sh"
+# shellcheck source=scripts/lib/model-capability.sh
+. "$OMS_MODEL_ROUTING_LIB_DIR/model-capability.sh"
 
 oms_model_validate_class() {
   case "$1" in auto|fast|balanced|deep) return 0 ;; esac
@@ -17,9 +29,31 @@ oms_model_validate_name() {
   fi
 }
 
+# Syntax only. Which of these a given provider accepts is a capability
+# question, answered by oms_reasoning_provider_validate: claude takes xhigh and
+# max, and capping the vocabulary here put both permanently out of reach.
 oms_reasoning_validate() {
-  case "$1" in auto|low|medium|high) return 0 ;; esac
-  echo "error: reasoning effort must be auto, low, medium, or high" >&2
+  case "$1" in auto|low|medium|high|xhigh|max) return 0 ;; esac
+  echo "error: reasoning effort must be auto, low, medium, high, xhigh, or max" >&2
+  return 2
+}
+
+# Does this provider take this effort, as of the last capability probe?
+oms_reasoning_provider_validate() {
+  local provider="$1" effort="$2"
+
+  [ "$effort" != auto ] || return 0
+  oms_capability_peek "$provider" || return 2
+  case "$OMS_CAP_EFFORT_MECHANISM" in
+    none|absent)
+      echo "error: $provider takes no reasoning-effort control; use --model or --model-class" >&2
+      return 2
+      ;;
+  esac
+  case " $OMS_CAP_EFFORT_VALUES " in
+    *" $effort "*) return 0 ;;
+  esac
+  echo "error: $provider does not accept reasoning effort '$effort' (it accepts: $OMS_CAP_EFFORT_VALUES)" >&2
   return 2
 }
 
@@ -37,6 +71,50 @@ oms_reasoning_from_model() {
     *"(Medium)") printf 'medium\n' ;;
     *"(High)") printf 'high\n' ;;
   esac
+}
+
+# Candidates for a tier, best first. More than one only where a live catalog
+# exists to choose between them: a preference that cannot be checked is not a
+# preference, it is a guess with extra steps.
+oms_model_preferences() {
+  local provider="$1"
+  local class="$2"
+  case "$provider:$class" in
+    antigravity:fast)
+      printf '%s\n' 'Gemini 3.6 Flash (Low)' 'Gemini 3.5 Flash (Low)' 'Gemini 3.1 Pro (Low)' ;;
+    antigravity:balanced)
+      printf '%s\n' 'Gemini 3.6 Flash (Medium)' 'Gemini 3.5 Flash (Medium)' ;;
+    antigravity:deep)
+      printf '%s\n' 'Gemini 3.6 Flash (High)' 'Gemini 3.5 Flash (High)' 'Gemini 3.1 Pro (High)' ;;
+    *) oms_model_default "$provider" "$class" ;;
+  esac
+}
+
+# The first candidate the provider actually has. With no catalog to consult the
+# head of the list stands, which is what every provider without a listing
+# command gets.
+oms_model_available_preference() {
+  local provider="$1"
+  local class="$2"
+  local candidate
+  local head=""
+  local rc
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [ -n "$head" ] || head="$candidate"
+    oms_capability_model_available "$provider" "$candidate"
+    rc=$?
+    [ "$rc" -ne 0 ] || { printf '%s\n' "$candidate"; return 0; }
+    # 2 is "no catalog known": nothing to filter with, so stop second-guessing.
+    [ "$rc" -ne 2 ] || { printf '%s\n' "$head"; return 0; }
+  done <<EOF
+$(oms_model_preferences "$provider" "$class")
+EOF
+  # A catalog exists and holds none of them. Naming a model the CLI has retired
+  # fails the call; letting the provider pick its own default still runs.
+  [ -z "$head" ] || echo "warning: no configured $provider $class model is in its live catalog; using the provider default" >&2
+  printf '\n'
 }
 
 oms_model_default() {
@@ -74,9 +152,11 @@ oms_model_mapping() {
   key="OMS_MODEL_${provider_key}_${class_key}"
   value="${!key-}"
   if [ -n "$value" ]; then
+    # An operator naming a model outright is a decision, not a suggestion: it
+    # is used as given, catalog or no catalog.
     printf '%s\n' "$value"
   else
-    oms_model_default "$provider" "$class"
+    oms_model_available_preference "$provider" "$class"
   fi
 }
 
@@ -145,9 +225,9 @@ oms_model_prepare() {
       return 2
     }
   fi
-  if [ "$provider" = antigravity ] && [ "$effort_requested" != auto ]; then
-    echo "error: antigravity reasoning effort is selected by the model variant; use --model or --model-class" >&2
-    return 2
+  oms_reasoning_provider_validate "$provider" "$effort_requested" || return $?
+  if [ -n "$effort_fallback_explicit" ]; then
+    oms_reasoning_provider_validate "$provider" "$effort_fallback_explicit" || return $?
   fi
 
   # Why a tier was chosen is as operational as which one: a worker silently
@@ -201,9 +281,15 @@ oms_model_prepare() {
 
   if [ "$effort_requested" = auto ]; then
     OMS_REASONING_RESOLVED="$(oms_reasoning_for_class "$resolved")"
+    OMS_REASONING_EXPLICIT=0
   else
     OMS_REASONING_RESOLVED="$effort_requested"
+    # A provider whose control is a flag has to be handed the flag; a caller
+    # asking for an effort and getting the default instead is the failure this
+    # distinction exists to prevent.
+    OMS_REASONING_EXPLICIT=1
   fi
+  export OMS_REASONING_EXPLICIT
   OMS_REASONING_FALLBACK=""
   if [ -n "$OMS_MODEL_FALLBACK" ]; then
     OMS_REASONING_FALLBACK="$OMS_REASONING_RESOLVED"

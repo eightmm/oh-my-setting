@@ -291,6 +291,17 @@ for provider in "${provider_values[@]}"; do
   append_row "$provider" "$binary" "$installed" "$version" "$version_exit" \
     "$help_exit" "$required_file" "$missing_file" "$routes_file" \
     "$listing_supported" "$listing_status" "$listing_exit" "$models_file"
+
+  # Routing reads capabilities but never probes for them, so something has to
+  # go and look. This is that place: the diagnostic that already asks each CLI
+  # what it supports leaves the answer where routing can use it. The catalog
+  # half is refreshed only under --live-models, which is the flag that says
+  # live probes are wanted.
+  if [ "$LIVE_MODELS" -eq 1 ]; then
+    oms_capability_refresh "$provider" || true
+  else
+    OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh "$provider" || true
+  fi
 done
 
 python3 - "$ROWS" "$OUTPUT" "$LIVE_MODELS" "$REQUIRE_ALL" "$STRICT_DIVERSITY" <<'PY'

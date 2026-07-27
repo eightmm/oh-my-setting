@@ -286,9 +286,14 @@ if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } &&
    [ "$(printf '%s' "$PROVIDERS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" != 1 ]; then
   fail "--model/--fallback-model requires exactly one provider"
 fi
-if [ "$REASONING_EFFORT" != auto ] &&
-   printf '%s' "$PROVIDERS" | tr ',' '\n' | grep -Eq '^[[:space:]]*(antigravity|agy)[[:space:]]*$'; then
-  fail "explicit reasoning effort is unavailable for Antigravity; select a Low/Medium/High model variant"
+# A council runs one question at one effort, so every member has to accept it.
+# Which members can is a capability question, not a fixed list of provider
+# names: the scales differ (claude reaches xhigh and max, the others stop at
+# high) and they move as the CLIs are updated.
+if [ "$REASONING_EFFORT" != auto ]; then
+  for ask_provider in $(printf '%s' "$PROVIDERS" | tr ',' ' '); do
+    oms_reasoning_provider_validate "$ask_provider" "$REASONING_EFFORT" || exit $?
+  done
 fi
 export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"

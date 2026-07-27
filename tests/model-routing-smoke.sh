@@ -201,11 +201,24 @@ reset_capture
   --prompt 'explicit reasoning' >/dev/null
 [ "$(effort_arg "$capture/codex.1.argv")" = 'model_reasoning_effort="low"' ] ||
   fail "explicit Codex effort missing"
+# Antigravity takes --effort (low|medium|high); the harness used to refuse the
+# request outright, on the strength of a comment that had gone stale. Accepting
+# it is only correct if it is actually handed to the CLI — being accepted and
+# then dropped is the failure the old refusal was protecting against.
 reset_capture
-rc=0
 "$CALL" --repo "$repo" --to antigravity --reasoning-effort high \
-  --prompt 'unsupported explicit reasoning' >/dev/null 2>&1 || rc=$?
-[ "$rc" = 2 ] || fail "Antigravity explicit effort should fail instead of being ignored"
+  --prompt 'explicit antigravity reasoning' >/dev/null
+grep -Fxq -- '--effort' "$capture/agy.1.argv" ||
+  fail "explicit Antigravity effort must reach the CLI: $(cat "$capture/agy.1.argv")"
+grep -Fxq -- 'high' "$capture/agy.1.argv" ||
+  fail "explicit Antigravity effort value missing"
+reset_capture
+# The auto path carries the tier in the model variant, so the flag stays off it.
+"$CALL" --repo "$repo" --to antigravity --model-class deep \
+  --prompt 'auto antigravity reasoning' >/dev/null
+if grep -Fxq -- '--effort' "$capture/agy.1.argv"; then
+  fail "auto routing should not also pass --effort: $(cat "$capture/agy.1.argv")"
+fi
 reset_capture
 rc=0
 "$CALL" --repo "$repo" --to codex --reasoning-effort extreme \
@@ -217,9 +230,9 @@ rc=0
 # model contract to preserve.
 reset_capture
 rc=0
-"$CALL" --repo "$repo" --to antigravity --reasoning-effort high \
-  --prompt 'invalid export route' --export-only >/dev/null 2>&1 || rc=$?
-[ "$rc" = 2 ] || fail "export-only should reject an unsupported route"
+"$CALL" --repo "$repo" --to antigravity --reasoning-effort xhigh \
+  --prompt 'unsupported effort value' --export-only >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "an effort the provider does not accept should be rejected"
 reset_capture
 "$CALL" --repo "$repo" --to codex --model-class fast \
   --prompt 'export routed model' --export-only >/dev/null
@@ -454,10 +467,16 @@ rc=0
   --no-diff --dry-run >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "different synthesis provider should reject exact fallback"
 
+# Both providers accept low/medium/high, so a shared effort is routable; a
+# value only one of them takes is not.
 rc=0
 "$ROOT/scripts/peer-ask.sh" --providers codex,antigravity --reasoning-effort high \
+  --prompt 'shared effort' --dry-run >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "an effort every provider accepts should route"
+rc=0
+"$ROOT/scripts/peer-ask.sh" --providers codex,antigravity --reasoning-effort max \
   --prompt 'reject mixed effort' --dry-run >/dev/null 2>&1 || rc=$?
-[ "$rc" = 2 ] || fail "multi-provider explicit effort should reject Antigravity"
+[ "$rc" = 2 ] || fail "an effort a quorum member cannot take should be rejected"
 
 # Quorum members must be distinct after provider alias normalization.
 for duplicate in codex,codex antigravity,agy; do
@@ -470,6 +489,67 @@ rc=0
 "$ROOT/scripts/peer-review.sh" --repo "$repo" --providers codex,codex \
   --prompt 'duplicate review quorum' --no-diff --dry-run >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "duplicate review provider quorum should fail"
+
+# --- capability-driven routing -----------------------------------------------
+# What a provider can do is read from a snapshot, and the snapshot is written by
+# whoever probes. Routing itself must never probe: a route decision that spawns
+# the provider puts a call in front of the one the caller asked for.
+cap_dir="$TMP/capabilities"
+mkdir -p "$cap_dir"
+export OMS_CAPABILITY_DIR="$cap_dir"
+
+reset_capture
+"$CALL" --repo "$repo" --to codex --model-class fast --prompt 'no probe on route' >/dev/null
+[ "$(cat "$capture/codex.count")" = 1 ] ||
+  fail "routing spawned the provider more than the one call asked for: $(cat "$capture/codex.count")"
+
+# A snapshot naming a narrower scale is believed over the declared default.
+cat > "$cap_dir/antigravity.env" <<EOF
+binary_key=$( . "$ROOT/scripts/lib/provider-registry.sh"
+              . "$ROOT/scripts/lib/model-capability.sh"
+              oms_capability_binary_key agy )
+effort_mechanism=none
+effort_values=
+probed_at=$(date +%s)
+EOF
+rc=0
+"$CALL" --repo "$repo" --to antigravity --reasoning-effort high \
+  --prompt 'snapshot says no effort control' >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "a probed absence of the control must reject the request"
+
+# A stale snapshot — taken against a different binary — is not used.
+sed 's/^binary_key=.*/binary_key=some-other-binary|1.1/' "$cap_dir/antigravity.env" \
+  > "$cap_dir/antigravity.env.tmp"
+mv "$cap_dir/antigravity.env.tmp" "$cap_dir/antigravity.env"
+reset_capture
+"$CALL" --repo "$repo" --to antigravity --reasoning-effort high \
+  --prompt 'stale snapshot ignored' >/dev/null ||
+  fail "a snapshot for a different binary must not decide the route"
+rm -f "$cap_dir/antigravity.env"
+
+# The live catalog picks between tier candidates: with 3.6 absent the route
+# slides to the next model that exists instead of naming a retired one. The
+# per-tier override has to come off first — a model named outright is a
+# decision and is deliberately used catalog or no catalog.
+printf 'gemini-3.5-flash-high\ngemini-3.5-flash-medium\ngemini-3.5-flash-low\n' \
+  > "$cap_dir/antigravity.models"
+saved_agy_deep="$OMS_MODEL_ANTIGRAVITY_DEEP"
+unset OMS_MODEL_ANTIGRAVITY_DEEP
+reset_capture
+"$CALL" --repo "$repo" --to antigravity --model-class deep \
+  --prompt 'catalog picks the available model' >/dev/null
+grep -Fxq 'Gemini 3.5 Flash (High)' "$capture/agy.1.argv" ||
+  fail "routing should pick a model the catalog has: $(cat "$capture/agy.1.argv")"
+
+# An explicitly named model is not second-guessed against the catalog.
+export OMS_MODEL_ANTIGRAVITY_DEEP="$saved_agy_deep"
+reset_capture
+"$CALL" --repo "$repo" --to antigravity --model-class deep \
+  --prompt 'named model wins over catalog' >/dev/null
+grep -Fxq "$saved_agy_deep" "$capture/agy.1.argv" ||
+  fail "an explicitly configured model must be used as given"
+rm -f "$cap_dir/antigravity.models"
+unset OMS_CAPABILITY_DIR
 
 "$ROOT/scripts/artifact-index.sh" --repo "$repo" validate >/dev/null
 echo "model-routing-smoke: ok"
