@@ -259,19 +259,29 @@ for provider in "${provider_values[@]}"; do
       done < "$required_file"
     fi
 
+    # Probe once and read the result twice: refresh writes the shared snapshot
+    # routing reads, and this report then reads the catalog back out of it.
+    # Asking the CLI a second time for the same list is not merely wasteful —
+    # `agy models` started while a previous agy is still exiting hangs, so the
+    # second answer was sometimes no answer at all. Every installed provider is
+    # refreshed, catalog or not: one without a listing command still has flag
+    # capabilities worth recording.
+    if [ "$LIVE_MODELS" -eq 1 ] && oms_provider_supports_model_listing "$provider"; then
+      oms_capability_refresh "$provider" || true
+    else
+      OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh "$provider" || true
+    fi
+
     if oms_provider_supports_model_listing "$provider"; then
       listing_supported=1
       if [ "$LIVE_MODELS" -eq 1 ]; then
-        listing_exit=0
-        # One reader for catalogs, shared with routing: agy prints lines, codex
-        # answers model/list on its app-server, and neither belongs spelled out
-        # twice.
-        oms_capability_probe_models "$provider" "$models_file" "$provider_dir/efforts" ||
-          listing_exit=$?
-        if [ "$listing_exit" -eq 0 ]; then
+        if oms_capability_models "$provider" > "$models_file" 2>/dev/null &&
+          [ -s "$models_file" ]; then
           listing_status=ok
+          listing_exit=0
         else
           listing_status=failed
+          listing_exit=1
         fi
       fi
     elif [ "$LIVE_MODELS" -eq 1 ]; then
@@ -301,11 +311,6 @@ for provider in "${provider_values[@]}"; do
   # what it supports leaves the answer where routing can use it. The catalog
   # half is refreshed only under --live-models, which is the flag that says
   # live probes are wanted.
-  if [ "$LIVE_MODELS" -eq 1 ]; then
-    oms_capability_refresh "$provider" || true
-  else
-    OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh "$provider" || true
-  fi
 done
 
 python3 - "$ROWS" "$OUTPUT" "$LIVE_MODELS" "$REQUIRE_ALL" "$STRICT_DIVERSITY" <<'PY'

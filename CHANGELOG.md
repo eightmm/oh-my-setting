@@ -28,7 +28,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   check uses the union of its models' scales. Both `model-doctor` and routing
   read catalogs through one function; `codex models` (which is not a
   subcommand) is gone. Claude Code has no catalog source and is reported as
-  unverified rather than assumed good.
+  unverified rather than assumed good. Catalogs are probed once per doctor run
+  and read back from the snapshot, rather than asked for twice: `agy models`
+  started while a previous agy invocation is still exiting hangs until its
+  timeout, so the second ask was intermittently no answer at all.
 - `provider-permissions` turns the last human-only setup step into a harness
   tool. Codex and Claude Code take authority per invocation and need nothing;
   antigravity needs standing rules, and finding out which ones took a session

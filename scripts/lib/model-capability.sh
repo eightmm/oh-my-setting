@@ -118,6 +118,16 @@ oms_capability_probe_models() {
 
   case "$(oms_provider_model_listing_kind "$provider")" in
     lines)
+      # agy holds a singleton while it exits, and a `models` call that starts
+      # inside that window hangs until the timeout instead of failing. The help
+      # probe runs immediately before this, so the window is exactly where this
+      # lands. Wait it out rather than hang and recover: a measured second of
+      # separation is enough, and a wasted second beats a wasted thirty.
+      sleep "${OMS_CAPABILITY_SETTLE_WAIT:-2}"
+      if oms_capability_run_bounded 30 "$models_out" "$binary" models && [ -s "$models_out" ]; then
+        return 0
+      fi
+      sleep "${OMS_CAPABILITY_SETTLE_WAIT:-2}"
       oms_capability_run_bounded 30 "$models_out" "$binary" models
       ;;
     codex-app-server)
