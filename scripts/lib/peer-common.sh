@@ -921,6 +921,15 @@ ma_provider_attempt() {
       # "--sandbox". Pass the prompt as the flag value instead.
       cmd=(agy)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
+      # agy does not take the shell's cwd as its workspace. Left to itself it
+      # picks a trusted workspace — for a repo under one, that is the ORIGINAL
+      # checkout, so a delegated worker edits the user's working tree instead of
+      # its worktree — or, failing that, its own scratch directory, where the
+      # work simply disappears. Naming the directory is what binds it to the
+      # tree the caller means. Both were observed: a worker in a home-directory
+      # repo wrote to the origin path, and the same worker without --add-dir
+      # wrote to ~/.gemini/antigravity-cli/scratch.
+      cmd+=(--add-dir "$workdir")
       cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}")
       cmd+=(--print "$(cat "$prompt_file")")
       ;;
