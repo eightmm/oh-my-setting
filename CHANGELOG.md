@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Worker-authority detection covers what a live four-model council said it
+  missed: untracked and ignored content is compared by stat, so planting
+  `sitecustomize.py` or swapping a file inside an ignored `.venv/` is caught
+  (`git status --ignored` collapses a fully ignored directory to one entry and
+  sees neither), and object-store wiring is compared too — alternates,
+  `info/exclude`, grafts, shallow, linked-worktree registrations, and submodule
+  config/HEAD under `.git/modules`. The stat scan is bounded by
+  `OMS_WORKER_GUARD_MAX_FILES` (default 20000) and says when it truncated. The
+  limits are now documented rather than implied: a reverted write, anything the
+  worker reads, and anything outside the repository need process isolation a
+  bash harness does not have.
 - The verification gate answers at feature level, not per line of chatter:
   `scripts/check.sh` prints one `ok: <stage>` per suite and the smoke runner one
   `scripts-smoke: ok (N tests)` per shard, so a green run is ~25 lines instead of

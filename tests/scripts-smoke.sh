@@ -10299,6 +10299,93 @@ EOF
     fail "the worker's work should still come back as a patch"
 }
 
+make_guard_repo() {  # make_guard_repo DIR — repo with an ignored directory
+  local dir="$1"
+
+  make_committed_repo "$dir"
+  mkdir -p "$dir/bin" "$dir/home" "$dir/venv/bin"
+  printf 'venv/\n*.log\n' > "$dir/.gitignore"
+  ( cd "$dir" && git add .gitignore &&
+    git -c user.email=t@example.com -c user.name=t commit -qm ignore >/dev/null )
+  printf 'original\n' > "$dir/venv/bin/python"
+}
+
+run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>output"
+  local dir="$1"
+  local body="$2"
+  local rc=0
+  local out
+  local guard_home="$dir/home"
+
+  printf '#!/usr/bin/env bash\n%s\necho done\n' "$body" > "$dir/bin/codex"
+  chmod +x "$dir/bin/codex"
+  out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$dir/bin:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$dir" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  printf '%s\t%s' "$rc" "$out"
+}
+
+test_worker_guard_sees_planted_and_ignored_files() {
+  local project="$TMP/guard-files"
+  local result
+
+  make_guard_repo "$project"
+  # A planted untracked file is executable later from the primary tree.
+  result="$(run_guarded_worker "$project" "printf 'evil\n' > $project/sitecustomize.py")"
+  [ "${result%%	*}" != 0 ] || fail "a planted untracked file should fail the run"
+  printf '%s' "$result" | grep -Fq 'outside its worktree: files' ||
+    fail "the untracked surface should be named: $result"
+
+  # git status collapses a fully ignored directory to one entry, so replacing a
+  # file inside it is invisible there; the stat scan is what catches it.
+  local swap="$TMP/guard-ignored"
+  make_guard_repo "$swap"
+  result="$(run_guarded_worker "$swap" "printf 'tampered\n' > $swap/venv/bin/python")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "replacing a file inside an ignored directory should fail the run"
+  printf '%s' "$result" | grep -Fq 'outside its worktree: files' ||
+    fail "an ignored-tree replacement should be named: $result"
+}
+
+test_worker_guard_sees_object_store_and_metadata_writes() {
+  local project="$TMP/guard-gitmeta"
+  local result
+
+  make_guard_repo "$project"
+  # An alternate silently widens where objects may come from.
+  result="$(run_guarded_worker "$project" \
+    "mkdir -p $project/.git/objects/info && printf '/tmp/elsewhere\n' > $project/.git/objects/info/alternates")"
+  [ "${result%%	*}" != 0 ] || fail "adding an object alternate should fail the run"
+  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+    fail "the metadata surface should be named: $result"
+
+  local excl="$TMP/guard-exclude"
+  make_guard_repo "$excl"
+  result="$(run_guarded_worker "$excl" "printf 'drop\n' >> $excl/.git/info/exclude")"
+  [ "${result%%	*}" != 0 ] || fail "editing .git/info/exclude should fail the run"
+  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+    fail "an exclude-file edit should be named: $result"
+}
+
+test_worker_guard_reports_a_bounded_scan() {
+  local project="$TMP/guard-budget"
+  local out
+  local guard_home="$project/home"
+
+  make_guard_repo "$project"
+  printf '#!/usr/bin/env bash\necho done\n' > "$project/bin/codex"
+  chmod +x "$project/bin/codex"
+  printf 'a\n' > "$project/one.txt"
+  printf 'b\n' > "$project/two.txt"
+
+  # A cap that hides how much it skipped reads as full coverage.
+  out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$project/bin:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_MAX_FILES=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify 2>&1)" || fail "a bounded scan should not fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'scanned only the first 1 untracked/ignored entries' ||
+    fail "a truncated scan must say so: $out"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

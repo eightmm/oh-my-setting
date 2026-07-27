@@ -121,6 +121,11 @@ PY
 #
 # .oms is deliberately excluded: workers are given OMS_STATE_REPO so they can
 # append shared harness state, and the harness itself writes there during a run.
+#
+# What this cannot see, by construction: a write that is undone before the
+# worker exits, anything the worker reads (inherited tokens, ssh agents), and
+# anything it does outside the repository (HOME, /tmp, a surviving background
+# process). Those need process isolation, which a bash harness does not have.
 oms_worker_surface_fingerprint() {
   local repo="$1"
   local git_dir
@@ -161,7 +166,7 @@ oms_worker_surface_diff() {
   local changed=""
   local name
 
-  for name in config remotes refs tracked hooks; do
+  for name in config remotes refs tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
     if ! oms_worker_surface_capture_one "$repo" "$name" | cmp -s - "$before_dir/$name"; then
       changed="${changed:+$changed, }$name"
@@ -189,6 +194,88 @@ oms_worker_surface_capture_one() {
       git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
       ;;
     tracked) git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | LC_ALL=C sort ;;
+    files)
+      # Untracked AND ignored content, by stat rather than by reading bytes.
+      # `git status --ignored` collapses a fully ignored directory to one entry,
+      # so replacing .venv/bin/python or planting sitecustomize.py inside an
+      # ignored tree is invisible to it. Enumerating with stat catches the
+      # replacement without reading a single dataset byte. The walk is bounded:
+      # a truncated scan says so instead of quietly covering less.
+      OMS_WG_REPO="$repo" OMS_WG_MAX="${OMS_WORKER_GUARD_MAX_FILES:-20000}" \
+      OMS_WG_EXCLUDE="${OMS_WORKER_GUARD_EXCLUDE:-}" python3 - <<'PY'
+import hashlib, os, subprocess, sys
+
+root = os.environ["OMS_WG_REPO"]
+try:
+    budget = int(os.environ.get("OMS_WG_MAX", "20000"))
+except ValueError:
+    budget = 20000
+try:
+    raw = subprocess.check_output(
+        ["git", "-C", root, "ls-files", "-z", "--others"],
+        stderr=subprocess.DEVNULL)
+except Exception:
+    raise SystemExit(0)
+paths = sorted(p for p in raw.split(b"\0") if p)
+count = 0
+# The harness writes this run's own artifacts and patch somewhere; when that is
+# inside the repo it is the harness moving, not the worker.
+excluded = [".oms"]
+for extra in (os.environ.get("OMS_WG_EXCLUDE") or "").splitlines():
+    extra = extra.strip().strip("/")
+    if extra:
+        excluded.append(extra)
+for rel in paths:
+    name = os.fsdecode(rel)
+    if any(name == prefix or name.startswith(prefix + "/") for prefix in excluded):
+        continue
+    count += 1
+    if count > budget:
+        print("TRUNCATED after %d entries" % budget)
+        break
+    full = os.path.join(root, name)
+    try:
+        info = os.lstat(full)
+        print("%s %o %d %d" % (
+            hashlib.sha256(rel).hexdigest(), info.st_mode, info.st_size,
+            getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))))
+    except OSError:
+        print("%s MISSING" % hashlib.sha256(rel).hexdigest())
+PY
+      ;;
+    gitmeta)
+      # Object-store wiring and repository metadata outside config/refs/hooks:
+      # an added alternate silently widens where objects may come from, a graft
+      # or shallow edit rewrites history's shape, a new linked worktree is
+      # another checkout of this repo, and a submodule keeps its own config,
+      # refs, and hooks under .git/modules.
+      if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
+        local meta
+        for meta in objects/info/alternates objects/info/http-alternates \
+          info/exclude info/grafts info/attributes shallow; do
+          if [ -f "$git_dir/$meta" ]; then
+            printf '%s %s\n' "$meta" \
+              "$(oms_sha256_file "$git_dir/$meta" 2>/dev/null || printf 'unreadable')"
+          fi
+        done
+        if [ -d "$git_dir/worktrees" ]; then
+          find "$git_dir/worktrees" -maxdepth 2 \( -name gitdir -o -name HEAD \) -type f \
+            -print 2>/dev/null | LC_ALL=C sort |
+            while IFS= read -r wt; do
+              printf 'worktree %s %s\n' "${wt#"$git_dir"/}" \
+                "$(oms_sha256_file "$wt" 2>/dev/null || printf 'unreadable')"
+            done
+        fi
+        if [ -d "$git_dir/modules" ]; then
+          find "$git_dir/modules" -maxdepth 3 \( -name config -o -name HEAD \) -type f \
+            -print 2>/dev/null | LC_ALL=C sort |
+            while IFS= read -r mod; do
+              printf 'module %s %s\n' "${mod#"$git_dir"/}" \
+                "$(oms_sha256_file "$mod" 2>/dev/null || printf 'unreadable')"
+            done
+        fi
+      fi
+      ;;
     hooks)
       if [ -n "$git_dir" ] && [ -d "$git_dir/hooks" ]; then
         find "$git_dir/hooks" -maxdepth 1 -type f ! -name '*.sample' -print 2>/dev/null |
@@ -208,7 +295,7 @@ oms_worker_surface_snapshot() {
   local name
 
   mkdir -p "$dir" || return 1
-  for name in config remotes refs tracked hooks; do
+  for name in config remotes refs tracked files gitmeta hooks; do
     oms_worker_surface_capture_one "$repo" "$name" > "$dir/$name" 2>/dev/null || true
   done
 }

@@ -55,3 +55,22 @@ Before landing a patch:
 Admission verifies applicability, syntax, verifier integrity, path scope, and
 the stored verification contract. A rejected patch remains rejected until the
 cause changes; consult the fail ledger before retrying.
+
+## What worker-authority detection does not cover
+
+`peer-delegate` compares the primary repo's tracked state, untracked and ignored
+files (by stat), local git config, remotes, refs, object-store/worktree/submodule
+metadata, and hooks around each worker run, and fails the run when one moves.
+It is detection, not a sandbox, and these stay outside it:
+
+- A write undone before the worker exits. Before/after comparison cannot see a
+  change that was reverted in between.
+- Anything the worker reads: inherited tokens, ssh agents, credentials in the
+  environment. Reads leave no trace to compare.
+- Anything outside the repository — `$HOME`, `/tmp`, a background process that
+  outlives the run.
+- Content inside an ignored directory beyond `OMS_WORKER_GUARD_MAX_FILES`
+  entries; a truncated scan reports itself rather than pretending to be complete.
+
+Closing those needs process isolation, which a bash harness does not have. Treat
+a clean result as "no repository surface moved", not as "the worker was safe".

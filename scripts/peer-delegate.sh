@@ -117,9 +117,18 @@ Options:
 
 Environment:
   OH_MY_SETTING_DELEGATE_DRY_RUN=1  Same as --dry-run.
-  OMS_WORKER_GUARD_OFF=1     Skip the check that the worker did not change the
-                             primary worktree, git config, remotes, refs, or
-                             hooks (detection only; it cannot prevent a write).
+  OMS_WORKER_GUARD_OFF=1     Skip the worker-authority check entirely.
+  OMS_WORKER_GUARD_MAX_FILES=20000
+                             Cap the untracked/ignored stat scan; a truncated
+                             scan is reported, never silent.
+
+The worker-authority check compares the primary repo's tracked state, untracked
+and ignored files (by stat, not by reading them), local git config, remotes,
+refs, object-store/worktree/submodule metadata, and hooks around the worker.
+It is detection, not a sandbox: it cannot prevent a write, and it cannot see a
+write that is undone before the worker exits, anything the worker reads
+(inherited tokens, ssh agents), or anything it does outside the repository
+(HOME, /tmp, a surviving background process). Those need process isolation.
   OMS_PEER_TIMEOUT=5m        Worker wall-clock timeout (GNU timeout).
 EOF
 }
@@ -758,8 +767,38 @@ plan_transition start
 # worktree, git config, remotes, refs, hooks — was previously invisible.
 worker_guard_dir=""
 if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
+  # This run's own writes are the harness moving, not the worker: the artifact
+  # directory, and our own stdout/stderr when the caller redirected them into
+  # the repo (`peer-delegate ... > run.log` is an ordinary thing to do). The fd
+  # lookup is Linux-only; elsewhere it simply contributes nothing.
+  OMS_WORKER_GUARD_EXCLUDE=""
+  case "$ARTIFACT_DIR" in
+    "$REPO"/*) OMS_WORKER_GUARD_EXCLUDE="${ARTIFACT_DIR#"$REPO"/}" ;;
+  esac
+  # Duplicate the real streams first: inside $( ) fd 1 is the capture pipe, so
+  # reading it there resolves to the substitution, never to the caller's file.
+  exec 9>&1 8>&2
+  for guard_fd in 9 8; do
+    guard_target="$(readlink -f "/proc/self/fd/$guard_fd" 2>/dev/null || true)"
+    case "$guard_target" in
+      "$REPO"/*)
+        OMS_WORKER_GUARD_EXCLUDE="${OMS_WORKER_GUARD_EXCLUDE:+$OMS_WORKER_GUARD_EXCLUDE
+}${guard_target#"$REPO"/}"
+        ;;
+    esac
+  done
+  exec 9>&- 8>&-
+  export OMS_WORKER_GUARD_EXCLUDE
   worker_guard_dir="$worktree_parent/worker-guard"
-  oms_worker_surface_snapshot "$REPO" "$worker_guard_dir" || worker_guard_dir=""
+  if oms_worker_surface_snapshot "$REPO" "$worker_guard_dir"; then
+    # A bounded scan must say it was bounded: silent truncation reads as full
+    # coverage exactly where coverage matters.
+    if grep -q '^TRUNCATED' "$worker_guard_dir/files" 2>/dev/null; then
+      echo "note: worker guard scanned only the first ${OMS_WORKER_GUARD_MAX_FILES:-20000} untracked/ignored entries (OMS_WORKER_GUARD_MAX_FILES)" >&2
+    fi
+  else
+    worker_guard_dir=""
+  fi
 fi
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
