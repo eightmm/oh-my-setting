@@ -10724,6 +10724,55 @@ test_landing_refuses_to_apply_without_a_recorded_intent() {
     fail "nothing should have been applied"
 }
 
+test_landing_refuses_while_another_landing_holds_the_repo() {
+  local project="$TMP/landing-serialized"
+  local patch="$project/change.patch"
+  local holder_pid
+  local waited=0
+  local rc=0
+  local out
+
+  make_committed_repo "$project"
+  printf 'base\nadded\n' > "$project/file.txt"
+  ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+
+  # Stand in for a landing already in flight. Two landers can both see a clean
+  # tree and both pass admission against the same base, so the second must be
+  # turned away rather than applying into the first one's half-landed tree.
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    oms_hold_file_lock "$project/.oms/landings.jsonl" 7 || exit 1
+    : > "$project/held"
+    while [ -f "$project/held" ]; do sleep 1; done
+    # A real holder releases on exit the way patch-land does; only an flock fd
+    # is dropped for free by the kernel.
+    oms_release_held_file_lock
+  ) &
+  holder_pid=$!
+  while [ ! -f "$project/held" ]; do
+    waited=$((waited + 1))
+    [ "$waited" -lt 50 ] || fail "the stand-in landing never took the lock"
+    sleep 1
+  done
+
+  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  rm -f "$project/held"
+  wait "$holder_pid" 2>/dev/null || true
+
+  [ "$rc" != 0 ] || fail "a concurrent landing should be refused: $out"
+  printf '%s' "$out" | grep -Fq 'another landing is in progress' ||
+    fail "the refusal should name the reason: $out"
+  [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
+    fail "the refused landing must not have applied anything"
+
+  # The lock is not sticky: once the holder is gone the same landing proceeds.
+  rc=0
+  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || fail "landing should succeed once the lock is free: $out"
+}
+
 test_landing_recovery_refuses_a_changed_patch() {
   local project="$TMP/landing-patchbound"
   local patch="$project/change.patch"

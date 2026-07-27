@@ -315,6 +315,17 @@ case "$check_out" in
     ;;
 esac
 
+# One landing at a time per repository. Everything from here to the apply is a
+# check-then-act on the shared working tree, and this harness exists to let
+# several agents work at once: two landers could both see a clean tree, both
+# pass admission against the same base, and both apply — each reviewed without
+# the other's changes. The recheck below closes the window only for a tree that
+# moved via commit, not for a second apply landing inside it.
+if ! oms_hold_file_lock "$REPO/.oms/landings.jsonl"; then
+  fail "another landing is in progress in $REPO; retry when it finishes"
+fi
+trap 'oms_release_held_file_lock' EXIT
+
 # Pre-flight: never apply onto a dirty tree — a half-applied patch on top of
 # unrelated edits is the mess this whole gate exists to avoid.
 # Admission verifies a throwaway worktree built from this base. If the main

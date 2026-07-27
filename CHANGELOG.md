@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Landings are now serialized per repository. Everything from the clean-tree
+  check through `git apply` was a check-then-act on the shared working tree with
+  no lock, so two agents could both be admitted against the same base and both
+  apply — each reviewed without the other's changes. A second lander is refused
+  outright rather than queued, because the tree it was admitted against is the
+  one the first lander is changing. `oms_hold_file_lock` holds a lock for the
+  rest of a process, which `oms_with_file_lock`'s subshell cannot do when later
+  steps need variables the earlier steps set.
 - A council counted a provider refusal as an answer. Antigravity's headless mode
   cannot prompt for a tool permission, so it auto-denies anything outside
   `permissions.allow`, exits 0, and prints only its own explanation — text

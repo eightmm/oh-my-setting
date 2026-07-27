@@ -212,6 +212,52 @@ oms_try_file_lock_mkdir() {
   )
 }
 
+# Hold a lock for the rest of the caller's process instead of around one
+# command. oms_with_file_lock runs its command in a subshell, which is right for
+# a read-modify-write on one file and wrong for a multi-step operation whose
+# later steps need variables the earlier steps set — landing a patch runs a
+# whole admission gate between its clean-tree check and its apply.
+# Non-blocking on purpose: a second lander cannot usefully queue, because the
+# tree it was admitted against is the tree the first lander is changing.
+# Returns 75 when someone else holds it. Release with
+# oms_release_held_file_lock (a flock fd is released by process exit anyway).
+OMS_HELD_LOCK_KIND=""
+OMS_HELD_LOCK_DIR=""
+OMS_HELD_LOCK_OWNER=""
+
+oms_hold_file_lock() {
+  local state_file="$1"
+  local fd="${2:-7}"
+  local lock_path
+  local owner_id
+
+  [ -n "$state_file" ] || {
+    echo "error: lock target is required" >&2
+    return 2
+  }
+  lock_path="$(oms_file_lock_path_for_file "$state_file")"
+  mkdir -p "$(dirname "$lock_path")"
+
+  if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then
+    eval "exec $fd>\"\$lock_path\"" || return 75
+    flock -n "$fd" || return 75
+    OMS_HELD_LOCK_KIND="flock"
+    return 0
+  fi
+  owner_id="$$.$(date +%s).${RANDOM:-0}"
+  oms_try_file_lock_mkdir_acquire "$lock_path" "$(oms_file_lock_timeout)" "$owner_id" ||
+    return 75
+  OMS_HELD_LOCK_KIND="mkdir"
+  OMS_HELD_LOCK_DIR="$lock_path"
+  OMS_HELD_LOCK_OWNER="$owner_id"
+}
+
+oms_release_held_file_lock() {
+  [ "$OMS_HELD_LOCK_KIND" = "mkdir" ] || return 0
+  oms_file_lock_mkdir_release "$OMS_HELD_LOCK_DIR" "$OMS_HELD_LOCK_OWNER"
+  OMS_HELD_LOCK_KIND=""
+}
+
 oms_try_file_lock() {
   local state_file="$1"
   local timeout
