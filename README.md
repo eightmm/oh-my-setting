@@ -1,8 +1,14 @@
 # oh-my-setting
 
 One setup that gives Codex, Claude Code, and Antigravity the same rules,
-skills, and agent harness on every machine. After install, everything is used by
-talking to your coding agent — there is nothing to run in a terminal.
+skills, and agent harness on every machine.
+
+**You never run any of it.** Install is the only command you type; from then on
+the harness is the agent's, not yours. Its tools (`oms ...`) are invoked by an
+agent mid-task, its state (`.oms/`) is written by agents, and its setup steps —
+updates, health checks, even the permissions another agent CLI needs — are
+things you ask your agent to do. If a document here shows a command, it is
+showing you what the agent will run.
 
 [한국어](README.ko.md)
 

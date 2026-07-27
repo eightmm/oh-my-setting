@@ -824,6 +824,23 @@ fi
 
 capture_patch
 
+# A worker can exit 0 having produced only its own reason for doing nothing —
+# a denied tool it could not prompt for, a missing login. Exit status says the
+# run succeeded and the empty patch says the task needed no changes, which is
+# the same shape as honest work on an already-correct tree. Name it instead:
+# 126 is "found but could not execute", and like a missing CLI (127) it is not
+# repairable, because no rewording of the brief grants a permission.
+worker_blocked=""
+if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ]; then
+  if [ "$(ma_answer_quality "$artifact")" = "blocked" ]; then
+    worker_blocked="$(ma_answer_block_reason "$artifact")"
+    worker_status=126
+    echo "worker: $TO could not run: $worker_blocked" >&2
+    printf '\n\n## Worker Blocked\n\n- %s\n- not a task failure: the CLI could not act, so no repair is attempted\n' \
+      "$worker_blocked" >> "$artifact"
+  fi
+fi
+
 verify_status=0
 if [ -n "$VERIFY_CMD" ]; then
   printf '\n\n## Verify\n\n- command: %s\n\n' "$VERIFY_CMD" >> "$artifact"
@@ -836,10 +853,12 @@ fi
 
 # Bounded repair: on worker/verify failure, re-invoke the same worker in the
 # same worktree with the failure fed back so it can correct its own attempt.
-# A missing CLI (127) is not repairable, and a repair prompt that trips the
-# outbound gate stops the loop — re-sending secret-laden context is futile.
+# A missing CLI (127) or a blocked one (126) is not repairable, and a repair
+# prompt that trips the outbound gate stops the loop — re-sending secret-laden
+# context is futile.
 repair_used=0
 if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] &&
+   [ "$worker_status" -ne 126 ] &&
    [ "$route_capacity_terminal" = 0 ]; then
   while [ "$repair_used" -lt "$REPAIR" ] && { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
     repair_used=$((repair_used + 1))

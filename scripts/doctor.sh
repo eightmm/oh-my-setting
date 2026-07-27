@@ -167,50 +167,17 @@ check_optional_cmd() {
 # this harness invokes agy, a granted command still cannot write outside the
 # sandbox without a separate `unsandboxed` rule.
 check_antigravity_permissions() {
-  local settings="$HOME/.gemini/antigravity-cli/settings.json"
-  local missing
+  local tool="$INSTALL_ROOT/scripts/provider-permissions.sh"
 
   command -v agy >/dev/null 2>&1 || return 0
-  if [ ! -f "$settings" ]; then
-    echo "warn: antigravity has no $settings; headless consults will be denied every tool"
+  if [ ! -x "$tool" ]; then
+    echo "missing: $tool"
+    FAILED=1
     return 0
   fi
-  missing="$(ANTIGRAVITY_SETTINGS="$settings" python3 - <<'PY'
-import json, os, sys
-
-path = os.environ["ANTIGRAVITY_SETTINGS"]
-try:
-    with open(path, encoding="utf-8") as handle:
-        allow = json.load(handle).get("permissions", {}).get("allow", [])
-except (OSError, ValueError):
-    print("unreadable")
-    sys.exit(0)
-granted = {}
-for rule in allow:
-    if not isinstance(rule, str) or not rule.endswith(")") or "(" not in rule:
-        continue
-    namespace, _, target = rule[:-1].partition("(")
-    granted.setdefault(namespace.strip(), set()).add(target.strip())
-missing = []
-# Reading a file is its own permission, not a shell command: without it the CLI
-# denies its own Read tool and shell access alone does not save the call.
-if "*" not in granted.get("read_file", ()):
-    missing.append("read_file(*) (file reads; a narrower path also works)")
-# A peer chains commands, and the rule is matched against the whole line, so a
-# curated list denies the first `cd x && rg y` and the answer is lost.
-if "*" not in granted.get("command", ()):
-    missing.append("command(*) (shell; --sandbox still blocks writes)")
-print(", ".join(missing))
-PY
-)"
-  if [ "$missing" = "unreadable" ]; then
-    echo "warn: antigravity settings $settings is not readable JSON"
-  elif [ -n "$missing" ]; then
-    echo "warn: antigravity headless consults will be denied: $missing"
-    echo "warn: add these under permissions.allow in $settings"
-  else
-    echo "ok: antigravity headless read permissions"
-  fi
+  # A missing grant is a warning, not a failure: the install is fine, one peer
+  # is mute. The tool prints its own ok/warn lines and how to fix it.
+  "$tool" --check || true
 }
 
 model_doctor_applicable() {

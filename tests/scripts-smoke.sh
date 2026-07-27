@@ -1569,7 +1569,7 @@ JSON
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a narrow antigravity allow-list is a warning, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'warn: antigravity headless consults will be denied' ||
+  printf '%s' "$out" | grep -Fq 'warn: antigravity will be denied these headlessly' ||
     fail "the doctor should name the missing permissions: $out"
   printf '%s' "$out" | grep -Fq 'command(*)' ||
     fail "a curated command list does not survive a chained command: $out"
@@ -10726,6 +10726,102 @@ test_landing_refuses_to_apply_without_a_recorded_intent() {
     fail "the refusal should say why: $out"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "nothing should have been applied"
+}
+
+test_provider_permissions_grants_only_what_is_missing() {
+  local dir="$TMP/provider-perms"
+  local settings="$dir/settings.json"
+  local bin="$dir/bin"
+  local rc=0
+  local out
+
+  mkdir -p "$dir" "$bin"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/agy"
+  chmod +x "$bin/agy"
+
+  out="$(PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" \
+    --apply --profile delegate --allow-command uv \
+    --worktree-parent /tmp --settings "$settings" 2>&1)" ||
+    fail "apply should succeed on a fresh settings file: $out"
+  python3 - "$settings" <<'PY' || fail "apply must write exactly the profile's rules"
+import json, sys
+allow = json.load(open(sys.argv[1]))["permissions"]["allow"]
+assert allow == ["read_file(*)", "command(*)", "write_file(/tmp)", "unsandboxed(uv)"], allow
+PY
+
+  # Re-running must be a no-op, not a second copy of every rule.
+  PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
+    --allow-command uv --worktree-parent /tmp --settings "$settings" >/dev/null ||
+    fail "a satisfied config should check clean"
+
+  # A directory grant covers paths under it, so a narrower requirement is met.
+  PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
+    --worktree-parent /tmp/nested/deeper --settings "$settings" >/dev/null ||
+    fail "write_file(/tmp) should already cover a directory beneath it"
+
+  # An unrelated command is still missing, and the hint must carry the flag
+  # that produced the finding.
+  out="$(PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
+    --allow-command npm --worktree-parent /tmp --settings "$settings" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "a missing unsandboxed grant should not check clean: $out"
+  printf '%s' "$out" | grep -Fq -- '--allow-command npm' ||
+    fail "following the hint must grant what was reported: $out"
+
+  # The sandbox boundary is not something to hand over with one flag.
+  rc=0
+  out="$(PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
+    --allow-command '*' --settings "$settings" 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "a wildcard sandbox escape should be refused: $out"
+}
+
+test_provider_permissions_leaves_flag_driven_providers_alone() {
+  local dir="$TMP/provider-perms-none"
+  local bin="$dir/bin"
+  local out
+
+  # No agy on PATH: codex and claude carry authority per invocation, so there
+  # is nothing standing to grant and the check must not invent work.
+  mkdir -p "$dir" "$bin"
+  out="$(PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" --check 2>&1)" ||
+    fail "no antigravity means nothing to do: $out"
+  printf '%s' "$out" | grep -Fq 'not installed' || fail "should say why there is nothing to do: $out"
+}
+
+test_delegate_reports_a_worker_that_could_not_act() {
+  local project="$TMP/delegate-blocked"
+  local bin="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin" "$home_dir"
+  # A CLI that exits 0 having printed only its reason for doing nothing. The
+  # empty patch that follows is indistinguishable from honest work on an
+  # already-correct tree, which is how a permission problem reads as success.
+  cat > "$bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+echo 'jetski: no output produced — a tool required the "unsandboxed" permission that headless mode cannot prompt for, so it was auto-denied.'
+exit 0
+EOF
+  chmod +x "$bin/codex"
+
+  out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --prompt "add a thing" --no-verify --repair 2 2>&1)" || rc=$?
+
+  # The script keeps its one failure code; the distinct 126 rides on the worker
+  # status, where a caller reading the run can tell "could not act" from "acted
+  # and failed".
+  [ "$rc" != 0 ] || fail "a blocked worker must not report success: $out"
+  printf '%s' "$out" | grep -Fq 'could not run' ||
+    fail "the operator needs to be told the worker never acted: $out"
+  printf '%s' "$out" | grep -Fq 'exit 126' ||
+    fail "a blocked worker should be distinguishable from a failed one: $out"
+  # No rewording of the brief grants a permission, so repair must not burn calls.
+  if printf '%s' "$out" | grep -Fq 'repair 1'; then
+    fail "a blocked worker is not repairable: $out"
+  fi
 }
 
 test_landing_refuses_while_another_landing_holds_the_repo() {

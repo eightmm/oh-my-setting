@@ -6,7 +6,27 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- `provider-permissions` turns the last human-only setup step into a harness
+  tool. Codex and Claude Code take authority per invocation and need nothing;
+  antigravity needs standing rules, and finding out which ones took a session
+  of probing. It now reports them (`--check`, which is what `doctor` runs),
+  emits them (`--print`), or grants them (`--apply`, keeping the previous
+  settings as `.bak`), in a `consult` or `delegate` profile. `unsandboxed` is
+  granted one named command at a time and a wildcard is refused: that namespace
+  *is* the sandbox boundary. A cold `uv run` needs `unsandboxed(uv)` only
+  because uv's cache lives outside the worktree — a warm one, and every test
+  the worker runs inside its worktree, needs nothing.
+- The README and `oms help` now say plainly what was only implied: install is
+  the one command a person types, and everything after it is the agent's.
+
 ### Fixed
+- `peer-delegate` no longer reports a worker that could not act as a clean run.
+  A CLI denied a tool it cannot prompt for exits 0 having printed only its
+  refusal, and the empty patch that follows looks exactly like honest work on an
+  already-correct tree. The worker status is now 126 ("found but could not
+  execute"), the reason is quoted, and — like a missing CLI — no repair round is
+  spent, because no rewording of a brief grants a permission.
 - Landings are now serialized per repository. Everything from the clean-tree
   check through `git apply` was a check-then-act on the shared working tree with
   no lock, so two agents could both be admitted against the same base and both
