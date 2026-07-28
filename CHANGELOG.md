@@ -101,6 +101,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - The README and `oms help` now say plainly what was only implied: install is
   the one command a person types, and everything after it is the agent's.
 
+### Added
+- The advisor now fires on its own after repeated failure. The rules told every
+  agent to consult one "after repeated failures" and nothing ever did — this
+  session is the evidence: an agent with those rules loaded pushed a dozen
+  gates, hit the same class of mistake twice, and never once reached for
+  `oms advise` unprompted. A line in a rules file competes with everything else
+  in the context; a code path does not. `peer-delegate` now consults an advisor
+  when a repair round has itself failed, injects the verdict into the next
+  attempt as evidence rather than instruction, and records it in the artifact.
+  Once per delegation, never on a first failure, and an unreachable advisor
+  leaves the repair exactly as it was. `OMS_ADVISE_ON_REPEAT=0` opts out.
+
 ### Fixed
 - The capability refresh stopped asking each CLI for `--help` a second time.
   `model-doctor` already had that output, so the refresh added a duplicate

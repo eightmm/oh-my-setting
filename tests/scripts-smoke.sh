@@ -10889,6 +10889,70 @@ test_delegate_says_the_worker_cannot_see_uncommitted_work() {
     fail "the patch reviewer needs to know which base it was written against"
 }
 
+test_delegate_consults_an_advisor_after_a_repair_also_fails() {
+  local project="$TMP/delegate-advise"
+  local bin="$project/bin"
+  local home_dir="$project/home"
+  local out
+  local artifact
+
+  make_committed_repo "$project"
+  mkdir -p "$bin" "$home_dir"
+  # The worker never succeeds; the advisor is a second provider, which is what
+  # the default picker looks for — an opinion from something other than the
+  # agent that is already stuck.
+  cat > "$bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+echo "tried and failed"
+exit 1
+EOF
+  cat > "$bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+echo "VERDICT: stop. The brief names a file that does not exist in this tree."
+EOF
+  chmod +x "$bin/codex" "$bin/claude"
+
+  out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_ADVISOR_PROVIDER=claude \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --prompt "a task that keeps failing" --no-verify --repair 2 2>&1)" || true
+
+  printf '%s' "$out" | grep -Fq 'advisor consulted after repeated failure' ||
+    fail "a second failing attempt should pull in an outside opinion: $out"
+  artifact="$(printf '%s' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
+  grep -Fq 'Advisor (after repeated failure)' "$artifact" ||
+    fail "the advice belongs in the artifact"
+  grep -Fq 'The brief names a file that does not exist' "$artifact" ||
+    fail "the advisor's actual answer should be recorded"
+
+  # Once per delegation: the point is a different opinion, not a second loop.
+  [ "$(grep -c 'Advisor (after repeated failure)' "$artifact")" = 1 ] ||
+    fail "the advisor should be consulted once, not every round"
+}
+
+test_delegate_does_not_consult_an_advisor_on_a_first_failure() {
+  local project="$TMP/delegate-advise-first"
+  local bin="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin" "$home_dir"
+  printf '#!/usr/bin/env bash\ncat > /dev/null\necho nope\nexit 1\n' > "$bin/codex"
+  printf '#!/usr/bin/env bash\ncat > /dev/null\necho advice\n' > "$bin/claude"
+  chmod +x "$bin/codex" "$bin/claude"
+
+  # One repair is the ordinary path: a worker that stumbles once and is told so
+  # usually recovers, and an advisor call there would be a tax on every run.
+  out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_ADVISOR_PROVIDER=claude \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --prompt "fails once" --no-verify --repair 1 2>&1)" || true
+  if printf '%s' "$out" | grep -Fq 'advisor consulted'; then
+    fail "a single repair round should not pay for an advisor: $out"
+  fi
+}
+
 test_delegate_refuses_to_nest_beyond_the_depth_cap() {
   local project="$TMP/delegate-depth"
   local bin="$project/bin"
