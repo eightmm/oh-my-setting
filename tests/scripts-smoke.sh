@@ -8188,6 +8188,25 @@ test_large_skills_use_progressive_disclosure() {
 
   skill="$ROOT/custom-skills/slurm-hpc/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 230 ] || fail "slurm-hpc front door is too large"
+
+  # A method, not a catalogue: the whole value is the contract, the evidence
+  # ranking, and the three commands it hands off to. Anything longer is prose
+  # nobody reads while a run is broken.
+  skill="$ROOT/custom-skills/trace/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 300 ] || fail "trace front door is too large"
+  for tool in "oms fail-ledger check --cmd" "oms consult --all" "oms advise --prompt"; do
+    assert_file_contains "$skill" "$tool"
+  done
+  # And the tools must still accept those forms. Prose that names an interface
+  # it no longer has is the defect this repository keeps paying for: a guessed
+  # field name left resolved failures looking open, and a hardcoded schema
+  # version told every project to run a command that could not help it.
+  "$ROOT/scripts/fail-ledger.sh" --help 2>&1 | grep -Eq 'check[[:space:]]+--cmd' ||
+    fail "trace cites fail-ledger check --cmd, which the tool no longer documents"
+  "$ROOT/scripts/agent-consult.sh" --help 2>&1 | grep -Eq '^[[:space:]]+--all' ||
+    fail "trace cites consult --all, which the tool no longer documents"
+  "$ROOT/scripts/advise.sh" --help 2>&1 | grep -Eq '^[[:space:]]+--prompt TEXT' ||
+    fail "trace cites advise --prompt, which the tool no longer documents"
 }
 
 test_policy_layers_match_compact_global_rules() {

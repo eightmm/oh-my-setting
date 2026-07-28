@@ -6,6 +6,25 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- `trace` skill: explain an observed failure before changing anything. The gap was
+  measured, not assumed — `research-method` covers designing an experiment,
+  `fail-ledger` records what broke, and `autonomy-loop` says to change the
+  hypothesis, but nothing said how to find a cause, which is the most expensive
+  situation in this kind of work. It carries three things: the contract
+  (observation, competing hypotheses, evidence for and against, the critical
+  unknown, and the cheapest probe that separates the leaders), a ranking of
+  evidence from controlled reproduction down to intuition, and the instruction to
+  refute your own favourite first. It hands off to tools that already exist —
+  `oms fail-ledger check --cmd` for prior evidence, `oms consult --all` for
+  hypotheses from other model families, `oms advise --prompt` before an
+  irreversible call. 289 words with no references, against a 1,502-word source
+  built on Claude-Code-only team orchestration: the method transfers, the
+  orchestration does not. Its test caps the size and asserts that the three
+  commands it names are still the forms those tools document, because prose that
+  has drifted from the interface it cites is the defect this repository keeps
+  paying for.
+
 ### Fixed
 - `doctor` no longer calls every current memory database invalid. It asserted
   schema version 2 as a literal while the helper had moved to 3, so any

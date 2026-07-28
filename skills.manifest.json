@@ -292,6 +292,22 @@
         "train/test overlap",
         "split leakage"
       ]
+    },
+    {
+      "name": "trace",
+      "source": "custom-skills/trace",
+      "enabled": true,
+      "reason": "Explain an observed failure or anomaly with competing hypotheses, ranked evidence, and a discriminating probe before changing code.",
+      "triggers": [
+        "원인 추적",
+        "원인이 뭐",
+        "왜 실패",
+        "왜 이런",
+        "root cause",
+        "재현이 안",
+        "간헐적으로",
+        "trace 해줘"
+      ]
     }
   ]
 }
