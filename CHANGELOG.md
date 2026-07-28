@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- `doctor` no longer calls every current memory database invalid. It asserted
+  schema version 2 as a literal while the helper had moved to 3, so any
+  repository that had used memory reported `warn: memory database is invalid`
+  and was told to run `rebuild` — which writes version 3 again, leaving advice
+  that could never clear the warning. The expected version is now read out of
+  `lib/agent-memory-db.py`, the file that writes it, so the two cannot drift
+  again. The existing tests could not catch this: the warning path is exercised
+  with a file that is not a database at all, and the clean-state check never
+  built one, so nothing ever compared the doctor against a database the tool had
+  actually produced. A test now does exactly that. Noticed only by running
+  `doctor` after an install update — the gate (`check.sh`) never looked.
 - The smoke suite's source-leak check no longer fires on the agent session that
   is running it. It fingerprints `.oms/` at shard start to catch a test writing
   into the checkout, but `hooks/` is the one subtree the live session writes on

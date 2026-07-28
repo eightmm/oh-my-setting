@@ -1648,6 +1648,37 @@ test_doctor_warns_on_a_damaged_memory_database() {
     fail "doctor should name the safe rebuild command: $out"
 }
 
+test_doctor_accepts_a_database_the_tool_just_built() {
+  local project="$TMP/doctor-memory-db-current"
+  local home_dir="$TMP/doctor-memory-db-current-home"
+  local out
+
+  # The warning path above is exercised with a file that is not a database at
+  # all, and the clean-state check never builds one, so nothing compared the
+  # doctor's expected schema version against the one the helper writes. It
+  # drifted: the bump to 3 left the doctor asserting 2, and every repository
+  # that had used memory was told to rebuild — which writes version 3 again, so
+  # the advice could never clear the warning. Build the database with the real
+  # tool and require the doctor to accept it.
+  setup_doctor_home "$home_dir"
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+  OMS_AGENT=codex "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --text "a note that forces the derived index into existence" >/dev/null
+  "$ROOT/scripts/agent-memory.sh" --repo "$project" recall "derived" >/dev/null
+  [ -f "$project/.oms/memory/memory.sqlite3" ] ||
+    fail "the memory tool should have built its derived database"
+
+  out="$(run_doctor_for_project "$project" "$home_dir")" ||
+    fail "doctor should pass on a freshly built memory database: $out"
+  printf '%s' "$out" | grep -Fq 'ok: memory database schema/integrity' ||
+    fail "doctor should accept the schema the helper writes: $out"
+  if printf '%s' "$out" | grep -Fq 'warn: memory database is invalid'; then
+    fail "doctor must not call the current schema invalid: $out"
+  fi
+}
+
 test_doctor_uses_canonical_artifact_validation() {
   local project="$TMP/doctor-artifact-contract"
   local home_dir="$TMP/doctor-artifact-contract-home"

@@ -616,13 +616,25 @@ check_harness_memory_db() {
 
   [ -f "$db" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  if python3 - "$db" >/dev/null 2>&1 <<'PY'
+  # The expected schema version is read out of the helper that writes it, not
+  # written here as a number. Hardcoding it meant the bump to 3 left this check
+  # asserting 2, so every repository that had used memory reported "invalid" and
+  # was told to rebuild — which produces the same version again, making the
+  # advice unfollowable and the warning permanent.
+  if python3 - "$db" "$ROOT/scripts/lib/agent-memory-db.py" >/dev/null 2>&1 <<'PY'
+import re
 import sqlite3
 import sys
 
+with open(sys.argv[2]) as handle:
+    match = re.search(r"^SCHEMA_VERSION\s*=\s*(\d+)", handle.read(), re.M)
+if not match:
+    raise SystemExit(1)
+expected = int(match.group(1))
+
 db = sqlite3.connect(sys.argv[1])
 try:
-    if db.execute("pragma user_version").fetchone()[0] != 2:
+    if db.execute("pragma user_version").fetchone()[0] != expected:
         raise SystemExit(1)
     if db.execute("pragma quick_check").fetchone()[0] != "ok":
         raise SystemExit(1)
