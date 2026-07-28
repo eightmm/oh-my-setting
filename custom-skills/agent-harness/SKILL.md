@@ -8,25 +8,47 @@ description: >
 
 # Agent Harness
 
-The current agent owns scope, admission, final verification, commit, push,
-release, and synthesis.
+You own scope, admission, final verification, commit, push, release, and
+synthesis. Everything below is reached for from inside a task.
 
-- On resume, run `oms state --repo .`; use `oms init` only for a fresh repo.
-- Discover tools with `oms list`; every tool answers `oms <tool> --help`.
+## Find it by what you are about to do
+
+Each row names the authority it takes. A read costs a call; a worktree write is
+isolated and comes back as a reviewable patch; a repo write changes the tree you
+are working in. Do not cross those lines by accident — that is why they are on
+every row rather than grouped by feature.
+
+| About to… | Do this | Authority |
+|---|---|---|
+| start or resume and the state is unclear | `oms state --repo .` (`oms init` only for a fresh repo) | read |
+| check what is already known, or record what you learned | `oms agent-memory recall "…"`; `append`/`pin` to add | read, append |
+| decide, and an outside view would change the next step | `oms consult "question"` (`--all` for every peer) | read |
+| act irreversibly, or fail the same way twice | `oms fail-ledger check --cmd "…"`, then `oms advise` | read |
+| hand work to another model | `oms peer-delegate --to NAME` (returns a patch) | worktree write |
+| split work so several agents can proceed | `oms agent-plan add`, then `oms plan-run` | worktree write |
+| judge a diff before it goes anywhere | `oms peer-review --gate` | read |
+| put a reviewed change into the tree | `oms patch-admit`, then `oms patch-land` | repo write |
+| run one provider pass at a known boundary | `oms agent-run --mode read\|write` | read or worktree write |
+| keep a worker in one persona across calls | `oms agent-role`, `oms agent-executor` | — |
+| pin a model tier or thinking level | routing follows the work phase on its own; see the routing reference | — |
+| decide whether you are done or should continue | see the autonomy reference | — |
+
+`oms list` catalogs every tool; each answers `oms <tool> --help`.
+
+## Lines that do not move
+
 - Keep secrets, private paths, machine/cluster details, raw logs, datasets, and
   checkpoints out of prompts and shared state.
-- Never write `.oms/` by hand; reading its state files directly is fine, but
-  prefer `--json` output where a tool offers it. Use `oms gc` for stale state
-  and `oms patch-land` for delegated changes.
-- Consult a peer mid-task when an independent view changes the next step:
-  `oms consult "question"` (`--all` for every peer). It is read-only, carries
-  the task context, and keeps the exchange in a thread.
-- Use advisors only for irreversible/high-risk decisions, repeated failures, or
-  release go/no-go—not routine completion.
-- Provider workers remain harness children, cannot recursively delegate, and do
-  not gain commit/push authority.
+- Never write `.oms/` by hand. Reading its files is fine; prefer `--json` where
+  a tool offers it. `oms gc` clears stale state.
+- Provider workers are harness children: they cannot delegate again and never
+  gain commit or push authority.
+- Advisors are for irreversible or high-risk decisions, repeated failures, and
+  release go/no-go — not routine completion.
+- `plan-run` executes one task and stops in review unless landing was
+  explicitly authorized.
 
-Read only the reference needed:
+## When a row is not enough
 
 - Prompt hooks, memory, active task, change guard:
   [state-memory.md](references/state-memory.md)
@@ -35,16 +57,11 @@ Read only the reference needed:
 - Roles and executor souls: [roles-executors.md](references/roles-executors.md)
 - Provider calls, artifacts, export/import, landing:
   [delegation-artifacts.md](references/delegation-artifacts.md)
-- Consulting peers mid-task and shared conversation threads:
+- Consulting peers and shared conversation threads:
   [cross-agent-consultation.md](references/cross-agent-consultation.md)
-- Model selection, capability checks, and quorum diversity:
+- Model selection, capability checks, quorum diversity:
   [model-routing.md](references/model-routing.md)
 - Prior provider session: [session-handoff.md](references/session-handoff.md)
 
-For one provider pass, use `oms agent-run --mode read|write`; set the mode when
-the authority boundary is known. For a pre-authorized plan task, use
-`oms plan-run` for one task and stop in review unless landing was explicitly
-authorized.
-
-Report the provider, useful conclusion, artifact/patch, landing decision, and
-failed or skipped verification.
+Report the provider, the useful conclusion, the artifact or patch, the landing
+decision, and any failed or skipped verification.

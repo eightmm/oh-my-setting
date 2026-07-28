@@ -6,6 +6,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+- The harness skill routes by what the agent is about to do, not by which
+  subsystem a capability belongs to. Its index used to be split the way the code
+  is — state-memory, plans-recovery, roles-executors, delegation-artifacts — so
+  an agent had to map its own situation onto the harness's internal taxonomy
+  before it could find anything, and the clusters that overlap in purpose
+  (`agent-call`, `consult`, `peer-ask`, `advise` are all "ask another model
+  read-only") looked like four unrelated choices. The entry is now a table of
+  situations, and every row carries the authority it takes — read, worktree
+  write, or repo write — because those clusters differ in blast radius, not just
+  in shape, and a routing table that hides that would invite exactly the wrong
+  kind of mistake. The references keep the detail and are all still linked.
+
 ### Added
 - Recall now spans everything the harness already records, not just prose notes.
   The SQLite index takes the failure ledger as a third source, so one
