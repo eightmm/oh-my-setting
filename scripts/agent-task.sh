@@ -467,9 +467,10 @@ print(json.dumps({
     verify_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     verify_started_epoch="$(date +%s)"
     verify_rc=0
+    verify_log="$(mktemp "$OMS_TASK_TMPDIR/verify.XXXXXX")" || exit 1
     set +e
-    (cd "$REPO" && bash -c "$verify_cmd")
-    verify_rc=$?
+    (cd "$REPO" && bash -c "$verify_cmd") 2>&1 | tee "$verify_log"
+    verify_rc="${PIPESTATUS[0]}"
     set -e
     verify_finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     verify_finished_epoch="$(date +%s)"
@@ -483,10 +484,34 @@ print(json.dumps({
     } > "$note_file"
     agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
     rm -f "$note_file"
+    # This is where the primary agent's own gate actually runs, and until now
+    # nothing recorded it: the failure ledger only ever saw harness-mediated
+    # paths (plan-run, patch-land, delegate), so the ledger stayed empty while
+    # the same gate failed the same way more than once. Recording is a shell
+    # write with no model involvement, and `patch-land`/`plan-run` already ask
+    # `check --cmd` before acting, so a row filed here is read by machinery
+    # that is already running.
     if [ "$verify_rc" -ne 0 ]; then
+      # Only on the failing path, and never allowed to fail: a grep that
+      # matches nothing exits non-zero, and under `set -e` that would take the
+      # whole command down over a missing summary line.
+      verify_summary="$(grep -aEm1 '^(FAIL|ERROR|error:|fatal:)' "$verify_log" 2>/dev/null |
+        cut -c1-200 || true)"
+      [ -n "$verify_summary" ] ||
+        verify_summary="$(grep -av '^[[:space:]]*$' "$verify_log" 2>/dev/null |
+          tail -n 1 | cut -c1-200 || true)"
+      (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" record --kind verify \
+        --cmd "$verify_cmd" --exit "$verify_rc" \
+        ${verify_summary:+--summary "$verify_summary"}) >/dev/null 2>&1 ||
+        echo "note: verification failure was not recorded in the fail-ledger" >&2
+      rm -f "$verify_log"
       echo "task: verification failed (exit $verify_rc); task remains active ($TASK_FILE)" >&2
       exit "$verify_rc"
     fi
+    # A gate that passes clears its own row, so the ledger answers "is this
+    # still broken" rather than "did this ever break".
+    (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" resolve --cmd "$verify_cmd") >/dev/null 2>&1 || true
+    rm -f "$verify_log"
     # Bind the pass to the tree it passed on and to the contract that ran, so a
     # later edit downgrades this to stale instead of staying green forever.
     agent_task_set_metadata "$TASK_FILE" verified_state \

@@ -7,6 +7,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The failure ledger now sees the gate the primary agent actually runs.
+  `agent-task verify` files a row when the stored verification command fails —
+  carrying the failing line, written by the shell with no model involvement —
+  and clears that row when the same command later passes, so the ledger answers
+  "is this still broken" rather than "did this ever break". Recording only ever
+  covered harness-mediated paths (`plan-run`, `patch-land`, `peer-delegate`),
+  which is why one repo held two rows across 136 commits while the same gate
+  failed the same way more than once in a single session. The readers were
+  already wired: `patch-land.sh:305` and `plan-run.sh:220` ask `check --cmd`
+  before acting, so a row filed here is consumed by machinery already running.
+  `resolve` accepts `--cmd` as well as `--fingerprint`, because a caller that
+  just watched a command pass holds the command, not the hash it was filed
+  under.
+- Settled by a three-model council, which disagreed usefully: hooking the
+  project's `check.sh` was rejected because the project this serves has none
+  (its gate is `uv run pytest`), and a `resolve --summary` field was dropped
+  because `record --summary` already carries the diagnosis. Session-start
+  memory injection is deferred until the write side is non-empty.
 - Project memory now has a local SQLite query index at
   `.oms/memory/memory.sqlite3`. The append-only `shared.md` and `pins.md` logs
   remain the human-readable source of truth, so the change is reversible and

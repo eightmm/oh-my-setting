@@ -11275,6 +11275,53 @@ test_delegate_says_the_worker_cannot_see_uncommitted_work() {
     fail "the patch reviewer needs to know which base it was written against"
 }
 
+test_task_verify_files_and_clears_its_own_failures() {
+  local project="$TMP/verify-ledger"
+  local gate='bash -c "grep -q fixed state.txt || { echo ERROR: state.txt not fixed; exit 1; }; echo ok"'
+  local out
+
+  make_committed_repo "$project"
+  printf 'broken\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal "fix state" --verify "$gate" >/dev/null
+
+  # The failure ledger only ever saw harness-mediated paths, so the gate the
+  # primary agent actually runs went unrecorded and the same break could be
+  # diagnosed twice.
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved)"
+  printf '%s' "$out" | grep -Fq 'ERROR: state.txt not fixed' ||
+    fail "a failed gate should file a row carrying the failing line: $out"
+
+  # The readers are already wired: patch-land and plan-run ask this before
+  # acting, so a row filed here is seen without any new integration.
+  # check signals "this failed before" through its exit code, which is why
+  # patch-land.sh:305 also takes it with `|| true`.
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$gate" 2>&1 || true)"
+  printf '%s' "$out" | grep -Fq 'already failed' ||
+    fail "the existing check path should see the row: $out"
+
+  # Same gate, fixed code: the row clears, so the ledger answers "is this still
+  # broken" rather than "did this ever break".
+  printf 'fixed\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 ||
+    fail "a passing gate must still verify the task"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved)"
+  if printf '%s' "$out" | grep -Fq 'state.txt not fixed'; then
+    fail "a passing gate should clear its own row: $out"
+  fi
+}
+
+test_task_verify_survives_a_gate_with_no_failure_line() {
+  local project="$TMP/verify-quiet"
+
+  # A passing gate prints nothing matching the summary patterns. Computing that
+  # summary on the success path once killed every passing verify under set -e.
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal "quiet gate" --verify "true" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 ||
+    fail "a silent passing gate must verify, not abort"
+}
+
 test_delegate_consults_an_advisor_after_a_repair_also_fails() {
   local project="$TMP/delegate-advise"
   local bin="$project/bin"

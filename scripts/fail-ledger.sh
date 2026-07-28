@@ -35,7 +35,7 @@ usage() {
   cat <<'EOF'
 Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT]
        fail-ledger.sh [--repo PATH] check  --cmd CMD
-       fail-ledger.sh [--repo PATH] resolve --fingerprint FP
+       fail-ledger.sh [--repo PATH] resolve (--fingerprint FP | --cmd CMD)
        fail-ledger.sh [--repo PATH] list   [--unresolved] [--json]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
@@ -174,7 +174,14 @@ sys.exit(0)
 PY
     ;;
   resolve)
-    [ -n "$FINGERPRINT" ] || fail "resolve requires --fingerprint"
+    # A caller that has just watched a command pass holds the command, not the
+    # fingerprint it was filed under. Deriving it here is the same computation
+    # `check --cmd` already does, and saves every caller from shelling out
+    # twice to clear a failure it just fixed.
+    if [ -z "$FINGERPRINT" ] && [ -n "$CMD" ]; then
+      FINGERPRINT="$(fingerprint_of "$CMD")"
+    fi
+    [ -n "$FINGERPRINT" ] || fail "resolve requires --fingerprint or --cmd"
     [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
     mkdir -p "$(dirname "$LEDGER")"
     row_tmp="$(mktemp)" || fail "mktemp failed"
