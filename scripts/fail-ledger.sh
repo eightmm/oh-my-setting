@@ -44,7 +44,11 @@ long digit runs masked). Schema-2 failures also carry a content-free git state
 fingerprint, so an unchanged retry is blocked while a retry after edits is
 allowed with a warning. Legacy rows remain command-only and conservative.
 
-record   Append a failure for CMD (exit N). Bumps the fingerprint's count.
+record   Append a failure for CMD (exit N). Bumps the fingerprint's count. At
+         the second unresolved failure of the same command it names `oms advise`
+         (OMS_ADVISE_AFTER_FAILURES sets the threshold, 0 disables): the rules
+         ask for an outside read after repeated failures, and retrying the same
+         thing is what happens when nothing says so.
 check    Exit 3 (and print prior context) if CMD's fingerprint is a known
          UNRESOLVED failure; exit 0 otherwise. Gate a retry with this.
 resolve  Mark a fingerprint fixed so it stops warning.
@@ -60,6 +64,52 @@ fail() { echo "error: $*" >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 # Print the fingerprint of a command string on stdout.
+# Unresolved failures recorded for a fingerprint, counted the way `check` counts
+# them: a resolve row zeroes the run. Used to decide when a repeat has become a
+# pattern worth an outside read.
+unresolved_fails_for() {
+  OMS_FP="$1" python3 - "$LEDGER" <<'COUNT'
+import json, os, sys
+fp = os.environ["OMS_FP"]
+fails = 0
+try:
+    handle = open(sys.argv[1], encoding="utf-8", errors="replace")
+except OSError:
+    print(0)
+    raise SystemExit(0)
+for line in handle:
+    try:
+        row = json.loads(line)
+    except Exception:
+        continue
+    if row.get("fingerprint") != fp:
+        continue
+    event = row.get("event")
+    if event == "resolved":
+        fails = 0
+    elif event == "fail":
+        fails += 1
+print(fails)
+COUNT
+}
+
+# The rules have always said to consult an advisor after repeated failures, and
+# peer-delegate does it from the second repair round. The primary agent's own
+# gate failures land here and escalated nowhere: it would file the row and try
+# the same thing again. Naming the advisor at the threshold costs one line of
+# stderr and no model call, so the decision to spend one stays with the caller.
+advise_hint_if_repeated() {
+  local fp="$1"
+  local fails="$2"
+  local threshold="${OMS_ADVISE_AFTER_FAILURES:-2}"
+
+  case "$threshold" in ''|*[!0-9]*) threshold=2 ;; esac
+  [ "$threshold" -gt 0 ] || return 0
+  [ "$fails" -ge "$threshold" ] || return 0
+  printf 'fail-ledger: %s has failed %dx unresolved; get an outside read before the next attempt (oms advise --prompt "...")\n' \
+    "$fp" "$fails" >&2
+}
+
 fingerprint_of() {
   OMS_CMD="$1" python3 - <<'PY'
 import os, re, hashlib
@@ -137,6 +187,9 @@ PY
     oms_with_file_lock "$LEDGER" ledger_append "$LEDGER" "$row_tmp"
     rm -f "$row_tmp"
     echo "fail-ledger: recorded $fp (exit $EXIT_CODE)" >&2
+    # Counted after the append, so the row just filed is included: the second
+    # unresolved failure of the same command is the one worth stopping on.
+    advise_hint_if_repeated "$fp" "$(unresolved_fails_for "$fp")"
     ;;
   check)
     [ -n "$CMD" ] || fail "check requires --cmd"
@@ -169,6 +222,12 @@ if fails > 0 and last is not None:
         sys.exit(0)
     sys.stderr.write("fail-ledger: %s already failed %dx (last exit %s): %s\n" % (
         fp, fails, last.get("exit"), (last.get("summary") or last.get("cmd", ""))[:160]))
+    threshold = os.environ.get("OMS_ADVISE_AFTER_FAILURES", "2")
+    threshold = int(threshold) if threshold.isdigit() else 2
+    if threshold > 0 and fails >= threshold:
+        sys.stderr.write(
+            "fail-ledger: %s has failed %dx unresolved; get an outside read before "
+            "the next attempt (oms advise --prompt \"...\")\n" % (fp, fails))
     sys.exit(3)
 sys.exit(0)
 PY

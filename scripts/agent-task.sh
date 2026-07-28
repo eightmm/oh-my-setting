@@ -500,10 +500,15 @@ print(json.dumps({
       [ -n "$verify_summary" ] ||
         verify_summary="$(grep -av '^[[:space:]]*$' "$verify_log" 2>/dev/null |
           tail -n 1 | cut -c1-200 || true)"
-      (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" record --kind verify \
+      ledger_out="$( (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" record --kind verify \
         --cmd "$verify_cmd" --exit "$verify_rc" \
-        ${verify_summary:+--summary "$verify_summary"}) >/dev/null 2>&1 ||
+        ${verify_summary:+--summary "$verify_summary"}) 2>&1 )" ||
         echo "note: verification failure was not recorded in the fail-ledger" >&2
+      # The ledger names an advisor once the same gate has failed twice
+      # unresolved. Silencing the whole recording step would swallow exactly the
+      # line this path exists to produce, so let that one through and keep the
+      # bookkeeping quiet.
+      printf '%s\n' "$ledger_out" | grep -F 'oms advise' >&2 || true
       rm -f "$verify_log"
       echo "task: verification failed (exit $verify_rc); task remains active ($TASK_FILE)" >&2
       exit "$verify_rc"

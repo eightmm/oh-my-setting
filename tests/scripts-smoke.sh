@@ -8431,6 +8431,55 @@ test_policy_layers_match_compact_global_rules() {
     fail "README.ko should match the conditional connector policy"
 }
 
+test_fail_ledger_names_an_advisor_after_a_repeat() {
+  local project="$TMP/fail-ledger-advise"
+  local gate='uv run pytest tests/broken.py'
+  local out
+
+  # The rules ask for an outside read after repeated failures, peer-delegate does
+  # it from the second repair round, and the primary agent's own gate failures
+  # escalated nowhere: it filed the row and tried the same thing again.
+  make_committed_repo "$project"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd "$gate" --exit 1 --summary "assert failed" 2>&1)" ||
+    fail "first record should succeed"
+  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+    fail "a single failure is not a pattern; no advisor yet: $out"
+  fi
+
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd "$gate" --exit 1 --summary "assert failed" 2>&1)" ||
+    fail "second record should succeed"
+  printf '%s' "$out" | grep -Fq 'has failed 2x unresolved' ||
+    fail "the second unresolved failure should be named as a repeat: $out"
+  printf '%s' "$out" | grep -Fq 'oms advise' ||
+    fail "the repeat should name the advisor: $out"
+
+  # `check` gates the retry, so it carries the same escalation and keeps exit 3.
+  local rc=0
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$gate" 2>&1)" || rc=$?
+  [ "$rc" = 3 ] || fail "check must still exit 3 for a known failure, got $rc"
+  printf '%s' "$out" | grep -Fq 'oms advise' ||
+    fail "check should name the advisor on a repeat: $out"
+
+  # A resolve zeroes the run: the next failure is a first failure again.
+  ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" resolve --cmd "$gate" ) >/dev/null 2>&1 ||
+    fail "resolve should succeed"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd "$gate" --exit 1 2>&1)" || fail "record after resolve should succeed"
+  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+    fail "a resolved fingerprint must start counting again: $out"
+  fi
+
+  # Threshold is configurable, and 0 turns it off for a caller that does not
+  # want an advisor named at all.
+  out="$(cd "$project" && OMS_ADVISE_AFTER_FAILURES=0 "$ROOT/scripts/fail-ledger.sh" record \
+    --cmd "$gate" --exit 1 2>&1)" || fail "record with the hint disabled should succeed"
+  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+    fail "OMS_ADVISE_AFTER_FAILURES=0 must silence the hint: $out"
+  fi
+}
+
 test_fail_ledger_records_checks_resolves() {
   local project="$TMP/fail-ledger"
   local SH="$ROOT/scripts/fail-ledger.sh"
@@ -11669,6 +11718,42 @@ PY
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" search "older note kept")"
   printf '%s' "$out" | grep -Fq 'older note kept' ||
     fail "re-deriving must not lose what is still in the Markdown: $out"
+}
+
+test_task_verify_surfaces_the_advisor_on_a_repeat() {
+  local project="$TMP/verify-advise"
+  local gate='bash -c "grep -q fixed state.txt || { echo ERROR: not fixed; exit 1; }"'
+  local out
+
+  # Recording is deliberately quiet here, which is what made this path dead on
+  # arrival: the ledger's escalation line was written to a stderr the caller
+  # threw away, so the one message this recording exists to produce never
+  # reached the agent that had just failed the same gate twice.
+  make_committed_repo "$project"
+  printf 'broken\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal "fix state" \
+    --verify "$gate" >/dev/null
+
+  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" verify 2>&1)" || true
+  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+    fail "one failed gate is not a pattern: $out"
+  fi
+
+  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" verify 2>&1)" || true
+  printf '%s' "$out" | grep -Fq 'oms advise' ||
+    fail "a gate that failed twice should reach the agent with an advisor: $out"
+  # The bookkeeping stays quiet; only the escalation is let through.
+  if printf '%s' "$out" | grep -Fq 'fail-ledger: recorded'; then
+    fail "the recording line should stay silenced: $out"
+  fi
+
+  printf 'fixed\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 ||
+    fail "the gate should pass once state.txt is fixed"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list)" ||
+    fail "list should succeed"
+  printf '%s' "$out" | grep -Fq 'resolved' ||
+    fail "a passing gate should resolve its row: $out"
 }
 
 test_task_close_promotes_the_decision_and_the_pitfall() {

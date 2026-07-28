@@ -7,6 +7,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- A repeated failure now names an advisor on the primary agent's own path. The
+  rules have always asked for an outside read after repeated failures, and
+  `peer-delegate` does it from the second repair round; the primary agent's gate
+  failures reached the ledger — since earlier in this release — and escalated
+  nowhere, so it filed the row and tried the same thing again. `fail-ledger
+  record` and `check` now name `oms advise` once the same fingerprint has failed
+  twice unresolved (`OMS_ADVISE_AFTER_FAILURES` sets the threshold, `0` disables
+  it), a resolve zeroes the run, and no model is called: the line costs one
+  stderr write and the decision to spend an advisor call stays with the caller.
+  `agent-task verify` silences the ledger's bookkeeping, which would have made
+  this dead on arrival — the one line it exists to produce was going to a stderr
+  the caller discarded — so the escalation is let through and the rest stays
+  quiet. Verified end to end on the real path: first failure silent, second
+  surfaces the advisor, a passing gate resolves the row.
 - `doctor` reports a provider CLI that is installed but not logged in. Forcing the
   install guarantees binaries, which moves the failure one step later: a present
   but uncredentialed CLI answers nothing, and the harness used to discover that by
