@@ -102,6 +102,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the one command a person types, and everything after it is the agent's.
 
 ### Fixed
+- The capability refresh stopped asking each CLI for `--help` a second time.
+  `model-doctor` already had that output, so the refresh added a duplicate
+  invocation of every installed provider — slower everywhere, and in the test
+  suite it turned fixture runs into real CLI calls, which made unrelated
+  timing-sensitive tests fail at random. Caught by the suite failing twice on
+  two different tests while three runs of the pre-capability commit passed. The
+  doctor now hands its help output over, and three consecutive runs are clean.
+  Routing's own binary-identity check is memoised per process and uses `stat`
+  rather than starting a python interpreter.
 - The worker guard was blind to new source files in any repository with a large
   ignored tree. It spent its entry budget in path order, so a real project whose
   `data/` and `runs/` hold tens of thousands of ignored files exhausted the cap

@@ -267,9 +267,9 @@ for provider in "${provider_values[@]}"; do
     # refreshed, catalog or not: one without a listing command still has flag
     # capabilities worth recording.
     if [ "$LIVE_MODELS" -eq 1 ] && oms_provider_supports_model_listing "$provider"; then
-      oms_capability_refresh "$provider" || true
+      oms_capability_refresh "$provider" "$help_file" || true
     else
-      OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh "$provider" || true
+      OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh "$provider" "$help_file" || true
     fi
 
     if oms_provider_supports_model_listing "$provider"; then

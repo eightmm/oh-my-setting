@@ -11,6 +11,9 @@ bin="$TMP/bin"
 mkdir -p "$bin"
 export PATH="$bin:/usr/bin:/bin"
 export OMS_CAPABILITY_RPC_WAIT=0
+# The stubs answer instantly and hold no singleton, so the waits that exist
+# for the real CLIs would only add dead time to every doctor run here.
+export OMS_CAPABILITY_SETTLE_WAIT=0
 export HOME="$TMP/home"
 mkdir -p "$HOME"
 

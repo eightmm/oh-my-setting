@@ -18,12 +18,29 @@ oms_capability_cache_dir() {
 
 # Identity of the binary we probed, so a different one — a test stub, a fresh
 # install, an nvm switch — is a cache miss rather than a wrong answer.
+# Memoized per process. peek runs on every routing decision and this is the
+# only part of it that touches the filesystem; routing is meant to be a read,
+# not a fork.
+OMS_CAPABILITY_KEY_CACHE="|"
+
 oms_capability_binary_key() {
   local binary="$1"
-  local path
-  path="$(command -v "$binary" 2>/dev/null)" || { printf 'absent\n'; return 0; }
-  path="$(oms_capability_resolve_path "$path")"
-  printf '%s|%s\n' "$path" "$(oms_capability_stat "$path")"
+  local path rest value
+  case "$OMS_CAPABILITY_KEY_CACHE" in
+    *"|$binary="*)
+      rest="${OMS_CAPABILITY_KEY_CACHE#*"|$binary="}"
+      printf '%s\n' "${rest%%|*}"
+      return 0
+      ;;
+  esac
+  if ! path="$(command -v "$binary" 2>/dev/null)"; then
+    value=absent
+  else
+    path="$(oms_capability_resolve_path "$path")"
+    value="$path:$(oms_capability_stat "$path")"
+  fi
+  OMS_CAPABILITY_KEY_CACHE="$OMS_CAPABILITY_KEY_CACHE$binary=$value|"
+  printf '%s\n' "$value"
 }
 
 oms_capability_resolve_path() {
@@ -38,17 +55,16 @@ oms_capability_resolve_path() {
   printf '%s\n' "$src"
 }
 
+# Size and mtime from one short-lived process rather than a python
+# interpreter: GNU and BSD stat disagree on the flag, and neither answer is
+# worth 40ms on a path that runs before every provider call.
 oms_capability_stat() {
   local path="$1"
-  python3 - "$path" <<'PY' 2>/dev/null || printf 'unknown\n'
-import os, sys
-try:
-    st = os.stat(sys.argv[1])
-except OSError:
-    print("missing")
-else:
-    print("%d.%d" % (st.st_size, int(st.st_mtime)))
-PY
+  local out
+  out="$(stat -c '%s.%Y' "$path" 2>/dev/null)" ||
+    out="$(stat -f '%z.%m' "$path" 2>/dev/null)" ||
+    out=unknown
+  printf '%s\n' "$out"
 }
 
 oms_capability_ttl() {
@@ -177,9 +193,15 @@ PY
 
 # Probe one provider and write the snapshot. Bounded: two short CLI calls at
 # most, and a probe that fails leaves the declared defaults in place.
+# HELP_FILE lets a caller that already asked the CLI for its --help hand that
+# output over. model-doctor always has it: probing again would run the provider
+# a second time for an answer already on disk, which is slower everywhere and
+# non-hermetic in tests, where it turns a fixture run into a real CLI call.
 oms_capability_refresh() {
   local provider="$1"
+  local supplied_help="${2:-}"
   local binary flag help_file models_file tmp efforts_tmp values detected mechanism dir
+  local own_help=1
   provider="$(oms_provider_normalize "$provider")" || return 2
   binary="$(oms_provider_binary "$provider")"
   mechanism="$(oms_provider_effort_mechanism "$provider")"
@@ -187,14 +209,21 @@ oms_capability_refresh() {
   dir="$(oms_capability_cache_dir)"
   mkdir -p "$dir" 2>/dev/null || return 1
 
-  help_file="$(mktemp "${TMPDIR:-/tmp}/oms-cap-help.XXXXXX")" || return 1
+  if [ -n "$supplied_help" ] && [ -s "$supplied_help" ]; then
+    help_file="$supplied_help"
+    own_help=0
+  else
+    help_file="$(mktemp "${TMPDIR:-/tmp}/oms-cap-help.XXXXXX")" || return 1
+  fi
   models_file="$dir/$provider.models"
   values=""
   if command -v "$binary" >/dev/null 2>&1; then
-    local -a probe=("$binary")
-    local arg
-    for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
-    oms_capability_run_bounded 10 "$help_file" "${probe[@]}" || true
+    if [ "$own_help" -eq 1 ]; then
+      local -a probe=("$binary")
+      local arg
+      for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
+      oms_capability_run_bounded 10 "$help_file" "${probe[@]}" || true
+    fi
     values="$(oms_provider_effort_values "$provider")"
     if [ "$mechanism" = flag ]; then
       if grep -Fq -- "$flag" "$help_file"; then
@@ -227,7 +256,7 @@ oms_capability_refresh() {
   else
     mechanism=absent
   fi
-  rm -f "$help_file"
+  [ "$own_help" -eq 0 ] || rm -f "$help_file"
 
   tmp="$(mktemp "$dir/.$provider.XXXXXX")" || return 1
   {
