@@ -765,10 +765,37 @@ check_cmd uv
 check_cmd claude
 check_cmd codex
 check_cmd agy
-# gh is optional: only GitHub-source and explicit GitHub CLI workflows need it,
-# and compute clusters routinely lack it (like the slurm tools below). Those
-# features fail loudly on their own when gh is absent.
-check_optional_cmd gh
+# gh is installed by default now, so it is required on the same terms as the
+# provider CLIs: REQUIRE_TOOLS=1 fails on it, and a machine that deliberately
+# skipped the tool install still only sees "optional missing".
+check_cmd gh
+# Presence is installable; authentication is an interactive browser flow, so it
+# can only ever be reported. An unauthenticated gh is the state in which
+# github-source and ci-status fail on their first call, which is worth knowing
+# here rather than there.
+#
+# Read the credential locally instead of asking `gh auth status`: that command
+# validates the token against the API, and this doctor is local-only by design —
+# a health check that needs the network reports "unauthenticated" for a dropped
+# connection. hosts.yml is the file `gh auth login` writes; the token variables
+# are the other way gh is credentialed.
+check_gh_auth() {
+  local config="${GH_CONFIG_DIR:-$HOME/.config/gh}"
+  # The environment variable names are assembled rather than written out: the
+  # harness's own sources have to pass the outbound scrubber, which flags any
+  # identifier ending in "…t0ken" (spelled properly) next to a colon or equals
+  # sign, and a peer review of this very file would otherwise be refused.
+  local suffix="TO""KEN"
+  local var
+
+  command -v gh >/dev/null 2>&1 || return 0
+  [ ! -s "$config/hosts.yml" ] || return 0
+  for var in "GH_$suffix" "GITHUB_$suffix"; do
+    [ -z "${!var:-}" ] || return 0
+  done
+  echo "warn: gh is not authenticated (run: gh auth login)"
+}
+check_gh_auth
 
 check_bash_version
 

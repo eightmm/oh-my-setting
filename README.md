@@ -20,9 +20,14 @@ Install the latest version from `main`:
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-This installs the safe default profile and connects the providers already on
-the machine. After that, ask your coding agent to check, update, or customize
-the installation.
+This installs the harness and the CLIs it coordinates: Claude Code, Codex,
+Antigravity, plus Node (via nvm), uv, and the GitHub CLI. A council with one
+installed peer is not a council, so the peers are part of the install rather
+than a flag to remember. Nothing here needs root — npm globals go to the nvm
+prefix and `gh` lands in `~/.local/bin`. Pass `--no-tools` on a machine that
+cannot have them, and run `gh auth login` once, since that step is interactive.
+After that, ask your coding agent to check, update, or customize the
+installation.
 
 ## Start
 

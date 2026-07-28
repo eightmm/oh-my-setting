@@ -6,6 +6,30 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+- The install brings the CLIs the harness coordinates instead of hoping they are
+  already there: Claude Code, Codex, Antigravity, Node via nvm, uv, and now `gh`.
+  Provider installation had been behind `--tools`, so the documented one-line
+  install produced a harness whose council had one voice and whose
+  `github-source`/`ci-status` had nothing to call; `doctor` then reported the
+  missing peers as optional, which is true of the flag but not of the product.
+  `OH_MY_SETTING_INSTALL_TOOLS` now defaults to 1, `--no-tools` is the explicit
+  escape hatch for a machine that cannot have them, and `gh` is checked like the
+  provider CLIs rather than as an optional extra. `gh` is installed without root
+  — brew on macOS, otherwise the official release archive into `~/.local/bin`,
+  reusing the one helper that owns that directory and persists it on PATH — with
+  the release tag read from the API and a pinned fallback so a rate-limited API
+  is not a failed install. Authentication stays a report, never an attempt: it is
+  an interactive browser flow, and an unauthenticated `gh` is exactly the state
+  where those two tools fail on their first call, so `doctor` warns and names
+  `gh auth login`. That warning reads the credential locally — `hosts.yml`, or
+  the token variables — rather than running `gh auth status`, which validates
+  against the API: this doctor is local-only by design, and a health check that
+  needs the network reports "unauthenticated" for a dropped connection. Because
+  credentials live under `HOME`, the doctor fixtures now fabricate one the same
+  way they already fabricate healthy Antigravity permissions, so a clean install
+  is not reported as warning about something it cannot fix.
+
 ### Added
 - `patch-admit` rejects a patch that quietly weakens the tests. The verifier gate
   already stopped a patch from rewriting the verify entrypoint, which left the

@@ -19,8 +19,12 @@ Codex, Claude Code, Antigravity에 같은 규칙·스킬·agent harness를 모�
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-안전한 기본 구성으로 설치되며, 머신에 이미 있는 provider를 연결한다. 이후 설치
-확인·업데이트·맞춤 설정은 coding agent에게 말하면 된다.
+하네스와 함께 이 하네스가 조율하는 CLI가 설치된다: Claude Code, Codex,
+Antigravity, 그리고 Node(nvm 경유), uv, GitHub CLI. peer가 하나만 설치된 council은
+council이 아니므로, peer는 기억해야 할 플래그가 아니라 설치의 일부다. root는
+필요 없다 — npm global은 nvm prefix로, `gh`는 `~/.local/bin`으로 간다. 설치할 수
+없는 머신에서는 `--no-tools`를 넘기고, 대화형 단계인 `gh auth login`은 한 번
+직접 실행한다. 이후 설치 확인·업데이트·맞춤 설정은 coding agent에게 말하면 된다.
 
 ## 시작
 

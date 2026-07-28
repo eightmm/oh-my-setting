@@ -8,19 +8,24 @@ REF="${OH_MY_SETTING_REF:-$INSTALLER_DEFAULT_REF}"
 PROFILE="${OH_MY_SETTING_PROFILE:-minimal}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
-INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-0}"
+# The three provider CLIs and gh are what the harness is for: a council with one
+# installed peer is not a council, and github-source/ci-status have nothing to
+# talk to without gh. Installing them is the default, not an opt-in flag nobody
+# passes. --no-tools remains for a machine that cannot or must not have them.
+INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-0}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--full] [--tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--star] [--help]
+Usage: install.sh [--ref REF] [--full] [--no-tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--star] [--help]
 
 Options:
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
   --full              Install provider tools, machine snapshot, and update timer.
-  --tools             Install Node, uv, and provider CLIs.
+  --tools             Install Node, uv, provider CLIs, and gh (already the default).
+  --no-tools          Skip them; doctor then treats every provider CLI as optional.
   --auto-update       Install the check-only update timer.
   --machine-snapshot  Generate local machine metadata.
   --slurm-snapshot    Generate local Slurm cluster metadata when available.
@@ -36,10 +41,11 @@ Environment:
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto  Skip, require, or auto-detect Codex plugin setup.
   OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
-  OH_MY_SETTING_INSTALL_TOOLS=1    Install Node/uv/agent CLIs.
+  OH_MY_SETTING_INSTALL_TOOLS=0    Skip the Node/uv/provider CLI/gh install (default: 1).
   OH_MY_SETTING_AUTO_UPDATE=1      Install auto-update trigger.
   OH_MY_SETTING_AUTO_UPDATE_MODE=apply  Auto-apply fast-forward updates (default: check-only).
-  OH_MY_SETTING_REQUIRE_TOOLS=1    Require every provider CLI during doctor.
+  OH_MY_SETTING_REQUIRE_TOOLS=0    Let doctor treat a missing CLI as optional
+                                   (default: 1 whenever the tools were installed).
   OH_MY_SETTING_DIR=/path/to/dir   Install location.
 EOF
 }
@@ -61,6 +67,10 @@ while [ "$#" -gt 0 ]; do
     --tools)
       [ "$PROFILE" = "full" ] || PROFILE=custom
       INSTALL_TOOLS=1
+      ;;
+    --no-tools)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
+      INSTALL_TOOLS=0
       ;;
     --auto-update)
       [ "$PROFILE" = "full" ] || PROFILE=custom

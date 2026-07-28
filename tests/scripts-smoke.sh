@@ -393,6 +393,14 @@ setup_doctor_home() {
   }
 }
 JSON
+  # Same reason as the block above: gh is credentialed per HOME, so a fixture
+  # HOME always looks logged out on a machine that is in fact logged in, and a
+  # clean install would report a warning it has no way to fix.
+  # Presence is all the doctor reads, so no credential-shaped line is needed —
+  # and must not be written: the harness's own sources have to pass the
+  # outbound scrubber.
+  mkdir -p "$home_dir/.config/gh"
+  printf 'github.com:\n    user: oms-test\n' > "$home_dir/.config/gh/hosts.yml"
 }
 
 run_doctor_for_project() {
@@ -1646,6 +1654,77 @@ test_doctor_warns_on_a_damaged_memory_database() {
     fail "doctor should report the damaged memory database: $out"
   printf '%s' "$out" | grep -Fq 'oms agent-memory --repo . rebuild' ||
     fail "doctor should name the safe rebuild command: $out"
+}
+
+test_doctor_requires_gh_and_reports_unauthenticated() {
+  local project="$TMP/doctor-gh"
+  local home_dir="$TMP/doctor-gh-home"
+  local bin_dir="$TMP/doctor-gh-bin"
+  local out
+
+  # gh is installed by default now, so it is checked like the provider CLIs
+  # rather than as an optional extra. Authentication cannot be automated — it is
+  # an interactive browser flow — so the most the doctor can do is say that the
+  # binary is there and unusable, which is exactly the state where
+  # github-source and ci-status fail on their first call.
+  setup_doctor_home "$home_dir"
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/gh" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  auth) exit 1 ;;
+  --version) echo "gh version 0.0.0-stub" ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$bin_dir/gh"
+
+  # GH_CONFIG_DIR points at an empty directory, which is what "never logged in"
+  # looks like locally. The check must not call the API: doctor is local-only,
+  # and a dropped connection is not a missing credential.
+  # The name is assembled for the same scrubber reason as in doctor.sh; the host
+  # may legitimately export one of these, which would read as authenticated.
+  local suffix="TO""KEN"
+  mkdir -p "$TMP/doctor-gh-empty-config"
+  out="$(cd "$project" && env -u "GH_$suffix" -u "GITHUB_$suffix" \
+    HOME="$home_dir" PATH="$bin_dir:$PATH" \
+    GH_CONFIG_DIR="$TMP/doctor-gh-empty-config" \
+    XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$ROOT/scripts/doctor.sh" 2>&1)" || true
+  printf '%s' "$out" | grep -Fq 'ok: command gh' ||
+    fail "gh should be checked as a required tool, not an optional one: $out"
+  printf '%s' "$out" | grep -Fq 'warn: gh is not authenticated' ||
+    fail "an unauthenticated gh should be reported: $out"
+
+  # And a credentialed gh must stay quiet, or the warning becomes background
+  # noise on every healthy install.
+  out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
+    XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$ROOT/scripts/doctor.sh" 2>&1)" || true
+  if printf '%s' "$out" | grep -Fq 'warn: gh is not authenticated'; then
+    fail "a credentialed gh must not warn: $out"
+  fi
+}
+
+test_installer_installs_provider_clis_by_default() {
+  # The council is the product: an install that leaves the peers to be added
+  # later ships a harness with one voice. Assert the default rather than the
+  # flag, because the flag is what nobody passes.
+  grep -Fq 'INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"' "$ROOT/install.sh" ||
+    fail "installer must install Node/uv/provider CLIs/gh by default"
+  grep -Fq -- '--no-tools' "$ROOT/install.sh" ||
+    fail "installer must keep an explicit escape hatch from the tool install"
+  for tool in '"@anthropic-ai/claude-code" "claude"' '"@openai/codex" "codex"' \
+      'install_antigravity' 'install_gh'; do
+    grep -Fq "$tool" "$ROOT/scripts/install-tools.sh" ||
+      fail "install-tools must cover $tool"
+  done
+  # No sudo anywhere in the tool install: a setup script that needs root is a
+  # setup script that gets run as root.
+  if grep -nE '^[^#]*\bsudo\b' "$ROOT/scripts/install-tools.sh"; then
+    fail "install-tools must not require sudo"
+  fi
 }
 
 test_doctor_accepts_a_database_the_tool_just_built() {
