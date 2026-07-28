@@ -7678,6 +7678,68 @@ test_patch_admit_rejects_verifier_change() {
     fail "--allow-verifier-change should admit the same patch"
 }
 
+test_patch_admit_rejects_a_patch_that_deletes_assertions() {
+  local project="$TMP/admit-test-reduction"
+  local report
+
+  # The verifier gate protects the entrypoint, which leaves the other way to
+  # self-certify open: delete the assertions and the suite passes honestly. The
+  # point of this test is that verify and verifier both PASS here — without the
+  # tests gate the patch lands.
+  make_committed_repo "$project"
+  mkdir -p "$project/tests" "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  printf 'assert_ok 1\nassert_ok 2\necho done\n' > "$project/tests/thing_test.sh"
+  git -C "$project" add scripts/check.sh tests/thing_test.sh
+  git -C "$project" commit -q -m "add check and a test"
+
+  printf 'assert_ok 1\necho done\n' > "$project/tests/thing_test.sh"
+  git -C "$project" diff > "$project/weaken.patch"
+  git -C "$project" checkout -q tests/thing_test.sh
+
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/weaken.patch" >/dev/null 2>&1 ); then
+    fail "a patch that net-removes test assertions must be REJECTED"
+  fi
+  report="$(ls -t "$project"/.oms/artifacts/admit/*.md | head -n 1)"
+  assert_file_contains "$report" "tests: FAIL"
+  assert_file_contains "$report" "assertion line(s) removed"
+  # The hole this closes: everything else was happy.
+  assert_file_contains "$report" "verify: PASS"
+  assert_file_contains "$report" "verifier: PASS"
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/weaken.patch" --allow-test-reduction >/dev/null 2>&1 ) ||
+    fail "--allow-test-reduction should admit the same patch"
+
+  # Adding coverage must not trip it, or the gate becomes noise people disable.
+  printf 'assert_ok 1\nassert_ok 2\nassert_ok 3\necho done\n' > "$project/tests/thing_test.sh"
+  git -C "$project" diff > "$project/strengthen.patch"
+  git -C "$project" checkout -q tests/thing_test.sh
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/strengthen.patch" >/dev/null 2>&1 ) ||
+    fail "a patch that adds assertions must still be ADMITTED"
+}
+
+test_patch_admit_rejects_a_deleted_test_file() {
+  local project="$TMP/admit-test-deleted"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/tests" "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  printf 'assert_ok 1\n' > "$project/tests/gone_test.sh"
+  git -C "$project" add scripts/check.sh tests/gone_test.sh
+  git -C "$project" commit -q -m "add check and a test"
+
+  git -C "$project" rm -q tests/gone_test.sh
+  git -C "$project" diff --cached > "$project/delete.patch"
+  git -C "$project" reset -q --hard HEAD
+
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/delete.patch" >/dev/null 2>&1 ); then
+    fail "a patch deleting a test file must be REJECTED"
+  fi
+  grep -lFq 'deleted test file' "$project"/.oms/artifacts/admit/*.md >/dev/null 2>&1 ||
+    fail "report should name the deleted test file"
+}
+
 test_change_guard_catches_committed_escape() {
   local project="$TMP/guard-committed"
 

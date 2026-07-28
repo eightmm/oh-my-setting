@@ -7,6 +7,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `patch-admit` rejects a patch that quietly weakens the tests. The verifier gate
+  already stopped a patch from rewriting the verify entrypoint, which left the
+  other route to self-certification open: delete the assertions and the suite
+  passes honestly. Measured on a fixture, the ladder read `verify: PASS`,
+  `verifier: PASS` — nothing else objected, so the patch would have landed. The
+  new gate counts assertion lines added and removed in the changed test surface
+  (`tests/`, `spec/`, `*_test.*`, `test_*`, `*.test.*`) and fails on a net
+  removal or a deleted test file, naming the count. `--allow-test-reduction` is
+  the explicit promotion for consolidating or replacing coverage, mirroring
+  `--allow-verifier-change`; adding assertions is unaffected, because a gate that
+  fires on ordinary work is a gate people switch off. Adopted from harness
+  designs that require operator promotion for any change to a safety surface, so
+  an agent cannot relax its own guardrails.
 - `trace` skill: explain an observed failure before changing anything. The gap was
   measured, not assumed — `research-method` covers designing an experiment,
   `fail-ledger` records what broke, and `autonomy-loop` says to change the

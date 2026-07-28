@@ -26,6 +26,7 @@ PATCH=""
 VERIFY=""
 ML=0
 ALLOW_VERIFIER_CHANGE=0
+ALLOW_TEST_REDUCTION=0
 KEEP_WORKTREE=0
 REPORT=""
 PLAN_TASK=""
@@ -56,11 +57,14 @@ Options:
   --keep-worktree  Keep the worktree for inspection.
   --allow-verifier-change  Admit a patch that modifies the verify command's
                  own files (normally rejected: it could self-certify).
+  --allow-test-reduction  Admit a patch that net-removes test assertions or
+                 deletes a test file (normally rejected: passing by deleting
+                 the check is the other way to self-certify).
   -h, --help     Show this help.
 
 Ladder: patch applies cleanly (not stale) -> changed shell files parse
-(bash -n) -> patch does not modify its own verifier -> verification command
-passes. Exit 0 only if every gate passes.
+(bash -n) -> patch does not weaken the tests -> patch does not modify its own
+verifier -> verification command passes. Exit 0 only if every gate passes.
 EOF
 }
 
@@ -101,6 +105,7 @@ while [ "$#" -gt 0 ]; do
     --executor) [ "$#" -ge 2 ] || fail "--executor requires id"; EXECUTOR_ID="$2"; shift 2 ;;
     --keep-worktree) KEEP_WORKTREE=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
+    --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -319,6 +324,68 @@ for f in os.environ["OMS_CHANGED"].splitlines():
 PY
 )"
     fi
+    # --- Gate 3b: the patch must not quietly weaken the tests ---------------
+    # Gate 3a protects the verify *entrypoint*, which leaves the other way to
+    # certify yourself wide open: delete the assertions and the suite passes
+    # honestly. That is the failure this ladder exists to catch, so it is a
+    # gate rather than a note — net-removed assertions or a deleted test file
+    # reject, and --allow-test-reduction is the explicit promotion for the
+    # legitimate case (consolidating or replacing coverage).
+    test_reduction=""
+    if [ "$ALLOW_TEST_REDUCTION" = 0 ] && command -v python3 >/dev/null 2>&1; then
+      test_reduction="$(OMS_PATCH="$PATCH" python3 - <<'PY'
+import os
+import re
+
+TEST_PATH = re.compile(
+    r"(^|/)(tests?|spec)/|(^|/)test_[^/]+$|[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$"
+)
+# Language-agnostic on purpose: the assertion vocabularies that matter here are
+# python/bash/js/go, and a line that stops asserting stops protecting.
+ASSERT = re.compile(
+    r"\bassert|\bexpect\s*\(|\bshould\b|\bfail\b|t\.(Error|Fatal)|"
+    r"\bok\s*\(|\brequire\s*\.|\bXCTAssert"
+)
+
+path = None
+counted = False
+added = removed = 0
+deleted_files = []
+try:
+    with open(os.environ["OMS_PATCH"], errors="replace") as handle:
+        lines = handle.read().splitlines()
+except OSError:
+    raise SystemExit(0)
+
+for i, line in enumerate(lines):
+    if line.startswith("diff --git "):
+        parts = line.split(" b/", 1)
+        path = parts[1].strip() if len(parts) == 2 else None
+        counted = bool(path and TEST_PATH.search(path))
+        continue
+    if line.startswith("deleted file mode") and counted and path:
+        deleted_files.append(path)
+        continue
+    if not counted or line.startswith(("+++", "---", "@@")):
+        continue
+    if line.startswith("+") and ASSERT.search(line):
+        added += 1
+    elif line.startswith("-") and ASSERT.search(line):
+        removed += 1
+
+if deleted_files:
+    print("deleted test file %s" % deleted_files[0])
+elif removed > added:
+    print("%d assertion line(s) removed, %d added" % (removed, added))
+PY
+)"
+    fi
+    if [ -n "$test_reduction" ]; then
+      record "tests" "FAIL" "patch weakens the tests: $test_reduction (override: --allow-test-reduction)"
+    else
+      record "tests" "PASS" "patch does not net-remove test assertions"
+    fi
+
     if [ -n "$verifier_hit" ]; then
       record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change)"
       record "verify" "SKIP" "not run: verifier integrity gate failed"
