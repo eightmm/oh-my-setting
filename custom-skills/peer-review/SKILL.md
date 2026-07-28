@@ -9,6 +9,9 @@ description: >
 
 # Peer Review
 
+This judges an existing diff and writes nothing. To ask a question instead, use
+`oms consult`; to have the change made, use `peer-delegate`.
+
 Get independent findings without outsourcing judgment. The parent reviews the
 evidence and owns fixes, verification, landing, commit, and release.
 

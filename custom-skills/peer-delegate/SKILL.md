@@ -8,6 +8,10 @@ description: >
 
 # Peer Delegate
 
+This writes: the worker edits an isolated worktree and returns a patch. If you only
+need another view, that is `oms consult` (read-only). If you need a diff judged,
+that is `peer-review`.
+
 The current agent remains owner of scope, review, landing, verification,
 commit, and push. Use local provider CLIs only.
 

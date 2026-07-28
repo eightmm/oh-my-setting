@@ -28,21 +28,21 @@ not universal defaults.
 - Load untrusted checkpoints with `weights_only=True`; never deserialize
   arbitrary Python objects from an untrusted source.
 
-## Route to the Relevant References
+## Find it by what you are seeing
 
-Start with the closest reference. Load additional references only when the
-request crosses contracts such as distributed masking plus checkpointing.
+These are symptoms, not subject headings: a wrong route costs a debugging
+session in the wrong layer. Load a second reference only when the symptom
+crosses contracts — masked loss under DDP, say.
 
-- Parameter grouping, AdamW baseline, optional Muon, short-run-safe schedules:
-  [optimizer-schedule.md](references/optimizer-schedule.md)
-- DDP initialization, sampler, collectives, validation, cleanup:
-  [distributed.md](references/distributed.md)
-- Variable atoms/residues/pairs and sparse-label loss normalization:
-  [loss-masking.md](references/loss-masking.md)
-- Portable save/load and exact-resume state:
-  [checkpoint.md](references/checkpoint.md)
-- SE(3)/equivariance implementation and transformation tests:
-  [equivariance.md](references/equivariance.md)
+| What you are seeing or about to do | Read |
+|---|---|
+| setting up or changing optimizer/LR/schedule, or a short run diverges | [optimizer-schedule.md](references/optimizer-schedule.md) |
+| loss or metrics differ by rank or world size; a run hangs or desyncs | [distributed.md](references/distributed.md) |
+| loss depends on batch composition, padding, or how many labels are present | [loss-masking.md](references/loss-masking.md) |
+| resume does not continue the same run, or a checkpoint will not load elsewhere | [checkpoint.md](references/checkpoint.md) |
+| predictions change when the input is rotated or translated | [equivariance.md](references/equivariance.md) |
+
+A symptom matching none of these is usually data, not training.
 
 For experiment design use `research-method`; for molecule/protein data splits,
 labels, and metrics use `chem-bio-ml`; for cluster allocation use `slurm-hpc`.

@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Changed
+- `ml-training` routes by symptom instead of by implementation subject, and the
+  two peer skills that write now name the read-only alternative. The training
+  index was headed optimizer / distributed / loss-masking / checkpoint /
+  equivariance, so "resume does not reproduce" or "loss differs by rank" had to
+  be translated into a subject first, and a wrong translation costs a debugging
+  session in the wrong layer. `peer-delegate` and `peer-review` never mentioned
+  each other or `consult`, so an agent that needed an opinion could land on the
+  tool that edits a worktree. Skills whose references are modes or phases of one
+  action — `peer-review`, `research-method`, `spec-interview` — were left alone,
+  and `chem-bio-ml` already indexes by problem domain rather than by internal
+  structure.
 - The harness skill routes by what the agent is about to do, not by which
   subsystem a capability belongs to. Its index used to be split the way the code
   is — state-memory, plans-recovery, roles-executors, delegation-artifacts — so
