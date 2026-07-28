@@ -48,6 +48,12 @@ if [ "${FAIL_MODE:-}" = entitlement ] && [ "$count" -eq 1 ]; then
   echo "This model is not available for your organization." >&2
   exit 1
 fi
+if [ "${FAIL_MODE:-}" = safeguard ] && [ "$count" -eq 1 ]; then
+  # Verbatim shape of the real error, which names the remedy itself.
+  echo "API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate coding, cybersecurity, and biology tasks. Claude Code can't respond to this message with Fable 5." >&2
+  echo "Try rephrasing the request in a new session or change your model." >&2
+  exit 1
+fi
 if [ "${FAIL_MODE:-}" = declined ]; then
   echo "Claude Code is unable to respond to this request, which appears to violate our Usage Policy." >&2
   exit 1
@@ -612,6 +618,28 @@ export FAIL_MODE=entitlement
 unset FAIL_MODE
 grep -Fxq 'fable' "$capture/claude.2.argv" ||
   fail "the retry should use the tier alias: $(cat "$capture/claude.2.argv")"
+
+# One model's safeguard firing is a property of that model: the error says the
+# safeguards are deliberately broad, that they can flag legitimate coding and
+# biology work, and to change the model. Reproduced live on a protein-ligand
+# binding-affinity question about a real repository.
+unset OMS_MODEL_CLAUDE_DEEP
+reset_capture
+export FAIL_MODE=safeguard
+"$CALL" --repo "$repo" --to claude --model-class deep --prompt 'safeguard route' >/dev/null ||
+  fail "a safeguard block should be retried once on a different model"
+unset FAIL_MODE
+grep -Fxq 'claude-fable-5' "$capture/claude.1.argv" ||
+  fail "the first attempt should be the tier's model: $(cat "$capture/claude.1.argv")"
+# The alias resolves to the same model, so it is no answer to that model's
+# filter; the retry has to be a genuinely different one.
+grep -Fxq 'opus' "$capture/claude.2.argv" ||
+  fail "the retry must use a different model, not the same one aliased: $(cat "$capture/claude.2.argv")"
+[ "$(cat "$capture/claude.count")" = 2 ] ||
+  fail "exactly one retry, not a loop: $(cat "$capture/claude.count") attempts"
+safeguard_artifact="$(find "$repo/.oms/artifacts/call" -name '*safeguard-route*.md' | head -n 1)"
+grep -Fq 'model-fallback: reason=model-safeguard selected=opus' "$safeguard_artifact" ||
+  fail "the artifact must record which model answered and why"
 
 # A declined request is the provider deciding about the request. It is reported
 # and stops there: re-sending it to another model until one answers would be a

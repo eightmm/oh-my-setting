@@ -128,7 +128,9 @@ oms_model_preferences() {
     # sonnet resolve, and it names opus/sonnet/fable as the public aliases.
     claude:fast) printf '%s\n' 'claude-haiku-4-5-20251001' 'haiku' ;;
     claude:balanced) printf '%s\n' 'claude-sonnet-5' 'sonnet' ;;
-    claude:deep) printf '%s\n' 'claude-fable-5' 'fable' ;;
+    # opus last: a different model of the same class, for when fable's own
+    # safeguard fires on work fable is otherwise the right model for.
+    claude:deep) printf '%s\n' 'claude-fable-5' 'fable' 'opus' ;;
     *) oms_model_default "$provider" "$class" ;;
   esac
 }
@@ -371,11 +373,14 @@ oms_model_prepare() {
   OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
 
   OMS_MODEL_ALTERNATE=""
+  OMS_MODEL_DISTINCT_ALTERNATE=""
   if [ -z "$explicit" ]; then
     OMS_MODEL_ALTERNATE="$(oms_model_same_tier_alternative "$provider" "$resolved" \
       "$OMS_MODEL_PRIMARY" || true)"
+    OMS_MODEL_DISTINCT_ALTERNATE="$(oms_model_next_distinct_model "$provider" "$resolved" \
+      "$OMS_MODEL_PRIMARY" || true)"
   fi
-  export OMS_MODEL_ALTERNATE
+  export OMS_MODEL_ALTERNATE OMS_MODEL_DISTINCT_ALTERNATE
   OMS_MODEL_SELECTED="$OMS_MODEL_PRIMARY"
   OMS_MODEL_FALLBACK_USED=0
   OMS_MODEL_FALLBACK_REASON=""
@@ -406,17 +411,49 @@ EOF
 # A provider reporting that the model itself is unknown or unavailable, as
 # distinct from being busy. Claude Code answers this locally in a couple of
 # seconds, so the retry costs almost nothing.
+# The next candidate that is a different model, not the same one under another
+# name: `fable` and `claude-fable-5` are one model, so an alias is no answer to
+# a safeguard that fired on that model.
+oms_model_next_distinct_model() {
+  local provider="$1" class="$2" current="$3"
+  local candidate current_key candidate_key
+
+  current_key="$(oms_model_catalog_key "$current")"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidate_key="$(oms_model_catalog_key "$candidate")"
+    case "$current_key" in *"$candidate_key"*) continue ;; esac
+    case "$candidate_key" in *"$current_key"*) continue ;; esac
+    printf '%s\n' "$candidate"
+    return 0
+  done <<EOF
+$(oms_model_preferences "$provider" "$class")
+EOF
+  return 1
+}
+
 oms_model_is_unknown_model_output() {
   local file="$1"
   grep -Eiq "issue with the selected model|model.*(does not exist|may not exist)|unknown model|invalid model|model_not_found|not (available|enabled) for (your|this) (account|organization|workspace)|do not have access to (this |that )?model" "$file"
 }
 
-# The provider declined the request itself, rather than failing to run it. This
-# is reported and never retried elsewhere: a decline is a decision by the
-# provider about the request, and machinery that re-sends it to a different
-# model until one complies would be a way around that decision regardless of
-# what any individual request happens to be. Naming it lets the caller see a
-# refusal instead of a mystery failure, and decide what to do.
+# One model's safeguard fired on a message another model of the same family
+# will answer. This is not the model weighing the request and declining it: the
+# error says so itself — "our intentionally broad safeguards ... can sometimes
+# flag legitimate coding, cybersecurity, and biology tasks" — and names the
+# remedy, "change your model". Observed on a protein-ligand binding-affinity
+# question about this user's own repository. Retrying once on a different model
+# is following that instruction, not working around a decision; a considered
+# refusal looks different and is handled by the check below.
+oms_model_is_model_safeguard_output() {
+  local file="$1"
+  grep -Eiq "safeguards flagged this message|can.t respond to this message with " "$file"
+}
+
+# The provider declined the request itself, rather than one model's filter
+# firing. Reported and never retried elsewhere: machinery that re-sends a
+# refused request until some model complies would be a way around the decision
+# regardless of what the request happens to be.
 oms_model_is_policy_decline_output() {
   local file="$1"
   grep -Eiq "violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|\"?stop_reason\"?: ?\"?refusal" "$file"

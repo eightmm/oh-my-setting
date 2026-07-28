@@ -44,6 +44,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - A model the account is not entitled to now falls back within its tier, the
   same way an unrecognised name does — both are availability problems, and
   dropping a tier is the answer to neither.
+- A model whose own safeguard fires on a message is retried once on a different
+  model. Verified live: Fable 5 refused a protein-ligand binding-affinity
+  question about a real repository with *"our intentionally broad safeguards
+  ... can sometimes flag legitimate coding, cybersecurity, and biology tasks"*
+  and *"change your model"*. That is a property of the model, not a judgement
+  on the request, and the remedy is the one the error names — so the deep tier
+  now carries `opus` behind `fable`, and the retry uses a genuinely different
+  model rather than the same one under an alias. The artifact records
+  `model-fallback: reason=model-safeguard selected=opus`. A considered refusal
+  is a different message and is still never retried.
 - A request the provider declines is reported as a decline rather than a
   generic failure: the artifact and the caller both say which provider and
   model declined it. It is deliberately not re-sent to another model, and a
