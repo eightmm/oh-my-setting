@@ -6,6 +6,28 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- `doctor` reports a provider CLI that is installed but not logged in. Forcing the
+  install guarantees binaries, which moves the failure one step later: a present
+  but uncredentialed CLI answers nothing, and the harness used to discover that by
+  spending a provider call on it. Each of the three keeps its credential in a
+  local file (`~/.claude/.credentials.json`, `~/.codex/auth.json`,
+  `~/.gemini/oauth_creds.json`), so this is answerable here — locally, with no
+  network, for the same reason as the `gh` check. Presence of the file is all that
+  is claimed; whether the credential is still valid is the provider's answer to
+  give. Reported, never failed: an interactive login is not an install defect. The
+  doctor fixtures fabricate all three, as they already do for `gh` and Antigravity
+  permissions, so a clean install does not warn about something it cannot fix.
+- A router precision test. Triggers are substring-matched against the whole
+  prompt, so precision is a property of the manifest that nothing checked: the
+  `trace` triggers were verified by hand against a re-implementation of the
+  matcher, which is exactly the kind of check that is not repeated. The test
+  drives the real hook over a corpus in both directions — five causal prompts
+  must reach `trace`, five neighbouring ones about regression tests, flaky tests,
+  refactors, commits and training scripts must not. A skill pushed into every
+  session that mentions a test is a permanent context tax, and a router that
+  cries wolf stops being read.
+
 ### Changed
 - The install brings the CLIs the harness coordinates instead of hoping they are
   already there: Claude Code, Codex, Antigravity, Node via nvm, uv, and now `gh`.

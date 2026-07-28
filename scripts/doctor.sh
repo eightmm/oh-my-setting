@@ -793,9 +793,38 @@ check_gh_auth() {
   for var in "GH_$suffix" "GITHUB_$suffix"; do
     [ -z "${!var:-}" ] || return 0
   done
+
   echo "warn: gh is not authenticated (run: gh auth login)"
 }
 check_gh_auth
+
+# The install now guarantees the binaries, which moves the failure one step
+# later: a provider CLI that is present but not logged in answers nothing, and
+# the harness discovers that by spending a call on it. Every one of them stores
+# its credential in a local file, so this is answerable here — locally, with no
+# network, for the same reason as the gh check above. Presence of the file is all
+# that is claimed; whether the credential is still valid is the provider's
+# answer to give, not this doctor's to guess.
+check_provider_auth() {
+  local cli file
+  local reported=0
+
+  for cli in claude codex agy; do
+    command -v "$cli" >/dev/null 2>&1 || continue
+    case "$cli" in
+      claude) file="$HOME/.claude/.credentials.json" ;;
+      codex) file="$HOME/.codex/auth.json" ;;
+      agy) file="$HOME/.gemini/oauth_creds.json" ;;
+    esac
+    if [ -s "$file" ]; then
+      continue
+    fi
+    echo "warn: $cli is installed but has no local credential (log in once with: $cli)"
+    reported=1
+  done
+  [ "$reported" = 1 ] || return 0
+}
+check_provider_auth
 
 check_bash_version
 

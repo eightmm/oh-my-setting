@@ -401,6 +401,14 @@ JSON
   # outbound scrubber.
   mkdir -p "$home_dir/.config/gh"
   printf 'github.com:\n    user: oms-test\n' > "$home_dir/.config/gh/hosts.yml"
+  # Same again for the provider CLIs: their credentials live under HOME, so a
+  # fixture HOME looks logged out for every one that is installed on the
+  # developer machine, and a clean install would warn about something it cannot
+  # fix from here.
+  mkdir -p "$home_dir/.claude" "$home_dir/.codex" "$home_dir/.gemini"
+  printf '{"fixture": true}\n' > "$home_dir/.claude/.credentials.json"
+  printf '{"fixture": true}\n' > "$home_dir/.codex/auth.json"
+  printf '{"fixture": true}\n' > "$home_dir/.gemini/oauth_creds.json"
 }
 
 run_doctor_for_project() {
@@ -1705,6 +1713,46 @@ STUB
   if printf '%s' "$out" | grep -Fq 'warn: gh is not authenticated'; then
     fail "a credentialed gh must not warn: $out"
   fi
+}
+
+test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
+  local project="$TMP/doctor-provider-auth"
+  local home_dir="$TMP/doctor-provider-auth-home"
+  local bin_dir="$TMP/doctor-provider-auth-bin"
+  local cli out
+
+  # Forcing the install guarantees binaries, which moves the failure one step
+  # later: a CLI that is present but not logged in answers nothing, and the
+  # harness finds out by spending a provider call on it.
+  setup_doctor_home "$home_dir"
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir"
+  for cli in claude codex agy; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/$cli"
+    chmod +x "$bin_dir/$cli"
+  done
+
+  # Credentialed (setup_doctor_home wrote all three): silence.
+  out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
+    XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$ROOT/scripts/doctor.sh" 2>&1)" || true
+  if printf '%s' "$out" | grep -Fq 'has no local credential'; then
+    fail "a credentialed provider CLI must not warn: $out"
+  fi
+
+  # Logged out: one line per CLI, naming the CLI to log in with.
+  rm -f "$home_dir/.claude/.credentials.json" "$home_dir/.codex/auth.json" \
+    "$home_dir/.gemini/oauth_creds.json"
+  out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
+    XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$ROOT/scripts/doctor.sh" 2>&1)" || true
+  for cli in claude codex agy; do
+    printf '%s' "$out" | grep -Fq "warn: $cli is installed but has no local credential" ||
+      fail "doctor should report $cli as installed and not logged in: $out"
+  done
+  # Reported, never failed: an interactive login is not an install defect.
+  printf '%s' "$out" | grep -Fq 'doctor: ok' ||
+    fail "a missing provider credential must not fail the doctor: $out"
 }
 
 test_installer_installs_provider_clis_by_default() {
@@ -8861,6 +8909,51 @@ test_skill_router_matches_and_dedupes() {
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "slurm-hpc" || fail "router should suggest slurm-hpc in a new session"
   printf '%s' "$out" | grep -Fq "chem-bio-ml" || fail "router should include the second match"
+}
+
+test_skill_router_keeps_trace_off_ordinary_test_talk() {
+  local d="$TMP/skill-router-precision"
+  local project="$d/project"
+  local prompt
+  local out
+  local i=0
+
+  # Triggers are substring-matched against the whole prompt, so precision is a
+  # property of the manifest that nothing else checks. A skill pushed into every
+  # session that mentions a test is a permanent context tax, and the first thing
+  # a reader does with a router that cries wolf is stop reading it.
+  make_committed_repo "$project"
+  while IFS= read -r prompt; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"router-pos-%s","turn_id":"t1","cwd":"%s"}' \
+      "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    printf '%s' "$out" | grep -Fq 'skill hint: trace' ||
+      fail "router should suggest trace for: $prompt ($out)"
+  done <<'EOF'
+원인 추적 좀 해줘
+what is the root cause of this crash
+재현이 안 되는 버그가 있어
+간헐적으로 결과가 달라진다
+왜 이런 결과가 나왔지
+EOF
+
+  i=0
+  while IFS= read -r prompt; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"router-neg-%s","turn_id":"t1","cwd":"%s"}' \
+      "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    if printf '%s' "$out" | grep -Fq 'trace'; then
+      fail "router must not suggest trace for: $prompt ($out)"
+    fi
+  done <<'EOF'
+add a regression test for this helper
+quarantine the flaky e2e test
+refactor this function for clarity
+commit and push the change
+write the training script
+EOF
 }
 
 test_skill_router_routes_chem_bio_task_families() {
