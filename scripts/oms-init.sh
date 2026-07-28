@@ -67,9 +67,12 @@ fi
 mem="$OMS/memory/shared.md"
 mem_state="present"
 if [ ! -f "$mem" ]; then
-  "$ROOT/scripts/agent-memory.sh" --repo "$STATE_ROOT" init >/dev/null 2>&1 || true
   mem_state="seeded"
 fi
+# `init` is idempotent and also builds the derived SQLite index. Running it for
+# an existing Markdown-only project is the automatic migration path after an
+# oh-my-setting update; the append-only source itself is never rewritten.
+"$ROOT/scripts/agent-memory.sh" --repo "$STATE_ROOT" init >/dev/null 2>&1 || true
 
 # Project rules the agents actually read. `oms init` reports them but never
 # writes them: which template applies depends on a confirmed project type.

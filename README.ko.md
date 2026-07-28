@@ -91,7 +91,7 @@ agent가 맞는 스크립트나 skill을 고른다. 직접 실행할 일은 없�
 | 깔끔한 공개 repo | 프로젝트별 하네스(`AGENTS.md`, `CLAUDE.md`, `PROJECT.md`)를 `.git/info/exclude`로 로컬에서만 숨긴다 — agent는 그대로 읽고, commit과 프로젝트 `.gitignore`에는 하네스 잔여물이 남지 않는다 |
 | 에이전트 간 대화 | 작업 중에 다른 에이전트에게 묻고 그 맥락을 유지한다. 모든 provider가 읽고 이어 쓰는 공유 thread 하나로, codex·claude·antigravity가 서로의 답변 위에 쌓아 올린다 (일회성 질문이 아니라) |
 | Multi-agent 리뷰·위임 | 세 로컬 모델의 ask/review와 격리 worktree write 위임 — outbound 민감정보 scrub, run artifact/index, 변경 범위 guard, 적용 전 patch admission까지 |
-| Agent 상태·자율 핸드오프 | 공유 메모리, 실제 검증을 실행하는 task packet, subtask DAG, 범위가 고정된 task 하나만 claim·격리 위임하고 명시적 landing 전에는 review에서 멈추는 `plan-run` — 모두 repo root에 앵커됨 |
+| Agent 상태·자율 핸드오프 | 되돌릴 수 있는 Markdown 원본과 프로젝트 로컬 SQLite 인덱스를 함께 쓰는 공유 메모리, 실제 검증을 실행하는 task packet, subtask DAG, 범위가 고정된 task 하나만 claim·격리 위임하고 명시적 landing 전에는 review에서 멈추는 `plan-run` — 모두 repo root에 앵커됨 |
 | ML 실험 추적 | Run id, ledger, 재현 캡슐, 사전등록 research run, metric/verdict 기록 — 깨진 계약으로 run을 날리지 않게 하는 게이트 포함 |
 | ML 데이터·leakage | ID와 chem-bio key(scaffold/inchikey/cluster/assay) 기준으로 train/eval leakage와 split drift를 잡는 manifest; raw row는 저장 안 함 |
 | ML/HPC 지원 | Slurm job reconcile, 단일 머신 GPU 큐, 로그 digest, 로컬 하드웨어/클러스터 컨텍스트 ([docs/COMPONENTS.md](docs/COMPONENTS.md)) |

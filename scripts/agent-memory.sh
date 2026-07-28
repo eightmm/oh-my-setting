@@ -18,10 +18,13 @@ AGENT_SEARCH=""
 TEXT=""
 USE_STDIN=0
 FULL=0
+LIMIT=""
+AS_JSON=0
+JSON_ARGS=()
 
 usage() {
   cat <<'EOF'
-Usage: agent-memory.sh [options] [path|show|context|init|append|pin|compact]
+Usage: agent-memory.sh [options] COMMAND [TEXT]
 
 Maintain harness-owned memory shared by Codex, Claude Code, and Antigravity.
 Project memory defaults to REPO/.oms/memory/shared.md. Global memory defaults to
@@ -35,19 +38,27 @@ Files:
               Append-only, same contract.
   summary.md  Compact recent notes generated from shared.md; regenerated in
               place by `compact`, so it is derived state, not a record.
+  memory.sqlite3
+              Derived project index for exact search and ranked FTS recall.
+              Existing Markdown logs are imported automatically and remain the
+              append-only source of truth.
 
 Options:
   --repo PATH       Project repo/directory for project memory. Default: PWD.
   --global          Use global harness memory instead of project memory.
   --file PATH       Use an explicit shared memory source file.
   --agent NAME      Agent label for appended notes / search author filter.
-  --text TEXT       Note text for append/pin; search pattern for search.
+  --text TEXT       Note text for append/pin; query for search/recall.
   --stdin           Read append/pin note from stdin.
   --full            context: emit full source tail instead of compact view.
+  --limit N         Limit search/recall results. Search is unlimited by default;
+                    recall defaults to 20.
+  --json            search/recall: emit JSONL with provenance metadata.
   -h, --help        Show help.
 
 Commands:
   path              Print the resolved memory file path.
+  db-path           Print the derived SQLite database path without creating it.
   show              Print source memory if it exists. Default.
   context           Print provider context view (compact by default).
   init              Create the source memory file if missing.
@@ -55,8 +66,11 @@ Commands:
   pin               Append a short note to pins.md.
   compact           Regenerate summary.md from source memory.
   search PATTERN    Print memory + pins entries matching PATTERN (case-
-                    insensitive, over header and body); --agent filters by
-                    the entry's author. Scales recall past cat-ing show.
+                    insensitive substring over header and body) from SQLite;
+                    --agent filters by the entry's author.
+  recall QUERY      Rank memory + pins with local SQLite FTS; --agent filters
+                    by author. No model call or embedding download is used.
+  rebuild           Recreate the derived database from the Markdown sources.
 EOF
 }
 
@@ -95,7 +109,20 @@ while [ "$#" -gt 0 ]; do
       FULL=1
       shift
       ;;
-    path|show|context|init|append|pin|compact|search)
+    --limit)
+      [ "$#" -ge 2 ] || { echo "error: --limit requires a value" >&2; exit 2; }
+      case "$2" in
+        *[!0-9]*|"") echo "error: --limit requires a positive integer" >&2; exit 2 ;;
+      esac
+      [ "$2" -gt 0 ] || { echo "error: --limit requires a positive integer" >&2; exit 2; }
+      LIMIT="$2"
+      shift 2
+      ;;
+    --json)
+      AS_JSON=1
+      shift
+      ;;
+    path|db-path|show|context|init|append|pin|compact|search|recall|rebuild)
       ACTION="$1"
       shift
       ;;
@@ -116,11 +143,23 @@ done
 
 ACTION="${ACTION:-show}"
 case "$ACTION" in
-  append|pin|search) ;;
+  append|pin|search|recall) ;;
   *)
     [ -z "$TEXT" ] || { echo "error: unknown argument: $TEXT" >&2; usage >&2; exit 2; }
     ;;
 esac
+if [ -n "$LIMIT" ]; then
+  case "$ACTION" in
+    search|recall) ;;
+    *) echo "error: --limit applies only to search or recall" >&2; exit 2 ;;
+  esac
+fi
+if [ "$AS_JSON" -eq 1 ]; then
+  case "$ACTION" in
+    search|recall) JSON_ARGS=(--json) ;;
+    *) echo "error: --json applies only to search or recall" >&2; exit 2 ;;
+  esac
+fi
 if [ -z "$MEMORY_FILE" ]; then
   if [ "$SCOPE" = "global" ]; then
     MEMORY_FILE="$(agent_memory_global_file)"
@@ -168,9 +207,14 @@ case "$ACTION" in
   path)
     printf '%s\n' "$MEMORY_FILE"
     ;;
+  db-path)
+    printf '%s\n' "$(agent_memory_db_file "$MEMORY_FILE")"
+    ;;
   init)
     agent_memory_init_file "$MEMORY_FILE" "$SCOPE"
+    agent_memory_sync_db "$MEMORY_FILE"
     echo "memory: initialized $MEMORY_FILE"
+    echo "memory: indexed $(agent_memory_db_file "$MEMORY_FILE")"
     ;;
   show)
     if [ -s "$MEMORY_FILE" ]; then
@@ -205,53 +249,28 @@ case "$ACTION" in
   compact)
     ensure_tmpdir
     agent_memory_refresh_summary "$MEMORY_FILE" "$SCOPE"
+    agent_memory_sync_db "$MEMORY_FILE"
     echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
     ;;
   search)
     [ -n "$TEXT" ] || { echo "error: search requires --text PATTERN (or a positional pattern)" >&2; exit 2; }
-    command -v python3 >/dev/null 2>&1 || { echo "error: python3 required for search" >&2; exit 2; }
-    # Scan the source log and pins for '## <ts> <agent>' entry blocks whose
-    # header or body matches; --agent filters by the entry author. Matches go
-    # to stdout, the hit count to stderr, and exit is nonzero on no match so
-    # an empty search is distinguishable from a miss.
-    OMS_Q="$TEXT" OMS_AGENT_FILTER="$AGENT_SEARCH" \
-      python3 - "$MEMORY_FILE" "$(agent_memory_pins_file "$MEMORY_FILE")" <<'PY'
-import os, re, sys
-q = os.environ["OMS_Q"].lower()
-agent_filter = os.environ.get("OMS_AGENT_FILTER", "")
-# shared.md/summary.md entries are '## <ts> <agent>' blocks; pins.md entries
-# are one-line '- <ts> [<agent>] <text>' bullets. Handle both.
-hdr = re.compile(r"^## (\S+) (.*)$")
-pin = re.compile(r"^- (\S+) \[([^\]]+)\] (.*)$")
-shown = 0
-for src in sys.argv[1:]:
-    if not src or not os.path.isfile(src):
-        continue
-    blocks = []
-    cur = None
-    for raw in open(src, encoding="utf-8", errors="replace"):
-        line = raw.rstrip("\n")
-        mp = pin.match(line)
-        if mp:
-            blocks.append({"agent": mp.group(2).strip(), "lines": [line]})
-            cur = None
-            continue
-        mh = hdr.match(line)
-        if mh:
-            cur = {"agent": mh.group(2).strip(), "lines": [line]}
-            blocks.append(cur)
-        elif cur is not None:
-            cur["lines"].append(line)
-    for b in blocks:
-        if agent_filter and b["agent"] != agent_filter:
-            continue
-        body = "\n".join(b["lines"]).strip()
-        if q in body.lower():
-            sys.stdout.write(body + "\n\n")
-            shown += 1
-sys.stderr.write("memory: %d match(es) for \"%s\"\n" % (shown, os.environ["OMS_Q"]))
-sys.exit(0 if shown else 1)
-PY
+    agent_memory_db_command "$MEMORY_FILE" search \
+      --query "$TEXT" \
+      --agent "$AGENT_SEARCH" \
+      --limit "${LIMIT:-0}" \
+      "${JSON_ARGS[@]}"
+    ;;
+  recall)
+    [ -n "$TEXT" ] || { echo "error: recall requires --text QUERY (or a positional query)" >&2; exit 2; }
+    agent_memory_db_command "$MEMORY_FILE" recall \
+      --query "$TEXT" \
+      --agent "$AGENT_SEARCH" \
+      --limit "${LIMIT:-20}" \
+      "${JSON_ARGS[@]}"
+    ;;
+  rebuild)
+    agent_memory_db_command "$MEMORY_FILE" rebuild
+    echo "memory: rebuilt $(agent_memory_db_file "$MEMORY_FILE")"
     ;;
   *)
     echo "error: unknown command: $ACTION" >&2

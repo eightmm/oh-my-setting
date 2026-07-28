@@ -7,6 +7,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Project memory now has a local SQLite query index at
+  `.oms/memory/memory.sqlite3`. The append-only `shared.md` and `pins.md` logs
+  remain the human-readable source of truth, so the change is reversible and
+  existing projects migrate automatically on `oms init`, append, pin, search,
+  or recall. Exact `search` keeps its case-insensitive substring contract;
+  `recall` adds ranked local FTS without a model call or embedding download.
+  Schema 2 links each new project note to a stable event ID, kind, active
+  task/session hashes, current Git HEAD, dirty bit, and bounded state
+  fingerprint. The append-only Markdown source carries that provenance through
+  rebuilds, compact provider context omits it, and `search`/`recall --json`
+  exposes it only on demand. Existing schema-1 databases and metadata-free
+  notes migrate automatically with stable legacy IDs.
+  Concurrent indexers use a bounded SQLite write transaction, `rebuild`
+  recreates a damaged derived database from Markdown, and `doctor` checks its
+  schema and integrity.
 - Routing follows what each provider CLI can actually do, instead of asserting
   it. Two assertions in the table had gone stale while the CLIs moved, and a
   stale capability is not a harmless comment: antigravity was refused a

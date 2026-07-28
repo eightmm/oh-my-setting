@@ -1619,6 +1619,25 @@ test_doctor_clean_harness_state_has_no_warnings() {
   fi
 }
 
+test_doctor_warns_on_a_damaged_memory_database() {
+  local project="$TMP/doctor-memory-db"
+  local home_dir="$TMP/doctor-memory-db-home"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms/memory"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf '# Shared Agent Memory\n' > "$project/.oms/memory/shared.md"
+  printf 'not a sqlite database\n' > "$project/.oms/memory/memory.sqlite3"
+
+  out="$(run_doctor_for_project "$project" "$home_dir")" ||
+    fail "a damaged derived database should warn, not fail doctor: $out"
+  printf '%s' "$out" | grep -Fq 'warn: memory database is invalid' ||
+    fail "doctor should report the damaged memory database: $out"
+  printf '%s' "$out" | grep -Fq 'oms agent-memory --repo . rebuild' ||
+    fail "doctor should name the safe rebuild command: $out"
+}
+
 test_doctor_uses_canonical_artifact_validation() {
   local project="$TMP/doctor-artifact-contract"
   local home_dir="$TMP/doctor-artifact-contract-home"
@@ -2940,6 +2959,367 @@ test_agent_memory_append_show_and_rejects_sensitive() {
     fail "sensitive-looking memory note should be rejected"
   fi
   assert_file_contains "$project/sensitive-err" "sensitive-looking content"
+
+  if HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "<!-- oms-memory" \
+    >"$project/reserved-out" 2>"$project/reserved-err"; then
+    fail "the reserved provenance marker must not be accepted as note text"
+  fi
+  assert_file_contains "$project/reserved-err" "reserved memory metadata marker"
+}
+
+test_agent_memory_indexes_existing_logs_in_sqlite() {
+  local project="$TMP/agent-memory-db"
+  local home_dir="$project/home"
+  local db
+  local out
+
+  mkdir -p "$project/.oms/memory" "$home_dir"
+  cat > "$project/.oms/memory/shared.md" <<'EOF'
+# Shared Agent Memory
+
+- scope: project
+
+## 2026-07-01T00:00:00Z claude
+
+Keep the legacy split policy stable.
+
+## 2026-07-02T00:00:00Z codex
+
+Use SQLite for durable project recall.
+
+EOF
+  cat > "$project/.oms/memory/pins.md" <<'EOF'
+# Pinned Agent Memory
+
+- scope: project
+
+- 2026-07-03T00:00:00Z [antigravity] Keep the migration reversible.
+EOF
+
+  db="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" db-path)"
+  [ "$db" = "$project/.oms/memory/memory.sqlite3" ] ||
+    fail "project memory database path is wrong: $db"
+  [ ! -e "$db" ] || fail "db-path must stay read-only"
+
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
+    search --agent claude --text "legacy split")" ||
+    fail "database-backed search should migrate existing logs: $out"
+  printf '%s' "$out" | grep -Fq 'Keep the legacy split policy stable.' ||
+    fail "migrated search missed the legacy shared entry: $out"
+  [ -f "$db" ] || fail "search should create the project memory database"
+
+  python3 - "$db" <<'PY' || fail "memory database schema/content is invalid"
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+assert db.execute("pragma user_version").fetchone()[0] == 2
+rows = db.execute(
+    "select source, agent, body from memory_entries order by source, ordinal"
+).fetchall()
+assert len(rows) == 3, rows
+assert {row[0] for row in rows} == {"shared", "pins"}, rows
+assert any(row[1] == "antigravity" and "reversible" in row[2] for row in rows), rows
+PY
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --agent codex --text "Index new notes immediately." >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" pin \
+    --agent claude --text "Pinned rows belong in the same database." >/dev/null
+  python3 - "$db" <<'PY' || fail "append/pin did not refresh the memory database"
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+text = "\n".join(row[0] for row in db.execute("select body from memory_entries"))
+assert "Index new notes immediately." in text, text
+assert "Pinned rows belong in the same database." in text, text
+PY
+}
+
+test_agent_memory_upgrades_schema_one_database() {
+  local project="$TMP/agent-memory-db-v1"
+  local home_dir="$project/home"
+  local db="$project/.oms/memory/memory.sqlite3"
+  local shared="$project/.oms/memory/shared.md"
+  local out
+
+  mkdir -p "$project/.oms/memory" "$home_dir"
+  cat > "$shared" <<'EOF'
+# Shared Agent Memory
+
+- scope: project
+
+## 2026-07-01T00:00:00Z codex
+
+Keep the schema-one memory available.
+
+EOF
+  python3 - "$db" "$shared" <<'PY'
+import hashlib
+import os
+import sqlite3
+import sys
+
+db_path, source = sys.argv[1:]
+raw = open(source, "rb").read()
+info = os.stat(source)
+mtime_ns = getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))
+db = sqlite3.connect(db_path)
+db.executescript(
+    """
+    create table memory_sources (
+      source text primary key,
+      path text not null,
+      size integer not null,
+      mtime_ns integer not null,
+      digest text not null
+    );
+    create table memory_entries (
+      id integer primary key,
+      source text not null,
+      ordinal integer not null,
+      occurred_at text not null,
+      agent text not null,
+      body text not null,
+      rendered text not null,
+      unique (source, ordinal)
+    );
+    pragma user_version = 1;
+    """
+)
+db.execute(
+    "insert into memory_sources values (?, ?, ?, ?, ?)",
+    ("shared", os.path.realpath(source), len(raw), mtime_ns, hashlib.sha256(raw).hexdigest()),
+)
+db.execute(
+    "insert into memory_entries "
+    "(source, ordinal, occurred_at, agent, body, rendered) values (?, ?, ?, ?, ?, ?)",
+    (
+        "shared",
+        0,
+        "2026-07-01T00:00:00Z",
+        "codex",
+        "Keep the schema-one memory available.",
+        "## 2026-07-01T00:00:00Z codex\n\nKeep the schema-one memory available.",
+    ),
+)
+db.commit()
+db.close()
+PY
+
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
+    search --text "schema-one")" ||
+    fail "schema-one memory should migrate automatically: $out"
+  printf '%s' "$out" | grep -Fq 'Keep the schema-one memory available.' ||
+    fail "automatic migration lost the existing memory: $out"
+
+  python3 - "$db" <<'PY' || fail "schema-one database did not migrate cleanly"
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+assert db.execute("pragma user_version").fetchone()[0] == 2
+columns = {
+    row[1] for row in db.execute("pragma table_info(memory_entries)")
+}
+assert {
+    "event_id", "kind", "task_id", "session_hash",
+    "git_sha", "git_dirty", "git_state",
+}.issubset(columns), columns
+row = db.execute(
+    "select event_id, kind, task_id, session_hash, git_sha, git_dirty, git_state "
+    "from memory_entries"
+).fetchone()
+assert row[0].startswith("legacy:shared:0:"), row
+assert row[1:] == ("note", "", "", "", None, ""), row
+PY
+}
+
+test_agent_memory_records_git_and_task_provenance() {
+  local project="$TMP/agent-memory-provenance"
+  local home_dir="$project/home"
+  local db="$project/.oms/memory/memory.sqlite3"
+  local source_session="0123456789abcdef"
+  local task_id
+  local sha
+  local json_out
+  local before_ids
+  local after_ids
+  local context
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  HOME="$home_dir" "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --goal "Record memory provenance" --source-session "$source_session" >/dev/null
+  task_id="$(awk -F': ' '/^- task_id:/{print $2; exit}' "$project/.oms/task/current.md")"
+  sha="$(git -C "$project" rev-parse HEAD)"
+  printf 'dirty work\n' >> "$project/file.txt"
+
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --agent codex --text "Remember the dirty implementation state." >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" pin \
+    --agent claude --text "Keep provenance compact." >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-task.sh" --repo "$project" close >/dev/null
+
+  assert_file_contains "$project/.oms/memory/shared.md" "<!-- oms-memory"
+  assert_file_contains "$project/.oms/memory/shared.md" "git_sha: $sha"
+  assert_file_contains "$project/.oms/memory/shared.md" "task_id: $task_id"
+
+  context="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" context)"
+  if printf '%s' "$context" | grep -Fq 'oms-memory'; then
+    fail "structured provenance must not consume compact provider context"
+  fi
+  if printf '%s' "$context" | grep -Fq 'git_sha:'; then
+    fail "git provenance must stay out of compact provider context"
+  fi
+
+  json_out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
+    --json search --text "dirty implementation")" ||
+    fail "structured search should return the appended note: $json_out"
+  OMS_MEMORY_JSON="$json_out" \
+    python3 - "$sha" "$task_id" "$source_session" <<'PY' ||
+    fail "JSON search did not expose stable provenance"
+import json
+import os
+import sys
+
+expected_sha, expected_task, expected_session = sys.argv[1:]
+row = json.loads(os.environ["OMS_MEMORY_JSON"])
+assert row["schema"] == 2, row
+assert row["event_id"].startswith("mem-"), row
+assert row["kind"] == "note", row
+assert row["task_id"] == expected_task, row
+assert row["session_hash"] == expected_session, row
+assert row["git_sha"] == expected_sha, row
+assert row["git_dirty"] is True, row
+assert row["git_state"].startswith(expected_sha + ":"), row
+PY
+
+  python3 - "$db" "$sha" "$task_id" "$source_session" <<'PY' ||
+    fail "append, pin, and task close provenance is incomplete"
+import sqlite3
+import sys
+
+db_path, expected_sha, expected_task, expected_session = sys.argv[1:]
+db = sqlite3.connect(db_path)
+assert db.execute("pragma user_version").fetchone()[0] == 2
+rows = db.execute(
+    "select event_id, source, ordinal, kind, task_id, session_hash, "
+    "git_sha, git_dirty, git_state, body "
+    "from memory_entries order by occurred_at, source, ordinal"
+).fetchall()
+assert len(rows) == 3, rows
+assert len({row[0] for row in rows}) == 3, rows
+assert {row[3] for row in rows} == {"note", "pin", "task_close"}, rows
+for row in rows:
+    assert row[4] == expected_task, row
+    assert row[5] == expected_session, row
+    assert row[6] == expected_sha, row
+    assert row[7] == 1, row
+    assert row[8].startswith(expected_sha + ":"), row
+PY
+
+  before_ids="$(python3 - "$db" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+print("\n".join(row[0] for row in db.execute(
+    "select event_id from memory_entries order by source, ordinal"
+)))
+PY
+)"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" rebuild >/dev/null
+  after_ids="$(python3 - "$db" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+print("\n".join(row[0] for row in db.execute(
+    "select event_id from memory_entries order by source, ordinal"
+)))
+PY
+)"
+  [ "$before_ids" = "$after_ids" ] ||
+    fail "rebuild must preserve stable memory event ids"
+}
+
+test_agent_memory_db_preserves_search_and_adds_ranked_recall() {
+  local project="$TMP/agent-memory-recall"
+  local home_dir="$project/home"
+  local db="$project/.oms/memory/memory.sqlite3"
+  local out
+
+  mkdir -p "$project" "$home_dir"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --agent codex --text "Use pgvector only after lexical recall has evidence." >/dev/null
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --agent claude --text "SQLite full text recall keeps the local baseline cheap." >/dev/null
+
+  # Existing search is a case-insensitive substring contract, including a
+  # substring that begins inside a token; moving to FTS must not narrow it.
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
+    search --text "GVector only")" ||
+    fail "database search should preserve substring matching: $out"
+  printf '%s' "$out" | grep -Fq 'Use pgvector only after lexical recall has evidence.' ||
+    fail "substring search changed during database migration: $out"
+
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
+    recall --limit 1 --text "sqlite full text")" ||
+    fail "ranked recall should return a database result: $out"
+  printf '%s' "$out" | grep -Fq 'SQLite full text recall keeps the local baseline cheap.' ||
+    fail "ranked recall returned the wrong entry: $out"
+
+  # The database is derived. Rebuilding it must recover from a damaged index
+  # without touching either append-only Markdown source.
+  printf 'not a sqlite database\n' > "$db"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" rebuild >/dev/null ||
+    fail "rebuild should recover a damaged derived database"
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
+    search --text "local baseline")" ||
+    fail "rebuilt database should be searchable: $out"
+  printf '%s' "$out" | grep -Fq 'SQLite full text recall keeps the local baseline cheap.' ||
+    fail "rebuild lost source memory: $out"
+}
+
+test_agent_memory_database_concurrent_appends_converge() {
+  local project="$TMP/agent-memory-db-race"
+  local home_dir="$project/home"
+  local pids=""
+  local pid
+  local status=0
+  local i=0
+
+  mkdir -p "$project" "$home_dir"
+  while [ "$i" -lt 12 ]; do
+    HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+      --agent codex --text "parallel memory note $i" >/dev/null 2>&1 &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" || status=1
+  done
+  [ "$status" -eq 0 ] || fail "a concurrent memory append failed"
+
+  # A final read synchronizes any source append whose process exited after
+  # writing Markdown but before winning the SQLite transaction.
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
+    search --text "parallel memory note" >/dev/null ||
+    fail "concurrent notes should remain searchable"
+  python3 - "$project/.oms/memory/memory.sqlite3" <<'PY' || fail "concurrent database index is incomplete or corrupt"
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+assert db.execute("pragma integrity_check").fetchone()[0] == "ok"
+rows = db.execute(
+    "select event_id, ordinal, body from memory_entries "
+    "where body like 'parallel memory note %' order by ordinal"
+).fetchall()
+assert len(rows) == 12, rows
+assert len({row[0] for row in rows}) == 12, rows
+assert [row[1] for row in rows] == list(range(12)), rows
+assert len({row[2] for row in rows}) == 12, rows
+PY
 }
 
 
@@ -7903,14 +8283,20 @@ test_oms_init_seeds_and_guides() {
   out="$(cd "$project" && "$ROOT/scripts/oms-init.sh")"
   [ -f "$project/.oms/.gitignore" ] || fail "init should create the .oms/.gitignore guard"
   [ -f "$project/.oms/memory/shared.md" ] || fail "init should seed shared memory"
+  [ -f "$project/.oms/memory/memory.sqlite3" ] ||
+    fail "init should create the project memory database"
   printf '%s' "$out" | grep -Fq "ML repo" || fail "init should tailor the checklist to an ML repo"
   printf '%s' "$out" | grep -Fq "oms state" || fail "init should point at oms state"
   printf '%s' "$out" | grep -Fq "oms data-manifest check --name <manifest>" ||
     fail "init should show a valid named manifest check command"
   printf '%s' "$out" | grep -Fq "oms data-manifest leakage --name <manifest>" ||
     fail "init should show a valid named leakage command"
-  # Idempotent: a second run must not error.
+  # Idempotent and migratory: a Markdown-only project gets its derived index
+  # back on the next init without changing the source.
+  rm -f "$project/.oms/memory/memory.sqlite3"
   ( cd "$project" && "$ROOT/scripts/oms-init.sh" >/dev/null 2>&1 ) || fail "init must be idempotent"
+  [ -f "$project/.oms/memory/memory.sqlite3" ] ||
+    fail "init should migrate an existing Markdown-only memory"
 }
 
 test_gc_closes_stale_open_run() {

@@ -35,6 +35,11 @@ privately first. Please allow time for a fix before public disclosure.
 
 - Never commit tokens, API keys, private data, or cluster/machine details.
   `.gitignore` blocks `.env`, `*.key`, `*.pem`, `local/`, and generated state.
+- Project memory and its derived SQLite index are local plaintext under
+  `.oms/memory/`; the index is not an encrypted secret store. Memory writes are
+  scrubbed before either representation is updated, and `.oms/` is gitignored.
+  Memory provenance stores bounded hashes and IDs, never branch names, paths,
+  commands, or raw diffs, and is omitted from compact provider prompts.
 - Outbound prompts/diffs to external agent CLIs are scanned for secrets and
   machine/cluster details; a match blocks the call (`scripts/lib/agent-memory-common.sh`).
 - Delegated patches pass a sensitive-content scan before they can be admitted

@@ -593,17 +593,63 @@ check_harness_sensitive_files() {
   fi
 
   if [ -d "$oms_dir/memory" ]; then
+    # SQLite is a derived copy of these Markdown sources. Scan the sources once
+    # instead of reporting every sensitive note twice (and treating a binary
+    # database page as another user-authored record).
     while IFS= read -r -d '' file; do
       if agent_memory_file_has_sensitive_content "$file"; then
         rel="$(harness_relpath "$project_dir" "$file")"
         echo "warn: sensitive-looking harness state: $rel"
         sensitive=$((sensitive + 1))
       fi
-    done < <(find "$oms_dir/memory" -maxdepth 1 -type f -print0 2>/dev/null)
+    done < <(find "$oms_dir/memory" -maxdepth 1 -type f -name '*.md' -print0 2>/dev/null)
   fi
 
   if [ "$sensitive" -eq 0 ]; then
     echo "ok: harness task/memory sensitive scan"
+  fi
+}
+
+check_harness_memory_db() {
+  local project_dir="$1"
+  local db="$project_dir/.oms/memory/memory.sqlite3"
+
+  [ -f "$db" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  if python3 - "$db" >/dev/null 2>&1 <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+try:
+    if db.execute("pragma user_version").fetchone()[0] != 2:
+        raise SystemExit(1)
+    if db.execute("pragma quick_check").fetchone()[0] != "ok":
+        raise SystemExit(1)
+    tables = {
+        row[0]
+        for row in db.execute(
+            "select name from sqlite_master where type = 'table'"
+        )
+    }
+    if not {"memory_sources", "memory_entries"}.issubset(tables):
+        raise SystemExit(1)
+    columns = {
+        row[1] for row in db.execute("pragma table_info(memory_entries)")
+    }
+    required = {
+        "event_id", "occurred_at", "ordinal", "agent", "kind", "task_id",
+        "session_hash", "git_sha", "git_dirty", "git_state", "body",
+    }
+    if not required.issubset(columns):
+        raise SystemExit(1)
+finally:
+    db.close()
+PY
+  then
+    echo "ok: memory database schema/integrity"
+  else
+    echo "warn: memory database is invalid (run: oms agent-memory --repo . rebuild)"
   fi
 }
 
@@ -674,6 +720,7 @@ check_harness_state() {
 
   check_harness_artifact_index "$project_dir"
   check_harness_run_state "$project_dir"
+  check_harness_memory_db "$project_dir"
   check_harness_sensitive_files "$project_dir"
   check_harness_residue "$project_dir"
 }

@@ -1,8 +1,13 @@
 # shellcheck shell=bash
 # Shared harness memory helpers. Sourced, not executed.
 
+AGENT_MEMORY_COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_MEMORY_DB_HELPER="$AGENT_MEMORY_COMMON_LIB_DIR/agent-memory-db.py"
+
 # shellcheck source=file-lock.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/file-lock.sh"
+. "$AGENT_MEMORY_COMMON_LIB_DIR/file-lock.sh"
+# shellcheck source=oms-common.sh
+. "$AGENT_MEMORY_COMMON_LIB_DIR/oms-common.sh"
 
 # Normalize a repo argument to its git worktree root so shared state does not
 # silently fork when a command runs from a subdirectory (repo/src/.oms vs
@@ -72,6 +77,58 @@ agent_memory_summary_file() {
   printf '%s/summary.md\n' "$(agent_memory_dir "$file")"
 }
 
+agent_memory_db_file() {
+  local file="$1"
+  local dir
+  local name
+
+  dir="$(agent_memory_dir "$file")"
+  name="$(basename "$file")"
+  case "$name" in
+    shared.md) printf '%s/memory.sqlite3\n' "$dir" ;;
+    *.*) printf '%s/%s.sqlite3\n' "$dir" "${name%.*}" ;;
+    *) printf '%s/%s.sqlite3\n' "$dir" "$name" ;;
+  esac
+}
+
+agent_memory_db_command() {
+  local memory_file="$1"
+  local command_name="$2"
+  local db_file
+  shift 2
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "error: python3 required for the memory database" >&2
+    return 2
+  }
+  [ -f "$AGENT_MEMORY_DB_HELPER" ] || {
+    echo "error: memory database helper missing: $AGENT_MEMORY_DB_HELPER" >&2
+    return 2
+  }
+  db_file="$(agent_memory_db_file "$memory_file")"
+  agent_memory_ensure_oms_ignore_for_path "$db_file"
+  python3 "$AGENT_MEMORY_DB_HELPER" "$command_name" \
+    --db "$db_file" \
+    --shared "$memory_file" \
+    --pins "$(agent_memory_pins_file "$memory_file")" \
+    "$@"
+}
+
+agent_memory_sync_db() {
+  local memory_file="$1"
+
+  agent_memory_db_command "$memory_file" sync
+}
+
+agent_memory_sync_db_best_effort() {
+  local memory_file="$1"
+
+  if ! agent_memory_sync_db "$memory_file"; then
+    echo "warning: memory note is safe in the Markdown source, but its database index is stale" >&2
+  fi
+  return 0
+}
+
 agent_memory_ensure_oms_ignore() {
   local repo="$1"
   local oms_dir
@@ -133,6 +190,96 @@ agent_memory_mktemp() {
   else
     mktemp
   fi
+}
+
+agent_memory_repo_for_file() {
+  local file="$1"
+  local repo=""
+
+  case "$file" in
+    */.oms/memory/*) repo="${file%/.oms/memory/*}" ;;
+    *) return 1 ;;
+  esac
+  if [ -z "$repo" ] ||
+    ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    return 1
+  fi
+  oms_repo_root "$repo"
+}
+
+agent_memory_task_metadata_value() {
+  local file="$1"
+  local key="$2"
+
+  [ -s "$file" ] || return 1
+  awk -v key="$key" '
+    /^## / { exit found ? 0 : 1 }
+    {
+      pattern = "^- " key ":[[:space:]]*"
+      if ($0 ~ pattern) {
+        sub(pattern, "")
+        print
+        found = 1
+        exit 0
+      }
+    }
+    END { if (!found) exit 1 }
+  ' "$file"
+}
+
+agent_memory_new_event_id() {
+  printf 'mem-%s-%s-%s\n' \
+    "$(date -u +%Y%m%dT%H%M%SZ)" "$$" "${RANDOM:-0}"
+}
+
+# Capture provenance before taking the append lock. Only bounded identifiers
+# and hashes are persisted: no diff, file path, command, or branch name enters
+# memory or provider context.
+agent_memory_write_metadata() {
+  local memory_file="$1"
+  local kind="$2"
+  local output="$3"
+  local repo=""
+  local task_file=""
+  local task_id="${OMS_TASK_ID:-}"
+  local session_hash="${OMS_AGENT_TASK_SOURCE_SESSION:-}"
+  local git_sha=""
+  local git_dirty=""
+  local git_state=""
+  local untracked=""
+
+  repo="$(agent_memory_repo_for_file "$memory_file" 2>/dev/null || true)"
+  if [ -n "$repo" ]; then
+    task_file="$repo/.oms/task/current.md"
+    [ -n "$task_id" ] ||
+      task_id="$(agent_memory_task_metadata_value "$task_file" task_id 2>/dev/null || true)"
+    [ -n "$session_hash" ] ||
+      session_hash="$(agent_memory_task_metadata_value "$task_file" source_session 2>/dev/null || true)"
+    git_sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+    untracked="$(git -C "$repo" ls-files --others --exclude-standard 2>/dev/null |
+      sed -n '1p')"
+    if ! git -C "$repo" diff --quiet HEAD -- 2>/dev/null ||
+      ! git -C "$repo" diff --cached --quiet -- 2>/dev/null ||
+      [ -n "$untracked" ]; then
+      git_dirty=1
+    else
+      git_dirty=0
+    fi
+    git_state="$(oms_git_state_fingerprint "$repo" 2>/dev/null || true)"
+  fi
+
+  {
+    printf '<!-- oms-memory\n'
+    printf 'schema: 1\n'
+    printf 'event_id: %s\n' "$(agent_memory_new_event_id)"
+    printf 'kind: %s\n' "$kind"
+    printf 'task_id: %s\n' "$task_id"
+    printf 'session_hash: %s\n' "$session_hash"
+    printf 'git_sha: %s\n' "$git_sha"
+    printf 'git_dirty: %s\n' "$git_dirty"
+    printf 'git_state: %s\n' "$git_state"
+    printf -- '-->\n'
+  } > "$output"
 }
 
 oms_check_sh_has_ml_smoke() {
@@ -259,10 +406,13 @@ agent_memory_append_file_unlocked() {
   local scope="$2"
   local agent="$3"
   local note_file="$4"
+  local occurred_at="$5"
+  local metadata_file="$6"
 
   agent_memory_init_file_unlocked "$memory_file" "$scope"
   {
-    printf '## %s %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent"
+    cat "$metadata_file"
+    printf '## %s %s\n\n' "$occurred_at" "$agent"
     cat "$note_file"
     printf '\n\n'
   } >> "$memory_file"
@@ -273,16 +423,35 @@ agent_memory_append_file() {
   local scope="$2"
   local agent="$3"
   local note_file="$4"
+  local kind="${5:-note}"
+  local occurred_at
+  local metadata_file
 
   if agent_memory_file_has_sensitive_content "$note_file"; then
     echo "error: memory note contains sensitive-looking content; not appended" >&2
     return 3
   fi
+  if grep -Fq '<!-- oms-memory' "$note_file"; then
+    echo "error: memory note contains the reserved memory metadata marker; not appended" >&2
+    return 3
+  fi
 
-  oms_with_file_lock "$memory_file" agent_memory_append_file_unlocked "$memory_file" "$scope" "$agent" "$note_file"
+  occurred_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  metadata_file="$(agent_memory_mktemp)" || return 1
+  if ! agent_memory_write_metadata "$memory_file" "$kind" "$metadata_file"; then
+    rm -f "$metadata_file"
+    return 1
+  fi
+  if ! oms_with_file_lock "$memory_file" agent_memory_append_file_unlocked \
+    "$memory_file" "$scope" "$agent" "$note_file" "$occurred_at" "$metadata_file"; then
+    rm -f "$metadata_file"
+    return 1
+  fi
+  rm -f "$metadata_file"
   # The note is already written; a stale summary must not turn the append
   # into a failure (refresh prints its own warning).
   agent_memory_refresh_summary "$memory_file" "$scope" || true
+  agent_memory_sync_db_best_effort "$memory_file"
 }
 
 agent_memory_pin_file_unlocked() {
@@ -290,6 +459,8 @@ agent_memory_pin_file_unlocked() {
   local agent="$3"
   local note_file="$4"
   local pins_file="$5"
+  local occurred_at="$6"
+  local metadata_file="$7"
   local line
   local chars="${OMS_AGENT_MEMORY_PIN_CHARS:-240}"
 
@@ -302,7 +473,10 @@ agent_memory_pin_file_unlocked() {
   fi
 
   line="$(tr '\n' ' ' < "$note_file" | tr -s '[:space:]' ' ' | agent_memory_truncate_bytes "$chars")"
-  printf -- '- %s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent" "$line" >> "$pins_file"
+  {
+    cat "$metadata_file"
+    printf -- '- %s [%s] %s\n' "$occurred_at" "$agent" "$line"
+  } >> "$pins_file"
 }
 
 agent_memory_pin_file() {
@@ -311,16 +485,34 @@ agent_memory_pin_file() {
   local agent="$3"
   local note_file="$4"
   local pins_file
+  local occurred_at
+  local metadata_file
 
   if agent_memory_file_has_sensitive_content "$note_file"; then
     echo "error: memory pin contains sensitive-looking content; not appended" >&2
+    return 3
+  fi
+  if grep -Fq '<!-- oms-memory' "$note_file"; then
+    echo "error: memory pin contains the reserved memory metadata marker; not appended" >&2
     return 3
   fi
 
   pins_file="$(agent_memory_pins_file "$memory_file")"
   agent_memory_ensure_oms_ignore_for_path "$pins_file"
   mkdir -p "$(dirname "$pins_file")"
-  oms_with_file_lock "$pins_file" agent_memory_pin_file_unlocked "$memory_file" "$scope" "$agent" "$note_file" "$pins_file"
+  occurred_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  metadata_file="$(agent_memory_mktemp)" || return 1
+  if ! agent_memory_write_metadata "$memory_file" pin "$metadata_file"; then
+    rm -f "$metadata_file"
+    return 1
+  fi
+  if ! oms_with_file_lock "$pins_file" agent_memory_pin_file_unlocked \
+    "$memory_file" "$scope" "$agent" "$note_file" "$pins_file" "$occurred_at" "$metadata_file"; then
+    rm -f "$metadata_file"
+    return 1
+  fi
+  rm -f "$metadata_file"
+  agent_memory_sync_db_best_effort "$memory_file"
 }
 
 agent_memory_emit_full_section() {

@@ -538,7 +538,8 @@ print(json.dumps({
       if [ -n "$goal_line" ]; then
         note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")"
         printf 'Closed task: %s%s\n' "$goal_line" "${next_line:+ | next: $next_line}" > "$note_file"
-        if agent_memory_append_file "$(agent_memory_project_file "$REPO")" project "$AGENT" "$note_file" >/dev/null 2>&1; then
+        if agent_memory_append_file "$(agent_memory_project_file "$REPO")" \
+          project "$AGENT" "$note_file" task_close >/dev/null 2>&1; then
           echo "task: outcome noted in project shared memory"
         else
           echo "warning: task outcome not added to shared memory" >&2
