@@ -560,9 +560,21 @@ print(json.dumps({
     if [ "${OMS_AGENT_TASK_CLOSE_MEMORY:-1}" = "1" ]; then
       goal_line="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
       next_line="$(awk '/^## Next Step$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
+      # The packet already holds the two lines worth recalling later: what was
+      # decided, and what went wrong on the way. Closing used to keep the goal
+      # and drop both. Promoting text that is already written costs nothing —
+      # no model is asked to summarise anything — and it is the only content in
+      # this whole flow that a later `recall` can actually act on, because a
+      # command and an exit code carry the symptom but never the reason.
+      decision_line="$(awk '/^## Decisions$/{f=1;next} /^## /{f=0} f&&NF{last=$0} END{if(last)print last}' "$TASK_FILE")"
+      pitfall_line="$(awk '/^## Last Failure$/{f=1;next} /^## /{f=0} f&&NF{last=$0} END{if(last)print last}' "$TASK_FILE")"
       if [ -n "$goal_line" ]; then
         note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")"
-        printf 'Closed task: %s%s\n' "$goal_line" "${next_line:+ | next: $next_line}" > "$note_file"
+        {
+          printf 'Closed task: %s%s\n' "$goal_line" "${next_line:+ | next: $next_line}"
+          [ -z "$decision_line" ] || printf 'decision: %s\n' "${decision_line#- }"
+          [ -z "$pitfall_line" ] || printf 'pitfall: %s\n' "${pitfall_line#- }"
+        } > "$note_file"
         if agent_memory_append_file "$(agent_memory_project_file "$REPO")" \
           project "$AGENT" "$note_file" task_close >/dev/null 2>&1; then
           echo "task: outcome noted in project shared memory"

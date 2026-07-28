@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 HEADER_RE = re.compile(r"^## (\S+) (.*)$")
 PIN_RE = re.compile(r"^- (\S+) \[([^\]]+)\] (.*)$")
 TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
@@ -224,6 +224,54 @@ def parse_pins(text: str) -> list[Entry]:
     return entries
 
 
+def parse_failures(text: str) -> list[Entry]:
+    """Index the failure ledger. Exact-fingerprint `check --cmd` answers "this
+    same command failed"; indexing the rows makes the softer question — have we
+    had trouble with this before, and what did it say — answerable too."""
+    entries: list[Entry] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        event = str(row.get("event") or ("resolved" if row.get("resolved") else "failure"))
+        command = str(row.get("cmd") or "")
+        summary = str(row.get("summary") or "")
+        fingerprint = str(row.get("fingerprint") or "")
+        exit_code = row.get("exit")
+        parts = [part for part in (summary, command) if part]
+        body = " | ".join(parts)
+        if exit_code is not None:
+            body = "%s (exit %s)" % (body, exit_code) if body else "exit %s" % exit_code
+        if not body:
+            continue
+        metadata = {
+            "kind": "failure" if event != "resolve" else "failure-resolved",
+            "task_id": str(row.get("task") or row.get("task_id") or ""),
+            "git_state": str(row.get("state") or row.get("git_state") or ""),
+        }
+        if EVENT_ID_RE.fullmatch("fail:%s:%d" % (fingerprint, len(entries))):
+            metadata["event_id"] = "fail:%s:%d" % (fingerprint, len(entries))
+        entries.append(
+            make_entry(
+                "failures",
+                len(entries),
+                str(row.get("ts") or row.get("timestamp") or ""),
+                str(row.get("agent") or ""),
+                body,
+                "## %s %s\n\n%s" % (
+                    row.get("ts") or "", row.get("agent") or "", body),
+                metadata,
+            )
+        )
+    return entries
+
+
 def connect(path: str) -> sqlite3.Connection:
     parent = os.path.dirname(path)
     if parent:
@@ -272,9 +320,26 @@ def migrate_schema_one(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def migrate_to_three(db: sqlite3.Connection) -> None:
+    """A CHECK constraint cannot be altered in place. Every row here is derived
+    from the Markdown logs and the JSONL ledger, so dropping and re-deriving
+    loses nothing that is not still on disk."""
+    db.execute("drop trigger if exists memory_entries_ai")
+    db.execute("drop trigger if exists memory_entries_ad")
+    db.execute("drop trigger if exists memory_entries_au")
+    db.execute("drop table if exists memory_fts")
+    db.execute("drop table if exists memory_entries")
+    db.execute("drop table if exists memory_sources")
+    db.execute("pragma user_version = 3")
+    db.commit()
+
+
 def ensure_schema(db: sqlite3.Connection) -> None:
     version = db.execute("pragma user_version").fetchone()[0]
     migrated = version == 1
+    if version == 2:
+        migrate_to_three(db)
+        version = 3
     if version not in (0, 1, SCHEMA_VERSION):
         raise RuntimeError(
             "unsupported memory database schema %d (expected %d)"
@@ -282,10 +347,11 @@ def ensure_schema(db: sqlite3.Connection) -> None:
         )
     if version == 1:
         migrate_schema_one(db)
+        migrate_to_three(db)
     db.executescript(
         """
         create table if not exists memory_sources (
-          source text primary key check (source in ('shared', 'pins')),
+          source text primary key check (source in ('shared', 'pins', 'failures')),
           path text not null,
           size integer not null,
           mtime_ns integer not null,
@@ -294,7 +360,7 @@ def ensure_schema(db: sqlite3.Connection) -> None:
         create table if not exists memory_entries (
           id integer primary key,
           event_id text not null unique,
-          source text not null check (source in ('shared', 'pins')),
+          source text not null check (source in ('shared', 'pins', 'failures')),
           ordinal integer not null,
           occurred_at text not null,
           agent text not null,
@@ -429,14 +495,19 @@ def replace_source(
     )
 
 
-def sync_sources(db: sqlite3.Connection, shared: str, pins: str) -> None:
+def sync_sources(
+    db: sqlite3.Connection, shared: str, pins: str, failures: str = ""
+) -> None:
     ensure_schema(db)
     db.execute("begin immediate")
     try:
-        for source, path, parser in (
+        sources = [
             ("shared", shared, parse_shared),
             ("pins", pins, parse_pins),
-        ):
+        ]
+        if failures:
+            sources.append(("failures", failures, parse_failures))
+        for source, path, parser in sources:
             try:
                 stat_result = os.stat(path)
             except FileNotFoundError:
@@ -564,13 +635,13 @@ def remove_database_files(path: str) -> None:
             pass
 
 
-def rebuild_database(path: str, shared: str, pins: str) -> None:
+def rebuild_database(path: str, shared: str, pins: str, failures: str = "") -> None:
     """Build beside the old index and replace it only after a clean commit."""
     temporary = "%s.rebuild.%d" % (path, os.getpid())
     remove_database_files(temporary)
     db = connect(temporary)
     try:
-        sync_sources(db, shared, pins)
+        sync_sources(db, shared, pins, failures)
         if db.execute("pragma integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("rebuilt memory database failed its integrity check")
     except Exception:
@@ -588,6 +659,8 @@ def main() -> int:
     parser.add_argument("--db", required=True)
     parser.add_argument("--shared", required=True)
     parser.add_argument("--pins", required=True)
+    # Optional: a repo that has never failed anything has no ledger to index.
+    parser.add_argument("--failures", default="")
     parser.add_argument("--query", default="")
     parser.add_argument("--agent", default="")
     parser.add_argument("--limit", type=int, default=1000)
@@ -601,13 +674,13 @@ def main() -> int:
         parser.error("--query is required")
 
     if args.command == "rebuild":
-        rebuild_database(args.db, args.shared, args.pins)
+        rebuild_database(args.db, args.shared, args.pins, args.failures)
         return 0
 
     db = connect(args.db)
     result = 0
     try:
-        sync_sources(db, args.shared, args.pins)
+        sync_sources(db, args.shared, args.pins, args.failures)
         if args.command == "search":
             entries = exact_search(db, args.query, args.agent, args.limit)
             shown = emit(entries, args.json)

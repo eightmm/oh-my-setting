@@ -7,6 +7,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Recall now spans everything the harness already records, not just prose notes.
+  The SQLite index takes the failure ledger as a third source, so one
+  `agent-memory recall` answers "what do we know about this" across notes, pins,
+  and what has already gone wrong — where `fail-ledger check --cmd` only ever
+  answered "this byte-identical command failed before". Indexing is mechanical:
+  a ledger row already carries the command, the exit code, and the failing line,
+  and no model is asked to describe anything. Schema 3; a schema-2 database
+  upgrades by re-deriving, because every row in it is derived from the Markdown
+  logs and the JSONL ledger that are still on disk.
+- Closing a task keeps the two lines worth recalling instead of dropping them.
+  The packet already holds a `## Decisions` and a `## Last Failure` written
+  during the work; close promoted only the goal and the next step. It now
+  promotes the latest decision and pitfall as well — text that already exists,
+  so the cost is zero tokens, and it is the only content in this flow a later
+  recall can act on: a command and an exit code carry the symptom but never the
+  reason.
 - The failure ledger now sees the gate the primary agent actually runs.
   `agent-task verify` files a row when the stored verification command fails —
   carrying the failing line, written by the shell with no model involvement —

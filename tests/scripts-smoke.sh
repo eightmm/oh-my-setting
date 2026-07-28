@@ -3014,7 +3014,7 @@ import sqlite3
 import sys
 
 db = sqlite3.connect(sys.argv[1])
-assert db.execute("pragma user_version").fetchone()[0] == 2
+assert db.execute("pragma user_version").fetchone()[0] == 3
 rows = db.execute(
     "select source, agent, body from memory_entries order by source, ordinal"
 ).fetchall()
@@ -3120,7 +3120,7 @@ import sqlite3
 import sys
 
 db = sqlite3.connect(sys.argv[1])
-assert db.execute("pragma user_version").fetchone()[0] == 2
+assert db.execute("pragma user_version").fetchone()[0] == 3
 columns = {
     row[1] for row in db.execute("pragma table_info(memory_entries)")
 }
@@ -3204,7 +3204,7 @@ import sys
 
 db_path, expected_sha, expected_task, expected_session = sys.argv[1:]
 db = sqlite3.connect(db_path)
-assert db.execute("pragma user_version").fetchone()[0] == 2
+assert db.execute("pragma user_version").fetchone()[0] == 3
 rows = db.execute(
     "select event_id, source, ordinal, kind, task_id, session_hash, "
     "git_sha, git_dirty, git_state, body "
@@ -11273,6 +11273,98 @@ test_delegate_says_the_worker_cannot_see_uncommitted_work() {
   [ -f "$artifact" ] || fail "no artifact recorded: $out"
   grep -Fq 'NOT visible to the worker' "$artifact" ||
     fail "the patch reviewer needs to know which base it was written against"
+}
+
+test_memory_recall_spans_notes_and_recorded_failures() {
+  local project="$TMP/memory-failures"
+  local gate='bash -c "grep -q fixed state.txt || { echo ERROR: state.txt not fixed; exit 1; }; echo ok"'
+  local out
+
+  make_committed_repo "$project"
+  printf 'broken\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal "fix state" --verify "$gate" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
+  OMS_AGENT=codex "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
+    --text "the gate reads state.txt directly" >/dev/null
+
+  # Exact-fingerprint `check --cmd` answers "this same command failed". One
+  # recall has to answer the softer question across everything recorded: notes,
+  # pins, and what already went wrong.
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt")"
+  printf '%s' "$out" | grep -Fq 'ERROR: state.txt not fixed' ||
+    fail "recall should reach the failure ledger: $out"
+  printf '%s' "$out" | grep -Fq 'the gate reads state.txt directly' ||
+    fail "recall should still reach the notes: $out"
+}
+
+test_memory_index_upgrades_a_schema_two_database() {
+  local project="$TMP/memory-v2"
+  local db="$project/.oms/memory/memory.sqlite3"
+  local out
+
+  # A database built before failures were indexed carries a CHECK constraint
+  # that cannot be altered in place. Everything in it is derived, so the upgrade
+  # re-derives rather than migrating rows.
+  mkdir -p "$project/.oms/memory"
+  printf '# Shared Agent Memory\n\n## 2026-07-01T00:00:00Z codex\n\nolder note kept\n' \
+    > "$project/.oms/memory/shared.md"
+  printf '# Pins\n\n- 2026-07-01T00:00:00Z [claude] pinned rule\n' \
+    > "$project/.oms/memory/pins.md"
+  python3 - "$db" "$project/.oms/memory/shared.md" "$project/.oms/memory/pins.md" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript(
+    """
+    create table memory_sources (
+      source text primary key check (source in ('shared', 'pins')),
+      path text not null, size integer not null,
+      mtime_ns integer not null, digest text not null
+    );
+    create table memory_entries (
+      id integer primary key, event_id text not null unique,
+      source text not null check (source in ('shared', 'pins')),
+      ordinal integer not null, occurred_at text not null, agent text not null,
+      kind text not null, task_id text not null, session_hash text not null,
+      git_sha text not null, git_dirty integer, git_state text not null,
+      body text not null, rendered text not null
+    );
+    pragma user_version = 2;
+    """
+)
+db.commit()
+PY
+  printf '{"schema":1,"ts":"2026-07-02T00:00:00Z","agent":"codex","kind":"verify","cmd":"uv run pytest","exit":1,"summary":"ERROR: fixture missing","fingerprint":"abc123"}\n' \
+    > "$project/.oms/failures.jsonl"
+
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" search "fixture missing")" ||
+    fail "an older database must upgrade rather than error: $out"
+  printf '%s' "$out" | grep -Fq 'ERROR: fixture missing' ||
+    fail "the upgraded index should carry failures: $out"
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" search "older note kept")"
+  printf '%s' "$out" | grep -Fq 'older note kept' ||
+    fail "re-deriving must not lose what is still in the Markdown: $out"
+}
+
+test_task_close_promotes_the_decision_and_the_pitfall() {
+  local project="$TMP/close-promote"
+  local out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal "wire it" --verify true >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" update \
+    --decision "the gate reads the file, so fixtures write it first" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" update \
+    --last-failure "PATH stub shadowed by ~/.local/bin unless HOME is a fixture" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" close >/dev/null
+
+  # Both lines were already written during the work. Closing used to keep the
+  # goal and drop the two lines a later session could act on.
+  out="$(cat "$project/.oms/memory/shared.md")"
+  printf '%s' "$out" | grep -Fq 'decision: ' ||
+    fail "the decision already in the packet should survive close: $out"
+  printf '%s' "$out" | grep -Fq 'PATH stub shadowed' ||
+    fail "the pitfall already in the packet should survive close: $out"
 }
 
 test_task_verify_files_and_clears_its_own_failures() {

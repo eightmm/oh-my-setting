@@ -77,6 +77,19 @@ agent_memory_summary_file() {
   printf '%s/summary.md\n' "$(agent_memory_dir "$file")"
 }
 
+# The failure ledger sits beside the memory directory, not inside it: it is
+# written by fail-ledger.sh as JSONL, and indexed here only so one recall
+# covers notes, pins, and what has already gone wrong.
+agent_memory_failures_file() {
+  local file="$1"
+  local dir
+  dir="$(agent_memory_dir "$file")"
+  case "$dir" in
+    */.oms/memory) printf '%s/failures.jsonl\n' "${dir%/memory}" ;;
+    *) printf '%s/failures.jsonl\n' "$dir" ;;
+  esac
+}
+
 agent_memory_db_file() {
   local file="$1"
   local dir
@@ -111,6 +124,7 @@ agent_memory_db_command() {
     --db "$db_file" \
     --shared "$memory_file" \
     --pins "$(agent_memory_pins_file "$memory_file")" \
+    --failures "$(agent_memory_failures_file "$memory_file")" \
     "$@"
 }
 
