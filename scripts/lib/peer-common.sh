@@ -1070,24 +1070,44 @@ ma_run_routed_provider() {
   # broad and can flag legitimate coding and biology work, and it names the
   # remedy — change the model. Do that once, on a genuinely different model
   # rather than the same one under an alias, and record it.
-  if [ -n "${OMS_MODEL_DISTINCT_ALTERNATE:-}" ] &&
+  if [ -n "${OMS_MODEL_DISTINCT_CHAIN:-}" ] &&
     oms_model_is_model_safeguard_output "$attempt_file"; then
-    if [ "$access" = write ]; then
-      after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
-      [ -n "$before" ] && [ "$after" = "$before" ] || OMS_MODEL_DISTINCT_ALTERNATE=""
-    fi
-    if [ -n "$OMS_MODEL_DISTINCT_ALTERNATE" ]; then
+    # Walk the tier's other models rather than trying one: the same broad
+    # filter can flag the second model as readily as the first, and stopping
+    # after one step leaves the work undone for no reason the caller can act
+    # on. Bounded — the chain is short and each step is a real provider call.
+    local safeguard_tries=0
+    local safeguard_cap="${OMS_MODEL_SAFEGUARD_RETRIES:-2}"
+    local safeguard_next safeguard_prev
+    case "$safeguard_cap" in *[!0-9]*|"") safeguard_cap=2 ;; esac
+    safeguard_prev="$OMS_MODEL_SELECTED"
+    while IFS= read -r safeguard_next; do
+      [ -n "$safeguard_next" ] || continue
+      [ "$safeguard_tries" -lt "$safeguard_cap" ] || break
+      oms_model_is_model_safeguard_output "$attempt_file" || break
+      if [ "$access" = write ]; then
+        after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
+        [ -n "$before" ] && [ "$after" = "$before" ] || break
+      fi
+      safeguard_tries=$((safeguard_tries + 1))
       OMS_MODEL_FALLBACK_USED=1
       OMS_MODEL_FALLBACK_REASON="model-safeguard"
-      OMS_MODEL_SELECTED="$OMS_MODEL_DISTINCT_ALTERNATE"
+      OMS_MODEL_SELECTED="$safeguard_next"
       printf '\nmodel-fallback: reason=model-safeguard selected=%s\n' \
         "$OMS_MODEL_SELECTED" >> "$artifact"
-      echo "note: $OMS_MODEL_PRIMARY safeguards flagged this message; retrying once on $OMS_MODEL_SELECTED" >&2
+      echo "note: $safeguard_prev safeguards flagged this message; retrying on $OMS_MODEL_SELECTED" >&2
+      safeguard_prev="$OMS_MODEL_SELECTED"
       : > "$attempt_file"
       status=0
       ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
         "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
       cat "$attempt_file" >> "$artifact"
+    done <<EOF
+$OMS_MODEL_DISTINCT_CHAIN
+EOF
+    if [ "$status" -ne 0 ] && oms_model_is_model_safeguard_output "$attempt_file"; then
+      echo "note: every model in this tier flagged the message; nothing left to try" >&2
+      printf '\nmodel-result: every model in the tier flagged this message\n' >> "$artifact"
     fi
   fi
 

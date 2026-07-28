@@ -50,10 +50,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   ... can sometimes flag legitimate coding, cybersecurity, and biology tasks"*
   and *"change your model"*. That is a property of the model, not a judgement
   on the request, and the remedy is the one the error names — so the deep tier
-  now carries `opus` behind `fable`, and the retry uses a genuinely different
-  model rather than the same one under an alias. The artifact records
-  `model-fallback: reason=model-safeguard selected=opus`. A considered refusal
-  is a different message and is still never retried.
+  now carries `opus` and then `sonnet` behind `fable`, and each retry uses a
+  genuinely different model rather than the same one under an alias — the same
+  broad filter can flag the second model as readily as the first, so the tier
+  is walked rather than tried once. Bounded by `OMS_MODEL_SAFEGUARD_RETRIES`
+  (default 2), and when every model in the tier flags the message the run says
+  so instead of cycling. The artifact records each step as
+  `model-fallback: reason=model-safeguard selected=<model>`. A considered
+  refusal is a different message and is still never retried.
 - A request the provider declines is reported as a decline rather than a
   generic failure: the artifact and the caller both say which provider and
   model declined it. It is deliberately not re-sent to another model, and a

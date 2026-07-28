@@ -48,6 +48,14 @@ if [ "${FAIL_MODE:-}" = entitlement ] && [ "$count" -eq 1 ]; then
   echo "This model is not available for your organization." >&2
   exit 1
 fi
+if [ "${FAIL_MODE:-}" = safeguard-all ]; then
+  echo "API Error: Fable 5's safeguards flagged this message. Claude Code can't respond to this message with Fable 5." >&2
+  exit 1
+fi
+if [ "${FAIL_MODE:-}" = safeguard-two ] && [ "$count" -le 2 ]; then
+  echo "API Error: safeguards flagged this message. Claude Code can't respond to this message with $model." >&2
+  exit 1
+fi
 if [ "${FAIL_MODE:-}" = safeguard ] && [ "$count" -eq 1 ]; then
   # Verbatim shape of the real error, which names the remedy itself.
   echo "API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate coding, cybersecurity, and biology tasks. Claude Code can't respond to this message with Fable 5." >&2
@@ -640,6 +648,32 @@ grep -Fxq 'opus' "$capture/claude.2.argv" ||
 safeguard_artifact="$(find "$repo/.oms/artifacts/call" -name '*safeguard-route*.md' | head -n 1)"
 grep -Fq 'model-fallback: reason=model-safeguard selected=opus' "$safeguard_artifact" ||
   fail "the artifact must record which model answered and why"
+
+# The same broad filter can flag the second model as readily as the first, so
+# the tier is walked rather than tried once.
+reset_capture
+export FAIL_MODE=safeguard-two
+"$CALL" --repo "$repo" --to claude --model-class deep --prompt 'safeguard twice' >/dev/null ||
+  fail "a second flagged model should fall through to the next one"
+unset FAIL_MODE
+grep -Fxq 'opus' "$capture/claude.2.argv" || fail "second attempt should be opus"
+grep -Fxq 'sonnet' "$capture/claude.3.argv" || fail "third attempt should be sonnet"
+[ "$(cat "$capture/claude.count")" = 3 ] ||
+  fail "the chain is bounded: $(cat "$capture/claude.count") attempts"
+
+# When every model in the tier flags it, that is the end of it — the run fails
+# and says why, instead of cycling.
+reset_capture
+export FAIL_MODE=safeguard-all
+rc=0
+"$CALL" --repo "$repo" --to claude --model-class deep --prompt 'safeguard everywhere' >/dev/null 2>&1 || rc=$?
+unset FAIL_MODE
+[ "$rc" != 0 ] || fail "an exhausted chain must not report success"
+[ "$(cat "$capture/claude.count")" = 3 ] ||
+  fail "the chain must stop at the cap: $(cat "$capture/claude.count") attempts"
+exhausted_artifact="$(find "$repo/.oms/artifacts/call" -name '*safeguard-everywhere*.md' | head -n 1)"
+grep -Fq 'every model in the tier flagged this message' "$exhausted_artifact" ||
+  fail "the artifact should say the chain was exhausted"
 
 # A declined request is the provider deciding about the request. It is reported
 # and stops there: re-sending it to another model until one answers would be a

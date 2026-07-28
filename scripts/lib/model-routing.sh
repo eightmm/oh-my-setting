@@ -128,9 +128,9 @@ oms_model_preferences() {
     # sonnet resolve, and it names opus/sonnet/fable as the public aliases.
     claude:fast) printf '%s\n' 'claude-haiku-4-5-20251001' 'haiku' ;;
     claude:balanced) printf '%s\n' 'claude-sonnet-5' 'sonnet' ;;
-    # opus last: a different model of the same class, for when fable's own
-    # safeguard fires on work fable is otherwise the right model for.
-    claude:deep) printf '%s\n' 'claude-fable-5' 'fable' 'opus' ;;
+    # opus then sonnet behind the alias: distinct models to fall through when a
+    # model's own safeguard fires on work it is otherwise the right model for.
+    claude:deep) printf '%s\n' 'claude-fable-5' 'fable' 'opus' 'sonnet' ;;
     *) oms_model_default "$provider" "$class" ;;
   esac
 }
@@ -373,14 +373,14 @@ oms_model_prepare() {
   OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
 
   OMS_MODEL_ALTERNATE=""
-  OMS_MODEL_DISTINCT_ALTERNATE=""
+  OMS_MODEL_DISTINCT_CHAIN=""
   if [ -z "$explicit" ]; then
     OMS_MODEL_ALTERNATE="$(oms_model_same_tier_alternative "$provider" "$resolved" \
       "$OMS_MODEL_PRIMARY" || true)"
-    OMS_MODEL_DISTINCT_ALTERNATE="$(oms_model_next_distinct_model "$provider" "$resolved" \
+    OMS_MODEL_DISTINCT_CHAIN="$(oms_model_distinct_chain "$provider" "$resolved" \
       "$OMS_MODEL_PRIMARY" || true)"
   fi
-  export OMS_MODEL_ALTERNATE OMS_MODEL_DISTINCT_ALTERNATE
+  export OMS_MODEL_ALTERNATE OMS_MODEL_DISTINCT_CHAIN
   OMS_MODEL_SELECTED="$OMS_MODEL_PRIMARY"
   OMS_MODEL_FALLBACK_USED=0
   OMS_MODEL_FALLBACK_REASON=""
@@ -411,25 +411,31 @@ EOF
 # A provider reporting that the model itself is unknown or unavailable, as
 # distinct from being busy. Claude Code answers this locally in a couple of
 # seconds, so the retry costs almost nothing.
-# The next candidate that is a different model, not the same one under another
-# name: `fable` and `claude-fable-5` are one model, so an alias is no answer to
-# a safeguard that fired on that model.
-oms_model_next_distinct_model() {
+# The tier's other models, in order, skipping anything that is the same model
+# under another name: `fable` and `claude-fable-5` are one model, so an alias is
+# no answer to a safeguard that fired on that model. Emitted as a chain rather
+# than a single next step, because the second model can be flagged by the same
+# broad filter as the first.
+oms_model_distinct_chain() {
   local provider="$1" class="$2" current="$3"
-  local candidate current_key candidate_key
+  local candidate candidate_key seen_key
+  local -a seen=()
 
-  current_key="$(oms_model_catalog_key "$current")"
+  seen+=("$(oms_model_catalog_key "$current")")
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     candidate_key="$(oms_model_catalog_key "$candidate")"
-    case "$current_key" in *"$candidate_key"*) continue ;; esac
-    case "$candidate_key" in *"$current_key"*) continue ;; esac
+    local duplicate=0
+    for seen_key in "${seen[@]}"; do
+      case "$seen_key" in *"$candidate_key"*) duplicate=1; break ;; esac
+      case "$candidate_key" in *"$seen_key"*) duplicate=1; break ;; esac
+    done
+    [ "$duplicate" -eq 0 ] || continue
+    seen+=("$candidate_key")
     printf '%s\n' "$candidate"
-    return 0
   done <<EOF
 $(oms_model_preferences "$provider" "$class")
 EOF
-  return 1
 }
 
 oms_model_is_unknown_model_output() {
