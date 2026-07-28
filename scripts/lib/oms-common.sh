@@ -128,40 +128,11 @@ PY
 # worker exits, anything the worker reads (inherited tokens, ssh agents), and
 # anything it does outside the repository (HOME, /tmp, a surviving background
 # process). Those need process isolation, which a bash harness does not have.
-oms_worker_surface_fingerprint() {
-  local repo="$1"
-  local git_dir
+#
+# Each surface is captured on its own (`oms_worker_surface_snapshot`) rather
+# than folded into one aggregate digest, so a violation can name what moved
+# instead of reporting that some hash differs.
 
-  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'non-git\n'; return 0; }
-  git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
-  case "$git_dir" in
-    "") git_dir="$(git -C "$repo" rev-parse --git-dir)" ;;
-    /*) ;;
-    *) git_dir="$repo/$git_dir" ;;
-  esac
-  {
-    printf 'config\n'
-    git -C "$repo" config --local --list 2>/dev/null | LC_ALL=C sort
-    printf 'remotes\n'
-    git -C "$repo" remote -v 2>/dev/null | LC_ALL=C sort
-    printf 'refs\n'
-    git -C "$repo" show-ref 2>/dev/null | LC_ALL=C sort
-    git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
-    printf 'tracked\n'
-    git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | LC_ALL=C sort
-    printf 'hooks\n'
-    if [ -d "$git_dir/hooks" ]; then
-      find "$git_dir/hooks" -maxdepth 1 -type f ! -name '*.sample' -print 2>/dev/null |
-        LC_ALL=C sort |
-        while IFS= read -r hook; do
-          printf '%s %s\n' "$(basename "$hook")" "$(oms_sha256_file "$hook" 2>/dev/null || printf 'unreadable')"
-        done
-    fi
-  } | oms_sha256_stream
-}
-
-# Which surface moved, for a message that names the problem instead of just
-# reporting a hash mismatch.
 # Compare recorded shared state against the current tree. Unlike the other
 # surfaces this is not an equality check: appending is allowed, so only a
 # changed prefix, a shrunk file, or a disappearance counts.

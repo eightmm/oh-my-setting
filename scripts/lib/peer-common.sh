@@ -141,16 +141,6 @@ $(jobs -pr)
 EOF
 }
 
-ma_wait_stdin_file() {
-  local input_file="$1"
-  local cmd_pid
-  shift
-
-  "$@" < "$input_file" &
-  cmd_pid="$!"
-  wait "$cmd_pid"
-}
-
 # Run "$@" under a wall clock. SIGTERM alone is not a bound — a CLI that traps
 # or ignores it survives the timeout — so pass --kill-after (SIGKILL
 # escalation) when the binary supports it (GNU coreutils does; busybox may

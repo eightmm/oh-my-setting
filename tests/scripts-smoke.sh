@@ -20,7 +20,17 @@ import sys
 
 root = os.path.realpath(sys.argv[1])
 h = hashlib.sha256()
+# `hooks/` is the one subtree the *live* agent session writes on its own
+# schedule: the prompt/turn hooks append to hooks/events.jsonl and stamp
+# hooks/sessions/*.json whenever the agent running this suite takes a step.
+# Including it makes the leak check fire on ambient session activity — a
+# concurrent tool call three seconds into a shard is enough — which is a false
+# alarm in exactly the environment the check exists to protect. Tests write
+# through temporary repos and never through this path, so excluding it costs no
+# coverage.
 for base, dirs, files in os.walk(root, followlinks=False):
+    if base == root:
+        dirs[:] = [name for name in dirs if name != "hooks"]
     symlink_dirs = [name for name in dirs if os.path.islink(os.path.join(base, name))]
     dirs[:] = sorted(name for name in dirs if name not in symlink_dirs)
     for name in sorted(files + symlink_dirs):
@@ -11295,6 +11305,38 @@ test_memory_recall_spans_notes_and_recorded_failures() {
     fail "recall should reach the failure ledger: $out"
   printf '%s' "$out" | grep -Fq 'the gate reads state.txt directly' ||
     fail "recall should still reach the notes: $out"
+}
+
+test_memory_recall_marks_a_resolved_failure() {
+  local project="$TMP/memory-failures-resolved"
+  local gate='bash -c "grep -q fixed state.txt || { echo ERROR: state.txt not fixed; exit 1; }; echo ok"'
+  local out
+
+  make_committed_repo "$project"
+  printf 'broken\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal "fix state" --verify "$gate" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
+  # The gate now passes, so the ledger row is resolved. A resolution is its own
+  # append-only row carrying nothing but the fingerprint it clears: recalling
+  # the failure without it presents a solved problem as an open one, which is
+  # worse than not recalling it at all.
+  printf 'fixed\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 ||
+    fail "the gate should pass once state.txt is fixed"
+
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt")"
+  printf '%s' "$out" | grep -Fq 'resolved' ||
+    fail "recall must mark a resolved failure as resolved: $out"
+  "$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt" --json |
+    grep -Fq '"kind": "failure-resolved"' ||
+    fail "a resolved failure should carry failure-resolved provenance"
+
+  # A later failure on the same fingerprint re-opens it: the last event wins.
+  printf 'broken\n' > "$project/state.txt"
+  "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt" --json)"
+  printf '%s' "$out" | grep -Fq '"kind": "failure"' ||
+    fail "a failure recorded after a resolution must recall as open: $out"
 }
 
 test_memory_index_upgrades_a_schema_two_database() {

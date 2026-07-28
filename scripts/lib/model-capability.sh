@@ -391,14 +391,6 @@ oms_capability_model_efforts() {
 }
 
 # Does this provider accept EFFORT right now?
-oms_capability_supports_effort() {
-  local provider="$1" effort="$2"
-  oms_capability_peek "$provider" || return 2
-  case "$OMS_CAP_EFFORT_MECHANISM" in none|absent) return 1 ;; esac
-  case " $OMS_CAP_EFFORT_VALUES " in *" $effort "*) return 0 ;; esac
-  return 1
-}
-
 # Highest supported effort at or below WANT, so a tier maps onto the scale the
 # provider actually has instead of failing or overshooting it.
 oms_capability_clamp_effort() {

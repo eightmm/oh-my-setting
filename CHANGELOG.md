@@ -6,7 +6,58 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Fixed
+- The smoke suite's source-leak check no longer fires on the agent session that
+  is running it. It fingerprints `.oms/` at shard start to catch a test writing
+  into the checkout, but `hooks/` is the one subtree the live session writes on
+  its own schedule: `UserPromptSubmit` appends a `route` event and `Stop` appends
+  a `turn_guard` event to `hooks/events.jsonl`. So an agent that runs the gate in
+  the background and then answers the user fails its own gate with "smoke suite
+  mutated the source checkout .oms state" — a guaranteed false alarm in ordinary
+  operation, and the reason this was chased twice. The event was timestamped
+  three seconds inside a shard while the checkout's state was provably unchanged
+  at the end, which is what a false alarm looks like: the check cannot tell a
+  leaking test from the agent it is protecting. `hooks/` is now excluded, verified both ways against a copy of
+  real state — an appended hook event is ignored, a file dropped anywhere else
+  is still caught.
+- `agent-memory recall` no longer presents a resolved failure as an open one. A
+  resolution is its own append-only row carrying nothing but the fingerprint it
+  clears, and the index parser was written against guessed field names — it
+  looked for an event called `resolve` and a key called `state`, while
+  `fail-ledger.sh` writes `resolved` and `state_fingerprint`. The resolution row
+  therefore had no body, was dropped as empty, and every fixed failure stayed in
+  the index looking live; recalling a solved problem as an open one is worse than
+  not recalling it. Resolution is now folded in over two passes, a later failure
+  on the same fingerprint re-opens it (the last event wins), the ledger's own
+  kind distinguishes a failing verification contract from an arbitrary command,
+  and a regression test covers all three states. Measured live against this
+  repository's own ledger, which is where the defect surfaced.
+
+### Removed
+- Three functions no dead-code sweep had caught, because nothing referenced them
+  from anywhere including the tests: `oms_worker_surface_fingerprint` (one
+  aggregate digest over every worker surface, superseded by the per-surface
+  capture that lets a violation name what moved — the comment explaining that
+  reason was left orphaned below it), `oms_capability_supports_effort`
+  (superseded by `oms_capability_clamp_effort`, which answers the same question
+  and maps onto the scale), and `ma_wait_stdin_file`.
+
 ### Changed
+- `docs/COMPONENTS.md` is grouped by area instead of being one 56-row table. The
+  Area column claimed a grouping the rows did not have — `Agent state` appeared
+  in two separate blocks, as did `Peer agents` and `Maintenance` — so a reader
+  who found one block had reason to believe they had seen the area. The widest
+  cell was 3,695 characters, which no table renders readably, and prose that
+  long had been damaged by successive insertions: the delegate entry's own main
+  clause survived only as "`OMS_WORKER_GUARD_OFF=1` opts out, verifies it there"
+  after the guard paragraph was spliced through the middle of it. Entries are now
+  wrapped paragraphs under six area headings, the four that carried two subjects
+  each were split so both halves are findable by name (delegation / repair rounds
+  / worker-authority guard / depth cap, and capability snapshot / call-time model
+  fallback), and the agy permission-namespace explanation moved out of `consult`
+  into the entry about permissions, which had been restating its conclusion
+  without the reasoning. Every original cell is preserved verbatim except those
+  four; all 301 backticked identifiers survive.
 - `ml-training` routes by symptom instead of by implementation subject, and the
   two peer skills that write now name the read-only alternative. The training
   index was headed optimizer / distributed / loss-masking / checkpoint /

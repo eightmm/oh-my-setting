@@ -227,8 +227,17 @@ def parse_pins(text: str) -> list[Entry]:
 def parse_failures(text: str) -> list[Entry]:
     """Index the failure ledger. Exact-fingerprint `check --cmd` answers "this
     same command failed"; indexing the rows makes the softer question — have we
-    had trouble with this before, and what did it say — answerable too."""
-    entries: list[Entry] = []
+    had trouble with this before, and what did it say — answerable too.
+
+    Two passes, because a resolution is a separate row that carries only the
+    fingerprint it clears. Recalling a fixed failure as though it still stood
+    is worse than not recalling it: the reader treats a solved problem as an
+    open one. The ledger is append-only and chronological, so the last event
+    for a fingerprint is its current state and a later failure re-opens it.
+    Field names here follow fail-ledger.sh, which writes exactly two events
+    (`fail`, `resolved`) and stores the git state as `state_fingerprint`."""
+    rows: list[dict] = []
+    resolved: dict[str, bool] = {}
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -239,7 +248,17 @@ def parse_failures(text: str) -> list[Entry]:
             continue
         if not isinstance(row, dict):
             continue
-        event = str(row.get("event") or ("resolved" if row.get("resolved") else "failure"))
+        fingerprint = str(row.get("fingerprint") or "")
+        if str(row.get("event") or "") == "resolved":
+            if fingerprint:
+                resolved[fingerprint] = True
+            continue
+        if fingerprint:
+            resolved[fingerprint] = False
+        rows.append(row)
+
+    entries: list[Entry] = []
+    for row in rows:
         command = str(row.get("cmd") or "")
         summary = str(row.get("summary") or "")
         fingerprint = str(row.get("fingerprint") or "")
@@ -250,10 +269,19 @@ def parse_failures(text: str) -> list[Entry]:
             body = "%s (exit %s)" % (body, exit_code) if body else "exit %s" % exit_code
         if not body:
             continue
+        # The ledger kind separates the project's own verification gate from an
+        # arbitrary command, which is the difference between "the contract
+        # broke" and "some command failed once".
+        kind = str(row.get("kind") or "")
+        if kind and kind != "cmd":
+            body = "%s failure: %s" % (kind, body)
+        is_resolved = resolved.get(fingerprint, False)
+        if is_resolved:
+            body = "resolved — %s" % body
         metadata = {
-            "kind": "failure" if event != "resolve" else "failure-resolved",
+            "kind": "failure-resolved" if is_resolved else "failure",
             "task_id": str(row.get("task") or row.get("task_id") or ""),
-            "git_state": str(row.get("state") or row.get("git_state") or ""),
+            "git_state": str(row.get("state_fingerprint") or ""),
         }
         if EVENT_ID_RE.fullmatch("fail:%s:%d" % (fingerprint, len(entries))):
             metadata["event_id"] = "fail:%s:%d" % (fingerprint, len(entries))
@@ -544,8 +572,7 @@ def emit(entries: Iterable[tuple[object, ...]], as_json: bool = False) -> int:
         if as_json:
             if values["git_dirty"] is not None:
                 values["git_dirty"] = bool(values["git_dirty"])
-            payload = {"schema": SCHEMA_VERSION}
-            payload.update(values)
+            payload = {"schema": SCHEMA_VERSION, **values}
             sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
         else:
             sys.stdout.write(rendered.rstrip() + "\n\n")
