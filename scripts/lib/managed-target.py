@@ -35,7 +35,11 @@ def path_hash(path: Path) -> tuple[str, str]:
                 digest.update(chunk)
         return "file", digest.hexdigest()
     if not path.is_dir():
-        raise FileNotFoundError(path)
+        # Bare FileNotFoundError(path) prints as just the path, which is what
+        # the first Windows CI failure reported: one line naming a directory
+        # that was plainly there, with no hint that the name carried a trailing
+        # carriage return. Say what was being attempted.
+        raise FileNotFoundError("not a file or directory: %s" % path)
 
     digest.update(b"directory\0")
     for base, dirs, files in os.walk(path, followlinks=False):
@@ -229,7 +233,10 @@ def main(argv: list[str]) -> int:
             remove_marker(Path(argv[2]))
             return 0
     except (FileNotFoundError, OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        # Name the operation. Without it a failure is one unlabelled line and
+        # the reader cannot tell an inspect from a copy, or a bad source from a
+        # bad target.
+        print(f"error: {command}: {exc}", file=sys.stderr)
         return 1
     usage()
     return 2

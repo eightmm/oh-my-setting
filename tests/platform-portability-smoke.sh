@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-platform.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+# Normalize away the "//" a trailing-slash TMPDIR leaves in the template.
+TMP="$(cd "$TMP" && pwd -P)"
 
 # setup-python exposes `python.exe` but not every Windows image also exposes a
 # `python3` command to Git Bash. The product installer creates the persistent
@@ -117,5 +119,68 @@ printf '# foreign edit\n' >> "$shim"
 if oms_install_python_shim_owned "$shim"; then
   fail "modified Python shim was still treated as removable"
 fi
+
+# Windows Python writes text streams with CRLF, so every value bash reads back
+# from a helper arrives with a trailing carriage return. Command substitution
+# strips the newline and leaves the CR, which turns a path into one that does
+# not exist and a state word into one no case branch matches. It shipped: the
+# first Windows CI run failed copying custom-skills/oh-my-setting-ops because
+# link.sh had built that name with a CR on the end from a manifest read.
+#
+# Simulated here with a python3 that emits CRLF, so the regression is reachable
+# on every platform instead of only on a Windows runner.
+crlf_bin="$TMP/crlf-bin"
+real_python="$(command -v python3)"
+mkdir -p "$crlf_bin"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -o pipefail'
+  printf '%s\n' "\"$real_python\" \"\$@\" | sed 's/\$/\\r/'"
+} > "$crlf_bin/python3"
+chmod +x "$crlf_bin/python3"
+
+[ "$(PATH="$crlf_bin:$PATH" python3 -c 'print("probe")' | od -c |
+  grep -c '\\r')" -gt 0 ] ||
+  fail "the CRLF python stub did not actually emit a carriage return"
+
+crlf_source="$TMP/crlf-source.txt"
+crlf_target="$TMP/crlf-target.txt"
+printf 'v1\n' > "$crlf_source"
+OMS_PLATFORM_OVERRIDE=windows oms_install_materialize "$crlf_source" "$crlf_target"
+
+state="$(PATH="$crlf_bin:$PATH" oms_install_target_state "$crlf_source" "$crlf_target")"
+[ "$state" = copy-current ] ||
+  fail "a CRLF helper broke the managed state word: [$state]"
+PATH="$crlf_bin:$PATH" oms_install_target_matches "$crlf_source" "$crlf_target" ||
+  fail "a CRLF helper broke managed target recognition"
+
+# A path read back through a helper has to stay usable as a path.
+recovered="$(PATH="$crlf_bin:$PATH" oms_install_target_owned_source_under \
+  "$TMP" "$crlf_target")" || fail "owned source lookup failed under CRLF"
+[ -f "$recovered" ] ||
+  fail "a CRLF helper returned a path that does not exist: [$recovered]"
+
+[ "$(oms_strip_cr "$(printf 'value\r')")" = value ] ||
+  fail "oms_strip_cr did not remove a carriage return"
+
+# An update transaction stages install-contract.sh without platform.sh, which is
+# why the contract carries a fallback for the platform helpers at all. Nothing
+# checked that the fallback is complete, and it was not: adding a helper on the
+# platform side made a staged contract call an undefined function and a signalled
+# update exit 1 instead of 143. Source it alone and use it.
+alone="$TMP/contract-alone"
+mkdir -p "$alone"
+cp "$ROOT/scripts/lib/install-contract.sh" "$alone/install-contract.sh"
+cp "$ROOT/scripts/lib/managed-target.py" "$alone/managed-target.py"
+bash -c "
+set -euo pipefail
+. '$alone/install-contract.sh'
+[ \"\$(oms_strip_cr \"\$(printf 'v\r')\")\" = v ] || exit 1
+[ \"\$(oms_install_link_mode)\" = symlink ] || exit 1
+oms_install_python_shim_owned '$alone/install-contract.sh' && exit 1
+[ \"\$(oms_install_target_state '$alone/install-contract.sh' '$alone/absent')\" = missing ] || exit 1
+oms_install_receipt_field commit '$alone/no-receipt.json' && exit 1
+exit 0
+" || fail "install-contract.sh must work when staged without platform.sh"
 
 echo "platform-portability: ok"

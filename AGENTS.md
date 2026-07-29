@@ -5,7 +5,10 @@
 - This repository maintains a Bash harness shared by Codex, Claude Code, and
   Antigravity. Preserve behavior across all three providers.
 - Keep scripts compatible with Bash 3.2, GNU/BSD userlands, and Windows Git
-  Bash for the documented core lifecycle.
+  Bash for the documented core lifecycle. On that path, strip `\r` from any
+  value read back from `python3` and resolve paths with `pwd -P` before
+  comparing them: Windows Python emits CRLF, and one directory has more than
+  one spelling.
 - Write a behavior regression before changing scripts or install contracts.
 - Keep install, update, repair, and uninstall ownership transitions reversible.
 - Run `bash scripts/check.sh` before commit or push. CI additionally verifies

@@ -633,9 +633,17 @@ if [ "$DRY_RUN" != "1" ]; then
     OMS_DL_FALLBACK_REASONING_EFFORT="$OMS_REASONING_FALLBACK" \
     OMS_DL_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_DL_WT="$worktree" \
     OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
-    python3 - > "$liveness_file" <<'PY'
-import json, os
-print(json.dumps({
+    OMS_DL_FILE="$liveness_file" python3 - <<'PY'
+import json, os, tempfile
+
+# Written atomically, not through a shell redirect: the redirect creates and
+# truncates the file before python runs, and this marker exists precisely to be
+# read by another process after this one dies abruptly. A reader that arrives in
+# that window gets a JSON error on a file that is supposed to be the record of
+# what was running. Surfaced as a flaky gate under parallel load, which is the
+# same race with a wider window.
+target = os.environ["OMS_DL_FILE"]
+row = json.dumps({
     "schema": 2, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
     "role": os.environ.get("OMS_DL_ROLE", ""), "executor_id": os.environ.get("OMS_DL_EXECUTOR", ""),
     "soul_sha256": os.environ.get("OMS_DL_SOUL_SHA", ""), "pid": int(os.environ["OMS_DL_PID"]),
@@ -647,7 +655,21 @@ print(json.dumps({
     "fallback_model": os.environ.get("OMS_DL_FALLBACK_MODEL", ""),
     "reasoning_effort": os.environ.get("OMS_DL_REASONING_EFFORT", ""),
     "fallback_reasoning_effort": os.environ.get("OMS_DL_FALLBACK_REASONING_EFFORT", ""),
-}, ensure_ascii=False))
+}, ensure_ascii=False)
+parent = os.path.dirname(target) or "."
+fd, tmp = tempfile.mkstemp(prefix=".%s." % os.path.basename(target), dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(row + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, target)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 PY
 fi
 

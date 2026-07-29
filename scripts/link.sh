@@ -90,6 +90,10 @@ for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
 PY
 )"
   while IFS= read -r source; do
+    # Windows Python prints CRLF, so this line would name a directory with a
+    # trailing carriage return and the copy would fail on a source that is
+    # right there. Confirmed on CI against custom-skills/oh-my-setting-ops.
+    source="${source%%$'\r'}"
     [ -n "$source" ] || continue
     skill="$ROOT/$source"
     name="$(basename "$skill")"

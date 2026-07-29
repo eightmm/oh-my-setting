@@ -7,6 +7,39 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- The Windows install could not copy a single skill. Windows Python writes text
+  streams with CRLF, so every value bash reads back from a helper arrives with a
+  trailing carriage return — command substitution strips the newline and leaves
+  the CR. `link.sh` built `custom-skills/oh-my-setting-ops\r` from a manifest
+  read and the copy failed on a source that was right there, reporting one
+  unlabelled line naming a directory that plainly existed. Reproduced locally
+  byte for byte, and the same defect was latent in every state word and path the
+  install path reads back: a managed state of `current\r` matches no case branch,
+  and `auto-update` runs from a timer where a CR would read as a foreign checkout
+  and silently skip. Stripped at each point of consumption in the documented
+  Windows lifecycle (`link`, `doctor`, `status`, `auto-update`, `oms`, and the
+  install contract, including the managed-copy helper). The regression simulates
+  a CRLF `python3`, so it fails on any platform rather than only on a Windows
+  runner; verified to fail with the fix removed.
+- The install lifecycle fixture compared paths that were the same directory
+  spelled two ways. macOS `TMPDIR` ends in a slash, so the mktemp template left
+  `//` in every derived path while the installer recorded `pwd -P` output with
+  none; Git Bash reaches one directory both through its POSIX mount and through
+  the drive-letter form. Both spellings failed ownership comparison. `HOME` and
+  the checkout are now resolved once, the way the installer resolves them. GNU
+  mktemp collapses the `//` and BSD mktemp does not, so this cannot be reproduced
+  on Linux — the fixture asserts its own paths are normalized rather than letting
+  the cause surface three assertions later as "managed target mismatch".
+- `managed-target.py` failures name the operation and what was wrong with the
+  path. `FileNotFoundError(path)` prints as nothing but the path, which is
+  exactly how the first Windows failure arrived: unreadable.
+- The delegation liveness marker is written atomically. It was written through a
+  shell redirect, so the file was created and truncated before the writer ran —
+  and this marker exists precisely so another process can read what was running
+  after a delegate dies abruptly. Any reader arriving in that window got a JSON
+  error on the one record of the crash. Found as a flaky gate under parallel
+  shards, which is the same race with a wider window; a sweep for the pattern
+  found no other published state file written this way.
 - Bash 3.2 could not parse `scripts/lib/peer-common.sh`, so every peer tool was
   dead on macOS while Linux stayed green — and CI said so, in the one job that
   has since been reworked. The cause is narrow and now pinned: bash 3.2 cannot

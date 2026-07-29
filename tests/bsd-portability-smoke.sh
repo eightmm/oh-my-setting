@@ -12,6 +12,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-bsd.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+# Normalize away the "//" a trailing-slash TMPDIR leaves in the template.
+TMP="$(cd "$TMP" && pwd -P)"
 
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null

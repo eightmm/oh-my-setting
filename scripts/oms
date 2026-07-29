@@ -49,6 +49,9 @@ except (OSError, ValueError):
 PY
 )"
   fi
+  # Windows Python writes CRLF and this value is about to be used as a path, so
+  # the carriage return would turn a correct checkout into a missing one.
+  source_root="${source_root//$'\r'/}"
   if [ -n "$source_root" ] && command -v cygpath >/dev/null 2>&1; then
     source_root="$(cygpath -u "$source_root")"
   fi

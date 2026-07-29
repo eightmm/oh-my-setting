@@ -38,8 +38,12 @@ now_utc() {
 auto_update_receipt_field() {
   local receipt="$1"
   local key="$2"
+  local value
   [ -f "$receipt" ] || return 1
-  python3 - "$receipt" "$key" <<'PY'
+  # Windows Python writes CRLF, and this value is compared to a literal and used
+  # as a path. This runs from a timer with no operator watching, so a stray
+  # carriage return here reads as a foreign checkout and silently skips.
+  value="$(python3 - "$receipt" "$key" <<'PY'
 import json, sys
 try:
     value = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -54,6 +58,8 @@ try:
 except Exception:
     raise SystemExit(1)
 PY
+)" || return
+  printf '%s\n' "${value//$'\r'/}"
 }
 
 log_msg() {

@@ -8,6 +8,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-install-lifecycle.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+# macOS TMPDIR ends in a slash, so the mktemp template yields a path with "//"
+# in it. Every expectation below is compared against a source string the
+# installer recorded from `pwd -P`, which has no double slash — the run then
+# fails on paths that are the same directory spelled two ways. Normalize once.
+TMP="$(cd "$TMP" && pwd -P)"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -50,6 +55,15 @@ git -C "$upstream" add -A
 git -C "$upstream" commit -qm "install fixture"
 
 export HOME="$TMP/home"
+mkdir -p "$HOME"
+# Every expectation below is a string built from $HOME and compared against a
+# path the installer resolved with `pwd -P`. Git Bash reaches the same directory
+# both through its POSIX mount and through the drive-letter form, and the first
+# Windows run failed on exactly that: the copy was recorded under one spelling
+# and looked up under the other. Resolve HOME the way the installer will, once,
+# before anything derives a path from it.
+HOME="$(cd "$HOME" && pwd -P)"
+export HOME
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_CACHE_HOME="$HOME/.cache"
 export TMPDIR="$TMP/runtime"
@@ -72,6 +86,16 @@ export PATH="$bin:$PATH"
 (cd "$HOME" && bash "$upstream/install.sh" --no-tools)
 dest="$HOME/.oh-my-setting"
 [ -d "$dest/.git" ] || fail "install did not clone the fixture"
+# Same reason as HOME: the checkout is the source side of every ownership
+# comparison, so it has to be spelled the way link.sh spelled it.
+dest="$(cd "$dest" && pwd -P)"
+# GNU mktemp collapses a "//" from a trailing-slash TMPDIR and BSD mktemp does
+# not, so this condition cannot be reproduced on Linux at all. Assert it instead
+# of letting it surface three assertions later as "managed target mismatch",
+# which says nothing about the cause.
+case "$HOME:$dest" in
+  *//*) fail "paths are not normalized (HOME=$HOME dest=$dest)" ;;
+esac
 export PATH="$HOME/.local/bin:$PATH"
 command -v python3 >/dev/null 2>&1 ||
   fail "installer did not expose a python3 command"

@@ -3,6 +3,24 @@
 
 # Canonical install ownership shared by link, doctor, status, and plugin setup.
 
+# Windows Python writes text streams with CRLF, so every value bash reads back
+# from a helper arrives with a trailing carriage return: a path becomes a path
+# that does not exist, and a state word matches no case branch. Command
+# substitution strips the newline and leaves the CR, so this has to happen at the
+# point of consumption. Confirmed on CI — `link.sh` built
+# `custom-skills/oh-my-setting-ops\r` from a manifest read and the copy failed on
+# a source that was right there.
+#
+# Defined before the platform block and outside it: this is string handling with
+# no platform dependency, and putting it behind the availability check made a
+# transaction fixture that ships this file without platform.sh call an undefined
+# function instead of running.
+oms_strip_cr() {
+  local value="$1"
+
+  printf '%s\n' "${value//$'\r'/}"
+}
+
 OMS_INSTALL_CONTRACT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 if [ -f "$OMS_INSTALL_CONTRACT_LIB_DIR/platform.sh" ]; then
   # shellcheck source=scripts/lib/platform.sh
@@ -36,13 +54,18 @@ oms_install_marker_path() {
 }
 
 oms_install_managed_target() {
+  local out
+
   if [ ! -f "$OMS_MANAGED_TARGET_HELPER" ]; then
     if [ "${1:-}" = copy ]; then
       echo "error: copy mode requires $OMS_MANAGED_TARGET_HELPER" >&2
     fi
     return 1
   fi
-  python3 "$OMS_MANAGED_TARGET_HELPER" "$@"
+  # The state word is matched against a closed set and the source is used as a
+  # path, so a Windows CR would turn both into values nothing recognizes.
+  out="$(python3 "$OMS_MANAGED_TARGET_HELPER" "$@")" || return
+  [ -z "$out" ] || oms_strip_cr "$out"
 }
 
 oms_install_target_state() {
@@ -212,6 +235,7 @@ except Exception:
     sys.exit(1)
 PY
 )" || return
+  owner="$(oms_strip_cr "$owner")"
   if oms_platform_is_windows && command -v cygpath >/dev/null 2>&1; then
     cygpath -u "$owner"
   else
@@ -224,7 +248,8 @@ oms_install_receipt_field() {
   local receipt="${2:-$(oms_install_receipt_path)}"
 
   [ -f "$receipt" ] || return 1
-  python3 - "$receipt" "$key" <<'PY'
+  local value
+  value="$(python3 - "$receipt" "$key" <<'PY'
 import json
 import sys
 
@@ -242,6 +267,8 @@ try:
 except Exception:
     sys.exit(1)
 PY
+)" || return
+  oms_strip_cr "$value"
 }
 
 oms_install_receipt_mode() {
@@ -287,7 +314,8 @@ oms_install_require_owner() {
 
 oms_install_tree_hash() {
   local tree="$1"
-  python3 - "$tree" <<'PY'
+  local value
+  value="$(python3 - "$tree" <<'PY'
 import hashlib
 import os
 import sys
@@ -313,6 +341,8 @@ for base, dirs, files in os.walk(root):
         h.update(b"\0")
 print(h.hexdigest())
 PY
+)" || return
+  oms_strip_cr "$value"
 }
 
 oms_install_plugin_hash() {
@@ -321,7 +351,8 @@ oms_install_plugin_hash() {
 
 oms_install_plugin_version() {
   local root="$1"
-  python3 - "$root/plugins/oh-my-setting/.codex-plugin/plugin.json" <<'PY'
+  local value
+  value="$(python3 - "$root/plugins/oh-my-setting/.codex-plugin/plugin.json" <<'PY'
 import json
 import sys
 
@@ -331,6 +362,8 @@ try:
 except Exception:
     print("unknown")
 PY
+)" || return
+  oms_strip_cr "$value"
 }
 
 oms_install_write_receipt() {

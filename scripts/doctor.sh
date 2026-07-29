@@ -271,6 +271,7 @@ check_custom_skills() {
   local source
 
   while IFS= read -r source; do
+    source="${source%%$'\r'}"
     [ -n "$source" ] || continue
     skill="$INSTALL_ROOT/$source"
     name="$(basename "$skill")"
@@ -427,6 +428,7 @@ with open(sys.argv[1], encoding="utf-8") as fh:
     print(json.load(fh)["name"])
 PY
 )"
+  marketplace_name="$(oms_strip_cr "$marketplace_name")"
   cache="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$marketplace_name/oh-my-setting/$plugin_version"
   expected_hash="$(oms_install_receipt_field plugin.sha256 "$RECEIPT" 2>/dev/null || oms_install_plugin_hash "$INSTALL_ROOT")"
 
@@ -509,6 +511,7 @@ PY
     return 0
   }
 
+  stats="$(oms_strip_cr "$stats")"
   read -r bad stale <<< "$stats"
   if [ "${bad:-0}" -gt 0 ]; then
     echo "warn: artifact index has $bad invalid JSON line(s)"
@@ -534,6 +537,7 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         break
 PY
 )"
+  schema1="$(oms_strip_cr "$schema1")"
   if [ "$schema1" = "1" ]; then
     if canonical_out="$("$ROOT/scripts/artifact-index.sh" --repo "$project_dir" validate 2>&1)"; then
       echo "ok: artifact index canonical validation"
@@ -570,6 +574,7 @@ for f in targets:
 print(bad)
 PY
 )" || { echo "warn: run-state audit failed"; return 0; }
+  bad="$(oms_strip_cr "$bad")"
   if [ "${bad:-0}" -gt 0 ]; then
     echo "warn: $bad run-state JSONL file(s) have malformed lines (run oms-run.sh validate)"
   else
