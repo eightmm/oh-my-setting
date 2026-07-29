@@ -177,4 +177,37 @@ oms_install_receipt_field commit '$alone/no-receipt.json' && exit 1
 exit 0
 " || fail "install-contract.sh must work when staged without platform.sh"
 
+# Ownership is decided by comparing the recorded source against the expected
+# one, so the same directory spelled two ways is not the same source. macOS
+# TMPDIR ends in a slash and BSD mktemp keeps the resulting "//" where GNU
+# mktemp collapses it, which is why the first macOS run failed and why the
+# condition cannot be reached through TMPDIR on Linux. Built explicitly here so
+# the contract is pinned and locally reproducible on every platform.
+spell_dir="$TMP/spelling"
+mkdir -p "$spell_dir"
+spell_source="$spell_dir/source.txt"
+printf 'v1\n' > "$spell_source"
+
+# The two modes do not agree on spelling, and that asymmetry is deliberate only
+# in the sense that nothing depends on it: copy mode compares realpaths through
+# managed-target.py and so accepts any spelling, while the symlink branch
+# compares the readlink string exactly and does not. It stays invisible because
+# every caller derives the source from $ROOT, which is pwd -P output. So the
+# contract worth pinning is the one both modes share — a normalized source is
+# recognized — plus the rule that produces it, since a caller that skips the
+# normalization gets a spurious backup instead of its own link.
+for mode in symlink copy; do
+  spell_target="$spell_dir/target-$mode"
+  OMS_PLATFORM_OVERRIDE=windows OH_MY_SETTING_LINK_MODE="$mode" \
+    oms_install_materialize "$spell_source" "$spell_target"
+  oms_install_target_matches "$spell_source" "$spell_target" ||
+    fail "$mode: a pwd -P normalized source must be recognized"
+done
+[ "$(cd "$spell_dir" && pwd -P)/source.txt" = "$spell_source" ] ||
+  fail "pwd -P must collapse the spelling every comparison relies on"
+# The macOS failure in one line: the unnormalized spelling is a different string,
+# and the symlink branch compares strings.
+[ "$spell_dir//source.txt" != "$spell_source" ] ||
+  fail "the double-slash spelling must actually differ for this to be a risk"
+
 echo "platform-portability: ok"

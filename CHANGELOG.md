@@ -113,6 +113,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   file for whichever subcommand was asked for.
 
 ### Added
+- CI runs the default install — tools enabled — which was the one path it never
+  executed, and the path most users take. It is also what turned CI red for three
+  commits: `install-tools` persists a PATH line into `.bashrc`, while the
+  assertion left over from before tools were installed by default said that file
+  must stay untouched. Every tool is stubbed as already present so each step
+  short-circuits, keeping it a no-network test of the documented behaviour: a
+  default install edits shell startup files and a `--no-tools` one does not.
+  Verified to fail when the PATH persistence is removed.
+- The path-spelling contract behind the macOS failure is pinned and now
+  reproducible on every platform, since it cannot be reached through `TMPDIR` on
+  Linux — GNU mktemp collapses the `//` that BSD mktemp keeps. Writing it down
+  surfaced an asymmetry worth recording: copy mode compares realpaths and accepts
+  any spelling, the symlink branch compares the `readlink` string and does not.
+  Nothing depends on it because every caller derives its source from `$ROOT`, so
+  the test pins what both modes share rather than freezing the difference as if
+  it were designed.
 - `tests/bsd-portability-smoke.sh` restores the fixtures that were deleted with
   the old macOS job: `detect-project-style`, `apply-project-template` +
   `project-doctor`, `job-digest`, `run-ledger`, and the run-tools set

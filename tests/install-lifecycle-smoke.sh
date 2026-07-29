@@ -174,4 +174,45 @@ fi
   fail "uninstall left a copy ownership sidecar"
 [ ! -d "$dest" ] || fail "uninstall --purge left the checkout"
 
+# The default install — tools enabled — was the one path CI never ran, and it is
+# the path most users take. It is also what turned CI red for three commits:
+# install-tools persists a PATH line into .bashrc, and the assertion left over
+# from before tools were installed by default said that file must be untouched.
+# Every tool is stubbed as already present, so install-tools short-circuits at
+# each step and this stays a no-network test of the documented default.
+tools_home="$TMP/home-tools"
+tools_bin="$TMP/tools-bin"
+npm_prefix="$TMP/npm-prefix"
+mkdir -p "$tools_home" "$tools_bin" "$npm_prefix"
+tools_home="$(cd "$tools_home" && pwd -P)"
+
+for cli in claude codex agy gh uv node; do
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    # ensure_node reads the major version through `node -p`; anything below 20
+    # sends the installer to nvm, which is exactly what must not happen here.
+    printf '%s\n' "if [ \"\$1\" = -p ]; then echo 22; else echo '$cli 1.0'; fi"
+  } > "$tools_bin/$cli"
+  chmod +x "$tools_bin/$cli"
+done
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' "[ \"\$1 \$2 \$3\" = 'config get prefix' ] && printf '%s\\n' '$npm_prefix'"
+  printf '%s\n' 'exit 0'
+} > "$tools_bin/npm"
+chmod +x "$tools_bin/npm"
+
+(cd "$tools_home" && HOME="$tools_home" \
+  XDG_CONFIG_HOME="$tools_home/.config" XDG_CACHE_HOME="$tools_home/.cache" \
+  PATH="$tools_bin:$PATH" bash "$upstream/install.sh") > "$TMP/tools-install.txt" 2>&1 ||
+  { cat "$TMP/tools-install.txt" >&2; fail "the default install must succeed"; }
+grep -Fq 'tools: ok' "$TMP/tools-install.txt" ||
+  fail "the default install did not run install-tools"
+grep -Fq 'doctor: ok' "$TMP/tools-install.txt" ||
+  fail "the default install did not end on a passing doctor"
+# The documented behaviour, and the assertion whose staleness hid a red CI: a
+# default install does edit shell startup files, and a --no-tools one does not.
+grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$tools_home/.bashrc" ||
+  fail "the default install must persist ~/.local/bin on PATH"
+
 echo "install-lifecycle: ok ($expected_mode)"
