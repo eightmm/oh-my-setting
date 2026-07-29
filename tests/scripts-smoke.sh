@@ -6034,7 +6034,12 @@ test_check_gate_hard_fails_without_shellcheck() {
   local out
   # Point the gate at a nonexistent shellcheck binary so it hits the
   # missing-tool path deterministically (no PATH surgery, no recursion).
-  out="$(OMS_SHELLCHECK_BIN=__oms_absent_shellcheck__ "$ROOT/scripts/check.sh" 2>&1)" && \
+  # --lint-only is passed explicitly: a gate with lint disabled has no reason to
+  # look for shellcheck, and when the split was an inherited environment variable
+  # CI's smoke job turned this test into a full recursive gate run instead of the
+  # fast failure the line above promises.
+  out="$(OMS_SHELLCHECK_BIN=__oms_absent_shellcheck__ \
+    "$ROOT/scripts/check.sh" --lint-only 2>&1)" && \
     fail "check.sh must exit nonzero when shellcheck is missing"
   printf '%s' "$out" | grep -Fq "shellcheck is not installed" ||
     fail "check.sh missing-tool message absent: $out"
@@ -6104,7 +6109,7 @@ EOF
 test_check_gate_splits_lint_from_tests() {
   local out
 
-  out="$(cd "$ROOT" && OMS_CHECK_TESTS=0 bash scripts/check.sh 2>&1)" ||
+  out="$(cd "$ROOT" && bash scripts/check.sh --lint-only 2>&1)" ||
     fail "lint-only gate should pass: $out"
   printf '%s' "$out" | grep -Fq 'ok: shellcheck' ||
     fail "lint-only gate must run shellcheck: $out"
@@ -6114,10 +6119,10 @@ test_check_gate_splits_lint_from_tests() {
     fail "lint-only gate must not run the test suites: $out"
   fi
 
-  if out="$(cd "$ROOT" && OMS_CHECK_LINT=0 OMS_CHECK_TESTS=0 bash scripts/check.sh 2>&1)"; then
+  if out="$(cd "$ROOT" && bash scripts/check.sh --no-lint --lint-only 2>&1)"; then
     fail "a gate that runs nothing must be refused: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'cannot both be 0' ||
+  printf '%s' "$out" | grep -Fq 'leave nothing to run' ||
     fail "refusal must name the cause: $out"
 }
 

@@ -33,6 +33,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `managed-target.py` failures name the operation and what was wrong with the
   path. `FileNotFoundError(path)` prints as nothing but the path, which is
   exactly how the first Windows failure arrived: unreadable.
+- The gate split is a flag, not an environment variable. `OMS_CHECK_LINT=0 bash
+  scripts/check.sh` exports into every descendant, so CI's smoke job leaked it
+  into the suite it was running: one test asked for a gate that runs nothing and
+  was refused, and the missing-shellcheck test skipped the check it exists for
+  and recursed through every suite instead of failing fast — breaking the "no
+  recursion" promise in its own comment. `--lint-only`/`--no-lint` reach only the
+  process they are passed to. The condition is reproducible locally by exporting
+  the old variable, which is how the fix was confirmed.
 - The delegation liveness marker is written atomically. It was written through a
   shell redirect, so the file was created and truncated before the writer ran —
   and this marker exists precisely so another process can read what was running
@@ -117,9 +125,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `OH_MY_SETTING_LINK_MODE=copy` passes on Linux end to end. A marker leak or a
   lost backup now fails in seconds instead of waiting for Windows.
 - Lint runs as its own CI job. `check.sh` exits at the first failing stage, so
-  one shellcheck nit would suppress every test result; `OMS_CHECK_LINT` and
-  `OMS_CHECK_TESTS` split the gate without running anything twice, and a run that
-  would execute nothing is refused.
+  one shellcheck nit would suppress every test result; `--lint-only`/`--no-lint`
+  split the gate without running anything twice, and a run that would execute
+  nothing is refused.
 - `scripts/check-python.sh` syntax-checks the Python helpers. Every `.sh` here is
   linted while the `.py` files had nothing, and one of them now decides what the
   installer may delete. Compiled in memory, so a read-only gate does not write

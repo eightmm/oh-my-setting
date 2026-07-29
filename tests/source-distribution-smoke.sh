@@ -50,10 +50,14 @@ grep -Fq 'OMS_BASH32_BIN=/bin/bash' "$workflow" ||
   fail "macOS portability job must parse with the stock Bash 3.2"
 # check.sh exits at the first failing stage, so lint sharing the smoke job
 # would suppress every test result behind one lint nit.
-grep -Fq 'OMS_CHECK_TESTS=0' "$workflow" ||
+grep -Fq -- '--lint-only' "$workflow" ||
   fail "lint must run as its own job"
-grep -Fq 'OMS_CHECK_LINT=0' "$workflow" ||
+grep -Fq -- '--no-lint' "$workflow" ||
   fail "the smoke job must not repeat the lint stages"
+# An env prefix would export into every test the suite runs; a flag cannot.
+if grep -qE 'OMS_CHECK_(LINT|TESTS)=' "$workflow"; then
+  fail "the gate split must be passed as a flag, not an inherited variable"
+fi
 if grep -Fq 'OH_MY_SETTING_UPGRADE_GH' "$ROOT/scripts/install-tools.sh"; then
   fail "test-only gh upgrade controls must not be part of the product interface"
 fi

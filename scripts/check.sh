@@ -28,15 +28,41 @@ mkdir -p "$XDG_CACHE_HOME" "$OMS_LOCK_DIR"
 
 # CI splits the gate into two jobs so a lint failure cannot mask every test
 # result: stage() exits on the first failure, so one shellcheck nit would
-# otherwise suppress the entire smoke report. Both default to on, so a local
-# run and the pre-push hook still execute the whole gate.
-RUN_LINT="${OMS_CHECK_LINT:-1}"
-RUN_TESTS="${OMS_CHECK_TESTS:-1}"
-case "$RUN_LINT$RUN_TESTS" in
-  00) echo "error: OMS_CHECK_LINT and OMS_CHECK_TESTS cannot both be 0" >&2; exit 2 ;;
-  [01][01]) ;;
-  *) echo "error: OMS_CHECK_LINT and OMS_CHECK_TESTS must be 0 or 1" >&2; exit 2 ;;
-esac
+# otherwise suppress the entire smoke report. Both halves run by default, so a
+# local run and the pre-push hook still execute the whole gate.
+#
+# Flags, not environment variables. An `OMS_CHECK_LINT=0 bash scripts/check.sh`
+# prefix exports into every descendant, so the smoke suite inherited it and two
+# tests that run this gate themselves changed behaviour: one asked for a gate
+# that runs nothing and was refused, and the other skipped the missing-shellcheck
+# check and recursed through every suite instead of failing fast. A flag reaches
+# only the process it is passed to.
+RUN_LINT=1
+RUN_TESTS=1
+usage() {
+  cat <<'EOF'
+usage: check.sh [--no-lint | --lint-only]
+
+Runs the repository gate: lint (shellcheck, Bash 3.2, Python syntax, skill
+manifest) then the test suites. With no arguments it runs both.
+
+  --no-lint     Skip the lint stages (CI runs them as their own job).
+  --lint-only   Run only the lint stages.
+EOF
+}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-lint) RUN_LINT=0 ;;
+    --lint-only) RUN_TESTS=0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+if [ "$RUN_LINT" = 0 ] && [ "$RUN_TESTS" = 0 ]; then
+  echo "error: --no-lint and --lint-only leave nothing to run" >&2
+  exit 2
+fi
 
 # Binary name is overridable so tests can exercise the missing-tool path
 # deterministically without PATH surgery.

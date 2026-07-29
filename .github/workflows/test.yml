@@ -25,7 +25,7 @@ jobs:
       - name: install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: lint
-        run: OMS_CHECK_TESTS=0 bash scripts/check.sh
+        run: bash scripts/check.sh --lint-only
 
   # Keep one stable Ubuntu check. check.sh runs the focused suites once and
   # parallelizes the large smoke suite inside this runner without four repeated
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: repository gate
-        run: OMS_CHECK_LINT=0 bash scripts/check.sh
+        run: bash scripts/check.sh --no-lint
 
   # Exercise the same install -> update -> uninstall contract on every
   # supported host, and in both ownership modes. Windows selects copy mode on

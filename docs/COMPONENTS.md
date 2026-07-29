@@ -472,9 +472,10 @@ per stage and one per shard; a failing stage prints its full output and
 The Bash 3.2 scan is static plus one rule a linter cannot express: a
 here-document inside `$( )` whose body holds an odd number of apostrophes makes
 the whole file unparseable under 3.2 even behind a quoted delimiter, and that
-has already shipped. `OMS_CHECK_LINT`/`OMS_CHECK_TESTS` split the gate so CI can
-run lint as its own job — the gate exits at the first failing stage, so sharing
-one job lets a lint nit hide every test result. CI additionally runs the real
+has already shipped. `--lint-only`/`--no-lint` split the gate so CI can run lint
+as its own job — the gate exits at the first failing stage, so sharing one job
+lets a lint nit hide every test result. Flags rather than environment variables,
+because an env prefix exports into every test the suite then runs. CI additionally runs the real
 install lifecycle on Linux (both ownership modes), macOS, and Windows Git Bash;
 the macOS job parses every script with its stock Bash 3.2 and runs the BSD
 userland fixtures, the one place `sed`/`awk`/`date` differences surface.
