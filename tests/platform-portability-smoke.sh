@@ -120,15 +120,9 @@ if oms_install_python_shim_owned "$shim"; then
   fail "modified Python shim was still treated as removable"
 fi
 
-# Windows Python writes text streams with CRLF, so every value bash reads back
-# from a helper arrives with a trailing carriage return. Command substitution
-# strips the newline and leaves the CR, which turns a path into one that does
-# not exist and a state word into one no case branch matches. It shipped: the
-# first Windows CI run failed copying custom-skills/oh-my-setting-ops because
-# link.sh had built that name with a CR on the end from a manifest read.
-#
-# Simulated here with a python3 that emits CRLF, so the regression is reachable
-# on every platform instead of only on a Windows runner.
+# Windows CRLF in a value bash reads back — see install-contract.sh for why it
+# breaks paths and state words. Simulated with a python3 that emits CRLF, so the
+# regression is reachable on every platform, not only on a Windows runner.
 crlf_bin="$TMP/crlf-bin"
 real_python="$(command -v python3)"
 mkdir -p "$crlf_bin"

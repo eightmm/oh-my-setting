@@ -265,27 +265,10 @@ install_gh() {
     echo "error: gh install completed but gh is not on PATH" >&2
     exit 1
   fi
+  # Not reporting authentication here: install.sh runs doctor at the end, and
+  # doctor already reads the same local credential and warns — alongside the
+  # three provider CLIs, in one place instead of two saying the same thing.
   echo "ok: $(gh --version | head -n 1)"
-  gh_auth_note
-}
-
-# Authentication is interactive and cannot be automated from here; say so
-# rather than leaving an installed-but-useless binary to be discovered later.
-# Read locally, the same way doctor does: `gh auth status` contacts GitHub, and
-# a captive or offline network would stall the tail of an install over a note.
-# The variable names are assembled because the harness's own sources must pass
-# the outbound scrubber, which flags any identifier ending in "…t0ken"
-# (spelled properly) next to a colon or equals sign.
-gh_auth_note() {
-  local config="${GH_CONFIG_DIR:-$HOME/.config/gh}"
-  local suffix="TO""KEN"
-  local var
-
-  [ ! -s "$config/hosts.yml" ] || return 0
-  for var in "GH_$suffix" "GITHUB_$suffix"; do
-    [ -z "${!var:-}" ] || return 0
-  done
-  echo "note: gh is not authenticated yet; run 'gh auth login' once"
 }
 
 ensure_uv() {

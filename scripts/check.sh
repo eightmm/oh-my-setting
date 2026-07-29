@@ -28,15 +28,9 @@ mkdir -p "$XDG_CACHE_HOME" "$OMS_LOCK_DIR"
 
 # CI splits the gate into two jobs so a lint failure cannot mask every test
 # result: stage() exits on the first failure, so one shellcheck nit would
-# otherwise suppress the entire smoke report. Both halves run by default, so a
-# local run and the pre-push hook still execute the whole gate.
-#
-# Flags, not environment variables. An `OMS_CHECK_LINT=0 bash scripts/check.sh`
-# prefix exports into every descendant, so the smoke suite inherited it and two
-# tests that run this gate themselves changed behaviour: one asked for a gate
-# that runs nothing and was refused, and the other skipped the missing-shellcheck
-# check and recursed through every suite instead of failing fast. A flag reaches
-# only the process it is passed to.
+# otherwise suppress the entire smoke report. Both halves run by default.
+# Flags rather than environment variables, which export into every descendant —
+# including the tests that run this gate themselves.
 RUN_LINT=1
 RUN_TESTS=1
 usage() {
