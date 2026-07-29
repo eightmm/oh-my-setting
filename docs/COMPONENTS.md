@@ -463,13 +463,22 @@ failures) and delegates artifacts to `artifact-index prune`; never touches
 frozen/running executors, live runs, the active task, unresolved failures,
 review tasks, or the append-only board
 
-**Verification gate (`check.sh`, `check-bash32.sh`, `install-hooks.sh`)** — One
-command runs the core checks shared with CI (shellcheck, Bash 3.2 static scan,
-deterministic four-way smoke shards) and fails hard if a tool is missing. A
-passing run prints one `ok:` line per stage and one per shard; a failing stage
-prints its full output and `OMS_VERBOSE=1` restores everything, so the gate
-stays readable between edits. CI additionally runs the real install lifecycle
-and macOS portability fixtures. `OMS_SMOKE_JOBS=1` enables serial debugging;
+**Verification gate (`check.sh`, `check-bash32.sh`, `check-python.sh`,
+`install-hooks.sh`)** — One command runs the core checks shared with CI
+(shellcheck, Bash 3.2 static scan, Python syntax, deterministic four-way smoke
+shards) and fails hard if a tool is missing. A passing run prints one `ok:` line
+per stage and one per shard; a failing stage prints its full output and
+`OMS_VERBOSE=1` restores everything, so the gate stays readable between edits.
+The Bash 3.2 scan is static plus one rule a linter cannot express: a
+here-document inside `$( )` whose body holds an odd number of apostrophes makes
+the whole file unparseable under 3.2 even behind a quoted delimiter, and that
+has already shipped. `OMS_CHECK_LINT`/`OMS_CHECK_TESTS` split the gate so CI can
+run lint as its own job — the gate exits at the first failing stage, so sharing
+one job lets a lint nit hide every test result. CI additionally runs the real
+install lifecycle on Linux (both ownership modes), macOS, and Windows Git Bash;
+the macOS job parses every script with its stock Bash 3.2 and runs the BSD
+userland fixtures, the one place `sed`/`awk`/`date` differences surface.
+`OMS_SMOKE_JOBS=1` enables serial debugging;
 `install-hooks.sh` wires the core gate as a pre-push hook
 
 **CI status (`ci-status.sh`)** — Prints the latest CI conclusion for the
@@ -515,7 +524,10 @@ successful commit while older receipts remain readable. Receipt-owned branch
 and detached updates share one clean-tree transaction; link/snapshot/doctor
 failure restores HEAD, links, snapshots, and receipt, and `update --rollback`
 returns to the prior success. Foreign checkouts cannot mutate the canonical
-install
+install. Linux/macOS/WSL use symlinks; Windows Git Bash defaults to verified
+copies with sidecar ownership hashes, so an untouched stale copy can be updated
+without hiding the original user backup while a user-edited copy is preserved.
+Native PowerShell is outside the Bash harness boundary
 
 **`oms` dispatcher (`scripts/oms`)** — One stable entrypoint on PATH: the
 public allowlist controls both `oms list` and dispatch (`run` aliases
@@ -536,4 +548,3 @@ mode unless apply is explicitly selected
 
 **Backup / unlink / uninstall** — Snapshot agent configs before changes; clean
 removal that restores what it replaced
-

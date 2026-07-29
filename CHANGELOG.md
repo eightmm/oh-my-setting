@@ -6,7 +6,92 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Fixed
+- Bash 3.2 could not parse `scripts/lib/peer-common.sh`, so every peer tool was
+  dead on macOS while Linux stayed green — and CI said so, in the one job that
+  has since been reworked. The cause is narrow and now pinned: bash 3.2 cannot
+  parse a here-document inside `$( )` whose body holds an odd number of
+  apostrophes, even behind a quoted `<<'PY'` delimiter, because its command
+  substitution scanner still reads the body looking for the closing paren, takes
+  the lone quote as the start of a literal, and swallows the `)`. A prose
+  "operator's" in an inline Python heredoc was enough. Confirmed against real
+  bash 3.2 in all four directions (apostrophe inside `$( )` fails; balanced
+  apostrophes pass; the same heredoc outside `$( )` passes; odd double quotes are
+  irrelevant). `check-bash32.sh` now rejects the construct statically, so every
+  push catches what previously only a macOS runner could, and the whole shipped
+  file set is verified to parse under a real 3.2.
+- Locks stopped being keyed to `XDG_CACHE_HOME`. The comment directly above the
+  function has always said why — an interactive session (set) and a cron session
+  (unset) compute different lock dirs for the same state file and both enter the
+  critical section — and `auto-update` runs from a systemd user timer, so the
+  asymmetry is not hypothetical. The motive was one hermetic `check.sh` run, which
+  `OMS_LOCK_DIR` now provides without the production path depending on an ambient
+  variable it does not control. The existing stability test covered only
+  `XDG_RUNTIME_DIR`; it now covers both, and neutralizes the sanctioned override
+  first so the assertion cannot pass trivially.
+- `oms-run validate` reported a healthy run index as invalid. Two unrelated
+  families are both named `index.jsonl` — `artifacts/index.jsonl` is read by
+  `kind`, `runs/index.jsonl` is the run-capsule roll-up read by `id` — and the
+  contract was keyed on the basename, so it demanded `kind` from every capsule
+  row. Matched by directory now, the way threads already were. Found by running
+  the restored BSD fixtures, not by the gate.
+- The machine snapshot names the distribution and the CPU model again. The
+  portable rewrite reduced OS to `Linux-6.8.0-x86_64-with-glibc2.39` — the kernel
+  line a second time, distro gone — and CPU to `x86_64`, which is the answer to a
+  question nobody asked of a hardware snapshot. `/etc/os-release` and
+  `/proc/cpuinfo` (then `sysctl machdep.cpu.brand_string`) are read first and the
+  portable form is the fallback; Windows support is unaffected. The regression
+  injects both sources as fixtures, because asserting that a `- CPU:` label
+  exists is what let the content vanish.
+- `ma_answer_quality` no longer fails open. Extracting the classifier from an
+  inline heredoc to `lib/answer-quality.py` created a failure mode that could not
+  exist before: a missing file or a python error left the verdict empty and
+  `${verdict:-ok}` counted every answer as real — including the provider refusal
+  text this checker was written to catch after a council reported two independent
+  families when one had spoken. An unrunnable checker is now named on stderr and
+  reported `blocked`.
+- An absent managed target reports `missing` instead of `foreign`. Calling a file
+  that is not there "someone else's" was untrue, and answering it through the copy
+  inspector cost a python3 process per probe (~25ms measured) — doctor and status
+  probe every managed target on every run, most of them absent on a partial
+  install.
+- `install-tools` reads the `gh` credential locally instead of calling
+  `gh auth status`, which contacts GitHub. Same reason the check was made local in
+  `doctor`: a captive or offline network should not stall the tail of an install
+  over a note.
+- Reinstalling can repair the managed `python3` shim it created. If the
+  interpreter behind the shim moved, the PATH probe failed and the installer then
+  refused to touch the shim and exited — no reinstall could fix what an install
+  had written. A shim matching the managed shape is replaced; anything else at
+  that path is still the user's launcher and is left alone. The ownership test
+  moved to `platform.sh`, which is all `install.sh` sources when it decides.
+- `oms` validates the receipt it falls back to and says so when nothing resolves.
+  A copy install has no link to follow, so the dispatcher reads `source_root`
+  from the receipt; it now requires the same schema-2 shape as the rest of the
+  harness, and a failure names the broken contract instead of reporting a missing
+  file for whichever subcommand was asked for.
+
 ### Added
+- `tests/bsd-portability-smoke.sh` restores the fixtures that were deleted with
+  the old macOS job: `detect-project-style`, `apply-project-template` +
+  `project-doctor`, `job-digest`, `run-ledger`, and the run-tools set
+  (`oms-run`, `run-capsule`, `data-manifest` leakage, `experiment-board`). They
+  lean on `sed`, `awk`, `date`, and `sort`, which is the one breakage class a
+  Linux-only gate cannot see. As inline CI steps they could not be run locally
+  and vanished silently; as a test file they run in `check.sh` and on macOS.
+- CI runs the install lifecycle in copy mode on Linux. Copy mode was provable
+  only on the Windows runner — the slowest leg in the matrix — although forcing
+  `OH_MY_SETTING_LINK_MODE=copy` passes on Linux end to end. A marker leak or a
+  lost backup now fails in seconds instead of waiting for Windows.
+- Lint runs as its own CI job. `check.sh` exits at the first failing stage, so
+  one shellcheck nit would suppress every test result; `OMS_CHECK_LINT` and
+  `OMS_CHECK_TESTS` split the gate without running anything twice, and a run that
+  would execute nothing is refused.
+- `scripts/check-python.sh` syntax-checks the Python helpers. Every `.sh` here is
+  linted while the `.py` files had nothing, and one of them now decides what the
+  installer may delete. Compiled in memory, so a read-only gate does not write
+  `__pycache__` into the tree it is certifying.
+
 - A repeated failure now names an advisor on the primary agent's own path. The
   rules have always asked for an outside read after repeated failures, and
   `peer-delegate` does it from the second repair round; the primary agent's gate

@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-autonomy-hook.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+export HOME="$TMP/home"
+export XDG_CACHE_HOME="$TMP/cache"
+export TMPDIR="$TMP/runtime"
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$TMPDIR"
 
 fail() {
   echo "autonomy-hook-smoke: $*" >&2

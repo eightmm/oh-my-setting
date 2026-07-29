@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Verify the install: symlink identity, tools, skills, and manifest sync for all three agent CLIs.
+# Verify managed target identity, tools, skills, and manifest sync for all
+# three agent CLIs.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FAILED=0
@@ -228,19 +229,32 @@ check_bash_version() {
 }
 
 check_path() {
-  # Optional $2: the exact symlink target this install expects. Existence
-  # alone is not parity — a link resolving to a foreign/stale file means this
-  # agent runs different rules while doctor would report ok.
+  # Optional $2: the exact managed source this install expects. Existence alone
+  # is not parity: a foreign/stale link or copy means the agent runs different
+  # rules while doctor would otherwise report ok.
   # -L before -e: a dangling symlink "exists" as a link but resolves to
   # nothing — exactly the breakage that silently strips an agent's rules.
-  if [ -L "$1" ] && [ ! -e "$1" ]; then
+  local mode
+
+  if [ -n "${2:-}" ] && oms_install_target_matches "$2" "$1"; then
+    mode="$(oms_install_target_mode "$2" "$1")"
+    if [ "$mode" = copy ]; then
+      echo "ok: $1 (copy parity)"
+    else
+      echo "ok: $1"
+    fi
+  elif [ -L "$1" ] && [ ! -e "$1" ]; then
     echo "broken link: $1 -> $(readlink "$1")"
     FAILED=1
   elif [ -L "$1" ] && [ -n "${2:-}" ] && [ "$(readlink "$1")" != "$2" ]; then
     echo "linked elsewhere: $1 -> $(readlink "$1") (expected $2)"
     FAILED=1
-  elif [ ! -L "$1" ] && [ -e "$1" ] && [ -n "${2:-}" ]; then
-    echo "not a symlink: $1 (expected link to $2)"
+  elif [ -e "$1" ] && [ -n "${2:-}" ] &&
+       [ "$(oms_install_target_mode "$2" "$1")" = copy ]; then
+    echo "copy differs: $1 (expected resource parity with $2)"
+    FAILED=1
+  elif [ -e "$1" ] && [ -n "${2:-}" ]; then
+    echo "not managed: $1 (expected $2)"
     FAILED=1
   elif [ -e "$1" ]; then
     echo "ok: $1"
@@ -260,22 +274,7 @@ check_custom_skills() {
     [ -n "$source" ] || continue
     skill="$INSTALL_ROOT/$source"
     name="$(basename "$skill")"
-    if [ -L "$target_root/$name" ]; then
-      # Symlink install: certify the link points at THIS checkout's skill,
-      # not a shadowed copy from another install.
-      check_path "$target_root/$name" "$skill"
-    elif [ -d "$target_root/$name" ]; then
-      # Copy fallback must preserve nested references and agent metadata too;
-      # checking SKILL.md alone can certify a partially installed skill.
-      if diff -qr "$skill" "$target_root/$name" >/dev/null 2>&1; then
-        echo "ok: $target_root/$name (copy parity)"
-      else
-        echo "copy differs: $target_root/$name (expected resource parity with $skill)"
-        FAILED=1
-      fi
-    else
-      check_path "$target_root/$name/SKILL.md"
-    fi
+    check_path "$target_root/$name" "$skill"
   done < <(python3 - "$INSTALL_ROOT/skills.manifest.json" <<'PY'
 import json
 import sys

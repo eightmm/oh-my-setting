@@ -10,7 +10,7 @@ usage() {
   cat <<'EOF'
 Usage: uninstall.sh [--yes] [--purge] [--dry-run] [-h|--help]
 
-Remove oh-my-setting symlinks (and restore backups when available). With
+Remove oh-my-setting managed links/copies (and restore backups when available). With
 --purge also delete the oh-my-setting checkout directory itself.
 
 Options:
@@ -87,7 +87,7 @@ fi
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/unlink.sh"
 
 if [ "$PURGE" != "1" ]; then
-  echo "uninstall: symlinks removed; checkout kept at $ROOT"
+  echo "uninstall: managed targets removed; checkout kept at $ROOT"
   echo "rerun with --purge to delete the checkout."
   exit 0
 fi

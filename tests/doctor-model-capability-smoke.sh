@@ -32,6 +32,16 @@ oms_install_receipt_path() { printf '%s\n' "${OMS_INSTALL_RECEIPT:-$HOME/.config
 oms_install_plugin_version() { printf '0.0.0\n'; }
 oms_install_plugin_hash() { printf 'unknown\n'; }
 oms_install_tree_hash() { printf 'unknown\n'; }
+oms_install_target_matches() {
+  [ -L "$2" ] && [ -e "$2" ] && [ "$(readlink "$2")" = "$1" ]
+}
+oms_install_target_mode() {
+  if [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; then
+    printf 'symlink\n'
+  else
+    printf 'foreign\n'
+  fi
+}
 EOF_STUB
 cat > "$fixture/scripts/skill-doctor.sh" <<'EOF_STUB'
 #!/usr/bin/env bash

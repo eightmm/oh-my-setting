@@ -10,4 +10,4 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 python3 "$ROOT/scripts/validate-skills.py" "$ROOT"
-echo "Custom skills live in $ROOT/custom-skills and are symlinked by scripts/link.sh."
+echo "Custom skills live in $ROOT/custom-skills and are installed by scripts/link.sh."

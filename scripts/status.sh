@@ -81,14 +81,21 @@ link_status() {
   local target="$1"
   local expected="$2"
   local current
+  local mode
 
-  if [ -L "$target" ]; then
-    current="$(readlink "$target")"
-    if [ "$current" = "$expected" ]; then
-      printf -- '- %s: linked\n' "$target"
+  if oms_install_target_matches "$expected" "$target"; then
+    mode="$(oms_install_target_mode "$expected" "$target")"
+    if [ "$mode" = copy ]; then
+      printf -- '- %s: copied\n' "$target"
     else
-      printf -- '- %s: linked elsewhere -> %s\n' "$target" "$current"
+      printf -- '- %s: linked\n' "$target"
     fi
+  elif [ -L "$target" ]; then
+    current="$(readlink "$target")"
+    printf -- '- %s: linked elsewhere -> %s\n' "$target" "$current"
+  elif [ -e "$target" ] &&
+       [ "$(oms_install_target_mode "$expected" "$target")" = copy ]; then
+    printf -- '- %s: copied but stale\n' "$target"
   elif [ -e "$target" ]; then
     printf -- '- %s: regular file\n' "$target"
   else
@@ -310,6 +317,8 @@ case "$RECEIPT_STATE" in
     [ -z "$value" ] || printf -- '- profile: %s\n' "$value"
     value="$(oms_install_receipt_field ref "$RECEIPT" 2>/dev/null || true)"
     [ -z "$value" ] || printf -- '- ref: %s\n' "$value"
+    value="$(oms_install_receipt_field link_mode "$RECEIPT" 2>/dev/null || true)"
+    [ -z "$value" ] || printf -- '- link_mode: %s\n' "$value"
     value="$(oms_install_receipt_field previous_commit "$RECEIPT" 2>/dev/null || true)"
     [ -z "$value" ] || printf -- '- rollback_commit: %s\n' "$value"
     printf -- '- installed_at: %s\n' "$(oms_install_receipt_field installed_at "$RECEIPT")"

@@ -4,8 +4,8 @@ set -euo pipefail
 # One stable entrypoint so any agent CLI (Codex, Claude Code, Antigravity)
 # can invoke harness tools by name — `oms run-ledger ...` — without
 # memorizing script paths. link.sh puts this on PATH at ~/.local/bin/oms;
-# the checkout is resolved from the dispatcher's own symlink target, so a
-# dev checkout and an install each dispatch to their own scripts.
+# symlink installs resolve the checkout from that link, while copy installs
+# recover the canonical checkout from the install receipt.
 
 # macOS readlink has no -f; walk the link chain by hand (bash 3.2 safe).
 resolve_self() {
@@ -24,6 +24,46 @@ resolve_self() {
 }
 
 SCRIPTS_DIR="$(cd "$(dirname "$(resolve_self "${BASH_SOURCE[0]}")")" && pwd)"
+if [ ! -f "$SCRIPTS_DIR/agent-task.sh" ]; then
+  # A copy install put a real file here, not a link back to the checkout, so
+  # the receipt is the only record of where the scripts live. The same schema-2
+  # shape the rest of the harness validates is required here: an unreadable or
+  # pre-v0.4 receipt must not silently redirect the dispatcher at some other
+  # tree that happens to be named in it.
+  receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
+  source_root=""
+  if command -v python3 >/dev/null 2>&1; then
+    source_root="$(python3 - "$receipt" <<'PY' 2>/dev/null || true
+import json
+import os
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        row = json.load(handle)
+    root = row.get("source_root", "")
+    if row.get("schema") == 2 and isinstance(root, str) and os.path.isabs(root):
+        print(root)
+except (OSError, ValueError):
+    pass
+PY
+)"
+  fi
+  if [ -n "$source_root" ] && command -v cygpath >/dev/null 2>&1; then
+    source_root="$(cygpath -u "$source_root")"
+  fi
+  if [ -n "$source_root" ] && [ -f "$source_root/scripts/agent-task.sh" ]; then
+    SCRIPTS_DIR="$source_root/scripts"
+  else
+    # Failing here names the broken contract. Falling through would report a
+    # missing file for whichever subcommand was asked for, which sends the
+    # reader after the wrong thing entirely.
+    echo "error: oms cannot locate its checkout from $SCRIPTS_DIR" >&2
+    echo "error: no harness scripts there and no usable install receipt at $receipt" >&2
+    echo "error: reinstall, or run scripts/oms from the checkout directly" >&2
+    exit 1
+  fi
+fi
 
 usage() {
   cat <<'EOF'

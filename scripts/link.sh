@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Symlink rules, skills, prompts, and the oms dispatcher into all three agent CLIs.
+# Install rules, skills, prompts, and the oms dispatcher into all three agent
+# CLIs. POSIX hosts use symlinks; Windows Git Bash uses ownership-marked copies.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STAMP="$(date +%Y%m%d%H%M%S)"
@@ -15,34 +16,57 @@ STAMP="$(date +%Y%m%d%H%M%S)"
 backup_if_needed() {
   local target="$1"
   local source="$2"
+  local state="$3"
+  local backup
 
-  if [ -L "$target" ]; then
-    local current
-    current="$(readlink "$target")"
-    if [ "$current" = "$source" ]; then
+  case "$state" in
+    symlink-current|symlink-owned|copy-current|copy-owned)
+      oms_install_remove_managed_target "$target"
       return 0
-    fi
-    if [ "$source" = "$ROOT/rules/global-AGENTS.md" ] &&
-       [ "$current" = "$ROOT/AGENTS.md" ]; then
-      return 0
-    fi
-    mv "$target" "$target.backup.$STAMP"
+      ;;
+  esac
+
+  # Pre-split installs pointed at the repository overlay. It is an old managed
+  # target, not user data, so migrate it without manufacturing a backup.
+  if [ -L "$target" ] &&
+     [ "$source" = "$ROOT/rules/global-AGENTS.md" ] &&
+     [ "$(readlink "$target")" = "$ROOT/AGENTS.md" ]; then
+    rm -f "$target"
     return 0
   fi
 
-  if [ -e "$target" ]; then
-    mv "$target" "$target.backup.$STAMP"
+  if [ -L "$target" ] || [ -e "$target" ]; then
+    backup="$target.backup.$STAMP"
+    mv "$target" "$backup"
+    # A modified managed copy is now preserved as user data. Its ownership
+    # marker must not travel into the backup or claim that it is removable.
+    oms_install_remove_marker "$target"
+    oms_install_remove_marker "$backup"
   fi
 }
 
 link_target() {
   local source="$1"
   local target="$2"
+  local desired_mode
+  local state
 
   mkdir -p "$(dirname "$target")"
-  backup_if_needed "$target" "$source"
-  oms_install_atomic_symlink "$source" "$target"
-  echo "linked $target -> $source"
+  desired_mode="$(oms_install_link_mode)" || return
+  state="$(oms_install_target_state "$source" "$target")" || return
+  case "$desired_mode:$state" in
+    symlink:symlink-current|copy:copy-current)
+      echo "$desired_mode current: $target"
+      return 0
+      ;;
+  esac
+  backup_if_needed "$target" "$source" "$state"
+  oms_install_materialize "$source" "$target"
+  if [ "$desired_mode" = copy ]; then
+    echo "copied $source -> $target"
+  else
+    echo "linked $target -> $source"
+  fi
 }
 
 link_skills() {
@@ -79,23 +103,21 @@ PY
     source="${skill#"$ROOT"/}"
     printf '%s\n' "$enabled_sources" | grep -Fxq "$source" && continue
     name="$(basename "$skill")"
-    if [ -L "$target_root/$name" ] && [ "$(readlink "$target_root/$name")" = "$skill" ]; then
-      rm -f "$target_root/$name"
+    if oms_install_target_owned "$skill" "$target_root/$name"; then
+      oms_install_remove_managed_target "$target_root/$name"
       echo "unlinked disabled skill $target_root/$name"
     fi
   done
 
-  # Remove dangling links owned by this checkout: a renamed or deleted skill
-  # leaves its old link pointing at a custom-skills path that no longer
-  # exists. Foreign links (other targets) are preserved even when dangling.
+  # Remove stale links or copies owned by this checkout: a renamed/deleted
+  # skill leaves an entry whose recorded source no longer exists. Foreign and
+  # user-modified entries are preserved.
   for link in "$target_root"/*; do
-    [ -L "$link" ] || continue
-    case "$(readlink "$link")" in
-      "$ROOT/custom-skills/"*) ;;
-      *) continue ;;
-    esac
-    if [ ! -e "$link" ]; then
-      rm -f "$link"
+    [ -L "$link" ] || [ -e "$link" ] || continue
+    source="$(oms_install_target_owned_source_under \
+      "$ROOT/custom-skills" "$link")" || continue
+    if [ ! -e "$source" ]; then
+      oms_install_remove_managed_target "$link"
       echo "unlinked stale skill $link (target removed)"
     fi
   done

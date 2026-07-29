@@ -46,6 +46,8 @@ Environment:
   OH_MY_SETTING_AUTO_UPDATE_MODE=apply  Auto-apply fast-forward updates (default: check-only).
   OH_MY_SETTING_REQUIRE_TOOLS=0    Let doctor treat a missing CLI as optional
                                    (default: 1 whenever the tools were installed).
+  OH_MY_SETTING_LINK_MODE=MODE     auto, symlink, or copy. auto uses copies on
+                                   Windows Git Bash and symlinks elsewhere.
   OH_MY_SETTING_DIR=/path/to/dir   Install location.
 EOF
 }
@@ -175,6 +177,56 @@ load_user_tool_paths() {
   fi
 }
 
+ensure_python3() {
+  local candidate=""
+  local shim="$HOME/.local/bin/python3"
+
+  export PATH="$HOME/.local/bin:$PATH"
+  if command -v python3 >/dev/null 2>&1 &&
+     python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+    return 0
+  fi
+  if ! oms_platform_is_windows; then
+    echo "error: a Python 3.9+ 'python3' command is required" >&2
+    exit 1
+  fi
+  if command -v python >/dev/null 2>&1 &&
+     python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+    candidate=python
+  elif command -v py >/dev/null 2>&1 &&
+       py -3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+    candidate=py
+  fi
+
+  if [ -z "$candidate" ]; then
+    echo "error: Python 3.9+ is required; install Python and rerun" >&2
+    exit 1
+  fi
+
+  # A shim we wrote whose interpreter has since moved is repairable, and
+  # refusing it would mean no reinstall can ever fix what an install created.
+  # Anything else at that path is the user's launcher and stays untouched.
+  if [ -e "$shim" ] || [ -L "$shim" ]; then
+    if oms_install_python_shim_owned "$shim"; then
+      rm -f "$shim"
+      echo "replacing stale managed python3 shim: $shim"
+    else
+      echo "error: refusing to replace existing Python launcher: $shim" >&2
+      exit 1
+    fi
+  fi
+  mkdir -p "$HOME/.local/bin"
+  if [ "$candidate" = py ]; then
+    printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+      'exec py -3 "$@"' > "$shim"
+  else
+    printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+      'exec python "$@"' > "$shim"
+  fi
+  chmod +x "$shim"
+  echo "python3 shim: $shim -> $candidate"
+}
+
 install_git_if_missing
 
 if [ "$REF" = "edge" ]; then
@@ -216,6 +268,10 @@ if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   export OH_MY_SETTING_REEXECED=1
   exec bash "$DEST/install.sh"
 fi
+
+# shellcheck disable=SC1091
+. "$DEST/scripts/lib/platform.sh"
+ensure_python3
 
 if [ "$INSTALL_TOOLS" = "1" ]; then
   "$DEST/scripts/install-tools.sh"

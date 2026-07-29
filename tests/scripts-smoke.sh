@@ -415,7 +415,8 @@ run_doctor_for_project() {
   local project="$1"
   local home_dir="$2"
 
-  (cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$home_dir/runtime" \
+  (cd "$project" && HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
+    XDG_RUNTIME_DIR="$home_dir/runtime" \
     OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")
 }
 
@@ -1831,8 +1832,12 @@ test_doctor_reports_crash_residue_warnings() {
   local project="$TMP/doctor-harness-residue"
   local home_dir="$TMP/doctor-home-residue"
   local runtime="$home_dir/runtime"
-  # Locks live in a fixed per-user dir (never XDG_RUNTIME_DIR); see file-lock.sh.
-  local lock_dir="$home_dir/.cache/oh-my-setting/locks/dead.lock"
+  # Locks live in a fixed per-user dir that no XDG variable moves; OMS_LOCK_DIR
+  # is the one override, and it is named here so a check.sh run that exports it
+  # for hermeticity does not point doctor at a different directory than this
+  # fixture writes to. See file-lock.sh.
+  local lock_root="$home_dir/.cache/oh-my-setting/locks"
+  local lock_dir="$lock_root/dead.lock"
   local out
 
   setup_doctor_home "$home_dir"
@@ -1841,7 +1846,9 @@ test_doctor_reports_crash_residue_warnings() {
   printf 'orphan\n' > "$project/.oms/artifacts/call/orphan.md"
   printf '999999999\n' > "$lock_dir/pid"
 
-  out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
+  out="$(cd "$project" && HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
+    OMS_LOCK_DIR="$lock_root" \
+    XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "doctor residue warnings must not fail: $out"
   printf '%s' "$out" | grep -Fq 'warn: 1 dead harness lock dir(s)' ||
     fail "missing dead lock warning: $out"
@@ -5446,7 +5453,9 @@ test_cleanup_prunes_stale_worktree_registration() {
 test_cleanup_removes_dead_lock_only() {
   local home_dir="$TMP/cleanup-lock-home"
   local runtime="$home_dir/runtime"
-  # Locks live in a fixed per-user dir (never XDG_RUNTIME_DIR); see file-lock.sh.
+  # Locks live in a fixed per-user dir that no XDG variable moves; OMS_LOCK_DIR
+  # is the one override, named here for the same reason as the doctor residue
+  # fixture. See file-lock.sh.
   local lock_root="$home_dir/.cache/oh-my-setting/locks"
   local dead_lock="$lock_root/dead.lock"
   local live_lock="$lock_root/live.lock"
@@ -5455,7 +5464,9 @@ test_cleanup_removes_dead_lock_only() {
   printf '999999999\n' > "$dead_lock/pid"
   printf '%s\n' "$$" > "$live_lock/pid"
 
-  HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/cleanup.out"
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" XDG_RUNTIME_DIR="$runtime" \
+    OMS_LOCK_DIR="$lock_root" \
+    "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/cleanup.out"
   assert_not_exists "$dead_lock"
   [ -d "$live_lock" ] || fail "cleanup should leave live lock dir"
   assert_file_contains "$home_dir/cleanup.out" "removed: $dead_lock (dead harness lock)"
@@ -6027,6 +6038,98 @@ test_check_gate_hard_fails_without_shellcheck() {
     fail "check.sh must exit nonzero when shellcheck is missing"
   printf '%s' "$out" | grep -Fq "shellcheck is not installed" ||
     fail "check.sh missing-tool message absent: $out"
+}
+
+test_bash32_gate_uses_the_requested_parser() {
+  local parser="$TMP/bash32-parser"
+  local log="$TMP/bash32-parser.log"
+
+  cat > "$parser" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$OMS_BASH32_LOG"
+EOF
+  chmod +x "$parser"
+
+  OMS_BASH32_BIN="$parser" OMS_BASH32_LOG="$log" \
+    "$ROOT/scripts/check-bash32.sh" >/dev/null
+  assert_file_contains "$log" "-n $ROOT/install.sh"
+  assert_file_contains "$log" "-n $ROOT/scripts/lib/peer-common.sh"
+}
+
+# Bash 3.2 cannot parse a here-document inside $( ) whose body holds an odd
+# number of apostrophes, even behind a quoted delimiter. It shipped: a prose
+# "operator's" inside an inline Python heredoc made peer-common.sh unparseable,
+# so every peer tool died on macOS while Linux stayed green. Nothing but a real
+# 3.2 parser sees it, and the only one in CI is one job away from deletion.
+test_bash32_gate_rejects_an_apostrophe_heredoc_in_substitution() {
+  local bad="$TMP/bash32-heredoc-bad.sh"
+  local good="$TMP/bash32-heredoc-good.sh"
+  local out
+
+  cat > "$bad" <<'EOF'
+#!/usr/bin/env bash
+f() {
+  v="$(python3 - <<'PY'
+# the fix is the operator's problem
+print("x")
+PY
+)"
+}
+EOF
+  # Same heredoc, apostrophes balanced: this one is legal and must stay legal.
+  cat > "$good" <<'EOF'
+#!/usr/bin/env bash
+f() {
+  v="$(python3 - <<'PY'
+# the fix is the operator's problem, and the operator's alone
+print("x")
+PY
+)"
+}
+EOF
+
+  if out="$("$ROOT/scripts/check-bash32.sh" "$bad" 2>&1)"; then
+    fail "the gate must reject an odd-apostrophe heredoc inside \$( ): $out"
+  fi
+  printf '%s' "$out" | grep -Fq 'heredoc <<PY inside $( )' ||
+    fail "the gate must name the offending heredoc: $out"
+
+  "$ROOT/scripts/check-bash32.sh" "$good" >/dev/null 2>&1 ||
+    fail "balanced apostrophes must still pass"
+}
+
+# check.sh exits at the first failing stage. CI runs lint and tests as separate
+# jobs so one shellcheck nit cannot suppress every test result, which only
+# works if each half can run without the other.
+test_check_gate_splits_lint_from_tests() {
+  local out
+
+  out="$(cd "$ROOT" && OMS_CHECK_TESTS=0 bash scripts/check.sh 2>&1)" ||
+    fail "lint-only gate should pass: $out"
+  printf '%s' "$out" | grep -Fq 'ok: shellcheck' ||
+    fail "lint-only gate must run shellcheck: $out"
+  printf '%s' "$out" | grep -Fq 'check: ok (lint only)' ||
+    fail "lint-only gate must say what it skipped: $out"
+  if printf '%s' "$out" | grep -Fq 'ok: context-core'; then
+    fail "lint-only gate must not run the test suites: $out"
+  fi
+
+  if out="$(cd "$ROOT" && OMS_CHECK_LINT=0 OMS_CHECK_TESTS=0 bash scripts/check.sh 2>&1)"; then
+    fail "a gate that runs nothing must be refused: $out"
+  fi
+  printf '%s' "$out" | grep -Fq 'cannot both be 0' ||
+    fail "refusal must name the cause: $out"
+}
+
+# Every .sh here is linted; the Python helpers had nothing, and one of them now
+# decides what the installer may delete.
+test_python_helpers_are_syntax_checked() {
+  local out
+
+  out="$(cd "$ROOT" && bash scripts/check-python.sh 2>&1)" ||
+    fail "python syntax gate should pass: $out"
+  printf '%s' "$out" | grep -Eq 'python-syntax: ok \([0-9]+ files\)' ||
+    fail "python syntax gate must report what it checked: $out"
 }
 
 test_ci_status_reports_conclusion() {
@@ -7522,13 +7625,103 @@ test_run_state_anchors_to_git_root_from_subdir() {
 }
 
 test_file_lock_dir_is_stable_across_xdg() {
+  local baseline
   local with_xdg
-  local without_xdg
+  local var
 
-  with_xdg="$(XDG_RUNTIME_DIR="$TMP/xdg-runtime" bash -c ". '$ROOT/scripts/lib/file-lock.sh'; oms_file_lock_dir")"
-  without_xdg="$(env -u XDG_RUNTIME_DIR bash -c ". '$ROOT/scripts/lib/file-lock.sh'; oms_file_lock_dir")"
-  [ "$with_xdg" = "$without_xdg" ] ||
-    fail "lock dir must not depend on XDG_RUNTIME_DIR ($with_xdg vs $without_xdg)"
+  # OMS_LOCK_DIR is the sanctioned override and check.sh exports it, so it has
+  # to come off first or every reading below is the same constant.
+  baseline="$(env -u OMS_LOCK_DIR -u XDG_RUNTIME_DIR -u XDG_CACHE_HOME \
+    bash -c ". '$ROOT/scripts/lib/file-lock.sh'; oms_file_lock_dir")"
+
+  # Two processes holding the same state file must agree on the lock path. A
+  # desktop shell and the auto-update systemd timer disagree about every XDG
+  # variable, so keying the lock dir on one lets both enter the same critical
+  # section — the failure this test exists to prevent, once introduced through
+  # XDG_RUNTIME_DIR and once through XDG_CACHE_HOME.
+  for var in XDG_RUNTIME_DIR XDG_CACHE_HOME; do
+    with_xdg="$(env -u OMS_LOCK_DIR "$var=$TMP/xdg-$var" \
+      bash -c ". '$ROOT/scripts/lib/file-lock.sh'; oms_file_lock_dir")"
+    [ "$with_xdg" = "$baseline" ] ||
+      fail "lock dir must not depend on $var ($with_xdg vs $baseline)"
+  done
+
+  # The one variable that may move it, so a test run can stay hermetic.
+  with_xdg="$(OMS_LOCK_DIR="$TMP/explicit-locks" \
+    bash -c ". '$ROOT/scripts/lib/file-lock.sh'; oms_file_lock_dir")"
+  [ "$with_xdg" = "$TMP/explicit-locks" ] ||
+    fail "OMS_LOCK_DIR must select the lock dir: $with_xdg"
+}
+
+# A copy install puts a real file at ~/.local/bin/oms, so the dispatcher cannot
+# find its checkout by following a link and reads the receipt instead. That
+# receipt has to be validated the way the rest of the harness validates it, and
+# when nothing resolves the failure must name the broken contract — falling
+# through reports a missing file for whatever subcommand was asked for, which
+# sends the reader after entirely the wrong thing.
+test_oms_dispatcher_refuses_an_unusable_receipt() {
+  local dir="$TMP/oms-dispatch"
+  local receipt="$dir/install.json"
+  local out
+
+  mkdir -p "$dir/bin"
+  cp "$ROOT/scripts/oms" "$dir/bin/oms"
+
+  # No receipt at all.
+  if out="$(OMS_INSTALL_RECEIPT="$dir/absent.json" "$dir/bin/oms" list 2>&1)"; then
+    fail "oms must not dispatch with no checkout and no receipt: $out"
+  fi
+  printf '%s' "$out" | grep -Fq 'cannot locate its checkout' ||
+    fail "oms must name the broken contract: $out"
+
+  # A pre-v0.4 receipt names a root but not under the contract this reads.
+  printf '{"schema": 1, "source_root": "%s"}\n' "$ROOT" > "$receipt"
+  if out="$(OMS_INSTALL_RECEIPT="$receipt" "$dir/bin/oms" list 2>&1)"; then
+    fail "oms must not trust a schema-1 receipt: $out"
+  fi
+
+  # The supported shape resolves and dispatches.
+  printf '{"schema": 2, "source_root": "%s"}\n' "$ROOT" > "$receipt"
+  out="$(OMS_INSTALL_RECEIPT="$receipt" "$dir/bin/oms" list 2>&1)" ||
+    fail "oms must dispatch through a schema-2 receipt: $out"
+  printf '%s' "$out" | grep -Fq plan-run ||
+    fail "receipt dispatch did not reach the real tool list: $out"
+}
+
+# Two unrelated families are both named index.jsonl: artifacts/index.jsonl is
+# read by `kind`, runs/index.jsonl by `id`. Keying the contract on the basename
+# demanded `kind` from every run-capsule row, so a healthy runs index was
+# reported invalid by the tool that certifies state validity.
+test_validate_separates_the_two_index_families() {
+  local project="$TMP/validate-index"
+  local out
+
+  mkdir -p "$project/.oms/runs" "$project/.oms/artifacts"
+  printf '{"id": "20260101T000000Z-1", "ts": "2026-01-01T00:00:00Z", "exit": 0}\n' \
+    > "$project/.oms/runs/index.jsonl"
+  printf '{"kind": "artifact-resolution", "operation_id": "o", "artifact_id": "a"}\n' \
+    > "$project/.oms/artifacts/index.jsonl"
+
+  out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)" ||
+    fail "both index families should validate: $out"
+  printf '%s' "$out" | grep -Fq '0 with errors or invalid rows' ||
+    fail "a run-capsule index must not be reported invalid: $out"
+
+  # Each family still enforces its own required field.
+  printf '{"ts": "2026-01-01T00:00:00Z"}\n' > "$project/.oms/runs/index.jsonl"
+  if out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)"; then
+    fail "a runs index row without an id must be rejected: $out"
+  fi
+  printf '%s' "$out" | grep -Fq "missing required field 'id'" ||
+    fail "the runs index must be checked for id: $out"
+
+  printf '{"id": "20260101T000000Z-1"}\n' > "$project/.oms/runs/index.jsonl"
+  printf '{"operation_id": "o"}\n' > "$project/.oms/artifacts/index.jsonl"
+  if out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)"; then
+    fail "an artifact index row without a kind must be rejected: $out"
+  fi
+  printf '%s' "$out" | grep -Fq "missing required field 'kind'" ||
+    fail "the artifact index must still be checked for kind: $out"
 }
 
 test_oms_run_link_records_calling_agent() {
@@ -10145,10 +10338,16 @@ test_agent_call_threads_the_exchange() {
 
 test_agent_consult_asks_a_peer_and_keeps_the_thread() {
   local project="$TMP/consult-basic"
+  local bin_dir="$project/bin"
   local out id
 
   make_committed_repo "$project"
-  out="$(cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+  mkdir -p "$bin_dir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/codex"
+  chmod +x "$bin_dir/codex"
+
+  out="$(cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
+    OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
     "$ROOT/scripts/agent-consult.sh" --repo "$project" "which split policy?" --quiet)" ||
     fail "consult should succeed: $out"
   printf '%s' "$out" | grep -Fq 'thread: ' || fail "consult should report its thread: $out"
@@ -10166,7 +10365,8 @@ assert answer.get("provider") != "claude", answer
 ' || fail "consult should record a question and a peer answer"
 
   # A follow-up joins the same conversation instead of starting over.
-  ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
+  ( cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
+    OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
     "$ROOT/scripts/agent-consult.sh" --repo "$project" "and for the test split?" --quiet >/dev/null )
   [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$id" ] ||
     fail "a follow-up consult should stay in the same thread"
@@ -10390,6 +10590,34 @@ assert ci["current_sha"], ci
 import json, sys
 assert json.load(sys.stdin)["ci"]["fresh"] is True
 ' || fail "CI for HEAD should be fresh"
+}
+
+# The classifier used to be an inline heredoc and could not go missing. As a
+# file it can, and an empty verdict defaulting to "ok" would silently restore
+# the bug it exists for: a provider's refusal counted as a real answer, so a
+# council reports two independent families when one of them never spoke.
+test_answer_quality_fails_closed_without_its_helper() {
+  local dir="$TMP/answer-quality-missing"
+  local stage="$dir/scripts"
+  local verdict
+  local err
+
+  # A complete lib with exactly one file removed, so the classifier's absence
+  # is the only variable. The artifact is a real answer, which means an "ok"
+  # verdict here could only have come from the default, not from a check.
+  mkdir -p "$stage"
+  cp -R "$ROOT/scripts/lib" "$stage/lib"
+  rm -f "$stage/lib/answer-quality.py"
+  printf '## Output\nThe split policy should be scaffold-based.\n## Exit\n0\n' \
+    > "$dir/answer.md"
+
+  verdict="$(bash -c ". '$stage/lib/peer-common.sh'; ma_answer_quality '$dir/answer.md'" \
+    2>"$dir/err")"
+  err="$(cat "$dir/err")"
+  [ "$verdict" = blocked ] ||
+    fail "a missing answer-quality helper must not read as a real answer: $verdict"
+  printf '%s' "$err" | grep -Fq 'answer-quality helper is missing' ||
+    fail "the missing helper must be named on stderr: $err"
 }
 
 test_answer_quality_separates_a_non_answer_from_an_answer() {

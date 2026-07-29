@@ -677,69 +677,32 @@ extract_output() {
 # Prints: ok | thin | empty | blocked.
 ma_answer_quality() {
   local artifact="$1"
+  local helper
   local tmp
   local verdict
 
   [ -f "$artifact" ] || { printf 'empty\n'; return 0; }
+  # The classifier used to be an inline heredoc, so it could not go missing.
+  # As a file it can, and defaulting to "ok" would resurrect the exact bug it
+  # was written for: a provider's permission refusal counted as a real answer,
+  # letting a council report two independent families when one had spoken.
+  # An unrunnable checker is an operator problem, so say so and fail closed.
+  helper="$(ma_scripts_dir)/lib/answer-quality.py"
+  if [ ! -f "$helper" ]; then
+    echo "error: answer-quality helper is missing: $helper" >&2
+    printf 'blocked\n'
+    return 0
+  fi
   tmp="$(agent_memory_mktemp)" || { printf 'ok\n'; return 0; }
   extract_output "$artifact" > "$tmp"
-  verdict="$(python3 - "$tmp" <<'PY'
-import re, sys
-
-# Provider banners and harness route lines are not answer content.
-noise = re.compile(
-    r"^\s*(model-route:|model-result:|tokens used|\[REDACTED|OpenAI Codex|"
-    r"workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|"
-    r"reasoning summaries:|session id:|-{3,}$|user$|DRY RUN)")
-lines = []
-with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
-    for line in f:
-        line = line.rstrip()
-        if not line.strip() or noise.match(line):
-            continue
-        lines.append(line.strip())
-body = "\n".join(lines)
-if not body:
-    print("empty")
-    raise SystemExit(0)
-# A CLI can exit 0 having printed only its own reason for doing nothing. That
-# text is long enough and declarative enough to pass every other test here, so
-# a council counted an antigravity permission refusal as a real answer and
-# reported two independent families when one provider had spoken. Matched only
-# when the WHOLE body is diagnostics: an answer that discusses permissions has
-# other lines and stays ok. "blocked" rather than "empty" because the fix is
-# the operator's (grant the tool, log in), not another retry.
-refusal = re.compile(
-    r"^(jetski: no output produced\b"
-    r"|add an allow-rule\b"
-    r"|alternatively, re-run with\b"
-    r"|.*\bcommand not found\b"
-    r"|(error|fatal)[: ].*\b(permission|not authenticated|not logged in|"
-    r"unauthorized|invalid api key|quota|rate limit)\b)",
-    re.IGNORECASE)
-if all(refusal.match(line) for line in lines):
-    print("blocked")
-    raise SystemExit(0)
-# Length is not substance: a correct answer can be one sentence, and rejecting
-# it costs another provider call for nothing. Only two things are reliably not
-# answers — a body with nothing in it, and a reply that only asks the caller
-# something back, which is what a provider that never received the prompt does.
-size = len(body.encode("utf-8"))
-if size < 24:
-    print("empty")
-    raise SystemExit(0)
-# Only-a-question is the shape a provider produces when it never received the
-# prompt. Checked before any length rule, because such replies are often short
-# and a short answer is not by itself a non-answer.
-questions = sum(1 for line in lines if line.endswith("?"))
-if questions == len(lines):
-    print("thin")
-    raise SystemExit(0)
-print("ok")
-PY
-)"
+  if ! verdict="$(python3 "$helper" "$tmp" 2>/dev/null)" || [ -z "$verdict" ]; then
+    rm -f "$tmp"
+    echo "error: answer-quality helper failed on $artifact" >&2
+    printf 'blocked\n'
+    return 0
+  fi
   rm -f "$tmp"
-  printf '%s\n' "${verdict:-ok}"
+  printf '%s\n' "$verdict"
 }
 
 # The provider's own first words about why it produced nothing. A blocked call

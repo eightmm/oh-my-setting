@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Remove the symlinks link.sh created and restore the backups they replaced.
+# Remove targets link.sh created and restore the backups they replaced.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
@@ -16,7 +16,7 @@ usage() {
   cat <<'EOF'
 usage: unlink.sh
 
-Remove oh-my-setting symlinks and restore the newest matching
+Remove oh-my-setting managed links/copies and restore the newest matching
 *.backup.TIMESTAMP file when one exists.
 
 Set OH_MY_SETTING_DRY_RUN=1 to preview changes.
@@ -28,7 +28,7 @@ unlink_and_restore() {
   local source="$2"
   local backup
 
-  if [ ! -L "$target" ] || [ "$(readlink "$target")" != "$source" ]; then
+  if ! oms_install_target_owned "$source" "$target"; then
     echo "skip: $target"
     return 0
   fi
@@ -44,7 +44,7 @@ unlink_and_restore() {
     return 0
   fi
 
-  rm -f "$target"
+  oms_install_remove_managed_target "$target"
   echo "removed $target"
 
   if [ -n "$backup" ]; then
@@ -81,6 +81,7 @@ esac
 
 unlink_all() {
   local receipt owner
+  local python_shim="$HOME/.local/bin/python3"
 
   # Pre-split installs linked the repository overlay directly. Accept that
   # owned target so an interrupted upgrade can still restore user backups.
@@ -112,6 +113,14 @@ unlink_all() {
   else
     rm -f "$receipt"
     echo "removed install receipt $receipt"
+  fi
+  if oms_install_python_shim_owned "$python_shim"; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would remove managed Python shim $python_shim"
+    else
+      rm -f "$python_shim"
+      echo "removed managed Python shim $python_shim"
+    fi
   fi
 }
 

@@ -452,7 +452,15 @@ REQUIRED = {
     "ci.jsonl": ("sha", "status"),
     "landings.jsonl": ("landing_id", "event"),
     "reconcile.jsonl": ("job_id",),
-    "index.jsonl": ("kind",),
+}
+# Two unrelated families are both named index.jsonl, so this one cannot be
+# keyed by basename: artifacts/index.jsonl records artifact resolutions and is
+# read by `kind`, while runs/index.jsonl is the run-capsule roll-up and is read
+# by `id`. Keying on the name alone demanded `kind` from every capsule row and
+# reported a healthy runs index as invalid.
+DIR_REQUIRED = {
+    ("artifacts", "index.jsonl"): ("kind",),
+    ("runs", "index.jsonl"): ("id",),
 }
 ENUMS = {
     "experiments.jsonl": {"status": {"claimed", "running", "finished", "aborted"}},
@@ -487,8 +495,12 @@ for f in files:
         if not isinstance(r, dict):
             continue
         base = os.path.basename(f)
-        in_threads = os.path.basename(os.path.dirname(f)) == "threads"
-        required = THREAD_REQUIRED if in_threads else REQUIRED.get(base, ())
+        parent = os.path.basename(os.path.dirname(f))
+        in_threads = parent == "threads"
+        if in_threads:
+            required = THREAD_REQUIRED
+        else:
+            required = DIR_REQUIRED.get((parent, base), REQUIRED.get(base, ()))
         for key in required:
             if r.get(key) in (None, ""):
                 invalid.append("%s:%d missing required field %r" % (f, i, key))

@@ -26,6 +26,24 @@ council이 아니므로, peer는 기억해야 할 플래그가 아니라 설치�
 없는 머신에서는 `--no-tools`를 넘기고, 대화형 단계인 `gh auth login`은 한 번
 직접 실행한다. 이후 설치 확인·업데이트·맞춤 설정은 coding agent에게 말하면 된다.
 
+지원 환경:
+
+- Linux와 WSL: Bash 3.2+, Git, Python 3.9+.
+- macOS: 기본 Bash 3.2, Git, Python 3.9+.
+- Windows: Git Bash, Git, Python 3.9+. Windows에서는 symlink 권한을 전제로
+  하지 않고 소유권이 표시된 검증 복사본을 쓴다. Node 20+와 provider CLI는
+  Windows용 installer로 먼저 설치하거나, harness만 설치할 때는
+  `curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --no-tools`
+  를 쓴다.
+
+native PowerShell은 실행 환경으로 지원하지 않는다. Git Bash나 WSL을 사용한다.
+선택된 `symlink`/`copy` 모드는 install receipt에 저장되어 update·doctor·uninstall
+전체가 같은 소유권 계약을 사용한다. 필요하면
+`OH_MY_SETTING_LINK_MODE=auto|symlink|copy`로 바꿀 수 있다.
+`--no-tools` 설치는 shell 시작 파일을 수정하지 않는다. `~/.local/bin`이 PATH에
+없으면 사용자가 추가한다. Windows에서 `python3` 명령만 없고 `python` 또는
+`py -3`가 있으면 설치기가 충돌 없는 관리형 shim을 만들며 uninstall 때 회수한다.
+
 ## 시작
 
 아무 디렉토리에서나 — 빈 디렉토리든, 진행 중이던 코드든 — coding agent를

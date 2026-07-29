@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-lifecycle-hardening.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+export XDG_CACHE_HOME="$TMP/cache"
+mkdir -p "$XDG_CACHE_HOME"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -54,6 +56,38 @@ test_machine_snapshot_cli_and_permissions() {
   if OH_MY_SETTING_MACHINE_SNAPSHOT="$out" "$ROOT/scripts/write-machine-snapshot.sh" --check >/dev/null 2>&1; then
     fail "machine snapshot check accepted corrupt content"
   fi
+}
+
+# The snapshot exists so an agent knows what machine it is on. Presence of the
+# labels is not the contract — the content is. A portable rewrite once reduced
+# OS to "Linux-6.8.0-x86_64-with-glibc2.39" (the kernel line again, distro
+# gone) and CPU to "x86_64", which answers nothing, and every label-shaped
+# assertion still passed. Fixtures are injected so this holds on any host.
+test_machine_snapshot_names_the_distro_and_the_cpu_model() {
+  local out="$TMP/machine-content.md"
+  local fixtures="$TMP/machine-fixtures"
+
+  mkdir -p "$fixtures"
+  printf 'NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 24.04.4 LTS"\nID=ubuntu\n' \
+    > "$fixtures/os-release"
+  printf 'processor\t: 0\nmodel name\t: Intel(R) Core(TM) i5-14600KF\n' \
+    > "$fixtures/cpuinfo"
+
+  OMS_OS_RELEASE="$fixtures/os-release" OMS_CPUINFO="$fixtures/cpuinfo" \
+    OH_MY_SETTING_MACHINE_SNAPSHOT="$out" \
+    "$ROOT/scripts/write-machine-snapshot.sh" --dry-run > "$TMP/machine-content"
+  assert_contains "$TMP/machine-content" "- OS: Ubuntu 24.04.4 LTS"
+  assert_contains "$TMP/machine-content" "- CPU: Intel(R) Core(TM) i5-14600KF"
+
+  # With no distro or cpuinfo to read, the portable answer is the fallback and
+  # must still produce a line rather than an empty field.
+  OMS_OS_RELEASE="$fixtures/absent" OMS_CPUINFO="$fixtures/absent" \
+    OH_MY_SETTING_MACHINE_SNAPSHOT="$out" \
+    "$ROOT/scripts/write-machine-snapshot.sh" --dry-run > "$TMP/machine-fallback"
+  grep -Eq '^- OS: .+' "$TMP/machine-fallback" ||
+    fail "OS must fall back to a portable value"
+  grep -Eq '^- CPU: .+' "$TMP/machine-fallback" ||
+    fail "CPU must fall back to a portable value"
 }
 
 test_slurm_snapshot_cli_and_permissions() {
@@ -113,7 +147,7 @@ test_tool_upgrade_refreshes_existing_clis() {
   local bin="$TMP/tool-bin"
   local home="$TMP/tool-home"
   mkdir -p "$bin" "$home/.local/bin"
-  for cmd in node claude codex agy uv; do
+  for cmd in node claude codex agy uv gh; do
     cat > "$bin/$cmd" <<EOF
 #!/usr/bin/env bash
 if [ "$cmd" = node ] && [ "\${1:-}" = -p ]; then echo 22; else echo '$cmd 1.0'; fi
@@ -126,7 +160,41 @@ printf '%s\n' "$*" >> "$OMS_TEST_NPM_LOG"
 [ "$1 $2 $3" = "config get prefix" ] && printf '%s\n' "$OMS_TEST_NPM_PREFIX"
 exit 0
 EOF
-  chmod +x "$bin/npm"
+  cat > "$bin/curl" <<'EOF'
+#!/usr/bin/env bash
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    output="$2"
+    shift
+  fi
+  shift
+done
+if [ -n "$output" ]; then
+  : > "$output"
+else
+  printf '{"tag_name":"v1.0.0"}\n'
+fi
+EOF
+  cat > "$bin/tar" <<'EOF'
+#!/usr/bin/env bash
+dest=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -C ]; then
+    dest="$2"
+    shift
+  fi
+  shift
+done
+mkdir -p "$dest/gh_1.0.0_linux_amd64/bin"
+cat > "$dest/gh_1.0.0_linux_amd64/bin/gh" <<'GH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ]; then exit 1; fi
+echo 'gh version 1.0.0'
+GH
+chmod +x "$dest/gh_1.0.0_linux_amd64/bin/gh"
+EOF
+  chmod +x "$bin/npm" "$bin/curl" "$bin/tar"
   OMS_TEST_NPM_LOG="$TMP/npm.log" OMS_TEST_NPM_PREFIX="$home" HOME="$home" \
     NVM_DIR="$home/.nvm" OH_MY_SETTING_UPGRADE_ANTIGRAVITY=0 \
     PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-tools.sh" --upgrade >/dev/null
@@ -241,6 +309,7 @@ PY
 
 test_receipt_preserves_snapshot_modes
 test_machine_snapshot_cli_and_permissions
+test_machine_snapshot_names_the_distro_and_the_cpu_model
 test_slurm_snapshot_cli_and_permissions
 test_project_doctor_strict_slurm_contract
 test_tsp_fallback_requires_opt_in

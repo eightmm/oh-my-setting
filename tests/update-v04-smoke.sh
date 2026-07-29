@@ -66,6 +66,8 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   cp "$ROOT/scripts/unlink.sh" "$source/scripts/unlink.sh"
   cp "$ROOT/scripts/doctor.sh" "$source/scripts/doctor.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
+  cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   cp "$ROOT/scripts/lib/agent-install-state.sh" "$source/scripts/lib/agent-install-state.sh"
   rm -rf "$source/workflows"
   rm -f "$source/scripts/multi-agent-ask.sh" "$source/scripts/multi-agent-review.sh" \
@@ -197,6 +199,8 @@ test_doctor_failure_restores_previous_plugin_payload() {
   mkdir -p "$source/scripts/lib" "$bin" "$(dirname "$receipt")"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
+  cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   for script in link install-claude-hooks install-autoupdate uninstall-autoupdate install-tools; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/$script.sh"
     chmod +x "$source/scripts/$script.sh"
@@ -261,7 +265,8 @@ test_schema1_update_preserves_channel_pin_and_cron() {
 
   git clone -q "$ROOT" "$source"
   for file in scripts/update.sh scripts/link.sh scripts/doctor.sh \
-    scripts/lib/install-contract.sh scripts/lib/agent-install-state.sh; do
+    scripts/lib/install-contract.sh scripts/lib/platform.sh \
+    scripts/lib/managed-target.py scripts/lib/agent-install-state.sh; do
     cp "$ROOT/$file" "$source/$file"
   done
   rm -rf "$source/workflows"
@@ -405,6 +410,8 @@ test_detached_schema2_auto_update_check() {
   mkdir -p "$repo/scripts/lib" "$repo/local" "$home/.config/oh-my-setting"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/platform.sh" "$repo/scripts/lib/platform.sh"
+  cp "$ROOT/scripts/lib/managed-target.py" "$repo/scripts/lib/managed-target.py"
   cat > "$repo/scripts/update.sh" <<'EOF'
 #!/usr/bin/env bash
 commit="$(git rev-parse HEAD)"

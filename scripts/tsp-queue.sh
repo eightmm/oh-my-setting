@@ -9,8 +9,9 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/poll.sh"
 
 RUN_LEDGER="$ROOT/scripts/run-ledger.sh"
-STATE_DIR="${OMS_TSP_STATE_DIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/oh-my-setting/tsp-queue}"
-FALLBACK_DIR="${OMS_TSP_FALLBACK_DIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/oh-my-setting/tsp-fallback}"
+CACHE_BASE="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}"
+STATE_DIR="${OMS_TSP_STATE_DIR:-$CACHE_BASE/oh-my-setting/tsp-queue}"
+FALLBACK_DIR="${OMS_TSP_FALLBACK_DIR:-$CACHE_BASE/oh-my-setting/tsp-fallback}"
 SCAN_FILE=""
 cleanup_done=0
 
@@ -39,7 +40,7 @@ Subcommands:
 If tsp is missing, enqueue fails closed. Pass --allow-noqueue (or set
 OMS_TSP_ALLOW_FALLBACK=1) to explicitly accept a nohup background run with no
 real queue or slot limiting. Fallback state lives under
-${XDG_RUNTIME_DIR:-$HOME/.cache}/oh-my-setting/tsp-fallback/.
+${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/oh-my-setting/tsp-fallback/.
 EOF
 }
 

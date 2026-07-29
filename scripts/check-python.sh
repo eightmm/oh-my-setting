@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Syntax gate for the harness's Python helpers. Every .sh here is linted, while
+# the .py files had nothing, and one of them is now on the install path
+# (managed-target.py decides what an installer may delete). python3 is already
+# a hard requirement of this repo, so this adds no new tool.
+#
+# Compiled in memory on purpose: writing __pycache__ into the checkout would
+# make a read-only gate mutate the tree it is certifying.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+python3 - scripts scripts/lib templates <<'PY'
+import pathlib
+import sys
+
+failed = 0
+checked = 0
+for directory in sys.argv[1:]:
+    for path in sorted(pathlib.Path(directory).glob("*.py")):
+        checked += 1
+        try:
+            compile(path.read_text(encoding="utf-8"), str(path), "exec")
+        except (SyntaxError, ValueError) as exc:
+            failed = 1
+            print("error: %s: %s" % (path, exc), file=sys.stderr)
+
+if not checked:
+    print("error: no Python helpers found to check", file=sys.stderr)
+    raise SystemExit(1)
+if failed:
+    raise SystemExit(1)
+print("python-syntax: ok (%d files)" % checked)
+PY

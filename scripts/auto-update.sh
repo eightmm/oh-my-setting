@@ -146,6 +146,11 @@ receipt_transaction_update() {
   schema="$(auto_update_receipt_field "$receipt" schema 2>/dev/null || true)"
   ref="$(auto_update_receipt_field "$receipt" ref 2>/dev/null || true)"
   owner="$(auto_update_receipt_field "$receipt" source_root 2>/dev/null || true)"
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      command -v cygpath >/dev/null 2>&1 && owner="$(cygpath -u "$owner")"
+      ;;
+  esac
   [ "$schema" = 2 ] && [ -n "$ref" ] || return 75
   [ -n "$owner" ] && [ "$(cd "$owner" 2>/dev/null && pwd -P || true)" = "$(cd "$ROOT" && pwd -P)" ] || return 75
   current="$(git -C "$ROOT" rev-parse HEAD)"

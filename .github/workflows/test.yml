@@ -15,193 +15,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Independent jobs so a lint failure can never mask a smoke failure (or vice
-  # versa) — each reports red/green on its own, in parallel.
-  shellcheck:
+  # Split from smoke on purpose: check.sh stops at the first failing stage, so
+  # running lint in the same job would let one shellcheck nit hide every test
+  # result. Twenty seconds of runner time buys an independent red/green.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: shellcheck
-        run: shellcheck -x -S warning install.sh scripts/oms scripts/*.sh scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
-      - name: bash 3.2 compat (no bash-4isms)
-        run: bash scripts/check-bash32.sh
+      - name: lint
+        run: OMS_CHECK_TESTS=0 bash scripts/check.sh
 
-  smoke-shard:
+  # Keep one stable Ubuntu check. check.sh runs the focused suites once and
+  # parallelizes the large smoke suite inside this runner without four repeated
+  # checkouts, skill installs, and a fifth aggregation job.
+  smoke:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: repository gate
+        run: OMS_CHECK_LINT=0 bash scripts/check.sh
+
+  # Exercise the same install -> update -> uninstall contract on every
+  # supported host, and in both ownership modes. Windows selects copy mode on
+  # its own; the Ubuntu copy leg exists because copy mode would otherwise be
+  # provable only on the slowest runner in the matrix.
+  install-e2e:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        include:
+          - os: ubuntu-latest
+            link_mode: auto
+          - os: ubuntu-latest
+            link_mode: copy
+          - os: macos-latest
+            link_mode: auto
+          - os: windows-latest
+            link_mode: auto
+    runs-on: ${{ matrix.os }}
+    name: install-e2e (${{ matrix.os }}, ${{ matrix.link_mode }})
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
-      - name: install-skills validation
-        run: bash scripts/install-skills.sh
-      - name: harness enhancement regressions
-        if: matrix.shard == 1
-        run: bash tests/harness-enhancements-smoke.sh
-      - name: model capability regressions
-        if: matrix.shard == 1
-        run: |
-          bash tests/model-doctor-smoke.sh
-          bash tests/doctor-model-capability-smoke.sh
-      - name: bounded autonomy regressions
-        if: matrix.shard == 1
-        run: |
-          bash tests/autonomy-hook-smoke.sh
-          bash tests/autonomy-verification-smoke.sh
-          bash tests/autonomy-failure-smoke.sh
-          bash tests/autonomy-plan-run-smoke.sh
-      - name: transactional update regressions
-        if: matrix.shard == 1
-        run: bash tests/update-v04-smoke.sh
-      - name: source distribution regressions
-        if: matrix.shard == 1
-        run: bash tests/source-distribution-smoke.sh
-      - name: scripts smoke
-        run: bash tests/run-smoke-shard.sh --shard "${{ matrix.shard }}/4"
-
-  # Preserve the stable `smoke` check name for branch protection while the
-  # matrix exposes per-shard failures and durations.
-  smoke:
-    runs-on: ubuntu-latest
-    if: always()
-    needs: smoke-shard
-    steps:
-      - name: require every smoke shard
-        env:
-          SHARD_RESULT: ${{ needs.smoke-shard.result }}
-        run: test "$SHARD_RESULT" = success
-
-  # The installer was the one path CI never executed: shellcheck+bash -n pass
-  # while a broken install.sh ships. Run the real install -> update ->
-  # uninstall lifecycle against a throwaway HOME, cloning from the checkout.
-  install-e2e:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
-          # update.sh needs a pullable history, not a shallow single commit.
-          fetch-depth: 0
+          python-version: "3.13"
       - name: install / update / uninstall lifecycle
-        run: |
-          set -euo pipefail
-          workspace="$PWD"
-          # PR checkouts are a detached HEAD; the install clone and the later
-          # ff-only pull both need a real branch to track.
-          git -C "$workspace" checkout -B ci-install-e2e
-          export HOME="$(mktemp -d)"
-          export OH_MY_SETTING_REPO_URL="$workspace"
-          export OH_MY_SETTING_GENERATE_SLURM=0
-          export OH_MY_SETTING_STAR_PROMPT=0
-          export OH_MY_SETTING_REQUIRE_TOOLS=0
+        env:
+          OH_MY_SETTING_LINK_MODE: ${{ matrix.link_mode }}
+        run: bash tests/install-lifecycle-smoke.sh
 
-          echo "== install =="
-          bash install.sh
-          dest="$HOME/.oh-my-setting"
-          [ -d "$dest/.git" ] || { echo "install did not clone the checkout" >&2; exit 1; }
-          for pair in \
-            "$HOME/.codex/AGENTS.md:$dest/rules/global-AGENTS.md" \
-            "$HOME/.claude/CLAUDE.md:$dest/rules/global-AGENTS.md" \
-            "$HOME/.gemini/AGENTS.md:$dest/rules/global-AGENTS.md" \
-            "$HOME/.codex/skills/agent-harness:$dest/custom-skills/agent-harness" \
-            "$HOME/.claude/skills/agent-harness:$dest/custom-skills/agent-harness" \
-            "$HOME/.gemini/antigravity/skills/agent-harness:$dest/custom-skills/agent-harness"; do
-            path="${pair%%:*}"
-            target="${pair#*:}"
-            [ -L "$path" ] && [ "$(readlink "$path")" = "$target" ] ||
-              { echo "install link mismatch: $path -> $target" >&2; exit 1; }
-          done
-          grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" ||
-            { echo "install did not register the skill-router hook" >&2; exit 1; }
-          [ ! -e "$HOME/.bashrc" ] || { echo "minimal install modified .bashrc" >&2; exit 1; }
-          [ ! -e "$dest/local/machine.md" ] || { echo "minimal install generated machine snapshot" >&2; exit 1; }
-          [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
-            { echo "minimal install registered auto-update" >&2; exit 1; }
-          "$dest/scripts/oms" list > "$HOME/oms-tools.txt"
-          grep -Fq plan-run "$HOME/oms-tools.txt"
-          grep -Fq model-doctor "$HOME/oms-tools.txt"
-
-          echo "== update (new upstream commit) =="
-          git -C "$workspace" -c user.email=ci@example.com -c user.name=ci \
-            commit --allow-empty -m "ci: update fixture"
-          "$dest/scripts/update.sh" --no-tools
-          [ "$(git -C "$dest" rev-parse HEAD)" = "$(git -C "$workspace" rev-parse HEAD)" ] ||
-            { echo "update did not fast-forward to upstream HEAD" >&2; exit 1; }
-          [ "$(readlink "$HOME/.codex/AGENTS.md")" = "$dest/rules/global-AGENTS.md" ] || exit 1
-          [ "$(readlink "$HOME/.claude/CLAUDE.md")" = "$dest/rules/global-AGENTS.md" ] || exit 1
-          [ "$(readlink "$HOME/.gemini/AGENTS.md")" = "$dest/rules/global-AGENTS.md" ] || exit 1
-
-          echo "== uninstall =="
-          "$dest/scripts/uninstall.sh" --yes --purge
-          [ ! -e "$HOME/.codex/AGENTS.md" ] || { echo "uninstall left Codex AGENTS.md behind" >&2; exit 1; }
-          [ ! -e "$HOME/.claude/CLAUDE.md" ] || { echo "uninstall left CLAUDE.md behind" >&2; exit 1; }
-          [ ! -e "$HOME/.gemini/AGENTS.md" ] || { echo "uninstall left Gemini AGENTS.md behind" >&2; exit 1; }
-          ! grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" 2>/dev/null ||
-            { echo "uninstall left the skill-router hook registered" >&2; exit 1; }
-          [ ! -d "$dest" ] || { echo "uninstall --purge left the checkout behind" >&2; exit 1; }
-
+  # The one parser that rejects a here-document inside $( ) whose body holds an
+  # odd apostrophe, and the one userland where BSD sed/awk/date differ. Both
+  # classes are invisible to a Linux-only gate, and both have shipped breakage.
   portability-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - name: bash syntax
-        run: |
-          for f in install.sh scripts/oms scripts/*.sh scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh; do
-            bash -n "$f"
-          done
-      - name: detect project style fixture
-        run: |
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp"' EXIT
-          mkdir -p "$tmp/app"
-          printf 'import torch\n' > "$tmp/app/model.py"
-          [ "$(scripts/detect-project-style.sh "$tmp/app")" = "ml" ]
-      - name: apply template and project doctor
-        run: |
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp"' EXIT
-          scripts/apply-project-template.sh general "$tmp/project" >/dev/null
-          scripts/project-doctor.sh "$tmp/project"
-      - name: job digest log fixture
-        run: |
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp"' EXIT
-          printf 'step 1 loss: 0.5\nTraceback (most recent call last):\n  File "t.py", line 1\nRuntimeError: CUDA out of memory\n' > "$tmp/run.log"
-          scripts/job-digest.sh "$tmp/run.log" > "$tmp/digest.md"
-          grep -Fq 'CUDA out of memory' "$tmp/digest.md"
-          grep -Fq '## Last traceback' "$tmp/digest.md"
-      - name: run ledger list fixture
-        run: |
-          repo="$PWD"
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp"' EXIT
-          mkdir -p "$tmp/project/docs"
-          printf '{"ts":"2026-06-12T00:00:00Z","exit":0,"duration_s":1,"git_sha":"abc1234","dirty":0,"cmd":["echo","ok"]}\n' > "$tmp/project/docs/EXPERIMENTS.jsonl"
-          (cd "$tmp/project" && "$repo/scripts/run-ledger.sh" list 1) > "$tmp/list.txt"
-          grep -Fq 'echo ok' "$tmp/list.txt"
-      - name: run-tools fixture (BSD portability)
-        run: |
-          repo="$PWD"
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp"' EXIT
-          export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
-          export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@e
-          proj="$tmp/p"; mkdir -p "$proj"; cd "$proj"; git init -b main -q .
-          echo base > f; git add f; git commit -qm init
-          export OMS_RUNS_DIR="$proj/.oms/runs" OMS_RUN_INDEX="$proj/.oms/runs/spine.jsonl"
-          id="$("$repo/scripts/oms-run.sh" new)"; export OMS_RUN_ID="$id"
-          printf 'fake\n' > ckpt.pt
-          "$repo/scripts/run-capsule.sh" run --output ckpt.pt --no-ledger -- bash -c 'echo trained' >/dev/null
-          "$repo/scripts/run-capsule.sh" whence ckpt.pt >/dev/null
-          "$repo/scripts/oms-run.sh" show "$id" | grep -Fq run-capsule
-          printf 'a\nb\nc\n' > train.txt; printf 'd\na\n' > val.txt
-          OMS_MANIFEST_DIR="$proj/.oms/manifests" "$repo/scripts/data-manifest.sh" create --name ds \
-            --split train=train.txt --split val=val.txt >/dev/null
-          if OMS_MANIFEST_DIR="$proj/.oms/manifests" "$repo/scripts/data-manifest.sh" leakage --name ds >/dev/null 2>&1; then
-            echo "expected leakage to be detected" >&2; exit 1
-          fi
-          OMS_EXPERIMENT_BOARD="$proj/.oms/experiments.jsonl" "$repo/scripts/experiment-board.sh" \
-            claim --id e --hypothesis h >/dev/null
-          "$repo/scripts/oms-run.sh" validate --dir "$proj/.oms" >/dev/null
+      - name: stock Bash 3.2 parse
+        run: OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh
+      - name: BSD userland fixtures
+        run: bash tests/bsd-portability-smoke.sh

@@ -2,8 +2,10 @@
 set -euo pipefail
 
 # Core repository gate shared with CI, which additionally runs the real install
-# lifecycle and macOS portability fixtures. A missing tool is a HARD FAILURE,
-# never a silent skip. Wire this as a pre-push hook with scripts/install-hooks.sh.
+# lifecycle on Linux (symlink and copy ownership), macOS, and Windows Git Bash,
+# and parses every script with macOS's stock Bash 3.2. A missing tool is a HARD
+# FAILURE, never a silent skip. Wire this as a pre-push hook with
+# scripts/install-hooks.sh.
 #
 # A passing run reports one line per stage: this gate is read by an agent
 # between edits, and a green run has nothing to say beyond "ok". OMS_VERBOSE=1
@@ -12,10 +14,34 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Keep lock/capability caches out of the invoking user's HOME. Several focused
+# suites intentionally create temporary repos but use shared lifecycle helpers;
+# one check run should be hermetic without duplicating HOME setup in every file.
+# The lock dir gets its own variable rather than riding on XDG_CACHE_HOME: locks
+# must resolve identically from a desktop shell and from the auto-update timer,
+# so the production path cannot key off an ambient XDG variable (file-lock.sh).
+CHECK_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/oms-check-runtime.XXXXXX")"
+trap 'rm -rf "$CHECK_RUNTIME"' EXIT HUP INT TERM
+export XDG_CACHE_HOME="${OMS_CHECK_CACHE_HOME:-$CHECK_RUNTIME/cache}"
+export OMS_LOCK_DIR="${OMS_CHECK_LOCK_DIR:-$CHECK_RUNTIME/locks}"
+mkdir -p "$XDG_CACHE_HOME" "$OMS_LOCK_DIR"
+
+# CI splits the gate into two jobs so a lint failure cannot mask every test
+# result: stage() exits on the first failure, so one shellcheck nit would
+# otherwise suppress the entire smoke report. Both default to on, so a local
+# run and the pre-push hook still execute the whole gate.
+RUN_LINT="${OMS_CHECK_LINT:-1}"
+RUN_TESTS="${OMS_CHECK_TESTS:-1}"
+case "$RUN_LINT$RUN_TESTS" in
+  00) echo "error: OMS_CHECK_LINT and OMS_CHECK_TESTS cannot both be 0" >&2; exit 2 ;;
+  [01][01]) ;;
+  *) echo "error: OMS_CHECK_LINT and OMS_CHECK_TESTS must be 0 or 1" >&2; exit 2 ;;
+esac
+
 # Binary name is overridable so tests can exercise the missing-tool path
 # deterministically without PATH surgery.
 SHELLCHECK="${OMS_SHELLCHECK_BIN:-shellcheck}"
-if ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
+if [ "$RUN_LINT" = 1 ] && ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
   echo "FATAL: shellcheck is not installed — CI enforces it, so passing here" >&2
   echo "would be false confidence. Install one of:" >&2
   echo "  apt-get install shellcheck   |   brew install shellcheck" >&2
@@ -44,12 +70,22 @@ stage() {  # stage NAME COMMAND...
   echo "ok: $name"
 }
 
-# scripts/oms is named explicitly: the dispatcher has no .sh extension, so
-# the glob alone would silently skip it.
-stage shellcheck "$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh \
-  scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
+if [ "$RUN_LINT" = 1 ]; then
+  # scripts/oms is named explicitly: the dispatcher has no .sh extension, so
+  # the glob alone would silently skip it.
+  stage shellcheck "$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh \
+    scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
 
-stage bash-3.2 bash scripts/check-bash32.sh
+  stage bash-compat bash scripts/check-bash32.sh
+  stage python-syntax bash scripts/check-python.sh
+
+  stage skill-manifest bash scripts/install-skills.sh
+fi
+
+if [ "$RUN_TESTS" != 1 ]; then
+  echo "check: ok (lint only)"
+  exit 0
+fi
 
 stage autonomy-hook bash tests/autonomy-hook-smoke.sh
 stage autonomy-verification bash tests/autonomy-verification-smoke.sh
@@ -64,6 +100,8 @@ stage harness-enhancements bash tests/harness-enhancements-smoke.sh
 stage context-core bash tests/context-core-smoke.sh
 stage prompt-budget bash tests/prompt-budget-smoke.sh
 stage source-distribution bash tests/source-distribution-smoke.sh
+stage platform-portability bash tests/platform-portability-smoke.sh
+stage bsd-portability bash tests/bsd-portability-smoke.sh
 bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
 
 echo "check: ok"

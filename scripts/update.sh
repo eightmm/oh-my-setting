@@ -9,11 +9,13 @@ CODEX_PLUGIN_SET="${OH_MY_SETTING_CODEX_PLUGIN+x}"
 CLAUDE_HOOKS_SET="${OH_MY_SETTING_CLAUDE_HOOKS+x}"
 MACHINE_SNAPSHOT_SET="${OH_MY_SETTING_GENERATE_MACHINE+x}"
 SLURM_SNAPSHOT_SET="${OH_MY_SETTING_GENERATE_SLURM+x}"
+LINK_MODE_SET="${OH_MY_SETTING_LINK_MODE+x}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-}"
 CLAUDE_HOOKS="${OH_MY_SETTING_CLAUDE_HOOKS:-}"
 MACHINE_SNAPSHOT="${OH_MY_SETTING_GENERATE_MACHINE:-}"
 SLURM_SNAPSHOT="${OH_MY_SETTING_GENERATE_SLURM:-}"
+LINK_MODE="${OH_MY_SETTING_LINK_MODE:-}"
 INSTALL_REF_OVERRIDE=""
 CHECK_ONLY=0
 ROLLBACK=0
@@ -148,6 +150,9 @@ fi
 if [ -z "$AUTO_UPDATE_SET" ]; then
   AUTO_UPDATE="$PREVIOUS_AUTO_UPDATE"
 fi
+if [ -z "$LINK_MODE_SET" ]; then
+  LINK_MODE="$(oms_install_receipt_field link_mode "$RECEIPT" 2>/dev/null || printf auto)"
+fi
 
 case "$CLAUDE_HOOKS:$AUTO_UPDATE" in
   [01]:[01]) ;;
@@ -168,6 +173,7 @@ esac
 
 export OH_MY_SETTING_PROFILE="$INSTALL_PROFILE"
 export OH_MY_SETTING_REF="$INSTALL_REF"
+export OH_MY_SETTING_LINK_MODE="$LINK_MODE"
 export OH_MY_SETTING_CLAUDE_HOOKS="$CLAUDE_HOOKS"
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
@@ -184,6 +190,10 @@ export OH_MY_SETTING_INSTALL_TOOLS OH_MY_SETTING_GENERATE_MACHINE OH_MY_SETTING_
 case "$OH_MY_SETTING_GENERATE_MACHINE:$OH_MY_SETTING_GENERATE_SLURM" in
   0:0|0:1|0:auto|1:0|1:1|1:auto|auto:0|auto:1|auto:auto) ;;
   *) echo "error: snapshot modes must be 0, 1, or auto" >&2; exit 2 ;;
+esac
+case "$OH_MY_SETTING_LINK_MODE" in
+  auto|copy|symlink) ;;
+  *) echo "error: install link mode must be auto, copy, or symlink" >&2; exit 2 ;;
 esac
 
 current="$(git -C "$ROOT" rev-parse HEAD)"
@@ -303,6 +313,9 @@ for managed_path in \
   "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$ROOT/local/machine.md}" \
   "${OH_MY_SETTING_SLURM_REF:-$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"; do
   snapshot_managed_target "$managed_path"
+  # Copy-mode ownership is a sidecar transaction record. Snapshot it beside
+  # the payload so a failed update cannot restore old content under a new hash.
+  snapshot_managed_target "$(oms_install_marker_path "$managed_path")"
 done
 
 cleanup_update_tmp() { rm -f "$receipt_backup"; rm -rf "$managed_backup"; }

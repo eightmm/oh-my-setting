@@ -29,6 +29,25 @@ cannot have them, and run `gh auth login` once, since that step is interactive.
 After that, ask your coding agent to check, update, or customize the
 installation.
 
+Supported hosts:
+
+- Linux and WSL: Bash 3.2+, Git, and Python 3.9+.
+- macOS: the stock Bash 3.2, Git, and Python 3.9+.
+- Windows: Git Bash, Git, and Python 3.9+. Managed files are verified copies
+  because Git for Windows cannot assume symlink privileges. Install Node 20+
+  and the provider CLIs with their native Windows installers, or use
+  `curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash -s -- --no-tools`
+  for the harness-only install.
+
+Native PowerShell is not an execution surface; use Git Bash or WSL. The
+selected `symlink`/`copy` mode is persisted in the install receipt, so update,
+doctor, and uninstall use the same ownership contract. It can be overridden
+with `OH_MY_SETTING_LINK_MODE=auto|symlink|copy`.
+A `--no-tools` install does not edit shell startup files; add `~/.local/bin` to
+PATH yourself when needed. On Windows, if only `python` or `py -3` is available,
+the installer creates a conflict-safe managed `python3` shim and removes it
+during uninstall.
+
 ## Start
 
 Open your coding agent in any directory — empty, mid-project, or ongoing —

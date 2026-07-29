@@ -3,6 +3,147 @@
 
 # Canonical install ownership shared by link, doctor, status, and plugin setup.
 
+OMS_INSTALL_CONTRACT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+if [ -f "$OMS_INSTALL_CONTRACT_LIB_DIR/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$OMS_INSTALL_CONTRACT_LIB_DIR/platform.sh"
+else
+  # Transaction fixtures and upgrades from pre-portability commits can briefly
+  # have the contract without its new helper. Preserve the historical POSIX
+  # symlink behavior until the complete checkout is present.
+  oms_platform_is_windows() { return 1; }
+  # Unrecognized rather than owned: without the helper this cannot prove the
+  # shim is ours, and the safe answer to "may I delete this" is no.
+  oms_install_python_shim_owned() { return 1; }
+  oms_install_link_mode() {
+    case "${OH_MY_SETTING_LINK_MODE:-auto}" in
+      auto|symlink) printf 'symlink\n' ;;
+      copy)
+        echo "error: copy mode requires scripts/lib/platform.sh" >&2
+        return 1
+        ;;
+      *) echo "error: invalid install link mode" >&2; return 2 ;;
+    esac
+  }
+fi
+OMS_MANAGED_TARGET_HELPER="$OMS_INSTALL_CONTRACT_LIB_DIR/managed-target.py"
+
+oms_install_marker_path() {
+  local target="$1"
+
+  printf '%s/.%s.oh-my-setting-managed.json\n' \
+    "$(dirname "$target")" "$(basename "$target")"
+}
+
+oms_install_managed_target() {
+  if [ ! -f "$OMS_MANAGED_TARGET_HELPER" ]; then
+    if [ "${1:-}" = copy ]; then
+      echo "error: copy mode requires $OMS_MANAGED_TARGET_HELPER" >&2
+    fi
+    return 1
+  fi
+  python3 "$OMS_MANAGED_TARGET_HELPER" "$@"
+}
+
+oms_install_target_state() {
+  local source="$1"
+  local target="$2"
+  local state
+
+  # Nothing there is its own answer. Reporting "foreign" would be a claim about
+  # someone else's file, and answering it through the copy inspector spends a
+  # python3 process (~25ms) per probe — doctor and status probe every managed
+  # target on every run, most of which are absent on a partial install.
+  if [ ! -L "$target" ] && [ ! -e "$target" ]; then
+    printf 'missing\n'
+    return 0
+  fi
+
+  if [ -L "$target" ]; then
+    if [ "$(readlink "$target")" != "$source" ]; then
+      printf 'foreign\n'
+    elif [ -e "$target" ]; then
+      printf 'symlink-current\n'
+    else
+      printf 'symlink-owned\n'
+    fi
+  else
+    state="$(oms_install_managed_target inspect "$source" "$target")" || return
+    case "$state" in
+      current|owned|modified) printf 'copy-%s\n' "$state" ;;
+      foreign) printf 'foreign\n' ;;
+      *) echo "error: invalid managed target state: $state" >&2; return 1 ;;
+    esac
+  fi
+}
+
+oms_install_target_matches() {
+  case "$(oms_install_target_state "$1" "$2")" in
+    symlink-current|copy-current) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+oms_install_target_owned() {
+  case "$(oms_install_target_state "$1" "$2")" in
+    symlink-current|symlink-owned|copy-current|copy-owned) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+oms_install_target_owned_source_under() {
+  local source_root="$1"
+  local target="$2"
+  local source
+
+  if [ -L "$target" ]; then
+    case "$(readlink "$target")" in
+      "$source_root"/*) readlink "$target"; return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  source="$(oms_install_managed_target source-under "$source_root" "$target")" ||
+    return
+  if oms_platform_is_windows && command -v cygpath >/dev/null 2>&1; then
+    cygpath -u "$source"
+  else
+    printf '%s\n' "$source"
+  fi
+}
+
+oms_install_target_mode() {
+  case "$(oms_install_target_state "$1" "$2")" in
+    symlink-*) printf 'symlink\n' ;;
+    copy-current|copy-owned) printf 'copy\n' ;;
+    missing) printf 'missing\n' ;;
+    *) printf 'foreign\n' ;;
+  esac
+}
+
+oms_install_remove_marker() {
+  [ -f "$OMS_MANAGED_TARGET_HELPER" ] || return 0
+  oms_install_managed_target remove-marker "$1"
+}
+
+oms_install_remove_managed_target() {
+  local target="$1"
+
+  rm -rf "$target"
+  oms_install_remove_marker "$target"
+}
+
+oms_install_materialize() {
+  local source="$1"
+  local target="$2"
+  local mode
+
+  mode="$(oms_install_link_mode)" || return
+  case "$mode" in
+    symlink) oms_install_atomic_symlink "$source" "$target" ;;
+    copy) oms_install_managed_target copy "$source" "$target" ;;
+  esac
+}
+
 oms_install_receipt_path() {
   printf '%s\n' "${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
 }
@@ -13,9 +154,10 @@ oms_install_physical_root() {
 
 oms_install_receipt_owner() {
   local receipt="${1:-$(oms_install_receipt_path)}"
+  local owner
 
   [ -f "$receipt" ] || return 1
-  python3 - "$receipt" <<'PY'
+  owner="$(python3 - "$receipt" <<'PY'
 import json
 import os
 import sys
@@ -38,12 +180,15 @@ try:
     if schema == 2:
         components = row.get("components")
         component_modes = row.get("component_modes")
+        link_mode = row.get("link_mode")
         required_components = (
             "tools", "claude_hooks", "codex_plugin", "auto_update",
             "machine_snapshot", "slurm_snapshot",
         )
         if row.get("profile") not in ("minimal", "full", "custom"):
             raise ValueError("invalid install profile")
+        if link_mode is not None and link_mode not in ("copy", "symlink"):
+            raise ValueError("invalid install link mode")
         if not isinstance(row.get("ref"), str) or not row.get("ref"):
             raise ValueError("invalid install ref")
         if not isinstance(row.get("previous_commit"), str):
@@ -66,6 +211,12 @@ try:
 except Exception:
     sys.exit(1)
 PY
+)" || return
+  if oms_platform_is_windows && command -v cygpath >/dev/null 2>&1; then
+    cygpath -u "$owner"
+  else
+    printf '%s\n' "$owner"
+  fi
 }
 
 oms_install_receipt_field() {
@@ -194,6 +345,7 @@ oms_install_write_receipt() {
   local previous_commit="${OMS_INSTALL_PREVIOUS_COMMIT:-}"
   local profile="${OH_MY_SETTING_PROFILE:-custom}"
   local install_ref="${OH_MY_SETTING_REF:-}"
+  local link_mode
 
   root="$(oms_install_physical_root "$root")" || return 1
   case "$profile" in minimal|full|custom) ;; *) echo "error: invalid install profile: $profile" >&2; return 2 ;; esac
@@ -202,6 +354,7 @@ oms_install_write_receipt() {
     *) echo "error: invalid snapshot component mode" >&2; return 2 ;;
   esac
   [ -n "$install_ref" ] || install_ref="unknown"
+  link_mode="$(oms_install_link_mode)" || return
   case "$previous_commit" in
     "") ;;
     *[!0-9a-fA-F]*) echo "error: invalid previous install commit" >&2; return 2 ;;
@@ -219,7 +372,7 @@ oms_install_write_receipt() {
   mkdir -p "$(dirname "$receipt")"
   OMS_INSTALL_DIRTY="$dirty" \
     OMS_INSTALL_PROFILE="$profile" OMS_INSTALL_REF="$install_ref" \
-    OMS_INSTALL_PREVIOUS="$previous_commit" python3 - \
+    OMS_INSTALL_PREVIOUS="$previous_commit" OMS_INSTALL_LINK_MODE="$link_mode" python3 - \
     "$receipt" "$root" "$commit" "$channel" "$version" \
     "$plugin_version" "$plugin_hash" <<'PY'
 import datetime
@@ -237,6 +390,7 @@ row = {
     "dirty": os.environ.get("OMS_INSTALL_DIRTY") == "true",
     "version": version,
     "profile": os.environ.get("OMS_INSTALL_PROFILE", "custom"),
+    "link_mode": os.environ["OMS_INSTALL_LINK_MODE"],
     "ref": os.environ.get("OMS_INSTALL_REF", channel),
     "previous_commit": os.environ.get("OMS_INSTALL_PREVIOUS", ""),
     "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -305,6 +459,11 @@ oms_install_atomic_symlink() {
   temp="$parent/.${target##*/}.oms-link.$$.$RANDOM"
   rm -f "$temp"
   ln -s "$source" "$temp"
+  if [ ! -L "$temp" ]; then
+    rm -rf "$temp"
+    echo "error: this shell did not create a real symlink; use OH_MY_SETTING_LINK_MODE=copy" >&2
+    return 1
+  fi
   if ! python3 - "$temp" "$target" <<'PY'
 import os
 import sys

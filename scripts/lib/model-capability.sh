@@ -13,7 +13,7 @@
 # advertises, so a failed probe there must not be read as "no support".
 
 oms_capability_cache_dir() {
-  printf '%s\n' "${OMS_CAPABILITY_DIR:-$HOME/.cache/oh-my-setting/capabilities}"
+  printf '%s\n' "${OMS_CAPABILITY_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/capabilities}"
 }
 
 # Identity of the binary we probed, so a different one — a test stub, a fresh
