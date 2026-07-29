@@ -498,19 +498,19 @@ rc=0
 # Both providers accept low/medium/high, so a shared effort is routable; a
 # value only one of them takes is not.
 rc=0
-"$ROOT/scripts/peer-ask.sh" --providers codex,antigravity --reasoning-effort high \
-  --prompt 'shared effort' --dry-run >/dev/null 2>&1 || rc=$?
+"$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers codex,antigravity \
+  --reasoning-effort high --prompt 'shared effort' --dry-run >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "an effort every provider accepts should route"
 rc=0
-"$ROOT/scripts/peer-ask.sh" --providers codex,antigravity --reasoning-effort max \
-  --prompt 'reject mixed effort' --dry-run >/dev/null 2>&1 || rc=$?
+"$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers codex,antigravity \
+  --reasoning-effort max --prompt 'reject mixed effort' --dry-run >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "an effort a quorum member cannot take should be rejected"
 
 # Quorum members must be distinct after provider alias normalization.
 for duplicate in codex,codex antigravity,agy; do
   rc=0
-  "$ROOT/scripts/peer-ask.sh" --providers "$duplicate" --prompt 'duplicate quorum' \
-    --dry-run >/dev/null 2>&1 || rc=$?
+  "$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers "$duplicate" \
+    --prompt 'duplicate quorum' --dry-run >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "duplicate provider quorum should fail: $duplicate"
 done
 rc=0

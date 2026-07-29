@@ -107,6 +107,21 @@ if [ "$RUN_TESTS" != 1 ]; then
   exit 0
 fi
 
+# No suite may write into this checkout's own .oms state. A test that forgets to
+# pass --repo defaults to the working directory, and one that did quietly filed
+# three council artifacts here on every gate run for weeks. scripts-smoke has its
+# own leak check, but it only covers that file — the offender was in a different
+# suite, so the guard belongs at the gate.
+#
+# hooks/ is excluded: the live agent session running this gate appends its own
+# events there mid-run, which is the session's business, not a suite's.
+oms_state_fingerprint() {
+  [ -d "$ROOT/.oms" ] || { printf 'absent\n'; return 0; }
+  (cd "$ROOT/.oms" && find . -path ./hooks -prune -o -type f -print 2>/dev/null |
+    LC_ALL=C sort | cksum)
+}
+STATE_BEFORE="$(oms_state_fingerprint)"
+
 stage autonomy-hook bash tests/autonomy-hook-smoke.sh
 stage autonomy-verification bash tests/autonomy-verification-smoke.sh
 stage autonomy-failure bash tests/autonomy-failure-smoke.sh
@@ -123,5 +138,12 @@ stage source-distribution bash tests/source-distribution-smoke.sh
 stage platform-portability bash tests/platform-portability-smoke.sh
 stage bsd-portability bash tests/bsd-portability-smoke.sh
 bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
+
+if [ "$(oms_state_fingerprint)" != "$STATE_BEFORE" ]; then
+  echo "check: a suite wrote into this checkout's .oms state" >&2
+  echo "a test that omits --repo defaults to the working directory; give it a" >&2
+  echo "temporary repo instead. Inspect with: git status --short .oms" >&2
+  exit 1
+fi
 
 echo "check: ok"
