@@ -12,6 +12,10 @@ contracts.
 
 - Inspect first. Infer reversible details locally; ask when authority, interface,
   or risk changes.
+- When two defensible approaches exist and the choice gets encoded across files
+  or interfaces, name both and the one you are taking, then proceed. Stop only
+  when it is hard to reverse. If you cannot state the second option there is no
+  fork — build.
 - Preserve unrelated work and fail explicitly. Continue inspect -> act -> verify
   while safe in-scope work remains; bound retries.
 

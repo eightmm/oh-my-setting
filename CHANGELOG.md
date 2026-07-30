@@ -113,6 +113,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   file for whichever subcommand was asked for.
 
 ### Added
+- Global rules require naming a decision fork instead of quietly taking one:
+  when two defensible approaches exist and the choice gets encoded across files
+  or interfaces, say both and which one is being taken, then keep going. Stop
+  only when the choice is hard to reverse, and if a second option cannot be
+  stated there is no fork to surface. Nothing covered this case —
+  `spec-interview` gates user-facing ambiguity on new or broad work, and
+  `peer-ask` only fires when the user names it — so a bounded task with two
+  defensible approaches was decided silently. Surfacing costs a sentence;
+  deciding alone costs whichever round trip proves the choice wrong, which it
+  did this release when the gate split was built on environment variables. The
+  rules budget moved 320→380 words and 140→150 lines to fit it: the smallest
+  round bump with slack, since this file is standing context in every session on
+  all three CLIs.
 - CI runs the default install — tools enabled — which was the one path it never
   executed, and the path most users take. It is also what turned CI red for three
   commits: `install-tools` persists a PATH line into `.bashrc`, while the
