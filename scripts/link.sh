@@ -6,6 +6,28 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STAMP="$(date +%Y%m%d%H%M%S)"
+
+usage() {
+  cat <<'EOF'
+usage: link.sh
+
+Install this checkout's rules, skills, prompts, and the oms dispatcher for
+Codex, Claude Code, and Antigravity, and record this checkout as the canonical
+install owner. Takes no arguments; behaviour comes from the environment
+(OH_MY_SETTING_LINK_MODE, OH_MY_SETTING_PROFILE, the snapshot toggles).
+EOF
+}
+
+# Refuse anything on the command line. This used to ignore its arguments and run,
+# so `link.sh --help` silently relinked a live install and moved canonical
+# ownership to whichever checkout was asked for help — the receipt names an
+# owner, so that is a real transfer, not a no-op. Every caller passes nothing.
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: link.sh takes no arguments: $1" >&2; usage >&2; exit 2 ;;
+  esac
+fi
 # shellcheck source=scripts/lib/agent-install-state.sh
 . "$ROOT/scripts/lib/agent-install-state.sh"
 # shellcheck source=scripts/lib/file-lock.sh

@@ -4,6 +4,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Arguments are file paths, so a flag has to be answered before the loop treats
+# it as one: adding the file-argument form made `--help` try to parse a file
+# named --help and exit 127.
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+usage: check-bash32.sh [FILE ...]
+
+Parse every shipped script with a Bash parser and reject bash-4-only syntax,
+plus here-documents inside $( ) whose body holds an odd number of apostrophes
+(Bash 3.2 cannot parse the enclosing file). With no arguments the full shipped
+set is checked. OMS_BASH32_BIN selects the parser, e.g. /bin/bash on macOS.
+EOF
+    exit 0
+    ;;
+  -*)
+    echo "error: unknown option: $1" >&2
+    exit 2
+    ;;
+esac
+
 parser="${OMS_BASH32_BIN:-bash}"
 command -v "$parser" >/dev/null 2>&1 || {
   echo "error: Bash parser not found: $parser" >&2

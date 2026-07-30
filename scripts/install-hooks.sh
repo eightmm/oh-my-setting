@@ -5,6 +5,23 @@ set -euo pipefail
 # (scripts/check.sh) so red never reaches the remote. Re-runnable.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+usage: install-hooks.sh
+
+Install this repository's git hooks (pre-push runs scripts/check.sh).
+Takes no arguments.
+EOF
+}
+
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: install-hooks.sh takes no arguments: $1" >&2; usage >&2; exit 2 ;;
+  esac
+fi
+
 hooks_dir="$ROOT/.git/hooks"
 
 [ -d "$ROOT/.git" ] || { echo "error: not a git checkout: $ROOT" >&2; exit 2; }

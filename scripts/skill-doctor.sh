@@ -8,6 +8,24 @@ set -euo pipefail
 # fix — a short SKILL.md that points at references/ read only when relevant.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    -h|--help)
+      cat <<'EOF'
+usage: skill-doctor.sh
+
+Report duplicate or missing skill entries across the Codex, Claude Code, and
+Antigravity skill roots, and flag any SKILL.md over the load budget
+(OMS_SKILL_WORDS, default 900) or holding references/ nothing links to.
+Read-only; takes no arguments.
+EOF
+      exit 0
+      ;;
+    *) echo "error: skill-doctor.sh takes no arguments: $1" >&2; exit 2 ;;
+  esac
+fi
+
 # shellcheck source=scripts/lib/agent-install-state.sh
 . "$ROOT/scripts/lib/agent-install-state.sh"
 

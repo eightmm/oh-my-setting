@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Entrypoints that write install state answer `--help` and refuse anything else.
+  `link.sh` ignored its arguments and ran, so `link.sh --help` relinked a live
+  install and moved canonical ownership to whichever checkout was asked for help
+  — the receipt names an owner, so that is a transfer, not a no-op. It happened
+  during this release's own analysis: 78 stray backup symlinks across the three
+  agent skill roots, snapshot modes reset from `auto` to `0`, the rollback commit
+  lost, and `doctor: failed`. `install-hooks.sh` had the same shape.
+  `check-bash32.sh` exited 127 on `--help` because the file-argument form it
+  gained this release treated the flag as a path, and `check-python.sh` and
+  `skill-doctor.sh` had no usage at all. A regression pins the rule for all five.
 - The Windows install could not copy a single skill. Windows Python writes text
   streams with CRLF, so every value bash reads back from a helper arrives with a
   trailing carriage return — command substitution strips the newline and leaves

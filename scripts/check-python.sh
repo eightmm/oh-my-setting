@@ -12,6 +12,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    -h|--help) echo "usage: check-python.sh   (syntax-check the Python helpers)"; exit 0 ;;
+    *) echo "error: check-python.sh takes no arguments: $1" >&2; exit 2 ;;
+  esac
+fi
+
 python3 - scripts scripts/lib templates <<'PY'
 import pathlib
 import sys

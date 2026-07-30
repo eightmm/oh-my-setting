@@ -6080,6 +6080,37 @@ test_check_gate_hard_fails_without_shellcheck() {
     fail "check.sh missing-tool message absent: $out"
 }
 
+# link.sh ignored its arguments and ran. `link.sh --help` therefore relinked a
+# live install and moved canonical ownership to whichever checkout was asked for
+# help — the receipt names an owner, so that is a transfer, not a no-op. It
+# happened during this session's own analysis, cost 78 stray backup symlinks and
+# a doctor: failed, and nothing would have caught it. Every entrypoint that
+# writes install state must answer --help and refuse anything else.
+test_state_writing_entrypoints_reject_unknown_arguments() {
+  local script
+  local out
+
+  for script in link.sh install-hooks.sh check-python.sh skill-doctor.sh; do
+    out="$("$ROOT/scripts/$script" --help 2>&1)" ||
+      fail "$script --help should exit 0: $out"
+    printf '%s' "$out" | grep -Fq "usage: $script" ||
+      fail "$script --help should print its usage: $out"
+    if out="$("$ROOT/scripts/$script" --definitely-not-a-flag 2>&1)"; then
+      fail "$script must refuse an unknown argument instead of running: $out"
+    fi
+  done
+
+  # check-bash32 takes file arguments, so a flag must be answered before the
+  # loop treats it as a path — it exited 127 trying to parse a file named --help.
+  out="$("$ROOT/scripts/check-bash32.sh" --help 2>&1)" ||
+    fail "check-bash32.sh --help should exit 0: $out"
+  printf '%s' "$out" | grep -Fq 'usage: check-bash32.sh' ||
+    fail "check-bash32.sh should print usage: $out"
+  if out="$("$ROOT/scripts/check-bash32.sh" --definitely-not-a-flag 2>&1)"; then
+    fail "check-bash32.sh must refuse an unknown option: $out"
+  fi
+}
+
 test_bash32_gate_uses_the_requested_parser() {
   local parser="$TMP/bash32-parser"
   local log="$TMP/bash32-parser.log"
