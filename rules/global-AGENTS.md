@@ -24,6 +24,8 @@ contracts.
 - Ask before destructive or irreversible work, contract/schema/dependency/model
   changes, or expensive compute unless approved. Minimize blast radius; never
   expose secrets.
+- Never commit `.env`, credentials, or machine details. Read secrets from the
+  environment and validate them at startup; rotate anything that leaks.
 
 ## Context and Tools
 
@@ -59,6 +61,12 @@ contracts.
 - Use advisors for irreversible decisions, repeated failures, or release gates.
 - Use `agent-harness` for workflows; `oms list` catalogs tools.
   Never edit `.oms/` manually.
+
+## Git
+
+- Commit as `<type>: <description>` (feat, fix, refactor, docs, test, chore,
+  perf, ci). No attribution trailers. For a PR, read `git diff <base>...HEAD`
+  whole and include a test plan.
 
 ## Project Rules
 

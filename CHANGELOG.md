@@ -113,6 +113,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   file for whichever subcommand was asked for.
 
 ### Added
+- Global rules carry the commit convention and secret handling, so codex and
+  antigravity get what only Claude had. An audit of the always-loaded layers
+  found the three CLIs were not seeing the same rules at all — Claude read 1,549
+  words, codex and antigravity 365 — while `project-doctor` enforces exactly that
+  parity one level down, for projects. The two rules promoted here are the two
+  the audit could show had changed behaviour: every commit in this release
+  follows `<type>: <description>` with no attribution trailer, and the outbound
+  scrubber caught a real leak. Budget 380→500 words to fit them.
 - Global rules require naming a decision fork instead of quietly taking one:
   when two defensible approaches exist and the choice gets encoded across files
   or interfaces, say both and which one is being taken, then keep going. Stop

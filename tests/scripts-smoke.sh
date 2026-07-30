@@ -8469,15 +8469,16 @@ test_global_rules_stay_compact_and_route_workflows() {
 
   [ -f "$global_rules" ] || fail "dedicated global rules file should exist"
   # This file is loaded into every session on all three CLIs, so the budget is a
-  # standing context cost, not a style rule. Raised from 320/140 once, to fit the
-  # decision-fork rule below: the smallest round bump that leaves slack rather
-  # than an invitation to sprawl.
+  # standing context cost, not a style rule. Raised twice: for the decision-fork
+  # rule, then to 500 when git and secret handling were promoted here from a
+  # Claude-only layer that codex and antigravity never saw. Raise it to admit a
+  # rule that earned its place, never to make room for prose.
   line_count="$(wc -l < "$global_rules" | tr -d ' ')"
-  [ "$line_count" -le 150 ] ||
+  [ "$line_count" -le 160 ] ||
     fail "global rules should stay compact (got $line_count lines)"
   word_count="$(wc -w < "$global_rules" | tr -d ' ')"
-  [ "$word_count" -le 380 ] ||
-    fail "global rules should stay under 380 words (got $word_count)"
+  [ "$word_count" -le 500 ] ||
+    fail "global rules should stay under 500 words (got $word_count)"
   for heading in Communication Execution Safety 'Context and Tools' Specification Verification 'Multi-Agent Work' 'Project Rules'; do
     [ "$(grep -Fxc "## $heading" "$global_rules")" = "1" ] ||
       fail "global rules should contain exactly one $heading section"
@@ -8492,6 +8493,13 @@ test_global_rules_stay_compact_and_route_workflows() {
   # peer-ask only fires when the user names it.
   grep -Fq 'name both and the one you are taking' "$global_rules" ||
     fail "global rules should require naming a decision fork before taking it"
+  # Promoted from a Claude-only layer after an audit showed they were the two
+  # that demonstrably changed behaviour, while codex and antigravity — which the
+  # harness exists to keep in step — never received them.
+  grep -Fq 'No attribution trailers' "$global_rules" ||
+    fail "global rules should carry the commit convention for every CLI"
+  grep -Fq 'rotate anything that leaks' "$global_rules" ||
+    fail "global rules should carry secret handling for every CLI"
   grep -Fq '## Multi-Agent Work' "$global_rules" ||
     fail "global rules should retain a compact multi-agent policy"
   grep -Fq 'agent-harness' "$global_rules" ||
