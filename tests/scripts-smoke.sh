@@ -4317,6 +4317,41 @@ EOF
     fail "latest-run should list unparseable artifact row individually"
 }
 
+# validate reports rows whose artifact is gone and nothing could repair them:
+# the retention prune is a cap on row count, so any keep value either spares
+# stale rows or discards good ones, and editing .oms by hand is forbidden. Found
+# by deleting 360 test-fixture artifacts and watching doctor warn with no fix
+# available.
+test_artifact_index_prunes_stale_references() {
+  local project="$TMP/artifact-index-stale"
+  local index="$project/.oms/artifacts/index.jsonl"
+  local out
+
+  mkdir -p "$project/.oms/artifacts/ask"
+  printf 'kept\n' > "$project/.oms/artifacts/ask/present.md"
+  printf '{"ts":"2026-06-11T00:00:01Z","kind":"call","artifact":".oms/artifacts/ask/present.md"}\n' >> "$index"
+  printf '{"ts":"2026-06-11T00:00:02Z","kind":"call","artifact":".oms/artifacts/ask/gone.md"}\n' >> "$index"
+  printf '{"ts":"2026-06-11T00:00:03Z","kind":"call","exit":0}\n' >> "$index"
+
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale --dry-run)"
+  printf '%s' "$out" | grep -Fq 'would drop 1 stale row' ||
+    fail "dry-run should report the stale row: $out"
+  [ "$(wc -l < "$index")" = "3" ] || fail "dry-run must not change the index"
+
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
+  printf '%s' "$out" | grep -Fq 'dropped 1 stale row' || fail "stale sweep should report: $out"
+  [ "$(wc -l < "$index")" = "2" ] || fail "stale sweep should drop exactly the stale row"
+  grep -Fq 'present.md' "$index" || fail "a row whose artifact exists must survive"
+  grep -Fq 'gone.md' "$index" && fail "the stale row must be gone"
+  # A row that references no file at all is not stale.
+  grep -Fq '00:00:03Z' "$index" || fail "a row with no artifact reference must survive"
+
+  # Age is not the question, so --keep must not enter into it.
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
+  printf '%s' "$out" | grep -Fq 'no stale references' || fail "second sweep should be a no-op: $out"
+  [ "$(wc -l < "$index")" = "2" ] || fail "a clean index must be left alone"
+}
+
 test_artifact_index_prune() {
   local project="$TMP/artifact-index-prune"
   local index="$project/.oms/artifacts/index.jsonl"
@@ -9627,6 +9662,13 @@ PY
   assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
 
   cp -a "$ROOT" "$foreign"
+  # The foreign checkout needs this repo's scripts, not its live state. Copying
+  # .oms couples the fixture to whatever is being appended there at that instant
+  # — the running session's hook events, for one — and doctor audits .oms JSONL,
+  # so a torn copy fails it. Observed once as a 4-way-parallel-only failure of
+  # the repair assertion below that would not reproduce serially or on re-run;
+  # the mechanism fits, and the coupling is wrong either way.
+  rm -rf "$foreign/.oms"
   cat > "$foreign/scripts/skill-doctor.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "foreign skill doctor must not run" >&2

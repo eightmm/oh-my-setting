@@ -113,6 +113,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   file for whichever subcommand was asked for.
 
 ### Added
+- `artifact-index prune --stale` drops index rows whose artifact or patch no
+  longer exists. `validate` has always reported those, and nothing could repair
+  them: the retention prune caps row count, so any keep value either spares
+  stale rows or discards good ones, and the global rules forbid editing `.oms`
+  by hand. Found by cleaning up 360 leaked test artifacts and watching doctor
+  warn about 360 references with no tool to answer it. Independent of `--keep`,
+  because a missing file is not an age question, and `--dry-run` first.
 - Global rules carry the commit convention and secret handling, so codex and
   antigravity get what only Claude had. An audit of the always-loaded layers
   found the three CLIs were not seeing the same rules at all — Claude read 1,549

@@ -13,6 +13,7 @@ AS_JSON=0
 LIMIT=""
 LIMIT_SET=0
 PRUNE_FILES=0
+PRUNE_STALE=0
 DRY_RUN=0
 TARGET_EVENT=""
 REASON=""
@@ -36,7 +37,10 @@ Commands:
   migrate        Idempotently upgrade legacy rows and recover unique basenames.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
                  append-only, so prune it when it grows. Add --files to delete
-                 unreferenced regular files under REPO/.oms/artifacts.
+                 unreferenced regular files under REPO/.oms/artifacts, or
+                 --stale to drop rows whose artifact/patch no longer exists —
+                 what `validate` reports and nothing else could repair, since
+                 editing .oms by hand is not allowed.
 
 Options:
   --repo PATH    Repo/directory. Default: PWD.
@@ -44,6 +48,8 @@ Options:
   --event-id ID  Failed outcome event to resolve.
   --reason TEXT  Optional bounded, non-sensitive resolution note.
   --files        With prune, delete orphaned artifact/patch files.
+  --stale        With prune, drop index rows referencing deleted files. Age is
+                 not the question here, so this ignores --keep.
   --dry-run      With prune, print row/file changes without changing them.
   -h, --help     Show help.
 EOF
@@ -78,6 +84,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --files)
       PRUNE_FILES=1
+      shift
+      ;;
+    --stale)
+      PRUNE_STALE=1
       shift
       ;;
     --dry-run)
@@ -126,6 +136,9 @@ case "$ACTION" in
 esac
 if [ "$PRUNE_FILES" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--files is only valid with prune"
+fi
+if [ "$PRUNE_STALE" -eq 1 ] && [ "$ACTION" != "prune" ]; then
+  fail "--stale is only valid with prune"
 fi
 if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--dry-run is only valid with prune"
@@ -455,6 +468,81 @@ if [ "$ACTION" = "prune" ]; then
   local tmp
 
   before="$(wc -l < "$INDEX_FILE" | tr -d ' ')"
+
+  # Stale sweep: drop rows whose referenced artifact or patch is gone. This is
+  # what `validate` reports and what nothing could repair — the retention prune
+  # is a cap on row count, so any keep value either spares stale rows or
+  # discards good ones, and the global rules forbid editing .oms by hand.
+  # Deliberately independent of --keep: a missing file is not an age question.
+  if [ "$PRUNE_STALE" -eq 1 ]; then
+    tmp="$(mktemp)" || fail "mktemp failed"
+    OMS_STALE_DRY="$DRY_RUN" python3 - "$REPO" "$INDEX_FILE" "$tmp" <<'EOF' || fail "stale sweep failed"
+import json, os, sys
+
+repo, index, out = sys.argv[1:4]
+kept = []
+
+def present(row):
+    for key in ("artifact", "patch", "source"):
+        value = row.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        if os.path.isabs(value) or value == ".." or value.startswith("../"):
+            continue  # unsafe paths are validate's business, not this sweep's
+        if not os.path.exists(os.path.realpath(os.path.join(repo, value))):
+            return False
+    return True
+
+with open(index, encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            kept.append(line)   # unparseable rows are validate's business
+            continue
+        if isinstance(row, dict) and not present(row):
+            continue
+        kept.append(line)
+
+with open(out, "w", encoding="utf-8") as handle:
+    for line in kept:
+        handle.write(line if line.endswith("\n") else line + "\n")
+EOF
+    dropped="$(python3 -c "
+import sys
+print(open(sys.argv[1]).read().count(chr(10)))" "$tmp")"
+    stale="$((before - dropped))"
+    if [ "$stale" -eq 0 ]; then
+      rm -f "$tmp"
+      echo "artifact-index: $before rows, no stale references"
+      exit 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+      rm -f "$tmp"
+      echo "artifact-index: would drop $stale stale row(s), $before -> $dropped"
+      exit 0
+    fi
+    python3 - "$INDEX_FILE" "$tmp" <<'EOF' || fail "atomic index replace failed"
+import os, shutil, sys, tempfile
+index, kept = sys.argv[1], sys.argv[2]
+real = os.path.realpath(index)
+fd, tmp2 = tempfile.mkstemp(dir=os.path.dirname(real))
+try:
+    with os.fdopen(fd, "wb") as out, open(kept, "rb") as src:
+        shutil.copyfileobj(src, out)
+    shutil.copymode(real, tmp2)
+    os.replace(tmp2, real)
+except Exception:
+    os.unlink(tmp2)
+    raise
+EOF
+    rm -f "$tmp"
+    echo "artifact-index: dropped $stale stale row(s), $before -> $dropped"
+    exit 0
+  fi
+
   if [ "$before" -le "$LIMIT" ] && [ "$PRUNE_FILES" -eq 0 ]; then
     echo "artifact-index: $before rows, within keep=$LIMIT; nothing pruned"
     exit 0
