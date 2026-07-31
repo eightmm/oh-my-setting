@@ -9896,6 +9896,35 @@ test_turn_guard_allows_verified_task() {
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_verified"'
 }
 
+test_claude_hud_renders_usage_safely() {
+  local hud="$ROOT/scripts/claude-statusline.py"
+  local out
+
+  out="$(printf '%s' '{"model":{"display_name":"Opus 4.1"},"context_window":{"used_percentage":62.5,"total_input_tokens":124500,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":23.5},"seven_day":{"used_percentage":41.2}},"cost":{"total_cost_usd":0.1234},"effort":{"level":"high"},"thinking":{"enabled":true}}' |
+    NO_COLOR=1 python3 "$hud")"
+  [ "$out" = 'Opus 4.1 | ctx [######----] 63% 125k/200k | 5h 24% | 7d 41% | $0.12 | high+think' ] ||
+    fail "Claude HUD full rendering mismatch: $out"
+
+  out="$(printf '%s' '{"model":{},"context_window":{"used_percentage":null,"current_usage":null}}' |
+    NO_COLOR=1 python3 "$hud")"
+  [ "$out" = 'Claude | ctx --' ] ||
+    fail "Claude HUD should handle fields missing before the first response: $out"
+
+  out="$(printf '{broken' | NO_COLOR=1 python3 "$hud")"
+  [ -z "$out" ] || fail "Claude HUD should fail quiet on invalid JSON: $out"
+
+  out="$(printf '%s' '{"model":{"display_name":"Bad\u001b[31m\nName"},"context_window":{"used_percentage":101,"total_input_tokens":999999999999,"context_window_size":200000}}' |
+    NO_COLOR=1 python3 "$hud")"
+  python3 - "$out" <<'PY' || fail "Claude HUD emitted unsafe or unbounded terminal text"
+import sys
+
+row = sys.argv[1]
+assert "\x1b" not in row and "\n" not in row and "\r" not in row
+assert "100%" in row
+assert len(row) <= 160
+PY
+}
+
 test_install_claude_hooks_merge_and_remove() {
   local d="$TMP/claude-hooks"
   local s="$d/settings.json"
@@ -9919,6 +9948,9 @@ stop_cmds = [h["command"] for e in stop for h in e["hooks"]]
 assert sum("turn-guard.sh" in c for c in stop_cmds) == 1
 assert any("user-router" in c for c in cmds)
 assert d["model"] == "x"
+status = d["statusLine"]
+assert status["type"] == "command"
+assert "claude-statusline.py" in status["command"]
 PY
   [ -f "$s.oms-bak" ] || fail "installer should back up settings before the first change"
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
@@ -9928,6 +9960,28 @@ d = json.load(open(sys.argv[1]))
 ups = d["hooks"]["UserPromptSubmit"]
 assert len(ups) == 1 and "user-router" in ups[0]["hooks"][0]["command"]
 assert "Stop" not in d["hooks"]
+assert "statusLine" not in d
+PY
+  # A status line the user already owns must survive install and remove.
+  python3 - "$s" <<'PY'
+import json, sys
+path = sys.argv[1]
+d = json.load(open(path))
+d["statusLine"] = {
+    "type": "command",
+    "command": "python3 /tmp/claude-statusline.py --custom",
+}
+json.dump(d, open(path, "w"))
+PY
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
+  python3 - "$s" <<'PY' || fail "installer should preserve a user-owned status line"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["statusLine"] == {
+    "type": "command",
+    "command": "python3 /tmp/claude-statusline.py --custom",
+}
 PY
   # Broken settings must refuse loudly, not clobber.
   printf '{broken' > "$s"

@@ -132,6 +132,8 @@ backup="$(find "$HOME/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' -print -qui
   fail "install did not preserve the existing Codex rules"
 grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" ||
   fail "install did not register the Claude hook"
+grep -Fq "claude-statusline.py" "$HOME/.claude/settings.json" ||
+  fail "install did not register the Claude HUD"
 [ ! -e "$dest/local/machine.md" ] ||
   fail "minimal install generated a machine snapshot"
 [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
@@ -190,6 +192,9 @@ oms_install_target_matches "$dest/rules/global-AGENTS.md" "$HOME/.codex/AGENTS.m
 [ ! -e "$HOME/.gemini/AGENTS.md" ] || fail "uninstall left Gemini rules"
 if grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" 2>/dev/null; then
   fail "uninstall left the Claude hook"
+fi
+if grep -Fq "claude-statusline.py" "$HOME/.claude/settings.json" 2>/dev/null; then
+  fail "uninstall left the Claude HUD"
 fi
 [ "$shim_created" = 0 ] || [ ! -e "$HOME/.local/bin/python3" ] ||
   fail "uninstall left its Python shim"

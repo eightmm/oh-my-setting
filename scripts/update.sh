@@ -38,7 +38,7 @@ Options:
   --no-doctor   Skip the post-update doctor (disables its rollback gate).
 
 Environment overrides persisted receipt components when explicitly set:
-  OH_MY_SETTING_CLAUDE_HOOKS=0|1
+  OH_MY_SETTING_CLAUDE_HOOKS=0|1  Claude Code hooks and usage HUD
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto
   OH_MY_SETTING_AUTO_UPDATE=0|1
   OH_MY_SETTING_GENERATE_MACHINE=0|1|auto

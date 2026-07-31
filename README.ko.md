@@ -23,6 +23,12 @@ peer는 기억해야 할 플래그가 아니라 설치의 일부다. root 권한
 수 없는 머신에서는 `--no-tools`를 붙이고, `gh auth login`은 대화형이라 한 번
 직접 실행한다.
 
+Claude Code에는 간결한 status-line HUD도 기본으로 설치된다. 모델, 실시간 context
+bar와 token, Claude가 제공할 때의 5시간/7일 plan 사용량, 예상 session 비용,
+reasoning effort를 한 줄로 보여준다. 로컬 렌더러라 API 호출이나 token 소비는
+없다. 사용자가 이미 만든 `statusLine`은 건드리지 않고, update/uninstall도
+oh-my-setting이 소유한 command만 갱신하거나 제거한다.
+
 선택적인 Work Journal Notion mirror는 설치할 때
 `--notion-data-source ID`를 주면 된다. 프로세스 환경에
 `OMS_WORK_JOURNAL_NOTION_TOKEN`이 있으면 연결과 schema까지 검증하고, 디스크에는

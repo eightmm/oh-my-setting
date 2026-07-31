@@ -24,6 +24,12 @@ installed peer is not a council, so the peers are part of the install rather
 than a flag to remember. Nothing needs root. Add `--no-tools` on a machine that
 cannot have them, and run `gh auth login` once, since that step is interactive.
 
+Claude Code also gets a compact status-line HUD by default: model, live context
+bar and tokens, five-hour/seven-day plan usage when Claude supplies it,
+estimated session cost, and reasoning effort. It is a local renderer and makes
+no API call. An existing user `statusLine` is left untouched; update refreshes
+only an oh-my-setting-owned command and uninstall removes only that command.
+
 For an optional Work Journal Notion mirror, give the installer a data source
 with `--notion-data-source ID`. If
 `OMS_WORK_JOURNAL_NOTION_TOKEN` is already supplied by the process environment,

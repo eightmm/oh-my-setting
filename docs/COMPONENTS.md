@@ -361,13 +361,20 @@ project type and to what the repo already has — missing or half-applied projec
 rules outrank task/plan advice. Reports missing rules, never writes them: the
 template needs a confirmed project type (`--no-private` skips the hiding)
 
-**Skill router + turn guard (`skill-router.sh`, `turn-guard.sh`)** —
+**Skill router + turn guard + Claude HUD (`skill-router.sh`, `turn-guard.sh`,
+`claude-statusline.py`)** —
 UserPromptSubmit matches prompts against skill triggers and records route state
 only for guarded work. Active-task recording is opt-in with `OMS_AUTO_TASK=1`.
 Provider subprocesses stay silent, do not route/guard/write tasks, and emit
 only a hash-only `ignored_child` event in the primary repo. Stop blocks at most
 once when guarded work omits verification. Disable with
-`OMS_SKILL_ROUTER_OFF=1` or `OMS_TURN_GUARD_OFF=1`
+`OMS_SKILL_ROUTER_OFF=1` or `OMS_TURN_GUARD_OFF=1`. Claude Code's official
+`statusLine` input feeds a local, dependency-free HUD with model, context,
+subscriber rate-limit windows when present, estimated cost, and effort. The
+renderer ignores transcript/path fields, bounds terminal output, strips control
+characters, and makes no API call. The additive settings merge preserves a
+user-owned status line; update and uninstall recognize only the managed command
+
 
 **Shared memory (`agent-memory.sh`)** — Compact cross-agent facts in
 `.oms/memory/`; append-only `shared.md`/`pins.md` remain the reversible source

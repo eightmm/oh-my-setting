@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Register (or remove) oh-my-setting's Claude Code hooks in the user's
+# Register (or remove) oh-my-setting's Claude Code hooks and HUD in the user's
 # ~/.claude/settings.json. Additive merge: existing settings and hooks are
 # preserved, our entries are identified by the "oh-my-setting" script names,
 # install is idempotent (re-running updates command paths in place), and a
@@ -28,9 +28,10 @@ usage() {
   cat <<'EOF'
 Usage: install-claude-hooks.sh [--remove] [--settings PATH]
 
-Register oh-my-setting's UserPromptSubmit skill-router hook and Stop
-turn-guard hook in Claude Code's settings.json (additive; existing hooks
-preserved; idempotent). --remove deletes only oh-my-setting hook entries.
+Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
+hook, and usage HUD in Claude Code's settings.json (additive; existing hooks
+and a user-owned statusLine are preserved; idempotent). --remove deletes only
+oh-my-setting entries.
 
 Options:
   --remove          Remove the oh-my-setting hook entries instead.
@@ -54,6 +55,7 @@ done
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$ROOT/scripts/skill-router.sh" ] || fail "skill-router.sh not found under $ROOT"
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
+[ -f "$ROOT/scripts/claude-statusline.py" ] || fail "claude-statusline.py not found under $ROOT"
 
 if [ "$REMOVE" != "1" ] && [ -f "$(oms_install_receipt_path)" ]; then
   owner="$(oms_install_receipt_owner "$(oms_install_receipt_path)" 2>/dev/null)" ||
@@ -70,13 +72,15 @@ mkdir -p "$(dirname "$SETTINGS")"
 
 OMS_CH_SETTINGS="$SETTINGS" OMS_CH_REMOVE="$REMOVE" \
   OMS_CH_SKILL_CMD="bash $ROOT/scripts/skill-router.sh" \
-  OMS_CH_GUARD_CMD="bash $ROOT/scripts/turn-guard.sh" python3 <<'PY'
-import json, os, sys, tempfile
+  OMS_CH_GUARD_CMD="bash $ROOT/scripts/turn-guard.sh" \
+  OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" python3 <<'PY'
+import json, os, shlex, sys, tempfile
 
 path = os.environ["OMS_CH_SETTINGS"]
 remove = os.environ["OMS_CH_REMOVE"] == "1"
 skill_cmd = os.environ["OMS_CH_SKILL_CMD"]
 guard_cmd = os.environ["OMS_CH_GUARD_CMD"]
+status_cmd = "python3 %s" % shlex.quote(os.environ["OMS_CH_STATUS_PATH"])
 MARKS = ("skill-router.sh", "turn-guard.sh")
 
 settings = {}
@@ -116,6 +120,12 @@ def upsert(event, mark, cmd):
     else:
         entries.append({"hooks": [{"type": "command", "command": cmd}]})
 
+def status_ours(value):
+    return (
+        isinstance(value, dict)
+        and value.get("command") == status_cmd
+    )
+
 before = json.dumps(settings, sort_keys=True)
 if remove:
     for event in list(hooks):
@@ -126,14 +136,21 @@ if remove:
                 del hooks[event]
     if not hooks:
         del settings["hooks"]
+    if status_ours(settings.get("statusLine")):
+        del settings["statusLine"]
     action = "removed"
 else:
     upsert("UserPromptSubmit", "skill-router.sh", skill_cmd)
     upsert("Stop", "turn-guard.sh", guard_cmd)
+    if "statusLine" not in settings:
+        settings["statusLine"] = {"type": "command", "command": status_cmd}
+    elif status_ours(settings.get("statusLine")):
+        settings["statusLine"]["type"] = "command"
+        settings["statusLine"]["command"] = status_cmd
     action = "installed"
 
 if json.dumps(settings, sort_keys=True) == before:
-    print("claude-hooks: already %s (%s)" % ("absent" if remove else "current", path))
+    print("claude-settings: already %s (%s)" % ("absent" if remove else "current", path))
     sys.exit(0)
 
 # One-time backup before the first change we make to this file.
@@ -151,5 +168,5 @@ try:
 except Exception:
     os.unlink(tmp)
     raise
-print("claude-hooks: %s oh-my-setting hooks (%s)" % (action, path))
+print("claude-settings: %s oh-my-setting hooks/HUD (%s)" % (action, path))
 PY

@@ -42,7 +42,7 @@ Environment:
   OH_MY_SETTING_STAR_PROMPT=1      Enable the GitHub star prompt.
   OH_MY_SETTING_REF=edge|REF       Track edge or pin an exact Git ref.
   OH_MY_SETTING_PROFILE=NAME       Receipt profile: minimal, full, or custom.
-  OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hook registration.
+  OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hooks and usage HUD.
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto  Skip, require, or auto-detect Codex plugin setup.
   OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
@@ -326,13 +326,13 @@ if [ -n "$NOTION_DATA_SOURCE_ID" ]; then
     --data-source-id "$NOTION_DATA_SOURCE_ID"
 fi
 
-# Claude Code skill-router hook (deterministic skill suggestions at prompt
-# time). Additive settings.json merge; Claude-only, non-fatal on failure.
+# Claude Code skill-router/turn-guard hooks and usage HUD. Additive
+# settings.json merge; Claude-only, non-fatal on failure.
 if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ]; then
   "$DEST/scripts/install-claude-hooks.sh" ||
-    echo "warning: claude hook registration failed (install continues)" >&2
+    echo "warning: claude settings registration failed (install continues)" >&2
 else
-  echo "skipping claude hook registration: OH_MY_SETTING_CLAUDE_HOOKS=0"
+  echo "skipping claude hooks/HUD: OH_MY_SETTING_CLAUDE_HOOKS=0"
 fi
 
 if [ "$CODEX_PLUGIN" = "1" ]; then

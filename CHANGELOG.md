@@ -6,6 +6,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- Claude Code installs a compact local status-line HUD showing the active model,
+  live context occupancy and token capacity, available five-hour/seven-day
+  subscription usage, estimated session cost, and reasoning effort. It uses
+  Claude Code's supplied JSON without API calls, handles pre-response nulls,
+  strips terminal controls, preserves an existing user `statusLine`, updates
+  only its own command path, and removes only its own entry on uninstall.
+
 ### Fixed
 - Peer-review mechanical verification now runs without the review provider's
   model-class, operation, or reasoning environment. A deep review gate could

@@ -78,7 +78,7 @@ oms_install_require_owner "$ROOT" "uninstall" || exit 1
 
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/uninstall-autoupdate.sh"
 if [ "$DRY_RUN" = "1" ]; then
-  echo "would remove claude oh-my-setting hooks from ~/.claude/settings.json"
+  echo "would remove claude oh-my-setting hooks/HUD from ~/.claude/settings.json"
   echo "would remove codex oh-my-setting plugin"
 else
   "$ROOT/scripts/install-claude-hooks.sh" --remove || true
