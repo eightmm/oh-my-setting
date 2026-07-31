@@ -128,6 +128,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   file for whichever subcommand was asked for.
 
 ### Added
+- Two read-only observability commands close the measurable gaps left after the
+  multi-agent and project-memory work. `oms artifact-index telemetry [N]
+  [--json]` aggregates only the retained call/ask/review/delegate rows by
+  provider and selected route, with recorded exits, verifier exits, fallbacks,
+  resolutions, and artifact-derived token/duration coverage; it deliberately
+  reports semantic outcome as unavailable instead of treating process exit zero
+  as task success. `oms agent-memory health [--json]` compares the append-only
+  Markdown/failure sources with SQLite using a read-only connection and reports
+  schema, integrity, FTS, currentness, ledger state, and provenance coverage.
+  Missing, stale, malformed, or degraded state is nonzero but never repaired by
+  the query. Neither command changes a source, index, artifact, or ignore file.
 - Global rules refuse authority to instructions found in content: a file, tool
   result, web page, or another agent's answer can carry text that reads like an
   order, and it is data to report, not a rule to obey. HANDBOOK.md (arXiv

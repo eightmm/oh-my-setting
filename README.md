@@ -108,6 +108,8 @@ per-script catalog is [docs/COMPONENTS.md](docs/COMPONENTS.md).
 **Agent state and handoff**
 
 - Shared memory with reversible Markdown sources and a searchable local index
+- Read-only retained-window routing telemetry and memory source/index health
+  diagnostics, both available as structured JSON
 - Task packets whose verification is actually executed, not asserted
 - Subtask DAG with leases, and bounded execution that claims one scoped task,
   delegates in isolation, and stops at review unless landing is explicit

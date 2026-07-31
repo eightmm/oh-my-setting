@@ -559,6 +559,317 @@ def has_fts(db: sqlite3.Connection) -> bool:
     )
 
 
+def failure_health(text: str) -> dict[str, int]:
+    valid_rows = 0
+    invalid_rows = 0
+    states: dict[str, bool] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            invalid_rows += 1
+            continue
+        if not isinstance(row, dict):
+            invalid_rows += 1
+            continue
+        valid_rows += 1
+        fingerprint = str(row.get("fingerprint") or "")
+        event = str(row.get("event") or "")
+        if fingerprint and event == "resolved":
+            states[fingerprint] = True
+        elif fingerprint and event == "fail":
+            states[fingerprint] = False
+    return {
+        "valid_rows": valid_rows,
+        "invalid_rows": invalid_rows,
+        "open_fingerprints": sum(not resolved for resolved in states.values()),
+        "resolved_fingerprints": sum(resolved for resolved in states.values()),
+    }
+
+
+def connect_readonly(path: str) -> sqlite3.Connection:
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    db = sqlite3.connect(uri, uri=True, timeout=10)
+    db.execute("pragma busy_timeout = 10000")
+    db.execute("pragma query_only = on")
+    return db
+
+
+def default_index_health(present: bool) -> dict:
+    return {
+        "present": present,
+        "readable": False,
+        "current": False,
+        "schema_version": None,
+        "expected_schema": SCHEMA_VERSION,
+        "integrity": "not-run",
+        "fts": False,
+        "fts_entries": None,
+        "fts_current": None,
+        "entries": 0,
+        "by_source": {"shared": 0, "pins": 0, "failures": 0},
+        "provenance": {
+            "total": 0,
+            "modern": 0,
+            "legacy": 0,
+            "task_id": 0,
+            "session_hash": 0,
+            "git_sha": 0,
+            "git_dirty": 0,
+            "git_state": 0,
+        },
+        "problems": [],
+    }
+
+
+def memory_health(
+    db_path: str, shared: str, pins: str, failures: str
+) -> tuple[dict, int]:
+    source_specs = (
+        ("shared", shared, parse_shared),
+        ("pins", pins, parse_pins),
+        ("failures", failures, parse_failures),
+    )
+    snapshots: dict[str, Snapshot] = {}
+    source_report: dict[str, dict[str, object]] = {}
+    for source, path, parser in source_specs:
+        snapshot = stable_snapshot(path)
+        snapshots[source] = snapshot
+        source_report[source] = {
+            "present": snapshot.size >= 0,
+            "bytes": max(snapshot.size, 0),
+            "entries": len(parser(snapshot.text)),
+        }
+
+    failure_report = failure_health(snapshots["failures"].text)
+    index_present = os.path.exists(db_path)
+    index_report = default_index_health(index_present)
+    total_source_entries = sum(
+        int(report["entries"]) for report in source_report.values()
+    )
+    report = {
+        "schema": 1,
+        "action": "health",
+        "assessment": "index-health-not-memory-quality",
+        "status": "empty",
+        "sources": source_report,
+        "failures": failure_report,
+        "index": index_report,
+        "problems": [],
+    }
+    if failure_report["invalid_rows"]:
+        report["problems"].append("failure-ledger-invalid")
+    if not index_present:
+        if report["problems"]:
+            report["status"] = "degraded"
+            return report, 1
+        if total_source_entries or failure_report["valid_rows"]:
+            report["status"] = "missing"
+            index_report["problems"].append("index-missing")
+            return report, 1
+        return report, 0
+
+    db: Optional[sqlite3.Connection] = None
+    try:
+        db = connect_readonly(db_path)
+        index_report["readable"] = True
+        index_report["integrity"] = str(
+            db.execute("pragma integrity_check").fetchone()[0]
+        )
+        version = int(db.execute("pragma user_version").fetchone()[0])
+        index_report["schema_version"] = version
+        tables = {
+            str(row[0])
+            for row in db.execute(
+                "select name from sqlite_master where type in ('table', 'view')"
+            )
+        }
+        required_tables = {"memory_sources", "memory_entries"}
+        missing_tables = sorted(required_tables - tables)
+        if missing_tables:
+            index_report["problems"].append("required-tables-missing")
+
+        required_columns = {
+            "event_id",
+            "source",
+            "ordinal",
+            "occurred_at",
+            "agent",
+            "kind",
+            "task_id",
+            "session_hash",
+            "git_sha",
+            "git_dirty",
+            "git_state",
+            "body",
+            "rendered",
+        }
+        columns: set[str] = set()
+        if "memory_entries" in tables:
+            columns = {
+                str(row[1]) for row in db.execute("pragma table_info(memory_entries)")
+            }
+            if not required_columns.issubset(columns):
+                index_report["problems"].append("required-columns-missing")
+
+        source_rows: dict[str, tuple[object, ...]] = {}
+        if "memory_sources" in tables:
+            source_rows = {
+                str(row[0]): tuple(row[1:])
+                for row in db.execute(
+                    "select source, path, size, mtime_ns, digest from memory_sources"
+                )
+            }
+        source_current = True
+        for source, snapshot in snapshots.items():
+            expected = (
+                snapshot.path,
+                snapshot.size,
+                snapshot.mtime_ns,
+                snapshot.digest,
+            )
+            if source_rows.get(source) != expected:
+                source_current = False
+        index_report["current"] = source_current
+        if not source_current:
+            index_report["problems"].append("source-index-mismatch")
+
+        if required_columns.issubset(columns):
+            index_report["entries"] = int(
+                db.execute("select count(*) from memory_entries").fetchone()[0]
+            )
+            by_source = {
+                str(source): int(count)
+                for source, count in db.execute(
+                    "select source, count(*) from memory_entries group by source"
+                )
+            }
+            index_report["by_source"] = {
+                source: by_source.get(source, 0)
+                for source in ("shared", "pins", "failures")
+            }
+            provenance_row = db.execute(
+                """
+                select
+                  count(*),
+                  sum(case when event_id like 'legacy:%' then 1 else 0 end),
+                  sum(case when task_id != '' then 1 else 0 end),
+                  sum(case when session_hash != '' then 1 else 0 end),
+                  sum(case when git_sha != '' then 1 else 0 end),
+                  sum(case when git_dirty is not null then 1 else 0 end),
+                  sum(case when git_state != '' then 1 else 0 end)
+                from memory_entries
+                """
+            ).fetchone()
+            values = [int(value or 0) for value in provenance_row]
+            (
+                total,
+                legacy,
+                task_count,
+                session_count,
+                sha_count,
+                dirty_count,
+                state_count,
+            ) = values
+            index_report["provenance"] = {
+                "total": total,
+                "modern": total - legacy,
+                "legacy": legacy,
+                "task_id": task_count,
+                "session_hash": session_count,
+                "git_sha": sha_count,
+                "git_dirty": dirty_count,
+                "git_state": state_count,
+            }
+
+        index_report["fts"] = "memory_fts" in tables
+        if index_report["fts"]:
+            fts_entries = int(
+                db.execute("select count(*) from memory_fts").fetchone()[0]
+            )
+            index_report["fts_entries"] = fts_entries
+            index_report["fts_current"] = fts_entries == index_report["entries"]
+            if not index_report["fts_current"]:
+                index_report["problems"].append("fts-entry-mismatch")
+
+        if version != SCHEMA_VERSION:
+            index_report["problems"].append("schema-version-mismatch")
+        if index_report["integrity"] != "ok":
+            index_report["problems"].append("integrity-check-failed")
+    except (OSError, sqlite3.DatabaseError):
+        index_report["problems"].append("database-unreadable")
+        report["status"] = "degraded"
+        return report, 1
+    finally:
+        if db is not None:
+            db.close()
+
+    degrading = {
+        "required-tables-missing",
+        "required-columns-missing",
+        "fts-entry-mismatch",
+        "schema-version-mismatch",
+        "integrity-check-failed",
+    }
+    if report["problems"] or degrading.intersection(index_report["problems"]):
+        report["status"] = "degraded"
+        return report, 1
+    if not index_report["current"]:
+        report["status"] = "stale"
+        return report, 1
+    report["status"] = "healthy"
+    return report, 0
+
+
+def emit_health(report: dict, as_json: bool) -> None:
+    if as_json:
+        sys.stdout.write(json.dumps(report, ensure_ascii=False, sort_keys=True) + "\n")
+        return
+    sources = report["sources"]
+    index = report["index"]
+    provenance = index["provenance"]
+    sys.stdout.write("memory health: %s\n" % report["status"])
+    sys.stdout.write(
+        "sources: shared=%d pins=%d failures=%d invalid-ledger-rows=%d\n"
+        % (
+            sources["shared"]["entries"],
+            sources["pins"]["entries"],
+            sources["failures"]["entries"],
+            report["failures"]["invalid_rows"],
+        )
+    )
+    if index["present"]:
+        sys.stdout.write(
+            "index: current=%s schema=%s/%d integrity=%s fts=%s entries=%d\n"
+            % (
+                "yes" if index["current"] else "no",
+                index["schema_version"],
+                index["expected_schema"],
+                index["integrity"],
+                "yes" if index["fts"] else "fallback",
+                index["entries"],
+            )
+        )
+        sys.stdout.write(
+            "provenance: modern=%d legacy=%d task=%d session=%d git-sha=%d\n"
+            % (
+                provenance["modern"],
+                provenance["legacy"],
+                provenance["task_id"],
+                provenance["session_hash"],
+                provenance["git_sha"],
+            )
+        )
+    else:
+        sys.stdout.write("index: absent\n")
+    problems = list(report["problems"]) + list(index["problems"])
+    if problems:
+        sys.stdout.write("problems: %s\n" % ", ".join(problems))
+    sys.stdout.write("assessment: index health only; memory quality not evaluated\n")
+
+
 def select_fields(alias: str = "") -> str:
     prefix = alias + "." if alias else ""
     return ", ".join(prefix + field for field in ENTRY_FIELDS)
@@ -682,7 +993,9 @@ def rebuild_database(path: str, shared: str, pins: str, failures: str = "") -> N
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("sync", "search", "recall", "rebuild"))
+    parser.add_argument(
+        "command", choices=("sync", "search", "recall", "health", "rebuild")
+    )
     parser.add_argument("--db", required=True)
     parser.add_argument("--shared", required=True)
     parser.add_argument("--pins", required=True)
@@ -703,6 +1016,12 @@ def main() -> int:
     if args.command == "rebuild":
         rebuild_database(args.db, args.shared, args.pins, args.failures)
         return 0
+    if args.command == "health":
+        report, result = memory_health(
+            args.db, args.shared, args.pins, args.failures
+        )
+        emit_health(report, args.json)
+        return result
 
     db = connect(args.db)
     result = 0

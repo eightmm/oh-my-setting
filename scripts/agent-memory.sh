@@ -53,7 +53,8 @@ Options:
   --full            context: emit full source tail instead of compact view.
   --limit N         Limit search/recall results. Search is unlimited by default;
                     recall defaults to 20.
-  --json            search/recall: emit JSONL with provenance metadata.
+  --json            search/recall: emit JSONL with provenance metadata;
+                    health: emit one schema-1 diagnostic object.
   -h, --help        Show help.
 
 Commands:
@@ -70,6 +71,8 @@ Commands:
                     --agent filters by the entry's author.
   recall QUERY      Rank memory + pins with local SQLite FTS; --agent filters
                     by author. No model call or embedding download is used.
+  health            Diagnose source/index consistency without creating,
+                    synchronizing, repairing, or otherwise changing either.
   rebuild           Recreate the derived database from the Markdown sources.
 EOF
 }
@@ -122,7 +125,7 @@ while [ "$#" -gt 0 ]; do
       AS_JSON=1
       shift
       ;;
-    path|db-path|show|context|init|append|pin|compact|search|recall|rebuild)
+    path|db-path|show|context|init|append|pin|compact|search|recall|health|rebuild)
       ACTION="$1"
       shift
       ;;
@@ -156,8 +159,8 @@ if [ -n "$LIMIT" ]; then
 fi
 if [ "$AS_JSON" -eq 1 ]; then
   case "$ACTION" in
-    search|recall) JSON_ARGS=(--json) ;;
-    *) echo "error: --json applies only to search or recall" >&2; exit 2 ;;
+    search|recall|health) JSON_ARGS=(--json) ;;
+    *) echo "error: --json applies only to search, recall, or health" >&2; exit 2 ;;
   esac
 fi
 if [ -z "$MEMORY_FILE" ]; then
@@ -267,6 +270,9 @@ case "$ACTION" in
       --agent "$AGENT_SEARCH" \
       --limit "${LIMIT:-20}" \
       "${JSON_ARGS[@]}"
+    ;;
+  health)
+    agent_memory_db_health "$MEMORY_FILE" "${JSON_ARGS[@]}"
     ;;
   rebuild)
     agent_memory_db_command "$MEMORY_FILE" rebuild

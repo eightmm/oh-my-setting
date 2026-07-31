@@ -128,6 +128,30 @@ agent_memory_db_command() {
     "$@"
 }
 
+agent_memory_db_health() {
+  local memory_file="$1"
+  local db_file
+  shift
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "error: python3 required for the memory database" >&2
+    return 2
+  }
+  [ -f "$AGENT_MEMORY_DB_HELPER" ] || {
+    echo "error: memory database helper missing: $AGENT_MEMORY_DB_HELPER" >&2
+    return 2
+  }
+  db_file="$(agent_memory_db_file "$memory_file")"
+  # Unlike search/recall/rebuild, health is a pure query. In particular it must
+  # not create .oms/.gitignore or synchronize a stale derived database.
+  python3 "$AGENT_MEMORY_DB_HELPER" health \
+    --db "$db_file" \
+    --shared "$memory_file" \
+    --pins "$(agent_memory_pins_file "$memory_file")" \
+    --failures "$(agent_memory_failures_file "$memory_file")" \
+    "$@"
+}
+
 agent_memory_sync_db() {
   local memory_file="$1"
 

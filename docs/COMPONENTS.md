@@ -287,7 +287,11 @@ of leaving dangling lineage, and state/doctor surface corrupt rows or invalid
 contracts. External files are represented by name/hash descriptors, not host
 paths. `validate`, atomic idempotent `migrate`, operation-aware `latest-run`,
 high-water retention, and grace-protected orphan pruning keep the index bounded
-and repairable
+and repairable. `telemetry [N]` (`--json`) groups the retained window by
+provider/model route and reports recorded exits, verifier exits, fallbacks,
+resolutions, and only the token/duration values recoverable from existing
+artifacts. Coverage is explicit: an exit zero is not called semantic task
+success, and rows outside the retained window cannot be inferred
 
 **Safety rails (built-in)** — Outbound prompts are scrubbed before any external
 CLI call (credentials, keys, machine/cluster details block the call); injected
@@ -354,7 +358,12 @@ already carries the command, exit code, and failing line. Closing a task also
 promotes the latest `## Decisions` and `## Last Failure` lines the packet
 already holds, which is the only recorded content that carries a reason rather
 than a symptom; sensitive content is rejected at write time and notes are
-attributed to the calling agent (`OMS_AGENT`, else CLI env markers)
+attributed to the calling agent (`OMS_AGENT`, else CLI env markers). `health`
+(`--json`) reads all three sources and opens SQLite in read-only mode to report
+source counts, ledger state, schema/integrity/FTS status, currentness, and
+provenance coverage. It exits nonzero for missing, stale, or degraded derived
+state without creating or repairing anything; this is index health, not an
+evaluation of whether the remembered content is useful
 
 **Task handoff (`agent-task.sh`)** — Active packet with task ID,
 active/verified/closed lifecycle, source-session hash, activity TTL, bounded

@@ -20,18 +20,21 @@ REASON=""
 
 usage() {
   cat <<'EOF'
-Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|resolve|validate|migrate|prune] [N]
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|validate|migrate|prune] [N]
 
 Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.
 
 Commands:
-  --json         list/latest/failures/unresolved: emit a schema-1 JSON object.
+  --json         list/latest/failures/unresolved/telemetry: emit schema-1 JSON.
   list [N]       Show the last N rows (default 20).
   latest         Show the most recent row.
   latest-run     Show a compact summary for the most recent run id.
   failures [N]   Show the last N non-zero-exit rows.
   unresolved [N] Show the last N failures without a resolution event.
+  telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
+                 over the retained window (default 1000). This does not infer
+                 semantic task success.
   resolve         Resolve one failed outcome selected by --event-id.
   validate       Validate schema, lineage ids, paths, and references.
   migrate        Idempotently upgrade legacy rows and recover unique basenames.
@@ -98,7 +101,7 @@ while [ "$#" -gt 0 ]; do
       AS_JSON=1
       shift
       ;;
-    list|latest|latest-run|failures|unresolved|resolve|validate|migrate|prune)
+    list|latest|latest-run|failures|unresolved|telemetry|resolve|validate|migrate|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
@@ -131,7 +134,7 @@ else
   [ -z "$REASON" ] || fail "--reason is only valid with resolve"
 fi
 case "$ACTION" in
-  list|latest|latest-run|failures|unresolved) ;;
+  list|latest|latest-run|failures|unresolved|telemetry) ;;
   *) [ "$AS_JSON" -eq 0 ] || fail "--json is not supported by $ACTION" ;;
 esac
 if [ "$PRUNE_FILES" -eq 1 ] && [ "$ACTION" != "prune" ]; then
@@ -144,7 +147,10 @@ if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--dry-run is only valid with prune"
 fi
 if [ "$LIMIT_SET" -eq 0 ]; then
-  [ "$ACTION" = "prune" ] && LIMIT="1000" || LIMIT="20"
+  case "$ACTION" in
+    prune|telemetry) LIMIT="1000" ;;
+    *) LIMIT="20" ;;
+  esac
 fi
 case "$LIMIT" in
   *[!0-9]*|"") fail "N must be a positive integer" ;;
@@ -155,6 +161,17 @@ esac
 REPO="$(oms_repo_root "$REPO")"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 if [ ! -s "$INDEX_FILE" ]; then
+  if [ "$ACTION" = "telemetry" ]; then
+    command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+    if [ "$AS_JSON" -eq 1 ]; then
+      python3 "$ROOT_LIB/artifact-telemetry.py" \
+        --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT" --json
+    else
+      python3 "$ROOT_LIB/artifact-telemetry.py" \
+        --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
+    fi
+    exit 0
+  fi
   # A machine consumer wants an empty view, not an error, when nothing has run
   # yet; the human path keeps saying where it looked.
   if [ "$AS_JSON" -eq 1 ]; then
@@ -164,6 +181,17 @@ if [ ! -s "$INDEX_FILE" ]; then
   fail "no artifact index at $INDEX_FILE"
 fi
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+
+if [ "$ACTION" = "telemetry" ]; then
+  if [ "$AS_JSON" -eq 1 ]; then
+    python3 "$ROOT_LIB/artifact-telemetry.py" \
+      --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT" --json
+  else
+    python3 "$ROOT_LIB/artifact-telemetry.py" \
+      --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
+  fi
+  exit 0
+fi
 
 if [ "$ACTION" = "resolve" ]; then
   [ "${#REASON}" -le 200 ] || fail "--reason must be at most 200 characters"

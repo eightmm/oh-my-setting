@@ -3215,6 +3215,153 @@ assert "Pinned rows belong in the same database." in text, text
 PY
 }
 
+test_agent_memory_health_is_read_only_and_detects_staleness() {
+  local empty_project="$TMP/agent-memory-health-empty"
+  local project="$TMP/agent-memory-health"
+  local home_dir="$project/home"
+  local index="$project/.oms/memory/memory.sqlite3"
+  local out
+  local before
+  local after
+  local rc=0
+
+  mkdir -p "$empty_project"
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$empty_project" --json health)" ||
+    fail "empty memory health should be a clean read: $out"
+  if ! OMS_MEMORY_HEALTH_JSON="$out" python3 - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["OMS_MEMORY_HEALTH_JSON"])
+assert report["schema"] == 1 and report["action"] == "health", report
+assert report["status"] == "empty", report
+assert report["index"]["present"] is False, report
+assert report["assessment"] == "index-health-not-memory-quality", report
+PY
+  then
+    fail "empty memory health JSON is incomplete"
+  fi
+  [ ! -e "$empty_project/.oms" ] ||
+    fail "health must not create project state for an empty memory"
+
+  mkdir -p "$project/.oms/memory" "$home_dir"
+  cat > "$project/.oms/memory/shared.md" <<'EOF'
+# Shared Agent Memory
+
+- scope: project
+
+## 2026-07-01T00:00:00Z codex
+
+Keep memory health read-only.
+EOF
+  cat > "$project/.oms/memory/pins.md" <<'EOF'
+# Pinned Agent Memory
+
+- scope: project
+
+- 2026-07-01T00:00:01Z [claude] Preserve the source logs.
+EOF
+  cat > "$project/.oms/failures.jsonl" <<'EOF'
+{"event":"fail","fingerprint":"fp-1","ts":"2026-07-01T00:00:02Z","agent":"codex","cmd":"false","exit":1,"summary":"fixture failed"}
+{"event":"resolved","fingerprint":"fp-1","ts":"2026-07-01T00:00:03Z"}
+EOF
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" rebuild >/dev/null
+
+  before="$(find "$project/.oms" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" --json health)" ||
+    fail "current memory health should pass: $out"
+  after="$(find "$project/.oms" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
+  [ "$before" = "$after" ] ||
+    fail "health must not mutate source or derived memory state"
+  if ! OMS_MEMORY_HEALTH_JSON="$out" python3 - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["OMS_MEMORY_HEALTH_JSON"])
+assert report["status"] == "healthy", report
+assert report["index"]["present"] is True, report
+assert report["index"]["readable"] is True, report
+assert report["index"]["current"] is True, report
+assert report["index"]["schema_version"] == 3, report
+assert report["index"]["expected_schema"] == 3, report
+assert report["index"]["integrity"] == "ok", report
+assert report["index"]["entries"] == 3, report
+assert report["index"]["by_source"] == {
+    "shared": 1, "pins": 1, "failures": 1
+}, report
+assert report["sources"]["shared"]["entries"] == 1, report
+assert report["sources"]["pins"]["entries"] == 1, report
+assert report["sources"]["failures"]["entries"] == 1, report
+assert report["failures"] == {
+    "valid_rows": 2,
+    "invalid_rows": 0,
+    "open_fingerprints": 0,
+    "resolved_fingerprints": 1,
+}, report
+assert report["index"]["provenance"]["total"] == 3, report
+PY
+  then
+    fail "healthy memory report lost source/index evidence"
+  fi
+
+  cat >> "$project/.oms/memory/shared.md" <<'EOF'
+
+## 2026-07-01T00:00:04Z codex
+
+This source now differs from the derived index.
+EOF
+  before="$(find "$project/.oms" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" --json health)" || rc=$?
+  [ "$rc" -eq 1 ] || fail "stale memory health should exit 1, got $rc: $out"
+  after="$(find "$project/.oms" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
+  [ "$before" = "$after" ] ||
+    fail "stale health detection must not repair or mutate the index"
+  if ! OMS_MEMORY_HEALTH_JSON="$out" python3 - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["OMS_MEMORY_HEALTH_JSON"])
+assert report["status"] == "stale", report
+assert report["index"]["current"] is False, report
+assert report["sources"]["shared"]["entries"] == 2, report
+assert report["index"]["by_source"]["shared"] == 1, report
+PY
+  then
+    fail "stale memory health JSON is incomplete"
+  fi
+
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" health 2>/dev/null)" || true
+  printf '%s' "$out" | grep -Fq 'memory health: stale' ||
+    fail "human health output should name the stale state: $out"
+  [ -f "$index" ] || fail "health must never remove the derived index"
+
+  printf 'not-json\n' >> "$project/.oms/failures.jsonl"
+  rc=0
+  out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" --json health)" || rc=$?
+  [ "$rc" -eq 1 ] || fail "malformed ledger health should exit 1, got $rc: $out"
+  if ! OMS_MEMORY_HEALTH_JSON="$out" python3 - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["OMS_MEMORY_HEALTH_JSON"])
+assert report["status"] == "degraded", report
+assert report["failures"]["invalid_rows"] == 1, report
+assert "failure-ledger-invalid" in report["problems"], report
+PY
+  then
+    fail "malformed failure-ledger evidence should degrade memory health"
+  fi
+}
+
 test_agent_memory_upgrades_schema_one_database() {
   local project="$TMP/agent-memory-db-v1"
   local home_dir="$project/home"
@@ -4284,6 +4431,115 @@ test_artifact_index_records_call() {
 
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest)"
   printf '%s' "$out" | grep -Fq 'call  codex  exit=0' || fail "artifact-index latest missing call row"
+}
+
+test_artifact_index_telemetry_is_scoped_and_read_only() {
+  local project="$TMP/artifact-index-telemetry"
+  local artifact_dir="$project/.oms/artifacts"
+  local index="$artifact_dir/index.jsonl"
+  local out
+  local human
+  local before
+  local after
+
+  mkdir -p "$artifact_dir"
+  cat > "$artifact_dir/call.md" <<'EOF'
+# Agent Call
+
+- started: 2026-07-01T00:00:00Z
+
+## Output
+
+tokens used
+1,200
+EOF
+  cat > "$artifact_dir/delegate.md" <<'EOF'
+# Agent Delegate
+
+- started: 2026-07-01T00:00:10Z
+
+## Output
+
+tokens used
+3,000
+EOF
+  cat > "$index" <<'EOF'
+{"schema":1,"event_id":"evt-call","operation_id":"op-call","artifact_id":"artifact-call","ts":"2026-07-01T00:00:03Z","kind":"call","provider":"codex","exit":0,"model_class":"fast","selected_model":"gpt-fast","fallback_used":false,"artifact":".oms/artifacts/call.md"}
+{"schema":1,"event_id":"evt-delegate","operation_id":"op-delegate","artifact_id":"artifact-delegate","ts":"2026-07-01T00:00:16Z","kind":"delegate","provider":"claude","exit":1,"verify_exit":2,"model_class":"deep","selected_model":"claude-deep","fallback_used":true,"fallback_reason":"capacity","artifact":".oms/artifacts/delegate.md"}
+{"schema":1,"event_id":"evt-export","operation_id":"op-export","artifact_id":"artifact-export","ts":"2026-07-01T00:00:17Z","kind":"call-export","provider":"codex","exit":0}
+{"schema":1,"event_id":"evt-admit","operation_id":"op-admit","artifact_id":"artifact-admit","ts":"2026-07-01T00:00:18Z","kind":"patch-admit","provider":"local","exit":0}
+{"schema":1,"event_id":"evt-resolution","operation_id":"op-delegate","artifact_id":"artifact-delegate","parent_event_id":"evt-delegate","resolves_event_id":"evt-delegate","resolution":"resolved","ts":"2026-07-01T00:00:19Z","kind":"artifact-resolution","provider":"local","exit":0}
+{"schema":1,"event_id":["bad-shape"],"ts":"2026-07-01T00:00:20Z","kind":[],"provider":"local","exit":"unknown"}
+not-json
+EOF
+
+  before="$(find "$artifact_dir" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry)" ||
+    fail "artifact telemetry should be available as JSON: $out"
+  after="$(find "$artifact_dir" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
+  [ "$before" = "$after" ] ||
+    fail "artifact telemetry must not mutate the retained index or artifacts"
+
+  if ! OMS_ARTIFACT_TELEMETRY_JSON="$out" python3 - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["OMS_ARTIFACT_TELEMETRY_JSON"])
+assert report["schema"] == 1 and report["action"] == "telemetry", report
+assert report["semantic_outcome"] == "unavailable", report
+assert report["window"]["scope"] == "retained-index-window", report
+assert report["window"]["available_rows"] == 6, report
+assert report["window"]["selected_rows"] == 6, report
+assert report["window"]["limit"] == 1000, report
+assert report["window"]["invalid_lines"] == 1, report
+assert report["operations"] == {"eligible": 2, "excluded": 4}, report
+assert report["recorded_exit"] == {
+    "zero": 1, "nonzero": 1, "unavailable": 0
+}, report
+assert report["verification"] == {
+    "recorded": 1, "zero": 0, "nonzero": 1, "unavailable": 1
+}, report
+assert report["fallback"]["used"] == 1, report
+assert report["fallback"]["not_used"] == 1, report
+assert report["fallback"]["unrecorded"] == 0, report
+assert report["fallback"]["reasons"] == [{"reason": "capacity", "count": 1}], report
+assert report["resolution"] == {
+    "events": 1, "resolved_nonzero": 1, "unresolved_nonzero": 0
+}, report
+assert report["coverage"] == {
+    "routing_metadata": 2,
+    "artifact_files": 2,
+    "duration_reports": 2,
+    "token_reports": 2,
+}, report
+assert report["usage"]["provider_reported_tokens"] == {
+    "reports": 2, "total": 4200
+}, report
+assert report["usage"]["wall_seconds"] == {
+    "reports": 2, "total": 9.0, "median": 4.5
+}, report
+routes = {
+    (row["provider"], row["model_class"], row["selected_model"]): row
+    for row in report["routes"]
+}
+assert routes[("codex", "fast", "gpt-fast")]["operations"] == 1, routes
+assert routes[("codex", "fast", "gpt-fast")]["recorded_exit_zero"] == 1, routes
+assert routes[("claude", "deep", "claude-deep")]["recorded_exit_nonzero"] == 1, routes
+assert routes[("claude", "deep", "claude-deep")]["fallback_used"] == 1, routes
+PY
+  then
+    fail "artifact telemetry JSON conflated or omitted recorded evidence"
+  fi
+
+  human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
+  printf '%s' "$human" | grep -Fq 'retained window: 6/6 row(s)' ||
+    fail "human telemetry should disclose its retained window: $human"
+  printf '%s' "$human" | grep -Fq 'semantic outcome: unavailable' ||
+    fail "human telemetry must not call exit zero task success: $human"
+  printf '%s' "$human" | grep -Fq 'provider-reported tokens: total=4200 reports=2' ||
+    fail "human telemetry should expose the measured token subtotal: $human"
 }
 
 test_artifact_index_latest_run_groups_rows() {
