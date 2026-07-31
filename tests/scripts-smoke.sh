@@ -5450,6 +5450,28 @@ test_link_idempotent_does_not_create_second_backup() {
   assert_symlink_to "$target" "$ROOT/rules/global-AGENTS.md"
 }
 
+test_link_enabled_skill_membership_is_pipefail_safe() {
+  local enabled_sources
+  local source="custom-skills/oh-my-setting-ops"
+
+  # Quiet grep exits as soon as it finds the first line. If a producer is still
+  # writing a pipe, pipefail turns that expected early close into EPIPE and the
+  # membership result becomes false. A value redirection has no producer
+  # process to fail, even when the rest of the list exceeds the pipe buffer.
+  enabled_sources="$(python3 - "$source" <<'PY'
+import sys
+
+print(sys.argv[1])
+for index in range(20000):
+    print("custom-skills/filler-%d" % index)
+PY
+)"
+  grep -Fxq "$source" <<< "$enabled_sources" ||
+    fail "an early enabled skill must remain a match under pipefail"
+  grep -Fq 'grep -Fxq "$source" <<< "$enabled_sources"' "$ROOT/scripts/link.sh" ||
+    fail "link.sh must not pipe an enabled-source list into quiet grep"
+}
+
 test_link_round_trip_restores_foreign_symlink() {
   local home_dir="$TMP/link-foreign-symlink-home"
   local foreign="$home_dir/foreign-agents.md"

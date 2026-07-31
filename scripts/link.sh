@@ -111,11 +111,10 @@ for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
         print(source)
 PY
 )"
+  # Windows Python writes CRLF. Normalize the captured list once: both the loop
+  # and the later membership check consume this same value.
+  enabled_sources="${enabled_sources//$'\r'/}"
   while IFS= read -r source; do
-    # Windows Python prints CRLF, so this line would name a directory with a
-    # trailing carriage return and the copy would fail on a source that is
-    # right there. Confirmed on CI against custom-skills/oh-my-setting-ops.
-    source="${source%%$'\r'}"
     [ -n "$source" ] || continue
     skill="$ROOT/$source"
     name="$(basename "$skill")"
@@ -127,7 +126,9 @@ PY
   for skill in "$ROOT"/custom-skills/*; do
     [ -d "$skill" ] || continue
     source="${skill#"$ROOT"/}"
-    printf '%s\n' "$enabled_sources" | grep -Fxq "$source" && continue
+    # A `printf | grep -q` pipeline is racy under pipefail: grep closes on the
+    # first match, printf gets EPIPE, and an enabled skill looks disabled.
+    grep -Fxq "$source" <<< "$enabled_sources" && continue
     name="$(basename "$skill")"
     if oms_install_target_owned "$skill" "$target_root/$name"; then
       oms_install_remove_managed_target "$target_root/$name"

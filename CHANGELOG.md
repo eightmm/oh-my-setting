@@ -7,6 +7,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Skill linking no longer lets quiet `grep` turn an enabled skill into a
+  disabled one. The membership check used `printf | grep -q` under `pipefail`;
+  when grep found an early match and closed, printf could receive EPIPE, invert
+  the condition, and unlink that enabled skill. It surfaced as an intermittent
+  doctor failure with `tsp-queue` missing only from Antigravity. The captured
+  manifest is now CRLF-normalized once and passed to grep as a value, with a
+  list larger than the pipe buffer pinning the behavior.
 - The source-checkout leak guard names the paths that moved. It compared two
   opaque digests, so each time it fired it destroyed the evidence it had just
   detected — three occurrences in one day, none diagnosable afterwards. It now
