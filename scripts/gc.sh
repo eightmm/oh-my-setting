@@ -198,6 +198,18 @@ PY
   done
 fi
 
+# 2.6) Crashed-writer replace scratch: shared-state writers stage
+#      .oms-replace.* beside their target so the swap is a same-directory
+#      rename; a scratch an hour old means its writer died between mktemp and
+#      mv. Minutes, not --days — the file has no value to anyone the moment
+#      its writer is gone.
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  note_remove "replace-scratch" "$f"
+done <<EOF
+$(find "$OMS" -type f -name '.oms-replace.*' -mmin +60 2>/dev/null)
+EOF
+
 # 3) Run capsules older than --days whose run is NOT open (open = no close event
 #    on the spine). Never GC a capsule for a run still in flight. In apply mode
 #    step 2.5 has already closed stale runs, so their capsules reclaim here;

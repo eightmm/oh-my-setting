@@ -62,4 +62,16 @@ done
 wait "$writer"
 [ "$empty" = 0 ] || fail "a reader observed an empty task file during writes"
 
+# A crashed writer's scratch is reclaimed by gc rather than left forever; a
+# fresh scratch (a writer that may still be alive) is not.
+crashed="$TMP/repo/.oms/task/.oms-replace.crashed"
+fresh="$TMP/repo/.oms/task/.oms-replace.alive"
+printf 'half-written\n' > "$crashed"
+touch -t 202601010000 "$crashed"
+printf 'mid-write\n' > "$fresh"
+bash "$ROOT/scripts/gc.sh" --repo "$TMP/repo" --apply >/dev/null 2>&1 ||
+  fail "gc apply failed"
+[ ! -e "$crashed" ] || fail "gc left crashed replace scratch behind"
+[ -e "$fresh" ] || fail "gc removed a scratch its writer may still hold"
+
 echo "atomic-state-smoke: ok"
