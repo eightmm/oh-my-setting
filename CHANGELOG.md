@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- The residue scan sees flock lock files. It only ever walked mkdir-path lock
+  directories, so a machine holding 12,427 flock lock files was told it had
+  zero — which reads as "nothing here" rather than "this kind is not
+  removable". They are permanent by design: unlinking a released flock file
+  lets a waiter on the old inode and a new arrival on a fresh one both hold the
+  lock. So doctor reports the count as a note, never a warning, and cleanup
+  still leaves them alone. A large count means a run leaked its lock dir into a
+  real HOME — a test without `OMS_LOCK_DIR` — not a broken install. The
+  cleanup regression also builds its dead lock through the real acquire path
+  now; the hand-made fixture is what let the gap hide.
 - Provider-call accounting survives artifact retention. Duration and
   provider-reported tokens were readable only by parsing the artifact body, so
   deleting stale artifacts erased the record of what those calls had cost -

@@ -680,6 +680,7 @@ check_harness_residue() {
   if git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
     stale_worktrees="$(oms_harness_count_stale_worktrees "$project_dir")"
   fi
+  local lock_files
   dead_locks="$(oms_harness_lock_residue_count)"
   temp_dirs="$(oms_harness_tmp_residue_count)"
   unindexed="$(oms_harness_count_unindexed_artifacts "$project_dir")"
@@ -691,6 +692,22 @@ check_harness_residue() {
   if [ "${dead_locks:-0}" -gt 0 ]; then
     echo "warn: $dead_locks dead harness lock dir(s)"
     residue=1
+  fi
+  # A note, not a warning, and not counted as residue: flock lock files cannot
+  # be unlinked safely, so there is no action to recommend. Reported because the
+  # scan above only sees mkdir-path directories, and staying silent about
+  # thousands of files reads as "nothing here" instead of "nothing removable".
+  # A large number means a run leaked its lock dir into this HOME — a test
+  # without OMS_LOCK_DIR — rather than anything wrong with the install.
+  # Guarded: an update transaction stages doctor.sh with only a subset of the
+  # libs, so calling a brand-new helper unconditionally turned a routine update
+  # into a rollback. A note is never worth failing an install over.
+  lock_files=0
+  if command -v oms_harness_lock_file_count >/dev/null 2>&1; then
+    lock_files="$(oms_harness_lock_file_count)"
+  fi
+  if [ "${lock_files:-0}" -ge "${OMS_LOCK_FILE_NOTE_AT:-1000}" ]; then
+    echo "note: $lock_files flock lock file(s) in $(oms_file_lock_dir); not removable by design"
   fi
   if [ "${temp_dirs:-0}" -gt 0 ]; then
     echo "warn: $temp_dirs dead harness temp dir(s)"

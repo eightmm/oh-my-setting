@@ -95,6 +95,32 @@ oms_harness_lock_residue_count() {
   printf '%s\n' "$count"
 }
 
+# flock-path locks are regular files, and the design never unlinks them: a
+# released flock file cannot be removed safely, because a waiter blocked on the
+# old inode and a new arrival creating a fresh one would both hold the lock.
+# They are therefore permanent by construction. Counting them anyway, because
+# the residue scan above only sees mkdir-path directories — on this machine that
+# meant reporting 0 while 12k files sat there, which reads as "nothing to clean"
+# rather than "this kind is not cleanable". Growth is bounded by the number of
+# distinct state-file paths ever locked; a run that leaks its lock dir into a
+# real HOME (a test without OMS_LOCK_DIR) is what makes that number large.
+oms_harness_lock_file_count() {
+  local lock_root
+  local lock_file
+  local count=0
+
+  lock_root="$(oms_file_lock_dir)"
+  [ -d "$lock_root" ] || {
+    printf '0\n'
+    return 0
+  }
+  for lock_file in "$lock_root"/*.lock; do
+    [ -f "$lock_file" ] || continue
+    count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+}
+
 oms_harness_cleanup_dead_locks() {
   local dry_run="${1:-0}"
   local lock_root

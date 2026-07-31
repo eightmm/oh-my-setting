@@ -1830,6 +1830,38 @@ EOF
 
 
 
+# The residue scan only ever looked at mkdir-path lock directories, so on a
+# machine with twelve thousand flock lock files it reported zero — which reads
+# as "nothing here" rather than "this kind cannot be removed". They are
+# permanent by design: unlinking a released flock file lets a waiter on the old
+# inode and a new arrival on a fresh one both hold the lock. So: report, never
+# remove, and say why.
+test_doctor_notes_flock_lock_files_without_removing_them() {
+  local project="$TMP/doctor-flock-note"
+  local home_dir="$TMP/doctor-flock-home"
+  local lock_root="$home_dir/.cache/oh-my-setting/locks"
+  local out
+
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms" "$lock_root"
+  : > "$lock_root/state.jsonl.123456789-42.lock"
+
+  out="$(cd "$project" && HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
+    OMS_LOCK_DIR="$lock_root" OMS_LOCK_FILE_NOTE_AT=1 \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
+    fail "a flock lock file must not fail the doctor: $out"
+  printf '%s' "$out" | grep -Fq 'flock lock file(s)' ||
+    fail "doctor should report flock lock files: $out"
+  printf '%s' "$out" | grep -Fq 'not removable by design' ||
+    fail "doctor should say why they stay: $out"
+
+  # Reported, and still there afterwards. cleanup must not take them either.
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" OMS_LOCK_DIR="$lock_root" \
+    "$ROOT/scripts/cleanup.sh" --apply >/dev/null 2>&1 || true
+  [ -f "$lock_root/state.jsonl.123456789-42.lock" ] ||
+    fail "cleanup must not unlink a flock lock file"
+}
+
 test_doctor_reports_crash_residue_warnings() {
   local project="$TMP/doctor-harness-residue"
   local home_dir="$TMP/doctor-home-residue"
@@ -5826,8 +5858,19 @@ test_cleanup_removes_dead_lock_only() {
   local dead_lock="$lock_root/dead.lock"
   local live_lock="$lock_root/live.lock"
 
-  mkdir -p "$dead_lock" "$live_lock"
+  # Build the dead lock through the real mkdir-path acquire rather than by hand.
+  # The hand-made fixture is what let a gap hide: it produced a shape the
+  # production path does not necessarily produce, so the test passed while the
+  # scan missed every flock-path lock on the machine.
+  mkdir -p "$lock_root"
+  OMS_LOCK_DIR="$lock_root" OMS_LOCK_FORCE_MKDIR=1 bash -c "
+    . '$ROOT/scripts/lib/file-lock.sh'
+    oms_file_lock_mkdir_acquire /tmp/dead-state '$dead_lock' 5 dead-owner
+  " >/dev/null 2>&1 || fail "the real acquire path should create a lock dir"
+  [ -f "$dead_lock/pid" ] ||
+    fail "the real acquire path must write a pid file the scan can read"
   printf '999999999\n' > "$dead_lock/pid"
+  mkdir -p "$live_lock"
   printf '%s\n' "$$" > "$live_lock/pid"
 
   HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" XDG_RUNTIME_DIR="$runtime" \
