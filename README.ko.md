@@ -132,7 +132,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 - lease가 있는 subtask DAG, 그리고 범위가 고정된 task 하나만 claim해 격리
   위임하고 명시적 landing 전에는 review에서 멈추는 실행
 - 명령 지문으로 키를 잡는 fail-ledger — 같은 것이 미해결로 두 번 실패하면
-  advisor를 지목한다
+  advisor를 지목한다. harness가 적용된 저장소에서는 Bash 도구 명령이 실패할
+  때마다 Claude Code 훅이 자동으로 채운다
 - append-only JSONL 상태 계약과 검증기·복구 도구
 
 **ML과 HPC**

@@ -9153,6 +9153,55 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
   fi
 }
 
+test_fail_ledger_hook_gives_failed_commands_a_memory() {
+  local project="$TMP/fail-ledger-hook"
+  local SH="$ROOT/scripts/fail-ledger-hook.sh"
+  local payload='{"tool_name":"Bash","tool_input":{"command":"uv run pytest tests/broken.py"},"tool_response":{"exit_code":2}}'
+  local out
+
+  # The ledger only ever spoke when something called it, and the primary agent
+  # mid-failure-loop never did. The hook is that call: silent on a first
+  # failure, prior context plus the advise hint on the repeat.
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  out="$(cd "$project" && printf '%s' "$payload" | bash "$SH")" ||
+    fail "hook must never exit nonzero"
+  [ -z "$out" ] || fail "a first failure has no context to surface: $out"
+  [ "$(wc -l < "$project/.oms/failures.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "the hook should have recorded the failure"
+
+  out="$(cd "$project" && printf '%s' "$payload" | bash "$SH")" ||
+    fail "hook must never exit nonzero on a repeat"
+  printf '%s' "$out" | grep -Fq 'already failed 1x' ||
+    fail "the repeat should surface prior ledger context: $out"
+  printf '%s' "$out" | grep -Fq 'oms advise' ||
+    fail "the repeat should name the advisor: $out"
+  if printf '%s' "$out" | grep -Fq 'recorded '; then
+    fail "bookkeeping receipts are not agent context: $out"
+  fi
+
+  # Non-Bash failures, interrupts, disabled hook, and unadopted repos are
+  # exact no-ops — and the hook must never seed .oms as a side effect.
+  out="$(cd "$project" && printf '%s' '{"tool_name":"Edit","tool_input":{}}' | bash "$SH")"
+  [ -z "$out" ] || fail "non-Bash failures are not ledger material: $out"
+  out="$(cd "$project" && printf '%s' \
+    '{"tool_name":"Bash","tool_input":{"command":"sleep 999"},"tool_response":{"exit_code":130}}' |
+    bash "$SH")"
+  [ -z "$out" ] || fail "an interrupt is not a failure worth remembering: $out"
+  [ "$(wc -l < "$project/.oms/failures.jsonl" | tr -d ' ')" = 2 ] ||
+    fail "no-op paths must not append rows"
+  before="$(wc -l < "$project/.oms/failures.jsonl" | tr -d ' ')"
+  out="$(cd "$project" && printf '%s' "$payload" | OMS_FAIL_LEDGER_HOOK=0 bash "$SH")"
+  [ -z "$out" ] || fail "the opt-out must silence the hook: $out"
+  [ "$(wc -l < "$project/.oms/failures.jsonl" | tr -d ' ')" = "$before" ] ||
+    fail "the opt-out must not record"
+  local plain="$TMP/fail-ledger-hook-plain"
+  mkdir -p "$plain"
+  out="$(cd "$plain" && printf '%s' "$payload" | bash "$SH")"
+  [ -z "$out" ] || fail "an unadopted repo gets no ledger speech: $out"
+  [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
+}
+
 test_fail_ledger_records_checks_resolves() {
   local project="$TMP/fail-ledger"
   local SH="$ROOT/scripts/fail-ledger.sh"
@@ -9950,6 +9999,11 @@ cmds = [h["command"] for e in ups for h in e["hooks"]]
 assert sum("skill-router.sh" in c for c in cmds) == 1
 stop_cmds = [h["command"] for e in stop for h in e["hooks"]]
 assert sum("turn-guard.sh" in c for c in stop_cmds) == 1
+failure = d["hooks"]["PostToolUseFailure"]
+assert len(failure) == 1, failure
+assert failure[0]["matcher"] == "Bash"
+assert "fail-ledger-hook.sh" in failure[0]["hooks"][0]["command"]
+assert failure[0]["hooks"][0]["timeout"] == 5
 assert any("user-router" in c for c in cmds)
 assert d["model"] == "x"
 status = d["statusLine"]
@@ -9964,6 +10018,7 @@ d = json.load(open(sys.argv[1]))
 ups = d["hooks"]["UserPromptSubmit"]
 assert len(ups) == 1 and "user-router" in ups[0]["hooks"][0]["command"]
 assert "Stop" not in d["hooks"]
+assert "PostToolUseFailure" not in d["hooks"]
 assert "statusLine" not in d
 PY
   # A status line the user already owns must survive install and remove.

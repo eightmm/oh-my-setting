@@ -16,6 +16,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   window, so "deleted 0 orphan file(s)" explains itself.
 
 ### Added
+- Failed Bash commands now feed the failure ledger by themselves. fail-ledger
+  has recorded, gated, and named `oms advise` at the repeat threshold since it
+  existed — but only when something called it, and the primary agent in the
+  middle of a failure loop never did (the same gap the delegate repair-round
+  advisor closed for workers). A Claude Code `PostToolUseFailure` hook now
+  makes the call: on a failed Bash tool run in a harness-adopted repo it
+  surfaces the ledger's prior context for that command into the conversation,
+  then records the failure so the second identical attempt meets the advise
+  threshold mechanically. Silent on first failures, matcher-scoped to Bash,
+  skips interrupts/SIGPIPE, never seeds `.oms` into unadopted repos, fail-open
+  with a 5s ceiling; `OMS_FAIL_LEDGER_HOOK=0` opts out.
 - Install closes the one setup step that still lived in a person's head:
   Antigravity's headless permissions. A fresh install ran the tools installer,
   hooks, and plugins, then left the first `peer-ask`/`peer-review` council to

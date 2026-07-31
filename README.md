@@ -137,7 +137,8 @@ per-script catalog is [docs/COMPONENTS.md](docs/COMPONENTS.md).
 - Subtask DAG with leases, and bounded execution that claims one scoped task,
   delegates in isolation, and stops at review unless landing is explicit
 - Failure ledger keyed by command fingerprint, which names an advisor once the
-  same thing has failed twice unresolved
+  same thing has failed twice unresolved — fed automatically by a Claude Code
+  hook whenever a Bash tool command fails in a harness-adopted repo
 - Append-only JSONL state contracts with a validator and repair tools
 
 **ML and HPC**

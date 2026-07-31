@@ -345,7 +345,14 @@ command)/`list` (`list --json` for machines); sensitive commands refused.
 Surfaced in `oms state`. `agent-task verify` files a row when the stored gate
 fails — with the failing line, written by the shell, no model involvement — and
 clears it when the same gate later passes, which is what puts the primary
-agent's own verification on the ledger instead of only harness-mediated paths
+agent's own verification on the ledger instead of only harness-mediated paths.
+A Claude Code `PostToolUseFailure` hook (`fail-ledger-hook.sh`, registered by
+`install-claude-hooks.sh`, `OMS_FAIL_LEDGER_HOOK=0` opts out) extends that to
+every failed Bash tool command in a harness-adopted repo: it surfaces what the
+ledger already knows about the command as agent context, then records the
+failure so the repeat crosses the advise threshold without anyone remembering
+to call the ledger; interrupts/SIGPIPE are skipped, unadopted repos are never
+seeded, and the hook is fail-open with a 5s ceiling
 
 **Delegation liveness** — `peer-delegate` writes `.oms/delegations/<id>.json`
 (pid, provider, model route, role/executor, soul hash, worktree, task lease)

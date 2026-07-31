@@ -29,9 +29,9 @@ usage() {
 Usage: install-claude-hooks.sh [--remove] [--settings PATH]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
-hook, and usage HUD in Claude Code's settings.json (additive; existing hooks
-and a user-owned statusLine are preserved; idempotent). --remove deletes only
-oh-my-setting entries.
+hook, PostToolUseFailure fail-ledger hook, and usage HUD in Claude Code's
+settings.json (additive; existing hooks and a user-owned statusLine are
+preserved; idempotent). --remove deletes only oh-my-setting entries.
 
 Options:
   --remove          Remove the oh-my-setting hook entries instead.
@@ -55,6 +55,7 @@ done
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$ROOT/scripts/skill-router.sh" ] || fail "skill-router.sh not found under $ROOT"
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
+[ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/claude-statusline.py" ] || fail "claude-statusline.py not found under $ROOT"
 
 if [ "$REMOVE" != "1" ] && [ -f "$(oms_install_receipt_path)" ]; then
@@ -73,6 +74,7 @@ mkdir -p "$(dirname "$SETTINGS")"
 OMS_CH_SETTINGS="$SETTINGS" OMS_CH_REMOVE="$REMOVE" \
   OMS_CH_SKILL_CMD="bash $ROOT/scripts/skill-router.sh" \
   OMS_CH_GUARD_CMD="bash $ROOT/scripts/turn-guard.sh" \
+  OMS_CH_FAIL_CMD="bash $ROOT/scripts/fail-ledger-hook.sh" \
   OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" python3 <<'PY'
 import json, os, shlex, sys, tempfile
 
@@ -80,8 +82,9 @@ path = os.environ["OMS_CH_SETTINGS"]
 remove = os.environ["OMS_CH_REMOVE"] == "1"
 skill_cmd = os.environ["OMS_CH_SKILL_CMD"]
 guard_cmd = os.environ["OMS_CH_GUARD_CMD"]
+fail_cmd = os.environ["OMS_CH_FAIL_CMD"]
 status_cmd = "python3 %s" % shlex.quote(os.environ["OMS_CH_STATUS_PATH"])
-MARKS = ("skill-router.sh", "turn-guard.sh")
+MARKS = ("skill-router.sh", "turn-guard.sh", "fail-ledger-hook.sh")
 
 settings = {}
 if os.path.isfile(path):
@@ -106,7 +109,7 @@ def ours(entry):
             return True
     return False
 
-def upsert(event, mark, cmd):
+def upsert(event, mark, cmd, matcher=None, timeout=None):
     entries = hooks.setdefault(event, [])
     existing = [e for e in entries if any(
         mark in str(h.get("command", ""))
@@ -118,7 +121,13 @@ def upsert(event, mark, cmd):
                 if mark in str(h.get("command", "")):
                     h["command"] = cmd
     else:
-        entries.append({"hooks": [{"type": "command", "command": cmd}]})
+        hook = {"type": "command", "command": cmd}
+        if timeout is not None:
+            hook["timeout"] = timeout
+        entry = {"hooks": [hook]}
+        if matcher is not None:
+            entry["matcher"] = matcher
+        entries.append(entry)
 
 def status_ours(value):
     return (
@@ -142,6 +151,13 @@ if remove:
 else:
     upsert("UserPromptSubmit", "skill-router.sh", skill_cmd)
     upsert("Stop", "turn-guard.sh", guard_cmd)
+    # Failed Bash commands feed the shared failure memory and surface what it
+    # already knows. Matcher-scoped so other tools' failures never pay for it;
+    # a 5s ceiling so a wedged ledger cannot stall the turn.
+    upsert(
+        "PostToolUseFailure", "fail-ledger-hook.sh", fail_cmd,
+        matcher="Bash", timeout=5,
+    )
     if "statusLine" not in settings:
         settings["statusLine"] = {"type": "command", "command": status_cmd}
     elif status_ours(settings.get("statusLine")):
