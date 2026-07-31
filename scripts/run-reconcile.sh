@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT_LIB/work-journal.sh"
 
 # Anchored to the git worktree root so reconcile state does not fork per
 # subdirectory. Env overrides stay verbatim.
@@ -194,6 +196,8 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
     oms_with_file_lock "$RECONCILE_FILE" reconcile_append_row "$RECONCILE_FILE" "$row_tmp"
+    work_journal_observe "$STATE_ROOT" run-reconcile "$row_tmp" \
+      --record-path "$RECONCILE_FILE"
     rm -f "$row_tmp"
     n_done=$((n_done + 1))
     echo "reconciled: job $jid -> $state (exit $exit_code, $elapsed)"

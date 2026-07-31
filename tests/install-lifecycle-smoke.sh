@@ -83,7 +83,9 @@ for cli in codex claude agy gh; do
 done
 export PATH="$bin:$PATH"
 
-(cd "$HOME" && bash "$upstream/install.sh" --no-tools)
+notion_data_source_id="ea343dea-4a66-4421-9653-dfc4fe68ed10"
+(cd "$HOME" && bash "$upstream/install.sh" --no-tools \
+  --notion-data-source "$notion_data_source_id")
 dest="$HOME/.oh-my-setting"
 [ -d "$dest/.git" ] || fail "install did not clone the fixture"
 # Same reason as HOME: the checkout is the source side of every ownership
@@ -137,6 +139,27 @@ grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" ||
 oms list > "$TMP/oms-tools.txt"
 grep -Fq plan-run "$TMP/oms-tools.txt" || fail "dispatcher omitted plan-run"
 grep -Fq model-doctor "$TMP/oms-tools.txt" || fail "dispatcher omitted model-doctor"
+grep -Fq journal "$TMP/oms-tools.txt" || fail "dispatcher omitted journal"
+work_journal_config="$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
+[ -f "$work_journal_config" ] || fail "install did not configure Work Journal"
+python3 - "$work_journal_config" "$notion_data_source_id" <<'PY'
+import json
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["schema_version"] == 1
+assert row["notion"]["data_source_id"] == sys.argv[2]
+assert "token" not in json.dumps(row).lower()
+PY
+oms journal status --repo "$upstream" --json > "$TMP/journal-status.json"
+python3 - "$TMP/journal-status.json" <<'PY'
+import json
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["notion"]["configured"] is True
+assert row["notion"]["credential_present"] is False
+PY
 "$dest/scripts/status.sh" > "$TMP/status.txt"
 case "$expected_mode" in
   copy)
@@ -172,6 +195,8 @@ fi
   fail "uninstall left its Python shim"
 [ -z "$(find "$HOME" -name '*.oh-my-setting-managed.json' -print -quit)" ] ||
   fail "uninstall left a copy ownership sidecar"
+[ ! -e "$work_journal_config" ] ||
+  fail "uninstall --purge left Work Journal configuration"
 [ ! -d "$dest" ] || fail "uninstall --purge left the checkout"
 
 # The default install — tools enabled — was the one path CI never ran, and it is

@@ -14,6 +14,8 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/agent-memory-common.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT_LIB/work-journal.sh"
 
 # Anchored to the git worktree root so capsules do not fork per subdirectory.
 STATE_ROOT="$(oms_repo_root "$PWD")"
@@ -366,7 +368,8 @@ PY
     local -a led=(--note "$NOTE" --no-gate)
     [ -n "$LEDGER_FILE" ] && led+=(--file "$LEDGER_FILE")
     [ -n "$METRICS_FILE" ] && [ -f "$METRICS_FILE" ] && led+=(--metrics "$METRICS_FILE")
-    OMS_RUN_LEDGER_STATUS_OVERRIDE="$status" "$ROOT/scripts/run-ledger.sh" \
+    OMS_WORK_JOURNAL_SUPPRESS=1 OMS_RUN_LEDGER_STATUS_OVERRIDE="$status" \
+      "$ROOT/scripts/run-ledger.sh" \
       "${led[@]}" -- "$@" >/dev/null 2>&1 || \
       echo "capsule: companion ledger row failed (capsule still saved)" >&2
   fi
@@ -376,6 +379,8 @@ PY
     "$ROOT/scripts/oms-run.sh" link --tool run-capsule --event capture \
       --path "$bundle/capsule.json" --detail "exit $status" >/dev/null 2>&1 || true
   fi
+
+  work_journal_observe "$STATE_ROOT" run-capsule "$bundle/capsule.json"
 
   echo "capsule: $bundle/capsule.json (exit $status, ${duration_s}s)" >&2
   printf '%s\n' "$id"

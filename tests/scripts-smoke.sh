@@ -7852,13 +7852,20 @@ EOF
   assert_file_contains "$project/out" "claude: pass"
   assert_one_artifact_contains "$artifact_dir" '_verify-gate-verify-backstop-*.md' 'contract broken'
 
-  # Passing contract + passing reviewers -> gate passes.
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  # Passing contract + passing reviewers -> gate passes. Provider routing is
+  # private to the review calls and must not contaminate the project verifier.
+  cat > "$project/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+[ -z "${OMS_MODEL_OPERATION:-}" ]
+[ -z "${OMS_MODEL_CLASS_REQUEST:-}" ]
+[ -z "${OMS_REASONING_EFFORT_REQUEST:-}" ]
+EOF
   rc=0
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
     --artifact-dir "$project/artifacts-pass" \
     --providers claude,antigravity \
+    --model-class deep \
     --no-diff \
     --gate \
     --prompt "Gate verify backstop" >"$project/out-pass" 2>&1 || rc=$?

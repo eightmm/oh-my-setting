@@ -301,6 +301,33 @@ stray writes never reach the tree
 
 ## Agent state
 
+**Work Journal (`scripts/lib/work-journal.sh`)** — Default-on, internal,
+fail-open observer that projects completed run/capsule, validation, patch
+review/admission, Git commit, CI/PR, experiment/job reconcile, explicit Agent
+State, and handoff receipts into a bounded schema-versioned append-only event
+log under `.oms/work-journal/`. A recoverable SQLite index makes duplicate
+checks, changed-period rendering, and summary export incremental; the JSON
+projection keeps only 256 recent descriptors while preserving all counts and
+periods. Daily and ISO-week Markdown are deterministic atomic derived views;
+late events rebuild their original periods and the prompt hook performs
+local-only rollover catch-up, injecting a bounded once-per-local-day digest
+into agent context (`OMS_WORK_JOURNAL_DIGEST=0` opts out).
+`oms journal show --today|--week|--blockers|--recent N [--json]` is the agent
+read path over the derived summaries and event index;
+`oms journal status|rebuild|sync|configure`
+provides the small operational surface and shares the observer's local/remote
+locks. Recursive
+sanitization excludes transcripts, raw logs, environments, diffs, credentials,
+and unobserved facts. Optional Notion export stores only nonsecret connection
+metadata at install, takes its token from the process environment, mirrors
+finalized summaries as native blocks, upserts by stable key and content hash,
+and leaves failed sync pending without changing local lifecycle results. Remote
+work has its own non-blocking lock and bounded tick budget, so it never owns the
+canonical append/materialization lock. Design, setup, responsibility
+boundaries, examples, fallback behavior, and the cross-machine duplicate limit
+are in
+[WORK-JOURNAL.md](WORK-JOURNAL.md)
+
 **Repo state (`repo-state.sh`)** — One read-only dashboard over the project
 harness and all shared `.oms` state — applied rule styles, `PROJECT.md` state,
 agent files exposed to git, active task/plan, experiment board, executor

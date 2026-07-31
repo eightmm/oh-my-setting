@@ -149,11 +149,12 @@ if [ "$(printf '%s' "$note" | wc -c | tr -d ' ')" -gt "$max_chars" ]; then
 fi
 
 note_file="$(mktemp)" || fail "mktemp failed"
+research_json_file="$(mktemp)" || { rm -f "$note_file"; fail "mktemp failed"; }
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
-  rm -f "$note_file"
+  rm -f "$note_file" "$research_json_file"
 }
 cleanup_signal() {
   local code="$1"
@@ -169,6 +170,27 @@ printf '%s\n' "$note" > "$note_file"
 if agent_memory_file_has_sensitive_content "$note_file"; then
   fail "pre-registration contains sensitive-looking content"
 fi
+
+OMS_RR_QUESTION="$QUESTION" OMS_RR_HYPOTHESIS="$HYPOTHESIS" \
+  OMS_RR_PREDICTION="$PREDICTION" OMS_RR_BASELINE="$BASELINE" \
+  OMS_RR_METRIC="$METRIC" OMS_RR_SUCCESS="$SUCCESS" OMS_RR_CHANGE="$CHANGE" \
+  python3 - "$research_json_file" <<'PY'
+import json
+import os
+import sys
+
+fields = {
+    "question": os.environ["OMS_RR_QUESTION"],
+    "hypothesis": os.environ["OMS_RR_HYPOTHESIS"],
+    "prediction": os.environ["OMS_RR_PREDICTION"],
+    "baseline": os.environ["OMS_RR_BASELINE"],
+    "metric": os.environ["OMS_RR_METRIC"],
+    "success": os.environ["OMS_RR_SUCCESS"],
+    "change": os.environ["OMS_RR_CHANGE"],
+}
+with open(sys.argv[1], "w", encoding="utf-8", newline="\n") as handle:
+    json.dump(fields, handle, ensure_ascii=False)
+PY
 
 cmd=("$ROOT/scripts/run-ledger.sh" --note "$note")
 [ -n "$LEDGER" ] && cmd+=(--file "$LEDGER")
@@ -190,4 +212,5 @@ fi
 
 printf 'research-runner: launching registered experiment\n' >&2
 printf 'research-runner: %s\n' "$note" >&2
-"${cmd[@]}"
+OMS_RESEARCH_METADATA_FILE="$research_json_file" \
+  OMS_WORK_JOURNAL_EVENT_TYPE=experiment "${cmd[@]}"

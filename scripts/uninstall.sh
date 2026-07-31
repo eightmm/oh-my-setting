@@ -98,6 +98,7 @@ if ! confirm "Delete checkout directory $ROOT?"; then
 fi
 
 if [ "$DRY_RUN" = "1" ]; then
+  echo "would remove managed Work Journal configuration"
   echo "would remove $ROOT"
   exit 0
 fi
@@ -105,6 +106,9 @@ fi
 # Defensive: refuse to purge the user's $HOME or unrelated paths.
 refuse_unsafe_purge_root
 
+"$ROOT/scripts/journal.sh" disconnect --managed >/dev/null || {
+  echo "warning: managed Work Journal configuration was not removed" >&2
+}
 cd /
 rm -rf "$ROOT"
 echo "purged $ROOT"

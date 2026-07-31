@@ -7,6 +7,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Peer-review mechanical verification now runs without the review provider's
+  model-class, operation, or reasoning environment. A deep review gate could
+  previously make an otherwise clean routing test observe the review phase and
+  fail, even though the verifier was not itself a reviewer call.
 - The residue scan sees flock lock files. It only ever walked mkdir-path lock
   directories, so a machine holding 12,427 flock lock files was told it had
   zero — which reads as "nothing here" rather than "this kind is not
@@ -153,6 +157,38 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   file for whichever subcommand was asked for.
 
 ### Added
+- Work Journal adds automatic local-first project memory with a small
+  `oms journal` status/rebuild/sync/configure surface. Existing run, capsule,
+  artifact, Agent State, review, CI/PR, and
+  experiment/job receipts are projected through one fail-open observer into a
+  schema-versioned append-only event log and deterministic daily/ISO-week
+  Markdown. A rebuildable SQLite index makes normal deduplication,
+  changed-period rendering, and summary export incremental, while the JSON
+  projection is bounded to 256 recent descriptors. Stable source IDs make
+  replay idempotent, late events rebuild old periods, commit rollover is
+  local-only, and recursive sanitization excludes credentials, transcripts,
+  raw logs, environments, and diffs. An optional standard-library Notion
+  adapter stores only nonsecret connection metadata during install and mirrors
+  finalized changed summaries as native blocks with stable-key upsert, bounded
+  Retry-After-aware retries, and pending local sync state; no credential means
+  no network.
+- Work Journal grew the read half it was missing: capture without recall is a
+  recorder, not memory. `oms journal show --today|--week|--period P|--blockers|
+  --recent N [--json]` is the one agent read command over the derived
+  summaries and event index — blockers and next actions are deduplicated from
+  the last seven days of events, newest first, with event IDs. The provider
+  prompt hook's rollover tick now also prints a bounded digest (open blockers,
+  next priorities, last journal day's counts) into agent context on the first
+  prompt of each local day; the marker is derived state and
+  `OMS_WORK_JOURNAL_DIGEST=0` keeps the tick but drops the injection. An
+  `agent-task close` without a recorded decision or next step gets a stderr
+  hint, never a block, since those two fields are what make the daily useful.
+  Rendered headings became configurable (`OMS_WORK_JOURNAL_LANG`, Korean
+  default, `en` available; labels only, never admission). Building the read
+  path surfaced that the summary exported to the index and Notion was
+  flattened to one line — `sanitize_text` folds newlines, so heading/bullet
+  block parsing and the blocker scan never matched; a line-preserving
+  `sanitize_multiline` now feeds both.
 - Two read-only observability commands close the measurable gaps left after the
   multi-agent and project-memory work. `oms artifact-index telemetry [N]
   [--json]` aggregates only the retained call/ask/review/delegate rows by

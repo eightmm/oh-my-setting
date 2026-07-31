@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-task-common.sh
 . "$ROOT/scripts/lib/agent-task-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT/scripts/lib/work-journal.sh"
 
 # OMS_STATE_REPO: set by peer-delegate.sh for worktree workers so they
 # read the primary repo's shared state instead of the throwaway checkout's.
@@ -355,6 +357,12 @@ append_text() {
   rm -f "$note_file"
 }
 
+journal_explicit_task_update() {
+  [ -n "$RESULT_NOTE$LAST_FAILURE$VERIFICATION_NOTE$DECISION$NEXT_STEP" ] ||
+    return 0
+  work_journal_observe "$REPO" agent-task "$TASK_FILE" --operation update
+}
+
 case "$ACTION" in
   path)
     printf '%s\n' "$TASK_FILE"
@@ -368,6 +376,7 @@ case "$ACTION" in
       agent_task_init_file "$TASK_FILE"
     fi
     apply_updates
+    journal_explicit_task_update
     echo "task: initialized $TASK_FILE"
     ;;
   show)
@@ -427,6 +436,7 @@ print(json.dumps({
     ensure_tmpdir
     agent_task_init_file "$TASK_FILE"
     apply_updates
+    journal_explicit_task_update
     echo "task: updated $TASK_FILE"
     ;;
   append)
@@ -457,6 +467,7 @@ print(json.dumps({
       } > "$note_file"
       agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
       rm -f "$note_file"
+      work_journal_observe "$REPO" agent-task "$TASK_FILE" --operation verify
       echo "task: verification skipped; task remains active ($TASK_FILE)"
       exit 0
     fi
@@ -509,6 +520,7 @@ print(json.dumps({
       # line this path exists to produce, so let that one through and keep the
       # bookkeeping quiet.
       printf '%s\n' "$ledger_out" | grep -F 'oms advise' >&2 || true
+      work_journal_observe "$REPO" agent-task "$TASK_FILE" --operation verify
       rm -f "$verify_log"
       echo "task: verification failed (exit $verify_rc); task remains active ($TASK_FILE)" >&2
       exit "$verify_rc"
@@ -524,12 +536,14 @@ print(json.dumps({
     agent_task_set_metadata "$TASK_FILE" verified_cmd_sha \
       "$(printf '%s\n' "$verify_cmd" | oms_sha256_stream 2>/dev/null || printf '')"
     agent_task_set_status "$TASK_FILE" verified
+    work_journal_observe "$REPO" agent-task "$TASK_FILE" --operation verify
     echo "task: verified $TASK_FILE"
     ;;
   rotate)
     ensure_tmpdir
     archive_file="$(agent_task_rotate "$TASK_FILE")"
     apply_updates
+    journal_explicit_task_update
     [ -z "$archive_file" ] || echo "task: archived $archive_file"
     echo "task: initialized $TASK_FILE"
     ;;
@@ -560,19 +574,25 @@ print(json.dumps({
       agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
       rm -f "$note_file"
     fi
+    goal_line="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
+    next_line="$(awk '/^## Next Step$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
+    # The packet already holds the two lines worth recalling later: what was
+    # decided, and what went wrong on the way. Closing used to keep the goal
+    # and drop both. Promoting text that is already written costs nothing —
+    # no model is asked to summarise anything — and it is the only content in
+    # this whole flow that a later `recall` can actually act on, because a
+    # command and an exit code carry the symptom but never the reason.
+    decision_line="$(awk '/^## Decisions$/{f=1;next} /^## /{f=0} f&&NF{last=$0} END{if(last)print last}' "$TASK_FILE")"
+    pitfall_line="$(awk '/^## Last Failure$/{f=1;next} /^## /{f=0} f&&NF{last=$0} END{if(last)print last}' "$TASK_FILE")"
+    # A close without a decision or next step produces a Work Journal daily
+    # whose two most useful sections are empty. Hint, never block: many small
+    # tasks legitimately have neither.
+    if work_journal_enabled && [ -z "$decision_line$next_line" ]; then
+      echo "hint: no decision or next step recorded; 'agent-task update --decision/--next' before close feeds the Work Journal daily" >&2
+    fi
     # Promote a one-line outcome into project shared memory so the next
     # session (any agent) starts from the conclusion, not from scratch.
     if [ "${OMS_AGENT_TASK_CLOSE_MEMORY:-1}" = "1" ]; then
-      goal_line="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
-      next_line="$(awk '/^## Next Step$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$TASK_FILE")"
-      # The packet already holds the two lines worth recalling later: what was
-      # decided, and what went wrong on the way. Closing used to keep the goal
-      # and drop both. Promoting text that is already written costs nothing —
-      # no model is asked to summarise anything — and it is the only content in
-      # this whole flow that a later `recall` can actually act on, because a
-      # command and an exit code carry the symptom but never the reason.
-      decision_line="$(awk '/^## Decisions$/{f=1;next} /^## /{f=0} f&&NF{last=$0} END{if(last)print last}' "$TASK_FILE")"
-      pitfall_line="$(awk '/^## Last Failure$/{f=1;next} /^## /{f=0} f&&NF{last=$0} END{if(last)print last}' "$TASK_FILE")"
       if [ -n "$goal_line" ]; then
         note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")"
         {
@@ -590,6 +610,11 @@ print(json.dumps({
       fi
     fi
     archive_file="$(agent_task_archive "$TASK_FILE")"
+    journal_close_verification="not_verified"
+    [ "$close_verification" != "fresh" ] ||
+      journal_close_verification="passed"
+    work_journal_observe "$REPO" agent-task "$archive_file" --operation close \
+      --verification-status "$journal_close_verification"
     echo "task: archived $archive_file"
     ;;
   *)

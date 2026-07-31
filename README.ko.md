@@ -23,6 +23,12 @@ peer는 기억해야 할 플래그가 아니라 설치의 일부다. root 권한
 수 없는 머신에서는 `--no-tools`를 붙이고, `gh auth login`은 대화형이라 한 번
 직접 실행한다.
 
+선택적인 Work Journal Notion mirror는 설치할 때
+`--notion-data-source ID`를 주면 된다. 프로세스 환경에
+`OMS_WORK_JOURNAL_NOTION_TOKEN`이 있으면 연결과 schema까지 검증하고, 디스크에는
+비밀이 아닌 ID와 property mapping만 저장한다. 자세한 내용은
+[docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md)에 있다.
+
 | 호스트 | 필요 | 관리 파일 |
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ | symlink |
@@ -105,6 +111,10 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 
 **Agent 상태와 핸드오프**
 
+- 자동 Work Journal 프로젝트 메모리: 구조화된 결과를 sanitize해 재생성 가능한
+  일간·주간 로컬 요약을 증분 색인하고, 에이전트는 `oms journal show`와 하루
+  한 번의 프롬프트 다이제스트로 다시 읽으며, 설치 때 구성한 Notion mirror에는
+  마감된 기간만 필요할 때 보낸다
 - 되돌릴 수 있는 Markdown 원본 + 검색 가능한 로컬 인덱스의 공유 메모리
 - 검증이 주장이 아니라 실제로 실행되는 task packet
 - lease가 있는 subtask DAG, 그리고 범위가 고정된 task 하나만 claim해 격리

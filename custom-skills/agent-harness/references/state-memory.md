@@ -23,6 +23,19 @@ oms agent-task --repo . verify --verification "focused check passed"
 oms agent-task --repo . close
 ```
 
+Work Journal automatically projects durable lifecycle receipts and explicit
+Agent State outcomes into local daily/weekly summaries. Capture needs no manual
+command: use the existing structured fields (`--result`, `--decision`,
+`--last-failure`, `--next`) when those facts matter, and let the observer
+reference the task receipt. Reading has exactly one command: when resuming
+work in a repository, run `oms journal show --blockers` and
+`oms journal show --today` (also `--week`, `--recent N`, `--json`) before
+planning — that is where past sessions' decisions, failures, and next actions
+live. The first prompt of each local day also injects a bounded digest
+automatically. For maintenance, use `oms journal status`,
+`oms journal rebuild`, or `oms journal sync --force`. Set
+`OMS_WORK_JOURNAL=0` only when a project must opt out.
+
 Before `close`, set `OMS_AGENT_TASK_CLOSE_MEMORY=0` when the outcome should not
 be promoted into durable memory.
 

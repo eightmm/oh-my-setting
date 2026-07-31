@@ -19,7 +19,7 @@ if [ "$#" -gt 0 ]; then
   esac
 fi
 
-python3 - scripts scripts/lib templates <<'PY'
+python3 - scripts scripts/lib templates tests <<'PY'
 import pathlib
 import sys
 

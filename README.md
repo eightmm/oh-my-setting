@@ -24,6 +24,12 @@ installed peer is not a council, so the peers are part of the install rather
 than a flag to remember. Nothing needs root. Add `--no-tools` on a machine that
 cannot have them, and run `gh auth login` once, since that step is interactive.
 
+For an optional Work Journal Notion mirror, give the installer a data source
+with `--notion-data-source ID`. If
+`OMS_WORK_JOURNAL_NOTION_TOKEN` is already supplied by the process environment,
+install validates the connection and schema; only the nonsecret ID and property
+mapping are persisted. See [docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md).
+
 | Host | Needs | Managed files |
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ | symlinks |
@@ -107,6 +113,10 @@ per-script catalog is [docs/COMPONENTS.md](docs/COMPONENTS.md).
 
 **Agent state and handoff**
 
+- Automatic Work Journal project memory: sanitized durable outcomes become
+  incrementally indexed, rebuildable daily/weekly local summaries that agents
+  read back with `oms journal show` and a once-per-day prompt digest, with an
+  optional finalized-period Notion mirror configured during install
 - Shared memory with reversible Markdown sources and a searchable local index
 - Read-only retained-window routing telemetry and memory source/index health
   diagnostics, both available as structured JSON

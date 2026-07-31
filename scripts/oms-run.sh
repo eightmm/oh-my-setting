@@ -18,6 +18,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT_LIB/work-journal.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
 
@@ -262,6 +264,10 @@ cmd_close() {
   if [ -f "$current" ] && [ "$(awk 'NR==1{print $1}' "$current")" = "$run_id" ]; then
     rm -f "$current"
   fi
+  work_journal_observe "$STATE_ROOT" oms-run "$INDEX" \
+    --source-id "$run_id:close" --event-type phase_outcome \
+    --outcome "Run closed" --outcome-status completed \
+    --verification-status not_applicable
   echo "closed: $run_id" >&2
 }
 

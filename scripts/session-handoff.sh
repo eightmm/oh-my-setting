@@ -10,6 +10,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT/scripts/lib/work-journal.sh"
 
 CLAUDE_HOME="${OMS_CLAUDE_HOME:-$HOME/.claude}"
 CODEX_HOME="${OMS_CODEX_HOME:-$HOME/.codex}"
@@ -389,7 +391,7 @@ cmd_capture() {
   AGENT="${AGENT:-claude}"
   CWD="$(cd "$CWD" 2>/dev/null && pwd || printf '%s' "$CWD")"
 
-  local source="" session_id="$SESSION" extract ts
+  local source="" session_id="$SESSION" extract ts handoff_hash
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   case "$AGENT" in
     claude)
@@ -444,6 +446,12 @@ cmd_capture() {
 
   printf '%s\n' "$extract" |
     render_digest "$AGENT" "$source" "$session_id" "$CWD" "$NOTE" "$ts" > "$out"
+  handoff_hash="$(
+    printf '%s\n%s\n' "$extract" "$NOTE" |
+      oms_sha256_stream 2>/dev/null || printf 'unhashed'
+  )"
+  work_journal_observe "$CWD" session-handoff "$out" \
+    --source-id "$AGENT:$session_id:$handoff_hash" --occurred-at "$ts"
   printf '%s\n' "$out"
 }
 

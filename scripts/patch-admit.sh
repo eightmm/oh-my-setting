@@ -20,6 +20,8 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/oms-common.sh"
 # shellcheck source=scripts/lib/peer-common.sh
 . "$ROOT_LIB/peer-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT_LIB/work-journal.sh"
 
 REPO="$PWD"
 PATCH=""
@@ -446,6 +448,17 @@ mkdir -p "$(dirname "$REPORT")"
 admit_exit=1
 [ "$verdict" = "ADMIT" ] && admit_exit=0
 ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" || true
+if [ "$verdict" = "ADMIT" ]; then
+  work_journal_observe "$REPO" patch-admit "$REPORT" \
+    --source-id "admit:$patch_sha:$base_sha:$verdict" \
+    --outcome "Patch admission passed" --outcome-status success \
+    --verification-status passed
+else
+  work_journal_observe "$REPO" patch-admit "$REPORT" \
+    --source-id "admit:$patch_sha:$base_sha:$verdict" \
+    --outcome "Patch admission rejected" --outcome-status failure \
+    --verification-status failed
+fi
 
 echo "patch-admit: $verdict ($REPORT)" >&2
 printf '%s\n' "$verdict"

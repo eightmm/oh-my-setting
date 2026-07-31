@@ -17,6 +17,8 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/file-lock.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT_LIB/work-journal.sh"
 
 # Anchored to the git worktree root so the board does not fork per subdirectory.
 STATE_ROOT="$(oms_repo_root "$PWD")"
@@ -210,13 +212,22 @@ PY
     # (correctly) reject a fresh claim of the same id, so bypass it here.
     oms_with_file_lock "$BOARD" board_append "$BOARD" "$row_tmp" || lock_rc=$?
   fi
-  rm -f "$row_tmp"
-  [ "$lock_rc" = 0 ] || exit "$lock_rc"
+  if [ "$lock_rc" != 0 ]; then
+    rm -f "$row_tmp"
+    exit "$lock_rc"
+  fi
   # Thin-spine join: link this lifecycle event to the active run id when set.
   if oms_effective_run_id "$STATE_ROOT" >/dev/null 2>&1; then
     "$ROOT/scripts/oms-run.sh" link --tool experiment-board --event "$status" \
       --detail "$ID" >/dev/null 2>&1 || true
   fi
+  case "$status" in
+    done|aborted)
+      work_journal_observe "$STATE_ROOT" experiment-board "$row_tmp" \
+        --record-path "$BOARD" --source-id "$ID:$status"
+      ;;
+  esac
+  rm -f "$row_tmp"
 }
 
 cmd_claim() {

@@ -16,10 +16,11 @@ INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-0}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
+NOTION_DATA_SOURCE_ID="${OH_MY_SETTING_NOTION_DATA_SOURCE_ID:-${OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID:-}}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--full] [--no-tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--star] [--help]
+Usage: install.sh [--ref REF] [--full] [--no-tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--star] [--help]
 
 Options:
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
@@ -29,6 +30,10 @@ Options:
   --auto-update       Install the check-only update timer.
   --machine-snapshot  Generate local machine metadata.
   --slurm-snapshot    Generate local Slurm cluster metadata when available.
+  --notion-data-source ID
+                      Configure the Work Journal Notion mirror. A token already
+                      present in the environment validates the target schema
+                      but is never persisted.
   --star              Offer the optional GitHub star prompt.
   --no-star           Skip the star prompt (compatibility; default).
   --help              Show this help.
@@ -43,6 +48,8 @@ Environment:
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
   OH_MY_SETTING_INSTALL_TOOLS=0    Skip the Node/uv/provider CLI/gh install (default: 1).
   OH_MY_SETTING_AUTO_UPDATE=1      Install auto-update trigger.
+  OH_MY_SETTING_NOTION_DATA_SOURCE_ID=ID
+                                   Configure the Work Journal Notion mirror.
   OH_MY_SETTING_AUTO_UPDATE_MODE=apply  Auto-apply fast-forward updates (default: check-only).
   OH_MY_SETTING_REQUIRE_TOOLS=0    Let doctor treat a missing CLI as optional
                                    (default: 1 whenever the tools were installed).
@@ -85,6 +92,15 @@ while [ "$#" -gt 0 ]; do
     --slurm-snapshot)
       [ "$PROFILE" = "full" ] || PROFILE=custom
       GENERATE_SLURM=1
+      ;;
+    --notion-data-source)
+      [ "$#" -ge 2 ] || {
+        echo "error: --notion-data-source requires a value" >&2
+        exit 2
+      }
+      [ "$PROFILE" = "full" ] || PROFILE=custom
+      NOTION_DATA_SOURCE_ID="$2"
+      shift
       ;;
     --star)
       [ "$PROFILE" = "full" ] || PROFILE=custom
@@ -130,6 +146,7 @@ export OH_MY_SETTING_GENERATE_MACHINE="$GENERATE_MACHINE"
 export OH_MY_SETTING_GENERATE_SLURM="$GENERATE_SLURM"
 export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
+export OH_MY_SETTING_NOTION_DATA_SOURCE_ID="$NOTION_DATA_SOURCE_ID"
 
 run_as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -303,6 +320,11 @@ esac
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 
 "$DEST/scripts/link.sh"
+
+if [ -n "$NOTION_DATA_SOURCE_ID" ]; then
+  "$DEST/scripts/journal.sh" configure \
+    --data-source-id "$NOTION_DATA_SOURCE_ID"
+fi
 
 # Claude Code skill-router hook (deterministic skill suggestions at prompt
 # time). Additive settings.json merge; Claude-only, non-fatal on failure.

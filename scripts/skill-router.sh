@@ -14,9 +14,22 @@ set -euo pipefail
 # entirely with OMS_SKILL_ROUTER_OFF=1. Claude Code installs this directly;
 # Codex installs it through the repo-local oh-my-setting plugin.
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT/scripts/lib/work-journal.sh"
+
+# Local-only rollover/catch-up on the first top-level agent prompt. This stays
+# independent of skill routing (which users may disable) and avoids network
+# work inside the five-second provider hook budget. On the first prompt of a
+# local day it also prints a bounded journal digest — hook stdout becomes
+# agent context, which is what makes the journal self-referencing.
+if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] &&
+  git -C "${OMS_STATE_REPO:-$PWD}" rev-parse --git-dir >/dev/null 2>&1; then
+  work_journal_prompt_tick "${OMS_STATE_REPO:-$PWD}"
+fi
+
 [ "${OMS_SKILL_ROUTER_OFF:-0}" = "1" ] && exit 0
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="${OMS_SKILL_MANIFEST:-$ROOT/skills.manifest.json}"
 HELPER="$ROOT/scripts/lib/hook_state.py"
 [ -f "$MANIFEST" ] || exit 0

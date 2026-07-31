@@ -4,6 +4,8 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/peer-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/peer-common.sh"
+# shellcheck source=lib/work-journal.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/work-journal.sh"
 
 MA_KIND="review"
 MA_SHOW_REPO=1
@@ -604,6 +606,25 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+record_review_outcome() {
+  local review_rc="$1"
+  local verified="$2"
+  local summary status
+
+  if [ "$review_rc" -eq 0 ]; then
+    summary="Peer review outcome passed"
+    status="success"
+  else
+    summary="Peer review outcome failed"
+    status="failure"
+  fi
+  ma_append_artifact_index "$REPO" review-outcome local "$review_rc" "$synth_file" || true
+  work_journal_observe "$REPO" peer-review "$synth_file" \
+    --source-id "$OMS_OPERATION_ID:outcome" --event-type patch_review \
+    --outcome "$summary" --outcome-status "$status" \
+    --verification-status "$verified"
+}
+
 if [ "$GATE" -eq 1 ]; then
   ma_print_run_summary
   gate_verify_exit=0
@@ -619,7 +640,18 @@ if [ "$GATE" -eq 1 ]; then
         printf '## Output\n\n'
       } > "$gate_verify_artifact"
       set +e
-      (cd "$REPO" && run_verify_with_timeout bash -c "$VERIFY_CMD") >> "$gate_verify_artifact" 2>&1
+      (
+        cd "$REPO" || exit 1
+        # Review routing belongs to provider calls, not to the project's own
+        # verifier. Leaking it changes nested harness tests and can make an
+        # otherwise clean gate depend on which review tier ran immediately
+        # before it.
+        unset OMS_MODEL_OPERATION OMS_MODEL_OPERATION_REQUEST
+        unset OMS_MODEL_CLASS_REQUEST OMS_MODEL_EXPLICIT
+        unset OMS_MODEL_FALLBACK_EXPLICIT OMS_MODEL_NO_FALLBACK
+        unset OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
+        run_verify_with_timeout bash -c "$VERIFY_CMD"
+      ) >> "$gate_verify_artifact" 2>&1
       gate_verify_exit=$?
       set -e
       printf '\n\n## Exit\n\n%s\n' "$gate_verify_exit" >> "$gate_verify_artifact"
@@ -637,9 +669,22 @@ if [ "$GATE" -eq 1 ]; then
   # takes precedence so the round gets re-run first.
   if [ "$verdict_rc" -eq 0 ] && [ "$gate_verify_exit" -ne 0 ]; then
     echo "gate: fail (mechanical verify failed despite reviewer pass)"
+    record_review_outcome 1 failed
     exit 1
+  fi
+  if [ "$verdict_rc" -eq 0 ]; then
+    record_review_outcome 0 passed
+  else
+    record_review_outcome "$verdict_rc" failed
   fi
   exit "$verdict_rc"
 fi
 
-ma_quorum_exit
+quorum_rc=0
+( ma_quorum_exit ) || quorum_rc=$?
+if [ "$quorum_rc" -eq 0 ]; then
+  record_review_outcome 0 not_verified
+else
+  record_review_outcome "$quorum_rc" failed
+fi
+exit "$quorum_rc"

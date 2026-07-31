@@ -10,6 +10,8 @@ ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
 . "$ROOT_LIB/agent-memory-common.sh"
 # shellcheck source=scripts/lib/oms-common.sh
 . "$ROOT_LIB/oms-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT_LIB/work-journal.sh"
 
 # Anchored to the git worktree root so the default ledger does not fork per
 # subdirectory. --file overrides stay verbatim.
@@ -431,12 +433,17 @@ EOF
 fi
 
 row_tmp="$(mktemp)" || fail "mktemp failed"
+effective_run_id="$(oms_effective_run_id "$STATE_ROOT" 2>/dev/null || true)"
+effective_run_id="${effective_run_id//$'\r'/}"
 OMS_METRICS_JSON="$METRICS_JSON" OMS_GATE_STATUS="$GATE_STATUS" OMS_GATE_REASON="$REASON" \
+  OMS_LEDGER_RUN_ID="$effective_run_id" \
   python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
   "$status" "$duration_s" "$NOTE" "$@" <<'EOF' > "$row_tmp"
-import json, os, sys
+import json, os, sys, uuid
 a = sys.argv[1:]
 row = {
+    "schema": 1,
+    "id": "ledger-" + uuid.uuid4().hex,
     "ts": a[0],
     "git_sha": a[1],
     "dirty": int(a[2]),
@@ -447,6 +454,10 @@ row = {
     "note": a[7],
     "cmd": a[8:],
 }
+if os.environ.get("OMS_OPERATION_ID"):
+    row["operation_id"] = os.environ["OMS_OPERATION_ID"]
+if os.environ.get("OMS_LEDGER_RUN_ID"):
+    row["run_id"] = os.environ["OMS_LEDGER_RUN_ID"]
 row["gate"] = os.environ.get("OMS_GATE_STATUS", "none")
 reason = os.environ.get("OMS_GATE_REASON", "")
 if row["gate"] == "skipped" and reason:
@@ -454,14 +465,43 @@ if row["gate"] == "skipped" and reason:
 mj = os.environ.get("OMS_METRICS_JSON", "")
 if mj:
     row["metrics"] = json.loads(mj)
+research_file = os.environ.get("OMS_RESEARCH_METADATA_FILE", "")
+if research_file:
+    try:
+        if os.path.getsize(research_file) <= 16384:
+            research = json.load(open(research_file, encoding="utf-8"))
+            allowed = (
+                "question", "hypothesis", "prediction", "baseline",
+                "metric", "success", "change",
+            )
+            if isinstance(research, dict):
+                clean = {
+                    key: str(research[key])[:1000]
+                    for key in allowed
+                    if research.get(key) not in (None, "")
+                }
+                if clean:
+                    row["research"] = clean
+    except (OSError, ValueError, TypeError):
+        pass
 print(json.dumps(row, ensure_ascii=False, allow_nan=False))
 EOF
 oms_with_file_lock "$LEDGER" run_ledger_append_row "$LEDGER" "$row_tmp"
 
 # Thin-spine join: link this ledger row to the active run id when set.
-if oms_effective_run_id "$STATE_ROOT" >/dev/null 2>&1; then
+if [ -n "$effective_run_id" ]; then
   "$ROOT_LIB/../oms-run.sh" link --tool run-ledger --event append \
     --path "$LEDGER" --detail "exit $status" >/dev/null 2>&1 || true
+fi
+
+if [ "${OMS_WORK_JOURNAL_SUPPRESS:-0}" != 1 ]; then
+  if [ -n "${OMS_WORK_JOURNAL_EVENT_TYPE:-}" ]; then
+    work_journal_observe "$STATE_ROOT" run-ledger "$row_tmp" \
+      --record-path "$LEDGER" --event-type "$OMS_WORK_JOURNAL_EVENT_TYPE"
+  else
+    work_journal_observe "$STATE_ROOT" run-ledger "$row_tmp" \
+      --record-path "$LEDGER"
+  fi
 fi
 
 echo "ledger: appended to $LEDGER (exit $status, ${duration_s}s)" >&2
