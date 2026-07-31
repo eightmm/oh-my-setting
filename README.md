@@ -30,6 +30,13 @@ estimated session cost, and reasoning effort. It is a local renderer and makes
 no API call. An existing user `statusLine` is left untouched; update refreshes
 only an oh-my-setting-owned command and uninstall removes only that command.
 
+Antigravity answers headless council calls only with standing permissions;
+without them a peer call is silently denied. A default install reports what
+would be denied, and `--peer-permissions` grants the consult profile
+(`read_file(*)`, `command(*)`) at install time, keeping a `.bak` of the
+settings it widened. Codex and Claude Code need nothing here — they carry
+authority per invocation.
+
 For an optional Work Journal Notion mirror, give the installer a data source
 with `--notion-data-source ID`. If
 `OMS_WORK_JOURNAL_NOTION_TOKEN` is already supplied by the process environment,

@@ -16,11 +16,12 @@ INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-0}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
+PEER_PERMISSIONS="${OH_MY_SETTING_PEER_PERMISSIONS:-0}"
 NOTION_DATA_SOURCE_ID="${OH_MY_SETTING_NOTION_DATA_SOURCE_ID:-${OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID:-}}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--full] [--no-tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--star] [--help]
+Usage: install.sh [--ref REF] [--full] [--no-tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
 
 Options:
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
@@ -34,6 +35,11 @@ Options:
                       Configure the Work Journal Notion mirror. A token already
                       present in the environment validates the target schema
                       but is never persisted.
+  --peer-permissions  Grant Antigravity the standing consult permissions
+                      (read_file(*), command(*)) so headless council calls are
+                      not auto-denied. Writes the user's Antigravity settings
+                      with a .bak beside it. Without this flag the installer
+                      only reports what a headless peer would be denied.
   --star              Offer the optional GitHub star prompt.
   --no-star           Skip the star prompt (compatibility; default).
   --help              Show this help.
@@ -44,6 +50,7 @@ Environment:
   OH_MY_SETTING_PROFILE=NAME       Receipt profile: minimal, full, or custom.
   OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hooks and usage HUD.
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto  Skip, require, or auto-detect Codex plugin setup.
+  OH_MY_SETTING_PEER_PERMISSIONS=1 Grant Antigravity consult permissions.
   OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
   OH_MY_SETTING_INSTALL_TOOLS=0    Skip the Node/uv/provider CLI/gh install (default: 1).
@@ -102,6 +109,10 @@ while [ "$#" -gt 0 ]; do
       NOTION_DATA_SOURCE_ID="$2"
       shift
       ;;
+    --peer-permissions)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
+      PEER_PERMISSIONS=1
+      ;;
     --star)
       [ "$PROFILE" = "full" ] || PROFILE=custom
       STAR_PROMPT=1
@@ -126,6 +137,10 @@ case "$PROFILE" in
   minimal|full|custom) ;;
   *) echo "error: OH_MY_SETTING_PROFILE must be minimal, full, or custom" >&2; exit 2 ;;
 esac
+case "$PEER_PERMISSIONS" in
+  0|1) ;;
+  *) echo "error: OH_MY_SETTING_PEER_PERMISSIONS must be 0 or 1" >&2; exit 2 ;;
+esac
 case "$GENERATE_MACHINE:$GENERATE_SLURM" in
   0:0|0:1|0:auto|1:0|1:1|1:auto|auto:0|auto:1|auto:auto) ;;
   *) echo "error: snapshot modes must be 0, 1, or auto" >&2; exit 2 ;;
@@ -146,6 +161,7 @@ export OH_MY_SETTING_GENERATE_MACHINE="$GENERATE_MACHINE"
 export OH_MY_SETTING_GENERATE_SLURM="$GENERATE_SLURM"
 export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
+export OH_MY_SETTING_PEER_PERMISSIONS="$PEER_PERMISSIONS"
 export OH_MY_SETTING_NOTION_DATA_SOURCE_ID="$NOTION_DATA_SOURCE_ID"
 
 run_as_root() {
@@ -339,6 +355,20 @@ if [ "$CODEX_PLUGIN" = "1" ]; then
   "$DEST/scripts/install-codex-plugin.sh"
 else
   echo "skipping codex plugin registration: OH_MY_SETTING_CODEX_PLUGIN=0"
+fi
+
+# Antigravity is the one provider whose headless calls are auto-denied without
+# standing permissions; codex and claude carry authority per invocation. The
+# grant widens what another program may do, so it stays behind an explicit
+# flag — a default install only reports what a headless peer would be denied,
+# instead of leaving that to be discovered after the first silent council.
+if command -v agy >/dev/null 2>&1; then
+  if [ "$PEER_PERMISSIONS" = "1" ]; then
+    "$DEST/scripts/provider-permissions.sh" --apply --profile consult ||
+      echo "warning: peer permission grant failed (install continues)" >&2
+  elif ! "$DEST/scripts/provider-permissions.sh" --check; then
+    echo "note: peer permissions not granted; rerun with --peer-permissions to allow headless antigravity councils"
+  fi
 fi
 
 if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v sinfo >/dev/null 2>&1; }; then

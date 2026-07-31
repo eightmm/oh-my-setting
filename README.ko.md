@@ -29,6 +29,12 @@ reasoning effort를 한 줄로 보여준다. 로컬 렌더러라 API 호출이�
 없다. 사용자가 이미 만든 `statusLine`은 건드리지 않고, update/uninstall도
 oh-my-setting이 소유한 command만 갱신하거나 제거한다.
 
+Antigravity는 standing permission이 있어야 headless council 호출에 답한다.
+없으면 peer 호출이 조용히 거부되는데, 기본 설치는 무엇이 거부될지 보고만 하고,
+`--peer-permissions`를 주면 설치 시점에 consult 프로파일(`read_file(*)`,
+`command(*)`)을 부여한다(넓힌 설정 파일 옆에 `.bak` 보존). Codex와 Claude
+Code는 호출 단위로 권한을 받으므로 여기 해당 없음.
+
 선택적인 Work Journal Notion mirror는 설치할 때
 `--notion-data-source ID`를 주면 된다. 프로세스 환경에
 `OMS_WORK_JOURNAL_NOTION_TOKEN`이 있으면 연결과 schema까지 검증하고, 디스크에는

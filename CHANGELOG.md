@@ -16,6 +16,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   window, so "deleted 0 orphan file(s)" explains itself.
 
 ### Added
+- Install closes the one setup step that still lived in a person's head:
+  Antigravity's headless permissions. A fresh install ran the tools installer,
+  hooks, and plugins, then left the first `peer-ask`/`peer-review` council to
+  discover that antigravity answers nothing without `permissions.allow` rules
+  — a denial that exits 0 and looks like an empty opinion.
+  `install.sh --peer-permissions` grants the consult profile at install time
+  (through the existing `provider-permissions.sh`, `.bak` beside the widened
+  settings); a default install instead reports exactly what a headless peer
+  would be denied and names the flag, because widening another program's
+  authority is not something an installer should do silently.
 - Claude Code installs a compact local status-line HUD showing the active model,
   live context occupancy and token capacity, available five-hour/seven-day
   subscription usage, estimated session cost, and reasoning effort. It uses

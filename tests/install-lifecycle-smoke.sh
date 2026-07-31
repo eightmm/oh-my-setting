@@ -84,7 +84,7 @@ done
 export PATH="$bin:$PATH"
 
 notion_data_source_id="ea343dea-4a66-4421-9653-dfc4fe68ed10"
-(cd "$HOME" && bash "$upstream/install.sh" --no-tools \
+(cd "$HOME" && bash "$upstream/install.sh" --no-tools --peer-permissions \
   --notion-data-source "$notion_data_source_id")
 dest="$HOME/.oh-my-setting"
 [ -d "$dest/.git" ] || fail "install did not clone the fixture"
@@ -101,6 +101,14 @@ esac
 export PATH="$HOME/.local/bin:$PATH"
 command -v python3 >/dev/null 2>&1 ||
   fail "installer did not expose a python3 command"
+# --peer-permissions is the explicit opt-in: the grant lands in the user's
+# Antigravity settings, with the prior state kept beside it when one existed.
+antigravity_settings="$HOME/.gemini/antigravity-cli/settings.json"
+[ -f "$antigravity_settings" ] ||
+  fail "--peer-permissions did not write the Antigravity settings"
+grep -Fq 'read_file(*)' "$antigravity_settings" &&
+  grep -Fq 'command(*)' "$antigravity_settings" ||
+  fail "--peer-permissions did not grant the consult profile"
 [ ! -e "$HOME/.bashrc" ] ||
   fail "minimal install modified .bashrc"
 shim_created=0
@@ -240,6 +248,12 @@ grep -Fq 'tools: ok' "$TMP/tools-install.txt" ||
   fail "the default install did not run install-tools"
 grep -Fq 'doctor: ok' "$TMP/tools-install.txt" ||
   fail "the default install did not end on a passing doctor"
+# Without the opt-in flag a default install must not widen Antigravity's
+# authority — it reports the denial and names the flag instead.
+grep -Fq 'rerun with --peer-permissions' "$TMP/tools-install.txt" ||
+  fail "the default install did not report ungranted peer permissions"
+[ ! -f "$tools_home/.gemini/antigravity-cli/settings.json" ] ||
+  fail "a default install silently granted Antigravity permissions"
 # The documented behaviour, and the assertion whose staleness hid a red CI: a
 # default install does edit shell startup files, and a --no-tools one does not.
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$tools_home/.bashrc" ||
