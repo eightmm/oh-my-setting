@@ -47,6 +47,7 @@ CONFIG_SCHEMA_VERSION = 1
 DIGEST_SCHEMA_VERSION = 1
 DIGEST_MAX_ITEMS = 3
 ANNOTATION_WINDOW_DAYS = 7
+HANDOFF_POINTER_MAX_AGE_SECONDS = 48 * 3600
 MAX_TEXT_BYTES = 2000
 MAX_EXPORT_BYTES = 65536
 MAX_COLLECTION_ITEMS = 64
@@ -1871,6 +1872,39 @@ class JournalStore:
                 )
         return {"since": since, **collected}
 
+    def _newest_handoff_pointer(self) -> Optional[str]:
+        """One line naming the newest recent handoff digest, or None.
+
+        Handoffs are captured manually and loaded manually; the digest is the
+        moment a new session would want to know one exists. A pointer only —
+        the digest never inlines another artifact's content.
+        """
+
+        handoffs = self.repo / ".oms" / "handoffs"
+        newest: Optional[pathlib.Path] = None
+        newest_mtime = 0.0
+        try:
+            for path in handoffs.iterdir():
+                if path.suffix != ".md" or not path.is_file():
+                    continue
+                mtime = path.stat().st_mtime
+                if mtime > newest_mtime:
+                    newest, newest_mtime = path, mtime
+        except OSError:
+            return None
+        if newest is None:
+            return None
+        now = self.clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.timezone.utc)
+        age = now.timestamp() - newest_mtime
+        if age < 0 or age > HANDOFF_POINTER_MAX_AGE_SECONDS:
+            return None
+        return "Newest handoff (%dh old): oms session-handoff show %s" % (
+            max(0, int(age // 3600)),
+            sanitize_text(newest.name, 200),
+        )
+
     def prompt_digest(self) -> str:
         """Bounded once-per-local-day catch-up block for prompt-hook stdout.
 
@@ -1936,6 +1970,9 @@ class JournalStore:
                 "Last journal day %s: %d events, %d verified."
                 % (last_day, len(day_events), verified)
             )
+        handoff_pointer = self._newest_handoff_pointer()
+        if handoff_pointer:
+            lines.append(handoff_pointer)
         lines.append(
             "Details: oms journal show --today | --blockers | --recent 20"
         )

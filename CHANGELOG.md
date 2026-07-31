@@ -16,6 +16,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   window, so "deleted 0 orphan file(s)" explains itself.
 
 ### Added
+- The daily Work Journal digest points at the newest session handoff. Handoffs
+  are captured manually and loaded manually, and the docs' "loading it is your
+  step" is exactly the step a fresh session forgets it has. The first prompt
+  of a local day now carries one line — the handoff's name, age, and the
+  `oms session-handoff show` command — when one was captured in the last 48
+  hours. A pointer only: the digest never inlines another artifact's content.
 - Failed Bash commands now feed the failure ledger by themselves. fail-ledger
   has recorded, gated, and named `oms advise` at the repeat threshold since it
   existed — but only when something called it, and the primary agent in the

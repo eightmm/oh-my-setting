@@ -701,6 +701,51 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("Last journal day 2026-07-31: 1 events, 1 verified.", follow_up)
         self.assertEqual("", next_day.prompt_digest())
 
+    def test_prompt_digest_points_at_the_newest_recent_handoff(self):
+        annotated = base_event("annotated")
+        annotated["blocker"] = "CI red on shellcheck"
+        self.store.record_event(annotated)
+        self.store.materialize()
+        handoffs = self.repo / ".oms" / "handoffs"
+        handoffs.mkdir(parents=True)
+        for name, hours_old in (("older.md", 5), ("newest.md", 1)):
+            path = handoffs / name
+            path.write_text("digest", encoding="utf-8")
+            stamp = (NOW - dt.timedelta(hours=hours_old)).timestamp()
+            os.utime(path, (stamp, stamp))
+        digest = self.store.prompt_digest()
+        self.assertIn("oms session-handoff show newest.md", digest)
+        self.assertNotIn("older.md", digest)
+
+        # A handoff older than the pointer window is silence, not a pointer.
+        stale_repo = self.tmp / "stale"
+        stale_repo.mkdir()
+        stale_store = wj.JournalStore(
+            stale_repo,
+            timezone_name="Asia/Seoul",
+            clock=lambda: NOW,
+            project_id="proj_stale",
+            project_name="stale",
+        )
+        stale_store.record_event(base_event("stale-source"))
+        stale_store.materialize()
+        stale_handoffs = stale_repo / ".oms" / "handoffs"
+        stale_handoffs.mkdir(parents=True)
+        stale_path = stale_handoffs / "old.md"
+        stale_path.write_text("digest", encoding="utf-8")
+        stamp = (NOW - dt.timedelta(hours=60)).timestamp()
+        os.utime(stale_path, (stamp, stamp))
+        next_day = wj.JournalStore(
+            stale_repo,
+            timezone_name="Asia/Seoul",
+            clock=lambda: NOW + dt.timedelta(days=1),
+            project_id="proj_stale",
+            project_name="stale",
+        )
+        follow_up = next_day.prompt_digest()
+        self.assertTrue(follow_up)
+        self.assertNotIn("session-handoff", follow_up)
+
     def test_renderer_language_is_configurable_and_blocker_scan_survives(self):
         annotated = base_event("annotated")
         annotated["blocker"] = "CI red on shellcheck"

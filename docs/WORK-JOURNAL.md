@@ -42,7 +42,9 @@ hook performs a local-only tick that reconciles `HEAD` and materializes dirty
 periods, which covers the first agent execution after a date or ISO-week
 rollover without a daemon or scheduler. Once per local day it also injects a
 bounded digest of at most three recent blockers and three next actions, plus a
-one-line previous-day count. This is the automatic read path: the journal can
+one-line previous-day count and, when a session handoff digest was captured in
+the last 48 hours, a one-line pointer to the newest one — a pointer only,
+never the handoff's content. This is the automatic read path: the journal can
 inform planning without loading its full history on every prompt. Set
 `OMS_WORK_JOURNAL_DIGEST=0` to keep rollover capture but disable that injection.
 A pending Notion export is retried by the next durable lifecycle observation.
