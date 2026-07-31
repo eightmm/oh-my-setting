@@ -27,6 +27,7 @@ every row rather than grouped by feature.
 | hand work to another model | `oms peer-delegate --to NAME` (returns a patch) | worktree write |
 | split work so several agents can proceed | `oms agent-plan add`, then `oms plan-run` | worktree write |
 | judge a diff before it goes anywhere | `oms peer-review --gate` | read |
+| ask what the peer calls cost, or how often they verified | `oms artifact-index telemetry` (routes, exits, fallbacks, tokens, wall time) | read |
 | put a reviewed change into the tree | `oms patch-admit`, then `oms patch-land` | repo write |
 | run one provider pass at a known boundary | `oms agent-run --mode read\|write` | read or worktree write |
 | keep a worker in one persona across calls | `oms agent-role`, `oms agent-executor` | — |

@@ -407,6 +407,8 @@ ma_append_artifact_index() {
   repo="$(cd "$repo" && pwd)" || return 0
   agent_memory_ensure_oms_ignore "$repo"
   index="${OMS_ARTIFACT_INDEX:-$repo/.oms/artifacts/index.jsonl}"
+  local telemetry_helper
+  telemetry_helper="$(ma_scripts_dir)/lib/artifact-telemetry.py"
   retention_helper="$(ma_scripts_dir)/lib/artifact-index-retention.py"
   mkdir -p "$(dirname "$index")"
   command -v python3 >/dev/null 2>&1 || return 0
@@ -434,9 +436,9 @@ ma_append_artifact_index() {
   OMS_INDEX_REASONING_EFFORT="${OMS_REASONING_RESOLVED:-}" \
   OMS_INDEX_SELECTED_REASONING_EFFORT="${OMS_REASONING_SELECTED:-}" \
   OMS_INDEX_FALLBACK_REASONING_EFFORT="${OMS_REASONING_FALLBACK:-}" \
-  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$retention_helper" <<'EOF'
+  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$retention_helper" "$telemetry_helper" <<'EOF'
 import hashlib, json, os, re, runpy, shutil, sys, tempfile, time, uuid
-repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, retention_helper = sys.argv[1:]
+repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, retention_helper, telemetry_helper = sys.argv[1:]
 event_id = "evt_" + uuid.uuid4().hex
 
 def safe_id(value):
@@ -543,6 +545,22 @@ if fallback_reasoning_effort in ("low", "medium", "high"):
 row.update(path_fields("artifact", artifact_raw))
 row.update(path_fields("patch", patch_raw))
 row.update(path_fields("source", source_raw))
+# Duration and provider-reported tokens live in the artifact body, so reading
+# them used to require the artifact to still exist — retention decided whether
+# past calls could be accounted for at all. Cache them on the row now, reusing
+# the telemetry module rather than copying its regexes here, and let a failure
+# be silent: accounting is not worth failing a recorded call over.
+if telemetry_helper and os.path.isfile(telemetry_helper) and row.get("artifact"):
+    try:
+        metrics = runpy.run_path(telemetry_helper)["artifact_metrics"](
+            os.path.realpath(repo), row)
+        if metrics[1] is not None:
+            row["duration_s"] = metrics[1]
+        if metrics[2] is not None:
+            row["tokens"] = metrics[2]
+    except Exception:
+        pass
+
 primary_hash = file_hash(artifact_raw) or file_hash(patch_raw)
 row["artifact_id"] = "sha256:" + (primary_hash or hashlib.sha256(event_id.encode()).hexdigest())
 if prompt_hash:

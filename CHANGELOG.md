@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Provider-call accounting survives artifact retention. Duration and
+  provider-reported tokens were readable only by parsing the artifact body, so
+  deleting stale artifacts erased the record of what those calls had cost -
+  pruning 360 leaked test artifacts this release took the parseable base down
+  with them. The index row now caches both at write time, reusing the telemetry
+  module rather than copying its regexes, and telemetry prefers the cached value
+  while still parsing for rows written earlier. Artifact coverage still drops
+  honestly when a file is gone; the numbers do not.
 - Skill linking no longer lets quiet `grep` turn an enabled skill into a
   disabled one. The membership check used `printf | grep -q` under `pipefail`;
   when grep found an early match and closed, printf could receive EPIPE, invert

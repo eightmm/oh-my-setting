@@ -4584,6 +4584,53 @@ EOF
 # stale rows or discards good ones, and editing .oms by hand is forbidden. Found
 # by deleting 360 test-fixture artifacts and watching doctor warn with no fix
 # available.
+# Duration and provider-reported tokens are parsed out of the artifact body, so
+# reading them used to require the artifact to still exist: retention decided
+# whether past calls could be accounted for, and pruning stale artifacts silently
+# erased what they had cost. The row caches them at write time now.
+test_artifact_index_accounting_survives_artifact_deletion() {
+  local project="$TMP/index-accounting"
+  local bin="$project/bin"
+  local index="$project/.oms/artifacts/index.jsonl"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'cat >/dev/null'
+    printf '%s\n' 'printf "a real answer body for the classifier\n\ntokens used\n1234\n"'
+  } > "$bin/codex"
+  chmod +x "$bin/codex"
+
+  ( cd "$project" && PATH="$bin:$PATH" "$ROOT/scripts/agent-call.sh" \
+      --to codex --repo "$project" --prompt 'accounting probe' >/dev/null 2>&1 ) ||
+    fail "the stubbed call should succeed"
+
+  python3 - "$index" <<'PY' || fail "the row should cache duration and tokens"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+row = rows[-1]
+assert isinstance(row.get("duration_s"), (int, float)), row
+assert isinstance(row.get("tokens"), int) and row["tokens"] > 0, row
+PY
+
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
+  printf '%s' "$out" | grep -Eq 'token-reports=[1-9]' ||
+    fail "telemetry should report the token count: $out"
+
+  # The artifact goes; the accounting stays. Coverage of artifacts drops, which
+  # is the honest part — the numbers do not.
+  rm -rf "$project/.oms/artifacts/call"
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
+  printf '%s' "$out" | grep -Fq 'artifacts=0' ||
+    fail "artifact coverage should drop once the file is gone: $out"
+  printf '%s' "$out" | grep -Eq 'token-reports=[1-9]' ||
+    fail "token accounting must survive artifact deletion: $out"
+  printf '%s' "$out" | grep -Eq 'durations=[1-9]' ||
+    fail "duration accounting must survive artifact deletion: $out"
+}
+
 test_artifact_index_prunes_stale_references() {
   local project="$TMP/artifact-index-stale"
   local index="$project/.oms/artifacts/index.jsonl"

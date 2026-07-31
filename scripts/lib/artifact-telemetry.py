@@ -49,15 +49,32 @@ def inside(path: str, root: str) -> bool:
         return False
 
 
+def cached_duration(row: dict[str, object]) -> Optional[float]:
+    value = row.get("duration_s")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return round(float(value), 3)
+
+
 def artifact_metrics(
     repo: str, row: dict[str, object]
 ) -> tuple[bool, Optional[float], Optional[int]]:
+    """Metrics for one row: cached numbers first, the artifact only as fallback.
+
+    Duration and tokens used to be readable exclusively by parsing the artifact,
+    so retention decided accounting — deleting stale artifacts silently erased
+    the record of what those calls cost. Rows written since carry the numbers,
+    and the parse remains for everything written before.
+    """
+    saved_duration = cached_duration(row)
+    saved_tokens = integer(row.get("tokens"))
+
     artifact = row.get("artifact")
     if not isinstance(artifact, str) or not artifact or os.path.isabs(artifact):
-        return False, None, None
+        return False, saved_duration, saved_tokens
     candidate = os.path.realpath(os.path.join(repo, artifact))
     if not inside(candidate, repo) or not os.path.isfile(candidate):
-        return False, None, None
+        return False, saved_duration, saved_tokens
     try:
         with open(candidate, "rb") as handle:
             size = os.fstat(handle.fileno()).st_size
@@ -69,7 +86,7 @@ def artifact_metrics(
                 raw = head + b"\n" + handle.read(ARTIFACT_EDGE_BYTES)
             text = raw.decode("utf-8", errors="replace")
     except OSError:
-        return False, None, None
+        return False, saved_duration, saved_tokens
 
     token_matches = TOKENS_RE.findall(text)
     tokens = int(token_matches[-1].replace(",", "")) if token_matches else None
@@ -81,6 +98,10 @@ def artifact_metrics(
         seconds = (finished - started).total_seconds()
         if seconds >= 0:
             duration = round(seconds, 3)
+    if saved_duration is not None:
+        duration = saved_duration
+    if saved_tokens is not None:
+        tokens = saved_tokens
     return True, duration, tokens
 
 
@@ -420,10 +441,29 @@ def emit_human(report: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--index", required=True)
-    parser.add_argument("--limit", required=True, type=int)
+    parser.add_argument("--index")
+    parser.add_argument("--limit", type=int)
     parser.add_argument("--json", action="store_true")
+    # Extract mode exists so the index writer can cache what only this module
+    # knows how to read, without a second copy of the regexes drifting from it.
+    parser.add_argument("--extract", help="artifact path, repo-relative")
+    parser.add_argument("--ts", help="row timestamp, for the duration")
     args = parser.parse_args()
+
+    if args.extract:
+        repo = os.path.realpath(args.repo)
+        row = {"artifact": args.extract, "ts": args.ts}
+        _, duration, tokens = artifact_metrics(repo, row)
+        out: dict[str, object] = {}
+        if duration is not None:
+            out["duration_s"] = duration
+        if tokens is not None:
+            out["tokens"] = tokens
+        print(json.dumps(out, sort_keys=True))
+        return 0
+
+    if not args.index or args.limit is None:
+        parser.error("--index and --limit are required without --extract")
     if args.limit <= 0:
         parser.error("--limit must be positive")
     repo = os.path.realpath(args.repo)
