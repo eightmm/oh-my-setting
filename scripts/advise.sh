@@ -7,6 +7,8 @@ set -euo pipefail
 # where Claude Code would consult its native advisor model.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/agent-memory-common.sh
+. "$SCRIPT_DIR/lib/agent-memory-common.sh"
 
 fail() {
   echo "error: $*" >&2
@@ -164,7 +166,13 @@ provider_cli_available() {
 # Default advisor: the first available provider that is not the caller, so
 # the advice comes from an independent model family when one is installed.
 pick_advisor() {
-  local caller="${OMS_AGENT:-}"
+  # Detect the caller instead of trusting OMS_AGENT alone: interactive
+  # sessions rarely export it, and an empty caller made the exclusion loop a
+  # no-op — the "independent" advisor defaulted to the caller's own family,
+  # which is replication, not an outside read.
+  local caller
+  caller="$(oms_detect_agent 2>/dev/null || printf '')"
+  [ "$caller" != agent ] || caller=""
   local candidate
 
   for candidate in claude codex antigravity; do
