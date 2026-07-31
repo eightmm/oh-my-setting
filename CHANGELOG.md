@@ -7,6 +7,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- The source-checkout leak guard names the paths that moved. It compared two
+  opaque digests, so each time it fired it destroyed the evidence it had just
+  detected — three occurrences in one day, none diagnosable afterwards. It now
+  keeps a per-path manifest and prints the difference, verified by injecting a
+  transient file and watching the guard report it by name.
 - Entrypoints that write install state answer `--help` and refuse anything else.
   `link.sh` ignored its arguments and ran, so `link.sh --help` relinked a live
   install and moved canonical ownership to whichever checkout was asked for help

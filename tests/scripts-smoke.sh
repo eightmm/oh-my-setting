@@ -19,7 +19,7 @@ import os
 import sys
 
 root = os.path.realpath(sys.argv[1])
-h = hashlib.sha256()
+entries = []
 # `hooks/` is the one subtree the *live* agent session writes on its own
 # schedule: the prompt/turn hooks append to hooks/events.jsonl and stamp
 # hooks/sessions/*.json whenever the agent running this suite takes a step.
@@ -36,18 +36,20 @@ for base, dirs, files in os.walk(root, followlinks=False):
     for name in sorted(files + symlink_dirs):
         path = os.path.join(base, name)
         rel = os.path.relpath(path, root).replace(os.sep, "/")
-        h.update(rel.encode())
-        h.update(b"\0")
         if os.path.islink(path):
-            h.update(b"L")
-            h.update(os.readlink(path).encode())
-        else:
-            h.update(b"F")
+            entries.append((rel, "L:" + os.readlink(path)))
+            continue
+        digest = hashlib.sha256()
+        try:
             with open(path, "rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    h.update(chunk)
-        h.update(b"\0")
-print(h.hexdigest())
+                    digest.update(chunk)
+        except OSError as exc:
+            entries.append((rel, "E:%s" % exc.__class__.__name__))
+            continue
+        entries.append((rel, "F:" + digest.hexdigest()[:16]))
+for rel, mark in sorted(entries):
+    print("%s  %s" % (mark, rel))
 PY
 }
 
@@ -9885,8 +9887,15 @@ test_artifact_prune_preserves_fresh_unindexed_file() {
 test_smoke_suite_does_not_mutate_source_oms() {
   local after
   after="$(source_oms_fingerprint)"
-  [ "$SOURCE_OMS_FINGERPRINT" = "$after" ] ||
-    fail "smoke suite mutated the source checkout .oms state"
+  [ "$SOURCE_OMS_FINGERPRINT" = "$after" ] && return 0
+  # Naming the paths is the point. This guard used to compare two opaque
+  # digests, so every time it fired it destroyed the evidence it had just
+  # detected — three separate occurrences in one day, none of them diagnosable
+  # after the fact, and a watcher could only catch a recurrence live.
+  printf '%s\n' "$SOURCE_OMS_FINGERPRINT" > "$TMP/oms-before.txt"
+  printf '%s\n' "$after" > "$TMP/oms-after.txt"
+  diff "$TMP/oms-before.txt" "$TMP/oms-after.txt" | grep -E '^[<>]' | head -20 >&2
+  fail "smoke suite mutated the source checkout .oms state (paths above)"
 }
 
 test_oms_run_validate_flags_schema_drift() {
