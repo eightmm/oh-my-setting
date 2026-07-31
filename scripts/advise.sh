@@ -171,8 +171,7 @@ pick_advisor() {
   # no-op — the "independent" advisor defaulted to the caller's own family,
   # which is replication, not an outside read.
   local caller
-  caller="$(oms_detect_agent 2>/dev/null || printf '')"
-  [ "$caller" != agent ] || caller=""
+  caller="$(oms_peer_caller)"
   local candidate
 
   for candidate in claude codex antigravity; do

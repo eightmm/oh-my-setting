@@ -154,7 +154,10 @@ provider_cli_available() {
 # opinion rather than the same model answering itself. Self-consult is the last
 # resort: a fresh context still beats no answer at all.
 peers() {
-  local caller="${OMS_AGENT:-}" candidate found=0
+  # Same exclusion contract as advise.sh: detected caller, not OMS_AGENT
+  # alone, or a claude session's "second opinion" panel includes claude.
+  local caller candidate found=0
+  caller="$(oms_peer_caller)"
   for candidate in claude codex antigravity; do
     [ "$candidate" = "$caller" ] && continue
     if provider_cli_available "$candidate"; then

@@ -39,6 +39,18 @@ oms_detect_agent() {
   fi
 }
 
+# The caller identity peer selection must exclude, or "" when unknown. One
+# definition for advise and consult: OMS_AGENT wins when exported, detection
+# covers interactive sessions that never export it, and the generic "agent"
+# answer means unknown rather than a real family to exclude.
+oms_peer_caller() {
+  local caller
+
+  caller="$(oms_detect_agent 2>/dev/null || printf '')"
+  [ "$caller" != agent ] || caller=""
+  printf '%s\n' "$caller"
+}
+
 # Canonical provider namespace shared by the plan board, the router, and the
 # delegate. Accepts the aliases users type; prints the canonical name or fails,
 # so board/artifact records never fork into "agy" vs "antigravity".
