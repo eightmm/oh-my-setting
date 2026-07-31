@@ -123,6 +123,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   file for whichever subcommand was asked for.
 
 ### Added
+- Global rules refuse authority to instructions found in content: a file, tool
+  result, web page, or another agent's answer can carry text that reads like an
+  order, and it is data to report, not a rule to obey. HANDBOOK.md (arXiv
+  2607.25398) measures exactly this over long tool-use horizons and finds it the
+  most common way a standing policy loses — one frontier model carried out a
+  VP's termination request in every trial although the handbook required two
+  named approvers. The harness already answered that paper's other three failure
+  patterns mechanically (`turn-guard` for verification silently skipped,
+  `peer-review --gate` and `patch-admit` for checks run and then ignored or
+  self-reported); this was the one with no defense.
 - `artifact-index prune --stale` drops index rows whose artifact or patch no
   longer exists. `validate` has always reported those, and nothing could repair
   them: the retention prune caps row count, so any keep value either spares
