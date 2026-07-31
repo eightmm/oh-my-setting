@@ -96,8 +96,9 @@ fi
 private_state="n/a"
 if git -C "$STATE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   private_state="hidden"
-  if "$ROOT/scripts/project-private.sh" --repo "$STATE_ROOT" status 2>/dev/null |
-    grep -q '^exposed'; then
+  private_report="$("$ROOT/scripts/project-private.sh" --repo "$STATE_ROOT" status 2>/dev/null || true)"
+  private_exposed="$(printf '%s\n' "$private_report" | grep -c '^exposed' || true)"
+  if [ "$private_exposed" -gt 0 ]; then
     if [ "$PRIVATE" = "1" ] &&
       "$ROOT/scripts/project-private.sh" --repo "$STATE_ROOT" apply >/dev/null 2>&1; then
       private_state="just-hidden"

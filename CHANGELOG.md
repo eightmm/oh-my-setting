@@ -15,6 +15,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   only its own command path, and removes only its own entry on uninstall.
 
 ### Fixed
+- `oms init` no longer misses exposed agent files when `grep -q` closes its
+  status pipe after the first match. Under `pipefail`, the still-writing
+  producer could receive SIGPIPE and invert the condition, so the late-`git
+  init` recovery sometimes skipped `.git/info/exclude` only under CI timing.
+  The status command now completes before its captured output is inspected.
 - Peer-review mechanical verification now runs without the review provider's
   model-class, operation, or reasoning environment. A deep review gate could
   previously make an otherwise clean routing test observe the review phase and
