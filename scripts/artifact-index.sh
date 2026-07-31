@@ -655,6 +655,7 @@ with open(kept_index) as f:
                 referenced.add(resolved)
 
 orphans = []
+fresh = 0
 for dirpath, dirnames, filenames in os.walk(artifacts_root, followlinks=False):
     dirnames[:] = [name for name in dirnames if not name.endswith(".lock")]
     for name in filenames:
@@ -670,8 +671,11 @@ for dirpath, dirnames, filenames in os.walk(artifacts_root, followlinks=False):
             continue
         if real == index_real or name in ("index.jsonl", ".gitignore") or name.endswith(".lock"):
             continue
-        if real not in referenced and now - st.st_mtime >= grace:
-            orphans.append(path)
+        if real not in referenced:
+            if now - st.st_mtime >= grace:
+                orphans.append(path)
+            else:
+                fresh += 1
 
 count = 0
 for path in sorted(orphans):
@@ -693,6 +697,13 @@ if dry:
     print(f"artifact-index: would delete {count} orphan file(s)")
 else:
     print(f"artifact-index: deleted {count} orphan file(s)")
+if fresh:
+    # "deleted 0" with no explanation reads as a broken remedy when the
+    # unindexed files simply have not aged past the grace window yet.
+    print(
+        f"artifact-index: kept {fresh} recent unindexed file(s) inside the "
+        f"{grace}s grace window (in-flight writers; they age out or get indexed)"
+    )
 EOF
   fi
   rm -f "$tmp"

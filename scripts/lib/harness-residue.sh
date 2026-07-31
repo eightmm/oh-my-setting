@@ -244,12 +244,24 @@ oms_harness_count_unindexed_artifacts() {
     printf '0\n'
     return 0
   }
-  python3 - "$repo" "$artifacts_dir" "$index" <<'PY'
+  # Count with the same grace window prune --files deletes with. A live
+  # provider call writes its artifact before the index row lands, so counting
+  # age-blind makes doctor warn about in-flight work and then prescribe a
+  # command that correctly deletes nothing — a remedy that cannot act on the
+  # complaint.
+  python3 - "$repo" "$artifacts_dir" "$index" \
+    "${OMS_ARTIFACT_ORPHAN_GRACE:-86400}" <<'PY'
 import json
 import os
 import sys
+import time
 
-repo, artifacts_dir, index = sys.argv[1:]
+repo, artifacts_dir, index, grace_raw = sys.argv[1:]
+try:
+    grace = max(0, int(grace_raw))
+except ValueError:
+    grace = 86400
+now = time.time()
 tracked = set()
 if os.path.exists(index):
     with open(index, "r", encoding="utf-8") as f:
@@ -274,8 +286,14 @@ for root, dirs, files in os.walk(artifacts_dir):
         if not (name.endswith(".md") or name.endswith(".patch")):
             continue
         path = os.path.join(root, name)
-        if os.path.realpath(path) not in tracked:
-            count += 1
+        if os.path.realpath(path) in tracked:
+            continue
+        try:
+            if now - os.stat(path).st_mtime < grace:
+                continue
+        except OSError:
+            continue
+        count += 1
 print(count)
 PY
 }

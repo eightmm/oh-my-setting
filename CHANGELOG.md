@@ -6,6 +6,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Fixed
+- Doctor counts unindexed artifacts with the same grace window `prune --files`
+  deletes with. A live provider call writes its artifact before the index row
+  lands, so the age-blind count warned about in-flight council runs and then
+  prescribed a command that correctly deleted nothing — doctor complaining,
+  the remedy shrugging, every time an ask/review was still executing. Prune
+  also now says how many recent unindexed files it kept inside the grace
+  window, so "deleted 0 orphan file(s)" explains itself.
+
 ### Added
 - Claude Code installs a compact local status-line HUD showing the active model,
   live context occupancy and token capacity, available five-hour/seven-day

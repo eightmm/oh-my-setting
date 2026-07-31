@@ -1877,7 +1877,11 @@ test_doctor_reports_crash_residue_warnings() {
   setup_doctor_home "$home_dir"
   mkdir -p "$project/.oms/artifacts/call" "$lock_dir"
   printf '*\n' > "$project/.oms/.gitignore"
+  # Only an orphan older than the prune grace window may be counted: doctor
+  # and prune --files must agree, or the warning prescribes a no-op remedy.
   printf 'orphan\n' > "$project/.oms/artifacts/call/orphan.md"
+  touch -t 202601010000 "$project/.oms/artifacts/call/orphan.md"
+  printf 'in-flight\n' > "$project/.oms/artifacts/call/fresh.md"
   printf '999999999\n' > "$lock_dir/pid"
 
   out="$(cd "$project" && HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
@@ -10307,10 +10311,12 @@ test_artifact_prune_preserves_fresh_unindexed_file() {
   mkdir -p "$d/.oms/artifacts"
   printf '%s\n' '{"schema":1,"event_id":"evt_a","operation_id":"op_a","ts":"2026-01-01T00:00:00Z","kind":"call","provider":"codex","exit":0}' > "$d/.oms/artifacts/index.jsonl"
   printf 'still writing\n' > "$d/.oms/artifacts/fresh.md"
-  OMS_ARTIFACT_ORPHAN_GRACE=86400 \
-    "$ROOT/scripts/artifact-index.sh" --repo "$d" prune 1 --files >/dev/null
+  out="$(OMS_ARTIFACT_ORPHAN_GRACE=86400 \
+    "$ROOT/scripts/artifact-index.sh" --repo "$d" prune 1 --files)"
   [ -f "$d/.oms/artifacts/fresh.md" ] ||
     fail "artifact pruning must preserve fresh unindexed writer output"
+  printf '%s' "$out" | grep -Fq 'kept 1 recent unindexed file(s)' ||
+    fail "prune should say why it kept the fresh file: $out"
 }
 
 test_smoke_suite_does_not_mutate_source_oms() {
