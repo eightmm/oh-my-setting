@@ -73,7 +73,7 @@ agent_task_set_metadata_unlocked() {
   local value="$3"
   local tmp
 
-  tmp="$(agent_memory_mktemp)" || return 1
+  tmp="$(agent_memory_mktemp_beside "$file")" || return 1
   awk -v key="$key" -v value="$value" '
     BEGIN { found = 0; inserted = 0; before_sections = 1 }
     before_sections == 1 {
@@ -270,7 +270,7 @@ agent_task_prune_current_state_unlocked() {
 
   case "$max" in *[!0-9]*|"") max=100 ;; esac
   [ "$max" -gt 0 ] || return 0
-  tmp="$(agent_memory_mktemp)" || return 1
+  tmp="$(agent_memory_mktemp_beside "$file")" || return 1
   awk -v max="$max" '
     function flush(    i, count, skip) {
       count = 0
@@ -302,7 +302,7 @@ agent_task_replace_section_unlocked() {
   local tmp
 
   agent_task_init_file_unlocked "$file"
-  tmp="$(agent_memory_mktemp)" || return 1
+  tmp="$(agent_memory_mktemp_beside "$file")" || return 1
   awk -v section="$section" -v content_file="$content_file" '
     BEGIN {
       while ((getline line < content_file) > 0) {
@@ -486,7 +486,7 @@ agent_task_append_bullet_unlocked() {
   local line_file
   line_file="$(agent_memory_mktemp)" || return 1
   printf '%s\n' "$line" > "$line_file"
-  tmp="$(agent_memory_mktemp)" || { rm -f "$line_file"; return 1; }
+  tmp="$(agent_memory_mktemp_beside "$file")" || { rm -f "$line_file"; return 1; }
   awk -v section="$section" -v line_file="$line_file" '
     BEGIN { getline line < line_file; found = 0; in_section = 0; inserted = 0 }
     $0 == section {

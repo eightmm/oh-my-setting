@@ -230,6 +230,18 @@ agent_memory_mktemp() {
   fi
 }
 
+# Scratch for an atomic replace of TARGET: the temp file must live in the
+# target's own directory, or `mv` degrades to copy+unlink whenever TMPDIR is a
+# different filesystem (tmpfs /tmp against an ext4 repo is the common case) —
+# and a copy-in-place gives every concurrent reader a window where the shared
+# state file is empty or truncated. Same-directory rename is atomic on any
+# POSIX filesystem.
+agent_memory_mktemp_beside() {
+  local target="$1"
+
+  mktemp "$(dirname "$target")/.oms-replace.XXXXXX"
+}
+
 agent_memory_repo_for_file() {
   local file="$1"
   local repo=""
@@ -410,7 +422,7 @@ agent_memory_refresh_summary() {
   summary_file="$(agent_memory_summary_file "$memory_file")"
   agent_memory_ensure_oms_ignore_for_path "$summary_file"
   mkdir -p "$(dirname "$summary_file")"
-  tmp="$(agent_memory_mktemp)" || return 1
+  tmp="$(agent_memory_mktemp_beside "$summary_file")" || return 1
 
   awk -v max_chars="$chars" '
     /^## / {

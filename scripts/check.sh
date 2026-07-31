@@ -131,6 +131,7 @@ stage model-doctor bash tests/model-doctor-smoke.sh
 stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
 stage update-v04 bash tests/update-v04-smoke.sh
 stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
+stage atomic-state bash tests/atomic-state-smoke.sh
 stage harness-enhancements bash tests/harness-enhancements-smoke.sh
 stage work-journal bash tests/work-journal-smoke.sh
 stage context-core bash tests/context-core-smoke.sh
