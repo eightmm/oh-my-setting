@@ -3353,16 +3353,15 @@ test_agent_memory_records_git_and_task_provenance() {
   json_out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     --json search --text "dirty implementation")" ||
     fail "structured search should return the appended note: $json_out"
-  OMS_MEMORY_JSON="$json_out" \
-    python3 - "$sha" "$task_id" "$source_session" <<'PY' ||
-    fail "JSON search did not expose stable provenance"
+  if ! OMS_MEMORY_JSON="$json_out" \
+    python3 - "$sha" "$task_id" "$source_session" <<'PY'
 import json
 import os
 import sys
 
 expected_sha, expected_task, expected_session = sys.argv[1:]
 row = json.loads(os.environ["OMS_MEMORY_JSON"])
-assert row["schema"] == 2, row
+assert row["schema"] == 3, row
 assert row["event_id"].startswith("mem-"), row
 assert row["kind"] == "note", row
 assert row["task_id"] == expected_task, row
@@ -3371,9 +3370,11 @@ assert row["git_sha"] == expected_sha, row
 assert row["git_dirty"] is True, row
 assert row["git_state"].startswith(expected_sha + ":"), row
 PY
+  then
+    fail "JSON search did not expose stable provenance"
+  fi
 
-  python3 - "$db" "$sha" "$task_id" "$source_session" <<'PY' ||
-    fail "append, pin, and task close provenance is incomplete"
+  if ! python3 - "$db" "$sha" "$task_id" "$source_session" <<'PY'
 import sqlite3
 import sys
 
@@ -3395,6 +3396,9 @@ for row in rows:
     assert row[7] == 1, row
     assert row[8].startswith(expected_sha + ":"), row
 PY
+  then
+    fail "append, pin, and task close provenance is incomplete"
+  fi
 
   before_ids="$(python3 - "$db" <<'PY'
 import sqlite3, sys
