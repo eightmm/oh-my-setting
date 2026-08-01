@@ -6,6 +6,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Fixed
+- The Notion mirror now works on machines without a usable OS keychain, and
+  the transport choice the docs always promised is actually persisted.
+  Connecting on a headless/sandboxed host failed with ntn's "Failed to
+  create keychain entry", and even after a manual file-based login the hooks
+  could not inherit the choice — `notion_settings()` re-read `OMS_NOTION_CLI`
+  from the environment on every call and persisted nothing, so publishing
+  depended on PATH order and ambient env (found live: a session whose only
+  fix was a hand-patched shim that the next `install-tools --upgrade` would
+  silently regenerate). `connect-services` now detects the keychain error,
+  switches to ntn's file-based store, names `NOTION_KEYRING=0 ntn login` in
+  its hints, and persists `keyring: "file"` plus `cli_command` in
+  `work-journal.json`; the transport reads both from config, environment
+  still overriding per invocation. Verified by bypassing the shim entirely:
+  a sync with no env and the raw CLI first on PATH publishes from persisted
+  config alone.
+
 ### Changed
 - The public `oms` catalog consolidated to one front door per capability —
   less is more: an agent choosing between 58 entries picks worse than one

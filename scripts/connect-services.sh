@@ -9,6 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 GH_BIN="${OMS_GH_BIN:-gh}"
 NOTION_CLI="${OMS_NOTION_CLI:-ntn}"
+NOTION_KEYRING_MODE="${OMS_NOTION_KEYRING:-}"
 MODE=auto
 CONNECT_GITHUB=1
 CONNECT_NOTION=1
@@ -125,9 +126,11 @@ connect_github() {
 configure_notion_target() {
   if [ -n "$DATA_SOURCE_ID" ]; then
     OMS_WORK_JOURNAL_NOTION_AUTH=ntn OMS_NOTION_CLI="$NOTION_CLI" \
+      OMS_NOTION_KEYRING="$NOTION_KEYRING_MODE" \
       "$ROOT/scripts/journal.sh" configure --data-source-id "$DATA_SOURCE_ID"
   else
     OMS_WORK_JOURNAL_NOTION_AUTH=ntn OMS_NOTION_CLI="$NOTION_CLI" \
+      OMS_NOTION_KEYRING="$NOTION_KEYRING_MODE" \
       "$ROOT/scripts/journal.sh" configure --discover
   fi
 }
@@ -139,6 +142,9 @@ remember_unverified_notion_target() {
 }
 
 connect_notion() {
+  local login_hint="ntn login"
+  local keyring_probe
+
   if ! command -v "$NOTION_CLI" >/dev/null 2>&1; then
     remember_unverified_notion_target
     problem "Notion CLI is unavailable; install ntn, run: ntn login, then rerun this command"
@@ -148,16 +154,29 @@ connect_notion() {
     problem "Python 3 is required to verify the Notion CLI session"
     return 0
   fi
+  # A machine without a usable OS keychain (headless or sandboxed session)
+  # cannot store or read the default credential; ntn's own hint names the
+  # fallback. Switch this run — and, through configure, the persisted
+  # transport — to the file-based store so hooks work without env plumbing.
+  keyring_probe="$("$NOTION_CLI" whoami 2>&1 || true)"
+  case "$keyring_probe" in
+    *[Kk]eychain*)
+      NOTION_KEYRING_MODE="file"
+      export NOTION_KEYRING=0
+      login_hint="NOTION_KEYRING=0 ntn login"
+      echo "note: OS keychain unavailable; using ntn's file-based credential store"
+      ;;
+  esac
   if ! notion_authenticated; then
     if [ "$INTERACTIVE" != 1 ]; then
       remember_unverified_notion_target
-      problem "Notion login pending; run: ntn login, then: oms journal configure --discover"
+      problem "Notion login pending; run: $login_hint, then: oms journal configure --discover"
       return 0
     fi
     echo "connecting Notion through ntn"
     if ! run_login "$NOTION_CLI" login || ! notion_authenticated; then
       remember_unverified_notion_target
-      problem "Notion login did not complete; rerun: ntn login"
+      problem "Notion login did not complete; rerun: $login_hint"
       return 0
     fi
   fi

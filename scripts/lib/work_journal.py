@@ -815,11 +815,26 @@ def notion_settings() -> Dict[str, Any]:
         os.environ.get("OMS_WORK_JOURNAL_NOTION_AUTH", "").strip().lower()
         or configured_auth
     )
-    cli_command = os.environ.get("OMS_NOTION_CLI", "ntn").strip() or "ntn"
+    # The transport choice is durable, non-secret config: the docs promise it
+    # persists, and hooks run in environments where PATH order and env vars
+    # cannot be assumed. Environment overrides remain for one-shot use.
+    configured_cli = ""
+    configured_keyring = ""
+    if isinstance(notion, Mapping):
+        configured_cli = str(notion.get("cli_command") or "").strip()
+        configured_keyring = str(notion.get("keyring") or "").strip().lower()
+    cli_command = (
+        os.environ.get("OMS_NOTION_CLI", "").strip() or configured_cli or "ntn"
+    )
+    keyring = (
+        os.environ.get("OMS_NOTION_KEYRING", "").strip().lower()
+        or configured_keyring
+    )
     return {
         "access_value": access_value,
         "auth_mode": auth_mode,
         "cli_command": cli_command,
+        "keyring": keyring,
         "data_source_id": data_source_id,
         "database_id": database_id,
         "title_property": configured(
@@ -880,6 +895,7 @@ def discover_notion_target() -> str:
     transport = NotionCLITransport(
         settings["cli_command"],
         "2026-03-11",
+        settings.get("keyring") or "",
     )
     try:
         return discover_work_journal_data_source(transport)
@@ -928,6 +944,12 @@ def configure_notion(
     # unvalidated target has a usable credential.
     if settings.get("auth_mode") == "ntn":
         notion_config["auth_mode"] = "ntn"
+        notion_config["cli_command"] = settings.get("cli_command") or "ntn"
+        # A machine without a usable OS keychain authenticates ntn through its
+        # file-based store; the hooks must inherit that choice from config,
+        # not from whichever shell happened to run configure.
+        if settings.get("keyring") == "file":
+            notion_config["keyring"] = "file"
     atomic_write_json(
         path,
         {

@@ -732,6 +732,21 @@ class HumanPageTest(unittest.TestCase):
             nested[-1]["paragraph"]["rich_text"][0]["text"]["content"],
         )
 
+    def test_file_keyring_mode_pins_the_credential_store(self):
+        completed = mock.Mock(returncode=0, stdout='{"id":"x"}\n', stderr="")
+        with mock.patch.object(notion.subprocess, "run", return_value=completed) as run:
+            notion.NotionCLITransport("ntn", "2026-03-11", keyring="file").request(
+                "GET", "/v1/x", None, 2.0
+            )
+        env = run.call_args.kwargs["env"]
+        self.assertEqual("0", env["NOTION_KEYRING"])
+        # Default transports must not touch the environment at all.
+        with mock.patch.object(notion.subprocess, "run", return_value=completed) as run:
+            notion.NotionCLITransport("ntn", "2026-03-11").request(
+                "GET", "/v1/x", None, 2.0
+            )
+        self.assertIsNone(run.call_args.kwargs["env"])
+
     def test_page_icon_set_on_create(self):
         transport = FakeTransport(
             [

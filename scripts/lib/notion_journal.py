@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime
 import email.utils
 import json
+import os
 import re
 import socket
 import subprocess
@@ -137,11 +138,21 @@ class _StandardLibraryTransport:
 class NotionCLITransport:
     """Authenticated Notion transport backed by the official ``ntn`` CLI."""
 
-    def __init__(self, command="ntn", api_version=NOTION_CURRENT_API_VERSION):
+    def __init__(
+        self, command="ntn", api_version=NOTION_CURRENT_API_VERSION, keyring=""
+    ):
         self._command = str(command or "ntn")
         self._api_version = str(api_version or NOTION_CURRENT_API_VERSION)
+        # keyring == "file" pins ntn to its file-based credential store: on
+        # machines without a usable OS keychain the choice is persisted in
+        # config, and hooks must not depend on ambient environment variables.
+        self._keyring = str(keyring or "").lower()
 
     def request(self, method, path, payload, timeout):
+        env = None
+        if self._keyring == "file":
+            env = dict(os.environ)
+            env["NOTION_KEYRING"] = "0"
         command = [
             self._command,
             "api",
@@ -163,6 +174,7 @@ class NotionCLITransport:
                 stderr=subprocess.PIPE,
                 timeout=float(timeout),
                 check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             raise TimeoutError("Notion CLI timed out") from None
@@ -249,6 +261,7 @@ class NotionJournalExporter:
         database_id="",
         auth_mode="",
         cli_command="ntn",
+        keyring="",
         transport=None,
         sleep=time.sleep,
         max_attempts=3,
@@ -290,6 +303,7 @@ class NotionJournalExporter:
         if self._auth_mode not in ("", "token", "ntn"):
             raise ValueError("unsupported Notion authentication mode")
         self._cli_command = str(cli_command or "ntn")
+        self._keyring = str(keyring or "").strip().lower()
         self._data_source_id = str(data_source_id or "").strip()
         self._database_id = str(database_id or "").strip()
         self._collection_id = self._data_source_id or self._database_id
@@ -328,6 +342,7 @@ class NotionJournalExporter:
                 self._transport = NotionCLITransport(
                     self._cli_command,
                     self._api_version,
+                    self._keyring,
                 )
         self._sleep = sleep
         self._max_attempts = int(max_attempts)
@@ -344,6 +359,7 @@ class NotionJournalExporter:
         database_id="",
         auth_mode="",
         cli_command="ntn",
+        keyring="",
         transport=None,
         sleep=time.sleep,
         max_attempts=3,
@@ -366,6 +382,7 @@ class NotionJournalExporter:
             database_id=database_id,
             auth_mode=auth_mode,
             cli_command=cli_command,
+            keyring=keyring,
             transport=transport,
             sleep=sleep,
             max_attempts=max_attempts,

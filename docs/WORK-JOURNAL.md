@@ -201,6 +201,15 @@ an incomplete login or target selection fail visibly. The installer's default
 `auto` mode instead prints exact follow-up commands and continues when no
 interactive terminal is available.
 
+On a machine without a usable OS keychain (headless hosts, sandboxed agent
+sessions), `connect-services` detects ntn's keychain error, switches the flow
+to ntn's file-based credential store (`NOTION_KEYRING=0`), names that mode in
+its login hint, and persists `keyring: "file"` alongside the `cli_command`
+transport choice in `work-journal.json` — so hooks and future sessions
+inherit the working store from config, with no dependence on PATH order or
+ambient environment variables. `OMS_NOTION_KEYRING`/`OMS_NOTION_CLI` still
+override per invocation.
+
 The installer validates access and the property schema. It persists only the
 target, property names, and `ntn` transport choice in
 `$XDG_CONFIG_HOME/oh-my-setting/work-journal.json` (normally

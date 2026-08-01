@@ -443,4 +443,54 @@ assert row["notion"]["auth_mode"] == "ntn"
 assert "token" not in json.dumps(row).lower()
 PY
 
+# A machine without a usable OS keychain: ntn errors with the keychain hint
+# until NOTION_KEYRING=0 selects the file-based store. connect-services must
+# detect that, finish the connection file-based, and persist the transport
+# choice so hooks inherit it from config rather than from ambient env.
+keyring_bin="$TMP/keyring-bin"
+keyring_marker="$TMP/ntn-file-authenticated"
+mkdir -p "$keyring_bin"
+cp "$connect_bin/gh" "$keyring_bin/gh"
+cat > "$keyring_bin/ntn" <<'EOF'
+#!/usr/bin/env bash
+if [ "${NOTION_KEYRING:-}" != "0" ]; then
+  echo "error: Failed to create keychain entry" >&2
+  echo "  hint: Set NOTION_KEYRING=0 to use file-based auth instead of the OS keychain." >&2
+  exit 1
+fi
+case "$1:$2" in
+  whoami:*) [ -f "$OMS_TEST_NTN_MARKER" ] || exit 1 ;;
+  login:*) touch "$OMS_TEST_NTN_MARKER" ;;
+  api:v1/user"s"/me)
+    [ -f "$OMS_TEST_NTN_MARKER" ] || exit 1
+    printf '%s\n' '{"object":"user","id":"user"}'
+    ;;
+  api:v1/search)
+    printf '%s\n' '{"results":[{"object":"data_source","id":"ea343dea-4a66-4421-9653-dfc4fe68ed10"}],"has_more":false,"next_cursor":null}'
+    ;;
+  api:v1/data_sources/ea343dea-4a66-4421-9653-dfc4fe68ed10)
+    printf '%s\n' '{"id":"ea343dea-4a66-4421-9653-dfc4fe68ed10","properties":{"Name":{"type":"title"},"Work Journal Key":{"type":"rich_text"},"Content Hash":{"type":"rich_text"},"Project":{"type":"rich_text"},"Kind":{"type":"select"},"Period":{"type":"date"},"Has Blocker":{"type":"checkbox"}}}'
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$keyring_bin/ntn"
+rm -f "$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
+keyring_out="$(PATH="$keyring_bin:$PATH" OMS_CONNECT_INTERACTIVE=1 \
+  OMS_GH_BIN="$keyring_bin/gh" OMS_NOTION_CLI="$keyring_bin/ntn" \
+  OMS_TEST_GH_MARKER="$gh_marker" OMS_TEST_NTN_MARKER="$keyring_marker" \
+  "$ROOT/scripts/connect-services.sh" --required 2>&1)" ||
+  fail "keychain-less connection should fall back to file auth: $keyring_out"
+printf '%s\n' "$keyring_out" | grep -q 'file-based credential store' ||
+  fail "keychain fallback should be announced: $keyring_out"
+[ -f "$keyring_marker" ] || fail "file-based login did not run"
+python3 - "$XDG_CONFIG_HOME/oh-my-setting/work-journal.json" <<'PY'
+import json
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["notion"]["keyring"] == "file", row["notion"]
+assert row["notion"]["cli_command"].endswith("/ntn"), row["notion"]
+PY
+
 echo "work-journal-smoke: ok"

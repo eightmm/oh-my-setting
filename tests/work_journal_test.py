@@ -821,6 +821,40 @@ class JournalTestCase(unittest.TestCase):
         )
 
 
+class NotionTransportPersistenceTest(unittest.TestCase):
+    def test_configure_persists_and_settings_prefer_the_transport_choice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "work-journal.json"
+            env = {
+                "OMS_WORK_JOURNAL_CONFIG": str(config),
+                "OMS_NOTION_CLI": "/opt/bin/ntn",
+                "OMS_NOTION_KEYRING": "file",
+                "OMS_WORK_JOURNAL_NOTION_AUTH": "ntn",
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                wj.configure_notion("0" * 32, validate=False, auth_mode="ntn")
+            stored = json.loads(config.read_text())["notion"]
+            self.assertEqual("/opt/bin/ntn", stored["cli_command"])
+            self.assertEqual("file", stored["keyring"])
+
+            # A hook environment carries neither env var: the persisted
+            # choice must win, and env must still override when present.
+            clean = {
+                "OMS_WORK_JOURNAL_CONFIG": str(config),
+                "OMS_NOTION_CLI": "",
+                "OMS_NOTION_KEYRING": "",
+            }
+            with mock.patch.dict(os.environ, clean, clear=False):
+                settings = wj.notion_settings()
+            self.assertEqual("/opt/bin/ntn", settings["cli_command"])
+            self.assertEqual("file", settings["keyring"])
+            override = dict(clean, OMS_NOTION_CLI="ntn2", OMS_NOTION_KEYRING="os")
+            with mock.patch.dict(os.environ, override, clear=False):
+                settings = wj.notion_settings()
+            self.assertEqual("ntn2", settings["cli_command"])
+            self.assertEqual("os", settings["keyring"])
+
+
 class NotionPresentationTest(unittest.TestCase):
     def test_strips_citations_and_folds_citation_only_duplicates(self):
         content = "\n".join(
