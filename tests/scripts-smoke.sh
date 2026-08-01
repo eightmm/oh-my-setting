@@ -12968,6 +12968,70 @@ test_landing_recovery_refuses_a_changed_patch() {
   fi
 }
 
+test_provider_contract_check_passes_without_providers() {
+  local home="$TMP/pc-home"
+  local out
+
+  mkdir -p "$home"
+  # A machine with no provider CLIs and no registrations is healthy: loader
+  # parity and fail-open still verify, MCP checks become notes.
+  out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="/usr/bin:/bin" \
+    bash "$ROOT/scripts/provider-contract.sh" --check 2>&1)" ||
+    fail "provider-contract should pass with no providers: $out"
+  printf '%s\n' "$out" | grep -q 'ok: loader parity (general)' ||
+    fail "general loader parity not verified: $out"
+  printf '%s\n' "$out" | grep -q 'ok: loader parity (ml)' ||
+    fail "ml loader parity (GEMINI adoption + style retire) not verified: $out"
+  printf '%s\n' "$out" | grep -q 'ok: fail-open' ||
+    fail "fail-open hook contract not verified: $out"
+  printf '%s\n' "$out" | grep -q 'note: mcp (claude): CLI not installed' ||
+    fail "missing CLI must be a note, not a failure: $out"
+  printf '%s\n' "$out" | grep -q 'provider-contract: ok' ||
+    fail "missing ok summary: $out"
+}
+
+test_provider_contract_flags_mcp_drift() {
+  local home="$TMP/pc-drift-home"
+  local bin="$TMP/pc-drift-bin"
+  local srv1="$TMP/pc-drift-srv1"
+  local srv2="$TMP/pc-drift-srv2"
+  local out rc
+
+  mkdir -p "$home" "$home/.codex" "$bin" "$srv1" "$srv2"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/claude"
+  chmod +x "$bin/claude"
+  : > "$srv1/oms-mcp-server.py"
+  : > "$srv2/oms-mcp-server.py"
+  cat > "$home/.claude.json" <<EOF
+{"mcpServers":{"oh-my-setting":{"type":"stdio","command":"python3","args":["$srv1/oms-mcp-server.py"]}}}
+EOF
+  cat > "$home/.codex/config.toml" <<EOF
+[mcp_servers.oh-my-setting]
+command = "python3"
+args = ["$srv2/oms-mcp-server.py"]
+EOF
+
+  # Two providers reading two different servers is the drift this gate exists
+  # to catch, even when each registration is individually valid.
+  rc=0
+  out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
+    bash "$ROOT/scripts/provider-contract.sh" 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "drifted registrations should exit 1 (rc=$rc): $out"
+  printf '%s\n' "$out" | grep -q 'fail: mcp parity' ||
+    fail "parity drift not reported: $out"
+
+  cat > "$home/.codex/config.toml" <<EOF
+[mcp_servers.oh-my-setting]
+command = "python3"
+args = ["$srv1/oms-mcp-server.py"]
+EOF
+  out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
+    bash "$ROOT/scripts/provider-contract.sh" 2>&1)" ||
+    fail "aligned registrations should pass: $out"
+  printf '%s\n' "$out" | grep -q 'ok: mcp parity' ||
+    fail "parity ok line missing: $out"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

@@ -6,6 +6,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- `oms provider-contract --check`: cross-CLI conformance gate. The 0.4.0
+  GEMINI.md incident showed native-loader drift — one CLI following rules the
+  other two retired — is the highest-risk failure class, and no single-script
+  test proves the provider integration. The gate verifies loader parity on a
+  throwaway fixture (identical managed block sets across `AGENTS.md`,
+  `CLAUDE.md`, and an adopted `GEMINI.md`, stale base styles retired on a
+  style switch), harness-state MCP registration parity (every registered
+  provider reads one and the same `oms-mcp-server.py`), and the fail-open
+  contract (hook scripts exit 0 without seeding `.oms` in an unadopted
+  directory). Read-only outside its own temp fixture; a missing provider CLI
+  is a note, never a failure. Ranked #1 by the 2026-08-01 peer council.
+
 ## [0.4.0] - 2026-08-01
 
 ### Added

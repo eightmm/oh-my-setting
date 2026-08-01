@@ -39,6 +39,13 @@ rules, spec state, and scaffold; warns on empty ML scientific-contract fields,
 agent files exposed to git, and structure drift (stray root files, tracked
 data, missing `src/` layout)
 
+**Provider contract (`provider-contract.sh`)** — Cross-CLI conformance gate:
+loader parity on a throwaway fixture (identical managed block sets across
+`AGENTS.md`/`CLAUDE.md`/an adopted `GEMINI.md`, stale base styles retired),
+harness-state MCP registration parity (every registered provider reads one
+`oms-mcp-server.py`), and fail-open hook no-ops in unadopted directories; a
+missing provider CLI is a note, never a failure
+
 ## Peer agents
 
 **Review (`peer-review.sh`)** — Three distinct local models review the diff in
