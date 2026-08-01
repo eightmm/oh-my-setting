@@ -13154,6 +13154,43 @@ EOF
     fail "empty-contract failure not explained: $out"
 }
 
+test_support_bundle_redacts_and_omits() {
+  local project="$TMP/sb-project"
+  local vector out bundle
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+  # Secret-shaped vector assembled at runtime, never as a source literal. The
+  # ledger writer rightly refuses secret-shaped commands, so seed the row
+  # directly: the bundle's scan is the last line of defense and must hold
+  # even when state arrived past the writer rails.
+  vector="$(printf 'sk_%s_' liv''e)$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)"
+  printf '{"schema": 2, "event": "fail", "ts": "2026-08-01T00:00:00Z", "agent": "test", "fingerprint": "feedfeedfeedfeed", "kind": "cmd", "cmd": "curl -H x-key: %s", "exit": 1}\n' \
+    "$vector" >> "$project/.oms/failures.jsonl"
+
+  out="$("$ROOT/scripts/support-bundle.sh" --repo "$project" --dry-run)"
+  printf '%s\n' "$out" | grep -q 'would write' ||
+    fail "dry-run should describe the bundle: $out"
+  [ ! -d "$project/.oms/support" ] || fail "dry-run must write nothing"
+
+  out="$("$ROOT/scripts/support-bundle.sh" --repo "$project")"
+  bundle="${out#support-bundle: }"
+  [ -d "$bundle" ] || fail "bundle directory missing: $out"
+  [ -f "$bundle/MANIFEST.md" ] || fail "MANIFEST.md missing"
+
+  # The ledger row carries a secret, so failures.json must be omitted whole.
+  grep -q 'failures.json — redacted content still matched' "$bundle/MANIFEST.md" ||
+    fail "secret-carrying family not recorded as omitted: $(cat "$bundle/MANIFEST.md")"
+  grep -rq "$vector" "$bundle" &&
+    fail "the vector leaked into the bundle" || true
+  # The fixture's own absolute path must not survive redaction.
+  grep -rq "$project" "$bundle" &&
+    fail "the repo path leaked into the bundle" || true
+  grep -q 'harness-version.txt' "$bundle/MANIFEST.md" ||
+    fail "clean families should be included: $(cat "$bundle/MANIFEST.md")"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

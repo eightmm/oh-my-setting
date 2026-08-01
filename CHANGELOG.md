@@ -7,6 +7,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms support-bundle [--out DIR] [--dry-run]`: redaction-first diagnostic
+  bundle. Harness state is rich and therefore unsafe to copy ad hoc into a
+  peer consultation or bug report. The bundle collects only bounded derived
+  summaries (repo-state, state-verify, task and journal status, fail-ledger
+  rows, artifact index counts — never artifact contents, raw logs, diffs,
+  datasets, or credentials), strips the repo path, home directory, and
+  hostname from every file, and then runs the shared sensitive-content
+  scrubber — a file that still matches is replaced whole by an omission
+  notice, the last line of defense for state that arrived past the writer
+  rails. `MANIFEST.md` records what was included, what was omitted and why,
+  and what is never collected. Ranked #5 by the 2026-08-01 peer council;
+  its #3 (git merge protocol for `.oms`) was rejected on inspection — the
+  standing contract keeps `.oms` out of git entirely, so the conflicts it
+  would classify cannot exist — and #6 (timeout probes in the
+  machine-conditional gate) was rejected because `shutil.which` cannot hang
+  and execution probes would make skill links flap on transient daemon
+  stalls.
 - Project skills may declare a verification contract: an optional `verify:`
   frontmatter command naming the evidence the skill expects. The forge
   validated structure and sensitive content but not whether a skill's rails

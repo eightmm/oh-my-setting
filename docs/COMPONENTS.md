@@ -47,6 +47,15 @@ unparseable packet timestamps, orphaned delegation markers, locks inside
 `.oms`, derived journal views behind their events. Never repairs; every
 finding names its remedy command
 
+**Support bundle (`support-bundle.sh`)** — Redaction-first diagnostic bundle
+for peer consultation and bug reports: bounded derived summaries only
+(repo-state, state-verify, task/journal status, fail-ledger rows, artifact
+index counts — never artifact contents, logs, diffs, or datasets), the repo
+path, home directory, and hostname stripped from every file, then the shared
+sensitive-content scrubber; a file that still trips it is replaced by an
+omission notice, and `MANIFEST.md` records inclusions, omissions, and the
+never-collected list
+
 **Provider contract (`provider-contract.sh`)** — Cross-CLI conformance gate:
 loader parity on a throwaway fixture (identical managed block sets across
 `AGENTS.md`/`CLAUDE.md`/an adopted `GEMINI.md`, stale base styles retired),
