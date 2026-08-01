@@ -22,7 +22,7 @@ the agent-facing files it writes are hidden from git by default (`--no-private`
 keeps them visible)
 
 **Local-only agent files (`project-private.sh`)** — Keeps the agent-facing
-harness files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `PROJECT.md`, plus
+harness files (`AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, plus
 `--path` extras) out of a project's git history by listing them in a managed
 block in `.git/info/exclude` — per-clone, never committed, and no entry added
 to the project's own `.gitignore`. Applied by default at template time
@@ -380,7 +380,12 @@ once when guarded work omits verification. Disable with
 subscriber rate-limit windows when present, estimated cost, and effort. The
 renderer ignores transcript/path fields, bounds terminal output, strips control
 characters, and makes no API call. The additive settings merge preserves a
-user-owned status line; update and uninstall recognize only the managed command
+user-owned status line; update and uninstall recognize only the managed
+command. `install-claude-hooks.sh` also registers the `PreCompact`
+handoff-snapshot hook, and `doctor.sh` verifies all four hook registrations
+plus the HUD actually landed in `settings.json` whenever the install receipt
+is valid — the installer treats registration failure as a warning, so the
+doctor is what catches a silently hook-less install
 
 
 **Shared memory (`agent-memory.sh`)** — Compact cross-agent facts in
@@ -425,9 +430,33 @@ advisor/auditor/implementation/test/review profiles resolve project -> global
 native Codex subagents receive the same full profile in their spawn message,
 keeping execution contracts consistent across surfaces
 
+**Harness-state MCP server (`oms-mcp-server.py`, `install-mcp.sh`,
+`install-agy-plugin.sh`)** — Read-only MCP tools over one repository's shared
+state: `oms_task_state`, `oms_fail_ledger`, `oms_handoffs`/`oms_handoff_show`,
+and `oms_journal`. One stdlib stdio server serves every MCP client the same
+state with no per-CLI hook code — which is also how Antigravity, whose CLI
+fires no hook events headlessly, reads journal/handoff/fail-ledger context.
+Claude Code and Codex register it directly (`install-mcp.sh`, idempotent,
+user scope); Antigravity imports it as the `oh-my-setting` plugin, generated
+with absolute paths at install time because `agy plugin install` copies the
+plugin directory verbatim. Headless agy needs the consult permission profile,
+which now includes `mcp(*)` (scoped mcp targets do not match on 1.1.9).
+Strictly read-only: each tool maps to a fixed read-only subcommand, digest
+reads take bare file names only, output is bounded
+
 **Session handoff (`session-handoff.sh`)** — Distills a prior agent session
 transcript (Claude/Codex/Antigravity) into a compact digest another agent can
-pick up; mechanical, no model call
+pick up; mechanical, no model call. Digests land in the project's
+`.oms/handoffs/` (the repo containing `--cwd`), which is where the Work
+Journal's newest-handoff pointer looks. A `PreCompact` hook
+(`precompact-handoff.sh`, registered for Claude Code by
+`install-claude-hooks.sh` and for Codex by the plugin) captures a digest
+automatically just before compaction discards the transcript detail:
+best-effort by contract, harness-adopted repos only, never guesses when the
+named session cannot be resolved, `OMS_PRECOMPACT_HANDOFF=0` opts out.
+Antigravity exposes no compaction or prompt-submit hook surface, so it gets
+skills and global rules but no automatic capture — run
+`oms session-handoff capture --agent antigravity` by hand
 
 ## Experiments
 
@@ -496,8 +525,38 @@ set: `agent-harness`, `oh-my-setting-ops`, `spec-interview`, `trace`, and
 delegation are internal `agent-harness` routes; their `oms` commands remain
 separate because their authority differs. `trust-boundary` is a
 language-neutral security method for material trust boundaries, not a broad
-framework checklist. Domain and machine guidance lives in project templates
-or command help, so it does not occupy the global skill catalog.
+framework checklist.
+
+**Machine-conditional skills** — A manifest entry may declare
+`"requires": ["cmd", ...]`; `link.sh` installs the skill only where every
+listed command resolves on PATH and withdraws it when a machine loses one,
+the router skips its triggers there (never naming a skill the session cannot
+load), and the doctor reports the skip as a note. `slurm` (requires `sinfo`)
+answers cluster questions from the private reference — partitions, node/GPU
+inventory, and the `sacctmgr` account/QOS limits — instead of re-probing
+nodes each session; `gpu-workstation` (requires `nvidia-smi`) checks VRAM
+first, serializes runs through the tsp queue, and triages CUDA OOM in a
+fixed order. Machines without those commands see exactly the five general
+skills.
+
+**Project skills (`skill-forge.sh`)** — Repository-scoped skills under
+`.oms/skills/<name>/SKILL.md`, linked into `.agents/skills/` (Codex,
+Antigravity) and `.claude/skills/` (Claude Code) so every CLI loads them
+through native project discovery — no router entry, no manifest. Rails
+rather than generation: `add` stores a skill only if it passes the Agent
+Skills checks (name matches directory, description substantial enough to
+route on, 500-line body budget) and the outbound scrubber, since a project
+skill is standing context for every later session in that repo; links are
+hidden from git through `project-private` and withdrawn when a skill goes
+invalid. `validate`/`list`/`show`/`remove`/`status` make the set reviewable,
+and the doctor reports per-repo health. The ML template installs
+`ml-experiment` (experiment-board duplicate check, pre-registered hypothesis
+runs, run-ledger gate, reproducibility capsule) and `dataset-safety`
+(manifest registration by declared group key, leakage and drift checks
+before training) this way, so ML discipline exists only in ML repos.
+`oms init` and `spec-interview` route the flow — evidence only, a few at
+most — and `agent-task close` hints at promoting a lesson once a repeated
+failure has been resolved in the repo.
 
 ## Code sources
 

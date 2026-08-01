@@ -67,6 +67,9 @@ path = os.path.join(dir_path, "SKILL.md")
 if not os.path.isfile(path):
     print("missing SKILL.md")
     sys.exit(1)
+if os.path.getsize(path) > 256 * 1024:
+    print("SKILL.md exceeds the 256 KiB input budget")
+    sys.exit(1)
 with open(path, encoding="utf-8") as fh:
     text = fh.read()
 lines = text.splitlines()
@@ -84,7 +87,11 @@ for line in lines[1:end]:
     if match:
         meta[match.group(1)] = match.group(2).strip()
 name = meta.get("name", "")
-if name != os.path.basename(dir_path):
+directory_name = os.path.basename(dir_path)
+if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", directory_name):
+    print("directory name must be lowercase kebab-case")
+    sys.exit(1)
+if name != directory_name:
     print("name must match directory: %r" % name)
     sys.exit(1)
 if len(meta.get("description", "")) < 40:
@@ -101,13 +108,16 @@ PY
 scrub_skill_dir() {
   local dir="$1"
   local file
-  for file in "$dir"/SKILL.md "$dir"/references/*.md; do
-    [ -f "$file" ] || continue
+  if [ -n "$(find "$dir" -type l -print -quit 2>/dev/null)" ]; then
+    printf 'symlinks are not allowed in project skills\n'
+    return 1
+  fi
+  while IFS= read -r -d '' file; do
     if agent_memory_file_has_sensitive_content "$file"; then
       printf 'sensitive content: %s\n' "$file"
       return 1
     fi
-  done
+  done < <(find "$dir" -type f -print0)
   return 0
 }
 
@@ -138,7 +148,7 @@ hide_from_git() {
 
 cmd_link() {
   local root skill name reason linked=0
-  for root in $(link_roots); do
+  while IFS= read -r root; do
     mkdir -p "$root"
     # Prune links we own whose skill no longer exists or no longer validates.
     for skill in "$root"/*; do
@@ -152,7 +162,7 @@ cmd_link() {
         echo "skill-forge: unlinked $name from $root"
       fi
     done
-  done
+  done < <(link_roots)
   [ -d "$SKILLS_DIR" ] || { echo "skill-forge: no project skills"; return 0; }
   for skill in "$SKILLS_DIR"/*; do
     [ -d "$skill" ] || continue
@@ -165,9 +175,9 @@ cmd_link() {
       echo "skill-forge: not linking $name: $reason" >&2
       continue
     fi
-    for root in $(link_roots); do
+    while IFS= read -r root; do
       ln -sfn "$skill" "$root/$name"
-    done
+    done < <(link_roots)
     hide_from_git "$name"
     linked=$((linked + 1))
   done
@@ -186,6 +196,9 @@ cmd_add() {
   [ -n "$name" ] || fail "add requires --name"
   valid_name "$name" || fail "skill names are lowercase kebab-case: $name"
   dir="$SKILLS_DIR/$name"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    fail "project skill already exists: $name"
+  fi
   mkdir -p "$dir"
   if [ -n "$file" ]; then
     [ -f "$file" ] || fail "no such file: $file"
@@ -208,6 +221,8 @@ cmd_add() {
 
 cmd_validate() {
   local target="${1:-}" skill name reason rc=0 checked=0
+  [ -z "$target" ] || valid_name "$target" ||
+    fail "skill names are lowercase kebab-case: $target"
   [ -d "$SKILLS_DIR" ] || { echo "skill-forge: no project skills"; return 0; }
   for skill in "$SKILLS_DIR"/*; do
     [ -d "$skill" ] || continue
@@ -244,7 +259,7 @@ cmd_list() {
         scrub_skill_dir "$skill" >/dev/null 2>&1 || state=invalid
       [ "$first" -eq 1 ] || printf ', '
       first=0
-      printf '{"name": "%s", "state": "%s"}' "$name" "$state"
+      python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "state": sys.argv[2]}, sort_keys=True), end="")' "$name" "$state"
     done
     printf ']}\n'
     return 0
@@ -264,6 +279,7 @@ cmd_list() {
 
 cmd_show() {
   [ "$#" -eq 1 ] || fail "show requires exactly one name"
+  valid_name "$1" || fail "skill names are lowercase kebab-case: $1"
   [ -f "$SKILLS_DIR/$1/SKILL.md" ] || fail "no such skill: $1"
   cat "$SKILLS_DIR/$1/SKILL.md"
 }
@@ -271,10 +287,11 @@ cmd_show() {
 cmd_remove() {
   [ "$#" -eq 1 ] || fail "remove requires exactly one name"
   local name="$1" root
+  valid_name "$name" || fail "skill names are lowercase kebab-case: $name"
   [ -d "$SKILLS_DIR/$name" ] || fail "no such skill: $name"
-  for root in $(link_roots); do
+  while IFS= read -r root; do
     owned_link_target "$root/$name" >/dev/null && rm -f "$root/$name"
-  done
+  done < <(link_roots)
   rm -rf "${SKILLS_DIR:?}/$name"
   echo "skill-forge: removed $name"
 }

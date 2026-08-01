@@ -88,9 +88,13 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 전부 agent가 필요할 때 알아서 집어 쓴다. 스크립트별 전체 카탈로그는
 [docs/COMPONENTS.md](docs/COMPONENTS.md)에 있다.
 
-모든 설치는 동일한 범용 skill 5개만 노출한다. ML·Slurm·workstation 세부 지침은
-프로젝트 템플릿이나 `oms` 명령 도움말에만 두어 무관한 세션이 도메인 전용 skill
-context를 부담하지 않게 한다.
+모든 설치는 동일한 범용 skill 5개를 노출한다. 무관한 세션이 쓸 수 없는 도메인
+context를 지지 않도록, 나머지 두 계층은 해당되는 곳에서만 스스로 붙는다.
+머신 조건 skill은 필요한 명령이 있는 머신에만 링크되고(클러스터의 `slurm`,
+`nvidia-smi`가 있는 `gpu-workstation`), 프로젝트 skill은 저장소의
+`.oms/skills/`에 만들어진다 — ML 템플릿이 실험·데이터셋 안전 규율을 설치하고,
+`oms skill-forge`는 그 저장소를 검사해 확인한 사실을 저장한다. 세 CLI 모두 각
+계층을 네이티브로 읽는다.
 
 **프로젝트 설정**
 
@@ -131,6 +135,9 @@ context를 부담하지 않게 한다.
   일간·주간 로컬 요약을 증분 색인하고, 에이전트는 `oms journal show`와 하루
   한 번의 프롬프트 다이제스트로 다시 읽으며, 설치 때 구성한 Notion mirror에는
   마감된 기간만 필요할 때 보낸다
+- Claude Code·Codex가 세션을 compact해 지우기 직전에 자동으로 캡처되는 세션
+  핸드오프 다이제스트 — 프로젝트의 `.oms/handoffs/`에 남고, 일간 다이제스트가
+  최신 것을 가리킨다
 - 되돌릴 수 있는 Markdown 원본 + 검색 가능한 로컬 인덱스의 공유 메모리
 - 검증이 주장이 아니라 실제로 실행되는 task packet
 - lease가 있는 subtask DAG, 그리고 범위가 고정된 task 하나만 claim해 격리

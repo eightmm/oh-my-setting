@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- ML project skills installed by the ml template: `ml-experiment` (check the
+  experiment board, pre-register hypothesis runs, gate long runs through the
+  run ledger, capture a capsule, record outcomes) and `dataset-safety`
+  (manifest registration with declared group keys, leakage and drift checks
+  before training). Shipped as `templates/project-skills/`, installed per
+  repo through skill-forge — so they exist only in ML projects, load through
+  native project skill discovery in all three CLIs, and pass the same
+  validation and scrubbing gate as any forged skill.
 - Project skill forge (`oms skill-forge`): distill inspected repo facts —
   build/test invocations, repo-specific pitfalls, domain data rules — into
   project-scoped skills under `.oms/skills/`, linked into `.agents/skills/`

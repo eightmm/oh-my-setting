@@ -91,9 +91,14 @@ Update oh-my-setting and re-run its doctor.
 Your agent picks these up on its own when a task calls for them. The full
 per-script catalog is [docs/COMPONENTS.md](docs/COMPONENTS.md).
 
-Every installation exposes the same five general-purpose skills. ML, Slurm,
-and workstation details stay in project templates or `oms` command help, so
-unrelated sessions do not carry domain-specific skill context.
+Every installation exposes the same five general-purpose skills, so unrelated
+sessions never carry domain context they cannot use. Two further layers add
+themselves only where they apply: machine-conditional skills, linked only
+where their required command exists (`slurm` on a cluster, `gpu-workstation`
+where `nvidia-smi` is), and project skills forged into a repository's
+`.oms/skills/` — the ML template installs experiment and dataset-safety
+discipline, and `oms skill-forge` stores what inspection verified about that
+specific repo. All three CLIs load every layer natively.
 
 **Project setup**
 
@@ -134,6 +139,9 @@ unrelated sessions do not carry domain-specific skill context.
   incrementally indexed, rebuildable daily/weekly local summaries that agents
   read back with `oms journal show` and a once-per-day prompt digest, with an
   optional finalized-period Notion mirror configured during install
+- Session handoff digests captured automatically just before Claude Code or
+  Codex compacts a session away, landing in the project's `.oms/handoffs/`
+  where the daily digest points at the newest one
 - Shared memory with reversible Markdown sources and a searchable local index
 - Read-only retained-window routing telemetry and memory source/index health
   diagnostics, both available as structured JSON

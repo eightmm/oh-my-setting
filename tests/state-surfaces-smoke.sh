@@ -291,7 +291,8 @@ test_router_skips_conditional_skill_without_command() {
 # --- project skill forge ----------------------------------------------------
 
 test_skill_forge_stores_links_and_hides() {
-  local repo="$TMP/forge-repo"
+  local repo="$TMP/forge repo"
+  local original="$TMP/original-skill"
   local out
 
   make_repo "$repo"
@@ -316,6 +317,15 @@ EOF
   bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status | grep -Fq "1 project skill(s) valid" ||
     fail "status should count the valid skill"
 
+  cp "$repo/.oms/skills/build-quirks/SKILL.md" "$original"
+  if printf -- '---\nname: build-quirks\ndescription: short\n---\nbody\n' |
+    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name build-quirks \
+      >/dev/null 2>&1; then
+    fail "add must refuse to overwrite an existing project skill"
+  fi
+  cmp -s "$original" "$repo/.oms/skills/build-quirks/SKILL.md" ||
+    fail "rejected replacement destroyed the existing project skill"
+
   # Invalidate the stored skill: the next link pass must withdraw the links
   # and status must fail loudly.
   printf 'no frontmatter\n' > "$repo/.oms/skills/build-quirks/SKILL.md"
@@ -332,6 +342,7 @@ EOF
 
 test_skill_forge_rejects_thin_and_sensitive() {
   local repo="$TMP/forge-reject"
+  local protected="$repo/.oms/protected"
   local vector
 
   make_repo "$repo"
@@ -348,6 +359,19 @@ test_skill_forge_rejects_thin_and_sensitive() {
     fail "secret-shaped content must be rejected"
   fi
   [ ! -d "$repo/.oms/skills/leaky" ] || fail "sensitive skill must not be stored"
+
+  mkdir -p "$protected"
+  printf 'must survive\n' > "$protected/SKILL.md"
+  if bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" show ../protected \
+    >/dev/null 2>&1; then
+    fail "show must reject a traversal name"
+  fi
+  if bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" remove ../protected \
+    >/dev/null 2>&1; then
+    fail "remove must reject a traversal name"
+  fi
+  [ -f "$protected/SKILL.md" ] ||
+    fail "traversal remove escaped the project skills directory"
 }
 
 test_task_close_hints_at_forging_learned_lessons() {
@@ -363,6 +387,34 @@ test_task_close_hints_at_forging_learned_lessons() {
   out="$(bash "$ROOT/scripts/agent-task.sh" --repo "$repo" close 2>&1 || true)"
   printf '%s' "$out" | grep -Fq "skill-forge add" ||
     fail "close should hint at promoting a resolved repeated failure: $out"
+}
+
+test_ml_template_installs_project_skills() {
+  local project="$TMP/ml-skills-proj"
+
+  mkdir -p "$project"
+  git -C "$project" init -q 2>/dev/null || true
+  bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||
+    fail "ml template apply failed"
+  [ -f "$project/.oms/skills/ml-experiment/SKILL.md" ] ||
+    fail "ml-experiment project skill not installed"
+  [ -f "$project/.oms/skills/dataset-safety/SKILL.md" ] ||
+    fail "dataset-safety project skill not installed"
+  [ -L "$project/.agents/skills/ml-experiment" ] ||
+    fail "ml-experiment not linked for native discovery"
+  bash "$ROOT/scripts/skill-forge.sh" --repo "$project" status |
+    grep -Fq "2 project skill(s) valid" || fail "installed skills should validate"
+
+  # Idempotent: a second apply must not fail on the existing skills.
+  bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||
+    fail "re-applying the ml template should be idempotent"
+
+  # A general project gets none.
+  local plain="$TMP/general-skills-proj"
+  mkdir -p "$plain"
+  bash "$ROOT/scripts/apply-project-template.sh" general "$plain" >/dev/null 2>&1 ||
+    fail "general template apply failed"
+  [ ! -d "$plain/.oms/skills" ] || fail "general template must not install ML skills"
 }
 
 # --- slurm generator rename -------------------------------------------------
@@ -388,6 +440,7 @@ test_router_skips_conditional_skill_without_command
 test_skill_forge_stores_links_and_hides
 test_skill_forge_rejects_thin_and_sensitive
 test_task_close_hints_at_forging_learned_lessons
+test_ml_template_installs_project_skills
 test_slurm_reference_rename_keeps_compat
 
 echo "state-surfaces-smoke: ok"

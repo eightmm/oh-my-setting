@@ -377,6 +377,23 @@ if [ "$BASE_STYLE" = "ml" ]; then
     fi
   fi
 
+  # ML project skills: the run-discipline and dataset-safety workflows ship
+  # as project skills so every CLI's native project discovery loads them —
+  # only in ML repos, never in the global catalog. Installed through
+  # skill-forge, which is also the validation and scrubbing gate.
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "would install ML project skills (ml-experiment, dataset-safety)"
+  else
+    for tskill in ml-experiment dataset-safety; do
+      tskill_src="$ROOT/templates/project-skills/$tskill/SKILL.md"
+      [ -f "$tskill_src" ] || continue
+      [ ! -f "$PROJECT_DIR/.oms/skills/$tskill/SKILL.md" ] || continue
+      "$ROOT/scripts/skill-forge.sh" --repo "$PROJECT_DIR" add \
+        --name "$tskill" --file "$tskill_src" >/dev/null ||
+        echo "warn: could not install project skill $tskill"
+    done
+  fi
+
   GITIGNORE="$PROJECT_DIR/.gitignore"
   ML_IGNORE_ENTRIES=("data/" "outputs/" "checkpoints/" "wandb/" "runs/" ".venv/" ".oms/")
   if [ "$DRY_RUN" = "1" ]; then
