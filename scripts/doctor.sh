@@ -849,6 +849,21 @@ check_harness_state() {
   check_harness_memory_db "$project_dir"
   check_harness_sensitive_files "$project_dir"
   check_harness_residue "$project_dir"
+  check_harness_project_skills "$project_dir"
+}
+
+# Project skills are standing context for every future session in this repo;
+# an invalid or secret-carrying one should surface here, not on first load.
+check_harness_project_skills() {
+  local project_dir="$1"
+  local out
+
+  [ -d "$project_dir/.oms/skills" ] || return 0
+  if out="$("$INSTALL_ROOT/scripts/skill-forge.sh" --repo "$project_dir" status 2>&1)"; then
+    echo "ok: ${out#skill-forge: }"
+  else
+    echo "warn: ${out#skill-forge: }"
+  fi
 }
 
 load_user_tool_paths

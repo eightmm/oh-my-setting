@@ -288,6 +288,83 @@ test_router_skips_conditional_skill_without_command() {
   fi
 }
 
+# --- project skill forge ----------------------------------------------------
+
+test_skill_forge_stores_links_and_hides() {
+  local repo="$TMP/forge-repo"
+  local out
+
+  make_repo "$repo"
+  cat <<'EOF' | bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name build-quirks
+---
+name: build-quirks
+description: How this repository actually builds and tests, including the nonstandard invocations discovered by inspection rather than guessed.
+---
+
+# Build Quirks
+
+- Tests run with `make check-fast`, not pytest directly.
+EOF
+  [ -f "$repo/.oms/skills/build-quirks/SKILL.md" ] || fail "skill not stored"
+  [ -L "$repo/.agents/skills/build-quirks" ] || fail "not linked for codex/agy"
+  [ -L "$repo/.claude/skills/build-quirks" ] || fail "not linked for claude"
+  grep -Fq ".agents/skills/build-quirks" "$repo/.git/info/exclude" ||
+    fail "codex/agy link not hidden from git"
+  grep -Fq ".claude/skills/build-quirks" "$repo/.git/info/exclude" ||
+    fail "claude link not hidden from git"
+
+  bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status | grep -Fq "1 project skill(s) valid" ||
+    fail "status should count the valid skill"
+
+  # Invalidate the stored skill: the next link pass must withdraw the links
+  # and status must fail loudly.
+  printf 'no frontmatter\n' > "$repo/.oms/skills/build-quirks/SKILL.md"
+  bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" link >/dev/null 2>&1
+  [ ! -e "$repo/.agents/skills/build-quirks" ] ||
+    fail "invalid skill must be unlinked"
+  if bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status >/dev/null 2>&1; then
+    fail "status must be nonzero with an invalid skill"
+  fi
+
+  bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" remove build-quirks >/dev/null
+  [ ! -d "$repo/.oms/skills/build-quirks" ] || fail "remove left the skill"
+}
+
+test_skill_forge_rejects_thin_and_sensitive() {
+  local repo="$TMP/forge-reject"
+  local vector
+
+  make_repo "$repo"
+  if printf -- '---\nname: bad\ndescription: short\n---\nbody\n' |
+    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name bad 2>/dev/null; then
+    fail "a thin description must be rejected"
+  fi
+  [ ! -d "$repo/.oms/skills/bad" ] || fail "rejected skill must not be stored"
+
+  # Assembled at runtime so this test file stays scrubber-clean.
+  vector="AK""IAIOSFODNN7EXAMPLE"
+  if printf -- '---\nname: leaky\ndescription: a sufficiently long description that satisfies the routing-quality floor\n---\nkey: %s\n' "$vector" |
+    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name leaky 2>/dev/null; then
+    fail "secret-shaped content must be rejected"
+  fi
+  [ ! -d "$repo/.oms/skills/leaky" ] || fail "sensitive skill must not be stored"
+}
+
+test_task_close_hints_at_forging_learned_lessons() {
+  local repo="$TMP/forge-hint"
+  local out
+
+  make_repo "$repo"
+  ( cd "$repo" &&
+    OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record --cmd "make flaky" --exit 1 >/dev/null &&
+    OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record --cmd "make flaky" --exit 1 >/dev/null &&
+    bash "$ROOT/scripts/fail-ledger.sh" resolve --cmd "make flaky" >/dev/null )
+  bash "$ROOT/scripts/agent-task.sh" --repo "$repo" init --goal "lesson" >/dev/null
+  out="$(bash "$ROOT/scripts/agent-task.sh" --repo "$repo" close 2>&1 || true)"
+  printf '%s' "$out" | grep -Fq "skill-forge add" ||
+    fail "close should hint at promoting a resolved repeated failure: $out"
+}
+
 # --- slurm generator rename -------------------------------------------------
 
 test_slurm_reference_rename_keeps_compat() {
@@ -308,6 +385,9 @@ test_router_state_hint_on_unresolved_failures
 test_router_state_hint_skips_unadopted_repo
 test_conditional_skills_link_only_where_required_commands_exist
 test_router_skips_conditional_skill_without_command
+test_skill_forge_stores_links_and_hides
+test_skill_forge_rejects_thin_and_sensitive
+test_task_close_hints_at_forging_learned_lessons
 test_slurm_reference_rename_keeps_compat
 
 echo "state-surfaces-smoke: ok"

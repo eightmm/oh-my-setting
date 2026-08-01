@@ -7,6 +7,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Project skill forge (`oms skill-forge`): distill inspected repo facts —
+  build/test invocations, repo-specific pitfalls, domain data rules — into
+  project-scoped skills under `.oms/skills/`, linked into `.agents/skills/`
+  and `.claude/skills/` so all three CLIs load them through native project
+  skill discovery (no router entry, no manifest). Rails, not generation: a
+  skill must pass the Agent Skills validation (name/dir match, routable
+  description, 500-line budget) and the outbound scrubber — a project skill
+  is standing context for every future session, so secret-shaped content is
+  refused at the door. Links are hidden from git via project-private and
+  withdrawn when a skill goes invalid; the doctor reports project-skill
+  health per repo. `oms init` and spec-interview point at the flow, and
+  `agent-task close` hints at promoting a lesson when a repeated failure
+  was resolved in this repo (`OMS_SKILL_FORGE_HINT=0` opts out).
 - Machine-conditional skills: a manifest entry may declare
   `"requires": ["cmd", ...]`, and the skill links, routes, and doctors only
   on machines where every listed command exists — link removes the links

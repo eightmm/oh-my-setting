@@ -146,6 +146,7 @@ if [ "$plan_state" = "none" ]; then
 else
   echo "- A plan exists: 'oms agent-plan ready' for actionable tasks."
 fi
+echo "- Distill verified repo lessons (build quirks, test invocation, domain rules) into project skills: 'oms skill-forge add --name NAME' — evidence-backed only, all three CLIs load them natively."
 if [ "$style" = "ml" ]; then
   echo "- ML repo: 'oms data-manifest check --name <manifest>' then 'oms data-manifest leakage --name <manifest>' before training when registered splits exist;"
   echo "  wrap runs in 'oms run-ledger' / 'oms run-capsule' and claim on 'oms experiment-board'."

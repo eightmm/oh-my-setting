@@ -25,6 +25,12 @@ contract, then proceed. Clarify public interfaces, persistence/schema,
 auth/privacy, destructive or expensive work, Slurm resources, dependencies,
 and acceptance criteria only when relevant.
 
+After the contract lands, distill what inspection actually verified — build
+and test invocations, repo-specific pitfalls, domain data rules — into at
+most a few project skills with `oms skill-forge add --name NAME`. Evidence
+only: a skill you cannot back with an inspected fact is context tax, not
+knowledge. All three CLIs load them natively from the project.
+
 Read one reference as needed:
 
 - Questions: [question-ui.md](references/question-ui.md)
