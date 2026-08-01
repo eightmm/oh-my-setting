@@ -827,6 +827,10 @@ class NotionPresentationTest(unittest.TestCase):
             [
                 "# Daily Work Journal — 2026-08-01",
                 "",
+                "## 핵심 진전",
+                "",
+                "- Commit 0e0390aa9589: test: capture status output [wj_a4b7c0f523496f5d; source git-commit:0e0390aa; evidence git-commit:0e0390aa]",
+                "",
                 "## 의사결정",
                 "",
                 "- decided the thing [wj_0392687b9e2ed75e; source agent-task:ta[REDACTED]:update:b99491a47ec430fa; evidence agent-state:ta[REDACTED]]",
@@ -843,10 +847,16 @@ class NotionPresentationTest(unittest.TestCase):
         self.assertNotIn("[REDACTED]", rendered)
         self.assertEqual(rendered.count("- decided the thing"), 1)
         self.assertIn("- another decision", rendered)
-        # Non-bullet structure is untouched, and the same text may legally
-        # repeat under a different heading.
         self.assertIn("# Daily Work Journal — 2026-08-01", rendered)
-        self.assertIn("## 다음 우선순위", rendered)
+        # Commit bullets lose their hash prefix but keep the message.
+        self.assertIn("- test: capture status output", rendered)
+        self.assertNotIn("Commit 0e0390aa9589", rendered)
+        # Decisions float above the progress listing.
+        self.assertLess(
+            rendered.index("## 의사결정"), rendered.index("## 핵심 진전")
+        )
+        # A section that says nothing is dropped from the human view.
+        self.assertNotIn("## 다음 우선순위", rendered)
 
     def test_dedup_scope_resets_per_section(self):
         content = "\n".join(

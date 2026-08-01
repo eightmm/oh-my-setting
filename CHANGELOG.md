@@ -13,8 +13,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   from its update and close events — but Notion is the surface the human
   actually reads, and the citations made the page unreadable in review.
   Publishing strips the trailing `[wj_...]` citations and folds bullets that
-  differ only by citation, per section. Deterministic text transforms only:
-  nothing is summarized or rewritten, and local files keep full provenance.
+  differ only by citation, per section. On review the page still read like a
+  git log, so the same pass now also drops `Commit <hash>:` prefixes (the
+  message is the human line; hashes stay in the local evidence layer),
+  removes sections that say nothing, and floats decisions, blockers, and
+  next priorities above the progress listing. Deterministic text transforms
+  only: nothing is summarized or rewritten, and local files keep full
+  provenance.
 
 ### Added
 - `oms support-bundle [--out DIR] [--dry-run]`: redaction-first diagnostic

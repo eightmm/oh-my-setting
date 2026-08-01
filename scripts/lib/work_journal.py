@@ -186,33 +186,74 @@ class SchemaError(JournalError):
     """Invalid or unsupported event schema."""
 
 
+# Section ordering for the human-facing Notion view: the reader wants the
+# day's judgment first (decisions, blockers, what is next) and the raw
+# progress listing last. Unknown titles keep their relative order in between.
+_NOTION_SECTION_RANK = {
+    "의사결정": 0, "Decisions": 0, "주요 의사결정": 0, "Key decisions": 0,
+    "Blockers": 1, "반복 Blockers": 1, "Recurring blockers": 1,
+    "다음 우선순위": 2, "Next priorities": 2,
+    "다음 주 우선순위": 2, "Next week priorities": 2,
+    "실패하거나 보류한 접근": 4, "Failed or parked approaches": 4,
+    "핵심 진전": 5, "Key progress": 5,
+    "프로젝트별 작업": 5, "Work by project": 5,
+    "프로젝트별 진전": 5, "Progress by project": 5,
+}
+
+
 def notion_presentation(content: str) -> str:
     """Human-facing rendering of a summary for the Notion mirror.
 
     The local daily files are the evidence layer: every claim carries an
-    event-id citation, and one packet update can emit near-identical bullets
-    from its update and close events. Notion is the surface the human actually
-    reads, so the mirror drops the trailing ``[wj_...]`` citations and folds
-    bullets that differ only by citation into one. Deterministic text
-    transforms only — nothing is summarized or rewritten, and the local files
-    keep full provenance.
+    event-id citation, commit bullets carry their hashes, and one packet
+    update can emit near-identical bullets from its update and close events.
+    Notion is the surface the human actually reads, so the mirror drops the
+    trailing ``[wj_...]`` citations and the ``Commit <hash>:`` prefixes,
+    folds bullets that differ only by citation, removes sections that say
+    nothing, and floats decisions, blockers, and next priorities above the
+    progress listing. Deterministic text transforms only — nothing is
+    summarized or rewritten, and the local files keep full provenance.
     """
 
     citation = re.compile(r"\s*\[wj_[0-9a-f]{8,}.*\]\s*$")
+    commit_prefix = re.compile(r"^- Commit [0-9a-f]{7,40}: ")
     lines: List[str] = []
     seen: set = set()
     for line in content.splitlines():
         if line.startswith("#"):
             seen = set()
         if line.startswith("- "):
-            stripped = citation.sub("", line)
+            stripped = commit_prefix.sub("- ", citation.sub("", line))
             if stripped in seen:
                 continue
             seen.add(stripped)
             lines.append(stripped)
         else:
             lines.append(line)
-    return "\n".join(lines)
+
+    preamble: List[str] = []
+    sections: List[Dict[str, Any]] = []
+    for line in lines:
+        if line.startswith("## "):
+            sections.append({"title": line[3:].strip(), "lines": [line]})
+        elif sections:
+            sections[-1]["lines"].append(line)
+        else:
+            preamble.append(line)
+
+    def says_nothing(section: Dict[str, Any]) -> bool:
+        body = [l for l in section["lines"][1:] if l.strip()]
+        return not body or all(l in _EMPTY_MARKERS for l in body)
+
+    kept = [s for s in sections if not says_nothing(s)]
+    ordered = sorted(kept, key=lambda s: _NOTION_SECTION_RANK.get(s["title"], 3))
+
+    out = list(preamble)
+    for section in ordered:
+        while out and not out[-1].strip():
+            out.pop()
+        out.extend(["", *section["lines"]])
+    return "\n".join(out).strip("\n")
 
 
 def _sha256_bytes(data: bytes) -> str:
