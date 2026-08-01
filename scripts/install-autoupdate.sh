@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
 MODE="${OH_MY_SETTING_AUTO_UPDATE_MODE:-check}"
 METHOD="${OH_MY_SETTING_AUTO_UPDATE_METHOD:-auto}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
@@ -191,3 +193,4 @@ case "$chosen" in
     exit 0
     ;;
 esac
+oms_install_record_auto_update true "$ROOT" "$DRY_RUN"

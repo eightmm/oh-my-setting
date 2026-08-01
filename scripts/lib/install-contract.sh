@@ -481,6 +481,90 @@ except Exception:
 PY
 }
 
+# Persist one components.<key> flag in an existing schema-2 receipt without
+# regenerating the rest of the row. Returns 1 when the receipt is missing or
+# unreadable and 3 when the schema predates the component profile.
+oms_install_receipt_set_component() {
+  local key="$1"
+  local value="$2"
+  local receipt="${3:-$(oms_install_receipt_path)}"
+
+  case "$value" in true|false) ;; *) return 2 ;; esac
+  [ -f "$receipt" ] || return 1
+  python3 - "$receipt" "$key" "$value" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+receipt, key, value = sys.argv[1:]
+try:
+    with open(receipt, encoding="utf-8") as fh:
+        row = json.load(fh)
+except Exception:
+    sys.exit(1)
+if row.get("schema") != 2:
+    sys.exit(3)
+components = row.get("components")
+if not isinstance(components, dict):
+    components = {}
+    row["components"] = components
+components[key] = value == "true"
+parent = os.path.dirname(receipt) or "."
+fd, tmp = tempfile.mkstemp(prefix=".install.", suffix=".tmp", dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(row, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, receipt)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    sys.exit(1)
+PY
+}
+
+# The trigger scripts record their state here so an out-of-band
+# `oms auto-update install`/`remove` survives the next update: update.sh
+# reconciles the trigger from the receipt's component profile, so a timer that
+# was installed but never recorded was silently uninstalled one update later.
+# Only the receipt owner may record; other checkouts get a note instead, and
+# schema-1 receipts are left alone because update.sh probes the scheduler
+# directly for those.
+oms_install_record_auto_update() {
+  local flag="$1"
+  local root="$2"
+  local dry_run="${3:-0}"
+  local receipt owner physical_root status
+
+  receipt="$(oms_install_receipt_path)"
+  [ -f "$receipt" ] || return 0
+  owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null)" || return 0
+  physical_root="$(oms_install_physical_root "$root")" || return 0
+  if [ "$owner" != "$physical_root" ]; then
+    echo "note: install receipt owner is $owner; auto_update=$flag not recorded from $physical_root" >&2
+    return 0
+  fi
+  if [ "$dry_run" = "1" ]; then
+    printf 'would record auto_update=%s in %s\n' "$flag" "$receipt"
+    return 0
+  fi
+  status=0
+  oms_install_receipt_set_component auto_update "$flag" "$receipt" || status="$?"
+  [ "$status" -ne 0 ] || return 0
+  [ "$status" -ne 3 ] || return 0
+  if [ "$flag" = "true" ]; then
+    echo "warning: auto-update trigger installed but not recorded in $receipt; the next update will remove it" >&2
+  else
+    echo "warning: auto-update trigger removed but still recorded in $receipt; the next update will reinstall it" >&2
+  fi
+  return 0
+}
+
 oms_install_atomic_symlink() {
   local source="$1"
   local target="$2"

@@ -6458,6 +6458,90 @@ test_autoupdate_install_dry_run_no_writes() {
     fail "install-autoupdate dry-run wrote under HOME"
 }
 
+# An out-of-band `oms auto-update install` used to leave the receipt saying
+# auto_update=false, so the next `oms update` reconciled components from the
+# receipt and silently uninstalled the timer it had just been asked to keep.
+test_autoupdate_trigger_records_receipt_component() {
+  local cron_file="$TMP/autoupdate-receipt.cron"
+  local receipt="$TMP/autoupdate-receipt.json"
+  local out
+
+  python3 - "$receipt" "$ROOT" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": 2,
+        "source_root": sys.argv[2],
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "channel": "main",
+        "version": "0.3.0",
+        "profile": "custom",
+        "ref": "main",
+        "previous_commit": "",
+        "link_mode": "symlink",
+        "installed_at": "2026-07-12T00:00:00Z",
+        "components": {
+            "tools": False,
+            "claude_hooks": True,
+            "codex_plugin": False,
+            "auto_update": False,
+            "machine_snapshot": False,
+            "slurm_snapshot": False,
+        },
+        "managed_targets": [".local/bin/oms"],
+        "plugin": {"name": "oh-my-setting", "version": "0.1.0", "sha256": "test"},
+    }, handle)
+PY
+
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron >/dev/null
+  python3 - "$receipt" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["components"]["auto_update"] is True, row["components"]
+assert row["components"]["claude_hooks"] is True, row["components"]
+assert row["version"] == "0.3.0", row
+PY
+
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
+  python3 - "$receipt" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["components"]["auto_update"] is False, row["components"]
+PY
+
+  # Dry-run previews the receipt write without performing it.
+  out="$(OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron --dry-run)"
+  printf '%s' "$out" | grep -Fq 'would record auto_update=true' ||
+    fail "dry-run should preview the receipt write: $out"
+  python3 - "$receipt" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["components"]["auto_update"] is False, row["components"]
+PY
+
+  # A checkout that does not own the receipt must not flip the flag.
+  python3 - "$receipt" "$TMP" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    row = json.load(handle)
+row["source_root"] = sys.argv[2]
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+PY
+  out="$(OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron 2>&1)"
+  printf '%s' "$out" | grep -Fq 'not recorded' ||
+    fail "foreign-owner install should note the skipped receipt write: $out"
+  python3 - "$receipt" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["components"]["auto_update"] is False, row["components"]
+PY
+}
+
 test_check_gate_hard_fails_without_shellcheck() {
   # The gate must FAIL (not silently skip) when shellcheck is absent — the
   # exact false-confidence that hid a session of red CI.

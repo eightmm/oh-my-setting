@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
+
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SERVICE_FILE="$SYSTEMD_DIR/oh-my-setting-autoupdate.service"
@@ -90,4 +94,5 @@ remove_cron() {
 
 remove_systemd
 remove_cron
+oms_install_record_auto_update false "$ROOT" "$DRY_RUN"
 echo "auto-update trigger: removed"
