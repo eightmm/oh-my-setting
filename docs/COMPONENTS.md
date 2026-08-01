@@ -39,6 +39,14 @@ rules, spec state, and scaffold; warns on empty ML scientific-contract fields,
 agent files exposed to git, and structure drift (stray root files, tracked
 data, missing `src/` layout)
 
+**State verify (`state-verify.sh`)** — Read-only consistency verdict over a
+repository's `.oms` tree: composes `oms-run validate`, `artifact-index
+validate`, task and journal status, then cross-checks what no single family
+owns — dangling `CURRENT` pointers, active packets carrying `closed_at`,
+unparseable packet timestamps, orphaned delegation markers, locks inside
+`.oms`, derived journal views behind their events. Never repairs; every
+finding names its remedy command
+
 **Provider contract (`provider-contract.sh`)** — Cross-CLI conformance gate:
 loader parity on a throwaway fixture (identical managed block sets across
 `AGENTS.md`/`CLAUDE.md`/an adopted `GEMINI.md`, stale base styles retired),

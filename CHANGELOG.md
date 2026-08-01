@@ -7,6 +7,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms state-verify [--json]`: read-only consistency verdict over a repo's
+  `.oms` tree. Shared state is the harness spine, and a dangling pointer or a
+  contradictory packet is inherited as false confidence by every CLI that
+  reads it — while each existing validator judged only its own family. The
+  command composes those engines (`oms-run validate`, `artifact-index
+  validate`, task and journal status) and adds the cross-family checks none
+  of them owns: `CURRENT` pointers naming missing threads or runs, active
+  task packets carrying `closed_at`, unparseable packet timestamps that make
+  staleness checks silently pass, delegation markers whose worker process is
+  dead, lock entries inside `.oms` (the locking contract keeps locks in
+  `OMS_LOCK_DIR`), a missing `.oms/.gitignore`, and derived journal views
+  behind `events.jsonl`. It never repairs; every finding names the command
+  that would. Ranked #2 by the 2026-08-01 peer council.
 - `oms provider-contract --check`: cross-CLI conformance gate. The 0.4.0
   GEMINI.md incident showed native-loader drift — one CLI following rules the
   other two retired — is the highest-risk failure class, and no single-script

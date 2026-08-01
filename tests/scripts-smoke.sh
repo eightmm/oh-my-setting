@@ -13032,6 +13032,76 @@ EOF
     fail "parity ok line missing: $out"
 }
 
+test_state_verify_clean_and_unadopted() {
+  local plain="$TMP/sv-plain"
+  local project="$TMP/sv-clean"
+  local out
+
+  mkdir -p "$plain"
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$plain" 2>&1)" ||
+    fail "an unadopted directory must verify clean: $out"
+  printf '%s\n' "$out" | grep -q 'not harness-adopted' ||
+    fail "unadopted repos should say so: $out"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  printf '*\n' > "$project/.oms/.gitignore"
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" ||
+    fail "a minimal adopted repo must verify clean: $out"
+  printf '%s\n' "$out" | grep -q 'state-verify: ok' ||
+    fail "missing ok verdict: $out"
+}
+
+test_state_verify_reports_cross_family_findings() {
+  local project="$TMP/sv-findings"
+  local out rc
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/threads" "$project/.oms/task"
+  printf '*\n' > "$project/.oms/.gitignore"
+  # A CURRENT pointer naming a thread that does not exist.
+  printf 'th-missing 1754000000 test\n' > "$project/.oms/threads/CURRENT"
+  # An active packet carrying a close timestamp.
+  cat > "$project/.oms/task/current.md" <<'EOF'
+# Active Agent Task
+
+- created: 2026-07-31T00:00:00Z
+- updated: 2026-07-31T00:00:00Z
+- task_id: task-contradiction
+- status: active
+- source_session:
+- last_activity: 2026-07-31T00:00:00Z
+- closed_at: 2026-07-31T01:00:00Z
+- owner: test
+
+## Goal
+EOF
+  # A lock entry inside .oms, which the locking contract forbids.
+  mkdir -p "$project/.oms/task/current.md.1234-56.lock"
+
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "findings must exit 1 (rc=$rc): $out"
+  printf '%s\n' "$out" | grep -q 'fail: threads: CURRENT names th-missing' ||
+    fail "dangling thread pointer not reported: $out"
+  printf '%s\n' "$out" | grep -q 'fail: task: packet is active but carries closed_at' ||
+    fail "task contradiction not reported: $out"
+  printf '%s\n' "$out" | grep -q 'fail: oms: .*lock' ||
+    fail "in-tree lock not reported: $out"
+  printf '%s\n' "$out" | grep -q 'remedy:' ||
+    fail "findings must carry remedies: $out"
+
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" && rc=0 || rc=$?
+  [ "$rc" = 1 ] || fail "json mode must also exit 1 (rc=$rc): $out"
+  printf '%s\n' "$out" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+assert report["schema"] == 1, report
+assert report["summary"]["fail"] >= 3, report
+assert all(f["remedy"] for f in report["findings"]), report
+' || fail "json report malformed: $out"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 
