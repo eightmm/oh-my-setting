@@ -18,9 +18,22 @@ if [ "${OMS_TURN_GUARD_OFF:-0}" != "1" ]; then
   [ -z "$guard_out" ] || printf '%s\n' "$guard_out"
 fi
 
-case "$guard_out" in
-  *'"decision": "block"'*) exit 0 ;;
-esac
+# The journal must not mirror a blocked answer as finished. Parse the guard
+# verdict instead of substring-matching its serialization, so a formatting
+# change in the emitter cannot silently turn blocked turns into finished ones;
+# malformed output fails open, exactly like the guard itself.
+decision="$(printf '%s' "$guard_out" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+if raw:
+    try:
+        verdict = json.loads(raw)
+    except ValueError:
+        verdict = None
+    if isinstance(verdict, dict):
+        print(verdict.get("decision", ""))
+' 2>/dev/null || true)"
+[ "$decision" != "block" ] || exit 0
 
 [ "${OMS_HARNESS_CHILD:-0}" != "1" ] || exit 0
 repo="$(printf '%s' "$payload" | python3 "$HELPER" repo 2>/dev/null || true)"
