@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-01
+
 ### Added
 - ML project skills installed by the ml template: `ml-experiment` (check the
   experiment board, pre-register hypothesis runs, gate long runs through the
@@ -93,86 +95,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   must be substantial enough to route on, and SKILL.md stays under the
   500-line progressive-disclosure budget.
 
-### Fixed
-- The smoke suite's source-state leak check no longer fires on the live
-  session's own Work Journal writes. The `.oms` fingerprint excluded only
-  `hooks/`, but the journal's turn boundaries (this cycle) rewrite
-  `work-journal/index.json`/`index.sqlite3` on every prompt the agent running
-  the suite submits — a run from an adopted repo failed with a fingerprint
-  mismatch that had nothing to do with the change under test. `work-journal/`
-  joins `hooks/` as an ambient-written subtree; tests exercise the journal
-  only through temporary repos, so no coverage is lost.
-- An existing project `GEMINI.md` is kept in sync with the other loaders.
-  Antigravity reads it as a directory rule file and prefers it over
-  `AGENTS.md`: verified live in a repository whose `AGENTS.md` carried the
-  ml loader while a leftover `GEMINI.md` still carried general — agy
-  reported the general template while Claude Code and Codex followed ml.
-  One CLI silently obeying rules the other two retired is exactly what this
-  project exists to prevent. The template now adopts `GEMINI.md` as a
-  managed file when the project already has one (so the retired block is
-  removed and the new loader written), and never creates one otherwise —
-  agy reads `AGENTS.md` fine, so a new project needs no third loader.
-- `GEMINI.md` stays a per-project harness file, and a test now pins it.
-  An earlier entry in this same unreleased cycle dropped it from the
-  default lists (project-private hiding, worktree seeding, template dedup)
-  on the belief that no supported CLI reads a project `GEMINI.md`. That was
-  wrong: Antigravity's own bundled rules documentation lists `GEMINI.md`,
-  `AGENTS.md`, and `.agents/rules/*.md` as the directory-based rule paths it
-  reads hierarchically. The practical risk was a project `GEMINI.md` no
-  longer being hidden from git by default — agent context leaking into a
-  public repo — and an agy worker in a delegate worktree losing project
-  rules. Nothing pinned the contract, so the removal passed the gate;
-  `tests/scripts-smoke.sh` now asserts the default harness-file set.
-- Switching a project's base style now retires the previous one. Managed
-  rule blocks are per-style, so applying `ml` over `general` left both in
-  place and the agent read two loaders with conflicting rules — found by
-  applying the ml template to a real research repo. Only the mutually
-  exclusive base styles (general, ml) are replaced; the slurm overlay
-  follows machine detection and is removed only by an explicit
-  `remove-project-template.sh slurm`. The ml and slurm templates also point
-  at `oms generate-slurm-reference` instead of the retired name.
-- Session-handoff digests land in the project repo, not the harness checkout.
-  The default output directory was the oh-my-setting checkout's own
-  `.oms/handoffs/`, while the Work Journal's newest-handoff pointer scans the
-  project's — every capture from another repo was invisible to the daily
-  digest. `capture` now resolves the repo containing `--cwd`; `list`/`show`
-  resolve `OMS_STATE_REPO`/`$PWD`.
-
-### Removed
-- `scripts/backup.sh`, an orphan: not a public `oms` tool, undocumented,
-  called by nothing but its own test, and superseded by update.sh's
-  transactional snapshot/rollback of managed targets.
-- Shared-state files are replaced with a same-directory rename. The
-  task-packet and memory-summary writers staged their scratch under TMPDIR
-  and `mv`'d it over the target; with TMPDIR on a different filesystem than
-  the repo (tmpfs /tmp against an ext4 checkout — the ordinary case) that
-  degrades to copy+unlink, and every concurrent reader — another agent
-  session, the work-journal observer, repo-state — had a window where the
-  file was empty or truncated. `agent-task status` answers `status: none`
-  with exit 0 for exactly that window, the most plausible mechanism behind a
-  load-dependent lifecycle-test flake (diagnosed with an advisor pass, whose
-  capture-first assertion prescription is also in). gc now reclaims a
-  crashed writer's `.oms-replace.*` scratch after an hour, and leaves fresh
-  scratch to the writer that may still hold it.
-- The default advisor and consult peers exclude the *detected* caller. Both
-  pickers excluded `${OMS_AGENT:-}`, which interactive sessions never
-  export, so an empty caller made the exclusion loop a no-op: a Claude
-  session asking for an outside read got Claude — replication presented as
-  independence, observed live when a flake advisory routed to the session's
-  own family. One shared `oms_peer_caller` (OMS_AGENT when set, detected
-  session identity otherwise, unknown excludes nothing) now feeds both, with
-  `--to`/`OMS_ADVISOR_PROVIDER` overrides and the last-resort self-advice
-  fallback unchanged; `tests/advisor-routing-smoke.sh` pins the contract as
-  its own gate stage.
-- Doctor counts unindexed artifacts with the same grace window `prune --files`
-  deletes with. A live provider call writes its artifact before the index row
-  lands, so the age-blind count warned about in-flight council runs and then
-  prescribed a command that correctly deleted nothing — doctor complaining,
-  the remedy shrugging, every time an ask/review was still executing. Prune
-  also now says how many recent unindexed files it kept inside the grace
-  window, so "deleted 0 orphan file(s)" explains itself.
-
-### Added
 - The daily Work Journal digest points at the newest session handoff. Handoffs
   are captured manually and loaded manually, and the docs' "loading it is your
   step" is exactly the step a fresh session forgets it has. The first prompt
@@ -207,175 +129,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   strips terminal controls, preserves an existing user `statusLine`, updates
   only its own command path, and removes only its own entry on uninstall.
 
-### Changed
-- Every install now exposes one five-skill, general-purpose catalog. Added a
-  compact, language-neutral `trust-boundary` method for security-sensitive
-  changes and threat models. Removed
-  the project- or machine-specific `chem-bio-ml`, `ml-training`,
-  `research-method`, `slurm-hpc`, and `tsp-queue` skills; their useful runtime
-  commands and project templates remain available without occupying global
-  skill context. Folded the `peer-ask`, `peer-review`, and `peer-delegate` skill
-  front doors into `agent-harness` while retaining their authority-specific
-  `oms` commands, and moved the private Slurm snapshot to `local/slurm.md`.
-
-### Fixed
-- `skill-doctor` now checks the shared `~/.agents/skills` root and detects a
-  duplicate name split across Codex's product-specific and shared overlays.
-- `oms init` no longer misses exposed agent files when `grep -q` closes its
-  status pipe after the first match. Under `pipefail`, the still-writing
-  producer could receive SIGPIPE and invert the condition, so the late-`git
-  init` recovery sometimes skipped `.git/info/exclude` only under CI timing.
-  The status command now completes before its captured output is inspected.
-- Peer-review mechanical verification now runs without the review provider's
-  model-class, operation, or reasoning environment. A deep review gate could
-  previously make an otherwise clean routing test observe the review phase and
-  fail, even though the verifier was not itself a reviewer call.
-- The residue scan sees flock lock files. It only ever walked mkdir-path lock
-  directories, so a machine holding 12,427 flock lock files was told it had
-  zero — which reads as "nothing here" rather than "this kind is not
-  removable". They are permanent by design: unlinking a released flock file
-  lets a waiter on the old inode and a new arrival on a fresh one both hold the
-  lock. So doctor reports the count as a note, never a warning, and cleanup
-  still leaves them alone. A large count means a run leaked its lock dir into a
-  real HOME — a test without `OMS_LOCK_DIR` — not a broken install. The
-  cleanup regression also builds its dead lock through the real acquire path
-  now; the hand-made fixture is what let the gap hide.
-- Provider-call accounting survives artifact retention. Duration and
-  provider-reported tokens were readable only by parsing the artifact body, so
-  deleting stale artifacts erased the record of what those calls had cost -
-  pruning 360 leaked test artifacts this release took the parseable base down
-  with them. The index row now caches both at write time, reusing the telemetry
-  module rather than copying its regexes, and telemetry prefers the cached value
-  while still parsing for rows written earlier. Artifact coverage still drops
-  honestly when a file is gone; the numbers do not.
-- Skill linking no longer lets quiet `grep` turn an enabled skill into a
-  disabled one. The membership check used `printf | grep -q` under `pipefail`;
-  when grep found an early match and closed, printf could receive EPIPE, invert
-  the condition, and unlink that enabled skill. It surfaced as an intermittent
-  doctor failure with `tsp-queue` missing only from Antigravity. The captured
-  manifest is now CRLF-normalized once and passed to grep as a value, with a
-  list larger than the pipe buffer pinning the behavior.
-- The source-checkout leak guard names the paths that moved. It compared two
-  opaque digests, so each time it fired it destroyed the evidence it had just
-  detected — three occurrences in one day, none diagnosable afterwards. It now
-  keeps a per-path manifest and prints the difference, verified by injecting a
-  transient file and watching the guard report it by name.
-- Entrypoints that write install state answer `--help` and refuse anything else.
-  `link.sh` ignored its arguments and ran, so `link.sh --help` relinked a live
-  install and moved canonical ownership to whichever checkout was asked for help
-  — the receipt names an owner, so that is a transfer, not a no-op. It happened
-  during this release's own analysis: 78 stray backup symlinks across the three
-  agent skill roots, snapshot modes reset from `auto` to `0`, the rollback commit
-  lost, and `doctor: failed`. `install-hooks.sh` had the same shape.
-  `check-bash32.sh` exited 127 on `--help` because the file-argument form it
-  gained this release treated the flag as a path, and `check-python.sh` and
-  `skill-doctor.sh` had no usage at all. A regression pins the rule for all five.
-- The Windows install could not copy a single skill. Windows Python writes text
-  streams with CRLF, so every value bash reads back from a helper arrives with a
-  trailing carriage return — command substitution strips the newline and leaves
-  the CR. `link.sh` built `custom-skills/oh-my-setting-ops\r` from a manifest
-  read and the copy failed on a source that was right there, reporting one
-  unlabelled line naming a directory that plainly existed. Reproduced locally
-  byte for byte, and the same defect was latent in every state word and path the
-  install path reads back: a managed state of `current\r` matches no case branch,
-  and `auto-update` runs from a timer where a CR would read as a foreign checkout
-  and silently skip. Stripped at each point of consumption in the documented
-  Windows lifecycle (`link`, `doctor`, `status`, `auto-update`, `oms`, and the
-  install contract, including the managed-copy helper). The regression simulates
-  a CRLF `python3`, so it fails on any platform rather than only on a Windows
-  runner; verified to fail with the fix removed.
-- The install lifecycle fixture compared paths that were the same directory
-  spelled two ways. macOS `TMPDIR` ends in a slash, so the mktemp template left
-  `//` in every derived path while the installer recorded `pwd -P` output with
-  none; Git Bash reaches one directory both through its POSIX mount and through
-  the drive-letter form. Both spellings failed ownership comparison. `HOME` and
-  the checkout are now resolved once, the way the installer resolves them. GNU
-  mktemp collapses the `//` and BSD mktemp does not, so this cannot be reproduced
-  on Linux — the fixture asserts its own paths are normalized rather than letting
-  the cause surface three assertions later as "managed target mismatch".
-- `managed-target.py` failures name the operation and what was wrong with the
-  path. `FileNotFoundError(path)` prints as nothing but the path, which is
-  exactly how the first Windows failure arrived: unreadable.
-- The gate split is a flag, not an environment variable. `OMS_CHECK_LINT=0 bash
-  scripts/check.sh` exports into every descendant, so CI's smoke job leaked it
-  into the suite it was running: one test asked for a gate that runs nothing and
-  was refused, and the missing-shellcheck test skipped the check it exists for
-  and recursed through every suite instead of failing fast — breaking the "no
-  recursion" promise in its own comment. `--lint-only`/`--no-lint` reach only the
-  process they are passed to. The condition is reproducible locally by exporting
-  the old variable, which is how the fix was confirmed.
-- The delegation liveness marker is written atomically. It was written through a
-  shell redirect, so the file was created and truncated before the writer ran —
-  and this marker exists precisely so another process can read what was running
-  after a delegate dies abruptly. Any reader arriving in that window got a JSON
-  error on the one record of the crash. Found as a flaky gate under parallel
-  shards, which is the same race with a wider window; a sweep for the pattern
-  found no other published state file written this way.
-- Bash 3.2 could not parse `scripts/lib/peer-common.sh`, so every peer tool was
-  dead on macOS while Linux stayed green — and CI said so, in the one job that
-  has since been reworked. The cause is narrow and now pinned: bash 3.2 cannot
-  parse a here-document inside `$( )` whose body holds an odd number of
-  apostrophes, even behind a quoted `<<'PY'` delimiter, because its command
-  substitution scanner still reads the body looking for the closing paren, takes
-  the lone quote as the start of a literal, and swallows the `)`. A prose
-  "operator's" in an inline Python heredoc was enough. Confirmed against real
-  bash 3.2 in all four directions (apostrophe inside `$( )` fails; balanced
-  apostrophes pass; the same heredoc outside `$( )` passes; odd double quotes are
-  irrelevant). `check-bash32.sh` now rejects the construct statically, so every
-  push catches what previously only a macOS runner could, and the whole shipped
-  file set is verified to parse under a real 3.2.
-- Locks stopped being keyed to `XDG_CACHE_HOME`. The comment directly above the
-  function has always said why — an interactive session (set) and a cron session
-  (unset) compute different lock dirs for the same state file and both enter the
-  critical section — and `auto-update` runs from a systemd user timer, so the
-  asymmetry is not hypothetical. The motive was one hermetic `check.sh` run, which
-  `OMS_LOCK_DIR` now provides without the production path depending on an ambient
-  variable it does not control. The existing stability test covered only
-  `XDG_RUNTIME_DIR`; it now covers both, and neutralizes the sanctioned override
-  first so the assertion cannot pass trivially.
-- `oms-run validate` reported a healthy run index as invalid. Two unrelated
-  families are both named `index.jsonl` — `artifacts/index.jsonl` is read by
-  `kind`, `runs/index.jsonl` is the run-capsule roll-up read by `id` — and the
-  contract was keyed on the basename, so it demanded `kind` from every capsule
-  row. Matched by directory now, the way threads already were. Found by running
-  the restored BSD fixtures, not by the gate.
-- The machine snapshot names the distribution and the CPU model again. The
-  portable rewrite reduced OS to `Linux-6.8.0-x86_64-with-glibc2.39` — the kernel
-  line a second time, distro gone — and CPU to `x86_64`, which is the answer to a
-  question nobody asked of a hardware snapshot. `/etc/os-release` and
-  `/proc/cpuinfo` (then `sysctl machdep.cpu.brand_string`) are read first and the
-  portable form is the fallback; Windows support is unaffected. The regression
-  injects both sources as fixtures, because asserting that a `- CPU:` label
-  exists is what let the content vanish.
-- `ma_answer_quality` no longer fails open. Extracting the classifier from an
-  inline heredoc to `lib/answer-quality.py` created a failure mode that could not
-  exist before: a missing file or a python error left the verdict empty and
-  `${verdict:-ok}` counted every answer as real — including the provider refusal
-  text this checker was written to catch after a council reported two independent
-  families when one had spoken. An unrunnable checker is now named on stderr and
-  reported `blocked`.
-- An absent managed target reports `missing` instead of `foreign`. Calling a file
-  that is not there "someone else's" was untrue, and answering it through the copy
-  inspector cost a python3 process per probe (~25ms measured) — doctor and status
-  probe every managed target on every run, most of them absent on a partial
-  install.
-- `install-tools` reads the `gh` credential locally instead of calling
-  `gh auth status`, which contacts GitHub. Same reason the check was made local in
-  `doctor`: a captive or offline network should not stall the tail of an install
-  over a note.
-- Reinstalling can repair the managed `python3` shim it created. If the
-  interpreter behind the shim moved, the PATH probe failed and the installer then
-  refused to touch the shim and exited — no reinstall could fix what an install
-  had written. A shim matching the managed shape is replaced; anything else at
-  that path is still the user's launcher and is left alone. The ownership test
-  moved to `platform.sh`, which is all `install.sh` sources when it decides.
-- `oms` validates the receipt it falls back to and says so when nothing resolves.
-  A copy install has no link to follow, so the dispatcher reads `source_root`
-  from the receipt; it now requires the same schema-2 shape as the rest of the
-  harness, and a failure names the broken contract instead of reporting a missing
-  file for whichever subcommand was asked for.
-
-### Added
 - Work Journal adds automatic local-first project memory with a small
   `oms journal` status/rebuild/sync/configure surface. Existing run, capsule,
   artifact, Agent State, review, CI/PR, and
@@ -528,31 +281,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   session that mentions a test is a permanent context tax, and a router that
   cries wolf stops being read.
 
-### Changed
-- The install brings the CLIs the harness coordinates instead of hoping they are
-  already there: Claude Code, Codex, Antigravity, Node via nvm, uv, and now `gh`.
-  Provider installation had been behind `--tools`, so the documented one-line
-  install produced a harness whose council had one voice and whose
-  `github-source`/`ci-status` had nothing to call; `doctor` then reported the
-  missing peers as optional, which is true of the flag but not of the product.
-  `OH_MY_SETTING_INSTALL_TOOLS` now defaults to 1, `--no-tools` is the explicit
-  escape hatch for a machine that cannot have them, and `gh` is checked like the
-  provider CLIs rather than as an optional extra. `gh` is installed without root
-  — brew on macOS, otherwise the official release archive into `~/.local/bin`,
-  reusing the one helper that owns that directory and persists it on PATH — with
-  the release tag read from the API and a pinned fallback so a rate-limited API
-  is not a failed install. Authentication stays a report, never an attempt: it is
-  an interactive browser flow, and an unauthenticated `gh` is exactly the state
-  where those two tools fail on their first call, so `doctor` warns and names
-  `gh auth login`. That warning reads the credential locally — `hosts.yml`, or
-  the token variables — rather than running `gh auth status`, which validates
-  against the API: this doctor is local-only by design, and a health check that
-  needs the network reports "unauthenticated" for a dropped connection. Because
-  credentials live under `HOME`, the doctor fixtures now fabricate one the same
-  way they already fabricate healthy Antigravity permissions, so a clean install
-  is not reported as warning about something it cannot fix.
-
-### Added
 - `patch-admit` rejects a patch that quietly weakens the tests. The verifier gate
   already stopped a patch from rewriting the verify entrypoint, which left the
   other route to self-certification open: delete the assertions and the suite
@@ -584,93 +312,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   has drifted from the interface it cites is the defect this repository keeps
   paying for.
 
-### Fixed
-- `doctor` no longer calls every current memory database invalid. It asserted
-  schema version 2 as a literal while the helper had moved to 3, so any
-  repository that had used memory reported `warn: memory database is invalid`
-  and was told to run `rebuild` — which writes version 3 again, leaving advice
-  that could never clear the warning. The expected version is now read out of
-  `lib/agent-memory-db.py`, the file that writes it, so the two cannot drift
-  again. The existing tests could not catch this: the warning path is exercised
-  with a file that is not a database at all, and the clean-state check never
-  built one, so nothing ever compared the doctor against a database the tool had
-  actually produced. A test now does exactly that. Noticed only by running
-  `doctor` after an install update — the gate (`check.sh`) never looked.
-- The smoke suite's source-leak check no longer fires on the agent session that
-  is running it. It fingerprints `.oms/` at shard start to catch a test writing
-  into the checkout, but `hooks/` is the one subtree the live session writes on
-  its own schedule: `UserPromptSubmit` appends a `route` event and `Stop` appends
-  a `turn_guard` event to `hooks/events.jsonl`. So an agent that runs the gate in
-  the background and then answers the user fails its own gate with "smoke suite
-  mutated the source checkout .oms state" — a guaranteed false alarm in ordinary
-  operation, and the reason this was chased twice. The event was timestamped
-  three seconds inside a shard while the checkout's state was provably unchanged
-  at the end, which is what a false alarm looks like: the check cannot tell a
-  leaking test from the agent it is protecting. `hooks/` is now excluded, verified both ways against a copy of
-  real state — an appended hook event is ignored, a file dropped anywhere else
-  is still caught.
-- `agent-memory recall` no longer presents a resolved failure as an open one. A
-  resolution is its own append-only row carrying nothing but the fingerprint it
-  clears, and the index parser was written against guessed field names — it
-  looked for an event called `resolve` and a key called `state`, while
-  `fail-ledger.sh` writes `resolved` and `state_fingerprint`. The resolution row
-  therefore had no body, was dropped as empty, and every fixed failure stayed in
-  the index looking live; recalling a solved problem as an open one is worse than
-  not recalling it. Resolution is now folded in over two passes, a later failure
-  on the same fingerprint re-opens it (the last event wins), the ledger's own
-  kind distinguishes a failing verification contract from an arbitrary command,
-  and a regression test covers all three states. Measured live against this
-  repository's own ledger, which is where the defect surfaced.
-
-### Removed
-- Three functions no dead-code sweep had caught, because nothing referenced them
-  from anywhere including the tests: `oms_worker_surface_fingerprint` (one
-  aggregate digest over every worker surface, superseded by the per-surface
-  capture that lets a violation name what moved — the comment explaining that
-  reason was left orphaned below it), `oms_capability_supports_effort`
-  (superseded by `oms_capability_clamp_effort`, which answers the same question
-  and maps onto the scale), and `ma_wait_stdin_file`.
-
-### Changed
-- `docs/COMPONENTS.md` is grouped by area instead of being one 56-row table. The
-  Area column claimed a grouping the rows did not have — `Agent state` appeared
-  in two separate blocks, as did `Peer agents` and `Maintenance` — so a reader
-  who found one block had reason to believe they had seen the area. The widest
-  cell was 3,695 characters, which no table renders readably, and prose that
-  long had been damaged by successive insertions: the delegate entry's own main
-  clause survived only as "`OMS_WORKER_GUARD_OFF=1` opts out, verifies it there"
-  after the guard paragraph was spliced through the middle of it. Entries are now
-  wrapped paragraphs under six area headings, the four that carried two subjects
-  each were split so both halves are findable by name (delegation / repair rounds
-  / worker-authority guard / depth cap, and capability snapshot / call-time model
-  fallback), and the agy permission-namespace explanation moved out of `consult`
-  into the entry about permissions, which had been restating its conclusion
-  without the reasoning. Every original cell is preserved verbatim except those
-  four; all 301 backticked identifiers survive.
-- `ml-training` routes by symptom instead of by implementation subject, and the
-  two peer skills that write now name the read-only alternative. The training
-  index was headed optimizer / distributed / loss-masking / checkpoint /
-  equivariance, so "resume does not reproduce" or "loss differs by rank" had to
-  be translated into a subject first, and a wrong translation costs a debugging
-  session in the wrong layer. `peer-delegate` and `peer-review` never mentioned
-  each other or `consult`, so an agent that needed an opinion could land on the
-  tool that edits a worktree. Skills whose references are modes or phases of one
-  action — `peer-review`, `research-method`, `spec-interview` — were left alone,
-  and `chem-bio-ml` already indexes by problem domain rather than by internal
-  structure.
-- The harness skill routes by what the agent is about to do, not by which
-  subsystem a capability belongs to. Its index used to be split the way the code
-  is — state-memory, plans-recovery, roles-executors, delegation-artifacts — so
-  an agent had to map its own situation onto the harness's internal taxonomy
-  before it could find anything, and the clusters that overlap in purpose
-  (`agent-call`, `consult`, `peer-ask`, `advise` are all "ask another model
-  read-only") looked like four unrelated choices. The entry is now a table of
-  situations, and every row carries the authority it takes — read, worktree
-  write, or repo write — because those clusters differ in blast radius, not just
-  in shape, and a routing table that hides that would invite exactly the wrong
-  kind of mistake. The references keep the detail and are all still linked.
-
-### Added
 - Recall now spans everything the harness already records, not just prose notes.
   The SQLite index takes the failure ledger as a third source, so one
   `agent-memory recall` answers "what do we know about this" across notes, pins,
@@ -814,7 +455,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - The README and `oms help` now say plainly what was only implied: install is
   the one command a person types, and everything after it is the agent's.
 
-### Added
 - The advisor now fires on its own after repeated failure. The rules told every
   agent to consult one "after repeated failures" and nothing ever did — this
   session is the evidence: an agent with those rules loaded pushed a dozen
@@ -826,64 +466,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   Once per delegation, never on a first failure, and an unreachable advisor
   leaves the repair exactly as it was. `OMS_ADVISE_ON_REPEAT=0` opts out.
 
-### Fixed
-- The capability refresh stopped asking each CLI for `--help` a second time.
-  `model-doctor` already had that output, so the refresh added a duplicate
-  invocation of every installed provider — slower everywhere, and in the test
-  suite it turned fixture runs into real CLI calls, which made unrelated
-  timing-sensitive tests fail at random. Caught by the suite failing twice on
-  two different tests while three runs of the pre-capability commit passed. The
-  doctor now hands its help output over, and three consecutive runs are clean.
-  Routing's own binary-identity check is memoised per process and uses `stat`
-  rather than starting a python interpreter.
-- The worker guard was blind to new source files in any repository with a large
-  ignored tree. It spent its entry budget in path order, so a real project whose
-  `data/` and `runs/` hold tens of thousands of ignored files exhausted the cap
-  alphabetically and never reached the handful of untracked source files — the
-  exact places a stray worker write lands. Untracked-but-not-ignored paths are
-  now scanned first, so truncation can only ever drop ignored churn, and the
-  message says which class was cut: reaching the cap inside the ignored tree is
-  a note, failing to cover the untracked files is a warning that coverage is
-  partial.
-- `peer-delegate` says when the caller's tree is dirty. The worktree is built
-  from HEAD, which is the right isolation and was completely silent: a brief
-  written about code the caller has on screen can describe something the worker
-  will never find, and the whole round is spent against a tree that does not
-  contain the problem. The count is printed once and recorded in the artifact,
-  so whoever reviews the patch later knows which base it was written against.
-- `peer-delegate` no longer reports a worker that could not act as a clean run.
-  A CLI denied a tool it cannot prompt for exits 0 having printed only its
-  refusal, and the empty patch that follows looks exactly like honest work on an
-  already-correct tree. The worker status is now 126 ("found but could not
-  execute"), the reason is quoted, and — like a missing CLI — no repair round is
-  spent, because no rewording of a brief grants a permission.
-- Landings are now serialized per repository. Everything from the clean-tree
-  check through `git apply` was a check-then-act on the shared working tree with
-  no lock, so two agents could both be admitted against the same base and both
-  apply — each reviewed without the other's changes. A second lander is refused
-  outright rather than queued, because the tree it was admitted against is the
-  one the first lander is changing. `oms_hold_file_lock` holds a lock for the
-  rest of a process, which `oms_with_file_lock`'s subshell cannot do when later
-  steps need variables the earlier steps set.
-- A council counted a provider refusal as an answer. Antigravity's headless mode
-  cannot prompt for a tool permission, so it auto-denies anything outside
-  `permissions.allow`, exits 0, and prints only its own explanation — text
-  declarative and long enough to pass every answer-quality rule. The last live
-  audit therefore reported "2 answered, 2 independent model families" when one
-  provider had spoken. Answer quality now classifies a body that is *entirely*
-  CLI diagnostics as `blocked` (an answer that merely discusses permissions is
-  untouched), keeps it out of the answered and family counts, and quotes the
-  provider's own reason so the operator knows what to fix. `doctor` reports the
-  same thing before a call is spent, by checking whether antigravity's
-  allow-list covers the commands a repository read needs. Probing the CLI
-  showed a curated command list cannot work — a `command` rule is matched
-  against the whole command line, so the first `cd x && rg y` a peer runs is
-  denied — while `command(*)` is not the write authority it appears to be:
-  under `--sandbox`, which is how this harness invokes agy, escaping to write
-  needs a separate `unsandboxed` rule. The check now asks for `command(*)` plus
-  `read_file(*)` instead of an unwinnable list of commands.
-
-### Added
 - A second audit council was asked where the harness is incomplete *and* where
   it is over-built. Three integrity holes it found are fixed: the worker guard
   compared `git status` categories, so a worker rewriting a file the user had
@@ -1076,63 +658,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   independent effort flag. Capacity fallback lowers automatic effort with the
   model tier; executor and artifact metadata freeze and record the route.
 
-### Fixed
-- Antigravity never received its prompt. `agy --print` takes the prompt as its
-  value (`--prompt` is an alias), so a prompt piped on stdin was ignored and the
-  next flag became the prompt — every antigravity answer was a reply to the
-  literal string `--sandbox`, in councils, reviews, and delegated writes alike.
-  The prompt is now passed as the flag value.
-- A landing no longer reports `complete` when its records did not land: a failed
-  lineage row or plan finish leaves `applied-pending-receipt`, which `oms state`
-  shows and `patch-land --recover` retries until both records exist.
-- `patch-land` rechecks the base commit and clean tree immediately before the
-  apply and refuses when either moved during admission, so what lands is the
-  combination that was verified.
-- Antigravity model routing follows the published benchmarks: 3.6 Flash wins
-  every coding and agentic suite against 3.1 Pro (SWE-Bench Pro, DeepSWE,
-  Terminal-Bench, MLE-Bench) at roughly twice the speed, and Pro keeps only a
-  narrow pure-reasoning lead, so all three tiers now use the 3.6 Flash variants.
-- `model-doctor --live-models` no longer reports every Antigravity route as
-  missing: the CLI lists its catalog as slugs (`gemini-3.6-flash-low`) while
-  naming the same model `Gemini 3.6 Flash (Low)` on `--model`, so the comparison
-  now normalizes both sides. The smoke fixture printed display names and hid the
-  mismatch; it now uses the notation the real CLI emits.
-- Receipt-owned branch and detached auto-updates now share `update.sh`'s
-  rollback transaction instead of maintaining a second half-linked path.
-- `update.sh --tools` now requests real provider CLI and uv upgrades instead of
-  silently accepting already-installed binaries.
-- `peer-ask --repo` now keeps its default artifacts under the selected state
-  repository instead of leaking them into the caller's working directory.
-- `fail-ledger` now accepts the documented `--repo` option and honors
-  `OMS_STATE_REPO`, matching the other shared harness state commands.
-- Removed the unused read-executor surface: executors are now write-worktree
-  contracts only. `--mode worktree-write` remains an unadvertised compatibility
-  no-op for existing callers; legacy `mode: read` metadata stays inspectable
-  and retireable but cannot validate, start, or delegate.
-- Mixed read/write requests such as `review and fix` now route to an isolated
-  write worker instead of stopping at a read-only pass.
-- Peer quorum lists reject duplicate providers after canonicalizing the `agy`
-  alias, preventing one CLI from counting as multiple independent reviewers.
-- Capacity fallback now treats ignored files as worktree mutations, recreates
-  Antigravity read isolation before retrying, and removes ignored verification
-  byproducts before repair.
-- Dry-run and export-only passes validate their provider route and record the
-  selected model; unknown Antigravity variants no longer claim an inferred
-  reasoning effort that the CLI did not expose.
-- Plan-bound executors can run through `plan-run` against their exact claimed
-  provider and lease. Creation rejects invalid plan claims, signal cleanup
-  preserves review evidence, and known failures key on resolved contracts.
-- Legacy executor metadata without reasoning fields now honors an explicit
-  caller effort instead of silently replacing it with automatic effort.
-
-### Removed
-- GitHub Release publication, release-only checksum tooling, documentation,
-  and CI contracts. Installation now uses the repository source channel; exact
-  tags, branches, or commits remain available through `--ref`.
-
-## [0.4.0] - Unreleased
-
-### Added
 - Provider-neutral worker model routing for `agent-call`, `agent-run`,
   `peer-ask`, `peer-review`, `peer-delegate`, `plan-run`, and `advise`.
   `fast`/`balanced`/`deep` classes map to each installed CLI, roles and
@@ -1208,7 +733,178 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   lifecycle against a throwaway HOME — the installer path was previously only
   linted, never executed.
 
+- Failure memory (`fail-ledger.sh`): durable `.oms/failures.jsonl` fingerprint
+  ledger so the three agents stop repeating the same failing command across
+  sessions — `record`/`check` (exit 3 on a known-unresolved failure)/`resolve`/
+  `list`; sensitive commands refused. Surfaced in `oms state`.
+- Delegation liveness: `multi-agent-delegate` writes `.oms/delegations/<id>.json`
+  while a worker is in flight and removes it on exit; `oms state` shows live
+  workers and flags dead-pid orphans (no daemon — the launcher is the writer).
+- `ci-status.sh record`: appends the latest CI conclusion to `.oms/ci.jsonl`
+  (deduped by sha); `oms state` shows the latest conclusion for HEAD's branch.
+- `oms init` (`oms-init.sh`): seeds the `.oms/` skeleton + `.gitignore`
+  (idempotent) and prints a next-actions checklist tailored to the detected
+  project type — a first move for an agent landing in a fresh repo.
+- `oms gc` (`gc.sh`): `--dry-run` by default; reclaims aged transient state
+  (orphaned delegation markers, archived task packets, capsules of non-open
+  runs, resolved failure rows) and delegates artifacts to `artifact-index
+  prune`; never touches open runs, the active task, unresolved failures, or the
+  append-only board.
+- `oms-run validate` now walks every `.oms/**/*.jsonl` family and flags schema
+  drift (rows below a family's expected schema) — the one place a future schema
+  bump is signalled — in addition to the parse check.
+
+- Role profiles (`agent-role.sh`): named, reusable worker personas as markdown
+  in `.oms/roles/<name>.md` (global fallback `~/.oh-my-setting/local/roles`);
+  `list`/`show`/`resolve`/`init`. `multi-agent-delegate.sh --role NAME` prepends
+  the profile to the worker brief, and an `agent-plan` task's new `role` field is
+  auto-injected when delegated via `--plan-task` — so the same reviewer /
+  refactorer / test-writer role can drive any of the three providers.
+
+- `repo-state.sh` (`oms state`): one read-only dashboard over all shared `.oms`
+  state — active task goal/next, plan tasks by state with stale claims flagged,
+  experiment board active/stale, current + open runs, latest artifact rows, and
+  change-guard status; `--json` for machines. Answers "what is active, stale,
+  or open here?" in one command instead of cat-ing five files.
+- `patch-land.sh` (`oms patch-land`): the one mutating step that composes the
+  trust boundary — clean-tree check → `patch-admit` ADMIT gate → `git apply` →
+  land row in the artifact index → optional `--plan-task` finish. Nothing lands
+  unless admission passes and the tree is clean.
+- Claim heartbeat: `agent-plan.sh touch --id` and `experiment-board.sh touch
+  --id` refresh a live claim's timestamp so a still-running worker is not
+  reclaimed / flagged stale mid-run (the reclaim/stale TTL clock restarts).
+- `scripts/oms` dispatcher, symlinked to `~/.local/bin/oms`: `oms <tool>`
+  invokes any harness script by name from any of the three agent CLIs
+  (`run` aliases `oms-run`); `oms list` prints every tool with its one-line
+  purpose. Linked/unlinked/doctored with the install.
+- `oms-run.sh new` writes a repo-scoped `.oms/runs/CURRENT` pointer and
+  `oms-run.sh current` resolves the effective run id; `link` and the
+  run-ledger/run-capsule/experiment-board auto-links fall back to a fresh
+  CURRENT when `OMS_RUN_ID` is unset, so a second agent process joins the
+  active run without env plumbing. Stale pointers expire
+  (`OMS_RUN_CURRENT_TTL`, default 86400 s) instead of misjoining.
+- Agent identity: `oms_detect_agent` (explicit `OMS_AGENT` > CLI env markers >
+  generic "agent") now attributes memory notes, task bullets, board claims,
+  capsules, and reconcile rows; spine link rows carry a new `agent` field
+  (`link --agent` overrides; `show`/`timeline` display it).
+- Delegate workers receive `OMS_STATE_REPO` — agent-memory/task/plan resolve
+  to the primary repo's shared `.oms` instead of the empty throwaway
+  worktree — and `OMS_AGENT=<provider>` for attribution.
+- `agent-run.sh --task-id`/`--plan-task`, forwarded to the delegate for plan
+  lineage and lifecycle coupling.
+- AGENTS.md "Run Provenance & Coordination" is now a capability catalog with
+  the `oms` invocation path; the agent-harness skill documents the plan DAG.
+
+- `agent-plan.sh`: shared subtask DAG (`.oms/plan/tasks.json`) with per-task
+  dependencies, path scope, and verify command; `ready`/`status` compute what is
+  actionable now so work can be split across agents without collisions.
+  `next`/`brief` emit a paste-able work brief; `next --claim --provider` is a
+  pull-work primitive (exit 3 when nothing is actionable). All mutations and
+  `next --claim` run under a file lock so concurrent agents cannot both claim the
+  same task; adds `review`/`release` commands, a stricter lifecycle (finish only
+  from claimed/running/review; a blocked task must be reopened before claim), and
+  a `claimed_at` timestamp.
+- `multi-agent-delegate.sh --task-id` and artifact-index lineage: every index
+  row now records `base_sha` and any `task_id`, surfaced in `artifact-index list`,
+  so a run traces back to the plan subtask and commit it came from.
+- `change-guard.sh`: `forbidden_paths` task constraint (deny beats allow),
+  documented in `agent-task.sh` help.
+- `data-manifest.sh`: `--key-column` entity-overlap leakage (inchikey/scaffold/
+  cluster/assay) and per-key fingerprints with `(id -> key)` mapping drift and
+  empty-key counts (manifest schema 3).
+- `run-ledger.sh`: each row records its gate decision (passed/skipped/recorded/
+  none); `list` surfaces it.
+- `project-doctor.sh`: flags an empty `## Commands`/`## Verification` once
+  `PROJECT.md` is past draft.
+- `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, this changelog.
+- `oms-run.sh close [id]` + `ls --open`: mark a run terminal and list
+  open-vs-closed runs; close also clears a `CURRENT` pointer naming the run so
+  later tool events stop auto-joining a finished run.
+- `oms-run.sh timeline --agent NAME` / `--tool NAME`: filter the merged
+  cross-stream timeline by who or which tool (case-insensitive substring).
+- `experiment-board.sh list --stale` / `--owner NAME`: surface TTL-expired
+  (reclaimable) claims and filter by claimer, instead of staleness only
+  showing up at the next claim collision.
+- `agent-memory.sh search PATTERN` (`--agent` author filter): recall over
+  shared memory and pins by entry, replacing `show` cat-ing the whole file.
+- `multi-agent-delegate.sh --plan-task ID` without `--prompt`/`--brief-file`
+  hydrates the worker brief from the task, and without `--verify` uses the
+  task's stored verify command — `delegate --to codex --plan-task t3` is now
+  a complete one-liner.
+
+
 ### Changed
+- Every install now exposes one five-skill, general-purpose catalog. Added a
+  compact, language-neutral `trust-boundary` method for security-sensitive
+  changes and threat models. Removed
+  the project- or machine-specific `chem-bio-ml`, `ml-training`,
+  `research-method`, `slurm-hpc`, and `tsp-queue` skills; their useful runtime
+  commands and project templates remain available without occupying global
+  skill context. Folded the `peer-ask`, `peer-review`, and `peer-delegate` skill
+  front doors into `agent-harness` while retaining their authority-specific
+  `oms` commands, and moved the private Slurm snapshot to `local/slurm.md`.
+
+- The install brings the CLIs the harness coordinates instead of hoping they are
+  already there: Claude Code, Codex, Antigravity, Node via nvm, uv, and now `gh`.
+  Provider installation had been behind `--tools`, so the documented one-line
+  install produced a harness whose council had one voice and whose
+  `github-source`/`ci-status` had nothing to call; `doctor` then reported the
+  missing peers as optional, which is true of the flag but not of the product.
+  `OH_MY_SETTING_INSTALL_TOOLS` now defaults to 1, `--no-tools` is the explicit
+  escape hatch for a machine that cannot have them, and `gh` is checked like the
+  provider CLIs rather than as an optional extra. `gh` is installed without root
+  — brew on macOS, otherwise the official release archive into `~/.local/bin`,
+  reusing the one helper that owns that directory and persists it on PATH — with
+  the release tag read from the API and a pinned fallback so a rate-limited API
+  is not a failed install. Authentication stays a report, never an attempt: it is
+  an interactive browser flow, and an unauthenticated `gh` is exactly the state
+  where those two tools fail on their first call, so `doctor` warns and names
+  `gh auth login`. That warning reads the credential locally — `hosts.yml`, or
+  the token variables — rather than running `gh auth status`, which validates
+  against the API: this doctor is local-only by design, and a health check that
+  needs the network reports "unauthenticated" for a dropped connection. Because
+  credentials live under `HOME`, the doctor fixtures now fabricate one the same
+  way they already fabricate healthy Antigravity permissions, so a clean install
+  is not reported as warning about something it cannot fix.
+
+- `docs/COMPONENTS.md` is grouped by area instead of being one 56-row table. The
+  Area column claimed a grouping the rows did not have — `Agent state` appeared
+  in two separate blocks, as did `Peer agents` and `Maintenance` — so a reader
+  who found one block had reason to believe they had seen the area. The widest
+  cell was 3,695 characters, which no table renders readably, and prose that
+  long had been damaged by successive insertions: the delegate entry's own main
+  clause survived only as "`OMS_WORKER_GUARD_OFF=1` opts out, verifies it there"
+  after the guard paragraph was spliced through the middle of it. Entries are now
+  wrapped paragraphs under six area headings, the four that carried two subjects
+  each were split so both halves are findable by name (delegation / repair rounds
+  / worker-authority guard / depth cap, and capability snapshot / call-time model
+  fallback), and the agy permission-namespace explanation moved out of `consult`
+  into the entry about permissions, which had been restating its conclusion
+  without the reasoning. Every original cell is preserved verbatim except those
+  four; all 301 backticked identifiers survive.
+- `ml-training` routes by symptom instead of by implementation subject, and the
+  two peer skills that write now name the read-only alternative. The training
+  index was headed optimizer / distributed / loss-masking / checkpoint /
+  equivariance, so "resume does not reproduce" or "loss differs by rank" had to
+  be translated into a subject first, and a wrong translation costs a debugging
+  session in the wrong layer. `peer-delegate` and `peer-review` never mentioned
+  each other or `consult`, so an agent that needed an opinion could land on the
+  tool that edits a worktree. Skills whose references are modes or phases of one
+  action — `peer-review`, `research-method`, `spec-interview` — were left alone,
+  and `chem-bio-ml` already indexes by problem domain rather than by internal
+  structure.
+- The harness skill routes by what the agent is about to do, not by which
+  subsystem a capability belongs to. Its index used to be split the way the code
+  is — state-memory, plans-recovery, roles-executors, delegation-artifacts — so
+  an agent had to map its own situation onto the harness's internal taxonomy
+  before it could find anything, and the clusters that overlap in purpose
+  (`agent-call`, `consult`, `peer-ask`, `advise` are all "ask another model
+  read-only") looked like four unrelated choices. The entry is now a table of
+  situations, and every row carries the authority it takes — read, worktree
+  write, or repo write — because those clusters differ in blast radius, not just
+  in shape, and a routing table that hides that would invite exactly the wrong
+  kind of mistake. The references keep the detail and are all still linked.
+
 - Removed the redundant `git-cli-workflow` custom skill; global policy already
   owns its complete local git/gh safety contract, and relinking removes stale
   owned skill links from all three providers.
@@ -1267,12 +963,406 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   README.ko.md mirrors the EN condensed structure; timeout env knobs
   documented in COMPONENTS.
 
+- README "What's Inside" is now an eight-row capability table; the full
+  per-script catalog moved to `docs/COMPONENTS.md` (no scripts removed). The
+  task plan is grouped under "Agent state", not "Memory".
+- Auto-update trigger defaults to **check-only** (records availability) instead
+  of auto-applying; opt in with `OH_MY_SETTING_AUTO_UPDATE_MODE=apply`.
+
+
 ### Removed
+- `scripts/backup.sh`, an orphan: not a public `oms` tool, undocumented,
+  called by nothing but its own test, and superseded by update.sh's
+  transactional snapshot/rollback of managed targets.
+- Shared-state files are replaced with a same-directory rename. The
+  task-packet and memory-summary writers staged their scratch under TMPDIR
+  and `mv`'d it over the target; with TMPDIR on a different filesystem than
+  the repo (tmpfs /tmp against an ext4 checkout — the ordinary case) that
+  degrades to copy+unlink, and every concurrent reader — another agent
+  session, the work-journal observer, repo-state — had a window where the
+  file was empty or truncated. `agent-task status` answers `status: none`
+  with exit 0 for exactly that window, the most plausible mechanism behind a
+  load-dependent lifecycle-test flake (diagnosed with an advisor pass, whose
+  capture-first assertion prescription is also in). gc now reclaims a
+  crashed writer's `.oms-replace.*` scratch after an hour, and leaves fresh
+  scratch to the writer that may still hold it.
+- The default advisor and consult peers exclude the *detected* caller. Both
+  pickers excluded `${OMS_AGENT:-}`, which interactive sessions never
+  export, so an empty caller made the exclusion loop a no-op: a Claude
+  session asking for an outside read got Claude — replication presented as
+  independence, observed live when a flake advisory routed to the session's
+  own family. One shared `oms_peer_caller` (OMS_AGENT when set, detected
+  session identity otherwise, unknown excludes nothing) now feeds both, with
+  `--to`/`OMS_ADVISOR_PROVIDER` overrides and the last-resort self-advice
+  fallback unchanged; `tests/advisor-routing-smoke.sh` pins the contract as
+  its own gate stage.
+- Doctor counts unindexed artifacts with the same grace window `prune --files`
+  deletes with. A live provider call writes its artifact before the index row
+  lands, so the age-blind count warned about in-flight council runs and then
+  prescribed a command that correctly deleted nothing — doctor complaining,
+  the remedy shrugging, every time an ask/review was still executing. Prune
+  also now says how many recent unindexed files it kept inside the grace
+  window, so "deleted 0 orphan file(s)" explains itself.
+
+- Three functions no dead-code sweep had caught, because nothing referenced them
+  from anywhere including the tests: `oms_worker_surface_fingerprint` (one
+  aggregate digest over every worker surface, superseded by the per-surface
+  capture that lets a violation name what moved — the comment explaining that
+  reason was left orphaned below it), `oms_capability_supports_effort`
+  (superseded by `oms_capability_clamp_effort`, which answers the same question
+  and maps onto the scale), and `ma_wait_stdin_file`.
+
+- GitHub Release publication, release-only checksum tooling, documentation,
+  and CI contracts. Installation now uses the repository source channel; exact
+  tags, branches, or commits remain available through `--ref`.
+
 - Deprecated `workflows/{spec-first,slurm-hpc,new-server}.md`, their global
   workflow link, and `multi-agent-{ask,review,delegate}.sh`. Upgrade cleanup
   restores the newest user workflow backup and preserves foreign targets.
 
+
 ### Fixed
+- The smoke suite's source-state leak check no longer fires on the live
+  session's own Work Journal writes. The `.oms` fingerprint excluded only
+  `hooks/`, but the journal's turn boundaries (this cycle) rewrite
+  `work-journal/index.json`/`index.sqlite3` on every prompt the agent running
+  the suite submits — a run from an adopted repo failed with a fingerprint
+  mismatch that had nothing to do with the change under test. `work-journal/`
+  joins `hooks/` as an ambient-written subtree; tests exercise the journal
+  only through temporary repos, so no coverage is lost.
+- An existing project `GEMINI.md` is kept in sync with the other loaders.
+  Antigravity reads it as a directory rule file and prefers it over
+  `AGENTS.md`: verified live in a repository whose `AGENTS.md` carried the
+  ml loader while a leftover `GEMINI.md` still carried general — agy
+  reported the general template while Claude Code and Codex followed ml.
+  One CLI silently obeying rules the other two retired is exactly what this
+  project exists to prevent. The template now adopts `GEMINI.md` as a
+  managed file when the project already has one (so the retired block is
+  removed and the new loader written), and never creates one otherwise —
+  agy reads `AGENTS.md` fine, so a new project needs no third loader.
+- `GEMINI.md` stays a per-project harness file, and a test now pins it.
+  An earlier entry in this same unreleased cycle dropped it from the
+  default lists (project-private hiding, worktree seeding, template dedup)
+  on the belief that no supported CLI reads a project `GEMINI.md`. That was
+  wrong: Antigravity's own bundled rules documentation lists `GEMINI.md`,
+  `AGENTS.md`, and `.agents/rules/*.md` as the directory-based rule paths it
+  reads hierarchically. The practical risk was a project `GEMINI.md` no
+  longer being hidden from git by default — agent context leaking into a
+  public repo — and an agy worker in a delegate worktree losing project
+  rules. Nothing pinned the contract, so the removal passed the gate;
+  `tests/scripts-smoke.sh` now asserts the default harness-file set.
+- Switching a project's base style now retires the previous one. Managed
+  rule blocks are per-style, so applying `ml` over `general` left both in
+  place and the agent read two loaders with conflicting rules — found by
+  applying the ml template to a real research repo. Only the mutually
+  exclusive base styles (general, ml) are replaced; the slurm overlay
+  follows machine detection and is removed only by an explicit
+  `remove-project-template.sh slurm`. The ml and slurm templates also point
+  at `oms generate-slurm-reference` instead of the retired name.
+- Session-handoff digests land in the project repo, not the harness checkout.
+  The default output directory was the oh-my-setting checkout's own
+  `.oms/handoffs/`, while the Work Journal's newest-handoff pointer scans the
+  project's — every capture from another repo was invisible to the daily
+  digest. `capture` now resolves the repo containing `--cwd`; `list`/`show`
+  resolve `OMS_STATE_REPO`/`$PWD`.
+
+- `skill-doctor` now checks the shared `~/.agents/skills` root and detects a
+  duplicate name split across Codex's product-specific and shared overlays.
+- `oms init` no longer misses exposed agent files when `grep -q` closes its
+  status pipe after the first match. Under `pipefail`, the still-writing
+  producer could receive SIGPIPE and invert the condition, so the late-`git
+  init` recovery sometimes skipped `.git/info/exclude` only under CI timing.
+  The status command now completes before its captured output is inspected.
+- Peer-review mechanical verification now runs without the review provider's
+  model-class, operation, or reasoning environment. A deep review gate could
+  previously make an otherwise clean routing test observe the review phase and
+  fail, even though the verifier was not itself a reviewer call.
+- The residue scan sees flock lock files. It only ever walked mkdir-path lock
+  directories, so a machine holding 12,427 flock lock files was told it had
+  zero — which reads as "nothing here" rather than "this kind is not
+  removable". They are permanent by design: unlinking a released flock file
+  lets a waiter on the old inode and a new arrival on a fresh one both hold the
+  lock. So doctor reports the count as a note, never a warning, and cleanup
+  still leaves them alone. A large count means a run leaked its lock dir into a
+  real HOME — a test without `OMS_LOCK_DIR` — not a broken install. The
+  cleanup regression also builds its dead lock through the real acquire path
+  now; the hand-made fixture is what let the gap hide.
+- Provider-call accounting survives artifact retention. Duration and
+  provider-reported tokens were readable only by parsing the artifact body, so
+  deleting stale artifacts erased the record of what those calls had cost -
+  pruning 360 leaked test artifacts this release took the parseable base down
+  with them. The index row now caches both at write time, reusing the telemetry
+  module rather than copying its regexes, and telemetry prefers the cached value
+  while still parsing for rows written earlier. Artifact coverage still drops
+  honestly when a file is gone; the numbers do not.
+- Skill linking no longer lets quiet `grep` turn an enabled skill into a
+  disabled one. The membership check used `printf | grep -q` under `pipefail`;
+  when grep found an early match and closed, printf could receive EPIPE, invert
+  the condition, and unlink that enabled skill. It surfaced as an intermittent
+  doctor failure with `tsp-queue` missing only from Antigravity. The captured
+  manifest is now CRLF-normalized once and passed to grep as a value, with a
+  list larger than the pipe buffer pinning the behavior.
+- The source-checkout leak guard names the paths that moved. It compared two
+  opaque digests, so each time it fired it destroyed the evidence it had just
+  detected — three occurrences in one day, none diagnosable afterwards. It now
+  keeps a per-path manifest and prints the difference, verified by injecting a
+  transient file and watching the guard report it by name.
+- Entrypoints that write install state answer `--help` and refuse anything else.
+  `link.sh` ignored its arguments and ran, so `link.sh --help` relinked a live
+  install and moved canonical ownership to whichever checkout was asked for help
+  — the receipt names an owner, so that is a transfer, not a no-op. It happened
+  during this release's own analysis: 78 stray backup symlinks across the three
+  agent skill roots, snapshot modes reset from `auto` to `0`, the rollback commit
+  lost, and `doctor: failed`. `install-hooks.sh` had the same shape.
+  `check-bash32.sh` exited 127 on `--help` because the file-argument form it
+  gained this release treated the flag as a path, and `check-python.sh` and
+  `skill-doctor.sh` had no usage at all. A regression pins the rule for all five.
+- The Windows install could not copy a single skill. Windows Python writes text
+  streams with CRLF, so every value bash reads back from a helper arrives with a
+  trailing carriage return — command substitution strips the newline and leaves
+  the CR. `link.sh` built `custom-skills/oh-my-setting-ops\r` from a manifest
+  read and the copy failed on a source that was right there, reporting one
+  unlabelled line naming a directory that plainly existed. Reproduced locally
+  byte for byte, and the same defect was latent in every state word and path the
+  install path reads back: a managed state of `current\r` matches no case branch,
+  and `auto-update` runs from a timer where a CR would read as a foreign checkout
+  and silently skip. Stripped at each point of consumption in the documented
+  Windows lifecycle (`link`, `doctor`, `status`, `auto-update`, `oms`, and the
+  install contract, including the managed-copy helper). The regression simulates
+  a CRLF `python3`, so it fails on any platform rather than only on a Windows
+  runner; verified to fail with the fix removed.
+- The install lifecycle fixture compared paths that were the same directory
+  spelled two ways. macOS `TMPDIR` ends in a slash, so the mktemp template left
+  `//` in every derived path while the installer recorded `pwd -P` output with
+  none; Git Bash reaches one directory both through its POSIX mount and through
+  the drive-letter form. Both spellings failed ownership comparison. `HOME` and
+  the checkout are now resolved once, the way the installer resolves them. GNU
+  mktemp collapses the `//` and BSD mktemp does not, so this cannot be reproduced
+  on Linux — the fixture asserts its own paths are normalized rather than letting
+  the cause surface three assertions later as "managed target mismatch".
+- `managed-target.py` failures name the operation and what was wrong with the
+  path. `FileNotFoundError(path)` prints as nothing but the path, which is
+  exactly how the first Windows failure arrived: unreadable.
+- The gate split is a flag, not an environment variable. `OMS_CHECK_LINT=0 bash
+  scripts/check.sh` exports into every descendant, so CI's smoke job leaked it
+  into the suite it was running: one test asked for a gate that runs nothing and
+  was refused, and the missing-shellcheck test skipped the check it exists for
+  and recursed through every suite instead of failing fast — breaking the "no
+  recursion" promise in its own comment. `--lint-only`/`--no-lint` reach only the
+  process they are passed to. The condition is reproducible locally by exporting
+  the old variable, which is how the fix was confirmed.
+- The delegation liveness marker is written atomically. It was written through a
+  shell redirect, so the file was created and truncated before the writer ran —
+  and this marker exists precisely so another process can read what was running
+  after a delegate dies abruptly. Any reader arriving in that window got a JSON
+  error on the one record of the crash. Found as a flaky gate under parallel
+  shards, which is the same race with a wider window; a sweep for the pattern
+  found no other published state file written this way.
+- Bash 3.2 could not parse `scripts/lib/peer-common.sh`, so every peer tool was
+  dead on macOS while Linux stayed green — and CI said so, in the one job that
+  has since been reworked. The cause is narrow and now pinned: bash 3.2 cannot
+  parse a here-document inside `$( )` whose body holds an odd number of
+  apostrophes, even behind a quoted `<<'PY'` delimiter, because its command
+  substitution scanner still reads the body looking for the closing paren, takes
+  the lone quote as the start of a literal, and swallows the `)`. A prose
+  "operator's" in an inline Python heredoc was enough. Confirmed against real
+  bash 3.2 in all four directions (apostrophe inside `$( )` fails; balanced
+  apostrophes pass; the same heredoc outside `$( )` passes; odd double quotes are
+  irrelevant). `check-bash32.sh` now rejects the construct statically, so every
+  push catches what previously only a macOS runner could, and the whole shipped
+  file set is verified to parse under a real 3.2.
+- Locks stopped being keyed to `XDG_CACHE_HOME`. The comment directly above the
+  function has always said why — an interactive session (set) and a cron session
+  (unset) compute different lock dirs for the same state file and both enter the
+  critical section — and `auto-update` runs from a systemd user timer, so the
+  asymmetry is not hypothetical. The motive was one hermetic `check.sh` run, which
+  `OMS_LOCK_DIR` now provides without the production path depending on an ambient
+  variable it does not control. The existing stability test covered only
+  `XDG_RUNTIME_DIR`; it now covers both, and neutralizes the sanctioned override
+  first so the assertion cannot pass trivially.
+- `oms-run validate` reported a healthy run index as invalid. Two unrelated
+  families are both named `index.jsonl` — `artifacts/index.jsonl` is read by
+  `kind`, `runs/index.jsonl` is the run-capsule roll-up read by `id` — and the
+  contract was keyed on the basename, so it demanded `kind` from every capsule
+  row. Matched by directory now, the way threads already were. Found by running
+  the restored BSD fixtures, not by the gate.
+- The machine snapshot names the distribution and the CPU model again. The
+  portable rewrite reduced OS to `Linux-6.8.0-x86_64-with-glibc2.39` — the kernel
+  line a second time, distro gone — and CPU to `x86_64`, which is the answer to a
+  question nobody asked of a hardware snapshot. `/etc/os-release` and
+  `/proc/cpuinfo` (then `sysctl machdep.cpu.brand_string`) are read first and the
+  portable form is the fallback; Windows support is unaffected. The regression
+  injects both sources as fixtures, because asserting that a `- CPU:` label
+  exists is what let the content vanish.
+- `ma_answer_quality` no longer fails open. Extracting the classifier from an
+  inline heredoc to `lib/answer-quality.py` created a failure mode that could not
+  exist before: a missing file or a python error left the verdict empty and
+  `${verdict:-ok}` counted every answer as real — including the provider refusal
+  text this checker was written to catch after a council reported two independent
+  families when one had spoken. An unrunnable checker is now named on stderr and
+  reported `blocked`.
+- An absent managed target reports `missing` instead of `foreign`. Calling a file
+  that is not there "someone else's" was untrue, and answering it through the copy
+  inspector cost a python3 process per probe (~25ms measured) — doctor and status
+  probe every managed target on every run, most of them absent on a partial
+  install.
+- `install-tools` reads the `gh` credential locally instead of calling
+  `gh auth status`, which contacts GitHub. Same reason the check was made local in
+  `doctor`: a captive or offline network should not stall the tail of an install
+  over a note.
+- Reinstalling can repair the managed `python3` shim it created. If the
+  interpreter behind the shim moved, the PATH probe failed and the installer then
+  refused to touch the shim and exited — no reinstall could fix what an install
+  had written. A shim matching the managed shape is replaced; anything else at
+  that path is still the user's launcher and is left alone. The ownership test
+  moved to `platform.sh`, which is all `install.sh` sources when it decides.
+- `oms` validates the receipt it falls back to and says so when nothing resolves.
+  A copy install has no link to follow, so the dispatcher reads `source_root`
+  from the receipt; it now requires the same schema-2 shape as the rest of the
+  harness, and a failure names the broken contract instead of reporting a missing
+  file for whichever subcommand was asked for.
+
+- `doctor` no longer calls every current memory database invalid. It asserted
+  schema version 2 as a literal while the helper had moved to 3, so any
+  repository that had used memory reported `warn: memory database is invalid`
+  and was told to run `rebuild` — which writes version 3 again, leaving advice
+  that could never clear the warning. The expected version is now read out of
+  `lib/agent-memory-db.py`, the file that writes it, so the two cannot drift
+  again. The existing tests could not catch this: the warning path is exercised
+  with a file that is not a database at all, and the clean-state check never
+  built one, so nothing ever compared the doctor against a database the tool had
+  actually produced. A test now does exactly that. Noticed only by running
+  `doctor` after an install update — the gate (`check.sh`) never looked.
+- The smoke suite's source-leak check no longer fires on the agent session that
+  is running it. It fingerprints `.oms/` at shard start to catch a test writing
+  into the checkout, but `hooks/` is the one subtree the live session writes on
+  its own schedule: `UserPromptSubmit` appends a `route` event and `Stop` appends
+  a `turn_guard` event to `hooks/events.jsonl`. So an agent that runs the gate in
+  the background and then answers the user fails its own gate with "smoke suite
+  mutated the source checkout .oms state" — a guaranteed false alarm in ordinary
+  operation, and the reason this was chased twice. The event was timestamped
+  three seconds inside a shard while the checkout's state was provably unchanged
+  at the end, which is what a false alarm looks like: the check cannot tell a
+  leaking test from the agent it is protecting. `hooks/` is now excluded, verified both ways against a copy of
+  real state — an appended hook event is ignored, a file dropped anywhere else
+  is still caught.
+- `agent-memory recall` no longer presents a resolved failure as an open one. A
+  resolution is its own append-only row carrying nothing but the fingerprint it
+  clears, and the index parser was written against guessed field names — it
+  looked for an event called `resolve` and a key called `state`, while
+  `fail-ledger.sh` writes `resolved` and `state_fingerprint`. The resolution row
+  therefore had no body, was dropped as empty, and every fixed failure stayed in
+  the index looking live; recalling a solved problem as an open one is worse than
+  not recalling it. Resolution is now folded in over two passes, a later failure
+  on the same fingerprint re-opens it (the last event wins), the ledger's own
+  kind distinguishes a failing verification contract from an arbitrary command,
+  and a regression test covers all three states. Measured live against this
+  repository's own ledger, which is where the defect surfaced.
+
+- The capability refresh stopped asking each CLI for `--help` a second time.
+  `model-doctor` already had that output, so the refresh added a duplicate
+  invocation of every installed provider — slower everywhere, and in the test
+  suite it turned fixture runs into real CLI calls, which made unrelated
+  timing-sensitive tests fail at random. Caught by the suite failing twice on
+  two different tests while three runs of the pre-capability commit passed. The
+  doctor now hands its help output over, and three consecutive runs are clean.
+  Routing's own binary-identity check is memoised per process and uses `stat`
+  rather than starting a python interpreter.
+- The worker guard was blind to new source files in any repository with a large
+  ignored tree. It spent its entry budget in path order, so a real project whose
+  `data/` and `runs/` hold tens of thousands of ignored files exhausted the cap
+  alphabetically and never reached the handful of untracked source files — the
+  exact places a stray worker write lands. Untracked-but-not-ignored paths are
+  now scanned first, so truncation can only ever drop ignored churn, and the
+  message says which class was cut: reaching the cap inside the ignored tree is
+  a note, failing to cover the untracked files is a warning that coverage is
+  partial.
+- `peer-delegate` says when the caller's tree is dirty. The worktree is built
+  from HEAD, which is the right isolation and was completely silent: a brief
+  written about code the caller has on screen can describe something the worker
+  will never find, and the whole round is spent against a tree that does not
+  contain the problem. The count is printed once and recorded in the artifact,
+  so whoever reviews the patch later knows which base it was written against.
+- `peer-delegate` no longer reports a worker that could not act as a clean run.
+  A CLI denied a tool it cannot prompt for exits 0 having printed only its
+  refusal, and the empty patch that follows looks exactly like honest work on an
+  already-correct tree. The worker status is now 126 ("found but could not
+  execute"), the reason is quoted, and — like a missing CLI — no repair round is
+  spent, because no rewording of a brief grants a permission.
+- Landings are now serialized per repository. Everything from the clean-tree
+  check through `git apply` was a check-then-act on the shared working tree with
+  no lock, so two agents could both be admitted against the same base and both
+  apply — each reviewed without the other's changes. A second lander is refused
+  outright rather than queued, because the tree it was admitted against is the
+  one the first lander is changing. `oms_hold_file_lock` holds a lock for the
+  rest of a process, which `oms_with_file_lock`'s subshell cannot do when later
+  steps need variables the earlier steps set.
+- A council counted a provider refusal as an answer. Antigravity's headless mode
+  cannot prompt for a tool permission, so it auto-denies anything outside
+  `permissions.allow`, exits 0, and prints only its own explanation — text
+  declarative and long enough to pass every answer-quality rule. The last live
+  audit therefore reported "2 answered, 2 independent model families" when one
+  provider had spoken. Answer quality now classifies a body that is *entirely*
+  CLI diagnostics as `blocked` (an answer that merely discusses permissions is
+  untouched), keeps it out of the answered and family counts, and quotes the
+  provider's own reason so the operator knows what to fix. `doctor` reports the
+  same thing before a call is spent, by checking whether antigravity's
+  allow-list covers the commands a repository read needs. Probing the CLI
+  showed a curated command list cannot work — a `command` rule is matched
+  against the whole command line, so the first `cd x && rg y` a peer runs is
+  denied — while `command(*)` is not the write authority it appears to be:
+  under `--sandbox`, which is how this harness invokes agy, escaping to write
+  needs a separate `unsandboxed` rule. The check now asks for `command(*)` plus
+  `read_file(*)` instead of an unwinnable list of commands.
+
+- Antigravity never received its prompt. `agy --print` takes the prompt as its
+  value (`--prompt` is an alias), so a prompt piped on stdin was ignored and the
+  next flag became the prompt — every antigravity answer was a reply to the
+  literal string `--sandbox`, in councils, reviews, and delegated writes alike.
+  The prompt is now passed as the flag value.
+- A landing no longer reports `complete` when its records did not land: a failed
+  lineage row or plan finish leaves `applied-pending-receipt`, which `oms state`
+  shows and `patch-land --recover` retries until both records exist.
+- `patch-land` rechecks the base commit and clean tree immediately before the
+  apply and refuses when either moved during admission, so what lands is the
+  combination that was verified.
+- Antigravity model routing follows the published benchmarks: 3.6 Flash wins
+  every coding and agentic suite against 3.1 Pro (SWE-Bench Pro, DeepSWE,
+  Terminal-Bench, MLE-Bench) at roughly twice the speed, and Pro keeps only a
+  narrow pure-reasoning lead, so all three tiers now use the 3.6 Flash variants.
+- `model-doctor --live-models` no longer reports every Antigravity route as
+  missing: the CLI lists its catalog as slugs (`gemini-3.6-flash-low`) while
+  naming the same model `Gemini 3.6 Flash (Low)` on `--model`, so the comparison
+  now normalizes both sides. The smoke fixture printed display names and hid the
+  mismatch; it now uses the notation the real CLI emits.
+- Receipt-owned branch and detached auto-updates now share `update.sh`'s
+  rollback transaction instead of maintaining a second half-linked path.
+- `update.sh --tools` now requests real provider CLI and uv upgrades instead of
+  silently accepting already-installed binaries.
+- `peer-ask --repo` now keeps its default artifacts under the selected state
+  repository instead of leaking them into the caller's working directory.
+- `fail-ledger` now accepts the documented `--repo` option and honors
+  `OMS_STATE_REPO`, matching the other shared harness state commands.
+- Removed the unused read-executor surface: executors are now write-worktree
+  contracts only. `--mode worktree-write` remains an unadvertised compatibility
+  no-op for existing callers; legacy `mode: read` metadata stays inspectable
+  and retireable but cannot validate, start, or delegate.
+- Mixed read/write requests such as `review and fix` now route to an isolated
+  write worker instead of stopping at a read-only pass.
+- Peer quorum lists reject duplicate providers after canonicalizing the `agy`
+  alias, preventing one CLI from counting as multiple independent reviewers.
+- Capacity fallback now treats ignored files as worktree mutations, recreates
+  Antigravity read isolation before retrying, and removes ignored verification
+  byproducts before repair.
+- Dry-run and export-only passes validate their provider route and record the
+  selected model; unknown Antigravity variants no longer claim an inferred
+  reasoning effort that the CLI did not expose.
+- Plan-bound executors can run through `plan-run` against their exact claimed
+  provider and lease. Creation rejects invalid plan claims, signal cleanup
+  preserves review evidence, and known failures key on resolved contracts.
+- Legacy executor metadata without reasoning fields now honors an explicit
+  caller effort instead of silently replacing it with automatic effort.
+
 - Aligned advisor and spec gates across global rules, skills, templates, docs,
   and prompts: routine completion and clear bounded changes no longer trigger
   mandatory advisor/interview workflows.
@@ -1304,37 +1394,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   covered by tests (`OMS_LOCK_FORCE_MKDIR` two-writer race; `kill -9` mid-
   delegate → `gc` sweeps the orphan marker and releases the plan task).
 
-### Added (earlier)
-- Failure memory (`fail-ledger.sh`): durable `.oms/failures.jsonl` fingerprint
-  ledger so the three agents stop repeating the same failing command across
-  sessions — `record`/`check` (exit 3 on a known-unresolved failure)/`resolve`/
-  `list`; sensitive commands refused. Surfaced in `oms state`.
-- Delegation liveness: `multi-agent-delegate` writes `.oms/delegations/<id>.json`
-  while a worker is in flight and removes it on exit; `oms state` shows live
-  workers and flags dead-pid orphans (no daemon — the launcher is the writer).
-- `ci-status.sh record`: appends the latest CI conclusion to `.oms/ci.jsonl`
-  (deduped by sha); `oms state` shows the latest conclusion for HEAD's branch.
-- `oms init` (`oms-init.sh`): seeds the `.oms/` skeleton + `.gitignore`
-  (idempotent) and prints a next-actions checklist tailored to the detected
-  project type — a first move for an agent landing in a fresh repo.
-- `oms gc` (`gc.sh`): `--dry-run` by default; reclaims aged transient state
-  (orphaned delegation markers, archived task packets, capsules of non-open
-  runs, resolved failure rows) and delegates artifacts to `artifact-index
-  prune`; never touches open runs, the active task, unresolved failures, or the
-  append-only board.
-- `oms-run validate` now walks every `.oms/**/*.jsonl` family and flags schema
-  drift (rows below a family's expected schema) — the one place a future schema
-  bump is signalled — in addition to the parse check.
-
-### Added (earlier since 0.3.0)
-- Role profiles (`agent-role.sh`): named, reusable worker personas as markdown
-  in `.oms/roles/<name>.md` (global fallback `~/.oh-my-setting/local/roles`);
-  `list`/`show`/`resolve`/`init`. `multi-agent-delegate.sh --role NAME` prepends
-  the profile to the worker brief, and an `agent-plan` task's new `role` field is
-  auto-injected when delegated via `--plan-task` — so the same reviewer /
-  refactorer / test-writer role can drive any of the three providers.
-
-### Fixed (earlier)
 - `patch-admit.sh`: a worktree apply failure was swallowed (`|| true`), so the
   syntax/verify gates could pass against the UNPATCHED tree — now recorded as an
   `apply-worktree` FAIL and the gates are skipped. numstat parsing split on
@@ -1361,84 +1420,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   conversion) and put `scripts/oms` under shellcheck and macOS `bash -n`, since
   `bash -n` alone let runtime-only bash-4 constructs slip past.
 
-### Added (earlier)
-- `repo-state.sh` (`oms state`): one read-only dashboard over all shared `.oms`
-  state — active task goal/next, plan tasks by state with stale claims flagged,
-  experiment board active/stale, current + open runs, latest artifact rows, and
-  change-guard status; `--json` for machines. Answers "what is active, stale,
-  or open here?" in one command instead of cat-ing five files.
-- `patch-land.sh` (`oms patch-land`): the one mutating step that composes the
-  trust boundary — clean-tree check → `patch-admit` ADMIT gate → `git apply` →
-  land row in the artifact index → optional `--plan-task` finish. Nothing lands
-  unless admission passes and the tree is clean.
-- Claim heartbeat: `agent-plan.sh touch --id` and `experiment-board.sh touch
-  --id` refresh a live claim's timestamp so a still-running worker is not
-  reclaimed / flagged stale mid-run (the reclaim/stale TTL clock restarts).
-- `scripts/oms` dispatcher, symlinked to `~/.local/bin/oms`: `oms <tool>`
-  invokes any harness script by name from any of the three agent CLIs
-  (`run` aliases `oms-run`); `oms list` prints every tool with its one-line
-  purpose. Linked/unlinked/doctored with the install.
-- `oms-run.sh new` writes a repo-scoped `.oms/runs/CURRENT` pointer and
-  `oms-run.sh current` resolves the effective run id; `link` and the
-  run-ledger/run-capsule/experiment-board auto-links fall back to a fresh
-  CURRENT when `OMS_RUN_ID` is unset, so a second agent process joins the
-  active run without env plumbing. Stale pointers expire
-  (`OMS_RUN_CURRENT_TTL`, default 86400 s) instead of misjoining.
-- Agent identity: `oms_detect_agent` (explicit `OMS_AGENT` > CLI env markers >
-  generic "agent") now attributes memory notes, task bullets, board claims,
-  capsules, and reconcile rows; spine link rows carry a new `agent` field
-  (`link --agent` overrides; `show`/`timeline` display it).
-- Delegate workers receive `OMS_STATE_REPO` — agent-memory/task/plan resolve
-  to the primary repo's shared `.oms` instead of the empty throwaway
-  worktree — and `OMS_AGENT=<provider>` for attribution.
-- `agent-run.sh --task-id`/`--plan-task`, forwarded to the delegate for plan
-  lineage and lifecycle coupling.
-- AGENTS.md "Run Provenance & Coordination" is now a capability catalog with
-  the `oms` invocation path; the agent-harness skill documents the plan DAG.
-
-- `agent-plan.sh`: shared subtask DAG (`.oms/plan/tasks.json`) with per-task
-  dependencies, path scope, and verify command; `ready`/`status` compute what is
-  actionable now so work can be split across agents without collisions.
-  `next`/`brief` emit a paste-able work brief; `next --claim --provider` is a
-  pull-work primitive (exit 3 when nothing is actionable). All mutations and
-  `next --claim` run under a file lock so concurrent agents cannot both claim the
-  same task; adds `review`/`release` commands, a stricter lifecycle (finish only
-  from claimed/running/review; a blocked task must be reopened before claim), and
-  a `claimed_at` timestamp.
-- `multi-agent-delegate.sh --task-id` and artifact-index lineage: every index
-  row now records `base_sha` and any `task_id`, surfaced in `artifact-index list`,
-  so a run traces back to the plan subtask and commit it came from.
-- `change-guard.sh`: `forbidden_paths` task constraint (deny beats allow),
-  documented in `agent-task.sh` help.
-- `data-manifest.sh`: `--key-column` entity-overlap leakage (inchikey/scaffold/
-  cluster/assay) and per-key fingerprints with `(id -> key)` mapping drift and
-  empty-key counts (manifest schema 3).
-- `run-ledger.sh`: each row records its gate decision (passed/skipped/recorded/
-  none); `list` surfaces it.
-- `project-doctor.sh`: flags an empty `## Commands`/`## Verification` once
-  `PROJECT.md` is past draft.
-- `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, this changelog.
-- Tag-triggered `release` workflow: gates on `scripts/check.sh`, verifies the
-  tag matches `VERSION`, and publishes a GitHub Release with `install.sh`,
-  `install.sh.sha256`, and a `SHA256SUMS` manifest. This historical publication
-  path was removed after the project switched to source-only distribution.
-
-- `oms-run.sh close [id]` + `ls --open`: mark a run terminal and list
-  open-vs-closed runs; close also clears a `CURRENT` pointer naming the run so
-  later tool events stop auto-joining a finished run.
-- `oms-run.sh timeline --agent NAME` / `--tool NAME`: filter the merged
-  cross-stream timeline by who or which tool (case-insensitive substring).
-- `experiment-board.sh list --stale` / `--owner NAME`: surface TTL-expired
-  (reclaimable) claims and filter by claimer, instead of staleness only
-  showing up at the next claim collision.
-- `agent-memory.sh search PATTERN` (`--agent` author filter): recall over
-  shared memory and pins by entry, replacing `show` cat-ing the whole file.
-- `multi-agent-delegate.sh --plan-task ID` without `--prompt`/`--brief-file`
-  hydrates the worker brief from the task, and without `--verify` uses the
-  task's stored verify command — `delegate --to codex --plan-task t3` is now
-  a complete one-liner.
-
-### Fixed
 - `patch-admit.sh` records each admission in the artifact index, so the report
   survives `artifact-index.sh prune --files` (which deletes unreferenced files
   under `.oms/artifacts/`); and it now fails closed when a patch modifies its
@@ -1469,12 +1450,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   scratch dir outside git): agy has no file-write-blocking flag, so stray
   writes are discarded instead of reaching the caller's tree.
 
-### Changed
-- README "What's Inside" is now an eight-row capability table; the full
-  per-script catalog moved to `docs/COMPONENTS.md` (no scripts removed). The
-  task plan is grouped under "Agent state", not "Memory".
-- Auto-update trigger defaults to **check-only** (records availability) instead
-  of auto-applying; opt in with `OH_MY_SETTING_AUTO_UPDATE_MODE=apply`.
 
 ### Security
 - `data-manifest.sh` leakage fails closed when a recorded split file, id column,
@@ -1482,6 +1457,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `run-ledger.sh` blocks a sensitive-looking gate skip `--reason` and no longer
   echoes the raw reason to stderr.
 - CI workflow runs with `contents: read` permissions.
+
 
 ## [0.3.0]
 
