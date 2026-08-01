@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The GitHub-backed personal source is one kind of code source, not its own
+# tool: code-source github <args> owns that flow.
+if [ "${1:-}" = "github" ]; then
+  shift
+  exec "$ROOT/scripts/github-source.sh" "$@"
+fi
+
 REPO_DIR="$PWD"
 REGISTRY=""
 GLOBAL=0
@@ -20,7 +28,7 @@ DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Usage: code-source.sh [options] [path|list|show|add|fetch] [NAME]
+Usage: code-source.sh [options] [path|list|show|add|fetch|github] [NAME]
 
 Maintain a small registry of trusted reusable code sources and fetch them via
 GitHub with provenance. Project registry defaults to .oms/code-sources.json;

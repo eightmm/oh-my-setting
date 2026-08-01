@@ -7225,7 +7225,7 @@ EOF
 
   SLURM_CAPTURE="$capture" USER=alice PATH="$bin:/usr/bin:/bin" \
     OH_MY_SETTING_SLURM_REF="$out" \
-    "$ROOT/scripts/generate-slurm-skill.sh" >/dev/null
+    "$ROOT/scripts/generate-slurm-reference.sh" >/dev/null
 
   assert_file_contains "$capture" 'sacctmgr -nP show assoc user=alice'
   assert_file_contains "$capture" 'sacctmgr -nP show qos'
@@ -8274,13 +8274,22 @@ test_oms_dispatcher_lists_and_dispatches() {
   out="$("$bin/oms" list)" || fail "oms list should succeed"
   printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
   printf '%s' "$out" | grep -Eq '^agent-run ' || fail "oms list should include agent-run"
-  for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate; do
+  for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
+    generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule uninstall-autoupdate write-machine-snapshot; do
     if printf '%s' "$out" | grep -Eq "^${hidden} "; then
       fail "oms list should hide internal/deprecated tool: $hidden"
     fi
   done
+  printf '%s' "$out" | grep -Eq '^snapshot ' || fail "oms list should include snapshot"
   "$bin/oms" run-ledger --help >/dev/null 2>&1 || fail "oms should dispatch run-ledger via its symlink"
   (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run should alias oms-run"
+  # Consolidated tools stay dispatchable (compat), and their front doors work.
+  "$bin/oms" run-capsule --help >/dev/null 2>&1 || fail "compat dispatch for run-capsule broke"
+  "$bin/oms" generate-slurm-skill --help >/dev/null 2>&1 || fail "generate-slurm-skill alias broke"
+  "$bin/oms" run capsule --help >/dev/null 2>&1 || fail "oms run capsule door broke"
+  "$bin/oms" code-source github --help >/dev/null 2>&1 || fail "code-source github door broke"
+  "$bin/oms" artifact-index import --help >/dev/null 2>&1 || fail "artifact-index import door broke"
+  "$bin/oms" snapshot --help >/dev/null 2>&1 || fail "snapshot front door broke"
   if "$bin/oms" no-such-tool >/dev/null 2>&1; then
     fail "oms must reject an unknown tool"
   fi

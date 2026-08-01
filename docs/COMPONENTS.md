@@ -265,7 +265,7 @@ standing rules it needs are granted by `oms provider-permissions`.
 `--thread`/`--new-thread` select the conversation. Read-only by design — a
 write task goes to `peer-delegate`
 
-**Export/import handoff (`--export-only`, `import-agent-result.sh`)** —
+**Export/import handoff (`--export-only`, `oms artifact-index import`)** —
 Validates the route and writes the selected model with provider prompts when
 the session may not call other agent CLIs directly; answers are imported back
 into the same artifact index, passing the same outbound sensitive-content gate
@@ -498,7 +498,7 @@ metric ("best run for val_auc")
 hypothesis, pre-registered metric, and baseline recorded before launch, verdict
 after
 
-**Run capsule (`run-capsule.sh`)** — Reproducibility bundle per run: exact
+**Run capsule (`oms run capsule`)** — Reproducibility bundle per run: exact
 commit + uncommitted diff + config/env/seed/output fingerprints + result;
 `reproduce`/`verify`/`whence` (trace a checkpoint back to its run)
 
@@ -540,7 +540,7 @@ ledger, degrades to a nohup fallback
 **ML context (`agent-ml-context.sh`)** — Compact ML digest (spec, ledger tail,
 configs) attached to cross-agent calls
 
-**Cluster snapshots** — Private atomic machine and Slurm references with schema
+**Machine and cluster snapshots (`oms snapshot [--cluster]`)** — Private atomic machine and Slurm references with schema
 validation and dry-run/check modes. Receipt modes preserve `0`/`1`/`auto`,
 updates refresh enabled snapshots transactionally, and the Slurm reference
 contains partitions, nodes, current-user associations/accounts, QOS/limits, a
@@ -593,7 +593,7 @@ failure has been resolved in the repo.
 **Registry (`code-source.sh`)** — Local registry of trusted reusable files
 (e.g. personal model blocks); fetch by name into the current project
 
-**GitHub fetch (`github-source.sh`)** — Profile/discover/fetch via `gh`; no
+**GitHub fetch (`oms code-source github`)** — Profile/discover/fetch via `gh`; no
 overwrite by default, provenance appended to `.oms/code-sources.jsonl`
 
 ## Maintenance
@@ -689,7 +689,8 @@ than being copied into OMS; cleanup removes only known legacy oms/backup
 symlinks (dry-run by default, never regular files or plugins)
 
 **Auto-update (`auto-update.sh`)** — Optional systemd timer or cron; check-only
-mode unless apply is explicitly selected
+mode unless apply is explicitly selected; `install`/`remove` own the
+user-level trigger lifecycle
 
 **Backup / unlink / uninstall** — Snapshot agent configs before changes; clean
 removal that restores what it replaced

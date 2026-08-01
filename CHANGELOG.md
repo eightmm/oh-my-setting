@@ -7,7 +7,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Changed
-- The Notion mirror now publishes a human-facing rendering of each summary.
+- The public `oms` catalog consolidated to one front door per capability —
+  less is more: an agent choosing between 58 entries picks worse than one
+  choosing between 51. `oms snapshot [--cluster]` fronts the machine and
+  Slurm context generators; `auto-update install|remove` absorbs the trigger
+  installers; `code-source github` absorbs the GitHub source; `artifact-index
+  import` absorbs the external-answer importer; `oms run capsule` fronts the
+  reproducibility capsule. Every consolidated name stays dispatchable through
+  a compat list (old habits, receipts, and already-applied project templates
+  keep working) but no longer appears in `oms list`; the dispatcher test pins
+  both the hiding and the compat dispatch. The `generate-slurm-skill` shim
+  script is gone — its name survives as a dispatcher alias, and its garbled
+  catalog line ("(local/slurm.md), not a skill…", the scraper reading a shim
+  comment) with it. Templates and skills now name the new doors.
   The local daily files are the evidence layer — every claim carries an
   event-id citation, and one packet update can emit near-identical bullets
   from its update and close events — but Notion is the surface the human

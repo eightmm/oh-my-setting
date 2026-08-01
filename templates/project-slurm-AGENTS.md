@@ -6,6 +6,6 @@
 - Use `sbatch` for batch jobs and allocated `srun` interactively.
 - Job scripts enter `$SLURM_SUBMIT_DIR`, fail fast, and write job-specific logs.
 - Record job ID, command, config, seed, commit, checkpoints, and logs.
-- Refresh private cluster data with `oms generate-slurm-reference`; never commit or
+- Refresh private cluster data with `oms snapshot --cluster`; never commit or
   share it.
 - Use `oms job-digest` for long logs and `oms run-reconcile` for finished jobs.

@@ -30,7 +30,7 @@ context is scanned and sensitive-looking content blocks the call.
 Use `--no-memory`, `--no-task`, or `--no-ml-context` to omit prompt layers.
 Use `--export-only` for read calls/reviews when another provider must not be
 called directly; the export records the validated model route. Then import the
-answer with `oms import-agent-result`.
+answer with `oms artifact-index import`.
 
 Artifacts are indexed under `.oms/artifacts/index.jsonl`, including selected
 model class/model, reasoning effort, and fallback outcome. Inspect with:

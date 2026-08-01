@@ -139,7 +139,22 @@ describe() {
 
 is_public_tool() {
   case "$1" in
-    apply-project-template|auto-update|change-guard|ci-status|cleanup|code-source|data-manifest|doctor|experiment-board|fail-ledger|gc|generate-slurm-reference|generate-slurm-skill|github-source|import-agent-result|install-autoupdate|job-digest|journal|model-doctor|oms-init|provider-permissions|oms-run|patch-admit|patch-land|peer-ask|peer-delegate|peer-review|plan-run|project-doctor|project-private|provider-contract|remove-project-template|repo-state|research-runner|run-capsule|run-ledger|run-reconcile|session-handoff|skill-forge|state-verify|status|support-bundle|tsp-queue|uninstall|uninstall-autoupdate|update|write-machine-snapshot|advise|agent-call|agent-consult|agent-executor|agent-memory|agent-plan|agent-role|agent-run|agent-task|agent-thread|artifact-index)
+    apply-project-template|auto-update|change-guard|ci-status|cleanup|code-source|data-manifest|doctor|experiment-board|fail-ledger|gc|job-digest|journal|model-doctor|oms-init|provider-permissions|oms-run|patch-admit|patch-land|peer-ask|peer-delegate|peer-review|plan-run|project-doctor|project-private|provider-contract|remove-project-template|repo-state|research-runner|run-ledger|run-reconcile|session-handoff|skill-forge|snapshot|state-verify|status|support-bundle|tsp-queue|uninstall|update|advise|agent-call|agent-consult|agent-executor|agent-memory|agent-plan|agent-role|agent-run|agent-task|agent-thread|artifact-index)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Consolidated tools: still dispatchable so old habits, receipts, and applied
+# project templates keep working, but no longer listed — the catalog shows one
+# front door per capability (snapshot, auto-update, code-source,
+# artifact-index, oms-run).
+is_compat_tool() {
+  case "$1" in
+    generate-slurm-reference|github-source|import-agent-result|install-autoupdate|run-capsule|uninstall-autoupdate|write-machine-snapshot)
       return 0
       ;;
     *)
@@ -192,7 +207,9 @@ TOOL="${TOOL%.sh}"
 [ "$TOOL" = "init" ] && TOOL="oms-init"    # oms init
 [ "$TOOL" = "consult" ] && TOOL="agent-consult"  # oms consult "question"
 [ "$TOOL" = "thread" ] && TOOL="agent-thread"    # oms thread list|show|new
-if ! is_public_tool "$TOOL"; then
+# The old skill-named generator keeps working through its honest name.
+[ "$TOOL" = "generate-slurm-skill" ] && TOOL="generate-slurm-reference"
+if ! is_public_tool "$TOOL" && ! is_compat_tool "$TOOL"; then
   echo "error: unknown tool: $TOOL (run: oms list)" >&2
   exit 2
 fi

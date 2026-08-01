@@ -26,7 +26,7 @@ Choose the smallest context: none for a concept, `--repo-context` for repository
 state, `--diff` for an uncommitted change, or a local summary of specific files.
 Use `--debate 1` only when answers materially disagree. If policy forbids direct
 provider calls, use `--export-only` and import the answer with
-`oms import-agent-result`.
+`oms artifact-index import`.
 
 ## Consult during work, not only at gates
 

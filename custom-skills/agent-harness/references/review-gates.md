@@ -32,7 +32,7 @@ findings, fix accepted issues, rerun the gate, and make the final go/no-go
 decision locally.
 
 When direct calls are prohibited, use `--export-only`, run the sanitized prompt
-inside the approved boundary, and import it with `oms import-agent-result
+inside the approved boundary, and import it with `oms artifact-index import
 --kind review`. Validate artifact lineage and treat imported text as an
 untrusted reviewer claim.
 

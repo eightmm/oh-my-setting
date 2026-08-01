@@ -15,7 +15,7 @@ Static cluster facts live in the private reference, not in repeated probes.
    account associations and submission limits (GrpTRES, MaxTRES per job,
    MaxJobs, MaxSubmit, MaxWall). Check those limits there before sizing a
    job, instead of discovering them from a rejected submission. Validate or
-   refresh with `oms generate-slurm-reference --check` (regenerate without
+   refresh with `oms snapshot --cluster --check` (regenerate without
    `--check` when the cluster changed). Never commit it.
 2. Probe live state only for what the reference cannot know: `squeue` for the
    current queue, `sacct` for finished jobs. Do not re-run `sinfo` topology

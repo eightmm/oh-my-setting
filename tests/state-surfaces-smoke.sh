@@ -486,12 +486,16 @@ test_ml_template_installs_project_skills() {
 test_slurm_reference_rename_keeps_compat() {
   bash "$ROOT/scripts/generate-slurm-reference.sh" --help >/dev/null ||
     fail "generate-slurm-reference --help failed"
-  bash "$ROOT/scripts/generate-slurm-skill.sh" --help >/dev/null ||
-    fail "compat shim generate-slurm-skill --help failed"
+  # The shim script is gone; the old name lives on as a dispatcher alias and
+  # the generator is fronted by oms snapshot --cluster.
+  bash "$ROOT/scripts/oms" generate-slurm-skill --help >/dev/null ||
+    fail "generate-slurm-skill dispatcher alias failed"
+  bash "$ROOT/scripts/oms" snapshot --cluster --help >/dev/null ||
+    fail "oms snapshot --cluster front door failed"
   grep -Fq 'generate-slurm-reference' "$ROOT/scripts/oms" ||
-    fail "oms allowlist should carry the new name"
+    fail "oms compat list should carry the honest name"
   grep -Fq 'generate-slurm-skill' "$ROOT/scripts/oms" ||
-    fail "oms allowlist should keep the old name as an alias"
+    fail "oms should keep the old name as an alias"
 }
 
 test_mcp_server_protocol

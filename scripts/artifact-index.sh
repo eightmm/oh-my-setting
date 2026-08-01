@@ -5,6 +5,13 @@ ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
 
+# Importing an externally run answer writes the same index this tool owns:
+# artifact-index import <args> is that front door.
+if [ "${1:-}" = "import" ]; then
+  shift
+  exec "$ROOT_LIB/../import-agent-result.sh" "$@"
+fi
+
 REPO="$PWD"
 INDEX_FILE=""
 ACTION="list"
@@ -20,7 +27,7 @@ REASON=""
 
 usage() {
   cat <<'EOF'
-Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|validate|migrate|prune] [N]
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|validate|migrate|prune|import] [N]
 
 Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.

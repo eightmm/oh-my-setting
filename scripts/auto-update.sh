@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The trigger installers are part of this capability, not separate tools:
+# auto-update install|remove owns the user-level trigger lifecycle.
+case "${1:-}" in
+  install) shift; exec "$ROOT/scripts/install-autoupdate.sh" "$@" ;;
+  remove) shift; exec "$ROOT/scripts/uninstall-autoupdate.sh" "$@" ;;
+esac
+
 MODE="${1:-check}"
 STATE_FILE="${OH_MY_SETTING_AUTO_UPDATE_STATE:-$ROOT/local/auto-update.status}"
 LOG_FILE="${OH_MY_SETTING_AUTO_UPDATE_LOG:-$ROOT/local/auto-update.log}"
@@ -11,7 +19,7 @@ APPLY_LOCK_TARGET="$ROOT/local/auto-update.apply"
 
 usage() {
   cat <<'EOF'
-Usage: auto-update.sh [check|apply|status] [-h|--help]
+Usage: auto-update.sh [check|apply|status|install|remove] [-h|--help]
 
 Check for or apply oh-my-setting updates.
 
@@ -21,6 +29,8 @@ Modes:
           Re-runs link.sh, but intentionally skips tool (re)installation;
           use update.sh --tools when install-tools.sh should be covered too.
   status  Print the last recorded auto-update state.
+  install Register the user-level auto-update trigger (systemd timer/cron).
+  remove  Remove the auto-update trigger.
 
 Environment:
   OH_MY_SETTING_AUTO_UPDATE_STATE=/path  Override state file.

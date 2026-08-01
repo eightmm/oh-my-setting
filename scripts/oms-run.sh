@@ -43,6 +43,7 @@ Usage: oms-run.sh new [--note TEXT]
        oms-run.sh diff <run_id_a> <run_id_b>
        oms-run.sh timeline [--since ISO8601|--today] [--limit N] [--agent NAME] [--tool NAME] [--json]
        oms-run.sh validate [--dir DIR]
+       oms-run.sh capsule [run-capsule args...]
 
 The run spine: a canonical run_id and an append-only join index
 (.oms/runs/index.jsonl) over the independent run tools.
@@ -583,6 +584,7 @@ case "${1:-}" in
   diff) shift; cmd_diff "$@" ;;
   timeline) shift; cmd_timeline "$@" ;;
   validate) shift; cmd_validate "$@" ;;
+  capsule) shift; exec "$ROOT/scripts/run-capsule.sh" "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;
   *) fail "unknown subcommand: $1" ;;

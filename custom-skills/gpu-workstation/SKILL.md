@@ -14,7 +14,7 @@ scheduler would impose is yours to apply.
    not start a job that plainly does not fit or that races a live run.
 2. Static hardware facts (GPU model, VRAM size, CPU/RAM, disks) are in the
    machine snapshot: `local/machine.md` under the oh-my-setting install root
-   (`oms status` reports the root; refresh with `oms write-machine-snapshot`).
+   (`oms status` reports the root; refresh with `oms snapshot`).
    Read it instead of re-deriving the hardware every session.
 3. If another job is running or queued, do not wait-loop in the session —
    enqueue via the GPU queue below and report the queue position.

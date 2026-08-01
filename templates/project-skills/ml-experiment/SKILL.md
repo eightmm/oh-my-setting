@@ -16,7 +16,7 @@ anything that costs more than a smoke test:
 3. **Gate the launch**: long or expensive runs go through `oms run-ledger`
    — it runs the project's `check.sh` pre-flight, warns on duplicates, and
    writes one JSONL row per run. Record eval scalars with `--metrics`.
-4. **Capture reproducibility**: `oms run-capsule` bundles the exact command,
+4. **Capture reproducibility**: `oms run capsule` bundles the exact command,
    environment, and data provenance so an output can be traced back to its
    run.
 5. **Record the outcome**: metrics into the ledger row, the conclusion into
