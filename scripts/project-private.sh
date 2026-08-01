@@ -28,7 +28,11 @@ EXTRA_PATHS=""
 
 # Agent-facing files the harness writes into a project. Listed whether or not
 # they exist yet, so apply once covers a file the loader adds later.
-DEFAULT_PATHS="AGENTS.md CLAUDE.md PROJECT.md"
+# GEMINI.md belongs here: Antigravity's own bundled rules documentation lists
+# `GEMINI.md`, `AGENTS.md`, and `.agents/rules/*.md` as the directory-based
+# rule paths it reads hierarchically, so a project GEMINI.md is live agent
+# context — and must not reach a public repo by default.
+DEFAULT_PATHS="AGENTS.md CLAUDE.md GEMINI.md PROJECT.md"
 
 usage() {
   cat <<'EOF'
@@ -47,7 +51,7 @@ remove  Delete the managed block; the files themselves are never touched.
 Options:
   --repo PATH   Project to act on (default: PWD, git-root anchored).
   --path REL    Extra repo-relative path to hide; repeatable. Added to the
-                defaults (AGENTS.md, CLAUDE.md, PROJECT.md).
+                defaults (AGENTS.md, CLAUDE.md, GEMINI.md, PROJECT.md).
   --check       Exit 1 when an agent file exists untracked but is not hidden.
   --untrack     For an already-tracked agent file, stage its removal from the
                 index (git rm --cached) and hide it. The file stays on disk;

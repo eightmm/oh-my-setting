@@ -22,7 +22,7 @@ the agent-facing files it writes are hidden from git by default (`--no-private`
 keeps them visible)
 
 **Local-only agent files (`project-private.sh`)** — Keeps the agent-facing
-harness files (`AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, plus
+harness files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `PROJECT.md`, plus
 `--path` extras) out of a project's git history by listing them in a managed
 block in `.git/info/exclude` — per-clone, never committed, and no entry added
 to the project's own `.gitignore`. Applied by default at template time

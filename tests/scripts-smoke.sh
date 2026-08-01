@@ -10632,6 +10632,28 @@ test_project_private_hides_agent_files_from_git() {
     fail "--check should pass once the agent files are hidden"
 }
 
+test_harness_file_set_covers_every_provider_rule_path() {
+  local project="$TMP/private-fileset"
+  local name
+  local out
+
+  make_committed_repo "$project"
+  # Each CLI reads its own directory-based rule file, and Antigravity's
+  # bundled rules documentation names GEMINI.md alongside AGENTS.md. A file
+  # dropped from this set stops being hidden from git, so project context
+  # leaks into a public repo — the failure that made this assertion exist.
+  for name in AGENTS.md CLAUDE.md GEMINI.md PROJECT.md; do
+    printf 'local rules\n' > "$project/$name"
+  done
+  "$ROOT/scripts/project-private.sh" --repo "$project" apply >/dev/null
+
+  out="$(git -C "$project" status --porcelain)"
+  [ -z "$out" ] || fail "every harness file must be invisible to git, got: $out"
+  for name in AGENTS.md CLAUDE.md GEMINI.md PROJECT.md; do
+    assert_file_contains "$project/.git/info/exclude" "$name"
+  done
+}
+
 test_project_private_opt_out_leaves_files_visible() {
   local project="$TMP/private-optout"
   local out

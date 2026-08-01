@@ -16,7 +16,7 @@ oms_seed_local_agent_files() {
   local name
 
   [ -d "$src_repo" ] && [ -d "$wt_dir" ] || return 0
-  for name in AGENTS.md CLAUDE.md PROJECT.md; do
+  for name in AGENTS.md CLAUDE.md GEMINI.md PROJECT.md; do
     [ -f "$src_repo/$name" ] || continue
     [ -e "$wt_dir/$name" ] && continue
     git -C "$wt_dir" check-ignore -q "$name" 2>/dev/null || continue

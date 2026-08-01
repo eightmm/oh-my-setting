@@ -94,6 +94,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   500-line progressive-disclosure budget.
 
 ### Fixed
+- `GEMINI.md` stays a per-project harness file, and a test now pins it.
+  An earlier entry in this same unreleased cycle dropped it from the
+  default lists (project-private hiding, worktree seeding, template dedup)
+  on the belief that no supported CLI reads a project `GEMINI.md`. That was
+  wrong: Antigravity's own bundled rules documentation lists `GEMINI.md`,
+  `AGENTS.md`, and `.agents/rules/*.md` as the directory-based rule paths it
+  reads hierarchically. The practical risk was a project `GEMINI.md` no
+  longer being hidden from git by default — agent context leaking into a
+  public repo — and an agy worker in a delegate worktree losing project
+  rules. Nothing pinned the contract, so the removal passed the gate;
+  `tests/scripts-smoke.sh` now asserts the default harness-file set.
 - Switching a project's base style now retires the previous one. Managed
   rule blocks are per-style, so applying `ml` over `general` left both in
   place and the agent read two loaders with conflicting rules — found by
@@ -110,12 +121,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   resolve `OMS_STATE_REPO`/`$PWD`.
 
 ### Removed
-- Per-project `GEMINI.md` from the default harness-file lists
-  (worktree seeding, project-private hiding, template dedup, docs). No
-  supported provider reads it: Antigravity takes global rules from
-  `~/.gemini/AGENTS.md` and per-project rules from `AGENTS.md`. The legacy
-  `~/.gemini/GEMINI.md` symlink cleanup stays for upgrades from the
-  Gemini-CLI era.
 - `scripts/backup.sh`, an orphan: not a public `oms` tool, undocumented,
   called by nothing but its own test, and superseded by update.sh's
   transactional snapshot/rollback of managed targets.
