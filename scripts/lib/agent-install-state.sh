@@ -134,6 +134,12 @@ oms_ops_clean_legacy_skill_links() {
     name="$(basename "$skill")"
     oms_ops_remove_legacy_link "$target_root/$name" "custom-skills/$name" "$dry_run"
   done
+
+  # These front doors were folded into agent-harness. Keep their runtime
+  # commands, but remove only legacy links owned by this checkout.
+  for name in peer-ask peer-delegate peer-review; do
+    oms_ops_remove_legacy_link "$target_root/$name" "custom-skills/$name" "$dry_run"
+  done
 }
 
 oms_ops_cleanup_legacy_links() {

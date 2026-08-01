@@ -18,7 +18,7 @@
       "name": "agent-harness",
       "source": "custom-skills/agent-harness",
       "enabled": true,
-      "reason": "Share harness state, route provider/model work, verify capability and model-family diversity, and coordinate bounded multi-agent execution.",
+      "reason": "Share harness state and route provider/model work, peer consultation, independent review, and bounded write delegation.",
       "triggers": [
         "oms state",
         "이어서 해줘",
@@ -47,7 +47,39 @@
         "최신 모델",
         "model doctor",
         "strict diversity",
-        "대화 이어서"
+        "대화 이어서",
+        "peer review",
+        "피어 리뷰",
+        "multi-agent review",
+        "교차 리뷰",
+        "크로스 리뷰",
+        "리뷰 게이트",
+        "review gate",
+        "독립 검증",
+        "다른 모델로 검증",
+        "council review",
+        "peer ask",
+        "세 모델에게",
+        "세 모델에",
+        "cross-model",
+        "독립 의견",
+        "의견 물어봐",
+        "다른 에이전트한테 물어",
+        "cross-check with",
+        "second opinion",
+        "ask codex what",
+        "oms consult",
+        "에이전트 회의",
+        "debate round",
+        "peer delegate",
+        "codex한테 시켜",
+        "codex에게 시켜",
+        "claude한테 시켜",
+        "agy한테 시켜",
+        "위임해줘",
+        "delegate to",
+        "have codex implement",
+        "맡겨줘"
       ]
     },
     {
@@ -69,62 +101,6 @@
         "keep agent files out of git",
         "project-private",
         "harness files private"
-      ]
-    },
-    {
-      "name": "peer-review",
-      "source": "custom-skills/peer-review",
-      "enabled": true,
-      "reason": "Run an explicitly requested independent review or release gate without changing the reviewed tree.",
-      "triggers": [
-        "peer review",
-        "피어 리뷰",
-        "multi-agent review",
-        "교차 리뷰",
-        "크로스 리뷰",
-        "리뷰 게이트",
-        "review gate",
-        "독립 검증",
-        "다른 모델로 검증",
-        "council review"
-      ]
-    },
-    {
-      "name": "peer-ask",
-      "source": "custom-skills/peer-ask",
-      "enabled": true,
-      "reason": "Ask Codex, Claude Code, and Antigravity the same conceptual question and synthesize perspectives.",
-      "triggers": [
-        "peer ask",
-        "세 모델에게",
-        "세 모델에",
-        "cross-model",
-        "독립 의견",
-        "의견 물어봐",
-        "다른 에이전트한테 물어",
-        "cross-check with",
-        "second opinion",
-        "ask codex what",
-        "oms consult",
-        "에이전트 회의",
-        "debate round"
-      ]
-    },
-    {
-      "name": "peer-delegate",
-      "source": "custom-skills/peer-delegate",
-      "enabled": true,
-      "reason": "Delegate a scoped write task to another agent CLI in an isolated worktree and review the returned patch.",
-      "triggers": [
-        "peer delegate",
-        "codex한테 시켜",
-        "codex에게 시켜",
-        "claude한테 시켜",
-        "agy한테 시켜",
-        "위임해줘",
-        "delegate to",
-        "have codex implement",
-        "맡겨줘"
       ]
     },
     {

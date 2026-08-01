@@ -91,7 +91,7 @@ Update oh-my-setting and re-run its doctor.
 Your agent picks these up on its own when a task calls for them. The full
 per-script catalog is [docs/COMPONENTS.md](docs/COMPONENTS.md).
 
-Every installation exposes the same eight general-purpose skills. ML, Slurm,
+Every installation exposes the same five general-purpose skills. ML, Slurm,
 and workstation details stay in project templates or `oms` command help, so
 unrelated sessions do not carry domain-specific skill context.
 

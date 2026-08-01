@@ -491,11 +491,13 @@ contains partitions, nodes, current-user associations/accounts, QOS/limits, a
 captured queue view, and exact configured CPU/memory/time defaults
 
 **Skill catalog** — Every install exposes the same compact, general-purpose
-set: `agent-harness`, `oh-my-setting-ops`, `peer-ask`, `peer-review`,
-`peer-delegate`, `spec-interview`, `trace`, and `trust-boundary`. The last is a
+set: `agent-harness`, `oh-my-setting-ops`, `spec-interview`, `trace`, and
+`trust-boundary`. Consultation, independent diff review, and isolated write
+delegation are internal `agent-harness` routes; their `oms` commands remain
+separate because their authority differs. `trust-boundary` is a
 language-neutral security method for material trust boundaries, not a broad
-framework checklist. Domain and machine guidance lives in project templates or
-command help, so it does not occupy the global skill catalog.
+framework checklist. Domain and machine guidance lives in project templates
+or command help, so it does not occupy the global skill catalog.
 
 ## Code sources
 

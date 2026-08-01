@@ -15,6 +15,19 @@ It picks a provider other than the caller, attaches the active task and shared
 memory, injects the running conversation, records question and answer, and
 prints the answer. Artifacts land under `.oms/artifacts/consult`.
 
+For independent answers to the same conceptual or planning question, use the
+symmetric council instead of a diff review:
+
+```bash
+oms peer-ask --prompt "Compare the two designs for this constraint."
+```
+
+Choose the smallest context: none for a concept, `--repo-context` for repository
+state, `--diff` for an uncommitted change, or a local summary of specific files.
+Use `--debate 1` only when answers materially disagree. If policy forbids direct
+provider calls, use `--export-only` and import the answer with
+`oms import-agent-result`.
+
 ## Consult during work, not only at gates
 
 Consult when another model's independent view changes what you do next:

@@ -88,7 +88,7 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 전부 agent가 필요할 때 알아서 집어 쓴다. 스크립트별 전체 카탈로그는
 [docs/COMPONENTS.md](docs/COMPONENTS.md)에 있다.
 
-모든 설치는 동일한 범용 skill 8개만 노출한다. ML·Slurm·workstation 세부 지침은
+모든 설치는 동일한 범용 skill 5개만 노출한다. ML·Slurm·workstation 세부 지침은
 프로젝트 템플릿이나 `oms` 명령 도움말에만 두어 무관한 세션이 도메인 전용 skill
 context를 부담하지 않게 한다.
 

@@ -2,7 +2,8 @@
 name: agent-harness
 description: >
   Shared state and multi-agent coordination for resume, memory, plans, recovery,
-  roles/executors, provider/model routing, patch landing, artifacts, and session
+  roles/executors, provider/model routing, peer consultation, independent diff
+  review, isolated write delegation, patch landing, artifacts, and session
   handoff across Codex, Claude Code, and Antigravity.
 ---
 
@@ -22,7 +23,7 @@ every row rather than grouped by feature.
 |---|---|---|
 | start or resume and the state is unclear | `oms state --repo .` (`oms init` only for a fresh repo) | read |
 | check what is already known, or record what you learned | `oms agent-memory recall "…"`; `append`/`pin` to add | read, append |
-| decide, and an outside view would change the next step | `oms consult "question"` (`--all` for every peer) | read |
+| decide, and an outside view would change the next step | `oms consult "question"`; use `oms peer-ask --prompt "…"` for the same question to several peers | read |
 | act irreversibly, or fail the same way twice | `oms fail-ledger check --cmd "…"`, then `oms advise` | read |
 | hand work to another model | `oms peer-delegate --to NAME` (returns a patch) | worktree write |
 | split work so several agents can proceed | `oms agent-plan add`, then `oms plan-run` | worktree write |
@@ -60,6 +61,8 @@ every row rather than grouped by feature.
   [delegation-artifacts.md](references/delegation-artifacts.md)
 - Consulting peers and shared conversation threads:
   [cross-agent-consultation.md](references/cross-agent-consultation.md)
+- Diff review, release gates, and export/import:
+  [review-gates.md](references/review-gates.md)
 - Model selection, capability checks, quorum diversity:
   [model-routing.md](references/model-routing.md)
 - Prior provider session: [session-handoff.md](references/session-handoff.md)

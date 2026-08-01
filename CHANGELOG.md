@@ -73,15 +73,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   only its own command path, and removes only its own entry on uninstall.
 
 ### Changed
-- Every install now exposes one eight-skill, general-purpose catalog. Added a
+- Every install now exposes one five-skill, general-purpose catalog. Added a
   compact, language-neutral `trust-boundary` method for security-sensitive
   changes and threat models. Removed
   the project- or machine-specific `chem-bio-ml`, `ml-training`,
   `research-method`, `slurm-hpc`, and `tsp-queue` skills; their useful runtime
   commands and project templates remain available without occupying global
-  skill context. Consultation triggers now belong to `peer-ask` instead of
-  competing with `agent-harness`, and the private Slurm snapshot moved to
-  `local/slurm.md`.
+  skill context. Folded the `peer-ask`, `peer-review`, and `peer-delegate` skill
+  front doors into `agent-harness` while retaining their authority-specific
+  `oms` commands, and moved the private Slurm snapshot to `local/slurm.md`.
 
 ### Fixed
 - `skill-doctor` now checks the shared `~/.agents/skills` root and detects a

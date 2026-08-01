@@ -5745,11 +5745,10 @@ test_link_and_unlink_with_home_override() {
   assert_symlink_to "$home_dir/.codex/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
   assert_symlink_to "$home_dir/.claude/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
   assert_symlink_to "$home_dir/.gemini/antigravity/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
-  [ "$(readlink "$home_dir/.codex/skills/peer-ask")" = \
-    "$ROOT/custom-skills/peer-ask" ] ||
-    fail "stale skill symlink not replaced"
-  find "$home_dir/.codex/skills" -maxdepth 1 -name 'peer-ask.backup.*' | grep -q . ||
-    fail "foreign skill symlink should be backed up before replacement"
+  assert_symlink_to "$home_dir/.codex/skills/peer-ask" "$home_dir/old-skills/peer-ask"
+  if find "$home_dir/.codex/skills" -maxdepth 1 -name 'peer-ask.backup.*' | grep -q .; then
+    fail "retired peer skill must not replace or back up a foreign skill"
+  fi
   [ ! -e "$home_dir/.codex/skills/oh-my-setting" ] ||
     fail "legacy grouped skill symlink not removed"
   [ ! -e "$home_dir/.agents/skills/peer-ask" ] ||
@@ -9033,9 +9032,6 @@ root = pathlib.Path(sys.argv[1])
 expected = {
     "agent-harness",
     "oh-my-setting-ops",
-    "peer-ask",
-    "peer-delegate",
-    "peer-review",
     "spec-interview",
     "trace",
     "trust-boundary",
@@ -9069,9 +9065,13 @@ test_large_skills_use_progressive_disclosure() {
 
   skill="$ROOT/custom-skills/agent-harness/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 650 ] || fail "agent-harness router is too large"
-  for ref in state-memory plans-recovery roles-executors delegation-artifacts session-handoff; do
+  for ref in state-memory plans-recovery roles-executors cross-agent-consultation \
+    delegation-artifacts review-gates session-handoff; do
     assert_file_contains "$skill" "references/$ref.md"
     [ -f "$ROOT/custom-skills/agent-harness/references/$ref.md" ] || fail "missing agent-harness reference: $ref"
+  done
+  for command in "oms consult" "oms peer-review --gate" "oms peer-delegate --to NAME"; do
+    assert_file_contains "$skill" "$command"
   done
 
   skill="$ROOT/custom-skills/spec-interview/SKILL.md"
@@ -9079,15 +9079,6 @@ test_large_skills_use_progressive_disclosure() {
   for ref in question-ui project-bootstrap spec-templates; do
     assert_file_contains "$skill" "references/$ref.md"
   done
-
-  skill="$ROOT/custom-skills/peer-review/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "peer-review router is too large"
-  for ref in context-safety gate-loop export-import; do
-    assert_file_contains "$skill" "references/$ref.md"
-  done
-
-  skill="$ROOT/custom-skills/peer-delegate/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 350 ] || fail "peer-delegate front door is too large"
 
   # A method, not a catalogue: the whole value is the contract, the evidence
   # ranking, and the three commands it hands off to. Anything longer is prose
@@ -9718,11 +9709,13 @@ test_skill_router_matches_and_dedupes() {
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "oh-my-setting-ops" ||
     fail "router must not suppress later identical prompts when turn_id is absent"
-  # New session: suggests again; multi-match caps at two skills.
+  # Multiple peer intents collapse to the one harness front door.
   out="$(printf '{"prompt":"peer review하고 의견 물어봐","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "peer-ask" || fail "router should suggest peer-ask in a new session"
-  printf '%s' "$out" | grep -Fq "peer-review" || fail "router should include the second match"
+  printf '%s' "$out" | grep -Fq "agent-harness" || fail "peer intents should route to agent-harness"
+  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+    fail "retired peer skill names must not be suggested"
+  fi
 }
 
 test_skill_router_separates_consultation_from_delegation() {
@@ -9733,16 +9726,16 @@ test_skill_router_separates_consultation_from_delegation() {
   make_committed_repo "$project"
   out="$(printf '{"prompt":"codex한테 의견 물어봐","session_id":"ask1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'peer-ask' || fail "consultation should route to peer-ask"
-  if printf '%s' "$out" | grep -Fq 'peer-delegate'; then
-    fail "consultation must not route to the write delegate"
+  printf '%s' "$out" | grep -Fq 'agent-harness' || fail "consultation should route to agent-harness"
+  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+    fail "consultation must not expose a retired peer skill"
   fi
 
   out="$(printf '{"prompt":"codex한테 시켜: README 고쳐","session_id":"write1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'peer-delegate' || fail "write delegation should route to peer-delegate"
-  if printf '%s' "$out" | grep -Fq 'peer-ask'; then
-    fail "write delegation must not route to the consultation skill"
+  printf '%s' "$out" | grep -Fq 'agent-harness' || fail "write delegation should route to agent-harness"
+  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+    fail "write delegation must not expose a retired peer skill"
   fi
 }
 
