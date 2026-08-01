@@ -9765,6 +9765,9 @@ test_skill_router_routes_trust_boundary_precisely() {
 threat model this webhook before release
 이 결제 권한의 보안 경계를 검토해줘
 map the abuse path for this file upload
+run a security review of this file upload
+add authorization to this API endpoint
+check secret handling for this payment webhook
 EOF
 
   i=0
@@ -9778,8 +9781,8 @@ EOF
     fi
   done <<'EOF'
 rename the internal boundary helper
-run a generic security review of this file upload
-add authorization to this API endpoint
+review the API documentation formatting
+fix the authorization spelling in this comment
 EOF
 }
 
@@ -10310,8 +10313,13 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
     --source-session 0123456789abcdef >/dev/null
   task_id="$("$sh" --repo "$d" status | awk '$1=="task_id:"{print $2}')"
   [ -n "$task_id" ] || fail "task init should assign a task id"
-  "$sh" --repo "$d" status | grep -Fq 'status: active' ||
-    fail "new tasks should be active"
+  # Capture-first: when this assertion flakes under load, the failure message
+  # must carry what status actually said — 'none' (file looked empty),
+  # 'active' (reader fell back), or truncated output each name a different
+  # mechanism, and the pipeline form discarded exactly that datum.
+  out="$("$sh" --repo "$d" status)"
+  printf '%s\n' "$out" | grep -Fq 'status: active' ||
+    fail "new tasks should be active; status said: $out"
 
   for n in 1 2 3 4 5; do
     OMS_AGENT_TASK_MAX_CURRENT_BULLETS=3 \
@@ -10321,8 +10329,9 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
     fail "Current State should retain only the configured newest bullets"
 
   "$sh" --repo "$d" verify --verification "checks passed" >/dev/null
-  "$sh" --repo "$d" status | grep -Fq 'status: verified' ||
-    fail "verify should mark lifecycle status"
+  out="$("$sh" --repo "$d" status)"
+  printf '%s\n' "$out" | grep -Fq 'status: verified' ||
+    fail "verify should mark lifecycle status; status said: $out"
   "$sh" --repo "$d" init --goal "second" >/dev/null
   archive="$(find "$d/.oms/task/archive" -type f -name "$task_id-*.md" | head -n 1)"
   [ -n "$archive" ] || fail "a new explicit goal should archive the previous task by id"

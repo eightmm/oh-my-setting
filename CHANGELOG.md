@@ -7,6 +7,28 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Shared-state files are replaced with a same-directory rename. The
+  task-packet and memory-summary writers staged their scratch under TMPDIR
+  and `mv`'d it over the target; with TMPDIR on a different filesystem than
+  the repo (tmpfs /tmp against an ext4 checkout — the ordinary case) that
+  degrades to copy+unlink, and every concurrent reader — another agent
+  session, the work-journal observer, repo-state — had a window where the
+  file was empty or truncated. `agent-task status` answers `status: none`
+  with exit 0 for exactly that window, the most plausible mechanism behind a
+  load-dependent lifecycle-test flake (diagnosed with an advisor pass, whose
+  capture-first assertion prescription is also in). gc now reclaims a
+  crashed writer's `.oms-replace.*` scratch after an hour, and leaves fresh
+  scratch to the writer that may still hold it.
+- The default advisor and consult peers exclude the *detected* caller. Both
+  pickers excluded `${OMS_AGENT:-}`, which interactive sessions never
+  export, so an empty caller made the exclusion loop a no-op: a Claude
+  session asking for an outside read got Claude — replication presented as
+  independence, observed live when a flake advisory routed to the session's
+  own family. One shared `oms_peer_caller` (OMS_AGENT when set, detected
+  session identity otherwise, unknown excludes nothing) now feeds both, with
+  `--to`/`OMS_ADVISOR_PROVIDER` overrides and the last-resort self-advice
+  fallback unchanged; `tests/advisor-routing-smoke.sh` pins the contract as
+  its own gate stage.
 - Doctor counts unindexed artifacts with the same grace window `prune --files`
   deletes with. A live provider call writes its artifact before the index row
   lands, so the age-blind count warned about in-flight council runs and then
@@ -52,7 +74,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 - Every install now exposes one eight-skill, general-purpose catalog. Added a
-  compact, language-neutral `trust-boundary` threat-model method. Removed
+  compact, language-neutral `trust-boundary` method for security-sensitive
+  changes and threat models. Removed
   the project- or machine-specific `chem-bio-ml`, `ml-training`,
   `research-method`, `slurm-hpc`, and `tsp-queue` skills; their useful runtime
   commands and project templates remain available without occupying global
