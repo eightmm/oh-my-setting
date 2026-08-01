@@ -9017,17 +9017,31 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-expected = {
+general = {
     "agent-harness",
     "oh-my-setting-ops",
     "spec-interview",
     "trace",
     "trust-boundary",
 }
+# Machine-conditional skills: linked only where every `requires` command
+# exists, so unrelated sessions never carry them. A conditional skill without
+# `requires` would silently join the general catalog; a general skill with
+# `requires` would silently vanish from some machines.
+conditional = {
+    "slurm",
+    "gpu-workstation",
+}
+expected = general | conditional
 skills = json.loads((root / "skills.manifest.json").read_text(encoding="utf-8"))["skills"]
 names = {row["name"] for row in skills}
 assert names == expected, (sorted(names - expected), sorted(expected - names))
 assert all(row.get("enabled") is True for row in skills)
+for row in skills:
+    if row["name"] in conditional:
+        assert row.get("requires"), "conditional skill must declare requires: %s" % row["name"]
+    else:
+        assert not row.get("requires"), "general skill must not declare requires: %s" % row["name"]
 
 on_disk = {
     path.parent.name

@@ -55,6 +55,15 @@ def main() -> int:
         if not name or not source:
             errors.append("manifest entry requires non-empty name and source")
             continue
+        # Machine-conditional skills: `requires` lists command names probed on
+        # PATH at link/route time. Validate the shape here; satisfaction is a
+        # per-machine question the validator must not answer.
+        requires = entry.get("requires", [])
+        if not isinstance(requires, list) or any(
+            not isinstance(req, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", req)
+            for req in requires
+        ):
+            errors.append(f"invalid requires (list of command names): {name}")
         if name in names:
             errors.append(f"duplicate skill name: {name}")
         if source in sources:

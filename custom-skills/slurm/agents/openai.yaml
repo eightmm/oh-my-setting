@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slurm"
+  short_description: "Cluster work via the private reference"
+  default_prompt: "Use $slurm to answer this from the cluster reference and submit or review the job properly."

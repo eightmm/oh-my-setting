@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -693,6 +694,14 @@ def cmd_route(args: argparse.Namespace) -> int:
     scored: list[tuple[int, str]] = []
     for skill in load_skills(args.manifest):
         if not skill.get("enabled") or not skill.get("triggers"):
+            continue
+        # Machine-conditional skills are not linked where their required
+        # commands are absent; suggesting one there would name a skill the
+        # session cannot load.
+        if any(
+            shutil.which(str(req)) is None
+            for req in (skill.get("requires") or [])
+        ):
             continue
         triggers = [str(t).lower() for t in skill.get("triggers", [])]
         hits = sum(1 for trigger in triggers if trigger in lower)

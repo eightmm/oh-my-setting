@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Machine-conditional skills: a manifest entry may declare
+  `"requires": ["cmd", ...]`, and the skill links, routes, and doctors only
+  on machines where every listed command exists — link removes the links
+  when a machine loses the command, the router never suggests a skill the
+  session cannot load, and the doctor reports the skip as a note. First
+  two: `slurm` (requires `sinfo`) — answer cluster questions from the
+  private reference (partitions, node/GPU inventory, and the
+  `sacctmgr show assoc`/`show qos` account limits) instead of re-probing
+  nodes, submit with fail-fast discipline, digest and reconcile job logs —
+  and `gpu-workstation` (requires `nvidia-smi`) — check VRAM first,
+  serialize runs through the tsp queue, triage CUDA OOM in order. The
+  general catalog stays exactly five everywhere else.
 - A read-only harness-state MCP server (`oms-mcp-server.py`): task packet,
   fail-ledger, handoff digests, and Work Journal of a repository as MCP
   tools, so every MCP client reads the same state with no per-CLI hook code.

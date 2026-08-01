@@ -211,6 +211,83 @@ test_router_state_hint_skips_unadopted_repo() {
   [ ! -d "$repo/.oms" ] || fail "the hint must not create .oms in a plain directory"
 }
 
+# --- machine-conditional skills ---------------------------------------------
+
+# A deterministic PATH: real tools by symlink, nothing else — so a command's
+# absence can be asserted even on machines that actually have it.
+make_toolbox() {
+  local dir="$1"
+  local cmd path
+
+  mkdir -p "$dir"
+  for cmd in bash sh python3 git ln mkdir rm rmdir mv cp ls basename dirname \
+    grep sed find sort tr cat printf echo date mktemp chmod readlink id \
+    uname wc head tail awk cmp touch env cut cksum sha256sum flock xargs \
+    sleep; do
+    path="$(command -v "$cmd" 2>/dev/null)" || continue
+    ln -sf "$path" "$dir/$cmd"
+  done
+}
+
+test_conditional_skills_link_only_where_required_commands_exist() {
+  local toolbox="$TMP/cond-toolbox"
+  local stub="$TMP/cond-stub"
+  local home="$TMP/cond-home"
+  local out
+
+  make_toolbox "$toolbox"
+  mkdir -p "$stub" "$home"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$stub/sinfo"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$stub/nvidia-smi"
+  chmod +x "$stub/sinfo" "$stub/nvidia-smi"
+
+  # Without the commands: base skills link, conditional skills do not.
+  PATH="$toolbox" HOME="$home" bash "$ROOT/scripts/link.sh" >/dev/null
+  [ -e "$home/.codex/skills/agent-harness" ] || fail "base skill missing"
+  [ ! -e "$home/.codex/skills/slurm" ] ||
+    fail "slurm skill linked without sinfo"
+  [ ! -e "$home/.codex/skills/gpu-workstation" ] ||
+    fail "gpu-workstation linked without nvidia-smi"
+
+  # With the commands: both conditional skills appear.
+  PATH="$stub:$toolbox" HOME="$home" bash "$ROOT/scripts/link.sh" >/dev/null
+  [ -e "$home/.codex/skills/slurm" ] || fail "slurm skill not linked with sinfo"
+  [ -e "$home/.codex/skills/gpu-workstation" ] ||
+    fail "gpu-workstation not linked with nvidia-smi"
+
+  # Machine lost the commands: the next link converges by removing them.
+  out="$(PATH="$toolbox" HOME="$home" bash "$ROOT/scripts/link.sh")"
+  [ ! -e "$home/.codex/skills/slurm" ] ||
+    fail "slurm link should be removed once sinfo is gone"
+  printf '%s' "$out" | grep -Fq "unlinked disabled skill" ||
+    fail "removal should be reported: $out"
+}
+
+test_router_skips_conditional_skill_without_command() {
+  local toolbox="$TMP/router-toolbox"
+  local stub="$TMP/router-stub"
+  local repo="$TMP/router-cond-repo"
+  local payload out
+
+  make_toolbox "$toolbox"
+  mkdir -p "$stub" "$repo"
+  git -C "$repo" init -q
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$stub/sinfo"
+  chmod +x "$stub/sinfo"
+  payload='{"prompt":"sbatch로 잡 제출하고 squeue 봐줘","session_id":"s","turn_id":"t"}'
+
+  out="$(printf '%s' "$payload" | PATH="$stub:$toolbox" \
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "slurm" ||
+    fail "router should suggest slurm when sinfo exists: $out"
+
+  out="$(printf '%s' "$payload" | PATH="$toolbox" \
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq "slurm"; then
+    fail "router must not suggest slurm without sinfo: $out"
+  fi
+}
+
 # --- slurm generator rename -------------------------------------------------
 
 test_slurm_reference_rename_keeps_compat() {
@@ -229,6 +306,8 @@ test_install_mcp_registers_and_is_idempotent
 test_install_agy_plugin_bakes_absolute_paths
 test_router_state_hint_on_unresolved_failures
 test_router_state_hint_skips_unadopted_repo
+test_conditional_skills_link_only_where_required_commands_exist
+test_router_skips_conditional_skill_without_command
 test_slurm_reference_rename_keeps_compat
 
 echo "state-surfaces-smoke: ok"

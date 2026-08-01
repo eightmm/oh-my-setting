@@ -273,16 +273,32 @@ check_custom_skills() {
   while IFS= read -r source; do
     source="${source%%$'\r'}"
     [ -n "$source" ] || continue
+    case "$source" in
+      skip:*)
+        echo "note: skill ${source#skip:} (machine-conditional)"
+        continue
+        ;;
+    esac
     skill="$INSTALL_ROOT/$source"
     name="$(basename "$skill")"
     check_path "$target_root/$name" "$skill"
   done < <(python3 - "$INSTALL_ROOT/skills.manifest.json" <<'PY'
 import json
+import shutil
 import sys
 for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
     source = str(skill.get("source", ""))
-    if skill.get("enabled") is True and source.startswith("custom-skills/"):
-        print(source)
+    if skill.get("enabled") is not True or not source.startswith("custom-skills/"):
+        continue
+    missing = [
+        str(req) for req in (skill.get("requires") or [])
+        if shutil.which(str(req)) is None
+    ]
+    if missing:
+        print("skip:%s not linked here (requires %s)" % (
+            skill.get("name", source), ", ".join(missing)))
+        continue
+    print(source)
 PY
 )
 }

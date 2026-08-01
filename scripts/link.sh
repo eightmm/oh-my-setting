@@ -102,13 +102,22 @@ link_skills() {
   mkdir -p "$target_root"
   oms_ops_clean_backup_skill_links "$target_root" 0
 
+  # A skill with `requires` is linked only where every listed command exists,
+  # so a Slurm skill never reaches a workstation. A requires-failed skill is
+  # simply absent from this list, which makes the disabled-link sweep below
+  # remove it — a machine that lost the command converges on the next link.
   enabled_sources="$(python3 - "$ROOT/skills.manifest.json" <<'PY'
 import json
+import shutil
 import sys
 for skill in json.load(open(sys.argv[1], encoding="utf-8")).get("skills", []):
     source = str(skill.get("source", ""))
-    if skill.get("enabled") is True and source.startswith("custom-skills/"):
-        print(source)
+    if skill.get("enabled") is not True or not source.startswith("custom-skills/"):
+        continue
+    requires = skill.get("requires") or []
+    if any(shutil.which(str(req)) is None for req in requires):
+        continue
+    print(source)
 PY
 )"
   # Windows Python writes CRLF. Normalize the captured list once: both the loop

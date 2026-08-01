@@ -121,6 +121,48 @@
       ]
     },
     {
+      "name": "slurm",
+      "source": "custom-skills/slurm",
+      "enabled": true,
+      "requires": ["sinfo"],
+      "reason": "On Slurm machines, answer cluster questions from the private reference and run jobs through the harness tools instead of re-probing nodes every session.",
+      "triggers": [
+        "slurm",
+        "sbatch",
+        "srun",
+        "squeue",
+        "sinfo",
+        "파티션",
+        "노드 상태",
+        "노드 정보",
+        "잡 제출",
+        "잡 상태",
+        "클러스터 큐",
+        "gpu 노드",
+        "큐 상태"
+      ]
+    },
+    {
+      "name": "gpu-workstation",
+      "source": "custom-skills/gpu-workstation",
+      "enabled": true,
+      "requires": ["nvidia-smi"],
+      "reason": "On local GPU machines, check VRAM first, serialize runs through the tsp queue, and triage OOM systematically.",
+      "triggers": [
+        "nvidia-smi",
+        "vram",
+        "gpu 메모리",
+        "gpu 확인",
+        "cuda out of memory",
+        "cuda oom",
+        "oom",
+        "gpu 큐",
+        "tsp",
+        "학습 돌려",
+        "학습 시작"
+      ]
+    },
+    {
       "name": "trust-boundary",
       "source": "custom-skills/trust-boundary",
       "enabled": true,
