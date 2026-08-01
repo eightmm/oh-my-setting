@@ -94,6 +94,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   500-line progressive-disclosure budget.
 
 ### Fixed
+- Switching a project's base style now retires the previous one. Managed
+  rule blocks are per-style, so applying `ml` over `general` left both in
+  place and the agent read two loaders with conflicting rules — found by
+  applying the ml template to a real research repo. Only the mutually
+  exclusive base styles (general, ml) are replaced; the slurm overlay
+  follows machine detection and is removed only by an explicit
+  `remove-project-template.sh slurm`. The ml and slurm templates also point
+  at `oms generate-slurm-reference` instead of the retired name.
 - Session-handoff digests land in the project repo, not the harness checkout.
   The default output directory was the oh-my-setting checkout's own
   `.oms/handoffs/`, while the Work Journal's newest-handoff pointer scans the

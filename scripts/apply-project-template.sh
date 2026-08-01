@@ -289,8 +289,38 @@ apply_one() {
   mv "$tmp" "$target"
 }
 
+# Switching a project's base style must retire the one it had. Managed blocks
+# are per-style, so applying `ml` over `general` used to leave both in place
+# and the agent read two loaders with different rules.
+#
+# Base styles (general, ml) are mutually exclusive and safe to replace. The
+# slurm block is an additive overlay whose presence follows machine detection
+# (has_slurm_runtime), so re-applying `ml` from a workstation must not strip
+# the cluster rules a cluster project deliberately carries — removing that is
+# `remove-project-template.sh slurm`, an explicit act.
+drop_stale_styles() {
+  local rel="$1"
+  local target="$PROJECT_DIR/$rel"
+  local style
+
+  [ -f "$target" ] || return 0
+  [ -n "$BASE_STYLE" ] || return 0
+  for style in general ml; do
+    [ "$style" = "$BASE_STYLE" ] && continue
+    grep -Fq "<!-- oh-my-setting:${style}:begin -->" "$target" || continue
+    if [ "$DRY_RUN" = "1" ]; then
+      printf 'would remove stale %s block from %s/%s\n' "$style" "$PROJECT_DIR" "$rel"
+      continue
+    fi
+    "$ROOT/scripts/remove-project-template.sh" "$style" "$PROJECT_DIR" "$rel" \
+      >/dev/null 2>&1 ||
+      printf 'warn: could not remove stale %s block from %s\n' "$style" "$rel" >&2
+  done
+}
+
 for f in "${FILES[@]}"; do
   applied=()
+  drop_stale_styles "$f"
   if [ -n "$BASE_STYLE" ]; then
     apply_one "$f" "$BASE_STYLE" "$TEMPLATE"
     applied+=("$BASE_STYLE")

@@ -389,6 +389,42 @@ test_task_close_hints_at_forging_learned_lessons() {
     fail "close should hint at promoting a resolved repeated failure: $out"
 }
 
+test_template_style_switch_retires_the_old_block() {
+  local project="$TMP/style-switch"
+
+  mkdir -p "$project"
+  git -C "$project" init -q 2>/dev/null || true
+  bash "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null 2>&1 ||
+    fail "general template apply failed"
+  grep -Fq "oh-my-setting:general:begin" "$project/AGENTS.md" ||
+    fail "general block missing after apply"
+
+  bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||
+    fail "ml template apply failed"
+  grep -Fq "oh-my-setting:ml:begin" "$project/AGENTS.md" ||
+    fail "ml block missing after switch"
+  # Two loaders with different rules is the bug this guards: the retired
+  # style must be gone from every managed file, not merely superseded.
+  local f
+  for f in AGENTS.md CLAUDE.md; do
+    if grep -Fq "oh-my-setting:general:begin" "$project/$f"; then
+      fail "stale general block survived the switch in $f"
+    fi
+  done
+
+  # The slurm overlay is additive and follows machine detection, so a
+  # re-apply from a machine without Slurm must not strip cluster rules a
+  # project deliberately carries. Only an explicit remove does that.
+  bash "$ROOT/scripts/apply-project-template.sh" slurm "$project" >/dev/null 2>&1 ||
+    fail "slurm overlay apply failed"
+  grep -Fq "oh-my-setting:slurm:begin" "$project/AGENTS.md" ||
+    fail "slurm overlay missing after apply"
+  bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||
+    fail "re-applying ml failed"
+  grep -Fq "oh-my-setting:slurm:begin" "$project/AGENTS.md" ||
+    fail "re-applying a base style must not strip the slurm overlay"
+}
+
 test_ml_template_installs_project_skills() {
   local project="$TMP/ml-skills-proj"
 
@@ -441,6 +477,7 @@ test_skill_forge_stores_links_and_hides
 test_skill_forge_rejects_thin_and_sensitive
 test_task_close_hints_at_forging_learned_lessons
 test_ml_template_installs_project_skills
+test_template_style_switch_retires_the_old_block
 test_slurm_reference_rename_keeps_compat
 
 echo "state-surfaces-smoke: ok"

@@ -27,7 +27,7 @@
 Use `oms data-manifest` for registered split/leakage checks and `oms
 research-runner` for pre-registered claims; use the raw run ledger for
 mechanical runs. Queue workstation jobs with `oms tsp-queue`. For Slurm work,
-refresh the private cluster snapshot with `oms generate-slurm-skill` and use
+refresh the private cluster snapshot with `oms generate-slurm-reference` and use
 `oms job-digest` or `oms run-reconcile` for long or finished jobs.
 
 Use `scripts/check.sh fast` as the default project verification contract when
