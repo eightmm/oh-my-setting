@@ -148,7 +148,7 @@
       "name": "trust-boundary",
       "source": "custom-skills/trust-boundary",
       "enabled": true,
-      "reason": "Threat-model explicit trust boundaries and abuse paths with scoped negative-path evidence instead of competing with broad security checklists.",
+      "reason": "Review security-sensitive changes and explicit threat models with scoped trust-boundary and negative-path evidence.",
       "triggers": [
         "trust boundary",
         "threat model",
@@ -159,7 +159,18 @@
         "보안 경계",
         "공격 경로",
         "security release gate",
-        "보안 릴리스 게이트"
+        "보안 릴리스 게이트",
+        "security review",
+        "보안 리뷰",
+        "add authentication",
+        "인증 추가",
+        "add authorization",
+        "권한 검사",
+        "file upload security",
+        "secret handling",
+        "payment security",
+        "webhook security",
+        "sensitive data"
       ]
     }
   ]

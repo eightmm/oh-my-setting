@@ -1,11 +1,11 @@
 ---
 name: trust-boundary
 description: >
-  Threat-model a change by tracing assets, actors, trust boundaries, abuse
-  paths, controls, and verification evidence. Use only when the user explicitly
-  requests a threat model, abuse-path analysis, trust-boundary review, or
-  security release gate. Do not invoke for routine authentication, input, API,
-  secret, or internal implementation work.
+  Review or implement a security-sensitive change by tracing assets, actors,
+  trust boundaries, abuse paths, controls, and verification evidence. Use for
+  threat models and security gates, or when changing authentication,
+  authorization, untrusted input or files, secrets, public endpoints,
+  payments, webhooks, or sensitive data. Skip routine internal-only edits.
 ---
 
 # Trust Boundary Review
