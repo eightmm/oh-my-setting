@@ -216,14 +216,21 @@ def notion_presentation(content: str) -> str:
     """
 
     citation = re.compile(r"\s*\[wj_[0-9a-f]{8,}.*\]\s*$")
-    commit_prefix = re.compile(r"^- Commit [0-9a-f]{7,40}: ")
+    commit_prefix = re.compile(r"^- ((?:작업|work): )?Commit [0-9a-f]{7,40}: ")
+    evidence_bullet = re.compile(r"^- (관련 evidence|related evidence): ")
     lines: List[str] = []
     seen: set = set()
     for line in content.splitlines():
         if line.startswith("#"):
             seen = set()
         if line.startswith("- "):
-            stripped = commit_prefix.sub("- ", citation.sub("", line))
+            # Raw evidence references (full hashes, task ids) are the local
+            # provenance layer, not reading material.
+            if evidence_bullet.match(line):
+                continue
+            stripped = commit_prefix.sub(
+                lambda m: "- " + (m.group(1) or ""), citation.sub("", line)
+            )
             if stripped in seen:
                 continue
             seen.add(stripped)

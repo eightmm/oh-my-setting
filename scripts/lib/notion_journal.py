@@ -34,6 +34,7 @@ NOTION_COLLAPSED_SECTIONS = frozenset(
         "프로젝트별 작업", "Work by project",
         "프로젝트별 진전", "Progress by project",
         "완료하거나 검증한 작업", "Completed or verified",
+        "아직 검증되지 않은 것", "Not yet verified",
     }
 )
 NOTION_MAX_INLINE_RETRY_DELAY = 2.0
@@ -836,6 +837,13 @@ class NotionJournalExporter:
                 close_toggle()
                 emit({"object": "block", "type": "divider", "divider": {}})
             elif heading:
+                # A per-project ### subsection belongs to the listing above
+                # it: only a section heading (## or #) leaves an open toggle.
+                if len(heading.group(1)) >= 3 and state["toggle"] is not None:
+                    append_text_blocks(
+                        "heading_%d" % len(heading.group(1)), heading.group(2)
+                    )
+                    continue
                 close_toggle()
                 title = heading.group(2)
                 if (

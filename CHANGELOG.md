@@ -35,7 +35,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   update so pre-existing pages pick it up), and the progress listing
   publishes as a collapsed toggle — the page opens on judgment, the commit
   detail unfolds on demand, and a nested-limit note replaces overflow past
-  the API's per-block child cap.
+  the API's per-block child cap. A review of the live page tightened the
+  same pass further: the not-yet-verified listing collapses too, per-project
+  `###` subsections stay inside their toggle instead of ending it, labeled
+  commit bullets (`작업: Commit <hash>:`) lose the hash prefix, and raw
+  evidence-reference bullets (full hashes, task ids) stay local — three
+  near-identical listings no longer render three times uncollapsed.
 
 ### Added
 - `oms support-bundle [--out DIR] [--dry-run]`: redaction-first diagnostic

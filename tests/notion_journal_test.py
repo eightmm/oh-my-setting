@@ -702,6 +702,20 @@ class HumanPageTest(unittest.TestCase):
             [block["type"] for block in children[1:]],
         )
 
+    def test_subsection_heading_stays_inside_the_toggle(self):
+        children = notion.NotionJournalExporter._summary_children(
+            "## 프로젝트별 작업\n### oh-my-setting\n- 작업: one\n\n## 의사결정\n- decided"
+        )
+        self.assertEqual("toggle", children[0]["type"])
+        self.assertEqual(
+            ["heading_3", "bulleted_list_item"],
+            [block["type"] for block in children[0]["toggle"]["children"]],
+        )
+        self.assertEqual(
+            ["heading_2", "bulleted_list_item"],
+            [block["type"] for block in children[1:]],
+        )
+
     def test_toggle_nested_overflow_is_truncated_with_a_note(self):
         lines = ["## Key progress"] + [
             "- item %d" % index

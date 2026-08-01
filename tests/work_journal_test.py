@@ -858,6 +858,22 @@ class NotionPresentationTest(unittest.TestCase):
         # A section that says nothing is dropped from the human view.
         self.assertNotIn("## 다음 우선순위", rendered)
 
+    def test_drops_evidence_bullets_and_labeled_commit_prefixes(self):
+        content = "\n".join(
+            [
+                "## 프로젝트별 작업",
+                "### proj",
+                "- 작업: Commit 0e0390aa9589: test: capture status output",
+                "- 관련 evidence: git-commit:0e0390aa95893b50e14bdf78d60f5c5d3090cf8d",
+                "- 결과: recorded",
+            ]
+        )
+        rendered = wj.notion_presentation(content)
+        self.assertIn("- 작업: test: capture status output", rendered)
+        self.assertNotIn("Commit 0e0390aa9589", rendered)
+        self.assertNotIn("관련 evidence", rendered)
+        self.assertIn("- 결과: recorded", rendered)
+
     def test_dedup_scope_resets_per_section(self):
         content = "\n".join(
             [
