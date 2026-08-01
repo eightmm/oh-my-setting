@@ -7,6 +7,29 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- A read-only harness-state MCP server (`oms-mcp-server.py`): task packet,
+  fail-ledger, handoff digests, and Work Journal of a repository as MCP
+  tools, so every MCP client reads the same state with no per-CLI hook code.
+  `install-mcp.sh` registers it with Claude Code (user scope) and Codex;
+  Antigravity receives it through a new `agy` plugin
+  (`install-agy-plugin.sh`), which bakes this checkout's absolute paths at
+  import time because `agy plugin install` copies the directory verbatim.
+  All three paths verified live: claude reports the server Connected, and a
+  headless `agy -p` call returned real task state through it. The consult
+  permission profile now grants `mcp(*)` — probed on Antigravity 1.1.9,
+  scoped `mcp(...)` targets do not match, the same non-convergence that
+  makes `command(*)` the command rule. The agy plugin carries no hooks: a
+  probe showed no hook event fires headlessly on 1.1.9, and the harness
+  ships only surfaces it can verify. install.sh/update.sh wire both
+  installers; uninstall removes both registrations.
+- State-conditional router hints: the skill router injects the one thing
+  native description matching cannot know — this repository's harness state.
+  A stale active task packet, or two or more unresolved fail-ledger rows,
+  produces a one-line reminder at most once per local day per repo
+  (`OMS_STATE_HINTS=0` opts out; harness-adopted repos only; fail-open).
+- `generate-slurm-reference.sh`: the honest name for what the script writes
+  (a private cluster reference at `local/slurm.md`, not a skill).
+  `generate-slurm-skill` remains as a compatibility shim and `oms` alias.
 - A `PreCompact` handoff-snapshot hook (`precompact-handoff.sh`): just before
   Claude Code or Codex compacts a session, a session-handoff digest is
   captured into the project's `.oms/handoffs/` while the transcript detail is

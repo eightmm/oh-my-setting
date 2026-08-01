@@ -70,6 +70,9 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   # installer fails on any hook the working tree added.
   cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
   cp "$ROOT/scripts/precompact-handoff.sh" "$source/scripts/precompact-handoff.sh"
+  cp "$ROOT/scripts/install-mcp.sh" "$source/scripts/install-mcp.sh"
+  cp "$ROOT/scripts/install-agy-plugin.sh" "$source/scripts/install-agy-plugin.sh"
+  cp "$ROOT/scripts/oms-mcp-server.py" "$source/scripts/oms-mcp-server.py"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
@@ -125,7 +128,8 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   git -C "$source" commit -qm "fixture: healthy doctor"
   good="$(git -C "$source" rev-parse HEAD)"
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
-    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools >/dev/null
+    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools >"$TMP/good.out" 2>&1 ||
+    { cat "$TMP/good.out" >&2; fail "healthy update should succeed"; }
   [ "$(git -C "$installed" rev-parse HEAD)" = "$good" ] || fail "successful update missed target"
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_commit"])' "$receipt")" = "$first" ] ||
     fail "successful update did not record previous_commit"
@@ -206,7 +210,7 @@ test_doctor_failure_restores_previous_plugin_payload() {
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
-  for script in link install-claude-hooks install-autoupdate uninstall-autoupdate install-tools; do
+  for script in link install-claude-hooks install-autoupdate uninstall-autoupdate install-tools install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/$script.sh"
     chmod +x "$source/scripts/$script.sh"
   done
@@ -270,6 +274,9 @@ test_schema1_update_preserves_channel_pin_and_cron() {
 
   git clone -q "$ROOT" "$source"
   for file in scripts/update.sh scripts/link.sh scripts/doctor.sh \
+    scripts/install-claude-hooks.sh scripts/precompact-handoff.sh \
+    scripts/install-mcp.sh scripts/install-agy-plugin.sh \
+    scripts/oms-mcp-server.py \
     scripts/lib/install-contract.sh scripts/lib/platform.sh \
     scripts/lib/managed-target.py scripts/lib/agent-install-state.sh; do
     cp "$ROOT/$file" "$source/$file"
@@ -360,7 +367,7 @@ mkdir -p "$HOME/.codex"
 rm -f "$HOME/.codex/AGENTS.md"
 ln -s /target/rules "$HOME/.codex/AGENTS.md"
 EOF
-  for script in install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate install-tools; do
+  for script in install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate install-tools install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/$script.sh"
     chmod +x "$source/scripts/$script.sh"
   done

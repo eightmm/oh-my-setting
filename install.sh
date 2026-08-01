@@ -357,6 +357,14 @@ else
   echo "skipping codex plugin registration: OH_MY_SETTING_CODEX_PLUGIN=0"
 fi
 
+# Harness-state MCP server: claude and codex register it directly,
+# antigravity receives it through the agy plugin. Non-fatal on failure; a
+# missing CLI is a note, not an error.
+"$DEST/scripts/install-mcp.sh" ||
+  echo "warning: MCP server registration failed (install continues)" >&2
+"$DEST/scripts/install-agy-plugin.sh" ||
+  echo "warning: antigravity plugin import failed (install continues)" >&2
+
 # Antigravity is the one provider whose headless calls are auto-denied without
 # standing permissions; codex and claude carry authority per invocation. The
 # grant widens what another program may do, so it stays behind an explicit
@@ -372,7 +380,7 @@ if command -v agy >/dev/null 2>&1; then
 fi
 
 if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v sinfo >/dev/null 2>&1; }; then
-  "$DEST/scripts/generate-slurm-skill.sh"
+  "$DEST/scripts/generate-slurm-reference.sh"
 fi
 
 if [ "$GENERATE_MACHINE" != "0" ]; then

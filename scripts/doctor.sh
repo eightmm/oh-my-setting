@@ -362,7 +362,7 @@ check_snapshots() {
   case "$slurm_mode" in
     1)
       if OH_MY_SETTING_SLURM_REF="$slurm_path" \
-        "$INSTALL_ROOT/scripts/generate-slurm-skill.sh" --check >/dev/null 2>&1; then
+        "$INSTALL_ROOT/scripts/generate-slurm-reference.sh" --check >/dev/null 2>&1; then
         echo "ok: Slurm snapshot"
       else
         echo "invalid or missing Slurm snapshot: $slurm_path"
@@ -372,7 +372,7 @@ check_snapshots() {
     auto)
       if command -v sinfo >/dev/null 2>&1; then
         if OH_MY_SETTING_SLURM_REF="$slurm_path" \
-          "$INSTALL_ROOT/scripts/generate-slurm-skill.sh" --check >/dev/null 2>&1; then
+          "$INSTALL_ROOT/scripts/generate-slurm-reference.sh" --check >/dev/null 2>&1; then
           echo "ok: Slurm snapshot"
         else
           echo "invalid or missing Slurm snapshot while Slurm is available: $slurm_path"

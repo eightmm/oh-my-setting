@@ -153,6 +153,12 @@ fi
 required() {
   printf 'read_file(*)\n'
   printf 'command(*)\n'
+  # The harness-state MCP server ships in the agy plugin, and a headless
+  # session auto-denies its tools without an mcp rule. Probed on 1.1.9:
+  # scoped forms — mcp(oh-my-setting), mcp(name.*), mcp(name:tool) — do not
+  # match; only mcp(*) does, the same non-convergence that makes command(*)
+  # the command rule.
+  printf 'mcp(*)\n'
   if [ "$PROFILE" = delegate ]; then
     printf 'write_file(%s)\n' "$WORKTREE_PARENT"
     printf '%s\n' "$ALLOW_COMMANDS" | while IFS= read -r cmd; do

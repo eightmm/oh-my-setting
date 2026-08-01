@@ -103,22 +103,22 @@ case "$*" in
 esac
 EOF
   chmod +x "$bin/sinfo"
-  "$ROOT/scripts/generate-slurm-skill.sh" --help >/dev/null
+  "$ROOT/scripts/generate-slurm-reference.sh" --help >/dev/null
   PATH="$bin:/usr/bin:/bin" OH_MY_SETTING_SLURM_REF="$out" \
-    "$ROOT/scripts/generate-slurm-skill.sh" --dry-run > "$TMP/slurm-dry"
+    "$ROOT/scripts/generate-slurm-reference.sh" --dry-run > "$TMP/slurm-dry"
   [ ! -e "$out" ] || fail "slurm --dry-run wrote output"
   assert_contains "$TMP/slurm-dry" "Schema: 1"
   PATH="$bin:/usr/bin:/bin" OH_MY_SETTING_SLURM_REF="$out" \
-    "$ROOT/scripts/generate-slurm-skill.sh" >/dev/null
+    "$ROOT/scripts/generate-slurm-reference.sh" >/dev/null
   [ "$(stat -c '%a' "$out" 2>/dev/null || stat -f '%Lp' "$out")" = 600 ] ||
     fail "Slurm snapshot is not private"
-  OH_MY_SETTING_SLURM_REF="$out" "$ROOT/scripts/generate-slurm-skill.sh" --check >/dev/null
+  OH_MY_SETTING_SLURM_REF="$out" "$ROOT/scripts/generate-slurm-reference.sh" --check >/dev/null
 
   local default_root="$TMP/slurm-default-root"
   mkdir -p "$default_root/scripts"
-  cp "$ROOT/scripts/generate-slurm-skill.sh" "$default_root/scripts/"
-  chmod +x "$default_root/scripts/generate-slurm-skill.sh"
-  PATH="$bin:/usr/bin:/bin" "$default_root/scripts/generate-slurm-skill.sh" >/dev/null
+  cp "$ROOT/scripts/generate-slurm-reference.sh" "$default_root/scripts/"
+  chmod +x "$default_root/scripts/generate-slurm-reference.sh"
+  PATH="$bin:/usr/bin:/bin" "$default_root/scripts/generate-slurm-reference.sh" >/dev/null
   [ -f "$default_root/local/slurm.md" ] ||
     fail "default Slurm snapshot should live under local/, outside the skill catalog"
 }
@@ -249,7 +249,7 @@ test_update_refreshes_snapshot_policy() {
   mkdir -p "$source/scripts/lib" "$(dirname "$receipt")"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
-  for script in install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate doctor; do
+  for script in install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate doctor install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/$script.sh"
     chmod +x "$source/scripts/$script.sh"
   done
@@ -264,11 +264,11 @@ EOF
 #!/usr/bin/env bash
 printf 'machine\n' >> "$OMS_TEST_SNAPSHOT_LOG"
 EOF
-  cat > "$source/scripts/generate-slurm-skill.sh" <<'EOF'
+  cat > "$source/scripts/generate-slurm-reference.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'slurm\n' >> "$OMS_TEST_SNAPSHOT_LOG"
 EOF
-  chmod +x "$source/scripts/write-machine-snapshot.sh" "$source/scripts/generate-slurm-skill.sh"
+  chmod +x "$source/scripts/write-machine-snapshot.sh" "$source/scripts/generate-slurm-reference.sh"
   printf 'base\n' > "$source/README.md"
   git -C "$source" init -q
   git -C "$source" checkout -qb main

@@ -1,0 +1,5 @@
+{
+  "name": "oh-my-setting",
+  "version": "0.0.0",
+  "description": "oh-my-setting harness state over MCP: task packet, fail-ledger, handoff digests, and Work Journal of the current repository."
+}

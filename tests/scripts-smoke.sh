@@ -395,7 +395,7 @@ setup_doctor_home() {
   cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
 {
   "permissions": {
-    "allow": ["command(*)", "read_file(*)"]
+    "allow": ["command(*)", "read_file(*)", "mcp(*)"]
   }
 }
 JSON
@@ -5949,7 +5949,7 @@ test_update_refreshes_tools_only_when_requested() {
   mkdir -p "$project/scripts/lib" "$bin"
   cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
-  for script in link doctor install-autoupdate uninstall-autoupdate install-claude-hooks; do
+  for script in link doctor install-autoupdate uninstall-autoupdate install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
     chmod +x "$project/scripts/$script.sh"
   done
@@ -6008,7 +6008,7 @@ test_update_auto_refreshes_only_installed_codex_plugin() {
   mkdir -p "$project/scripts/lib" "$bin"
   cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
-  for script in link doctor install-autoupdate uninstall-autoupdate install-tools install-claude-hooks; do
+  for script in link doctor install-autoupdate uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
     chmod +x "$project/scripts/$script.sh"
   done
@@ -12362,7 +12362,8 @@ test_provider_permissions_grants_only_what_is_missing() {
   python3 - "$settings" <<'PY' || fail "apply must write exactly the profile's rules"
 import json, sys
 allow = json.load(open(sys.argv[1]))["permissions"]["allow"]
-assert allow == ["read_file(*)", "command(*)", "write_file(/tmp)", "unsandboxed(uv)"], allow
+assert allow == ["read_file(*)", "command(*)", "mcp(*)",
+                 "write_file(/tmp)", "unsandboxed(uv)"], allow
 PY
 
   # Re-running must be a no-op, not a second copy of every rule.

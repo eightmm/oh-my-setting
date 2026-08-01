@@ -375,14 +375,16 @@ reconcile_core() {
   elif command -v codex >/dev/null 2>&1; then
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null 2>&1 || return 1
   fi
+  "$ROOT/scripts/install-mcp.sh" || return 1
+  "$ROOT/scripts/install-agy-plugin.sh" || return 1
   case "$OH_MY_SETTING_GENERATE_MACHINE" in
     1|auto) "$ROOT/scripts/write-machine-snapshot.sh" || return 1 ;;
   esac
   case "$OH_MY_SETTING_GENERATE_SLURM" in
-    1) "$ROOT/scripts/generate-slurm-skill.sh" || return 1 ;;
+    1) "$ROOT/scripts/generate-slurm-reference.sh" || return 1 ;;
     auto)
       if command -v sinfo >/dev/null 2>&1; then
-        "$ROOT/scripts/generate-slurm-skill.sh" || return 1
+        "$ROOT/scripts/generate-slurm-reference.sh" || return 1
       fi
       ;;
   esac

@@ -80,9 +80,13 @@ OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/uninstall-autoupdate.sh"
 if [ "$DRY_RUN" = "1" ]; then
   echo "would remove claude oh-my-setting hooks/HUD from ~/.claude/settings.json"
   echo "would remove codex oh-my-setting plugin"
+  echo "would unregister the oh-my-setting MCP server from claude and codex"
+  echo "would uninstall the antigravity oh-my-setting plugin"
 else
   "$ROOT/scripts/install-claude-hooks.sh" --remove || true
   "$ROOT/scripts/install-codex-plugin.sh" --remove || true
+  "$ROOT/scripts/install-mcp.sh" --remove || true
+  "$ROOT/scripts/install-agy-plugin.sh" --remove || true
 fi
 OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/unlink.sh"
 
