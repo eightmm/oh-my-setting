@@ -186,6 +186,35 @@ class SchemaError(JournalError):
     """Invalid or unsupported event schema."""
 
 
+def notion_presentation(content: str) -> str:
+    """Human-facing rendering of a summary for the Notion mirror.
+
+    The local daily files are the evidence layer: every claim carries an
+    event-id citation, and one packet update can emit near-identical bullets
+    from its update and close events. Notion is the surface the human actually
+    reads, so the mirror drops the trailing ``[wj_...]`` citations and folds
+    bullets that differ only by citation into one. Deterministic text
+    transforms only — nothing is summarized or rewritten, and the local files
+    keep full provenance.
+    """
+
+    citation = re.compile(r"\s*\[wj_[0-9a-f]{8,}.*\]\s*$")
+    lines: List[str] = []
+    seen: set = set()
+    for line in content.splitlines():
+        if line.startswith("#"):
+            seen = set()
+        if line.startswith("- "):
+            stripped = citation.sub("", line)
+            if stripped in seen:
+                continue
+            seen.add(stripped)
+            lines.append(stripped)
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -2160,7 +2189,9 @@ class JournalStore:
                 break
             attempted += 1
             try:
-                content = self._summary_content(row["kind"], row["period"])
+                content = notion_presentation(
+                    self._summary_content(row["kind"], row["period"])
+                )
                 result = exporter.upsert(
                     row["summary_key"],
                     row["title"],

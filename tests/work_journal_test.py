@@ -821,5 +821,45 @@ class JournalTestCase(unittest.TestCase):
         )
 
 
+class NotionPresentationTest(unittest.TestCase):
+    def test_strips_citations_and_folds_citation_only_duplicates(self):
+        content = "\n".join(
+            [
+                "# Daily Work Journal — 2026-08-01",
+                "",
+                "## 의사결정",
+                "",
+                "- decided the thing [wj_0392687b9e2ed75e; source agent-task:ta[REDACTED]:update:b99491a47ec430fa; evidence agent-state:ta[REDACTED]]",
+                "- decided the thing [wj_767833cf7f99e79b; source agent-task:ta[REDACTED]:close:a4026fc73de9baaa; evidence agent-state:ta[REDACTED]]",
+                "- another decision [wj_a9286f0d548fa0aa; source git-commit:abc123; evidence git-commit:abc123]",
+                "",
+                "## 다음 우선순위",
+                "",
+                "- 기록 없음",
+            ]
+        )
+        rendered = wj.notion_presentation(content)
+        self.assertNotIn("wj_", rendered)
+        self.assertNotIn("[REDACTED]", rendered)
+        self.assertEqual(rendered.count("- decided the thing"), 1)
+        self.assertIn("- another decision", rendered)
+        # Non-bullet structure is untouched, and the same text may legally
+        # repeat under a different heading.
+        self.assertIn("# Daily Work Journal — 2026-08-01", rendered)
+        self.assertIn("## 다음 우선순위", rendered)
+
+    def test_dedup_scope_resets_per_section(self):
+        content = "\n".join(
+            [
+                "## A",
+                "- same line [wj_0392687b9e2ed75e; source x; evidence y]",
+                "## B",
+                "- same line [wj_767833cf7f99e79b; source x; evidence y]",
+            ]
+        )
+        rendered = wj.notion_presentation(content)
+        self.assertEqual(rendered.count("- same line"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

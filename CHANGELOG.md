@@ -6,6 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+- The Notion mirror now publishes a human-facing rendering of each summary.
+  The local daily files are the evidence layer — every claim carries an
+  event-id citation, and one packet update can emit near-identical bullets
+  from its update and close events — but Notion is the surface the human
+  actually reads, and the citations made the page unreadable in review.
+  Publishing strips the trailing `[wj_...]` citations and folds bullets that
+  differ only by citation, per section. Deterministic text transforms only:
+  nothing is summarized or rewritten, and local files keep full provenance.
+
 ### Added
 - `oms support-bundle [--out DIR] [--dry-run]`: redaction-first diagnostic
   bundle. Harness state is rich and therefore unsafe to copy ad hoc into a
