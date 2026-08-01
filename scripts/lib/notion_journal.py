@@ -22,6 +22,20 @@ NOTION_LEGACY_API_VERSION = "2022-06-28"
 NOTION_TEXT_CHUNK = 2000
 NOTION_CHILD_BATCH = 100
 NOTION_MAX_BLOCKS = 900
+# One API request may nest at most 100 children under a block; stay under it
+# so a long progress listing never fails the whole page.
+NOTION_TOGGLE_CHILD_LIMIT = 95
+# Progress listings collapse into a toggle so the page opens on judgment —
+# decisions, blockers, next priorities — rather than a wall of commit lines.
+# Titles mirror the section labels in work_journal.py.
+NOTION_COLLAPSED_SECTIONS = frozenset(
+    {
+        "핵심 진전", "Key progress",
+        "프로젝트별 작업", "Work by project",
+        "프로젝트별 진전", "Progress by project",
+        "완료하거나 검증한 작업", "Completed or verified",
+    }
+)
 NOTION_MAX_INLINE_RETRY_DELAY = 2.0
 NOTION_MAX_DEFER_DELAY = 86400.0
 
@@ -610,6 +624,7 @@ class NotionJournalExporter:
             parent = {"database_id": self._database_id}
         payload = {
             "parent": parent,
+            "icon": NotionJournalExporter._page_icon(metadata),
             "properties": self._page_properties(
                 summary_key,
                 title,
@@ -647,12 +662,13 @@ class NotionJournalExporter:
             "PATCH",
             "/v1/pages/{}".format(encoded_page_id),
             {
+                "icon": NotionJournalExporter._page_icon(metadata),
                 "properties": self._page_properties(
                     summary_key,
                     title,
                     content_hash,
                     metadata,
-                )
+                ),
             },
         )
 
@@ -737,13 +753,56 @@ class NotionJournalExporter:
         return properties
 
     @staticmethod
+    def _page_icon(metadata):
+        # A stable icon per summary kind makes journal pages scannable in
+        # database views; set on create and refreshed on update so pages
+        # created before this existed pick it up on their next sync.
+        kind = str((metadata or {}).get("kind") or "")
+        return {
+            "type": "emoji",
+            "emoji": "📚" if kind == "weekly" else "📔",
+        }
+
+    @staticmethod
     def _summary_children(content):
         children = []
+        state = {"total": 0, "toggle": None, "toggle_full": False}
+
+        def note_block(text):
+            return {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [NotionJournalExporter._text_object(text)]
+                },
+            }
+
+        def emit(block):
+            if state["total"] >= NOTION_MAX_BLOCKS:
+                return False
+            toggle = state["toggle"]
+            if toggle is not None:
+                nested = toggle["toggle"]["children"]
+                if len(nested) >= NOTION_TOGGLE_CHILD_LIMIT:
+                    if not state["toggle_full"]:
+                        state["toggle_full"] = True
+                        nested[-1] = note_block(
+                            "Truncated at the nested block limit; the full "
+                            "listing stays in the local journal file."
+                        )
+                    return False
+                nested.append(block)
+            else:
+                children.append(block)
+            state["total"] += 1
+            return True
+
+        def close_toggle():
+            state["toggle"] = None
+            state["toggle_full"] = False
 
         def append_text_blocks(block_type, text, **attributes):
             for offset in range(0, len(text), NOTION_TEXT_CHUNK):
-                if len(children) >= NOTION_MAX_BLOCKS:
-                    return
                 chunk_type = block_type if offset == 0 else "paragraph"
                 payload = {
                     "rich_text": [
@@ -754,16 +813,17 @@ class NotionJournalExporter:
                 }
                 if offset == 0:
                     payload.update(attributes)
-                children.append(
+                if not emit(
                     {
                         "object": "block",
                         "type": chunk_type,
                         chunk_type: payload,
                     }
-                )
+                ):
+                    return
 
         for raw_line in str(content or "").splitlines():
-            if len(children) >= NOTION_MAX_BLOCKS:
+            if state["total"] >= NOTION_MAX_BLOCKS:
                 break
             line = raw_line.strip()
             if not line:
@@ -773,11 +833,31 @@ class NotionJournalExporter:
             bullet = re.match(r"^-\s+(.+)$", line)
             numbered = re.match(r"^\d+\.\s+(.+)$", line)
             if line == "---":
-                children.append({"object": "block", "type": "divider", "divider": {}})
+                close_toggle()
+                emit({"object": "block", "type": "divider", "divider": {}})
             elif heading:
-                append_text_blocks(
-                    "heading_%d" % len(heading.group(1)), heading.group(2)
-                )
+                close_toggle()
+                title = heading.group(2)
+                if (
+                    len(heading.group(1)) == 2
+                    and title.strip() in NOTION_COLLAPSED_SECTIONS
+                ):
+                    toggle_block = {
+                        "object": "block",
+                        "type": "toggle",
+                        "toggle": {
+                            "rich_text": [
+                                NotionJournalExporter._text_object(title.strip())
+                            ],
+                            "children": [],
+                        },
+                    }
+                    if emit(toggle_block):
+                        state["toggle"] = toggle_block
+                else:
+                    append_text_blocks(
+                        "heading_%d" % len(heading.group(1)), title
+                    )
             elif todo:
                 append_text_blocks(
                     "to_do",
@@ -791,18 +871,10 @@ class NotionJournalExporter:
             else:
                 append_text_blocks("paragraph", line)
 
-        if len(children) >= NOTION_MAX_BLOCKS:
-            children[-1] = {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [
-                        NotionJournalExporter._text_object(
-                            "Work Journal content was truncated at the safe block limit."
-                        )
-                    ]
-                },
-            }
+        if state["total"] >= NOTION_MAX_BLOCKS and children:
+            children[-1] = note_block(
+                "Work Journal content was truncated at the safe block limit."
+            )
         return children
 
     @staticmethod

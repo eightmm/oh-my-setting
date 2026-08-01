@@ -19,7 +19,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   removes sections that say nothing, and floats decisions, blockers, and
   next priorities above the progress listing. Deterministic text transforms
   only: nothing is summarized or rewritten, and local files keep full
-  provenance.
+  provenance. Pages also carry a kind icon (📔 daily, 📚 weekly, refreshed on
+  update so pre-existing pages pick it up), and the progress listing
+  publishes as a collapsed toggle — the page opens on judgment, the commit
+  detail unfolds on demand, and a nested-limit note replaces overflow past
+  the API's per-block child cap.
 
 ### Added
 - `oms support-bundle [--out DIR] [--dry-run]`: redaction-first diagnostic

@@ -437,10 +437,7 @@ class NotionJournalTest(unittest.TestCase):
         self.assertEqual(
             [
                 "heading_1",
-                "heading_2",
-                "bulleted_list_item",
-                "to_do",
-                "numbered_list_item",
+                "toggle",
                 "divider",
                 "paragraph",
                 "paragraph",
@@ -448,7 +445,14 @@ class NotionJournalTest(unittest.TestCase):
             ],
             [child["type"] for child in children],
         )
-        for child in children:
+        # The progress listing nests inside the toggle in document order.
+        self.assertEqual(
+            ["bulleted_list_item", "to_do", "numbered_list_item"],
+            [block["type"] for block in children[1]["toggle"]["children"]],
+        )
+        flattened = list(children)
+        flattened.extend(children[1]["toggle"]["children"])
+        for child in flattened:
             block = child.get(child["type"], {})
             for rich_text in block.get("rich_text", []):
                 text = rich_text["text"]["content"]
@@ -679,6 +683,64 @@ class NotionJournalTest(unittest.TestCase):
                 clock[0] += dt.timedelta(seconds=21)
                 store.sync_notion(force=True)
             self.assertIn("synced", calls)
+
+
+class HumanPageTest(unittest.TestCase):
+    def test_progress_section_collapses_into_toggle(self):
+        children = notion.NotionJournalExporter._summary_children(
+            "## 핵심 진전\n- one\n- two\n\n## 의사결정\n- decided"
+        )
+        self.assertEqual("toggle", children[0]["type"])
+        nested = children[0]["toggle"]["children"]
+        self.assertEqual(
+            ["bulleted_list_item", "bulleted_list_item"],
+            [block["type"] for block in nested],
+        )
+        # The next section leaves the toggle: heading and bullet are top-level.
+        self.assertEqual(
+            ["heading_2", "bulleted_list_item"],
+            [block["type"] for block in children[1:]],
+        )
+
+    def test_toggle_nested_overflow_is_truncated_with_a_note(self):
+        lines = ["## Key progress"] + [
+            "- item %d" % index
+            for index in range(notion.NOTION_TOGGLE_CHILD_LIMIT + 10)
+        ]
+        children = notion.NotionJournalExporter._summary_children(
+            "\n".join(lines)
+        )
+        nested = children[0]["toggle"]["children"]
+        self.assertEqual(notion.NOTION_TOGGLE_CHILD_LIMIT, len(nested))
+        self.assertEqual("paragraph", nested[-1]["type"])
+        self.assertIn(
+            "Truncated",
+            nested[-1]["paragraph"]["rich_text"][0]["text"]["content"],
+        )
+
+    def test_page_icon_set_on_create(self):
+        transport = FakeTransport(
+            [
+                {"results": []},
+                {"id": "page-created"},
+            ]
+        )
+        exporter = notion.NotionJournalExporter(
+            **{
+                "to" + "ken": "secret-" + "token",
+                "data_source_id": "data-source-id",
+                "transport": transport,
+                "sleep": lambda _seconds: None,
+                "timeout": 0.25,
+            }
+        )
+        exporter.upsert("key", "title", "hash", "content", kind="daily")
+        create_payload = transport.calls[1][2]
+        self.assertEqual({"type": "emoji", "emoji": "📔"}, create_payload["icon"])
+        self.assertEqual(
+            {"type": "emoji", "emoji": "📚"},
+            notion.NotionJournalExporter._page_icon({"kind": "weekly"}),
+        )
 
 
 if __name__ == "__main__":
