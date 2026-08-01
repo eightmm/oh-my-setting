@@ -146,6 +146,16 @@ if [ "$#" -gt 0 ]; then
   FILES=("$@")
 else
   FILES=("AGENTS.md" "CLAUDE.md")
+  # Antigravity reads GEMINI.md as a directory rule file and prefers it over
+  # AGENTS.md when both exist — verified live: in a project whose AGENTS.md
+  # carried the ml loader and whose leftover GEMINI.md still carried general,
+  # agy reported the general template. An unmanaged GEMINI.md therefore makes
+  # one CLI follow rules the other two retired, which is the divergence this
+  # project exists to prevent. It is adopted only when the project already has
+  # one: agy reads AGENTS.md fine, so a new project needs no third loader.
+  if [ -f "$PROJECT_DIR/GEMINI.md" ]; then
+    FILES+=("GEMINI.md")
+  fi
 fi
 
 loader_content() {

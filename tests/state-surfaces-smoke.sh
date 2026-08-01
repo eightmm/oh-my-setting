@@ -425,6 +425,34 @@ test_template_style_switch_retires_the_old_block() {
     fail "re-applying a base style must not strip the slurm overlay"
 }
 
+test_existing_gemini_md_is_kept_in_sync() {
+  local project="$TMP/gemini-sync"
+
+  mkdir -p "$project"
+  git -C "$project" init -q 2>/dev/null || true
+  # A project that already carries GEMINI.md: Antigravity reads it and
+  # prefers it over AGENTS.md, so leaving it unmanaged makes one CLI follow
+  # rules the other two retired.
+  printf '<!-- oh-my-setting:general:begin -->\n\nstale loader\n\n<!-- oh-my-setting:general:end -->\n' \
+    > "$project/GEMINI.md"
+  bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||
+    fail "ml template apply failed"
+
+  grep -Fq "project-ml-AGENTS.md" "$project/GEMINI.md" ||
+    fail "an existing GEMINI.md must receive the new loader"
+  if grep -Fq "oh-my-setting:general:begin" "$project/GEMINI.md"; then
+    fail "the retired style must not survive in GEMINI.md"
+  fi
+
+  # A project without one stays at two loader files: agy reads AGENTS.md, so
+  # a third file would be footprint without benefit.
+  local plain="$TMP/gemini-absent"
+  mkdir -p "$plain"
+  bash "$ROOT/scripts/apply-project-template.sh" ml "$plain" >/dev/null 2>&1 ||
+    fail "ml template apply failed for the plain project"
+  [ ! -e "$plain/GEMINI.md" ] || fail "the template must not create GEMINI.md"
+}
+
 test_ml_template_installs_project_skills() {
   local project="$TMP/ml-skills-proj"
 
@@ -478,6 +506,7 @@ test_skill_forge_rejects_thin_and_sensitive
 test_task_close_hints_at_forging_learned_lessons
 test_ml_template_installs_project_skills
 test_template_style_switch_retires_the_old_block
+test_existing_gemini_md_is_kept_in_sync
 test_slurm_reference_rename_keeps_compat
 
 echo "state-surfaces-smoke: ok"

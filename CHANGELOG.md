@@ -94,6 +94,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   500-line progressive-disclosure budget.
 
 ### Fixed
+- An existing project `GEMINI.md` is kept in sync with the other loaders.
+  Antigravity reads it as a directory rule file and prefers it over
+  `AGENTS.md`: verified live in a repository whose `AGENTS.md` carried the
+  ml loader while a leftover `GEMINI.md` still carried general — agy
+  reported the general template while Claude Code and Codex followed ml.
+  One CLI silently obeying rules the other two retired is exactly what this
+  project exists to prevent. The template now adopts `GEMINI.md` as a
+  managed file when the project already has one (so the retired block is
+  removed and the new loader written), and never creates one otherwise —
+  agy reads `AGENTS.md` fine, so a new project needs no third loader.
 - `GEMINI.md` stays a per-project harness file, and a test now pins it.
   An earlier entry in this same unreleased cycle dropped it from the
   default lists (project-private hiding, worktree seeding, template dedup)
