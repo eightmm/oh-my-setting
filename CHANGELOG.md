@@ -6,6 +6,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- The Claude HUD shows when each rate-limit window resets, and which session
+  it belongs to. `rate_limits.*.resets_at` (epoch seconds, documented
+  statusline payload) renders as a compact countdown next to the usage
+  percentage — `5h 24% (1h58m)`, `7d 41% (3d5h)` — with implausible values
+  (past, or beyond eight days) treated as bad data rather than a countdown.
+  The line also carries `session_name` and the workspace directory basename
+  when present, which is what actually distinguishes two concurrent sessions
+  in the same repo. Rendering stays bounded and pure — only the stdin
+  payload, no subprocesses; `OMS_HUD_NOW` pins the clock for deterministic
+  tests. Codex and Antigravity expose no statusline surface, so the HUD
+  stays a Claude surface; their session-start digest already carries the
+  harness state, and `oms repo-state` is the on-demand equivalent.
+
 ### Fixed
 - The installer accepts uv-only machines. A host with `uv` but no `python3`
   command (fresh workstations, cluster accounts) failed hard with "a Python

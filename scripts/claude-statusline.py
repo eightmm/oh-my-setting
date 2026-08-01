@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import time
 import unicodedata
 from typing import Any, Dict, Optional
 
@@ -60,6 +61,19 @@ def compact_tokens(value: Any) -> Optional[str]:
     return str(int(number + 0.5))
 
 
+def compact_duration(seconds: float) -> str:
+    if seconds < 60:
+        return "<1m"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return "%dm" % minutes
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return "%dh%02dm" % (hours, minutes)
+    days, hours = divmod(hours, 24)
+    return "%dd%dh" % (days, hours)
+
+
 def color_for(percent: int) -> str:
     if percent >= 80:
         return "\033[31m"
@@ -90,6 +104,15 @@ def render(payload: Dict[str, Any], color: bool) -> str:
     )
     parts = [model_name]
 
+    session_name = safe_text(payload.get("session_name"), "", 16)
+    if session_name:
+        parts.append(session_name)
+    current_dir = mapping(payload.get("workspace")).get("current_dir")
+    if isinstance(current_dir, str) and current_dir.strip():
+        directory = safe_text(os.path.basename(current_dir.rstrip("/")), "", 16)
+        if directory:
+            parts.append(directory)
+
     context = mapping(payload.get("context_window"))
     used = rounded_percent(context.get("used_percentage"))
     if used is None:
@@ -111,10 +134,27 @@ def render(payload: Dict[str, Any], color: bool) -> str:
         parts.append(colorize(context_text, used, color))
 
     rate_limits = mapping(payload.get("rate_limits"))
+    now: Optional[float] = None
+    raw_now = os.environ.get("OMS_HUD_NOW", "").strip()
+    if raw_now:
+        try:
+            now = float(raw_now)
+        except ValueError:
+            now = None
+    if now is None or not math.isfinite(now):
+        now = time.time()
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        rate = rounded_percent(mapping(rate_limits.get(key)).get("used_percentage"))
+        window = mapping(rate_limits.get(key))
+        rate = rounded_percent(window.get("used_percentage"))
         if rate is not None:
-            parts.append(colorize("%s %d%%" % (label, rate), rate, color))
+            rate_text = "%s %d%%" % (label, rate)
+            resets_at = finite_number(window.get("resets_at"), 0.0, 4_000_000_000.0)
+            if resets_at is not None:
+                remaining = resets_at - now
+                # A reset implausibly far out is bad data, not a countdown.
+                if 0 < remaining <= 8 * 86400:
+                    rate_text += " (%s)" % compact_duration(remaining)
+            parts.append(colorize(rate_text, rate, color))
 
     cost = finite_number(mapping(payload.get("cost")).get("total_cost_usd"))
     if cost is not None:
