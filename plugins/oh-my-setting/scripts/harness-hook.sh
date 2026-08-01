@@ -2,7 +2,7 @@
 set -euo pipefail
 
 tool="${1:-}"
-case "$tool" in skill-router|turn-guard) ;; *) exit 0 ;; esac
+case "$tool" in skill-router|turn-guard|precompact-handoff) ;; *) exit 0 ;; esac
 payload="$(cat)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "${CLAUDE_PLUGIN_ROOT:-$SCRIPT_DIR/..}" 2>/dev/null && pwd || printf '%s\n' "$SCRIPT_DIR/..")"
@@ -14,7 +14,7 @@ fi
 for root in "$SOURCE_ROOT" "${OH_MY_SETTING_DIR:-}" "$PLUGIN_ROOT/../.." "$HOME/.oh-my-setting"; do
   [ -n "$root" ] || continue
   if [ -f "$root/scripts/$tool.sh" ]; then
-    printf '%s' "$payload" | bash "$root/scripts/$tool.sh" || true
+    printf '%s' "$payload" | bash "$root/scripts/$tool.sh" "${@:2}" || true
     exit 0
   fi
 done

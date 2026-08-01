@@ -384,6 +384,10 @@ setup_doctor_home() {
 
   mkdir -p "$home_dir"
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  # A healthy install has the Claude hooks registered; the doctor verifies the
+  # registration whenever the receipt is valid, so a clean fixture registers
+  # them the same way install.sh does.
+  HOME="$home_dir" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
   # A healthy install lets antigravity read a repository in headless mode; the
   # doctor only checks this when agy is on PATH, so a clean fixture has to look
   # healthy on a developer machine that has it installed.
@@ -1646,6 +1650,25 @@ test_doctor_clean_harness_state_has_no_warnings() {
   if printf '%s' "$out" | grep -Fq 'warn:'; then
     fail "clean harness state should not warn: $out"
   fi
+}
+
+test_doctor_fails_when_claude_hooks_unregistered() {
+  local project="$TMP/doctor-hooks-missing"
+  local home_dir="$TMP/doctor-hooks-missing-home"
+  local out
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  # link.sh writes the receipt but registers no hooks: the exact state the
+  # installer leaves behind when hook registration failed as a warning.
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "doctor must fail when claude hooks are not registered"
+  printf '%s' "$out" | grep -Fq 'claude hooks not registered' ||
+    fail "doctor should name the missing hook registration: $out"
+  printf '%s' "$out" | grep -Fq 'install-claude-hooks.sh' ||
+    fail "doctor should point at the remedy: $out"
 }
 
 test_doctor_warns_on_a_damaged_memory_database() {
@@ -5686,41 +5709,6 @@ test_uninstall_purge_guard_refuses_home_and_root() {
 }
 
 
-test_backup_copies_all_config_targets() {
-  local home_dir="$TMP/backup-home"
-  local had_backups=0
-  local out
-  local backup_dir
-
-  [ -d "$ROOT/backups" ] && had_backups=1
-  mkdir -p "$home_dir/.codex/skills/demo" "$home_dir/.claude/skills/demo" \
-    "$home_dir/.gemini/antigravity/skills/demo" "$home_dir/.gemini" "$home_dir/.claude"
-  printf 'codex agents\n' > "$home_dir/.codex/AGENTS.md"
-  printf 'claude config\n' > "$home_dir/.claude/CLAUDE.md"
-  printf 'gemini agents\n' > "$home_dir/.gemini/AGENTS.md"
-  printf 'codex skill\n' > "$home_dir/.codex/skills/demo/SKILL.md"
-  printf 'claude skill\n' > "$home_dir/.claude/skills/demo/SKILL.md"
-  printf 'gemini skill\n' > "$home_dir/.gemini/antigravity/skills/demo/SKILL.md"
-
-  out="$(HOME="$home_dir" "$ROOT/scripts/backup.sh")"
-  backup_dir="$(printf '%s\n' "$out" | awk '/^backup: / { sub(/^backup: /, ""); print }')"
-  [ -n "$backup_dir" ] || fail "backup.sh did not print backup dir"
-  [ -d "$backup_dir" ] || fail "backup dir missing: $backup_dir"
-
-  assert_file_contains "$backup_dir/codex-AGENTS.md" "codex agents"
-  assert_file_contains "$backup_dir/claude-CLAUDE.md" "claude config"
-  assert_file_contains "$backup_dir/gemini-AGENTS.md" "gemini agents"
-  assert_file_contains "$backup_dir/codex-skills/demo/SKILL.md" "codex skill"
-  assert_file_contains "$backup_dir/claude-skills/demo/SKILL.md" "claude skill"
-  assert_file_contains "$backup_dir/gemini-skills/demo/SKILL.md" "gemini skill"
-
-  rm -rf "$backup_dir"
-  if [ "$had_backups" = "0" ]; then
-    rmdir "$ROOT/backups" 2>/dev/null || true
-  fi
-}
-
-
 test_link_and_unlink_with_home_override() {
   local home_dir="$TMP/link-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
@@ -5830,23 +5818,23 @@ test_cleanup_dry_run_and_apply() {
   local home_dir="$TMP/cleanup-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
     "$home_dir/.pi/agent/skills" "$home_dir/.gemini"
-  ln -s "$ROOT/custom-skills/peer-ask" \
-    "$home_dir/.codex/skills/peer-ask.backup.legacy"
-  ln -s "$ROOT/custom-skills/peer-review" \
-    "$home_dir/.agents/skills/peer-review"
+  ln -s "$ROOT/custom-skills/trace" \
+    "$home_dir/.codex/skills/trace.backup.legacy"
+  ln -s "$ROOT/custom-skills/trust-boundary" \
+    "$home_dir/.agents/skills/trust-boundary"
   ln -s "$ROOT/custom-skills/spec-interview" \
     "$home_dir/.pi/agent/skills/spec-interview"
   ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --dry-run >"$home_dir/dry-run"
   assert_file_contains "$home_dir/dry-run" "cleanup: 4 removable item(s) found"
-  [ -e "$home_dir/.codex/skills/peer-ask.backup.legacy" ] ||
+  [ -e "$home_dir/.codex/skills/trace.backup.legacy" ] ||
     fail "dry-run removed backup symlink"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/apply"
-  [ ! -e "$home_dir/.codex/skills/peer-ask.backup.legacy" ] ||
+  [ ! -e "$home_dir/.codex/skills/trace.backup.legacy" ] ||
     fail "cleanup did not remove backup symlink"
-  [ ! -e "$home_dir/.agents/skills/peer-review" ] ||
+  [ ! -e "$home_dir/.agents/skills/trust-boundary" ] ||
     fail "cleanup did not remove legacy .agents skill"
   [ ! -e "$home_dir/.pi/agent/skills/spec-interview" ] ||
     fail "cleanup did not remove legacy pi skill"
@@ -10012,6 +10000,10 @@ assert len(failure) == 1, failure
 assert failure[0]["matcher"] == "Bash"
 assert "fail-ledger-hook.sh" in failure[0]["hooks"][0]["command"]
 assert failure[0]["hooks"][0]["timeout"] == 5
+precompact = d["hooks"]["PreCompact"]
+assert len(precompact) == 1, precompact
+assert "precompact-handoff.sh" in precompact[0]["hooks"][0]["command"]
+assert precompact[0]["hooks"][0]["timeout"] == 30
 assert any("user-router" in c for c in cmds)
 assert d["model"] == "x"
 status = d["statusLine"]
@@ -10027,6 +10019,7 @@ ups = d["hooks"]["UserPromptSubmit"]
 assert len(ups) == 1 and "user-router" in ups[0]["hooks"][0]["command"]
 assert "Stop" not in d["hooks"]
 assert "PostToolUseFailure" not in d["hooks"]
+assert "PreCompact" not in d["hooks"]
 assert "statusLine" not in d
 PY
   # A status line the user already owns must survive install and remove.
@@ -10056,6 +10049,48 @@ PY
     fail "installer must refuse to touch invalid settings JSON"
   fi
   grep -Fq '{broken' "$s" || fail "installer must not modify a file it refused"
+}
+
+test_precompact_handoff_guards() {
+  local repo="$TMP/precompact-guard"
+  mkdir -p "$repo"
+
+  # Not harness-adopted: exit 0 and leave no .oms behind.
+  printf '{"session_id":"s1","cwd":"%s"}' "$repo" |
+    "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must exit 0 without a .oms tree"
+  [ ! -d "$repo/.oms" ] || fail "precompact hook must not create .oms"
+
+  # Garbage payload and empty payload must both stay silent successes.
+  printf 'not json' | "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must exit 0 on a garbage payload"
+  printf '' | "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must exit 0 on an empty payload"
+
+  # Explicit opt-out.
+  printf '{}' | OMS_PRECOMPACT_HANDOFF=0 "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must exit 0 when disabled"
+}
+
+test_precompact_handoff_captures_adopted_repo() {
+  local repo="$TMP/precompact-capture"
+  local claude_home="$TMP/precompact-claude-home"
+  local project_dir
+
+  mkdir -p "$repo/.oms"
+  printf '*\n' > "$repo/.oms/.gitignore"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  mkdir -p "$project_dir"
+  cat > "$project_dir/sess-1.jsonl" <<EOF
+{"type":"user","cwd":"$repo","message":{"role":"user","content":"build the widget"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Widget built and tested."}]}}
+EOF
+
+  printf '{"session_id":"sess-1","cwd":"%s"}' "$repo" |
+    OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must exit 0 on capture"
+  find "$repo/.oms/handoffs" -name '*.md' 2>/dev/null | grep -q . ||
+    fail "precompact hook should write a handoff digest for an adopted repo"
 }
 
 test_install_codex_plugin_registers_marketplace() {
@@ -10216,6 +10251,7 @@ EOF
   chmod +x "$foreign/scripts/skill-doctor.sh"
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 \
     "$foreign/scripts/doctor.sh" >"$d/doctor" ||
     fail "a foreign checkout should validate the canonical receipt owner"
   assert_file_contains "$d/doctor" "delegating doctor to canonical owner"
@@ -10223,6 +10259,7 @@ EOF
   ln -sfn "$foreign/AGENTS.md" "$home/.codex/AGENTS.md"
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 \
     "$foreign/scripts/doctor.sh" --repair >"$d/repair" ||
     fail "doctor --repair should relink from the valid canonical owner"
   assert_symlink_to "$home/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"

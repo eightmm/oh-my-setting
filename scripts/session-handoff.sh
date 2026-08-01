@@ -31,7 +31,8 @@ Usage: session-handoff.sh <capture|list|show> [options]
 Distill an agent CLI session into a portable handoff digest.
 
 Subcommands:
-  capture   Read a session and write a digest to .oms/handoffs/.
+  capture   Read a session and write a digest to the project's .oms/handoffs/
+            (the repo containing --cwd; the Work Journal digest points there).
   list      List captured handoff digests (newest first); --json for machines.
   show FILE Print a captured digest to stdout.
 
@@ -417,7 +418,15 @@ cmd_capture() {
 
   local out="$OUT"
   if [ -z "$out" ]; then
-    local dir="$ROOT/.oms/handoffs"
+    # Digests are project artifacts: the Work Journal's newest-handoff pointer
+    # scans the project's .oms/handoffs, so writing anywhere else (e.g. the
+    # harness checkout) makes every capture invisible to the daily digest.
+    local repo_root
+    repo_root="$(oms_repo_root "$CWD" 2>/dev/null || true)"
+    if [ -z "$repo_root" ] || [ ! -d "$repo_root" ]; then
+      fail "cannot resolve a state repo for --cwd: $CWD (pass --out)"
+    fi
+    local dir="$repo_root/.oms/handoffs"
     agent_memory_ensure_oms_ignore_for_path "$dir" 2>/dev/null || true
     mkdir -p "$dir"
     local stamp
@@ -463,7 +472,8 @@ cmd_list() {
   local as_json=0
   if [ "${1:-}" = "--json" ]; then as_json=1; shift; fi
   [ "$#" -eq 0 ] || fail "list takes no arguments"
-  local dir="$ROOT/.oms/handoffs"
+  local dir
+  dir="$(oms_repo_root "${OMS_STATE_REPO:-$PWD}")/.oms/handoffs"
   if [ ! -d "$dir" ]; then
     if [ "$as_json" -eq 1 ]; then
       echo '{"schema": 1, "handoffs": []}'
@@ -490,7 +500,8 @@ print(json.dumps({"schema": 1, "handoffs": rows}, ensure_ascii=False))
 cmd_show() {
   [ "$#" -eq 1 ] || fail "show requires exactly one file"
   local f="$1"
-  [ -f "$f" ] || f="$ROOT/.oms/handoffs/$1"
+  [ -f "$f" ] ||
+    f="$(oms_repo_root "${OMS_STATE_REPO:-$PWD}")/.oms/handoffs/$1"
   [ -f "$f" ] || fail "no such handoff: $1"
   cat "$f"
 }

@@ -453,6 +453,83 @@ PY
   fi
 }
 
+# install.sh treats hook registration failure as a warning and continues, so a
+# "healthy" install can silently lack skill routing, the turn guard, or the
+# fail ledger. Verify the registration actually landed instead of trusting the
+# receipt; --repair re-runs install-claude-hooks.sh, which is the remedy.
+check_claude_hooks() {
+  local settings="${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+  local missing
+
+  if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" != "1" ]; then
+    echo "note: claude hooks check disabled (OH_MY_SETTING_CLAUDE_HOOKS=0)"
+    return 0
+  fi
+  # Without a valid receipt there is no install whose claim to verify; a bare
+  # checkout (or a sandboxed $HOME) is not a broken registration.
+  [ "$RECEIPT_STATE" = valid ] || return 0
+  # An install that opted out of the hooks recorded that choice in the
+  # receipt; the doctor verifies claims, it does not upgrade them to demands.
+  if [ "$(oms_install_receipt_mode claude_hooks 1 "$RECEIPT")" = "0" ]; then
+    echo "note: claude hooks not part of this install (receipt opt-out)"
+    return 0
+  fi
+  if [ ! -f "$settings" ]; then
+    if ! command -v claude >/dev/null 2>&1; then
+      echo "note: claude CLI and settings absent; skipping hook check"
+      return 0
+    fi
+    echo "fail: claude hooks not registered ($settings absent)"
+    echo "hint: run $INSTALL_ROOT/scripts/install-claude-hooks.sh"
+    FAILED=1
+    return 0
+  fi
+  missing="$(python3 - "$settings" <<'PY'
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        settings = json.load(fh)
+except Exception:
+    print("unreadable settings JSON")
+    sys.exit(0)
+hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
+
+def registered(event, mark):
+    entries = hooks.get(event)
+    for entry in entries if isinstance(entries, list) else []:
+        for h in entry.get("hooks", []) if isinstance(entry, dict) else []:
+            if mark in str(h.get("command", "")):
+                return True
+    return False
+
+for event, mark in (
+    ("UserPromptSubmit", "skill-router.sh"),
+    ("Stop", "turn-guard.sh"),
+    ("PostToolUseFailure", "fail-ledger-hook.sh"),
+    ("PreCompact", "precompact-handoff.sh"),
+):
+    if not registered(event, mark):
+        print("%s -> %s" % (event, mark))
+# A user-owned statusLine is preserved by the installer and counts as wired.
+status = settings.get("statusLine") if isinstance(settings, dict) else None
+if not (isinstance(status, dict) and status.get("command")):
+    print("statusLine")
+PY
+)"
+  if [ -n "$missing" ]; then
+    while IFS= read -r line; do
+      echo "fail: claude hook missing: $line"
+    done <<EOF
+$missing
+EOF
+    echo "hint: run $INSTALL_ROOT/scripts/install-claude-hooks.sh"
+    FAILED=1
+  else
+    echo "ok: claude hooks registered (router, turn guard, fail ledger, pre-compact, HUD)"
+  fi
+}
+
 harness_relpath() {
   local project_dir="$1"
   local path="$2"
@@ -881,6 +958,8 @@ if ! "$INSTALL_ROOT/scripts/install-skills.sh" >/dev/null; then
   echo "fail: skills.manifest.json out of sync (run scripts/install-skills.sh for details)"
   FAILED=1
 fi
+
+check_claude_hooks
 
 check_codex_plugin
 

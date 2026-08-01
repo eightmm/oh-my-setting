@@ -6,7 +6,47 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- A `PreCompact` handoff-snapshot hook (`precompact-handoff.sh`): just before
+  Claude Code or Codex compacts a session, a session-handoff digest is
+  captured into the project's `.oms/handoffs/` while the transcript detail is
+  still lossless. Registered for Claude by `install-claude-hooks.sh` and for
+  Codex by the plugin; best-effort by contract (a hook that blocks compaction
+  costs more than a missing digest), harness-adopted repos only, and it never
+  falls back to newest-session guessing when the payload names a session it
+  cannot resolve — a concurrent session's work must not be snapshotted under
+  this one's label. `OMS_PRECOMPACT_HANDOFF=0` opts out.
+- The doctor verifies the Claude hook registration it depends on. install.sh
+  treats hook-registration failure as a warning and continues, so an install
+  could report healthy with no skill routing at all; `check_claude_hooks` now
+  reads `settings.json` and fails with the remedy when any of the four hooks
+  or the HUD is missing, gated on a valid install receipt so bare checkouts
+  and sandboxed homes stay quiet.
+- Codex skill-picker metadata (`agents/openai.yaml`) for the four skills that
+  lacked it; only trust-boundary had a display name and default prompt.
+- `validate-skills.py` enforces Agent Skills spec conformance the other
+  runtimes rely on: the skill name must match its directory, the description
+  must be substantial enough to route on, and SKILL.md stays under the
+  500-line progressive-disclosure budget.
+
 ### Fixed
+- Session-handoff digests land in the project repo, not the harness checkout.
+  The default output directory was the oh-my-setting checkout's own
+  `.oms/handoffs/`, while the Work Journal's newest-handoff pointer scans the
+  project's — every capture from another repo was invisible to the daily
+  digest. `capture` now resolves the repo containing `--cwd`; `list`/`show`
+  resolve `OMS_STATE_REPO`/`$PWD`.
+
+### Removed
+- Per-project `GEMINI.md` from the default harness-file lists
+  (worktree seeding, project-private hiding, template dedup, docs). No
+  supported provider reads it: Antigravity takes global rules from
+  `~/.gemini/AGENTS.md` and per-project rules from `AGENTS.md`. The legacy
+  `~/.gemini/GEMINI.md` symlink cleanup stays for upgrades from the
+  Gemini-CLI era.
+- `scripts/backup.sh`, an orphan: not a public `oms` tool, undocumented,
+  called by nothing but its own test, and superseded by update.sh's
+  transactional snapshot/rollback of managed targets.
 - Shared-state files are replaced with a same-directory rename. The
   task-packet and memory-summary writers staged their scratch under TMPDIR
   and `mv`'d it over the target; with TMPDIR on a different filesystem than

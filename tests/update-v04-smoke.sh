@@ -65,6 +65,11 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   cp "$ROOT/scripts/link.sh" "$source/scripts/link.sh"
   cp "$ROOT/scripts/unlink.sh" "$source/scripts/unlink.sh"
   cp "$ROOT/scripts/doctor.sh" "$source/scripts/doctor.sh"
+  # The doctor verifies the hook registration the installer writes, so the two
+  # must come from the same tree — a working-tree doctor against a HEAD-clone
+  # installer fails on any hook the working tree added.
+  cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
+  cp "$ROOT/scripts/precompact-handoff.sh" "$source/scripts/precompact-handoff.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"

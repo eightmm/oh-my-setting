@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trace"
+  short_description: "Explain failures before changing code"
+  default_prompt: "Use $trace to explain this failure with competing hypotheses and a discriminating probe before changing anything."

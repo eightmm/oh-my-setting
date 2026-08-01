@@ -17,7 +17,18 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" turn-guard",
-            "timeout": 5
+            "timeout": 12
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" precompact-handoff codex",
+            "timeout": 30
           }
         ]
       }

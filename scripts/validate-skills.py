@@ -94,8 +94,22 @@ def main() -> int:
             errors.append(f"missing skill name: {source}/SKILL.md")
         elif actual_name != name:
             errors.append(f"name mismatch: {name} -> {source}/SKILL.md has {actual_name}")
-        if not metadata.get("description", "").strip():
+        # Agent Skills spec: the name must match the parent directory, or the
+        # skill breaks when installed into a runtime that resolves by path.
+        if skill_dir.name != name:
+            errors.append(f"directory mismatch: {source} must be named {name}")
+        description = metadata.get("description", "").strip()
+        if not description:
             errors.append(f"missing skill description: {source}/SKILL.md")
+        elif len(description) < 40:
+            # The description is the only routing signal most runtimes read;
+            # a stub can never be matched against a task.
+            errors.append(f"description too thin for routing: {source}/SKILL.md")
+        body_lines = len(content.splitlines())
+        if body_lines > 500:
+            # Spec budget: keep the always-loadable body small, push detail
+            # into references/.
+            errors.append(f"SKILL.md over 500 lines ({body_lines}): {source}")
 
         targets = {match.group(1) for match in REFERENCE_RE.finditer(content)}
         for target in sorted(targets):

@@ -403,7 +403,7 @@ if [ "$PRIVATE" = "1" ]; then
   [ "$DRY_RUN" = "1" ] && PRIVATE_ARGS+=(--dry-run)
   for f in "${FILES[@]}"; do
     case "$f" in
-      AGENTS.md|CLAUDE.md|GEMINI.md|PROJECT.md) ;;  # already default entries
+      AGENTS.md|CLAUDE.md|PROJECT.md) ;;  # already default entries
       *[[:space:]]*|/*|*..*)
         echo "note: cannot auto-hide $f; add it by hand to .git/info/exclude" ;;
       *) PRIVATE_ARGS+=(--path "$f") ;;
