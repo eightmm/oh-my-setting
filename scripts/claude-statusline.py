@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -98,11 +99,19 @@ def fallback_input_tokens(context: Dict[str, Any]) -> Optional[float]:
 
 
 def render(payload: Dict[str, Any], color: bool) -> str:
+    # Identity parts and metric parts render as one row when the terminal is
+    # wide enough and split into two rows when it is not: Claude Code
+    # truncates an overlong status line with an ellipsis, and the numbers on
+    # the right are exactly what disappears first.
+    identity: list = []
+    metrics: list = []
+    parts = identity
+
     model = mapping(payload.get("model"))
     model_name = safe_text(
         model.get("display_name"), safe_text(model.get("id"), "Claude")
     )
-    parts = [model_name]
+    parts.append(model_name)
 
     session_name = safe_text(payload.get("session_name"), "", 16)
     if session_name:
@@ -112,6 +121,7 @@ def render(payload: Dict[str, Any], color: bool) -> str:
         directory = safe_text(os.path.basename(current_dir.rstrip("/")), "", 16)
         if directory:
             parts.append(directory)
+    parts = metrics
 
     context = mapping(payload.get("context_window"))
     used = rounded_percent(context.get("used_percentage"))
@@ -156,6 +166,9 @@ def render(payload: Dict[str, Any], color: bool) -> str:
                     rate_text += " (%s)" % compact_duration(remaining)
             parts.append(colorize(rate_text, rate, color))
 
+    # Cost and effort are short: they ride the identity row so the split
+    # lines stay balanced instead of one long metrics row that still clips.
+    parts = identity
     cost = finite_number(mapping(payload.get("cost")).get("total_cost_usd"))
     if cost is not None:
         parts.append("$%.2f" % cost)
@@ -169,7 +182,14 @@ def render(payload: Dict[str, Any], color: bool) -> str:
     if effort_value:
         parts.append(effort_value)
 
-    return " | ".join(parts)
+    single = " | ".join(identity + metrics)
+    raw_columns = os.environ.get("COLUMNS", "").strip()
+    # Claude Code sets COLUMNS to the terminal width before running the
+    # script; without it, assume a conservative classic width.
+    threshold = int(raw_columns) if raw_columns.isdigit() and int(raw_columns) > 0 else 80
+    if len(re.sub(r"\x1b\[[0-9;]*m", "", single)) <= threshold:
+        return single
+    return "\n".join((" | ".join(identity), " | ".join(metrics)))
 
 
 def main() -> int:

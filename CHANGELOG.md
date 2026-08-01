@@ -18,7 +18,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   payload, no subprocesses; `OMS_HUD_NOW` pins the clock for deterministic
   tests. Codex and Antigravity expose no statusline surface, so the HUD
   stays a Claude surface; their session-start digest already carries the
-  harness state, and `oms repo-state` is the on-demand equivalent.
+  harness state, and `oms repo-state` is the on-demand equivalent. The line
+  is also width-aware: Claude Code clips an overlong status line with an
+  ellipsis — and the numbers on the right are exactly what disappears — so
+  when the row exceeds the terminal width (`COLUMNS`, conservative 80 when
+  unset) it splits into a balanced identity row (model, session, directory,
+  cost, effort) and metrics row (context, rate windows).
 
 ### Fixed
 - The installer accepts uv-only machines. A host with `uv` but no `python3`

@@ -9980,10 +9980,19 @@ test_claude_hud_renders_usage_safely() {
   local hud="$ROOT/scripts/claude-statusline.py"
   local out
 
-  out="$(printf '%s' '{"model":{"display_name":"Opus 4.1"},"session_name":"release-run","workspace":{"current_dir":"/x/myrepo"},"context_window":{"used_percentage":62.5,"total_input_tokens":124500,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1000007100},"seven_day":{"used_percentage":41.2,"resets_at":1000277200}},"cost":{"total_cost_usd":0.1234},"effort":{"level":"high"},"thinking":{"enabled":true}}' |
-    NO_COLOR=1 OMS_HUD_NOW=1000000000 python3 "$hud")"
-  [ "$out" = 'Opus 4.1 | release-run | myrepo | ctx [######----] 63% 125k/200k | 5h 24% (1h58m) | 7d 41% (3d5h) | $0.12 | high+think' ] ||
-    fail "Claude HUD full rendering mismatch: $out"
+  local full_payload='{"model":{"display_name":"Opus 4.1"},"session_name":"release-run","workspace":{"current_dir":"/x/myrepo"},"context_window":{"used_percentage":62.5,"total_input_tokens":124500,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1000007100},"seven_day":{"used_percentage":41.2,"resets_at":1000277200}},"cost":{"total_cost_usd":0.1234},"effort":{"level":"high"},"thinking":{"enabled":true}}'
+  out="$(printf '%s' "$full_payload" |
+    NO_COLOR=1 OMS_HUD_NOW=1000000000 COLUMNS=200 python3 "$hud")"
+  [ "$out" = 'Opus 4.1 | release-run | myrepo | $0.12 | high+think | ctx [######----] 63% 125k/200k | 5h 24% (1h58m) | 7d 41% (3d5h)' ] ||
+    fail "Claude HUD wide rendering mismatch: $out"
+
+  # A terminal too narrow for one row splits into a balanced identity row
+  # and metrics row instead of letting Claude Code clip the numbers.
+  out="$(printf '%s' "$full_payload" |
+    NO_COLOR=1 OMS_HUD_NOW=1000000000 COLUMNS=80 python3 "$hud")"
+  [ "$out" = 'Opus 4.1 | release-run | myrepo | $0.12 | high+think
+ctx [######----] 63% 125k/200k | 5h 24% (1h58m) | 7d 41% (3d5h)' ] ||
+    fail "Claude HUD narrow rendering mismatch: $out"
 
   # Without resets_at (older payloads) the usage percentages render bare.
   out="$(printf '%s' '{"model":{"display_name":"Opus 4.1"},"rate_limits":{"five_hour":{"used_percentage":23.5}}}' |
