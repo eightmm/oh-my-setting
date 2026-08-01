@@ -94,6 +94,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   500-line progressive-disclosure budget.
 
 ### Fixed
+- The smoke suite's source-state leak check no longer fires on the live
+  session's own Work Journal writes. The `.oms` fingerprint excluded only
+  `hooks/`, but the journal's turn boundaries (this cycle) rewrite
+  `work-journal/index.json`/`index.sqlite3` on every prompt the agent running
+  the suite submits — a run from an adopted repo failed with a fingerprint
+  mismatch that had nothing to do with the change under test. `work-journal/`
+  joins `hooks/` as an ambient-written subtree; tests exercise the journal
+  only through temporary repos, so no coverage is lost.
 - An existing project `GEMINI.md` is kept in sync with the other loaders.
   Antigravity reads it as a directory rule file and prefers it over
   `AGENTS.md`: verified live in a repository whose `AGENTS.md` carried the

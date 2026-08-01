@@ -20,17 +20,20 @@ import sys
 
 root = os.path.realpath(sys.argv[1])
 entries = []
-# `hooks/` is the one subtree the *live* agent session writes on its own
-# schedule: the prompt/turn hooks append to hooks/events.jsonl and stamp
-# hooks/sessions/*.json whenever the agent running this suite takes a step.
-# Including it makes the leak check fire on ambient session activity — a
-# concurrent tool call three seconds into a shard is enough — which is a false
+# `hooks/` and `work-journal/` are the subtrees the *live* agent session
+# writes on its own schedule: the prompt/turn hooks append to
+# hooks/events.jsonl and stamp hooks/sessions/*.json, and the Work Journal's
+# turn boundaries roll over daily files and rewrite index.json/index.sqlite3
+# whenever the agent running this suite takes a step. Including them makes the
+# leak check fire on ambient session activity — a concurrent tool call or a
+# prompt submitted three seconds into a shard is enough — which is a false
 # alarm in exactly the environment the check exists to protect. Tests write
-# through temporary repos and never through this path, so excluding it costs no
-# coverage.
+# through temporary repos and never through this path, so excluding them costs
+# no coverage.
+ambient = {"hooks", "work-journal"}
 for base, dirs, files in os.walk(root, followlinks=False):
     if base == root:
-        dirs[:] = [name for name in dirs if name != "hooks"]
+        dirs[:] = [name for name in dirs if name not in ambient]
     symlink_dirs = [name for name in dirs if os.path.islink(os.path.join(base, name))]
     dirs[:] = sorted(name for name in dirs if name not in symlink_dirs)
     for name in sorted(files + symlink_dirs):
