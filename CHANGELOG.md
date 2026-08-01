@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Project skills may declare a verification contract: an optional `verify:`
+  frontmatter command naming the evidence the skill expects. The forge
+  validated structure and sensitive content but not whether a skill's rails
+  produce observable outcomes, which let skills drift into aspiration. Rails
+  stay rails: validation is syntax-only (an empty or unparseable command
+  fails), `skill-forge status` counts declared contracts, a new
+  `skill-forge contracts` subcommand lists `name<TAB>command` rows, and
+  `agent-task close` prints one reminder per contract — the harness never
+  executes standing context on its own authority. Ranked #4 by the
+  2026-08-01 peer council.
 - `oms state-verify [--json]`: read-only consistency verdict over a repo's
   `.oms` tree. Shared state is the harness spine, and a dangling pointer or a
   contradictory packet is inherited as false confidence by every CLI that

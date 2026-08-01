@@ -626,6 +626,18 @@ PY
         echo "hint: $lesson_count repeated failure(s) were resolved in this repo; consider 'oms skill-forge add --name NAME' to make the lesson a project skill" >&2
       fi
     fi
+    # A project skill may declare the evidence it expects (a `verify:`
+    # frontmatter command). Remind at close — never execute: running standing
+    # context on the harness's own authority is not a rail.
+    if [ "${OMS_SKILL_FORGE_HINT:-1}" = "1" ] && [ -d "$REPO/.oms/skills" ]; then
+      contract_rows="$("$ROOT/scripts/skill-forge.sh" --repo "$REPO" contracts 2>/dev/null || true)"
+      if [ -n "$contract_rows" ]; then
+        while IFS="$(printf '\t')" read -r contract_name contract_cmd; do
+          [ -n "$contract_name" ] || continue
+          echo "hint: project skill '$contract_name' declares verify contract: $contract_cmd" >&2
+        done <<< "$contract_rows"
+      fi
+    fi
     # Promote a one-line outcome into project shared memory so the next
     # session (any agent) starts from the conclusion, not from scratch.
     if [ "${OMS_AGENT_TASK_CLOSE_MEMORY:-1}" = "1" ]; then

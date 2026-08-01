@@ -567,7 +567,10 @@ route on, 500-line body budget) and the outbound scrubber, since a project
 skill is standing context for every later session in that repo; links are
 hidden from git through `project-private` and withdrawn when a skill goes
 invalid. `validate`/`list`/`show`/`remove`/`status` make the set reviewable,
-and the doctor reports per-repo health. The ML template installs
+and the doctor reports per-repo health. A skill may declare a `verify:`
+frontmatter command — the evidence it expects; validation checks the syntax
+only, `status` counts declared contracts, `contracts` lists them, and
+`agent-task close` reminds about each one rather than executing it. The ML template installs
 `ml-experiment` (experiment-board duplicate check, pre-registered hypothesis
 runs, run-ledger gate, reproducibility capsule) and `dataset-safety`
 (manifest registration by declared group key, leakage and drift checks

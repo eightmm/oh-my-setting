@@ -30,6 +30,8 @@ Commands:
   show NAME                   Print a project skill.
   remove NAME                 Remove a skill and its links.
   status                      One-line health summary (used by the doctor).
+  contracts                   List declared verify contracts, one
+                              "name<TAB>command" row per skill that has one.
 
 Project skills live in <repo>/.oms/skills/<name>/SKILL.md. They load through
 each CLI's native project skill discovery — no router entry, no manifest.
@@ -100,6 +102,45 @@ if len(meta.get("description", "")) < 40:
 if len(lines) > 500:
     print("over the 500-line body budget (%d)" % len(lines))
     sys.exit(1)
+# Optional verification contract: a repo command whose success is the skill's
+# evidence. Syntax-only here — the harness records and reminds, it never
+# executes standing context on its own.
+if "verify" in meta:
+    verify = meta["verify"]
+    if not verify:
+        print("verify: declared but empty")
+        sys.exit(1)
+    import shlex
+    try:
+        if not shlex.split(verify):
+            raise ValueError
+    except ValueError:
+        print("verify: is not a parseable command: %r" % verify)
+        sys.exit(1)
+PY
+}
+
+# The declared verify contract of one skill dir, empty when none.
+skill_verify_contract() {
+  local dir="$1"
+  OMS_SF_DIR="$dir" python3 - <<'PY' 2>/dev/null || true
+import os, re
+path = os.path.join(os.environ["OMS_SF_DIR"], "SKILL.md")
+try:
+    lines = open(path, encoding="utf-8").read().splitlines()
+except OSError:
+    raise SystemExit
+if not lines or lines[0].strip() != "---":
+    raise SystemExit
+try:
+    end = lines.index("---", 1)
+except ValueError:
+    raise SystemExit
+for line in lines[1:end]:
+    match = re.match(r"^verify:\s*(.+)$", line)
+    if match:
+        print(match.group(1).strip())
+        break
 PY
 }
 
@@ -297,7 +338,7 @@ cmd_remove() {
 }
 
 cmd_status() {
-  local total=0 invalid=0 skill
+  local total=0 invalid=0 contracts=0 skill
   if [ ! -d "$SKILLS_DIR" ]; then
     echo "skill-forge: no project skills"
     return 0
@@ -307,16 +348,34 @@ cmd_status() {
     total=$((total + 1))
     validate_skill_dir "$skill" >/dev/null 2>&1 &&
       scrub_skill_dir "$skill" >/dev/null 2>&1 || invalid=$((invalid + 1))
+    [ -z "$(skill_verify_contract "$skill")" ] || contracts=$((contracts + 1))
   done
   if [ "$invalid" -gt 0 ]; then
     echo "skill-forge: $invalid of $total project skill(s) invalid (run 'oms skill-forge validate')"
     return 1
   fi
-  echo "skill-forge: $total project skill(s) valid"
+  if [ "$contracts" -gt 0 ]; then
+    echo "skill-forge: $total project skill(s) valid, $contracts with a verify contract"
+  else
+    echo "skill-forge: $total project skill(s) valid"
+  fi
+}
+
+# One row per declared verify contract; consumed by agent-task close to
+# remind — never to execute.
+cmd_contracts() {
+  local skill contract
+  [ -d "$SKILLS_DIR" ] || return 0
+  for skill in "$SKILLS_DIR"/*; do
+    [ -d "$skill" ] || continue
+    contract="$(skill_verify_contract "$skill")"
+    [ -z "$contract" ] || printf '%s\t%s\n' "$(basename "$skill")" "$contract"
+  done
 }
 
 case "${1:-}" in
   add) shift; cmd_add "$@" ;;
+  contracts) shift; cmd_contracts "$@" ;;
   validate) shift; cmd_validate "$@" ;;
   link) shift; cmd_link "$@" ;;
   list) shift; cmd_list "$@" ;;

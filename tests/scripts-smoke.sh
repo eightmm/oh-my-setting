@@ -13102,6 +13102,58 @@ assert all(f["remedy"] for f in report["findings"]), report
 ' || fail "json report malformed: $out"
 }
 
+test_skill_forge_verify_contract_lifecycle() {
+  local project="$TMP/sf-contract"
+  local out
+
+  make_committed_repo "$project"
+  cat > "$project/skill.md" <<'EOF'
+---
+name: repo-build-check
+description: Build and test discipline for this repository, including the canonical check command and its expected green output.
+verify: bash scripts/check.sh
+---
+
+# Repo build check
+
+Run the canonical gate before claiming done.
+EOF
+  "$ROOT/scripts/skill-forge.sh" --repo "$project" add \
+    --name repo-build-check --file "$project/skill.md" >/dev/null 2>&1 ||
+    fail "adding a skill with a verify contract should succeed"
+
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status)"
+  printf '%s\n' "$out" | grep -q '1 with a verify contract' ||
+    fail "status should surface the contract count: $out"
+
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
+  printf '%s\n' "$out" | grep -q "repo-build-check	bash scripts/check.sh" ||
+    fail "contracts should list name<TAB>command: $out"
+
+  # The close path reminds about the contract; it must never execute it.
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal g >/dev/null 2>&1
+  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" close --reason smoke 2>&1)"
+  printf '%s\n' "$out" |
+    grep -q "declares verify contract: bash scripts/check.sh" ||
+    fail "close should remind about the verify contract: $out"
+
+  # An empty contract is a validation failure, not a silent no-op.
+  mkdir -p "$project/.oms/skills/bad-contract"
+  cat > "$project/.oms/skills/bad-contract/SKILL.md" <<'EOF'
+---
+name: bad-contract
+description: A skill whose declared verification contract is empty and must therefore fail validation.
+verify:
+---
+
+body
+EOF
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate bad-contract 2>&1)" &&
+    fail "an empty verify contract must fail validation: $out"
+  printf '%s\n' "$out" | grep -q 'verify: declared but empty' ||
+    fail "empty-contract failure not explained: $out"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 
