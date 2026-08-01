@@ -350,6 +350,21 @@ if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   exec bash "$DEST/install.sh"
 fi
 
+# One failure past this point can leave a partial install: tools present but
+# targets unlinked, or hooks half-registered. The installer is idempotent and
+# doctor relinks from the receipt, so a crash should name that recovery path
+# instead of ending with only the failing tool's error.
+install_failed() {
+  local code="$1"
+
+  [ "$code" -ne 0 ] || return 0
+  {
+    echo "error: install failed (exit $code)"
+    echo "recover: rerun this installer, or run $DEST/scripts/doctor.sh --repair to fix links from the receipt"
+  } >&2
+}
+trap 'install_failed "$?"' EXIT
+
 # shellcheck disable=SC1091
 . "$DEST/scripts/lib/platform.sh"
 ensure_python3
