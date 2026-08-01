@@ -247,9 +247,7 @@ write_prompt() {
       printf -- '- Data leakage/splits: fitting or selection on val/test; group, time, seed, preprocessing, or checkpoint leakage.\n'
       printf -- '- Objective/eval: target and metric meaning, loss sign/scale/reduction/masks, eval mode, no-grad, NaN/Inf, dtype.\n'
       printf -- '- Reproducibility/distribution: seeds, versions, checkpoint symmetry, sampler.set_epoch, rank-0 effects, metric reduction.\n'
-      printf -- '- Chem-bio core: scientific units, entity-aware holdouts, provenance, cheap baselines, calibration, and applicability slices; use chem-bio-ml references for the active family.\n'
-      printf -- '- Molecule/protein/3D/interactions: scaffold/sequence-identity split; family/template/pose/assay leakage; stereochemistry, construct, residue, frame, invariance; report cold-drug/cold-target/cold-both.\n'
-      printf -- '- reaction, generation, nucleic acid, single-cell, and knowledge-graph: template/patent/time/locus/donor/batch/inverse-edge leakage; validity, memorization, oracle, and no-change baselines.\n\n'
+      printf '\n'
     fi
     ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
     printf 'Question:\n%s\n\n' "$question"

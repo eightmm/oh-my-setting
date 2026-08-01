@@ -2350,8 +2350,8 @@ test_peer_review_ml_preset() {
   mkdir -p "$project/.oms/manifests"
   git -C "$project" init >/dev/null
   printf 'import torch\n' > "$project/train.py"
-  printf '%s\n' '# PROJECT.md' '- State: confirmed' '- Goal: Review cold-target DTI' '- Data manifest: dti-v1' > "$project/PROJECT.md"
-  printf '%s\n' '{"schema":2,"name":"dti-v1","id_column":"pair_id","leakage_keys":["target_family"],"splits":[{"label":"train"},{"label":"test"}]}' > "$project/.oms/manifests/dti-v1.json"
+  printf '%s\n' '# PROJECT.md' '- State: confirmed' '- Goal: Review the training loop' '- Data manifest: dataset-v1' > "$project/PROJECT.md"
+  printf '%s\n' '{"schema":2,"name":"dataset-v1","id_column":"sample_id","leakage_keys":["group_id"],"splits":[{"label":"train"},{"label":"test"}]}' > "$project/.oms/manifests/dataset-v1.json"
 
   OH_MY_SETTING_REVIEW_DRY_RUN=1 "$ROOT/scripts/peer-review.sh" \
     --repo "$project" \
@@ -2363,10 +2363,9 @@ test_peer_review_ml_preset() {
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'Data leakage'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'sampler.set_epoch'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'silent ML bugs'
-  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'scaffold/sequence-identity split'
-  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'chem-bio-ml'
-  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'Review cold-target DTI'
-  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'dti-v1'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'metric reduction'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'Review the training loop'
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'dataset-v1'
 }
 
 test_peer_review_default_prompt_requires_ml() {
@@ -5805,6 +5804,29 @@ EOF
   assert_file_contains "$home_dir/out" "duplicate skill name: duplicate-skill"
 }
 
+test_skill_doctor_detects_duplicates_across_codex_roots() {
+  local home_dir="$TMP/skill-doctor-codex-overlay"
+  mkdir -p "$home_dir/.codex/skills/local" "$home_dir/.agents/skills/shared"
+
+  cat > "$home_dir/.codex/skills/local/SKILL.md" <<'EOF'
+---
+name: duplicate-skill
+---
+EOF
+  cat > "$home_dir/.agents/skills/shared/SKILL.md" <<'EOF'
+---
+name: duplicate-skill
+---
+EOF
+
+  if HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/out" 2>&1; then
+    fail "skill-doctor should detect a duplicate across Codex skill roots"
+  fi
+  assert_file_contains "$home_dir/out" "duplicate skill name: duplicate-skill"
+  assert_file_contains "$home_dir/out" "$home_dir/.codex/skills/local/SKILL.md"
+  assert_file_contains "$home_dir/out" "$home_dir/.agents/skills/shared/SKILL.md"
+}
+
 test_cleanup_dry_run_and_apply() {
   local home_dir="$TMP/cleanup-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
@@ -9001,6 +9023,46 @@ test_project_policy_templates_stay_compact() {
   assert_file_contains "$ROOT/templates/project-slurm-AGENTS.md" 'login nodes'
 }
 
+test_skill_catalog_is_one_general_purpose_set() {
+  python3 - "$ROOT" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+expected = {
+    "agent-harness",
+    "oh-my-setting-ops",
+    "peer-ask",
+    "peer-delegate",
+    "peer-review",
+    "spec-interview",
+    "trace",
+    "trust-boundary",
+}
+skills = json.loads((root / "skills.manifest.json").read_text(encoding="utf-8"))["skills"]
+names = {row["name"] for row in skills}
+assert names == expected, (sorted(names - expected), sorted(expected - names))
+assert all(row.get("enabled") is True for row in skills)
+
+on_disk = {
+    path.parent.name
+    for path in (root / "custom-skills").glob("*/SKILL.md")
+}
+assert on_disk == expected, (sorted(on_disk - expected), sorted(expected - on_disk))
+
+owners = {}
+duplicates = []
+for row in skills:
+    for raw in row.get("triggers", []):
+        trigger = str(raw).strip().casefold()
+        previous = owners.setdefault(trigger, row["name"])
+        if previous != row["name"]:
+            duplicates.append((trigger, previous, row["name"]))
+assert not duplicates, duplicates
+PY
+}
+
 test_large_skills_use_progressive_disclosure() {
   local skill
   local ref
@@ -9012,27 +9074,9 @@ test_large_skills_use_progressive_disclosure() {
     [ -f "$ROOT/custom-skills/agent-harness/references/$ref.md" ] || fail "missing agent-harness reference: $ref"
   done
 
-  skill="$ROOT/custom-skills/ml-training/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 400 ] || fail "ml-training router is too large"
-  for ref in optimizer-schedule distributed loss-masking checkpoint equivariance; do
-    assert_file_contains "$skill" "references/$ref.md"
-    [ -f "$ROOT/custom-skills/ml-training/references/$ref.md" ] || fail "missing ml-training reference: $ref"
-  done
-  assert_file_contains "$ROOT/custom-skills/ml-training/references/distributed.md" 'world_size * local_loss_sum / global_valid_count'
-  assert_file_contains "$ROOT/custom-skills/ml-training/references/checkpoint.md" 'model.module if hasattr(model, "module") else model'
-  if grep -RFn 'static_graph=True' "$ROOT/custom-skills/ml-training" >/dev/null; then
-    fail "ml-training should not prescribe static_graph=True as a default"
-  fi
-
   skill="$ROOT/custom-skills/spec-interview/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "spec-interview router is too large"
   for ref in question-ui project-bootstrap spec-templates; do
-    assert_file_contains "$skill" "references/$ref.md"
-  done
-
-  skill="$ROOT/custom-skills/research-method/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "research-method router is too large"
-  for ref in run-provenance experiment-coordination design-review; do
     assert_file_contains "$skill" "references/$ref.md"
   done
 
@@ -9045,12 +9089,6 @@ test_large_skills_use_progressive_disclosure() {
   skill="$ROOT/custom-skills/peer-delegate/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 350 ] || fail "peer-delegate front door is too large"
 
-  skill="$ROOT/custom-skills/chem-bio-ml/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 430 ] || fail "chem-bio-ml front door is too large"
-
-  skill="$ROOT/custom-skills/slurm-hpc/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 230 ] || fail "slurm-hpc front door is too large"
-
   # A method, not a catalogue: the whole value is the contract, the evidence
   # ranking, and the three commands it hands off to. Anything longer is prose
   # nobody reads while a run is broken.
@@ -9059,6 +9097,11 @@ test_large_skills_use_progressive_disclosure() {
   for tool in "oms fail-ledger check --cmd" "oms consult --all" "oms advise --prompt"; do
     assert_file_contains "$skill" "$tool"
   done
+
+  skill="$ROOT/custom-skills/trust-boundary/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 400 ] || fail "trust-boundary method is too large"
+  assert_file_contains "$skill" "trust boundary"
+  assert_file_contains "$skill" "negative-path"
   # And the tools must still accept those forms. Prose that names an interface
   # it no longer has is the defect this repository keeps paying for: a guessed
   # field name left resolved failures looking open, and a hardcoded schema
@@ -9676,10 +9719,68 @@ test_skill_router_matches_and_dedupes() {
   printf '%s' "$out" | grep -Fq "oh-my-setting-ops" ||
     fail "router must not suppress later identical prompts when turn_id is absent"
   # New session: suggests again; multi-match caps at two skills.
-  out="$(printf '{"prompt":"slurm 잡 제출하고 scaffold split 확인해줘","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
+  out="$(printf '{"prompt":"peer review하고 의견 물어봐","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "slurm-hpc" || fail "router should suggest slurm-hpc in a new session"
-  printf '%s' "$out" | grep -Fq "chem-bio-ml" || fail "router should include the second match"
+  printf '%s' "$out" | grep -Fq "peer-ask" || fail "router should suggest peer-ask in a new session"
+  printf '%s' "$out" | grep -Fq "peer-review" || fail "router should include the second match"
+}
+
+test_skill_router_separates_consultation_from_delegation() {
+  local d="$TMP/skill-router-actions"
+  local project="$d/project"
+  local out
+
+  make_committed_repo "$project"
+  out="$(printf '{"prompt":"codex한테 의견 물어봐","session_id":"ask1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'peer-ask' || fail "consultation should route to peer-ask"
+  if printf '%s' "$out" | grep -Fq 'peer-delegate'; then
+    fail "consultation must not route to the write delegate"
+  fi
+
+  out="$(printf '{"prompt":"codex한테 시켜: README 고쳐","session_id":"write1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'peer-delegate' || fail "write delegation should route to peer-delegate"
+  if printf '%s' "$out" | grep -Fq 'peer-ask'; then
+    fail "write delegation must not route to the consultation skill"
+  fi
+}
+
+test_skill_router_routes_trust_boundary_precisely() {
+  local d="$TMP/skill-router-trust-boundary"
+  local project="$d/project"
+  local prompt
+  local out
+  local i=0
+
+  make_committed_repo "$project"
+  while IFS= read -r prompt; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"security-pos-%s","turn_id":"t1","cwd":"%s"}' \
+      "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    printf '%s' "$out" | grep -Fq 'trust-boundary' ||
+      fail "router should suggest trust-boundary for: $prompt ($out)"
+  done <<'EOF'
+threat model this webhook before release
+이 결제 권한의 보안 경계를 검토해줘
+map the abuse path for this file upload
+EOF
+
+  i=0
+  while IFS= read -r prompt; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"security-neg-%s","turn_id":"t1","cwd":"%s"}' \
+      "$prompt" "$i" "$project" |
+      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    if printf '%s' "$out" | grep -Fq 'trust-boundary'; then
+      fail "router must not suggest trust-boundary for: $prompt ($out)"
+    fi
+  done <<'EOF'
+rename the internal boundary helper
+run a generic security review of this file upload
+add authorization to this API endpoint
+EOF
 }
 
 test_skill_router_keeps_trace_off_ordinary_test_talk() {
@@ -9727,100 +9828,6 @@ write the training script
 EOF
 }
 
-test_skill_router_routes_chem_bio_task_families() {
-  local d="$TMP/skill-router-chem-bio"
-  local project="$d/project"
-  local prompt
-  local out
-  local i=0
-
-  make_committed_repo "$project"
-  while IFS= read -r prompt; do
-    i=$((i + 1))
-    out="$(printf '{"prompt":"%s","session_id":"chem-bio-%s","turn_id":"t1","cwd":"%s"}' "$prompt" "$i" "$project" |
-      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    printf '%s' "$out" | grep -Fq "chem-bio-ml" ||
-      fail "router should suggest chem-bio-ml for: $prompt"
-  done <<'EOF'
-RDKit SMILES standardization
-MMseqs2 sequence identity split
-DMS variant effect benchmark
-protein ligand docking cold target
-reaction yield retrosynthesis
-antibody developability peptide MHC
-CRISPR guide RNA off-target prediction
-single-cell perturbation Cell Painting
-biomedical knowledge graph link prediction
-molecular generation oracle
-quantum molecular force prediction
-spatial transcriptomics patient split
-metabolomics adduct annotation
-proteomics peptide protein inference
-ASO oligonucleotide design
-base editing prime editing off-target
-drug-drug interaction DDI prediction
-gene-disease association benchmark
-HTS toxicity pharmacokinetic model
-canonical SMILES string validation
-conformer ensemble generation
-molecular docking virtual screening
-protein generation and peptide generation
-epitope prediction for drug combination multi-omics
-genomic variant effect prediction
-EOF
-
-  while IFS= read -r prompt; do
-    i=$((i + 1))
-    out="$(printf '{"prompt":"%s","session_id":"chem-bio-negative-%s","turn_id":"t1","cwd":"%s"}' "$prompt" "$i" "$project" |
-      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Fq "chem-bio-ml"; then
-      fail "router must not route unrelated prompt: $prompt"
-    fi
-  done <<'EOF'
-fix the shipping page
-debug memory leakage in React
-plan a high-protein meal
-recommend molecular gastronomy restaurants
-debug molecule.js rendering
-fix window docking behavior
-generate a portrait where everyone smiles
-단백질이 무엇인지 설명해줘
-화합물 이름의 유래를 설명해줘
-EOF
-}
-
-test_chem_bio_skill_routes_all_references() {
-  local skill="$ROOT/custom-skills/chem-bio-ml/SKILL.md"
-  local ref
-
-  for ref in \
-    shared-data-evaluation.md \
-    small-molecule-property.md \
-    molecular-3d-physics.md \
-    protein-sequence-function.md \
-    protein-structure-variant.md \
-    interactions-complexes.md \
-    biologics-immunology.md \
-    nucleic-acids-gene-editing.md \
-    reactions-synthesis.md \
-    generative-design.md \
-    cellular-omics-phenotypic.md \
-    biomedical-networks.md; do
-    [ -f "$ROOT/custom-skills/chem-bio-ml/references/$ref" ] ||
-      fail "chem-bio-ml reference missing: $ref"
-    assert_file_contains "$skill" "references/$ref"
-  done
-}
-
-test_ml_review_includes_chem_bio_task_families() {
-  local review="$ROOT/scripts/peer-review.sh"
-
-  assert_file_contains "$review" "cold-drug/cold-target/cold-both"
-  assert_file_contains "$review" "reaction"
-  assert_file_contains "$review" "single-cell"
-  assert_file_contains "$review" "knowledge-graph"
-}
-
 test_skill_router_auto_records_task_prompts() {
   local d="$TMP/skill-router-auto-task"
   local project="$d/project"
@@ -9865,9 +9872,9 @@ test_skill_router_plain_question_leaves_no_state() {
   local out
 
   make_committed_repo "$project"
-  out="$(printf '{"prompt":"explain slurm","session_id":"plain1","turn_id":"t1","cwd":"%s"}' "$project" |
+  out="$(printf '{"prompt":"oh-my-setting이 뭐야","session_id":"plain1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'slurm-hpc' || fail "plain question should still receive a skill hint"
+  printf '%s' "$out" | grep -Fq 'oh-my-setting-ops' || fail "plain question should still receive a skill hint"
   assert_not_exists "$project/.oms"
 }
 

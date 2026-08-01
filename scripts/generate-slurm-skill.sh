@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate the local Slurm reference for the slurm-hpc skill from this cluster.
+# Generate a private local Slurm reference from this cluster.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${OH_MY_SETTING_SLURM_REF:-$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"
+OUT="${OH_MY_SETTING_SLURM_REF:-$ROOT/local/slurm.md}"
 RAW_DIR="${OH_MY_SETTING_SLURM_RAW_DIR:-$ROOT/local/slurm}"
 WRITE_RAW="${OH_MY_SETTING_SLURM_WRITE_RAW:-0}"
 CURRENT_USER="${USER:-$(id -un 2>/dev/null || printf 'unknown')}"

@@ -64,7 +64,7 @@ MA_SAFE_PATHS=(
   ':(top,exclude,glob)**/*credentials*'
   ':(top,exclude,glob)**/*secrets*.yml'
   ':(top,exclude,glob)**/*secrets*.yaml'
-  ':(top,exclude)custom-skills/slurm-hpc/references/cluster.generated.md'
+  ':(top,exclude)local/slurm.md'
 )
 
 fail() {

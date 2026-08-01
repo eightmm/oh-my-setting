@@ -339,7 +339,7 @@ check_snapshots() {
   local machine_mode=0
   local slurm_mode=0
   local machine_path="${OH_MY_SETTING_MACHINE_SNAPSHOT:-$INSTALL_ROOT/local/machine.md}"
-  local slurm_path="${OH_MY_SETTING_SLURM_REF:-$INSTALL_ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"
+  local slurm_path="${OH_MY_SETTING_SLURM_REF:-$INSTALL_ROOT/local/slurm.md}"
 
   [ "$RECEIPT_STATE" = valid ] || return 0
   machine_mode="$(oms_install_receipt_mode machine_snapshot 0 "$RECEIPT")"

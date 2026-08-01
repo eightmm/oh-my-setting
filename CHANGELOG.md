@@ -50,7 +50,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   strips terminal controls, preserves an existing user `statusLine`, updates
   only its own command path, and removes only its own entry on uninstall.
 
+### Changed
+- Every install now exposes one eight-skill, general-purpose catalog. Added a
+  compact, language-neutral `trust-boundary` threat-model method. Removed
+  the project- or machine-specific `chem-bio-ml`, `ml-training`,
+  `research-method`, `slurm-hpc`, and `tsp-queue` skills; their useful runtime
+  commands and project templates remain available without occupying global
+  skill context. Consultation triggers now belong to `peer-ask` instead of
+  competing with `agent-harness`, and the private Slurm snapshot moved to
+  `local/slurm.md`.
+
 ### Fixed
+- `skill-doctor` now checks the shared `~/.agents/skills` root and detects a
+  duplicate name split across Codex's product-specific and shared overlays.
 - `oms init` no longer misses exposed agent files when `grep -q` closes its
   status pipe after the first match. Under `pipefail`, the still-writing
   producer could receive SIGPIPE and invert the condition, so the late-`git

@@ -358,7 +358,7 @@ if [ "$RECEIPT_STATE" = valid ]; then
   printf -- '- slurm_policy: %s\n' "$(oms_install_receipt_mode slurm_snapshot 0 "$RECEIPT")"
 fi
 file_status "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$INSTALL_ROOT/local/machine.md}"
-file_status "${OH_MY_SETTING_SLURM_REF:-$INSTALL_ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"
+file_status "${OH_MY_SETTING_SLURM_REF:-$INSTALL_ROOT/local/slurm.md}"
 
 printf '\n## Active Task\n\n'
 active_task_status

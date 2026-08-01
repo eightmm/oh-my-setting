@@ -80,7 +80,7 @@ Run a peer review of the current diff.
 Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
 Ask another agent about this split policy, and keep the thread.
-Check this molecular dataset's split for leakage before I train.
+Check this dataset's group split for leakage before I train.
 Frame this as a hypothesis-driven experiment before I launch the run.
 Wait for Slurm job 12345, then digest its log and report.
 Update oh-my-setting and re-run its doctor.
@@ -90,6 +90,10 @@ Update oh-my-setting and re-run its doctor.
 
 Your agent picks these up on its own when a task calls for them. The full
 per-script catalog is [docs/COMPONENTS.md](docs/COMPONENTS.md).
+
+Every installation exposes the same eight general-purpose skills. ML, Slurm,
+and workstation details stay in project templates or `oms` command help, so
+unrelated sessions do not carry domain-specific skill context.
 
 **Project setup**
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trust Boundary"
+  short_description: "Threat-model trust boundaries and abuse paths"
+  default_prompt: "Use $trust-boundary to threat-model this change and identify relevant negative-path checks."

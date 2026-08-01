@@ -219,3 +219,56 @@ oms_ops_check_skill_root() {
   fi
   printf '\n'
 }
+
+# Codex loads both its product-specific root and the shared ~/.agents root.
+# A per-directory check can therefore report two clean roots while the model
+# still receives two skills with the same name. Check that effective overlay
+# without treating the expected copies across different agent products as
+# duplicates.
+oms_ops_check_skill_overlay() {
+  local label="$1"
+  shift
+  local root
+  local file
+  local name
+  local previous
+  local previous_file
+  local previous_root
+  local roots=0
+  local issues=0
+  local first_seen=""
+
+  printf '## %s\n\n' "$label"
+
+  for root in "$@"; do
+    [ -d "$root" ] || continue
+    roots=$((roots + 1))
+    while IFS= read -r -d '' file; do
+      name="$(oms_ops_extract_skill_name "$file")"
+      [ -n "$name" ] || continue
+      previous="$(printf '%s' "$first_seen" |
+        awk -F'\t' -v n="$name" '$1 == n { print $2 "\t" $3; exit }')"
+      if [ -n "$previous" ]; then
+        previous_file="${previous%%$'\t'*}"
+        previous_root="${previous#*$'\t'}"
+        if [ "$previous_root" != "$root" ]; then
+          printf 'duplicate skill name: %s\n' "$name"
+          printf '  first: %s\n' "$previous_file"
+          printf '  also:  %s\n' "$file"
+          OMS_OPS_FAILED=1
+          issues=1
+        fi
+      else
+        first_seen="${first_seen}${name}$(printf '\t')${file}$(printf '\t')${root}
+"
+      fi
+    done < <(find -L "$root" -mindepth 2 -maxdepth 2 -name SKILL.md -type f -print0 2>/dev/null)
+  done
+
+  if [ "$roots" -lt 2 ]; then
+    printf 'skip: fewer than two skill roots are present\n'
+  elif [ "$issues" -eq 0 ]; then
+    printf 'ok: no duplicate names across the effective overlay\n'
+  fi
+  printf '\n'
+}

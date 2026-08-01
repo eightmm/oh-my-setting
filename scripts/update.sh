@@ -311,7 +311,7 @@ for managed_path in \
   "$HOME/.oh-my-setting-prompts" "$HOME/.oh-my-setting-workflows" \
   "$HOME/.local/bin/oms" "$HOME/.claude/settings.json" \
   "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$ROOT/local/machine.md}" \
-  "${OH_MY_SETTING_SLURM_REF:-$ROOT/custom-skills/slurm-hpc/references/cluster.generated.md}"; do
+  "${OH_MY_SETTING_SLURM_REF:-$ROOT/local/slurm.md}"; do
   snapshot_managed_target "$managed_path"
   # Copy-mode ownership is a sidecar transaction record. Snapshot it beside
   # the payload so a failed update cannot restore old content under a new hash.

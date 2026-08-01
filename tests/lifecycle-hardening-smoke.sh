@@ -113,6 +113,14 @@ EOF
   [ "$(stat -c '%a' "$out" 2>/dev/null || stat -f '%Lp' "$out")" = 600 ] ||
     fail "Slurm snapshot is not private"
   OH_MY_SETTING_SLURM_REF="$out" "$ROOT/scripts/generate-slurm-skill.sh" --check >/dev/null
+
+  local default_root="$TMP/slurm-default-root"
+  mkdir -p "$default_root/scripts"
+  cp "$ROOT/scripts/generate-slurm-skill.sh" "$default_root/scripts/"
+  chmod +x "$default_root/scripts/generate-slurm-skill.sh"
+  PATH="$bin:/usr/bin:/bin" "$default_root/scripts/generate-slurm-skill.sh" >/dev/null
+  [ -f "$default_root/local/slurm.md" ] ||
+    fail "default Slurm snapshot should live under local/, outside the skill catalog"
 }
 
 test_project_doctor_strict_slurm_contract() {

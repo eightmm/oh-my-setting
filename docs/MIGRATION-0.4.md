@@ -21,6 +21,9 @@ components such as `--tools` or `--auto-update` records `custom`. The concrete
 component flags remain authoritative. Automation can set
 `OH_MY_SETTING_PROFILE=minimal|full|custom` explicitly.
 
+These receipt profiles change components, not skills. Every installation links
+the same general-purpose skill catalog.
+
 The schema-2 install receipt persists the selected ref and concrete component
 choices. A plain later update therefore does not silently re-enable a Claude
 hook, Codex plugin, or update timer that was disabled at install time. Existing
@@ -44,7 +47,7 @@ and `oms update --rollback` to return to the recorded prior success.
 | `multi-agent-delegate.sh` | `oms peer-delegate` |
 | `OMS_MULTI_AGENT_*` | the matching `OMS_PEER_*` variable |
 | `workflows/spec-first.md` | `spec-interview` skill |
-| `workflows/slurm-hpc.md` | `slurm-hpc` skill |
+| `workflows/slurm-hpc.md` | `project-slurm-AGENTS.md` plus `oms generate-slurm-skill` |
 | `workflows/new-server.md` | chat-driven installer and project bootstrap |
 
 Legacy environment variables fail with an explicit replacement instead of

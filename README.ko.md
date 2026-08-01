@@ -77,7 +77,7 @@ oh-my-setting ml 템플릿 적용해줘.                 # 또는 general, slurm
 세 모델에게 debate 한 라운드로 물어봐: vector DB냐 pgvector냐?
 이거 codex한테 위임해줘: scripts/train.py에 입력 검증 추가.
 이 split 정책 다른 에이전트한테 물어보고 thread 유지해줘.
-학습 전에 이 분자 데이터셋 split leakage 확인해줘.
+학습 전에 이 데이터셋 group split leakage 확인해줘.
 런 돌리기 전에 가설 기반 실험으로 정리해줘.
 Slurm job 12345 끝나면 로그 digest해서 보고해줘.
 oh-my-setting 업데이트하고 doctor 다시 돌려줘.
@@ -87,6 +87,10 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 
 전부 agent가 필요할 때 알아서 집어 쓴다. 스크립트별 전체 카탈로그는
 [docs/COMPONENTS.md](docs/COMPONENTS.md)에 있다.
+
+모든 설치는 동일한 범용 skill 8개만 노출한다. ML·Slurm·workstation 세부 지침은
+프로젝트 템플릿이나 `oms` 명령 도움말에만 두어 무관한 세션이 도메인 전용 skill
+context를 부담하지 않게 한다.
 
 **프로젝트 설정**
 

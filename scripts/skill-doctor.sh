@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Diagnose duplicate or missing skill entries across all three agents' skill
-# roots, and rightsize the skills themselves: a SKILL.md that keeps growing
+# roots and Codex's shared ~/.agents overlay, and rightsize the skills
+# themselves: a SKILL.md that keeps growing
 # stops being a router into detail and becomes context an agent pays for on
 # every load, whether or not the task needs it. Progressive disclosure is the
 # fix — a short SKILL.md that points at references/ read only when relevant.
@@ -15,8 +16,9 @@ if [ "$#" -gt 0 ]; then
       cat <<'EOF'
 usage: skill-doctor.sh
 
-Report duplicate or missing skill entries across the Codex, Claude Code, and
-Antigravity skill roots, and flag any SKILL.md over the load budget
+Report duplicate or missing skill entries across the Codex, shared ~/.agents,
+Claude Code, and Antigravity skill roots, including names duplicated across
+Codex's effective overlay. Flag any SKILL.md over the load budget
 (OMS_SKILL_WORDS, default 900) or holding references/ nothing links to.
 Read-only; takes no arguments.
 EOF
@@ -32,11 +34,14 @@ fi
 printf '# oh-my-setting skill doctor\n\n'
 oms_ops_reset_check_state
 oms_ops_check_skill_root "Codex skills" "$HOME/.codex/skills"
+oms_ops_check_skill_root "Shared agent skills" "$HOME/.agents/skills"
+oms_ops_check_skill_overlay "Codex effective skill overlay" \
+  "$HOME/.codex/skills" "$HOME/.agents/skills"
 oms_ops_check_skill_root "Claude skills" "$HOME/.claude/skills"
 oms_ops_check_skill_root "Antigravity skills" "$HOME/.gemini/antigravity/skills"
 
 # Rightsizing is advisory: an oversized skill still works, it just costs every
-# agent that loads it. Budgets are overridable because a domain skill with no
+# agent that loads it. Budgets are overridable because a focused skill with no
 # sensible split is a legitimate exception.
 printf '\n## Skill size\n\n'
 skill_budget="${OMS_SKILL_WORDS:-900}"

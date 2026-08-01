@@ -73,4 +73,4 @@ contracts.
 
 ## Project Rules
 
-- Keep language, ML/data, and HPC policy in templates or domain skills.
+- Keep language, ML/data, and HPC policy in templates or project contracts.

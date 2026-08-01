@@ -490,11 +490,12 @@ updates refresh enabled snapshots transactionally, and the Slurm reference
 contains partitions, nodes, current-user associations/accounts, QOS/limits, a
 captured queue view, and exact configured CPU/memory/time defaults
 
-**Domain skills** — `ml-training` (optimizer/LR/DDP defaults), `chem-bio-ml`
-(progressive guardrails for molecules, proteins, interactions, biologics,
-nucleic acids/gene editing, reactions, generation, cellular/omics/phenotypic
-data, and biomedical networks), `research-method` (falsifiable-hypothesis
-loop), `slurm-hpc`
+**Skill catalog** — Every install exposes the same compact, general-purpose
+set: `agent-harness`, `oh-my-setting-ops`, `peer-ask`, `peer-review`,
+`peer-delegate`, `spec-interview`, `trace`, and `trust-boundary`. The last is a
+language-neutral security method for material trust boundaries, not a broad
+framework checklist. Domain and machine guidance lives in project templates or
+command help, so it does not occupy the global skill catalog.
 
 ## Code sources
 
@@ -587,12 +588,14 @@ filenames. `oms list` shows each tool's full first sentence, and any tool
 exiting with the misuse convention (exit 2) gets a `--help` recovery hint
 
 **Skill hygiene (`skill-doctor.sh`, `cleanup.sh`)** — Diagnoses
-duplicate/missing skill-picker entries across all three agents and rightsizes
-the skills themselves — a `SKILL.md` over the load budget (`OMS_SKILL_WORDS`,
-default 900) or a `references/` directory no `SKILL.md` links is flagged,
-keeping skills short routers into detail that is read only when relevant;
-cleanup removes only known legacy oms/backup symlinks (dry-run by default,
-never touches regular files or plugins)
+duplicate/missing skill-picker entries across all three agents, including
+duplicate names across Codex's `.codex/skills` + shared `.agents/skills`
+overlay, and rightsizes the skills themselves — a `SKILL.md` over the load
+budget (`OMS_SKILL_WORDS`, default 900) or a `references/` directory no
+`SKILL.md` links is flagged, keeping skills short routers into detail that is
+read only when relevant. System and plugin skills remain upstream-owned rather
+than being copied into OMS; cleanup removes only known legacy oms/backup
+symlinks (dry-run by default, never regular files or plugins)
 
 **Auto-update (`auto-update.sh`)** — Optional systemd timer or cron; check-only
 mode unless apply is explicitly selected
