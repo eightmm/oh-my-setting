@@ -120,6 +120,28 @@ if oms_install_python_shim_owned "$shim"; then
   fail "modified Python shim was still treated as removable"
 fi
 
+# The uv-backed shim shape is managed too, and it must actually run: the
+# interpreter is resolved through `uv python find` at call time so the shim
+# survives uv relocating its managed CPython.
+uv_stub_bin="$TMP/uv-stub-bin"
+mkdir -p "$uv_stub_bin"
+real_python3="$(command -v python3)"
+cat > "$uv_stub_bin/uv" <<EOF
+#!/usr/bin/env bash
+[ "\$1:\$2" = "python:find" ] || exit 2
+printf '%s\n' "$real_python3"
+EOF
+chmod +x "$uv_stub_bin/uv"
+uv_shim="$TMP/uv-python3"
+printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+  'exec "$(uv python find)" "$@"' > "$uv_shim"
+chmod +x "$uv_shim"
+oms_install_python_shim_owned "$uv_shim" ||
+  fail "uv-backed managed shim was not recognized"
+out="$(PATH="$uv_stub_bin:$PATH" "$uv_shim" -c 'print("uv-shim-ok")')" ||
+  fail "uv-backed shim did not exec the resolved interpreter"
+[ "$out" = "uv-shim-ok" ] || fail "uv-backed shim ran the wrong interpreter: $out"
+
 # Windows CRLF in a value bash reads back — see install-contract.sh for why it
 # breaks paths and state words. Simulated with a python3 that emits CRLF, so the
 # regression is reachable on every platform, not only on a Windows runner.

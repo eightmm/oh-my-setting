@@ -235,6 +235,7 @@ load_user_tool_paths() {
 
 ensure_python3() {
   local candidate=""
+  local uv_interp=""
   local shim="$HOME/.local/bin/python3"
 
   export PATH="$HOME/.local/bin:$PATH"
@@ -242,20 +243,37 @@ ensure_python3() {
      python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
     return 0
   fi
-  if ! oms_platform_is_windows; then
-    echo "error: a Python 3.9+ 'python3' command is required" >&2
-    exit 1
+  if oms_platform_is_windows; then
+    if command -v python >/dev/null 2>&1 &&
+       python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+      candidate=python
+    elif command -v py >/dev/null 2>&1 &&
+         py -3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+      candidate=py
+    fi
   fi
-  if command -v python >/dev/null 2>&1 &&
-     python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-    candidate=python
-  elif command -v py >/dev/null 2>&1 &&
-       py -3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-    candidate=py
+  # uv-only machines (fresh workstations, cluster accounts) carry a managed
+  # CPython without exposing any python3 command. Adopt it through a managed
+  # shim that resolves `uv python find` at call time, so the shim survives uv
+  # relocating or upgrading its interpreters.
+  if [ -z "$candidate" ] && command -v uv >/dev/null 2>&1; then
+    uv_interp="$(uv python find 2>/dev/null || true)"
+    if [ -z "$uv_interp" ]; then
+      uv python install >/dev/null 2>&1 || true
+      uv_interp="$(uv python find 2>/dev/null || true)"
+    fi
+    if [ -n "$uv_interp" ] &&
+       "$uv_interp" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+      candidate=uv
+    fi
   fi
 
   if [ -z "$candidate" ]; then
-    echo "error: Python 3.9+ is required; install Python and rerun" >&2
+    if oms_platform_is_windows; then
+      echo "error: Python 3.9+ is required; install Python and rerun" >&2
+    else
+      echo "error: a Python 3.9+ 'python3' command is required (installing uv also satisfies this)" >&2
+    fi
     exit 1
   fi
 
@@ -272,13 +290,20 @@ ensure_python3() {
     fi
   fi
   mkdir -p "$HOME/.local/bin"
-  if [ "$candidate" = py ]; then
-    printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
-      'exec py -3 "$@"' > "$shim"
-  else
-    printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
-      'exec python "$@"' > "$shim"
-  fi
+  case "$candidate" in
+    py)
+      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+        'exec py -3 "$@"' > "$shim"
+      ;;
+    uv)
+      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+        'exec "$(uv python find)" "$@"' > "$shim"
+      ;;
+    *)
+      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+        'exec python "$@"' > "$shim"
+      ;;
+  esac
   chmod +x "$shim"
   echo "python3 shim: $shim -> $candidate"
 }

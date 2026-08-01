@@ -50,8 +50,8 @@ nonsecret ID, property mapping, and CLI authentication mode are persisted. See
 
 | Host | Needs | Managed files |
 |---|---|---|
-| Linux, WSL | Bash 3.2+, Git, Python 3.9+ | symlinks |
-| macOS | stock Bash 3.2, Git, Python 3.9+ | symlinks |
+| Linux, WSL | Bash 3.2+, Git, Python 3.9+ (or uv) | symlinks |
+| macOS | stock Bash 3.2, Git, Python 3.9+ (or uv) | symlinks |
 | Windows Git Bash | Git, Python 3.9+; Node 22+ and provider CLIs from their native installers | verified copies |
 
 Windows gets copies because Git for Windows cannot assume symlink privileges;

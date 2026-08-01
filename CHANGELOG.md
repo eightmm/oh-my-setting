@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- The installer accepts uv-only machines. A host with `uv` but no `python3`
+  command (fresh workstations, cluster accounts) failed hard with "a Python
+  3.9+ 'python3' command is required", and no environment variable could
+  satisfy the check — found live on a cluster login node. `ensure_python3`
+  now falls back to uv's managed CPython: it writes the managed shim as
+  `exec "$(uv python find)" "$@"` (resolved at call time, so the shim
+  survives uv relocating or upgrading interpreters), installs a CPython
+  through uv when none exists yet, and the shim-ownership contract
+  recognizes the new shape so uninstall still removes only what the
+  installer wrote.
 - The Notion mirror now works on machines without a usable OS keychain, and
   the transport choice the docs always promised is actually persisted.
   Connecting on a headless/sandboxed host failed with ntn's "Failed to

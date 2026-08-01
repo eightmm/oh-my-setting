@@ -46,8 +46,8 @@ mapping, CLI 인증 방식만 저장한다. 자세한 내용은
 
 | 호스트 | 필요 | 관리 파일 |
 |---|---|---|
-| Linux, WSL | Bash 3.2+, Git, Python 3.9+ | symlink |
-| macOS | 기본 Bash 3.2, Git, Python 3.9+ | symlink |
+| Linux, WSL | Bash 3.2+, Git, Python 3.9+ (또는 uv) | symlink |
+| macOS | 기본 Bash 3.2, Git, Python 3.9+ (또는 uv) | symlink |
 | Windows Git Bash | Git, Python 3.9+; Node 22+와 provider CLI는 각자의 Windows 설치기로 | 검증된 사본 |
 
 Windows는 Git for Windows가 symlink 권한을 가정할 수 없어 사본을 쓴다. 선택된

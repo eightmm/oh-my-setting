@@ -23,10 +23,12 @@ oms_platform_is_windows() {
   [ "$(oms_platform_name)" = windows ]
 }
 
-# The Windows-only `python3` shim, recognized by its exact managed shape. Lives
-# on the platform boundary because both the installer that writes it and the
+# The managed `python3` shim, recognized by its exact shape. Lives on the
+# platform boundary because both the installer that writes it and the
 # uninstaller that removes it must agree on what "ours" means — anything else
-# at that path is a user's launcher and is never touched.
+# at that path is a user's launcher and is never touched. The uv variant
+# resolves the interpreter at call time, so the shim survives uv relocating
+# or upgrading its managed CPython.
 oms_install_python_shim_owned() {
   local target="$1"
   local command
@@ -36,7 +38,7 @@ oms_install_python_shim_owned() {
   [ "$(sed -n '2p' "$target")" = '# managed by oh-my-setting' ] || return 1
   command="$(sed -n '3p' "$target")"
   case "$command" in
-    'exec python "$@"'|'exec py -3 "$@"') ;;
+    'exec python "$@"'|'exec py -3 "$@"'|'exec "$(uv python find)" "$@"') ;;
     *) return 1 ;;
   esac
   [ -z "$(sed -n '4p' "$target")" ]
