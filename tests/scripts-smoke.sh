@@ -9756,11 +9756,16 @@ test_skill_router_routes_trust_boundary_precisely() {
   make_committed_repo "$project"
   while IFS= read -r prompt; do
     i=$((i + 1))
+    # Stderr goes to a file so a failure names its mechanism: the router is
+    # fail-open by design, and a transient helper crash under parallel-shard
+    # load surfaces as empty suggestions with exit 0 — indistinguishable from
+    # a routing miss unless the diagnostic is kept.
     out="$(printf '{"prompt":"%s","session_id":"security-pos-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
-      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+      TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh" \
+        2> "$d/router-stderr.txt")"
     printf '%s' "$out" | grep -Fq 'trust-boundary' ||
-      fail "router should suggest trust-boundary for: $prompt ($out)"
+      fail "router should suggest trust-boundary for: $prompt (out: $out; stderr: $(cat "$d/router-stderr.txt" 2>/dev/null))"
   done <<'EOF'
 threat model this webhook before release
 이 결제 권한의 보안 경계를 검토해줘
