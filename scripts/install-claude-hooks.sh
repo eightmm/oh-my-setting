@@ -157,7 +157,7 @@ if remove:
     action = "removed"
 else:
     upsert("UserPromptSubmit", "skill-router.sh", skill_cmd)
-    upsert("Stop", "turn-guard.sh", guard_cmd)
+    upsert("Stop", "turn-guard.sh", guard_cmd, timeout=12)
     # Failed Bash commands feed the shared failure memory and surface what it
     # already knows. Matcher-scoped so other tools' failures never pay for it;
     # a 5s ceiling so a wedged ledger cannot stall the turn.

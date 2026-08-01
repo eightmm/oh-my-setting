@@ -74,6 +74,36 @@ count="$(wc -l < "$repo/.oms/work-journal/events.jsonl" | tr -d ' ')"
 [ -f "$repo/.oms/work-journal/weekly/2026-W31.md" ] ||
   fail "weekly summary was not materialized"
 
+# Durable observations stay local while the agent works. The top-level finish
+# boundary owns the only remote sync and publishes only today's daily summary.
+fake_boundary_journal="$TMP/fake-boundary-journal.py"
+boundary_calls="$TMP/boundary-calls"
+cat > "$fake_boundary_journal" <<'PY'
+import os
+import pathlib
+import sys
+
+if sys.argv[1] == "sync":
+    with pathlib.Path(os.environ["OMS_TEST_BOUNDARY_CALLS"]).open("a") as handle:
+        handle.write(" ".join(sys.argv[1:]) + "\n")
+PY
+access_name="OMS_WORK_JOURNAL_NOTION_"'TOKEN'
+export "$access_name=test-credential"
+export OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID=fake-target
+export OMS_WORK_JOURNAL_PYTHON="$fake_boundary_journal"
+export OMS_TEST_BOUNDARY_CALLS="$boundary_calls"
+work_journal_observe "$repo" run-ledger "$row"
+[ ! -e "$boundary_calls" ] || fail "work-time observation called the remote mirror"
+work_journal_finish "$repo"
+[ "$(wc -l < "$boundary_calls" | tr -d ' ')" = 1 ] ||
+  fail "finish boundary should perform exactly one remote sync"
+grep -Fq -- '--force --today' "$boundary_calls" ||
+  fail "finish boundary did not limit sync to today's daily summary"
+unset "$access_name"
+unset OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID
+unset OMS_WORK_JOURNAL_PYTHON
+unset OMS_TEST_BOUNDARY_CALLS
+
 # Distinct processes append concurrently through the same existing lock helper.
 pids=""
 i=1
@@ -106,9 +136,8 @@ assert index["event_count"] == 13
 assert not list(root.rglob("*.tmp-*"))
 PY
 
-# A remote mirror owns a separate, non-blocking lock. While one fake sync is
-# held open, a second local observation must complete instead of queueing behind
-# network work.
+# Explicit remote sync owns a separate, non-blocking lock. Local observation
+# remains independent of that network lock.
 fake_journal="$TMP/fake-work-journal.py"
 sync_started="$TMP/sync-started"
 sync_release="$TMP/sync-release"
@@ -132,7 +161,7 @@ export OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID=fake-target
 export OMS_WORK_JOURNAL_PYTHON="$fake_journal"
 export OMS_TEST_SYNC_STARTED="$sync_started"
 export OMS_TEST_SYNC_RELEASE="$sync_release"
-(work_journal_observe "$repo" run-ledger "$row") &
+(work_journal_sync "$repo") &
 first_sync_pid=$!
 i=0
 while [ ! -f "$sync_started" ] && [ "$i" -lt 100 ]; do
@@ -363,5 +392,55 @@ set +e
 rc=$?
 set -e
 [ "$rc" = 2 ] || fail "work-journal became a public oms command"
+
+# One installer-side service connection flow owns both logins. It discovers
+# the existing Work Journal target after Notion authentication and persists no
+# credential in the harness config.
+connect_bin="$TMP/connect-bin"
+gh_marker="$TMP/gh-authenticated"
+ntn_marker="$TMP/ntn-authenticated"
+mkdir -p "$connect_bin"
+cat > "$connect_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$1:$2" in
+  auth:status) [ -f "$OMS_TEST_GH_MARKER" ] ;;
+  auth:login) touch "$OMS_TEST_GH_MARKER" ;;
+  *) exit 2 ;;
+esac
+EOF
+cat > "$connect_bin/ntn" <<'EOF'
+#!/usr/bin/env bash
+case "$1:$2" in
+  login:*) touch "$OMS_TEST_NTN_MARKER" ;;
+  api:v1/user"s"/me)
+    [ -f "$OMS_TEST_NTN_MARKER" ] || exit 1
+    printf '%s\n' '{"object":"user","id":"user"}'
+    ;;
+  api:v1/search)
+    printf '%s\n' '{"results":[{"object":"data_source","id":"ea343dea-4a66-4421-9653-dfc4fe68ed10"}],"has_more":false,"next_cursor":null}'
+    ;;
+  api:v1/data_sources/ea343dea-4a66-4421-9653-dfc4fe68ed10)
+    printf '%s\n' '{"id":"ea343dea-4a66-4421-9653-dfc4fe68ed10","properties":{"Name":{"type":"title"},"Work Journal Key":{"type":"rich_text"},"Content Hash":{"type":"rich_text"},"Project":{"type":"rich_text"},"Kind":{"type":"select"},"Period":{"type":"date"},"Has Blocker":{"type":"checkbox"}}}'
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$connect_bin/gh" "$connect_bin/ntn"
+rm -f "$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
+PATH="$connect_bin:$PATH" OMS_CONNECT_INTERACTIVE=1 \
+  OMS_GH_BIN="$connect_bin/gh" OMS_NOTION_CLI="$connect_bin/ntn" \
+  OMS_TEST_GH_MARKER="$gh_marker" OMS_TEST_NTN_MARKER="$ntn_marker" \
+  "$ROOT/scripts/connect-services.sh" --required >/dev/null
+[ -f "$gh_marker" ] || fail "service connection did not authenticate gh"
+[ -f "$ntn_marker" ] || fail "service connection did not authenticate Notion"
+python3 - "$XDG_CONFIG_HOME/oh-my-setting/work-journal.json" <<'PY'
+import json
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["notion"]["data_source_id"] == "ea343dea-4a66-4421-9653-dfc4fe68ed10"
+assert row["notion"]["auth_mode"] == "ntn"
+assert "token" not in json.dumps(row).lower()
+PY
 
 echo "work-journal-smoke: ok"

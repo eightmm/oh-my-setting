@@ -19,10 +19,15 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 ```
 
 This installs the harness and the CLIs it coordinates — Claude Code, Codex,
-Antigravity, Node (via nvm), uv, and the GitHub CLI. A council with one
+Antigravity, Node (via nvm), uv, GitHub CLI, and Notion CLI. A council with one
 installed peer is not a council, so the peers are part of the install rather
 than a flag to remember. Nothing needs root. Add `--no-tools` on a machine that
-cannot have them, and run `gh auth login` once, since that step is interactive.
+cannot have them. In an interactive terminal the installer delegates browser
+login to `gh auth login` and `ntn login`, then discovers the one compatible
+Work Journal data source. The CLIs keep their own credentials; the harness
+does not copy them. A non-interactive install prints the follow-up commands and
+continues. Use `--connect-services` to require a completed connection or
+`--no-connect-services` to skip both logins.
 
 Claude Code also gets a compact status-line HUD by default: model, live context
 bar and tokens, five-hour/seven-day plan usage when Claude supplies it,
@@ -37,17 +42,17 @@ would be denied, and `--peer-permissions` grants the consult profile
 settings it widened. Codex and Claude Code need nothing here — they carry
 authority per invocation.
 
-For an optional Work Journal Notion mirror, give the installer a data source
-with `--notion-data-source ID`. If
-`OMS_WORK_JOURNAL_NOTION_TOKEN` is already supplied by the process environment,
-install validates the connection and schema; only the nonsecret ID and property
-mapping are persisted. See [docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md).
+For the Work Journal Notion mirror, automatic discovery succeeds when exactly
+one accessible data source has the expected schema. If none or several match,
+give the installer the intended one with `--notion-data-source ID`. Only the
+nonsecret ID, property mapping, and CLI authentication mode are persisted. See
+[docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md).
 
 | Host | Needs | Managed files |
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ | symlinks |
 | macOS | stock Bash 3.2, Git, Python 3.9+ | symlinks |
-| Windows Git Bash | Git, Python 3.9+; Node and the provider CLIs from their native installers | verified copies |
+| Windows Git Bash | Git, Python 3.9+; Node 22+ and provider CLIs from their native installers | verified copies |
 
 Windows gets copies because Git for Windows cannot assume symlink privileges;
 the mode is recorded in the install receipt so update, doctor, and uninstall

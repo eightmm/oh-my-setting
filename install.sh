@@ -8,11 +8,12 @@ REF="${OH_MY_SETTING_REF:-$INSTALLER_DEFAULT_REF}"
 PROFILE="${OH_MY_SETTING_PROFILE:-minimal}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
-# The three provider CLIs and gh are what the harness is for: a council with one
+# The three provider CLIs, gh, and ntn are what the harness is for: a council with one
 # installed peer is not a council, and github-source/ci-status have nothing to
 # talk to without gh. Installing them is the default, not an opt-in flag nobody
 # passes. --no-tools remains for a machine that cannot or must not have them.
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
+CONNECT_SERVICES="${OH_MY_SETTING_CONNECT_SERVICES:-auto}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-0}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
@@ -21,20 +22,22 @@ NOTION_DATA_SOURCE_ID="${OH_MY_SETTING_NOTION_DATA_SOURCE_ID:-${OMS_WORK_JOURNAL
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--full] [--no-tools] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
+Usage: install.sh [--ref REF] [--full] [--no-tools] [--connect-services] [--no-connect-services] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
 
 Options:
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
   --full              Install provider tools, machine snapshot, and update timer.
-  --tools             Install Node, uv, provider CLIs, and gh (already the default).
+  --tools             Install Node, uv, provider CLIs, gh, and ntn (already the default).
   --no-tools          Skip them; doctor then treats every provider CLI as optional.
+  --connect-services  Require interactive gh and Notion login plus journal linking.
+  --no-connect-services
+                      Skip account login and automatic journal discovery.
   --auto-update       Install the check-only update timer.
   --machine-snapshot  Generate local machine metadata.
   --slurm-snapshot    Generate local Slurm cluster metadata when available.
   --notion-data-source ID
-                      Configure the Work Journal Notion mirror. A token already
-                      present in the environment validates the target schema
-                      but is never persisted.
+                      Select the Work Journal Notion mirror. Authentication is
+                      owned by ntn and is never persisted by oh-my-setting.
   --peer-permissions  Grant Antigravity the standing consult permissions
                       (read_file(*), command(*)) so headless council calls are
                       not auto-denied. Writes the user's Antigravity settings
@@ -53,7 +56,10 @@ Environment:
   OH_MY_SETTING_PEER_PERMISSIONS=1 Grant Antigravity consult permissions.
   OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
-  OH_MY_SETTING_INSTALL_TOOLS=0    Skip the Node/uv/provider CLI/gh install (default: 1).
+  OH_MY_SETTING_INSTALL_TOOLS=0    Skip the Node/uv/provider CLI/gh/ntn install (default: 1).
+  OH_MY_SETTING_CONNECT_SERVICES=auto|required|0
+                                   Auto-connect in an interactive terminal,
+                                   require connection, or skip it (default: auto).
   OH_MY_SETTING_AUTO_UPDATE=1      Install auto-update trigger.
   OH_MY_SETTING_NOTION_DATA_SOURCE_ID=ID
                                    Configure the Work Journal Notion mirror.
@@ -87,6 +93,14 @@ while [ "$#" -gt 0 ]; do
     --no-tools)
       [ "$PROFILE" = "full" ] || PROFILE=custom
       INSTALL_TOOLS=0
+      ;;
+    --connect-services)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
+      CONNECT_SERVICES=required
+      ;;
+    --no-connect-services)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
+      CONNECT_SERVICES=0
       ;;
     --auto-update)
       [ "$PROFILE" = "full" ] || PROFILE=custom
@@ -141,6 +155,14 @@ case "$PEER_PERMISSIONS" in
   0|1) ;;
   *) echo "error: OH_MY_SETTING_PEER_PERMISSIONS must be 0 or 1" >&2; exit 2 ;;
 esac
+case "$CONNECT_SERVICES" in
+  1) CONNECT_SERVICES=required ;;
+  auto|required|0) ;;
+  *)
+    echo "error: OH_MY_SETTING_CONNECT_SERVICES must be auto, required, or 0" >&2
+    exit 2
+    ;;
+esac
 case "$GENERATE_MACHINE:$GENERATE_SLURM" in
   0:0|0:1|0:auto|1:0|1:1|1:auto|auto:0|auto:1|auto:auto) ;;
   *) echo "error: snapshot modes must be 0, 1, or auto" >&2; exit 2 ;;
@@ -157,6 +179,7 @@ export OH_MY_SETTING_REF="$REF"
 export OH_MY_SETTING_PROFILE="$PROFILE"
 export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"
 export OH_MY_SETTING_INSTALL_TOOLS="$INSTALL_TOOLS"
+export OH_MY_SETTING_CONNECT_SERVICES="$CONNECT_SERVICES"
 export OH_MY_SETTING_GENERATE_MACHINE="$GENERATE_MACHINE"
 export OH_MY_SETTING_GENERATE_SLURM="$GENERATE_SLURM"
 export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
@@ -337,10 +360,22 @@ export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 
 "$DEST/scripts/link.sh"
 
-if [ -n "$NOTION_DATA_SOURCE_ID" ]; then
-  "$DEST/scripts/journal.sh" configure \
-    --data-source-id "$NOTION_DATA_SOURCE_ID"
-fi
+case "$CONNECT_SERVICES" in
+  auto|required)
+    connect_args=("--$CONNECT_SERVICES")
+    if [ -n "$NOTION_DATA_SOURCE_ID" ]; then
+      connect_args+=(--data-source-id "$NOTION_DATA_SOURCE_ID")
+    fi
+    "$DEST/scripts/connect-services.sh" "${connect_args[@]}"
+    ;;
+  0)
+    if [ -n "$NOTION_DATA_SOURCE_ID" ]; then
+      "$DEST/scripts/journal.sh" configure \
+        --data-source-id "$NOTION_DATA_SOURCE_ID" --no-validate
+    fi
+    echo "skipping GitHub/Notion connection: OH_MY_SETTING_CONNECT_SERVICES=0"
+    ;;
+esac
 
 # Claude Code skill-router/turn-guard hooks and usage HUD. Additive
 # settings.json merge; Claude-only, non-fatal on failure.

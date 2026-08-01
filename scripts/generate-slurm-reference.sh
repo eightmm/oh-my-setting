@@ -12,7 +12,7 @@ MODE="write"
 
 usage() {
   cat <<'EOF'
-Usage: generate-slurm-skill.sh [--check|--dry-run] [-h|--help]
+Usage: generate-slurm-reference.sh [--check|--dry-run] [-h|--help]
 
 Write a private, atomic cluster reference. --dry-run prints without writing;
 --check validates the existing generated reference without querying Slurm.

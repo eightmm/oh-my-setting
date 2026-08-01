@@ -18,10 +18,13 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 ```
 
 하네스와 함께 조율 대상 CLI까지 설치한다 — Claude Code, Codex, Antigravity,
-Node(nvm 경유), uv, GitHub CLI. peer 하나만 깔린 council은 council이 아니므로
+Node(nvm 경유), uv, GitHub CLI, Notion CLI. peer 하나만 깔린 council은 council이 아니므로
 peer는 기억해야 할 플래그가 아니라 설치의 일부다. root 권한은 필요 없다. 설치할
-수 없는 머신에서는 `--no-tools`를 붙이고, `gh auth login`은 대화형이라 한 번
-직접 실행한다.
+수 없는 머신에서는 `--no-tools`를 붙인다. 대화형 터미널에서는 설치기가
+`gh auth login`과 `ntn login`의 공식 브라우저 로그인을 실행한 뒤 호환되는 Work
+Journal data source 하나를 자동 발견한다. 인증정보는 각 CLI가 보관하며 하네스가
+복사하지 않는다. 비대화형 설치는 후속 명령을 알려주고 계속 진행한다.
+`--connect-services`는 연동 완료를 강제하고 `--no-connect-services`는 둘 다 건너뛴다.
 
 Claude Code에는 간결한 status-line HUD도 기본으로 설치된다. 모델, 실시간 context
 bar와 token, Claude가 제공할 때의 5시간/7일 plan 사용량, 예상 session 비용,
@@ -35,17 +38,17 @@ Antigravity는 standing permission이 있어야 headless council 호출에 답�
 `command(*)`)을 부여한다(넓힌 설정 파일 옆에 `.bak` 보존). Codex와 Claude
 Code는 호출 단위로 권한을 받으므로 여기 해당 없음.
 
-선택적인 Work Journal Notion mirror는 설치할 때
-`--notion-data-source ID`를 주면 된다. 프로세스 환경에
-`OMS_WORK_JOURNAL_NOTION_TOKEN`이 있으면 연결과 schema까지 검증하고, 디스크에는
-비밀이 아닌 ID와 property mapping만 저장한다. 자세한 내용은
+Work Journal Notion mirror는 접근 가능한 data source 중 예상 schema와 일치하는
+것이 정확히 하나면 자동 연결된다. 없거나 여러 개면 설치할 때
+`--notion-data-source ID`로 지정한다. 디스크에는 비밀이 아닌 ID, property
+mapping, CLI 인증 방식만 저장한다. 자세한 내용은
 [docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md)에 있다.
 
 | 호스트 | 필요 | 관리 파일 |
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ | symlink |
 | macOS | 기본 Bash 3.2, Git, Python 3.9+ | symlink |
-| Windows Git Bash | Git, Python 3.9+; Node와 provider CLI는 각자의 Windows 설치기로 | 검증된 사본 |
+| Windows Git Bash | Git, Python 3.9+; Node 22+와 provider CLI는 각자의 Windows 설치기로 | 검증된 사본 |
 
 Windows는 Git for Windows가 symlink 권한을 가정할 수 없어 사본을 쓴다. 선택된
 모드는 설치 영수증에 기록되어 update·doctor·uninstall이 같은 소유권 계약을

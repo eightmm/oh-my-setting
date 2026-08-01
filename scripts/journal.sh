@@ -32,6 +32,7 @@ case "${1:-}" in
     if [ "$command_name" = "sync" ]; then
       shift
       force_args=""
+      today_args=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --repo)
@@ -46,6 +47,10 @@ case "${1:-}" in
             force_args="--force"
             shift
             ;;
+          --today)
+            today_args="--today"
+            shift
+            ;;
           *)
             echo "error: unrecognized sync argument: $1" >&2
             exit 2
@@ -53,11 +58,10 @@ case "${1:-}" in
         esac
       done
       work_journal_call_local "$repo" materialize --repo "$repo"
-      if [ -n "$force_args" ]; then
-        work_journal_sync "$repo" --force
-      else
-        work_journal_sync "$repo"
-      fi
+      set --
+      [ -z "$force_args" ] || set -- "$@" "$force_args"
+      [ -z "$today_args" ] || set -- "$@" "$today_args"
+      work_journal_sync "$repo" "$@"
       exit $?
     fi
     work_journal_call_local "$repo" "$@"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install the tool CLIs the harness expects (node via nvm, provider CLIs).
+# Install the tool CLIs the harness expects (node via nvm, provider/service CLIs).
 
 NODE_VERSION="${OH_MY_SETTING_NODE_VERSION:-lts/*}"
 NVM_VERSION="${OH_MY_SETTING_NVM_VERSION:-v0.40.3}"
@@ -16,8 +16,9 @@ usage() {
 Usage: install-tools.sh [--upgrade] [-h|--help]
 
 Install missing harness tools: Node (via nvm), uv, the three provider CLIs
-(claude, codex, agy), and gh. --upgrade also refreshes existing provider CLIs,
-gh, and uv; an existing nvm-managed Node is refreshed to the configured channel.
+(claude, codex, agy), gh, and ntn. --upgrade also refreshes existing provider
+and service CLIs plus uv; an existing nvm-managed Node is refreshed to the
+configured channel.
 
 Nothing here needs root: npm globals go to the nvm prefix and gh is installed
 into ~/.local/bin from the official release archive (or brew on macOS).
@@ -68,7 +69,7 @@ install_nvm() {
 
   if oms_platform_is_windows; then
     echo "error: automatic nvm setup is disabled on Windows Git Bash" >&2
-    echo "error: install Node.js 20+ for Windows, reopen Git Bash, and rerun" >&2
+    echo "error: install Node.js 22+ for Windows, reopen Git Bash, and rerun" >&2
     exit 1
   fi
 
@@ -82,7 +83,7 @@ install_nvm() {
 }
 
 ensure_node() {
-  if has_cmd node && has_cmd npm && [ "$(node_major)" -ge 20 ]; then
+  if has_cmd node && has_cmd npm && [ "$(node_major)" -ge 22 ]; then
     if [ "$UPGRADE" = 1 ] && [ -s "$NVM_DIR/nvm.sh" ]; then
       load_nvm
       nvm install "$NODE_VERSION"
@@ -306,10 +307,12 @@ ensure_uv
 
 install_npm_global "@anthropic-ai/claude-code" "claude"
 install_npm_global "@openai/codex" "codex"
+install_npm_global "ntn" "ntn"
 install_antigravity
 install_gh
 
 write_npm_shim "claude"
 write_npm_shim "codex"
+write_npm_shim "ntn"
 
 echo "tools: ok"

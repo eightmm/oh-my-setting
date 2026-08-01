@@ -16,6 +16,7 @@ import math
 import os
 import pathlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -360,13 +361,39 @@ def _git_output(repo: pathlib.Path, args: Sequence[str]) -> str:
         return ""
 
 
+def canonical_github_repository(remote: str) -> Optional[Tuple[str, str]]:
+    """Normalize common GitHub remotes to a protocol-independent key/name."""
+
+    value = str(remote or "").strip().replace("\\", "/")
+    match = re.match(
+        r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]+@)?([^/:]+)(?::[0-9]+)?/(.+)$",
+        value,
+    )
+    if match is None:
+        match = re.match(r"^(?:[^@/:]+@)?([^/:]+):(.+)$", value)
+    if match is None or match.group(1).lower() != "github.com":
+        return None
+    path = match.group(2).split("?", 1)[0].split("#", 1)[0].strip("/")
+    if path.lower().endswith(".git"):
+        path = path[:-4]
+    parts = [part for part in path.split("/") if part]
+    if len(parts) != 2 or any(part in (".", "..") for part in parts):
+        return None
+    slug = "%s/%s" % (parts[0].lower(), parts[1].lower())
+    return "github.com/%s" % slug, slug
+
+
 def project_identity(repo: pathlib.Path) -> Tuple[str, str]:
     root = _git_output(repo, ["rev-parse", "--show-toplevel"])
     canonical = pathlib.Path(root or repo).resolve()
     remote = _git_output(canonical, ["config", "--get", "remote.origin.url"])
-    identity = sanitize_text(remote, 1000) if remote else str(canonical)
+    github = canonical_github_repository(remote)
+    if github is not None:
+        identity, name = github
+    else:
+        identity = sanitize_text(remote, 1000) if remote else str(canonical)
+        name = sanitize_text(canonical.name, 120) or "project"
     project_id = "proj_" + _sha256_bytes(identity.encode("utf-8"))[:20]
-    name = sanitize_text(canonical.name, 120) or "project"
     return project_id, name
 
 
@@ -679,7 +706,7 @@ def load_work_journal_config() -> Dict[str, Any]:
     return dict(row)
 
 
-def notion_settings() -> Dict[str, str]:
+def notion_settings() -> Dict[str, Any]:
     config = load_work_journal_config()
     notion = config.get("notion") if isinstance(config.get("notion"), Mapping) else {}
     properties = (
@@ -703,10 +730,19 @@ def notion_settings() -> Dict[str, str]:
     if not data_source_id and not database_id and isinstance(notion, Mapping):
         data_source_id = str(notion.get("data_source_id") or "").strip()
         database_id = str(notion.get("database_id") or "").strip()
+    access_value = os.environ.get("OMS_WORK_JOURNAL_NOTION_TOKEN", "").strip()
+    configured_auth = ""
+    if isinstance(notion, Mapping):
+        configured_auth = str(notion.get("auth_mode") or "").strip().lower()
+    auth_mode = "token" if access_value else (
+        os.environ.get("OMS_WORK_JOURNAL_NOTION_AUTH", "").strip().lower()
+        or configured_auth
+    )
+    cli_command = os.environ.get("OMS_NOTION_CLI", "ntn").strip() or "ntn"
     return {
-        "access_value": os.environ.get(
-            "OMS_WORK_JOURNAL_NOTION_TOKEN", ""
-        ).strip(),
+        "access_value": access_value,
+        "auth_mode": auth_mode,
+        "cli_command": cli_command,
         "data_source_id": data_source_id,
         "database_id": database_id,
         "title_property": configured(
@@ -728,14 +764,61 @@ def notion_settings() -> Dict[str, str]:
         "blocker_property": configured(
             "blocker", "OMS_WORK_JOURNAL_NOTION_BLOCKER_PROPERTY"
         ),
+        "timeout": float(
+            os.environ.get("OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS", "10")
+        ),
+        "budget_seconds": float(
+            os.environ.get("OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS", "8")
+        ),
     }
 
 
-def configure_notion(data_source_id: str, *, validate: bool = True) -> pathlib.Path:
+def notion_auth_available(settings: Mapping[str, Any]) -> bool:
+    if settings.get("access_value"):
+        return True
+    if settings.get("auth_mode") != "ntn":
+        return False
+    command = str(settings.get("cli_command") or "ntn")
+    return bool(shutil.which(command) or pathlib.Path(command).is_file())
+
+
+def discover_notion_target() -> str:
+    settings = notion_settings()
+    settings["auth_mode"] = "ntn"
+    if not notion_auth_available(settings):
+        raise JournalError("Notion CLI is required; install ntn and run ntn login")
+    try:
+        from notion_journal import (
+            NotionCLITransport,
+            NotionTransportError,
+            discover_work_journal_data_source,
+        )
+    except ImportError:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        from notion_journal import (
+            NotionCLITransport,
+            NotionTransportError,
+            discover_work_journal_data_source,
+        )
+    transport = NotionCLITransport(
+        settings["cli_command"],
+        "2026-03-11",
+    )
+    try:
+        return discover_work_journal_data_source(transport)
+    except NotionTransportError as exc:
+        raise JournalError(str(exc)) from None
+
+
+def configure_notion(
+    data_source_id: str, *, validate: bool = True, auth_mode: str = ""
+) -> pathlib.Path:
     target = str(data_source_id or "").strip()
     if not _NOTION_ID_RE.match(target):
         raise JournalError("invalid Notion data source id")
     settings = notion_settings()
+    if auth_mode:
+        settings["auth_mode"] = auth_mode
     settings["data_source_id"] = target
     settings["database_id"] = ""
     settings.update(
@@ -749,7 +832,7 @@ def configure_notion(data_source_id: str, *, validate: bool = True) -> pathlib.P
             "blocker_property": DEFAULT_NOTION_PROPERTIES["blocker"],
         }
     )
-    if validate and settings["access_value"]:
+    if validate and notion_auth_available(settings):
         try:
             from notion_journal import NotionJournalExporter
         except ImportError:
@@ -758,16 +841,22 @@ def configure_notion(data_source_id: str, *, validate: bool = True) -> pathlib.P
         exporter = NotionJournalExporter.from_config(**settings)
         exporter.validate_target()
     path = work_journal_config_path()
+    notion_config = {
+        "data_source_id": target,
+        "properties": dict(DEFAULT_NOTION_PROPERTIES),
+        "sync_mode": "finalized",
+    }
+    # ntn is a durable, non-secret transport choice. Environment credentials
+    # need no persisted marker, and omitting one also avoids implying that an
+    # unvalidated target has a usable credential.
+    if settings.get("auth_mode") == "ntn":
+        notion_config["auth_mode"] = "ntn"
     atomic_write_json(
         path,
         {
             "schema_version": CONFIG_SCHEMA_VERSION,
             "managed_by": "oh-my-setting",
-            "notion": {
-                "data_source_id": target,
-                "properties": dict(DEFAULT_NOTION_PROPERTIES),
-                "sync_mode": "finalized",
-            },
+            "notion": notion_config,
         },
     )
     try:
@@ -1715,7 +1804,8 @@ class JournalStore:
                 "configured": bool(
                     settings["data_source_id"] or settings["database_id"]
                 ),
-                "credential_present": bool(settings["access_value"]),
+                "credential_present": notion_auth_available(settings),
+                "auth_mode": settings.get("auth_mode") or "",
                 "target_kind": "data_source"
                 if settings["data_source_id"]
                 else ("database" if settings["database_id"] else ""),
@@ -1982,9 +2072,9 @@ class JournalStore:
         )
         return "\n".join(lines)
 
-    def sync_notion(self, *, force: bool = False) -> None:
+    def sync_notion(self, *, force: bool = False, today_only: bool = False) -> None:
         settings = notion_settings()
-        if not settings["access_value"] or not (
+        if not notion_auth_available(settings) or not (
             settings["data_source_id"] or settings["database_id"]
         ):
             return
@@ -2045,7 +2135,15 @@ class JournalStore:
             sync_now = sync_now.replace(tzinfo=dt.timezone.utc)
         sync_now = sync_now.astimezone(dt.timezone.utc)
         attempted = 0
-        for row in self._summary_rows(include_open=force, include_content=False):
+        rows = self._summary_rows(include_open=force, include_content=False)
+        if today_only:
+            current_day, _current_week = self._current_periods()
+            rows = [
+                row
+                for row in rows
+                if row["kind"] == "daily" and row["period"] == current_day
+            ]
+        for row in rows:
             previous = state["summaries"].get(row["summary_key"], {})
             if (
                 previous.get("status") == "synced"
@@ -2603,7 +2701,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=True)
     sub = parser.add_subparsers(dest="command", required=True)
     configure = sub.add_parser("configure")
-    configure.add_argument("--data-source-id", required=True)
+    target = configure.add_mutually_exclusive_group(required=True)
+    target.add_argument("--data-source-id")
+    target.add_argument("--discover", action="store_true")
     configure.add_argument("--no-validate", action="store_true")
     status = sub.add_parser("status")
     status.add_argument("--repo", default=".")
@@ -2643,6 +2743,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("sync")
     sync.add_argument("--repo", default=".")
     sync.add_argument("--force", action="store_true")
+    sync.add_argument("--today", action="store_true")
     return parser
 
 
@@ -2712,19 +2813,26 @@ def _run_show(store: JournalStore, args: argparse.Namespace) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "configure":
+        data_source_id = (
+            discover_notion_target() if args.discover else args.data_source_id
+        )
         path = configure_notion(
-            args.data_source_id,
+            data_source_id,
             validate=not args.no_validate,
+            auth_mode="ntn" if args.discover else "",
         )
         settings = notion_settings()
         print("configured: %s" % path)
-        if not settings["access_value"]:
+        if not notion_auth_available(settings):
             print(
                 "Notion access: missing "
-                "(set OMS_WORK_JOURNAL_NOTION_TOKEN in the agent environment)"
+                "(run ntn login or set OMS_WORK_JOURNAL_NOTION_TOKEN)"
             )
         else:
-            print("Notion access: present; target schema validated")
+            print(
+                "Notion access: %s; target schema validated"
+                % (settings.get("auth_mode") or "token")
+            )
         return 0
     if args.command == "disconnect":
         if not args.managed:
@@ -2768,7 +2876,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         store.materialize()
         return 0
     if args.command == "sync":
-        store.sync_notion(force=args.force)
+        store.sync_notion(force=args.force, today_only=args.today)
         return 0
     if args.command == "show":
         return _run_show(store, args)

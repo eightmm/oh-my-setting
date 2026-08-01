@@ -97,6 +97,62 @@ class NotionJournalTest(unittest.TestCase):
             )
             self.assertEqual([], transport.calls)
 
+    def test_cli_authenticated_transport_enables_export_without_token(self):
+        transport = FakeTransport([{"object": "data_source", "properties": {}}])
+        exporter = notion.NotionJournalExporter.from_config(
+            access_value="",
+            data_source_id="target",
+            auth_mode="ntn",
+            transport=transport,
+        )
+        self.assertTrue(exporter.enabled)
+
+    def test_notion_cli_transport_sends_json_on_stdin_without_token_argument(self):
+        completed = mock.Mock(returncode=0, stdout='{"id":"page"}\n', stderr="")
+        with mock.patch.object(notion.subprocess, "run", return_value=completed) as run:
+            transport = notion.NotionCLITransport("ntn", "2026-03-11")
+            result = transport.request(
+                "POST", "/v1/pages", {"parent": {"page_id": "parent"}}, 2.0
+            )
+        self.assertEqual("page", result["id"])
+        command = run.call_args.args[0]
+        self.assertEqual("ntn", command[0])
+        self.assertIn("v1/pages", command)
+        self.assertNotIn("token", " ".join(command).lower())
+        self.assertEqual(
+            {"parent": {"page_id": "parent"}},
+            json.loads(run.call_args.kwargs["input"]),
+        )
+
+    def test_discovers_unique_work_journal_data_source_by_schema(self):
+        properties = {
+            "Name": {"type": "title"},
+            "Work Journal Key": {"type": "rich_text"},
+            "Content Hash": {"type": "rich_text"},
+            "Project": {"type": "rich_text"},
+            "Kind": {"type": "select"},
+            "Period": {"type": "date"},
+            "Has Blocker": {"type": "checkbox"},
+        }
+        transport = FakeTransport(
+            [
+                {
+                    "results": [
+                        {"object": "data_source", "id": "journal-source"},
+                        {"object": "data_source", "id": "other-source"},
+                    ],
+                    "has_more": False,
+                    "next_cursor": None,
+                },
+                {"id": "journal-source", "properties": properties},
+                {"id": "other-source", "properties": {"Name": {"type": "title"}}},
+            ]
+        )
+        self.assertEqual(
+            "journal-source",
+            notion.discover_work_journal_data_source(transport),
+        )
+
     def test_core_has_no_optional_sdk_import(self):
         original_import = __import__
 

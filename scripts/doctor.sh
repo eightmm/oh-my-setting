@@ -894,6 +894,7 @@ check_cmd uv
 check_cmd claude
 check_cmd codex
 check_cmd agy
+check_cmd ntn
 # gh is installed by default now, so it is required on the same terms as the
 # provider CLIs: REQUIRE_TOOLS=1 fails on it, and a machine that deliberately
 # skipped the tool install still only sees "optional missing".

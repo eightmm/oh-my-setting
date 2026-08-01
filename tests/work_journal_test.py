@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -793,6 +794,31 @@ class JournalTestCase(unittest.TestCase):
             clock=lambda: NOW,
         )
         self.assertEqual(original, recovered.project_id)
+
+    def test_github_identity_normalizes_ssh_and_https_remotes(self):
+        repos = []
+        for index, remote in enumerate(
+            (
+                "git@github.com:EightMM/Oh-My-Setting.git",
+                "https://github.com/eightmm/oh-my-setting.git",
+                "ssh://git@github.com/eightmm/oh-my-setting",
+            )
+        ):
+            repo = self.tmp / ("github-%d" % index)
+            repo.mkdir()
+            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "remote", "add", "origin", remote],
+                check=True,
+            )
+            repos.append(repo)
+
+        identities = [wj.project_identity(repo) for repo in repos]
+        self.assertEqual(1, len({row[0] for row in identities}))
+        self.assertEqual(
+            {"eightmm/oh-my-setting"},
+            {row[1] for row in identities},
+        )
 
 
 if __name__ == "__main__":

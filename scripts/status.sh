@@ -343,7 +343,7 @@ link_status "$HOME/.claude/CLAUDE.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
 link_status "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
 
 printf '\n## Required tools\n\n'
-for tool in git curl node npm uv claude codex agy gh; do
+for tool in git curl node npm uv claude codex agy gh ntn; do
   tool_status "$tool"
 done
 

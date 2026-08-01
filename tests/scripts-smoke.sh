@@ -1655,15 +1655,18 @@ test_doctor_clean_harness_state_has_no_warnings() {
 test_doctor_fails_when_claude_hooks_unregistered() {
   local project="$TMP/doctor-hooks-missing"
   local home_dir="$TMP/doctor-hooks-missing-home"
+  local bin_dir="$TMP/doctor-hooks-missing-bin"
   local out
   local rc=0
 
   make_committed_repo "$project"
-  mkdir -p "$home_dir"
+  mkdir -p "$home_dir" "$bin_dir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/claude"
+  chmod +x "$bin_dir/claude"
   # link.sh writes the receipt but registers no hooks: the exact state the
   # installer leaves behind when hook registration failed as a warning.
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
-  out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" || rc=$?
+  out="$(PATH="$bin_dir:$PATH" run_doctor_for_project "$project" "$home_dir" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "doctor must fail when claude hooks are not registered"
   printf '%s' "$out" | grep -Fq 'claude hooks not registered' ||
     fail "doctor should name the missing hook registration: $out"
@@ -1786,14 +1789,16 @@ test_installer_installs_provider_clis_by_default() {
   # later ships a harness with one voice. Assert the default rather than the
   # flag, because the flag is what nobody passes.
   grep -Fq 'INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"' "$ROOT/install.sh" ||
-    fail "installer must install Node/uv/provider CLIs/gh by default"
+    fail "installer must install Node/uv/provider CLIs/gh/ntn by default"
   grep -Fq -- '--no-tools' "$ROOT/install.sh" ||
     fail "installer must keep an explicit escape hatch from the tool install"
   for tool in '"@anthropic-ai/claude-code" "claude"' '"@openai/codex" "codex"' \
-      'install_antigravity' 'install_gh'; do
+      '"ntn" "ntn"' 'install_antigravity' 'install_gh'; do
     grep -Fq "$tool" "$ROOT/scripts/install-tools.sh" ||
       fail "install-tools must cover $tool"
   done
+  grep -Fq 'check_cmd ntn' "$ROOT/scripts/doctor.sh" ||
+    fail "doctor must check the Notion CLI installed by default"
   # No sudo anywhere in the tool install: a setup script that needs root is a
   # setup script that gets run as root.
   if grep -nE '^[^#]*\bsudo\b' "$ROOT/scripts/install-tools.sh"; then
@@ -6123,7 +6128,7 @@ test_status_probes_provider_versions_only_when_verbose() {
   local tool
 
   mkdir -p "$home_dir" "$bin_dir"
-  for tool in node npm uv claude codex agy gh; do
+  for tool in node npm uv claude codex agy gh ntn; do
     cat > "$bin_dir/$tool" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$0 $*" >> "$OMS_TEST_STATUS_MARKER"

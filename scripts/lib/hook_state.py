@@ -818,6 +818,14 @@ def cmd_guard(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_repo(_: argparse.Namespace) -> int:
+    payload, _ = load_payload()
+    repo = hook_repo(payload)
+    if repo is not None:
+        print(repo)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="oh-my-setting hook state helper")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -826,6 +834,8 @@ def main() -> int:
     route.set_defaults(func=cmd_route)
     guard = sub.add_parser("guard")
     guard.set_defaults(func=cmd_guard)
+    repo = sub.add_parser("repo")
+    repo.set_defaults(func=cmd_repo)
     args = parser.parse_args()
     return int(args.func(args))
 

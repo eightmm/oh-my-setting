@@ -8,6 +8,7 @@ import email.utils
 import json
 import re
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -28,6 +29,15 @@ _DEFAULT_TITLE_PROPERTY = "Name"
 _DEFAULT_KEY_PROPERTY = "Work Journal Key"
 _DEFAULT_HASH_PROPERTY = "Content Hash"
 _RETRYABLE_HTTP_STATUS = frozenset((500, 502, 503, 504))
+_WORK_JOURNAL_SCHEMA = {
+    "Name": "title",
+    "Work Journal Key": "rich_text",
+    "Content Hash": "rich_text",
+    "Project": "rich_text",
+    "Kind": "select",
+    "Period": "date",
+    "Has Blocker": "checkbox",
+}
 
 
 class NotionHTTPError(RuntimeError):
@@ -109,6 +119,111 @@ class _StandardLibraryTransport:
         return decoded
 
 
+class NotionCLITransport:
+    """Authenticated Notion transport backed by the official ``ntn`` CLI."""
+
+    def __init__(self, command="ntn", api_version=NOTION_CURRENT_API_VERSION):
+        self._command = str(command or "ntn")
+        self._api_version = str(api_version or NOTION_CURRENT_API_VERSION)
+
+    def request(self, method, path, payload, timeout):
+        command = [
+            self._command,
+            "api",
+            str(path).lstrip("/"),
+            "-X",
+            str(method).upper(),
+            "--notion-version",
+            self._api_version,
+        ]
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        try:
+            completed = subprocess.run(
+                command,
+                input=body,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=float(timeout),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise TimeoutError("Notion CLI timed out") from None
+        except OSError:
+            raise NotionTransportError("Notion CLI is unavailable") from None
+        if completed.returncode != 0:
+            match = re.search(r"(?i)\b(?:http(?: status)?[ :=]*)?([45][0-9]{2})\b", completed.stderr)
+            if match:
+                raise NotionHTTPError(int(match.group(1))) from None
+            raise NotionTransportError("Notion CLI request failed")
+        raw = completed.stdout.strip()
+        if not raw:
+            return {}
+        try:
+            decoded = json.loads(raw)
+        except (UnicodeError, json.JSONDecodeError):
+            raise NotionTransportError(
+                "Notion CLI returned an invalid JSON response"
+            ) from None
+        if not isinstance(decoded, Mapping):
+            raise NotionTransportError(
+                "Notion CLI returned an unexpected JSON response"
+            )
+        return decoded
+
+
+def discover_work_journal_data_source(transport, timeout=8.0):
+    """Return the one accessible data source matching the journal schema."""
+
+    cursor = None
+    candidates = []
+    while True:
+        payload = {
+            "filter": {"property": "object", "value": "data_source"},
+            "page_size": 100,
+        }
+        if cursor:
+            payload["start_cursor"] = cursor
+        response = transport.request("POST", "/v1/search", payload, timeout)
+        results = response.get("results", [])
+        if not isinstance(results, list):
+            raise NotionTransportError("Notion search response is invalid")
+        candidates.extend(
+            str(row.get("id"))
+            for row in results
+            if isinstance(row, Mapping)
+            and row.get("object") == "data_source"
+            and row.get("id")
+        )
+        if not response.get("has_more"):
+            break
+        cursor = response.get("next_cursor")
+        if not cursor:
+            raise NotionTransportError("Notion search cursor is missing")
+
+    matches = []
+    for data_source_id in candidates:
+        response = transport.request(
+            "GET", "/v1/data_sources/{}".format(data_source_id), None, timeout
+        )
+        properties = response.get("properties", {})
+        if not isinstance(properties, Mapping):
+            continue
+        if all(
+            isinstance(properties.get(name), Mapping)
+            and properties[name].get("type") == expected_type
+            for name, expected_type in _WORK_JOURNAL_SCHEMA.items()
+        ):
+            matches.append(data_source_id)
+    if not matches:
+        raise NotionTransportError("no compatible Work Journal data source found")
+    if len(matches) > 1:
+        raise NotionTransportError("multiple compatible Work Journal data sources found")
+    return matches[0]
+
+
 class NotionJournalExporter:
     """Idempotently mirror one materialized summary into a Notion database."""
 
@@ -117,6 +232,8 @@ class NotionJournalExporter:
         access_value=None,
         data_source_id="",
         database_id="",
+        auth_mode="",
+        cli_command="ntn",
         transport=None,
         sleep=time.sleep,
         max_attempts=3,
@@ -152,6 +269,12 @@ class NotionJournalExporter:
             raise ValueError("budget_seconds must be greater than 0")
 
         self._access_value = str(access_value or "").strip()
+        self._auth_mode = str(auth_mode or "").strip().lower()
+        if self._access_value:
+            self._auth_mode = "token"
+        if self._auth_mode not in ("", "token", "ntn"):
+            raise ValueError("unsupported Notion authentication mode")
+        self._cli_command = str(cli_command or "ntn")
         self._data_source_id = str(data_source_id or "").strip()
         self._database_id = str(database_id or "").strip()
         self._collection_id = self._data_source_id or self._database_id
@@ -167,7 +290,10 @@ class NotionJournalExporter:
         self._kind_property = self._redact_access(kind_property).strip()
         self._period_property = self._redact_access(period_property).strip()
         self._blocker_property = self._redact_access(blocker_property).strip()
-        self.enabled = bool(self._access_value and self._collection_id)
+        self.enabled = bool(
+            self._collection_id
+            and (self._access_value or self._auth_mode == "ntn")
+        )
         if self.enabled and not all(
             (
                 self._title_property,
@@ -178,10 +304,16 @@ class NotionJournalExporter:
             raise ValueError("Notion property names must not be empty")
         self._transport = transport
         if self.enabled and self._transport is None:
-            self._transport = _StandardLibraryTransport(
-                self._access_value,
-                self._api_version,
-            )
+            if self._access_value:
+                self._transport = _StandardLibraryTransport(
+                    self._access_value,
+                    self._api_version,
+                )
+            else:
+                self._transport = NotionCLITransport(
+                    self._cli_command,
+                    self._api_version,
+                )
         self._sleep = sleep
         self._max_attempts = int(max_attempts)
         self._timeout = float(timeout)
@@ -195,6 +327,8 @@ class NotionJournalExporter:
         access_value=None,
         data_source_id="",
         database_id="",
+        auth_mode="",
+        cli_command="ntn",
         transport=None,
         sleep=time.sleep,
         max_attempts=3,
@@ -215,6 +349,8 @@ class NotionJournalExporter:
             access_value=access_value,
             data_source_id=data_source_id,
             database_id=database_id,
+            auth_mode=auth_mode,
+            cli_command=cli_command,
             transport=transport,
             sleep=sleep,
             max_attempts=max_attempts,
@@ -342,7 +478,9 @@ class NotionJournalExporter:
         return text
 
     def _request(self, method, path, payload=None):
-        if self._access_value in path or self._contains_access(payload):
+        if self._access_value and (
+            self._access_value in path or self._contains_access(payload)
+        ):
             raise NotionTransportError(
                 "Notion API data contains an authentication credential"
             )

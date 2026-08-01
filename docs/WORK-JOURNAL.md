@@ -38,16 +38,19 @@ or job result that was being observed.
 
 Capture happens after durable run/capsule, validation, patch review/admission,
 CI, job reconciliation, Agent State, and handoff writes. The provider prompt
-hook performs a local-only tick that reconciles `HEAD` and materializes dirty
-periods, which covers the first agent execution after a date or ISO-week
-rollover without a daemon or scheduler. Once per local day it also injects a
+hook first performs a local tick that reconciles `HEAD` and materializes dirty
+periods, then gives at most one closed or pending Notion item a two-second
+retry. This covers the first agent execution after a date or ISO-week rollover
+without a daemon or scheduler. Once per local day it also injects a
 bounded digest of at most three recent blockers and three next actions, plus a
 one-line previous-day count and, when a session handoff digest was captured in
 the last 48 hours, a one-line pointer to the newest one — a pointer only,
 never the handoff's content. This is the automatic read path: the journal can
 inform planning without loading its full history on every prompt. Set
 `OMS_WORK_JOURNAL_DIGEST=0` to keep rollover capture but disable that injection.
-A pending Notion export is retried by the next durable lifecycle observation.
+Durable lifecycle observations remain local while work is running. On an
+allowed top-level Stop, the final `HEAD` is reconciled and today's daily page is
+force-synced once; stable content hashes make duplicate Stop delivery a no-op.
 
 An event ID is derived, in order, from an authoritative source record ID, a
 caller operation ID, or a hash of normalized stable source fields. Current time
@@ -78,6 +81,7 @@ oms journal status --repo .
 oms journal rebuild --repo .
 oms journal sync --repo .
 oms journal sync --repo . --force
+oms journal sync --repo . --force --today
 ```
 
 `show` reads only the requested summary or bounded indexed event slice.
@@ -173,39 +177,48 @@ Template Markdown is canonical. The repository does not make a recursive agent
 call to rewrite it; an optional enrichment failure or timeout always falls back
 to the template.
 
-## Optional Notion mirror
+## Notion mirror
 
-The installer can configure the nonsecret half of the connection:
+The normal interactive installer owns the complete connection flow:
 
 ```bash
-read -r -s -p "Notion access value: " OMS_WORK_JOURNAL_NOTION_TOKEN
-export OMS_WORK_JOURNAL_NOTION_TOKEN
+curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
+```
+
+It installs `ntn` through npm, delegates browser authorization to `ntn login`,
+and discovers an accessible data source with the required schema. If discovery
+finds none or more than one, select the target explicitly:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh \
-  | bash -s -- --notion-data-source <data-source-id>
+  | bash -s -- --connect-services --notion-data-source <data-source-id>
 ```
 
-The same operation on an existing install is:
+On an existing install, the equivalent repair is
+`~/.oh-my-setting/scripts/connect-services.sh --required`; add
+`--data-source-id ID` only to resolve ambiguous discovery. `--required` makes
+an incomplete login or target selection fail visibly. The installer's default
+`auto` mode instead prints exact follow-up commands and continues when no
+interactive terminal is available.
 
-```bash
-oms journal configure --data-source-id <data-source-id>
-```
-
-The installer validates access and the property schema when the token is
-present. It persists only the target and property names in
+The installer validates access and the property schema. It persists only the
+target, property names, and `ntn` transport choice in
 `$XDG_CONFIG_HOME/oh-my-setting/work-journal.json` (normally
 `~/.config/oh-my-setting/work-journal.json`; `%LOCALAPPDATA%` is used by native
-Windows Python). The token is never written there, to a project, or to an
-install receipt. The secret manager or process launcher must provide
-`OMS_WORK_JOURNAL_NOTION_TOKEN` to later agent processes. Codex's connected
-Notion OAuth credential belongs to the connector and cannot be extracted or
-reused by a local shell script.
+Windows Python). `ntn` keeps workspace credentials in the operating system's
+credential store; the harness invokes `ntn api` and never extracts them. A
+legacy unattended path may still provide `OMS_WORK_JOURNAL_NOTION_TOKEN` to the
+agent process, but that value is never written to config, a project, or an
+install receipt. Codex's connected Notion app credential likewise belongs to
+the connector and cannot be extracted or reused by a local shell script.
 
-When the credential and configured target are present, closed daily/weekly
-summaries are mirrored after local materialization. The current day and current
-ISO week stay local while they are changing; the next durable lifecycle event
-after rollover syncs them. `oms journal sync --force` also publishes the open
-periods. This keeps long-running projects from repeatedly rewriting the same
-Notion pages while preserving an explicit live-preview path.
+When the CLI session and configured target are present, work-time observers
+only update local state. A prompt-start check retries at most one closed or
+pending summary within two seconds. An allowed Stop publishes today's daily
+summary within the normal eight-second sync budget. The current ISO week stays
+local until it closes unless `oms journal sync --force` is requested. This
+gives each top-level turn two bounded checkpoints without adding network work
+between them.
 
 `OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID` can override the persisted target and
 uses the current Notion data source API.
@@ -249,10 +262,13 @@ Notion side: a calendar or timeline over `Period`, a `Has Blocker` filter for
 stuck work, grouping by `Project` when several repositories share one
 database, and a `Kind` filter separating daily pages from weekly rollups.
 
-Duplicate prevention is serialized and guaranteed within one local state root.
+GitHub SSH and HTTPS remotes normalize to the same lowercase
+`github.com/owner/repository` project identity, so switching protocols does not
+split the journal. Duplicate prevention is serialized and guaranteed within
+one local state root.
 The remote lock is non-blocking: when another sync is active, local capture
-still completes and the mirror is retried by a later lifecycle. The remote key
-lookup also reduces duplicates after local sync-state loss.
+still completes and the mirror is retried by a later start or finish boundary.
+The remote key lookup also reduces duplicates after local sync-state loss.
 Notion does not offer a uniqueness constraint, so two machines or unrelated
 writers racing against the same database can still create duplicate pages; the
 local canonical journal remains correct and the mirror can be discarded and

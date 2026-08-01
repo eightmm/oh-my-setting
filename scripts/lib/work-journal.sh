@@ -86,15 +86,12 @@ work_journal_observe() {
     echo "warning: Work Journal observer degraded; primary lifecycle result is unchanged" >&2
     return 0
   fi
-  if ! work_journal_sync "$repo" >/dev/null 2>&1; then
-    echo "warning: Work Journal mirror degraded; local journal is preserved" >&2
-  fi
   return 0
 }
 
-# Prompt-hook entry: the same local-only rollover tick, plus a bounded
-# once-per-local-day digest on stdout. UserPromptSubmit stdout becomes agent
-# context, so this is the one place journal content surfaces without an
+# Prompt-hook entry: a local rollover tick, one bounded pending-mirror retry,
+# plus a once-per-local-day digest on stdout. UserPromptSubmit stdout becomes
+# agent context, so this is the one place journal content surfaces without an
 # explicit command. OMS_WORK_JOURNAL_DIGEST=0 keeps the tick but drops the
 # injection.
 work_journal_prompt_tick() {
@@ -115,7 +112,36 @@ work_journal_prompt_tick() {
     echo "warning: Work Journal materialization degraded; primary lifecycle result is unchanged" >&2
     return 0
   fi
+  # The start boundary retries at most one closed/pending summary within the
+  # provider hook budget. Durable observers stay local while work is running.
+  if ! OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK=1 \
+    OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS=2 \
+    OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS=2 \
+    work_journal_sync "$repo" >/dev/null 2>&1; then
+    echo "warning: Work Journal start sync degraded; local journal is preserved" >&2
+  fi
   [ -z "$out" ] || printf '%s\n' "$out"
+  return 0
+}
+
+# Top-level Stop-hook boundary: capture the final HEAD, materialize, then
+# publish today's daily summary once. Idempotent content hashes make repeated
+# Stop delivery a local no-op after the first successful sync.
+work_journal_finish() {
+  local repo="$1"
+
+  work_journal_enabled || return 0
+  [ "${OMS_WORK_JOURNAL_ACTIVE:-0}" != 1 ] || return 0
+  repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
+  repo="${repo//$'\r'/}"
+  repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
+  if ! work_journal_call_local "$repo" tick --repo "$repo" --local-only >/dev/null 2>&1; then
+    echo "warning: Work Journal finish materialization degraded" >&2
+    return 0
+  fi
+  if ! work_journal_sync "$repo" --force --today >/dev/null 2>&1; then
+    echo "warning: Work Journal finish sync degraded; local journal is preserved" >&2
+  fi
   return 0
 }
 

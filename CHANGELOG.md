@@ -63,6 +63,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `generate-slurm-reference.sh`: the honest name for what the script writes
   (a private cluster reference at `local/slurm.md`, not a skill).
   `generate-slurm-skill` remains as a compatibility shim and `oms` alias.
+- Work Journal now has bounded top-level turn boundaries: prompt start performs
+  local rollover plus one two-second pending Notion retry, work-time observers
+  stay local, and an allowed Stop captures final `HEAD` then publishes only
+  today's daily summary. GitHub SSH/HTTPS remotes share one normalized project
+  identity. The default installer adds the official `ntn` CLI and delegates
+  `gh`/Notion browser login to their CLIs, discovers a unique compatible data
+  source, and persists no credential; non-interactive auto mode remains
+  non-blocking while `--connect-services` makes incomplete setup fail.
 - A `PreCompact` handoff-snapshot hook (`precompact-handoff.sh`): just before
   Claude Code or Codex compacts a session, a session-handoff digest is
   captured into the project's `.oms/handoffs/` while the transcript detail is

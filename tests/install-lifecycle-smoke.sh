@@ -40,7 +40,7 @@ excluded = {".git", ".oms", "__pycache__", "local"}
 def ignore(_directory, names):
     return [name for name in names if name in excluded]
 
-shutil.copytree(source, target, ignore=ignore)
+shutil.copytree(source, target, ignore=ignore, ignore_dangling_symlinks=True)
 PY
 
 export GIT_CONFIG_GLOBAL=/dev/null
@@ -77,7 +77,7 @@ export OH_MY_SETTING_MODEL_DOCTOR=0
 bin="$TMP/bin"
 mkdir -p "$HOME/.codex" "$TMPDIR" "$bin"
 printf 'user rules\n' > "$HOME/.codex/AGENTS.md"
-for cli in codex claude agy gh; do
+for cli in codex claude agy gh ntn; do
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$bin/$cli"
   chmod +x "$bin/$cli"
 done
@@ -224,10 +224,10 @@ npm_prefix="$TMP/npm-prefix"
 mkdir -p "$tools_home" "$tools_bin" "$npm_prefix"
 tools_home="$(cd "$tools_home" && pwd -P)"
 
-for cli in claude codex agy gh uv node; do
+for cli in claude codex agy gh ntn uv node; do
   {
     printf '%s\n' '#!/usr/bin/env bash'
-    # ensure_node reads the major version through `node -p`; anything below 20
+    # ensure_node reads the major version through `node -p`; anything below 22
     # sends the installer to nvm, which is exactly what must not happen here.
     printf '%s\n' "if [ \"\$1\" = -p ]; then echo 22; else echo '$cli 1.0'; fi"
   } > "$tools_bin/$cli"
