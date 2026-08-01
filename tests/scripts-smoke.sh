@@ -13299,6 +13299,79 @@ test_support_bundle_redacts_and_omits() {
     fail "clean families should be included: $(cat "$bundle/MANIFEST.md")"
 }
 
+# The dispatch allowlist used to be one 500-character case line that nothing
+# reconciled against scripts/: a renamed or removed script became a ghost
+# entry that only failed at dispatch time, and a new script shipped without
+# anyone deciding whether it belongs on the oms surface. The catalog is data
+# now; this gate keeps every class honest.
+test_oms_allowlist_stays_in_sync_with_scripts() {
+  local public_list="$TMP/oms-public-tools"
+  local compat_list="$TMP/oms-compat-tools"
+  local all_list="$TMP/oms-all-tools"
+  local internal name dup script
+
+  awk '/^OMS_PUBLIC_TOOLS="$/{f=1;next} f&&/^"$/{exit} f' "$ROOT/scripts/oms" > "$public_list"
+  awk '/^OMS_COMPAT_TOOLS="$/{f=1;next} f&&/^"$/{exit} f' "$ROOT/scripts/oms" > "$compat_list"
+  [ -s "$public_list" ] || fail "could not extract OMS_PUBLIC_TOOLS from scripts/oms"
+  [ -s "$compat_list" ] || fail "could not extract OMS_COMPAT_TOOLS from scripts/oms"
+
+  cat "$public_list" "$compat_list" > "$all_list"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ -f "$ROOT/scripts/$name.sh" ] || fail "allowlisted tool has no script: $name"
+  done < "$all_list"
+
+  dup="$(sort "$all_list" | uniq -d)"
+  [ -z "$dup" ] || fail "tool classified twice: $dup"
+
+  sort -c "$public_list" 2>/dev/null || fail "OMS_PUBLIC_TOOLS is not sorted"
+  sort -c "$compat_list" 2>/dev/null || fail "OMS_COMPAT_TOOLS is not sorted"
+
+  # Scripts outside the oms surface, invoked by path from install/update/
+  # hooks/CI only. A new scripts/*.sh must be classified: public tool, compat
+  # shim, or a deliberate entry here.
+  internal="
+agent-ml-context
+check
+check-bash32
+check-python
+connect-services
+detect-project-style
+fail-ledger-hook
+install-agy-plugin
+install-claude-hooks
+install-codex-plugin
+install-hooks
+install-mcp
+install-skills
+install-tools
+link
+precompact-handoff
+skill-router
+turn-guard
+unlink
+"
+  for script in "$ROOT/scripts"/*.sh; do
+    name="$(basename "$script" .sh)"
+    if grep -Fxq "$name" "$public_list" || grep -Fxq "$name" "$compat_list"; then
+      continue
+    fi
+    case "$internal" in
+      *"
+$name
+"*) continue ;;
+    esac
+    fail "unclassified script: scripts/$name.sh (public tool, compat shim, or internal — pick one)"
+  done
+
+  # The dispatcher answers for a public tool and rejects an internal script.
+  "$ROOT/scripts/oms" skill-doctor --help >/dev/null ||
+    fail "public tool skill-doctor must dispatch"
+  if "$ROOT/scripts/oms" link --help >/dev/null 2>&1; then
+    fail "internal script link must not dispatch"
+  fi
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 # SMOKE_TEST_CALLS_END
 

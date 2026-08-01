@@ -137,30 +137,96 @@ describe() {
   printf '%s\n' "$desc"
 }
 
-is_public_tool() {
-  case "$1" in
-    apply-project-template|auto-update|change-guard|ci-status|cleanup|code-source|data-manifest|doctor|experiment-board|fail-ledger|gc|job-digest|journal|model-doctor|oms-init|provider-permissions|oms-run|patch-admit|patch-land|peer-ask|peer-delegate|peer-review|plan-run|project-doctor|project-private|provider-contract|remove-project-template|repo-state|research-runner|run-ledger|run-reconcile|session-handoff|skill-forge|snapshot|state-verify|status|support-bundle|tsp-queue|uninstall|update|advise|agent-call|agent-consult|agent-executor|agent-memory|agent-plan|agent-role|agent-run|agent-task|agent-thread|artifact-index)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
+# Public tools are the supported `oms` surface: listed by `oms list` and
+# dispatchable by name. One name per line, sorted, so a diff shows exactly
+# what entered or left the catalog; tests/scripts-smoke.sh reconciles both
+# lists against scripts/*.sh so a rename cannot leave a ghost entry.
+OMS_PUBLIC_TOOLS="
+advise
+agent-call
+agent-consult
+agent-executor
+agent-memory
+agent-plan
+agent-role
+agent-run
+agent-task
+agent-thread
+apply-project-template
+artifact-index
+auto-update
+change-guard
+ci-status
+cleanup
+code-source
+data-manifest
+doctor
+experiment-board
+fail-ledger
+gc
+job-digest
+journal
+model-doctor
+oms-init
+oms-run
+patch-admit
+patch-land
+peer-ask
+peer-delegate
+peer-review
+plan-run
+project-doctor
+project-private
+provider-contract
+provider-permissions
+remove-project-template
+repo-state
+research-runner
+run-ledger
+run-reconcile
+session-handoff
+skill-doctor
+skill-forge
+snapshot
+state-verify
+status
+support-bundle
+tsp-queue
+uninstall
+update
+"
 
 # Consolidated tools: still dispatchable so old habits, receipts, and applied
 # project templates keep working, but no longer listed — the catalog shows one
 # front door per capability (snapshot, auto-update, code-source,
 # artifact-index, oms-run).
-is_compat_tool() {
-  case "$1" in
-    generate-slurm-reference|github-source|import-agent-result|install-autoupdate|run-capsule|uninstall-autoupdate|write-machine-snapshot)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
+OMS_COMPAT_TOOLS="
+generate-slurm-reference
+github-source
+import-agent-result
+install-autoupdate
+run-capsule
+uninstall-autoupdate
+write-machine-snapshot
+"
+
+# Newline-delimited membership; tool names come from the validated command
+# line or from scripts/*.sh basenames, so they never carry a newline.
+tool_in_list() {
+  case "$2" in
+    *"
+$1
+"*) return 0 ;;
+    *) return 1 ;;
   esac
+}
+
+is_public_tool() {
+  tool_in_list "$1" "$OMS_PUBLIC_TOOLS"
+}
+
+is_compat_tool() {
+  tool_in_list "$1" "$OMS_COMPAT_TOOLS"
 }
 
 cmd_list() {
