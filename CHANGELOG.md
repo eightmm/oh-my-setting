@@ -73,6 +73,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   config alone.
 
 ### Changed
+- Auto-update is on by default. A fresh install registers the check-only
+  trigger (systemd timer, or cron when no user manager is reachable) so a
+  harness cannot silently go stale: it records update availability and
+  applies nothing. `--no-auto-update` or `OH_MY_SETTING_AUTO_UPDATE=0` opts
+  out, and applying updates remains an explicit choice via
+  `OH_MY_SETTING_AUTO_UPDATE_MODE=apply`. Existing installs keep their
+  recorded choice — the new default changes only what a fresh install does.
 - The `oms` dispatch allowlist is data, and a gate keeps it honest. The
   public/compat catalog was one 500-character case line that nothing
   reconciled against `scripts/` — a rename could leave a ghost entry that

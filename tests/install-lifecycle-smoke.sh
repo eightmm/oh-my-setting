@@ -74,6 +74,10 @@ export OH_MY_SETTING_STAR_PROMPT=0
 export OH_MY_SETTING_CODEX_PLUGIN=0
 export OH_MY_SETTING_REQUIRE_TOOLS=0
 export OH_MY_SETTING_MODEL_DOCTOR=0
+# Auto-update is on by default; route the trigger at a sandbox cron file so
+# this suite never touches the real user's crontab or systemd manager.
+export OH_MY_SETTING_AUTO_UPDATE_METHOD=cron
+export OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$TMP/autoupdate.cron"
 bin="$TMP/bin"
 mkdir -p "$HOME/.codex" "$TMPDIR" "$bin"
 printf 'user rules\n' > "$HOME/.codex/AGENTS.md"
@@ -144,8 +148,12 @@ grep -Fq "claude-statusline.py" "$HOME/.claude/settings.json" ||
   fail "install did not register the Claude HUD"
 [ ! -e "$dest/local/machine.md" ] ||
   fail "minimal install generated a machine snapshot"
+grep -Fq '# oh-my-setting autoupdate:begin' "$TMP/autoupdate.cron" 2>/dev/null ||
+  fail "default install did not register the auto-update trigger"
+grep -Fq 'auto-update.sh" check' "$TMP/autoupdate.cron" ||
+  fail "default auto-update trigger must be check-only, not apply"
 [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
-  fail "minimal install registered auto-update"
+  fail "forced cron method still wrote a systemd unit"
 oms list > "$TMP/oms-tools.txt"
 grep -Fq plan-run "$TMP/oms-tools.txt" || fail "dispatcher omitted plan-run"
 grep -Fq model-doctor "$TMP/oms-tools.txt" || fail "dispatcher omitted model-doctor"
@@ -211,6 +219,9 @@ fi
 [ ! -e "$work_journal_config" ] ||
   fail "uninstall --purge left Work Journal configuration"
 [ ! -d "$dest" ] || fail "uninstall --purge left the checkout"
+if grep -Fq 'oh-my-setting autoupdate' "$TMP/autoupdate.cron" 2>/dev/null; then
+  fail "uninstall left the auto-update trigger"
+fi
 
 # The default install — tools enabled — was the one path CI never ran, and it is
 # the path most users take. It is also what turned CI red for three commits:

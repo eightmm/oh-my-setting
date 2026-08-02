@@ -15,14 +15,18 @@ GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 CONNECT_SERVICES="${OH_MY_SETTING_CONNECT_SERVICES:-auto}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
-AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-0}"
+# The check-only update trigger is a default, not an opt-in: a harness that
+# silently goes stale stops matching the docs and skills its agents trust.
+# Check mode only records that an update exists; applying stays an explicit
+# choice (OH_MY_SETTING_AUTO_UPDATE_MODE=apply), and --no-auto-update opts out.
+AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 PEER_PERMISSIONS="${OH_MY_SETTING_PEER_PERMISSIONS:-0}"
 NOTION_DATA_SOURCE_ID="${OH_MY_SETTING_NOTION_DATA_SOURCE_ID:-${OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID:-}}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--full] [--no-tools] [--connect-services] [--no-connect-services] [--auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
+Usage: install.sh [--ref REF] [--full] [--no-tools] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
 
 Options:
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
@@ -32,7 +36,8 @@ Options:
   --connect-services  Require interactive gh and Notion login plus journal linking.
   --no-connect-services
                       Skip account login and automatic journal discovery.
-  --auto-update       Install the check-only update timer.
+  --auto-update       Install the check-only update timer (already the default).
+  --no-auto-update    Skip the auto-update trigger.
   --machine-snapshot  Generate local machine metadata.
   --slurm-snapshot    Generate local Slurm cluster metadata when available.
   --notion-data-source ID
@@ -60,7 +65,7 @@ Environment:
   OH_MY_SETTING_CONNECT_SERVICES=auto|required|0
                                    Auto-connect in an interactive terminal,
                                    require connection, or skip it (default: auto).
-  OH_MY_SETTING_AUTO_UPDATE=1      Install auto-update trigger.
+  OH_MY_SETTING_AUTO_UPDATE=0      Skip the auto-update trigger (default: 1).
   OH_MY_SETTING_NOTION_DATA_SOURCE_ID=ID
                                    Configure the Work Journal Notion mirror.
   OH_MY_SETTING_AUTO_UPDATE_MODE=apply  Auto-apply fast-forward updates (default: check-only).
@@ -105,6 +110,10 @@ while [ "$#" -gt 0 ]; do
     --auto-update)
       [ "$PROFILE" = "full" ] || PROFILE=custom
       AUTO_UPDATE=1
+      ;;
+    --no-auto-update)
+      [ "$PROFILE" = "full" ] || PROFILE=custom
+      AUTO_UPDATE=0
       ;;
     --machine-snapshot)
       [ "$PROFILE" = "full" ] || PROFILE=custom

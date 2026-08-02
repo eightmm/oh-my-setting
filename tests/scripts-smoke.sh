@@ -1787,6 +1787,16 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
     fail "a missing provider credential must not fail the doctor: $out"
 }
 
+test_installer_enables_auto_update_by_default() {
+  # A harness that silently goes stale stops matching its own docs and
+  # skills. Assert the default rather than the flag: check-only trigger on,
+  # with an explicit escape hatch.
+  grep -Fq 'AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"' "$ROOT/install.sh" ||
+    fail "installer must register the check-only auto-update trigger by default"
+  grep -Fq -- '--no-auto-update' "$ROOT/install.sh" ||
+    fail "installer must keep an explicit auto-update escape hatch"
+}
+
 test_installer_installs_provider_clis_by_default() {
   # The council is the product: an install that leaves the peers to be added
   # later ships a harness with one voice. Assert the default rather than the

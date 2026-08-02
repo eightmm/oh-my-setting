@@ -688,9 +688,11 @@ read only when relevant. System and plugin skills remain upstream-owned rather
 than being copied into OMS; cleanup removes only known legacy oms/backup
 symlinks (dry-run by default, never regular files or plugins)
 
-**Auto-update (`auto-update.sh`)** — Optional systemd timer or cron; check-only
-mode unless apply is explicitly selected; `install`/`remove` own the
-user-level trigger lifecycle
+**Auto-update (`auto-update.sh`)** — Systemd timer or cron, installed by
+default in check-only mode (`--no-auto-update` opts out; applying updates
+stays an explicit choice via `OH_MY_SETTING_AUTO_UPDATE_MODE=apply`);
+`install`/`remove` own the user-level trigger lifecycle, and the receipt
+records both the component and its mode so updates preserve the choice
 
 **Backup / unlink / uninstall** — Snapshot agent configs before changes; clean
 removal that restores what it replaced
