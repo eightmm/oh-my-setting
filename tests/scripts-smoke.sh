@@ -6499,6 +6499,7 @@ PY
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["components"]["auto_update"] is True, row["components"]
+assert row["component_modes"]["auto_update"] == "check", row
 assert row["components"]["claude_hooks"] is True, row["components"]
 assert row["version"] == "0.3.0", row
 PY
@@ -6509,6 +6510,25 @@ PY
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["components"]["auto_update"] is False, row["components"]
+PY
+
+  # --apply records the chosen mode so a later update reinstalls apply, not
+  # the check default; disabling keeps the mode for the next enable.
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >/dev/null
+  python3 - "$receipt" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["components"]["auto_update"] is True, row["components"]
+assert row["component_modes"]["auto_update"] == "apply", row
+PY
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
+  python3 - "$receipt" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["components"]["auto_update"] is False, row["components"]
+assert row["component_modes"]["auto_update"] == "apply", row
 PY
 
   # Dry-run previews the receipt write without performing it.
@@ -6540,6 +6560,85 @@ import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["components"]["auto_update"] is False, row["components"]
 PY
+}
+
+# update.sh reinstalls the trigger on every run; before the mode lived in the
+# receipt's component_modes, that reinstall silently downgraded an apply-mode
+# timer to the check default.
+test_update_preserves_auto_update_mode() {
+  local project="$TMP/update-autoupdate-mode"
+  local bin="$project/bin"
+  local receipt="$TMP/update-autoupdate-mode-receipt.json"
+  local marker="$project/mode-marker"
+  local branch
+
+  make_committed_repo "$project"
+  mkdir -p "$project/scripts/lib" "$bin"
+  cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
+  for script in link doctor uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
+    chmod +x "$project/scripts/$script.sh"
+  done
+  cat > "$project/scripts/install-autoupdate.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${OH_MY_SETTING_AUTO_UPDATE_MODE:-unset}" > "$OMS_TEST_MODE_MARKER"
+EOF
+  chmod +x "$project/scripts/install-autoupdate.sh"
+  cat > "$bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *' pull --ff-only') exit 0 ;;
+esac
+exec /usr/bin/git "$@"
+EOF
+  chmod +x "$bin/git"
+  git -C "$project" add scripts bin
+  git -C "$project" commit -qm "test: auto-update mode fixture"
+  branch="$(git -C "$project" symbolic-ref --short HEAD)"
+  git -C "$project" remote add origin "$project"
+  git -C "$project" fetch -q origin "$branch"
+  git -C "$project" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null
+  python3 - "$receipt" "$project" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": 2,
+        "source_root": sys.argv[2],
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "channel": "main",
+        "version": "0.3.0",
+        "profile": "custom",
+        "ref": "main",
+        "previous_commit": "",
+        "link_mode": "symlink",
+        "installed_at": "2026-07-12T00:00:00Z",
+        "components": {
+            "tools": False,
+            "claude_hooks": False,
+            "codex_plugin": False,
+            "auto_update": True,
+            "machine_snapshot": False,
+            "slurm_snapshot": False,
+        },
+        "component_modes": {
+            "auto_update": "apply",
+            "machine_snapshot": "0",
+            "slurm_snapshot": "0",
+        },
+        "managed_targets": [".local/bin/oms"],
+        "plugin": {"name": "oh-my-setting", "version": "0.1.0", "sha256": "test"},
+    }, handle)
+PY
+
+  env -u OH_MY_SETTING_AUTO_UPDATE -u OH_MY_SETTING_AUTO_UPDATE_MODE \
+    PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_TEST_MODE_MARKER="$marker" OH_MY_SETTING_CLAUDE_HOOKS=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=0 \
+    "$project/scripts/update.sh" --no-doctor >/dev/null
+  [ -f "$marker" ] || fail "update should reinstall the recorded auto-update trigger"
+  grep -Fxq apply "$marker" ||
+    fail "update downgraded the recorded apply mode: $(cat "$marker")"
 }
 
 test_check_gate_hard_fails_without_shellcheck() {

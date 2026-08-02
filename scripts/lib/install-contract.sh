@@ -220,10 +220,15 @@ try:
             not isinstance(components.get(key), bool) for key in required_components
         ):
             raise ValueError("invalid component profile")
+        # A surgical component write may create component_modes holding only
+        # the key it recorded; absent keys fall back to the components flags,
+        # so presence is optional but a present value must be valid.
         if component_modes is not None and (
             not isinstance(component_modes, dict)
-            or any(component_modes.get(key) not in ("0", "1", "auto")
+            or any(key in component_modes
+                   and component_modes.get(key) not in ("0", "1", "auto")
                    for key in ("machine_snapshot", "slurm_snapshot"))
+            or component_modes.get("auto_update") not in (None, "check", "apply")
         ):
             raise ValueError("invalid component modes")
         if not isinstance(row.get("managed_targets"), list) or any(
@@ -436,6 +441,11 @@ row = {
         "slurm_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_SLURM", "0") != "0",
     },
     "component_modes": {
+        "auto_update": (
+            "apply"
+            if os.environ.get("OH_MY_SETTING_AUTO_UPDATE_MODE") == "apply"
+            else "check"
+        ),
         "machine_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_MACHINE", "0"),
         "slurm_snapshot": os.environ.get("OH_MY_SETTING_GENERATE_SLURM", "0"),
     },
@@ -482,22 +492,25 @@ PY
 }
 
 # Persist one components.<key> flag in an existing schema-2 receipt without
-# regenerating the rest of the row. Returns 1 when the receipt is missing or
-# unreadable and 3 when the schema predates the component profile.
+# regenerating the rest of the row; a non-empty fourth argument also records
+# component_modes.<key> in the same atomic write. Returns 1 when the receipt
+# is missing or unreadable and 3 when the schema predates the component
+# profile.
 oms_install_receipt_set_component() {
   local key="$1"
   local value="$2"
   local receipt="${3:-$(oms_install_receipt_path)}"
+  local mode="${4:-}"
 
   case "$value" in true|false) ;; *) return 2 ;; esac
   [ -f "$receipt" ] || return 1
-  python3 - "$receipt" "$key" "$value" <<'PY'
+  python3 - "$receipt" "$key" "$value" "$mode" <<'PY'
 import json
 import os
 import sys
 import tempfile
 
-receipt, key, value = sys.argv[1:]
+receipt, key, value, mode = sys.argv[1:]
 try:
     with open(receipt, encoding="utf-8") as fh:
         row = json.load(fh)
@@ -510,6 +523,12 @@ if not isinstance(components, dict):
     components = {}
     row["components"] = components
 components[key] = value == "true"
+if mode:
+    modes = row.get("component_modes")
+    if not isinstance(modes, dict):
+        modes = {}
+        row["component_modes"] = modes
+    modes[key] = mode
 parent = os.path.dirname(receipt) or "."
 fd, tmp = tempfile.mkstemp(prefix=".install.", suffix=".tmp", dir=parent)
 try:
@@ -539,8 +558,10 @@ oms_install_record_auto_update() {
   local flag="$1"
   local root="$2"
   local dry_run="${3:-0}"
+  local mode="${4:-}"
   local receipt owner physical_root status
 
+  case "$mode" in ""|check|apply) ;; *) return 2 ;; esac
   receipt="$(oms_install_receipt_path)"
   [ -f "$receipt" ] || return 0
   owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null)" || return 0
@@ -550,11 +571,11 @@ oms_install_record_auto_update() {
     return 0
   fi
   if [ "$dry_run" = "1" ]; then
-    printf 'would record auto_update=%s in %s\n' "$flag" "$receipt"
+    printf 'would record auto_update=%s%s in %s\n' "$flag" "${mode:+ ($mode)}" "$receipt"
     return 0
   fi
   status=0
-  oms_install_receipt_set_component auto_update "$flag" "$receipt" || status="$?"
+  oms_install_receipt_set_component auto_update "$flag" "$receipt" "$mode" || status="$?"
   [ "$status" -ne 0 ] || return 0
   [ "$status" -ne 3 ] || return 0
   if [ "$flag" = "true" ]; then

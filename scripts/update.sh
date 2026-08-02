@@ -5,12 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-1}"
 SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
 AUTO_UPDATE_SET="${OH_MY_SETTING_AUTO_UPDATE+x}"
+AUTO_UPDATE_MODE_SET="${OH_MY_SETTING_AUTO_UPDATE_MODE+x}"
 CODEX_PLUGIN_SET="${OH_MY_SETTING_CODEX_PLUGIN+x}"
 CLAUDE_HOOKS_SET="${OH_MY_SETTING_CLAUDE_HOOKS+x}"
 MACHINE_SNAPSHOT_SET="${OH_MY_SETTING_GENERATE_MACHINE+x}"
 SLURM_SNAPSHOT_SET="${OH_MY_SETTING_GENERATE_SLURM+x}"
 LINK_MODE_SET="${OH_MY_SETTING_LINK_MODE+x}"
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-}"
+AUTO_UPDATE_MODE="${OH_MY_SETTING_AUTO_UPDATE_MODE:-}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-}"
 CLAUDE_HOOKS="${OH_MY_SETTING_CLAUDE_HOOKS:-}"
 MACHINE_SNAPSHOT="${OH_MY_SETTING_GENERATE_MACHINE:-}"
@@ -41,6 +43,7 @@ Environment overrides persisted receipt components when explicitly set:
   OH_MY_SETTING_CLAUDE_HOOKS=0|1  Claude Code hooks and usage HUD
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto
   OH_MY_SETTING_AUTO_UPDATE=0|1
+  OH_MY_SETTING_AUTO_UPDATE_MODE=check|apply
   OH_MY_SETTING_GENERATE_MACHINE=0|1|auto
   OH_MY_SETTING_GENERATE_SLURM=0|1|auto
 EOF
@@ -153,6 +156,17 @@ fi
 if [ -z "$LINK_MODE_SET" ]; then
   LINK_MODE="$(oms_install_receipt_field link_mode "$RECEIPT" 2>/dev/null || printf auto)"
 fi
+# The trigger's check/apply mode lives in component_modes so a reinstall
+# during update restores what the user chose instead of downgrading an
+# apply-mode timer to check. Legacy receipts have no record and stay check.
+if [ -z "$AUTO_UPDATE_MODE_SET" ]; then
+  AUTO_UPDATE_MODE="$(oms_install_receipt_field component_modes.auto_update "$RECEIPT" 2>/dev/null || true)"
+fi
+case "$AUTO_UPDATE_MODE" in
+  "") AUTO_UPDATE_MODE="check" ;;
+  check|apply) ;;
+  *) echo "error: OH_MY_SETTING_AUTO_UPDATE_MODE must be check or apply" >&2; exit 2 ;;
+esac
 
 case "$CLAUDE_HOOKS:$AUTO_UPDATE" in
   [01]:[01]) ;;
@@ -177,6 +191,7 @@ export OH_MY_SETTING_LINK_MODE="$LINK_MODE"
 export OH_MY_SETTING_CLAUDE_HOOKS="$CLAUDE_HOOKS"
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
+export OH_MY_SETTING_AUTO_UPDATE_MODE="$AUTO_UPDATE_MODE"
 OH_MY_SETTING_INSTALL_TOOLS="$(receipt_bool tools 0)"
 if [ -z "$MACHINE_SNAPSHOT_SET" ]; then
   MACHINE_SNAPSHOT="$(oms_install_receipt_mode machine_snapshot 0 "$RECEIPT")"

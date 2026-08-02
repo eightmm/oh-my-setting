@@ -193,4 +193,4 @@ case "$chosen" in
     exit 0
     ;;
 esac
-oms_install_record_auto_update true "$ROOT" "$DRY_RUN"
+oms_install_record_auto_update true "$ROOT" "$DRY_RUN" "$MODE"
