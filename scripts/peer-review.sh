@@ -126,6 +126,7 @@ write_gate_instruction() {
   cat <<'EOF'
 
 Gate verdict:
+Immediately before the final line, emit one line: CONFIDENCE: <value between 0.0 and 1.0>, your calibrated confidence in the verdict.
 End your response with exactly one final line: GATE: pass or GATE: fail.
 The final line must contain only that exact GATE text, with no punctuation or formatting.
 Use GATE: pass only if this change is ready to proceed with no blocking findings.
@@ -204,10 +205,17 @@ review_verdicts() {
     # ("...exactly one line: GATE: pass or GATE: fail.") must not match.
     verdict="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
       grep -E '^[*[:space:]]*GATE: (pass|fail)[*[:space:]]*$' | tail -n 1 | grep -oE 'pass|fail')" || verdict=""
+    # Stated confidence is advisory display for tiebreaks, never a gate
+    # input: a confident wrong verdict must not outvote the mechanical check.
+    confidence="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
+      grep -E '^[*[:space:]]*CONFIDENCE: (0(\.[0-9]+)?|1(\.0+)?)[*[:space:]]*$' |
+      tail -n 1 | grep -oE '0(\.[0-9]+)?|1(\.0+)?' | tail -n 1)" || confidence=""
+    suffix=""
+    [ -z "$confidence" ] || suffix=" (confidence $confidence)"
     case "$verdict" in
-      pass) echo "$provider: pass" ;;
+      pass) echo "$provider: pass$suffix" ;;
       fail)
-        echo "$provider: fail"
+        echo "$provider: fail$suffix"
         if [ "$overall" -ne 2 ]; then overall=1; fi
         ;;
       *)

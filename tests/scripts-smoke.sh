@@ -732,7 +732,7 @@ test_review_verdicts_subcommand() {
   # Complete pass, complete fail, and a died-mid-run artifact. The prompt echo
   # inside Output ("...exactly one line: GATE: pass or GATE: fail.") must not
   # be read as a verdict.
-  printf '# codex review\n\n## Output\n\nexactly one line: GATE: pass or GATE: fail.\nFindings: none\nGATE: pass\n\n## Exit\n\n0\n' \
+  printf '# codex review\n\n## Output\n\nexactly one line: GATE: pass or GATE: fail.\nFindings: none\nCONFIDENCE: 0.9\nGATE: pass\n\n## Exit\n\n0\n' \
     > "$dir/mixed/codex-x-$run.md"
   printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
     > "$dir/mixed/claude-x-$run.md"
@@ -741,7 +741,8 @@ test_review_verdicts_subcommand() {
 
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/mixed")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "incomplete artifact should yield exit 2, got $rc"
-  printf '%s' "$out" | grep -Fq 'codex: pass' || fail "missing codex pass"
+  printf '%s' "$out" | grep -Fq 'codex: pass (confidence 0.9)' ||
+    fail "stated confidence should ride the verdict line: $out"
   printf '%s' "$out" | grep -Fq 'claude: fail' || fail "missing claude fail"
   printf '%s' "$out" | grep -Fq 'antigravity: incomplete' || fail "missing incomplete detection"
 
