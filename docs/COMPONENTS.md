@@ -239,6 +239,17 @@ command edited mid-run; every terminal writes a reason row and parks leave a
 fail-ledger trail. Deliberately narrow: no task generation, no replanning, no
 lease reclaim, no push — decomposition and recovery stay with the parent
 
+**Plan from spec (`plan-from-spec.sh`, `oms plan-from-spec`)** — Reads a
+confirmed PROJECT.md (refuses `State: draft`) and asks a deep-tier peer to
+decompose the remaining work into plan tasks — each with an id, a
+conventional-commit title, non-empty repo-relative allowed paths, a
+mechanical verify command, and in-proposal dependencies, all validated
+before anything is written. Proposes only: the task list lands in
+`.oms/plan/proposal-*.json` for review, and enters the board exclusively
+through `--apply`, which also initializes the plan's goal and acceptance
+command from PROJECT.md when no plan exists yet. Completes the chain
+PROJECT.md → propose → approve → `goal-drive`
+
 **Advise (`advise.sh`, `oms advise`)** — Cross-CLI advisor pass before
 irreversible/high-risk decisions, after repeated failures, or at a
 release go/no-go; routine completion does not require it. Composes an

@@ -4178,6 +4178,81 @@ test_agent_call_missing_cli_writes_exit_and_index() {
 }
 
 
+test_plan_from_spec_proposes_then_applies() {
+  local project="$TMP/plan-from-spec"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local proposal
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: active
+
+## Project
+
+- Goal: ship a tiny greeting CLI
+- Scope: src/, tests/
+- Non-goals: packaging
+
+## Commands
+
+- Test: bash tests/run.sh
+
+## Verification
+
+- Required checks: bash tests/run.sh
+EOF
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'plan follows.\n{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]},{"id":"t2","title":"test: greeting covered","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}\n'
+EOF
+  chmod +x "$bin_dir/codex"
+
+  # Propose: writes a proposal, prints the review pointer, touches no plan.
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/out" 2>&1 ||
+    fail "propose should succeed: $(tail -4 "$project/out")"
+  assert_file_contains "$project/out" "proposed 2 task(s)"
+  assert_file_contains "$project/out" "review the list"
+  [ ! -f "$project/.oms/plan/tasks.json" ] || fail "propose must not touch the task board"
+  proposal="$(find "$project/.oms/plan" -name 'proposal-*.json' | head -n 1)"
+  [ -n "$proposal" ] || fail "proposal file missing"
+
+  # Apply: plan initialized from PROJECT.md (goal + acceptance) plus the tasks.
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --apply "$proposal" >"$project/apply-out" 2>&1 ||
+    fail "apply should succeed: $(tail -4 "$project/apply-out")"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" status >"$project/plan-status"
+  assert_file_contains "$project/plan-status" "accept: bash tests/run.sh"
+  assert_file_contains "$project/plan-status" "ready now: t1"
+
+  # A draft spec refuses: decomposing an unconfirmed contract is guessing.
+  sed 's/- State: active/- State: draft/' "$project/PROJECT.md" > "$project/PROJECT.md.tmp" &&
+    mv "$project/PROJECT.md.tmp" "$project/PROJECT.md"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/draft-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "draft spec should refuse with exit 2, got $rc"
+  assert_file_contains "$project/draft-out" "draft"
+
+  # An answer with no tasks JSON fails closed with the artifact kept.
+  sed 's/- State: draft/- State: active/' "$project/PROJECT.md" > "$project/PROJECT.md.tmp" &&
+    mv "$project/PROJECT.md.tmp" "$project/PROJECT.md"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "no structure here"\n' > "$bin_dir/codex"
+  chmod +x "$bin_dir/codex"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/bad-out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "unparseable answer should exit 3, got $rc"
+  assert_file_contains "$project/bad-out" "could not extract a proposal"
+}
+
 test_agent_call_provider_nonzero_writes_exit_and_index() {
   local project="$TMP/agent-call-provider-nonzero"
   local artifact_dir="$project/artifacts"

@@ -175,6 +175,7 @@ patch-land
 peer-ask
 peer-delegate
 peer-review
+plan-from-spec
 plan-run
 project-doctor
 project-private

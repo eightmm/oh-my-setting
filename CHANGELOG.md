@@ -37,6 +37,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   attach shared memory now include a query-ranked "relevant recall" section
   keyed on the operation's own prompt (FTS5/bm25 with a portable fallback) —
   the ranking machinery existed but no automatic path used it.
+- `oms plan-from-spec` closes the loop from spec to driver: it reads a
+  confirmed PROJECT.md, has a deep-tier peer decompose the remaining work
+  into validated plan tasks (scoped paths, mechanical verify, in-proposal
+  dependencies), and writes a proposal that becomes plan state only through
+  an explicit `--apply` — which also derives the plan's goal and acceptance
+  command from the spec when no plan exists. Draft specs are refused: the
+  chain is PROJECT.md → propose → human approval → `goal-drive`, with the
+  model's judgment always behind the approval gate.
 - The continuity layer closes the autonomy loop. A session-handoff digest now
   carries its resume contract — the active packet's Verify command — and any
   review round that ended split rides along as open dissents the next session

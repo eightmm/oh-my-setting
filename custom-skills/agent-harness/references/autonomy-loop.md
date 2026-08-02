@@ -69,6 +69,11 @@ oms agent-plan --repo . add --id t1 --title "feat: ..." --allowed src/ --verify 
 oms goal-drive --repo . --to codex --max-cycles 3
 ```
 
+`oms plan-from-spec` decomposes a confirmed PROJECT.md into that plan — but
+it only ever PROPOSES: review the printed task list, then `--apply` the
+proposal file. Generated plans enter the board through approval, never
+silently; a `State: draft` spec is refused outright.
+
 Each cycle: acceptance command (pass = done) → one `plan-run --next --land` →
 commit of exactly the admitted patch's paths, task title as subject. It
 refuses a dirty tree, parks on task exhaustion, an acceptance command edited
