@@ -480,10 +480,24 @@ Journal's newest-handoff pointer looks. A `PreCompact` hook
 `install-claude-hooks.sh` and for Codex by the plugin) captures a digest
 automatically just before compaction discards the transcript detail:
 best-effort by contract, harness-adopted repos only, never guesses when the
-named session cannot be resolved, `OMS_PRECOMPACT_HANDOFF=0` opts out.
+named session cannot be resolved, `OMS_PRECOMPACT_HANDOFF=0` opts out. A
+refused capture is recorded in the fail-ledger (`kind=hook`) instead of
+vanishing, so `oms check`/`inbox` surface it. The scrubber is tiered: true
+secrets always block the digest; absolute home paths are normalized to `~`
+and written, since the digest is repo-local and git-ignored.
 Antigravity exposes no compaction or prompt-submit hook surface, so it gets
 skills and global rules but no automatic capture — run
 `oms session-handoff capture --agent antigravity` by hand
+
+**Session resume (`resume-hook.sh`)** — `SessionStart` hook (Claude directly,
+Codex via the plugin): prints one bounded block so a fresh session starts
+knowing the repo's state instead of rediscovering it — active task packet
+(goal, next step, verify command), newest handoff digest pointer (72h cap),
+unresolved fail-ledger rows with the recorded next action, and a live-peer
+advisory when another session's hook events touched this worktree within 15
+minutes (dirty-tree `git add` can commit a neighbor's hunks). Reads scrubbed
+`.oms` state only, never mutates, exits 0 on every failure path;
+`OMS_RESUME_HOOK=0` opts out, harness children stay silent
 
 ## Experiments
 
@@ -601,9 +615,10 @@ overwrite by default, provenance appended to `.oms/code-sources.jsonl`
 ## Maintenance
 
 **Retention GC (`gc.sh`, `oms gc`)** — `--dry-run` by default; reclaims aged
-transient state (orphaned delegation markers, archived task packets, stale open
-runs, closed capsules, abandoned guards, draft/done/failed executors, resolved
-failures) and delegates artifacts to `artifact-index prune`; never touches
+transient state (orphaned delegation markers, archived task packets, aged
+handoff digests, stale open runs, closed capsules, abandoned guards,
+draft/done/failed executors, resolved failures) and delegates artifacts to
+`artifact-index prune`; never touches
 frozen/running executors, live runs, the active task, unresolved failures,
 review tasks, or the append-only board
 

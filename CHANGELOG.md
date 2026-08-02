@@ -7,6 +7,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Sessions manage their own continuity. The sensitivity scrubber grew tiers:
+  true secrets still block every write, but absolute home paths now
+  normalize to `~` for repo-local git-ignored records — previously any Linux
+  transcript tripped the flat pattern, so the PreCompact handoff always
+  refused, `.oms/handoffs` stayed empty, and fail-ledger rows with paths in
+  the failed command were silently dropped. A refused capture now leaves a
+  fail-ledger trail (`kind=hook`) instead of exiting quietly. A new
+  `SessionStart` resume hook prints one bounded `[oms resume]` block — active
+  task packet with its verify command, newest handoff pointer, unresolved
+  failures with next actions, and a live-peer advisory sourced from hook
+  event heartbeats when another session used the same worktree minutes ago.
+  `oms gc` sweeps aged handoff digests, and gate/delegate auto-verify probes
+  `check.sh` for a `fast` mode before invoking it instead of assuming the
+  template contract.
 - The continuity layer closes the autonomy loop. A session-handoff digest now
   carries its resume contract — the active packet's Verify command — and any
   review round that ended split rides along as open dissents the next session
