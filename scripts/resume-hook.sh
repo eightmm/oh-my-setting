@@ -86,7 +86,9 @@ try:
             fp = row.get("fingerprint")
             if not fp:
                 continue
-            if row.get("event") == "resolve":
+            # The ledger names its resolution event "resolved"; legacy rows
+            # may carry a resolved flag instead (same reading as skill-router).
+            if row.get("event") == "resolved" or row.get("resolved") is True:
                 rows.pop(fp, None)
             else:
                 rows[fp] = row

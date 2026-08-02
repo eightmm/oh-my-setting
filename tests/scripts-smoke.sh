@@ -10834,6 +10834,14 @@ test_resume_hook_prints_bounded_resume_block() {
   printf '%s\n' "$out" | grep -q 'peers: another session' || fail "missing peer warning"
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
 
+  # A resolved failure leaves the count — the event name is "resolved", which
+  # a prior version of this hook misread and counted forever.
+  ( cd "$repo" && "$ROOT/scripts/fail-ledger.sh" resolve --cmd "pytest -k boom" >/dev/null 2>&1 )
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  if printf '%s\n' "$out" | grep -q 'failures:'; then
+    fail "a resolved failure must drop out of the resume count: $out"
+  fi
+
   # Rows from this session's own hash must not read as a peer.
   python3 - "$repo/.oms/hooks/events.jsonl" <<'PY'
 import hashlib, json, sys
