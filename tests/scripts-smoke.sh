@@ -983,6 +983,21 @@ test_tsp_queue_secret_guard_blocks_enqueue() {
   fi
 }
 
+test_tsp_queue_allows_machine_path_commands() {
+  local dir="$TMP/tsp-paths"
+  local bin="$dir/bin"
+
+  mkdir -p "$dir"
+  write_fake_tsp "$bin"
+  # GPU jobs almost always name dataset/script paths under /home; the guard
+  # blocks secrets only, so this must enqueue.
+  TSP_STUB_LOG="$dir/tsp.log" OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" enqueue -- \
+    python "/ho""me/researcher/data/train.py" >/dev/null 2>"$dir/error" ||
+    fail "a path-bearing command must enqueue: $(cat "$dir/error")"
+  [ -s "$dir/tsp.log" ] || fail "command did not reach the queue"
+}
+
 test_run_ledger_records_and_lists() {
   local project="$TMP/run-ledger"
   make_committed_repo "$project"
@@ -5348,6 +5363,31 @@ test_scrubber_blocks_credential_variants() {
   fi
 }
 
+test_scrubber_tiers_split_secret_from_machine() {
+  local f="$TMP/scrub-tiers"
+  local lib="$ROOT/scripts/lib/agent-memory-common.sh"
+
+  # Machine tier: home path matches the combined re but NOT the secret tier.
+  printf 'edit /ho''me/researcher/proj/loader.py\n' > "$f"
+  bash -c ". '$lib'; agent_memory_file_has_sensitive_content '$f'" ||
+    fail "home path must still match the combined sensitive tier"
+  if bash -c ". '$lib'; agent_memory_file_has_secret_content '$f'"; then
+    fail "home path must not match the secret tier"
+  fi
+
+  # Secret tier: a credential assignment matches both.
+  printf 'export MY_API_T''OKEN=abc\n' > "$f"
+  bash -c ". '$lib'; agent_memory_file_has_secret_content '$f'" ||
+    fail "credential assignment must match the secret tier"
+
+  # Normalizer folds home prefixes to ~ and leaves other paths alone.
+  local got
+  got="$(printf 'run /ho''me/researcher/proj/train.py --data /data/set\n' |
+    bash -c ". '$lib'; agent_memory_normalize_machine_paths")"
+  [ "$got" = 'run ~/proj/train.py --data /data/set' ] ||
+    fail "normalizer output unexpected: $got"
+}
+
 
 test_scrubber_blocks_outbound_secret_shapes() {
   local f="$TMP/scrub-outbound-shapes"
@@ -7117,6 +7157,22 @@ test_session_handoff_blocks_sensitive_digest() {
     --out "$home/clean.md" >/dev/null 2>&1 ||
     fail "clean transcript must not self-block on a /home header path"
   [ -f "$home/clean.md" ] || fail "clean digest with /home cwd not written"
+
+  # Machine tier in USER content (a /home path in a turn) no longer refuses the
+  # digest: it is normalized and written. This was the PreCompact killer — on
+  # Linux every real transcript cites /home paths, so auto-capture always
+  # refused and .oms/handoffs stayed empty.
+  local pdir="$home/projects/-proj-pathy-app"
+  mkdir -p "$pdir"
+  printf '{"type":"user","message":{"role":"user","content":"fix /ho%s/researcher/proj/loader.py"}}\n' \
+    "me" > "$pdir/p.jsonl"
+  OMS_CLAUDE_HOME="$home" "$SH" capture --agent claude --cwd "/proj/pathy-app" \
+    --out "$home/pathy.md" >/dev/null 2>&1 ||
+    fail "machine-tier user content must capture, not refuse"
+  assert_file_contains "$home/pathy.md" 'fix ~/proj/loader.py'
+  if grep -q '/ho''me/researcher' "$home/pathy.md"; then
+    fail "raw home path must not survive into the digest body"
+  fi
 }
 
 test_session_handoff_claude_digest() {
@@ -9697,6 +9753,30 @@ test_fail_ledger_records_checks_resolves() {
   local secret_cmd='export aws_secret_access_''key=EXAMPLEVALUE1234567'
   if ( cd "$project" && "$SH" record --cmd "$secret_cmd" --exit 1 >/dev/null 2>&1 ); then
     fail "a sensitive-looking command must be refused"
+  fi
+}
+
+test_fail_ledger_records_machine_paths_normalized() {
+  local project="$TMP/fail-ledger-paths"
+  local SH="$ROOT/scripts/fail-ledger.sh"
+  local path_cmd
+  # Failed commands routinely carry absolute paths; the ledger must keep the
+  # failure (normalized), not refuse it — refusal silently lost the memory.
+  path_cmd="python /ho""me/researcher/proj/train.py --epochs 3"
+
+  make_committed_repo "$project"
+  ( cd "$project" && "$SH" record --cmd "$path_cmd" --exit 1 \
+      --summary "OOM at /ho""me/researcher/proj/data" >/dev/null 2>&1 ) ||
+    fail "a path-bearing failed command must be recordable"
+  ( cd "$project" && "$SH" list --json | grep -q 'python ~/proj/train.py' ) ||
+    fail "stored command must have its home prefix normalized"
+  if ( cd "$project" && "$SH" list --json | grep -q '/ho''me/researcher' ); then
+    fail "raw home path must not reach the ledger"
+  fi
+  # Lookup consistency: checking the RAW command must hit the stored row
+  # because both sides normalize before fingerprinting.
+  if ( cd "$project" && "$SH" check --cmd "$path_cmd" >/dev/null 2>&1 ); then
+    fail "check must flag the normalized fingerprint for the raw command"
   fi
 }
 

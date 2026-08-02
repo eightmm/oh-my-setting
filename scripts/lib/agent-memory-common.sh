@@ -209,14 +209,50 @@ agent_memory_ensure_oms_ignore_for_path() {
 
 # Bracket classes like [o] keep these literal patterns from matching their own
 # source line, so harness diffs stay reviewable. Do not "simplify" them away.
+#
+# Two tiers. Secret tier: credential material that must never be written
+# anywhere, no matter the destination. Machine tier: machine identity (home
+# paths, HPC filesystems, cluster fields) that must stay out of git-tracked
+# files and outbound prompts, but is harmless in repo-local git-ignored state
+# once normalized — a handoff digest that cannot mention a file path is empty.
+agent_memory_secret_re() {
+  printf '%s\n' '((^|[^A-Za-z0-9])[A-Za-z0-9_]*(t[o]ken|s[e]cret|passw(or)?[d]|credentia[l]s?|(ap[i]|s[e]cret|privat[e])[-_ ]?(ke[y]|t[o]ken)|aws_s[e]cret_access_[k]ey)["'\'']?[[:space:]]*[:=]|auth[o]rization:[[:space:]]+[^[:space:]]+|bear[e]r[[:space:]]+[A-Za-z0-9._-]{10,}|[a-z][a-z0-9+.-]*://[^[:space:]/:@]+:[^*[:space:]@/][^[:space:]@/]*@[^[:space:]/]+|(^|[^A-Za-z0-9_-])ey[J][A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}($|[^A-Za-z0-9_-])|gh[pousr]_[A-Za-z0-9_]{20,}|githu[b]_pa[t]_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9]{36,}|h[f]_[A-Za-z0-9]{34,}|glpa[t]-[A-Za-z0-9_-]{20,}|[sr]k_(liv[e]|tes[t])_[A-Za-z0-9]{16,}|AI[z]a[0-9A-Za-z_-]{35}|hook[s]\.slac[k]\.com/service[s]/|disc[o]rd(app)?\.com/api/webhook[s]/|machin[e][[:space:]]+[^[:space:]]+[[:space:]]+logi[n][[:space:]]+[^[:space:]]+[[:space:]]+passwor[d][[:space:]]+[^[:space:]]+|(^|[^A-Za-z0-9_])s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN)'
+}
+
+agent_memory_machine_re() {
+  printf '%s\n' '(/hom[e]/[^[:space:]]+|/User[s]/[^[:space:]]+|/scratc[h]/[^[:space:]]+|/lustr[e]/[^[:space:]]+|/gpf[s]/[^[:space:]]+|/beegf[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
+}
+
 agent_memory_sensitive_re() {
-  printf '%s\n' '((^|[^A-Za-z0-9])[A-Za-z0-9_]*(t[o]ken|s[e]cret|passw(or)?[d]|credentia[l]s?|(ap[i]|s[e]cret|privat[e])[-_ ]?(ke[y]|t[o]ken)|aws_s[e]cret_access_[k]ey)["'\'']?[[:space:]]*[:=]|auth[o]rization:[[:space:]]+[^[:space:]]+|bear[e]r[[:space:]]+[A-Za-z0-9._-]{10,}|[a-z][a-z0-9+.-]*://[^[:space:]/:@]+:[^*[:space:]@/][^[:space:]@/]*@[^[:space:]/]+|(^|[^A-Za-z0-9_-])ey[J][A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}($|[^A-Za-z0-9_-])|gh[pousr]_[A-Za-z0-9_]{20,}|githu[b]_pa[t]_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9]{36,}|h[f]_[A-Za-z0-9]{34,}|glpa[t]-[A-Za-z0-9_-]{20,}|[sr]k_(liv[e]|tes[t])_[A-Za-z0-9]{16,}|AI[z]a[0-9A-Za-z_-]{35}|hook[s]\.slac[k]\.com/service[s]/|disc[o]rd(app)?\.com/api/webhook[s]/|machin[e][[:space:]]+[^[:space:]]+[[:space:]]+logi[n][[:space:]]+[^[:space:]]+[[:space:]]+passwor[d][[:space:]]+[^[:space:]]+|(^|[^A-Za-z0-9_])s[k]-[A-Za-z0-9_-]{10,}|xox[bap]-[A-Za-z0-9-]{10,}|AK[I]A[0-9A-Z]{16}|-----BE[G]IN|/hom[e]/[^[:space:]]+|/User[s]/[^[:space:]]+|/scratc[h]/[^[:space:]]+|/lustr[e]/[^[:space:]]+|/gpf[s]/[^[:space:]]+|/beegf[s]/[^[:space:]]+|\.ss[h]/|\.aw[s]/|clust[e]r[[:space:]]*[:=]|partiti[o]n[[:space:]]*[:=]|nodelis[t][[:space:]]*[:=]|sbatc[h][[:space:]]+--partition)'
+  printf '%s|%s\n' "$(agent_memory_secret_re)" "$(agent_memory_machine_re)"
 }
 
 agent_memory_file_has_sensitive_content() {
   local file="$1"
   [ -s "$file" ] || return 1
   grep -Eiq "$(agent_memory_sensitive_re)" "$file"
+}
+
+agent_memory_file_has_secret_content() {
+  local file="$1"
+  [ -s "$file" ] || return 1
+  grep -Eiq "$(agent_memory_secret_re)" "$file"
+}
+
+# Rewrite machine-identifying path prefixes to ~ so repo-local records can keep
+# their content without recording the account layout. Textual only, applied to
+# stored copies — never to a command that still has to execute. Secret-tier
+# content is not rewritten: a secret must block, not be laundered into
+# something that scans clean.
+agent_memory_normalize_machine_paths() {
+  local home_re
+  home_re="$(printf '%s' "${HOME:-}" | sed -e 's/[][\.*^$/]/\\&/g')"
+  if [ -n "$home_re" ]; then
+    sed -E -e "s/$home_re/~/g" \
+      -e 's|/hom[e]/[A-Za-z0-9._-]+|~|g' -e 's|/User[s]/[A-Za-z0-9._-]+|~|g'
+  else
+    sed -E -e 's|/hom[e]/[A-Za-z0-9._-]+|~|g' -e 's|/User[s]/[A-Za-z0-9._-]+|~|g'
+  fi
 }
 
 # Byte-budget truncation that never leaves a split multibyte character

@@ -163,14 +163,23 @@ esac
 STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
 LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
 
+# Failed commands routinely carry absolute paths; refusing them lost the
+# failure memory this ledger exists for. Machine paths are normalized instead
+# of blocked, on every action so fingerprints of the stored and looked-up text
+# agree. Secrets still block at record time below.
+[ -z "$CMD" ] || CMD="$(printf '%s' "$CMD" | agent_memory_normalize_machine_paths)"
+[ -z "$SUMMARY" ] || SUMMARY="$(printf '%s' "$SUMMARY" | agent_memory_normalize_machine_paths)"
+[ -z "$NEXT" ] || NEXT="$(printf '%s' "$NEXT" | agent_memory_normalize_machine_paths)"
+[ -z "$HOW" ] || HOW="$(printf '%s' "$HOW" | agent_memory_normalize_machine_paths)"
+
 case "$ACTION" in
   record)
     [ -n "$CMD" ] || fail "record requires --cmd"
     case "$EXIT_CODE" in *[!0-9]*|"") fail "record requires --exit N (non-negative integer)" ;; esac
-    # Refuse sensitive-looking content, mirroring the memory writer.
+    # Refuse secret-tier content; machine paths were already normalized above.
     scan="$(mktemp)" || fail "mktemp failed"
     printf '%s\n%s\n' "$CMD" "$SUMMARY" > "$scan"
-    if agent_memory_file_has_sensitive_content "$scan"; then
+    if agent_memory_file_has_secret_content "$scan"; then
       rm -f "$scan"
       echo "fail-ledger: refused; command/summary looks sensitive" >&2
       exit 3

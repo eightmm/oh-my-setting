@@ -133,7 +133,10 @@ scan_outbound() {
     printf '%s\n' "$note"
     printf '%s\n' "$@"
   } > "$SCAN_FILE"
-  if agent_memory_file_has_sensitive_content "$SCAN_FILE"; then
+  # Secret tier only: GPU job commands almost always carry dataset/script
+  # paths, and blocking on those made local submission impossible. The ledger
+  # writer downstream applies its own git-tracked-destination guard.
+  if agent_memory_file_has_secret_content "$SCAN_FILE"; then
     echo "error: command or ledger note looks sensitive; pass credentials via environment or files, not command arguments" >&2
     exit 3
   fi

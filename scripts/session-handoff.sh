@@ -484,13 +484,21 @@ cmd_capture() {
   # the digest is meant to be loaded into another, possibly external, agent.
   SCAN_FILE="$(mktemp)" || fail "mktemp failed"
   { printf '%s\n' "$extract"; printf '%s\n' "$NOTE"; } > "$SCAN_FILE"
-  if agent_memory_file_has_sensitive_content "$SCAN_FILE"; then
+  if agent_memory_file_has_secret_content "$SCAN_FILE"; then
     rm -f "$SCAN_FILE"; SCAN_FILE=""
     if [ "${ALLOW_SENSITIVE:-0}" = 1 ]; then
       echo "warning: handoff digest looks sensitive; emitting under --allow-sensitive" >&2
     else
       fail "session content looks sensitive; refusing to write the digest. Re-run with --allow-sensitive to override."
     fi
+  elif agent_memory_file_has_sensitive_content "$SCAN_FILE"; then
+    # Machine tier only (home paths, cluster fields): every real Linux session
+    # trips it, and a digest that cannot cite a path is no digest at all. The
+    # file is repo-local and git-ignored, so normalize the paths and write.
+    # Anything leaving toward a peer re-scans with the strict tier regardless.
+    rm -f "$SCAN_FILE"; SCAN_FILE=""
+    extract="$(printf '%s\n' "$extract" | agent_memory_normalize_machine_paths)"
+    NOTE="$(printf '%s' "$NOTE" | agent_memory_normalize_machine_paths)"
   else
     rm -f "$SCAN_FILE"; SCAN_FILE=""
   fi
