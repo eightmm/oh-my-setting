@@ -522,8 +522,10 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/review}"
 if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "$REPO/scripts/check.sh" ]; then
   if [ "$ML_PRESET" -eq 1 ] && oms_check_sh_has_ml_smoke "$REPO/scripts/check.sh"; then
     VERIFY_CMD="bash scripts/check.sh ml-smoke"
-  else
+  elif oms_check_sh_has_fast_mode "$REPO/scripts/check.sh"; then
     VERIFY_CMD="bash scripts/check.sh fast"
+  else
+    VERIFY_CMD="bash scripts/check.sh"
   fi
   echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
 fi

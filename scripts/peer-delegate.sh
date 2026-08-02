@@ -703,8 +703,10 @@ if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -x "$worktree/scripts/check
   project_style="$("$(ma_scripts_dir)/detect-project-style.sh" "$worktree" 2>/dev/null || echo general)"
   if [ "$project_style" = "ml" ] && oms_check_sh_has_ml_smoke "$worktree/scripts/check.sh"; then
     VERIFY_CMD="bash scripts/check.sh ml-smoke"
-  else
+  elif oms_check_sh_has_fast_mode "$worktree/scripts/check.sh"; then
     VERIFY_CMD="bash scripts/check.sh fast"
+  else
+    VERIFY_CMD="bash scripts/check.sh"
   fi
   echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
 fi

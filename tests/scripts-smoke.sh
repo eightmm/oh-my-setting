@@ -5303,6 +5303,34 @@ EOF
   fi
 }
 
+test_shared_fast_mode_detection_gates_auto_verify() {
+  local dir="$TMP/shared-fast-mode"
+  local check_sh="$dir/check.sh"
+
+  mkdir -p "$dir"
+  printf 'case "${1:-fast}" in\n  fast) echo fast ;;\nesac\n' > "$check_sh"
+  bash -c '. "$1"; oms_check_sh_has_fast_mode "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$check_sh" ||
+    fail "fast) arm not detected"
+
+  printf 'case "$1" in\n  --quick) echo quick ;;\nesac\n' > "$check_sh"
+  if bash -c '. "$1"; oms_check_sh_has_fast_mode "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$check_sh"; then
+    fail "check.sh without a fast mode must not be probed as having one"
+  fi
+
+  # The two contracts the default was written across: the template ships a
+  # fast mode, this repo's own gate does not — so the auto-verify default must
+  # probe before invoking `check.sh fast`, or the gate blocks on a usage error.
+  bash -c '. "$1"; oms_check_sh_has_fast_mode "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$ROOT/templates/check.sh" ||
+    fail "template check.sh fast mode not detected"
+  if bash -c '. "$1"; oms_check_sh_has_fast_mode "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$ROOT/scripts/check.sh"; then
+    fail "harness check.sh misdetected as having a fast mode"
+  fi
+  grep -q 'oms_check_sh_has_fast_mode' "$ROOT/scripts/peer-review.sh" ||
+    fail "peer-review gate auto-verify must probe fast mode before defaulting"
+  grep -q 'oms_check_sh_has_fast_mode' "$ROOT/scripts/peer-delegate.sh" ||
+    fail "peer-delegate auto-verify must probe fast mode before defaulting"
+}
+
 
 test_scrubber_blocks_credential_variants() {
   local f="$TMP/scrub-variants"
@@ -8256,7 +8284,9 @@ EOF
     --gate \
     --prompt "Gate verify backstop" >"$project/out" 2>&1 || rc=$?
   [ "$rc" = "1" ] || fail "failing mechanical verify must force gate fail, got $rc"
-  assert_file_contains "$project/out" "gate auto-verify: bash scripts/check.sh fast"
+  # The fixture check.sh has no fast) arm, so the probe falls back to the
+  # plain contract instead of inventing an invalid `fast` invocation.
+  assert_file_contains "$project/out" "gate auto-verify: bash scripts/check.sh (disable"
   assert_file_contains "$project/out" "gate verify: fail (exit 1)"
   assert_file_contains "$project/out" "claude: pass"
   assert_one_artifact_contains "$artifact_dir" '_verify-gate-verify-backstop-*.md' 'contract broken'

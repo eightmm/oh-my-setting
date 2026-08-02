@@ -351,6 +351,17 @@ oms_check_sh_has_ml_smoke() {
   grep -Eq '(^|[[:space:]("|'\''])ml-smoke("|'\'')?\)' "$check_sh_path"
 }
 
+# The template check.sh dispatches on a `fast)` case arm; a project that wrote
+# its own check.sh (this repo included) may not. Auto-verify defaults must probe
+# before invoking `check.sh fast`, or the gate runs an invalid command and
+# blocks on a usage error instead of the diff.
+oms_check_sh_has_fast_mode() {
+  local check_sh_path="$1"
+
+  [ -f "$check_sh_path" ] || return 1
+  grep -Eq '(^|[[:space:]("|'\''])fast("|'\'')?\)' "$check_sh_path"
+}
+
 # Pure read intent wins over write nouns ("review the fix" is a read), but a
 # read request explicitly coordinated with an action ("review and fix") is a
 # write. Anything ambiguous stays read — the conservative default.
