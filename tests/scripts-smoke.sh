@@ -3832,6 +3832,10 @@ test_agent_task_init_context_and_rejects_sensitive() {
   "$ROOT/scripts/agent-task.sh" --repo "$project" context >"$project/context"
   assert_file_contains "$project/context" "Active task packet follows"
   assert_file_contains "$project/context" "Wire task context into provider calls"
+  # A Verify contract that never passed is a claim, not a checkpoint: every
+  # resume surface reaching this context sees the reminder.
+  assert_file_contains "$project/context" \
+    'verification: none — run `oms agent-task verify` before building on this packet'
 
   if "$ROOT/scripts/agent-task.sh" \
     --repo "$project" append --text "private path /hom""e/jaemin/secret" \

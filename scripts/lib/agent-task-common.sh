@@ -552,6 +552,7 @@ agent_task_emit_context() {
   local tokens
   local max_chars="${OMS_AGENT_TASK_CONTEXT_CHARS:-6000}"
   local updated
+  local verification
 
   case "$max_chars" in *[!0-9]*|"") max_chars=6000 ;; esac
 
@@ -570,6 +571,13 @@ agent_task_emit_context() {
   printf 'Active task packet follows. Treat it as task-local handoff state; explicit prompt, AGENTS.md, and repo docs override it.\n'
   printf -- '- file: %s\n' "$rel"
   [ -n "$updated" ] && printf -- '- updated: %s\n' "$updated"
+  # A packet with a Verify contract that has not passed against the current
+  # tree is a claim, not a checkpoint. Every resume surface reaches this
+  # context, so the reminder rides here instead of in any one front door.
+  verification="$(agent_task_verification_state "$file" "$repo")"
+  if [ "$verification" != "fresh" ] && [ -n "$(agent_task_verify_command "$file")" ]; then
+    printf -- '- verification: %s — run `oms agent-task verify` before building on this packet\n' "$verification"
+  fi
   printf -- '- size: %s bytes (~%s tokens)\n\n' "$bytes" "$tokens"
   if [ "$bytes" -gt "$max_chars" ]; then
     agent_task_prune_for_budget "$file" "$max_chars"
