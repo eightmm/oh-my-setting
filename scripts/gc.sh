@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # Retention sweep for repo-local .oms state. Only artifact-index prune reclaims
-# anything today; capsules, task archives, orphaned delegation markers, and
-# resolved failure rows otherwise grow unbounded over a repo's lifetime. This
-# sweeps the SAFE, clearly-transient families by age and never touches live
-# state (open runs, the active task, unresolved failures, active claims).
+# anything today; capsules, task archives, handoff digests, orphaned delegation
+# markers, and resolved failure rows otherwise grow unbounded over a repo's
+# lifetime. This sweeps the SAFE, clearly-transient families by age and never
+# touches live state (open runs, the active task, unresolved failures, active
+# claims).
 # --dry-run by default, mirroring cleanup.sh.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
@@ -33,10 +34,10 @@ Options:
 
 Swept (older than --days): orphaned delegation markers (dead pid; a coupled
 claimed/running plan task is released back to ready), archived task packets,
-stale open runs (no spine event in --days; a close event is appended), run
-capsules of runs that are NOT open, abandoned change-guards (dead owner pid
-or aged snapshot), terminal/draft executor souls, resolved failure rows, closed
-conversation threads;
+handoff digests, stale open runs (no spine event in --days; a close event is
+appended), run capsules of runs that are NOT open, abandoned change-guards
+(dead owner pid or aged snapshot), terminal/draft executor souls, resolved
+failure rows, closed conversation threads;
 artifact index/files are delegated
 to artifact-index prune. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
@@ -149,6 +150,16 @@ if [ -d "$OMS/task/archive" ]; then
     note_remove "task-archive" "$f"
   done <<EOF
 $(find "$OMS/task/archive" -maxdepth 1 -type f -name '*.md' -mtime +"$DAYS" 2>/dev/null)
+EOF
+fi
+
+# 2.25) Handoff digests older than --days.
+if [ -d "$OMS/handoffs" ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    note_remove "handoff" "$f"
+  done <<EOF
+$(find "$OMS/handoffs" -maxdepth 1 -type f -name '*.md' -mtime +"$DAYS" 2>/dev/null)
 EOF
 fi
 

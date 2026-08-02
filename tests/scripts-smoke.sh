@@ -9887,6 +9887,27 @@ test_gc_reclaims_safely() {
   [ ! -s "$project/.oms/failures.jsonl" ] || fail "gc should compact an all-resolved old ledger to empty"
 }
 
+test_gc_reclaims_aged_handoffs() {
+  local project="$TMP/gc-handoffs"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/handoffs"
+  printf 'old\n' > "$project/.oms/handoffs/old.md"
+  printf 'fresh\n' > "$project/.oms/handoffs/fresh.md"
+  touch -t 202601010000 "$project/.oms/handoffs/old.md"
+
+  out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
+  printf '%s' "$out" | grep -Fq "handoff: $project/.oms/handoffs/old.md" ||
+    fail "dry-run should list the aged handoff: $out"
+  [ -f "$project/.oms/handoffs/old.md" ] || fail "dry-run must keep aged handoffs"
+  [ -f "$project/.oms/handoffs/fresh.md" ] || fail "dry-run must keep fresh handoffs"
+
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
+  [ ! -f "$project/.oms/handoffs/old.md" ] || fail "gc should remove an aged handoff"
+  [ -f "$project/.oms/handoffs/fresh.md" ] || fail "gc must keep a fresh handoff"
+}
+
 test_oms_init_seeds_and_guides() {
   local project="$TMP/oms-init"
 
