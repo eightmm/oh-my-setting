@@ -501,6 +501,20 @@ rc=0
 "$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers codex,antigravity \
   --reasoning-effort high --prompt 'shared effort' --dry-run >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "an effort every provider accepts should route"
+
+# An exact model belongs to one provider. The cardinality check must count the
+# final list item even though the comma-separated value has no trailing newline:
+# the old wc -l pipeline counted one provider as zero and two as one.
+rc=0
+"$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers claude \
+  --model exact-claude-model --prompt 'one exact provider' --dry-run >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "one provider should accept an exact model"
+rc=0
+"$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers codex,claude \
+  --model exact-model-with-no-owner --prompt 'ambiguous exact provider' \
+  --dry-run >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "two providers must reject one exact model"
+
 rc=0
 "$ROOT/scripts/peer-ask.sh" --repo "$repo" --providers codex,antigravity \
   --reasoning-effort max --prompt 'reject mixed effort' --dry-run >/dev/null 2>&1 || rc=$?

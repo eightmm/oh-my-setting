@@ -283,7 +283,7 @@ oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } &&
-   [ "$(printf '%s' "$PROVIDERS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" != 1 ]; then
+   [ "$(printf '%s\n' "$PROVIDERS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" != 1 ]; then
   fail "--model/--fallback-model requires exactly one provider"
 fi
 # A council runs one question at one effort, so every member has to accept it.
