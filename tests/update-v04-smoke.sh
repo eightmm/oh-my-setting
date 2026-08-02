@@ -70,6 +70,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   # installer fails on any hook the working tree added.
   cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
   cp "$ROOT/scripts/precompact-handoff.sh" "$source/scripts/precompact-handoff.sh"
+  cp "$ROOT/scripts/resume-hook.sh" "$source/scripts/resume-hook.sh"
   cp "$ROOT/scripts/install-mcp.sh" "$source/scripts/install-mcp.sh"
   cp "$ROOT/scripts/install-agy-plugin.sh" "$source/scripts/install-agy-plugin.sh"
   cp "$ROOT/scripts/oms-mcp-server.py" "$source/scripts/oms-mcp-server.py"
@@ -275,6 +276,7 @@ test_schema1_update_preserves_channel_pin_and_cron() {
   git clone -q "$ROOT" "$source"
   for file in scripts/update.sh scripts/link.sh scripts/doctor.sh \
     scripts/install-claude-hooks.sh scripts/precompact-handoff.sh \
+    scripts/resume-hook.sh \
     scripts/install-mcp.sh scripts/install-agy-plugin.sh \
     scripts/oms-mcp-server.py \
     scripts/lib/install-contract.sh scripts/lib/platform.sh \

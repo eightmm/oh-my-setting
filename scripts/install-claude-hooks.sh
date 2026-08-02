@@ -30,9 +30,9 @@ Usage: install-claude-hooks.sh [--remove] [--settings PATH]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure fail-ledger hook, PreCompact handoff-snapshot hook,
-and usage HUD in Claude Code's settings.json (additive; existing hooks and a
-user-owned statusLine are preserved; idempotent). --remove deletes only
-oh-my-setting entries.
+SessionStart resume hook, and usage HUD in Claude Code's settings.json
+(additive; existing hooks and a user-owned statusLine are preserved;
+idempotent). --remove deletes only oh-my-setting entries.
 
 Options:
   --remove          Remove the oh-my-setting hook entries instead.
@@ -58,6 +58,7 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
 [ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/precompact-handoff.sh" ] || fail "precompact-handoff.sh not found under $ROOT"
+[ -f "$ROOT/scripts/resume-hook.sh" ] || fail "resume-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/claude-statusline.py" ] || fail "claude-statusline.py not found under $ROOT"
 
 if [ "$REMOVE" != "1" ] && [ -f "$(oms_install_receipt_path)" ]; then
@@ -78,6 +79,7 @@ OMS_CH_SETTINGS="$SETTINGS" OMS_CH_REMOVE="$REMOVE" \
   OMS_CH_GUARD_CMD="bash $ROOT/scripts/turn-guard.sh" \
   OMS_CH_FAIL_CMD="bash $ROOT/scripts/fail-ledger-hook.sh" \
   OMS_CH_PRECOMPACT_CMD="bash $ROOT/scripts/precompact-handoff.sh" \
+  OMS_CH_RESUME_CMD="bash $ROOT/scripts/resume-hook.sh" \
   OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" python3 <<'PY'
 import json, os, shlex, sys, tempfile
 
@@ -87,10 +89,11 @@ skill_cmd = os.environ["OMS_CH_SKILL_CMD"]
 guard_cmd = os.environ["OMS_CH_GUARD_CMD"]
 fail_cmd = os.environ["OMS_CH_FAIL_CMD"]
 precompact_cmd = os.environ["OMS_CH_PRECOMPACT_CMD"]
+resume_cmd = os.environ["OMS_CH_RESUME_CMD"]
 status_cmd = "python3 %s" % shlex.quote(os.environ["OMS_CH_STATUS_PATH"])
 MARKS = (
     "skill-router.sh", "turn-guard.sh", "fail-ledger-hook.sh",
-    "precompact-handoff.sh",
+    "precompact-handoff.sh", "resume-hook.sh",
 )
 
 settings = {}
@@ -169,6 +172,9 @@ else:
     # The hook is best-effort and self-bounded, but a ceiling keeps a huge
     # transcript from stalling compaction.
     upsert("PreCompact", "precompact-handoff.sh", precompact_cmd, timeout=30)
+    # A resuming session starts knowing its active task, newest handoff,
+    # open failures, and live-peer status instead of rediscovering them.
+    upsert("SessionStart", "resume-hook.sh", resume_cmd, timeout=10)
     if "statusLine" not in settings:
         settings["statusLine"] = {"type": "command", "command": status_cmd}
     elif status_ours(settings.get("statusLine")):

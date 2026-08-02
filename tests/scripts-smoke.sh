@@ -10611,6 +10611,10 @@ precompact = d["hooks"]["PreCompact"]
 assert len(precompact) == 1, precompact
 assert "precompact-handoff.sh" in precompact[0]["hooks"][0]["command"]
 assert precompact[0]["hooks"][0]["timeout"] == 30
+resume = d["hooks"]["SessionStart"]
+assert len(resume) == 1, resume
+assert "resume-hook.sh" in resume[0]["hooks"][0]["command"]
+assert resume[0]["hooks"][0]["timeout"] == 10
 assert any("user-router" in c for c in cmds)
 assert d["model"] == "x"
 status = d["statusLine"]
@@ -10627,6 +10631,7 @@ assert len(ups) == 1 and "user-router" in ups[0]["hooks"][0]["command"]
 assert "Stop" not in d["hooks"]
 assert "PostToolUseFailure" not in d["hooks"]
 assert "PreCompact" not in d["hooks"]
+assert "SessionStart" not in d["hooks"]
 assert "statusLine" not in d
 PY
   # A status line the user already owns must survive install and remove.
@@ -10726,6 +10731,56 @@ test_precompact_handoff_records_refusal_in_fail_ledger() {
     fail "refusal row must carry kind=hook"
   grep -q 'pre-compact' "$repo/.oms/failures.jsonl" ||
     fail "refusal row must name the pre-compact capture"
+}
+
+test_resume_hook_prints_bounded_resume_block() {
+  local repo="$TMP/resume-hook-repo"
+  local out
+
+  make_committed_repo "$repo"
+  mkdir -p "$repo/.oms/handoffs" "$repo/.oms/hooks"
+  ( cd "$repo" && "$ROOT/scripts/agent-task.sh" init --goal "Ship the resume surface" \
+      --next "wire hooks.json" --verify "bash tests/x.sh" >/dev/null )
+  printf 'digest\n' > "$repo/.oms/handoffs/claude-abc.md"
+  ( cd "$repo" && "$ROOT/scripts/fail-ledger.sh" record --cmd "pytest -k boom" --exit 1 \
+      --summary "flaky assertion" --next "rerun standalone" >/dev/null 2>&1 )
+  printf '{"session":"peer111","ts":"%s","cwd_hash":"x","hook":"PostToolUse"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$repo/.oms/hooks/events.jsonl"
+
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
+    fail "resume hook must exit 0"
+  printf '%s\n' "$out" | grep -q '^\[oms resume\]' || fail "missing resume header: $out"
+  printf '%s\n' "$out" | grep -q 'Ship the resume surface' || fail "missing task goal"
+  printf '%s\n' "$out" | grep -q 'next: wire hooks.json' || fail "missing next step"
+  printf '%s\n' "$out" | grep -q 'verify: bash tests/x.sh' || fail "missing verify command"
+  printf '%s\n' "$out" | grep -q 'session-handoff show claude-abc.md' ||
+    fail "missing handoff pointer"
+  printf '%s\n' "$out" | grep -q 'failures: 1 unresolved' || fail "missing failure line"
+  printf '%s\n' "$out" | grep -q 'peers: another session' || fail "missing peer warning"
+  [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
+
+  # Rows from this session's own hash must not read as a peer.
+  python3 - "$repo/.oms/hooks/events.jsonl" <<'PY'
+import hashlib, json, sys
+from datetime import datetime, timezone
+me = hashlib.sha256(b"me").hexdigest()[:32]
+row = {"session": me,
+       "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+       "hook": "PostToolUse"}
+open(sys.argv[1], "w").write(json.dumps(row) + "\n")
+PY
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  if printf '%s\n' "$out" | grep -q 'peers:'; then
+    fail "own session must not be reported as a peer"
+  fi
+
+  # Outside an adopted repo, and when disabled: exit 0 with no output.
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$TMP" | "$ROOT/scripts/resume-hook.sh")" ||
+    fail "resume hook must exit 0 outside an adopted repo"
+  [ -z "$out" ] || fail "non-adopted dir must stay silent"
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" |
+    OMS_RESUME_HOOK=0 "$ROOT/scripts/resume-hook.sh")"
+  [ -z "$out" ] || fail "OMS_RESUME_HOOK=0 must disable the hook"
 }
 
 test_install_codex_plugin_registers_marketplace() {
@@ -13853,6 +13908,7 @@ install-tools
 link
 pre-push-check
 precompact-handoff
+resume-hook
 skill-router
 turn-guard
 unlink

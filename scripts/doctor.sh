@@ -524,6 +524,7 @@ for event, mark in (
     ("Stop", "turn-guard.sh"),
     ("PostToolUseFailure", "fail-ledger-hook.sh"),
     ("PreCompact", "precompact-handoff.sh"),
+    ("SessionStart", "resume-hook.sh"),
 ):
     if not registered(event, mark):
         print("%s -> %s" % (event, mark))
@@ -542,7 +543,7 @@ EOF
     echo "hint: run $INSTALL_ROOT/scripts/install-claude-hooks.sh"
     FAILED=1
   else
-    echo "ok: claude hooks registered (router, turn guard, fail ledger, pre-compact, HUD)"
+    echo "ok: claude hooks registered (router, turn guard, fail ledger, pre-compact, resume, HUD)"
   fi
 }
 
