@@ -445,6 +445,47 @@ EOF
     fail "parallel smoke log directory survived parent TERM"
 }
 
+test_smoke_runner_reports_bounded_opt_in_timings() {
+  local suite="$TMP/timed-smoke.sh"
+  local timed_out="$TMP/timed-smoke.out"
+  local quiet_out="$TMP/quiet-smoke.out"
+
+  cat > "$suite" <<'EOF'
+set -euo pipefail
+test_slow() {
+  # SECONDS is a Bash 3.2 special variable. Advancing it makes this fixture
+  # deterministic without sleeping in every full gate run.
+  SECONDS=$((SECONDS + 2))
+}
+test_fast() {
+  [ "${OMS_SMOKE_TIMINGS+x}" != x ] || {
+    echo "runner control leaked into the suite" >&2
+    return 1
+  }
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_slow
+test_fast
+# SMOKE_TEST_CALLS_END
+EOF
+
+  OMS_SMOKE_SUITE="$suite" OMS_SMOKE_TIMINGS=1 OMS_SMOKE_TIMING_LIMIT=1 \
+    "$ROOT/tests/run-smoke-shard.sh" > "$timed_out"
+  grep -Eq '^smoke-timing: [0-9]+s test_slow$' "$timed_out" ||
+    fail "timing mode did not report the slow test: $(cat "$timed_out")"
+  [ "$(grep -c '^smoke-timing:' "$timed_out")" = 1 ] ||
+    fail "timing output ignored OMS_SMOKE_TIMING_LIMIT: $(cat "$timed_out")"
+  grep -Eq '^scripts-smoke: ok \(2 tests, duration=[0-9]+s\)$' "$timed_out" ||
+    fail "smoke summary did not report shard duration: $(cat "$timed_out")"
+
+  OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" > "$quiet_out"
+  if grep -q '^smoke-timing:' "$quiet_out"; then
+    fail "default smoke output should remain one compact summary line"
+  fi
+  [ "$(wc -l < "$quiet_out" | tr -d ' ')" = 1 ] ||
+    fail "default smoke output became noisy: $(cat "$quiet_out")"
+}
+
 test_install_owner_guards_and_stale_status() {
   local home_dir="$TMP/install-owner-home"
   local receipt="$home_dir/install.json"
@@ -535,6 +576,7 @@ test_smoke_shards_partition_every_definition
 test_artifact_resolution_and_dashboard_statuses
 test_artifact_retention_corruption_and_source_tracking
 test_smoke_runner_tail_and_signal_cleanup
+test_smoke_runner_reports_bounded_opt_in_timings
 test_install_owner_guards_and_stale_status
 "$ROOT/tests/executor-smoke.sh"
 

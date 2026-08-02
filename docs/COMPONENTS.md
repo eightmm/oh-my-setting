@@ -606,23 +606,31 @@ frozen/running executors, live runs, the active task, unresolved failures,
 review tasks, or the append-only board
 
 **Verification gate (`check.sh`, `check-bash32.sh`, `check-python.sh`,
-`install-hooks.sh`)** — One command runs the core checks shared with CI
-(shellcheck, Bash 3.2 static scan, Python syntax, deterministic four-way smoke
-shards) and fails hard if a tool is missing. A passing run prints one `ok:` line
-per stage and one per shard; a failing stage prints its full output and
-`OMS_VERBOSE=1` restores everything, so the gate stays readable between edits.
+`pre-push-check.sh`, `install-hooks.sh`)** — One command runs the core checks
+shared with CI (shellcheck, Bash 3.2 static scan, Python syntax, focused suites,
+deterministic four-way smoke shards) and fails hard if a required tool is
+missing. A passing run prints one timed `ok:` line per stage and one timed line
+per shard; a failing stage prints its full output and `OMS_VERBOSE=1` restores
+everything, so the gate stays readable between edits. CI enables bounded
+per-test smoke timings (`OMS_SMOKE_TIMINGS=1`, default slowest 10) to make shard
+rebalancing evidence-driven without filling every green log.
 The Bash 3.2 scan is static plus one rule a linter cannot express: a
 here-document inside `$( )` whose body holds an odd number of apostrophes makes
 the whole file unparseable under 3.2 even behind a quoted delimiter, and that
-has already shipped. `--lint-only`/`--no-lint` split the gate so CI can run lint
-as its own job — the gate exits at the first failing stage, so sharing one job
-lets a lint nit hide every test result. Flags rather than environment variables,
-because an env prefix exports into every test the suite then runs. CI additionally runs the real
+has already shipped. `--lint-only`, `--focused-only`, and
+`--scripts-smoke-only --shard I/N` give CI independent jobs, so a lint failure
+cannot hide test results and each large shard gets its own runner. The fixed-name
+`gate` job fails closed over lint, focused suites, every smoke matrix child, the
+cross-platform install matrix, and macOS portability; branch protection should
+require only `gate`, never a matrix child name. CI additionally runs the real
 install lifecycle on Linux (both ownership modes), macOS, and Windows Git Bash;
 the macOS job parses every script with its stock Bash 3.2 and runs the BSD
 userland fixtures, the one place `sed`/`awk`/`date` differences surface.
-`OMS_SMOKE_JOBS=1` enables serial debugging;
-`install-hooks.sh` wires the core gate as a pre-push hook
+`OMS_SMOKE_JOBS=1` enables serial local debugging. `install-hooks.sh` keeps the
+complete gate as its safe default. After branch protection requires `gate`,
+`install-hooks.sh --quick` installs exact-push-range changed-file feedback and
+states explicitly that GitHub Actions remains authoritative; ambiguous pushes
+fall back to the full local gate.
 
 **CI status (`ci-status.sh`)** — Prints the latest CI conclusion for the
 current branch and exits nonzero on a failed run, so a red push can't go

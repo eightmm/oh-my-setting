@@ -27,21 +27,39 @@ jobs:
       - name: lint
         run: bash scripts/check.sh --lint-only
 
-  # Keep one stable Ubuntu check. check.sh runs the focused suites once and
-  # parallelizes the large smoke suite inside this runner without four repeated
-  # checkouts, skill installs, and a fifth aggregation job.
-  smoke:
+  # Focused suites share state and are intentionally serialized. Their stage
+  # durations stay visible without competing for one runner's CPU and making
+  # load-sensitive process tests flaky.
+  focused:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: repository gate
-        run: bash scripts/check.sh --no-lint
+      - name: focused suites
+        run: bash scripts/check.sh --focused-only
+
+  # scripts-smoke is the dominant wall-clock cost. Native matrix children get
+  # separate runners instead of four process trees racing on one VM. The
+  # deterministic partition and bounded slow-test timing make rebalancing
+  # evidence-driven.
+  smoke_shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    name: scripts-smoke (${{ matrix.shard }}/4)
+    steps:
+      - uses: actions/checkout@v7
+      - name: smoke shard
+        env:
+          OMS_SMOKE_TIMINGS: "1"
+        run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
 
   # Exercise the same install -> update -> uninstall contract on every
   # supported host, and in both ownership modes. Windows selects copy mode on
   # its own; the Ubuntu copy leg exists because copy mode would otherwise be
   # provable only on the slowest runner in the matrix.
-  install-e2e:
+  install_e2e:
     strategy:
       fail-fast: false
       matrix:
@@ -72,7 +90,7 @@ jobs:
   # The one parser that rejects a here-document inside $( ) whose body holds an
   # odd apostrophe, and the one userland where BSD sed/awk/date differ. Both
   # classes are invisible to a Linux-only gate, and both have shipped breakage.
-  portability-macos:
+  portability_macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -80,3 +98,33 @@ jobs:
         run: OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh
       - name: BSD userland fixtures
         run: bash tests/bsd-portability-smoke.sh
+
+  # Branch protection targets only this fixed name. Matrix child check names
+  # can change as shards are rebalanced; this job fails closed on every failed,
+  # cancelled, or skipped dependency.
+  gate:
+    if: always()
+    needs: [lint, focused, smoke_shard, install_e2e, portability_macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: require every verification job
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          FOCUSED_RESULT: ${{ needs.focused.result }}
+          SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
+          INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
+          PORTABILITY_MACOS_RESULT: ${{ needs.portability_macos.result }}
+        run: |
+          status=0
+          for result in \
+            "$LINT_RESULT" \
+            "$FOCUSED_RESULT" \
+            "$SMOKE_SHARD_RESULT" \
+            "$INSTALL_E2E_RESULT" \
+            "$PORTABILITY_MACOS_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "required job result: $result" >&2
+              status=1
+            fi
+          done
+          exit "$status"

@@ -89,8 +89,8 @@ door per capability; the full catalog is `oms list`, documented in
   hypothesis runs, dataset leakage manifests, Slurm reconcile and GPU queue
 - **Providers and models** — capability probing, fast/balanced/deep tier
   routing with fallback, family-diversity diagnostics
-- **Maintenance** — transactional update with rollback, doctor, one
-  verification gate wired as a pre-push hook
+- **Maintenance** — transactional update with rollback, doctor, one full
+  verification gate plus a protected-branch quick pre-push mode
 
 Skills load in three layers: five general-purpose skills everywhere,
 machine-conditional skills only where their command exists (`slurm`,

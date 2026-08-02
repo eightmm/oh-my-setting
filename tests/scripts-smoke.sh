@@ -6762,8 +6762,19 @@ EOF
 # works if each half can run without the other.
 test_check_gate_splits_lint_from_tests() {
   local out
+  local shellcheck_stub="$TMP/check-split-shellcheck"
 
-  out="$(cd "$ROOT" && bash scripts/check.sh --lint-only 2>&1)" ||
+  # This is a mode-routing contract, not a second shellcheck correctness run.
+  # The top-level lint gate checks every file; repeating the real linter here
+  # added roughly 45 seconds to one scripts-smoke shard with no new evidence.
+  cat > "$shellcheck_stub" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$shellcheck_stub"
+
+  out="$(cd "$ROOT" && OMS_SHELLCHECK_BIN="$shellcheck_stub" \
+    bash scripts/check.sh --lint-only 2>&1)" ||
     fail "lint-only gate should pass: $out"
   printf '%s' "$out" | grep -Fq 'ok: shellcheck' ||
     fail "lint-only gate must run shellcheck: $out"
@@ -6826,6 +6837,50 @@ test_install_hooks_writes_pre_push() {
   ( cd "$repo" && bash scripts/install-hooks.sh >/dev/null ) || fail "install-hooks failed"
   [ -x "$repo/.git/hooks/pre-push" ] || fail "pre-push hook not installed/executable"
   grep -Fq 'scripts/check.sh' "$repo/.git/hooks/pre-push" || fail "hook does not call check.sh"
+
+  ( cd "$repo" && bash scripts/install-hooks.sh --quick >/dev/null ) ||
+    fail "install-hooks --quick failed"
+  grep -Fq 'scripts/pre-push-check.sh' "$repo/.git/hooks/pre-push" ||
+    fail "quick hook does not route through pre-push-check.sh"
+  grep -Fq 'full GitHub Actions gate' "$repo/.git/hooks/pre-push" ||
+    fail "quick hook must say that its local result is partial"
+}
+
+test_pre_push_quick_gate_uses_the_exact_push_range() {
+  local repo="$TMP/pre-push-quick"
+  local first second zero
+
+  mkdir -p "$repo/scripts"
+  git -C "$repo" init -b main >/dev/null
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  cp "$ROOT/scripts/pre-push-check.sh" "$repo/scripts/pre-push-check.sh"
+  cat > "$repo/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$OMS_TEST_CHECK_ARGS"
+EOF
+  chmod +x "$repo/scripts/check.sh" "$repo/scripts/pre-push-check.sh"
+  printf 'one\n' > "$repo/tracked.txt"
+  git -C "$repo" add scripts tracked.txt
+  git -C "$repo" commit -m first >/dev/null
+  first="$(git -C "$repo" rev-parse HEAD)"
+  printf 'two\n' > "$repo/tracked.txt"
+  git -C "$repo" add tracked.txt
+  git -C "$repo" commit -m second >/dev/null
+  second="$(git -C "$repo" rev-parse HEAD)"
+
+  printf 'refs/heads/main %s refs/heads/main %s\n' "$second" "$first" |
+    (cd "$repo" && OMS_TEST_CHECK_ARGS="$repo/check.args" \
+      bash scripts/pre-push-check.sh origin example.invalid >/dev/null)
+  [ "$(cat "$repo/check.args")" = "--quick --changed-from $first --changed-to $second" ] ||
+    fail "quick pre-push did not preserve the exact update range: $(cat "$repo/check.args")"
+
+  zero=0000000000000000000000000000000000000000
+  rm -f "$repo/check.args"
+  printf 'refs/heads/old %s refs/heads/old %s\n' "$zero" "$second" |
+    (cd "$repo" && OMS_TEST_CHECK_ARGS="$repo/check.args" \
+      bash scripts/pre-push-check.sh origin example.invalid >/dev/null)
+  [ ! -e "$repo/check.args" ] || fail "a deletion-only push should not run a gate"
 }
 
 test_install_skills_detects_name_mismatch() {
@@ -13439,7 +13494,7 @@ test_oms_allowlist_stays_in_sync_with_scripts() {
   # Scripts outside the oms surface, invoked by path from install/update/
   # hooks/CI only. A new scripts/*.sh must be classified: public tool, compat
   # shim, or a deliberate entry here.
-  internal="
+internal="
 agent-ml-context
 check
 check-bash32
@@ -13455,6 +13510,7 @@ install-mcp
 install-skills
 install-tools
 link
+pre-push-check
 precompact-handoff
 skill-router
 turn-guard

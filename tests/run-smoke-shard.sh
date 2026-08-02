@@ -7,6 +7,11 @@ MODE="run"
 SHARD=1
 TOTAL=1
 JOBS=""
+TIMINGS="${OMS_SMOKE_TIMINGS:-0}"
+TIMING_LIMIT="${OMS_SMOKE_TIMING_LIMIT:-10}"
+# Runner controls are not product/test inputs. Keep them out of the suite just
+# as check.sh keeps its own mode flags out of descendants.
+unset OMS_SMOKE_TIMINGS OMS_SMOKE_TIMING_LIMIT
 
 usage() {
   cat <<'EOF'
@@ -15,8 +20,9 @@ Usage: run-smoke-shard.sh [--list] [--shard I/N] [--jobs N]
 Run every test_* function defined in scripts-smoke.sh. --shard selects one
 deterministic, 1-based round-robin partition. --jobs runs N shards in parallel.
 
-A passing run prints one line. Set OMS_VERBOSE=1 for the full test output; a
-failing run always prints everything.
+A passing run prints one line with its duration. Set OMS_VERBOSE=1 for the full
+test output; a failing run always prints everything. OMS_SMOKE_TIMINGS=1 prints
+the slowest tests, bounded by OMS_SMOKE_TIMING_LIMIT (default 10).
 EOF
 }
 
@@ -77,6 +83,7 @@ if [ -n "$JOBS" ]; then
       wait "$pid" 2>/dev/null || true
     done
     rm -rf "$LOG_DIR"
+    rm -f "$RUN_SCRIPT"
   }
   trap cleanup_workers EXIT
   trap 'exit 129' HUP
@@ -85,7 +92,8 @@ if [ -n "$JOBS" ]; then
   set -m
   i=1
   while [ "$i" -le "$JOBS" ]; do
-    "$0" --shard "$i/$JOBS" > "$LOG_DIR/$i.log" 2>&1 &
+    OMS_SMOKE_TIMINGS="$TIMINGS" OMS_SMOKE_TIMING_LIMIT="$TIMING_LIMIT" \
+      "$0" --shard "$i/$JOBS" > "$LOG_DIR/$i.log" 2>&1 &
     PIDS="$PIDS $!"
     i=$((i + 1))
   done
@@ -101,6 +109,7 @@ if [ -n "$JOBS" ]; then
     i=$((i + 1))
   done
   rm -rf "$LOG_DIR"
+  rm -f "$RUN_SCRIPT"
   trap - EXIT HUP INT TERM
   exit "$status"
 fi
@@ -138,7 +147,7 @@ fi
 
 # Rewrite the explicitly marked legacy call tail in memory and derive calls
 # from definitions, so a newly added test can never be silently omitted.
-awk -v shard="$SHARD" -v total="$TOTAL" '
+awk -v shard="$SHARD" -v total="$TOTAL" -v timings="$TIMINGS" '
   /^test_[[:alnum:]_]+\(\) \{/ {
     name=$1
     sub(/\(\)$/, "", name)
@@ -146,8 +155,21 @@ awk -v shard="$SHARD" -v total="$TOTAL" '
   }
   $0 == "# SMOKE_TEST_CALLS_BEGIN" {
     print
+    if (timings == "1") {
+      print "oms_smoke_run_test() {"
+      print "  local oms_smoke_name=\"$1\""
+      print "  local oms_smoke_started=\"${SECONDS:-0}\""
+      print "  local oms_smoke_elapsed"
+      print "  \"$oms_smoke_name\""
+      print "  oms_smoke_elapsed=$((SECONDS - oms_smoke_started))"
+      print "  printf \047%s\\t%s\\n\047 \"$oms_smoke_elapsed\" \"$oms_smoke_name\" >> \"$OMS_SMOKE_TIMING_FILE\""
+      print "}"
+    }
     for (i=1; i<=count; i++) {
-      if ((i - 1) % total == shard - 1) print names[i]
+      if ((i - 1) % total == shard - 1) {
+        if (timings == "1") print "oms_smoke_run_test " names[i]
+        else print names[i]
+      }
     }
     emitted=1
     tail=1
@@ -172,17 +194,34 @@ awk -v shard="$SHARD" -v total="$TOTAL" '
 # agent has to read and pay for. A failure prints everything.
 run_count="$(manifest | awk -v shard="$SHARD" -v total="$TOTAL" '(NR - 1) % total == shard - 1' | grep -c .)"
 run_log="$(mktemp "${TMPDIR:-/tmp}/oms-smoke-run.XXXXXX")"
+timing_file=""
+if [ "$TIMINGS" = "1" ]; then
+  case "$TIMING_LIMIT" in
+    *[!0-9]*|"") fail "OMS_SMOKE_TIMING_LIMIT requires a positive integer" ;;
+  esac
+  [ "$TIMING_LIMIT" -gt 0 ] || fail "OMS_SMOKE_TIMING_LIMIT requires a positive integer"
+  timing_file="$(mktemp "${TMPDIR:-/tmp}/oms-smoke-timing.XXXXXX")"
+fi
+run_started="$(date +%s)"
 run_status=0
-OMS_SMOKE_RUNNER_ACTIVE=1 OMS_TEST_ROOT="$ROOT" bash "$RUN_SCRIPT" > "$run_log" 2>&1 || run_status=$?
+OMS_SMOKE_RUNNER_ACTIVE=1 OMS_TEST_ROOT="$ROOT" \
+  OMS_SMOKE_TIMING_FILE="$timing_file" bash "$RUN_SCRIPT" > "$run_log" 2>&1 || run_status=$?
+run_elapsed=$(( $(date +%s) - run_started ))
 if [ "$run_status" -ne 0 ] || [ "${OMS_VERBOSE:-0}" = "1" ]; then
   cat "$run_log"
 fi
-rm -f "$run_log" "$RUN_SCRIPT"
+if [ -n "$timing_file" ] && [ -s "$timing_file" ]; then
+  LC_ALL=C sort -rn "$timing_file" | sed -n "1,${TIMING_LIMIT}p" |
+    while IFS="$(printf '\t')" read -r elapsed name; do
+      printf 'smoke-timing: %ss %s\n' "$elapsed" "$name"
+    done
+fi
+rm -f "$run_log" "$timing_file" "$RUN_SCRIPT"
 if [ "$run_status" -eq 0 ]; then
   if [ "$TOTAL" -eq 1 ]; then
-    echo "scripts-smoke: ok ($run_count tests)"
+    echo "scripts-smoke: ok ($run_count tests, duration=${run_elapsed}s)"
   else
-    echo "scripts-smoke: ok (shard $SHARD/$TOTAL, $run_count tests)"
+    echo "scripts-smoke: ok (shard $SHARD/$TOTAL, $run_count tests, duration=${run_elapsed}s)"
   fi
 fi
 exit "$run_status"

@@ -83,8 +83,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   manifest, Slurm reconcile과 GPU 큐
 - **Provider와 모델** — capability 프로브, fast/balanced/deep 티어 라우팅과
   폴백, family 다양성 진단
-- **유지보수** — 롤백 가능한 트랜잭션 업데이트, doctor, pre-push hook으로
-  걸리는 검증 게이트 하나
+- **유지보수** — 롤백 가능한 트랜잭션 업데이트, doctor, 하나의 전체 검증
+  게이트와 보호 브랜치용 빠른 pre-push 모드
 
 skill은 세 계층으로 붙는다: 어디서나 같은 범용 5개, 필요한 명령이 있는
 머신에만 링크되는 머신 조건 skill(`slurm`, `gpu-workstation`), 그리고 저장소의
