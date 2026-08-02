@@ -73,6 +73,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   config alone.
 
 ### Changed
+- The shared global rules absorb the guidance that previously lived only in
+  Claude-local `~/.claude/rules/*.md` files, so all three CLIs receive it
+  identically through the one linked `rules/global-AGENTS.md`: model routing
+  by phase with spawned workers one tier below and judgment roles at session
+  tier, independent advisors over same-family ones, the peer-CLI wrapper
+  contract (peer-ask/review/delegate, agent-consult, advise; Gemini CLI
+  retired in favor of agy), harness hook awareness with live-wiring
+  inspection over prose lists, and the context-window tail guidance.
+  CLI-specific machinery (settings paths, hook registration commands, the
+  Claude-only subagent catalog) stayed out — each CLI's own surfaces already
+  carry it.
 - Auto-update is on by default. A fresh install registers the check-only
   trigger (systemd timer, or cron when no user manager is reachable) so a
   harness cannot silently go stale: it records update availability and
