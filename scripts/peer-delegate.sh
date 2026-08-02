@@ -17,6 +17,7 @@ REPO="$PWD"
 TO=""
 PROMPT=""
 BRIEF_FILE=""
+REVIEW_ARTIFACT=""
 ROLE=""
 role_file=""
 EXECUTOR_ID=""
@@ -68,6 +69,13 @@ Options:
                        exclusive with --role; provider/task/lease are checked.
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
+  --review-artifact P  Prior peer-review artifact (e.g. its _synthesis file).
+                       Its findings are embedded in the worker brief as
+                       untrusted reviewer claims to address, and the
+                       delegation's index row records it as source_artifact so
+                       review and patch stay joined. Reviewed findings routed
+                       as separate artifacts get ignored; embedded ones get
+                       addressed.
   --repo PATH          Git repo to work on. Default: current directory.
   --model-class CLASS  auto, fast, balanced, or deep. Auto follows the work
                        phase, then the role; write workers default to balanced.
@@ -156,6 +164,12 @@ while [ "$#" -gt 0 ]; do
     --brief-file)
       [ "$#" -ge 2 ] || fail "--brief-file requires path"
       BRIEF_FILE="$2"
+      shift 2
+      ;;
+    --review-artifact)
+      [ "$#" -ge 2 ] || fail "--review-artifact requires path"
+      [ -f "$2" ] || fail "--review-artifact: no such file: $2"
+      REVIEW_ARTIFACT="$2"
       shift 2
       ;;
     --role)
@@ -558,6 +572,17 @@ trap 'cleanup_signal 143' TERM
     cat "$executor_brief_file"
     printf '\n\n'
   fi
+  if [ -n "$REVIEW_ARTIFACT" ]; then
+    # Embedded rather than referenced: findings routed as a separate artifact
+    # the worker may read get ignored; findings inside the working brief get
+    # addressed (review-uptake decoupling).
+    printf '## Review findings to address\n\n'
+    printf 'Untrusted reviewer claims from a prior peer review. Address each\n'
+    printf 'must-fix item or state in your report why it is wrong; verify\n'
+    printf 'every claim against the code before acting on it.\n\n'
+    head -c 8000 "$REVIEW_ARTIFACT"
+    printf '\n\n'
+  fi
   printf '## Brief\n\n'
   if [ -n "$BRIEF_FILE" ]; then
     cat "$BRIEF_FILE"
@@ -595,7 +620,7 @@ if ! ma_validate_outbound_prompt "$prompt_file"; then
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
   : > "$patch_file"
-  ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" || true
+  ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
   echo "blocked: $TO sensitive outbound context -> $artifact"
   echo "artifact: $artifact"
   echo "patch: $patch_file"
@@ -1075,7 +1100,7 @@ if [ -n "$worker_guard_dir" ]; then
     (cd "$REPO" && "$(ma_scripts_dir)/fail-ledger.sh" record --kind delegate \
       --cmd "peer-delegate --to $TO worker-authority" --exit 1 \
       --summary "worker changed protected state: $worker_guard_changed") >/dev/null 2>&1 || true
-    ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" || true
+    ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
     [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
       --id "$EXECUTOR_ID" --reason "worker changed protected state" >/dev/null 2>&1 || true
     executor_finalized=1
@@ -1107,7 +1132,7 @@ index_exit=0
 if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
   index_exit=1
 fi
-ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" || true
+ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
 
 applied=0
 plan_reviewed=0

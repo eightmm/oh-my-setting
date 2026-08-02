@@ -3153,6 +3153,37 @@ test_delegate_dry_run() {
   [ -z "$(git -C "$project" status --porcelain file.txt)" ] || fail "delegate dry-run touched main tree"
 }
 
+test_delegate_embeds_review_findings() {
+  local project="$TMP/delegate-review-uptake"
+  local artifact_dir="$project/artifacts"
+  local review="$project/review-synthesis.md"
+
+  make_committed_repo "$project"
+  printf '# Review synthesis\n\nMust-fix: the loop off-by-one in foo().\n' > "$review"
+
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --to codex \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --review-artifact "$review" \
+    --prompt "Fix per review" >/dev/null
+
+  # Findings live inside the worker brief, not in a side artifact the worker
+  # may ignore; the index row keeps review->patch lineage joinable.
+  assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' 'Review findings to address'
+  assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' 'the loop off-by-one in foo()'
+  assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' 'Untrusted reviewer claims'
+  grep -Fq '"source": "review-synthesis.md"' "$project/.oms/artifacts/index.jsonl" ||
+    fail "delegation index row must record the review artifact as its source"
+
+  # A missing review artifact is misuse, caught before any worker runs.
+  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" \
+    --review-artifact "$project/absent.md" --prompt x >/dev/null 2>&1; then
+    fail "--review-artifact with a missing file must be rejected"
+  fi
+}
+
 test_delegate_fake_worker_apply() {
   local project="$TMP/delegate-apply"
   local artifact_dir="$project/artifacts"
