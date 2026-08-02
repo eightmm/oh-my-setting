@@ -10679,6 +10679,34 @@ EOF
     fail "precompact hook should write a handoff digest for an adopted repo"
 }
 
+test_precompact_handoff_records_refusal_in_fail_ledger() {
+  local repo="$TMP/precompact-refusal"
+  local claude_home="$TMP/precompact-refusal-home"
+  local project_dir
+
+  git init -q "$repo"
+  mkdir -p "$repo/.oms"
+  printf '*\n' > "$repo/.oms/.gitignore"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  mkdir -p "$project_dir"
+  # Secret-tier content forces a capture refusal (split literal keeps this
+  # test source scrubber-clean).
+  printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"use AK%s"}}\n' \
+    "$repo" "IAIOSFODNN7EXAMPLE" > "$project_dir/sess-r.jsonl"
+
+  printf '{"session_id":"sess-r","cwd":"%s"}' "$repo" |
+    OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must still exit 0 on a refused capture"
+  find "$repo/.oms/handoffs" -name '*.md' 2>/dev/null | grep -q . &&
+    fail "refused capture must not write a digest"
+  [ -f "$repo/.oms/failures.jsonl" ] ||
+    fail "refused capture must be recorded in the fail-ledger"
+  grep -q '"kind": "hook"' "$repo/.oms/failures.jsonl" ||
+    fail "refusal row must carry kind=hook"
+  grep -q 'pre-compact' "$repo/.oms/failures.jsonl" ||
+    fail "refusal row must name the pre-compact capture"
+}
+
 test_install_codex_plugin_registers_marketplace() {
   local d="$TMP/codex-plugin"
   local bin="$d/bin"

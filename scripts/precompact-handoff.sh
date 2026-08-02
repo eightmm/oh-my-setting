@@ -42,5 +42,22 @@ args=(capture --agent "$AGENT" --cwd "$cwd" --note "auto: pre-compact snapshot")
 if [ -n "$session" ]; then
   args+=(--session "$session")
 fi
-"$ROOT/scripts/session-handoff.sh" "${args[@]}" >/dev/null 2>&1 || true
+# Still fail-open, no longer fail-silent: a refused capture goes to the
+# fail-ledger, whose existing surfaces (check, inbox, daily hint) show it.
+# Months of empty .oms/handoffs with every hook reporting success is exactly
+# the failure mode this closes.
+err="$(mktemp 2>/dev/null)" || err=""
+if [ -z "$err" ]; then
+  "$ROOT/scripts/session-handoff.sh" "${args[@]}" >/dev/null 2>&1 || true
+  exit 0
+fi
+if ! "$ROOT/scripts/session-handoff.sh" "${args[@]}" >/dev/null 2>"$err"; then
+  summary="$(head -c 160 "$err" 2>/dev/null | tr '\n' ' ')"
+  "$ROOT/scripts/fail-ledger.sh" record --repo "$cwd" --kind hook \
+    --cmd "session-handoff capture --agent $AGENT (pre-compact)" --exit 1 \
+    --summary "${summary:-capture failed}" \
+    --next "run manually: oms session-handoff capture --agent $AGENT" \
+    >/dev/null 2>&1 || true
+fi
+rm -f "$err"
 exit 0
