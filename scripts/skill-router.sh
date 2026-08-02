@@ -48,7 +48,9 @@ state_hint() {
   failures="$(cd "$repo" && bash "$ROOT/scripts/fail-ledger.sh" list --json 2>/dev/null || true)"
   skills="$(find "$repo/.oms/skills" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
   OMS_SH_TASK="$task" OMS_SH_FAILURES="$failures" OMS_SH_SKILLS="$skills" \
-    OMS_SH_LEDGER="$repo/.oms/failures.jsonl" python3 - <<'PY' 2>/dev/null || true
+    OMS_SH_LEDGER="$repo/.oms/failures.jsonl" \
+    OMS_SH_PLAN="$repo/.oms/plan/tasks.json" \
+    OMS_SH_PROGRESS="$repo/.oms/plan/progress.jsonl" python3 - <<'PY' 2>/dev/null || true
 import json, os
 
 def load(name):
@@ -65,6 +67,33 @@ if task.get("present") and task.get("status") == "active" and task.get("stale"):
         % (task.get("task_id") or "?")
     )
     raise SystemExit(0)
+# A parked goal outranks generic failure counts: the driver already digested
+# its failure into one reason and one next command.
+try:
+    with open(os.environ.get("OMS_SH_PLAN", ""), encoding="utf-8") as fh:
+        plan = json.load(fh)
+except (OSError, ValueError):
+    plan = {}
+if plan.get("accept"):
+    last_terminal = None
+    try:
+        with open(os.environ.get("OMS_SH_PROGRESS", ""), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("kind") == "terminal":
+                    last_terminal = row
+    except OSError:
+        pass
+    if last_terminal and last_terminal.get("status") == "park":
+        print(
+            "[oms] goal parked (%s) — review .oms/plan/progress.jsonl, then"
+            " resume with `oms goal-drive`."
+            % (last_terminal.get("reason") or "?")
+        )
+        raise SystemExit(0)
 failures = load("OMS_SH_FAILURES")
 rows = [f for f in failures.get("failures", []) if not f.get("resolved")]
 if len(rows) >= 2:

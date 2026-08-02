@@ -206,6 +206,37 @@ test_router_state_hint_on_unresolved_failures() {
   fi
 }
 
+test_router_state_hint_surfaces_parked_goal() {
+  local repo="$TMP/hint-goal-repo"
+  local payload out
+
+  make_repo "$repo"
+  ( cd "$repo" &&
+    bash "$ROOT/scripts/agent-plan.sh" init --goal "unmet" --accept "false" >/dev/null )
+  mkdir -p "$repo/.oms/plan"
+  printf '%s\n' \
+    '{"schema": 1, "kind": "acceptance", "status": "fail", "cycle": 1}' \
+    '{"schema": 1, "kind": "terminal", "status": "park", "reason": "tasks-exhausted", "cycle": 1}' \
+    > "$repo/.oms/plan/progress.jsonl"
+
+  payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "goal parked (tasks-exhausted)" ||
+    fail "a parked goal run should surface in the daily hint: $out"
+
+  # A goal that finished (terminal done) stays quiet.
+  printf '%s\n' \
+    '{"schema": 1, "kind": "terminal", "status": "done", "reason": "acceptance-pass", "cycle": 2}' \
+    >> "$repo/.oms/plan/progress.jsonl"
+  rm -f "$repo/.oms/hooks/state-hint."*
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq "goal parked"; then
+    fail "a completed goal must not keep hinting"
+  fi
+}
+
 test_router_state_hint_skips_unadopted_repo() {
   local repo="$TMP/hint-plain"
   mkdir -p "$repo"
