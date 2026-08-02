@@ -211,6 +211,35 @@ test_router_state_hint_skips_unadopted_repo() {
   [ ! -d "$repo/.oms" ] || fail "the hint must not create .oms in a plain directory"
 }
 
+test_router_state_hint_offers_forge_for_resolved_repeats() {
+  local repo="$TMP/hint-forge-repo"
+  local payload out
+
+  make_repo "$repo"
+  ( cd "$repo" &&
+    bash "$ROOT/scripts/fail-ledger.sh" record --cmd "make test" --exit 1 >/dev/null &&
+    OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record \
+      --cmd "make test" --exit 1 >/dev/null &&
+    bash "$ROOT/scripts/fail-ledger.sh" resolve --cmd "make test" >/dev/null 2>&1 )
+
+  payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "skill-forge add" ||
+    fail "a resolved repeated failure with no project skill should hint at the forge: $out"
+
+  # Once any project skill exists, the forge hint stays quiet.
+  printf -- '---\nname: lesson\ndescription: %s\n---\n\nBody.\n' \
+    "A test lesson description long enough to pass the validation gate." |
+    ( cd "$repo" && bash "$ROOT/scripts/skill-forge.sh" add --name lesson >/dev/null )
+  rm -f "$repo/.oms/hooks/state-hint."*
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq "skill-forge add"; then
+    fail "an existing project skill must silence the forge hint"
+  fi
+}
+
 # --- machine-conditional skills ---------------------------------------------
 
 # A deterministic PATH: real tools by symlink, nothing else — so a command's
@@ -503,6 +532,7 @@ test_install_mcp_registers_and_is_idempotent
 test_install_agy_plugin_bakes_absolute_paths
 test_router_state_hint_on_unresolved_failures
 test_router_state_hint_skips_unadopted_repo
+test_router_state_hint_offers_forge_for_resolved_repeats
 test_conditional_skills_link_only_where_required_commands_exist
 test_router_skips_conditional_skill_without_command
 test_skill_forge_stores_links_and_hides

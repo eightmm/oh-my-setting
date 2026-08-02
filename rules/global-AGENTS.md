@@ -69,6 +69,10 @@ contracts.
 
 - Use `agent-harness` for workflows; `oms list` catalogs tools; never edit
   `.oms/` manually.
+- A fix or procedure that repeats becomes a project skill: `oms skill-forge
+  add` stores it under `.oms/skills/` and links it for every CLI. Machine and
+  cluster facts (`sinfo`/`sacctmgr`) go to `oms snapshot [--cluster]`
+  references, not project skills.
 - Peer CLIs: `claude`, `codex`, `agy` (Gemini is retired). Cross-model work
   uses `peer-ask`, `peer-review`, `peer-delegate`, `agent-consult`, `advise` —
   never raw CLI calls.

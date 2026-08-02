@@ -23,6 +23,7 @@ every row rather than grouped by feature.
 |---|---|---|
 | start or resume and the state is unclear | `oms state --repo .` (`oms init` only for a fresh repo) | read |
 | check what is already known, or record what you learned | `oms agent-memory recall "…"`; `append`/`pin` to add | read, append |
+| catch yourself re-deriving the same fix or procedure | `oms skill-forge add --name NAME` — it becomes a project skill every CLI loads | append |
 | decide, and an outside view would change the next step | `oms consult "question"`; use `oms peer-ask --prompt "…"` for the same question to several peers | read |
 | act irreversibly, or fail the same way twice | `oms fail-ledger check --cmd "…"`, then `oms advise` | read |
 | hand work to another model | `oms peer-delegate --to NAME` (returns a patch) | worktree write |
@@ -52,7 +53,7 @@ every row rather than grouped by feature.
 
 ## When a row is not enough
 
-- Prompt hooks, memory, active task, change guard:
+- Prompt hooks, memory, active task, project skills, change guard:
   [state-memory.md](references/state-memory.md)
 - Plans, fail ledger, reclaim, GC: [plans-recovery.md](references/plans-recovery.md)
 - Autonomous progress and stopping: [autonomy-loop.md](references/autonomy-loop.md)

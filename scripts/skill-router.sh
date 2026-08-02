@@ -30,12 +30,13 @@ fi
 
 # State-conditional hints: inject the one thing native skill matching cannot
 # know — this repo's harness state. A stale claimed task outranks a repeated
-# unresolved failure; one line, at most once per local day per repo, adopted
-# repos only. The day marker lives under .oms/hooks/, the subtree already
-# treated as live-session state. OMS_STATE_HINTS=0 disables. Fail-open.
+# unresolved failure, which outranks an unforged lesson; one line, at most
+# once per local day per repo, adopted repos only. The day marker lives under
+# .oms/hooks/, the subtree already treated as live-session state.
+# OMS_STATE_HINTS=0 disables. Fail-open.
 state_hint() {
   local repo="$1"
-  local day marker task failures
+  local day marker task failures skills
   day="$(date +%Y-%m-%d)"
   marker="$repo/.oms/hooks/state-hint.$day"
   [ -e "$marker" ] && return 0
@@ -45,7 +46,9 @@ state_hint() {
     ! -name "state-hint.$day" -delete 2>/dev/null || true
   task="$(cd "$repo" && bash "$ROOT/scripts/agent-task.sh" status --json 2>/dev/null || true)"
   failures="$(cd "$repo" && bash "$ROOT/scripts/fail-ledger.sh" list --json 2>/dev/null || true)"
-  OMS_SH_TASK="$task" OMS_SH_FAILURES="$failures" python3 - <<'PY' 2>/dev/null || true
+  skills="$(find "$repo/.oms/skills" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
+  OMS_SH_TASK="$task" OMS_SH_FAILURES="$failures" OMS_SH_SKILLS="$skills" \
+    OMS_SH_LEDGER="$repo/.oms/failures.jsonl" python3 - <<'PY' 2>/dev/null || true
 import json, os
 
 def load(name):
@@ -70,6 +73,42 @@ if len(rows) >= 2:
         " list` before retrying anything that already failed."
         % len(rows)
     )
+    raise SystemExit(0)
+
+# A failure that repeated and was then resolved is a learned lesson. Until the
+# repo holds any project skill, offer the forge. The ledger is read raw
+# because `list` zeroes a fingerprint's count on resolve, erasing exactly the
+# repeated-then-resolved signal this hint keys on.
+if os.environ.get("OMS_SH_SKILLS") == "0":
+    state = {}
+    try:
+        with open(os.environ.get("OMS_SH_LEDGER", ""), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                fp = row.get("fingerprint")
+                if not fp:
+                    continue
+                entry = state.setdefault(fp, {"count": 0, "resolved": False})
+                if row.get("event") == "resolved" or row.get("resolved") is True:
+                    entry["resolved"] = True
+                elif row.get("event") == "fail":
+                    entry["count"] += 1
+                    entry["resolved"] = False
+    except OSError:
+        state = {}
+    lessons = sum(1 for e in state.values() if e["count"] >= 2 and e["resolved"])
+    if lessons:
+        print(
+            "[oms] %d repeated failure(s) here were resolved but no project"
+            " skill records the lesson — `oms skill-forge add --name NAME`"
+            " turns it into standing context." % lessons
+        )
 PY
 }
 

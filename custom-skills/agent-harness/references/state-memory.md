@@ -51,6 +51,33 @@ The skill router emits hints and records guarded routes. Disable it with
 `OMS_SKILL_ROUTER_OFF=1`; disable the final verification guard with
 `OMS_TURN_GUARD_OFF=1`.
 
+## Project skills
+
+A procedure you re-derived, or a failure that repeated and was then resolved,
+is a lesson worth standing context. Forge it as a project skill: stored under
+`.oms/skills/<name>/`, linked into `.agents/skills` and `.claude/skills` so
+every CLI loads it natively, and kept out of git.
+
+```bash
+oms skill-forge add --name flaky-itest --file /tmp/skill.md   # or stdin
+oms skill-forge list
+oms skill-forge show flaky-itest
+oms skill-forge remove flaky-itest
+```
+
+The forge validates before storing: frontmatter `name` matching the
+directory, a description of at least 40 characters (that is what routing
+reads), a 500-line budget, and a sensitive-content scrub. An optional
+`verify:` frontmatter command declares the evidence the skill expects;
+`agent-task close` reminds about it and never executes it.
+
+Scope: project-specific procedure only. Machine and cluster facts
+(`sinfo`/`sacctmgr` output, GPU inventory) belong to `oms snapshot
+[--cluster]` references consumed by the global `gpu-workstation`/`slurm`
+skills; a habit useful in every repository is a candidate for the global
+catalog, not a per-project copy. Keep the set small — a few strong skills
+route better than many thin ones.
+
 ## Memory write contract
 
 `shared.md` and `pins.md` are append-only. Correct a note by appending another;

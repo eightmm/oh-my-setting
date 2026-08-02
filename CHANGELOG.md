@@ -7,6 +7,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Project skills get a cold-start nudge and standing guidance, so forging
+  them is a habit every CLI learns rather than a feature only `agent-task
+  close` mentions. The skill router's daily state hint gains a third rank:
+  when the fail ledger shows a failure that repeated and was then resolved
+  but `.oms/skills/` holds no project skill yet, the hint offers
+  `oms skill-forge add` — once per local day, outranked by a stale task and
+  by unresolved failures, silenced as soon as the repo has any project skill.
+  The ledger is read raw for this because `list` zeroes a fingerprint's count
+  on resolve, which erases exactly the repeated-then-resolved signal the hint
+  keys on. The shared rules and the agent-harness skill now carry the habit
+  itself — a repeating fix or procedure becomes a project skill; machine and
+  cluster facts (`sinfo`/`sacctmgr`, GPU inventory) stay in
+  `oms snapshot [--cluster]` references — with the forge workflow documented
+  in the agent-harness state-memory reference.
 - The Claude HUD shows when each rate-limit window resets, and which session
   it belongs to. `rate_limits.*.resets_at` (epoch seconds, documented
   statusline payload) renders as a compact countdown next to the usage

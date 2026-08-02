@@ -586,7 +586,9 @@ runs, run-ledger gate, reproducibility capsule) and `dataset-safety`
 before training) this way, so ML discipline exists only in ML repos.
 `oms init` and `spec-interview` route the flow — evidence only, a few at
 most — and `agent-task close` hints at promoting a lesson once a repeated
-failure has been resolved in the repo.
+failure has been resolved in the repo. Until a repo holds its first project
+skill, the skill router's daily state hint offers the forge on the same
+signal, so the habit does not depend on using agent tasks.
 
 ## Code sources
 
