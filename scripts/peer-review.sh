@@ -17,6 +17,8 @@ MA_DEBATE_SECTIONS=$'Findings:\nRisks:\nMissing tests:\nRecommendation:\nChanged
 REPO="$PWD"
 PROMPT=""
 PROVIDERS="codex,claude,antigravity"
+PROVIDERS_EXPLICIT=0
+WRITER=""
 TIERS=""
 ARTIFACT_DIR=""
 NO_DIFF=0
@@ -65,6 +67,12 @@ Options:
                        Use e.g. --base origin/main for branch/PR review.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
                        An entry may carry a tier (codex:deep) to pin that one.
+  --writer PROVIDER    Name the provider that authored the change under
+                       review. By default that provider is dropped from the
+                       reviewer council (its family re-judging its own patch
+                       is correlated judgment, not independence); an explicit
+                       --providers list including it is honored with a
+                       warning.
   --tiers a,b          Ask every provider once per named tier (fast, balanced,
                        deep), turning the council into a panel across model
                        tiers. Answers from one provider share a model family,
@@ -222,11 +230,44 @@ fi
 validate_provider_list() {
   local normalized
   local expanded
+  local writer_norm
+  local writer_provider
+  local kept
+  local entry
+  local -a entries
   # Tiers first, then normalize: expansion produces the targets, normalization
   # canonicalizes the agy alias and rejects the same target twice.
   expanded="$(ma_expand_targets "$PROVIDERS" "$TIERS")" || exit $?
   normalized="$(ma_normalize_provider_list "$expanded")" || exit $?
   PROVIDERS="$normalized"
+  # The patch author's family re-judging its own patch is correlated
+  # judgment, not independence. Unless the caller pinned --providers, the
+  # writer sits out of the council; an explicit list is honored but named.
+  if [ -n "$WRITER" ]; then
+    writer_norm="$(ma_normalize_provider_list "$WRITER")" || exit $?
+    case "$writer_norm" in
+      *,*) fail "--writer takes exactly one provider" ;;
+    esac
+    writer_provider="${writer_norm%%:*}"
+    IFS=',' read -r -a entries <<< "$PROVIDERS"
+    if [ "$PROVIDERS_EXPLICIT" -eq 1 ]; then
+      for entry in "${entries[@]}"; do
+        if [ "${entry%%:*}" = "$writer_provider" ]; then
+          echo "warning: writer $writer_provider sits in its own review council — family independence reduced" >&2
+          break
+        fi
+      done
+    else
+      kept=""
+      for entry in "${entries[@]}"; do
+        [ "${entry%%:*}" = "$writer_provider" ] && continue
+        kept="${kept:+$kept,}$entry"
+      done
+      [ -n "$kept" ] || fail "--writer $writer_provider leaves no reviewers; pass --providers explicitly"
+      PROVIDERS="$kept"
+      echo "writer: $writer_provider (excluded from reviewer council)"
+    fi
+  fi
 }
 
 write_prompt() {
@@ -299,6 +340,12 @@ while [ "$#" -gt 0 ]; do
     --providers)
       [ "$#" -ge 2 ] || fail "--providers requires list"
       PROVIDERS="$2"
+      PROVIDERS_EXPLICIT=1
+      shift 2
+      ;;
+    --writer)
+      [ "$#" -ge 2 ] || fail "--writer requires a provider"
+      WRITER="$2"
       shift 2
       ;;
     --artifact-dir)

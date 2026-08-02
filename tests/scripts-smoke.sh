@@ -2020,6 +2020,51 @@ test_peer_review_export_only_skips_cli() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "review-export"'
 }
 
+test_peer_review_writer_sits_out_of_default_council() {
+  local project="$TMP/review-writer"
+
+  make_committed_repo "$project"
+  printf 'changed\n' >> "$project/file.txt"
+  # Default council: the writer's provider is dropped and named.
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts" \
+    --writer codex \
+    --export-only \
+    --prompt "writer exclusion" >"$project/out"
+  assert_file_contains "$project/out" "writer: codex (excluded from reviewer council)"
+  assert_file_contains "$project/out" "summary: exported 2 provider prompt(s)"
+  if ls "$project/artifacts"/codex-* >/dev/null 2>&1; then
+    fail "the writer's provider must not receive a review prompt by default"
+  fi
+
+  # An explicit provider list including the writer is honored but warned.
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts2" \
+    --writer codex \
+    --providers codex,claude \
+    --export-only \
+    --prompt "writer explicit" >"$project/out2" 2>"$project/err2"
+  assert_file_contains "$project/err2" "family independence reduced"
+  assert_file_contains "$project/out2" "summary: exported 2 provider prompt(s)"
+
+  # The agy alias canonicalizes before exclusion, same as --providers.
+  OH_MY_SETTING_REVIEW_DRY_RUN=0 "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts3" \
+    --writer agy \
+    --export-only \
+    --prompt "writer alias" >"$project/out3"
+  assert_file_contains "$project/out3" "writer: antigravity (excluded from reviewer council)"
+
+  # Unknown writer is misuse.
+  if "$ROOT/scripts/peer-review.sh" --repo "$project" --writer gemini \
+    --export-only --prompt x >/dev/null 2>&1; then
+    fail "unknown --writer must be rejected"
+  fi
+}
+
 
 write_fake_review_gate_provider() {
   local bin_dir="$1"

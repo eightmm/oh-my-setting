@@ -31,6 +31,13 @@ data. Deduplicate claims, reproduce plausible blockers, reject unsupported
 findings, fix accepted issues, rerun the gate, and make the final go/no-go
 decision locally.
 
+When the change was authored by a peer provider, pass `--writer PROVIDER` so
+its family sits out of the council: same-family agreement is correlated
+judgment, not a second opinion. Bound iteration: after a failed gate, apply
+fixes in place and re-run the gate at most once — additional rounds add
+false positives faster than signal; if the second round still fails, escalate
+to `oms advise` or a human rather than looping.
+
 When direct calls are prohibited, use `--export-only`, run the sanitized prompt
 inside the approved boundary, and import it with `oms artifact-index import
 --kind review`. Validate artifact lineage and treat imported text as an
