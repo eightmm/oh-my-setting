@@ -7,6 +7,29 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The opinion-exchange loop closes where measurement said it leaked, based on
+  a three-family council (codex, claude, antigravity answering the same
+  design question), external research, and an eight-probe code audit that
+  killed the plausible-but-wrong items first (the "peers emit diff text"
+  hypothesis died against `capture_patch`; the MCP session-model concern died
+  against the already-stateless server). What survived, shipped: peer-review
+  gains `--writer PROVIDER` and benches the patch author's family from the
+  default council (same-family re-judgment is correlated, not independent),
+  with review-gates bounding post-gate fixes to one re-run; peer-delegate
+  gains `--review-artifact` so prior review findings ride inside the worker
+  brief — findings routed as side artifacts get ignored, embedded ones get
+  addressed — and the delegation's index row records the review as its
+  source, joining review to patch; the delegate epilogue now routes unapplied
+  patches through `oms patch-land` instead of a raw `git apply` that
+  sidestepped admission; the fail-ledger validates `--kind`, records a
+  recommended `--next` action surfaced by `check`/`list`, and `resolve --how`
+  finally gives the repeated-then-resolved forge hint content to forge;
+  resuming an active packet whose Verify contract has not passed against the
+  current tree says so in the injected context; `skill-forge status` flags
+  project skills untouched past `OMS_SKILL_STALE_DAYS` (default 90); and the
+  MCP server clamps `protocolVersion` to revisions it actually implements
+  instead of echoing false conformance. Every new mechanism is advisory or
+  additive — no new hard gate ships before its effect is measured.
 - Project skills get a cold-start nudge and standing guidance, so forging
   them is a habit every CLI learns rather than a feature only `agent-task
   close` mentions. The skill router's daily state hint gains a third rank:
