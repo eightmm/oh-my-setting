@@ -32,6 +32,7 @@ test_mcp_server_protocol() {
   make_repo "$repo"
   {
     printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":6,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
     printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
     printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
     printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oms_task_state","arguments":{"repo":"%s"}}}\n' "$repo"
@@ -49,8 +50,11 @@ with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
         by_id[msg.get("id")] = msg
 
 init = by_id[1]["result"]
-assert init["protocolVersion"] == "2026-03-26", init
+# An unimplemented revision is clamped to the newest supported one, never
+# echoed back as false conformance; a supported revision is honored.
+assert init["protocolVersion"] == "2025-06-18", init
 assert init["serverInfo"]["name"] == "oh-my-setting", init
+assert by_id[6]["result"]["protocolVersion"] == "2025-03-26", by_id[6]
 tools = {t["name"] for t in by_id[2]["result"]["tools"]}
 assert {"oms_task_state", "oms_fail_ledger", "oms_handoffs",
         "oms_handoff_show", "oms_journal"} <= tools, tools

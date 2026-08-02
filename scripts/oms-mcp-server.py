@@ -20,6 +20,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FALLBACK_PROTOCOL = "2025-06-18"
+# Revisions whose semantics this server actually implements. Echoing an
+# arbitrary requested revision back would advertise conformance to behavior
+# (newer handshakes, task extensions) it has never implemented.
+SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26")
 OUTPUT_LIMIT = 60_000
 
 
@@ -172,7 +176,10 @@ def handle(message: dict):
     if method == "initialize":
         params = message.get("params") or {}
         requested = params.get("protocolVersion")
-        protocol = requested if isinstance(requested, str) and requested else FALLBACK_PROTOCOL
+        if isinstance(requested, str) and requested in SUPPORTED_PROTOCOLS:
+            protocol = requested
+        else:
+            protocol = FALLBACK_PROTOCOL
         return response(
             msg_id,
             {
