@@ -26,6 +26,26 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   cost, effort) and metrics row (context, rate windows).
 
 ### Fixed
+- Auto-update trigger state round-trips through the install receipt.
+  `oms auto-update install` wrote systemd/cron state but never the receipt,
+  so the next `oms update` reconciled components from the receipt and
+  silently uninstalled the timer it had just been asked to keep; the same
+  reinstall also downgraded an apply-mode trigger to the check default,
+  because the chosen mode was recorded nowhere. The trigger scripts now
+  record `components.auto_update`, and their check/apply mode in
+  `component_modes.auto_update`, through a surgical owner-guarded receipt
+  write; update.sh restores the recorded mode when it reinstalls the
+  trigger. Schema-1 receipts stay untouched — update.sh probes the
+  scheduler directly for those.
+- The Stop-hook turn guard parses its verdict instead of substring-matching
+  the serialized JSON, so a formatting change in the emitter can no longer
+  make the Work Journal mirror blocked answers as finished work. Malformed
+  guard output still fails open, exactly like the guard itself.
+- A failed install names its recovery path. install.sh runs under `set -e`
+  with no trap, so a crash after link.sh died with only the failing tool's
+  error and left a partial install for the reader to diagnose; an EXIT trap
+  now states the exit code and points at the idempotent rerun or
+  `doctor.sh --repair`.
 - The installer accepts uv-only machines. A host with `uv` but no `python3`
   command (fresh workstations, cluster accounts) failed hard with "a Python
   3.9+ 'python3' command is required", and no environment variable could
@@ -53,6 +73,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   config alone.
 
 ### Changed
+- The `oms` dispatch allowlist is data, and a gate keeps it honest. The
+  public/compat catalog was one 500-character case line that nothing
+  reconciled against `scripts/` — a rename could leave a ghost entry that
+  only failed at dispatch time. Both classes are now sorted
+  one-name-per-line lists, and a smoke gate asserts every allowlisted tool
+  has a script, nothing is classified twice, the lists stay sorted, and
+  every `scripts/*.sh` is deliberately public, compat, or internal.
+  `skill-doctor` joins the public catalog: the ops skill documents it, but
+  it was reachable only as a side effect of doctor and cleanup.
 - The public `oms` catalog consolidated to one front door per capability —
   less is more: an agent choosing between 58 entries picks worse than one
   choosing between 51. `oms snapshot [--cluster]` fronts the machine and
