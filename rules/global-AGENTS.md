@@ -55,8 +55,7 @@ contracts.
   the parent owns admission, verification, commit, push, and synthesis.
 - Route harness and native workers by phase: deep planning/gates, balanced
   implementation/review, fast routine analysis. Spawned workers default one
-  model tier below; judgment roles stay at session tier — no blanket
-  subagent-model override.
+  model tier below; judgment roles stay at session tier.
 - Run commands/tests directly; never spawn agents merely to execute them.
   Delegate independent judgment or disjoint writes, launched in parallel.
 - Use a task-scoped executor only for substantial writes; workers cannot widen
@@ -68,16 +67,12 @@ contracts.
 ## Harness
 
 - Use `agent-harness` for workflows; `oms list` catalogs tools; never edit
-  `.oms/` manually.
-- A fix or procedure that repeats becomes a project skill: `oms skill-forge
-  add` stores it under `.oms/skills/` and links it for every CLI. Machine and
-  cluster facts (`sinfo`/`sacctmgr`) go to `oms snapshot [--cluster]`
-  references, not project skills.
-- Peer CLIs: `claude`, `codex`, `agy` (Gemini is retired). Cross-model work
+  `.oms/` manually; forge repeating fixes into project skills
+  (`oms skill-forge`).
+- Peer CLIs: `claude`, `codex`, `agy`. Cross-model work
   uses `peer-ask`, `peer-review`, `peer-delegate`, `agent-consult`, `advise` —
   never raw CLI calls.
-- Hooks — skill routing, stop guard, fail-ledger, pre-compact handoff — are
-  install-wired; inspect live wiring, not prose.
+- Hooks are install-wired; inspect live wiring, not prose.
 
 ## Git
 

@@ -16,11 +16,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   by unresolved failures, silenced as soon as the repo has any project skill.
   The ledger is read raw for this because `list` zeroes a fingerprint's count
   on resolve, which erases exactly the repeated-then-resolved signal the hint
-  keys on. The shared rules and the agent-harness skill now carry the habit
-  itself — a repeating fix or procedure becomes a project skill; machine and
-  cluster facts (`sinfo`/`sacctmgr`, GPU inventory) stay in
-  `oms snapshot [--cluster]` references — with the forge workflow documented
-  in the agent-harness state-memory reference.
+  keys on. The shared rules gain a one-line forge habit paid for inside their
+  500-word budget — by trimming restatements (the hook enumeration the rules
+  themselves say not to trust, the no-blanket-override echo, the Gemini
+  retirement note) rather than raising the cap — and the agent-harness skill
+  carries the full workflow: a repeating fix or procedure becomes a project
+  skill; machine and cluster facts (`sinfo`/`sacctmgr`, GPU inventory) stay
+  in `oms snapshot [--cluster]` references, documented in the state-memory
+  reference.
 - The Claude HUD shows when each rate-limit window resets, and which session
   it belongs to. `rate_limits.*.resets_at` (epoch seconds, documented
   statusline payload) renders as a compact countdown next to the usage
