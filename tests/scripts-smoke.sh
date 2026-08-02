@@ -9600,6 +9600,48 @@ test_fail_ledger_records_checks_resolves() {
   fi
 }
 
+test_fail_ledger_kind_next_how_and_legacy_rows() {
+  local project="$TMP/fail-ledger-fields"
+  local SH="$ROOT/scripts/fail-ledger.sh"
+  local out fp rc=0
+
+  make_committed_repo "$project"
+  out="$(cd "$project" && "$SH" --repo "$project" record --cmd "false" --exit 1 --kind invalid 2>&1)" &&
+    fail "unknown fail-ledger kind must fail"
+  printf '%s' "$out" | grep -Fq 'cmd, hook, verify, plan-run, delegate, patch-land' ||
+    fail "kind rejection must name the allowed set: $out"
+
+  ( cd "$project" && "$SH" --repo "$project" record --cmd "bash broken.sh" --exit 1 \
+      --kind verify --next "inspect the failing assertion" ) >/dev/null 2>&1 ||
+    fail "record with --next should succeed"
+  out="$(cd "$project" && "$SH" --repo "$project" check --cmd "bash broken.sh" 2>&1)" || rc=$?
+  [ "$rc" = 3 ] || fail "check must still return 3 with --next, got $rc"
+  printf '%s' "$out" | grep -Fq 'next: inspect the failing assertion' ||
+    fail "check must surface the recommended next action: $out"
+  out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list with --next should succeed"
+  printf '%s' "$out" | grep -Fq '  next: inspect the failing assertion' ||
+    fail "list must surface --next: $out"
+  fp="$(printf '%s\n' "$out" | awk 'NR == 1 { print $1 }')"
+  ( cd "$project" && "$SH" --repo "$project" resolve --fingerprint "$fp" --how "fixed the assertion" ) \
+    >/dev/null 2>&1 || fail "resolve with --how should succeed"
+  out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list after --how should succeed"
+  printf '%s' "$out" | grep -Fq '  fixed: fixed the assertion' ||
+    fail "list must surface --how on resolved rows: $out"
+  out="$(cd "$project" && "$SH" --repo "$project" list --json)" || fail "list --json should succeed"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["failures"][0]
+assert row["next"] == "inspect the failing assertion", row
+assert row["how"] == "fixed the assertion", row
+' || fail "list --json must retain --next and --how"
+
+  printf '{"schema":1,"event":"fail","fingerprint":"legacy-row","kind":"cmd","cmd":"old command","exit":1}\n' \
+    >> "$project/.oms/failures.jsonl"
+  out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list should parse old rows"
+  printf '%s' "$out" | grep -Fq 'old command' ||
+    fail "old rows without new fields must still list: $out"
+}
+
 test_ci_status_record_and_state() {
   local project="$TMP/ci-record"
   local bin="$TMP/ci-record-bin"

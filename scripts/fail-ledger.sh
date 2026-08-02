@@ -26,16 +26,18 @@ CMD=""
 EXIT_CODE=""
 KIND="cmd"
 SUMMARY=""
+NEXT=""
 FINGERPRINT=""
+HOW=""
 UNRESOLVED_ONLY=0
 AS_JSON=0
 ACTION=""
 
 usage() {
   cat <<'EOF'
-Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT]
+Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT] [--next TEXT]
        fail-ledger.sh [--repo PATH] check  --cmd CMD
-       fail-ledger.sh [--repo PATH] resolve (--fingerprint FP | --cmd CMD)
+       fail-ledger.sh [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]
        fail-ledger.sh [--repo PATH] list   [--unresolved] [--json]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
@@ -44,14 +46,16 @@ long digit runs masked). Schema-2 failures also carry a content-free git state
 fingerprint, so an unchanged retry is blocked while a retry after edits is
 allowed with a warning. Legacy rows remain command-only and conservative.
 
-record   Append a failure for CMD (exit N). Bumps the fingerprint's count. At
+record   Append a failure for CMD (exit N), optionally with a recommended next
+         action. Bumps the fingerprint's count. At
          the second unresolved failure of the same command it names `oms advise`
          (OMS_ADVISE_AFTER_FAILURES sets the threshold, 0 disables): the rules
          ask for an outside read after repeated failures, and retrying the same
          thing is what happens when nothing says so.
 check    Exit 3 (and print prior context) if CMD's fingerprint is a known
          UNRESOLVED failure; exit 0 otherwise. Gate a retry with this.
-resolve  Mark a fingerprint fixed so it stops warning.
+resolve  Mark a fingerprint fixed so it stops warning; --how records how it
+         was fixed.
 list     One line per fingerprint (count, last exit, resolved); --unresolved
          shows only still-failing ones, --json emits a schema-1 JSON object.
 
@@ -138,7 +142,9 @@ while [ "$#" -gt 0 ]; do
     --exit) [ "$#" -ge 2 ] || fail "--exit requires an integer"; EXIT_CODE="$2"; shift 2 ;;
     --kind) [ "$#" -ge 2 ] || fail "--kind requires text"; KIND="$2"; shift 2 ;;
     --summary) [ "$#" -ge 2 ] || fail "--summary requires text"; SUMMARY="$2"; shift 2 ;;
+    --next) [ "$#" -ge 2 ] || fail "--next requires text"; NEXT="$2"; shift 2 ;;
     --fingerprint) [ "$#" -ge 2 ] || fail "--fingerprint requires a value"; FINGERPRINT="$2"; shift 2 ;;
+    --how) [ "$#" -ge 2 ] || fail "--how requires text"; HOW="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --unresolved) UNRESOLVED_ONLY=1; shift ;;
     --json) AS_JSON=1; shift ;;
@@ -150,6 +156,10 @@ done
 
 ACTION="${ACTION:-list}"
 [ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--json is only supported by list"
+case "$KIND" in
+  cmd|hook|verify|plan-run|delegate|patch-land) ;;
+  *) fail "--kind must be one of: cmd, hook, verify, plan-run, delegate, patch-land" ;;
+esac
 STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
 LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
 
@@ -171,7 +181,7 @@ case "$ACTION" in
     agent_memory_ensure_oms_ignore_for_path "$LEDGER" 2>/dev/null || true
     row_tmp="$(mktemp)" || fail "mktemp failed"
     OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
-      OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" \
+      OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" OMS_NEXT="$NEXT" \
       OMS_STATE_FP="$(state_fingerprint)" \
       python3 - > "$row_tmp" <<'PY'
 import json, os
@@ -182,6 +192,8 @@ row = {"schema": int(os.environ["OMS_SCHEMA"]), "event": "fail",
        "state_fingerprint": os.environ["OMS_STATE_FP"]}
 if os.environ.get("OMS_SUMMARY"):
     row["summary"] = os.environ["OMS_SUMMARY"]
+if os.environ.get("OMS_NEXT"):
+    row["next"] = os.environ["OMS_NEXT"]
 print(json.dumps(row, ensure_ascii=False, allow_nan=False))
 PY
     oms_with_file_lock "$LEDGER" ledger_append "$LEDGER" "$row_tmp"
@@ -222,6 +234,8 @@ if fails > 0 and last is not None:
         sys.exit(0)
     sys.stderr.write("fail-ledger: %s already failed %dx (last exit %s): %s\n" % (
         fp, fails, last.get("exit"), (last.get("summary") or last.get("cmd", ""))[:160]))
+    if last.get("next"):
+        sys.stderr.write("fail-ledger: next: %s\n" % last["next"])
     threshold = os.environ.get("OMS_ADVISE_AFTER_FAILURES", "2")
     threshold = int(threshold) if threshold.isdigit() else 2
     if threshold > 0 and fails >= threshold:
@@ -245,11 +259,14 @@ PY
     mkdir -p "$(dirname "$LEDGER")"
     row_tmp="$(mktemp)" || fail "mktemp failed"
     OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
-      OMS_FP="$FINGERPRINT" python3 - > "$row_tmp" <<'PY'
+      OMS_FP="$FINGERPRINT" OMS_HOW="$HOW" python3 - > "$row_tmp" <<'PY'
 import json, os
-print(json.dumps({"schema": int(os.environ["OMS_SCHEMA"]), "event": "resolved",
-                  "ts": os.environ["OMS_TS"], "agent": os.environ["OMS_AGENT_L"],
-                  "fingerprint": os.environ["OMS_FP"]}, ensure_ascii=False))
+row = {"schema": int(os.environ["OMS_SCHEMA"]), "event": "resolved",
+       "ts": os.environ["OMS_TS"], "agent": os.environ["OMS_AGENT_L"],
+       "fingerprint": os.environ["OMS_FP"]}
+if os.environ.get("OMS_HOW"):
+    row["how"] = os.environ["OMS_HOW"]
+print(json.dumps(row, ensure_ascii=False))
 PY
     oms_with_file_lock "$LEDGER" ledger_append "$LEDGER" "$row_tmp"
     rm -f "$row_tmp"
@@ -279,23 +296,25 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if not fp:
         continue
     if fp not in agg:
-        agg[fp] = {"count": 0, "last": None, "resolved": False}
+        agg[fp] = {"count": 0, "last": None, "resolved": False, "how": None}
         order.append(fp)
     ev = r.get("event")
     if ev == "resolved":
         agg[fp]["resolved"] = True
         agg[fp]["count"] = 0
+        agg[fp]["how"] = r.get("how")
     elif ev == "fail":
         agg[fp]["count"] += 1
         agg[fp]["last"] = r
         agg[fp]["resolved"] = False
+        agg[fp]["how"] = None
 rows = []
 for fp in order:
     d = agg[fp]
     if unresolved_only and (d["resolved"] or d["count"] == 0):
         continue
     last = d["last"] or {}
-    rows.append({
+    row = {
         "fingerprint": fp,
         "resolved": d["resolved"],
         "count": d["count"],
@@ -304,7 +323,12 @@ for fp in order:
         "kind": last.get("kind"),
         "cmd": last.get("cmd"),
         "summary": last.get("summary"),
-    })
+    }
+    if last.get("next"):
+        row["next"] = last["next"]
+    if d.get("how"):
+        row["how"] = d["how"]
+    rows.append(row)
 if as_json:
     print(json.dumps({"schema": 1, "failures": rows}, ensure_ascii=False))
 else:
@@ -314,6 +338,10 @@ else:
             r["fingerprint"], tag, r["count"],
             "-" if r["exit"] is None else r["exit"],
             (r["summary"] or r["cmd"] or "")[:80]))
+        if r.get("next"):
+            print("  next: %s" % r["next"])
+        if r["resolved"] and r.get("how"):
+            print("  fixed: %s" % r["how"])
 PY
     ;;
   *)
