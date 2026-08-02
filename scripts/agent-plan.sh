@@ -143,6 +143,18 @@ fi
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# The plan file is durable state; a credential in the goal or acceptance
+# command would persist verbatim (same contract as fail-ledger's cmd field).
+if [ -n "$GOAL$ACCEPT" ]; then
+  scan="$(mktemp)" || fail "mktemp failed"
+  printf '%s\n%s\n' "$GOAL" "$ACCEPT" > "$scan"
+  if agent_memory_file_has_secret_content "$scan"; then
+    rm -f "$scan"
+    fail "goal/acceptance text looks sensitive; pass credentials via environment, not command text"
+  fi
+  rm -f "$scan"
+fi
+
 # All mutations and queries run in one python process: load -> act -> (write|print).
 # The whole load/decide/save section runs under a file lock so concurrent
 # `next --claim` from different agents cannot both win the same task (the write

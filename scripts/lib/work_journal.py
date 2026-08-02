@@ -1937,7 +1937,7 @@ class JournalStore:
             max(0, len(ordered) - 5),
         )
 
-    def distill(self, *, dry_run: bool = False) -> Tuple[List[str], int]:
+    def distill(self, *, dry_run: bool = False) -> Tuple[List[str], int, int]:
         """Promote new recurring blockers and explicit decisions to shared memory."""
 
         events = self.active_events(self.load_events())
@@ -1950,8 +1950,13 @@ class JournalStore:
         ]
         lessons, dropped = self._distill_candidates(pending)
         if dry_run:
-            return lessons, dropped
+            return lessons, dropped, 0
+        promoted: List[str] = []
+        skipped = 0
         for lesson in lessons:
+            # The memory writer applies its own scrubbing and may refuse a
+            # lesson (a blocker text can carry anything). One refused lesson
+            # must not crash the run or block the others — skip it, say so.
             try:
                 subprocess.run(
                     [
@@ -1970,9 +1975,13 @@ class JournalStore:
                     ],
                     check=True,
                     stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-            except (OSError, subprocess.CalledProcessError) as exc:
-                raise JournalError("agent memory append failed") from exc
+            except (OSError, subprocess.CalledProcessError):
+                skipped += 1
+                continue
+            promoted.append(lesson)
+        lessons = promoted
         through = None
         if events:
             latest = max(
@@ -1986,7 +1995,7 @@ class JournalStore:
         atomic_write_json(
             self.distill_state_path, {"schema_version": 1, "through": through}
         )
-        return lessons, dropped
+        return lessons, dropped, skipped
 
     def status(self) -> Dict[str, Any]:
         self._ensure_index_database()
@@ -3107,7 +3116,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         store.sync_notion(force=args.force, today_only=args.today)
         return 0
     if args.command == "distill":
-        lessons, dropped = store.distill(dry_run=args.dry_run)
+        lessons, dropped, skipped = store.distill(dry_run=args.dry_run)
         if args.dry_run:
             for lesson in lessons:
                 print(lesson)
@@ -3116,6 +3125,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("journal distill: %s lesson(s) promoted, marker advanced" % len(lessons))
         else:
             print("journal distill: nothing to promote")
+        if skipped:
+            print(
+                "journal distill: %d lesson(s) refused by the memory writer"
+                " and skipped" % skipped
+            )
         if dropped:
             print(
                 "journal distill: %d candidate(s) beyond the per-run cap were"

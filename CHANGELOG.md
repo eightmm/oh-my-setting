@@ -45,6 +45,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   command from the spec when no plan exists. Draft specs are refused: the
   chain is PROJECT.md → propose → human approval → `goal-drive`, with the
   model's judgment always behind the approval gate.
+- A durable-writers boundary contract suite locks today's expansion of
+  persistent state down: one table-driven fixture drives the same secret and
+  home-path sentinels through every writer — fail-ledger, session-handoff,
+  shared memory, journal distill, plan receipts — asserting refuse, normalize,
+  or digest-only per each sink's contract (a cross-family retrospective named
+  this the highest-leverage next step). It immediately caught two gaps, both
+  fixed: `agent-plan init` stored secret-bearing goal/acceptance text
+  verbatim (now refused, matching the fail-ledger contract), and a
+  scrubber-refused lesson crashed `journal distill` mid-run (now skipped and
+  reported, the rest still promote).
 - `oms journal distill` graduates episodes into lessons: blockers recurring
   across two or more days and explicitly recorded decisions since the last
   distill marker become compact `journal-distill:` entries in shared
