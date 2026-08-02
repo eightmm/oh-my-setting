@@ -6682,6 +6682,17 @@ test_check_gate_hard_fails_without_shellcheck() {
     fail "check.sh missing-tool message absent: $out"
 }
 
+test_check_gate_is_hermetic_to_hook_git_env() {
+  # Git exports GIT_DIR to hooks; from a linked worktree it is absolute and
+  # redirects every fixture's git calls into the enclosing checkout — a
+  # pre-push from a worktree rewrote the checkout with fixture commits and
+  # failed autonomy-plan-run on the enclosing tree's dirtiness. The gate
+  # must drop the inherited git context before any stage runs.
+  grep -Fq 'unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE' \
+    "$ROOT/scripts/check.sh" ||
+    fail "check.sh must unset the inherited hook git env (GIT_DIR family)"
+}
+
 # link.sh ignored its arguments and ran. `link.sh --help` therefore relinked a
 # live install and moved canonical ownership to whichever checkout was asked for
 # help — the receipt names an owner, so that is a transfer, not a no-op. It

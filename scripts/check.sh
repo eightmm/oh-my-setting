@@ -14,6 +14,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Git exports GIT_DIR (and friends) to hooks. From a linked worktree that
+# path is absolute, so it overrides repository discovery for every git call
+# in every test fixture — `cd fixture && git add` then operates on THIS
+# checkout, not the fixture. A pre-push from a worktree proved the leak by
+# rewriting the checkout with fixture commits. The gate must be hermetic to
+# the invoking git context.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+  GIT_OBJECT_DIRECTORY GIT_QUARANTINE_PATH GIT_PREFIX
+
 # Keep lock/capability caches out of the invoking user's HOME. Several focused
 # suites intentionally create temporary repos but use shared lifecycle helpers;
 # one check run should be hermetic without duplicating HOME setup in every file.

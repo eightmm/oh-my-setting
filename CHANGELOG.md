@@ -43,6 +43,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   cost, effort) and metrics row (context, rate windows).
 
 ### Fixed
+- The check gate is hermetic to the invoking git context. Git exports
+  `GIT_DIR` to hooks, and from a linked worktree that path is absolute, so
+  it overrode repository discovery for every git call in every test
+  fixture: a pre-push run from a worktree rewrote the checkout with fixture
+  commits and failed `autonomy-plan-run` with "refusing to land: main tree
+  has uncommitted changes" (from the main checkout the exported path is
+  relative and resolved inside each fixture by accident, which is why the
+  leak never surfaced before). `check.sh` now unsets the `GIT_DIR` family on
+  entry, so pushing from a clean linked worktree — the documented recovery
+  when the main tree carries another session's edits — gets the same green
+  gate as pushing from the main checkout.
 - Auto-update trigger state round-trips through the install receipt.
   `oms auto-update install` wrote systemd/cron state but never the receipt,
   so the next `oms update` reconciled components from the receipt and
