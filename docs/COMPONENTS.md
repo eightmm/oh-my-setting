@@ -699,10 +699,12 @@ than being copied into OMS; cleanup removes only known legacy oms/backup
 symlinks (dry-run by default, never regular files or plugins)
 
 **Auto-update (`auto-update.sh`)** — Systemd timer or cron, installed by
-default in check-only mode (`--no-auto-update` opts out; applying updates
-stays an explicit choice via `OH_MY_SETTING_AUTO_UPDATE_MODE=apply`);
-`install`/`remove` own the user-level trigger lifecycle, and the receipt
-records both the component and its mode so updates preserve the choice
+default in apply mode: fast-forward only, dirty or diverged checkouts are
+skipped (`OH_MY_SETTING_AUTO_UPDATE_MODE=check` records without applying;
+`--no-auto-update` opts out entirely); `install`/`remove` own the user-level
+trigger lifecycle, and the receipt records both the component and its mode
+so updates preserve the choice — legacy receipts with no recorded mode stay
+check
 
 **Backup / unlink / uninstall** — Snapshot agent configs before changes; clean
 removal that restores what it replaced

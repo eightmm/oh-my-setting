@@ -150,8 +150,8 @@ grep -Fq "claude-statusline.py" "$HOME/.claude/settings.json" ||
   fail "minimal install generated a machine snapshot"
 grep -Fq '# oh-my-setting autoupdate:begin' "$TMP/autoupdate.cron" 2>/dev/null ||
   fail "default install did not register the auto-update trigger"
-grep -Fq 'auto-update.sh" check' "$TMP/autoupdate.cron" ||
-  fail "default auto-update trigger must be check-only, not apply"
+grep -Fq 'auto-update.sh" apply' "$TMP/autoupdate.cron" ||
+  fail "default auto-update trigger must be apply mode"
 [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
   fail "forced cron method still wrote a systemd unit"
 oms list > "$TMP/oms-tools.txt"

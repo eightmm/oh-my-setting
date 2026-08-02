@@ -90,6 +90,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   config alone.
 
 ### Changed
+- A fresh install now registers the auto-update trigger in **apply** mode:
+  the daily schedule fast-forwards a clean checkout instead of only recording
+  that an update exists. The safety envelope is unchanged — fast-forward
+  only, dirty or diverged checkouts are skipped, the apply lock serializes
+  runs, and the doctor validates the result. Opt-outs stay explicit:
+  `OH_MY_SETTING_AUTO_UPDATE_MODE=check` (or
+  `oms auto-update install --check-only`) records without touching, and
+  `--no-auto-update` skips the trigger entirely. Existing installs are not
+  flipped: the receipt's recorded mode wins on update, and legacy receipts
+  with no recorded mode keep the old check default.
 - The shared global rules absorb the guidance that previously lived only in
   Claude-local `~/.claude/rules/*.md` files, so all three CLIs receive it
   identically through the one linked `rules/global-AGENTS.md`: model routing

@@ -15,10 +15,11 @@ GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 CONNECT_SERVICES="${OH_MY_SETTING_CONNECT_SERVICES:-auto}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
-# The check-only update trigger is a default, not an opt-in: a harness that
+# The apply-mode update trigger is a default, not an opt-in: a harness that
 # silently goes stale stops matching the docs and skills its agents trust.
-# Check mode only records that an update exists; applying stays an explicit
-# choice (OH_MY_SETTING_AUTO_UPDATE_MODE=apply), and --no-auto-update opts out.
+# Apply fast-forwards a clean checkout on the daily schedule; recording
+# without touching stays available (OH_MY_SETTING_AUTO_UPDATE_MODE=check),
+# and --no-auto-update opts out.
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 PEER_PERMISSIONS="${OH_MY_SETTING_PEER_PERMISSIONS:-0}"
@@ -36,7 +37,7 @@ Options:
   --connect-services  Require interactive gh and Notion login plus journal linking.
   --no-connect-services
                       Skip account login and automatic journal discovery.
-  --auto-update       Install the check-only update timer (already the default).
+  --auto-update       Install the apply-mode update timer (already the default).
   --no-auto-update    Skip the auto-update trigger.
   --machine-snapshot  Generate local machine metadata.
   --slurm-snapshot    Generate local Slurm cluster metadata when available.
@@ -68,7 +69,7 @@ Environment:
   OH_MY_SETTING_AUTO_UPDATE=0      Skip the auto-update trigger (default: 1).
   OH_MY_SETTING_NOTION_DATA_SOURCE_ID=ID
                                    Configure the Work Journal Notion mirror.
-  OH_MY_SETTING_AUTO_UPDATE_MODE=apply  Auto-apply fast-forward updates (default: check-only).
+  OH_MY_SETTING_AUTO_UPDATE_MODE=check  Only record available updates (default: apply).
   OH_MY_SETTING_REQUIRE_TOOLS=0    Let doctor treat a missing CLI as optional
                                    (default: 1 whenever the tools were installed).
   OH_MY_SETTING_LINK_MODE=MODE     auto, symlink, or copy. auto uses copies on

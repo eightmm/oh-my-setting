@@ -1789,10 +1789,13 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
 
 test_installer_enables_auto_update_by_default() {
   # A harness that silently goes stale stops matching its own docs and
-  # skills. Assert the default rather than the flag: check-only trigger on,
-  # with an explicit escape hatch.
+  # skills. Assert the default rather than the flag: apply-mode trigger on,
+  # with explicit escape hatches (check-only mode, or no trigger at all).
   grep -Fq 'AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"' "$ROOT/install.sh" ||
-    fail "installer must register the check-only auto-update trigger by default"
+    fail "installer must register the auto-update trigger by default"
+  grep -Fq 'MODE="${OH_MY_SETTING_AUTO_UPDATE_MODE:-apply}"' \
+    "$ROOT/scripts/install-autoupdate.sh" ||
+    fail "auto-update trigger must default to apply mode"
   grep -Fq -- '--no-auto-update' "$ROOT/install.sh" ||
     fail "installer must keep an explicit auto-update escape hatch"
 }
@@ -6419,13 +6422,24 @@ test_autoupdate_cron_install_and_uninstall() {
   local out
 
   mkdir -p "$config_home"
-  # Default mode is check-only: installing without --apply must not schedule a
-  # self-mutating apply run.
+  # Default mode is apply: a fresh install keeps itself current on the
+  # schedule (fast-forward only; auto-update.sh skips dirty/diverged trees).
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron >"$TMP/autoupdate-default"
-  assert_file_contains "$TMP/autoupdate-default" "cron installed (check)"
+  assert_file_contains "$TMP/autoupdate-default" "cron installed (apply)"
+  grep -Fq 'auto-update.sh" apply' "$cron_file" ||
+    fail "default auto-update trigger must schedule apply"
+  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
+
+  # --check-only opts down to recording update availability without touching
+  # the checkout.
+  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron --check-only \
+    >"$TMP/autoupdate-checkonly"
+  assert_file_contains "$TMP/autoupdate-checkonly" "cron installed (check)"
   if grep -Fq 'auto-update.sh" apply' "$cron_file"; then
-    fail "default auto-update trigger must be check-only, not apply"
+    fail "--check-only trigger must not schedule apply"
   fi
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
@@ -6509,7 +6523,7 @@ PY
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["components"]["auto_update"] is True, row["components"]
-assert row["component_modes"]["auto_update"] == "check", row
+assert row["component_modes"]["auto_update"] == "apply", row
 assert row["components"]["claude_hooks"] is True, row["components"]
 assert row["version"] == "0.3.0", row
 PY
@@ -6522,15 +6536,15 @@ row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["components"]["auto_update"] is False, row["components"]
 PY
 
-  # --apply records the chosen mode so a later update reinstalls apply, not
-  # the check default; disabling keeps the mode for the next enable.
+  # --check-only records the chosen mode so a later update reinstalls check,
+  # not the apply default; disabling keeps the mode for the next enable.
   OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
-    "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >/dev/null
+    "$ROOT/scripts/install-autoupdate.sh" --method cron --check-only >/dev/null
   python3 - "$receipt" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["components"]["auto_update"] is True, row["components"]
-assert row["component_modes"]["auto_update"] == "apply", row
+assert row["component_modes"]["auto_update"] == "check", row
 PY
   OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
@@ -6538,7 +6552,7 @@ PY
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["components"]["auto_update"] is False, row["components"]
-assert row["component_modes"]["auto_update"] == "apply", row
+assert row["component_modes"]["auto_update"] == "check", row
 PY
 
   # Dry-run previews the receipt write without performing it.
