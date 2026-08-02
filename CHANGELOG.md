@@ -7,6 +7,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The continuity layer closes the autonomy loop. A session-handoff digest now
+  carries its resume contract — the active packet's Verify command — and any
+  review round that ended split rides along as open dissents the next session
+  must acknowledge (agree, override with reasons, or escalate) instead of
+  silently re-deriving consensus. `plan-run --land --auto-repair` turns a
+  failed landing into exactly one repair delegation with the failed gate's
+  own output embedded in the worker brief (the same `--review-artifact`
+  channel peer-review findings use), retries the landing once, and then
+  parks the task with a recorded next action (`oms advise`) rather than
+  looping. Reviewers under `--gate` now state a calibrated CONFIDENCE before
+  their GATE line and `verdicts` displays it for tiebreaks — advisory only:
+  a confident wrong verdict still cannot outvote the mechanical check. The
+  agent-harness autonomy reference gains "Deciding Without the User": take
+  reversible forks yourself, weigh split verdicts by confidence, one repair
+  round then a cross-family advisor, and face the user with results, not
+  menus.
 - The opinion-exchange loop closes where measurement said it leaked, based on
   a three-family council (codex, claude, antigravity answering the same
   design question), external research, and an eight-probe code audit that
