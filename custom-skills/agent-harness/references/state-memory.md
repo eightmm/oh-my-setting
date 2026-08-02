@@ -43,7 +43,10 @@ planning — that is where past sessions' decisions, failures, and next actions
 live. The first prompt of each local day also injects a bounded digest
 automatically. For maintenance, use `oms journal status`,
 `oms journal rebuild`, or `oms journal sync --force`. Set
-`OMS_WORK_JOURNAL=0` only when a project must opt out.
+`OMS_WORK_JOURNAL=0` only when a project must opt out. Periodically (or when
+the same blocker keeps reappearing) run `oms journal distill` to promote
+recurring blockers and recorded decisions into shared memory —
+`--dry-run` previews what would graduate.
 
 Before `close`, set `OMS_AGENT_TASK_CLOSE_MEMORY=0` when the outcome should not
 be promoted into durable memory.

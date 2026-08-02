@@ -347,6 +347,49 @@ recent_out="$("$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --recent 
 [ "$(printf '%s\n' "$recent_out" | wc -l | tr -d ' ')" = 3 ] ||
   fail "journal show --recent 3 did not return three event lines"
 
+# Distillation promotes a recurring unresolved blocker once, then advances its
+# cursor so a second run cannot append the same lesson.
+distill_repo="$TMP/distill-repo"
+mkdir -p "$distill_repo"
+git -C "$distill_repo" init -q
+git -C "$distill_repo" config user.name "Test"
+git -C "$distill_repo" config user.email "test@example.com"
+printf 'seed\n' > "$distill_repo/seed.txt"
+git -C "$distill_repo" add seed.txt
+git -C "$distill_repo" commit -qm "seed"
+python3 - "$ROOT/scripts/lib" "$distill_repo" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import work_journal as wj
+
+store = wj.JournalStore(sys.argv[2], timezone_name="UTC")
+for source_id, occurred_at in (
+    ("blocker-first", "2026-07-30T02:00:00Z"),
+    ("blocker-repeat", "2026-08-02T02:00:00Z"),
+):
+    store.record_event(
+        {
+            "event_type": "agent_state",
+            "occurred_at": occurred_at,
+            "source": {"type": "fixture", "id": source_id},
+            "verification_status": "not_verified",
+            "blocker": "CI red on shellcheck",
+        }
+    )
+PY
+distill_out="$("$ROOT/scripts/journal.sh" distill --repo "$distill_repo")"
+printf '%s\n' "$distill_out" | grep -Fq 'journal distill: 1 lesson(s) promoted, marker advanced' ||
+  fail "journal distill did not report the promoted blocker"
+shared_memory="$distill_repo/.oms/memory/shared.md"
+[ "$(grep -Fc 'journal-distill:' "$shared_memory")" = 1 ] ||
+  fail "journal distill did not append exactly one shared-memory lesson"
+second_distill_out="$("$ROOT/scripts/journal.sh" distill --repo "$distill_repo")"
+[ "$second_distill_out" = 'journal distill: nothing to promote' ] ||
+  fail "journal distill did not become idempotent"
+[ "$(grep -Fc 'journal-distill:' "$shared_memory")" = 1 ] ||
+  fail "journal distill appended a duplicate lesson"
+
 # The first prompt of a local day injects one bounded digest; later prompts and
 # the opt-out stay silent. The earlier skill-router call may have consumed
 # today's digest, and the marker is derived state, so reset it explicitly.

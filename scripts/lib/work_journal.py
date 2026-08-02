@@ -1270,6 +1270,7 @@ class JournalStore:
         self.quarantine_path = self.root / "quarantine" / "index.json"
         self.notion_state_path = self.sync_dir / "notion.json"
         self.digest_state_path = self.root / "digest.json"
+        self.distill_state_path = self.root / "distill.json"
         self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
         self.timezone_name, self.timezone_info = resolve_timezone(timezone_name)
         detected_id, detected_name = project_identity(self.repo)
@@ -1863,6 +1864,123 @@ class JournalStore:
 
     def rebuild(self) -> Dict[str, Any]:
         return self._render_all(self.load_events())
+
+    def _distill_marker(self) -> Optional[Tuple[str, str]]:
+        if not self.distill_state_path.is_file():
+            return None
+        try:
+            row = json.loads(self.distill_state_path.read_text(encoding="utf-8"))
+            through = row.get("through") if isinstance(row, Mapping) else None
+            if (
+                row.get("schema_version") == 1
+                and isinstance(through, Mapping)
+                and isinstance(through.get("occurred_at"), str)
+                and isinstance(through.get("event_id"), str)
+            ):
+                return str(through["occurred_at"]), str(through["event_id"])
+        except (OSError, UnicodeError, ValueError, TypeError):
+            pass
+        return None
+
+    @staticmethod
+    def _distill_normalized_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip().casefold()
+
+    def _distill_candidates(
+        self, events: Sequence[Mapping[str, Any]]
+    ) -> List[str]:
+        blockers: Dict[str, List[Mapping[str, Any]]] = {}
+        candidates: List[Tuple[Tuple[str, str], str]] = []
+        for event in events:
+            decision = event.get("decision")
+            if isinstance(decision, str) and decision:
+                text = sanitize_text(decision, 600)
+                candidates.append(
+                    (
+                        (str(event["occurred_at"]), str(event["event_id"])),
+                        "journal-distill: decision %s: %s"
+                        % (event["local_date"], text),
+                    )
+                )
+            blocker = event.get("blocker")
+            if isinstance(blocker, str) and blocker:
+                key = self._distill_normalized_text(blocker)
+                if key:
+                    blockers.setdefault(key, []).append(event)
+        for group in blockers.values():
+            days = sorted({str(event["local_date"]) for event in group})
+            if len(days) < 2:
+                continue
+            latest = max(
+                (str(event["occurred_at"]), str(event["event_id"]))
+                for event in group
+            )
+            text = sanitize_text(str(group[0]["blocker"]), 600)
+            candidates.append(
+                (
+                    latest,
+                    "journal-distill: blocker seen %dd %s..%s: %s"
+                    % (len(days), days[0], days[-1], text),
+                )
+            )
+        ordered = sorted(candidates)
+        # No silent caps: the marker advances past everything below, so a
+        # candidate beyond the cap is dropped for good and must be said aloud.
+        return (
+            [lesson for _position, lesson in ordered[:5]],
+            max(0, len(ordered) - 5),
+        )
+
+    def distill(self, *, dry_run: bool = False) -> Tuple[List[str], int]:
+        """Promote new recurring blockers and explicit decisions to shared memory."""
+
+        events = self.active_events(self.load_events())
+        marker = self._distill_marker()
+        pending = [
+            event
+            for event in events
+            if marker is None
+            or (str(event["occurred_at"]), str(event["event_id"])) > marker
+        ]
+        lessons, dropped = self._distill_candidates(pending)
+        if dry_run:
+            return lessons, dropped
+        for lesson in lessons:
+            try:
+                subprocess.run(
+                    [
+                        "bash",
+                        str(
+                            pathlib.Path(__file__).resolve().parents[1]
+                            / "agent-memory.sh"
+                        ),
+                        "--repo",
+                        str(self.repo),
+                        "append",
+                        "--agent",
+                        "journal",
+                        "--text",
+                        lesson,
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+            except (OSError, subprocess.CalledProcessError) as exc:
+                raise JournalError("agent memory append failed") from exc
+        through = None
+        if events:
+            latest = max(
+                events, key=lambda event: (event["occurred_at"], event["event_id"])
+            )
+            through = {
+                "occurred_at": latest["occurred_at"],
+                "event_id": latest["event_id"],
+            }
+        self._ensure_layout()
+        atomic_write_json(
+            self.distill_state_path, {"schema_version": 1, "through": through}
+        )
+        return lessons, dropped
 
     def status(self) -> Dict[str, Any]:
         self._ensure_index_database()
@@ -2845,6 +2963,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--repo", default=".")
     sync.add_argument("--force", action="store_true")
     sync.add_argument("--today", action="store_true")
+    distill = sub.add_parser("distill")
+    distill.add_argument("--repo", default=".")
+    distill.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -2978,6 +3099,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     if args.command == "sync":
         store.sync_notion(force=args.force, today_only=args.today)
+        return 0
+    if args.command == "distill":
+        lessons, dropped = store.distill(dry_run=args.dry_run)
+        if args.dry_run:
+            for lesson in lessons:
+                print(lesson)
+            print("journal distill: %s lesson(s) would be promoted" % len(lessons))
+        elif lessons:
+            print("journal distill: %s lesson(s) promoted, marker advanced" % len(lessons))
+        else:
+            print("journal distill: nothing to promote")
+        if dropped:
+            print(
+                "journal distill: %d candidate(s) beyond the per-run cap were"
+                " not promoted" % dropped
+            )
         return 0
     if args.command == "show":
         return _run_show(store, args)

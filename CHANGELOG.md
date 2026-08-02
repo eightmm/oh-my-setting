@@ -45,6 +45,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   command from the spec when no plan exists. Draft specs are refused: the
   chain is PROJECT.md → propose → human approval → `goal-drive`, with the
   model's judgment always behind the approval gate.
+- `oms journal distill` graduates episodes into lessons: blockers recurring
+  across two or more days and explicitly recorded decisions since the last
+  distill marker become compact `journal-distill:` entries in shared
+  agent-memory (through the memory writer's own scrubbing), capped per run
+  with any overflow said out loud, idempotent via an atomically-written
+  cursor, `--dry-run` to preview. The episodic→semantic promotion path the
+  audit found missing — the journal was write-mostly before this.
 - Memory recall learns from its own use. Each recalled entry gains an access
   receipt (`memory_access`, keyed by the content-derived event id so a
   markdown re-derive cannot erase it); ranking nudges recently-recalled
