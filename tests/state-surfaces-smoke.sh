@@ -369,6 +369,39 @@ EOF
   [ ! -d "$repo/.oms/skills/build-quirks" ] || fail "remove left the skill"
 }
 
+test_skill_forge_status_flags_stale_skills() {
+  local repo="$TMP/forge-stale"
+  local skill="$repo/.oms/skills/stale-lesson/SKILL.md"
+  local out
+
+  make_repo "$repo"
+  cat <<'EOF' | bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name stale-lesson >/dev/null
+---
+name: stale-lesson
+description: A durable project lesson that is long enough to meet the skill routing-quality validation requirement.
+---
+
+# Stale Lesson
+
+Review this lesson periodically.
+EOF
+  touch -t 202001010000 "$skill"
+  out="$(OMS_SKILL_STALE_DAYS=1 bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status)"
+  printf '%s' "$out" | grep -Fq "1 project skill(s) untouched >1d" ||
+    fail "stale skill warning should name the count: $out"
+
+  out="$(OMS_SKILL_STALE_DAYS=0 bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status)"
+  if printf '%s' "$out" | grep -Fq "untouched >"; then
+    fail "OMS_SKILL_STALE_DAYS=0 must silence stale warnings: $out"
+  fi
+
+  touch "$skill"
+  out="$(OMS_SKILL_STALE_DAYS=1 bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status)"
+  if printf '%s' "$out" | grep -Fq "untouched >"; then
+    fail "fresh skills must not produce stale warnings: $out"
+  fi
+}
+
 test_skill_forge_rejects_thin_and_sensitive() {
   local repo="$TMP/forge-reject"
   local protected="$repo/.oms/protected"
@@ -536,6 +569,7 @@ test_router_state_hint_offers_forge_for_resolved_repeats
 test_conditional_skills_link_only_where_required_commands_exist
 test_router_skips_conditional_skill_without_command
 test_skill_forge_stores_links_and_hides
+test_skill_forge_status_flags_stale_skills
 test_skill_forge_rejects_thin_and_sensitive
 test_task_close_hints_at_forging_learned_lessons
 test_ml_template_installs_project_skills

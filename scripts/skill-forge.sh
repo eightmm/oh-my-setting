@@ -29,7 +29,7 @@ Commands:
   list [--json]               List project skills with validity.
   show NAME                   Print a project skill.
   remove NAME                 Remove a skill and its links.
-  status                      One-line health summary (used by the doctor).
+  status                      Health summary; flags stale project skills.
   contracts                   List declared verify contracts, one
                               "name<TAB>command" row per skill that has one.
 
@@ -337,8 +337,24 @@ cmd_remove() {
   echo "skill-forge: removed $name"
 }
 
+skill_is_stale() {
+  local file="$1" days="$2"
+  OMS_SF_FILE="$file" OMS_SF_STALE_DAYS="$days" python3 - <<'PY'
+import os
+import time
+
+path = os.environ["OMS_SF_FILE"]
+days = int(os.environ["OMS_SF_STALE_DAYS"])
+raise SystemExit(0 if time.time() - os.path.getmtime(path) > days * 86400 else 1)
+PY
+}
+
 cmd_status() {
-  local total=0 invalid=0 contracts=0 skill
+  local total=0 invalid=0 contracts=0 stale=0 skill stale_days
+  stale_days="${OMS_SKILL_STALE_DAYS:-90}"
+  case "$stale_days" in
+    *[!0-9]*|'') fail "OMS_SKILL_STALE_DAYS must be a non-negative integer" ;;
+  esac
   if [ ! -d "$SKILLS_DIR" ]; then
     echo "skill-forge: no project skills"
     return 0
@@ -346,8 +362,14 @@ cmd_status() {
   for skill in "$SKILLS_DIR"/*; do
     [ -d "$skill" ] || continue
     total=$((total + 1))
-    validate_skill_dir "$skill" >/dev/null 2>&1 &&
-      scrub_skill_dir "$skill" >/dev/null 2>&1 || invalid=$((invalid + 1))
+    if validate_skill_dir "$skill" >/dev/null 2>&1 &&
+       scrub_skill_dir "$skill" >/dev/null 2>&1; then
+      if [ "$stale_days" -gt 0 ] && skill_is_stale "$skill/SKILL.md" "$stale_days"; then
+        stale=$((stale + 1))
+      fi
+    else
+      invalid=$((invalid + 1))
+    fi
     [ -z "$(skill_verify_contract "$skill")" ] || contracts=$((contracts + 1))
   done
   if [ "$invalid" -gt 0 ]; then
@@ -358,6 +380,9 @@ cmd_status() {
     echo "skill-forge: $total project skill(s) valid, $contracts with a verify contract"
   else
     echo "skill-forge: $total project skill(s) valid"
+  fi
+  if [ "$stale" -gt 0 ]; then
+    echo "skill-forge: $stale project skill(s) untouched >${stale_days}d — review with oms skill-forge list"
   fi
 }
 
