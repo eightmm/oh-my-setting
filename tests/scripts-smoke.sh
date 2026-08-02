@@ -7124,6 +7124,40 @@ test_session_handoff_claude_digest() {
   fi
 }
 
+test_session_handoff_carries_resume_contract_and_dissents() {
+  local home="$TMP/sh-resume-home"
+  local cwd="$TMP/sh-resume-proj"
+  local run="20260611T000000Z-77"
+  local proj sess out
+
+  # A repo with an active packet carrying a Verify contract and a review
+  # round that ended split: both must ride the digest.
+  mkdir -p "$cwd/.oms/task" "$cwd/.oms/artifacts/review"
+  printf '# Task\n\n## Verify\n\nbash scripts/check.sh --focused-only\n\n## Goal\n\nship\n' \
+    > "$cwd/.oms/task/current.md"
+  printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$cwd/.oms/artifacts/review/codex-x-$run.md"
+  printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
+    > "$cwd/.oms/artifacts/review/claude-x-$run.md"
+
+  proj="$home/projects/$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9.' '-')"
+  sess="$proj/bbbbbbbb-1111-2222-3333-444444444444.jsonl"
+  mkdir -p "$proj"
+  {
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"continue the feature"}}'
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"paused at review"}]}}'
+  } > "$sess"
+
+  out="$(OMS_CLAUDE_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd" --out "$home/digest.md" 2>/dev/null)"
+  [ -f "$out" ] || fail "resume-contract digest not written"
+  assert_file_contains "$out" "## Resume contract"
+  assert_file_contains "$out" "bash scripts/check.sh --focused-only"
+  assert_file_contains "$out" "## Open dissents"
+  assert_file_contains "$out" "codex: pass"
+  assert_file_contains "$out" "claude: fail"
+}
+
 test_session_handoff_codex_digest() {
   local home="$TMP/sh-codex-home"
   local cwd="/proj/codex-app"

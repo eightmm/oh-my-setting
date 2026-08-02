@@ -377,6 +377,48 @@ render_digest() {
   printf '## Last assistant summary\n\n%s\n' "$last"
 }
 
+# A digest is what the next session resumes from, and a checkpoint is state
+# PLUS its verifier: the active packet's Verify command rides along so the
+# resumed session inherits a machine-checkable gate, and a review round that
+# ended split rides along as open dissents the next session must acknowledge
+# (agree, override with reasons, or escalate) instead of silently re-deriving
+# consensus. Mechanical and fail-open, like the rest of capture.
+append_resume_contract() {
+  local repo="$1"
+  local out="$2"
+  local verify_cmd=""
+  local verdicts=""
+  local task_file="$repo/.oms/task/current.md"
+
+  if [ -s "$task_file" ]; then
+    verify_cmd="$(awk '
+      $0 == "## Verify" { inside = 1; next }
+      inside && /^## / { exit }
+      inside && NF { print }
+    ' "$task_file" 2>/dev/null || true)"
+  fi
+  if [ -d "$repo/.oms/artifacts/review" ]; then
+    verdicts="$("$ROOT/scripts/peer-review.sh" verdicts \
+      "$repo/.oms/artifacts/review" 2>/dev/null || true)"
+  fi
+  {
+    if [ -n "$verify_cmd" ]; then
+      printf '\n## Resume contract\n\n'
+      printf 'Run before building on this handoff:\n\n'
+      printf '```bash\n%s\n```\n' "$verify_cmd"
+    fi
+    if [ -n "$verdicts" ] &&
+      printf '%s' "$verdicts" | grep -q ': pass' &&
+      printf '%s' "$verdicts" | grep -q ': fail'; then
+      printf '\n## Open dissents\n\n'
+      printf 'The last review round ended split. Acknowledge each verdict —\n'
+      printf 'agree, override with reasons, or escalate — before landing\n'
+      printf 'related work; do not silently re-derive consensus.\n\n'
+      printf '%s\n' "$verdicts"
+    fi
+  } >> "$out"
+}
+
 cmd_capture() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -455,6 +497,7 @@ cmd_capture() {
 
   printf '%s\n' "$extract" |
     render_digest "$AGENT" "$source" "$session_id" "$CWD" "$NOTE" "$ts" > "$out"
+  append_resume_contract "$CWD" "$out" || true
   handoff_hash="$(
     printf '%s\n%s\n' "$extract" "$NOTE" |
       oms_sha256_stream 2>/dev/null || printf 'unhashed'
