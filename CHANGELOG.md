@@ -21,6 +21,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `oms gc` sweeps aged handoff digests, and gate/delegate auto-verify probes
   `check.sh` for a `fast` mode before invoking it instead of assuming the
   template contract.
+- Goals get an executable definition of done and a bounded driver. A plan
+  now carries a goal-level acceptance command (`agent-plan init --accept`);
+  `agent-plan accept` runs it and appends a receipt row (tree SHA, command
+  digest, verdict) to `.oms/plan/progress.jsonl`. `oms goal-drive` loops
+  acceptance → one `plan-run --next --land` → an exact commit of the admitted
+  patch's paths, over an existing human-approved plan, until acceptance
+  passes or a hard cycle cap parks it — with stuck detection (same tree, same
+  failing acceptance twice), refusal of dirty trees and mid-run acceptance
+  edits, and a recorded reason plus fail-ledger trail on every park. Shipped
+  deliberately narrow after a cross-family design review: no plan generation,
+  no replanning, no automatic lease reclaim — decomposition and recovery stay
+  with the parent agent.
 - The continuity layer closes the autonomy loop. A session-handoff digest now
   carries its resume contract — the active packet's Verify command — and any
   review round that ended split rides along as open dissents the next session

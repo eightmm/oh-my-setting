@@ -40,6 +40,8 @@ prompt="$(cat)"
 case "${OMS_TASK_ID:-}:$prompt" in
   t2:*) printf 'two\n' > delegated2.txt ;;
   executor:*) printf 'executor\n' > executor.txt ;;
+  g1:*) printf 'goal-one\n' > goal1.txt ;;
+  g2:*) printf 'goal-two\n' > goal2.txt ;;
   *) printf 'one\n' > delegated.txt ;;
 esac
 echo worker-ok
@@ -190,5 +192,72 @@ bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list |
   grep -Fq "next: get an outside read" ||
   fail "park should record a recommended next action"
 git -C "$repo" checkout -q README.md
+
+# --- goal-drive: acceptance-first bounded loop over an approved plan ---------
+# Two dependent tasks whose landings the driver must commit itself — the g1
+# commit is exactly what unblocks the g2 landing on a clean tree — then the
+# acceptance command passes and the run reports done. Verify goes through
+# check.sh arms (committed first) so the admission gate's verifier-integrity
+# rule does not see the created file inside its own verify command.
+cat > "$repo/scripts/check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  t1) grep -Fxq one delegated.txt ;;
+  t2) grep -Fxq two delegated2.txt ;;
+  executor) grep -Fxq executor executor.txt ;;
+  g1) grep -Fxq goal-one goal1.txt ;;
+  g2) grep -Fxq goal-two goal2.txt ;;
+  *) exit 2 ;;
+esac
+EOF
+git -C "$repo" add scripts/check.sh
+git -C "$repo" commit -qm 'test: goal arms join the check contract'
+"$PLAN" --repo "$repo" init --goal "both goal files exist" \
+  --accept 'bash scripts/check.sh g1 && bash scripts/check.sh g2' >/dev/null
+"$PLAN" --repo "$repo" add --id g1 --title "feat: goal one lands" \
+  --allowed goal1.txt --verify 'bash scripts/check.sh g1' >/dev/null
+"$PLAN" --repo "$repo" add --id g2 --title "feat: goal two lands" --depends g1 \
+  --allowed goal2.txt --verify 'bash scripts/check.sh g2' >/dev/null
+head0="$(git -C "$repo" rev-parse HEAD)"
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$repo" --to codex --max-cycles 3 >"$TMP/gd.out" 2>&1 ||
+  fail "goal-drive should reach acceptance: $(tail -8 "$TMP/gd.out")"
+grep -Fq 'goal-drive: done' "$TMP/gd.out" || fail "done line missing"
+grep -Fq 'acceptance passed' "$TMP/gd.out" || fail "acceptance pass missing"
+[ "$(git -C "$repo" rev-list --count "$head0"..HEAD)" = 2 ] ||
+  fail "driver should have committed exactly the two landed tasks"
+git -C "$repo" log --format=%s -2 | grep -Fq 'feat: goal two lands' ||
+  fail "task title should be the commit subject"
+[ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ] ||
+  fail "driver left tracked changes uncommitted"
+"$PLAN" --repo "$repo" show --id g2 | grep -Fq '"state": "done"' || fail "g2 not done"
+grep -Fq '"kind": "acceptance"' "$repo/.oms/plan/progress.jsonl" ||
+  fail "acceptance rows missing from progress.jsonl"
+grep -Fq '"reason": "acceptance-pass"' "$repo/.oms/plan/progress.jsonl" ||
+  fail "terminal done row missing from progress.jsonl"
+
+# A dirty tree refuses up front: driving over someone's live edits is the
+# split-brain incident this driver exists to prevent.
+printf 'dirt\n' >> "$repo/README.md"
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$repo" --to codex >"$TMP/gd-dirty.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "dirty tree should refuse with exit 2, got $rc"
+grep -Fq 'tree is dirty' "$TMP/gd-dirty.out" || fail "dirty refusal reason missing"
+git -C "$repo" checkout -q README.md
+
+# Acceptance failing with no actionable task parks with a recorded reason —
+# v1 never invents new tasks on its own.
+"$PLAN" --repo "$repo" init --goal "unreachable" --accept 'grep -Fxq nope absent.txt' >/dev/null
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$repo" --to codex >"$TMP/gd-park.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "exhausted plan should park with exit 3, got $rc"
+grep -Fq 'reason=tasks-exhausted' "$TMP/gd-park.out" || fail "park reason missing"
+grep -Fq '"reason": "tasks-exhausted"' "$repo/.oms/plan/progress.jsonl" ||
+  fail "terminal park row missing"
+bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list | grep -Fq 'parked: tasks-exhausted' ||
+  fail "park should leave a fail-ledger trail"
 
 echo "autonomy-plan-run-smoke: ok"

@@ -52,6 +52,31 @@ contract. It never commits, pushes, publishes releases, adds dependencies, gener
 tasks, or recursively delegates. Use `--repair N` for bounded worker correction;
 an unchanged known failure is refused unless `--retry-known` is explicit.
 
-Do not use a multi-task `while ready` loop. The parent re-orients between tasks
-so user edits, changed authority, blocked dependencies, and new evidence remain
-visible.
+Do not hand-roll a multi-task `while ready` loop. The parent re-orients
+between tasks so user edits, changed authority, blocked dependencies, and new
+evidence remain visible. The one sanctioned mechanization of that
+re-orientation is `oms goal-drive`, whose between-cycle checks — acceptance
+first, stuck detection, park-with-reason — are the re-orientation, bounded by
+a hard cycle cap.
+
+## Goal Drive
+
+For a HUMAN-APPROVED plan whose definition of done is executable:
+
+```bash
+oms agent-plan --repo . init --goal "..." --accept "bash scripts/check.sh"
+oms agent-plan --repo . add --id t1 --title "feat: ..." --allowed src/ --verify "..."
+oms goal-drive --repo . --to codex --max-cycles 3
+```
+
+Each cycle: acceptance command (pass = done) → one `plan-run --next --land` →
+commit of exactly the admitted patch's paths, task title as subject. It
+refuses a dirty tree, parks on task exhaustion, an acceptance command edited
+mid-run, tracked changes beyond the admitted patch, or an unchanged tree with
+the same failing acceptance twice — every terminal leaves a reason row in
+`.oms/plan/progress.jsonl` and a fail-ledger entry when parked. The driver
+never generates or re-plans tasks, never pushes, and never reclaims leases:
+task decomposition and recovery stay with the parent. Acceptance pass means
+"the recorded command passed on this tree", nothing more — keep the command
+honest and out of worker reach, and spot-check the goal yourself before
+shipping.

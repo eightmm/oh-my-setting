@@ -226,6 +226,19 @@ boundary. Empty scope/verification and unchanged resolved route/task/executor
 failures fail closed; it never loops, commits, pushes, publishes releases, or
 recursively delegates
 
+**Goal driver (`goal-drive.sh`, `oms goal-drive`)** — Bounded loop over an
+existing human-approved plan whose definition of done is executable: the plan
+stores a goal-level acceptance command (`agent-plan init --accept CMD`;
+`agent-plan accept` runs it and appends a receipt to
+`.oms/plan/progress.jsonl`). Each cycle runs acceptance first (pass = done),
+executes one `plan-run --next --land`, then commits exactly the admitted
+patch's paths with the task title as subject — the commit is what unblocks
+the next landing. Hard `--max-cycles` cap, stuck detection (same tree + same
+failing acceptance twice), refusal of dirty trees and of an acceptance
+command edited mid-run; every terminal writes a reason row and parks leave a
+fail-ledger trail. Deliberately narrow: no task generation, no replanning, no
+lease reclaim, no push — decomposition and recovery stay with the parent
+
 **Advise (`advise.sh`, `oms advise`)** — Cross-CLI advisor pass before
 irreversible/high-risk decisions, after repeated failures, or at a
 release go/no-go; routine completion does not require it. Composes an

@@ -32,6 +32,7 @@ DEPENDS=""
 ALLOWED=""
 FORBIDDEN=""
 VERIFY=""
+ACCEPT=""
 ROLE=""
 STATE_FILTER=""
 CLAIM=0
@@ -45,7 +46,9 @@ usage() {
 Usage: agent-plan.sh [--repo PATH] [--file PATH] <command> [options]
 
 Commands:
-  init   --goal TEXT                 Create/replace the plan with a goal.
+  init   --goal TEXT [--accept CMD]  Create/replace the plan with a goal and an
+                                     optional goal-level acceptance command —
+                                     the executable definition of done.
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
          [--verify CMD] [--role NAME]
@@ -76,6 +79,10 @@ Commands:
   list   [--state STATE]             List tasks (optionally by state).
   ready                              Print ids actionable now (deps done).
   status                             Human-readable summary.
+  accept                             Run the stored acceptance command from the
+                                     repo root (outside the plan lock), append
+                                     one row to .oms/plan/progress.jsonl, and
+                                     exit 0 on pass / 3 on fail.
   brief  --id ID                     Print a paste-able work brief for a task.
   next   [--provider NAME] [--claim] [--ttl TEXT]
                                      Print the brief for the next actionable
@@ -112,6 +119,7 @@ while [ "$#" -gt 0 ]; do
     --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
+    --accept) [ "$#" -ge 2 ] || fail "--accept requires command"; ACCEPT="$2"; shift 2 ;;
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
     --lease-id) [ "$#" -ge 2 ] || fail "--lease-id requires value"; LEASE_ID="$2"; shift 2 ;;
     --claim) CLAIM=1; shift ;;
@@ -119,7 +127,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|add|claim|start|touch|review|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief)
+    init|add|claim|start|touch|review|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief|accept)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -143,7 +151,7 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
-  OMS_VERIFY="$VERIFY" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
+  OMS_VERIFY="$VERIFY" OMS_ACCEPT="$ACCEPT" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
   OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW" \
   OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON"
 
@@ -151,7 +159,7 @@ plan_run() {
 python3 <<'PY'
 import json, os, re, secrets, sys, tempfile
 
-SCHEMA = 2
+SCHEMA = 3
 path = os.environ["OMS_PLAN_FILE"]
 act = os.environ["OMS_ACTION"]
 ts = os.environ["OMS_TS"]
@@ -165,10 +173,11 @@ def die(msg):
 
 def load():
     if not os.path.exists(path):
-        return {"schema": SCHEMA, "goal": "", "tasks": {}}
+        return {"schema": SCHEMA, "goal": "", "accept": "", "tasks": {}}
     with open(path, encoding="utf-8") as fh:
         d = json.load(fh)
     d.setdefault("tasks", {})
+    d.setdefault("accept", "")   # schema 2 plans predate the acceptance contract
     d["schema"] = SCHEMA
     for task in d["tasks"].values():
         task.setdefault("lease_epoch", 0)
@@ -224,7 +233,7 @@ d = load()
 tasks = d["tasks"]
 
 if act == "init":
-    d = {"schema": SCHEMA, "goal": env("OMS_GOAL"), "tasks": {}}
+    d = {"schema": SCHEMA, "goal": env("OMS_GOAL"), "accept": env("OMS_ACCEPT"), "tasks": {}}
     save(d); print("plan: initialized (%s)" % path); sys.exit(0)
 
 if act == "add":
@@ -425,6 +434,23 @@ if act == "list":
 
 if act == "status":
     if d.get("goal"): print("goal: %s" % d["goal"])
+    if d.get("accept"):
+        print("accept: %s" % d["accept"])
+        progress_path = os.path.join(os.path.dirname(path), "progress.jsonl")
+        last = None
+        try:
+            with open(progress_path, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        last = json.loads(line)
+                    except Exception:
+                        continue
+        except OSError:
+            pass
+        if last:
+            print("acceptance: %s at %s (base %s)" % (
+                last.get("status", "?"), last.get("ts", "?"),
+                str(last.get("base_sha", "?"))[:12]))
     by = {}
     for t in tasks.values(): by[t["state"]] = by.get(t["state"], 0) + 1
     order = ["ready", "claimed", "running", "review", "landing", "blocked", "done"]
@@ -447,6 +473,68 @@ PY
 # Keep the plan dir out of git like the rest of .oms state.
 mkdir -p "$(dirname "$PLAN_FILE")"
 agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
+
+# `accept` runs OUTSIDE the plan lock: the acceptance command is an arbitrary
+# project check (often the full gate) and must not hold the task-graph lock
+# for its whole runtime. It only reads the stored command, runs it from the
+# repo root, and appends one receipt row — the executable answer to "is the
+# goal actually met", which no per-task verify can give.
+if [ "$ACTION" = "accept" ]; then
+  [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; run: agent-plan init --goal ... --accept CMD"
+  accept_cmd="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+print(d.get("accept", "") or "")
+' "$PLAN_FILE")"
+  [ -n "$accept_cmd" ] ||
+    fail "plan has no acceptance command; set one with: agent-plan init --goal ... --accept CMD"
+  progress="$(dirname "$PLAN_FILE")/progress.jsonl"
+  out_tmp="$(mktemp)" || fail "mktemp failed"
+  start_s="$(date +%s)"
+  set +e
+  ( cd "$REPO" && bash -c "$accept_cmd" ) > "$out_tmp" 2>&1
+  accept_exit=$?
+  set -e
+  duration=$(( $(date +%s) - start_s ))
+  base_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unborn)"
+  out_digest="$(oms_sha256_stream < "$out_tmp" 2>/dev/null || echo unhashed)"
+  verdict=pass
+  [ "$accept_exit" -eq 0 ] || verdict=fail
+  accept_digest="$(printf '%s' "$accept_cmd" | oms_sha256_stream 2>/dev/null || echo unhashed)"
+  # run_id/cycle are set by goal-drive so one run's rows correlate; manual
+  # invocations leave them empty. The row is the goal-run protocol record:
+  # enough to answer which command, on which tree, in which cycle, and why.
+  OMS_PA_TS="$ts" OMS_PA_SHA="$base_sha" OMS_PA_VERDICT="$verdict" \
+    OMS_PA_EXIT="$accept_exit" OMS_PA_DIGEST="$out_digest" OMS_PA_DUR="$duration" \
+    OMS_PA_ACCEPT="$accept_digest" OMS_PA_RUN="${OMS_GOAL_RUN_ID:-}" \
+    OMS_PA_CYCLE="${OMS_GOAL_CYCLE:-}" \
+    python3 -c '
+import json, os
+row = {
+    "schema": 1, "kind": "acceptance",
+    "ts": os.environ["OMS_PA_TS"], "base_sha": os.environ["OMS_PA_SHA"],
+    "status": os.environ["OMS_PA_VERDICT"], "exit": int(os.environ["OMS_PA_EXIT"]),
+    "accept_sha256": os.environ["OMS_PA_ACCEPT"][:16],
+    "output_sha256": os.environ["OMS_PA_DIGEST"][:16],
+    "duration_s": int(os.environ["OMS_PA_DUR"]),
+}
+if os.environ.get("OMS_PA_RUN"): row["run_id"] = os.environ["OMS_PA_RUN"]
+if os.environ.get("OMS_PA_CYCLE"): row["cycle"] = int(os.environ["OMS_PA_CYCLE"])
+print(json.dumps(row, ensure_ascii=False))
+' >> "$progress"
+  echo "plan-accept: $verdict (exit $accept_exit, ${duration}s) base=$base_sha"
+  if [ "$verdict" = "fail" ]; then
+    echo "--- acceptance output (last 20 lines) ---" >&2
+    tail -n 20 "$out_tmp" >&2
+    rm -f "$out_tmp"
+    exit 3
+  fi
+  rm -f "$out_tmp"
+  exit 0
+fi
 
 # Serialize the read-decide-write section against other agents.
 oms_with_file_lock "$PLAN_FILE" plan_run
