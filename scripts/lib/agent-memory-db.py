@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
 import re
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -412,6 +414,16 @@ def ensure_schema(db: sqlite3.Connection) -> None:
           on memory_entries (task_id);
         create index if not exists memory_entries_git_sha
           on memory_entries (git_sha);
+        -- Access stats live OUTSIDE memory_entries: entry rows are re-derived
+        -- from Markdown (and dropped wholesale on schema migration), while
+        -- what was recalled and when must survive that. Keyed by the stable
+        -- content-derived event_id. An explicit `rebuild` starts a fresh file
+        -- and forfeits these stats; recall quality degrades gracefully.
+        create table if not exists memory_access (
+          event_id text primary key,
+          last_accessed text not null,
+          hit_count integer not null default 0
+        );
         """
     )
     try:
@@ -922,12 +934,89 @@ def fts_query(text: str) -> str:
     return " OR ".join(tokens)
 
 
+ACCESS_BOOST_WINDOW_S = 7 * 86400
+ACCESS_DORMANT_AGE_S = 45 * 86400
+
+
+def parse_ts(text: object) -> Optional[float]:
+    try:
+        return datetime.datetime.strptime(
+            str(text), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def apply_access_decay(
+    db: sqlite3.Connection,
+    ranked: list[tuple[object, str, tuple[object, ...]]],
+    limit: int,
+) -> list[tuple[object, ...]]:
+    """Re-rank match-ordered candidates by access history (mem0-style: the
+    record never dies, its reach does). Recently recalled entries move up one
+    quartile, never-recalled old entries move down one; the match order stays
+    primary because bonuses are rank-ordinal, immune to bm25's sign. The
+    entries handed back are touched in memory_access — best effort, a
+    read-only database must not fail recall."""
+    now = time.time()
+    try:
+        access = {
+            row[0]: (row[1], row[2])
+            for row in db.execute(
+                "select event_id, last_accessed, hit_count from memory_access"
+            )
+        }
+    except sqlite3.OperationalError:
+        access = {}
+    event_index = ENTRY_FIELDS.index("event_id")
+    span = len(ranked)
+    nudge = max(1.0, span / 4.0)
+    adjusted = []
+    for position, (_, occurred_at, entry) in enumerate(ranked):
+        score = float(span - position)
+        stats = access.get(entry[event_index])
+        last_ts = parse_ts(stats[0]) if stats else None
+        if last_ts is not None and now - last_ts <= ACCESS_BOOST_WINDOW_S:
+            score += nudge
+        occurred_ts = parse_ts(occurred_at)
+        if (
+            stats is None
+            and occurred_ts is not None
+            and now - occurred_ts >= ACCESS_DORMANT_AGE_S
+        ):
+            score -= nudge
+        adjusted.append((score, occurred_at, position, entry))
+    adjusted.sort(key=lambda item: (-item[0], str(item[1]), item[2]))
+    chosen = [item[3] for item in adjusted[:limit]]
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    try:
+        for entry in chosen:
+            db.execute(
+                """
+                insert into memory_access (event_id, last_accessed, hit_count)
+                values (?, ?, 1)
+                on conflict (event_id) do update set
+                  last_accessed = excluded.last_accessed,
+                  hit_count = memory_access.hit_count + 1
+                """,
+                (entry[event_index], stamp),
+            )
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
+    return chosen
+
+
 def ranked_recall(
     db: sqlite3.Connection, query: str, agent: str, limit: int
 ) -> list[tuple[object, ...]]:
+    occurred_index = ENTRY_FIELDS.index("occurred_at")
+    candidates: list[tuple[object, str, tuple[object, ...]]] = []
     match = fts_query(query)
     if match and has_fts(db):
-        return db.execute(
+        for row in db.execute(
             """
             select %s
             from memory_fts
@@ -937,12 +1026,13 @@ def ranked_recall(
             limit ?
             """
             % select_fields("entries"),
-            (match, agent, agent, limit),
-        ).fetchall()
+            (match, agent, agent, max(limit * 3, limit)),
+        ):
+            candidates.append((None, row[occurred_index], tuple(row)))
+        return apply_access_decay(db, candidates, limit)
 
     tokens = [token.casefold() for token in TOKEN_RE.findall(query)]
     ranked = []
-    occurred_index = ENTRY_FIELDS.index("occurred_at")
     rendered_index = ENTRY_FIELDS.index("rendered")
     for row in db.execute(
         """
@@ -962,7 +1052,10 @@ def ranked_recall(
         if score:
             ranked.append((score, occurred_at, row_id, entry))
     ranked.sort(reverse=True)
-    return [row[3] for row in ranked[:limit]]
+    candidates = [
+        (row[0], row[1], row[3]) for row in ranked[: max(limit * 3, limit)]
+    ]
+    return apply_access_decay(db, candidates, limit)
 
 
 def remove_database_files(path: str) -> None:

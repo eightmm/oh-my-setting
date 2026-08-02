@@ -13019,6 +13019,39 @@ test_shared_memory_context_ranked_recall() {
   fi
 }
 
+test_memory_recall_tracks_access_for_decay() {
+  local repo="$TMP/memory-access-decay"
+  local db
+
+  make_committed_repo "$repo"
+  ( cd "$repo" &&
+    bash "$ROOT/scripts/agent-memory.sh" append --agent claude \
+      --text "Parser fixes need the focused test first." >/dev/null &&
+    bash "$ROOT/scripts/agent-memory.sh" append --agent claude \
+      --text "Deploy needs the staging flag." >/dev/null )
+  ( cd "$repo" && bash "$ROOT/scripts/agent-memory.sh" recall \
+      --text "parser focused test" --limit 2 >/dev/null )
+  db="$(find "$repo/.oms/memory" -name '*.sqlite3' | head -n 1)"
+  [ -n "$db" ] || fail "memory database missing after recall"
+  # Recall is what marks a memory as alive: the returned entry gains an
+  # access row, and a second recall increments it. Stats live outside
+  # memory_entries so a markdown re-derive cannot erase them.
+  python3 - "$db" <<'PY' || fail "first recall should record one access"
+import sqlite3, sys
+rows = list(sqlite3.connect(sys.argv[1]).execute(
+    "select hit_count from memory_access"))
+assert rows == [(1,)], rows
+PY
+  ( cd "$repo" && bash "$ROOT/scripts/agent-memory.sh" recall \
+      --text "parser focused test" --limit 2 >/dev/null )
+  python3 - "$db" <<'PY' || fail "second recall should increment the hit count"
+import sqlite3, sys
+rows = list(sqlite3.connect(sys.argv[1]).execute(
+    "select hit_count from memory_access"))
+assert rows == [(2,)], rows
+PY
+}
+
 test_shared_memory_writes_are_append_only() {
   local project="$TMP/memory-contract"
   local home_dir="$project/agenthome"

@@ -45,6 +45,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   command from the spec when no plan exists. Draft specs are refused: the
   chain is PROJECT.md → propose → human approval → `goal-drive`, with the
   model's judgment always behind the approval gate.
+- Memory recall learns from its own use. Each recalled entry gains an access
+  receipt (`memory_access`, keyed by the content-derived event id so a
+  markdown re-derive cannot erase it); ranking nudges recently-recalled
+  entries up one quartile and never-recalled 45-day-old entries down one —
+  match order stays primary, nothing is ever deleted, reach just fades
+  (search-time decay, not destruction).
 - The continuity layer closes the autonomy loop. A session-handoff digest now
   carries its resume contract — the active packet's Verify command — and any
   review round that ended split rides along as open dissents the next session
