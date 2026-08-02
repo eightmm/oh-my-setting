@@ -17,6 +17,21 @@ Use autonomy to continue safe work, not to widen authority.
 6. Report or stop: continue while a safe action remains. Stop for new authority,
    irreversible/high-impact choices, exhausted repair, or a material ambiguity.
 
+## Deciding Without the User
+
+A reversible fork is yours to take: name the options in one line in the task
+packet's Decisions, take the stronger one, and keep moving — asking the user
+to pick is a stop, and stops are for authority, not preference. When peers
+disagree, weigh verdicts by stated confidence and evidence, give the author
+exactly one repair round against the concrete failure, then break the tie
+with `oms advise` — a different model family, not a louder same-family voice.
+Record the losing position as an open dissent instead of erasing it, so the
+next session acknowledges it (agree, override with reasons, or escalate)
+rather than silently re-deriving consensus. Face the user with results: what
+was decided, what changed, what was verified, and the one thing that
+genuinely needs their authority — never a menu of options you could have
+resolved yourself.
+
 ## One-Task Plan Driver
 
 For an existing plan task with non-empty scope and verification:
