@@ -1891,17 +1891,23 @@ class JournalStore:
     ) -> List[str]:
         blockers: Dict[str, List[Mapping[str, Any]]] = {}
         candidates: List[Tuple[Tuple[str, str], str]] = []
+        seen_decisions: set = set()
         for event in events:
             decision = event.get("decision")
             if isinstance(decision, str) and decision:
-                text = sanitize_text(decision, 600)
-                candidates.append(
-                    (
-                        (str(event["occurred_at"]), str(event["event_id"])),
-                        "journal-distill: decision %s: %s"
-                        % (event["local_date"], text),
+                # The same decision often re-observes on later days; one lesson
+                # per distinct text, or duplicates crowd out the per-run cap.
+                decision_key = self._distill_normalized_text(decision)
+                if decision_key and decision_key not in seen_decisions:
+                    seen_decisions.add(decision_key)
+                    text = sanitize_text(decision, 600)
+                    candidates.append(
+                        (
+                            (str(event["occurred_at"]), str(event["event_id"])),
+                            "journal-distill: decision %s: %s"
+                            % (event["local_date"], text),
+                        )
                     )
-                )
             blocker = event.get("blocker")
             if isinstance(blocker, str) and blocker:
                 key = self._distill_normalized_text(blocker)
