@@ -171,4 +171,24 @@ wait "$runner_pid" || rc=$?
 [ -e "$TMP/child-cleaned" ] || fail "claim released before child cleanup completed"
 "$PLAN" --repo "$repo" show --id signal | grep -Fq '"state": "ready"' || fail "signal cleanup stranded claim"
 
+# --- --auto-repair: one embedded repair round at landing, then park ----------
+# Delegation succeeds (worker writes, verify passes in the worktree); landing
+# fails on the dirty main tree both times, so exactly one repair round runs
+# and the task parks with a recommended next action instead of looping.
+"$PLAN" --repo "$repo" add --id t9 --title autorepair \
+  --allowed delegated.txt --verify 'bash scripts/check.sh t1' >/dev/null
+printf 'dirt\n' >> "$repo/README.md"
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
+  --id t9 --land --auto-repair >"$TMP/t9.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "auto-repair on an unlandable tree should exit nonzero"
+grep -Fq "one auto-repair round" "$TMP/t9.out" ||
+  fail "auto-repair round not attempted: $(tail -5 "$TMP/t9.out")"
+grep -Fq "parked task=t9" "$TMP/t9.out" ||
+  fail "task should park after the bounded repair: $(tail -5 "$TMP/t9.out")"
+bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list |
+  grep -Fq "next: get an outside read" ||
+  fail "park should record a recommended next action"
+git -C "$repo" checkout -q README.md
+
 echo "autonomy-plan-run-smoke: ok"

@@ -20,6 +20,7 @@ TASK_ID=""
 USE_NEXT=0
 REPAIR=0
 LAND=0
+AUTO_REPAIR=0
 RETRY_KNOWN=0
 DRY_RUN=0
 EXECUTOR_ID=""
@@ -51,6 +52,10 @@ Options:
   --next          Atomically claim the next actionable task.
   --repair N      Bounded worker repair rounds, 0-3 (default: 0).
   --land          Land through patch-land after successful delegation.
+  --auto-repair   With --land: when landing fails, run exactly ONE repair
+                  delegation with the failed gate's own output embedded in
+                  the worker brief, retry landing once, then park the task
+                  for an outside read (oms advise). Never loops.
   --retry-known   Retry even when this exact task/base/provider/verify contract
                   is an unresolved known failure.
   --executor ID   Use a frozen task-scoped executor soul.
@@ -78,6 +83,7 @@ while [ "$#" -gt 0 ]; do
     --next) USE_NEXT=1; shift ;;
     --repair) [ "$#" -ge 2 ] || fail "--repair requires N"; REPAIR="$2"; shift 2 ;;
     --land) LAND=1; shift ;;
+    --auto-repair) AUTO_REPAIR=1; [ "$REPAIR" -ge 1 ] || REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --executor) [ "$#" -ge 2 ] || fail "--executor requires ID"; EXECUTOR_ID="$2"; shift 2 ;;
     --model-class) [ "$#" -ge 2 ] || fail "--model-class requires value"; MODEL_CLASS="$2"; shift 2 ;;
@@ -274,7 +280,34 @@ KEEP_CLAIM=1
 if [ "$LAND" -eq 1 ]; then
   land_cmd=("$ROOT/scripts/patch-land.sh" --repo "$REPO" --plan-task "$TASK_ID" --verify "$VERIFY")
   [ -n "$EXECUTOR_ID" ] && land_cmd+=(--executor "$EXECUTOR_ID")
-  "${land_cmd[@]}"
+  land_log="$(agent_memory_mktemp)" || exit 1
+  set +e
+  "${land_cmd[@]}" >"$land_log" 2>&1
+  land_status=$?
+  set -e
+  cat "$land_log"
+  if [ "$land_status" -ne 0 ] && [ "$AUTO_REPAIR" -eq 1 ]; then
+    # One repair round, never a loop: the failed gate's own output is the
+    # review finding, embedded in the repair brief the same way peer-review
+    # findings are; a second failure parks the task for an outside read.
+    echo "plan-run: landing failed; one auto-repair round with the gate output embedded"
+    set +e
+    "${delegate_cmd[@]}" --review-artifact "$land_log"
+    repair_status=$?
+    if [ "$repair_status" -eq 0 ]; then
+      "${land_cmd[@]}"
+      land_status=$?
+    fi
+    set -e
+  fi
+  rm -f "$land_log"
+  if [ "$land_status" -ne 0 ]; then
+    (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" record --kind plan-run --cmd "$FAIL_CMD" --exit "$land_status" \
+      --summary "landing failed for task $TASK_ID after bounded repair" \
+      --next "get an outside read: oms advise, then decide land vs abandon") || true
+    echo "plan-run: parked task=$TASK_ID state=review next=advise" >&2
+    exit "$land_status"
+  fi
   next_action="continue-plan"
   state="done"
 else
