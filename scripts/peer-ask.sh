@@ -126,7 +126,7 @@ write_prompt() {
       printf -- '- Prediction: is the expected direction and effect size stated BEFORE the run?\n'
       printf 'Rank "this experiment cannot falsify the hypothesis" as the most severe finding.\n\n'
     fi
-    ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
+    ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$question"
     printf 'Question:\n%s\n\n' "$question"
     if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
       printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"

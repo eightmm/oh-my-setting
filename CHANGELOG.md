@@ -32,7 +32,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   edits, and a recorded reason plus fail-ledger trail on every park. Shipped
   deliberately narrow after a cross-family design review: no plan generation,
   no replanning, no automatic lease reclaim — decomposition and recovery stay
-  with the parent agent.
+  with the parent agent. A parked goal claims the daily state hint so the
+  next session resumes it instead of rediscovering it, and peer calls that
+  attach shared memory now include a query-ranked "relevant recall" section
+  keyed on the operation's own prompt (FTS5/bm25 with a portable fallback) —
+  the ranking machinery existed but no automatic path used it.
 - The continuity layer closes the autonomy loop. A session-handoff digest now
   carries its resume contract — the active packet's Verify command — and any
   review round that ended split rides along as open dissents the next session

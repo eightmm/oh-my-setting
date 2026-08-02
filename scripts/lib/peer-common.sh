@@ -289,13 +289,14 @@ ma_write_harness_context() {
   local include_memory="$2"
   local include_task="$3"
   local include_ml="$4"
+  local recall_query="${5:-}"
   local tmp
   local warnings
 
   tmp="$(agent_memory_mktemp)" || return 0
   {
     if [ "$include_memory" -eq 1 ]; then
-      ma_write_shared_memory_context "$repo"
+      ma_write_shared_memory_context "$repo" "$recall_query"
     fi
     if [ "$include_task" -eq 1 ]; then
       ma_write_task_context "$repo"

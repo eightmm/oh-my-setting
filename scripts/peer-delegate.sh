@@ -560,7 +560,7 @@ trap 'cleanup_signal 143' TERM
 {
   printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
   printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized. If blocked, report it without asking questions.\n\n'
-  ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT"
+  ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$PROMPT"
   ma_write_thread_context "$REPO" "$THREAD_ID"
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'

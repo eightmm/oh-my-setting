@@ -702,8 +702,39 @@ agent_memory_emit_compact_section() {
 }
 
 
+# Query-ranked recall rides along when the caller names its operation: the
+# recency tails answer "what happened lately", this answers "what do we know
+# about THIS". Ranking (FTS5 bm25 with a token-count fallback) lives in the
+# db helper; here we only bound and scrub the result.
+agent_memory_emit_recall_section() {
+  local memory_file="$1"
+  local query="$2"
+  local limit="${OMS_AGENT_MEMORY_RECALL_LIMIT:-5}"
+  local out
+
+  [ -s "$memory_file" ] || return 1
+  query="$(printf '%s' "$query" | head -c 300 | tr '\n' ' ')"
+  [ -n "$query" ] || return 1
+  out="$(agent_memory_mktemp)" || return 1
+  if ! agent_memory_db_command "$memory_file" recall \
+      --query "$query" --limit "$limit" > "$out" 2>/dev/null; then
+    rm -f "$out"; return 1
+  fi
+  [ -s "$out" ] || { rm -f "$out"; return 1; }
+  if agent_memory_file_has_sensitive_content "$out"; then
+    echo "warning: ranked recall omitted because it contains sensitive-looking content" >&2
+    rm -f "$out"; return 1
+  fi
+  printf '### relevant recall\n'
+  agent_memory_truncate_bytes 4000 < "$out"
+  printf '\n'
+  rm -f "$out"
+  return 0
+}
+
 ma_write_shared_memory_context() {
   local repo="${1:-$PWD}"
+  local query="${2:-}"
   local global_file
   local project_file
   local mode="${OMS_AGENT_MEMORY_MODE:-compact}"
@@ -731,6 +762,15 @@ ma_write_shared_memory_context() {
       fi
       if [ -n "$project_file" ] && [ -s "$project_file" ]; then
         agent_memory_emit_compact_section "project" "$project_file" "project" || true
+      fi
+    fi
+    if [ -n "$query" ]; then
+      # Project memory first — it holds this repo's lessons; fall back to the
+      # global store only when the project has none.
+      if [ -n "$project_file" ] && [ -s "$project_file" ]; then
+        agent_memory_emit_recall_section "$project_file" "$query" || true
+      elif [ -s "$global_file" ]; then
+        agent_memory_emit_recall_section "$global_file" "$query" || true
       fi
     fi
   } >> "$buf"

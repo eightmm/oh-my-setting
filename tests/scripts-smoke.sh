@@ -12918,6 +12918,32 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
     fail "a new worktree registration should be named: $result"
 }
 
+test_shared_memory_context_ranked_recall() {
+  local repo="$TMP/memory-recall-ctx"
+  local out
+
+  make_committed_repo "$repo"
+  ( cd "$repo" &&
+    bash "$ROOT/scripts/agent-memory.sh" append --agent claude \
+      --text "Always run the focused parser test before landing parser changes." >/dev/null &&
+    bash "$ROOT/scripts/agent-memory.sh" append --agent claude \
+      --text "The deploy pipeline needs the staging flag." >/dev/null )
+
+  # Naming the operation adds a query-ranked recall section to the injected
+  # memory context; without a query the recency tails stand alone.
+  out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2" "refactor the parser module tests"' \
+    _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
+  printf '%s' "$out" | grep -Fq '### relevant recall' ||
+    fail "query should add a ranked recall section: $out"
+  printf '%s' "$out" | grep -Fq 'focused parser test' ||
+    fail "recall should surface the matching lesson"
+  out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2"' \
+    _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
+  if printf '%s' "$out" | grep -Fq 'relevant recall'; then
+    fail "no query must mean no recall section"
+  fi
+}
+
 test_shared_memory_writes_are_append_only() {
   local project="$TMP/memory-contract"
   local home_dir="$project/agenthome"

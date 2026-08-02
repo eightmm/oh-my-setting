@@ -2,7 +2,9 @@
 
 Use project memory for stable preferences and recurring pitfalls; keep required
 rules in checked-in policy. Prefer compact `context` or targeted `search` over
-loading the full source log.
+loading the full source log. Peer calls that attach memory also attach a
+query-ranked "relevant recall" section keyed on the prompt — recency answers
+"what happened lately", recall answers "what do we know about this".
 
 ```bash
 oms agent-memory --repo . context
