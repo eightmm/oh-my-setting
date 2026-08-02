@@ -1173,7 +1173,14 @@ echo "patch: $patch_file"
 if [ "$applied" = 1 ]; then
   echo "applied: yes (review with: git -C $REPO diff)"
 else
-  echo "applied: no (review patch, then: git -C $REPO apply --binary $patch_file)"
+  # The printed next step is the admission front door, never a gate bypass:
+  # a raw `git apply` would land an unreviewed patch outside patch-land's
+  # dirty-tree refusal, lock, and admission checks.
+  if [ -n "$PLAN_TASK_ID" ]; then
+    echo "applied: no (review patch, then: oms patch-land --repo $REPO --patch $patch_file --plan-task $PLAN_TASK_ID)"
+  else
+    echo "applied: no (review patch, then: oms patch-land --repo $REPO --patch $patch_file)"
+  fi
 fi
 if [ "$KEEP_WORKTREE" = 1 ]; then
   echo "worktree kept: $worktree"
