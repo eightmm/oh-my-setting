@@ -19,7 +19,7 @@ INCLUDE_ML_CONTEXT=0
 THREAD_ID=""
 OPERATION=""
 EXPORT_ONLY=0
-MODEL_CLASS=auto
+MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
@@ -39,22 +39,17 @@ Options:
   --prompt-file PATH   Prompt file to send.
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/call.
-  --model-class CLASS  auto, fast, balanced, or deep (default: auto/read=fast).
+  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --no-model-fallback  Disable implicit class fallback.
+  --no-model-fallback  Deprecated compatibility no-op.
   --reasoning-effort E auto, low, medium, or high (default: auto).
   --memory             Attach shared harness memory.
   --task               Attach the active task handoff packet.
   --ml-context         Attach the compact ML context digest.
   --thread ID          Join a cross-agent thread: prior turns are injected and
                        this exchange is appended (agent-thread.sh).
-  --operation NAME     Declare the work phase so the tier follows the work, not
-                       the calling script. Without it every read pass routes as
-                       a plain call (fast). Names: plan, advise, decision,
-                       review-gate, release (deep); ask, review, implement,
-                       repair (balanced); call, read, verify, check, triage
-                       (fast).
+  --operation NAME     Record the work phase in artifacts; it does not select a model.
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).
@@ -189,15 +184,15 @@ case "$TO" in
   *) fail "unsupported provider: $TO" ;;
 esac
 [ "$TO" = "agy" ] && TO="antigravity"
-oms_model_validate_class "$MODEL_CLASS" || exit $?
+[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
-export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+unset OMS_MODEL_CLASS_REQUEST
+export OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
-# The caller's declared phase wins over this tool's own kind; "call" remains
-# the tier for a pass that never said what kind of work it is.
+# Operation is retained as artifact context only.
 export OMS_MODEL_OPERATION="${OPERATION:-call}"
 [ -z "$OPERATION" ] || export OMS_MODEL_OPERATION_REQUEST="$OPERATION"
 

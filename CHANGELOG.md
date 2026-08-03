@@ -136,6 +136,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   only unchanged OMS-managed entries. Antigravity exposes no equivalent footer.
 
 ### Fixed
+- Model selection is now catalog-first: tier policy and hard-coded provider
+  model names are removed, while explicit model/effort validation and cached
+  catalog visibility remain.
 - The check gate is hermetic to the invoking git context. Git exports
   `GIT_DIR` to hooks, and from a linked worktree that path is absolute, so
   it overrode repository discovery for every git call in every test

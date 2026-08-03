@@ -157,20 +157,14 @@ retired. `brief` rechecks the frozen hash; lifecycle is draft -> frozen ->
 running -> done/failed; GC removes only aged non-active states
 
 **Single-agent router (`agent-run.sh`)** — Routes one prompt to one provider:
-read-only questions to a call, write tasks to a delegate worktree; automatic
-routing follows the work phase first (routine execution/checks `fast`,
-implementation/review `balanced`, decisions/gates `deep`) and uses the role
-only as a fallback, with `--model-class`/`--model`/`--reasoning-effort`
-overrides; `--executor ID` forwards a frozen executor only to write mode
+read-only questions to a call and write tasks to a delegate worktree. Model
+selection is catalog-first: callers use `oms models` to inspect cached facts,
+then pass `--model` and optional `--reasoning-effort`, or let the provider
+default run. Legacy tier flags warn and are ignored.
 
-**Task-fitted effort** — Automatic routing picks the tier from the work phase,
-then the thinking level from the task and the model: an operation that gates
-something irreversible (`advise`, `decision`, `release`, `review-gate`) takes
-one step above its tier's effort, and the result is clamped to the scale the
-selected model actually publishes. The same release gate therefore runs at
-`xhigh` on codex and claude and at `high` on antigravity, without either being
-spelled out anywhere. Routine work is untouched; `OMS_REASONING_NO_HEADROOM=1`
-disables the escalation
+**Reasoning effort** — An explicit `--reasoning-effort` is validated against
+the selected model's cached published scale. `auto` passes no effort control;
+advisor calls default to `high`, clamped to that scale.
 
 **Capability snapshot (`lib/model-capability.sh`)** — What each provider CLI
 can actually do, cached under `~/.cache/oh-my-setting/capabilities` and keyed
@@ -193,7 +187,10 @@ and never silently removes it: codex takes effort through
 `-c model_reasoning_effort=`, which no help text advertises, so a probe that
 cannot see it is not evidence of absence
 
-**Model fallback at call time** — Claude's tiers carry the pinned name first
+**Model fallback at call time** — An explicit model falls back only to the
+provider default unless a fallback model is named. Catalog-backed safeguards
+can try distinct cached catalog entries; without a catalog they try only the
+provider default.
 (an artifact should say which model actually ran) and the CLI's own public
 alias (`fable`, `sonnet`, `haiku`) as the same-tier alternative: a pinned name
 that rotates out is recovered from on the next call rather than turning that
@@ -208,14 +205,11 @@ alias resolves to the same model and is no answer to its filter), bounded by
 message, the run fails saying exactly that rather than cycling. A considered
 refusal reads differently and is reported with no retry at all.
 
-**Model/CLI doctor (`model-doctor.sh`, `oms model-doctor`)** — Local-only by
-default: checks provider binary/version and the exact CLI flags the harness
-requires, resolves every `fast`/`balanced`/`deep` model and effort route, and
-verifies model-family diversity even when Antigravity surfaces Claude or
-GPT-family models. `--live-models` runs bounded catalog probes where a stable
-list command is registered (currently `agy models`), `--json` emits schema-1
-output, `--require-all` makes partial installs fail, and `--strict-diversity`
-fails when fewer than two usable independent families remain
+**Model/CLI doctor (`model-doctor.sh`, `oms model-doctor`, `oms models`)** —
+Checks provider binary/default reachability and cached effort capability facts.
+`--live-models` refreshes supported catalogs; `oms models` surfaces cached
+catalogs without probing unless passed `--refresh`. Doctor JSON is schema-2;
+`--strict-diversity` checks usable provider families.
 
 **Bounded plan driver (`plan-run.sh`, `oms plan-run`)** — Atomically claims and
 executes exactly one pre-authorized plan task with its provider-neutral role,

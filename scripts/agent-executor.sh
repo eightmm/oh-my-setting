@@ -29,7 +29,7 @@ VERIFY=""
 SOUL_FILE=""
 REASON=""
 MODE="worktree-write"
-MODEL_CLASS=auto
+MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
@@ -119,7 +119,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
-oms_model_validate_class "$MODEL_CLASS" || exit $?
+[ -z "${MODEL_CLASS:-}" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -221,7 +221,8 @@ PY
   fi
   role_file="$($ROOT/scripts/agent-role.sh --repo "$REPO" --name "$STRATEGY" resolve)" ||
     fail "unknown strategy: $STRATEGY"
-  export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+  unset OMS_MODEL_CLASS_REQUEST
+  export OMS_MODEL_EXPLICIT="$MODEL"
   export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
   export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
   export OMS_MODEL_ROLE="$STRATEGY" OMS_MODEL_OPERATION=delegate

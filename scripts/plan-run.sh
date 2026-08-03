@@ -24,7 +24,7 @@ AUTO_REPAIR=0
 RETRY_KNOWN=0
 DRY_RUN=0
 EXECUTOR_ID=""
-MODEL_CLASS=auto
+MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
@@ -100,7 +100,7 @@ done
 
 [ -n "$TO" ] || fail "--to is required"
 TO="$(oms_normalize_provider "$TO")" || fail "unknown provider: $TO"
-oms_model_validate_class "$MODEL_CLASS" || exit $?
+[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -213,7 +213,8 @@ print("|".join(str(d.get(k,"")) for k in keys))
 ')|request=$MODEL_CLASS:$MODEL:$FALLBACK_MODEL:$NO_MODEL_FALLBACK:$REASONING_EFFORT"
 else
   task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))')"
-  export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+  unset OMS_MODEL_CLASS_REQUEST
+  export OMS_MODEL_EXPLICIT="$MODEL"
   export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
   export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT" OMS_REASONING_FALLBACK_EXPLICIT=""
   export OMS_MODEL_ROLE="$task_role" OMS_MODEL_OPERATION=delegate
@@ -248,11 +249,12 @@ delegate_script="${OMS_PLAN_RUN_DELEGATE:-$ROOT/scripts/peer-delegate.sh}"
 [ -x "$delegate_script" ] || fail "delegate command is not executable: $delegate_script"
 delegate_cmd=("$delegate_script" --repo "$REPO" --to "$TO" --plan-task "$TASK_ID" --repair "$REPAIR")
 [ -n "$EXECUTOR_ID" ] && delegate_cmd+=(--executor "$EXECUTOR_ID")
-delegate_cmd+=(--model-class "$MODEL_CLASS")
+[ -n "$MODEL_CLASS" ] && delegate_cmd+=(--model-class "$MODEL_CLASS")
 [ -n "$MODEL" ] && delegate_cmd+=(--model "$MODEL")
 [ -n "$FALLBACK_MODEL" ] && delegate_cmd+=(--fallback-model "$FALLBACK_MODEL")
 [ "$NO_MODEL_FALLBACK" -eq 1 ] && delegate_cmd+=(--no-model-fallback)
-delegate_cmd+=(--reasoning-effort "$REASONING_EFFORT")
+[ -n "$REASONING_EFFORT" ] && [ "$REASONING_EFFORT" != auto ] &&
+  delegate_cmd+=(--reasoning-effort "$REASONING_EFFORT")
 output_file="$(agent_memory_mktemp)" || exit 1
 set +e
 "${delegate_cmd[@]}" >"$output_file" 2>&1 &

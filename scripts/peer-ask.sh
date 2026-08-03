@@ -26,7 +26,7 @@ INCLUDE_ML_CONTEXT=0
 DEBATE=0
 HYPOTHESIS_PRESET=0
 EXPORT_ONLY=0
-MODEL_CLASS=auto
+MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
@@ -51,13 +51,12 @@ Options:
                        Use before expensive runs.
   --repo PATH          Git repo for optional context. Default: current directory.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
-                       An entry may carry a tier (codex:deep) to pin that one.
-  --tiers a,b          Ask every provider once per named tier (fast, balanced,
-                       deep), turning the council into a panel across model
-                       tiers. Answers from one provider share a model family,
-                       which the reported family count makes explicit.
+                       An entry may carry a model (codex:model=NAME) to pin it.
+  --tiers a,b          Deprecated and ignored; use PROVIDER:model=NAME entries.
+                       Answers from one provider share a model family, which
+                       the reported family count makes explicit.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/ask.
-  --model-class CLASS  auto, fast, balanced, or deep.
+  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   Explicit fallback; requires exactly one provider.
   --no-model-fallback  Disable implicit class fallback.
@@ -278,7 +277,7 @@ if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 validate_provider_list
-oms_model_validate_class "$MODEL_CLASS" || exit $?
+[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -295,7 +294,8 @@ if [ "$REASONING_EFFORT" != auto ]; then
     oms_reasoning_provider_validate "$ask_provider" "$REASONING_EFFORT" || exit $?
   done
 fi
-export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+unset OMS_MODEL_CLASS_REQUEST
+export OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 if [ "$HYPOTHESIS_PRESET" -eq 1 ]; then

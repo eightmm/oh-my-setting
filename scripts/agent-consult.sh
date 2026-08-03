@@ -10,9 +10,9 @@ set -euo pipefail
 # --all it asks every installed peer in parallel and keeps every answer in the
 # same thread, so the next question starts from what all of them said.
 #
-# Targets may name a tier or an exact model, and may repeat a provider, so a
-# panel can be several models rather than one per CLI: --to codex:deep --to
-# codex:balanced asks the same CLI twice and records the answers separately.
+# Targets may name an exact model and may repeat a provider, so a panel can be
+# several models rather than one per CLI: --to codex:model=a --to
+# codex:model=b asks the same CLI twice and records the answers separately.
 # Agreement is then reported by model family, because two answers from one
 # family are one opinion twice, not two independent opinions.
 #
@@ -29,13 +29,11 @@ REPO="$PWD"
 PROMPT=""
 PROMPT_FILE=""
 TARGETS_EXPLICIT=()
-TIERS=""
 ALL=0
 THREAD_ID=""
 NEW_THREAD=0
 TOPIC=""
 QUIET=0
-MODEL_CLASS="auto"
 PASSTHROUGH=()
 
 usage() {
@@ -53,20 +51,17 @@ Options:
   --prompt-file PATH   Read the question from a file.
   --repo PATH          Repo for context and state. Default: PWD.
   --to TARGET          Ask this target instead of the automatic pick. Repeatable.
-                       TARGET is PROVIDER, PROVIDER:CLASS (fast|balanced|deep),
-                       or PROVIDER:model=NAME for an exact model. Repeating a
-                       provider with different tiers/models is allowed and each
-                       answer is recorded separately.
+                       TARGET is PROVIDER or PROVIDER:model=NAME for an exact
+                       model. Repeating a provider with different models is
+                       allowed and each answer is recorded separately.
   --all                Ask every installed peer (not the caller) in parallel
                        and record all answers in the thread.
-  --tiers a,b          With --all: ask every peer once per named tier, so a
-                       panel spans both providers and model tiers.
+  --tiers a,b          Deprecated and ignored; use PROVIDER:model=NAME targets.
   --thread ID          Use this thread. Default: the current one, created on
                        first use so a series of consults stays one conversation.
   --new-thread         Start a fresh thread even if one is current.
   --topic TEXT         Topic for a newly created thread.
-  --model-class CLASS  auto, fast, balanced, or deep. Default: auto
-                       (balanced — a consult is judgement, not a lookup).
+  --model-class CLASS  Deprecated and ignored; use PROVIDER:model=NAME targets.
   --no-memory          Do not attach shared memory.
   --no-task            Do not attach the active task packet.
   --ml-context         Attach the ML digest as well.
@@ -103,13 +98,16 @@ while [ "$#" -gt 0 ]; do
       shift 2 ;;
     --tiers)
       [ "$#" -ge 2 ] || fail "--tiers requires a comma-separated list"
-      TIERS="$2"
+      echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
       shift 2 ;;
     --all) ALL=1; shift ;;
     --thread) [ "$#" -ge 2 ] || fail "--thread requires an id"; THREAD_ID="$2"; shift 2 ;;
     --new-thread) NEW_THREAD=1; shift ;;
     --topic) [ "$#" -ge 2 ] || fail "--topic requires text"; TOPIC="$2"; shift 2 ;;
-    --model-class) [ "$#" -ge 2 ] || fail "--model-class requires a value"; MODEL_CLASS="$2"; shift 2 ;;
+    --model-class)
+      [ "$#" -ge 2 ] || fail "--model-class requires a value"
+      echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
+      shift 2 ;;
     --no-memory) INCLUDE_MEMORY=0; shift ;;
     --no-task) INCLUDE_TASK=0; shift ;;
     --ml-context) PASSTHROUGH+=(--ml-context); shift ;;
@@ -134,12 +132,6 @@ fi
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 [ "$ALL" -eq 0 ] || [ "${#TARGETS_EXPLICIT[@]}" -eq 0 ] ||
   fail "--all and --to are mutually exclusive"
-[ -z "$TIERS" ] || [ "$ALL" -eq 1 ] || fail "--tiers requires --all"
-case "$MODEL_CLASS" in
-  auto) MODEL_CLASS=balanced ;;
-  fast|balanced|deep) ;;
-  *) fail "--model-class must be auto, fast, balanced, or deep" ;;
-esac
 
 provider_cli_available() {
   case "$1" in
@@ -175,16 +167,6 @@ peers() {
 # talking about the same resolved pair.
 target_provider() { printf '%s\n' "${1%%:*}"; }
 
-target_class() {
-  local spec="${1#*:}"
-  [ "$spec" != "$1" ] || { printf '\n'; return 0; }
-  case "$spec" in
-    model=*) printf '\n' ;;
-    fast|balanced|deep) printf '%s\n' "$spec" ;;
-    *) printf '\n' ;;
-  esac
-}
-
 target_model() {
   local spec="${1#*:}"
   [ "$spec" != "$1" ] || { printf '\n'; return 0; }
@@ -204,8 +186,8 @@ validate_target() {
   esac
   [ "$spec" = "$1" ] && return 0
   case "$spec" in
-    fast|balanced|deep|model=?*) ;;
-    *) fail "target must be PROVIDER, PROVIDER:fast|balanced|deep, or PROVIDER:model=NAME: $1" ;;
+    model=?*) ;;
+    *) fail "target must be PROVIDER or PROVIDER:model=NAME: $1" ;;
   esac
 }
 
@@ -237,16 +219,14 @@ thread="$(resolve_thread)" || fail "could not open a thread"
 call_one() {
   local target="$1"
   local artifact_out="${2:-}"
-  local provider class model args rc=0 log
+  local provider model args rc=0 log
 
   provider="$(target_provider "$target")"
-  class="$(target_class "$target")"
   model="$(target_model "$target")"
-  [ -n "$class" ] || class="$MODEL_CLASS"
 
   args=("$SCRIPT_DIR/agent-call.sh" --to "$provider" --repo "$REPO"
         --artifact-dir "$REPO/.oms/artifacts/consult"
-        --model-class "$class" --thread "$thread")
+        --thread "$thread")
   [ -z "$model" ] || args+=(--model "$model")
   [ "$INCLUDE_MEMORY" -eq 1 ] && args+=(--memory)
   [ "$INCLUDE_TASK" -eq 1 ] && args+=(--task)
@@ -333,20 +313,7 @@ if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
 elif [ "$ALL" -eq 1 ]; then
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    if [ -n "$TIERS" ]; then
-      # Panel across providers and tiers: the same CLI answers once per tier.
-      IFS=',' read -r -a tier_list <<< "$TIERS"
-      for tier in "${tier_list[@]}"; do
-        [ -n "$tier" ] || continue
-        case "$tier" in
-          fast|balanced|deep) ;;
-          *) fail "--tiers accepts fast, balanced, or deep: $tier" ;;
-        esac
-        targets+=("$p:$tier")
-      done
-    else
-      targets+=("$p")
-    fi
+    targets+=("$p")
   done <<EOF
 $(peers)
 EOF

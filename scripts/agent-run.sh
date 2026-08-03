@@ -20,7 +20,7 @@ TASK_ID=""
 PLAN_TASK=""
 EXECUTOR_ID=""
 ROLE=""
-MODEL_CLASS=auto
+MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
 NO_MODEL_FALLBACK=0
@@ -52,7 +52,7 @@ Options:
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
   --mode MODE          auto, read, or write. Default: auto.
   --role NAME          Write mode: reusable strategy profile.
-  --model-class CLASS  auto, fast, balanced, or deep.
+  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
   --no-model-fallback  Disable implicit class fallback.
@@ -369,7 +369,7 @@ esac
 # Canonicalize aliases so artifacts, plan claims, and worker records all carry
 # the same provider name.
 TO="$(oms_normalize_provider "$TO")"
-oms_model_validate_class "$MODEL_CLASS" || exit $?
+[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -416,11 +416,12 @@ if [ "$resolved_mode" = "read" ]; then
     cmd+=(--prompt "$PROMPT")
   fi
   [ -n "$ARTIFACT_DIR" ] && cmd+=(--artifact-dir "$ARTIFACT_DIR")
-  cmd+=(--model-class "$MODEL_CLASS")
+  [ -n "$MODEL_CLASS" ] && cmd+=(--model-class "$MODEL_CLASS")
   [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
   [ -n "$FALLBACK_MODEL" ] && cmd+=(--fallback-model "$FALLBACK_MODEL")
   [ "$NO_MODEL_FALLBACK" -eq 1 ] && cmd+=(--no-model-fallback)
-  cmd+=(--reasoning-effort "$REASONING_EFFORT")
+  [ -n "$REASONING_EFFORT" ] && [ "$REASONING_EFFORT" != auto ] &&
+    cmd+=(--reasoning-effort "$REASONING_EFFORT")
   [ "$INCLUDE_MEMORY" -eq 1 ] && cmd+=(--memory)
   [ "$INCLUDE_TASK" -eq 1 ] && cmd+=(--task)
   [ "$INCLUDE_ML_CONTEXT" -eq 1 ] && cmd+=(--ml-context)
@@ -438,11 +439,12 @@ else
   fi
   [ -n "$ARTIFACT_DIR" ] && cmd+=(--artifact-dir "$ARTIFACT_DIR")
   [ -n "$ROLE" ] && cmd+=(--role "$ROLE")
-  cmd+=(--model-class "$MODEL_CLASS")
+  [ -n "$MODEL_CLASS" ] && cmd+=(--model-class "$MODEL_CLASS")
   [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
   [ -n "$FALLBACK_MODEL" ] && cmd+=(--fallback-model "$FALLBACK_MODEL")
   [ "$NO_MODEL_FALLBACK" -eq 1 ] && cmd+=(--no-model-fallback)
-  cmd+=(--reasoning-effort "$REASONING_EFFORT")
+  [ -n "$REASONING_EFFORT" ] && [ "$REASONING_EFFORT" != auto ] &&
+    cmd+=(--reasoning-effort "$REASONING_EFFORT")
   [ -n "$VERIFY_CMD" ] && cmd+=(--verify "$VERIFY_CMD")
   [ "$NO_VERIFY" -eq 1 ] && cmd+=(--no-verify)
   [ -n "$TASK_ID" ] && cmd+=(--task-id "$TASK_ID")

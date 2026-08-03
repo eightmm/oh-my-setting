@@ -7,8 +7,8 @@ oms agent-run --to claude --repo . --mode read --prompt "Assess this plan."
 oms agent-run --to codex --repo . --mode write --prompt "Implement the bounded fix."
 ```
 
-The harness resolves `auto` to `fast`, `balanced`, or `deep` from the operation
-and role, then maps that class to the provider CLI. Use `--model-class` to pin a
+The harness leaves model choice to the provider unless the caller passes an
+explicit `--model`. Use `oms models` to inspect cached provider catalogs before
 class, `--model` for an exact model, `--fallback-model` for an explicit backup,
 or `--no-model-fallback` to disable fallback. Only a recognized capacity error
 may retry, at most once; a write attempt that changed its worktree is never
@@ -17,8 +17,8 @@ a freshly recreated isolation worktree. Provider/class mappings can be overridde
 `OMS_MODEL_CODEX_FAST`, `OMS_MODEL_CLAUDE_BALANCED`, and
 `OMS_MODEL_ANTIGRAVITY_DEEP`.
 
-Reasoning effort follows the selected class by default: `fast=low`,
-`balanced=medium`, and `deep=high`. Use `--reasoning-effort` to override it for
+Reasoning effort is passed only when named with `--reasoning-effort` and is
+validated against the selected model's cached scale. Use `--reasoning-effort` for
 Codex or Claude. Antigravity exposes effort through its model variants rather
 than a separate flag, so select an explicit Low/Medium/High model there. If a
 custom variant does not identify its effort, provenance leaves effort unset.

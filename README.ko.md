@@ -83,8 +83,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   실제로 실행되는 task packet, 반복 실패 시 advisor를 지목하는 fail-ledger
 - **ML과 HPC** — run spine과 재현 캡슐, 사전등록 가설 run, 데이터셋 leakage
   manifest, Slurm reconcile과 GPU 큐
-- **Provider와 모델** — capability 프로브, fast/balanced/deep 티어 라우팅과
-  폴백, family 다양성 진단, provider가 제공할 때만 기록하는 내용 비저장형
+- **Provider와 모델** — 캐시된 capability 프로브, 카탈로그 우선 명시 모델/effort
+  선택과 Provider 기본값 폴백, family 다양성 진단, provider가 제공할 때만 기록하는 내용 비저장형
   native activity/token telemetry
 - **유지보수** — 롤백 가능한 트랜잭션 업데이트, doctor, 하나의 전체 검증
   게이트와 보호 브랜치용 빠른 pre-push 모드

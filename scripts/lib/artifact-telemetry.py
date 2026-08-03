@@ -15,7 +15,11 @@ from typing import Optional
 
 
 ELIGIBLE_KINDS = frozenset(("call", "ask", "review", "delegate"))
-MODEL_CLASSES = frozenset(("fast", "balanced", "deep"))
+# Current markers plus the retired tier vocabulary: telemetry reads history,
+# and rows recorded before de-tiering must stay legible, not "unrecorded".
+MODEL_CLASSES = frozenset(
+    ("explicit", "provider-default", "fast", "balanced", "deep")
+)
 STARTED_RE = re.compile(r"(?m)^- started:\s*(\S+)\s*$")
 TOKENS_RE = re.compile(
     r"(?im)^tokens used[ \t]*\r?\n[ \t]*([0-9][0-9,]*)[ \t]*$"

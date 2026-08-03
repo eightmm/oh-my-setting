@@ -29,7 +29,7 @@ independent read-only pass.
 ```bash
 oms agent-plan --repo . claim --id t1 --provider codex
 oms agent-executor --repo . create --id ex1 --provider codex \
-  --strategy implementation-worker --plan-task t1 --model-class auto \
+  --strategy implementation-worker --plan-task t1 \
   --soul-file proposal.md
 oms agent-executor --repo . validate --id ex1
 oms agent-executor --repo . freeze --id ex1

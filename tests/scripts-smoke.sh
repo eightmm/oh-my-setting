@@ -11958,9 +11958,9 @@ test_agent_consult_rejects_conflicting_targets() {
   if "$ROOT/scripts/agent-consult.sh" --repo "$project" >/dev/null 2>&1; then
     fail "a consult without a question must be refused"
   fi
-  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --model-class huge "x" >/dev/null 2>&1; then
-    fail "an unknown model class must be refused"
-  fi
+  out="$("$ROOT/scripts/agent-consult.sh" --repo "$project" --model-class huge 2>&1 >/dev/null)" || true
+  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
+    fail "deprecated --model-class must warn"
 }
 
 test_repo_state_and_gc_cover_threads() {
@@ -12571,7 +12571,8 @@ EOF
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
-    --to codex:deep --to codex:balanced --to antigravity:deep \
+    --to codex:model=gpt-5.6-sol --to codex:model=gpt-5.6-terra \
+    --to "antigravity:model=Gemini 3.6 Flash (High)" \
     "which loader?" --quiet 2>&1)" || fail "panel consult should succeed: $out"
 
   printf '%s' "$out" | grep -Fq '3/3 target(s) answered, 2 independent model family(ies)' ||
@@ -12608,7 +12609,8 @@ EOF
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
-    --to codex:deep --to codex:fast "which loader?" --quiet 2>&1)" ||
+    --to codex:model=gpt-5.6-sol --to codex:model=gpt-5.6-luna \
+    "which loader?" --quiet 2>&1)" ||
     fail "same-family panel should still succeed: $out"
   printf '%s' "$out" | grep -Fq '1 independent model family' ||
     fail "family count should collapse for one provider: $out"
@@ -12616,45 +12618,37 @@ EOF
     fail "same-family agreement must not be sold as corroboration: $out"
 
   if "$ROOT/scripts/agent-consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
-    fail "an unknown tier in a target must be refused"
+    fail "a target that is neither PROVIDER nor PROVIDER:model=NAME must be refused"
   fi
-  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --tiers deep "x" >/dev/null 2>&1; then
-    fail "--tiers without --all must be refused"
-  fi
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    --tiers deep "x" --quiet 2>&1)" || fail "deprecated --tiers must still run: $out"
+  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
+    fail "deprecated --tiers must warn: $out"
 }
 
 test_worker_tier_follows_the_role_before_the_phase() {
   local out
 
-  # The phase is what the work actually is now, so a bundled role neither
-  # downgrades a gate nor inflates a routine check; the reason says which rule
-  # decided, which is the part that used to be invisible.
+  # Selection is catalog-first: a role or operation label never chooses a
+  # model; only an explicit request does, and everything else is the
+  # provider's own default.
   out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
-    OMS_MODEL_ROLE=repo-auditor OMS_MODEL_OPERATION=decision \
-      OMS_MODEL_CLASS_REQUEST=auto oms_model_prepare codex >/dev/null
-    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
-  [ "$out" = "deep operation" ] || fail "a cheap role must not downgrade a gate, got: $out"
+    OMS_MODEL_ROLE=repo-auditor OMS_MODEL_OPERATION=decision oms_model_prepare codex >/dev/null
+    printf "%s %s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON" "$OMS_MODEL_PRIMARY"')"
+  [ "$out" = "provider-default provider-default provider-default" ] ||
+    fail "a role or phase must not select a model, got: $out"
 
   out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
-    OMS_MODEL_OPERATION=advise OMS_MODEL_CLASS_REQUEST=auto oms_model_prepare codex >/dev/null
-    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
-  [ "$out" = "deep operation" ] || fail "phase should decide without a role, got: $out"
+    OMS_MODEL_EXPLICIT=named-model oms_model_prepare codex >/dev/null
+    printf "%s %s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON" "$OMS_MODEL_PRIMARY"')"
+  [ "$out" = "explicit explicit named-model" ] ||
+    fail "an explicit model must be used as given, got: $out"
 
   out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
-    OMS_MODEL_ROLE=decision-advisor OMS_MODEL_OPERATION=verify \
-      OMS_MODEL_CLASS_REQUEST=fast oms_model_prepare codex >/dev/null
-    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
-  [ "$out" = "fast request" ] || fail "an explicit class must still win, got: $out"
-
-  # A custom role carries its own tier so the name table is not the only source.
-  printf '# Strategy: Custom\n\n<!-- oms-model-class: deep -->\n' > "$TMP/custom-role.md"
-  out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
-    OMS_MODEL_ROLE_CLASS="$(oms_model_class_from_role_file "'"$TMP"'/custom-role.md")" \
-      OMS_MODEL_ROLE=unknown-role OMS_MODEL_OPERATION=verify \
-      OMS_MODEL_CLASS_REQUEST=auto oms_model_prepare codex >/dev/null
-    printf "%s %s" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON"')"
-  [ "$out" = "deep role_file" ] ||
-    fail "an explicitly declared role tier should outrank the phase, got: $out"
+    OMS_MODEL_CLASS_REQUEST=deep oms_model_prepare codex >/dev/null' 2>&1)"
+  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
+    fail "a deprecated class request must warn, got: $out"
 }
 
 test_agent_call_declares_its_work_phase() {
@@ -12662,19 +12656,19 @@ test_agent_call_declares_its_work_phase() {
   local artifact
 
   make_committed_repo "$project"
-  # Without a declared phase every read pass is a plain call, which is the
-  # cheapest tier — fine for a lookup, wrong for a decision.
+  # Without an explicit model the provider default runs, and the artifact
+  # says so instead of implying a harness choice.
   ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
     --to codex --repo "$project" --prompt "plain" >/dev/null )
   artifact="$(ls -t "$project"/.oms/artifacts/call/*plain*.md | head -1)"
-  grep -Fq 'model-route: class=fast (operation)' "$artifact" ||
-    fail "an undeclared pass should route fast: $(grep -h '^model-route' "$artifact")"
+  grep -Fq 'model-route: class=provider-default (provider-default) primary=provider-default' "$artifact" ||
+    fail "an unrequested pass should record the provider default: $(grep -h '^model-route' "$artifact")"
 
   ( cd "$project" && OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
-    --to codex --repo "$project" --operation advise --prompt "declared" >/dev/null )
+    --to codex --repo "$project" --model named-model --prompt "declared" >/dev/null )
   artifact="$(ls -t "$project"/.oms/artifacts/call/*declared*.md | head -1)"
-  grep -Fq 'model-route: class=deep (operation)' "$artifact" ||
-    fail "a declared advise phase should route deep: $(grep -h '^model-route' "$artifact")"
+  grep -Fq 'model-route: class=explicit (explicit) primary=named-model' "$artifact" ||
+    fail "an explicit model should be recorded as given: $(grep -h '^model-route' "$artifact")"
 }
 
 test_patch_land_completes_only_when_its_records_land() {
@@ -12762,26 +12756,27 @@ test_peer_ask_panel_spans_providers_and_tiers() {
   make_council_stubs "$bin_dir"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex,antigravity \
-    --tiers deep,balanced --prompt "is this safe?" 2>&1)" ||
-    fail "a tiered council should succeed: $out"
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" \
+    --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-terra,antigravity:model=gemini-3.6-flash,antigravity:model=gemini-3.5-flash \
+    --prompt "is this safe?" 2>&1)" ||
+    fail "a model panel council should succeed: $out"
 
   printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
-    fail "two providers at two tiers should be four calls: $out"
-  # Agreement across tiers of one CLI is replication; the count must say how
+    fail "two providers at two models each should be four calls: $out"
+  # Agreement across models of one CLI is replication; the count must say how
   # many independent families actually answered.
   printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||
     fail "the council should report independent families: $out"
 
   # Each target needs its own artifact, or a panel overwrites its own answers.
-  [ -f "$(ls "$project"/.oms/artifacts/ask/codex-deep-*.md 2>/dev/null | head -1)" ] ||
-    fail "the deep codex answer should have its own artifact"
-  [ -f "$(ls "$project"/.oms/artifacts/ask/codex-balanced-*.md 2>/dev/null | head -1)" ] ||
-    fail "the balanced codex answer should have its own artifact"
-  grep -Fq 'class=deep' "$(ls "$project"/.oms/artifacts/ask/codex-deep-*.md | head -1)" ||
-    fail "a target tier should drive that call's route"
-  grep -Fq 'class=balanced' "$(ls "$project"/.oms/artifacts/ask/codex-balanced-*.md | head -1)" ||
-    fail "the balanced target should route balanced"
+  [ -f "$(ls "$project"/.oms/artifacts/ask/codex-gpt-5.6-sol-*.md 2>/dev/null | head -1)" ] ||
+    fail "the sol codex answer should have its own artifact"
+  [ -f "$(ls "$project"/.oms/artifacts/ask/codex-gpt-5.6-terra-*.md 2>/dev/null | head -1)" ] ||
+    fail "the terra codex answer should have its own artifact"
+  grep -Fq 'primary=gpt-5.6-sol' "$(ls "$project"/.oms/artifacts/ask/codex-gpt-5.6-sol-*.md | head -1)" ||
+    fail "a target model should drive that call's route"
+  grep -Fq 'primary=gpt-5.6-terra' "$(ls "$project"/.oms/artifacts/ask/codex-gpt-5.6-terra-*.md | head -1)" ||
+    fail "the terra target should route its own model"
 }
 
 test_peer_ask_panel_warns_on_one_family_and_rejects_repeats() {
@@ -12795,11 +12790,12 @@ test_peer_ask_panel_warns_on_one_family_and_rejects_repeats() {
   make_council_stubs "$bin_dir"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex \
-    --tiers deep,balanced --prompt "is this safe?" 2>&1)" ||
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" \
+    --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-luna \
+    --prompt "is this safe?" 2>&1)" ||
     fail "a single-provider panel should still succeed: $out"
   printf '%s' "$out" | grep -Fq 'families: 1 independent model family(ies) answered' ||
-    fail "one provider at two tiers is one family: $out"
+    fail "one provider at two models is one family: $out"
   printf '%s' "$out" | grep -Fq 'treat agreement as replication, not corroboration' ||
     fail "same-family agreement must be labelled: $out"
 
@@ -12808,14 +12804,16 @@ test_peer_ask_panel_warns_on_one_family_and_rejects_repeats() {
     --prompt x >/dev/null 2>&1; then
     fail "the agy alias must not smuggle in a duplicate target"
   fi
-  if "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex:deep,codex:deep \
+  if "$ROOT/scripts/peer-ask.sh" --repo "$project" \
+    --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-sol \
     --prompt x >/dev/null 2>&1; then
     fail "an exactly repeated target must be refused"
   fi
-  if "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex --tiers huge \
-    --prompt x >/dev/null 2>&1; then
-    fail "an unknown tier must be refused"
-  fi
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex --tiers huge \
+    --prompt x 2>&1)" || fail "deprecated --tiers must still run: $out"
+  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
+    fail "deprecated --tiers must warn: $out"
 }
 
 test_peer_review_panel_reports_families() {
@@ -12830,9 +12828,10 @@ test_peer_review_panel_reports_families() {
   printf 'base\nreviewed change\n' > "$project/file.txt"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/peer-review.sh" --repo "$project" --providers codex,antigravity \
-    --tiers deep,balanced --prompt "review this diff" 2>&1)" ||
-    fail "a tiered review should succeed: $out"
+    "$ROOT/scripts/peer-review.sh" --repo "$project" \
+    --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-terra,antigravity:model=gemini-3.6-flash,antigravity:model=gemini-3.5-flash \
+    --prompt "review this diff" 2>&1)" ||
+    fail "a model-panel review should succeed: $out"
   printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
     fail "the review panel should run every target: $out"
   printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||

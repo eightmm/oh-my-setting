@@ -265,6 +265,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   stage functional-evolution bash tests/functional-evolution-smoke.sh
   [ "$quick_harness" = 0 ] || stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   [ "$quick_models" = 0 ] || stage model-routing bash tests/model-routing-smoke.sh
+  [ "$quick_models" = 0 ] || stage models-surface bash tests/models-smoke.sh
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
@@ -273,6 +274,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage autonomy-failure bash tests/autonomy-failure-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
+  stage models-surface bash tests/models-smoke.sh
   stage model-doctor bash tests/model-doctor-smoke.sh
   stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
   stage update-v04 bash tests/update-v04-smoke.sh

@@ -40,7 +40,7 @@ PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
 plan_brief_file=""
 REPAIR=0
-MODEL_CLASS=auto
+MODEL_CLASS=""
 MODEL_CLASS_EXPLICIT=0
 MODEL=""
 FALLBACK_MODEL=""
@@ -77,11 +77,10 @@ Options:
                        as separate artifacts get ignored; embedded ones get
                        addressed.
   --repo PATH          Git repo to work on. Default: current directory.
-  --model-class CLASS  auto, fast, balanced, or deep. Auto follows the work
-                       phase, then the role; write workers default to balanced.
+  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --no-model-fallback  Disable implicit class fallback.
+  --no-model-fallback  Deprecated compatibility no-op.
   --reasoning-effort E auto, low, medium, or high. Auto follows model class.
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit
@@ -335,7 +334,7 @@ case "$TO" in
   *) fail "unsupported provider: $TO" ;;
 esac
 [ "$TO" = "agy" ] && TO="antigravity"
-oms_model_validate_class "$MODEL_CLASS" || exit $?
+[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -408,7 +407,7 @@ if [ -n "$EXECUTOR_ID" ]; then
     [ -z "$executor_reasoning_effort" ] ||
     [ "$REASONING_EFFORT" = "$executor_reasoning_effort" ] ||
     fail "--reasoning-effort conflicts with executor contract"
-  MODEL_CLASS="${executor_model_class:-auto}"
+  MODEL_CLASS=""
   MODEL="$executor_model"
   FALLBACK_MODEL="$executor_fallback_model"
   NO_MODEL_FALLBACK=1
@@ -498,7 +497,8 @@ if [ -n "$ROLE" ]; then
   echo "role: $ROLE ($role_file)"
 fi
 
-export OMS_MODEL_CLASS_REQUEST="$MODEL_CLASS" OMS_MODEL_EXPLICIT="$MODEL"
+unset OMS_MODEL_CLASS_REQUEST
+export OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 export OMS_REASONING_FALLBACK_EXPLICIT="${executor_fallback_reasoning_effort:-}"
@@ -506,7 +506,7 @@ export OMS_MODEL_ROLE="${ROLE:-${executor_strategy:-}}" OMS_MODEL_OPERATION=dele
 # A role file may declare the tier its work needs; the name table only knows
 # the bundled personas, so a custom role would otherwise fall back to balanced.
 if [ -n "$role_file" ]; then
-  OMS_MODEL_ROLE_CLASS="$(oms_model_class_from_role_file "$role_file" || true)"
+  OMS_MODEL_ROLE_CLASS=""
   export OMS_MODEL_ROLE_CLASS
 fi
 oms_model_prepare "$TO" || exit $?

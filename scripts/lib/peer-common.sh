@@ -295,6 +295,24 @@ ma_write_harness_context() {
 
   tmp="$(agent_memory_mktemp)" || return 0
   {
+    # Cached only: prompt construction must not cause a provider probe. No
+    # cached catalog for any provider means no section, not an empty header.
+    if [ -f "$(dirname "${BASH_SOURCE[0]}")/model-capability.sh" ]; then
+      . "$(dirname "${BASH_SOURCE[0]}")/provider-registry.sh"
+      . "$(dirname "${BASH_SOURCE[0]}")/model-capability.sh"
+      model_lines=""
+      for provider in codex claude antigravity; do
+        models="$(oms_capability_models "$provider" 2>/dev/null | sed -n '1,2p' | tr '\n' ' ' || true)"
+        [ -n "$models" ] || continue
+        model_lines="${model_lines}- $provider: $models
+"
+      done
+      if [ -n "$model_lines" ]; then
+        printf '### available models\n'
+        printf '%s' "$model_lines"
+        printf 'Use --model and --effort on a later call to select explicitly.\n\n'
+      fi
+    fi
     if [ "$include_memory" -eq 1 ]; then
       ma_write_shared_memory_context "$repo" "$recall_query"
     fi
@@ -930,7 +948,7 @@ ma_normalize_provider_list() {
   local raw="$1"
   local entry
   local provider
-  local class
+  local model
   local canonical
   local seen=","
   local output=""
@@ -942,12 +960,12 @@ ma_normalize_provider_list() {
     [ -n "$entry" ] || continue
     ma_target_validate "$entry" || return 2
     provider="$(ma_target_provider "$entry")"
-    class="$(ma_target_class "$entry")"
-    # Canonicalize the agy alias before the duplicate check: the same CLI at
-    # the same tier is one voice however it was spelled. Different tiers of one
-    # provider are allowed — that is the panel — and family accounting is what
-    # keeps their agreement honest.
-    canonical="$provider${class:+:$class}"
+    model="$(ma_target_model "$entry")"
+    # Canonicalize the agy alias before the duplicate check: the same CLI as
+    # the same model is one voice however it was spelled. Different models of
+    # one provider are allowed — that is the panel — and family accounting is
+    # what keeps their agreement honest.
+    canonical="$provider${model:+:model=$model}"
     case "$seen" in
       *",$canonical,"*) echo "error: duplicate target: $canonical" >&2; return 2 ;;
     esac
@@ -1174,21 +1192,21 @@ EOF
 }
 
 # --- Council targets --------------------------------------------------------
-# A target is PROVIDER or PROVIDER:CLASS. Providers alone keep the historical
-# one-model-per-CLI council; a class turns the list into a panel that can ask
-# the same CLI at several tiers. Both consult and the councils split targets
-# here so the notation cannot drift between them.
+# A target is PROVIDER or PROVIDER:model=NAME. Providers alone keep the
+# historical one-model-per-CLI council; an exact model turns the list into a
+# panel that can ask the same CLI as several models. Both consult and the
+# councils split targets here so the notation cannot drift between them.
 ma_target_provider() {
   local provider="${1%%:*}"
   [ "$provider" != agy ] || provider=antigravity
   printf '%s\n' "$provider"
 }
 
-ma_target_class() {
+ma_target_model() {
   local spec="${1#*:}"
   [ "$spec" != "$1" ] || { printf '\n'; return 0; }
   case "$spec" in
-    fast|balanced|deep) printf '%s\n' "$spec" ;;
+    model=?*) printf '%s\n' "${spec#model=}" ;;
     *) printf '\n' ;;
   esac
 }
@@ -1203,47 +1221,32 @@ ma_target_validate() {
   esac
   [ "$spec" = "$1" ] && return 0
   case "$spec" in
-    fast|balanced|deep) ;;
-    *) echo "error: target tier must be fast, balanced, or deep: $1" >&2; return 2 ;;
+    model=?*) ;;
+    *) echo "error: target must be PROVIDER or PROVIDER:model=NAME: $1" >&2; return 2 ;;
   esac
 }
 
+# The second argument may be a model name with spaces or punctuation; the
+# label lands in artifact filenames, so it is slugged.
 ma_target_label() {
-  printf '%s\n' "$(ma_target_provider "$1")${2:+-$2}"
+  local extra="${2:-}"
+  [ -z "$extra" ] || extra="$(printf '%s' "$extra" |
+    tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9.' '-' | sed 's/^-//; s/-$//')"
+  printf '%s\n' "$(ma_target_provider "$1")${extra:+-$extra}"
 }
 
-# Expand a provider list across tiers: "codex,claude" + "deep,balanced" becomes
-# four targets. Without tiers the list passes through unchanged. Expansion is
-# multiplicative and debate rounds multiply it again, so the total is capped:
-# three providers at three tiers with two debate rounds is 27 provider calls,
-# which is not a council, it is a bill.
+# Historically expanded a provider list across tiers; with tiers gone the list
+# passes through unchanged (a panel of one CLI as several models is written as
+# explicit PROVIDER:model=NAME targets). The call budget still applies.
 ma_expand_targets() {
   local providers="$1"
   local tiers="$2"
-  local out=""
-  local provider tier
-  local -a provider_list tier_list
 
-  IFS=',' read -r -a provider_list <<< "$providers"
-  if [ -z "$tiers" ]; then
-    printf '%s\n' "$providers"
-    return 0
+  if [ -n "$tiers" ]; then
+    echo 'warning: model tiers were removed; name models with PROVIDER:model=NAME targets' >&2
   fi
-  IFS=',' read -r -a tier_list <<< "$tiers"
-  for provider in "${provider_list[@]}"; do
-    [ -n "$provider" ] || continue
-    for tier in "${tier_list[@]}"; do
-      tier="$(printf '%s' "$tier" | tr -d '[:space:]')"
-      [ -n "$tier" ] || continue
-      case "$tier" in
-        fast|balanced|deep) ;;
-        *) echo "error: --tiers accepts fast, balanced, or deep: $tier" >&2; return 2 ;;
-      esac
-      out="${out:+$out,}$provider:$tier"
-    done
-  done
-  ma_target_budget_check "$out" || return 2
-  printf '%s\n' "$out"
+  ma_target_budget_check "$providers" || return 2
+  printf '%s\n' "$providers"
 }
 
 # Refuse an expansion whose cost the caller probably did not intend.
@@ -1298,10 +1301,10 @@ run_provider() {
   local started
   local status
   local provider
-  local target_class
+  local target_model
 
   provider="$(ma_target_provider "$target")"
-  target_class="$(ma_target_class "$target")"
+  target_model="$(ma_target_model "$target")"
 
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # A phase the caller declared outranks the tool's own kind: without this the
@@ -1309,11 +1312,11 @@ run_provider() {
   # makes, so a deep question asked through agent-call routes as a plain call.
   OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
   export OMS_MODEL_OPERATION
-  # A target may carry its own tier (codex:deep), so one council can span model
-  # tiers, not just providers. The class applies to this call only.
-  if [ -n "$target_class" ]; then
-    OMS_MODEL_CLASS_REQUEST="$target_class"
-    export OMS_MODEL_CLASS_REQUEST
+  # A target may carry its own model (codex:model=NAME), so one council can
+  # span models, not just providers. The model applies to this call only.
+  if [ -n "$target_model" ]; then
+    OMS_MODEL_EXPLICIT="$target_model"
+    export OMS_MODEL_EXPLICIT
   fi
   oms_model_prepare "$provider" || return $?
 
@@ -1471,7 +1474,7 @@ ma_run_round1() {
     total=$((total + 1))
     # Label the artifact with the tier too, so a panel that asks one CLI twice
     # does not write both answers to the same name.
-    artifact="$ARTIFACT_DIR/$(ma_target_label "$provider" "$(ma_target_class "$provider")")-$slug-$timestamp.md"
+    artifact="$ARTIFACT_DIR/$(ma_target_label "$provider" "$(ma_target_model "$provider")")-$slug-$timestamp.md"
     run_provider "$provider" "$prompt_file" "$artifact" &
     pids+=("$!")
     artifacts+=("$artifact")

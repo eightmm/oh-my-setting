@@ -45,11 +45,11 @@ Options:
   --repo PATH          Repo for context and artifacts. Default: PWD.
   --strategy NAME      Strategy/role profile (default: decision-advisor).
                        Alias: --role NAME.
-  --model-class CLASS  Advisor model class (default: deep).
+  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact advisor model.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --reasoning-effort E auto, low, medium, or high (default: auto/deep=high).
-  --no-model-fallback  Disable implicit class fallback.
+  --reasoning-effort E Explicit effort; default is high, clamped to the model scale.
+  --no-model-fallback  Deprecated compatibility no-op.
   --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
   --memory             Attach shared harness memory.
@@ -238,11 +238,18 @@ summary="$PROMPT"
 # Not exec: the EXIT trap must outlive the call so the composed prompt file
 # exists while agent-call reads it and the tmpdir is still cleaned up after.
 status=0
+has_effort=0
+for option in "${PASSTHROUGH[@]+${PASSTHROUGH[@]}}"; do
+  [ "$option" = --reasoning-effort ] && has_effort=1
+done
+if [ "$has_effort" -eq 0 ]; then
+  PASSTHROUGH+=(--reasoning-effort high)
+  export OMS_REASONING_CLAMP=1
+fi
 bash "$SCRIPT_DIR/agent-call.sh" \
   --to "$TO" \
   --repo "$REPO" \
   --artifact-dir "$REPO/.oms/artifacts/advise" \
-  --model-class deep \
   --prompt-file "$advisor_prompt" \
   ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} || status=$?
 exit "$status"

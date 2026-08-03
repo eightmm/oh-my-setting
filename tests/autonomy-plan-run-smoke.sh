@@ -139,15 +139,16 @@ HOME="$home" CALL_LOG="$call_log" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo
 grep -Fq 'known unchanged plan-run failure' "$TMP/known.err" || fail "known failure guidance missing"
 "$PLAN" --repo "$repo" show --id known | grep -Fq '"state": "ready"' || fail "known-failure refusal stranded claim"
 
-# A changed resolved route is a changed failure hypothesis even when the CLI
-# request remains --model-class auto.
+# A changed resolved route is a changed failure hypothesis; with tiers gone
+# the route changes by naming a different model outright.
 "$PLAN" --repo "$repo" add --id mapped --title mapped --allowed mapped.txt --verify true >/dev/null
 rc=0
 OMS_PLAN_RUN_DELEGATE="$TMP/failing-delegate" HOME="$home" PATH="$bin:/usr/bin:/bin" \
   "$RUN" --repo "$repo" --to codex --id mapped >/dev/null 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "mapped fixture failure should exit 1"
-OMS_MODEL_CODEX_BALANCED=changed-balanced HOME="$home" PATH="$bin:/usr/bin:/bin" \
-  "$RUN" --repo "$repo" --to codex --id mapped --dry-run >"$TMP/mapped.out" 2>"$TMP/mapped.err" ||
+HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id mapped --model changed-model --dry-run \
+  >"$TMP/mapped.out" 2>"$TMP/mapped.err" ||
   fail "changed resolved route should not match the old known failure"
 
 # TERM waits for child cleanup before releasing the exact lease.

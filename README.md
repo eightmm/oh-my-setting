@@ -89,8 +89,8 @@ door per capability; the full catalog is `oms list`, documented in
   that names an advisor after repeats
 - **ML and HPC** — run spine and reproducibility capsules, pre-registered
   hypothesis runs, dataset leakage manifests, Slurm reconcile and GPU queue
-- **Providers and models** — capability probing, fast/balanced/deep tier
-  routing with fallback, family-diversity diagnostics, and content-free native
+- **Providers and models** — cached capability probing, catalog-first explicit
+  model/effort selection with provider-default fallback, family-diversity diagnostics, and content-free native
   activity/token telemetry when providers expose it
 - **Maintenance** — transactional update with rollback, doctor, one full
   verification gate plus a protected-branch quick pre-push mode
