@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from typing import Any, Dict, Optional
@@ -16,6 +19,8 @@ from typing import Any, Dict, Optional
 MAX_INPUT_BYTES = 256 * 1024
 BAR_WIDTH = 10
 RESET = "\033[0m"
+GIT_CACHE_SECONDS = 5.0
+MAX_GIT_OUTPUT_CHARS = 512 * 1024
 
 
 def mapping(value: Any) -> Dict[str, Any]:
@@ -98,6 +103,131 @@ def fallback_input_tokens(context: Dict[str, Any]) -> Optional[float]:
     return sum(present) if present else None
 
 
+def git_cache_path(payload: Dict[str, Any], current_dir: str) -> str:
+    session_id = payload.get("session_id")
+    identity = "%s\0%s" % (
+        session_id if isinstance(session_id, str) else "",
+        os.path.realpath(current_dir),
+    )
+    digest = hashlib.sha256(identity.encode("utf-8", "replace")).hexdigest()[:24]
+    cache_dir = os.environ.get("OMS_HUD_CACHE_DIR", "").strip()
+    if not cache_dir:
+        cache_dir = os.path.join(tempfile.gettempdir(), "oh-my-setting-hud")
+    return os.path.join(cache_dir, "git-%s.json" % digest)
+
+
+def parse_git_status(output: str) -> Dict[str, Any]:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("## "):
+        return {}
+    head = lines[0][3:].strip()
+    for prefix in ("No commits yet on ", "Initial commit on "):
+        if head.startswith(prefix):
+            head = head[len(prefix) :]
+            break
+    if head.startswith("HEAD ") or head == "HEAD":
+        branch = "detached"
+    else:
+        branch = head.split("...", 1)[0].split(" [", 1)[0]
+    branch = safe_text(branch, "", 24)
+    if not branch:
+        return {}
+
+    staged = modified = untracked = 0
+    for line in lines[1:]:
+        if line.startswith("??"):
+            untracked += 1
+            continue
+        if len(line) < 2:
+            continue
+        if line[0] not in (" ", "?", "!"):
+            staged += 1
+        if line[1] not in (" ", "?", "!"):
+            modified += 1
+    return {
+        "branch": branch,
+        "staged": staged,
+        "modified": modified,
+        "untracked": untracked,
+    }
+
+
+def read_git_status(payload: Dict[str, Any], current_dir: Any) -> Dict[str, Any]:
+    if not isinstance(current_dir, str) or not current_dir.strip():
+        return {}
+    cache_path = git_cache_path(payload, current_dir)
+    now = time.time()
+    try:
+        if now - os.path.getmtime(cache_path) <= GIT_CACHE_SECONDS:
+            with open(cache_path, encoding="utf-8") as fh:
+                cached = json.load(fh)
+            return cached if isinstance(cached, dict) else {}
+    except (OSError, ValueError, TypeError):
+        pass
+
+    result: Dict[str, Any] = {}
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--branch",
+                "--untracked-files=normal",
+            ],
+            cwd=current_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+            timeout=2.0,
+            check=False,
+        )
+        if proc.returncode == 0 and len(proc.stdout) <= MAX_GIT_OUTPUT_CHARS:
+            result = parse_git_status(proc.stdout)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    try:
+        cache_dir = os.path.dirname(cache_path)
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".git-", dir=cache_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(result, fh, sort_keys=True)
+                fh.write("\n")
+            os.replace(tmp, cache_path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
+    return result
+
+
+def render_git(payload: Dict[str, Any], current_dir: Any) -> str:
+    state = read_git_status(payload, current_dir)
+    branch = safe_text(state.get("branch"), "", 24)
+    if not branch:
+        return ""
+    text = "git %s" % branch
+    for key, prefix in (("staged", "+"), ("modified", "~"), ("untracked", "?")):
+        value = finite_number(state.get(key), 0.0, 9999.0)
+        if value:
+            text += " %s%d" % (prefix, int(value))
+    return text
+
+
+def truncate_plain(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width]
+    return text[: width - 1].rstrip() + "…"
+
+
 def render(payload: Dict[str, Any], color: bool) -> str:
     # Identity parts and metric parts render as one row when the terminal is
     # wide enough and split into two rows when it is not: Claude Code
@@ -118,9 +248,14 @@ def render(payload: Dict[str, Any], color: bool) -> str:
         parts.append(session_name)
     current_dir = mapping(payload.get("workspace")).get("current_dir")
     if isinstance(current_dir, str) and current_dir.strip():
-        directory = safe_text(os.path.basename(current_dir.rstrip("/")), "", 16)
+        directory = safe_text(re.split(r"[/\\]", current_dir.rstrip("/\\"))[-1], "", 16)
         if directory:
             parts.append(directory)
+    if payload.get("fast_mode") is True:
+        parts.append("fast")
+    git_text = render_git(payload, current_dir)
+    if git_text:
+        parts.append(git_text)
     parts = metrics
 
     context = mapping(payload.get("context_window"))
@@ -189,7 +324,9 @@ def render(payload: Dict[str, Any], color: bool) -> str:
     threshold = int(raw_columns) if raw_columns.isdigit() and int(raw_columns) > 0 else 80
     if len(re.sub(r"\x1b\[[0-9;]*m", "", single)) <= threshold:
         return single
-    return "\n".join((" | ".join(identity), " | ".join(metrics)))
+    return "\n".join(
+        (truncate_plain(" | ".join(identity), threshold), " | ".join(metrics))
+    )
 
 
 def main() -> int:

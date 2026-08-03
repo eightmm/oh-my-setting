@@ -9,27 +9,26 @@ description: >
 
 # Agent Harness
 
-You own scope, admission, final verification, commit, push, release, and
-synthesis. Everything below is reached for from inside a task.
+You own scope, admission, verification, commit, push, release, and synthesis.
 
 ## Find it by what you are about to do
 
-Each row names the authority it takes. A read costs a call; a worktree write is
-isolated and comes back as a reviewable patch; a repo write changes the tree you
-are working in. Do not cross those lines by accident — that is why they are on
-every row rather than grouped by feature.
+Use the table by intent. Authority distinguishes reads, appends, isolated
+worktree writes, and repository writes.
 
 | About to… | Do this | Authority |
 |---|---|---|
-| start or resume and the state is unclear | `oms state --repo .` (`oms init` only for a fresh repo) | read |
+| start or resume and the state is unclear | `oms inbox --repo .`; use `oms state --repo .` for full detail (`oms init` only for a fresh repo) | read |
 | check what is already known, or record what you learned | `oms agent-memory recall "…"`; `append`/`pin` to add | read, append |
+| record a fact derived from checked-in code/docs | `oms agent-memory append --source-file PATH --source-line N --text "…"` | append |
 | catch yourself re-deriving the same fix or procedure | `oms skill-forge add --name NAME` — it becomes a project skill every CLI loads | append |
 | decide, and an outside view would change the next step | `oms consult "question"`; use `oms peer-ask --prompt "…"` for the same question to several peers | read |
 | act irreversibly, or fail the same way twice | `oms fail-ledger check --cmd "…"`, then `oms advise` | read |
 | hand work to another model | `oms peer-delegate --to NAME` (returns a patch) | worktree write |
 | split work so several agents can proceed | `oms agent-plan add`, then `oms plan-run` | worktree write |
 | judge a diff before it goes anywhere | `oms peer-review --gate` | read |
-| ask what the peer calls cost, or how often they verified | `oms artifact-index telemetry` (routes, exits, fallbacks, tokens, wall time) | read |
+| ask what agents cost or how often they verified/delegated | `oms artifact-index telemetry` (routes, outcomes, native activity, tokens, wall time) | read |
+| preserve local staged/unstaged state before a risky edit | `oms checkpoint create --label "…"`; restore is dry-run unless `--apply` | repo write |
 | put a reviewed change into the tree | `oms patch-admit`, then `oms patch-land` | repo write |
 | run one provider pass at a known boundary | `oms agent-run --mode read\|write` | read or worktree write |
 | keep a worker in one persona across calls | `oms agent-role`, `oms agent-executor` | — |
@@ -40,10 +39,9 @@ every row rather than grouped by feature.
 
 ## Lines that do not move
 
-- Keep secrets, private paths, machine/cluster details, raw logs, datasets, and
-  checkpoints out of prompts and shared state.
-- Never write `.oms/` by hand. Reading its files is fine; prefer `--json` where
-  a tool offers it. `oms gc` clears stale state.
+- Keep secrets, private paths, machine details, raw logs/data, and checkpoints
+  out of prompts and shared state.
+- Do not hand-edit `.oms/`; prefer tool JSON. `oms gc` clears stale state.
 - Provider workers are harness children: they cannot delegate again and never
   gain commit or push authority.
 - Advisors are for irreversible or high-risk decisions, repeated failures, and

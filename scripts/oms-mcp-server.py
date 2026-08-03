@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only MCP server over the harness state of one repository.
 
-Exposes the shared state another agent surface needs to resume work — task
-packet, fail-ledger, handoff digests, Work Journal — as MCP tools, so every
+Exposes the shared state another agent surface needs to resume work — the
+prioritized inbox, task packet, fail-ledger, handoff digests, Work Journal — as MCP tools, so every
 MCP client (Claude Code, Codex, Antigravity, IDEs) reads the same state
 without per-CLI hook code. Strictly read-only: each tool maps to a fixed
 read-only subcommand argv; nothing here can write harness state.
@@ -45,6 +45,15 @@ REPO_PROPERTY = {
 }
 
 TOOLS = [
+    {
+        "name": "oms_inbox",
+        "description": (
+            "Prioritized read-only attention queue derived from all shared"
+            " harness state, with one exact next command per item."
+        ),
+        "argv": ["bash", "scripts/inbox.sh", "--json"],
+        "properties": REPO_PROPERTY,
+    },
     {
         "name": "oms_task_state",
         "description": (

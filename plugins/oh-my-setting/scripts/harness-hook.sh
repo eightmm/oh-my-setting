@@ -2,7 +2,7 @@
 set -euo pipefail
 
 tool="${1:-}"
-case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook) ;; *) exit 0 ;; esac
+case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook|telemetry-hook) ;; *) exit 0 ;; esac
 payload="$(cat)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "${CLAUDE_PLUGIN_ROOT:-$SCRIPT_DIR/..}" 2>/dev/null && pwd || printf '%s\n' "$SCRIPT_DIR/..")"

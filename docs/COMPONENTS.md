@@ -338,7 +338,11 @@ high-water retention, and grace-protected orphan pruning keep the index bounded
 and repairable. `telemetry [N]` (`--json`) groups the retained window by
 provider/model route and reports recorded exits, verifier exits, fallbacks,
 resolutions, and only the token/duration values recoverable from existing
-artifacts. Coverage is explicit: an exit zero is not called semantic task
+artifacts. The same report joins content-free native hook activity (hashed
+session identity, turns, tool/subagent counts, and provider-exposed usage),
+never prompts, commands, arguments, or output. Usage is labeled as a
+per-session maximum because provider hooks differ between cumulative and delta
+counters. Coverage is explicit: an exit zero is not called semantic task
 success, and rows outside the retained window cannot be inferred
 
 **Safety rails (built-in)** — Outbound prompts are scrubbed before any external
@@ -387,6 +391,22 @@ and change-guard status; `--json` for machines, `oms state` alias. Hand-written
 agent rules are reported as `unmanaged` instead of prompting for a template.
 Pure query except opt-in `--refresh-ci`
 
+**Attention inbox (`inbox.sh`, `oms inbox`)** — A compact priority queue
+derived from `oms state`: expired plan leases, stale/red CI, unresolved
+artifacts and failures, abandoned reviews/guards/landings, then open threads.
+Every item carries one exact next command. The default and MCP surface are
+read-only; `--fix-safe` may only reclaim expired claimed leases and refresh a
+stale CI receipt, then re-reads state. It never resolves, deletes, or judges
+work on the agent's behalf
+
+**Tracked-state checkpoints (`checkpoint.sh`, `oms checkpoint`)** — Local
+snapshots under `.oms/checkpoints/` keep `HEAD -> index` and `index ->
+worktree` binary patches separate, preserving which tracked changes were
+staged. `verify` proves hashes and applicability in a temporary detached
+worktree. `restore` is a dry-run unless `--apply`; an applied restore requires
+the same HEAD, creates a mandatory recovery checkpoint, avoids reset/checkout,
+and leaves all untracked files untouched
+
 **Failure ledger (`fail-ledger.sh`)** — Durable cross-session failure memory in
 `.oms/failures.jsonl`: `record` a failed command by normalized fingerprint plus
 a content-free git-state hash; `check` blocks the unchanged failure but permits
@@ -419,8 +439,8 @@ project type and to what the repo already has — missing or half-applied projec
 rules outrank task/plan advice. Reports missing rules, never writes them: the
 template needs a confirmed project type (`--no-private` skips the hiding)
 
-**Skill router + turn guard + Claude HUD (`skill-router.sh`, `turn-guard.sh`,
-`claude-statusline.py`)** —
+**Skill router + turn guard + provider HUDs (`skill-router.sh`, `turn-guard.sh`,
+`claude-statusline.py`, `claude-subagent-statusline.py`)** —
 UserPromptSubmit matches prompts against skill triggers and records route state
 only for guarded work. Active-task recording is opt-in with `OMS_AUTO_TASK=1`.
 Provider subprocesses stay silent, do not route/guard/write tasks, and emit
@@ -428,23 +448,41 @@ only a hash-only `ignored_child` event in the primary repo. Stop blocks at most
 once when guarded work omits verification. Disable with
 `OMS_SKILL_ROUTER_OFF=1` or `OMS_TURN_GUARD_OFF=1`. Claude Code's official
 `statusLine` input feeds a local, dependency-free HUD with model, context,
-subscriber rate-limit windows when present, estimated cost, and effort. The
-renderer ignores transcript/path fields, bounds terminal output, strips control
-characters, and makes no API call. The additive settings merge preserves a
-user-owned status line; update and uninstall recognize only the managed
-command. `install-claude-hooks.sh` also registers the `PreCompact`
-handoff-snapshot hook, and `doctor.sh` verifies all four hook registrations
-plus the HUD actually landed in `settings.json` whenever the install receipt
-is valid — the installer treats registration failure as a warning, so the
-doctor is what catches a silently hook-less install
+subscriber rate-limit windows when present, estimated cost, effort, fast mode,
+and Git branch/change counts. Git is the only subprocess and is bounded by a
+two-second timeout plus a per-session five-second cache; rendering makes no API
+call and consumes no model tokens. `subagentStatusLine` adds one bounded row per
+visible worker with its label, resolved model/effort, context use, elapsed time,
+and status; descriptions and paths are not rendered. The additive settings
+merge preserves either user-owned HUD independently, and update/uninstall remove
+only managed commands. Codex uses its native `tui.status_line` rather than a
+script (`model-with-reasoning`, remaining context, 5-hour/weekly limits, Git
+branch). `install-codex-plugin.sh` adds a marked entry only when no user setting
+exists, backs up the file once, and removes only an unchanged managed entry.
+Antigravity currently has no equivalent footer surface.
+`install-claude-hooks.sh` also registers the `PreCompact`
+handoff-snapshot hook and four lifecycle telemetry events
+(`SessionStart`, `PostToolUse`, `SubagentStop`, `SessionEnd`). Telemetry is
+fail-open, skips harness children, and stores only bounded identifiers,
+hashes, counters, timings, and usage (`OMS_TELEMETRY_HOOK=0` opts out).
+`doctor.sh` verifies all eight hook registrations plus both Claude HUDs and the
+Codex footer actually landed whenever the install receipt is valid — the installer
+treats registration failure as a warning, so the doctor is what catches a
+silently hook-less install
 
 
 **Shared memory (`agent-memory.sh`)** — Compact cross-agent facts in
 `.oms/memory/`; append-only `shared.md`/`pins.md` remain the reversible source
 of truth while `memory.sqlite3` is an automatically synchronized derived index.
 New project notes retain a stable event ID, kind, task/session hashes, Git
-HEAD, dirty bit, and bounded state fingerprint without storing a branch, path,
-command, or raw diff; compact prompts omit that provenance and
+HEAD, dirty bit, and bounded state fingerprint without storing a branch,
+command, or raw diff. An append may explicitly cite a repository-relative
+tracked file and line; only that source path, committed blob oid, and exact
+line hash are added. Cited notes are excluded from compact prompts and are
+returned only after validating current `HEAD`: an unchanged line is `valid`, a
+uniquely relocated line is `moved`, and a changed/missing/ambiguous line is
+omitted unless `--include-stale` is requested for audit. Compact prompts omit
+all provenance and
 `search`/`recall --json` exposes it on demand. `search` preserves exact
 case-insensitive substring recall, `recall` ranks local FTS results without a
 model call, and `rebuild` recovers the index from Markdown. The index takes
@@ -483,8 +521,9 @@ keeping execution contracts consistent across surfaces
 
 **Harness-state MCP server (`oms-mcp-server.py`, `install-mcp.sh`,
 `install-agy-plugin.sh`)** — Read-only MCP tools over one repository's shared
-state: `oms_task_state`, `oms_fail_ledger`, `oms_handoffs`/`oms_handoff_show`,
-and `oms_journal`. One stdlib stdio server serves every MCP client the same
+state: `oms_inbox`, `oms_task_state`, `oms_fail_ledger`,
+`oms_handoffs`/`oms_handoff_show`, and `oms_journal`. One stdlib stdio server
+serves every MCP client the same
 state with no per-CLI hook code — which is also how Antigravity, whose CLI
 fires no hook events headlessly, reads journal/handoff/fail-ledger context.
 Claude Code and Codex register it directly (`install-mcp.sh`, idempotent,
@@ -640,11 +679,13 @@ overwrite by default, provenance appended to `.oms/code-sources.jsonl`
 
 **Retention GC (`gc.sh`, `oms gc`)** — `--dry-run` by default; reclaims aged
 transient state (orphaned delegation markers, archived task packets, aged
-handoff digests, stale open runs, closed capsules, abandoned guards,
-draft/done/failed executors, resolved failures) and delegates artifacts to
-`artifact-index prune`; never touches
-frozen/running executors, live runs, the active task, unresolved failures,
-review tasks, or the append-only board
+handoff digests, stale open runs, closed capsules, local tracked-state
+checkpoints, old hook events/session files, abandoned guards, draft/done/failed
+executors, resolved failures) and delegates artifacts to `artifact-index
+prune`; never touches frozen/running executors, live runs, the active task,
+unresolved failures, review tasks, or the append-only board. Hook event
+compaction preserves invalid/unparseable rows
+for diagnosis and replaces the file atomically under its writer lock
 
 **Verification gate (`check.sh`, `check-bash32.sh`, `check-python.sh`,
 `pre-push-check.sh`, `install-hooks.sh`)** — One command runs the core checks
@@ -677,7 +718,10 @@ fall back to the full local gate.
 current branch and exits nonzero on a failed run, so a red push can't go
 unnoticed; `record` appends the conclusion to `.oms/ci.jsonl` (deduped by sha)
 so a later session / `oms state` sees "CI failed on <sha>" instead of the
-result vanishing
+result vanishing. `tick` is a fail-open boundary observer used by prompt and
+allowed Stop hooks only for GitHub-backed adopted repos: a completed current
+SHA is a local no-op, unresolved lookups are throttled, the network subprocess
+has a two-second default budget, and concurrent hooks skip instead of queuing
 
 **Provider permissions (`provider-permissions.sh`,
 `oms provider-permissions`)** — The one setup step that used to live in a

@@ -23,8 +23,9 @@ Antigravity, Node (via nvm), uv, GitHub CLI, and Notion CLI. Nothing needs
 root; add `--no-tools` on a machine that cannot have them. In an interactive
 terminal the installer delegates browser login to `gh auth login` and
 `ntn login` and discovers the Work Journal's Notion target; a non-interactive
-install prints the follow-up commands and continues. Claude Code also gets a
-local status-line HUD (context, plan usage with reset countdowns, cost).
+install prints the follow-up commands and continues. Claude Code gets compact
+main and subagent HUDs (model/effort, context, rate-limit countdowns, cost, Git
+state); Codex gets the equivalent native footer when it has no user footer.
 
 | Host | Needs | Managed files |
 |---|---|---|
@@ -82,13 +83,15 @@ door per capability; the full catalog is `oms list`, documented in
   one mutation boundary, hash-frozen executor souls and worker-authority
   fingerprints
 - **Agent state and handoff** — Work Journal with daily summaries and an
-  optional Notion mirror, pre-compaction session handoffs, shared memory,
-  task packets with executed verification, a failure ledger that names an
-  advisor after repeats
+  optional Notion mirror, a prioritized attention inbox, pre-compaction
+  handoffs, source-validated shared memory, reversible tracked-state
+  checkpoints, task packets with executed verification, and a failure ledger
+  that names an advisor after repeats
 - **ML and HPC** — run spine and reproducibility capsules, pre-registered
   hypothesis runs, dataset leakage manifests, Slurm reconcile and GPU queue
 - **Providers and models** — capability probing, fast/balanced/deep tier
-  routing with fallback, family-diversity diagnostics
+  routing with fallback, family-diversity diagnostics, and content-free native
+  activity/token telemetry when providers expose it
 - **Maintenance** — transactional update with rollback, doctor, one full
   verification gate plus a protected-branch quick pre-push mode
 

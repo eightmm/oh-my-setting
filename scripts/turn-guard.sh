@@ -43,4 +43,13 @@ git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || exit 0
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
 work_journal_finish "$repo"
+
+# A push near the end of a turn may not have a result yet. One bounded tick
+# records it if already available; otherwise the next prompt retries after the
+# throttle window. Never delay or fail Stop beyond the tick's own small budget.
+if [ "${OMS_CI_TICK:-1}" = 1 ] &&
+  git -C "$repo" remote get-url origin 2>/dev/null | grep -Eq 'github\.com[:/]'; then
+  (cd "$repo" && OMS_CI_TICK_QUIET=1 \
+    bash "$ROOT/scripts/ci-status.sh" tick) >/dev/null 2>&1 || true
+fi
 exit 0

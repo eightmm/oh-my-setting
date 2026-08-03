@@ -120,6 +120,8 @@ agent_memory_db_command() {
   local memory_file="$1"
   local command_name="$2"
   local db_file
+  local repo=""
+  local repo_args=()
   shift 2
 
   command -v python3 >/dev/null 2>&1 || {
@@ -131,12 +133,17 @@ agent_memory_db_command() {
     return 2
   }
   db_file="$(agent_memory_db_file "$memory_file")"
+  repo="$(agent_memory_repo_for_file "$memory_file" 2>/dev/null || true)"
+  if [ -n "$repo" ]; then
+    repo_args=(--repo "$repo")
+  fi
   agent_memory_ensure_oms_ignore_for_path "$db_file"
   python3 "$AGENT_MEMORY_DB_HELPER" "$command_name" \
     --db "$db_file" \
     --shared "$memory_file" \
     --pins "$(agent_memory_pins_file "$memory_file")" \
     --failures "$(agent_memory_failures_file "$memory_file")" \
+    "${repo_args[@]}" \
     "$@"
 }
 
@@ -331,12 +338,15 @@ agent_memory_new_event_id() {
 }
 
 # Capture provenance before taking the append lock. Only bounded identifiers
-# and hashes are persisted: no diff, file path, command, or branch name enters
-# memory or provider context.
+# and hashes are persisted by default: no diff, command, or branch name enters
+# memory or provider context. A user-requested source citation is the one
+# exception: its repository-relative tracked path and exact line hash remain in
+# the source log, but cited notes are excluded from compact provider context.
 agent_memory_write_metadata() {
   local memory_file="$1"
   local kind="$2"
   local output="$3"
+  local citation_file="${4:-}"
   local repo=""
   local task_file=""
   local task_id="${OMS_TASK_ID:-}"
@@ -376,7 +386,65 @@ agent_memory_write_metadata() {
     printf 'git_sha: %s\n' "$git_sha"
     printf 'git_dirty: %s\n' "$git_dirty"
     printf 'git_state: %s\n' "$git_state"
+    if [ -n "$citation_file" ] && [ -s "$citation_file" ]; then
+      cat "$citation_file"
+    fi
     printf -- '-->\n'
+  } > "$output"
+}
+
+# Resolve one citation against the committed tree. Working-tree content is not
+# accepted as evidence: the stable blob oid and exact line bytes must be
+# reproducible on another checkout of the same commit.
+agent_memory_write_source_citation() {
+  local repo="$1"
+  local source_file="$2"
+  local source_line="$3"
+  local output="$4"
+  local source_path=""
+  local blob_oid=""
+  local line_hash=""
+
+  [ -n "$source_file" ] && [ -n "$source_line" ] || return 0
+  repo="$(oms_repo_root "$repo")" || return 1
+  case "$source_file" in
+    *$'\n'*|*$'\r'*)
+      echo "error: citation paths cannot contain newlines" >&2
+      return 2
+      ;;
+  esac
+  # Disable Git's default C-style quoting so spaces and non-ASCII repository
+  # paths remain the exact tree path consumed by rev-parse/show below.
+  source_path="$(git -C "$repo" -c core.quotePath=false \
+    ls-files --full-name --error-unmatch -- "$source_file" 2>/dev/null || true)"
+  source_path="$(printf '%s' "$source_path" | tr -d '\r')"
+  [ -n "$source_path" ] && [ "$(printf '%s\n' "$source_path" | wc -l | tr -d ' ')" -eq 1 ] || {
+    echo "error: citation source must be one tracked file in the current project: $source_file" >&2
+    return 2
+  }
+  blob_oid="$(git -C "$repo" rev-parse "HEAD:$source_path" 2>/dev/null || true)"
+  blob_oid="$(printf '%s' "$blob_oid" | tr -d '\r')"
+  [ -n "$blob_oid" ] && [ "$(git -C "$repo" cat-file -t "$blob_oid" 2>/dev/null || true)" = blob ] || {
+    echo "error: citation source is not a committed file at HEAD: $source_path" >&2
+    return 2
+  }
+  line_hash="$(git -C "$repo" show "HEAD:$source_path" | python3 -c '
+import hashlib, sys
+line = int(sys.argv[1])
+rows = sys.stdin.buffer.read().splitlines()
+if line < 1 or line > len(rows):
+    raise SystemExit(3)
+sys.stdout.write(hashlib.sha256(rows[line - 1]).hexdigest())
+' "$source_line")" || {
+    echo "error: citation line $source_line does not exist in HEAD:$source_path" >&2
+    return 2
+  }
+  line_hash="$(printf '%s' "$line_hash" | tr -d '\r')"
+  {
+    printf 'source_path: %s\n' "$source_path"
+    printf 'source_line: %s\n' "$source_line"
+    printf 'source_line_sha256: %s\n' "$line_hash"
+    printf 'source_blob_oid: %s\n' "$blob_oid"
   } > "$output"
 }
 
@@ -484,13 +552,32 @@ agent_memory_refresh_summary() {
   tmp="$(agent_memory_mktemp_beside "$summary_file")" || return 1
 
   awk -v max_chars="$chars" '
+    $0 == "<!-- oms-memory" {
+      in_metadata=1
+      pending_cited=0
+      next
+    }
+    in_metadata {
+      if ($0 == "-->") {
+        in_metadata=0
+      } else if ($0 ~ /^source_path:[[:space:]]*[^[:space:]]/) {
+        pending_cited=1
+      }
+      next
+    }
     /^## / {
       current=$0
       sub(/^## /, "", current)
       captured=0
+      cited=pending_cited
+      pending_cited=0
       next
     }
     current != "" && captured == 0 && NF {
+      if (cited) {
+        captured=1
+        next
+      }
       line=$0
       gsub(/[[:space:]]+/, " ", line)
       if (length(line) > max_chars) {
@@ -533,8 +620,12 @@ agent_memory_append_file() {
   local agent="$3"
   local note_file="$4"
   local kind="${5:-note}"
+  local source_file="${6:-}"
+  local source_line="${7:-}"
   local occurred_at
   local metadata_file
+  local citation_file=""
+  local repo=""
 
   if agent_memory_file_has_sensitive_content "$note_file"; then
     echo "error: memory note contains sensitive-looking content; not appended" >&2
@@ -547,10 +638,33 @@ agent_memory_append_file() {
 
   occurred_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   metadata_file="$(agent_memory_mktemp)" || return 1
-  if ! agent_memory_write_metadata "$memory_file" "$kind" "$metadata_file"; then
+  if [ -n "$source_file" ] || [ -n "$source_line" ]; then
+    [ -n "$source_file" ] && [ -n "$source_line" ] || {
+      echo "error: citation source file and line must be provided together" >&2
+      rm -f "$metadata_file"
+      return 2
+    }
+    repo="$(agent_memory_repo_for_file "$memory_file" 2>/dev/null || true)"
+    [ -n "$repo" ] || {
+      echo "error: source citations require project memory under REPO/.oms/memory" >&2
+      rm -f "$metadata_file"
+      return 2
+    }
+    citation_file="$(agent_memory_mktemp)" || {
+      rm -f "$metadata_file"
+      return 1
+    }
+    if ! agent_memory_write_source_citation "$repo" "$source_file" "$source_line" "$citation_file"; then
+      rm -f "$metadata_file" "$citation_file"
+      return 2
+    fi
+  fi
+  if ! agent_memory_write_metadata "$memory_file" "$kind" "$metadata_file" "$citation_file"; then
     rm -f "$metadata_file"
+    [ -z "$citation_file" ] || rm -f "$citation_file"
     return 1
   fi
+  [ -z "$citation_file" ] || rm -f "$citation_file"
   if ! oms_with_file_lock "$memory_file" agent_memory_append_file_unlocked \
     "$memory_file" "$scope" "$agent" "$note_file" "$occurred_at" "$metadata_file"; then
     rm -f "$metadata_file"

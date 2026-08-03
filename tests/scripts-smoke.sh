@@ -4738,7 +4738,7 @@ import os
 
 report = json.loads(os.environ["OMS_ARTIFACT_TELEMETRY_JSON"])
 assert report["schema"] == 1 and report["action"] == "telemetry", report
-assert report["semantic_outcome"] == "unavailable", report
+assert report["semantic_outcome"] == "mechanical-only", report
 assert report["window"]["scope"] == "retained-index-window", report
 assert report["window"]["available_rows"] == 6, report
 assert report["window"]["selected_rows"] == 6, report
@@ -4750,6 +4750,9 @@ assert report["recorded_exit"] == {
 }, report
 assert report["verification"] == {
     "recorded": 1, "zero": 0, "nonzero": 1, "unavailable": 1
+}, report
+assert report["outcomes"] == {
+    "verified_success": 0, "verified_failure": 1, "unknown": 1
 }, report
 assert report["fallback"]["used"] == 1, report
 assert report["fallback"]["not_used"] == 1, report
@@ -4763,6 +4766,7 @@ assert report["coverage"] == {
     "artifact_files": 2,
     "duration_reports": 2,
     "token_reports": 2,
+    "verification_reports": 1,
 }, report
 assert report["usage"]["provider_reported_tokens"] == {
     "reports": 2, "total": 4200
@@ -4786,8 +4790,8 @@ PY
   human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
   printf '%s' "$human" | grep -Fq 'retained window: 6/6 row(s)' ||
     fail "human telemetry should disclose its retained window: $human"
-  printf '%s' "$human" | grep -Fq 'semantic outcome: unavailable' ||
-    fail "human telemetry must not call exit zero task success: $human"
+  printf '%s' "$human" | grep -Fq 'semantic outcome: mechanical-only' ||
+    fail "human telemetry must distinguish mechanical verification from task success: $human"
   printf '%s' "$human" | grep -Fq 'provider-reported tokens: total=4200 reports=2' ||
     fail "human telemetry should expose the measured token subtotal: $human"
 }
@@ -10614,6 +10618,7 @@ test_turn_guard_allows_verified_task() {
 
 test_claude_hud_renders_usage_safely() {
   local hud="$ROOT/scripts/claude-statusline.py"
+  local git_repo="$TMP/claude-hud-git"
   local out
 
   local full_payload='{"model":{"display_name":"Opus 4.1"},"session_name":"release-run","workspace":{"current_dir":"/x/myrepo"},"context_window":{"used_percentage":62.5,"total_input_tokens":124500,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1000007100},"seven_day":{"used_percentage":41.2,"resets_at":1000277200}},"cost":{"total_cost_usd":0.1234},"effort":{"level":"high"},"thinking":{"enabled":true}}'
@@ -10654,6 +10659,63 @@ assert "\x1b" not in row and "\n" not in row and "\r" not in row
 assert "100%" in row
 assert len(row) <= 160
 PY
+
+  make_committed_repo "$git_repo"
+  git -C "$git_repo" checkout -qb hud-test
+  printf 'staged\n' >> "$git_repo/file.txt"
+  git -C "$git_repo" add file.txt
+  printf 'unstaged\n' >> "$git_repo/file.txt"
+  printf 'new\n' > "$git_repo/new.txt"
+  out="$(printf '{"model":{},"session_id":"hud-git","workspace":{"current_dir":"%s"},"fast_mode":true,"context_window":{}}' "$git_repo" |
+    NO_COLOR=1 COLUMNS=200 OMS_HUD_CACHE_DIR="$TMP/hud-cache" python3 "$hud")"
+  [ "$out" = 'Claude | claude-hud-git | fast | git hud-test +1 ~1 ?1 | ctx --' ] ||
+    fail "Claude HUD git/fast rendering mismatch: $out"
+  out="$(printf '{"model":{},"session_id":"hud-git","workspace":{"current_dir":"%s"},"fast_mode":true,"context_window":{}}' "$git_repo" |
+    NO_COLOR=1 COLUMNS=40 OMS_HUD_CACHE_DIR="$TMP/hud-cache" python3 "$hud")"
+  python3 - "$out" <<'PY' || fail "Claude HUD narrow Git rendering is not bounded: $out"
+import sys
+
+lines = sys.argv[1].splitlines()
+assert len(lines) == 2 and all(len(line) <= 40 for line in lines), lines
+assert "fast" in lines[0] and lines[0].endswith("…"), lines
+PY
+}
+
+test_claude_subagent_hud_renders_bounded_rows() {
+  local hud="$ROOT/scripts/claude-subagent-statusline.py"
+  local out
+  local payload='{"columns":120,"tasks":[{"id":"task-1","name":"reviewer","type":"Explore","status":"running","label":"diff review","startTime":999999900000,"model":"claude-sonnet-4-5-20250929","effort":"high","contextWindowSize":200000,"tokenCount":34567},{"id":"task-2","name":"tester","status":"completed","startTime":999999970,"model":"claude-haiku-4-5","tokenCount":900}]}'
+
+  out="$(printf '%s' "$payload" | OMS_HUD_NOW=1000000000 python3 "$hud")"
+  python3 - "$out" <<'PY' || fail "Claude subagent HUD rendering mismatch: $out"
+import json, sys
+
+rows = [json.loads(line) for line in sys.argv[1].splitlines()]
+assert rows == [
+    {
+        "id": "task-1",
+        "content": "diff review | sonnet-4-5/high | ctx 35k/200k 17% | 1m40s | running",
+    },
+    {
+        "id": "task-2",
+        "content": "tester | haiku-4-5 | ctx 900 | 30s | done",
+    },
+], rows
+PY
+
+  out="$(printf '%s' '{"columns":32,"tasks":[{"id":"safe","name":"Bad\u001b[31m\nName that is deliberately long","status":"errored","description":"must never leak"},{"id":"bad\nrow","name":"skip"}]}' | python3 "$hud")"
+  python3 - "$out" <<'PY' || fail "Claude subagent HUD emitted unsafe or unbounded rows: $out"
+import json, sys
+
+rows = [json.loads(line) for line in sys.argv[1].splitlines()]
+assert len(rows) == 1 and rows[0]["id"] == "safe", rows
+content = rows[0]["content"]
+assert "\x1b" not in content and "\n" not in content and "description" not in content
+assert len(content) <= 32 and "…" in content, content
+PY
+
+  out="$(printf '{broken' | python3 "$hud")"
+  [ -z "$out" ] || fail "Claude subagent HUD should fail quiet on invalid JSON: $out"
 }
 
 test_install_claude_hooks_merge_and_remove() {
@@ -10686,15 +10748,28 @@ precompact = d["hooks"]["PreCompact"]
 assert len(precompact) == 1, precompact
 assert "precompact-handoff.sh" in precompact[0]["hooks"][0]["command"]
 assert precompact[0]["hooks"][0]["timeout"] == 30
-resume = d["hooks"]["SessionStart"]
-assert len(resume) == 1, resume
-assert "resume-hook.sh" in resume[0]["hooks"][0]["command"]
+resume = [
+    entry for entry in d["hooks"]["SessionStart"]
+    if "resume-hook.sh" in entry["hooks"][0]["command"]
+]
+assert len(resume) == 1, d["hooks"]["SessionStart"]
 assert resume[0]["hooks"][0]["timeout"] == 10
+for event in ("SessionStart", "PostToolUse", "SubagentStop", "SessionEnd"):
+    telemetry = [
+        entry for entry in d["hooks"][event]
+        if "telemetry-hook.sh" in entry["hooks"][0]["command"]
+    ]
+    assert len(telemetry) == 1, (event, d["hooks"][event])
+    hook = telemetry[0]["hooks"][0]
+    assert hook["timeout"] == 5, (event, hook)
 assert any("user-router" in c for c in cmds)
 assert d["model"] == "x"
 status = d["statusLine"]
 assert status["type"] == "command"
 assert "claude-statusline.py" in status["command"]
+subagent = d["subagentStatusLine"]
+assert subagent["type"] == "command"
+assert "claude-subagent-statusline.py" in subagent["command"]
 PY
   [ -f "$s.oms-bak" ] || fail "installer should back up settings before the first change"
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
@@ -10706,8 +10781,10 @@ assert len(ups) == 1 and "user-router" in ups[0]["hooks"][0]["command"]
 assert "Stop" not in d["hooks"]
 assert "PostToolUseFailure" not in d["hooks"]
 assert "PreCompact" not in d["hooks"]
-assert "SessionStart" not in d["hooks"]
+for event in ("SessionStart", "PostToolUse", "SubagentStop", "SessionEnd"):
+    assert event not in d["hooks"], (event, d["hooks"])
 assert "statusLine" not in d
+assert "subagentStatusLine" not in d
 PY
   # A status line the user already owns must survive install and remove.
   python3 - "$s" <<'PY'
@@ -10716,7 +10793,11 @@ path = sys.argv[1]
 d = json.load(open(path))
 d["statusLine"] = {
     "type": "command",
-    "command": "python3 /tmp/claude-statusline.py --custom",
+    "command": "python3 /tmp/claude-statusline.py",
+}
+d["subagentStatusLine"] = {
+    "type": "command",
+    "command": "python3 /tmp/claude-subagent-statusline.py",
 }
 json.dump(d, open(path, "w"))
 PY
@@ -10727,7 +10808,11 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["statusLine"] == {
     "type": "command",
-    "command": "python3 /tmp/claude-statusline.py --custom",
+    "command": "python3 /tmp/claude-statusline.py",
+}
+assert d["subagentStatusLine"] == {
+    "type": "command",
+    "command": "python3 /tmp/claude-subagent-statusline.py",
 }
 PY
   # Broken settings must refuse loudly, not clobber.
@@ -10870,8 +10955,13 @@ test_install_codex_plugin_registers_marketplace() {
   local d="$TMP/codex-plugin"
   local bin="$d/bin"
   local log="$d/codex.log"
+  local codex_home="$d/codex-home"
 
-  mkdir -p "$bin"
+  mkdir -p "$bin" "$codex_home"
+  cat > "$codex_home/config.toml" <<'EOF'
+[tui]
+animations = true
+EOF
   cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CODEX_LOG"
@@ -10882,15 +10972,49 @@ exit 0
 EOF
   chmod +x "$bin/codex"
 
-  CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
   assert_file_contains "$log" "plugin marketplace list"
   assert_file_contains "$log" "plugin marketplace add $ROOT"
   assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
+  assert_file_contains "$codex_home/config.toml" '# >>> oh-my-setting managed Codex HUD >>>'
+  assert_file_contains "$codex_home/config.toml" 'status_line = ["model-with-reasoning", "context-remaining", "five-hour-limit", "weekly-limit", "git-branch"]'
+  assert_file_contains "$codex_home/config.toml.oms-bak" 'animations = true'
+  python3 - "$codex_home/config.toml" <<'PY' || fail "Codex HUD config should remain valid TOML"
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(0)
+with open(sys.argv[1], "rb") as fh:
+    row = tomllib.load(fh)
+assert row["tui"]["animations"] is True
+assert row["tui"]["status_line"][-1] == "git-branch"
+PY
 
   : > "$log"
-  CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
   assert_file_contains "$log" "plugin remove oh-my-setting@oh-my-setting-local"
   assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
+  if grep -Fq 'status_line' "$codex_home/config.toml"; then
+    fail "Codex plugin removal left the managed HUD"
+  fi
+  assert_file_contains "$codex_home/config.toml" 'animations = true'
+
+  cat > "$codex_home/config.toml" <<'EOF'
+[tui]
+status_line = ["model", "current-dir"]
+EOF
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
+  assert_file_contains "$codex_home/config.toml" 'status_line = ["model", "current-dir"]'
+  if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
+    fail "Codex installer should preserve a user-owned status line"
+  fi
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
+  assert_file_contains "$codex_home/config.toml" 'status_line = ["model", "current-dir"]'
 }
 
 test_codex_plugin_has_no_vague_default_prompt() {
@@ -10976,6 +11100,7 @@ EOF
     fail "doctor --repair should refresh an installed plugin in auto mode"
   assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
   assert_file_contains "$d/out" "ok: codex plugin oh-my-setting (cache parity)"
+  assert_file_contains "$d/out" "ok: codex HUD configured (managed)"
   assert_not_exists "$cache/stale.txt"
 }
 
@@ -14040,6 +14165,7 @@ check-python
 connect-services
 detect-project-style
 fail-ledger-hook
+telemetry-hook
 install-agy-plugin
 install-claude-hooks
 install-codex-plugin

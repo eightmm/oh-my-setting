@@ -12,6 +12,7 @@ oms agent-memory --repo . search --text pgvector
 oms agent-memory --repo . --json search --text pgvector
 oms agent-memory --repo . recall --text "database migration"
 oms agent-memory --repo . append --agent codex --text "Run the focused check first."
+oms agent-memory --repo . append --source-file src/policy.py --source-line 42 --text "This invariant is enforced here."
 oms agent-memory --repo . pin --agent codex --text "Current migration boundary: v2."
 ```
 
@@ -57,6 +58,25 @@ Use a change guard only when user edits or scope drift are plausible:
 oms change-guard --repo . --allow scripts/ begin
 oms change-guard --repo . check
 oms change-guard --repo . end
+```
+
+At resume, prefer the ranked read-only queue over manually inspecting every
+state family. Its optional repair mode is deliberately narrow.
+
+```bash
+oms inbox --repo .
+oms inbox --repo . --fix-safe
+```
+
+Before a risky local refactor, preserve tracked staged and unstaged state. A
+restore first verifies in a temporary worktree, defaults to dry-run, requires
+the same HEAD, and creates an automatic recovery checkpoint when applied.
+
+```bash
+oms checkpoint create --label "before parser rewrite"
+oms checkpoint verify <id>
+oms checkpoint restore <id>          # dry-run
+oms checkpoint restore <id> --apply
 ```
 
 The skill router emits hints and records guarded routes. Disable it with
@@ -106,8 +126,12 @@ embedding model.
 
 New project-memory entries carry hidden, append-only provenance: a stable event
 ID, note kind, active task/session hashes, current Git HEAD, dirty state, and a
-bounded Git-state fingerprint. No branch name, path, command, or raw diff is
-stored. Compact provider context omits this metadata; add `--json` to `search`
-or `recall` when a machine-readable result needs it. Legacy notes receive stable
-derived IDs on indexing. Use `oms run timeline` for the full project event
-timeline instead of copying every commit or tool event into durable memory.
+bounded Git-state fingerprint. No branch name, command, or raw diff is stored.
+The explicit `--source-file/--source-line` mode is the narrow path exception:
+it records a tracked repository-relative path, committed blob oid, and exact
+line hash. Such notes never enter compact context; `search`/`recall` validates
+them against current `HEAD`, follows a uniquely moved line, and hides stale
+facts unless `--include-stale` is requested for audit. Add `--json` for the
+machine-readable citation verdict. Legacy notes receive stable derived IDs on
+indexing. Use `oms run timeline` for the full project event timeline instead
+of copying every commit or tool event into durable memory.

@@ -21,6 +21,9 @@ FULL=0
 LIMIT=""
 AS_JSON=0
 JSON_ARGS=()
+SOURCE_FILE=""
+SOURCE_LINE=""
+INCLUDE_STALE=0
 
 usage() {
   cat <<'EOF'
@@ -55,6 +58,13 @@ Options:
                     recall defaults to 20.
   --json            search/recall: emit JSONL with provenance metadata;
                     health: emit one schema-1 diagnostic object.
+  --source-file PATH
+                    append: cite a tracked file from the current project HEAD.
+                    Cited notes stay out of compact provider context and are
+                    revalidated whenever they are searched or recalled.
+  --source-line N   append: 1-based line paired with --source-file.
+  --include-stale   search/recall: include cited notes whose source can no
+                    longer be verified. Default recall omits them.
   -h, --help        Show help.
 
 Commands:
@@ -125,6 +135,24 @@ while [ "$#" -gt 0 ]; do
       AS_JSON=1
       shift
       ;;
+    --source-file)
+      [ "$#" -ge 2 ] || { echo "error: --source-file requires a path" >&2; exit 2; }
+      SOURCE_FILE="$2"
+      shift 2
+      ;;
+    --source-line)
+      [ "$#" -ge 2 ] || { echo "error: --source-line requires a value" >&2; exit 2; }
+      case "$2" in
+        *[!0-9]*|"") echo "error: --source-line requires a positive integer" >&2; exit 2 ;;
+      esac
+      [ "$2" -gt 0 ] || { echo "error: --source-line requires a positive integer" >&2; exit 2; }
+      SOURCE_LINE="$2"
+      shift 2
+      ;;
+    --include-stale)
+      INCLUDE_STALE=1
+      shift
+      ;;
     path|db-path|show|context|init|append|pin|compact|search|recall|health|rebuild)
       ACTION="$1"
       shift
@@ -157,9 +185,29 @@ if [ -n "$LIMIT" ]; then
     *) echo "error: --limit applies only to search or recall" >&2; exit 2 ;;
   esac
 fi
+if [ -n "$SOURCE_FILE" ] || [ -n "$SOURCE_LINE" ]; then
+  [ "$ACTION" = append ] || {
+    echo "error: --source-file/--source-line apply only to append" >&2
+    exit 2
+  }
+  [ -n "$SOURCE_FILE" ] && [ -n "$SOURCE_LINE" ] || {
+    echo "error: --source-file and --source-line must be used together" >&2
+    exit 2
+  }
+  [ "$SCOPE" = project ] || {
+    echo "error: source citations require project memory" >&2
+    exit 2
+  }
+fi
+if [ "$INCLUDE_STALE" -eq 1 ]; then
+  case "$ACTION" in
+    search|recall) JSON_ARGS+=(--include-stale) ;;
+    *) echo "error: --include-stale applies only to search or recall" >&2; exit 2 ;;
+  esac
+fi
 if [ "$AS_JSON" -eq 1 ]; then
   case "$ACTION" in
-    search|recall|health) JSON_ARGS=(--json) ;;
+    search|recall|health) JSON_ARGS+=(--json) ;;
     *) echo "error: --json applies only to search, recall, or health" >&2; exit 2 ;;
   esac
 fi
@@ -238,7 +286,8 @@ case "$ACTION" in
     ensure_tmpdir
     note_file="$(mktemp "$OMS_MEMORY_TMPDIR/note.XXXXXX")"
     write_note_file "$note_file"
-    agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file"
+    agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file" \
+      note "$SOURCE_FILE" "$SOURCE_LINE"
     echo "memory: appended $MEMORY_FILE"
     echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
     ;;

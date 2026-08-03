@@ -28,6 +28,17 @@ if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] &&
   work_journal_prompt_tick "${OMS_STATE_REPO:-$PWD}"
 fi
 
+# Recover CI results at a natural start boundary without polling during work.
+# Only GitHub-backed adopted repos participate; `tick` is locally deduped,
+# throttled, two-second bounded by default, and fail-open.
+ci_tick_repo="${OMS_STATE_REPO:-$PWD}"
+if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_CI_TICK:-1}" = 1 ] &&
+  [ -d "$ci_tick_repo/.oms" ] &&
+  git -C "$ci_tick_repo" remote get-url origin 2>/dev/null | grep -Eq 'github\.com[:/]'; then
+  (cd "$ci_tick_repo" && OMS_CI_TICK_QUIET=1 \
+    bash "$ROOT/scripts/ci-status.sh" tick) >/dev/null 2>&1 || true
+fi
+
 # State-conditional hints: inject the one thing native skill matching cannot
 # know — this repo's harness state. A stale claimed task outranks a repeated
 # unresolved failure, which outranks an unforged lesson; one line, at most

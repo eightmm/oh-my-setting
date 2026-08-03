@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Register (or remove) oh-my-setting's Claude Code hooks and HUD in the user's
+# Register (or remove) oh-my-setting's Claude Code hooks and HUDs in the user's
 # ~/.claude/settings.json. Additive merge: existing settings and hooks are
 # preserved, our entries are identified by the "oh-my-setting" script names,
 # install is idempotent (re-running updates command paths in place), and a
@@ -30,9 +30,11 @@ Usage: install-claude-hooks.sh [--remove] [--settings PATH]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure fail-ledger hook, PreCompact handoff-snapshot hook,
-SessionStart resume hook, and usage HUD in Claude Code's settings.json
-(additive; existing hooks and a user-owned statusLine are preserved;
-idempotent). --remove deletes only oh-my-setting entries.
+SessionStart resume hook, SessionStart/PostToolUse/SubagentStop/SessionEnd
+telemetry hooks, main usage HUD, and compact subagent HUD in Claude Code's
+settings.json. The merge is additive: existing hooks and user-owned
+statusLine/subagentStatusLine entries are preserved, and repeated installs are
+idempotent. --remove deletes only oh-my-setting entries.
 
 Options:
   --remove          Remove the oh-my-setting hook entries instead.
@@ -59,7 +61,9 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/precompact-handoff.sh" ] || fail "precompact-handoff.sh not found under $ROOT"
 [ -f "$ROOT/scripts/resume-hook.sh" ] || fail "resume-hook.sh not found under $ROOT"
+[ -f "$ROOT/scripts/telemetry-hook.sh" ] || fail "telemetry-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/claude-statusline.py" ] || fail "claude-statusline.py not found under $ROOT"
+[ -f "$ROOT/scripts/claude-subagent-statusline.py" ] || fail "claude-subagent-statusline.py not found under $ROOT"
 
 if [ "$REMOVE" != "1" ] && [ -f "$(oms_install_receipt_path)" ]; then
   owner="$(oms_install_receipt_owner "$(oms_install_receipt_path)" 2>/dev/null)" ||
@@ -80,7 +84,9 @@ OMS_CH_SETTINGS="$SETTINGS" OMS_CH_REMOVE="$REMOVE" \
   OMS_CH_FAIL_CMD="bash $ROOT/scripts/fail-ledger-hook.sh" \
   OMS_CH_PRECOMPACT_CMD="bash $ROOT/scripts/precompact-handoff.sh" \
   OMS_CH_RESUME_CMD="bash $ROOT/scripts/resume-hook.sh" \
-  OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" python3 <<'PY'
+  OMS_CH_TELEMETRY_CMD="bash $ROOT/scripts/telemetry-hook.sh" \
+  OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" \
+  OMS_CH_SUBAGENT_STATUS_PATH="$ROOT/scripts/claude-subagent-statusline.py" python3 <<'PY'
 import json, os, shlex, sys, tempfile
 
 path = os.environ["OMS_CH_SETTINGS"]
@@ -90,10 +96,14 @@ guard_cmd = os.environ["OMS_CH_GUARD_CMD"]
 fail_cmd = os.environ["OMS_CH_FAIL_CMD"]
 precompact_cmd = os.environ["OMS_CH_PRECOMPACT_CMD"]
 resume_cmd = os.environ["OMS_CH_RESUME_CMD"]
+telemetry_cmd = os.environ["OMS_CH_TELEMETRY_CMD"]
 status_cmd = "python3 %s" % shlex.quote(os.environ["OMS_CH_STATUS_PATH"])
+subagent_status_cmd = "python3 %s" % shlex.quote(
+    os.environ["OMS_CH_SUBAGENT_STATUS_PATH"]
+)
 MARKS = (
     "skill-router.sh", "turn-guard.sh", "fail-ledger-hook.sh",
-    "precompact-handoff.sh", "resume-hook.sh",
+    "precompact-handoff.sh", "resume-hook.sh", "telemetry-hook.sh",
 )
 
 settings = {}
@@ -139,10 +149,28 @@ def upsert(event, mark, cmd, matcher=None, timeout=None):
             entry["matcher"] = matcher
         entries.append(entry)
 
-def status_ours(value):
+def status_ours(value, command, script_name):
+    if not isinstance(value, dict):
+        return False
+    if value.get("command") == command:
+        return True
+    try:
+        argv = shlex.split(str(value.get("command", "")))
+    except ValueError:
+        return False
+    if not (
+        len(argv) == 2
+        and argv[0] == "python3"
+        and argv[1].replace("\\", "/").rsplit("/", 1)[-1] == script_name
+    ):
+        return False
+    # A previous canonical checkout can move. Recognize it only when the
+    # command still points into an actual OMS checkout; a user's unrelated
+    # script with the same basename remains user-owned.
+    candidate_root = os.path.dirname(os.path.dirname(os.path.realpath(argv[1])))
     return (
-        isinstance(value, dict)
-        and value.get("command") == status_cmd
+        os.path.isfile(os.path.join(candidate_root, ".agents", "plugins", "marketplace.json"))
+        and os.path.isfile(os.path.join(candidate_root, "scripts", "install-claude-hooks.sh"))
     )
 
 before = json.dumps(settings, sort_keys=True)
@@ -155,8 +183,14 @@ if remove:
                 del hooks[event]
     if not hooks:
         del settings["hooks"]
-    if status_ours(settings.get("statusLine")):
+    if status_ours(settings.get("statusLine"), status_cmd, "claude-statusline.py"):
         del settings["statusLine"]
+    if status_ours(
+        settings.get("subagentStatusLine"),
+        subagent_status_cmd,
+        "claude-subagent-statusline.py",
+    ):
+        del settings["subagentStatusLine"]
     action = "removed"
 else:
     upsert("UserPromptSubmit", "skill-router.sh", skill_cmd)
@@ -175,11 +209,29 @@ else:
     # A resuming session starts knowing its active task, newest handoff,
     # open failures, and live-peer status instead of rediscovering them.
     upsert("SessionStart", "resume-hook.sh", resume_cmd, timeout=10)
+    # Only content-free counters and bounded identifiers are retained. Keep
+    # every event under the recommended five-second synchronous hook budget.
+    for event in ("SessionStart", "PostToolUse", "SubagentStop", "SessionEnd"):
+        upsert(event, "telemetry-hook.sh", telemetry_cmd, timeout=5)
     if "statusLine" not in settings:
         settings["statusLine"] = {"type": "command", "command": status_cmd}
-    elif status_ours(settings.get("statusLine")):
+    elif status_ours(
+        settings.get("statusLine"), status_cmd, "claude-statusline.py"
+    ):
         settings["statusLine"]["type"] = "command"
         settings["statusLine"]["command"] = status_cmd
+    if "subagentStatusLine" not in settings:
+        settings["subagentStatusLine"] = {
+            "type": "command",
+            "command": subagent_status_cmd,
+        }
+    elif status_ours(
+        settings.get("subagentStatusLine"),
+        subagent_status_cmd,
+        "claude-subagent-statusline.py",
+    ):
+        settings["subagentStatusLine"]["type"] = "command"
+        settings["subagentStatusLine"]["command"] = subagent_status_cmd
     action = "installed"
 
 if json.dumps(settings, sort_keys=True) == before:
@@ -201,5 +253,5 @@ try:
 except Exception:
     os.unlink(tmp)
     raise
-print("claude-settings: %s oh-my-setting hooks/HUD (%s)" % (action, path))
+print("claude-settings: %s oh-my-setting hooks/HUDs (%s)" % (action, path))
 PY

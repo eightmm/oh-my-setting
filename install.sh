@@ -427,7 +427,7 @@ case "$CONNECT_SERVICES" in
     ;;
 esac
 
-# Claude Code skill-router/turn-guard hooks and usage HUD. Additive
+# Claude Code skill-router/turn-guard hooks and main/subagent HUDs. Additive
 # settings.json merge; Claude-only, non-fatal on failure.
 if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ]; then
   "$DEST/scripts/install-claude-hooks.sh" ||

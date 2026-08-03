@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # Retention sweep for repo-local .oms state. Only artifact-index prune reclaims
-# anything today; capsules, task archives, handoff digests, orphaned delegation
-# markers, and resolved failure rows otherwise grow unbounded over a repo's
-# lifetime. This sweeps the SAFE, clearly-transient families by age and never
-# touches live state (open runs, the active task, unresolved failures, active
-# claims).
+# anything today; capsules, task archives, handoff digests, hook
+# telemetry/session state, local checkpoints, orphaned delegation markers, and
+# resolved failure rows otherwise grow unbounded over a repo's lifetime. This
+# sweeps the SAFE, clearly-transient families by age and never touches live
+# state (open runs, the active task, unresolved failures, active claims).
 # --dry-run by default, mirroring cleanup.sh.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
@@ -34,10 +34,11 @@ Options:
 
 Swept (older than --days): orphaned delegation markers (dead pid; a coupled
 claimed/running plan task is released back to ready), archived task packets,
-handoff digests, stale open runs (no spine event in --days; a close event is
-appended), run capsules of runs that are NOT open, abandoned change-guards
-(dead owner pid or aged snapshot), terminal/draft executor souls, resolved
-failure rows, closed conversation threads;
+handoff digests, local tracked-state checkpoints, hook events/sessions,
+stale open runs (no spine event in --days; a close event is appended), run
+capsules of runs that are NOT open, abandoned change-guards (dead owner pid
+or aged snapshot), terminal/draft executor souls, resolved failure rows, closed
+conversation threads;
 artifact index/files are delegated
 to artifact-index prune. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
@@ -153,7 +154,73 @@ $(find "$OMS/task/archive" -maxdepth 1 -type f -name '*.md' -mtime +"$DAYS" 2>/d
 EOF
 fi
 
-# 2.25) Handoff digests older than --days.
+# 2.1) Local tracked-state checkpoints are recovery aids, not durable project
+# history. Their metadata carries a portable UTC creation time; malformed or
+# symlinked entries are never guessed at or deleted.
+cutoff_epoch=$(( $(date +%s) - DAYS * 86400 ))
+if [ -d "$OMS/checkpoints" ] && [ ! -L "$OMS/checkpoints" ]; then
+  for checkpoint_dir in "$OMS/checkpoints"/cp-*; do
+    if [ ! -d "$checkpoint_dir" ] || [ -L "$checkpoint_dir" ]; then
+      continue
+    fi
+    checkpoint_created="$(python3 - "$checkpoint_dir/meta.json" <<'PY' 2>/dev/null || true
+import datetime, json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle).get("created_at", "")
+if value.endswith("Z"):
+    value = value[:-1] + "+00:00"
+stamp = datetime.datetime.fromisoformat(value)
+if stamp.tzinfo is None:
+    stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+print(int(stamp.timestamp()))
+PY
+)"
+    case "$checkpoint_created" in *[!0-9]*|"") continue ;; esac
+    [ "$checkpoint_created" -lt "$cutoff_epoch" ] || continue
+    note_remove "checkpoint" "$checkpoint_dir"
+  done
+fi
+
+# 2.2) Hook state is deliberately transient. Compact only parseable old rows;
+# invalid/unparseable rows are preserved for diagnosis. Apply uses a
+# same-directory atomic replace under the shared file lock so a live hook can
+# never observe a truncated file.
+hook_events="$OMS/hooks/events.jsonl"
+compact_hook_events() {
+  local path="$1"
+  local cutoff="$2"
+  local apply="$3"
+  local -a compact_args
+  compact_args=(compact-events --path "$path" --cutoff "$cutoff")
+  [ "$apply" = 0 ] || compact_args+=(--apply)
+  python3 "$ROOT_LIB/hook_state.py" "${compact_args[@]}"
+}
+if [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; then
+  hook_counts="$(compact_hook_events "$hook_events" "$cutoff_epoch" "$((1 - DRY_RUN))")"
+  hook_before="$(printf '%s' "$hook_counts" | cut -f1)"
+  hook_after="$(printf '%s' "$hook_counts" | cut -f2)"
+  case "$hook_before" in *[!0-9]*|"") echo "error: gc: could not compact hook events" >&2; exit 1 ;; esac
+  case "$hook_after" in *[!0-9]*|"") echo "error: gc: could not compact hook events" >&2; exit 1 ;; esac
+  if [ "$hook_after" -lt "$hook_before" ]; then
+    printf -- '- hook-events: compact %s -> %s rows\n' "$hook_before" "$hook_after"
+    removed=$((removed + hook_before - hook_after))
+  fi
+fi
+
+if [ -d "$OMS/hooks/sessions" ] && [ ! -L "$OMS/hooks/sessions" ]; then
+  for hook_session in "$OMS/hooks/sessions"/*; do
+    if [ ! -f "$hook_session" ] || [ -L "$hook_session" ]; then
+      continue
+    fi
+    hook_mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' \
+      "$hook_session" 2>/dev/null || true)"
+    case "$hook_mtime" in *[!0-9]*|"") continue ;; esac
+    [ "$hook_mtime" -lt "$cutoff_epoch" ] || continue
+    note_remove "hook-session" "$hook_session"
+  done
+fi
+
+# 2.3) Handoff digests older than --days.
 if [ -d "$OMS/handoffs" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue

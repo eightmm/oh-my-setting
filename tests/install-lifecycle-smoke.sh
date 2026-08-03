@@ -145,7 +145,9 @@ backup="$(find "$HOME/.codex" -maxdepth 1 -name 'AGENTS.md.backup.*' -print -qui
 grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" ||
   fail "install did not register the Claude hook"
 grep -Fq "claude-statusline.py" "$HOME/.claude/settings.json" ||
-  fail "install did not register the Claude HUD"
+  fail "install did not register the Claude main HUD"
+grep -Fq "claude-subagent-statusline.py" "$HOME/.claude/settings.json" ||
+  fail "install did not register the Claude subagent HUD"
 [ ! -e "$dest/local/machine.md" ] ||
   fail "minimal install generated a machine snapshot"
 grep -Fq '# oh-my-setting autoupdate:begin' "$TMP/autoupdate.cron" 2>/dev/null ||
@@ -210,7 +212,10 @@ if grep -Fq "skill-router.sh" "$HOME/.claude/settings.json" 2>/dev/null; then
   fail "uninstall left the Claude hook"
 fi
 if grep -Fq "claude-statusline.py" "$HOME/.claude/settings.json" 2>/dev/null; then
-  fail "uninstall left the Claude HUD"
+  fail "uninstall left the Claude main HUD"
+fi
+if grep -Fq "claude-subagent-statusline.py" "$HOME/.claude/settings.json" 2>/dev/null; then
+  fail "uninstall left the Claude subagent HUD"
 fi
 [ "$shim_created" = 0 ] || [ ! -e "$HOME/.local/bin/python3" ] ||
   fail "uninstall left its Python shim"

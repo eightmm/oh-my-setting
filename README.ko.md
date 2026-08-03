@@ -22,8 +22,9 @@ Node(nvm 경유), uv, GitHub CLI, Notion CLI. root 권한은 필요 없고, 설�
 없는 머신에서는 `--no-tools`를 붙인다. 대화형 터미널에서는 설치기가
 `gh auth login`과 `ntn login`의 브라우저 로그인을 실행하고 Work Journal의
 Notion 대상을 자동 발견하며, 비대화형 설치는 후속 명령을 알려주고 계속
-진행한다. Claude Code에는 로컬 status-line HUD(컨텍스트, 리셋 카운트다운이
-붙는 plan 사용량, 비용)도 기본으로 설치된다.
+진행한다. Claude Code에는 메인·서브에이전트 HUD(모델/노력도, 컨텍스트,
+리셋 카운트다운이 붙는 사용량, 비용, Git 상태)가 설치되고, Codex에는 사용자가
+직접 정한 footer가 없을 때 같은 목적의 내장 footer가 기본 설정된다.
 
 | 호스트 | 필요 | 관리 파일 |
 |---|---|---|
@@ -77,12 +78,14 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 - **쓰기 위임** — 격리 worktree 위임, admission 사다리, 단일 변이 경계,
   해시 동결 executor soul과 워커 권한 지문
 - **Agent 상태와 핸드오프** — 일간 요약과 선택적 Notion mirror가 있는 Work
-  Journal, compaction 직전 세션 핸드오프, 공유 메모리, 검증이 실제로 실행되는
-  task packet, 반복 실패 시 advisor를 지목하는 fail-ledger
+  Journal, 우선순위 attention inbox, compaction 직전 세션 핸드오프, 출처를
+  재검증하는 공유 메모리, 되돌릴 수 있는 tracked-state checkpoint, 검증이
+  실제로 실행되는 task packet, 반복 실패 시 advisor를 지목하는 fail-ledger
 - **ML과 HPC** — run spine과 재현 캡슐, 사전등록 가설 run, 데이터셋 leakage
   manifest, Slurm reconcile과 GPU 큐
 - **Provider와 모델** — capability 프로브, fast/balanced/deep 티어 라우팅과
-  폴백, family 다양성 진단
+  폴백, family 다양성 진단, provider가 제공할 때만 기록하는 내용 비저장형
+  native activity/token telemetry
 - **유지보수** — 롤백 가능한 트랜잭션 업데이트, doctor, 하나의 전체 검증
   게이트와 보호 브랜치용 빠른 pre-push 모드
 

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Install the repo-local oh-my-setting Codex plugin so Codex gets the same
-# prompt skill hints and Stop-hook turn guard as Claude Code.
+# prompt skill hints, Stop guard, pre-compaction handoff, and content-free
+# lifecycle telemetry as Claude Code.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 MARKETPLACE_FILE="${OMS_CODEX_MARKETPLACE_FILE:-$ROOT/.agents/plugins/marketplace.json}"
@@ -10,6 +11,9 @@ MARKETPLACE_ROOT="${OMS_CODEX_MARKETPLACE_ROOT:-$ROOT}"
 PLUGIN_NAME="oh-my-setting"
 REMOVE=0
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_CONFIG="${OMS_CODEX_CONFIG:-$CODEX_HOME_DIR/config.toml}"
+HUD_CONFIG_HELPER="$ROOT/scripts/lib/codex-hud-config.py"
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/file-lock.sh
@@ -26,13 +30,16 @@ usage() {
 Usage: install-codex-plugin.sh [--remove]
 
 Register oh-my-setting's local Codex plugin marketplace and install the
-oh-my-setting plugin. The plugin adds UserPromptSubmit skill hints and a Stop
-turn guard. --remove removes only this plugin and marketplace entry.
+oh-my-setting plugin. The plugin adds UserPromptSubmit skill hints, a Stop
+turn guard, pre-compaction handoff, and content-free lifecycle telemetry. A
+compact native Codex status line is added only when the user has not configured
+one. --remove removes only this plugin, marketplace entry, and managed HUD.
 
 Environment:
   OH_MY_SETTING_DRY_RUN=1        Preview commands without changing Codex config.
   OMS_CODEX_MARKETPLACE_FILE=PATH Override marketplace.json path.
   OMS_CODEX_MARKETPLACE_ROOT=PATH Override marketplace root path.
+  OMS_CODEX_CONFIG=PATH          Override Codex config.toml path.
 EOF
 }
 
@@ -49,8 +56,10 @@ done
 oms_install_require_owner "$ROOT" "modify the Codex plugin" || exit 1
 
 command -v codex >/dev/null 2>&1 || fail "codex command is required"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$MARKETPLACE_FILE" ] || fail "missing marketplace: $MARKETPLACE_FILE"
 [ -d "$MARKETPLACE_ROOT" ] || fail "missing marketplace root: $MARKETPLACE_ROOT"
+[ -f "$HUD_CONFIG_HELPER" ] || fail "missing Codex HUD helper: $HUD_CONFIG_HELPER"
 
 MARKETPLACE_NAME="$(python3 - "$MARKETPLACE_FILE" <<'PY'
 import json, sys
@@ -68,7 +77,6 @@ PLUGIN_HASH="$(oms_install_plugin_hash "$ROOT")"
 case "$PLUGIN_VERSION" in
   *[!A-Za-z0-9._+-]*|"") fail "unsafe plugin version: $PLUGIN_VERSION" ;;
 esac
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 PLUGIN_CACHE="$CODEX_HOME_DIR/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME/$PLUGIN_VERSION"
 
 run_cmd() {
@@ -78,6 +86,15 @@ run_cmd() {
     printf '\n'
   else
     "$@"
+  fi
+}
+
+configure_hud() {
+  local action="$1"
+  if [ "$DRY_RUN" = "1" ]; then
+    python3 "$HUD_CONFIG_HELPER" "$action" "$CODEX_CONFIG" --dry-run
+  else
+    python3 "$HUD_CONFIG_HELPER" "$action" "$CODEX_CONFIG"
   fi
 }
 
@@ -183,6 +200,7 @@ install_plugin() {
 if [ "$REMOVE" = "1" ]; then
   run_cmd codex plugin remove "$PLUGIN_NAME@$MARKETPLACE_NAME" || true
   run_cmd codex plugin marketplace remove "$MARKETPLACE_NAME" || true
+  configure_hud remove
   echo "codex-plugin: removed $PLUGIN_NAME@$MARKETPLACE_NAME"
   exit 0
 fi
@@ -219,3 +237,5 @@ else
     echo "codex-plugin: installed $PLUGIN_NAME@$MARKETPLACE_NAME"
   fi
 fi
+
+configure_hud install

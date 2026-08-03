@@ -40,6 +40,44 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" resume-hook",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" telemetry-hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" telemetry-hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" telemetry-hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" telemetry-hook",
+            "timeout": 5
           }
         ]
       }

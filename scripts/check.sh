@@ -262,6 +262,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   stage source-distribution bash tests/source-distribution-smoke.sh
   stage platform-portability bash tests/platform-portability-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh
+  stage functional-evolution bash tests/functional-evolution-smoke.sh
   [ "$quick_harness" = 0 ] || stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   [ "$quick_models" = 0 ] || stage model-routing bash tests/model-routing-smoke.sh
 fi
@@ -276,6 +277,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
   stage update-v04 bash tests/update-v04-smoke.sh
   stage state-surfaces bash tests/state-surfaces-smoke.sh
+  stage functional-evolution bash tests/functional-evolution-smoke.sh
   stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
   stage atomic-state bash tests/atomic-state-smoke.sh
   stage advisor-routing bash tests/advisor-routing-smoke.sh

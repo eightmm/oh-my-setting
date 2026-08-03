@@ -38,6 +38,7 @@ test_mcp_server_protocol() {
     printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oms_task_state","arguments":{"repo":"%s"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"oms_handoff_show","arguments":{"repo":"%s","file":"../escape"}}}\n' "$repo"
     printf '%s\n' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}'
+    printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_inbox","arguments":{"repo":"%s"}}}\n' "$repo"
   } | python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "MCP protocol exchange did not match the contract"
@@ -56,7 +57,7 @@ assert init["protocolVersion"] == "2025-06-18", init
 assert init["serverInfo"]["name"] == "oh-my-setting", init
 assert by_id[6]["result"]["protocolVersion"] == "2025-03-26", by_id[6]
 tools = {t["name"] for t in by_id[2]["result"]["tools"]}
-assert {"oms_task_state", "oms_fail_ledger", "oms_handoffs",
+assert {"oms_inbox", "oms_task_state", "oms_fail_ledger", "oms_handoffs",
         "oms_handoff_show", "oms_journal"} <= tools, tools
 task = by_id[3]["result"]
 assert not task["isError"], task
@@ -65,6 +66,9 @@ guard = by_id[4]["result"]
 assert guard["isError"], guard
 assert "bare digest file name" in guard["content"][0]["text"], guard
 assert by_id[5]["error"]["code"] == -32602, by_id[5]
+inbox = by_id[7]["result"]
+assert not inbox["isError"], inbox
+assert json.loads(inbox["content"][0]["text"])["schema"] == 1, inbox
 PY
 }
 

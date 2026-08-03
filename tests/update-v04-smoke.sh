@@ -69,6 +69,9 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   # must come from the same tree — a working-tree doctor against a HEAD-clone
   # installer fails on any hook the working tree added.
   cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
+  cp "$ROOT/scripts/claude-statusline.py" "$source/scripts/claude-statusline.py"
+  cp "$ROOT/scripts/claude-subagent-statusline.py" "$source/scripts/claude-subagent-statusline.py"
+  cp "$ROOT/scripts/telemetry-hook.sh" "$source/scripts/telemetry-hook.sh"
   cp "$ROOT/scripts/precompact-handoff.sh" "$source/scripts/precompact-handoff.sh"
   cp "$ROOT/scripts/resume-hook.sh" "$source/scripts/resume-hook.sh"
   cp "$ROOT/scripts/install-mcp.sh" "$source/scripts/install-mcp.sh"
@@ -204,9 +207,10 @@ test_doctor_failure_restores_previous_plugin_payload() {
   local receipt="$home/.config/oh-my-setting/install.json"
   local bin="$TMP/plugin-bin"
   local state="$home/plugin-state"
+  local codex_config="$home/.codex/config.toml"
   local first
 
-  mkdir -p "$source/scripts/lib" "$bin" "$(dirname "$receipt")"
+  mkdir -p "$source/scripts/lib" "$bin" "$(dirname "$receipt")" "$(dirname "$codex_config")"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
@@ -230,6 +234,7 @@ EOF
   first="$(git -C "$source" rev-parse HEAD)"
   git clone -q "$source" "$installed"
   printf 'old\n' > "$state"
+  printf '[tui]\nanimations = true\n' > "$codex_config"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$bin/codex"
   chmod +x "$bin/codex"
   python3 - "$receipt" "$installed" "$first" <<'PY'
@@ -247,8 +252,20 @@ json.dump({
 PY
 
   printf 'new\n' > "$source/plugin-payload"
+  cat > "$source/scripts/install-codex-plugin.sh" <<'EOF'
+#!/usr/bin/env bash
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+if [ "${1:-}" = "--remove" ]; then
+  rm -f "$OMS_PLUGIN_STATE"
+else
+  cp "$root/plugin-payload" "$OMS_PLUGIN_STATE"
+  printf '[tui]\nstatus_line = ["model"]\n' > "$config"
+  printf 'new backup\n' > "$config.oms-bak"
+fi
+EOF
   printf '#!/usr/bin/env bash\nexit 41\n' > "$source/scripts/doctor.sh"
-  git -C "$source" add plugin-payload scripts/doctor.sh
+  git -C "$source" add plugin-payload scripts/doctor.sh scripts/install-codex-plugin.sh
   git -C "$source" commit -qm "fixture: new plugin with failing doctor"
 
   if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
@@ -257,6 +274,10 @@ PY
     fail "plugin fixture update should fail doctor"
   fi
   grep -Fxq old "$state" || fail "rollback left the target plugin payload installed"
+  grep -Fq 'animations = true' "$codex_config" ||
+    fail "plugin rollback did not restore the user's Codex config"
+  [ ! -e "$codex_config.oms-bak" ] ||
+    fail "plugin rollback left a backup created by the failed target"
   [ "$(git -C "$installed" rev-parse HEAD)" = "$first" ] ||
     fail "plugin rollback did not restore source HEAD"
 }
@@ -275,8 +296,9 @@ test_schema1_update_preserves_channel_pin_and_cron() {
 
   git clone -q "$ROOT" "$source"
   for file in scripts/update.sh scripts/link.sh scripts/doctor.sh \
-    scripts/install-claude-hooks.sh scripts/precompact-handoff.sh \
-    scripts/resume-hook.sh \
+    scripts/install-claude-hooks.sh scripts/claude-statusline.py \
+    scripts/claude-subagent-statusline.py scripts/telemetry-hook.sh \
+    scripts/precompact-handoff.sh scripts/resume-hook.sh \
     scripts/install-mcp.sh scripts/install-agy-plugin.sh \
     scripts/oms-mcp-server.py \
     scripts/lib/install-contract.sh scripts/lib/platform.sh \

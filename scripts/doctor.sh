@@ -412,6 +412,8 @@ check_codex_plugin() {
   local marker_hash=""
   local marker_root=""
   local actual_hash
+  local hud_config="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
+  local hud_state
 
   if [ "$mode" = "0" ]; then
     echo "note: codex plugin check disabled (OH_MY_SETTING_CODEX_PLUGIN=0)"
@@ -466,6 +468,15 @@ PY
     FAILED=1
   else
     echo "ok: codex plugin oh-my-setting (cache parity)"
+  fi
+
+  if hud_state="$(python3 "$INSTALL_ROOT/scripts/lib/codex-hud-config.py" \
+    check "$hud_config" 2>&1)"; then
+    echo "ok: codex HUD configured (${hud_state#codex-hud: })"
+  else
+    echo "fail: codex HUD is not configured: $hud_state"
+    echo "hint: run $INSTALL_ROOT/scripts/install-codex-plugin.sh"
+    FAILED=1
   fi
 }
 
@@ -525,13 +536,18 @@ for event, mark in (
     ("PostToolUseFailure", "fail-ledger-hook.sh"),
     ("PreCompact", "precompact-handoff.sh"),
     ("SessionStart", "resume-hook.sh"),
+    ("SessionStart", "telemetry-hook.sh"),
+    ("PostToolUse", "telemetry-hook.sh"),
+    ("SubagentStop", "telemetry-hook.sh"),
+    ("SessionEnd", "telemetry-hook.sh"),
 ):
     if not registered(event, mark):
         print("%s -> %s" % (event, mark))
-# A user-owned statusLine is preserved by the installer and counts as wired.
-status = settings.get("statusLine") if isinstance(settings, dict) else None
-if not (isinstance(status, dict) and status.get("command")):
-    print("statusLine")
+# User-owned status lines are preserved by the installer and count as wired.
+for key in ("statusLine", "subagentStatusLine"):
+    status = settings.get(key) if isinstance(settings, dict) else None
+    if not (isinstance(status, dict) and status.get("command")):
+        print(key)
 PY
 )"
   if [ -n "$missing" ]; then
@@ -543,7 +559,7 @@ EOF
     echo "hint: run $INSTALL_ROOT/scripts/install-claude-hooks.sh"
     FAILED=1
   else
-    echo "ok: claude hooks registered (router, turn guard, fail ledger, pre-compact, resume, HUD)"
+    echo "ok: claude hooks registered (router, turn guard, fail ledger, pre-compact, resume, telemetry, main/subagent HUDs)"
   fi
 }
 

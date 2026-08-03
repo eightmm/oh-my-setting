@@ -320,11 +320,13 @@ restore_managed_targets() {
   done
 }
 
+CODEX_CONFIG_PATH="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 for managed_path in \
   "$HOME/.codex/AGENTS.md" "$HOME/.claude/CLAUDE.md" "$HOME/.gemini/AGENTS.md" \
   "$HOME/.codex/skills" "$HOME/.claude/skills" "$HOME/.gemini/antigravity/skills" \
   "$HOME/.oh-my-setting-prompts" "$HOME/.oh-my-setting-workflows" \
   "$HOME/.local/bin/oms" "$HOME/.claude/settings.json" \
+  "$CODEX_CONFIG_PATH" "$CODEX_CONFIG_PATH.oms-bak" \
   "${OH_MY_SETTING_MACHINE_SNAPSHOT:-$ROOT/local/machine.md}" \
   "${OH_MY_SETTING_SLURM_REF:-$ROOT/local/slurm.md}"; do
   snapshot_managed_target "$managed_path"

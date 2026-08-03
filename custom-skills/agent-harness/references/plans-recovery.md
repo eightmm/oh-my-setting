@@ -24,8 +24,8 @@ Never refresh a reclaimed lease from current shared state.
 
 Recovery sequence:
 
-1. Run `oms state --repo .` and inspect stale claims, reviews, guards, workers,
-   open runs, CI, and unresolved failures.
+1. Run `oms inbox --repo .` for the ranked attention queue; use `oms state
+   --repo .` when the full underlying state is needed.
 2. Run `oms gc --repo .` and review the dry-run.
 3. Run `oms gc --repo . --apply` when the listed cleanup is in scope.
 4. Run `oms agent-plan --repo . reclaim --include-review` if review work needs

@@ -124,23 +124,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   skill; machine and cluster facts (`sinfo`/`sacctmgr`, GPU inventory) stay
   in `oms snapshot [--cluster]` references, documented in the state-memory
   reference.
-- The Claude HUD shows when each rate-limit window resets, and which session
-  it belongs to. `rate_limits.*.resets_at` (epoch seconds, documented
-  statusline payload) renders as a compact countdown next to the usage
-  percentage — `5h 24% (1h58m)`, `7d 41% (3d5h)` — with implausible values
-  (past, or beyond eight days) treated as bad data rather than a countdown.
-  The line also carries `session_name` and the workspace directory basename
-  when present, which is what actually distinguishes two concurrent sessions
-  in the same repo. Rendering stays bounded and pure — only the stdin
-  payload, no subprocesses; `OMS_HUD_NOW` pins the clock for deterministic
-  tests. Codex and Antigravity expose no statusline surface, so the HUD
-  stays a Claude surface; their session-start digest already carries the
-  harness state, and `oms repo-state` is the on-demand equivalent. The line
-  is also width-aware: Claude Code clips an overlong status line with an
-  ellipsis — and the numbers on the right are exactly what disappears — so
-  when the row exceeds the terminal width (`COLUMNS`, conservative 80 when
-  unset) it splits into a balanced identity row (model, session, directory,
-  cost, effort) and metrics row (context, rate windows).
+- Provider HUDs are useful by default after install without taking over user
+  settings. Claude's main HUD shows session/repository identity, cached Git
+  branch/change counts, fast mode, model/effort, context, cost, and rate-limit
+  reset countdowns; it stays width-aware and makes no API call. Git is refreshed
+  at most every five seconds per session with a two-second ceiling. A new
+  `subagentStatusLine` renders each visible worker's model/effort, context use,
+  elapsed time, and state without descriptions or paths. Codex uses its native
+  `tui.status_line` for model/reasoning, remaining context, 5-hour/weekly limits,
+  and branch. Both installers preserve user-owned settings; uninstall removes
+  only unchanged OMS-managed entries. Antigravity exposes no equivalent footer.
 
 ### Fixed
 - The check gate is hermetic to the invoking git context. Git exports

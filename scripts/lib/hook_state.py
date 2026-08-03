@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -258,26 +260,203 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             os.unlink(tmp)
 
 
+@contextlib.contextmanager
+def event_file_lock(path: Path, timeout: float = 1.0):
+    """Portable short lock shared by hook appends and GC compaction."""
+    lock = path.parent / ".events-lockdir"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            lock.mkdir()
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - lock.stat().st_mtime > 60
+            except OSError:
+                stale = False
+            if stale:
+                displaced = lock.parent / (lock.name + ".stale.%d" % os.getpid())
+                try:
+                    os.replace(lock, displaced)
+                    shutil.rmtree(displaced, ignore_errors=True)
+                    continue
+                except OSError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError("hook event file is busy")
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        shutil.rmtree(lock, ignore_errors=True)
+
+
 def append_event(repo: Path | None, payload: dict[str, Any], **fields: Any) -> None:
     if repo is None:
         return
     try:
         hooks_dir = ensure_oms(repo)
+        raw_turn = payload.get("turn_id") or payload.get("turnId") or ""
+        turn_id = bounded_name(raw_turn, 120)
         row = {
             "schema": 1,
             "ts": utc_now(),
-            "agent": os.environ.get("OMS_AGENT") or "hook",
-            "hook": str(payload.get("hook_event_name") or payload.get("hookEventName") or "unknown"),
+            "agent": bounded_name(os.environ.get("OMS_AGENT"), 40) or "hook",
+            "hook": bounded_name(
+                payload.get("hook_event_name") or payload.get("hookEventName"), 80
+            ) or "unknown",
             "session": session_hash(payload),
-            "turn_id": str(payload.get("turn_id") or payload.get("turnId") or ""),
+            "turn_id": turn_id,
             "cwd_hash": sha256_text(payload_cwd(payload))[:16] if payload_cwd(payload) else "",
         }
+        if raw_turn and not turn_id:
+            row["turn_id_hash"] = sha256_text(str(raw_turn))[:16]
         row.update({k: v for k, v in fields.items() if v is not None})
-        with (hooks_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
-            json.dump(row, handle, ensure_ascii=False, sort_keys=True)
-            handle.write("\n")
+        events_path = hooks_dir / "events.jsonl"
+        with event_file_lock(events_path):
+            with events_path.open("a", encoding="utf-8") as handle:
+                json.dump(row, handle, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
     except Exception:
         return
+
+
+def bounded_name(value: Any, limit: int = 120) -> str:
+    """Return one content-free identifier, never arbitrary hook text."""
+    if isinstance(value, dict):
+        value = value.get("id") or value.get("name") or value.get("display_name") or ""
+    if not isinstance(value, (str, int, float)):
+        return ""
+    text = str(value).strip()
+    if not text or len(text) > limit or not re.fullmatch(r"[A-Za-z0-9_.:+() /-]+", text):
+        return ""
+    return text
+
+
+def nonnegative_number(value: Any) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return round(value, 3)
+    return int(value)
+
+
+def usage_containers(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    containers = [payload]
+    for key in ("usage", "token_usage", "tokenUsage", "model_usage", "modelUsage", "metrics"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    response = payload.get("tool_response") or payload.get("toolResponse")
+    if isinstance(response, dict):
+        nested = response.get("usage")
+        if isinstance(nested, dict):
+            containers.append(nested)
+    return containers
+
+
+def first_metric(containers: list[dict[str, Any]], *names: str) -> int | float | None:
+    for container in containers:
+        for name in names:
+            value = nonnegative_number(container.get(name))
+            if value is not None:
+                return value
+    return None
+
+
+def cmd_telemetry(_: argparse.Namespace) -> int:
+    payload, _ = load_payload()
+    repo = hook_repo(payload)
+    # Hooks do not adopt arbitrary repositories merely because an agent opened
+    # one. `oms init` is the explicit ownership boundary.
+    if repo is None or not (repo / ".oms").is_dir():
+        return 0
+
+    containers = usage_containers(payload)
+    raw_response = payload.get("tool_response") or payload.get("toolResponse")
+    response = raw_response if isinstance(raw_response, dict) else {}
+    fields: dict[str, Any] = {"action": "telemetry"}
+
+    tool_name = bounded_name(payload.get("tool_name") or payload.get("toolName"), 80)
+    model = bounded_name(payload.get("model") or payload.get("model_name") or payload.get("modelName"), 160)
+    subagent_type = bounded_name(
+        payload.get("subagent_type") or payload.get("subagentType") or payload.get("agent_type"),
+        80,
+    )
+    if tool_name:
+        fields["tool_name"] = tool_name
+    if model:
+        fields["model"] = model
+    if subagent_type:
+        fields["subagent_type"] = subagent_type
+
+    metrics = (
+        (("duration_ms", "durationMs"), "duration_ms"),
+        (("input_tokens", "inputTokens", "prompt_tokens"), "input_tokens"),
+        (("output_tokens", "outputTokens", "completion_tokens"), "output_tokens"),
+        (("cache_read_input_tokens", "cache_read_tokens", "cacheReadTokens"), "cache_read_tokens"),
+        (("cache_creation_input_tokens", "cache_creation_tokens", "cacheCreationTokens"), "cache_creation_tokens"),
+        (("reasoning_tokens", "reasoning_output_tokens", "reasoningTokens"), "reasoning_tokens"),
+        (("cost_usd", "total_cost_usd", "costUsd"), "cost_usd"),
+    )
+    for source_names, target in metrics:
+        value = first_metric(containers, *source_names)
+        if value is None and target == "duration_ms":
+            value = first_metric([response], *source_names)
+        if value is not None:
+            fields[target] = value
+
+    success = payload.get("success")
+    if not isinstance(success, bool):
+        success = response.get("success")
+    if isinstance(success, bool):
+        fields["success"] = success
+
+    for source, target in (
+        (payload.get("agent_id") or payload.get("agentId"), "agent_id_hash"),
+        (payload.get("parent_agent_id") or payload.get("parentAgentId"), "parent_agent_id_hash"),
+    ):
+        if isinstance(source, (str, int)) and str(source):
+            fields[target] = sha256_text(str(source))[:16]
+
+    append_event(repo, payload, **fields)
+    return 0
+
+
+def cmd_compact_events(args: argparse.Namespace) -> int:
+    """Drop parseable old transient hook rows under the append lock."""
+    path = Path(args.path)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("hook event path is missing or unsafe")
+    with event_file_lock(path, timeout=5.0):
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(True)
+
+        def old(line: str) -> bool:
+            try:
+                row = json.loads(line)
+                value = row.get("ts", "") if isinstance(row, dict) else ""
+                normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+                stamp = datetime.fromisoformat(normalized)
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                return int(stamp.timestamp()) < args.cutoff
+            except (AttributeError, TypeError, ValueError):
+                return False
+
+        kept = [line for line in lines if not old(line)]
+        if args.apply and len(kept) != len(lines):
+            fd, temporary = tempfile.mkstemp(
+                prefix=".oms-replace.", dir=str(path.parent)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.writelines(kept)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+    print("%d\t%d" % (len(lines), len(kept)))
+    return 0
 
 
 def term_matches(text: str, term: str) -> bool:
@@ -834,6 +1013,13 @@ def main() -> int:
     route.set_defaults(func=cmd_route)
     guard = sub.add_parser("guard")
     guard.set_defaults(func=cmd_guard)
+    telemetry = sub.add_parser("telemetry")
+    telemetry.set_defaults(func=cmd_telemetry)
+    compact = sub.add_parser("compact-events")
+    compact.add_argument("--path", required=True)
+    compact.add_argument("--cutoff", required=True, type=int)
+    compact.add_argument("--apply", action="store_true")
+    compact.set_defaults(func=cmd_compact_events)
     repo = sub.add_parser("repo")
     repo.set_defaults(func=cmd_repo)
     args = parser.parse_args()
@@ -843,5 +1029,10 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception:
+    except Exception as error:
+        # Provider hooks are fail-open. The maintenance command is explicit and
+        # must fail loudly rather than claim it compacted state when it did not.
+        if len(sys.argv) > 1 and sys.argv[1] == "compact-events":
+            print("error: hook event compaction: %s" % error, file=sys.stderr)
+            raise SystemExit(2)
         raise SystemExit(0)

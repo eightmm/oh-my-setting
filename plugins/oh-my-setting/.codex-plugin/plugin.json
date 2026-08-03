@@ -1,7 +1,7 @@
 {
   "name": "oh-my-setting",
   "version": "0.4.0",
-  "description": "Shared coding-agent harness hooks for Codex.",
+  "description": "Shared coding-agent routing, handoff, guard, and content-free telemetry hooks for Codex.",
   "author": {
     "name": "oh-my-setting"
   },
@@ -16,8 +16,8 @@
   ],
   "interface": {
     "displayName": "oh-my-setting",
-    "shortDescription": "Skill hints and guarded turn completion for Codex.",
-    "longDescription": "oh-my-setting adds local Codex hooks that route prompts to installed skills and guard high-risk coding turns so final answers state verification status.",
+    "shortDescription": "Routing, handoff, guards, and private local telemetry for Codex.",
+    "longDescription": "oh-my-setting adds local Codex hooks that route prompts to installed skills, preserve pre-compaction handoffs, guard high-risk coding turns, and retain content-free lifecycle counters without prompts, commands, or output.",
     "developerName": "oh-my-setting",
     "category": "Developer Tools",
     "capabilities": [

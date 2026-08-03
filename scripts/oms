@@ -156,6 +156,7 @@ apply-project-template
 artifact-index
 auto-update
 change-guard
+checkpoint
 ci-status
 cleanup
 code-source
@@ -165,6 +166,7 @@ experiment-board
 fail-ledger
 gc
 goal-drive
+inbox
 job-digest
 journal
 model-doctor

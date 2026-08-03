@@ -167,6 +167,70 @@ def empty_route(provider: str, model_class: str, selected_model: str) -> dict:
         "provider_reported_tokens": 0,
         "duration_reports": 0,
         "wall_seconds": 0.0,
+        "verified_success": 0,
+        "verified_failure": 0,
+        "outcome_unknown": 0,
+    }
+
+
+def native_activity(repo: str) -> dict:
+    path = os.path.join(repo, ".oms", "hooks", "events.jsonl")
+    rows: list[dict[str, object]] = []
+    invalid = 0
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    invalid += 1
+                    continue
+                if isinstance(row, dict) and row.get("action") == "telemetry":
+                    rows.append(row)
+
+    sessions = {
+        row.get("session") for row in rows
+        if isinstance(row.get("session"), str) and row.get("session")
+    }
+    turns = {
+        (row.get("session"), row.get("turn_id")) for row in rows
+        if isinstance(row.get("session"), str)
+        and isinstance(row.get("turn_id"), str)
+        and row.get("turn_id")
+    }
+    usage_keys = (
+        "input_tokens", "output_tokens", "cache_read_tokens",
+        "cache_creation_tokens", "reasoning_tokens",
+    )
+    # Providers differ on whether a hook reports a delta or a cumulative
+    # session value. Per-session maxima avoid double-counting cumulative rows.
+    by_session: dict[str, dict[str, int]] = {}
+    for row in rows:
+        session = row.get("session")
+        if not isinstance(session, str) or not session:
+            continue
+        totals = by_session.setdefault(session, {})
+        for key in usage_keys:
+            value = integer(row.get(key))
+            if value is not None:
+                totals[key] = max(totals.get(key, 0), value)
+    usage = {
+        key: sum(values.get(key, 0) for values in by_session.values())
+        for key in usage_keys
+    }
+    return {
+        "events": len(rows),
+        "invalid_lines": invalid,
+        "sessions": len(sessions),
+        "turns": len(turns),
+        "tool_events": sum(bool(row.get("tool_name")) for row in rows),
+        "subagent_events": sum(
+            "subagent" in str(row.get("hook", "")).lower()
+            or bool(row.get("subagent_type"))
+            for row in rows
+        ),
+        "usage_aggregation": "per-session-max",
+        "usage": usage,
     }
 
 
@@ -200,6 +264,7 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
     fallback_reasons: Counter[str] = Counter()
     resolution = Counter()
     coverage = Counter()
+    outcomes = Counter()
     token_values: list[int] = []
     duration_values: list[float] = []
     routes: dict[tuple[str, str, str], dict] = {}
@@ -224,12 +289,21 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
         verify_exit = integer(row.get("verify_exit"))
         if verify_exit is None:
             verification["unavailable"] += 1
+            outcomes["unknown"] += 1
         else:
             verification["recorded"] += 1
+            coverage["verification_reports"] += 1
             if verify_exit == 0:
                 verification["zero"] += 1
+                if exit_value == 0:
+                    outcomes["verified_success"] += 1
+                elif exit_value is None:
+                    outcomes["unknown"] += 1
+                else:
+                    outcomes["verified_failure"] += 1
             else:
                 verification["nonzero"] += 1
+                outcomes["verified_failure"] += 1
 
         fallback_value = row.get("fallback_used")
         if fallback_value is True:
@@ -278,6 +352,15 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
             route["verification_recorded"] += 1
             if verify_exit != 0:
                 route["verification_nonzero"] += 1
+                route["verified_failure"] += 1
+            elif exit_value == 0:
+                route["verified_success"] += 1
+            elif exit_value is None:
+                route["outcome_unknown"] += 1
+            else:
+                route["verified_failure"] += 1
+        else:
+            route["outcome_unknown"] += 1
         if fallback_value is True:
             route["fallback_used"] += 1
 
@@ -300,7 +383,9 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
     return {
         "schema": 1,
         "action": "telemetry",
-        "semantic_outcome": "unavailable",
+        "semantic_outcome": (
+            "mechanical-only" if verification["recorded"] else "unavailable"
+        ),
         "window": {
             "scope": "retained-index-window",
             "available_rows": len(rows),
@@ -325,6 +410,11 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
             "nonzero": verification["nonzero"],
             "unavailable": verification["unavailable"],
         },
+        "outcomes": {
+            "verified_success": outcomes["verified_success"],
+            "verified_failure": outcomes["verified_failure"],
+            "unknown": outcomes["unknown"],
+        },
         "fallback": {
             "used": fallback["used"],
             "not_used": fallback["not_used"],
@@ -344,6 +434,7 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
             "artifact_files": coverage["artifact_files"],
             "duration_reports": coverage["duration_reports"],
             "token_reports": coverage["token_reports"],
+            "verification_reports": coverage["verification_reports"],
         },
         "usage": {
             "provider_reported_tokens": {
@@ -361,6 +452,7 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
             },
         },
         "routes": [routes[key] for key in sorted(routes)],
+        "native_activity": native_activity(repo),
     }
 
 
@@ -385,7 +477,7 @@ def emit_human(report: dict) -> None:
         "routed operations: %d (excluded %d)"
         % (operations["eligible"], operations["excluded"])
     )
-    print("semantic outcome: unavailable")
+    print("semantic outcome: %s" % report["semantic_outcome"])
     print(
         "recorded exit: zero=%d nonzero=%d unavailable=%d"
         % (exits["zero"], exits["nonzero"], exits["unavailable"])
@@ -420,6 +512,17 @@ def emit_human(report: dict) -> None:
             usage["wall_seconds"]["total"],
             usage["wall_seconds"]["median"],
             usage["wall_seconds"]["reports"],
+        )
+    )
+    native = report["native_activity"]
+    print(
+        "native activity: sessions=%d turns=%d tools=%d subagents=%d events=%d"
+        % (
+            native["sessions"],
+            native["turns"],
+            native["tool_events"],
+            native["subagent_events"],
+            native["events"],
         )
     )
     for route in report["routes"]:

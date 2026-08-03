@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -56,6 +57,10 @@ class Entry:
     git_state: str
     body: str
     rendered: str
+    source_path: str = ""
+    source_line: Optional[int] = None
+    source_line_sha256: str = ""
+    source_blob_oid: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,12 @@ def make_entry(
     kind = metadata.get("kind", "") or ("pin" if source == "pins" else "note")
     dirty_text = metadata.get("git_dirty", "")
     git_dirty = int(dirty_text) if dirty_text in ("0", "1") else None
+    source_line_text = metadata.get("source_line", "")
+    source_line = (
+        int(source_line_text)
+        if source_line_text.isdigit() and int(source_line_text) > 0
+        else None
+    )
     return Entry(
         event_id=event_id,
         source=source,
@@ -125,6 +136,10 @@ def make_entry(
         git_state=metadata.get("git_state", ""),
         body=body,
         rendered=rendered,
+        source_path=metadata.get("source_path", ""),
+        source_line=source_line,
+        source_line_sha256=metadata.get("source_line_sha256", ""),
+        source_blob_oid=metadata.get("source_blob_oid", ""),
     )
 
 
@@ -887,18 +902,152 @@ def select_fields(alias: str = "") -> str:
     return ", ".join(prefix + field for field in ENTRY_FIELDS)
 
 
-def emit(entries: Iterable[tuple[object, ...]], as_json: bool = False) -> int:
+def source_citation_map(shared: str) -> dict[str, dict[str, object]]:
+    """Read citation provenance from the canonical Markdown source.
+
+    Citation fields deliberately remain outside SQLite: the database is a
+    rebuildable search index, while the append-only Markdown log is the durable
+    provenance record. This also lets older schema-three indexes gain citation
+    validation without a migration.
+    """
+    snapshot = stable_snapshot(shared)
+    citations: dict[str, dict[str, object]] = {}
+    for entry in parse_shared(snapshot.text):
+        if not (
+            entry.source_path
+            and entry.source_line is not None
+            and entry.source_line_sha256
+        ):
+            continue
+        citations[entry.event_id] = {
+            "path": entry.source_path,
+            "line": entry.source_line,
+            "line_sha256": entry.source_line_sha256,
+            "source_blob_oid": entry.source_blob_oid,
+        }
+    return citations
+
+
+def git_output(repo: str, *arguments: str) -> Optional[bytes]:
+    if not repo:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo, *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def validate_citation(
+    citation: dict[str, object],
+    repo: str,
+    cache: dict[str, tuple[Optional[bytes], str]],
+) -> dict[str, object]:
+    path = str(citation.get("path") or "")
+    line = int(citation.get("line") or 0)
+    expected_hash = str(citation.get("line_sha256") or "")
+    result: dict[str, object] = {
+        "status": "stale",
+        "path": path,
+        "line": line,
+        "source_blob_oid": str(citation.get("source_blob_oid") or ""),
+    }
+
+    # Metadata in source logs is data, not authority. Only repo-relative paths
+    # may reach git, even though `git show HEAD:path` cannot read outside HEAD.
+    parts = Path(path).parts
+    if not path or Path(path).is_absolute() or ".." in parts or not repo:
+        result["reason"] = "source-unavailable"
+        return result
+
+    if path not in cache:
+        blob = git_output(repo, "rev-parse", "HEAD:%s" % path)
+        raw = git_output(repo, "show", "HEAD:%s" % path)
+        cache[path] = (
+            raw,
+            blob.decode("ascii", errors="ignore").strip() if blob else "",
+        )
+    raw, current_blob_oid = cache[path]
+    if raw is None:
+        result["reason"] = "source-missing"
+        return result
+    result["current_blob_oid"] = current_blob_oid
+
+    rows = raw.splitlines()
+    if 1 <= line <= len(rows):
+        current_hash = hashlib.sha256(rows[line - 1]).hexdigest()
+        if current_hash == expected_hash:
+            result["status"] = "valid"
+            result["current_line"] = line
+            return result
+
+    matches = [
+        index + 1
+        for index, row in enumerate(rows)
+        if hashlib.sha256(row).hexdigest() == expected_hash
+    ]
+    if len(matches) == 1:
+        result["status"] = "moved"
+        result["current_line"] = matches[0]
+        return result
+    result["reason"] = "line-changed" if not matches else "line-ambiguous"
+    return result
+
+
+def filter_cited_entries(
+    entries: Iterable[tuple[object, ...]],
+    citations: dict[str, dict[str, object]],
+    repo: str,
+    include_stale: bool,
+) -> tuple[list[tuple[object, ...]], dict[str, dict[str, object]]]:
+    kept: list[tuple[object, ...]] = []
+    validation: dict[str, dict[str, object]] = {}
+    event_index = ENTRY_FIELDS.index("event_id")
+    cache: dict[str, tuple[Optional[bytes], str]] = {}
+    for row in entries:
+        event_id = str(row[event_index])
+        citation = citations.get(event_id)
+        if citation is None:
+            kept.append(row)
+            continue
+        checked = validate_citation(citation, repo, cache)
+        validation[event_id] = checked
+        if checked["status"] in ("valid", "moved") or include_stale:
+            kept.append(row)
+    return kept, validation
+
+
+def emit(
+    entries: Iterable[tuple[object, ...]],
+    as_json: bool = False,
+    citations: Optional[dict[str, dict[str, object]]] = None,
+) -> int:
+    citations = citations or {}
     shown = 0
     for row in entries:
         values = dict(zip(ENTRY_FIELDS, row))
         rendered = str(values.pop("rendered"))
+        citation = citations.get(str(values["event_id"]))
         if as_json:
             if values["git_dirty"] is not None:
                 values["git_dirty"] = bool(values["git_dirty"])
             payload = {"schema": SCHEMA_VERSION, **values}
+            if citation is not None:
+                payload["citation"] = citation
             sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
         else:
             sys.stdout.write(rendered.rstrip() + "\n\n")
+            if citation is not None:
+                current_line = citation.get("current_line", citation["line"])
+                sys.stdout.write(
+                    "[source: %s:%s; %s]\n\n"
+                    % (citation["path"], current_line, citation["status"])
+                )
         shown += 1
     return shown
 
@@ -956,8 +1105,10 @@ def apply_access_decay(
     record never dies, its reach does). Recently recalled entries move up one
     quartile, never-recalled old entries move down one; the match order stays
     primary because bonuses are rank-ordinal, immune to bm25's sign. The
-    entries handed back are touched in memory_access — best effort, a
-    read-only database must not fail recall."""
+    entries handed back are touched in memory_access unless the caller asked
+    for the full candidate pool (limit 0) to filter further — then the caller
+    touches its final selection. Best effort either way: a read-only database
+    must not fail recall."""
     now = time.time()
     try:
         access = {
@@ -987,12 +1138,24 @@ def apply_access_decay(
             score -= nudge
         adjusted.append((score, occurred_at, position, entry))
     adjusted.sort(key=lambda item: (-item[0], str(item[1]), item[2]))
-    chosen = [item[3] for item in adjusted[:limit]]
+    chosen = (
+        [item[3] for item in adjusted]
+        if limit == 0
+        else [item[3] for item in adjusted[:limit]]
+    )
+    if limit != 0:
+        touch_access(db, chosen)
+    return chosen
+
+
+def touch_access(db: sqlite3.Connection, entries) -> None:
+    """Record a recall receipt for each entry — best effort."""
+    event_index = ENTRY_FIELDS.index("event_id")
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     try:
-        for entry in chosen:
+        for entry in entries:
             db.execute(
                 """
                 insert into memory_access (event_id, last_accessed, hit_count)
@@ -1006,7 +1169,6 @@ def apply_access_decay(
         db.commit()
     except sqlite3.OperationalError:
         pass
-    return chosen
 
 
 def ranked_recall(
@@ -1016,6 +1178,7 @@ def ranked_recall(
     candidates: list[tuple[object, str, tuple[object, ...]]] = []
     match = fts_query(query)
     if match and has_fts(db):
+        sql_limit = -1 if limit == 0 else max(limit * 3, limit)
         for row in db.execute(
             """
             select %s
@@ -1026,7 +1189,7 @@ def ranked_recall(
             limit ?
             """
             % select_fields("entries"),
-            (match, agent, agent, max(limit * 3, limit)),
+            (match, agent, agent, sql_limit),
         ):
             candidates.append((None, row[occurred_index], tuple(row)))
         return apply_access_decay(db, candidates, limit)
@@ -1052,9 +1215,8 @@ def ranked_recall(
         if score:
             ranked.append((score, occurred_at, row_id, entry))
     ranked.sort(reverse=True)
-    candidates = [
-        (row[0], row[1], row[3]) for row in ranked[: max(limit * 3, limit)]
-    ]
+    pool = ranked if limit == 0 else ranked[: max(limit * 3, limit)]
+    candidates = [(row[0], row[1], row[3]) for row in pool]
     return apply_access_decay(db, candidates, limit)
 
 
@@ -1094,10 +1256,12 @@ def main() -> int:
     parser.add_argument("--pins", required=True)
     # Optional: a repo that has never failed anything has no ledger to index.
     parser.add_argument("--failures", default="")
+    parser.add_argument("--repo", default="")
     parser.add_argument("--query", default="")
     parser.add_argument("--agent", default="")
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--include-stale", action="store_true")
     args = parser.parse_args()
     if args.limit < 0:
         parser.error("--limit must not be negative")
@@ -1121,15 +1285,27 @@ def main() -> int:
     try:
         sync_sources(db, args.shared, args.pins, args.failures)
         if args.command == "search":
-            entries = exact_search(db, args.query, args.agent, args.limit)
-            shown = emit(entries, args.json)
+            citations = source_citation_map(args.shared)
+            entries = exact_search(db, args.query, args.agent, 0)
+            entries, validation = filter_cited_entries(
+                entries, citations, args.repo, args.include_stale
+            )
+            if args.limit:
+                entries = entries[: args.limit]
+            shown = emit(entries, args.json, validation)
             sys.stderr.write(
                 'memory: %d match(es) for "%s"\n' % (shown, args.query)
             )
             result = 0 if shown else 1
         elif args.command == "recall":
-            entries = ranked_recall(db, args.query, args.agent, args.limit)
-            shown = emit(entries, args.json)
+            citations = source_citation_map(args.shared)
+            entries = ranked_recall(db, args.query, args.agent, 0)
+            entries, validation = filter_cited_entries(
+                entries, citations, args.repo, args.include_stale
+            )
+            entries = entries[: args.limit]
+            touch_access(db, entries)
+            shown = emit(entries, args.json, validation)
             sys.stderr.write(
                 'memory: %d recalled entr%s for "%s"\n'
                 % (shown, "y" if shown == 1 else "ies", args.query)
