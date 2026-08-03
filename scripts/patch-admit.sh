@@ -284,11 +284,16 @@ EOF
 
     # --- Gate 3: verification contract --------------------------------------
     if [ -z "$VERIFY" ] && [ -x "$worktree/scripts/check.sh" ]; then
-      verify_mode="fast"
+      # A check.sh without a `fast` arm (this repo's own, for one) must get the
+      # gate's default invocation, not an argument it rejects.
+      verify_mode=""
+      if oms_check_sh_has_fast_mode "$worktree/scripts/check.sh"; then
+        verify_mode="fast"
+      fi
       if [ "$ML" = 1 ] && oms_check_sh_has_ml_smoke "$worktree/scripts/check.sh"; then
         verify_mode="ml-smoke"
       fi
-      VERIFY="bash scripts/check.sh $verify_mode"
+      VERIFY="bash scripts/check.sh${verify_mode:+ $verify_mode}"
     fi
 
     # --- Gate 3a: the patch must not modify its own verifier ----------------
