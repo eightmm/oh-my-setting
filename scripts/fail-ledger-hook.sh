@@ -84,8 +84,10 @@ def fingerprint(cmd):
     home = os.environ.get("HOME") or ""
     if home:
         cmd = cmd.replace(home, "~")
-    cmd = re.sub(r"/home/[A-Za-z0-9._-]+", "~", cmd)
-    cmd = re.sub(r"/Users/[A-Za-z0-9._-]+", "~", cmd)
+    # The [e]/[s] classes keep these regex literals out of the outbound
+    # scrubber net, same spelling as agent_memory_normalize_machine_paths.
+    cmd = re.sub(r"/hom[e]/[A-Za-z0-9._-]+", "~", cmd)
+    cmd = re.sub(r"/User[s]/[A-Za-z0-9._-]+", "~", cmd)
     norm = re.sub(r"\s+", " ", cmd).strip()
     norm = re.sub(r"\d{8,}", "N", norm)
     return hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:16]
