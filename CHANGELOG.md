@@ -7,6 +7,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Antigravity surfaces are certified per binary before any hook ships.
+  `oms update --probe-agy-surfaces` runs a throwaway-HOME probe that must
+  mechanically prove schema acceptance, actual headless `PreInvocation`/`Stop`
+  delivery, payload shape, and timeout enforcement; the verdict
+  (`verified`/`unsupported`/`unverified`) is cached per agy binary
+  fingerprint, only `verified` lets the installer generate `hooks.json`, and
+  a new fingerprint actively retracts installed hooks back to MCP-only. The
+  certified surface observes turns (state hint, journal/CI tick, advisory-only
+  Stop) — it cannot route skills, since `PreInvocation` carries no user
+  prompt — and the status line stays out until separately tested. Live probe
+  on this machine: `unverified` (agy cannot authenticate under an isolated
+  HOME), so nothing changes for any existing install — which is the design:
+  the 1.1.10 changelog advertising working Stop hooks is a reason to
+  re-probe, never evidence.
 - The fail-ledger's automatic writers became symmetric. The Bash failure hook
   now also registers for `PostToolUse`: a command that later exits 0 resolves
   its own unresolved rows mechanically (one python pass, no git-state hash,

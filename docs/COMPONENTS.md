@@ -589,15 +589,29 @@ keeping execution contracts consistent across surfaces
 state: `oms_inbox`, `oms_task_state`, `oms_fail_ledger`,
 `oms_handoffs`/`oms_handoff_show`, and `oms_journal`. One stdlib stdio server
 serves every MCP client the same
-state with no per-CLI hook code — which is also how Antigravity, whose CLI
-fires no hook events headlessly, reads journal/handoff/fail-ledger context.
+state with no per-CLI hook code — which is also how Antigravity, whose hook
+delivery is uncertified by default, reads journal/handoff/fail-ledger context.
 Claude Code and Codex register it directly (`install-mcp.sh`, idempotent,
 user scope); Antigravity imports it as the `oh-my-setting` plugin, generated
 with absolute paths at install time because `agy plugin install` copies the
 plugin directory verbatim. Headless agy needs the consult permission profile,
 which now includes `mcp(*)` (scoped mcp targets do not match on 1.1.9).
 Strictly read-only: each tool maps to a fixed read-only subcommand, digest
-reads take bare file names only, output is bounded
+reads take bare file names only, output is bounded.
+`oms update --probe-agy-surfaces` is how the plugin ever grows beyond MCP:
+once per agy binary fingerprint, a throwaway-HOME probe must mechanically
+prove plugin schema acceptance, ACTUAL headless delivery of `PreInvocation`
+and `Stop` (marker files written by a real handler, not help text or binary
+symbols), payload shape, and handler-timeout enforcement; only a cached
+`verified` verdict lets the installer emit `hooks.json`, ambiguity lands on
+`unverified`, and a new binary fingerprint actively retracts installed hooks
+back to MCP-only. The certified surface observes turns — state hint, journal
+and CI tick on the first invocation, an advisory-only Stop that always
+returns `{}` — it does not route skills, because `PreInvocation` carries no
+user prompt. The 1.1.9 probe found hooks accepted but never fired headlessly;
+1.1.10 advertises they run now, and an advertisement is a reason to re-probe,
+not evidence. On this machine the live probe verdict is `unverified` (agy
+cannot authenticate under a throwaway HOME), so agy stays MCP-only
 
 **Session handoff (`session-handoff.sh`)** — Distills a prior agent session
 transcript (Claude/Codex/Antigravity) into a compact digest another agent can

@@ -132,7 +132,9 @@ test_install_agy_plugin_bakes_absolute_paths() {
   local log="$TMP/agy-log"
   local capture="$TMP/agy-plugin-copy"
 
-  mkdir -p "$bin" "$capture"
+  # A throwaway HOME: the installer reaches into the installed plugin to
+  # retract stale hooks, and a test must never do that to the real one.
+  mkdir -p "$bin" "$capture" "$TMP/agy-home"
   cat > "$bin/agy" <<EOF
 #!/usr/bin/env bash
 echo "agy \$*" >> "$log"
@@ -143,11 +145,19 @@ exit 0
 EOF
   chmod +x "$bin/agy"
 
-  PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-out" ||
+  # Uncertified is the default: an agy nobody has probed gets the MCP server
+  # and nothing else, whatever a previous probe on this machine concluded about
+  # a different binary.
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-out" ||
     fail "agy plugin install should succeed with agy present"
   grep -Fq "agy-plugin: installed" "$TMP/agy-out" || fail "install was not reported"
+  grep -Fq "run \`oms update --probe-agy-surfaces\`" "$TMP/agy-out" ||
+    fail "an uncertified agy should say how to certify it"
   [ -f "$capture/plugin.json" ] || fail "plugin.json was not built"
   [ -f "$capture/mcp_config.json" ] || fail "mcp_config.json was not built"
+  [ ! -e "$capture/hooks.json" ] || fail "hooks.json must not ship uncertified"
+  [ ! -e "$capture/agy-hook.sh" ] || fail "the hook adapter must not ship uncertified"
   OMS_T_DIR="$capture" OMS_T_ROOT="$ROOT" python3 - <<'PY' || fail "generated plugin content is wrong"
 import json, os
 d = os.environ["OMS_T_DIR"]
@@ -161,19 +171,257 @@ assert server["command"] == "python3", server
 assert server["args"] == [os.path.join(root, "scripts", "oms-mcp-server.py")], server
 PY
 
-  PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null ||
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null ||
     fail "plugin removal should succeed"
   grep -Fq "agy plugin uninstall oh-my-setting" "$log" ||
     fail "removal should call agy plugin uninstall"
 
-  PATH="$bin:/usr/bin:/bin" OH_MY_SETTING_AGY_PLUGIN=0 \
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OH_MY_SETTING_AGY_PLUGIN=0 \
     bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-skip" ||
     fail "explicit skip should exit 0"
   grep -Fq "skipped" "$TMP/agy-skip" || fail "skip should be reported"
 
-  PATH="/usr/bin:/bin" bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-absent" ||
+  PATH="/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-absent" ||
     fail "absent agy in auto mode must be a note"
   grep -Fq "agy CLI absent" "$TMP/agy-absent" || fail "absent agy should be noted"
+}
+
+# --- antigravity surface certification --------------------------------------
+
+# A mock agy. FIRE=1 delivers plugin hooks the way the CLI documents them:
+# handlers run through `sh -c` with the working directory set to the directory
+# holding hooks.json, the payload arrives as camelCase JSON on stdin, and a
+# declared timeout is enforced. FIRE=0 accepts the same plugin and runs a
+# headless turn that fires nothing, which is what 1.1.9 did.
+make_agy_mock() {
+  local path="$1" fire="$2"
+  mkdir -p "$(dirname "$path")"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'FIRE=%s\n' "$fire"
+    cat <<'MOCK'
+case "${1:-}" in
+  --version) printf '1.1.10-mock\n'; exit 0 ;;
+esac
+case "${1:-} ${2:-}" in
+  "plugin validate")
+    if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$3/hooks.json" 2>/dev/null; then
+      printf '          hooks       : 1 processed\n'
+    else
+      printf '          hooks       : skipped (not found)\n'
+    fi
+    exit 0
+    ;;
+  "plugin install")
+    name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' \
+      "$3/plugin.json")" || exit 1
+    mkdir -p "$HOME/.gemini/config/plugins/$name"
+    cp "$3"/* "$HOME/.gemini/config/plugins/$name/" || exit 1
+    exit 0
+    ;;
+  "plugin uninstall") rm -rf "$HOME/.gemini/config/plugins/$3"; exit 0 ;;
+esac
+case "${1:-}" in
+  -p|--print|--prompt) ;;
+  *) exit 0 ;;
+esac
+if [ "$FIRE" = 1 ]; then
+  for plugin in "$HOME"/.gemini/config/plugins/*/; do
+    [ -f "$plugin/hooks.json" ] || continue
+    OMS_MOCK_WS="$PWD" python3 - "$plugin" <<'PY'
+import json, os, subprocess, sys
+
+plugin = sys.argv[1]
+workspace = os.environ["OMS_MOCK_WS"]
+with open(os.path.join(plugin, "hooks.json"), encoding="utf-8") as handle:
+    hooks = json.load(handle)
+common = {
+    "conversationId": "mock-conversation",
+    "workspacePaths": [workspace],
+    "transcriptPath": os.path.join(workspace, ".gemini/antigravity-cli/transcript.jsonl"),
+    "artifactDirectoryPath": os.path.join(workspace, ".gemini/antigravity-cli/artifacts"),
+    "modelName": "auto",
+}
+events = [
+    ("PreInvocation", dict(common, invocationNum=1, initialNumSteps=3)),
+    ("Stop", dict(common, executionNum=1, terminationReason="model_stop", fullyIdle=True)),
+]
+for event, payload in events:
+    for named in hooks.values():
+        for handler in named.get(event) or []:
+            command = handler.get("command")
+            if not command:
+                continue
+            try:
+                subprocess.run(
+                    ["sh", "-c", command],
+                    cwd=plugin,
+                    input=json.dumps(payload),
+                    text=True,
+                    capture_output=True,
+                    timeout=handler.get("timeout") or 60,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+PY
+  done
+fi
+printf 'ok\n'
+exit 0
+MOCK
+  } > "$path"
+  chmod +x "$path"
+}
+
+test_agy_surfaces_are_certified_before_hooks_ship() {
+  local bin="$TMP/cert-bin"
+  local caps="$TMP/cert-caps"
+  local home="$TMP/cert-home"
+  local plugin="$home/.gemini/config/plugins/oh-my-setting"
+  local repo="$TMP/cert-repo"
+  local out
+
+  make_agy_mock "$bin/agy" 1
+  mkdir -p "$home"
+
+  # 1. Probing certifies the surface, and does it without touching the caller's
+  #    Antigravity configuration.
+  PATH="$bin:/usr/bin:/bin" HOME="$home" OMS_CAPABILITY_DIR="$caps" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --probe-surfaces > "$TMP/cert-probe" ||
+    fail "the surface probe should exit 0"
+  grep -Fq "agy-surfaces: verified" "$TMP/cert-probe" ||
+    fail "a firing agy should certify: $(cat "$TMP/cert-probe")"
+  [ ! -e "$home/.gemini/config/plugins" ] ||
+    fail "the probe must install its fixture under its own HOME, not the caller's"
+  grep -Fq "verdict=verified" "$caps/agy-surfaces.env" ||
+    fail "the verdict was not cached"
+  grep -Fq "handler_timeout_enforced=yes" "$caps/agy-surfaces.env" ||
+    fail "the timeout check should have passed against a mock that enforces it"
+
+  # 2. Only now does the installer generate hooks.
+  PATH="$bin:/usr/bin:/bin" HOME="$home" OMS_CAPABILITY_DIR="$caps" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/cert-install" ||
+    fail "installing a certified plugin should succeed"
+  grep -Fq "certified PreInvocation/Stop hooks" "$TMP/cert-install" ||
+    fail "the certified install was not reported: $(cat "$TMP/cert-install")"
+  [ -f "$plugin/hooks.json" ] || fail "a certified agy should get hooks.json"
+  [ -f "$plugin/agy-hook.sh" ] || fail "hooks.json needs its adapter beside it"
+  OMS_T_HOOKS="$plugin/hooks.json" python3 - <<'PY' || fail "generated hooks.json is wrong"
+import json, os
+
+with open(os.environ["OMS_T_HOOKS"], encoding="utf-8") as handle:
+    hooks = json.load(handle)
+named = hooks["oh-my-setting"]
+assert set(named) == {"PreInvocation", "Stop"}, named
+for event, argument in (("PreInvocation", "preinvocation"), ("Stop", "stop")):
+    handlers = named[event]
+    assert len(handlers) == 1, handlers
+    handler = handlers[0]
+    assert handler["type"] == "command", handler
+    # Relative to the directory holding hooks.json: the adapter travels with
+    # the plugin instead of pointing at a path this checkout guessed.
+    assert handler["command"] == "bash ./agy-hook.sh %s" % argument, handler
+    assert handler["timeout"] == 5, handler
+PY
+
+  # 3. The adapter answers in Antigravity's shapes: a router hint becomes an
+  #    injected ephemeral step, and Stop never returns a decision, so this
+  #    surface can observe a turn but never block one.
+  make_repo "$repo"
+  ( cd "$repo" &&
+    bash "$ROOT/scripts/fail-ledger.sh" record --cmd "make test" --exit 1 >/dev/null &&
+    OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record \
+      --cmd "python train.py" --exit 2 >/dev/null )
+
+  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"modelName":"auto","invocationNum":1}' "$repo" |
+    TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)" ||
+    fail "the preinvocation adapter must exit 0"
+  OMS_T_OUT="$out" python3 - <<'PY' || fail "preinvocation did not inject the router hint: $out"
+import json, os
+
+result = json.loads(os.environ["OMS_T_OUT"])
+steps = result["injectSteps"]
+assert len(steps) == 1, steps
+assert "unresolved fail-ledger rows" in steps[0]["ephemeralMessage"], steps
+PY
+
+  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"terminationReason":"model_stop","executionNum":1}' "$repo" |
+    TMPDIR="$TMP" bash "$plugin/agy-hook.sh" stop)" ||
+    fail "the stop adapter must exit 0"
+  [ "$out" = "{}" ] || fail "stop must never return a decision, got: $out"
+
+  # Later invocations of the same turn stay quiet, and every kill switch is
+  # honoured without reaching the harness at all.
+  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":7}' "$repo" |
+    TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
+  [ "$out" = "{}" ] || fail "only the first invocation of a turn should route: $out"
+  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo" |
+    OH_MY_SETTING_AGY_HOOKS=0 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
+  [ "$out" = "{}" ] || fail "OH_MY_SETTING_AGY_HOOKS=0 should silence the adapter: $out"
+  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo" |
+    OMS_SKILL_ROUTER_OFF=1 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
+  [ "$out" = "{}" ] || fail "OMS_SKILL_ROUTER_OFF=1 should silence the router path: $out"
+  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo" |
+    OMS_HARNESS_CHILD=1 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
+  [ "$out" = "{}" ] || fail "a harness child must not route: $out"
+
+  # 4. A different binary is a different question. Changing the mock changes
+  #    its fingerprint, and the hooks the previous binary earned are actively
+  #    retracted from the installed plugin rather than merely left out of the
+  #    next build.
+  printf '\n# rebuilt\n' >> "$bin/agy"
+  PATH="$bin:/usr/bin:/bin" HOME="$home" OMS_CAPABILITY_DIR="$caps" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/cert-refresh" ||
+    fail "installing against a new binary should still succeed"
+  [ ! -e "$plugin/hooks.json" ] ||
+    fail "a new agy fingerprint must retract the certified hooks.json"
+  [ ! -e "$plugin/agy-hook.sh" ] ||
+    fail "a new agy fingerprint must retract the hook adapter"
+  [ -f "$plugin/mcp_config.json" ] ||
+    fail "retracting hooks must leave the MCP server installed"
+  grep -Fq "retracted hooks" "$TMP/cert-refresh" ||
+    fail "the retraction should be reported: $(cat "$TMP/cert-refresh")"
+  grep -Fq "run \`oms update --probe-agy-surfaces\`" "$TMP/cert-refresh" ||
+    fail "the fallback should point at re-certification"
+}
+
+test_agy_surfaces_stay_mcp_only_when_hooks_never_fire() {
+  local bin="$TMP/silent-bin"
+  local caps="$TMP/silent-caps"
+  local home="$TMP/silent-home"
+
+  make_agy_mock "$bin/agy" 0
+  mkdir -p "$home"
+
+  PATH="$bin:/usr/bin:/bin" HOME="$home" OMS_CAPABILITY_DIR="$caps" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --probe-surfaces > "$TMP/silent-probe" ||
+    fail "a silent agy should still exit 0"
+  grep -Fq "agy-surfaces: unsupported" "$TMP/silent-probe" ||
+    fail "a completed run that fires nothing is unsupported: $(cat "$TMP/silent-probe")"
+  grep -Fq "reason=preinvocation" "$caps/agy-surfaces.env" ||
+    fail "the cached reason should name the surface that never arrived"
+
+  PATH="$bin:/usr/bin:/bin" HOME="$home" OMS_CAPABILITY_DIR="$caps" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/silent-install" ||
+    fail "an unsupported verdict must not fail the install"
+  [ ! -e "$home/.gemini/config/plugins/oh-my-setting/hooks.json" ] ||
+    fail "an unsupported agy must not get hooks.json"
+  grep -Fq "failed surface certification" "$TMP/silent-install" ||
+    fail "the omission should be reported: $(cat "$TMP/silent-install")"
+}
+
+test_update_probe_flag_reaches_the_probe() {
+  local out
+  out="$(PATH="/usr/bin:/bin" bash "$ROOT/scripts/update.sh" --probe-agy-surfaces 2>&1)" ||
+    fail "the update flag should exit 0 with no agy installed: $out"
+  printf '%s\n' "$out" | grep -Fq "agy-surfaces: unverified" ||
+    fail "an absent agy is unverified, never a guess: $out"
+  out="$(bash "$ROOT/scripts/update.sh" --probe-agy-surfaces --check 2>&1)" && rc=0 || rc=$?
+  [ "${rc:-0}" = 2 ] || fail "--probe-agy-surfaces with --check should be misuse"
+  bash "$ROOT/scripts/update.sh" --help | grep -Fq -- "--probe-agy-surfaces" ||
+    fail "the flag should be documented in usage"
 }
 
 # --- router state hints -----------------------------------------------------
@@ -602,6 +850,9 @@ test_slurm_reference_rename_keeps_compat() {
 test_mcp_server_protocol
 test_install_mcp_registers_and_is_idempotent
 test_install_agy_plugin_bakes_absolute_paths
+test_agy_surfaces_are_certified_before_hooks_ship
+test_agy_surfaces_stay_mcp_only_when_hooks_never_fire
+test_update_probe_flag_reaches_the_probe
 test_router_state_hint_on_unresolved_failures
 test_router_state_hint_skips_unadopted_repo
 test_router_state_hint_offers_forge_for_resolved_repeats

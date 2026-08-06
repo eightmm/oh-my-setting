@@ -21,12 +21,13 @@ LINK_MODE="${OH_MY_SETTING_LINK_MODE:-}"
 INSTALL_REF_OVERRIDE=""
 CHECK_ONLY=0
 ROLLBACK=0
+PROBE_AGY=0
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 
 usage() {
   cat <<'EOF'
-Usage: update.sh [--check] [--rollback] [--ref REF] [--tools] [--no-tools] [--no-doctor] [-h|--help]
+Usage: update.sh [--check] [--rollback] [--ref REF] [--tools] [--no-tools] [--no-doctor] [--probe-agy-surfaces] [-h|--help]
 
 Update transactionally, preserving the installed component profile. Link or
 doctor failure restores the previous commit, links, and install receipt.
@@ -38,6 +39,11 @@ Options:
   --tools       Refresh Node/uv/provider tools after the core update commits.
   --no-tools    Skip tool refresh (default).
   --no-doctor   Skip the post-update doctor (disables its rollback gate).
+  --probe-agy-surfaces
+                Certify this Antigravity binary's lifecycle hook surfaces
+                under a throwaway HOME and cache the verdict, then exit.
+                Updates nothing; a later update installs the certified
+                hooks.json only if the verdict is verified.
 
 Environment overrides persisted receipt components when explicitly set:
   OH_MY_SETTING_CLAUDE_HOOKS=0|1  Claude Code hooks and usage HUD
@@ -61,6 +67,7 @@ while [ "$#" -gt 0 ]; do
     --tools) SKIP_TOOLS=0; shift ;;
     --no-tools) SKIP_TOOLS=1; shift ;;
     --no-doctor) SKIP_DOCTOR=1; shift ;;
+    --probe-agy-surfaces) PROBE_AGY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -74,6 +81,17 @@ done
   echo "error: --rollback and --ref cannot be combined" >&2
   exit 2
 }
+
+# Surface certification is an operator question about the installed Antigravity
+# binary, not a step of the update transaction: it spends one bounded provider
+# invocation, so it happens only when asked for by name and installs nothing.
+if [ "$PROBE_AGY" = "1" ]; then
+  if [ "$CHECK_ONLY" = "1" ] || [ "$ROLLBACK" = "1" ]; then
+    echo "error: --probe-agy-surfaces cannot be combined with --check or --rollback" >&2
+    exit 2
+  fi
+  exec "$ROOT/scripts/install-agy-plugin.sh" --probe-surfaces
+fi
 
 oms_install_require_owner "$ROOT" "update the install" || exit 1
 [ -d "$ROOT/.git" ] || { echo "error: $ROOT is not a git checkout" >&2; exit 1; }
