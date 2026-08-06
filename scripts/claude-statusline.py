@@ -329,6 +329,47 @@ def render(payload: Dict[str, Any], color: bool) -> str:
     )
 
 
+def write_context_cache(payload: Dict[str, Any]) -> None:
+    # The status line is the only surface Claude Code hands the authoritative
+    # context_window reading; prompt hooks never see it. Persist it per
+    # session so the UserPromptSubmit context-pressure check reads a number
+    # instead of re-deriving one from the transcript.
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    context = mapping(payload.get("context_window"))
+    used = rounded_percent(context.get("used_percentage"))
+    if used is None:
+        return
+    digest = hashlib.sha256(session_id.encode("utf-8", "replace")).hexdigest()[:24]
+    cache_dir = os.environ.get("OMS_HUD_CACHE_DIR", "").strip()
+    if not cache_dir:
+        cache_dir = os.path.join(tempfile.gettempdir(), "oh-my-setting-hud")
+    record = {
+        "schema": 1,
+        "used_percentage": used,
+        "context_window_size": finite_number(context.get("context_window_size")),
+        "total_input_tokens": finite_number(context.get("total_input_tokens")),
+        "ts": time.time(),
+    }
+    try:
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".ctx-", dir=cache_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(record, fh, sort_keys=True)
+                fh.write("\n")
+            os.replace(tmp, os.path.join(cache_dir, "ctx-%s.json" % digest))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
+
+
 def main() -> int:
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
@@ -342,6 +383,7 @@ def main() -> int:
 
     use_color = "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
     output = render(payload, use_color)
+    write_context_cache(payload)
     if output:
         print(output)
     return 0

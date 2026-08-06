@@ -10559,6 +10559,153 @@ test_skill_router_skips_system_prompts() {
   [ -z "$out" ] || fail "OMS_SKILL_ROUTER_OFF=1 must silence the router"
 }
 
+ctx_cache_digest() {
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:24])' "$1"
+}
+
+test_context_pressure_warns_once_at_low_context() {
+  local d="$TMP/ctx-pressure-warn"
+  local project="$d/project"
+  local hud="$d/hud-cache"
+  local out digest
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms" "$hud"
+  digest="$(ctx_cache_digest ctxwarn1)"
+  printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
+
+  out="$(printf '{"prompt":"이어서 계속 봐줘","session_id":"ctxwarn1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq '[oms] context low (~10% left)' ||
+    fail "10% left must trigger the warn advisory: $out"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "context_pressure"'
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"capture": "skipped"'
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"source": "claude"'
+  # The advisory is once per band per session, not once per prompt.
+  out="$(printf '{"prompt":"이어서 계속 봐줘 2","session_id":"ctxwarn1","turn_id":"t2","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+    fail "warn band must announce once per session: $out"
+  fi
+}
+
+test_context_pressure_escalates_and_rearms() {
+  local d="$TMP/ctx-pressure-bands"
+  local project="$d/project"
+  local hud="$d/hud-cache"
+  local out digest state
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms" "$hud"
+  digest="$(ctx_cache_digest ctxband1)"
+  state="$project/.oms/hooks/sessions/$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:32])' ctxband1).ctx.json"
+
+  run_band() {
+    printf '{"schema":1,"used_percentage":%s}\n' "$1" > "$hud/ctx-$digest.json"
+    printf '{"prompt":"계속 진행해줘","session_id":"ctxband1","turn_id":"%s","cwd":"%s"}' "$2" "$project" |
+      TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh"
+  }
+
+  out="$(run_band 90 t1)"
+  printf '%s' "$out" | grep -Fq 'context low' || fail "10% left must warn: $out"
+  # Crossing into the urgent band speaks once more, then latches.
+  out="$(run_band 95 t2)"
+  printf '%s' "$out" | grep -Fq 'context nearly exhausted (~5% left)' ||
+    fail "5% left must escalate to urgent: $out"
+  out="$(run_band 96 t3)"
+  [ -z "$out" ] || fail "urgent band must announce once: $out"
+  # Recovery (compaction, fresh window) re-arms both bands.
+  out="$(run_band 50 t4)"
+  [ -z "$out" ] || fail "recovered context must stay silent: $out"
+  grep -Fq '"stage": null' "$state" || fail "recovery must reset the band latch"
+  out="$(run_band 88 t5)"
+  printf '%s' "$out" | grep -Fq 'context low (~12% left)' ||
+    fail "a fresh crossing after re-arm must warn again: $out"
+}
+
+test_context_pressure_reads_codex_transcript() {
+  local d="$TMP/ctx-pressure-codex"
+  local project="$d/project"
+  local transcript="$d/rollout-test.jsonl"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  # Newest token_count wins; trailing non-token rows must not hide it.
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":100000},"model_context_window":200000}}}' > "$transcript"
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":178000},"model_context_window":200000}}}' >> "$transcript"
+  printf '%s\n' '{"type":"response_item","payload":{"type":"message"}}' >> "$transcript"
+
+  out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxcodex1","turn_id":"t1","cwd":"%s","transcript_path":"%s"}' "$project" "$transcript" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$d/no-cache" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'context low (~11% left)' ||
+    fail "codex transcript token_count must feed the advisory: $out"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"source": "codex"'
+}
+
+test_context_pressure_fails_open() {
+  local d="$TMP/ctx-pressure-open"
+  local project="$d/project"
+  local hud="$d/hud-cache"
+  local out digest
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms" "$hud"
+  digest="$(ctx_cache_digest ctxopen1)"
+  printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
+
+  # Kill switch.
+  out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxopen1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_PRESSURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+    fail "OMS_CTX_PRESSURE=0 must silence the advisory: $out"
+  fi
+  # A stale reading is no reading: the cache outlived its TTL.
+  touch -d '2 hours ago' "$hud/ctx-$digest.json"
+  out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxopen1","turn_id":"t2","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+    fail "a stale context cache must stay silent: $out"
+  fi
+  # Unadopted repos hold no latch state, so they get no advisory at all.
+  local plain="$d/plain"
+  make_committed_repo "$plain"
+  digest="$(ctx_cache_digest ctxplain1)"
+  printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
+  out="$(printf '{"prompt":"이 저장소가 뭐야","session_id":"ctxplain1","turn_id":"t1","cwd":"%s"}' "$plain" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+    fail "an unadopted repo must not receive the advisory: $out"
+  fi
+  assert_not_exists "$plain/.oms"
+}
+
+test_claude_hud_feeds_context_pressure() {
+  local d="$TMP/ctx-pressure-chain"
+  local project="$d/project"
+  local hud="$d/hud-cache"
+  local out digest
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  # Producer: the status line persists the authoritative reading...
+  printf '{"session_id":"ctxchain1","context_window":{"used_percentage":91.4,"total_input_tokens":182800,"context_window_size":200000}}' |
+    NO_COLOR=1 OMS_HUD_CACHE_DIR="$hud" python3 "$ROOT/scripts/claude-statusline.py" >/dev/null
+  digest="$(ctx_cache_digest ctxchain1)"
+  [ -f "$hud/ctx-$digest.json" ] || fail "status line must write the context cache"
+  grep -Fq '"used_percentage": 91' "$hud/ctx-$digest.json" ||
+    fail "context cache must carry the rounded used percentage"
+  # ...consumer: the prompt hook turns it into one advisory line.
+  out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxchain1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'context low (~9% left)' ||
+    fail "the status-line cache must feed the prompt-time advisory: $out"
+  # A payload without a context reading writes no cache.
+  printf '{"session_id":"ctxchain2","context_window":{}}' |
+    NO_COLOR=1 OMS_HUD_CACHE_DIR="$hud" python3 "$ROOT/scripts/claude-statusline.py" >/dev/null
+  assert_not_exists "$hud/ctx-$(ctx_cache_digest ctxchain2).json"
+}
+
 test_turn_guard_blocks_unverified_dirty_task_once() {
   local d="$TMP/turn-guard"
   local project="$d/project"

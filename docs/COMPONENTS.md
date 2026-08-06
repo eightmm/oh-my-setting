@@ -454,6 +454,15 @@ script (`model-with-reasoning`, remaining context, 5-hour/weekly limits, Git
 branch). `install-codex-plugin.sh` adds a marked entry only when no user setting
 exists, backs up the file once, and removes only an unchanged managed entry.
 Antigravity currently has no equivalent footer surface.
+The Claude HUD also persists its `context_window` reading to a per-session
+temp cache, which the prompt hook reads (for Codex it tail-scans the
+rollout's latest `token_count` event instead, version-gated) to raise at most
+two context-pressure advisories per session in adopted repos: warn at ≤15%
+remaining — which also detaches a mechanical `session-handoff` capture — and
+urgent at ≤8%; recovery above 30% re-arms. Advisory only: it never blocks a
+prompt, never migrates a session, and stays out of unadopted repos.
+`OMS_CTX_PRESSURE=0` disables; `OMS_CTX_WARN_PCT`/`OMS_CTX_URGENT_PCT`/
+`OMS_CTX_REARM_PCT`/`OMS_CTX_CACHE_TTL`/`OMS_CTX_CAPTURE` tune it.
 `install-claude-hooks.sh` also registers the `PreCompact`
 handoff-snapshot hook and four lifecycle telemetry events
 (`SessionStart`, `PostToolUse`, `SubagentStop`, `SessionEnd`). Telemetry is

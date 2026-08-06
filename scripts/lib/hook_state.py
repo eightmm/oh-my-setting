@@ -855,11 +855,214 @@ def fresh_skill_names(payload: dict[str, Any], scored_names: list[str]) -> list[
     return fresh
 
 
+# Context pressure: an advisory, never a control decision. The 2026-08-06
+# cross-family debate on the codex-context-checkpoint plugin converged on
+# keeping the one valuable piece — a measured early warning plus durable
+# capture — and rejecting forced migration, per-turn HUD injection into model
+# context, and prompt-only handoffs. Migration stays the agent's call.
+
+
+def hud_cache_dir() -> Path:
+    cache_dir = os.environ.get("OMS_HUD_CACHE_DIR", "").strip()
+    if not cache_dir:
+        cache_dir = os.path.join(tempfile.gettempdir(), "oh-my-setting-hud")
+    return Path(cache_dir)
+
+
+def percent_left_from_cache(payload: dict[str, Any]) -> float | None:
+    """Read the statusline's authoritative context reading, TTL-bounded."""
+    session = str(payload.get("session_id") or payload.get("sessionId") or "")
+    if not session:
+        return None
+    path = hud_cache_dir() / ("ctx-%s.json" % sha256_text(session)[:24])
+    ttl = env_int("OMS_CTX_CACHE_TTL", 600, minimum=5, maximum=86400)
+    try:
+        if time.time() - path.stat().st_mtime > ttl:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    used = data.get("used_percentage") if isinstance(data, dict) else None
+    if isinstance(used, bool) or not isinstance(used, (int, float)):
+        return None
+    if not 0 <= used <= 100:
+        return None
+    return 100.0 - float(used)
+
+
+def percent_left_from_codex_transcript(payload: dict[str, Any]) -> float | None:
+    """Tail-scan a codex rollout for its latest token_count event.
+
+    The rollout format is not a stable interface, so every shape mismatch
+    means "no reading", never an error.
+    """
+    transcript = payload.get("transcript_path") or payload.get("transcriptPath") or ""
+    if not isinstance(transcript, str) or not transcript:
+        return None
+    path = Path(transcript)
+    try:
+        if not path.is_file():
+            return None
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > 262144:
+                handle.seek(size - 262144)
+            tail = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if '"token_count"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        event = row.get("payload") if isinstance(row.get("payload"), dict) else row
+        if event.get("type") != "token_count":
+            continue
+        info = event.get("info")
+        if not isinstance(info, dict):
+            continue
+        last = info.get("last_token_usage")
+        used = last.get("total_tokens") if isinstance(last, dict) else None
+        window = info.get("model_context_window")
+        if (
+            not isinstance(used, bool)
+            and isinstance(used, (int, float))
+            and used >= 0
+            and not isinstance(window, bool)
+            and isinstance(window, (int, float))
+            and window > 0
+        ):
+            return max(0.0, min(100.0, (window - used) / window * 100.0))
+    return None
+
+
+def ctx_state_path(hooks_dir: Path, payload: dict[str, Any]) -> Path:
+    return hooks_dir / "sessions" / f"{session_hash(payload)}.ctx.json"
+
+
+def start_handoff_capture(repo: Path, payload: dict[str, Any], agent: str, left: float) -> bool:
+    """Detach a mechanical digest capture; the advisory never waits on it."""
+    if os.environ.get("OMS_CTX_CAPTURE", "1") != "1":
+        return False
+    script = Path(__file__).resolve().parent.parent / "session-handoff.sh"
+    if not script.exists():
+        return False
+    command = [
+        "bash",
+        str(script),
+        "capture",
+        "--agent",
+        agent,
+        "--cwd",
+        payload_cwd(payload) or str(repo),
+        "--note",
+        "auto: context pressure (~%d%% left)" % int(left),
+    ]
+    session = str(payload.get("session_id") or payload.get("sessionId") or "")
+    if session:
+        command += ["--session", session]
+    try:
+        subprocess.Popen(
+            command,
+            cwd=str(repo),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def context_pressure_hint(payload: dict[str, Any]) -> str | None:
+    if os.environ.get("OMS_CTX_PRESSURE", "1") != "1":
+        return None
+    repo = hook_repo(payload)
+    # Adopted repos only: without .oms there is nowhere to keep the once-per-
+    # band latch, and an unlatched advisory would nag on every prompt.
+    if repo is None or not (repo / ".oms").is_dir():
+        return None
+    left = percent_left_from_cache(payload)
+    agent = "claude" if left is not None else "codex"
+    if left is None:
+        left = percent_left_from_codex_transcript(payload)
+    if left is None:
+        return None
+
+    warn = env_int("OMS_CTX_WARN_PCT", 15, minimum=1, maximum=90)
+    urgent = min(env_int("OMS_CTX_URGENT_PCT", 8, minimum=0, maximum=89), warn)
+    rearm = max(env_int("OMS_CTX_REARM_PCT", 30, minimum=2, maximum=100), warn)
+    hooks_dir = ensure_oms(repo)
+    state_path = ctx_state_path(hooks_dir, payload)
+    state = load_state(state_path)
+    stage = state.get("stage") if state.get("stage") in ("warn", "urgent") else None
+
+    def save(new_stage: str | None) -> None:
+        write_json_atomic(
+            state_path,
+            {
+                "schema": 1,
+                "updated_at": utc_now(),
+                "session": session_hash(payload),
+                "stage": new_stage,
+                "percent_left": round(left, 1),
+            },
+        )
+
+    if left > rearm:
+        # Compaction or a fresh reading recovered the window; re-arm.
+        if stage:
+            save(None)
+        return None
+    rank = {"warn": 1, "urgent": 2}
+    new_stage = "urgent" if left <= urgent else "warn" if left <= warn else None
+    if new_stage is None or (stage and rank[new_stage] <= rank[stage]):
+        # Between bands, or a band this session already announced; only an
+        # escalation (warn -> urgent) speaks again before re-arming.
+        return None
+    save(new_stage)
+    captured = start_handoff_capture(repo, payload, agent, left)
+    append_event(
+        repo,
+        payload,
+        action="context_pressure",
+        status=new_stage,
+        percent_left=round(left, 1),
+        source=agent,
+        capture="started" if captured else "skipped",
+    )
+    if new_stage == "urgent":
+        return (
+            "[oms] context nearly exhausted (~%d%% left) — wrap up now: finish or"
+            " record the current step, then migrate to a fresh session; do not"
+            " start new multi-step work." % int(left)
+        )
+    return (
+        "[oms] context low (~%d%% left) — a handoff digest capture %s; finish the"
+        " current atomic step, then continue in a fresh session from"
+        " `oms session-handoff list` (or keep going deliberately)."
+        % (int(left), "was started" if captured else "is worth running")
+    )
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     payload, _ = load_payload()
     if is_harness_child():
         append_event(hook_repo(payload), payload, action="ignored_child", status="route", **child_event_fields())
         return 0
+    # Context pressure is orthogonal to prompt content: it must fire even on
+    # turns the skill router skips (slash commands, system-ish notifications),
+    # because near exhaustion those may be the only turns left.
+    try:
+        pressure = context_pressure_hint(payload)
+    except Exception:
+        pressure = None
+    if pressure:
+        print(pressure)
     prompt = str(payload.get("prompt") or "")
     if should_skip_prompt(prompt):
         return 0

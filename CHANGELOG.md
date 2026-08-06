@@ -7,6 +7,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Context pressure becomes a measured advisory instead of a surprise. The
+  Claude status line now persists its authoritative `context_window` reading
+  to a per-session cache, and the prompt-time hook turns that number (or,
+  for Codex, the rollout's latest `token_count` event, version-gated and
+  fail-open) into at most two one-line advisories per session: a warn band
+  (default ≤15% left) that also detaches a mechanical `session-handoff`
+  digest capture, and an urgent band (default ≤8%) that says wrap up and
+  migrate. Recovery above 30% re-arms both bands. Adopted repos only; the
+  advisory never blocks, never migrates, and never injects a per-turn HUD —
+  the 2026-08-06 cross-family debate on the codex-context-checkpoint plugin
+  rejected forced migration and kept exactly this measured-early-warning
+  slice. `OMS_CTX_PRESSURE=0` disables; `OMS_CTX_WARN_PCT`,
+  `OMS_CTX_URGENT_PCT`, `OMS_CTX_REARM_PCT`, `OMS_CTX_CACHE_TTL`, and
+  `OMS_CTX_CAPTURE` tune it.
 - Sessions manage their own continuity. The sensitivity scrubber grew tiers:
   true secrets still block every write, but absolute home paths now
   normalize to `~` for repo-local git-ignored records — previously any Linux
