@@ -72,7 +72,8 @@ model-family diversity; ML pre-training gate (`--ml`), debate rounds,
 per-finding verdicts, and `--gate` one-command pass/fail verdict backstopped by
 a mechanical `--verify` run of the project's own `check.sh` — a self-reported
 pass cannot pass a failing diff; untracked-file content absent from the diff is
-flagged to reviewers
+flagged to reviewers. A blocked reviewer's `no-verdict` quotes its own stated
+reason (usually the operator's allow-list), so a gate failure says what to fix
 
 **Ask (`peer-ask.sh`)** — Same question to distinct local models for
 independent opinions; `--tiers` (or `codex:deep` inside `--providers`) turns
@@ -82,7 +83,15 @@ so a Cartesian panel plus debate rounds cannot silently become dozens of calls,
 and the run reports how many independent model families answered — one family
 means replication, not corroboration; duplicate provider identities are
 rejected and `model-doctor` can detect a shared underlying family; optional
-debate rounds and hypothesis design-attack preset
+debate rounds and hypothesis design-attack preset. A seat is counted by its
+answer, not its exit status: a CLI that exits 0 having printed only a
+permission banner or nothing usable is classified by the same answer-quality
+gate consult uses, withheld from the ok and family counts, dropped from
+debate replay (an exit-0 banner in round two cannot become the final answer),
+and labeled `non-answer` in the synthesis instead of being quoted as an
+opinion — so "N independent model families" describes answers that exist.
+Dry runs skip classification (their artifacts are all noise-stripped lines);
+`OMS_COUNCIL_QUALITY=0` restores exit-status-only accounting
 
 **Delegate (`peer-delegate.sh`)** — Runs a write task in an isolated git
 worktree and verifies it there, then returns a reviewable patch (verify bounded

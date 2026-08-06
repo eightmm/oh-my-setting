@@ -135,7 +135,7 @@ EOF
 review_verdicts() {
   local vdir="$1"
   local forced_run_id="${2:-}"
-  local latest run_id base provider suf r f verdict overall found
+  local latest run_id base provider suf r f verdict overall found reason
   # bash 3.2 has no associative arrays; track one "provider<TAB>round<TAB>file"
   # record per candidate and pick the highest round per provider at the end.
   local vrecords="" providers
@@ -216,7 +216,20 @@ review_verdicts() {
         if [ "$overall" -ne 2 ]; then overall=1; fi
         ;;
       *)
-        echo "$provider: no-verdict (complete but no GATE line)"
+        # A provider whose permission was denied also finishes with no GATE
+        # line, and both readings fail the gate. Only one of them is fixed by
+        # editing an allow-list, so the operator has to be told which this is.
+        # No DRY_RUN guard is needed: a dry-run artifact has no exit section and
+        # is caught above as incomplete, so it never reaches this branch.
+        reason=""
+        [ "${OMS_COUNCIL_QUALITY:-1}" = "0" ] ||
+          [ "$(ma_answer_quality "$f")" != "blocked" ] ||
+          reason="$(ma_answer_block_reason "$f")"
+        if [ -n "$reason" ]; then
+          echo "$provider: no-verdict (blocked: $reason)"
+        else
+          echo "$provider: no-verdict (complete but no GATE line)"
+        fi
         overall=2
         ;;
     esac

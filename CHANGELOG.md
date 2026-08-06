@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Council seats are counted by answer quality, not exit status. A peer-ask or
+  peer-review seat whose CLI exits 0 having printed only a permission banner
+  (headless Antigravity's standing failure mode) is classified by the same
+  answer-quality gate consult already uses: withheld from the ok and family
+  counts — so "N independent model families" describes answers that exist —
+  dropped from debate replay so a round-two banner cannot become the final
+  answer, and rendered as a labeled non-answer in the synthesis instead of
+  being quoted as an opinion. A blocked reviewer's `no-verdict` now quotes the
+  provider's own stated reason so a gate failure names the operator's fix.
+  Dry runs skip classification; `OMS_COUNCIL_QUALITY=0` restores
+  exit-status-only accounting.
 - A session end captures a handoff digest. The PreCompact snapshot script now
   also registers for `SessionEnd` (nine managed hook registrations; doctor
   checks all nine), because measurement showed the capture stream was dry:

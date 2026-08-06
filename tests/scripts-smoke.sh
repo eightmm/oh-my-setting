@@ -13233,6 +13233,149 @@ test_peer_review_panel_reports_families() {
     fail "the review panel should report families: $out"
 }
 
+write_blocked_council_provider() {  # write_blocked_council_provider BIN_DIR PROVIDER
+  local bin_dir="$1"
+  local provider="$2"
+  local binary="$provider"
+
+  [ "$provider" = "antigravity" ] && binary="agy"
+  mkdir -p "$bin_dir"
+  # Exits 0 having printed only its reason for saying nothing, which is what a
+  # headless CLI does when a tool permission is auto-denied. Both lines are
+  # refusals, so the artifact holds no answer at all.
+  cat > "$bin_dir/$binary" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+echo 'add an allow-rule for the read tool, then re-run the council.'
+echo 'alternatively, re-run with the permission prompt enabled.'
+EOF
+  chmod +x "$bin_dir/$binary"
+}
+
+test_peer_ask_council_does_not_seat_a_provider_that_never_answered() {
+  local project="$TMP/ask-council-nonanswer"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local synth
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  make_council_stubs "$bin_dir"
+  write_blocked_council_provider "$bin_dir" claude
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,claude,antigravity \
+    --no-memory --no-task --no-ml-context \
+    --prompt "Council seat quality" >"$project/out" 2>"$project/err" || rc=$?
+
+  [ "$rc" = "0" ] || fail "two real answers are still a quorum, got $rc"
+  # The seat exited 0, so exit status alone reports three voices where two spoke.
+  assert_file_contains "$project/out" 'summary: 2/3 providers succeeded (1 non-answer(s))'
+  assert_file_contains "$project/err" 'note: claude did not really answer (blocked)'
+  assert_file_contains "$project/err" 'note: claude said: add an allow-rule for the read tool'
+  assert_file_contains "$project/err" 'note: exited 0 without answering: claude'
+
+  synth="$(find "$artifact_dir" -type f -name '_synthesis-council-seat-quality-*.md' | head -n 1)"
+  [ -n "$synth" ] || fail "missing council synthesis"
+  assert_file_contains "$synth" '_non-answer (blocked): add an allow-rule for the read tool'
+  if grep -Fq 'alternatively, re-run with' "$synth"; then
+    fail "synthesis must name the non-answer, not paste its banner as one more opinion"
+  fi
+
+  # An operator who hits a classifier false positive needs a way back to the
+  # old accounting that does not involve editing the harness.
+  rc=0
+  OMS_COUNCIL_QUALITY=0 HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts-optout" \
+    --providers codex,claude,antigravity \
+    --no-memory --no-task --no-ml-context \
+    --prompt "Council seat quality" >"$project/out2" 2>"$project/err2" || rc=$?
+
+  [ "$rc" = "0" ] || fail "the opt-out run should still exit 0, got $rc"
+  assert_file_contains "$project/out2" 'summary: 3/3 providers succeeded'
+  if grep -Fq 'non-answer' "$project/out2" "$project/err2"; then
+    fail "OMS_COUNCIL_QUALITY=0 must restore exit-status-only accounting"
+  fi
+}
+
+test_peer_ask_debate_drops_a_round_two_non_answer() {
+  local project="$TMP/ask-debate-nonanswer"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local synth
+  local rc=0
+
+  mkdir -p "$project" "$home_dir" "$bin_dir"
+  write_fake_debate_provider "$bin_dir" codex 0
+  write_fake_debate_provider "$bin_dir" antigravity 0
+  # Answers round 1, then loses the permission and exits 0 anyway in round 2.
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+prompt="$(cat)"
+case "$prompt" in
+  *"This is debate round 2."*)
+    echo 'add an allow-rule for the read tool, then re-run the debate.'
+    exit 0
+    ;;
+esac
+printf 'Answer:\nCLAUDE ROUND1 ANSWER\nRecommendation:\nuse claude round 1\n'
+EOF
+  chmod +x "$bin_dir/claude"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-ask.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers codex,claude,antigravity \
+    --no-memory --no-task --no-ml-context \
+    --debate 1 \
+    --prompt "Debate round two banner" >"$project/out" 2>"$project/err" || rc=$?
+
+  [ "$rc" = "0" ] || fail "a round-2 non-answer should not sink the council, got $rc"
+  assert_file_contains "$project/err" 'note: claude did not really answer in round 2 (blocked)'
+  assert_file_contains "$project/out" 'summary: 3/3 providers succeeded (1 dropped during debate)'
+  synth="$(find "$artifact_dir" -type f -name '_synthesis-debate-round-two-banner-*.md' | head -n 1)"
+  [ -n "$synth" ] || fail "missing debate synthesis"
+  # The banner exited 0, so without the check it outranks the round-1 answer and
+  # is published as this provider's final answer after debate.
+  assert_file_contains "$synth" 'CLAUDE ROUND1 ANSWER'
+  if grep -Fq 'add an allow-rule' "$synth"; then
+    fail "a round-2 banner must not become the final answer after debate"
+  fi
+}
+
+test_peer_review_verdicts_name_a_blocked_provider() {
+  local dir="$TMP/verdicts-blocked"
+  local run="20260611T000000Z-77"
+  local out
+  local rc=0
+
+  mkdir -p "$dir/run"
+  # Both artifacts are complete and neither carries a GATE line, so both fail
+  # the gate. Only one of them is fixed by editing an allow-list.
+  printf '# codex review\n\n## Output\n\nadd an allow-rule for the read tool, then re-run the review.\n\n## Exit\n\n0\n' \
+    > "$dir/run/codex-x-$run.md"
+  printf '# claude review\n\n## Output\n\nFindings: the diff looks fine to me.\nI forgot to print the verdict line.\n\n## Exit\n\n0\n' \
+    > "$dir/run/claude-x-$run.md"
+
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/run")" && rc=0 || rc=$?
+  [ "$rc" = "2" ] || fail "a missing verdict must still fail the gate, got $rc"
+  printf '%s' "$out" | grep -Fq 'codex: no-verdict (blocked: add an allow-rule for the read tool' ||
+    fail "a gate failure should say what the operator has to fix: $out"
+  printf '%s' "$out" | grep -Fq 'claude: no-verdict (complete but no GATE line)' ||
+    fail "a provider that merely omitted the line keeps the plain message: $out"
+}
+
 test_delegate_detects_a_worker_writing_outside_its_worktree() {
   local project="$TMP/worker-guard"
   local bin_dir="$project/bin"

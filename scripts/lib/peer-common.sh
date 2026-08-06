@@ -1453,18 +1453,42 @@ OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_K
   unset OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 }
 
+# Should this seat be dropped for saying nothing usable? A headless CLI whose
+# permission was auto-denied prints its banner and exits 0, so exit status alone
+# seats it as an independent family voice, replays it into debate prompts, and
+# reports a corroboration that never happened.
+# Dry runs are exempt: their artifacts hold only route lines and "DRY RUN", every
+# one of which the classifier strips as noise, so an unguarded check would read
+# every dry-run seat as empty and kill the whole council (peer-delegate.sh guards
+# its own use of the classifier the same way).
+# Prints the quality when the seat must be dropped; prints nothing when it holds.
+ma_council_nonanswer() {
+  local artifact="$1"
+  local quality
+
+  [ "${OMS_COUNCIL_QUALITY:-1}" != "0" ] || return 0
+  [ "${DRY_RUN:-0}" != "1" ] || return 0
+  quality="$(ma_answer_quality "$artifact")"
+  [ "$quality" != "ok" ] || return 0
+  printf '%s\n' "$quality"
+}
+
 # Round 1: fan out the same prompt to all providers in parallel.
 # Sets: ok, total, pids, artifacts, provider_names, alive, last_arts,
-# dropped, dropped_names.
+# dropped, dropped_names, nonanswers, nonanswer_names, seat_quality, seat_reason.
 ma_run_round1() {
-  local provider artifact i provider_list
+  local provider artifact i provider_list quality
   ok=0
   total=0
   dropped=0
+  nonanswers=0
   pids=()
   artifacts=()
   provider_names=()
   dropped_names=()
+  nonanswer_names=()
+  seat_quality=()
+  seat_reason=()
 
   IFS=',' read -r -a provider_list <<< "$PROVIDERS"
   for provider in "${provider_list[@]}"; do
@@ -1486,13 +1510,31 @@ ma_run_round1() {
   alive=()
   last_arts=()
   for i in "${!pids[@]}"; do
-    if wait "${pids[i]}"; then
+    seat_quality[i]=""
+    seat_reason[i]=""
+    last_arts[i]="${artifacts[i]}"
+    if ! wait "${pids[i]}"; then
+      alive[i]=0
+      continue
+    fi
+    quality="$(ma_council_nonanswer "${artifacts[i]}")"
+    if [ -z "$quality" ]; then
       ok=$((ok + 1))
       alive[i]=1
-    else
-      alive[i]=0
+      continue
     fi
-    last_arts[i]="${artifacts[i]}"
+    # Withhold the ok increment rather than counting the seat and warning about
+    # it: ma_answered_families and ma_quorum_exit read these counters, and a
+    # count that includes a non-answer is the lie this check exists to stop.
+    alive[i]=0
+    nonanswers=$((nonanswers + 1))
+    nonanswer_names+=("${provider_names[i]}")
+    seat_quality[i]="$quality"
+    echo "note: ${provider_names[i]} did not really answer ($quality)" >&2
+    if [ "$quality" = blocked ]; then
+      seat_reason[i]="$(ma_answer_block_reason "${artifacts[i]}")"
+      echo "note: ${provider_names[i]} said: ${seat_reason[i]}" >&2
+    fi
   done
 }
 
@@ -1535,7 +1577,7 @@ write_debate_prompt() {
 
 # Debate rounds 2..DEBATE+1. Mutates alive and last_arts.
 ma_run_debate_rounds() {
-  local round i j k p others debate_prompt artifact
+  local round i j k p others debate_prompt artifact quality
   local r_pids r_idx r_arts active
 
   for ((round = 2; round <= DEBATE + 1; round++)); do
@@ -1570,14 +1612,21 @@ ma_run_debate_rounds() {
 
     for k in "${!r_pids[@]}"; do
       i="${r_idx[k]}"
+      quality=""
       if wait "${r_pids[k]}"; then
-        last_arts[i]="${r_arts[k]}"
-      else
-        # Drop failed provider from later rounds; keep its last good answer.
-        alive[i]=0
-        dropped=$((dropped + 1))
-        dropped_names+=("${provider_names[i]}")
+        # A banner that exits 0 in round 2 would otherwise be promoted over the
+        # round-1 answer and published as the "final answer after debate".
+        quality="$(ma_council_nonanswer "${r_arts[k]}")"
+        if [ -z "$quality" ]; then
+          last_arts[i]="${r_arts[k]}"
+          continue
+        fi
+        echo "note: ${provider_names[i]} did not really answer in round $round ($quality)" >&2
       fi
+      # Drop failed provider from later rounds; keep its last good answer.
+      alive[i]=0
+      dropped=$((dropped + 1))
+      dropped_names+=("${provider_names[i]}")
     done
   done
 }
@@ -1601,6 +1650,13 @@ ma_write_synthesis() {
     printf '\n```\n\n'
     for i in "${!artifacts[@]}"; do
       printf '## %s\n\n' "${provider_names[i]}"
+      # This loop walks every seat, alive or not, so a dropped seat's body would
+      # still be read here as one more opinion. Name it instead of pasting it.
+      if [ -n "${seat_quality[i]:-}" ]; then
+        printf '_non-answer (%s): %s_\n\n' "${seat_quality[i]}" \
+          "$(printf '%s\n' "${seat_reason[i]:-no usable output}" | ma_sanitize_quoted_output)"
+        continue
+      fi
       if [ "${last_arts[i]}" != "${artifacts[i]}" ]; then
         printf '_final answer after debate_\n\n'
       fi
@@ -1611,11 +1667,19 @@ ma_write_synthesis() {
 }
 
 ma_print_run_summary() {
+  local detail=""
+
+  # Two different losses, counted apart: a debate drop still contributed the
+  # answer being synthesized, a non-answer never contributed one.
+  [ "${dropped:-0}" -le 0 ] || detail="$dropped dropped during debate"
+  [ "${nonanswers:-0}" -le 0 ] ||
+    detail="${detail:+$detail, }$nonanswers non-answer(s)"
+  echo "summary: $ok/$total providers succeeded${detail:+ ($detail)}"
   if [ "${dropped:-0}" -gt 0 ]; then
-    echo "summary: $ok/$total providers succeeded ($dropped dropped during debate)"
     echo "note: debate dropped providers: ${dropped_names[*]}; their last successful round's answer was used for synthesis" >&2
-  else
-    echo "summary: $ok/$total providers succeeded"
+  fi
+  if [ "${nonanswers:-0}" -gt 0 ]; then
+    echo "note: exited 0 without answering: ${nonanswer_names[*]}" >&2
   fi
   echo "artifacts: $ARTIFACT_DIR"
   echo "synthesis: $synth_file"
