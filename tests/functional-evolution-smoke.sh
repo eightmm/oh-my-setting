@@ -73,6 +73,92 @@ assert r["coverage"]["verification_reports"] == 2, r
 PY
 }
 
+test_review_uptake_withholds_rates_until_both_cohorts_are_large_enough() {
+  local repo="$TMP/review-uptake"
+  local report
+
+  make_repo "$repo"
+  mkdir -p "$repo/.oms/artifacts"
+  # One delegation per cohort: far below the floor, so the report owes counts
+  # and no rate at all.
+  cat > "$repo/.oms/artifacts/index.jsonl" <<'EOF'
+{"schema":1,"event_id":"evt_f1","operation_id":"op_f1","artifact_id":"sha256:f1","ts":"2026-08-03T00:00:01Z","kind":"delegate","provider":"codex","exit":0,"verify_exit":0,"prompt_sha256":"p1","source":".oms/artifacts/review-1.md","tokens":10,"duration_s":1.0}
+{"schema":1,"event_id":"evt_d1","operation_id":"op_d1","artifact_id":"sha256:d1","ts":"2026-08-03T00:00:02Z","kind":"delegate","provider":"codex","exit":0,"prompt_sha256":"p2","tokens":5,"duration_s":5.0}
+EOF
+  report="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" --json telemetry --review-uptake)" ||
+    fail "review-uptake telemetry failed"
+  OMS_TEST_REPORT="$report" python3 - <<'PY' || fail "undersized cohorts were reported as rates"
+import json, os
+block = json.loads(os.environ["OMS_TEST_REPORT"])["review_uptake"]
+assert block["status"] == "insufficient-data", block
+assert block["minimum_sample"] == 5 and block["delegations"] == 2, block
+cohorts = {entry["cohort"]: entry for entry in block["cohorts"]}
+assert set(cohorts) == {"review-fed", "direct"}, block
+for entry in block["cohorts"]:
+    assert entry["status"] == "insufficient-data", entry
+    assert entry["size"] == 1 and entry["recorded_exit"]["zero"] == 1, entry
+    assert entry["recorded_exit_zero_rate"] is None, entry
+    assert entry["verifier_coverage_rate"] is None, entry
+    assert entry["verifier_exit_zero_rate"] is None, entry
+    assert entry["wall_seconds"]["median"] is None, entry
+assert cohorts["review-fed"]["wall_seconds"]["total"] == 1.0, block
+PY
+
+  # Enough rows for both cohorts, one review fed from outside the repo, plus a
+  # non-delegate row that must stay out of the partition.
+  cat >> "$repo/.oms/artifacts/index.jsonl" <<'EOF'
+{"schema":1,"event_id":"evt_f2","operation_id":"op_f2","artifact_id":"sha256:f2","ts":"2026-08-03T00:00:03Z","kind":"delegate","provider":"codex","exit":0,"verify_exit":0,"prompt_sha256":"p3","source":".oms/artifacts/review-2.md","tokens":30,"duration_s":3.0}
+{"schema":1,"event_id":"evt_f3","operation_id":"op_f3","artifact_id":"sha256:f3","ts":"2026-08-03T00:00:04Z","kind":"delegate","provider":"codex","exit":0,"prompt_sha256":"p4","source":".oms/artifacts/review-3.md"}
+{"schema":1,"event_id":"evt_f4","operation_id":"op_f4","artifact_id":"sha256:f4","ts":"2026-08-03T00:00:05Z","kind":"delegate","provider":"codex","exit":0,"prompt_sha256":"p5","source_external":{"name":"review-4.md","owned":false,"sha256":"deadbeef"}}
+{"schema":1,"event_id":"evt_f5","operation_id":"op_f5","artifact_id":"sha256:f5","ts":"2026-08-03T00:00:06Z","kind":"delegate","provider":"codex","exit":1,"prompt_sha256":"p6","source":".oms/artifacts/review-5.md"}
+{"schema":1,"event_id":"evt_d2","operation_id":"op_d2","artifact_id":"sha256:d2","ts":"2026-08-03T00:00:07Z","kind":"delegate","provider":"codex","exit":0,"prompt_sha256":"p7"}
+{"schema":1,"event_id":"evt_d3","operation_id":"op_d3","artifact_id":"sha256:d3","ts":"2026-08-03T00:00:08Z","kind":"delegate","provider":"codex","exit":0,"prompt_sha256":"p8"}
+{"schema":1,"event_id":"evt_d4","operation_id":"op_d4","artifact_id":"sha256:d4","ts":"2026-08-03T00:00:09Z","kind":"delegate","provider":"codex","exit":1,"prompt_sha256":"p9"}
+{"schema":1,"event_id":"evt_d5","operation_id":"op_d5","artifact_id":"sha256:d5","ts":"2026-08-03T00:00:10Z","kind":"delegate","provider":"codex","exit":1,"verify_exit":1,"prompt_sha256":"p10"}
+{"schema":1,"event_id":"evt_c1","operation_id":"op_c1","artifact_id":"sha256:c1","ts":"2026-08-03T00:00:11Z","kind":"call","provider":"codex","exit":0,"source":".oms/artifacts/review-6.md"}
+EOF
+  report="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" --json telemetry --review-uptake)" ||
+    fail "review-uptake telemetry failed on the larger window"
+  OMS_TEST_REPORT="$report" python3 - <<'PY' || fail "cohort figures are wrong"
+import json, os
+report = json.loads(os.environ["OMS_TEST_REPORT"])
+block = report["review_uptake"]
+assert block["status"] == "reported", block
+assert block["basis"] == "observational, mechanical-only", block
+# Only delegations are partitioned; the call row stays in the wider report.
+assert block["delegations"] == 10 and report["operations"]["eligible"] == 11, block
+cohorts = {entry["cohort"]: entry for entry in block["cohorts"]}
+fed, direct = cohorts["review-fed"], cohorts["direct"]
+assert fed["size"] == 5 and direct["size"] == 5, block
+assert fed["status"] == "reported" and direct["status"] == "reported", block
+assert fed["recorded_exit_zero_rate"] == 0.8, fed
+assert direct["recorded_exit_zero_rate"] == 0.6, direct
+assert fed["verifier_coverage_rate"] == 0.4, fed
+assert fed["verifier_exit_zero_rate"] == 1.0, fed
+assert direct["verifier_coverage_rate"] == 0.2, direct
+assert direct["verifier_exit_zero_rate"] == 0.0, direct
+# The externally recorded review counts as fed and is the only hashed source.
+assert fed["lineage"] == {"operation_id": 5, "prompt_hash": 5, "source_hash": 1}, fed
+assert direct["lineage"]["source_hash"] == 0, direct
+# Cached row metrics, so a pruned artifact cannot erase them.
+assert fed["wall_seconds"] == {"median": 2.0, "reports": 2, "total": 4.0}, fed
+assert fed["provider_reported_tokens"] == {"reports": 2, "total": 40}, fed
+# An exit zero is not semantic task success, and nothing here may say it is.
+assert "success_rate" not in json.dumps(block), block
+PY
+
+  report="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" --json telemetry)" ||
+    fail "default telemetry failed"
+  OMS_TEST_REPORT="$report" python3 - <<'PY' || fail "omitting --review-uptake changed the default report"
+import json, os
+assert "review_uptake" not in json.loads(os.environ["OMS_TEST_REPORT"])
+PY
+
+  if "$ROOT/scripts/artifact-index.sh" --repo "$repo" --review-uptake list >/dev/null 2>&1; then
+    fail "--review-uptake was accepted outside telemetry"
+  fi
+}
+
 write_fake_gh() {
   local path="$1"
   local sha="$2"
@@ -435,6 +521,7 @@ PY
 }
 
 test_native_hook_telemetry_is_content_free_and_correlated
+test_review_uptake_withholds_rates_until_both_cohorts_are_large_enough
 test_ci_tick_records_once_and_skips_a_fresh_sha
 test_inbox_ranks_state_and_applies_only_safe_repairs
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch

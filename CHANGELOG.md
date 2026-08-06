@@ -7,6 +7,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Review-uptake telemetry, honestly bounded. `oms artifact-index telemetry
+  --review-uptake` partitions delegate rows into review-fed and direct
+  cohorts and reports recorded exit-zero, verifier, lineage-coverage, and
+  duration/token figures per cohort — labeled observational and
+  mechanical-only, with all rates withheld as `insufficient-data` below a
+  five-row cohort floor. On today's live index that floor fires (2 delegate
+  rows, 0 review-fed), which is the point: the question "do embedded review
+  findings change worker output" becomes answerable the moment the data
+  exists, without ever being answered before it does.
 - Council seats are counted by answer quality, not exit status. A peer-ask or
   peer-review seat whose CLI exits 0 having printed only a permission banner
   (headless Antigravity's standing failure mode) is classified by the same

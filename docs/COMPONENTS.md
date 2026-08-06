@@ -360,7 +360,15 @@ session identity, turns, tool/subagent counts, and provider-exposed usage),
 never prompts, commands, arguments, or output. Usage is labeled as a
 per-session maximum because provider hooks differ between cumulative and delta
 counters. Coverage is explicit: an exit zero is not called semantic task
-success, and rows outside the retained window cannot be inferred
+success, and rows outside the retained window cannot be inferred.
+`--review-uptake` adds an opt-in cohort block: delegate rows partitioned into
+review-fed (internal `source` or external `source_external` lineage) and
+direct, each reporting size, lineage/hash coverage, recorded exit-zero and
+verifier rates, and recoverable duration/token figures — labeled
+"observational, mechanical-only", never causal, with every rate withheld as
+`insufficient-data` while a cohort is under the minimum sample (5), because
+a two-row cohort reporting a "rate" would be the exact overclaim the
+telemetry contract exists to prevent
 
 **Safety rails (built-in)** — Outbound prompts are scrubbed before any external
 CLI call (credentials, keys, machine/cluster details block the call); injected

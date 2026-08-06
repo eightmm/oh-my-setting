@@ -22,6 +22,7 @@ LIMIT_SET=0
 PRUNE_FILES=0
 PRUNE_STALE=0
 DRY_RUN=0
+REVIEW_UPTAKE=0
 TARGET_EVENTS=()
 # Counted separately because Bash 3.2 rejects ${arr[@]} on an empty array
 # under `set -u`, and every non-resolve action has to test emptiness.
@@ -48,7 +49,8 @@ Commands:
                  nothing is resolved for you.
   telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
                  over the retained window (default 1000). This does not infer
-                 semantic task success.
+                 semantic task success. Add --review-uptake to also split
+                 delegations into review-fed and direct cohorts.
   resolve        Resolve the failed outcomes selected by --event-id, which may
                  be repeated to clear a triaged batch in one locked call.
   validate       Validate schema, lineage ids, paths, and references.
@@ -71,6 +73,13 @@ Options:
   --stale        With prune, drop index rows referencing deleted files. Age is
                  not the question here, so this ignores --keep.
   --dry-run      With prune, print row/file changes without changing them.
+  --review-uptake With telemetry, partition kind=delegate rows in the same
+                 window into review-fed (a recorded source artifact, internal
+                 or external) and direct cohorts, and report each cohort's
+                 size, lineage/hash coverage, recorded exit-zero rate, and
+                 verifier coverage. Observational and mechanical-only: a
+                 cohort below the minimum sample reports insufficient-data
+                 with counts instead of rates, and no difference is causal.
   -h, --help     Show help.
 EOF
 }
@@ -113,6 +122,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --review-uptake)
+      REVIEW_UPTAKE=1
       shift
       ;;
     --json)
@@ -164,6 +177,9 @@ fi
 if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--dry-run is only valid with prune"
 fi
+if [ "$REVIEW_UPTAKE" -eq 1 ] && [ "$ACTION" != "telemetry" ]; then
+  fail "--review-uptake is only valid with telemetry"
+fi
 if [ "$LIMIT_SET" -eq 0 ]; then
   case "$ACTION" in
     prune|telemetry) LIMIT="1000" ;;
@@ -178,16 +194,21 @@ esac
 # Anchor to the git worktree root so the index does not fork per subdirectory.
 REPO="$(oms_repo_root "$REPO")"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
+
+# Telemetry has two exits — empty index and populated — so the argument list is
+# built once; a flag added to one call site only would silently not apply to
+# the other. `set --` rather than an array: Bash 3.2 rejects an empty one.
+artifact_index_telemetry() {
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+  set -- --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
+  [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
+  [ "$REVIEW_UPTAKE" -eq 0 ] || set -- "$@" --review-uptake
+  python3 "$ROOT_LIB/artifact-telemetry.py" "$@"
+}
+
 if [ ! -s "$INDEX_FILE" ]; then
   if [ "$ACTION" = "telemetry" ]; then
-    command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-    if [ "$AS_JSON" -eq 1 ]; then
-      python3 "$ROOT_LIB/artifact-telemetry.py" \
-        --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT" --json
-    else
-      python3 "$ROOT_LIB/artifact-telemetry.py" \
-        --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
-    fi
+    artifact_index_telemetry
     exit 0
   fi
   # A machine consumer wants an empty view, not an error, when nothing has run
@@ -201,13 +222,7 @@ fi
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 if [ "$ACTION" = "telemetry" ]; then
-  if [ "$AS_JSON" -eq 1 ]; then
-    python3 "$ROOT_LIB/artifact-telemetry.py" \
-      --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT" --json
-  else
-    python3 "$ROOT_LIB/artifact-telemetry.py" \
-      --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
-  fi
+  artifact_index_telemetry
   exit 0
 fi
 

@@ -25,6 +25,10 @@ TOKENS_RE = re.compile(
     r"(?im)^tokens used[ \t]*\r?\n[ \t]*([0-9][0-9,]*)[ \t]*$"
 )
 ARTIFACT_EDGE_BYTES = 64 * 1024
+# A cohort this small cannot carry a rate. Below the floor the uptake report
+# prints counts and withholds every ratio, because two delegations shaped into
+# a percentage read as a finding and there is none yet.
+REVIEW_UPTAKE_MIN_SAMPLE = 5
 
 
 def integer(value: object) -> Optional[int]:
@@ -238,7 +242,147 @@ def native_activity(repo: str) -> dict:
     }
 
 
-def telemetry(repo: str, index: str, limit: int) -> dict:
+def ratio(part: int, whole: int) -> Optional[float]:
+    return round(part / whole, 3) if whole else None
+
+
+def review_fed(row: dict[str, object]) -> bool:
+    """True when a delegation recorded the review artifact it was fed.
+
+    The two lineage shapes differ: an in-repo review is a repo-relative path
+    under `source`, an outside one is a name-only dict under `source_external`
+    because the harness never owned that file.
+    """
+    source = row.get("source")
+    if isinstance(source, str) and source:
+        return True
+    external = row.get("source_external")
+    name = external.get("name") if isinstance(external, dict) else None
+    return isinstance(name, str) and bool(name)
+
+
+def source_hashed(row: dict[str, object]) -> bool:
+    digest = row.get("source_sha256")
+    if isinstance(digest, str) and digest:
+        return True
+    external = row.get("source_external")
+    digest = external.get("sha256") if isinstance(external, dict) else None
+    return isinstance(digest, str) and bool(digest)
+
+
+def cohort(repo: str, name: str, rows: list[dict[str, object]]) -> dict:
+    """Mechanical figures for one delegation cohort. Nothing is inferred."""
+    exits = Counter()
+    verification = Counter()
+    lineage = Counter()
+    durations: list[float] = []
+    tokens: list[int] = []
+    for row in rows:
+        exit_value = integer(row.get("exit"))
+        if exit_value is None:
+            exits["unavailable"] += 1
+        elif exit_value == 0:
+            exits["zero"] += 1
+        else:
+            exits["nonzero"] += 1
+
+        verify_exit = integer(row.get("verify_exit"))
+        if verify_exit is not None:
+            verification["recorded"] += 1
+            if verify_exit == 0:
+                verification["zero"] += 1
+
+        operation_id = row.get("operation_id")
+        if isinstance(operation_id, str) and operation_id:
+            lineage["operation_id"] += 1
+        prompt_hash = row.get("prompt_sha256")
+        if isinstance(prompt_hash, str) and prompt_hash:
+            lineage["prompt_hash"] += 1
+        if source_hashed(row):
+            lineage["source_hash"] += 1
+
+        # Cached row metrics first, so a pruned artifact does not erase the
+        # figures a previous call already reported.
+        _, duration, token_count = artifact_metrics(repo, row)
+        if duration is not None:
+            durations.append(duration)
+        if token_count is not None:
+            tokens.append(token_count)
+
+    size = len(rows)
+    reportable = size >= REVIEW_UPTAKE_MIN_SAMPLE
+    return {
+        "cohort": name,
+        "size": size,
+        "status": "reported" if reportable else "insufficient-data",
+        "recorded_exit": {
+            "zero": exits["zero"],
+            "nonzero": exits["nonzero"],
+            "unavailable": exits["unavailable"],
+        },
+        # Named for what it counts: an exit zero is not semantic task success.
+        "recorded_exit_zero_rate": (
+            ratio(exits["zero"], size) if reportable else None
+        ),
+        "verification": {
+            "recorded": verification["recorded"],
+            "zero": verification["zero"],
+        },
+        "verifier_coverage_rate": (
+            ratio(verification["recorded"], size) if reportable else None
+        ),
+        "verifier_exit_zero_rate": (
+            ratio(verification["zero"], verification["recorded"])
+            if reportable
+            else None
+        ),
+        "lineage": {
+            "operation_id": lineage["operation_id"],
+            "prompt_hash": lineage["prompt_hash"],
+            "source_hash": lineage["source_hash"],
+        },
+        "wall_seconds": {
+            "reports": len(durations),
+            "total": round(sum(durations), 3),
+            "median": (
+                round(float(statistics.median(durations)), 3)
+                if reportable and durations
+                else None
+            ),
+        },
+        "provider_reported_tokens": {
+            "reports": len(tokens),
+            "total": sum(tokens),
+        },
+    }
+
+
+def review_uptake(repo: str, selected: list[dict[str, object]]) -> dict:
+    delegations = [row for row in selected if row.get("kind") == "delegate"]
+    cohorts = [
+        cohort(repo, "review-fed", [r for r in delegations if review_fed(r)]),
+        cohort(
+            repo, "direct", [r for r in delegations if not review_fed(r)]
+        ),
+    ]
+    comparable = all(entry["status"] == "reported" for entry in cohorts)
+    return {
+        "basis": "observational, mechanical-only",
+        "caveat": (
+            "recorded exit zero is not semantic task success; cohort "
+            "membership is not assigned, so no difference here is causal"
+        ),
+        "scope": "retained-index-window",
+        "minimum_sample": REVIEW_UPTAKE_MIN_SAMPLE,
+        "status": "reported" if comparable else "insufficient-data",
+        "delegations": len(delegations),
+        "cohorts": cohorts,
+    }
+
+
+def telemetry(
+    repo: str, index: str, limit: int, uptake: bool = False
+) -> dict:
     rows: list[dict[str, object]] = []
     invalid_lines = 0
     if os.path.exists(index):
@@ -384,7 +528,7 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
 
     first_ts = selected[0].get("ts", "") if selected else ""
     last_ts = selected[-1].get("ts", "") if selected else ""
-    return {
+    report = {
         "schema": 1,
         "action": "telemetry",
         "semantic_outcome": (
@@ -458,6 +602,69 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
         "routes": [routes[key] for key in sorted(routes)],
         "native_activity": native_activity(repo),
     }
+    # Opt-in only: omitting the flag leaves the default report byte-identical.
+    if uptake:
+        report["review_uptake"] = review_uptake(repo, selected)
+    return report
+
+
+def emit_review_uptake(block: dict) -> None:
+    print(
+        "review uptake: %s; status=%s; minimum sample=%d; delegations=%d"
+        % (
+            block["basis"],
+            block["status"],
+            block["minimum_sample"],
+            block["delegations"],
+        )
+    )
+    print("  caveat: %s" % block["caveat"])
+    for entry in block["cohorts"]:
+        exits = entry["recorded_exit"]
+        verification = entry["verification"]
+        lineage = entry["lineage"]
+        seconds = entry["wall_seconds"]
+        tokens = entry["provider_reported_tokens"]
+        print(
+            "  cohort %s: rows=%d status=%s recorded exit zero=%d nonzero=%d "
+            "unavailable=%d verifier recorded=%d zero=%d"
+            % (
+                entry["cohort"],
+                entry["size"],
+                entry["status"],
+                exits["zero"],
+                exits["nonzero"],
+                exits["unavailable"],
+                verification["recorded"],
+                verification["zero"],
+            )
+        )
+        print(
+            "    lineage: operation-id=%d prompt-hash=%d source-hash=%d; "
+            "wall seconds total=%s reports=%d; tokens total=%d reports=%d"
+            % (
+                lineage["operation_id"],
+                lineage["prompt_hash"],
+                lineage["source_hash"],
+                seconds["total"],
+                seconds["reports"],
+                tokens["total"],
+                tokens["reports"],
+            )
+        )
+        if entry["status"] != "reported":
+            print("    rates withheld: cohort below the minimum sample")
+            continue
+        print(
+            "    recorded exit-zero rate=%s verifier coverage=%s "
+            "verifier exit-zero rate=%s wall seconds median=%s"
+            % (
+                entry["recorded_exit_zero_rate"],
+                entry["verifier_coverage_rate"],
+                entry["verifier_exit_zero_rate"],
+                seconds["median"],
+            )
+        )
 
 
 def emit_human(report: dict) -> None:
@@ -529,6 +736,8 @@ def emit_human(report: dict) -> None:
             native["events"],
         )
     )
+    if "review_uptake" in report:
+        emit_review_uptake(report["review_uptake"])
     for route in report["routes"]:
         print(
             "route: provider=%s class=%s model=%s operations=%d "
@@ -551,6 +760,7 @@ def main() -> int:
     parser.add_argument("--index")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--review-uptake", action="store_true")
     # Extract mode exists so the index writer can cache what only this module
     # knows how to read, without a second copy of the regexes drifting from it.
     parser.add_argument("--extract", help="artifact path, repo-relative")
@@ -574,7 +784,7 @@ def main() -> int:
     if args.limit <= 0:
         parser.error("--limit must be positive")
     repo = os.path.realpath(args.repo)
-    report = telemetry(repo, args.index, args.limit)
+    report = telemetry(repo, args.index, args.limit, args.review_uptake)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:
