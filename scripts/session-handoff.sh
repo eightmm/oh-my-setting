@@ -23,6 +23,11 @@ CWD="$PWD"
 OUT=""
 NOTE=""
 TURNS="${OMS_HANDOFF_TURNS:-6}"
+# A session with fewer real user turns than this has nothing to hand off, and
+# capturing it would only push a substantive digest out of the resume hook's
+# newest-handoff slot. The automatic hooks inherit this default; a deliberate
+# manual capture can lower it.
+MIN_USER_TURNS=2
 
 usage() {
   cat <<'EOF'
@@ -42,11 +47,16 @@ capture options:
   --cwd PATH       Project dir to match (default: current dir).
   --note TEXT      Free-text note added to the digest header.
   --out FILE       Write digest here instead of the default handoffs dir.
+  --min-user-turns N  Skip the capture when the session has fewer than N real
+                   user turns (default: 2; 0 captures anything).
   --allow-sensitive  Write the digest even if it looks sensitive (default:
                    refuse, since the digest is meant for another agent).
 
 Notes:
   - Extraction is mechanical; no model is called.
+  - A session below --min-user-turns is skipped, not failed: it writes no
+    digest, says so on stderr, and exits 0, so the automatic hooks stay quiet
+    instead of reporting a failure for every trivial session.
   - antigravity stores only user prompts in history.jsonl (assistant output
     lives in opaque protobuf), so its digest is prompts-only (best-effort).
   - Digests are local artifacts; loading one into another agent is your step.
@@ -427,6 +437,13 @@ cmd_capture() {
       --cwd) [ "$#" -ge 2 ] || fail "--cwd requires a path"; CWD="$2"; shift 2 ;;
       --note) [ "$#" -ge 2 ] || fail "--note requires text"; NOTE="$2"; shift 2 ;;
       --out) [ "$#" -ge 2 ] || fail "--out requires a path"; OUT="$2"; shift 2 ;;
+      --min-user-turns)
+        [ "$#" -ge 2 ] || fail "--min-user-turns requires a count"
+        case "$2" in
+          ''|*[!0-9]*) fail "--min-user-turns requires a non-negative integer: $2" ;;
+        esac
+        MIN_USER_TURNS="$2"; shift 2
+        ;;
       --allow-sensitive) ALLOW_SENSITIVE=1; shift ;;
       *) fail "unknown capture argument: $1" ;;
     esac
@@ -501,6 +518,23 @@ cmd_capture() {
     NOTE="$(printf '%s' "$NOTE" | agent_memory_normalize_machine_paths)"
   else
     rm -f "$SCAN_FILE"; SCAN_FILE=""
+  fi
+
+  # Trivial sessions (one prompt, then /clear) would otherwise take over the
+  # resume hook's newest-handoff slot from a digest that says something. The
+  # floor sits after the sensitivity scan on purpose: a secret-bearing
+  # transcript stays a loud refusal instead of becoming a silent skip. Skipping
+  # exits 0 rather than failing, so the automatic hook path does not file a
+  # fail-ledger row for every one-prompt session.
+  local user_count
+  user_count="$(printf '%s\n' "$extract" |
+    awk -F'\t' '$1 == "USER_COUNT" { print $2; exit }')"
+  case "$user_count" in
+    ''|*[!0-9]*) user_count=0 ;;
+  esac
+  if [ "$user_count" -lt "$MIN_USER_TURNS" ]; then
+    echo "session-handoff: skipped $AGENT $session_id: $user_count user turn(s), below the --min-user-turns floor of $MIN_USER_TURNS (pass --min-user-turns 0 to capture anyway)" >&2
+    return 0
   fi
 
   printf '%s\n' "$extract" |

@@ -40,6 +40,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `OMS_SESSIONEND_HANDOFF=0` disables only the new trigger. Existing installs
   pick the registration up on the next `oms update` (or
   `install-claude-hooks.sh`); until then doctor reports the missing hook.
+  Capture itself also grew a floor: a transcript with fewer than
+  `--min-user-turns` user turns (default 2) is skipped — the floor lives in
+  the writer so the hook, the pressure path, and every future caller inherit
+  it, and it sits after the sensitivity scan so a short transcript carrying a
+  secret still refuses loudly. `--min-user-turns 0` captures anyway.
 - The unresolved-artifact queue gained mechanical triage. Each unresolved row
   prints the exact `resolve --event-id ... --reason ...` command that clears
   it, annotated `superseded-by: evt_X` when the failed patch's exact bytes

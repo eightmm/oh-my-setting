@@ -62,8 +62,9 @@ if OMS_CLAUDE_HOME="$ch" bash "$ROOT/scripts/session-handoff.sh" capture \
   fail "handoff capture must refuse a secret-bearing transcript"
 fi
 [ ! -f "$TMP/d1.md" ] || fail "refused digest must not persist"
-printf '{"type":"user","message":{"role":"user","content":"fix %s"}}\n' "$MPATH" \
-  > "$proj/s1.jsonl"
+{ printf '{"type":"user","message":{"role":"user","content":"fix %s"}}\n' "$MPATH"
+  printf '{"type":"user","message":{"role":"user","content":"then run the tests"}}\n'
+} > "$proj/s1.jsonl"
 OMS_CLAUDE_HOME="$ch" bash "$ROOT/scripts/session-handoff.sh" capture \
     --agent claude --cwd /proj/contract --out "$TMP/d2.md" >/dev/null 2>&1 ||
   fail "handoff capture must accept a path-bearing transcript"

@@ -14,6 +14,10 @@ The capture is mechanical and stores a compact local digest under
 `.oms/handoffs/`. It scans transcript-derived content and refuses sensitive
 material by default. Use `--allow-sensitive` only after explicit inspection and
 only when loading the digest remains within the approved trust boundary.
+A transcript with fewer than two user turns is skipped (exit 0, nothing
+written) — there is nothing to hand off; pass `--min-user-turns 0` to capture
+a trivial session anyway. A sensitive transcript still refuses loudly
+regardless of the floor.
 
 Claude captures user/assistant turns, Codex captures task messages and final
 answers, and Antigravity history may contain prompts only. State that limitation

@@ -7207,6 +7207,8 @@ test_session_handoff_blocks_sensitive_digest() {
   local vector="AK""IAIOSFODNN7EXAMPLE"
   printf '{"type":"user","message":{"role":"user","content":"deploy with %s"}}\n' \
     "$vector" > "$proj/sess.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"then roll it back"}}\n' \
+    >> "$proj/sess.jsonl"
 
   # Default: refuse to write, nonzero exit, no file.
   if ( OMS_CLAUDE_HOME="$home" "$SH" capture --agent claude --cwd "$cwd" \
@@ -7230,8 +7232,10 @@ test_session_handoff_blocks_sensitive_digest() {
   local hdir
   hdir="$home/projects/$(printf '%s' "$hcwd" | sed 's#/#-#g')"
   mkdir -p "$hdir"
-  printf '{"type":"user","message":{"role":"user","content":"refactor the loader"}}\n' \
-    > "$hdir/h.jsonl"
+  {
+    printf '{"type":"user","message":{"role":"user","content":"refactor the loader"}}\n'
+    printf '{"type":"user","message":{"role":"user","content":"then add a test"}}\n'
+  } > "$hdir/h.jsonl"
   OMS_CLAUDE_HOME="$home" "$SH" capture --agent claude --cwd "$hcwd" \
     --out "$home/clean.md" >/dev/null 2>&1 ||
     fail "clean transcript must not self-block on a /home header path"
@@ -7245,6 +7249,8 @@ test_session_handoff_blocks_sensitive_digest() {
   mkdir -p "$pdir"
   printf '{"type":"user","message":{"role":"user","content":"fix /ho%s/researcher/proj/loader.py"}}\n' \
     "me" > "$pdir/p.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"then run the loader tests"}}\n' \
+    >> "$pdir/p.jsonl"
   OMS_CLAUDE_HOME="$home" "$SH" capture --agent claude --cwd "/proj/pathy-app" \
     --out "$home/pathy.md" >/dev/null 2>&1 ||
     fail "machine-tier user content must capture, not refuse"
@@ -7310,6 +7316,7 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   {
     printf '%s\n' '{"type":"user","message":{"role":"user","content":"continue the feature"}}'
     printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"paused at review"}]}}'
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"resume where it stopped"}}'
   } > "$sess"
 
   out="$(OMS_CLAUDE_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
@@ -7333,6 +7340,7 @@ test_session_handoff_codex_digest() {
     printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"deadbeef\",\"cwd\":\"$cwd\"}}"
     printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message","message":"refactor the parser"}}'
     printf '%s\n' '{"type":"event_msg","payload":{"type":"agent_message","message":"thinking"}}'
+    printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message","message":"now cover the edge cases"}}'
     printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"parser refactored and tested"}}'
   } > "$sess"
 
@@ -11145,6 +11153,7 @@ test_precompact_handoff_captures_adopted_repo() {
   cat > "$project_dir/sess-1.jsonl" <<EOF
 {"type":"user","cwd":"$repo","message":{"role":"user","content":"build the widget"}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Widget built and tested."}]}}
+{"type":"user","cwd":"$repo","message":{"role":"user","content":"now wire it to the queue"}}
 EOF
 
   printf '{"session_id":"sess-1","cwd":"%s"}' "$repo" |

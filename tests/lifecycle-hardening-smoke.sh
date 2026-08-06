@@ -16,7 +16,8 @@ assert_contains() {
   grep -Fq -- "$2" "$1" || fail "$1 does not contain: $2"
 }
 
-# An adopted repo plus a Claude transcript the handoff extractor can read.
+# An adopted repo plus a Claude transcript the handoff extractor can read. Two
+# user turns, since capture floors trivial sessions at --min-user-turns.
 make_handoff_fixture() {
   local repo="$1"
   local claude_home="$2"
@@ -30,6 +31,25 @@ make_handoff_fixture() {
   cat > "$project_dir/$session.jsonl" <<EOF
 {"type":"user","cwd":"$repo","message":{"role":"user","content":"build the widget"}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Widget built and tested."}]}}
+{"type":"user","cwd":"$repo","message":{"role":"user","content":"now wire it to the queue"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Wired and verified."}]}}
+EOF
+}
+
+# One user prompt and nothing else: the session the floor exists to skip.
+make_trivial_handoff_fixture() {
+  local repo="$1"
+  local claude_home="$2"
+  local session="$3"
+  local project_dir
+
+  mkdir -p "$repo/.oms"
+  printf '*\n' > "$repo/.oms/.gitignore"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  mkdir -p "$project_dir"
+  cat > "$project_dir/$session.jsonl" <<EOF
+{"type":"user","cwd":"$repo","message":{"role":"user","content":"what does this repo do"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"It is a harness."}]}}
 EOF
 }
 
@@ -142,6 +162,62 @@ test_session_end_handoff_honors_child_and_opt_out_gates() {
     fail "the session-end opt-out must not disable the pre-compact capture"
   grep -Rlq "auto: pre-compact snapshot" "$repo/.oms/handoffs" ||
     fail "the pre-compact digest should keep its own note"
+}
+
+# The hook now fires on every session end, so the floor is what keeps a
+# one-prompt session from evicting a substantive digest from the resume hook's
+# newest-handoff slot.
+test_handoff_capture_floors_trivial_sessions() {
+  local repo="$TMP/handoff-floor"
+  local claude_home="$TMP/handoff-floor-home"
+  local out="$TMP/handoff-floor.out"
+
+  make_trivial_handoff_fixture "$repo" "$claude_home" sess-thin
+
+  # Automatic path: passes nothing, inherits the default floor.
+  fire_handoff_hook "$repo" "$claude_home" sess-thin SessionEnd ||
+    fail "the hook must exit 0 when the capture is skipped"
+  [ "$(digest_count "$repo")" = 0 ] ||
+    fail "a one-prompt session must not write a handoff digest"
+  # A trivial session is expected noise, not a failure worth a ledger row.
+  [ ! -f "$repo/.oms/failures.jsonl" ] ||
+    fail "a skipped capture must not file a fail-ledger row"
+
+  # Skipped, not failed, and the reason names the flag that overrides it.
+  OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/session-handoff.sh" capture \
+    --agent claude --cwd "$repo" --session sess-thin \
+    > "$TMP/handoff-floor.stdout" 2> "$out" ||
+    fail "a skipped capture must exit 0"
+  assert_contains "$out" "--min-user-turns"
+  [ ! -s "$TMP/handoff-floor.stdout" ] ||
+    fail "a skipped capture must not print a digest path"
+
+  # An explicit manual capture can still take it.
+  OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/session-handoff.sh" capture \
+    --agent claude --cwd "$repo" --session sess-thin --min-user-turns 0 \
+    >/dev/null || fail "--min-user-turns 0 must capture a one-prompt session"
+  [ "$(digest_count "$repo")" = 1 ] ||
+    fail "--min-user-turns 0 should have written a digest"
+
+  if OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/session-handoff.sh" capture \
+      --agent claude --cwd "$repo" --session sess-thin \
+      --min-user-turns two >/dev/null 2>&1; then
+    fail "--min-user-turns must reject a non-numeric count"
+  fi
+
+  # Ordering: the floor must not turn a secret-bearing transcript into a silent
+  # skip. Split literal keeps this test source scrubber-clean.
+  local project_dir
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"use AK%s"}}\n' \
+    "$repo" "IAIOSFODNN7EXAMPLE" > "$project_dir/sess-thin.jsonl"
+  if OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/session-handoff.sh" capture \
+      --agent claude --cwd "$repo" --session sess-thin \
+      --out "$TMP/handoff-floor-secret.md" >/dev/null 2>&1; then
+    fail "a secret-bearing transcript must stay a refusal, floor or not"
+  fi
+  [ ! -f "$TMP/handoff-floor-secret.md" ] ||
+    fail "a refused capture must not persist a digest"
 }
 
 test_claude_hooks_register_and_verify_session_end_handoff() {
@@ -496,6 +572,7 @@ PY
 
 test_session_end_captures_a_handoff_digest
 test_session_end_handoff_honors_child_and_opt_out_gates
+test_handoff_capture_floors_trivial_sessions
 test_claude_hooks_register_and_verify_session_end_handoff
 test_receipt_preserves_snapshot_modes
 test_machine_snapshot_cli_and_permissions

@@ -600,7 +600,12 @@ are skipped — peer children end throwaway sessions in the adopted repo's cwd
 and would otherwise hijack the newest-handoff pointer.
 Best-effort by contract, harness-adopted repos only, never guesses when the
 named session cannot be resolved; `OMS_PRECOMPACT_HANDOFF=0` still disables
-the whole script, `OMS_SESSIONEND_HANDOFF=0` only the session-end trigger. A
+the whole script, `OMS_SESSIONEND_HANDOFF=0` only the session-end trigger.
+A transcript below `--min-user-turns` (default 2) is skipped rather than
+captured — the floor lives in the writer so every caller inherits it, and it
+sits after the sensitivity scan so a one-turn transcript carrying a secret
+still refuses loudly instead of skipping silently; `--min-user-turns 0`
+captures a trivial session deliberately. A
 refused capture is recorded in the fail-ledger (`kind=hook`) instead of
 vanishing, so `oms check`/`inbox` surface it. The scrubber is tiered: true
 secrets always block the digest; absolute home paths are normalized to `~`
