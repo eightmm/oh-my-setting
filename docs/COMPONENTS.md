@@ -239,8 +239,15 @@ patch's paths with the task title as subject — the commit is what unblocks
 the next landing. Hard `--max-cycles` cap, stuck detection (same tree + same
 failing acceptance twice), refusal of dirty trees and of an acceptance
 command edited mid-run; every terminal writes a reason row and parks leave a
-fail-ledger trail. Deliberately narrow: no task generation, no replanning, no
-lease reclaim, no push — decomposition and recovery stay with the parent
+fail-ledger trail whose fingerprint is contract-shaped — reason plus the
+acceptance command's hash, with the unique run id demoted to the summary — so
+a goal that parks twice for the same reason actually crosses the ledger's
+advise-at-repeat threshold, and the hint it prints is no longer discarded but
+shown at the park. When acceptance finally passes, the done terminal resolves
+that contract's open park rows (an edited acceptance command is a different
+goalpost, so its old parks stay open). Deliberately narrow: no task
+generation, no replanning, no lease reclaim, no push — decomposition and
+recovery stay with the parent
 
 **Plan from spec (`plan-from-spec.sh`, `oms plan-from-spec`)** — Reads a
 confirmed PROJECT.md (refuses `State: draft`) and asks a deep-tier peer to
@@ -456,7 +463,16 @@ every failed Bash tool command in a harness-adopted repo: it surfaces what the
 ledger already knows about the command as agent context, then records the
 failure so the repeat crosses the advise threshold without anyone remembering
 to call the ledger; interrupts/SIGPIPE are skipped, unadopted repos are never
-seeded, and the hook is fail-open with a 5s ceiling
+seeded, and the hook is fail-open with a 5s ceiling. The same script now
+registers for `PostToolUse` too, making record/resolve symmetric for its own
+rows: when a Bash command exits 0 and the ledger holds unresolved failures for
+the same fingerprint, one python pass appends the resolution (`same command
+passed`) — no `check` call, no git-state hash, an empty ledger bails on one
+stat, and an unadopted repo pays a rev-parse, not a python spawn. Two named
+semantic changes: a flaky fail/pass/fail command resets its repeat count (the
+advise threshold reads "failed twice since the last pass"), and one-off
+never-rerun rows still accumulate — the manual sweep shrinks, it does not
+end. `OMS_FAIL_LEDGER_RESOLVE=0` disables only the success side
 
 **Delegation liveness** — `peer-delegate` writes `.oms/delegations/<id>.json`
 (pid, provider, model route, role/executor, soul hash, worktree, task lease)

@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# PostToolUseFailure hook: give the agent's failed commands the memory the
-# rules always assumed. fail-ledger has recorded, warned, and named `oms
-# advise` at the repeat threshold since it existed — but only when something
-# called it, which the primary agent mid-failure-loop never did. This hook is
-# that call: when a Bash tool run fails, it first surfaces what the ledger
-# already knows about this command (hook stdout becomes agent context), then
-# records the failure so the second identical attempt crosses the advise
-# threshold mechanically. Fail-open by construction: it cannot change the tool
-# result, it never exits nonzero, and it prints nothing unless the ledger has
-# something to say. OMS_FAIL_LEDGER_HOOK=0 disables it.
+# PostToolUseFailure + PostToolUse hook: give the agent's Bash commands the
+# memory the rules always assumed, and take it back when they pass. fail-ledger
+# has recorded, warned, and named `oms advise` at the repeat threshold since it
+# existed — but only when something called it, which the primary agent
+# mid-failure-loop never did. This hook is that call: when a Bash tool run
+# fails, it first surfaces what the ledger already knows about this command
+# (hook stdout becomes agent context), then records the failure so the second
+# identical attempt crosses the advise threshold mechanically. When the same
+# command later exits 0, the hook resolves its own row — the ledger's
+# resolved-on-success contract, honored by the writer that produced the rows
+# instead of by a human sweep. Fail-open by construction: it cannot change the
+# tool result, it never exits nonzero, and it prints nothing unless the ledger
+# has something to say. OMS_FAIL_LEDGER_HOOK=0 disables the whole script;
+# OMS_FAIL_LEDGER_RESOLVE=0 disables only the success side.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -21,9 +25,33 @@ esac
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-parsed="$(OMS_FLH_PAYLOAD="$payload" python3 - <<'PY' 2>/dev/null || true
+# Adoption gating before the parse: PostToolUse fires on every successful Bash
+# call, so an unadopted repo must cost a rev-parse rather than a python spawn.
+# Only repos that already carry harness state get rows — a command in an
+# unadopted repo must not seed .oms as a hook side effect.
+repo="${OMS_STATE_REPO:-$PWD}"
+root="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo")"
+[ -d "$root/.oms" ] || exit 0
+[ -x "$ROOT/scripts/fail-ledger.sh" ] || exit 0
+
+# One stat is the whole cost of the success side in a repo with no failure
+# history: an empty ledger has nothing to resolve, and the scan below never
+# opens it. Emptied here so the parse can bail before fingerprinting anything.
+ledger="${OMS_FAIL_LEDGER:-$root/.oms/failures.jsonl}"
+[ -s "$ledger" ] || ledger=""
+case "${OMS_FAIL_LEDGER_RESOLVE:-1}" in
+  0|false|FALSE|no|NO|off|OFF) ledger="" ;;
+esac
+
+# One python3 pass decides everything: which side of the ledger this event is,
+# and — on the success side — whether the fingerprint has an open failure at
+# all. Deliberately not a `check` call: resolving needs no git state
+# fingerprint, so this never computes one.
+parsed="$(OMS_FLH_PAYLOAD="$payload" OMS_FLH_LEDGER="$ledger" python3 - <<'PY' 2>/dev/null || true
+import hashlib
 import json
 import os
+import re
 
 try:
     row = json.loads(os.environ["OMS_FLH_PAYLOAD"])
@@ -35,36 +63,99 @@ tool_input = row.get("tool_input")
 command = tool_input.get("command") if isinstance(tool_input, dict) else None
 if not isinstance(command, str) or not command.strip():
     raise SystemExit(0)
+command = command.replace("\n", " ")[:2000]
 response = row.get("tool_response")
 exit_code = None
 if isinstance(response, dict):
     for key in ("exit_code", "exitCode", "code"):
         value = response.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             exit_code = value
             break
-if exit_code is None:
+event = row.get("hook_event_name")
+event = event if isinstance(event, str) else ""
+
+
+def fingerprint(cmd):
+    # Mirrors fail-ledger.sh: machine paths normalized the way
+    # agent_memory_normalize_machine_paths does, whitespace collapsed, long
+    # digit runs masked. Drift can only miss a resolve, never invent one — the
+    # row is filed under the fingerprint `fail-ledger.sh resolve` recomputes.
+    home = os.environ.get("HOME") or ""
+    if home:
+        cmd = cmd.replace(home, "~")
+    cmd = re.sub(r"/home/[A-Za-z0-9._-]+", "~", cmd)
+    cmd = re.sub(r"/Users/[A-Za-z0-9._-]+", "~", cmd)
+    norm = re.sub(r"\s+", " ", cmd).strip()
+    norm = re.sub(r"\d{8,}", "N", norm)
+    return hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+# The success event fires on every Bash call; only an explicit exit 0 is a
+# pass, and a nonzero one belongs to the failure event, which records it —
+# deciding here keeps one failed command from being filed twice. A payload
+# with no event name and an explicit 0 is a success too: 0 is not a failure.
+if event == "PostToolUse" or (not event and exit_code == 0):
+    ledger = os.environ.get("OMS_FLH_LEDGER") or ""
+    if exit_code != 0 or not ledger:
+        raise SystemExit(0)
+    fp = fingerprint(command)
+    fails = 0
+    try:
+        handle = open(ledger, encoding="utf-8", errors="replace")
+    except OSError:
+        raise SystemExit(0)
+    with handle:
+        for line in handle:
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            if r.get("fingerprint") != fp:
+                continue
+            if r.get("event") == "resolved":
+                fails = 0
+            elif r.get("event") == "fail":
+                fails += 1
+    # Two named semantic changes this branch buys, both intended:
+    # (a) a flaky fail/pass/fail command resets its repeat count here, so the
+    #     advise threshold now means "failed twice since the last pass";
+    # (b) a command that is never rerun verbatim still accumulates — this
+    #     shrinks the manual sweep burden, it does not end it.
+    if fails <= 0:
+        raise SystemExit(0)
+    print("resolve")
+    print(command)
+    raise SystemExit(0)
+
+if exit_code is None or exit_code == 0:
     # A failure event without a readable exit code is still a failure.
     exit_code = 1
 if exit_code in (130, 141, 143):
     # Interrupts and closed pipes are not failures worth remembering.
     raise SystemExit(0)
+print("record")
 print(exit_code)
-print(command.replace("\n", " ")[:2000])
+print(command)
 PY
 )"
 [ -n "$parsed" ] || exit 0
-exit_code="$(printf '%s\n' "$parsed" | sed -n 1p)"
-cmd="$(printf '%s\n' "$parsed" | sed -n 2p)"
+mode="$(printf '%s\n' "$parsed" | sed -n 1p)"
+
+if [ "$mode" = "resolve" ]; then
+  cmd="$(printf '%s\n' "$parsed" | sed -n 2p)"
+  [ -n "$cmd" ] || exit 0
+  # Silent on purpose: the resolve receipt is bookkeeping, and a command that
+  # just passed is the last thing the agent needs narrated back to it.
+  "$ROOT/scripts/fail-ledger.sh" --repo "$root" resolve --cmd "$cmd" \
+    --how "same command passed (exit 0)" >/dev/null 2>&1 || true
+  exit 0
+fi
+
+exit_code="$(printf '%s\n' "$parsed" | sed -n 2p)"
+cmd="$(printf '%s\n' "$parsed" | sed -n 3p)"
 case "$exit_code" in ''|*[!0-9]*) exit 0 ;; esac
 [ -n "$cmd" ] || exit 0
-
-# Only repos that already carry harness state get rows: a failed command in an
-# unadopted repo must not seed .oms as a hook side effect.
-repo="${OMS_STATE_REPO:-$PWD}"
-root="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo")"
-[ -d "$root/.oms" ] || exit 0
-[ -x "$ROOT/scripts/fail-ledger.sh" ] || exit 0
 
 # Known-failure context first: the ledger speaks on stderr, and check exits 3
 # exactly when this fingerprint is an unresolved failure in an unchanged repo.

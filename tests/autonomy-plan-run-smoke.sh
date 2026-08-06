@@ -261,4 +261,54 @@ grep -Fq '"reason": "tasks-exhausted"' "$repo/.oms/plan/progress.jsonl" ||
 bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list | grep -Fq 'parked: tasks-exhausted' ||
   fail "park should leave a fail-ledger trail"
 
+# The park row is fingerprinted on the contract (reason + acceptance hash), not
+# on the run: a RUN_ID in the cmd survives the ledger's digit mask and made
+# every park a singleton, so the advise-at-repeat threshold could never be
+# reached. Lineage stays readable in the summary.
+park_row() {
+  bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved --json |
+    python3 -c 'import json,sys
+rows = [r for r in json.load(sys.stdin)["failures"]
+         if (r.get("cmd") or "").startswith("goal-drive park ")]
+print(json.dumps(rows[-1] if rows else {}))'
+}
+park_cmd="$(park_row | python3 -c 'import json,sys; print(json.load(sys.stdin).get("cmd",""))')"
+case "$park_cmd" in
+  "goal-drive park reason=tasks-exhausted accept="*) ;;
+  *) fail "park row is not contract-shaped: $park_cmd" ;;
+esac
+case "$park_cmd" in
+  *gd-*) fail "run id must not be part of the park fingerprint: $park_cmd" ;;
+esac
+park_row | grep -Fq 'parked: tasks-exhausted (gd-' ||
+  fail "park summary should carry the run lineage"
+
+# The same goal parking twice is the pattern the advise threshold exists for,
+# and the hint used to go to /dev/null with the rest of record's stderr.
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$repo" --to codex >"$TMP/gd-park2.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "second exhausted run should park with exit 3, got $rc"
+grep -Fq 'oms advise' "$TMP/gd-park2.out" ||
+  fail "a repeated park must surface the advise hint: $(cat "$TMP/gd-park2.out")"
+[ "$(park_row | python3 -c 'import json,sys; print(json.load(sys.stdin).get("count",0))')" = 2 ] ||
+  fail "two parks of the same goal should share one fingerprint"
+
+# Acceptance passing is what closes those rows: without it every park stayed
+# OPEN in the resume hook, inbox, and advise prompts until a human swept it.
+printf 'nope\n' > "$repo/absent.txt"
+git -C "$repo" add absent.txt
+git -C "$repo" commit -qm 'test: the acceptance target now exists'
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$repo" --to codex >"$TMP/gd-resolve.out" 2>&1 ||
+  fail "acceptance should now pass: $(tail -5 "$TMP/gd-resolve.out")"
+grep -Fq 'goal-drive: done' "$TMP/gd-resolve.out" || fail "done line missing after fix"
+if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
+  grep -Fq 'parked: tasks-exhausted'; then
+  fail "acceptance pass should resolve this goal's park rows"
+fi
+bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list |
+  grep -Fq 'fixed: acceptance passed in gd-' ||
+  fail "park resolution should record how it was fixed"
+
 echo "autonomy-plan-run-smoke: ok"

@@ -39,7 +39,7 @@ Stops by design: acceptance pass; --max-cycles (the hard terminator, default
 failing acceptance twice (stuck); acceptance command changed mid-run; any
 mismatch between the admitted patch and the working tree. Every terminal
 writes a reason row to .oms/plan/progress.jsonl and a fail-ledger entry when
-it parked.
+it parked; a later run whose acceptance passes resolves those park rows.
 
   --repo PATH     Repository (default: current directory). Tree must be clean.
   --to PROVIDER   Worker for plan-run delegation (default: codex).
@@ -112,13 +112,55 @@ print(json.dumps({
 }
 
 park() {  # REASON NEXT
+  local recorded
   terminal_row park "$1"
-  "$ROOT/scripts/fail-ledger.sh" record --repo "$REPO" --kind plan-run \
-    --cmd "goal-drive $RUN_ID" --exit 3 --summary "parked: $1" \
-    --next "$2" >/dev/null 2>&1 || true
+  # The ledger fingerprints the command, and `goal-drive $RUN_ID` made every
+  # park a singleton: its digit mask only collapses runs of 8+ digits, so the
+  # RUN_ID's time-of-day and pid survive and the count per fingerprint can
+  # never reach the advise threshold. The contract — this reason against this
+  # acceptance command — is what repeats across runs, so that is the cmd;
+  # lineage belongs in the summary.
+  recorded="$("$ROOT/scripts/fail-ledger.sh" record --repo "$REPO" --kind plan-run \
+    --cmd "goal-drive park reason=$1 accept=$ACCEPT_SNAPSHOT" --exit 3 \
+    --summary "parked: $1 ($RUN_ID)" --next "$2" 2>&1 >/dev/null || true)"
   echo "goal-drive: parked run=$RUN_ID cycle=$CYCLE reason=$1"
   echo "goal-drive: next: $2"
+  # record names `oms advise` once the same park repeats, and this used to
+  # send that line to /dev/null — the threshold crossing has to be visible at
+  # the one moment the run is ending on it.
+  printf '%s\n' "$recorded" | grep -F 'oms advise' || true
   exit 3
+}
+
+# The ledger's contract is resolved-on-success and nothing honored it for
+# parks: a goal that finally passes left every earlier park OPEN in the resume
+# hook, the inbox, and every advise prompt until a human swept it. One list
+# call, bounded by the open park rows filed against this run's acceptance
+# contract — parks of a different goal stay open, because they still are.
+resolve_parks() {
+  local fps fp
+  fps="$("$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json 2>/dev/null |
+    OMS_GD_ACCEPT="$ACCEPT_SNAPSHOT" python3 -c '
+import json, os, sys
+try:
+    rows = json.load(sys.stdin).get("failures")
+except Exception:
+    raise SystemExit(0)
+suffix = "accept=" + os.environ["OMS_GD_ACCEPT"]
+for row in rows if isinstance(rows, list) else []:
+    cmd = row.get("cmd") or ""
+    fp = row.get("fingerprint") or ""
+    if fp and cmd.startswith("goal-drive park ") and cmd.endswith(suffix):
+        print(fp)
+' 2>/dev/null || true)"
+  [ -n "$fps" ] || return 0
+  while IFS= read -r fp; do
+    [ -n "$fp" ] || continue
+    "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" resolve --fingerprint "$fp" \
+      --how "acceptance passed in $RUN_ID" >/dev/null 2>&1 || true
+  done <<EOF
+$fps
+EOF
 }
 
 prev_tree=""
@@ -138,6 +180,7 @@ while :; do
   printf '%s\n' "$accept_out" | tail -n 3
   if [ "$accept_rc" -eq 0 ]; then
     terminal_row "done" acceptance-pass
+    resolve_parks
     echo "goal-drive: done run=$RUN_ID cycles=$CYCLE (acceptance passed)"
     exit 0
   fi

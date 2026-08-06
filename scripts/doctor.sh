@@ -534,6 +534,7 @@ for event, mark in (
     ("UserPromptSubmit", "skill-router.sh"),
     ("Stop", "turn-guard.sh"),
     ("PostToolUseFailure", "fail-ledger-hook.sh"),
+    ("PostToolUse", "fail-ledger-hook.sh"),
     ("PreCompact", "precompact-handoff.sh"),
     ("SessionEnd", "precompact-handoff.sh"),
     ("SessionStart", "resume-hook.sh"),

@@ -29,7 +29,7 @@ usage() {
 Usage: install-claude-hooks.sh [--remove] [--settings PATH]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
-hook, PostToolUseFailure fail-ledger hook, PreCompact/SessionEnd
+hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PreCompact/SessionEnd
 handoff-snapshot hooks, SessionStart resume hook,
 SessionStart/PostToolUse/SubagentStop/SessionEnd telemetry hooks, main usage
 HUD, and compact subagent HUD in Claude Code's
@@ -201,6 +201,14 @@ else:
     # a 5s ceiling so a wedged ledger cannot stall the turn.
     upsert(
         "PostToolUseFailure", "fail-ledger-hook.sh", fail_cmd,
+        matcher="Bash", timeout=5,
+    )
+    # The same script on the success event closes the loop: a command that
+    # passes resolves the row its failure wrote, so the ledger stops needing a
+    # human sweep to stay readable. Same matcher and ceiling; a repo with no
+    # failure history costs one stat.
+    upsert(
+        "PostToolUse", "fail-ledger-hook.sh", fail_cmd,
         matcher="Bash", timeout=5,
     )
     # Compaction discards transcript detail; snapshot a handoff digest first.

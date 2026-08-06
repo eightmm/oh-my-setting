@@ -124,7 +124,91 @@ Constraint: preserve API"
   [ "$after" -eq $((before + 1)) ] || fail "ordinary continuation was not appended"
 }
 
+hook_payload() {  # COMMAND EXIT EVENT
+  python3 - "$@" <<'PY'
+import json, sys
+print(json.dumps({
+    "hook_event_name": sys.argv[3], "tool_name": "Bash",
+    "tool_input": {"command": sys.argv[1]},
+    "tool_response": {"exit_code": int(sys.argv[2])},
+}))
+PY
+}
+
+ledger_rows() {
+  [ -f "$1/.oms/failures.jsonl" ] || { echo 0; return 0; }
+  wc -l < "$1/.oms/failures.jsonl" | tr -d ' '
+}
+
+# The record/resolve pair has to close in the writer that opened it: rows the
+# hook files on failure used to stay OPEN until a human swept them, polluting
+# the resume hook, the inbox, and every advise prompt in between.
+test_fail_ledger_hook_resolves_on_success() {
+  local repo="$TMP/hook-ledger"
+  local hook="$ROOT/scripts/fail-ledger-hook.sh"
+  local cmd="bash $repo/scripts/check.sh focused"
+  local failed passed rows out
+
+  mkdir -p "$repo/.oms"
+  git -C "$repo" init -q
+  git -C "$repo" -c user.email=test@example.com -c user.name=Test \
+    commit -q --allow-empty -m base
+  failed="$(hook_payload "$cmd" 2 PostToolUseFailure)"
+  passed="$(hook_payload "$cmd" 0 PostToolUse)"
+
+  # A repo with no failure history pays one stat and writes nothing.
+  out="$(cd "$repo" && printf '%s' "$passed" | bash "$hook")" ||
+    fail "the hook must never exit nonzero"
+  [ -z "$out" ] || fail "a success is not agent context: $out"
+  [ ! -e "$repo/.oms/failures.jsonl" ] || fail "a success seeded a ledger"
+
+  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null
+  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null
+  [ "$(ledger_rows "$repo")" = 2 ] || fail "two failures should file two rows"
+
+  out="$(cd "$repo" && printf '%s' "$passed" | bash "$hook")" ||
+    fail "the success side must never exit nonzero"
+  [ -z "$out" ] || fail "the resolve receipt is bookkeeping, not context: $out"
+  if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
+    grep -Fq 'check.sh focused'; then
+    fail "the passing command should have resolved its own rows"
+  fi
+
+  # Nothing open means nothing to say: no resolve-row bloat on every green run.
+  rows="$(ledger_rows "$repo")"
+  (cd "$repo" && printf '%s' "$passed" | bash "$hook") >/dev/null
+  [ "$(ledger_rows "$repo")" = "$rows" ] ||
+    fail "a success with no open failure must append nothing"
+
+  # A nonzero exit on the success event belongs to the failure event, which
+  # already recorded it — neither side may act on it here.
+  (cd "$repo" && printf '%s' "$(hook_payload "$cmd" 7 PostToolUse)" | bash "$hook") >/dev/null
+  [ "$(ledger_rows "$repo")" = "$rows" ] ||
+    fail "a failing command on the success event must not write"
+
+  # Both opt-outs: the narrow one silences only resolution, the old one the
+  # whole script.
+  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null
+  rows="$(ledger_rows "$repo")"
+  (cd "$repo" && printf '%s' "$passed" | OMS_FAIL_LEDGER_RESOLVE=0 bash "$hook") >/dev/null
+  [ "$(ledger_rows "$repo")" = "$rows" ] || fail "OMS_FAIL_LEDGER_RESOLVE=0 still resolved"
+  (cd "$repo" && printf '%s' "$passed" | OMS_FAIL_LEDGER_HOOK=0 bash "$hook") >/dev/null
+  [ "$(ledger_rows "$repo")" = "$rows" ] || fail "OMS_FAIL_LEDGER_HOOK=0 still resolved"
+  (cd "$repo" && printf '%s' "$passed" | bash "$hook") >/dev/null
+  if bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved |
+    grep -Fq 'check.sh focused'; then
+    fail "a later pass should still resolve after the opt-outs"
+  fi
+
+  # An unadopted repo stays untouched on the success side too.
+  mkdir -p "$TMP/hook-plain"
+  out="$(cd "$TMP/hook-plain" && printf '%s' "$passed" | bash "$hook")"
+  [ -z "$out" ] || fail "an unadopted repo gets no ledger speech: $out"
+  [ ! -d "$TMP/hook-plain/.oms" ] || fail "the hook must not seed .oms"
+}
+
 test_classifier_boundaries
 test_verification_disclosure_boundaries
 test_explicit_goal_rotation
+test_fail_ledger_hook_resolves_on_success
 echo "autonomy-hook-smoke: ok"

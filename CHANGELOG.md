@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The fail-ledger's automatic writers became symmetric. The Bash failure hook
+  now also registers for `PostToolUse`: a command that later exits 0 resolves
+  its own unresolved rows mechanically (one python pass, no git-state hash,
+  empty-ledger bail first), so ad-hoc failures stop accumulating as permanent
+  inbox/resume/advise noise once fixed. Two named semantic changes: flaky
+  commands reset their repeat count on each pass, and one-off never-rerun
+  rows still need the occasional manual sweep. Goal-drive parks gained
+  contract-shaped fingerprints (reason + acceptance hash; run id demoted to
+  the summary) so the advise-at-repeat threshold is actually reachable, the
+  previously-discarded advise hint now prints at the park, and a passing
+  acceptance resolves that contract's open parks.
+  `OMS_FAIL_LEDGER_RESOLVE=0` disables only the resolve side.
 - Review-uptake telemetry, honestly bounded. `oms artifact-index telemetry
   --review-uptake` partitions delegate rows into review-fed and direct
   cohorts and reports recorded exit-zero, verifier, lineage-coverage, and
