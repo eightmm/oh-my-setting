@@ -372,7 +372,13 @@ daily page.
 read path over the derived summaries and event index;
 `oms journal status|rebuild|sync|configure`
 provides the small operational surface and shares the observer's local/remote
-locks. Recursive
+locks. The daily prompt tick also distills recurring blockers and decisions
+into shared memory mechanically — once per local day on its own marker
+(independent of the digest's), deduplicated against what `agent-task close`
+already promoted (a candidate whose normalized text is already in `shared.md`
+is skipped and counted, never re-appended), fail-open so a distill failure
+cannot break the tick; `OMS_JOURNAL_AUTODISTILL=0` opts out and
+`oms journal distill` remains the manual preview/off-cycle front door. Recursive
 sanitization excludes transcripts, raw logs, environments, diffs, credentials,
 and unobserved facts. Notion export stores only nonsecret connection metadata
 at install, delegates credentials to the official `ntn` CLI and OS keychain,

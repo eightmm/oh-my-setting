@@ -390,9 +390,91 @@ second_distill_out="$("$ROOT/scripts/journal.sh" distill --repo "$distill_repo")
 [ "$(grep -Fc 'journal-distill:' "$shared_memory")" = 1 ] ||
   fail "journal distill appended a duplicate lesson"
 
+# The prompt tick distills once per local day. A decision that agent-task close
+# already promoted must be skipped rather than duplicated into the bounded
+# memory context; a decision on a never-closed task has no other promotion path
+# and still graduates.
+auto_repo="$TMP/autodistill-repo"
+mkdir -p "$auto_repo"
+git -C "$auto_repo" init -q
+git -C "$auto_repo" config user.name "Test"
+git -C "$auto_repo" config user.email "test@example.com"
+printf 'seed\n' > "$auto_repo/seed.txt"
+git -C "$auto_repo" add seed.txt
+git -C "$auto_repo" commit -qm "seed"
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" init \
+  --goal "closed fixture" --verify "true" >/dev/null
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" update \
+  --decision "close path already promoted this one" >/dev/null
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" verify >/dev/null
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" close >/dev/null
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" init \
+  --goal "open fixture" --verify "true" >/dev/null
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" update \
+  --decision "never closed so nothing promoted it" >/dev/null
+
+auto_memory="$auto_repo/.oms/memory/shared.md"
+auto_marker="$auto_repo/.oms/work-journal/distill.json"
+auto_out="$(OMS_JOURNAL_AUTODISTILL=0 work_journal_prompt_tick "$auto_repo")"
+if printf '%s\n' "$auto_out" | grep -Fq 'distill:'; then
+  fail "autodistill opt-out still ran the distill: $auto_out"
+fi
+if grep -Fq 'journal-distill:' "$auto_memory"; then
+  fail "autodistill opt-out still appended a lesson"
+fi
+[ ! -e "$auto_marker" ] ||
+  fail "autodistill opt-out advanced the once-per-day marker"
+
+auto_out="$(work_journal_prompt_tick "$auto_repo")"
+printf '%s\n' "$auto_out" | grep -Fq '[work-journal] distill: 1 promoted' ||
+  fail "prompt tick did not distill the never-closed decision: $auto_out"
+printf '%s\n' "$auto_out" | grep -Fq '1 already in shared memory' ||
+  fail "prompt tick did not report the shared-memory dedup skip: $auto_out"
+[ "$(grep -Fc 'journal-distill:' "$auto_memory")" = 1 ] ||
+  fail "tick distill did not append exactly one lesson"
+grep -Fq 'journal-distill: decision' "$auto_memory" ||
+  fail "tick distill did not promote a decision lesson"
+if ! grep -F 'journal-distill:' "$auto_memory" |
+  grep -Fq 'never closed so nothing promoted it'; then
+  fail "tick distill promoted the wrong decision"
+fi
+if grep -F 'journal-distill:' "$auto_memory" |
+  grep -Fq 'close path already promoted this one'; then
+  fail "tick distill duplicated a decision agent-task close already promoted"
+fi
+auto_out="$(work_journal_prompt_tick "$auto_repo")"
+if printf '%s\n' "$auto_out" | grep -Fq 'distill:'; then
+  fail "tick distilled twice in one local day: $auto_out"
+fi
+[ "$(grep -Fc 'journal-distill:' "$auto_memory")" = 1 ] ||
+  fail "second tick appended another lesson"
+
+# The distill owns its day marker: the digest advances its own marker only when
+# it emits, so the digest opt-out must not silence the distill.
+rm -f "$auto_marker"
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" update \
+  --decision "digest off must not gate the distill" >/dev/null
+auto_out="$(OMS_WORK_JOURNAL_DIGEST=0 work_journal_prompt_tick "$auto_repo")"
+printf '%s\n' "$auto_out" | grep -Fq '[work-journal] distill: 1 promoted' ||
+  fail "digest opt-out suppressed the independent distill: $auto_out"
+
+# A distill that cannot write its own marker stays inside the tick: no degraded
+# warning, no lost primary result.
+rm -f "$auto_marker"
+mkdir -p "$auto_marker"
+auto_err="$(work_journal_prompt_tick "$auto_repo" 2>&1 >/dev/null)"
+if printf '%s\n' "$auto_err" | grep -Fq 'degraded'; then
+  fail "a failed distill degraded the tick: $auto_err"
+fi
+[ -d "$auto_marker" ] ||
+  fail "the distill marker write was expected to fail in this fixture"
+rm -rf "$auto_marker"
+
 # The first prompt of a local day injects one bounded digest; later prompts and
 # the opt-out stay silent. The earlier skill-router call may have consumed
-# today's digest, and the marker is derived state, so reset it explicitly.
+# today's digest, and the marker is derived state, so reset it explicitly. That
+# router prompt also consumed this repo's distill day, so the tick below carries
+# the digest alone.
 rm -f "$lifecycle_repo/.oms/work-journal/digest.json"
 digest_out="$(OMS_WORK_JOURNAL_DIGEST=0 work_journal_prompt_tick "$lifecycle_repo")"
 [ -z "$digest_out" ] || fail "digest opt-out still injected output"

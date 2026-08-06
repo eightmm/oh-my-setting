@@ -1886,11 +1886,24 @@ class JournalStore:
     def _distill_normalized_text(text: str) -> str:
         return re.sub(r"\s+", " ", text).strip().casefold()
 
+    def _shared_memory_text(self) -> str:
+        """Normalized project shared memory, for containment dedup.
+
+        Absent or unreadable shared memory means nothing is known to be
+        promoted already, so dedup skips nothing instead of blocking the run.
+        """
+
+        path = self.repo / ".oms" / "memory" / "shared.md"
+        try:
+            return self._distill_normalized_text(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            return ""
+
     def _distill_candidates(
-        self, events: Sequence[Mapping[str, Any]]
-    ) -> List[str]:
+        self, events: Sequence[Mapping[str, Any]], promoted: str = ""
+    ) -> Tuple[List[str], int, int]:
         blockers: Dict[str, List[Mapping[str, Any]]] = {}
-        candidates: List[Tuple[Tuple[str, str], str]] = []
+        candidates: List[Tuple[Tuple[str, str], str, str]] = []
         seen_decisions: set = set()
         for event in events:
             decision = event.get("decision")
@@ -1906,6 +1919,7 @@ class JournalStore:
                             (str(event["occurred_at"]), str(event["event_id"])),
                             "journal-distill: decision %s: %s"
                             % (event["local_date"], text),
+                            self._distill_normalized_text(text),
                         )
                     )
             blocker = event.get("blocker")
@@ -1927,17 +1941,27 @@ class JournalStore:
                     latest,
                     "journal-distill: blocker seen %dd %s..%s: %s"
                     % (len(days), days[0], days[-1], text),
+                    self._distill_normalized_text(text),
                 )
             )
-        ordered = sorted(candidates)
+        ordered = sorted(candidates, key=lambda candidate: candidate[0])
+        fresh: List[str] = []
+        deduped = 0
+        for _position, lesson, needle in ordered:
+            # Decisions come only from agent-task records, whose close path
+            # already appends them to shared memory. Without this containment
+            # check the first automatic run would duplicate an existing line in
+            # the bounded memory context every peer call carries. Dedup runs
+            # ahead of the cap so redundant text cannot consume a promotion slot.
+            if promoted and needle and needle in promoted:
+                deduped += 1
+                continue
+            fresh.append(lesson)
         # No silent caps: the marker advances past everything below, so a
         # candidate beyond the cap is dropped for good and must be said aloud.
-        return (
-            [lesson for _position, lesson in ordered[:5]],
-            max(0, len(ordered) - 5),
-        )
+        return fresh[:5], max(0, len(fresh) - 5), deduped
 
-    def distill(self, *, dry_run: bool = False) -> Tuple[List[str], int, int]:
+    def distill(self, *, dry_run: bool = False) -> Tuple[List[str], int, int, int]:
         """Promote new recurring blockers and explicit decisions to shared memory."""
 
         events = self.active_events(self.load_events())
@@ -1948,9 +1972,11 @@ class JournalStore:
             if marker is None
             or (str(event["occurred_at"]), str(event["event_id"])) > marker
         ]
-        lessons, dropped = self._distill_candidates(pending)
+        lessons, dropped, deduped = self._distill_candidates(
+            pending, self._shared_memory_text()
+        )
         if dry_run:
-            return lessons, dropped, 0
+            return lessons, dropped, 0, deduped
         promoted: List[str] = []
         skipped = 0
         for lesson in lessons:
@@ -1993,9 +2019,37 @@ class JournalStore:
             }
         self._ensure_layout()
         atomic_write_json(
-            self.distill_state_path, {"schema_version": 1, "through": through}
+            self.distill_state_path,
+            {
+                "schema_version": 1,
+                "through": through,
+                "last_run_date": self._current_periods()[0],
+            },
         )
-        return lessons, dropped, skipped
+        return lessons, dropped, skipped, deduped
+
+    def distill_due_today(self) -> bool:
+        """True when no distill has completed in the current local day.
+
+        The distill owns this day marker instead of reading the digest's: the
+        digest advances its own marker only when it actually emits, and
+        OMS_WORK_JOURNAL_DIGEST=0 drops the digest from the tick entirely.
+        """
+
+        current_day, _current_week = self._current_periods()
+        if not self.distill_state_path.is_file():
+            return True
+        try:
+            row = json.loads(self.distill_state_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(row, Mapping)
+                and row.get("schema_version") == 1
+                and row.get("last_run_date") == current_day
+            ):
+                return False
+        except (OSError, UnicodeError, ValueError, TypeError):
+            pass
+        return True
 
     def status(self) -> Dict[str, Any]:
         self._ensure_index_database()
@@ -2965,6 +3019,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--repo", required=True)
     tick.add_argument("--local-only", action="store_true")
     tick.add_argument("--digest", action="store_true")
+    tick.add_argument("--autodistill", action="store_true")
     show = sub.add_parser("show")
     show.add_argument("--repo", default=".")
     mode = show.add_mutually_exclusive_group()
@@ -3047,6 +3102,35 @@ def _run_show(store: JournalStore, args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_autodistill(store: JournalStore) -> None:
+    """Mechanical once-per-local-day distill at the tick boundary.
+
+    Fail-open by contract: the tick's primary result is local materialization,
+    and a raised exception here would become the exit code the prompt hook
+    reports as degraded, discarding the digest it already produced.
+    """
+
+    try:
+        if not store.distill_due_today():
+            return
+        lessons, dropped, skipped, deduped = store.distill()
+    except Exception:
+        return
+    counts: List[str] = []
+    if lessons:
+        counts.append("%d promoted" % len(lessons))
+    if deduped:
+        counts.append("%d already in shared memory" % deduped)
+    if skipped:
+        counts.append("%d refused by the memory writer" % skipped)
+    if dropped:
+        counts.append("%d beyond the per-run cap" % dropped)
+    # Tick stdout becomes agent context, so stay silent on a no-op day and
+    # spend at most one bounded line when something actually moved.
+    if counts:
+        print("[work-journal] distill: %s" % ", ".join(counts))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "configure":
@@ -3116,7 +3200,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         store.sync_notion(force=args.force, today_only=args.today)
         return 0
     if args.command == "distill":
-        lessons, dropped, skipped = store.distill(dry_run=args.dry_run)
+        lessons, dropped, skipped, deduped = store.distill(dry_run=args.dry_run)
         if args.dry_run:
             for lesson in lessons:
                 print(lesson)
@@ -3125,6 +3209,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("journal distill: %s lesson(s) promoted, marker advanced" % len(lessons))
         else:
             print("journal distill: nothing to promote")
+        if deduped:
+            print(
+                "journal distill: %d candidate(s) already in shared memory"
+                " and skipped" % deduped
+            )
         if skipped:
             print(
                 "journal distill: %d lesson(s) refused by the memory writer"
@@ -3161,6 +3250,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         digest = store.prompt_digest()
         if digest:
             print(digest)
+    if args.command == "tick" and args.autodistill:
+        _run_autodistill(store)
     return 0
 
 

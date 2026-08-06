@@ -93,7 +93,8 @@ work_journal_observe() {
 # plus a once-per-local-day digest on stdout. UserPromptSubmit stdout becomes
 # agent context, so this is the one place journal content surfaces without an
 # explicit command. OMS_WORK_JOURNAL_DIGEST=0 keeps the tick but drops the
-# injection.
+# injection. The tick also carries the once-per-local-day lesson distill, which
+# owns its own day marker: OMS_JOURNAL_AUTODISTILL=0 opts out of that alone.
 work_journal_prompt_tick() {
   local repo="$1"
   local out
@@ -107,6 +108,10 @@ work_journal_prompt_tick() {
   case "${OMS_WORK_JOURNAL_DIGEST:-1}" in
     0|false|FALSE|no|NO|off|OFF) ;;
     *) set -- "$@" --digest ;;
+  esac
+  case "${OMS_JOURNAL_AUTODISTILL:-1}" in
+    0|false|FALSE|no|NO|off|OFF) ;;
+    *) set -- "$@" --autodistill ;;
   esac
   if ! out="$(work_journal_call_local "$repo" "$@" 2>/dev/null)"; then
     echo "warning: Work Journal materialization degraded; primary lifecycle result is unchanged" >&2

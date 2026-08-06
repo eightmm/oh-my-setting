@@ -7,6 +7,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Journal lessons distill themselves at the daily tick. The prompt tick now
+  runs the journal's distill pass once per local day on its own marker
+  (independent of the digest's, which vanishes under
+  `OMS_WORK_JOURNAL_DIGEST=0`), deduplicating candidates against what
+  `agent-task close` already promoted into `shared.md` so decision-class
+  lessons are never re-appended; skips are counted and reported, the
+  through-marker still advances past them, and a distill failure cannot break
+  the tick. `distill.json` gains an additive `last_run_date` key;
+  `OMS_JOURNAL_AUTODISTILL=0` opts out.
 - Stale cross-agent threads become advisory triage instead of permanent inbox
   noise. `oms thread list --stale` flags non-current open threads idle past
   `OMS_THREAD_STALE_TTL` (default three days) with the exact close command per
