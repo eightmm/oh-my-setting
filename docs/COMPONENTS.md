@@ -329,9 +329,16 @@ path the task already stores
 **Artifact index (`artifact-index.sh`)** — Schema-1 JSONL event envelope for
 every cross-agent operation: event/operation/artifact IDs plus optional
 run/task/delegation/parent lineage. `resolve --event-id` appends an idempotent
-resolution event; `unresolved` and `oms state` replay
+resolution event; the flag is repeatable, every target is validated before any
+append (one bad id leaves the index byte-identical), and one call clears a
+triaged batch. `unresolved` and `oms state` replay
 success/resolved/unresolved outcome status without conflating sibling
-providers. Retention keeps or evicts target-resolution pairs atomically instead
+providers, and each unresolved row now prints the exact resolve command that
+clears it, annotated `superseded-by: evt_X` when the failed patch's exact
+bytes (`patch_sha256`, never the path; an empty-patch digest never matches)
+were later admitted or landed — advisory only, judgment stays with the agent,
+and no supersession is ever claimed across sibling providers within an
+operation. Retention keeps or evicts target-resolution pairs atomically instead
 of leaving dangling lineage, and state/doctor surface corrupt rows or invalid
 contracts. External files are represented by name/hash descriptors, not host
 paths. `validate`, atomic idempotent `migrate`, operation-aware `latest-run`,

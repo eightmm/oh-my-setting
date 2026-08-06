@@ -176,6 +176,83 @@ PY
     fail "safe repair must leave failures visible"
 }
 
+test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch() {
+  local repo="$TMP/artifact-queue"
+  local index
+  local before report
+
+  make_repo "$repo"
+  index="$repo/.oms/artifacts/index.jsonl"
+  mkdir -p "$repo/.oms/artifacts"
+  : > "$repo/.oms/artifacts/work.patch"
+  : > "$repo/.oms/artifacts/empty.patch"
+  : > "$repo/.oms/artifacts/other.patch"
+  # evt_rewritten_fail shares the patch PATH with the later success but not its
+  # bytes, and evt_peer_fail is a fan-out sibling of a synthesis that succeeded:
+  # both are the wrong answers a looser join would give.
+  cat > "$index" <<'EOF'
+{"schema":1,"event_id":"evt_delegate_fail","operation_id":"delegate-1","artifact_id":"sha256:d1","ts":"2026-08-03T04:01:00Z","kind":"delegate","provider":"codex","exit":3,"patch":".oms/artifacts/work.patch","patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"schema":1,"event_id":"evt_rewritten_fail","operation_id":"op_1","artifact_id":"sha256:r1","ts":"2026-08-03T04:02:00Z","kind":"patch-admit","provider":"","exit":1,"patch":".oms/artifacts/work.patch","patch_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+{"schema":1,"event_id":"evt_admit_fail","operation_id":"op_2","artifact_id":"sha256:a1","ts":"2026-08-03T04:03:00Z","kind":"patch-admit","provider":"","exit":1,"patch":".oms/artifacts/work.patch","patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"schema":1,"event_id":"evt_admit_ok","operation_id":"op_3","artifact_id":"sha256:a2","ts":"2026-08-03T04:04:00Z","kind":"patch-admit","provider":"","exit":0,"patch":".oms/artifacts/work.patch","patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"schema":1,"event_id":"evt_empty_fail","operation_id":"delegate-2","artifact_id":"sha256:e1","ts":"2026-08-03T04:05:00Z","kind":"delegate","provider":"codex","exit":3,"patch":".oms/artifacts/empty.patch","patch_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+{"schema":1,"event_id":"evt_empty_land","operation_id":"op_4","artifact_id":"sha256:e2","ts":"2026-08-03T04:06:00Z","kind":"patch-land","provider":"","exit":0,"patch":".oms/artifacts/other.patch","patch_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+{"schema":1,"event_id":"evt_peer_fail","operation_id":"ask-1","artifact_id":"sha256:p1","ts":"2026-08-03T04:07:00Z","kind":"ask","provider":"gemini","exit":1}
+{"schema":1,"event_id":"evt_peer_synthesis","operation_id":"ask-1","artifact_id":"sha256:p2","ts":"2026-08-03T04:08:00Z","kind":"ask-synthesis","provider":"claude","exit":0}
+EOF
+
+  report="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" --json unresolved 20)" ||
+    fail "unresolved queue query failed"
+  OMS_TEST_REPORT="$report" python3 - <<'PY' || fail "supersession was claimed on the wrong join"
+import json, os
+rows = json.loads(os.environ["OMS_TEST_REPORT"])["rows"]
+superseded = {row["event_id"]: row.get("superseded_by") for row in rows}
+assert superseded["evt_delegate_fail"] == "evt_admit_ok", superseded
+assert superseded["evt_admit_fail"] == "evt_admit_ok", superseded
+assert superseded["evt_rewritten_fail"] is None, superseded
+assert superseded["evt_empty_fail"] is None, superseded
+assert superseded["evt_peer_fail"] is None, superseded
+assert "evt_admit_ok" not in superseded, superseded
+PY
+
+  "$ROOT/scripts/artifact-index.sh" --repo "$repo" unresolved 20 > "$TMP/queue-before"
+  grep -Fq 'superseded-by: evt_admit_ok  next: oms artifact-index resolve --event-id evt_admit_fail --reason "superseded by evt_admit_ok"' \
+    "$TMP/queue-before" || fail "a superseded row must print its prefilled resolve command"
+  grep -Fq -- '--event-id evt_peer_fail --reason "<why this failure is no longer open>"' \
+    "$TMP/queue-before" || fail "a row with no supersession still needs a resolve command"
+  [ "$(grep -c 'next: oms artifact-index resolve' "$TMP/queue-before")" -eq 5 ] ||
+    fail "the queue must print exactly one resolve command per row"
+  "$ROOT/scripts/artifact-index.sh" --repo "$repo" list 20 > "$TMP/list-after"
+  if grep -Fq 'next: oms artifact-index resolve' "$TMP/list-after"; then
+    fail "triage belongs to the queue view, not the list inventory"
+  fi
+
+  before="$(wc -l < "$index" | tr -d ' ')"
+  if "$ROOT/scripts/artifact-index.sh" --repo "$repo" resolve \
+    --event-id evt_admit_fail --event-id evt_unknown >/dev/null 2>&1; then
+    fail "a batch resolve naming an unknown event should fail"
+  fi
+  [ "$before" = "$(wc -l < "$index" | tr -d ' ')" ] ||
+    fail "a rejected batch must leave the index untouched"
+
+  # One resolution per distinct target: the scalar --event-id this replaced kept
+  # only the last id and silently dropped the rest of the batch.
+  OMS_AGENT=codex "$ROOT/scripts/artifact-index.sh" --repo "$repo" resolve \
+    --event-id evt_delegate_fail --event-id evt_admit_fail --event-id evt_delegate_fail \
+    --reason "superseded by evt_admit_ok" >/dev/null || fail "batch resolve failed"
+  [ "$((before + 2))" = "$(wc -l < "$index" | tr -d ' ')" ] ||
+    fail "repeated --event-id must resolve each distinct target exactly once"
+  "$ROOT/scripts/artifact-index.sh" --repo "$repo" validate >/dev/null ||
+    fail "batch resolution produced invalid lineage"
+
+  "$ROOT/scripts/artifact-index.sh" --repo "$repo" unresolved 20 > "$TMP/queue-after"
+  if grep -Eq 'event=evt_delegate_fail|event=evt_admit_fail' "$TMP/queue-after"; then
+    fail "batch-resolved rows should leave the queue"
+  fi
+  grep -Fq 'event=evt_peer_fail' "$TMP/queue-after" ||
+    fail "untriaged rows must survive a batch that did not name them"
+}
+
 test_memory_citations_revalidate_and_stay_out_of_default_context() {
   local repo="$TMP/memory-citation"
   local source_path="src/규칙 파일.txt"
@@ -360,6 +437,7 @@ PY
 test_native_hook_telemetry_is_content_free_and_correlated
 test_ci_tick_records_once_and_skips_a_fresh_sha
 test_inbox_ranks_state_and_applies_only_safe_repairs
+test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup
 test_hook_installers_include_native_telemetry_events

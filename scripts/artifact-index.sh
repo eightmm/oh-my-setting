@@ -22,7 +22,10 @@ LIMIT_SET=0
 PRUNE_FILES=0
 PRUNE_STALE=0
 DRY_RUN=0
-TARGET_EVENT=""
+TARGET_EVENTS=()
+# Counted separately because Bash 3.2 rejects ${arr[@]} on an empty array
+# under `set -u`, and every non-resolve action has to test emptiness.
+TARGET_EVENT_COUNT=0
 REASON=""
 
 usage() {
@@ -38,11 +41,16 @@ Commands:
   latest         Show the most recent row.
   latest-run     Show a compact summary for the most recent run id.
   failures [N]   Show the last N non-zero-exit rows.
-  unresolved [N] Show the last N failures without a resolution event.
+  unresolved [N] Show the last N failures without a resolution event. Each row
+                 is followed by the exact resolve command that clears it, and
+                 by `superseded-by: evt_X` when the failed patch's exact bytes
+                 were later admitted or landed. The annotation is advisory —
+                 nothing is resolved for you.
   telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
                  over the retained window (default 1000). This does not infer
                  semantic task success.
-  resolve         Resolve one failed outcome selected by --event-id.
+  resolve        Resolve the failed outcomes selected by --event-id, which may
+                 be repeated to clear a triaged batch in one locked call.
   validate       Validate schema, lineage ids, paths, and references.
   migrate        Idempotently upgrade legacy rows and recover unique basenames.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
@@ -55,8 +63,10 @@ Commands:
 Options:
   --repo PATH    Repo/directory. Default: PWD.
   --file PATH    Index path. Default: REPO/.oms/artifacts/index.jsonl.
-  --event-id ID  Failed outcome event to resolve.
-  --reason TEXT  Optional bounded, non-sensitive resolution note.
+  --event-id ID  Failed outcome event to resolve. Repeatable; each id is
+                 validated and resolved on its own, repeats are collapsed.
+  --reason TEXT  Optional bounded, non-sensitive resolution note. One reason
+                 covers every --event-id in the call.
   --files        With prune, delete orphaned artifact/patch files.
   --stale        With prune, drop index rows referencing deleted files. Age is
                  not the question here, so this ignores --keep.
@@ -84,7 +94,8 @@ while [ "$#" -gt 0 ]; do
       ;;
     --event-id)
       [ "$#" -ge 2 ] || fail "--event-id requires an id"
-      TARGET_EVENT="$2"
+      TARGET_EVENTS+=("$2")
+      TARGET_EVENT_COUNT=$((TARGET_EVENT_COUNT + 1))
       shift 2
       ;;
     --reason)
@@ -135,9 +146,9 @@ if { [ "$ACTION" = "validate" ] || [ "$ACTION" = "migrate" ]; } && [ "$LIMIT_SET
   fail "unknown argument: $LIMIT"
 fi
 if [ "$ACTION" = "resolve" ]; then
-  [ -n "$TARGET_EVENT" ] || fail "resolve requires --event-id"
+  [ "$TARGET_EVENT_COUNT" -gt 0 ] || fail "resolve requires --event-id"
 else
-  [ -z "$TARGET_EVENT" ] || fail "--event-id is only valid with resolve"
+  [ "$TARGET_EVENT_COUNT" -eq 0 ] || fail "--event-id is only valid with resolve"
   [ -z "$REASON" ] || fail "--reason is only valid with resolve"
 fi
 case "$ACTION" in
@@ -213,14 +224,20 @@ if [ "$ACTION" = "resolve" ]; then
   fi
 
   artifact_index_resolve_locked() {
-    OMS_ARTIFACT_TARGET_EVENT="$TARGET_EVENT" \
+    # Target ids ride on argv, not one env var: a repeated --event-id used to
+    # overwrite the scalar and silently resolve only the last one.
     OMS_ARTIFACT_REASON="$REASON" \
     OMS_ARTIFACT_PROVIDER="${OMS_AGENT:-unknown}" \
-      python3 - "$INDEX_FILE" "$ROOT_LIB/artifact-index-retention.py" <<'PY'
+      python3 - "$INDEX_FILE" "$ROOT_LIB/artifact-index-retention.py" \
+        "${TARGET_EVENTS[@]}" <<'PY'
 import datetime, json, os, runpy, shutil, sys, tempfile, uuid
 
-index, retention_helper = sys.argv[1:]
-target_id = os.environ["OMS_ARTIFACT_TARGET_EVENT"]
+index, retention_helper = sys.argv[1:3]
+target_ids = []
+for value in sys.argv[3:]:
+    # The same id twice is one caller's copy-paste, not two resolutions.
+    if value not in target_ids:
+        target_ids.append(value)
 reason = os.environ["OMS_ARTIFACT_REASON"]
 provider = os.environ["OMS_ARTIFACT_PROVIDER"]
 rows = []
@@ -240,50 +257,68 @@ with open(index, encoding="utf-8", errors="replace") as handle:
             ids.add(event_id)
         rows.append(row)
 
-target = next((row for row in rows if row.get("event_id") == target_id), None)
-if target is None:
-    raise SystemExit(f"error: unknown artifact event: {target_id}")
-required = ("operation_id", "artifact_id", "ts", "kind", "provider", "exit")
-missing = [key for key in required if key not in target]
-if (target.get("schema") != 1 or missing or
-        any(target.get(key) in (None, "") for key in ("operation_id", "artifact_id", "ts", "kind")) or
-        not isinstance(target.get("provider"), str) or isinstance(target.get("exit"), bool) or
-        not isinstance(target.get("exit"), int) or target.get("exit") < 0):
-    raise SystemExit("error: resolve target must be a complete schema-1 event; run migrate first")
-if target.get("kind") == "artifact-resolution":
-    raise SystemExit("error: a resolution event cannot be resolved")
-try:
-    failed = int(target.get("exit", 0)) != 0
-except (TypeError, ValueError):
-    failed = False
-if not failed:
-    raise SystemExit("error: only non-zero-exit artifact events can be resolved")
+# Every target is validated before anything is appended, so a batch with one
+# bad id leaves the index exactly as it was rather than half-resolved.
+targets = []
+for target_id in target_ids:
+    target = next((row for row in rows if row.get("event_id") == target_id), None)
+    if target is None:
+        raise SystemExit(f"error: unknown artifact event: {target_id}")
+    required = ("operation_id", "artifact_id", "ts", "kind", "provider", "exit")
+    missing = [key for key in required if key not in target]
+    if (target.get("schema") != 1 or missing or
+            any(target.get(key) in (None, "") for key in ("operation_id", "artifact_id", "ts", "kind")) or
+            not isinstance(target.get("provider"), str) or isinstance(target.get("exit"), bool) or
+            not isinstance(target.get("exit"), int) or target.get("exit") < 0):
+        raise SystemExit(f"error: resolve target {target_id} must be a complete schema-1 event; run migrate first")
+    if target.get("kind") == "artifact-resolution":
+        raise SystemExit(f"error: a resolution event cannot be resolved: {target_id}")
+    try:
+        failed = int(target.get("exit", 0)) != 0
+    except (TypeError, ValueError):
+        failed = False
+    if not failed:
+        raise SystemExit(f"error: only non-zero-exit artifact events can be resolved: {target_id}")
+    targets.append((target_id, target))
 
-for row in rows:
-    if row.get("kind") == "artifact-resolution" and (
-        row.get("resolves_event_id") == target_id or row.get("parent_event_id") == target_id
-    ):
-        print(f"artifact-index: already resolved {target_id}")
-        raise SystemExit(0)
+pending = []
+for target_id, target in targets:
+    resolved_already = False
+    for row in rows:
+        if row.get("kind") == "artifact-resolution" and (
+            row.get("resolves_event_id") == target_id or row.get("parent_event_id") == target_id
+        ):
+            print(f"artifact-index: already resolved {target_id}")
+            resolved_already = True
+            break
+    if not resolved_already:
+        pending.append((target_id, target))
+
+if not pending:
+    raise SystemExit(0)
 
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-row = {
-    "schema": 1,
-    "event_id": "evt_resolve_" + uuid.uuid4().hex,
-    "operation_id": target.get("operation_id"),
-    "artifact_id": target.get("artifact_id"),
-    "ts": now,
-    "kind": "artifact-resolution",
-    "provider": provider,
-    "exit": 0,
-    "parent_event_id": target_id,
-    "resolves_event_id": target_id,
-    "resolution": "resolved",
-}
-if reason:
-    row["reason"] = reason
+new_rows = []
+for target_id, target in pending:
+    row = {
+        "schema": 1,
+        "event_id": "evt_resolve_" + uuid.uuid4().hex,
+        "operation_id": target.get("operation_id"),
+        "artifact_id": target.get("artifact_id"),
+        "ts": now,
+        "kind": "artifact-resolution",
+        "provider": provider,
+        "exit": 0,
+        "parent_event_id": target_id,
+        "resolves_event_id": target_id,
+        "resolution": "resolved",
+    }
+    if reason:
+        row["reason"] = reason
+    new_rows.append(row)
 with open(index, "a", encoding="utf-8") as handle:
-    handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+    for row in new_rows:
+        handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
 
@@ -310,7 +345,8 @@ if keep > 0 and high >= keep:
             except OSError:
                 pass
             raise
-print(f"artifact-index: resolved {target_id}")
+for target_id, _target in pending:
+    print(f"artifact-index: resolved {target_id}")
 PY
   }
   oms_with_file_lock "$INDEX_FILE" artifact_index_resolve_locked
@@ -779,6 +815,63 @@ def status(r):
     return "resolved" if r.get("event_id") in resolved else "unresolved"
 
 
+# sha256 of zero bytes: an empty patch is every other empty patch, so it
+# identifies no work and can never be evidence that something was superseded.
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def patch_bytes_id(r):
+    value = r.get("patch_sha256")
+    if not isinstance(value, str) or not SHA256_RE.match(value) or value == EMPTY_SHA256:
+        return ""
+    return value
+
+
+def exit_ok(r):
+    value = r.get("exit")
+    return not isinstance(value, bool) and isinstance(value, int) and value == 0
+
+
+# Mechanical supersession, advisory only: a failed patch-admit/delegate row
+# whose exact patch bytes were later admitted or landed. The join is on
+# patch_sha256 and never on the patch path, which gets rewritten in place
+# across delegations. Nothing is claimed across sibling providers inside one
+# operation — a fan-out peer's failure is not superseded by its synthesis.
+superseded_by = {}
+nearest_success = {}
+for i in range(len(all_rows) - 1, -1, -1):
+    r = all_rows[i]
+    digest = patch_bytes_id(r)
+    if not digest:
+        continue
+    kind = str(r.get("kind", ""))
+    if kind in ("patch-admit", "patch-land") and exit_ok(r):
+        winner = r.get("event_id")
+        if isinstance(winner, str) and winner:
+            nearest_success[digest] = winner
+        continue
+    if kind in ("patch-admit", "delegate") and status(r) == "unresolved":
+        winner = nearest_success.get(digest)
+        event_id = r.get("event_id")
+        if winner and isinstance(event_id, str) and event_id:
+            superseded_by[event_id] = winner
+
+
+def triage_line(r):
+    event_id = r.get("event_id")
+    # A row resolve would reject is not worth printing a command for; migrate
+    # is what mints the ids and schema resolve requires.
+    if not isinstance(event_id, str) or not event_id or r.get("schema") != 1:
+        return "  next: oms artifact-index migrate  (row is not a resolvable schema-1 event)"
+    winner = superseded_by.get(event_id)
+    if winner:
+        return ('  superseded-by: %s  next: oms artifact-index resolve '
+                '--event-id %s --reason "superseded by %s"' % (winner, event_id, winner))
+    return ('  next: oms artifact-index resolve --event-id %s '
+            '--reason "<why this failure is no longer open>"' % event_id)
+
+
 rows = []
 for r in all_rows:
     row_status = status(r)
@@ -909,11 +1002,23 @@ if action == "latest":
     rows = rows[-1:]
 else:
     rows = rows[-limit:]
+
+def json_row(r):
+    out = dict(r, status=status(r))
+    winner = superseded_by.get(r.get("event_id"))
+    if winner:
+        out["superseded_by"] = winner
+    return out
+
+
 if as_json:
     print(json.dumps({"schema": 1, "action": action,
-                      "rows": [dict(r, status=status(r)) for r in rows]},
+                      "rows": [json_row(r) for r in rows]},
                      ensure_ascii=False))
     sys.exit(0)
 for r in rows:
     print(format_row(r))
+    # Triage belongs to the queue view; list/failures stay one line per row.
+    if action == "unresolved":
+        print(triage_line(r))
 EOF

@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The unresolved-artifact queue gained mechanical triage. Each unresolved row
+  prints the exact `resolve --event-id ... --reason ...` command that clears
+  it, annotated `superseded-by: evt_X` when the failed patch's exact bytes
+  were later admitted or landed (joined on `patch_sha256` only — never the
+  path, never across sibling providers, and an empty-patch digest never
+  matches); `--json` gains an additive `superseded_by` field. `--event-id` is
+  now repeatable so a triaged batch clears in one locked call, fixing the
+  silent last-wins overwrite when the flag was passed twice. Honest framing:
+  this speeds triage to one bounded batch call — on live data only 2 of 17
+  rows were mechanically superseded — it does not drain the queue for you.
 - Journal lessons distill themselves at the daily tick. The prompt tick now
   runs the journal's distill pass once per local day on its own marker
   (independent of the digest's, which vanishes under
