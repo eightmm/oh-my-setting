@@ -29,9 +29,10 @@ usage() {
 Usage: install-claude-hooks.sh [--remove] [--settings PATH]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
-hook, PostToolUseFailure fail-ledger hook, PreCompact handoff-snapshot hook,
-SessionStart resume hook, SessionStart/PostToolUse/SubagentStop/SessionEnd
-telemetry hooks, main usage HUD, and compact subagent HUD in Claude Code's
+hook, PostToolUseFailure fail-ledger hook, PreCompact/SessionEnd
+handoff-snapshot hooks, SessionStart resume hook,
+SessionStart/PostToolUse/SubagentStop/SessionEnd telemetry hooks, main usage
+HUD, and compact subagent HUD in Claude Code's
 settings.json. The merge is additive: existing hooks and user-owned
 statusLine/subagentStatusLine entries are preserved, and repeated installs are
 idempotent. --remove deletes only oh-my-setting entries.
@@ -206,6 +207,11 @@ else:
     # The hook is best-effort and self-bounded, but a ceiling keeps a huge
     # transcript from stalling compaction.
     upsert("PreCompact", "precompact-handoff.sh", precompact_cmd, timeout=30)
+    # A session that ends below the pressure bands and without ever compacting
+    # is the common case, and it used to capture nothing. Same script, same
+    # ceiling: it reads the event name off the payload and dedupes against a
+    # capture from the last few minutes.
+    upsert("SessionEnd", "precompact-handoff.sh", precompact_cmd, timeout=30)
     # A resuming session starts knowing its active task, newest handoff,
     # open failures, and live-peer status instead of rediscovering them.
     upsert("SessionStart", "resume-hook.sh", resume_cmd, timeout=10)

@@ -7,6 +7,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- A session end captures a handoff digest. The PreCompact snapshot script now
+  also registers for `SessionEnd` (nine managed hook registrations; doctor
+  checks all nine), because measurement showed the capture stream was dry:
+  sessions that never compacted and never hit the pressure band left the
+  resume hook nothing inside its 72-hour window. The digest note names its
+  trigger, a 15-minute recency dedupe prevents twin digests (recency, not
+  existence — an existence check would keep stale mid-session digests
+  authoritative), and the harness-child skip keeps peer children's throwaway
+  sessions from hijacking the newest-handoff pointer.
+  `OMS_PRECOMPACT_HANDOFF=0` still kills the whole script;
+  `OMS_SESSIONEND_HANDOFF=0` disables only the new trigger. Existing installs
+  pick the registration up on the next `oms update` (or
+  `install-claude-hooks.sh`); until then doctor reports the missing hook.
 - The unresolved-artifact queue gained mechanical triage. Each unresolved row
   prints the exact `resolve --event-id ... --reason ...` command that clears
   it, annotated `superseded-by: evt_X` when the failed patch's exact bytes

@@ -16,6 +16,185 @@ assert_contains() {
   grep -Fq -- "$2" "$1" || fail "$1 does not contain: $2"
 }
 
+# An adopted repo plus a Claude transcript the handoff extractor can read.
+make_handoff_fixture() {
+  local repo="$1"
+  local claude_home="$2"
+  local session="$3"
+  local project_dir
+
+  mkdir -p "$repo/.oms"
+  printf '*\n' > "$repo/.oms/.gitignore"
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  mkdir -p "$project_dir"
+  cat > "$project_dir/$session.jsonl" <<EOF
+{"type":"user","cwd":"$repo","message":{"role":"user","content":"build the widget"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Widget built and tested."}]}}
+EOF
+}
+
+# Trailing arguments are extra environment assignments for the hook process.
+fire_handoff_hook() {
+  local repo="$1"
+  local claude_home="$2"
+  local session="$3"
+  local event="$4"
+  shift 4
+
+  printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s"}' \
+    "$session" "$repo" "$event" |
+    env OMS_CLAUDE_HOME="$claude_home" "$@" "$ROOT/scripts/precompact-handoff.sh"
+}
+
+digest_count() {
+  find "$1/.oms/handoffs" -name '*.md' 2>/dev/null | wc -l | tr -d ' '
+}
+
+fresh_digest_count() {
+  find "$1/.oms/handoffs" -name '*.md' -mmin -5 2>/dev/null | wc -l | tr -d ' '
+}
+
+# The digest filename carries a whole-second timestamp, so two captures inside
+# the same second land on one name and a file count cannot tell them apart.
+# Fractional mtimes can.
+digest_state() {
+  python3 - "$1/.oms/handoffs" <<'PY'
+import os, sys
+directory = sys.argv[1]
+if os.path.isdir(directory):
+    for name in sorted(os.listdir(directory)):
+        print(name, os.path.getmtime(os.path.join(directory, name)))
+PY
+}
+
+# touch -d takes no relative time on BSD, so age the fixtures from Python.
+age_digests() {
+  python3 - "$1/.oms/handoffs" <<'PY'
+import os, sys, time
+old = time.time() - 3600
+for name in os.listdir(sys.argv[1]):
+    path = os.path.join(sys.argv[1], name)
+    os.utime(path, (old, old))
+PY
+}
+
+# A session that ends below the pressure bands and without ever compacting is
+# the common case, and it used to leave the next session no continuity pointer
+# at all.
+test_session_end_captures_a_handoff_digest() {
+  local repo="$TMP/sessionend-repo"
+  local claude_home="$TMP/sessionend-home"
+  local before
+
+  make_handoff_fixture "$repo" "$claude_home" sess-end
+  fire_handoff_hook "$repo" "$claude_home" sess-end SessionEnd ||
+    fail "session-end handoff hook must exit 0"
+  [ "$(digest_count "$repo")" = 1 ] ||
+    fail "session end should capture a handoff digest"
+  grep -Rlq "auto: session end" "$repo/.oms/handoffs" ||
+    fail "the digest should carry the session-end note derived from the event"
+
+  # Dedupe is by recency, not existence: a capture from moments ago (pressure
+  # path, or compact-then-exit) makes this run redundant...
+  before="$(digest_state "$repo")"
+  fire_handoff_hook "$repo" "$claude_home" sess-end SessionEnd ||
+    fail "a deduped run must still exit 0"
+  [ "$(digest_state "$repo")" = "$before" ] ||
+    fail "session end re-captured inside the dedupe window"
+
+  # ...but an aged digest is stale mid-session state, and the session-end
+  # capture that supersedes it is exactly what the next session needs.
+  age_digests "$repo"
+  fire_handoff_hook "$repo" "$claude_home" sess-end SessionEnd ||
+    fail "session-end handoff hook must exit 0 after the dedupe window"
+  [ "$(fresh_digest_count "$repo")" -ge 1 ] ||
+    fail "a stale digest must not suppress the session-end capture"
+}
+
+test_session_end_handoff_honors_child_and_opt_out_gates() {
+  local repo="$TMP/sessionend-gates"
+  local claude_home="$TMP/sessionend-gates-home"
+
+  make_handoff_fixture "$repo" "$claude_home" sess-gate
+
+  # Peer children (peer-common.sh) end their throwaway sessions in the adopted
+  # repo; a digest from one would hijack the resume hook's newest pointer.
+  fire_handoff_hook "$repo" "$claude_home" sess-gate SessionEnd \
+    OMS_HARNESS_CHILD=1 || fail "the harness-child skip must exit 0"
+  [ "$(digest_count "$repo")" = 0 ] ||
+    fail "a harness child must not write a handoff digest"
+
+  # The pre-existing kill switch covers the new trigger too.
+  fire_handoff_hook "$repo" "$claude_home" sess-gate SessionEnd \
+    OMS_PRECOMPACT_HANDOFF=0 || fail "the disabled hook must exit 0"
+  [ "$(digest_count "$repo")" = 0 ] ||
+    fail "OMS_PRECOMPACT_HANDOFF=0 must disable the session-end capture"
+
+  fire_handoff_hook "$repo" "$claude_home" sess-gate SessionEnd \
+    OMS_SESSIONEND_HANDOFF=0 || fail "the disabled session-end trigger must exit 0"
+  [ "$(digest_count "$repo")" = 0 ] ||
+    fail "OMS_SESSIONEND_HANDOFF=0 must disable the session-end capture"
+
+  # That opt-out is trigger-scoped: compaction still captures.
+  fire_handoff_hook "$repo" "$claude_home" sess-gate PreCompact \
+    OMS_SESSIONEND_HANDOFF=0 || fail "pre-compact handoff hook must exit 0"
+  [ "$(digest_count "$repo")" = 1 ] ||
+    fail "the session-end opt-out must not disable the pre-compact capture"
+  grep -Rlq "auto: pre-compact snapshot" "$repo/.oms/handoffs" ||
+    fail "the pre-compact digest should keep its own note"
+}
+
+test_claude_hooks_register_and_verify_session_end_handoff() {
+  local home="$TMP/sessionend-hooks-home"
+  local project="$TMP/sessionend-hooks-project"
+  local settings="$TMP/sessionend-settings.json"
+  local stripped="$TMP/sessionend-settings-stripped.json"
+  local receipt="$TMP/sessionend-receipt.json"
+
+  mkdir -p "$home" "$project"
+  HOME="$home" OMS_INSTALL_RECEIPT="$receipt" \
+    "$ROOT/scripts/install-claude-hooks.sh" --settings "$settings" >/dev/null
+  python3 - "$settings" <<'PY' || fail "SessionEnd handoff hook is not registered"
+import json, sys
+
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+ours = [h for entry in hooks["SessionEnd"] for h in entry["hooks"]
+        if "precompact-handoff.sh" in h["command"]]
+assert len(ours) == 1, ours
+assert ours[0]["timeout"] == 30, ours
+PY
+
+  # A registration nothing verifies is one settings edit away from vanishing,
+  # so the doctor's checklist has to name it.
+  HOME="$home" OMS_INSTALL_RECEIPT="$receipt" \
+    bash -c '. "$1"; oms_install_write_receipt "$2" "$3"' _ \
+      "$ROOT/scripts/lib/install-contract.sh" "$ROOT" "$receipt" >/dev/null
+  python3 - "$settings" "$stripped" <<'PY'
+import json, sys
+
+settings = json.load(open(sys.argv[1], encoding="utf-8"))
+settings["hooks"]["SessionEnd"] = [
+    entry for entry in settings["hooks"]["SessionEnd"]
+    if not any("precompact-handoff.sh" in h["command"] for h in entry["hooks"])
+]
+json.dump(settings, open(sys.argv[2], "w", encoding="utf-8"))
+PY
+  # Only the hook verdict is in scope, so the doctor's overall status (it
+  # reports on subsystems this fixture does not install) is discarded.
+  run_hook_doctor() {
+    ( cd "$project" || exit 2
+      HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+        OMS_INSTALL_RECEIPT="$receipt" OMS_CLAUDE_SETTINGS="$1" \
+        OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
+        OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh" 2>&1 ) || true
+  }
+  run_hook_doctor "$stripped" > "$TMP/sessionend-doctor-missing"
+  assert_contains "$TMP/sessionend-doctor-missing" \
+    "claude hook missing: SessionEnd -> precompact-handoff.sh"
+  run_hook_doctor "$settings" > "$TMP/sessionend-doctor-ok"
+  assert_contains "$TMP/sessionend-doctor-ok" "ok: claude hooks registered"
+}
+
 test_receipt_preserves_snapshot_modes() {
   local repo="$TMP/receipt-repo"
   local receipt="$TMP/config/install.json"
@@ -315,6 +494,9 @@ PY
     fail "no-op reconciliation replaced the last real rollback commit"
 }
 
+test_session_end_captures_a_handoff_digest
+test_session_end_handoff_honors_child_and_opt_out_gates
+test_claude_hooks_register_and_verify_session_end_handoff
 test_receipt_preserves_snapshot_modes
 test_machine_snapshot_cli_and_permissions
 test_machine_snapshot_names_the_distro_and_the_cpu_model

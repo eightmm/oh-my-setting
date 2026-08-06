@@ -492,12 +492,12 @@ excluding this session's own harness children, which write rows under their
 own session hashes — and announces each neighbor once per session. The latch
 lives in a per-session `peers.json`, never `ctx.json`, whose full-replace
 writer would clobber it. Advisory only; `OMS_PEER_ADVISORY=0` disables.
-`install-claude-hooks.sh` also registers the `PreCompact`
-handoff-snapshot hook and four lifecycle telemetry events
+`install-claude-hooks.sh` also registers the `PreCompact` and `SessionEnd`
+handoff-snapshot hooks and four lifecycle telemetry events
 (`SessionStart`, `PostToolUse`, `SubagentStop`, `SessionEnd`). Telemetry is
 fail-open, skips harness children, and stores only bounded identifiers,
 hashes, counters, timings, and usage (`OMS_TELEMETRY_HOOK=0` opts out).
-`doctor.sh` verifies all eight hook registrations plus both Claude HUDs and the
+`doctor.sh` verifies all nine hook registrations plus both Claude HUDs and the
 Codex footer actually landed whenever the install receipt is valid — the installer
 treats registration failure as a warning, so the doctor is what catches a
 silently hook-less install
@@ -573,9 +573,17 @@ pick up; mechanical, no model call. Digests land in the project's
 Journal's newest-handoff pointer looks. A `PreCompact` hook
 (`precompact-handoff.sh`, registered for Claude Code by
 `install-claude-hooks.sh` and for Codex by the plugin) captures a digest
-automatically just before compaction discards the transcript detail:
-best-effort by contract, harness-adopted repos only, never guesses when the
-named session cannot be resolved, `OMS_PRECOMPACT_HANDOFF=0` opts out. A
+automatically just before compaction discards the transcript detail, and the
+same script now also runs at `SessionEnd` — the stream that was actually dry:
+sessions that never compact and never hit the pressure band used to leave
+nothing for the resume hook. The trigger is named in the digest note, a
+15-minute recency dedupe keeps a session that just captured (compaction,
+pressure band, or a quick restart) from writing twins, and harness children
+are skipped — peer children end throwaway sessions in the adopted repo's cwd
+and would otherwise hijack the newest-handoff pointer.
+Best-effort by contract, harness-adopted repos only, never guesses when the
+named session cannot be resolved; `OMS_PRECOMPACT_HANDOFF=0` still disables
+the whole script, `OMS_SESSIONEND_HANDOFF=0` only the session-end trigger. A
 refused capture is recorded in the fail-ledger (`kind=hook`) instead of
 vanishing, so `oms check`/`inbox` surface it. The scrubber is tiered: true
 secrets always block the digest; absolute home paths are normalized to `~`

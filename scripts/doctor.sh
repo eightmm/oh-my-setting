@@ -535,6 +535,7 @@ for event, mark in (
     ("Stop", "turn-guard.sh"),
     ("PostToolUseFailure", "fail-ledger-hook.sh"),
     ("PreCompact", "precompact-handoff.sh"),
+    ("SessionEnd", "precompact-handoff.sh"),
     ("SessionStart", "resume-hook.sh"),
     ("SessionStart", "telemetry-hook.sh"),
     ("PostToolUse", "telemetry-hook.sh"),
@@ -559,7 +560,7 @@ EOF
     echo "hint: run $INSTALL_ROOT/scripts/install-claude-hooks.sh"
     FAILED=1
   else
-    echo "ok: claude hooks registered (router, turn guard, fail ledger, pre-compact, resume, telemetry, main/subagent HUDs)"
+    echo "ok: claude hooks registered (router, turn guard, fail ledger, pre-compact/session-end handoff, resume, telemetry, main/subagent HUDs)"
   fi
 }
 
