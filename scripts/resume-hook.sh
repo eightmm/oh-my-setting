@@ -143,6 +143,10 @@ for line in lines:
     ts = row.get("ts") or ""
     if not session or session == me:
         continue
+    # Harness children write rows under their own session hashes into the
+    # primary repo's ledger; a session's own delegated workers are not a peer.
+    if row.get("action") == "ignored_child" or row.get("origin"):
+        continue
     try:
         when = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
     except Exception:

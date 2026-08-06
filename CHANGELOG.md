@@ -7,6 +7,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The incumbent session learns when a live peer joins its worktree. The
+  SessionStart advisory only ever warned the newcomer, so the prompt hook
+  now tails the hook ledger for other sessions' recent rows — excluding the
+  session's own harness children, a filter also backported to the
+  SessionStart detection — and warns once per neighbor, latched in a
+  per-session `peers.json` outside `ctx.json`. Advisory only;
+  `OMS_PEER_ADVISORY=0` disables.
 - Context pressure becomes a measured advisory instead of a surprise. The
   Claude status line now persists its authoritative `context_window` reading
   to a per-session cache, and the prompt-time hook turns that number (or,

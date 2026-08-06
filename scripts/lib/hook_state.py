@@ -136,6 +136,11 @@ CHITCHAT_RE = re.compile(
     re.IGNORECASE,
 )
 GOAL_RE = re.compile(r"^\s*(goal|objective|목표)\s*[:：]\s*(.+)$", re.IGNORECASE)
+# Live-peer detection bounds, matching the SessionStart advisory in
+# resume-hook.sh: same 15-minute window, same bounded tail of the ledger.
+PEER_WINDOW_SEC = 900
+PEER_TAIL_ROWS = 200
+PEER_LATCH_MAX = 16
 
 
 def utc_now() -> str:
@@ -978,6 +983,98 @@ def start_handoff_capture(repo: Path, payload: dict[str, Any], agent: str, left:
     return True
 
 
+def peers_state_path(hooks_dir: Path, payload: dict[str, Any]) -> Path:
+    # A file of its own, never ctx.json: the pressure advisory's writer
+    # full-replaces that document, so a latch co-located there would be wiped
+    # on every band transition (and wipe the band stage if written back).
+    return hooks_dir / "sessions" / f"{session_hash(payload)}.peers.json"
+
+
+def event_epoch(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        stamp = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.timestamp()
+
+
+def live_peer_sessions(events: Path, me: str, now: float) -> dict[str, float]:
+    """Neighbor session hashes seen recently, this session's children excluded."""
+    try:
+        with events.open(encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()[-PEER_TAIL_ROWS:]
+    except OSError:
+        return {}
+    seen: dict[str, float] = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        session = row.get("session")
+        if not isinstance(session, str) or not session or session == me:
+            continue
+        # Harness children write rows under their own session hashes into the
+        # primary repo's ledger, so without this the session's own delegated
+        # workers read as a live neighbor on every delegation run.
+        if row.get("action") == "ignored_child" or row.get("origin"):
+            continue
+        when = event_epoch(row.get("ts"))
+        if when is None or now - when > PEER_WINDOW_SEC:
+            continue
+        seen[session] = max(seen.get(session, 0.0), when)
+    return seen
+
+
+def peer_advisory_hint(payload: dict[str, Any]) -> str | None:
+    """Tell the incumbent session, once per neighbor, that it is not alone."""
+    if os.environ.get("OMS_PEER_ADVISORY", "1") != "1":
+        return None
+    repo = hook_repo(payload)
+    # Adopted repos only: the hook ledger is the evidence, and without .oms
+    # there is nowhere to keep the once-per-neighbor latch.
+    if repo is None or not (repo / ".oms").is_dir():
+        return None
+    events = repo / ".oms" / "hooks" / "events.jsonl"
+    if not events.is_file():
+        return None
+    now = time.time()
+    me = session_hash(payload)
+    peers = live_peer_sessions(events, me, now)
+    if not peers:
+        return None
+
+    hooks_dir = ensure_oms(repo)
+    state_path = peers_state_path(hooks_dir, payload)
+    announced = [h for h in load_state(state_path).get("announced", []) if isinstance(h, str)]
+    fresh = [h for h in sorted(peers) if h not in announced]
+    if not fresh:
+        return None
+    write_json_atomic(
+        state_path,
+        {
+            "schema": 1,
+            "updated_at": utc_now(),
+            "session": me,
+            "announced": (announced + fresh)[-PEER_LATCH_MAX:],
+        },
+    )
+    append_event(repo, payload, action="peer_advisory", status="announced", peers=len(fresh))
+    minutes = max(0, int((now - max(peers[h] for h in fresh)) // 60))
+    return (
+        "[oms] another session is live in this worktree (last activity ~%dm ago)"
+        " — a dirty-tree `git add`/`commit` can pick up its hunks; stage with"
+        " `git add -p` or work in a separate worktree." % minutes
+    )
+
+
 def context_pressure_hint(payload: dict[str, Any]) -> str | None:
     if os.environ.get("OMS_CTX_PRESSURE", "1") != "1":
         return None
@@ -1063,6 +1160,15 @@ def cmd_route(args: argparse.Namespace) -> int:
         pressure = None
     if pressure:
         print(pressure)
+    # A neighbor that joined after this session started is invisible to the
+    # SessionStart advisory, which only ever warns the newcomer. Kept in its
+    # own try so a raising advisory cannot silence the other.
+    try:
+        peers = peer_advisory_hint(payload)
+    except Exception:
+        peers = None
+    if peers:
+        print(peers)
     prompt = str(payload.get("prompt") or "")
     if should_skip_prompt(prompt):
         return 0

@@ -463,6 +463,13 @@ urgent at ≤8%; recovery above 30% re-arms. Advisory only: it never blocks a
 prompt, never migrates a session, and stays out of unadopted repos.
 `OMS_CTX_PRESSURE=0` disables; `OMS_CTX_WARN_PCT`/`OMS_CTX_URGENT_PCT`/
 `OMS_CTX_REARM_PCT`/`OMS_CTX_CACHE_TTL`/`OMS_CTX_CAPTURE` tune it.
+The same prompt hook also warns the incumbent when a live peer joins its
+worktree: the SessionStart advisory only ever warns the newcomer, so the
+route hook tails the hook ledger for recent rows from other sessions —
+excluding this session's own harness children, which write rows under their
+own session hashes — and announces each neighbor once per session. The latch
+lives in a per-session `peers.json`, never `ctx.json`, whose full-replace
+writer would clobber it. Advisory only; `OMS_PEER_ADVISORY=0` disables.
 `install-claude-hooks.sh` also registers the `PreCompact`
 handoff-snapshot hook and four lifecycle telemetry events
 (`SessionStart`, `PostToolUse`, `SubagentStop`, `SessionEnd`). Telemetry is
@@ -561,7 +568,8 @@ knowing the repo's state instead of rediscovering it — active task packet
 (goal, next step, verify command), newest handoff digest pointer (72h cap),
 unresolved fail-ledger rows with the recorded next action, and a live-peer
 advisory when another session's hook events touched this worktree within 15
-minutes (dirty-tree `git add` can commit a neighbor's hunks). Reads scrubbed
+minutes (dirty-tree `git add` can commit a neighbor's hunks; the session's
+own harness children write ledger rows too and are excluded). Reads scrubbed
 `.oms` state only, never mutates, exits 0 on every failure path;
 `OMS_RESUME_HOOK=0` opts out, harness children stay silent
 

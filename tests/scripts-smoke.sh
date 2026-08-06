@@ -10706,6 +10706,148 @@ test_claude_hud_feeds_context_pressure() {
   assert_not_exists "$hud/ctx-$(ctx_cache_digest ctxchain2).json"
 }
 
+session_digest() {
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:32])' "$1"
+}
+
+# Append one hook-ledger row for $2's session hash, $3 seconds old; any further
+# arguments are extra key=value fields (a child row carries action/origin).
+write_peer_event() {
+  python3 - "$@" <<'PY'
+import hashlib, json, sys
+from datetime import datetime, timedelta, timezone
+
+row = {"schema": 1, "hook": "PostToolUse", "agent": "test",
+       "session": hashlib.sha256(sys.argv[2].encode()).hexdigest()[:32],
+       "ts": (datetime.now(timezone.utc) - timedelta(seconds=int(sys.argv[3])))
+             .strftime("%Y-%m-%dT%H:%M:%SZ")}
+for pair in sys.argv[4:]:
+    key, _, value = pair.partition("=")
+    row[key] = value
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+}
+
+peer_prompt() {
+  local d="$1"
+  local project="$2"
+  local session="$3"
+  local turn="$4"
+  shift 4
+  printf '{"prompt":"계속 진행해줘","session_id":"%s","turn_id":"%s","cwd":"%s"}' \
+    "$session" "$turn" "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$d/no-cache" env "$@" bash "$ROOT/scripts/skill-router.sh"
+}
+
+test_peer_advisory_warns_incumbent_once_per_neighbor() {
+  local d="$TMP/peer-advisory-warn"
+  local project="$d/project"
+  local events hud out latch ctx
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/hooks" "$d/hud-cache"
+  hud="$d/hud-cache"
+  events="$project/.oms/hooks/events.jsonl"
+  write_peer_event "$events" peer-a 120
+
+  # The incumbent started before the neighbor, so SessionStart never told it.
+  out="$(peer_prompt "$d" "$project" incumbent1 t1)"
+  printf '%s' "$out" | grep -Fq '[oms] another session is live in this worktree' ||
+    fail "a live neighbor must warn the incumbent: $out"
+  assert_file_contains "$events" '"action": "peer_advisory"'
+  latch="$project/.oms/hooks/sessions/$(session_digest incumbent1).peers.json"
+  assert_file_contains "$latch" "$(session_digest peer-a)"
+
+  # Once per neighbor, not once per prompt.
+  out="$(peer_prompt "$d" "$project" incumbent1 t2)"
+  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+    fail "an announced neighbor must not warn again: $out"
+  fi
+
+  # A second neighbor is news; the first one's latch survives.
+  write_peer_event "$events" peer-b 60
+  out="$(peer_prompt "$d" "$project" incumbent1 t3)"
+  printf '%s' "$out" | grep -Fq '[oms] another session is live in this worktree' ||
+    fail "a newly arrived neighbor must warn: $out"
+  assert_file_contains "$latch" "$(session_digest peer-a)"
+  assert_file_contains "$latch" "$(session_digest peer-b)"
+
+  # The peer latch lives beside the context-pressure latch, never inside it:
+  # ctx.json's writer full-replaces its document.
+  printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$(ctx_cache_digest incumbent2).json"
+  write_peer_event "$events" peer-c 30
+  out="$(printf '{"prompt":"계속 진행해줘","session_id":"incumbent2","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'context low (~10% left)' ||
+    fail "the pressure advisory must still fire alongside the peer advisory: $out"
+  printf '%s' "$out" | grep -Fq '[oms] another session is live' ||
+    fail "the peer advisory must fire alongside the pressure advisory: $out"
+  ctx="$project/.oms/hooks/sessions/$(session_digest incumbent2).ctx.json"
+  assert_file_contains "$ctx" '"stage": "warn"'
+  assert_file_contains "$project/.oms/hooks/sessions/$(session_digest incumbent2).peers.json" \
+    "$(session_digest peer-c)"
+}
+
+test_peer_advisory_ignores_children_and_stale_rows() {
+  local d="$TMP/peer-advisory-quiet"
+  local project="$d/project"
+  local plain="$d/plain"
+  local events out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/hooks"
+  events="$project/.oms/hooks/events.jsonl"
+
+  # The load-bearing filter: this session's own delegated workers write rows
+  # under their own session hashes into the primary repo's ledger, so counting
+  # them would fire the advisory on every delegation run.
+  write_peer_event "$events" child-a 30 action=ignored_child origin=peer-delegate status=route
+  write_peer_event "$events" child-b 30 origin=peer-review
+  out="$(peer_prompt "$d" "$project" quiet1 t1)"
+  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+    fail "harness child rows must not read as a live peer: $out"
+  fi
+  assert_not_exists "$project/.oms/hooks/sessions/$(session_digest quiet1).peers.json"
+
+  # A neighbor outside the 15-minute window is history, not a live peer. Each
+  # case starts from an empty ledger: a routed prompt leaves rows under its own
+  # session hash, and the previous case's session is a genuine live peer.
+  : > "$events"
+  write_peer_event "$events" peer-old 4000
+  out="$(peer_prompt "$d" "$project" quiet2 t1)"
+  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+    fail "a stale neighbor row must stay silent: $out"
+  fi
+
+  # Kill switch, with a genuinely live neighbor present.
+  : > "$events"
+  write_peer_event "$events" peer-live 30
+  out="$(peer_prompt "$d" "$project" quiet3 t1 OMS_PEER_ADVISORY=0)"
+  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+    fail "OMS_PEER_ADVISORY=0 must silence the advisory: $out"
+  fi
+
+  # This session's own rows are not a neighbor.
+  : > "$events"
+  write_peer_event "$events" quiet4 30
+  out="$(peer_prompt "$d" "$project" quiet4 t1)"
+  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+    fail "own session rows must not read as a peer: $out"
+  fi
+
+  # Unadopted repos hold no ledger and no latch, so they get no advisory. A
+  # question keeps the router itself from adopting the repo, so the absent
+  # .oms tree is evidence the advisory created nothing.
+  make_committed_repo "$plain"
+  out="$(printf '{"prompt":"이 저장소가 뭐야","session_id":"quiet5","turn_id":"t1","cwd":"%s"}' "$plain" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$d/no-cache" bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+    fail "an unadopted repo must not receive the advisory: $out"
+  fi
+  assert_not_exists "$plain/.oms"
+}
+
 test_turn_guard_blocks_unverified_dirty_task_once() {
   local d="$TMP/turn-guard"
   local project="$d/project"
@@ -11087,6 +11229,22 @@ PY
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
   if printf '%s\n' "$out" | grep -q 'peers:'; then
     fail "own session must not be reported as a peer"
+  fi
+
+  # Nor must this session's own delegated workers: harness children write rows
+  # under their own session hashes into the primary repo's ledger.
+  python3 - "$repo/.oms/hooks/events.jsonl" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+rows = [{"session": "child0", "ts": now, "hook": "UserPromptSubmit",
+         "action": "ignored_child", "origin": "peer-delegate"},
+        {"session": "child1", "ts": now, "hook": "Stop", "origin": "peer-review"}]
+open(sys.argv[1], "w").write("".join(json.dumps(row) + "\n" for row in rows))
+PY
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  if printf '%s\n' "$out" | grep -q 'peers:'; then
+    fail "harness child rows must not be reported as a peer"
   fi
 
   # Outside an adopted repo, and when disabled: exit 0 with no output.
