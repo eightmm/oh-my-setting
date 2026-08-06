@@ -43,9 +43,11 @@ for provider in codex claude antigravity; do
     "$provider" "$binary" "$(command -v "$binary" >/dev/null 2>&1 && echo true || echo false)" \
     "$(oms_capability_read_field "$file" effort_mechanism 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" \
-    "$(oms_capability_read_field "$file" probed_at 2>/dev/null || true)" >> "$rows" <<'PY'
+    "$(oms_capability_read_field "$file" probed_at 2>/dev/null || true)" \
+    "$(oms_capability_read_field "$file" models_probe 2>/dev/null || true)" \
+    "$(oms_provider_model_listing_kind "$provider")" >> "$rows" <<'PY'
 import json, os, sys, time
-provider, binary, present, mechanism, values, probed = sys.argv[1:]
+provider, binary, present, mechanism, values, probed, probe, listing = sys.argv[1:]
 def lines(path, limit=20):
     try:
         with open(path, encoding="utf-8") as f:
@@ -62,10 +64,14 @@ def scales(path):
     return result
 try: age = max(0, int(time.time()) - int(probed))
 except ValueError: age = None
+# "unsupported" is a property of the CLI, so it is derived here rather than
+# stored: a snapshot taken before the provider grew a listing command would
+# otherwise keep asserting it has none.
+catalog_probe = "unsupported" if listing == "none" else (probe or "unknown")
 print(json.dumps({"provider": provider, "binary": binary, "present": present == "true",
  "models": lines(os.environ["OMS_MODELS_FILE"]), "effort_mechanism": mechanism or None,
  "effort_values": values.split() if values else [], "model_effort_scales": scales(os.environ["OMS_EFFORTS_FILE"]),
- "snapshot_age_seconds": age}, ensure_ascii=False))
+ "catalog_probe": catalog_probe, "snapshot_age_seconds": age}, ensure_ascii=False))
 PY
 done
 if [ "$JSON" -eq 1 ]; then
@@ -76,9 +82,18 @@ PY
 else
   python3 - "$rows" <<'PY'
 import json, sys
+HINT = "'oms models --refresh' (local catalog listing, no model tokens)"
 for raw in open(sys.argv[1]):
     row=json.loads(raw); print("## %s (%s)" % (row["provider"], "present" if row["present"] else "absent"))
-    print("models: " + (", ".join(row["models"]) or "unknown"))
+    # Catalog presence decides, then catalog_probe only explains an empty one:
+    # a run that skips the probe rewrites the snapshot beside a catalog an
+    # earlier --refresh wrote, and a repair named there points at nothing.
+    if row["models"]: print("models: " + ", ".join(row["models"]))
+    elif row["catalog_probe"] == "unsupported":
+        print("models: no local catalog; the CLI validates --model at call time")
+    else:
+        lead = "last probe failed; retry with " if row["catalog_probe"] == "failed" else "probe with "
+        print("models: unknown — " + lead + HINT)
     print("effort: %s %s" % (row["effort_mechanism"] or "unknown", " ".join(row["effort_values"])))
     print("snapshot age: %s" % (str(row["snapshot_age_seconds"]) + "s" if row["snapshot_age_seconds"] is not None else "unknown"))
 PY

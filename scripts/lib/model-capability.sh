@@ -201,6 +201,7 @@ oms_capability_refresh() {
   local provider="$1"
   local supplied_help="${2:-}"
   local binary flag help_file models_file tmp efforts_tmp values detected mechanism dir
+  local models_probe
   local own_help=1
   provider="$(oms_provider_normalize "$provider")" || return 2
   binary="$(oms_provider_binary "$provider")"
@@ -217,6 +218,10 @@ oms_capability_refresh() {
   fi
   models_file="$dir/$provider.models"
   values=""
+  # Skipped until a probe actually runs: an absent binary, a provider with no
+  # listing source, and OMS_CAPABILITY_SKIP_MODELS all leave the catalog
+  # untouched, which is not the same as having asked and got nothing.
+  models_probe=skipped
   if command -v "$binary" >/dev/null 2>&1; then
     if [ "$own_help" -eq 1 ]; then
       local -a probe=("$binary")
@@ -238,10 +243,12 @@ oms_capability_refresh() {
     fi
     if oms_provider_supports_model_listing "$provider" &&
       [ "${OMS_CAPABILITY_SKIP_MODELS:-0}" != 1 ]; then
+      models_probe=failed
       tmp="$(mktemp "${TMPDIR:-/tmp}/oms-cap-models.XXXXXX")" || tmp=""
       efforts_tmp="$(mktemp "${TMPDIR:-/tmp}/oms-cap-efforts.XXXXXX")" || efforts_tmp=""
       if [ -n "$tmp" ] && [ -n "$efforts_tmp" ]; then
         if oms_capability_probe_models "$provider" "$tmp" "$efforts_tmp"; then
+          models_probe=ok
           mv "$tmp" "$models_file"
           if [ -s "$efforts_tmp" ]; then
             mv "$efforts_tmp" "$dir/$provider.efforts"
@@ -263,6 +270,14 @@ oms_capability_refresh() {
     printf 'binary_key=%s\n' "$(oms_capability_binary_key "$binary")"
     printf 'effort_mechanism=%s\n' "$mechanism"
     printf 'effort_values=%s\n' "$values"
+    # What THIS run's probe did, not what the catalog holds. The two live in
+    # separate files and drift apart in both directions: a model-doctor run
+    # skips the probe and rewrites this one beside a catalog an earlier
+    # --refresh wrote, and a failed probe leaves the previous catalog standing.
+    # Whether models are known is the .models file's answer; this only explains
+    # an empty one. A snapshot from before this field means unknown, not
+    # skipped.
+    printf 'models_probe=%s\n' "$models_probe"
     printf 'probed_at=%s\n' "$(date +%s)"
   } > "$tmp"
   mv "$tmp" "$(oms_capability_file "$provider")"
