@@ -80,6 +80,7 @@ OMS_RS_BOARD_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}" \
 OMS_RS_RUN_TTL="${OMS_RUN_CURRENT_TTL:-86400}" \
 OMS_RS_GUARD_TTL="${OMS_GUARD_TTL:-86400}" \
 OMS_RS_THREAD_TTL="${OMS_THREAD_CURRENT_TTL:-86400}" \
+OMS_RS_THREAD_STALE_TTL="${OMS_THREAD_STALE_TTL:-259200}" \
 OMS_RS_HEAD="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)" \
 python3 <<'PY'
 import calendar, glob, json, os, time
@@ -92,6 +93,7 @@ board_ttl = int(os.environ["OMS_RS_BOARD_TTL"])
 run_ttl = int(os.environ["OMS_RS_RUN_TTL"])
 guard_ttl = int(os.environ["OMS_RS_GUARD_TTL"])
 thread_ttl = int(os.environ["OMS_RS_THREAD_TTL"])
+thread_stale_ttl = int(os.environ["OMS_RS_THREAD_STALE_TTL"])
 now = time.time()
 
 
@@ -534,7 +536,7 @@ if private.get("git"):
 state["harness"] = harness
 
 # --- Cross-agent threads: what the agents are actually discussing -----------
-threads = {"current": None, "open": 0, "recent": []}
+threads = {"current": None, "open": 0, "stale_open": 0, "recent": []}
 tdir = oms("threads")
 if os.path.isdir(tdir):
     cur = os.path.join(tdir, "CURRENT")
@@ -557,13 +559,29 @@ if os.path.isdir(tdir):
             p = r.get("provider")
             if p and p not in providers:
                 providers.append(p)
+        # Date a thread by its newest turn whose timestamp parses: a malformed
+        # ts cannot age it, and an undatable thread is never called abandoned.
+        last_epoch = None
+        for r in reversed(rows):
+            last_epoch = epoch(r.get("ts"))
+            if last_epoch is not None:
+                break
         rows_by_thread.append({
             "id": tid, "turns": len(rows), "closed": closed,
             "providers": providers, "last_ts": rows[-1].get("ts"),
+            "age_seconds": None if last_epoch is None else int(now - last_epoch),
         })
     rows_by_thread.sort(key=lambda t: t["last_ts"] or "", reverse=True)
-    threads["open"] = sum(1 for t in rows_by_thread if not t["closed"])
-    threads["recent"] = [t for t in rows_by_thread if not t["closed"]][:3]
+    open_threads = [t for t in rows_by_thread if not t["closed"]]
+    threads["open"] = len(open_threads)
+    # Advisory count only: the current thread is live by definition, and an
+    # open thread is the only record that an exchange happened, so nothing
+    # here (or in gc) closes one — see `oms thread list --stale`.
+    threads["stale_open"] = sum(
+        1 for t in open_threads
+        if t["id"] != threads["current"] and t["age_seconds"] is not None
+        and t["age_seconds"] > thread_stale_ttl)
+    threads["recent"] = open_threads[:3]
 state["threads"] = threads
 
 if as_json:
@@ -596,12 +614,15 @@ else:
 
     th = state["threads"]
     if th["current"] or th["open"]:
-        line("\n## Cross-agent threads (%d open)" % th["open"])
+        line("\n## Cross-agent threads (%d open, %d stale)" % (
+            th["open"], th["stale_open"]))
         for entry in th["recent"]:
             line("  %s%-26s turns=%-3d %s" % (
                 "* " if entry["id"] == th["current"] else "  ",
                 entry["id"], entry["turns"],
                 ",".join(entry["providers"]) or "-"))
+        if th["stale_open"]:
+            line("  stale: oms thread list --stale  (advisory; nothing auto-closes)")
         if th["current"]:
             line("  resume: oms consult \"...\"  (joins %s)" % th["current"])
 

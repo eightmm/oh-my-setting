@@ -12302,6 +12302,96 @@ assert [r["id"] for r in t["recent"]] == ["keep-open"], t
     fail "gc should sweep an aged closed thread"
 }
 
+test_thread_stale_triage_stays_advisory() {
+  local project="$TMP/thread-stale"
+  local out
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id abandoned >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+    --role question --text "which sampler?" >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+    --role answer --text "top-p" --provider codex --quality ok >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+    --role question --text "and the temperature?" >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+    --role answer --text "0.7" --provider antigravity --quality thin >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id undatable >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id undatable append \
+    --role note --text "no clock" >/dev/null
+  # `new` leaves this one current, and a current thread is live by definition.
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id live >/dev/null
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id live append \
+    --role note --text "still talking" >/dev/null
+
+  # Age is read from the recorded turn timestamps, not from file mtimes, so the
+  # fixture rewrites them: one abandoned, one that cannot be dated at all.
+  python3 - "$project/.oms/threads" <<'PY'
+import json, os, sys
+for tid, ts in (("abandoned", "2001-01-01T00:00:00Z"), ("undatable", "whenever")):
+    path = os.path.join(sys.argv[1], tid + ".jsonl")
+    with open(path, encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    for row in rows:
+        row["ts"] = ts
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+PY
+
+  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" list --stale)"
+  printf '%s' "$out" | grep -Fq 'oms thread close --id abandoned' ||
+    fail "--stale should print the exact close command per thread: $out"
+  if printf '%s' "$out" | grep -Fq 'undatable'; then
+    fail "a thread with no parseable timestamp must never be stale: $out"
+  fi
+  if printf '%s' "$out" | grep -Fq 'close --id live'; then
+    fail "the current thread must never be reported stale: $out"
+  fi
+
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" list --stale --json |
+    python3 -c '
+import json, sys
+threads = json.load(sys.stdin)["threads"]
+assert [t["id"] for t in threads] == ["abandoned"], threads
+assert threads[0]["staleness"] == "stale", threads
+' || fail "list --stale --json should carry only the stale thread"
+
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" stats --json | python3 -c '
+import json, sys
+s = json.load(sys.stdin)["stats"]
+assert s["open"] == 3 and s["stale_open"] == 1, s
+assert s["undatable_open"] == 1, s
+assert s["second_question"] == 1 and s["multi_provider"] == 1, s
+assert s["answers_rated"] == 2 and s["answers_ok"] == 1, s
+' || fail "stats should report mechanical utility counts"
+
+  # The attention surfaces key on the abandoned thread, not on all three.
+  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+import json, sys
+t = json.load(sys.stdin)["threads"]
+assert t["open"] == 3 and t["stale_open"] == 1, t
+' || fail "repo-state should separate stale open threads from the total"
+  out="$("$ROOT/scripts/inbox.sh" --repo "$project")"
+  printf '%s' "$out" | grep -Fq 'oms thread list --stale' ||
+    fail "inbox should point at the stale triage: $out"
+  printf '%s' "$out" | grep -Eq '1 open cross-agent thread' ||
+    fail "inbox should count only stale threads: $out"
+  out="$(OMS_THREAD_ATTENTION=0 "$ROOT/scripts/inbox.sh" --repo "$project")"
+  if printf '%s' "$out" | grep -Fq 'thread'; then
+    fail "OMS_THREAD_ATTENTION=0 should drop the thread advisory: $out"
+  fi
+
+  # Triage is advisory. An open thread is the only record that the exchange
+  # happened and there is no reopen path, so no view may close or delete one.
+  "$ROOT/scripts/agent-thread.sh" --repo "$project" list --json | python3 -c '
+import json, sys
+threads = json.load(sys.stdin)["threads"]
+assert len(threads) == 3, threads
+assert not any(t["closed"] for t in threads), threads
+' || fail "advisory triage must never close a thread"
+}
+
 test_machine_readable_views_cover_the_state_tools() {
   local project="$TMP/json-coverage"
 

@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Stale cross-agent threads become advisory triage instead of permanent inbox
+  noise. `oms thread list --stale` flags non-current open threads idle past
+  `OMS_THREAD_STALE_TTL` (default three days) with the exact close command per
+  row, `oms thread stats` reports mechanical utility counts, and the inbox
+  now lists only the stale count (`OMS_THREAD_ATTENTION=0` opts out). Nothing
+  auto-closes — an open thread is the only record an exchange happened, an
+  undatable turn is `unknown` rather than stale, and `gc` still sweeps only
+  closed threads.
 - The incumbent session learns when a live peer joins its worktree. The
   SessionStart advisory only ever warned the newcomer, so the prompt hook
   now tails the hook ledger for other sessions' recent rows — excluding the

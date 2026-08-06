@@ -35,6 +35,7 @@ MAX_BYTES="${OMS_THREAD_CONTEXT_BYTES:-6000}"
 MAX_TURNS="${OMS_THREAD_CONTEXT_TURNS:-12}"
 AS_JSON=0
 ALL=0
+STALE=0
 
 usage() {
   cat <<'EOF'
@@ -43,7 +44,8 @@ Usage: agent-thread.sh new     [--id ID] [--topic TEXT] [--repo PATH]
                                [--provider P] [--model M] [--artifact PATH]
        agent-thread.sh context [--id ID] [--max-bytes N] [--turns N]
        agent-thread.sh show    [--id ID] [--json]
-       agent-thread.sh list    [--all] [--json]
+       agent-thread.sh list    [--all] [--stale] [--json]
+       agent-thread.sh stats   [--json]
        agent-thread.sh current
        agent-thread.sh close   [--id ID] [--summary TEXT]
 
@@ -57,7 +59,10 @@ new      Create a thread and make it current. Prints the thread id.
 append   Add one turn. Roles: question, answer, note, decision, summary.
 context  Print the recent transcript, oldest first, within the byte budget.
 show     Print the full thread (or --json for the raw rows).
-list     Open threads, newest first; --all includes closed ones.
+list     Open threads, newest first; --all includes closed ones, --stale keeps
+         only the abandoned ones and prints the close command for each.
+stats    Mechanical counts over every thread, open and closed: follow-up
+         questions, multi-provider threads, recorded answer quality.
 current  Print the active thread id, or exit 1 when there is none.
 close    Mark the thread closed with an optional summary turn.
 
@@ -79,13 +84,22 @@ Options:
   --max-bytes N   Context byte budget (default: 6000, OMS_THREAD_CONTEXT_BYTES).
   --turns N       Context turn limit (default: 12, OMS_THREAD_CONTEXT_TURNS).
   --all           list: include closed threads.
-  --json          Machine-readable output (show, list).
+  --stale         list: only stale open threads, each with its close command.
+  --json          Machine-readable output (show, list, stats).
   -h, --help      Show help.
 
 A stale current pointer expires after OMS_THREAD_CURRENT_TTL seconds
 (default 86400), and a pointer written under a different active task is not
 reused, so a new consult never silently joins last week's — or another task's —
 conversation.
+
+An open thread that is not current counts as stale once its last valid turn is
+older than OMS_THREAD_STALE_TTL seconds (default 259200, three days). Turns
+whose timestamp will not parse leave the thread `unknown`, never stale.
+Staleness is advisory: nothing here closes, deletes, or rewrites a thread.
+An open thread is the only record that an exchange happened and there is no
+reopen path, so closing one stays a deliberate call — `--stale` only prints
+the command you would run.
 EOF
 }
 
@@ -93,7 +107,7 @@ fail() { echo "error: $*" >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    new|append|context|show|list|current|close)
+    new|append|context|show|list|stats|current|close)
       [ -z "$ACTION" ] || fail "only one command allowed"
       ACTION="$1"; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
@@ -116,6 +130,7 @@ while [ "$#" -gt 0 ]; do
     --max-bytes) [ "$#" -ge 2 ] || fail "--max-bytes requires a value"; MAX_BYTES="$2"; shift 2 ;;
     --turns) [ "$#" -ge 2 ] || fail "--turns requires a value"; MAX_TURNS="$2"; shift 2 ;;
     --all) ALL=1; shift ;;
+    --stale) STALE=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -123,6 +138,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-list}"
+[ "$STALE" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--stale applies to list"
 case "$MAX_BYTES" in *[!0-9]*|"") fail "--max-bytes must be a positive integer" ;; esac
 case "$MAX_TURNS" in *[!0-9]*|"") fail "--turns must be a positive integer" ;; esac
 [ "$MAX_BYTES" -gt 0 ] || fail "--max-bytes must be a positive integer"
@@ -134,6 +150,8 @@ THREADS="$STATE_ROOT/.oms/threads"
 CURRENT="$THREADS/CURRENT"
 TTL="${OMS_THREAD_CURRENT_TTL:-86400}"
 case "$TTL" in *[!0-9]*|"") TTL=86400 ;; esac
+STALE_TTL="${OMS_THREAD_STALE_TTL:-259200}"
+case "$STALE_TTL" in *[!0-9]*|"") STALE_TTL=259200 ;; esac
 
 thread_file() { printf '%s/%s.jsonl\n' "$THREADS" "$1"; }
 
@@ -438,17 +456,55 @@ with open(os.environ["OMS_TH_FILE"], encoding="utf-8", errors="replace") as f:
 PY
 }
 
-cmd_list() {
+# One scan feeds both views: staleness, the provider set, and current status all
+# come from the rows the listing already reads.
+thread_view() {
   local current=""
   current="$(read_current || true)"
   OMS_TH_DIR="$THREADS" OMS_TH_ALL="$ALL" OMS_TH_JSON="$AS_JSON" \
-  OMS_TH_CURRENT="$current" python3 - <<'PY'
-import glob, json, os
+  OMS_TH_CURRENT="$current" OMS_TH_MODE="$1" OMS_TH_STALE="$STALE" \
+  OMS_TH_STALE_TTL="$STALE_TTL" python3 - <<'PY'
+import calendar, glob, json, os, re, time
 
 d = os.environ["OMS_TH_DIR"]
-show_all = os.environ["OMS_TH_ALL"] == "1"
+mode = os.environ["OMS_TH_MODE"]
 as_json = os.environ["OMS_TH_JSON"] == "1"
+only_stale = os.environ["OMS_TH_STALE"] == "1"
+# Whether a thread ever got reused is a question closed threads answer too.
+show_all = os.environ["OMS_TH_ALL"] == "1" or mode == "stats"
+stale_ttl = int(os.environ["OMS_TH_STALE_TTL"])
 current = os.environ.get("OMS_TH_CURRENT") or ""
+now = time.time()
+# Only an id the --id flag would accept can appear in a printed close command.
+addressable = re.compile(r"\A[A-Za-z0-9_-][A-Za-z0-9._-]*\Z")
+
+
+def last_epoch(rows):
+    """Age a thread by its newest turn whose timestamp actually parses."""
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        try:
+            return calendar.timegm(
+                time.strptime(row.get("ts") or "", "%Y-%m-%dT%H:%M:%SZ"))
+        except Exception:
+            continue
+    return None
+
+
+def human(seconds):
+    if seconds is None:
+        return "?"
+    if seconds >= 86400:
+        return "%dd" % (seconds // 86400)
+    if seconds >= 3600:
+        return "%dh" % (seconds // 3600)
+    return "%dm" % (seconds // 60)
+
+
+stats = {"threads": 0, "open": 0, "closed": 0, "stale_open": 0,
+         "undatable_open": 0, "second_question": 0, "multi_provider": 0,
+         "answers_rated": 0, "answers_ok": 0}
 threads = []
 for path in sorted(glob.glob(os.path.join(d, "*.jsonl"))):
     tid = os.path.basename(path)[:-len(".jsonl")]
@@ -476,22 +532,98 @@ for path in sorted(glob.glob(os.path.join(d, "*.jsonl"))):
                 topic = r.get("text", "")
                 break
     providers = []
+    questions = 0
+    rated = 0
+    rated_ok = 0
     for r in rows:
-        p = r.get("provider") if isinstance(r, dict) else None
+        if not isinstance(r, dict):
+            continue
+        p = r.get("provider")
         if p and p not in providers:
             providers.append(p)
-    threads.append({
+        if r.get("role") == "question":
+            questions += 1
+        if r.get("role") == "answer" and r.get("quality"):
+            rated += 1
+            if r.get("quality") == "ok":
+                rated_ok += 1
+    epoch = last_epoch(rows)
+    age = None if epoch is None else int(now - epoch)
+    # Advisory classification only. The current thread is live by definition,
+    # and a turn the harness cannot date must not be called abandoned.
+    if closed:
+        staleness = "closed"
+    elif tid == current:
+        staleness = "current"
+    elif age is None:
+        staleness = "unknown"
+    elif age > stale_ttl:
+        staleness = "stale"
+    else:
+        staleness = "fresh"
+    stats["threads"] += 1
+    stats["closed" if closed else "open"] += 1
+    if staleness == "stale":
+        stats["stale_open"] += 1
+    elif staleness == "unknown":
+        stats["undatable_open"] += 1
+    if questions >= 2:
+        stats["second_question"] += 1
+    if len(providers) >= 2:
+        stats["multi_provider"] += 1
+    stats["answers_rated"] += rated
+    stats["answers_ok"] += rated_ok
+    entry = {
         "id": tid,
         "turns": len(rows),
         "closed": closed,
         "current": tid == current,
         "topic": " ".join(topic.split())[:80],
         "providers": providers,
-        "last_ts": rows[-1].get("ts") if rows else None,
-    })
+        "last_ts": rows[-1].get("ts") if rows and isinstance(rows[-1], dict) else None,
+        "staleness": staleness,
+        "age_seconds": age,
+    }
+    if staleness == "stale" and addressable.match(tid):
+        entry["close_command"] = 'oms thread close --id %s --summary "stale"' % tid
+    threads.append(entry)
 threads.sort(key=lambda t: t["last_ts"] or "", reverse=True)
+
+if mode == "stats":
+    if as_json:
+        print(json.dumps({"schema": 1, "stale_ttl_seconds": stale_ttl,
+                          "stats": stats}, ensure_ascii=False, sort_keys=True))
+    else:
+        print("# thread stats")
+        print("  threads: %d (open %d, closed %d)" % (
+            stats["threads"], stats["open"], stats["closed"]))
+        print("  stale open: %d (idle over %s; oms thread list --stale)" % (
+            stats["stale_open"], human(stale_ttl)))
+        print("  undatable open: %d" % stats["undatable_open"])
+        print("  with a follow-up question: %d" % stats["second_question"])
+        print("  with multiple providers: %d" % stats["multi_provider"])
+        print("  rated answers: %d (quality=ok %d)" % (
+            stats["answers_rated"], stats["answers_ok"]))
+    raise SystemExit(0)
+
+if only_stale:
+    threads = [t for t in threads if t["staleness"] == "stale"]
 if as_json:
     print(json.dumps({"schema": 1, "threads": threads}, ensure_ascii=False))
+elif only_stale and not threads:
+    print("no stale open threads (none idle longer than %s)" % human(stale_ttl))
+elif only_stale:
+    print("%d stale open thread(s), idle over %s. Nothing is closed "
+          "automatically:" % (len(threads), human(stale_ttl)))
+    for t in threads:
+        print("%-28s idle=%-5s turns=%-3d %s%s" % (
+            t["id"], human(t["age_seconds"]), t["turns"],
+            ",".join(t["providers"]) or "-",
+            ("  " + t["topic"]) if t["topic"] else ""))
+        if t.get("close_command"):
+            print("  close: %s" % t["close_command"])
+        else:
+            print("  close: unavailable, id is not addressable by --id")
 elif not threads:
     print("no threads")
 else:
@@ -503,6 +635,10 @@ else:
             ("  " + t["topic"]) if t["topic"] else ""))
 PY
 }
+
+cmd_list() { thread_view list; }
+
+cmd_stats() { thread_view stats; }
 
 cmd_current() {
   local id
@@ -534,6 +670,7 @@ case "$ACTION" in
   context) cmd_context ;;
   show) cmd_show ;;
   list) cmd_list ;;
+  stats) cmd_stats ;;
   current) cmd_current ;;
   close) cmd_close ;;
 esac

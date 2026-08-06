@@ -25,6 +25,9 @@ command for every item. The default is a pure query.
   --json       Emit one schema-1 JSON object.
   --fix-safe   Reclaim expired claimed plan leases and refresh stale CI, then
                report the remaining inbox. Never resolves or deletes work.
+
+Only cross-agent threads idle past OMS_THREAD_STALE_TTL are listed, and
+OMS_THREAD_ATTENTION=0 drops that advisory entirely.
 EOF
 }
 
@@ -83,6 +86,7 @@ PY
 fi
 
 OMS_INBOX_JSON="$AS_JSON" OMS_INBOX_SAFE="$safe_actions" \
+OMS_INBOX_THREADS="${OMS_THREAD_ATTENTION:-1}" \
 python3 - "$tmp/state.json" <<'PY'
 import json, os, sys
 
@@ -141,10 +145,13 @@ if landings:
     add(70, "P1", "interrupted-landing", "%d interrupted patch landing(s)" % len(landings),
         "oms state-verify --repo .", len(landings))
 
-threads = int(state.get("threads", {}).get("open", 0) or 0)
-if threads:
-    add(80, "P2", "open-threads", "%d open cross-agent thread(s)" % threads,
-        "oms thread list", threads)
+# Only abandoned threads are attention: a live conversation is not an inbox
+# item, and the advisory never asks for a close it could make itself.
+stale_threads = int(state.get("threads", {}).get("stale_open", 0) or 0)
+if stale_threads and os.environ.get("OMS_INBOX_THREADS") != "0":
+    add(80, "P2", "stale-threads",
+        "%d open cross-agent thread(s) idle past the stale TTL" % stale_threads,
+        "oms thread list --stale", stale_threads)
 
 items.sort(key=lambda item: (item["order"], item["code"]))
 for item in items:

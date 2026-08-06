@@ -262,7 +262,14 @@ the same sensitive-content gate as shared memory refuses secrets, private
 paths, and cluster details. `--thread ID` on `agent-call`, `agent-run`,
 `peer-ask`, `peer-delegate`, and `advise` records into the same conversation
 (naming a thread creates it); `oms state` shows open threads and `oms gc`
-sweeps only closed ones
+sweeps only closed ones. `list --stale` flags non-current open threads idle
+past `OMS_THREAD_STALE_TTL` (default three days) and prints the exact close
+command for each — advisory only: nothing auto-closes, because an open thread
+is the only record that an exchange happened and there is no reopen path, and
+a turn whose timestamp will not parse leaves the thread `unknown`, never
+stale. `stats` reports mechanical utility counts (follow-up questions,
+multi-provider threads, rated answers), which is how "is the thread feature
+pulling weight" stops being a guess
 
 **Consult (`agent-consult.sh`, `oms consult`)** — One verb for asking peers
 mid-task: picks a provider that is not the caller, attaches the active task,
@@ -387,7 +394,9 @@ Pure query except opt-in `--refresh-ci`
 
 **Attention inbox (`inbox.sh`, `oms inbox`)** — A compact priority queue
 derived from `oms state`: expired plan leases, stale/red CI, unresolved
-artifacts and failures, abandoned reviews/guards/landings, then open threads.
+artifacts and failures, abandoned reviews/guards/landings, then stale open
+threads — a live conversation is not an inbox item, so only threads idle past
+the stale TTL surface (`OMS_THREAD_ATTENTION=0` drops that advisory).
 Every item carries one exact next command. The default and MCP surface are
 read-only; `--fix-safe` may only reclaim expired claimed leases and refresh a
 stale CI receipt, then re-reads state. It never resolves, deletes, or judges
