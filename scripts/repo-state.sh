@@ -82,6 +82,10 @@ OMS_RS_GUARD_TTL="${OMS_GUARD_TTL:-86400}" \
 OMS_RS_THREAD_TTL="${OMS_THREAD_CURRENT_TTL:-86400}" \
 OMS_RS_THREAD_STALE_TTL="${OMS_THREAD_STALE_TTL:-259200}" \
 OMS_RS_HEAD="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)" \
+OMS_RS_BRANCH="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)" \
+OMS_RS_UPSTREAM="$(git -C "$REPO" rev-parse --abbrev-ref '@{u}' 2>/dev/null || true)" \
+OMS_RS_AHEAD="$(git -C "$REPO" rev-list --count '@{u}..HEAD' 2>/dev/null || true)" \
+OMS_RS_HAS_WORKFLOWS="$([ -d "$REPO/.github/workflows" ] && echo 1 || echo 0)" \
 python3 <<'PY'
 import calendar, glob, json, os, time
 
@@ -383,21 +387,44 @@ for fp in forder:
                        "summary": (last.get("summary") or last.get("cmd", ""))[:80]})
 state["failures"] = {"open": open_fails[-5:], "open_total": len(open_fails)}
 
-# --- Latest CI conclusion for HEAD's branch ---------------------------------
-ci = {"present": False, "current_sha": None, "fresh": None}
+# --- CI for HEAD, keyed by (branch, sha) ------------------------------------
+# A recorded conclusion is evidence about the commit it ran on. Three unlike
+# situations used to collapse into one "stale" nag: a HEAD CI has not been
+# shown yet, a HEAD that was never pushed, and a repo whose push state cannot
+# be determined at all. Only the unpushed one has an action, and it is a push.
+ci = {"present": False, "current_sha": None, "fresh": None, "state": "none",
+      "ahead": None, "unpushed": None, "upstream": None, "current_branch": None}
+ahead_raw = (os.environ.get("OMS_RS_AHEAD") or "").strip()
+ahead = int(ahead_raw) if ahead_raw.isdigit() else None
+head_sha = os.environ.get("OMS_RS_HEAD") or None
+ci["current_sha"] = head_sha
+ci["current_branch"] = os.environ.get("OMS_RS_BRANCH") or None
+ci["upstream"] = os.environ.get("OMS_RS_UPSTREAM") or None
+ci["ahead"] = ahead
+if ahead is not None:
+    ci["unpushed"] = ahead > 0
 ci_rows = read_jsonl(oms("ci.jsonl"))
 if ci_rows:
     ci["present"] = True
     last = ci_rows[-1]
     ci.update({k: last.get(k) for k in ("branch", "sha", "status", "conclusion", "url")})
-    # A recorded conclusion is evidence about the commit it ran on. Without
-    # saying which commit that is relative to HEAD, an agent cites green CI for
-    # a revision that no longer exists in the working tree.
-    ci["current_sha"] = os.environ.get("OMS_RS_HEAD") or None
     recorded = ci.get("sha") or ""
-    if ci["current_sha"] and recorded:
-        short = min(len(recorded), len(ci["current_sha"]))
-        ci["fresh"] = recorded[:short] == ci["current_sha"][:short]
+    if head_sha and recorded:
+        short = min(len(recorded), len(head_sha))
+        ci["fresh"] = recorded[:short] == head_sha[:short]
+if ci["fresh"]:
+    ci["state"] = "current"
+elif ci["unpushed"]:
+    # Silent in a repo with neither CI history nor workflows: nothing is
+    # waiting on that push, so naming it would be noise, not attention.
+    if ci["present"] or os.environ.get("OMS_RS_HAS_WORKFLOWS") == "1":
+        ci["state"] = "unpushed"
+elif ci["present"] and ahead == 0:
+    ci["state"] = "pending"
+elif ci["present"]:
+    # No upstream to compare against: the recorded run may or may not describe
+    # this commit, and refreshing is the only answer available.
+    ci["state"] = "stale"
 state["ci"] = ci
 
 # --- In-flight delegations (liveness files) ---------------------------------
@@ -691,14 +718,26 @@ else:
                 (e.get("soul_sha256", "") or "-")[:12]))
 
     ci = state["ci"]
-    if ci["present"]:
-        line("\n## CI (%s)" % (ci.get("branch") or "?"))
-        stale_tag = ""
-        if ci.get("fresh") is False:
-            stale_tag = "  STALE (HEAD is %s)" % (ci.get("current_sha") or "?")[:12]
-        line("  %s %s  %s%s" % (ci.get("status") or "?", ci.get("conclusion") or "?",
-                                (ci.get("sha") or "")[:12], stale_tag))
-        if ci.get("fresh") is False:
+    if ci["state"] != "none":
+        line("\n## CI (%s)" % (ci.get("branch") or ci.get("current_branch") or "?"))
+        recorded = "%s %s  %s" % (ci.get("status") or "?", ci.get("conclusion") or "?",
+                                  (ci.get("sha") or "")[:12])
+        if ci["state"] == "current":
+            line("  %s" % recorded)
+        elif ci["state"] == "unpushed":
+            line("  unpushed: %d commit(s) ahead of %s — push to get CI" % (
+                ci.get("ahead") or 0, ci.get("upstream") or "the upstream"))
+            if ci["present"]:
+                line("  history: %s" % recorded)
+        elif ci["state"] == "pending":
+            line("  unknown/pending: no run recorded for HEAD %s" % (
+                (ci.get("current_sha") or "?")[:12]))
+            if ci["present"]:
+                line("  history: %s" % recorded)
+            line("  refresh: oms state --refresh-ci")
+        else:
+            line("  %s  STALE (HEAD is %s)" % (
+                recorded, (ci.get("current_sha") or "?")[:12]))
             line("  refresh: oms state --refresh-ci")
 
     ld = state["landings"]

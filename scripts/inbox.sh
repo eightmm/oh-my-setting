@@ -70,10 +70,13 @@ PY
     fi
   fi
 
+  # Refresh only where a query can change the answer: a pushed HEAD with no
+  # run recorded for it, or a repo whose push state cannot be determined. An
+  # unpushed HEAD has no run to find, so asking gh is pure latency.
   ci_stale="$(python3 - "$tmp/state.json" <<'PY'
 import json, sys
 ci = json.load(open(sys.argv[1], encoding="utf-8")).get("ci", {})
-print(1 if ci.get("present") and not ci.get("fresh") else 0)
+print(1 if ci.get("state") in ("stale", "pending") else 0)
 PY
 )"
   if [ "$ci_stale" = 1 ] && command -v "${OMS_GH_BIN:-gh}" >/dev/null 2>&1; then
@@ -110,14 +113,25 @@ if stale:
         "oms agent-plan --repo . reclaim", len(stale))
 
 ci = state.get("ci", {})
-if ci.get("present") and not ci.get("fresh"):
-    add(20, "P1", "ci-stale", "recorded CI does not match the current HEAD",
-        "oms state --repo . --refresh-ci")
-elif ci.get("present") and ci.get("conclusion") in (
+ci_state = ci.get("state")
+if ci_state == "current" and ci.get("conclusion") in (
     "failure", "timed_out", "cancelled", "startup_failure"
 ):
     add(20, "P1", "ci-failed", "latest CI conclusion is %s" % ci.get("conclusion"),
         "oms ci-status")
+elif ci_state == "stale":
+    # Only where push state is unknowable does "does it describe HEAD?" remain
+    # the open question; elsewhere the item below names what to actually do.
+    add(20, "P1", "ci-stale", "recorded CI does not match the current HEAD",
+        "oms state --repo . --refresh-ci")
+elif ci_state == "unpushed":
+    # Committed work no CI has ever seen. Not urgent like a red run, but it is
+    # the one CI state with an action, and silence here is how commits sit for
+    # a day behind a dashboard that only says "stale".
+    ahead = int(ci.get("ahead") or 0)
+    add(25, "P2", "unpushed-head",
+        "%d commit(s) not pushed — CI has never seen this HEAD" % ahead,
+        "git push", ahead)
 
 artifacts = state.get("artifacts", {})
 unresolved = int(artifacts.get("counts", {}).get("unresolved", 0) or 0)

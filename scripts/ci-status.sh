@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Print the latest CI conclusion for a branch (default: current) so a red run
-# can't go unnoticed after a push — the "nobody looked" failure mode. Exits
-# nonzero when the most recent completed run failed. gh is overridable
+# Print the CI conclusion for a branch's HEAD (default: current branch) so a
+# red run can't go unnoticed after a push — the "nobody looked" failure mode.
+# The result is keyed by (branch, HEAD sha): a run for an earlier commit is
+# history, an unpushed HEAD is reported as unpushed rather than dressed up in
+# an older commit's verdict, and a gh that cannot answer says so instead of
+# reading as "no CI here". Exits nonzero when HEAD's completed run failed, and
+# 2 when gh is missing or unusable. gh is overridable
 # (OMS_GH_BIN) for testing. `record` also appends the conclusion to
 # .oms/ci.jsonl so a later session / oms state sees "CI failed on <sha>"
 # instead of the result vanishing after the print. `tick` is the bounded,
@@ -131,14 +135,38 @@ fi
 
 command -v "$GH" >/dev/null 2>&1 || { echo "ci-status: gh CLI not installed" >&2; exit 2; }
 
-json="$("$GH" run list --branch "$branch" --limit 1 \
-  --json status,conclusion,workflowName,headSha,url 2>/dev/null || true)"
+# Whether HEAD is on the upstream decides which question CI can even answer.
+# It is only knowable for the checked-out branch with a configured upstream;
+# for any other branch the recorded-vs-HEAD comparison stays the whole story.
+HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+AHEAD=""
+if [ -n "$HEAD_SHA" ] && [ "$branch" = "$CURRENT_BRANCH" ]; then
+  AHEAD="$(git rev-list --count '@{u}..HEAD' 2>/dev/null || true)"
+fi
+case "$AHEAD" in *[!0-9]*) AHEAD="" ;; esac
+
+# An unauthenticated gh prints nothing and exits nonzero. Swallowing that made
+# the query indistinguishable from "this branch has no CI" — an all-clear this
+# tool exists to prevent. `tick` already returned above: a hook stays silent.
+# One commit routinely has several runs, so ask for enough rows to recognise
+# HEAD's own run in the same single call rather than only the newest one.
+gh_rc=0
+json="$("$GH" run list --branch "$branch" --limit 10 \
+  --json status,conclusion,workflowName,headSha,url 2>/dev/null)" || gh_rc=$?
+if [ "$gh_rc" -ne 0 ]; then
+  echo "ci-status: gh not authenticated or unreachable (try: gh auth login)" >&2
+  exit 2
+fi
 
 LEDGER=""
 PR_JSON=""
+PR_ERR=""
 JOURNAL_ROW=""
+GH_DEGRADED=0
 cleanup_ci_status() {
   [ -z "${JOURNAL_ROW:-}" ] || rm -f "$JOURNAL_ROW"
+  [ -z "${PR_ERR:-}" ] || rm -f "$PR_ERR"
 }
 trap cleanup_ci_status EXIT
 if [ "$ACTION" = record ]; then
@@ -146,32 +174,89 @@ if [ "$ACTION" = record ]; then
   LEDGER="${OMS_CI_LEDGER:-$state_root/.oms/ci.jsonl}"
   mkdir -p "$(dirname "$LEDGER")"
   agent_memory_ensure_oms_ignore_for_path "$LEDGER" 2>/dev/null || true
-  PR_JSON="$("$GH" pr view "$branch" --json number,state,url,headRefOid 2>/dev/null || true)"
+  PR_ERR="$(mktemp)" || exit 1
+  pr_rc=0
+  PR_JSON="$("$GH" pr view "$branch" --json number,state,url,headRefOid 2>"$PR_ERR")" || pr_rc=$?
+  if [ "$pr_rc" -ne 0 ]; then
+    PR_JSON=""
+    # "no pull requests found for branch" is the ordinary answer for a branch
+    # without a PR. Any other failure is the same gh outage as above, reported
+    # rather than silently dropped — but only after the CI row is written.
+    if ! grep -qi 'pull request' "$PR_ERR"; then
+      echo "ci-status: gh not authenticated or unreachable (try: gh auth login)" >&2
+      GH_DEGRADED=1
+    fi
+  fi
   JOURNAL_ROW="$(mktemp)" || exit 1
 fi
 
 ci_rc=0
 OMS_BRANCH="$branch" OMS_JSON="$json" OMS_CI_LEDGER_OUT="$LEDGER" \
   OMS_CI_PR_JSON="$PR_JSON" OMS_CI_JOURNAL_ROW="$JOURNAL_ROW" \
+  OMS_CI_HEAD="$HEAD_SHA" OMS_CI_AHEAD="$AHEAD" \
   OMS_CI_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" python3 - <<'PY' || ci_rc=$?
 import json, os, sys
 branch = os.environ["OMS_BRANCH"]
 raw = os.environ.get("OMS_JSON", "").strip()
+head = os.environ.get("OMS_CI_HEAD", "")
+ahead_raw = os.environ.get("OMS_CI_AHEAD", "")
+ahead = int(ahead_raw) if ahead_raw.isdigit() else None
 try:
     runs = json.loads(raw) if raw else []
 except Exception:
     runs = []
-if not runs:
+if not isinstance(runs, list):
+    runs = []
+runs = [r for r in runs if isinstance(r, dict)]
+latest = runs[0] if runs else None
+match = None
+for r in runs:
+    if head and (r.get("headSha") or "") == head:
+        match = r
+        break
+
+
+def describe(r):
+    status = r.get("status") or "?"
+    return "%s %s" % (status, r.get("conclusion") or status)
+
+
+def history(r):
+    return "  history: %s on %s  %s" % (
+        describe(r), (r.get("headSha") or "?")[:12], r.get("url", ""))
+
+
+# `current` is the run that actually describes HEAD; `chosen` is the newest
+# run worth recording as history. Printing a prior commit's green run as the
+# current result is exactly the reassurance this tool must never manufacture.
+if ahead is not None and ahead > 0:
+    print("ci-status [%s]: unpushed (%d commit%s ahead of the upstream — push to get CI)" % (
+        branch, ahead, "" if ahead == 1 else "s"))
+    if latest:
+        print(history(latest))
+    chosen, current = latest, None
+elif match:
+    print("ci-status [%s]: %s  %s" % (branch, describe(match), match.get("url", "")))
+    chosen, current = match, match
+elif ahead == 0 and latest:
+    print("ci-status [%s]: no run yet for HEAD %s (pending or not started)" % (
+        branch, head[:12]))
+    print(history(latest))
+    chosen, current = latest, None
+elif latest:
+    # Push state unknown (no upstream, or a branch other than the checkout):
+    # the newest run remains the only answer available, as before.
+    print("ci-status [%s]: %s  %s" % (branch, describe(latest), latest.get("url", "")))
+    chosen, current = latest, latest
+else:
     print("ci-status: no runs for %s" % branch)
-    sys.exit(0)
-r = runs[0]
-status = r.get("status")
-concl = r.get("conclusion") or status
-print("ci-status [%s]: %s %s  %s" % (
-    branch, status, concl, r.get("url", "")))
+    chosen, current = None, None
 
 ledger = os.environ.get("OMS_CI_LEDGER_OUT", "")
-if ledger:
+if ledger and chosen:
+    r = chosen
+    status = r.get("status")
+    concl = r.get("conclusion") or status
     sha = r.get("headSha", "")
     row = {"schema": 1, "ts": os.environ["OMS_CI_TS"], "branch": branch,
            "sha": sha, "status": status, "conclusion": concl, "url": r.get("url", "")}
@@ -202,12 +287,18 @@ if ledger:
         with open(journal_row, "w", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-# Nonzero only on a completed failure; in-progress/queued are not failures.
-sys.exit(1 if concl in ("failure", "timed_out", "cancelled", "startup_failure") else 0)
+# Nonzero only on a completed failure for the commit in hand; in-progress and
+# queued are not failures, and neither is a red run on a superseded commit.
+verdict = (current or {}).get("conclusion") or (current or {}).get("status")
+sys.exit(1 if verdict in ("failure", "timed_out", "cancelled", "startup_failure") else 0)
 PY
 
 if [ -n "$JOURNAL_ROW" ] && [ -s "$JOURNAL_ROW" ]; then
   work_journal_observe "$state_root" ci-status "$JOURNAL_ROW" \
     --record-path "$LEDGER"
+fi
+# A gh failure must not read as a clean run even when the CI row itself landed.
+if [ "$ci_rc" -eq 0 ] && [ "$GH_DEGRADED" -eq 1 ]; then
+  ci_rc=2
 fi
 exit "$ci_rc"

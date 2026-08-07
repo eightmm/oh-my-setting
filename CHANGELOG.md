@@ -20,6 +20,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- `ci-status` stops giving a false all-clear. An unauthenticated or
+  unreachable `gh` used to print "no runs for <branch>" and exit 0 —
+  indistinguishable from a branch with no CI, at the one tool whose stated
+  job is that a red run can't go unnoticed. Explicit invocations now say
+  `gh not authenticated or unreachable (try: gh auth login)` and exit 2; the
+  hook tick stays a silent no-op by design. CI is also keyed to HEAD now:
+  an unpushed HEAD reads `unpushed (N commits ahead — push to get CI)` (the
+  exact state that let 14 finished commits sit undeployed for a day), a
+  pushed HEAD without a run reads unknown/pending, and a prior commit's
+  result renders as history instead of a STALE-current nag. inbox gains a P2
+  `unpushed-head` item whose command is `git push`; where push state is
+  unknowable (no upstream), the old stale rendering deliberately remains.
 - Patch admission has a structural floor when no scope is supplied. The scope
   gate used to SKIP without a task/executor scope, so nothing constrained
   destination paths — a malformed worker patch once moved two test files to
