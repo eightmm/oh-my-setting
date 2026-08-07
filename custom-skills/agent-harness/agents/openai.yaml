@@ -1,4 +1,0 @@
-interface:
-  display_name: "Agent Harness"
-  short_description: "Shared task state and cross-agent workflows"
-  default_prompt: "Use $agent-harness to resume the shared task state and route peer consultation, review, or delegation for this work."

@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Changed
+- Global harness skills are namespaced `oms-*` (agent-harness →
+  oms-agent-harness, oh-my-setting-ops → oms-ops, spec-interview, trace,
+  trust-boundary, gpu-workstation, slurm likewise). Skills install into
+  roots shared with user and third-party skills, where generic names are a
+  live collision class; the prefix also makes ownership legible at a
+  glance. No alias directories: `oms update` relinks owned entries under
+  the new names, a rename table lets uninstall and the `~/.agents`/`~/.pi`
+  cleanup claim old names they own, and `oms skill-doctor` advisorily
+  names any legacy leftover with its successor. Project-forged skills
+  (`oms skill-forge`) stay unprefixed.
 - `oms inbox --fix-safe` gains a third mechanical repair: the
   exactly-superseded artifact sweep. `repo-state` applies the same hook-row
   TTL as the ledger's own read paths, and every smoke suite added this round

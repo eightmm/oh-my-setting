@@ -1,5 +1,5 @@
 ---
-name: gpu-workstation
+name: oms-gpu-workstation
 description: Discipline for launching training or inference on a local GPU machine (not a Slurm cluster): check VRAM and running processes before launching, serialize GPU jobs through the tsp queue instead of racing other work, read the machine snapshot for hardware limits, and triage CUDA OOM systematically.
 ---
 

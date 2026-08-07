@@ -1,5 +1,5 @@
 ---
-name: trust-boundary
+name: oms-trust-boundary
 description: >
   Review or implement a security-sensitive change by tracing assets, actors,
   trust boundaries, abuse paths, controls, and verification evidence. Use for

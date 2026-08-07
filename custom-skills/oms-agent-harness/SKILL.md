@@ -1,5 +1,5 @@
 ---
-name: agent-harness
+name: oms-agent-harness
 description: >
   Shared state and multi-agent coordination for resume, memory, plans, recovery,
   roles/executors, provider/model routing, peer consultation, independent diff

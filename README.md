@@ -96,8 +96,10 @@ door per capability; the full catalog is `oms list`, documented in
   verification gate plus a protected-branch quick pre-push mode
 
 Skills load in three layers: five general-purpose skills everywhere,
-machine-conditional skills only where their command exists (`slurm`,
-`gpu-workstation`), and per-repo skills forged into `.oms/skills/`.
+machine-conditional skills only where their command exists (`oms-slurm`,
+`oms-gpu-workstation`), and per-repo skills forged into `.oms/skills/`. Global
+skills are named `oms-*` so they cannot collide with your own skills in the
+shared skill roots; forged project skills keep their plain names.
 
 ## Notes
 

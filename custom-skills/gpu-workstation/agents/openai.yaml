@@ -1,4 +1,0 @@
-interface:
-  display_name: "GPU Workstation"
-  short_description: "Local GPU launch and queue discipline"
-  default_prompt: "Use $gpu-workstation to check the GPU, queue this run properly, and handle memory limits."

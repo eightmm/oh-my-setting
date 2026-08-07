@@ -90,8 +90,10 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   게이트와 보호 브랜치용 빠른 pre-push 모드
 
 skill은 세 계층으로 붙는다: 어디서나 같은 범용 5개, 필요한 명령이 있는
-머신에만 링크되는 머신 조건 skill(`slurm`, `gpu-workstation`), 그리고 저장소의
-`.oms/skills/`에 포지되는 프로젝트 skill.
+머신에만 링크되는 머신 조건 skill(`oms-slurm`, `oms-gpu-workstation`), 그리고
+저장소의 `.oms/skills/`에 포지되는 프로젝트 skill. 전역 skill 이름은 `oms-`로
+시작한다: 공유 skill 루트에서 직접 만든 skill과 이름이 부딪히지 않는다. 포지된
+프로젝트 skill은 접두사 없이 그대로 둔다.
 
 ## 참고
 

@@ -74,7 +74,7 @@ task = load("OMS_SH_TASK")
 if task.get("present") and task.get("status") == "active" and task.get("stale"):
     print(
         "[oms] stale active task %s — read `oms agent-task status` before new"
-        " work; the agent-harness skill covers resume/handoff."
+        " work; the oms-agent-harness skill covers resume/handoff."
         % (task.get("task_id") or "?")
     )
     raise SystemExit(0)

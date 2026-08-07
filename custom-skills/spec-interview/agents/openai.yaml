@@ -1,4 +1,0 @@
-interface:
-  display_name: "Spec Interview"
-  short_description: "Resolve implementation-shaping choices first"
-  default_prompt: "Use $spec-interview to inspect this project, ask only about material gaps, and write the spec before coding."

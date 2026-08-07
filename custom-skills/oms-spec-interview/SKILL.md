@@ -1,5 +1,5 @@
 ---
-name: spec-interview
+name: oms-spec-interview
 description: >
   Resolve implementation-shaping choices for new projects, repo onboarding,
   unresolved drafts, or broad features. Inspect first and ask only about

@@ -1,4 +1,4 @@
 interface:
   display_name: "Oh My Setting Ops"
   short_description: "Maintain the oh-my-setting install"
-  default_prompt: "Use $oh-my-setting-ops to check, update, or repair this oh-my-setting install."
+  default_prompt: "Use $oms-ops to check, update, or repair this oh-my-setting install."

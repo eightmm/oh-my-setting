@@ -57,6 +57,7 @@ unlink_skills() {
   local target_root="$1"
   local skill
   local name
+  local row
 
   for skill in "$ROOT"/custom-skills/*; do
     [ -d "$skill" ] || continue
@@ -64,6 +65,16 @@ unlink_skills() {
     name="$(basename "$skill")"
     unlink_and_restore "$target_root/$name" "$skill"
   done
+
+  # A skill installed before the `oms-` namespace answers to neither the loop
+  # above nor its own source, which no longer exists. Uninstalling would leave
+  # it linked into a checkout the user is removing, so claim it by its old
+  # name; anything this checkout does not own is skipped as usual.
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    name="${row%%:*}"
+    unlink_and_restore "$target_root/$name" "$ROOT/custom-skills/$name"
+  done <<< "$(oms_ops_legacy_skill_renames)"
 }
 
 case "${1:-}" in

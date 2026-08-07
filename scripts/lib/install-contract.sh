@@ -8,8 +8,8 @@
 # that does not exist, and a state word matches no case branch. Command
 # substitution strips the newline and leaves the CR, so this has to happen at the
 # point of consumption. Confirmed on CI — `link.sh` built
-# `custom-skills/oh-my-setting-ops\r` from a manifest read and the copy failed on
-# a source that was right there.
+# a `custom-skills/<skill>\r` source path from a manifest read and the copy failed
+# on a source that was right there.
 #
 # Defined before the platform block and outside it: this is string handling with
 # no platform dependency, and putting it behind the availability check made a

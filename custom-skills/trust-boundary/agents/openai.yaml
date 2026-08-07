@@ -1,4 +1,0 @@
-interface:
-  display_name: "Trust Boundary"
-  short_description: "Review secure changes and trust boundaries"
-  default_prompt: "Use $trust-boundary to review this security-sensitive change and identify relevant negative-path checks."

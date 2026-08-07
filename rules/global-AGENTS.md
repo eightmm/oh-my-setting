@@ -66,7 +66,7 @@ contracts.
 
 ## Harness
 
-- Use `agent-harness` for workflows; `oms list` catalogs tools; never edit
+- Use `oms-agent-harness` for workflows; `oms list` catalogs tools; never edit
   `.oms/` manually; forge repeating fixes into project skills
   (`oms skill-forge`).
 - Peer CLIs: `claude`, `codex`, `agy`. Cross-model work

@@ -1,8 +1,8 @@
 {
   "skills": [
     {
-      "name": "oh-my-setting-ops",
-      "source": "custom-skills/oh-my-setting-ops",
+      "name": "oms-ops",
+      "source": "custom-skills/oms-ops",
       "enabled": true,
       "reason": "Let agents maintain the oh-my-setting install, cleanup legacy links, and run doctors from chat.",
       "triggers": [
@@ -15,8 +15,8 @@
       ]
     },
     {
-      "name": "agent-harness",
-      "source": "custom-skills/agent-harness",
+      "name": "oms-agent-harness",
+      "source": "custom-skills/oms-agent-harness",
       "enabled": true,
       "reason": "Share harness state and route provider/model work, peer consultation, independent review, and bounded write delegation.",
       "triggers": [
@@ -83,8 +83,8 @@
       ]
     },
     {
-      "name": "spec-interview",
-      "source": "custom-skills/spec-interview",
+      "name": "oms-spec-interview",
+      "source": "custom-skills/oms-spec-interview",
       "enabled": true,
       "reason": "Interview and write a spec before coding unclear or broad requests.",
       "triggers": [
@@ -104,8 +104,8 @@
       ]
     },
     {
-      "name": "trace",
-      "source": "custom-skills/trace",
+      "name": "oms-trace",
+      "source": "custom-skills/oms-trace",
       "enabled": true,
       "reason": "Explain an observed failure or anomaly with competing hypotheses, ranked evidence, and a discriminating probe before changing code.",
       "triggers": [
@@ -121,8 +121,8 @@
       ]
     },
     {
-      "name": "slurm",
-      "source": "custom-skills/slurm",
+      "name": "oms-slurm",
+      "source": "custom-skills/oms-slurm",
       "enabled": true,
       "requires": ["sinfo"],
       "reason": "On Slurm machines, answer cluster questions from the private reference and run jobs through the harness tools instead of re-probing nodes every session.",
@@ -143,8 +143,8 @@
       ]
     },
     {
-      "name": "gpu-workstation",
-      "source": "custom-skills/gpu-workstation",
+      "name": "oms-gpu-workstation",
+      "source": "custom-skills/oms-gpu-workstation",
       "enabled": true,
       "requires": ["nvidia-smi"],
       "reason": "On local GPU machines, check VRAM first, serialize runs through the tsp queue, and triage OOM systematically.",
@@ -163,10 +163,10 @@
       ]
     },
     {
-      "name": "trust-boundary",
-      "source": "custom-skills/trust-boundary",
+      "name": "oms-trust-boundary",
+      "source": "custom-skills/oms-trust-boundary",
       "enabled": true,
-      "reason": "Review security-sensitive changes and explicit threat models with scoped trust-boundary and negative-path evidence.",
+      "reason": "Review security-sensitive changes and explicit threat models with scoped trust boundaries and negative-path evidence.",
       "triggers": [
         "trust boundary",
         "threat model",

@@ -127,9 +127,9 @@ for pair in \
   "$HOME/.codex/AGENTS.md:$dest/rules/global-AGENTS.md" \
   "$HOME/.claude/CLAUDE.md:$dest/rules/global-AGENTS.md" \
   "$HOME/.gemini/AGENTS.md:$dest/rules/global-AGENTS.md" \
-  "$HOME/.codex/skills/agent-harness:$dest/custom-skills/agent-harness" \
-  "$HOME/.claude/skills/agent-harness:$dest/custom-skills/agent-harness" \
-  "$HOME/.gemini/antigravity/skills/agent-harness:$dest/custom-skills/agent-harness"; do
+  "$HOME/.codex/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
+  "$HOME/.claude/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
+  "$HOME/.gemini/antigravity/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness"; do
   path="${pair%%:*}"
   source="${pair#*:}"
   oms_install_target_matches "$source" "$path" ||

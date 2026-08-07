@@ -1,9 +1,9 @@
 ---
-name: oh-my-setting-ops
+name: oms-ops
 description: >
   Maintain an oh-my-setting installation from chat: status, update, doctor,
   duplicate-skill cleanup, local snapshots, rollback, or uninstall. Use
-  `agent-harness` instead for repository task state.
+  `oms-agent-harness` instead for repository task state.
 ---
 
 # oh-my-setting Operations

@@ -119,11 +119,29 @@ oms_ops_clean_backup_skill_links() {
   done < <(find "$target_root" -maxdepth 1 -type l -name '*.backup.*' -print0 2>/dev/null)
 }
 
+# Global skills shipped before the `oms-` namespace, as `old:new` rows. Skills
+# install into roots shared with the user's own and other tools' skills, so an
+# unprefixed name is a collision waiting to happen; the prefix is the fix and
+# this table is what makes the transition legible. One table, two readers: the
+# cleanup below removes links a previous install left under an old name, and
+# skill-doctor reports whatever it could not remove.
+oms_ops_legacy_skill_renames() {
+  printf '%s\n' \
+    'agent-harness:oms-agent-harness' \
+    'oh-my-setting-ops:oms-ops' \
+    'spec-interview:oms-spec-interview' \
+    'trace:oms-trace' \
+    'trust-boundary:oms-trust-boundary' \
+    'gpu-workstation:oms-gpu-workstation' \
+    'slurm:oms-slurm'
+}
+
 oms_ops_clean_legacy_skill_links() {
   local target_root="$1"
   local dry_run="${2:-0}"
   local skill
   local name
+  local row
 
   [ -d "$target_root" ] || return 0
   oms_ops_clean_backup_skill_links "$target_root" "$dry_run"
@@ -135,7 +153,15 @@ oms_ops_clean_legacy_skill_links() {
     oms_ops_remove_legacy_link "$target_root/$name" "custom-skills/$name" "$dry_run"
   done
 
-  # These front doors were folded into agent-harness. Keep their runtime
+  # A renamed skill's old link is invisible to the loop above, which only ever
+  # sees current names, so these roots would keep it forever.
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    name="${row%%:*}"
+    oms_ops_remove_legacy_link "$target_root/$name" "custom-skills/$name" "$dry_run"
+  done <<< "$(oms_ops_legacy_skill_renames)"
+
+  # These front doors were folded into oms-agent-harness. Keep their runtime
   # commands, but remove only legacy links owned by this checkout.
   for name in peer-ask peer-delegate peer-review; do
     oms_ops_remove_legacy_link "$target_root/$name" "custom-skills/$name" "$dry_run"

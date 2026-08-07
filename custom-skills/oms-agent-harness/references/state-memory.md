@@ -106,7 +106,7 @@ reads), a 500-line budget, and a sensitive-content scrub. An optional
 
 Scope: project-specific procedure only. Machine and cluster facts
 (`sinfo`/`sacctmgr` output, GPU inventory) belong to `oms snapshot
-[--cluster]` references consumed by the global `gpu-workstation`/`slurm`
+[--cluster]` references consumed by the global `oms-gpu-workstation`/`oms-slurm`
 skills; a habit useful in every repository is a candidate for the global
 catalog, not a per-project copy. Keep the set small — a few strong skills
 route better than many thin ones.

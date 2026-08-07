@@ -1,5 +1,5 @@
 ---
-name: trace
+name: oms-trace
 description: >
   Explain why an observed failure or anomaly happened before changing anything:
   competing hypotheses, ranked evidence, and the cheapest probe that tells them
