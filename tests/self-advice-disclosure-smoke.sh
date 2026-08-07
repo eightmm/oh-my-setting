@@ -59,7 +59,7 @@ grep -q '^dry-run: claude ' "$TMP/out" ||
 grep -Fq "$NOTE" "$TMP/out" &&
   fail "the disclosure must stay off stdout: $(cat "$TMP/out")"
 
-run "$ROOT/scripts/agent-consult.sh" --prompt "self-advice probe" --dry-run --quiet > "$TMP/out"
+run "$ROOT/scripts/consult.sh" --prompt "self-advice probe" --dry-run --quiet > "$TMP/out"
 [ "$rc" -eq 0 ] || fail "consult self-fallback should still succeed (exit $rc): $(cat "$TMP/err")"
 grep -Fq "$NOTE" "$TMP/err" ||
   fail "consult self-fallback did not disclose self-advice: $(cat "$TMP/err")"
@@ -72,7 +72,7 @@ grep -Fq "$NOTE" "$TMP/out" &&
   fail "consult disclosed self-advice more than once: $(cat "$TMP/err")"
 
 # --all reaches the same fallback: a one-CLI "panel" is the caller alone.
-run "$ROOT/scripts/agent-consult.sh" --prompt "panel probe" --all --dry-run --quiet > "$TMP/out"
+run "$ROOT/scripts/consult.sh" --prompt "panel probe" --all --dry-run --quiet > "$TMP/out"
 grep -Fq "$NOTE" "$TMP/err" ||
   fail "consult --all did not disclose a caller-only panel: $(cat "$TMP/err")"
 
@@ -87,7 +87,7 @@ grep -Fq "$NOTE" "$TMP/err" &&
 grep -q '^dry-run: codex ' "$TMP/out" ||
   fail "advise should have picked codex: $(cat "$TMP/out")"
 
-run "$ROOT/scripts/agent-consult.sh" --prompt "independent probe" --dry-run --quiet > "$TMP/out"
+run "$ROOT/scripts/consult.sh" --prompt "independent probe" --dry-run --quiet > "$TMP/out"
 [ "$rc" -eq 0 ] || fail "consult with a peer failed (exit $rc): $(cat "$TMP/err")"
 grep -Fq "$NOTE" "$TMP/err" &&
   fail "consult disclosed self-advice while codex was installed: $(cat "$TMP/err")"
@@ -96,7 +96,7 @@ grep -Eq '(^|/)codex-' "$TMP/out" ||
 
 # 3. An explicit --to is the caller's own choice, not a silent fallback, so it
 #    stays quiet even when it names the caller's family.
-run "$ROOT/scripts/agent-consult.sh" --prompt "explicit probe" --to claude --dry-run --quiet > "$TMP/out"
+run "$ROOT/scripts/consult.sh" --prompt "explicit probe" --to claude --dry-run --quiet > "$TMP/out"
 [ "$rc" -eq 0 ] || fail "explicit consult failed (exit $rc): $(cat "$TMP/err")"
 grep -Fq "$NOTE" "$TMP/err" &&
   fail "an explicit --to must not be reported as a fallback: $(cat "$TMP/err")"

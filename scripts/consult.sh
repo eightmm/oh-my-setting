@@ -38,8 +38,8 @@ PASSTHROUGH=()
 
 usage() {
   cat <<'EOF'
-Usage: agent-consult.sh (--prompt TEXT | --prompt-file PATH) [options]
-       agent-consult.sh "question text" [options]
+Usage: consult.sh (--prompt TEXT | --prompt-file PATH) [options]
+       consult.sh "question text" [options]
 
 Ask another agent mid-task and keep the exchange. Picks a peer that is not the
 caller, attaches the active task, shared memory, and the current conversation

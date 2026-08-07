@@ -42,7 +42,7 @@ OUTPUT_LIMIT = 60_000
 # Peer consultation: which front-door verb each kind runs, and where that verb
 # writes its answer artifacts. Started detached, polled from disk.
 PEER_KINDS = {
-    "consult": {"script": "scripts/agent-consult.sh", "artifacts": "consult"},
+    "consult": {"script": "scripts/consult.sh", "artifacts": "consult"},
     "advise": {"script": "scripts/advise.sh", "artifacts": "advise"},
     "ask": {"script": "scripts/peer-ask.sh", "artifacts": "ask"},
 }
@@ -407,7 +407,7 @@ def artifact_paths(log: Path) -> list[str]:
     """Artifact paths the run reported, in the order it reported them.
 
     agent-call prints "artifact: PATH" and run_provider prints
-    "ok: PROVIDER -> PATH"; reading the log is how agent-consult itself learns
+    "ok: PROVIDER -> PATH"; reading the log is how consult itself learns
     which artifact belongs to which target.
     """
     paths: list[str] = []

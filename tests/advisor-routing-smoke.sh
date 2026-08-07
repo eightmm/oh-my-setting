@@ -52,12 +52,12 @@ out="$(
 printf '%s' "$out" | grep -q '^dry-run: claude ' ||
   fail "--to must still override the exclusion: $out"
 
-# agent-consult shares the exclusion contract: a claude session's automatic
+# consult shares the exclusion contract: a claude session's automatic
 # consult must not go to claude.
 out="$(
   cd "$TMP/repo" &&
     env -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX CLAUDECODE=1 \
-      bash "$ROOT/scripts/agent-consult.sh" --prompt "routing probe" \
+      bash "$ROOT/scripts/consult.sh" --prompt "routing probe" \
       --dry-run --quiet 2>&1
 )" || fail "consult dry-run failed: $out"
 if printf '%s' "$out" | grep -Eq '(^|/)claude-'; then

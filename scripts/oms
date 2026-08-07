@@ -144,7 +144,6 @@ describe() {
 OMS_PUBLIC_TOOLS="
 advise
 agent-call
-agent-consult
 agent-executor
 agent-memory
 agent-plan
@@ -159,6 +158,7 @@ change-guard
 checkpoint
 ci-status
 cleanup
+consult
 data-manifest
 doctor
 experiment-board
@@ -259,7 +259,6 @@ TOOL="${TOOL%.sh}"
 [ "$TOOL" = "run" ] && TOOL="oms-run"      # oms run new|current|show|timeline ...
 [ "$TOOL" = "state" ] && TOOL="repo-state" # oms state
 [ "$TOOL" = "init" ] && TOOL="oms-init"    # oms init
-[ "$TOOL" = "consult" ] && TOOL="agent-consult"  # oms consult "question"
 [ "$TOOL" = "thread" ] && TOOL="agent-thread"    # oms thread list|show|new
 if ! is_public_tool "$TOOL"; then
   echo "error: unknown tool: $TOOL (run: oms list)" >&2

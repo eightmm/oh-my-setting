@@ -287,7 +287,7 @@ stale. `stats` reports mechanical utility counts (follow-up questions,
 multi-provider threads, rated answers), which is how "is the thread feature
 pulling weight" stops being a guess
 
-**Consult (`agent-consult.sh`, `oms consult`)** — One verb for asking peers
+**Consult (`consult.sh`, `oms consult`)** — One verb for asking peers
 mid-task: picks a provider that is not the caller, attaches the active task,
 shared memory, and the running thread, records question and answer, and prints
 the answer. `--all` asks every installed peer in parallel and records one

@@ -9739,7 +9739,7 @@ test_large_skills_use_progressive_disclosure() {
   # version told every project to run a command that could not help it.
   "$ROOT/scripts/fail-ledger.sh" --help 2>&1 | grep -Eq 'check[[:space:]]+--cmd' ||
     fail "oms-trace cites fail-ledger check --cmd, which the tool no longer documents"
-  "$ROOT/scripts/agent-consult.sh" --help 2>&1 | grep -Eq '^[[:space:]]+--all' ||
+  "$ROOT/scripts/consult.sh" --help 2>&1 | grep -Eq '^[[:space:]]+--all' ||
     fail "oms-trace cites consult --all, which the tool no longer documents"
   "$ROOT/scripts/advise.sh" --help 2>&1 | grep -Eq '^[[:space:]]+--prompt TEXT' ||
     fail "oms-trace cites advise --prompt, which the tool no longer documents"
@@ -12286,7 +12286,7 @@ test_agent_call_threads_the_exchange() {
     fail "the answer should be recorded: $out"
 }
 
-test_agent_consult_asks_a_peer_and_keeps_the_thread() {
+test_consult_asks_a_peer_and_keeps_the_thread() {
   local project="$TMP/consult-basic"
   local bin_dir="$project/bin"
   local out id
@@ -12298,7 +12298,7 @@ test_agent_consult_asks_a_peer_and_keeps_the_thread() {
 
   out="$(cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
     OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
-    "$ROOT/scripts/agent-consult.sh" --repo "$project" "which split policy?" --quiet)" ||
+    "$ROOT/scripts/consult.sh" --repo "$project" "which split policy?" --quiet)" ||
     fail "consult should succeed: $out"
   printf '%s' "$out" | grep -Fq 'thread: ' || fail "consult should report its thread: $out"
 
@@ -12317,22 +12317,22 @@ assert answer.get("provider") != "claude", answer
   # A follow-up joins the same conversation instead of starting over.
   ( cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
     OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
-    "$ROOT/scripts/agent-consult.sh" --repo "$project" "and for the test split?" --quiet >/dev/null )
+    "$ROOT/scripts/consult.sh" --repo "$project" "and for the test split?" --quiet >/dev/null )
   [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$id" ] ||
     fail "a follow-up consult should stay in the same thread"
 }
 
-test_agent_consult_rejects_conflicting_targets() {
+test_consult_rejects_conflicting_targets() {
   local project="$TMP/consult-misuse"
 
   make_committed_repo "$project"
-  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --all --to codex "x" >/dev/null 2>&1; then
+  if "$ROOT/scripts/consult.sh" --repo "$project" --all --to codex "x" >/dev/null 2>&1; then
     fail "--all and --to must be mutually exclusive"
   fi
-  if "$ROOT/scripts/agent-consult.sh" --repo "$project" >/dev/null 2>&1; then
+  if "$ROOT/scripts/consult.sh" --repo "$project" >/dev/null 2>&1; then
     fail "a consult without a question must be refused"
   fi
-  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --model-class huge "x" >/dev/null 2>&1; then
+  if "$ROOT/scripts/consult.sh" --repo "$project" --model-class huge "x" >/dev/null 2>&1; then
     fail "the removed --model-class flag must be refused"
   fi
 }
@@ -12794,7 +12794,7 @@ EOF
   chmod +x "$bin_dir/codex" "$bin_dir/agy"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     "which loader?" --quiet 2>&1)" || fail "consult should recover: $out"
   printf '%s' "$out" | grep -Fq 'did not really answer (thin); asking antigravity' ||
     fail "consult should report the fallback: $out"
@@ -12831,7 +12831,7 @@ EOF
   chmod +x "$bin_dir/codex" "$bin_dir/agy"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" --to codex \
+    OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" --to codex \
     "which loader?" --quiet 2>&1)" || true
   if printf '%s' "$out" | grep -Fq 'asking antigravity'; then
     fail "an explicitly pinned peer must not be second-guessed: $out"
@@ -13034,7 +13034,7 @@ EOF
   done
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     --to codex:model=gpt-5.6-sol --to codex:model=gpt-5.6-terra \
     --to "antigravity:model=Gemini 3.6 Flash (High)" \
     "which loader?" --quiet 2>&1)" || fail "panel consult should succeed: $out"
@@ -13072,7 +13072,7 @@ EOF
   chmod +x "$bin_dir/codex"
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     --to codex:model=gpt-5.6-sol --to codex:model=gpt-5.6-luna \
     "which loader?" --quiet 2>&1)" ||
     fail "same-family panel should still succeed: $out"
@@ -13081,11 +13081,11 @@ EOF
   printf '%s' "$out" | grep -Fq 'treat agreement as one opinion, not corroboration' ||
     fail "same-family agreement must not be sold as corroboration: $out"
 
-  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
+  if "$ROOT/scripts/consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
     fail "a target that is neither PROVIDER nor PROVIDER:model=NAME must be refused"
   fi
   if HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
+    OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     --tiers deep "x" --quiet >/dev/null 2>&1; then
     fail "the removed --tiers flag must be refused"
   fi
