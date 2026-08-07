@@ -795,6 +795,9 @@ def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> 
     previous = load_state(state_path)
     turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
     previous_turn = str(previous.get("turn_id") or "")
+    # Without a payload turn id both sides are empty, so the old equality read
+    # every prompt as the same turn and carried a spent block budget forever.
+    same_turn = bool(turn_id) and previous_turn == turn_id
     state = {
         "schema": 1,
         "updated_at": utc_now(),
@@ -805,7 +808,8 @@ def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> 
         "workflow": route["workflow"],
         "risk": route["risk"],
         "guard": bool(route["guard"]),
-        "guard_blocks": previous.get("guard_blocks", {}) if previous_turn == turn_id else {},
+        "guard_blocks": previous.get("guard_blocks", {}) if same_turn else {},
+        "stop_seq": previous.get("stop_seq", 0),
     }
     write_json_atomic(state_path, state)
     append_event(
@@ -1230,6 +1234,11 @@ def git_dirty(repo: Path) -> bool:
     return bool(proc.stdout.strip())
 
 
+# Shared wording with turn-guard.sh, which reports the failures that never
+# reach this process at all.
+GUARD_UNAVAILABLE = "oh-my-setting turn guard: unavailable (%s); this turn was not checked."
+
+
 def max_blocks_per_turn() -> int:
     raw = os.environ.get("OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN", "1")
     try:
@@ -1249,6 +1258,25 @@ def assistant_message(payload: dict[str, Any]) -> str:
 def has_verification_disclosure(message: str) -> bool:
     """Require an explicit verification-status field, not a keyword mention."""
     return bool(VERIFICATION_DISCLOSURE_RE.search(message))
+
+
+def guard_turn_key(payload: dict[str, Any], state: dict[str, Any]) -> tuple[str, str, int]:
+    """Key the block budget per turn even when the Stop payload carries no id.
+
+    Claude Code's Stop payload has no turn identifier, so an empty key spent the
+    whole session's budget on the first block. A Stop that continues a blocked
+    turn is marked stop_hook_active; only an unmarked Stop opens the next turn,
+    which keeps the cap a loop fuse instead of a per-event allowance.
+    """
+    seq = state.get("stop_seq")
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+        seq = 0
+    raw = str(payload.get("turn_id") or payload.get("turnId") or "")
+    if raw:
+        return raw, "payload", seq
+    continuing = bool(payload.get("stop_hook_active") or payload.get("stopHookActive"))
+    seq = max(seq, 1) if continuing else seq + 1
+    return "stop-%d" % seq, "counter", seq
 
 
 def cmd_guard(_: argparse.Namespace) -> int:
@@ -1281,21 +1309,22 @@ def cmd_guard(_: argparse.Namespace) -> int:
         append_event(repo, payload, action="turn_guard", status="allow_verified", workflow=workflow, risk=risk, dirty=dirty)
         return 0
 
-    turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
+    turn_key, key_source, stop_seq = guard_turn_key(payload, state)
     blocks = state.get("guard_blocks")
     if not isinstance(blocks, dict):
         blocks = {}
-    count = int(blocks.get(turn_id, 0) or 0)
+    count = int(blocks.get(turn_key, 0) or 0)
     limit = max_blocks_per_turn()
     if count >= limit:
-        append_event(repo, payload, action="turn_guard", status="allow_block_limit", workflow=workflow, risk=risk, dirty=dirty)
+        append_event(repo, payload, action="turn_guard", status="allow_block_limit", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source)
         return 0
 
-    blocks[turn_id] = count + 1
+    blocks[turn_key] = count + 1
     state["guard_blocks"] = blocks
+    state["stop_seq"] = stop_seq
     state["updated_at"] = utc_now()
     write_json_atomic(state_path, state)
-    append_event(repo, payload, action="turn_guard", status="block_unverified", workflow=workflow, risk=risk, dirty=dirty)
+    append_event(repo, payload, action="turn_guard", status="block_unverified", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source)
     reason = (
         "oh-my-setting turn guard: high-risk "
         + workflow
@@ -1344,4 +1373,9 @@ if __name__ == "__main__":
         if len(sys.argv) > 1 and sys.argv[1] == "compact-events":
             print("error: hook event compaction: %s" % error, file=sys.stderr)
             raise SystemExit(2)
+        if len(sys.argv) > 1 and sys.argv[1] == "guard":
+            # Fail-open still holds, but the turn nobody guarded must not read
+            # as a turn that passed the guard.
+            with contextlib.suppress(Exception):
+                print(json.dumps({"systemMessage": GUARD_UNAVAILABLE % "helper error"}))
         raise SystemExit(0)

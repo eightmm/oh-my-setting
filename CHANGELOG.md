@@ -7,6 +7,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- The turn guard's per-turn block cap works again. The Stop payload carries
+  no turn id, so the cap was keyed on an empty string and became a
+  once-per-session fuse (live evidence: 5 interventions vs 47 suppressions).
+  Missing ids now key on a persisted per-session Stop counter that is aware
+  of `stop_hook_active` continuations, telemetry records the key source, and
+  a spent budget no longer survives prompts whose turn id is empty. A guard
+  that crashes or emits garbage now says so in one systemMessage line —
+  "this turn was not checked" — instead of silently approving; it still
+  fails open.
 - Self-advice discloses itself. When `oms advise` or `oms consult` finds no
   independent provider CLI and falls back to asking the caller's own family,
   it now says so on stderr (`note: no independent provider available; ...`)
