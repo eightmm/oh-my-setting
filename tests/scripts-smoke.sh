@@ -13096,9 +13096,10 @@ test_worker_tier_follows_the_role_before_the_phase() {
     fail "an explicit model must be used as given, got: $out"
 
   out="$(bash -c '. "'"$ROOT"'/scripts/lib/model-routing.sh"
-    OMS_MODEL_CLASS_REQUEST=deep oms_model_prepare codex >/dev/null' 2>&1)"
-  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
-    fail "a deprecated class request must warn, got: $out"
+    OMS_MODEL_CLASS_REQUEST=deep oms_model_prepare codex >/dev/null
+    printf "%s" "$OMS_MODEL_PRIMARY"' 2>&1)"
+  [ "$out" = "provider-default" ] ||
+    fail "a legacy class request must be ignored without noise, got: $out"
 }
 
 test_agent_call_declares_its_work_phase() {
@@ -14846,30 +14847,21 @@ test_support_bundle_redacts_and_omits() {
 # now; this gate keeps every class honest.
 test_oms_allowlist_stays_in_sync_with_scripts() {
   local public_list="$TMP/oms-public-tools"
-  local compat_list="$TMP/oms-compat-tools"
-  local all_list="$TMP/oms-all-tools"
-  local internal name dup script
+  local internal name script
 
   awk '/^OMS_PUBLIC_TOOLS="$/{f=1;next} f&&/^"$/{exit} f' "$ROOT/scripts/oms" > "$public_list"
-  awk '/^OMS_COMPAT_TOOLS="$/{f=1;next} f&&/^"$/{exit} f' "$ROOT/scripts/oms" > "$compat_list"
   [ -s "$public_list" ] || fail "could not extract OMS_PUBLIC_TOOLS from scripts/oms"
-  [ -s "$compat_list" ] || fail "could not extract OMS_COMPAT_TOOLS from scripts/oms"
 
-  cat "$public_list" "$compat_list" > "$all_list"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     [ -f "$ROOT/scripts/$name.sh" ] || fail "allowlisted tool has no script: $name"
-  done < "$all_list"
-
-  dup="$(sort "$all_list" | uniq -d)"
-  [ -z "$dup" ] || fail "tool classified twice: $dup"
+  done < "$public_list"
 
   sort -c "$public_list" 2>/dev/null || fail "OMS_PUBLIC_TOOLS is not sorted"
-  sort -c "$compat_list" 2>/dev/null || fail "OMS_COMPAT_TOOLS is not sorted"
 
   # Scripts outside the oms surface, invoked by path from install/update/
-  # hooks/CI only. A new scripts/*.sh must be classified: public tool, compat
-  # shim, or a deliberate entry here.
+  # hooks/CI or as implementation behind a front door. A new scripts/*.sh
+  # must be classified: public tool or a deliberate entry here.
 internal="
 agent-ml-context
 check
@@ -14878,6 +14870,12 @@ check-python
 connect-services
 detect-project-style
 fail-ledger-hook
+generate-slurm-reference
+import-agent-result
+install-autoupdate
+run-capsule
+uninstall-autoupdate
+write-machine-snapshot
 telemetry-hook
 install-agy-plugin
 install-claude-hooks
@@ -14896,7 +14894,7 @@ unlink
 "
   for script in "$ROOT/scripts"/*.sh; do
     name="$(basename "$script" .sh)"
-    if grep -Fxq "$name" "$public_list" || grep -Fxq "$name" "$compat_list"; then
+    if grep -Fxq "$name" "$public_list"; then
       continue
     fi
     case "$internal" in
@@ -14904,7 +14902,7 @@ unlink
 $name
 "*) continue ;;
     esac
-    fail "unclassified script: scripts/$name.sh (public tool, compat shim, or internal — pick one)"
+    fail "unclassified script: scripts/$name.sh (public tool or internal — pick one)"
   done
 
   # The dispatcher answers for a public tool and rejects an internal script.

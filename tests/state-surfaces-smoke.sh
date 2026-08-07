@@ -1112,19 +1112,19 @@ test_ml_template_installs_project_skills() {
 
 # --- slurm generator rename -------------------------------------------------
 
-test_slurm_reference_rename_keeps_compat() {
+test_slurm_generator_has_one_front_door() {
   bash "$ROOT/scripts/generate-slurm-reference.sh" --help >/dev/null ||
     fail "generate-slurm-reference --help failed"
-  # The shim script is gone; the old name lives on as a dispatcher alias and
-  # the generator is fronted by oms snapshot --cluster.
-  bash "$ROOT/scripts/oms" generate-slurm-skill --help >/dev/null ||
-    fail "generate-slurm-skill dispatcher alias failed"
+  # The generator is internal implementation behind oms snapshot --cluster;
+  # the old dispatcher names are refused, not aliased.
   bash "$ROOT/scripts/oms" snapshot --cluster --help >/dev/null ||
     fail "oms snapshot --cluster front door failed"
-  grep -Fq 'generate-slurm-reference' "$ROOT/scripts/oms" ||
-    fail "oms compat list should carry the honest name"
-  grep -Fq 'generate-slurm-skill' "$ROOT/scripts/oms" ||
-    fail "oms should keep the old name as an alias"
+  rc=0
+  bash "$ROOT/scripts/oms" generate-slurm-skill --help >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "the retired generate-slurm-skill alias must be refused, got $rc"
+  rc=0
+  bash "$ROOT/scripts/oms" generate-slurm-reference --help >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "the internal generator name must not dispatch, got $rc"
 }
 
 test_mcp_server_protocol
@@ -1148,6 +1148,6 @@ test_task_close_hints_at_forging_learned_lessons
 test_ml_template_installs_project_skills
 test_template_style_switch_retires_the_old_block
 test_existing_gemini_md_is_kept_in_sync
-test_slurm_reference_rename_keeps_compat
+test_slurm_generator_has_one_front_door
 
 echo "state-surfaces-smoke: ok"
