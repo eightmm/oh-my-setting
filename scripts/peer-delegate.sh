@@ -377,7 +377,6 @@ if [ -n "$EXECUTOR_ID" ]; then
   executor_verify="$(printf '%s' "$executor_values" | cut -f6)"
   EXECUTOR_SOUL_SHA="$(printf '%s' "$executor_values" | cut -f7)"
   executor_strategy="$(printf '%s' "$executor_values" | cut -f8)"
-  executor_model_class="$(printf '%s' "$executor_values" | cut -f9)"
   executor_model="$(printf '%s' "$executor_values" | cut -f10)"
   executor_fallback_model="$(printf '%s' "$executor_values" | cut -f11)"
   executor_reasoning_effort="$(printf '%s' "$executor_values" | cut -f12)"
