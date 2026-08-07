@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Prioritized attention view derived entirely from `oms state`. The default is
-# read-only. `--fix-safe` performs only two idempotent mechanical repairs:
-# reclaim expired claimed plan leases and refresh a stale CI record. Failures,
+# read-only. `--fix-safe` performs only three idempotent mechanical repairs:
+# reclaim expired claimed plan leases, refresh a stale CI record, and resolve
+# artifact failures whose exact patch bytes later succeeded. Failures, other
 # unresolved artifacts, reviews, guards, and threads always remain judgments.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,8 +24,9 @@ command for every item. The default is a pure query.
 
   --repo PATH  Repository to inspect (default: current repository).
   --json       Emit one schema-1 JSON object.
-  --fix-safe   Reclaim expired claimed plan leases and refresh stale CI, then
-               report the remaining inbox. Never resolves or deletes work.
+  --fix-safe   Reclaim expired claimed plan leases, refresh stale CI, and
+               resolve exactly-superseded artifact failures, then report the
+               remaining inbox. Never deletes work or judges anything else.
 
 Only cross-agent threads idle past OMS_THREAD_STALE_TTL are listed, and
 OMS_THREAD_ATTENTION=0 drops that advisory entirely.
@@ -84,6 +86,14 @@ PY
     # the ledger, so safe repair records the attempt and leaves the red item.
     (cd "$REPO" && "$ROOT/scripts/ci-status.sh" record) >/dev/null 2>&1 || true
     safe_actions="${safe_actions:+$safe_actions,}refreshed-ci"
+  fi
+
+  # Mechanically resolvable by construction: a failed artifact row whose exact
+  # patch bytes the same provider later admitted or landed. Idempotent sweep.
+  swept="$("$ROOT/scripts/artifact-index.sh" --repo "$REPO" resolve-superseded 2>/dev/null |
+    grep -c '^artifact-index: resolved ' || true)"
+  if [ "${swept:-0}" -gt 0 ] 2>/dev/null; then
+    safe_actions="${safe_actions:+$safe_actions,}resolved-superseded:$swept"
   fi
   read_state
 fi

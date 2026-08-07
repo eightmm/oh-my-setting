@@ -75,6 +75,7 @@ OMS_RS_REPO="$REPO" \
 OMS_RS_JSON="$AS_JSON" \
 OMS_RS_PRIVATE="$PRIVATE_JSON" \
 OMS_RS_PLAN_TTL="${OMS_PLAN_CLAIM_TTL:-3600}" \
+OMS_RS_HOOK_FAIL_TTL="${OMS_HOOK_FAIL_TTL:-86400}" \
 OMS_RS_REVIEW_TTL="${OMS_PLAN_REVIEW_TTL:-86400}" \
 OMS_RS_BOARD_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}" \
 OMS_RS_RUN_TTL="${OMS_RUN_CURRENT_TTL:-86400}" \
@@ -374,6 +375,14 @@ for r in fail_rows:
         fagg[fp]["resolved"] = True
         fagg[fp]["count"] = 0
     elif r.get("event") == "fail":
+        # Same read-time predicate as fail-ledger check/list: an expired
+        # hook row contributes nothing to the open count. Unparseable ts is
+        # never grounds for retirement.
+        if r.get("kind") == "hook":
+            fail_epoch = epoch(r.get("ts") or "")
+            if fail_epoch is not None and \
+                    now - fail_epoch > int(os.environ["OMS_RS_HOOK_FAIL_TTL"]):
+                continue
         fagg[fp]["count"] += 1
         fagg[fp]["resolved"] = False
         fagg[fp]["last"] = r

@@ -291,6 +291,15 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage source-distribution bash tests/source-distribution-smoke.sh
   stage platform-portability bash tests/platform-portability-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh
+  stage turn-guard-fuse bash tests/turn-guard-fuse-smoke.sh
+  stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
+  stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
+  stage patch-admit-structural bash tests/patch-admit-structural-smoke.sh
+  stage ci-status bash tests/ci-status-smoke.sh
+  stage read-time-expiry bash tests/read-time-expiry-smoke.sh
+  stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
+  stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
+  stage artifact-supersession bash tests/artifact-supersession-smoke.sh
 fi
 
 if [ "$RUN_SMOKE" = 1 ]; then

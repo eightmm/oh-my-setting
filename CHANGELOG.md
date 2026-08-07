@@ -7,6 +7,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Changed
+- `oms inbox --fix-safe` gains a third mechanical repair: the
+  exactly-superseded artifact sweep. `repo-state` applies the same hook-row
+  TTL as the ledger's own read paths, and every smoke suite added this round
+  is staged in the focused gate.
 - Read-time expiry is now the primary retirement mechanism for the two state
   families that only ever accumulated. A `kind=hook` fail-ledger row older
   than `OMS_HOOK_FAIL_TTL` (default 24h) counts zero toward open failures in
