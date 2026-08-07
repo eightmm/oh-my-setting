@@ -7,6 +7,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Self-advice discloses itself. When `oms advise` or `oms consult` finds no
+  independent provider CLI and falls back to asking the caller's own family,
+  it now says so on stderr (`note: no independent provider available; ...`)
+  instead of presenting the answer as an outside read. stdout contracts are
+  unchanged; an explicit `--to` stays quiet.
 - The fail-ledger hook refuses fingerprints no session can recompute: a
   failed command that names a session-scoped scratch path
   (`/tmp/claude-<uid>/...`) is not recorded — the row would be open forever

@@ -324,6 +324,17 @@ else
 fi
 [ "${#targets[@]}" -gt 0 ] || fail "no peer agent CLI found (codex, claude, agy)"
 
+# The exclusion loop in peers() can never emit the caller, so an automatic pick
+# that names the caller means the self-consult fallback fired. Disclose it once
+# here rather than inside peers(): that runs in several command substitutions,
+# and call_one folds its child's stderr into the answer on stdout.
+if [ "${#TARGETS_EXPLICIT[@]}" -eq 0 ]; then
+  consult_caller="$(oms_peer_caller)"
+  if [ -n "$consult_caller" ] && [ "${targets[0]}" = "$consult_caller" ]; then
+    echo "note: no independent provider available; answering from the caller's own family (self-advice)" >&2
+  fi
+fi
+
 # One consult per peer, in parallel: waiting for three serial calls is the
 # other reason mid-task consultation does not happen.
 status=0

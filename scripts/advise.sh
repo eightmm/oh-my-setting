@@ -181,8 +181,11 @@ pick_advisor() {
       return 0
     fi
   done
-  # Self-advice from a fresh context still beats no advice.
+  # Self-advice from a fresh context still beats no advice, but it must not
+  # be presented as an outside read: say on stderr that this pass is the
+  # caller's own family. stdout stays the provider name downstream parses.
   if [ -n "$caller" ] && provider_cli_available "$caller"; then
+    echo "note: no independent provider available; answering from the caller's own family (self-advice)" >&2
     printf '%s\n' "$caller"
     return 0
   fi
