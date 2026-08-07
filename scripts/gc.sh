@@ -339,8 +339,8 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         except Exception:
             rows.append(None)
 
-# Retirement predicate, textually identical in fail-ledger.sh (record's repeat
-# count, check, list) and in gc.sh's failure compaction: read-time expiry and
+# Retirement predicate, textually identical in fail-ledger.sh (record repeat
+# count, check, list) and in the gc failure compaction: read-time expiry and
 # gc compose only while all four agree on which rows are retired.
 def hook_expired(r):
     if r.get("kind") != "hook" or r.get("event") != "fail":

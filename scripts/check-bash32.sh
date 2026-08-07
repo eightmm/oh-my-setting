@@ -13,7 +13,8 @@ case "${1:-}" in
 usage: check-bash32.sh [FILE ...]
 
 Parse every shipped script with a Bash parser and reject bash-4-only syntax,
-plus here-documents inside $( ) whose body holds an odd number of apostrophes
+plus here-documents inside $( ) whose body derails the Bash 3.2 command-
+substitution scanner — an open quote or a quote-hidden paren either way
 (Bash 3.2 cannot parse the enclosing file). With no arguments the full shipped
 set is checked. OMS_BASH32_BIN selects the parser, e.g. /bin/bash on macOS.
 EOF
@@ -82,24 +83,57 @@ for name in sys.argv[1:]:
             cursor += 1
         # Unclosed "$(" to the left means this here-document opens inside a
         # command substitution, which is the only place the bug bites.
+        # Simulate the 3.2 scanner over the body instead of counting lone
+        # apostrophes: an EVEN pair of quotes can still hide a paren between
+        # them (that is exactly how gc.sh broke every macOS CI leg while the
+        # parity rule stayed green). The body of a data heredoc is safe only
+        # when the scan leaves no quote open and no net paren drift.
         before = lines[index][: match.start()]
         if before.count("$(") - before.count(")") > 0:
-            if "\n".join(body).count("'") % 2:
-                problems.append("%s:%d: heredoc <<%s inside $( )" % (
-                    name, index + 1, delimiter))
+            text = "\n".join(body)
+            state = None
+            depth = 0
+            k = 0
+            while k < len(text):
+                c = text[k]
+                if state == "'":
+                    if c == "'":
+                        state = None
+                elif state == '"':
+                    if c == '"' and text[k - 1] != "\\":
+                        state = None
+                elif state == "`":
+                    if c == "`":
+                        state = None
+                else:
+                    if c == "'":
+                        state = "'"
+                    elif c == '"':
+                        state = '"'
+                    elif c == "`":
+                        state = "`"
+                    elif c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                k += 1
+            if state is not None or depth != 0:
+                problems.append(
+                    "%s:%d: heredoc <<%s inside $( ) (open quote: %s, paren drift: %+d)" % (
+                        name, index + 1, delimiter, state or "none", depth))
         # Skip the body either way. It is data, not shell, and a test fixture
         # that demonstrates this very bug must not be read as an instance of it.
         index = cursor + 1
 
 if problems:
     sys.stderr.write(
-        "here-documents inside $( ) with an odd number of apostrophes "
-        "(bash 3.2 cannot parse the enclosing file):\n")
+        "here-documents inside $( ) whose body derails the bash 3.2 scanner "
+        "(the enclosing file fails to parse on macOS):\n")
     for problem in problems:
         sys.stderr.write("  %s\n" % problem)
     sys.stderr.write(
-        "fix: balance the apostrophes, reword the text, or move the script "
-        "into its own file\n")
+        "fix: reword the body so quotes pair up and no paren hides inside a "
+        "quote span, or move the script into its own file\n")
     raise SystemExit(1)
 SCAN
 

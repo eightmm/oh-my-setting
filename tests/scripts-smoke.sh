@@ -7054,6 +7054,27 @@ EOF
 
   "$ROOT/scripts/check-bash32.sh" "$good" >/dev/null 2>&1 ||
     fail "balanced apostrophes must still pass"
+
+  # Even apostrophes can still hide a paren between them: the 3.2 scanner
+  # skips the ")" inside the quote span and the file fails at EOF. This is
+  # the exact shape that kept every macOS CI leg red while the old parity
+  # rule stayed green locally.
+  local sneaky="$TMP/bash32-heredoc-sneaky.sh"
+  cat > "$sneaky" <<'EOF'
+#!/usr/bin/env bash
+f() {
+  v="$(python3 - <<'PY'
+# identical in fail-ledger.sh (record's repeat count) and in gc.sh's sweep
+print("x")
+PY
+)"
+}
+EOF
+  if out="$("$ROOT/scripts/check-bash32.sh" "$sneaky" 2>&1)"; then
+    fail "the gate must reject a paren hidden inside an even quote span: $out"
+  fi
+  printf '%s' "$out" | grep -Fq 'paren drift: +1' ||
+    fail "the gate must report the paren drift: $out"
 }
 
 # check.sh exits at the first failing stage. CI runs lint and tests as separate
