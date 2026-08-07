@@ -37,6 +37,7 @@ PLAN_STATE=""
 PLAN_JSON=""
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
+ALLOW_RESTRUCTURE=0
 RECOVER=0
 LANDING_ID=""
 
@@ -61,6 +62,9 @@ Options:
                    its own verifier (normally rejected).
   --allow-test-reduction  Forward to patch-admit: permit a patch that
                    net-removes test assertions (normally rejected).
+  --allow-restructure  Forward to patch-admit: permit an unscoped patch that
+                   adds top-level files or moves files across directories
+                   (normally rejected by the structural floor).
   --recover        Finish or abandon landings interrupted by a crash: for each
                    outstanding intent, check whether the patch is in the tree,
                    then record the missing lineage and plan completion (or mark
@@ -101,6 +105,7 @@ while [ "$#" -gt 0 ]; do
       EXECUTOR_ID="$2"; shift 2 ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
+    --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
     --recover) RECOVER=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -348,6 +353,7 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ -n "$EXECUTOR_ID" ] && admit_cmd+=(--executor "$EXECUTOR_ID")
 [ "$ALLOW_VERIFIER_CHANGE" = 1 ] && admit_cmd+=(--allow-verifier-change)
 [ "$ALLOW_TEST_REDUCTION" = 1 ] && admit_cmd+=(--allow-test-reduction)
+[ "$ALLOW_RESTRUCTURE" = 1 ] && admit_cmd+=(--allow-restructure)
 if ! "${admit_cmd[@]}" >/dev/null; then
   echo "patch-land: REJECTED by admission gate; not applied" >&2
   # Durable record: without this a later agent re-runs the whole delegate +

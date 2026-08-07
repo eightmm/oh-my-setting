@@ -29,6 +29,7 @@ VERIFY=""
 ML=0
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
+ALLOW_RESTRUCTURE=0
 KEEP_WORKTREE=0
 REPORT=""
 PLAN_TASK=""
@@ -62,11 +63,16 @@ Options:
   --allow-test-reduction  Admit a patch that net-removes test assertions or
                  deletes a test file (normally rejected: passing by deleting
                  the check is the other way to self-certify).
+  --allow-restructure  Admit a patch that adds a new top-level file or moves a
+                 file across directories (normally rejected when no scope is
+                 supplied: nothing else says where the patch may write).
   -h, --help     Show this help.
 
-Ladder: patch applies cleanly (not stale) -> changed shell files parse
-(bash -n) -> patch does not weaken the tests -> patch does not modify its own
-verifier -> verification command passes. Exit 0 only if every gate passes.
+Ladder: patch applies cleanly (not stale) -> changed files stay in scope ->
+changed shell files parse (bash -n) -> patch does not weaken the tests ->
+patch does not modify its own verifier -> verification command passes. Exit 0
+only if every gate passes. Without --plan-task/--executor there is no declared
+scope, so the structural floor stands in for it: keep the existing layout.
 EOF
 }
 
@@ -108,6 +114,7 @@ while [ "$#" -gt 0 ]; do
     --keep-worktree) KEEP_WORKTREE=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
+    --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -233,6 +240,51 @@ PY
       record "scope" "PASS" "changed files satisfy task/executor scope"
     else
       record "scope" "SKIP" "no task/executor scope supplied"
+    fi
+
+    # --- Gate 2b: structural floor when no scope constrains the paths -------
+    # The scope gate is the only one that says WHERE a patch may write, and
+    # with no --plan-task/--executor it has nothing to enforce, so any layout
+    # change was admitted: a worker patch with malformed headers applied as a
+    # rename and moved two test files to the repo root. When nothing declares
+    # a scope, the changed set must still read as editing this tree rather
+    # than rearranging it — no brand-new top-level file, no move across
+    # directories. Judged from the applied worktree, not the patch headers,
+    # because the headers are what lied.
+    if [ -z "$SCOPE_ALLOWED$SCOPE_FORBIDDEN" ]; then
+      # The base listing is repo-sized rather than patch-sized, so it travels
+      # by file: --repo is arbitrary, and a few thousand paths would exceed the
+      # per-string environment limit the other gates never approach.
+      base_files="$worktree_parent/base-files.txt"
+      git -C "$worktree" ls-tree -r --name-only HEAD > "$base_files" 2>/dev/null || true
+      structure_detail="$(OMS_CHANGED="$changed_files" OMS_BASE_FILE="$base_files" OMS_WORKTREE="$worktree" python3 - <<'PY'
+import os
+changed=[x for x in os.environ.get("OMS_CHANGED","").splitlines() if x]
+with open(os.environ["OMS_BASE_FILE"], errors="replace") as handle:
+    base=set(x for x in handle.read().splitlines() if x)
+wt=os.environ["OMS_WORKTREE"]
+added, removed = [], []
+for path in changed:
+    here=os.path.lexists(os.path.join(wt, path))
+    if here and path not in base: added.append(path)
+    elif not here and path in base: removed.append(path)
+bad=["new top-level file: " + p for p in added if "/" not in p]
+for src in removed:
+    for dst in added:
+        if os.path.basename(src) == os.path.basename(dst) and os.path.dirname(src) != os.path.dirname(dst):
+            bad.append("moved across directories: %s -> %s" % (src, dst))
+print("; ".join(bad))
+PY
+)"
+      if [ -z "$structure_detail" ]; then
+        record "structure" "PASS" "changed files keep the existing layout"
+      elif [ "$ALLOW_RESTRUCTURE" = 1 ]; then
+        record "structure" "PASS" "restructure permitted by --allow-restructure: $structure_detail"
+      else
+        record "structure" "FAIL" "patch restructures the tree: $structure_detail (override: --allow-restructure)"
+      fi
+    else
+      record "structure" "SKIP" "declared scope enforced instead"
     fi
 
     # --- Gate 3: changed syntax-checked files parse -------------------------
