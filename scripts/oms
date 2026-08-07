@@ -159,7 +159,6 @@ change-guard
 checkpoint
 ci-status
 cleanup
-code-source
 data-manifest
 doctor
 experiment-board
@@ -201,19 +200,6 @@ uninstall
 update
 "
 
-# Consolidated tools: still dispatchable so old habits, receipts, and applied
-# project templates keep working, but no longer listed — the catalog shows one
-# front door per capability (snapshot, auto-update, code-source,
-# artifact-index, oms-run).
-OMS_COMPAT_TOOLS="
-generate-slurm-reference
-github-source
-import-agent-result
-install-autoupdate
-run-capsule
-uninstall-autoupdate
-write-machine-snapshot
-"
 
 # Newline-delimited membership; tool names come from the validated command
 # line or from scripts/*.sh basenames, so they never carry a newline.
@@ -230,9 +216,6 @@ is_public_tool() {
   tool_in_list "$1" "$OMS_PUBLIC_TOOLS"
 }
 
-is_compat_tool() {
-  tool_in_list "$1" "$OMS_COMPAT_TOOLS"
-}
 
 cmd_list() {
   local f
@@ -278,9 +261,7 @@ TOOL="${TOOL%.sh}"
 [ "$TOOL" = "init" ] && TOOL="oms-init"    # oms init
 [ "$TOOL" = "consult" ] && TOOL="agent-consult"  # oms consult "question"
 [ "$TOOL" = "thread" ] && TOOL="agent-thread"    # oms thread list|show|new
-# The old skill-named generator keeps working through its honest name.
-[ "$TOOL" = "generate-slurm-skill" ] && TOOL="generate-slurm-reference"
-if ! is_public_tool "$TOOL" && ! is_compat_tool "$TOOL"; then
+if ! is_public_tool "$TOOL"; then
   echo "error: unknown tool: $TOOL (run: oms list)" >&2
   exit 2
 fi

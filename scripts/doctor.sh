@@ -1181,7 +1181,7 @@ check_cmd ntn
 check_cmd gh
 # Presence is installable; authentication is an interactive browser flow, so it
 # can only ever be reported. An unauthenticated gh is the state in which
-# github-source and ci-status fail on their first call, which is worth knowing
+# ci-status fails on its first call, which is worth knowing
 # here rather than there.
 #
 # Read the credential locally instead of asking `gh auth status`: that command

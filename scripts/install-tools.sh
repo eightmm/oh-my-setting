@@ -205,9 +205,8 @@ install_antigravity() {
   echo "ok: agy $(agy --version)"
 }
 
-# The GitHub CLI is a harness dependency, not a convenience: github-source.sh
-# fetches trusted reusable files through it, ci-status.sh reads the last run
-# through it, and PR work goes through it. Installed without sudo on purpose —
+# The GitHub CLI is a harness dependency, not a convenience: ci-status.sh
+# reads the last run through it, and PR work goes through it. Installed without sudo on purpose —
 # a setup script that needs root is a setup script that gets run as root.
 install_gh() {
   if has_cmd gh && [ "$UPGRADE" != 1 ]; then

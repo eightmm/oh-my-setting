@@ -1204,73 +1204,7 @@ EOF
   chmod +x "$bin/gh"
 }
 
-test_github_source_profile_discover_and_fetch() {
-  local project="$TMP/github-source"
-  local bin="$project/bin"
 
-  mkdir -p "$project"
-  write_fake_gh_source "$bin"
-
-  PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" profile --user octo-user >"$project/profile"
-  assert_file_contains "$project/profile" "ML and geometry"
-  assert_file_contains "$project/profile" "topics=gnn,equivariant"
-
-  PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" discover \
-    --user octo-user --query equivariant >"$project/discover"
-  assert_file_contains "$project/discover" "octo-user/flowfrag flowfrag/equivariant.py"
-
-  (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" fetch \
-    --repo octo-user/flowfrag \
-    --path flowfrag/equivariant.py \
-    --target src/models/equivariant.py >"$project/fetch-out")
-  assert_file_contains "$project/src/models/equivariant.py" "class EquivariantBlock"
-  assert_file_contains "$project/.oms/code-sources.jsonl" '"repo": "octo-user/flowfrag"'
-  assert_file_contains "$project/.oms/code-sources.jsonl" '"commit": "commit123"'
-
-  if (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" fetch \
-    --repo octo-user/flowfrag \
-    --path flowfrag/equivariant.py \
-    --target src/models/equivariant.py >/dev/null 2>"$project/overwrite-err"); then
-    fail "github-source fetch should not overwrite without --force"
-  fi
-  assert_file_contains "$project/overwrite-err" "target exists"
-
-  # A symlink target must be refused even with --force (open(wb) would follow
-  # it and write outside the intended path). Keep the link target under $TMP.
-  local linkdest="$project/should-not-be-written"
-  ln -s "$linkdest" "$project/linktarget.py"
-  if (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/github-source.sh" fetch \
-    --repo octo-user/flowfrag --path flowfrag/equivariant.py \
-    --target linktarget.py --force >/dev/null 2>"$project/symlink-err"); then
-    fail "github-source fetch must refuse a symlink target"
-  fi
-  assert_file_contains "$project/symlink-err" "symlink"
-  [ ! -e "$linkdest" ] || fail "fetch wrote through the symlink"
-}
-
-test_code_source_registry_fetches_registered_source() {
-  local project="$TMP/code-source"
-  local bin="$project/bin"
-
-  mkdir -p "$project"
-  write_fake_gh_source "$bin"
-
-  "$ROOT/scripts/code-source.sh" --repo-dir "$project" add flowfrag-equivariant \
-    --repo octo-user/flowfrag \
-    --path flowfrag/equivariant.py \
-    --target src/models/equivariant.py \
-    --tags ml,gnn,equivariant \
-    --license own-code \
-    --notes "Reusable equivariant GNN block" >/dev/null
-
-  "$ROOT/scripts/code-source.sh" --repo-dir "$project" list >"$project/list"
-  assert_file_contains "$project/list" "flowfrag-equivariant"
-  assert_file_contains "$project/list" "tags=ml,gnn,equivariant"
-
-  (cd "$project" && PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/code-source.sh" --repo-dir "$project" fetch flowfrag-equivariant >/dev/null)
-  assert_file_contains "$project/src/models/equivariant.py" "class EquivariantBlock"
-  assert_file_contains "$project/.oms/code-sources.jsonl" '"target": "src/models/equivariant.py"'
-}
 
 test_research_runner_requires_registration() {
   local project="$TMP/research-runner-required"
@@ -1722,7 +1656,7 @@ test_doctor_requires_gh_and_reports_unauthenticated() {
   # rather than as an optional extra. Authentication cannot be automated — it is
   # an interactive browser flow — so the most the doctor can do is say that the
   # binary is there and unusable, which is exactly the state where
-  # github-source and ci-status fail on their first call.
+  # ci-status fails on its first call.
   setup_doctor_home "$home_dir"
   make_committed_repo "$project"
   mkdir -p "$bin_dir"
@@ -6449,8 +6383,6 @@ PY
 
 test_auto_update_help_runs() {
   "$ROOT/scripts/artifact-index.sh" --help >/dev/null
-  "$ROOT/scripts/github-source.sh" --help >/dev/null
-  "$ROOT/scripts/code-source.sh" --help >/dev/null
   "$ROOT/scripts/import-agent-result.sh" --help >/dev/null
   "$ROOT/scripts/research-runner.sh" --help >/dev/null
   "$ROOT/scripts/auto-update.sh" --help >/dev/null
@@ -8972,11 +8904,9 @@ test_oms_dispatcher_lists_and_dispatches() {
   printf '%s' "$out" | grep -Eq '^snapshot ' || fail "oms list should include snapshot"
   "$bin/oms" run-ledger --help >/dev/null 2>&1 || fail "oms should dispatch run-ledger via its symlink"
   (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run should alias oms-run"
-  # Consolidated tools stay dispatchable (compat), and their front doors work.
-  "$bin/oms" run-capsule --help >/dev/null 2>&1 || fail "compat dispatch for run-capsule broke"
-  "$bin/oms" generate-slurm-skill --help >/dev/null 2>&1 || fail "generate-slurm-skill alias broke"
+  # One entrance per capability: the consolidated front doors work, and the
+  # retired direct names are refused outright — no compat dispatch.
   "$bin/oms" run capsule --help >/dev/null 2>&1 || fail "oms run capsule door broke"
-  "$bin/oms" code-source github --help >/dev/null 2>&1 || fail "code-source github door broke"
   "$bin/oms" artifact-index import --help >/dev/null 2>&1 || fail "artifact-index import door broke"
   "$bin/oms" snapshot --help >/dev/null 2>&1 || fail "snapshot front door broke"
   if "$bin/oms" no-such-tool >/dev/null 2>&1; then
@@ -8985,7 +8915,10 @@ test_oms_dispatcher_lists_and_dispatches() {
   if "$bin/oms" ../oms >/dev/null 2>&1; then
     fail "oms must reject path-like tool names"
   fi
-  for hidden in skill-router turn-guard check-bash32 install-tools; do
+  for hidden in skill-router turn-guard check-bash32 install-tools \
+    run-capsule generate-slurm-skill generate-slurm-reference github-source \
+    import-agent-result install-autoupdate uninstall-autoupdate \
+    write-machine-snapshot; do
     rc=0
     "$bin/oms" "$hidden" --help >/dev/null 2>&1 || rc=$?
     [ "$rc" = 2 ] || fail "oms should reject hidden tool $hidden with exit 2, got $rc"

@@ -9,7 +9,7 @@ PROFILE="${OH_MY_SETTING_PROFILE:-minimal}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
 # The three provider CLIs, gh, and ntn are what the harness is for: a council with one
-# installed peer is not a council, and github-source/ci-status have nothing to
+# installed peer is not a council, and ci-status has nothing to
 # talk to without gh. Installing them is the default, not an opt-in flag nobody
 # passes. --no-tools remains for a machine that cannot or must not have them.
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"

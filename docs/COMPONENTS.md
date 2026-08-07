@@ -816,14 +816,6 @@ family's pattern or a linked `covered_by` global skill, expired past
 Propose-only: recurrence is not importance, and the judgment stays with the
 agent.
 
-## Code sources
-
-**Registry (`code-source.sh`)** — Local registry of trusted reusable files
-(e.g. personal model blocks); fetch by name into the current project
-
-**GitHub fetch (`oms code-source github`)** — Profile/discover/fetch via `gh`; no
-overwrite by default, provenance appended to `.oms/code-sources.jsonl`
-
 ## Maintenance
 
 **Retention GC (`gc.sh`, `oms gc`)** — `--dry-run` by default; reclaims aged
