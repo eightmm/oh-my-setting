@@ -284,6 +284,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage atomic-state bash tests/atomic-state-smoke.sh
   stage advisor-routing bash tests/advisor-routing-smoke.sh
   stage advisor-session bash tests/advisor-session-smoke.sh
+  stage debate-delta bash tests/debate-delta-smoke.sh
   stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   stage work-journal bash tests/work-journal-smoke.sh
   stage durable-writers bash tests/durable-writers-contract-smoke.sh

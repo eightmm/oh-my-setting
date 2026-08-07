@@ -24,9 +24,13 @@ oms peer-ask --prompt "Compare the two designs for this constraint."
 
 Choose the smallest context: none for a concept, `--repo-context` for repository
 state, `--diff` for an uncommitted change, or a local summary of specific files.
-Use `--debate 1` only when answers materially disagree. If policy forbids direct
-provider calls, use `--export-only` and import the answer with
-`oms artifact-index import`.
+Use `--debate 1` only when answers materially disagree. Longer debates
+(`--debate 2-3`) stay token-bounded on their own: full positions cross once,
+later rounds carry only each peer's delta sections plus an on-disk pointer to
+the full answer, and the debate stops early when no seat changed position —
+so asking for the budgeted rounds is safe when the disagreement warrants
+them. If policy forbids direct provider calls, use `--export-only` and import
+the answer with `oms artifact-index import`.
 
 ## Advisor that reads your history
 

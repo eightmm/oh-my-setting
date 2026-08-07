@@ -93,7 +93,16 @@ debate replay (an exit-0 banner in round two cannot become the final answer),
 and labeled `non-answer` in the synthesis instead of being quoted as an
 opinion — so "N independent model families" describes answers that exist.
 Dry runs skip classification (their artifacts are all noise-stripped lines);
-`OMS_COUNCIL_QUALITY=0` restores exit-status-only accounting
+`OMS_COUNCIL_QUALITY=0` restores exit-status-only accounting. Debate rounds
+exchange positions once and deltas after: round 2 quotes each peer's bounded
+full answer, later rounds quote only the "Changed from previous round" /
+"Remaining disagreements" sections (anchored on their last occurrence, since
+codex-style output echoes the prompt's own headers) plus a repo-relative
+pointer to the full answer on disk for pull-based retrieval; a peer without
+delta sections falls back to the bounded full quote and is named on stderr.
+When every seat that answered a round declares "none" under "Changed from
+previous round:", the remaining rounds are skipped and the synthesis says so
+— a stability stop, not a consensus claim: recorded disagreements stand
 
 **Delegate (`peer-delegate.sh`)** — Runs a write task in an isolated git
 worktree and verifies it there, then returns a reviewable patch (verify bounded

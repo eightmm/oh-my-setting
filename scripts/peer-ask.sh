@@ -68,7 +68,13 @@ Options:
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Debate rounds exchange answers only;
-                       repo context is attached to round-1 prompts only.
+                       repo context is attached to round-1 prompts only. Full
+                       positions cross once (round 2); later rounds quote only
+                       each peer's delta sections plus an on-disk reference to
+                       the full answer, and the debate stops early when every
+                       seat declares "none" under "Changed from previous
+                       round:" — stability, not consensus: recorded
+                       disagreements stand.
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with

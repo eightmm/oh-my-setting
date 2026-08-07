@@ -1602,6 +1602,65 @@ ma_run_round1() {
   done
 }
 
+# The delta sections ("Changed from previous round:" and "Remaining
+# disagreements:") are what a later round actually needs from a peer; the
+# full positions already crossed in round 2. Anchor on the LAST occurrence
+# of the header: codex-style providers echo the whole prompt — section
+# headers included — inside their output stream, so a first-occurrence match
+# would extract the instructions, not the answer. Exits nonzero when the
+# artifact has no delta sections at all.
+ma_extract_debate_delta() {
+  local artifact="$1"
+  extract_output "$artifact" | awk '
+    { lines[NR] = $0; if ($0 ~ /^[[:space:]]*Changed from previous round:/) last = NR }
+    END {
+      if (!last) exit 1
+      for (i = last; i <= NR; i++) print lines[i]
+    }'
+}
+
+# Exit 0 when the seat's debate answer explicitly declared no position
+# change: the first non-empty line of the delta (same line as the header or
+# below it, stopping before "Remaining disagreements:") reads none or
+# unchanged, trailing punctuation tolerated. Anything else — prose, an empty
+# section, no section — counts as changed: a loose match here would cut a
+# debate short, while a strict one merely runs the rounds that were asked
+# for.
+ma_debate_seat_unchanged() {
+  local artifact="$1"
+  local first
+  first="$(ma_extract_debate_delta "$artifact" | awk '
+    NR == 1 {
+      sub(/^[[:space:]]*Changed from previous round:[[:space:]]*/, "")
+      if (NF) { print; exit }
+      next
+    }
+    /^[[:space:]]*Remaining disagreements:/ { exit }
+    NF { print; exit }')" || return 1
+  first="$(printf '%s' "$first" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -e 's/^[[:space:]]*//' -e 's/[[:space:].!]*$//')"
+  case "$first" in
+    none|unchanged) return 0 ;;
+  esac
+  return 1
+}
+
+# Repo-relative artifact path for prompt references: the outbound scrubber
+# masks absolute home paths, which would break the pointer for the reader.
+ma_repo_rel() {
+  local root="${REPO:-}"
+  if [ -n "$root" ]; then
+    case "$1" in
+      "$root"/*)
+        printf '%s\n' "${1#"$root"/}"
+        return 0
+        ;;
+    esac
+  fi
+  printf '%s\n' "$1"
+}
+
 write_debate_prompt() {
   local output="$1"
   local provider="$2"
@@ -1623,27 +1682,44 @@ write_debate_prompt() {
     printf 'Your previous answer:\n'
     extract_output "$self_artifact" | ma_sanitize_quoted_output
     printf '\nOther %s:\n' "${MA_DEBATE_ROLE:-advisors}"
-    local pair name art
+    local pair name art delta
     for pair in "$@"; do
       name="${pair%%:*}"
       art="${pair#*:}"
-      printf '\n## %s\n' "$name"
-      extract_output "$art" | ma_sanitize_quoted_output
+      printf '\n## %s (full answer on disk: %s)\n' "$name" "$(ma_repo_rel "$art")"
+      # Round 2 exchanges full positions. Later rounds quote only what moved:
+      # re-sending every seat's whole revised answer each round is the
+      # quadratic re-injection a bounded debate exists to avoid. A peer whose
+      # answer has no extractable delta sections falls back to the bounded
+      # full quote — and says so on stderr, so a non-compliant provider is a
+      # visible cost, not a silent one.
+      if [ "$round" -ge 3 ] && delta="$(ma_extract_debate_delta "$art")" && [ -n "$delta" ]; then
+        printf '%s\n' "$delta" | ma_sanitize_quoted_output
+      else
+        if [ "$round" -ge 3 ]; then
+          echo "note: $name answer carries no delta sections; quoting the bounded full answer" >&2
+        fi
+        extract_output "$art" | ma_sanitize_quoted_output
+      fi
     done
     printf -- '\n--- end external provider output ---\n\n'
+    printf 'Read a listed on-disk answer only when the quoted part is not enough.\n'
     printf 'Return exactly these sections:\n'
     printf '%s\n' "$MA_DEBATE_SECTIONS"
+    printf 'If nothing changed your position this round, write exactly "none" under "Changed from previous round:".\n'
     if [ -n "${MA_DEBATE_GATE_INSTRUCTION:-}" ]; then
       printf '%s\n' "$MA_DEBATE_GATE_INSTRUCTION"
     fi
   } > "$output"
 }
 
-# Debate rounds 2..DEBATE+1. Mutates alive and last_arts.
+# Debate rounds 2..DEBATE+1. Mutates alive and last_arts; sets
+# debate_stable_round when the debate stopped early.
 ma_run_debate_rounds() {
   local round i j k p others debate_prompt artifact quality
-  local r_pids r_idx r_arts active
+  local r_pids r_idx r_arts active settled checked
 
+  debate_stable_round=""
   for ((round = 2; round <= DEBATE + 1; round++)); do
     active=()
     for i in "${!provider_names[@]}"; do
@@ -1692,6 +1768,33 @@ ma_run_debate_rounds() {
       dropped=$((dropped + 1))
       dropped_names+=("${provider_names[i]}")
     done
+
+    # Stability exit: when every seat that answered this round declared
+    # "none" under "Changed from previous round:", a further round can only
+    # restate the standoff — nobody moved, under a prompt that already tells
+    # them to move only for a stronger argument. Disagreements may well
+    # remain; they are recorded in the answers, and this is why the check is
+    # for stability, not consensus. Unanimity is required and the match is
+    # strict, so the loose-match failure (a debate cut short) is traded for
+    # the cheap one (a round that repeats itself).
+    if [ "$round" -le "$DEBATE" ]; then
+      settled=1
+      checked=0
+      for k in "${!r_pids[@]}"; do
+        i="${r_idx[k]}"
+        [ "${alive[i]}" = 1 ] || continue
+        checked=$((checked + 1))
+        if ! ma_debate_seat_unchanged "${r_arts[k]}"; then
+          settled=0
+          break
+        fi
+      done
+      if [ "$settled" -eq 1 ] && [ "$checked" -ge 1 ]; then
+        debate_stable_round="$round"
+        echo "debate stable after round $round: no seat changed position; skipping $((DEBATE + 1 - round)) remaining round(s)" >&2
+        break
+      fi
+    fi
   done
 }
 
@@ -1707,6 +1810,10 @@ ma_write_synthesis() {
     printf -- '- success: %d/%d providers\n' "$ok" "$total"
     if [ "${DEBATE:-0}" -gt 0 ]; then
       printf -- '- debate rounds: %d\n' "$DEBATE"
+    fi
+    if [ -n "${debate_stable_round:-}" ]; then
+      printf -- '- debate stopped early: no seat changed position after round %s\n' \
+        "$debate_stable_round"
     fi
     printf '\n## Prompt\n\n'
     printf '```\n'
@@ -1741,6 +1848,9 @@ ma_print_run_summary() {
   # A third loss, apart from both: this seat never came back at all.
   [ "${failed:-0}" -le 0 ] || detail="${detail:+$detail, }$failed failed"
   echo "summary: $ok/$total providers succeeded${detail:+ ($detail)}"
+  if [ -n "${debate_stable_round:-}" ]; then
+    echo "note: debate stopped early — no seat changed position after round $debate_stable_round" >&2
+  fi
   if [ "${dropped:-0}" -gt 0 ]; then
     echo "note: debate dropped providers: ${dropped_names[*]}; their last successful round's answer was used for synthesis" >&2
   fi

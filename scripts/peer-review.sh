@@ -84,7 +84,12 @@ Options:
   --debate N           Add N debate rounds (1-3). Each round, every reviewer
                        sees the others' previous findings, critiques them, and
                        revises its own. Debate rounds exchange findings only;
-                       the diff is attached to round-1 prompts only.
+                       the diff is attached to round-1 prompts only. Full
+                       findings cross once (round 2); later rounds quote only
+                       each reviewer's delta sections plus an on-disk
+                       reference to the full answer, and the debate stops
+                       early when every seat declares "none" under "Changed
+                       from previous round:".
   --gate               Require each reviewer to end with GATE: pass or
                        GATE: fail, then print verdicts and exit with the gate
                        status. Review mode only.

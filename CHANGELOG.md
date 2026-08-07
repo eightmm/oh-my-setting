@@ -155,6 +155,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   used.
 
 ### Added
+- Debate rounds exchange positions once, then deltas. Round 2 still crosses
+  each seat's bounded full answer, but every later round now quotes only the
+  "Changed from previous round" / "Remaining disagreements" sections of each
+  peer (anchored on their last occurrence — codex-style output echoes the
+  prompt's own section headers, so a first-match extraction would quote the
+  instructions), plus a repo-relative pointer to the full answer on disk so
+  a seat that needs the whole argument pulls it instead of every seat paying
+  for it every round. A peer without delta sections falls back to the
+  bounded full quote and is named on stderr. And when every seat that
+  answered a round writes exactly "none" under "Changed from previous
+  round:", the remaining budgeted rounds are skipped: a stability stop, not
+  a consensus claim — the prompt still forbids converging for agreement's
+  sake, unanimity is required, and recorded disagreements stand. The run
+  summary and synthesis both say when a debate stopped early.
 - `oms advise --session` gives every CLI the read Claude Code's native
   advisor gets for free: a mechanical session-handoff digest of the calling
   session rides into the advisor prompt after the decision context, so the
