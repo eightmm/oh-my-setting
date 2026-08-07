@@ -289,7 +289,11 @@ fi
 
 # The question is recorded from the operator prompt, not the composed file, so
 # a thread stays a conversation instead of a pile of harness boilerplate.
-record_thread_exchange() {
+# With FAILED_EXIT, the call died and the turn is one typed line naming it: a
+# thread that keeps only the calls that worked is not the conversation it claims
+# to be, and the next agent cannot see what it never got an answer to.
+record_thread_exchange() {  # record_thread_exchange [FAILED_EXIT]
+  local status="${1:-}"
   local question
   [ -n "$THREAD_ID" ] || return 0
   question="$(agent_memory_mktemp)" || return 0
@@ -298,8 +302,14 @@ record_thread_exchange() {
   else
     printf '%s\n' "$PROMPT" > "$question"
   fi
-  ma_thread_record_exchange "$REPO" "$THREAD_ID" "$TO" "$OMS_MODEL_SELECTED" \
-    "$artifact" "$question"
+  if [ -n "$status" ]; then
+    [ "${OMS_THREAD_QUESTION_RECORDED:-0}" = "1" ] ||
+      ma_thread_append "$REPO" "$THREAD_ID" question "$question"
+    ma_thread_append_nonanswer "$REPO" "$THREAD_ID" "$TO" "exit $status" "$artifact"
+  else
+    ma_thread_record_exchange "$REPO" "$THREAD_ID" "$TO" "$OMS_MODEL_SELECTED" \
+      "$artifact" "$question"
+  fi
   rm -f "$question"
 }
 
@@ -308,6 +318,8 @@ if run_provider "$TO" "$prompt_file" "$artifact"; then
   echo "artifact: $artifact"
 else
   rc=$?
+  record_thread_exchange "$rc"
+  ma_record_seat_failure "$TO" "$rc"
   echo "artifact: $artifact"
   # Propagate run_provider's code: 3 = blocked by scrubber, 1 = provider failed.
   exit "$rc"

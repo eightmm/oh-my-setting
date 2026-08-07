@@ -829,6 +829,56 @@ ma_thread_record_exchange() {
   rm -f "$tmp"
 }
 
+# Record a seat that produced no answer as one short turn. A thread is what the
+# next agent reads as the conversation of record: a seat that is simply absent
+# from it reads as a seat nobody asked, which is how a timed-out provider became
+# invisible everywhere except its artifact row.
+# The turn is a note, not an answer, so it never enters the answer-quality
+# counts; and it is one line, because ma_write_thread_context replays turns into
+# later prompts and a failure body would crowd out the conversation.
+ma_thread_append_nonanswer() {
+  local repo="$1" thread="$2" provider="$3" reason="$4"
+  local artifact="${5:-}" quality="${6:-}"
+  local label tmp
+
+  [ -n "$thread" ] || return 0
+  # The path is printed repo-relative, or as a bare name when the artifact dir
+  # lives elsewhere: an absolute home/cluster path in turn text is refused
+  # outright by the thread's own scrubber and would trip the outbound guard once
+  # this turn is replayed. The full path still rides in the row's artifact field.
+  label=""
+  if [ -n "$artifact" ]; then
+    label="$artifact"
+    [ -z "$repo" ] || label="${label#"$repo"/}"
+    case "$label" in /*) label="$(basename "$label")" ;; esac
+  fi
+  tmp="$(agent_memory_mktemp)" || return 0
+  printf 'no answer (%s)%s\n' "$reason" "${label:+; artifact: $label}" > "$tmp"
+  ma_thread_append "$repo" "$thread" note "$tmp" "$provider" "" "$artifact" "$quality"
+  rm -f "$tmp"
+}
+
+# File a dead seat in the durable failure memory. The artifact index already
+# holds this seat's true exit, but that is a per-run record: the ledger is what a
+# LATER session (or another agent) reads before spending one more call on a
+# provider that has been hanging all day.
+# The fingerprint is the seat, not the exit code, so every failure of the same
+# provider in the same kind of call accumulates onto one count and reaches the
+# advise threshold; the exit rides in --summary. Best-effort by construction — a
+# council must not fail because its bookkeeping did.
+ma_record_seat_failure() {
+  local provider="$1" status="$2"
+
+  # A dry run never called the provider. Durable failure memory must not carry a
+  # failure that never happened.
+  [ "${DRY_RUN:-0}" != "1" ] || return 0
+  "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
+    --cmd "peer-${MA_KIND:-call} seat $provider" --exit "$status" \
+    --summary "$provider ${MA_KIND:-call} seat returned no answer (exit $status)" \
+    --next "check the provider CLI, raise OMS_PEER_TIMEOUT, or drop the seat" \
+    >/dev/null 2>&1 || true
+}
+
 # Mask filesystem paths in quoted prior-round answers before they are re-sent in
 # a debate prompt. Providers cite absolute paths (file:// URLs, absolute home
 # paths) when they read the repo; those trip the outbound path guard and block the
@@ -1475,20 +1525,24 @@ ma_council_nonanswer() {
 
 # Round 1: fan out the same prompt to all providers in parallel.
 # Sets: ok, total, pids, artifacts, provider_names, alive, last_arts,
-# dropped, dropped_names, nonanswers, nonanswer_names, seat_quality, seat_reason.
+# dropped, dropped_names, nonanswers, nonanswer_names, failed, failed_names,
+# seat_quality, seat_reason, seat_exit.
 ma_run_round1() {
-  local provider artifact i provider_list quality
+  local provider artifact i provider_list quality rc
   ok=0
   total=0
   dropped=0
   nonanswers=0
+  failed=0
   pids=()
   artifacts=()
   provider_names=()
   dropped_names=()
   nonanswer_names=()
+  failed_names=()
   seat_quality=()
   seat_reason=()
+  seat_exit=()
 
   IFS=',' read -r -a provider_list <<< "$PROVIDERS"
   for provider in "${provider_list[@]}"; do
@@ -1512,9 +1566,22 @@ ma_run_round1() {
   for i in "${!pids[@]}"; do
     seat_quality[i]=""
     seat_reason[i]=""
+    # shellcheck disable=SC2034 # the owning ask/review script reads seat_exit
+    seat_exit[i]=0
     last_arts[i]="${artifacts[i]}"
-    if ! wait "${pids[i]}"; then
+    rc=0
+    wait "${pids[i]}" || rc=$?
+    if [ "$rc" -ne 0 ]; then
       alive[i]=0
+      # shellcheck disable=SC2034 # read by the caller to type its thread turn
+      seat_exit[i]="$rc"
+      # A seat that died gets the same bookkeeping as one that answered. Counting
+      # it here is what lets the summary name it: before this, a timed-out seat
+      # appeared in no list at all, only as the silent differential in
+      # "2/3 providers succeeded".
+      failed=$((failed + 1))
+      failed_names+=("${provider_names[i]} (exit $rc)")
+      ma_record_seat_failure "${provider_names[i]}" "$rc"
       continue
     fi
     quality="$(ma_council_nonanswer "${artifacts[i]}")"
@@ -1674,12 +1741,17 @@ ma_print_run_summary() {
   [ "${dropped:-0}" -le 0 ] || detail="$dropped dropped during debate"
   [ "${nonanswers:-0}" -le 0 ] ||
     detail="${detail:+$detail, }$nonanswers non-answer(s)"
+  # A third loss, apart from both: this seat never came back at all.
+  [ "${failed:-0}" -le 0 ] || detail="${detail:+$detail, }$failed failed"
   echo "summary: $ok/$total providers succeeded${detail:+ ($detail)}"
   if [ "${dropped:-0}" -gt 0 ]; then
     echo "note: debate dropped providers: ${dropped_names[*]}; their last successful round's answer was used for synthesis" >&2
   fi
   if [ "${nonanswers:-0}" -gt 0 ]; then
     echo "note: exited 0 without answering: ${nonanswer_names[*]}" >&2
+  fi
+  if [ "${failed:-0}" -gt 0 ]; then
+    echo "note: no answer: ${failed_names[*]}" >&2
   fi
   echo "artifacts: $ARTIFACT_DIR"
   echo "synthesis: $synth_file"

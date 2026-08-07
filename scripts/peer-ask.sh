@@ -373,7 +373,7 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export OMS_OPERATION_ID="${OMS_OPERATION_ID:-ask-$timestamp}"
 slug="$(slugify "$PROMPT")"
 [ -n "$slug" ] || slug="ask"
-declare -a pids artifacts provider_names alive last_arts
+declare -a pids artifacts provider_names alive last_arts seat_quality seat_exit
 
 if [ "$EXPORT_ONLY" -eq 1 ]; then
   ma_export_round1
@@ -399,10 +399,25 @@ if [ -n "$THREAD_ID" ] && [ "$EXPORT_ONLY" -eq 0 ]; then
     printf '%s\n' "$PROMPT" > "$ask_turn"
     ma_thread_append "$REPO" "$THREAD_ID" question "$ask_turn"
     for ask_i in "${!provider_names[@]}"; do
-      [ "${alive[ask_i]}" = 1 ] || continue
-      extract_output "${last_arts[ask_i]}" | ma_sanitize_quoted_output > "$ask_turn" 2>/dev/null || true
-      ma_thread_append "$REPO" "$THREAD_ID" answer "$ask_turn" \
-        "${provider_names[ask_i]}" "" "${last_arts[ask_i]}"
+      if [ "${alive[ask_i]}" = 1 ]; then
+        extract_output "${last_arts[ask_i]}" | ma_sanitize_quoted_output > "$ask_turn" 2>/dev/null || true
+        ma_thread_append "$REPO" "$THREAD_ID" answer "$ask_turn" \
+          "${provider_names[ask_i]}" "" "${last_arts[ask_i]}"
+        continue
+      fi
+      # A seat that said nothing is named in one line rather than dropped from
+      # the thread: skipping it left the conversation of record missing a seat
+      # that the artifacts and the summary both know about.
+      # Only these two populations qualify. A seat dropped during debate also
+      # has alive=0, but it did answer round 1 and that answer is in the
+      # synthesis, so calling it a non-answer here would be the opposite lie.
+      if [ -n "${seat_quality[ask_i]:-}" ]; then
+        ma_thread_append_nonanswer "$REPO" "$THREAD_ID" "${provider_names[ask_i]}" \
+          "${seat_quality[ask_i]}" "${artifacts[ask_i]}" "${seat_quality[ask_i]}"
+      elif [ "${seat_exit[ask_i]:-0}" != 0 ]; then
+        ma_thread_append_nonanswer "$REPO" "$THREAD_ID" "${provider_names[ask_i]}" \
+          "exit ${seat_exit[ask_i]}" "${artifacts[ask_i]}"
+      fi
     done
     rm -f "$ask_turn"
   fi

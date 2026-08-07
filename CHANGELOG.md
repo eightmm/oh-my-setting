@@ -20,6 +20,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- A dead council seat is bookkept like a live one. A timed-out or failed
+  seat used to reach only the artifact index — the thread the next agent
+  reads as the conversation of record silently missed the seat, no
+  fail-ledger row existed, and the summary said only "2/3 succeeded" without
+  a name. The seat now writes one typed non-answer thread turn (`no answer
+  (exit N)`, role note, one line, repo-relative artifact ref), a fail-ledger
+  row whose fingerprint accumulates repeats per provider, and a named
+  summary line. Exit-0 non-answers thread but never reach the ledger;
+  quorum semantics are untouched.
 - `ci-status` stops giving a false all-clear. An unauthenticated or
   unreachable `gh` used to print "no runs for <branch>" and exit 0 —
   indistinguishable from a branch with no CI, at the one tool whose stated
