@@ -136,6 +136,11 @@ if exit_code is None or exit_code == 0:
 if exit_code in (130, 141, 143):
     # Interrupts and closed pipes are not failures worth remembering.
     raise SystemExit(0)
+if re.search(r"/tmp/claude-\d+/", command):
+    # A command naming a session-scoped scratch path has a fingerprint no
+    # other session can recompute: the row would be write-only from birth.
+    # The deliberate `record` verb is unaffected — this gates only the hook.
+    raise SystemExit(0)
 print("record")
 print(exit_code)
 print(command)
