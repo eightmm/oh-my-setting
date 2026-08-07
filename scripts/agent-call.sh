@@ -19,10 +19,8 @@ INCLUDE_ML_CONTEXT=0
 THREAD_ID=""
 OPERATION=""
 EXPORT_ONLY=0
-MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
-NO_MODEL_FALLBACK=0
 REASONING_EFFORT=auto
 DRY_RUN="${OH_MY_SETTING_CALL_DRY_RUN:-0}"
 
@@ -39,10 +37,8 @@ Options:
   --prompt-file PATH   Prompt file to send.
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/call.
-  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --no-model-fallback  Deprecated compatibility no-op.
   --reasoning-effort E auto, low, medium, or high (default: auto).
   --memory             Attach shared harness memory.
   --task               Attach the active task handoff packet.
@@ -92,11 +88,6 @@ while [ "$#" -gt 0 ]; do
       ARTIFACT_DIR="$2"
       shift 2
       ;;
-    --model-class)
-      [ "$#" -ge 2 ] || fail "--model-class requires value"
-      MODEL_CLASS="$2"
-      shift 2
-      ;;
     --model)
       [ "$#" -ge 2 ] || fail "--model requires value"
       MODEL="$2"
@@ -106,10 +97,6 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--fallback-model requires value"
       FALLBACK_MODEL="$2"
       shift 2
-      ;;
-    --no-model-fallback)
-      NO_MODEL_FALLBACK=1
-      shift
       ;;
     --reasoning-effort)
       [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
@@ -184,13 +171,11 @@ case "$TO" in
   *) fail "unsupported provider: $TO" ;;
 esac
 [ "$TO" = "agy" ] && TO="antigravity"
-[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
-unset OMS_MODEL_CLASS_REQUEST
 export OMS_MODEL_EXPLICIT="$MODEL"
-export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 # Operation is retained as artifact context only.
 export OMS_MODEL_OPERATION="${OPERATION:-call}"

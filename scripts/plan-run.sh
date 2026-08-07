@@ -24,10 +24,8 @@ AUTO_REPAIR=0
 RETRY_KNOWN=0
 DRY_RUN=0
 EXECUTOR_ID=""
-MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
-NO_MODEL_FALLBACK=0
 REASONING_EFFORT=auto
 LEASE_ID=""
 VERIFY=""
@@ -59,10 +57,8 @@ Options:
   --retry-known   Retry even when this exact task/base/provider/verify contract
                   is an unresolved known failure.
   --executor ID   Use a frozen task-scoped executor soul.
-  --model-class C auto, fast, balanced, or deep.
   --model MODEL   Exact provider model; disables implicit fallback.
   --fallback-model M  Explicit one-shot capacity fallback model.
-  --no-model-fallback Disable implicit class fallback.
   --reasoning-effort E  auto, low, medium, or high.
   --repo PATH     Target repo (default: current directory).
   --dry-run       Show the selected task and command without claiming/calling.
@@ -88,10 +84,8 @@ while [ "$#" -gt 0 ]; do
     --auto-repair) AUTO_REPAIR=1; [ "$REPAIR" -ge 1 ] || REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --executor) [ "$#" -ge 2 ] || fail "--executor requires ID"; EXECUTOR_ID="$2"; shift 2 ;;
-    --model-class) [ "$#" -ge 2 ] || fail "--model-class requires value"; MODEL_CLASS="$2"; shift 2 ;;
     --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
-    --no-model-fallback) NO_MODEL_FALLBACK=1; shift ;;
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"; REASONING_EFFORT="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -102,7 +96,6 @@ done
 
 [ -n "$TO" ] || fail "--to is required"
 TO="$(oms_normalize_provider "$TO")" || fail "unknown provider: $TO"
-[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -228,12 +221,11 @@ import json,sys
 d=json.load(sys.stdin)
 keys=("executor_id","provider","strategy","mode","plan_task","task_id","base_sha","allowed_paths","forbidden_paths","verify","model_class","model","fallback_model","reasoning_effort","fallback_reasoning_effort","soul_sha256")
 print("|".join(str(d.get(k,"")) for k in keys))
-')|request=$MODEL_CLASS:$MODEL:$FALLBACK_MODEL:$NO_MODEL_FALLBACK:$REASONING_EFFORT"
+')|request=$MODEL:$FALLBACK_MODEL:$REASONING_EFFORT"
 else
   task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))')"
-  unset OMS_MODEL_CLASS_REQUEST
   export OMS_MODEL_EXPLICIT="$MODEL"
-  export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+  export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
   export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT" OMS_REASONING_FALLBACK_EXPLICIT=""
   export OMS_MODEL_ROLE="$task_role" OMS_MODEL_OPERATION=delegate
   oms_model_prepare "$TO" || exit $?
@@ -267,10 +259,8 @@ delegate_script="${OMS_PLAN_RUN_DELEGATE:-$ROOT/scripts/peer-delegate.sh}"
 [ -x "$delegate_script" ] || fail "delegate command is not executable: $delegate_script"
 delegate_cmd=("$delegate_script" --repo "$REPO" --to "$TO" --plan-task "$TASK_ID" --repair "$REPAIR")
 [ -n "$EXECUTOR_ID" ] && delegate_cmd+=(--executor "$EXECUTOR_ID")
-[ -n "$MODEL_CLASS" ] && delegate_cmd+=(--model-class "$MODEL_CLASS")
 [ -n "$MODEL" ] && delegate_cmd+=(--model "$MODEL")
 [ -n "$FALLBACK_MODEL" ] && delegate_cmd+=(--fallback-model "$FALLBACK_MODEL")
-[ "$NO_MODEL_FALLBACK" -eq 1 ] && delegate_cmd+=(--no-model-fallback)
 [ -n "$REASONING_EFFORT" ] && [ "$REASONING_EFFORT" != auto ] &&
   delegate_cmd+=(--reasoning-effort "$REASONING_EFFORT")
 output_file="$(agent_memory_mktemp)" || exit 1

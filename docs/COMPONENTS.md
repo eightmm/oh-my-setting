@@ -76,8 +76,8 @@ flagged to reviewers. A blocked reviewer's `no-verdict` quotes its own stated
 reason (usually the operator's allow-list), so a gate failure says what to fix
 
 **Ask (`peer-ask.sh`)** — Same question to distinct local models for
-independent opinions; `--tiers` (or `codex:deep` inside `--providers`) turns
-the council into a panel across model tiers, each target writing its own
+independent opinions; `PROVIDER:model=NAME` entries inside `--providers` turn
+the council into a panel across exact models, each target writing its own
 artifact, with the expansion refused above `OMS_COUNCIL_MAX_CALLS` (default 12)
 so a Cartesian panel plus debate rounds cannot silently become dozens of calls,
 and the run reports how many independent model families answered — one family
@@ -291,9 +291,8 @@ pulling weight" stops being a guess
 mid-task: picks a provider that is not the caller, attaches the active task,
 shared memory, and the running thread, records question and answer, and prints
 the answer. `--all` asks every installed peer in parallel and records one
-question with N answers in the same thread; `--to PROVIDER[:CLASS|:model=NAME]`
-is repeatable, so one CLI can answer at several tiers or exact models and
-`--all --tiers deep,balanced` spans both axes. Results report "N targets
+question with N answers in the same thread; `--to PROVIDER[:model=NAME]` is
+repeatable, so one CLI can answer as several exact models. Results report "N targets
 answered, K independent model families" and flag a panel whose answers all
 share a family, because repetition inside one family is not corroboration. A
 CLI that exits 0 having printed only its own reason for doing nothing — a

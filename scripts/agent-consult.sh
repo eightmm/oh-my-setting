@@ -56,12 +56,10 @@ Options:
                        allowed and each answer is recorded separately.
   --all                Ask every installed peer (not the caller) in parallel
                        and record all answers in the thread.
-  --tiers a,b          Deprecated and ignored; use PROVIDER:model=NAME targets.
   --thread ID          Use this thread. Default: the current one, created on
                        first use so a series of consults stays one conversation.
   --new-thread         Start a fresh thread even if one is current.
   --topic TEXT         Topic for a newly created thread.
-  --model-class CLASS  Deprecated and ignored; use PROVIDER:model=NAME targets.
   --no-memory          Do not attach shared memory.
   --no-task            Do not attach the active task packet.
   --ml-context         Attach the ML digest as well.
@@ -96,18 +94,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--to requires a target"
       TARGETS_EXPLICIT+=("$2")
       shift 2 ;;
-    --tiers)
-      [ "$#" -ge 2 ] || fail "--tiers requires a comma-separated list"
-      echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
-      shift 2 ;;
     --all) ALL=1; shift ;;
     --thread) [ "$#" -ge 2 ] || fail "--thread requires an id"; THREAD_ID="$2"; shift 2 ;;
     --new-thread) NEW_THREAD=1; shift ;;
     --topic) [ "$#" -ge 2 ] || fail "--topic requires text"; TOPIC="$2"; shift 2 ;;
-    --model-class)
-      [ "$#" -ge 2 ] || fail "--model-class requires a value"
-      echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
-      shift 2 ;;
     --no-memory) INCLUDE_MEMORY=0; shift ;;
     --no-task) INCLUDE_TASK=0; shift ;;
     --ml-context) PASSTHROUGH+=(--ml-context); shift ;;
@@ -115,7 +105,6 @@ while [ "$#" -gt 0 ]; do
     --dry-run) DRY_RUN=1; PASSTHROUGH+=(--dry-run); shift ;;
     --model|--fallback-model|--reasoning-effort)
       [ "$#" -ge 2 ] || fail "$1 requires a value"; PASSTHROUGH+=("$1" "$2"); shift 2 ;;
-    --no-model-fallback) PASSTHROUGH+=("$1"); shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       [ -z "$PROMPT" ] || fail "unknown argument: $1"

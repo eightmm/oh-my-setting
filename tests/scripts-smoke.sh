@@ -8507,7 +8507,6 @@ EOF
     --repo "$project" \
     --artifact-dir "$project/artifacts-pass" \
     --providers claude,antigravity \
-    --model-class deep \
     --no-diff \
     --gate \
     --prompt "Gate verify backstop" >"$project/out-pass" 2>&1 || rc=$?
@@ -12333,9 +12332,9 @@ test_agent_consult_rejects_conflicting_targets() {
   if "$ROOT/scripts/agent-consult.sh" --repo "$project" >/dev/null 2>&1; then
     fail "a consult without a question must be refused"
   fi
-  out="$("$ROOT/scripts/agent-consult.sh" --repo "$project" --model-class huge 2>&1 >/dev/null)" || true
-  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
-    fail "deprecated --model-class must warn"
+  if "$ROOT/scripts/agent-consult.sh" --repo "$project" --model-class huge "x" >/dev/null 2>&1; then
+    fail "the removed --model-class flag must be refused"
+  fi
 }
 
 test_repo_state_and_gc_cover_threads() {
@@ -13085,11 +13084,11 @@ EOF
   if "$ROOT/scripts/agent-consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
     fail "a target that is neither PROVIDER nor PROVIDER:model=NAME must be refused"
   fi
-  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  if HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/agent-consult.sh" --repo "$project" \
-    --tiers deep "x" --quiet 2>&1)" || fail "deprecated --tiers must still run: $out"
-  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
-    fail "deprecated --tiers must warn: $out"
+    --tiers deep "x" --quiet >/dev/null 2>&1; then
+    fail "the removed --tiers flag must be refused"
+  fi
 }
 
 test_worker_tier_follows_the_role_before_the_phase() {
@@ -13274,11 +13273,11 @@ test_peer_ask_panel_warns_on_one_family_and_rejects_repeats() {
     --prompt x >/dev/null 2>&1; then
     fail "an exactly repeated target must be refused"
   fi
-  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  if HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex --tiers huge \
-    --prompt x 2>&1)" || fail "deprecated --tiers must still run: $out"
-  printf '%s' "$out" | grep -Fq 'warning: model tiers were removed' ||
-    fail "deprecated --tiers must warn: $out"
+    --prompt x >/dev/null 2>&1; then
+    fail "the removed --tiers flag must be refused"
+  fi
 }
 
 test_peer_review_panel_reports_families() {

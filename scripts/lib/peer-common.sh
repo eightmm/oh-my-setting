@@ -20,24 +20,6 @@
 # shellcheck source=provider-registry.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/provider-registry.sh"
 
-# Removed in 0.4: fail explicitly so legacy CI does not silently run with
-# different timeout or termination behavior.
-if [ -n "${OMS_MULTI_AGENT_TIMEOUT+x}" ]; then
-  echo "error: OMS_MULTI_AGENT_TIMEOUT was removed; use OMS_PEER_TIMEOUT" >&2
-  exit 2
-fi
-if [ -n "${OMS_MULTI_AGENT_VERIFY_TIMEOUT+x}" ]; then
-  echo "error: OMS_MULTI_AGENT_VERIFY_TIMEOUT was removed; use OMS_PEER_VERIFY_TIMEOUT" >&2
-  exit 2
-fi
-if [ -n "${OMS_MULTI_AGENT_KILL_AFTER+x}" ]; then
-  echo "error: OMS_MULTI_AGENT_KILL_AFTER was removed; use OMS_PEER_KILL_AFTER" >&2
-  exit 2
-fi
-if [ -n "${OMS_MULTI_AGENT_PRINT_TIMEOUT+x}" ]; then
-  echo "error: OMS_MULTI_AGENT_PRINT_TIMEOUT was removed; use OMS_PEER_PRINT_TIMEOUT" >&2
-  exit 2
-fi
 
 MA_SAFE_PATHS=(
   .
@@ -1285,16 +1267,11 @@ ma_target_label() {
   printf '%s\n' "$(ma_target_provider "$1")${extra:+-$extra}"
 }
 
-# Historically expanded a provider list across tiers; with tiers gone the list
-# passes through unchanged (a panel of one CLI as several models is written as
-# explicit PROVIDER:model=NAME targets). The call budget still applies.
+# Validates the provider target list (a panel of one CLI as several models is
+# written as explicit PROVIDER:model=NAME targets) and enforces the call budget.
 ma_expand_targets() {
   local providers="$1"
-  local tiers="$2"
 
-  if [ -n "$tiers" ]; then
-    echo 'warning: model tiers were removed; name models with PROVIDER:model=NAME targets' >&2
-  fi
   ma_target_budget_check "$providers" || return 2
   printf '%s\n' "$providers"
 }
@@ -1312,7 +1289,7 @@ ma_target_budget_check() {
   case "$budget" in *[!0-9]*|"") budget=12 ;; esac
   if [ "$total" -gt "$budget" ]; then
     echo "error: this council would make $total provider calls ($count targets x $((rounds + 1)) rounds)" >&2
-    echo "error: narrow --providers/--tiers, or raise OMS_COUNCIL_MAX_CALLS (currently $budget)" >&2
+    echo "error: narrow --providers, or raise OMS_COUNCIL_MAX_CALLS (currently $budget)" >&2
     return 2
   fi
 }

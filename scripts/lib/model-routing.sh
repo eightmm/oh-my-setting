@@ -97,9 +97,6 @@ oms_model_prepare() {
   local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
 
   [ "$provider" != agy ] || provider=antigravity
-  if [ -n "${OMS_MODEL_CLASS_REQUEST:-}" ] || [ -n "${OMS_MODEL_ROLE_CLASS:-}" ]; then
-    echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
-  fi
   oms_model_validate_name "$explicit" || return $?
   oms_model_validate_name "$explicit_fallback" || return $?
   oms_reasoning_validate "$effort_requested" || return $?

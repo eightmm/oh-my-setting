@@ -16,7 +16,6 @@ REPO="$PWD"
 PROMPT=""
 THREAD_ID=""
 PROVIDERS="codex,claude,antigravity"
-TIERS=""
 ARTIFACT_DIR=""
 INCLUDE_STATUS=0
 INCLUDE_DIFF=0
@@ -26,10 +25,8 @@ INCLUDE_ML_CONTEXT=0
 DEBATE=0
 HYPOTHESIS_PRESET=0
 EXPORT_ONLY=0
-MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
-NO_MODEL_FALLBACK=0
 REASONING_EFFORT=auto
 DRY_RUN="${OH_MY_SETTING_ASK_DRY_RUN:-0}"
 
@@ -52,14 +49,11 @@ Options:
   --repo PATH          Git repo for optional context. Default: current directory.
   --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
                        An entry may carry a model (codex:model=NAME) to pin it.
-  --tiers a,b          Deprecated and ignored; use PROVIDER:model=NAME entries.
                        Answers from one provider share a model family, which
                        the reported family count makes explicit.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/ask.
-  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   Explicit fallback; requires exactly one provider.
-  --no-model-fallback  Disable implicit class fallback.
   --reasoning-effort E auto, low, medium, or high.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.
@@ -95,7 +89,7 @@ validate_provider_list() {
   local expanded
   # Tiers first, then normalize: expansion produces the targets, normalization
   # canonicalizes the agy alias and rejects the same target twice.
-  expanded="$(ma_expand_targets "$PROVIDERS" "$TIERS")" || exit $?
+  expanded="$(ma_expand_targets "$PROVIDERS")" || exit $?
   normalized="$(ma_normalize_provider_list "$expanded")" || exit $?
   PROVIDERS="$normalized"
 }
@@ -160,11 +154,6 @@ while [ "$#" -gt 0 ]; do
       REPO="$2"
       shift 2
       ;;
-    --tiers)
-      [ "$#" -ge 2 ] || fail "--tiers requires a comma-separated list"
-      TIERS="$2"
-      shift 2
-      ;;
     --providers)
       [ "$#" -ge 2 ] || fail "--providers requires list"
       PROVIDERS="$2"
@@ -175,10 +164,6 @@ while [ "$#" -gt 0 ]; do
       ARTIFACT_DIR="$2"
       shift 2
       ;;
-    --model-class)
-      [ "$#" -ge 2 ] || fail "--model-class requires value"
-      MODEL_CLASS="$2"; shift 2
-      ;;
     --model)
       [ "$#" -ge 2 ] || fail "--model requires value"
       MODEL="$2"; shift 2
@@ -186,9 +171,6 @@ while [ "$#" -gt 0 ]; do
     --fallback-model)
       [ "$#" -ge 2 ] || fail "--fallback-model requires value"
       FALLBACK_MODEL="$2"; shift 2
-      ;;
-    --no-model-fallback)
-      NO_MODEL_FALLBACK=1; shift
       ;;
     --reasoning-effort)
       [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
@@ -277,7 +259,6 @@ if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 validate_provider_list
-[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -294,9 +275,8 @@ if [ "$REASONING_EFFORT" != auto ]; then
     oms_reasoning_provider_validate "$ask_provider" "$REASONING_EFFORT" || exit $?
   done
 fi
-unset OMS_MODEL_CLASS_REQUEST
 export OMS_MODEL_EXPLICIT="$MODEL"
-export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 if [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
   export MA_MODEL_OPERATION=decision

@@ -45,11 +45,9 @@ Options:
   --repo PATH          Repo for context and artifacts. Default: PWD.
   --strategy NAME      Strategy/role profile (default: decision-advisor).
                        Alias: --role NAME.
-  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact advisor model.
   --fallback-model M   Explicit one-shot capacity fallback model.
   --reasoning-effort E Explicit effort; default is high, clamped to the model scale.
-  --no-model-fallback  Deprecated compatibility no-op.
   --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
   --memory             Attach shared harness memory.
@@ -116,14 +114,10 @@ while [ "$#" -gt 0 ]; do
       PASSTHROUGH+=("$1" "$2")
       shift 2
       ;;
-    --model-class|--model|--fallback-model|--reasoning-effort)
+    --model|--fallback-model|--reasoning-effort)
       [ "$#" -ge 2 ] || fail "$1 requires value"
       PASSTHROUGH+=("$1" "$2")
       shift 2
-      ;;
-    --no-model-fallback)
-      PASSTHROUGH+=("$1")
-      shift
       ;;
     -h|--help)
       usage

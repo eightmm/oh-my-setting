@@ -19,7 +19,6 @@ PROMPT=""
 PROVIDERS="codex,claude,antigravity"
 PROVIDERS_EXPLICIT=0
 WRITER=""
-TIERS=""
 ARTIFACT_DIR=""
 NO_DIFF=0
 BASE_REF=""
@@ -33,10 +32,8 @@ EXPORT_ONLY=0
 GATE=0
 VERIFY_CMD=""
 NO_VERIFY=0
-MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
-NO_MODEL_FALLBACK=0
 REASONING_EFFORT=auto
 DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 
@@ -73,12 +70,9 @@ Options:
                        is correlated judgment, not independence); an explicit
                        --providers list including it is honored with a
                        warning.
-  --tiers a,b          Deprecated and ignored; use PROVIDER:model=NAME entries.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
-  --model-class CLASS  Deprecated and ignored; use --model instead.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   Explicit fallback; requires exactly one provider.
-  --no-model-fallback  Disable implicit class fallback.
   --reasoning-effort E auto, low, medium, or high.
   --no-diff            Do not attach git diff/status context.
   --memory             Attach shared harness memory.
@@ -255,7 +249,7 @@ validate_provider_list() {
   local -a entries
   # Tiers first, then normalize: expansion produces the targets, normalization
   # canonicalizes the agy alias and rejects the same target twice.
-  expanded="$(ma_expand_targets "$PROVIDERS" "$TIERS")" || exit $?
+  expanded="$(ma_expand_targets "$PROVIDERS")" || exit $?
   normalized="$(ma_normalize_provider_list "$expanded")" || exit $?
   PROVIDERS="$normalized"
   # The patch author's family re-judging its own patch is correlated
@@ -350,11 +344,6 @@ while [ "$#" -gt 0 ]; do
       BASE_REF="$2"
       shift 2
       ;;
-    --tiers)
-      [ "$#" -ge 2 ] || fail "--tiers requires a comma-separated list"
-      TIERS="$2"
-      shift 2
-      ;;
     --providers)
       [ "$#" -ge 2 ] || fail "--providers requires list"
       PROVIDERS="$2"
@@ -371,10 +360,6 @@ while [ "$#" -gt 0 ]; do
       ARTIFACT_DIR="$2"
       shift 2
       ;;
-    --model-class)
-      [ "$#" -ge 2 ] || fail "--model-class requires value"
-      MODEL_CLASS="$2"; shift 2
-      ;;
     --model)
       [ "$#" -ge 2 ] || fail "--model requires value"
       MODEL="$2"; shift 2
@@ -382,9 +367,6 @@ while [ "$#" -gt 0 ]; do
     --fallback-model)
       [ "$#" -ge 2 ] || fail "--fallback-model requires value"
       FALLBACK_MODEL="$2"; shift 2
-      ;;
-    --no-model-fallback)
-      NO_MODEL_FALLBACK=1; shift
       ;;
     --reasoning-effort)
       [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
@@ -490,7 +472,6 @@ if [ -z "$PROMPT" ] && [ "$ML_PRESET" -eq 1 ]; then
 fi
 [ -n "$PROMPT" ] || fail "--prompt is required"
 validate_provider_list
-[ -z "$MODEL_CLASS" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -511,9 +492,8 @@ if [ "$REASONING_EFFORT" != auto ] && {
    }; then
   fail "explicit reasoning effort is unavailable for Antigravity; select a Low/Medium/High model variant"
 fi
-unset OMS_MODEL_CLASS_REQUEST
 export OMS_MODEL_EXPLICIT="$MODEL"
-export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 if [ "$GATE" -eq 1 ]; then
   export MA_MODEL_OPERATION=review-gate
@@ -713,7 +693,7 @@ if [ "$GATE" -eq 1 ]; then
         # otherwise clean gate depend on which review tier ran immediately
         # before it.
         unset OMS_MODEL_OPERATION OMS_MODEL_OPERATION_REQUEST
-        unset OMS_MODEL_CLASS_REQUEST OMS_MODEL_EXPLICIT
+        unset OMS_MODEL_EXPLICIT
         unset OMS_MODEL_FALLBACK_EXPLICIT OMS_MODEL_NO_FALLBACK
         unset OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
         run_verify_with_timeout bash -c "$VERIFY_CMD"

@@ -29,10 +29,8 @@ VERIFY=""
 SOUL_FILE=""
 REASON=""
 MODE="worktree-write"
-MODEL_CLASS=""
 MODEL=""
 FALLBACK_MODEL=""
-NO_MODEL_FALLBACK=0
 REASONING_EFFORT=auto
 GC_APPLY=0
 
@@ -63,10 +61,8 @@ Options:
   --forbidden LIST   Comma/space-separated forbidden project paths.
   --verify CMD       Frozen verification command.
   --soul-file FILE   Model-generated behavioral specialization for create.
-  --model-class C    auto, fast, balanced, or deep; frozen at create time.
   --model MODEL      Exact provider model.
   --fallback-model M Explicit one-shot capacity fallback model.
-  --no-model-fallback Disable implicit class fallback.
   --reasoning-effort E auto, low, medium, or high; frozen at create time.
   --reason TEXT      Failure reason for fail.
   --days N           Retention age for gc. Default: 30.
@@ -105,10 +101,8 @@ while [ "$#" -gt 0 ]; do
       esac
       shift 2
       ;;
-    --model-class) [ "$#" -ge 2 ] || fail "--model-class requires value"; MODEL_CLASS="$2"; shift 2 ;;
     --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
-    --no-model-fallback) NO_MODEL_FALLBACK=1; shift ;;
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"; REASONING_EFFORT="$2"; shift 2 ;;
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
     --days) [ "$#" -ge 2 ] || fail "--days requires integer"; DAYS="$2"; shift 2 ;;
@@ -119,7 +113,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
-[ -z "${MODEL_CLASS:-}" ] || echo 'warning: model tiers were removed; name a model with --model or let the provider default run' >&2
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -221,9 +214,8 @@ PY
   fi
   role_file="$($ROOT/scripts/agent-role.sh --repo "$REPO" --name "$STRATEGY" resolve)" ||
     fail "unknown strategy: $STRATEGY"
-  unset OMS_MODEL_CLASS_REQUEST
   export OMS_MODEL_EXPLICIT="$MODEL"
-  export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL" OMS_MODEL_NO_FALLBACK="$NO_MODEL_FALLBACK"
+  export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
   export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
   export OMS_MODEL_ROLE="$STRATEGY" OMS_MODEL_OPERATION=delegate
   oms_model_prepare "$PROVIDER" || exit $?
