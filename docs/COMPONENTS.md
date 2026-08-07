@@ -268,7 +268,14 @@ release go/no-go; routine completion does not require it. Composes an
 adversarial VERDICT/RISKS/MISSING/NEXT prompt, attaches unresolved fail-ledger
 rows (`--no-failures` to skip), picks the first available provider that is not
 the caller (`OMS_ADVISOR_PROVIDER` or `--to` to pin), and sends it through
-`agent-call.sh` (read-only, scrubbed, artifacts under `.oms/artifacts/advise`)
+`agent-call.sh` (read-only, scrubbed, artifacts under `.oms/artifacts/advise`).
+`--session` additionally attaches a mechanical session-handoff digest of the
+calling session, so the advisor reads the history behind the decision the way
+Claude Code's native advisor does — from any CLI. The newest cwd-matching
+session is assumed; `--session-id` pins one when two live sessions share a
+worktree, `--allow-sensitive` overrides session-handoff's sensitivity refusal
+(agent-call's outbound scrub still applies and can block the call), and any
+capture miss fails the call rather than thinning the prompt
 
 **Cross-agent threads (`agent-thread.sh`, `oms thread`)** — Durable multi-turn
 conversations in `.oms/threads/<id>.jsonl`: any provider can read and extend

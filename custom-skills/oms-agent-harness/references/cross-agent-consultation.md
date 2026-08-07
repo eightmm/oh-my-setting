@@ -28,6 +28,25 @@ Use `--debate 1` only when answers materially disagree. If policy forbids direct
 provider calls, use `--export-only` and import the answer with
 `oms artifact-index import`.
 
+## Advisor that reads your history
+
+`oms advise` is the decision-point advisor (VERDICT/RISKS/MISSING/NEXT). Add
+`--session` to attach a mechanical digest of the current session, so the
+advisor judges the decision against what actually happened instead of only
+your summary of it — the same read Claude Code's native advisor gets, from
+any CLI:
+
+```bash
+oms advise --session --prompt "Decision: … Evidence: … Planned next: …"
+```
+
+It digests the newest session matching the repo; when two live sessions share
+one worktree, pin yours with `--session-id ID`. A sensitive-looking digest is
+refused by default because it crosses to another provider; `--allow-sensitive`
+overrides that refusal, though agent-call's outbound scrub still applies and
+can block the call. Any capture miss fails the call instead of silently
+thinning the prompt.
+
 ## Consult during work, not only at gates
 
 Consult when another model's independent view changes what you do next:

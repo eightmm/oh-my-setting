@@ -145,6 +145,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   used.
 
 ### Added
+- `oms advise --session` gives every CLI the read Claude Code's native
+  advisor gets for free: a mechanical session-handoff digest of the calling
+  session rides into the advisor prompt after the decision context, so the
+  advisor judges the decision against what actually happened instead of only
+  the caller's summary of itself. The newest cwd-matching session is assumed;
+  `--session-id` pins one when two live sessions share a worktree (the
+  drift this repo demonstrates daily). A capture miss fails the call rather
+  than thinning the prompt, and sensitivity stays double-gated:
+  `--allow-sensitive` lifts only session-handoff's refusal while agent-call's
+  outbound scrub still blocks a secret-bearing prompt.
 - `oms doctor --surfaces` proves the wiring instead of trusting it. The
   installer's hook registrations now live in one HOOK_SURFACES manifest with
   a HOOKS_SCHEMA stamp (`--print-expected` emits it as JSON; the receipt
