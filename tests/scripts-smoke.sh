@@ -5125,28 +5125,14 @@ test_v04_removes_deprecated_peer_shims() {
   done
 }
 
-test_peer_legacy_env_vars_fail_with_migration_error() {
-  local legacy
-  local replacement
+test_peer_legacy_env_vars_are_simply_unknown() {
   local out
-  local rc
 
-  for pair in \
-    'OMS_MULTI_AGENT_TIMEOUT OMS_PEER_TIMEOUT' \
-    'OMS_MULTI_AGENT_VERIFY_TIMEOUT OMS_PEER_VERIFY_TIMEOUT' \
-    'OMS_MULTI_AGENT_KILL_AFTER OMS_PEER_KILL_AFTER' \
-    'OMS_MULTI_AGENT_PRINT_TIMEOUT OMS_PEER_PRINT_TIMEOUT'; do
-    legacy="${pair%% *}"
-    replacement="${pair#* }"
-    rc=0
-    out="$(env "$legacy=legacy" bash -c ". '$ROOT/scripts/lib/peer-common.sh'" 2>&1)" || rc=$?
-    [ "$rc" = 2 ] || fail "$legacy should fail with exit 2, got $rc"
-    printf '%s' "$out" | grep -Fq "use $replacement" ||
-      fail "$legacy migration error should name $replacement: $out"
-  done
-
-  out="$(OMS_PEER_TIMEOUT=2m bash -c \
-    ". '$ROOT/scripts/lib/peer-common.sh'; printf '%s' \"\$OMS_PEER_TIMEOUT\"")"
+  # The 0.4 migration tombstones are gone: a legacy OMS_MULTI_AGENT_* variable
+  # is ignored like any other unknown environment, and the live variable works.
+  out="$(OMS_MULTI_AGENT_TIMEOUT=legacy OMS_PEER_TIMEOUT=2m bash -c \
+    ". '$ROOT/scripts/lib/peer-common.sh'; printf '%s' \"\$OMS_PEER_TIMEOUT\"")" ||
+    fail "peer-common must load with a legacy env var present"
   [ "$out" = "2m" ] || fail "OMS_PEER_TIMEOUT should remain supported, got: $out"
 }
 

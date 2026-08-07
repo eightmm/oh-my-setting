@@ -8,9 +8,9 @@ oms agent-run --to codex --repo . --mode write --prompt "Implement the bounded f
 ```
 
 The harness leaves model choice to the provider unless the caller passes an
-explicit `--model`. Use `oms models` to inspect cached provider catalogs before
-class, `--model` for an exact model, `--fallback-model` for an explicit backup,
-or `--no-model-fallback` to disable fallback. Only a recognized capacity error
+explicit `--model`. Use `oms models` to inspect cached provider catalogs,
+`--model` for an exact model, and `--fallback-model` for an explicit backup.
+Only a recognized capacity error
 may retry, at most once; a write attempt that changed its worktree is never
 retried, including changes to ignored files. Antigravity read fallback receives
 a freshly recreated isolation worktree. Provider/class mappings can be overridden with variables such as

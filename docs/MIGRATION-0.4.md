@@ -45,7 +45,7 @@ and `oms update --rollback` to return to the recorded prior success.
 | `multi-agent-ask.sh` | `oms peer-ask` |
 | `multi-agent-review.sh` | `oms peer-review` |
 | `multi-agent-delegate.sh` | `oms peer-delegate` |
-| `OMS_MULTI_AGENT_*` | the matching `OMS_PEER_*` variable |
+| `OMS_MULTI_AGENT_*` | the matching `OMS_PEER_*` variable (legacy names are now ignored, not errors) |
 | `workflows/spec-first.md` | `spec-interview` skill |
 | `workflows/slurm-hpc.md` | `project-slurm-AGENTS.md` plus `oms generate-slurm-skill` |
 | `workflows/new-server.md` | chat-driven installer and project bootstrap |
