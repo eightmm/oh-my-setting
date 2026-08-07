@@ -57,14 +57,20 @@ valid_name() {
 
 # Spec conformance for one skill dir: frontmatter name matches the directory,
 # a description substantial enough to route on, and the 500-line body budget.
+# Strict mode (add-time only) additionally enforces the Agent Skills portable
+# shape — name/description/compatibility budgets and no top-level fields
+# outside the spec set. Read paths stay lenient so an upgraded gate never
+# unlinks skills an older gate accepted.
 validate_skill_dir() {
   local dir="$1"
-  OMS_SF_DIR="$dir" python3 - <<'PY'
+  OMS_SF_DIR="$dir" OMS_SF_STRICT="${2:-0}" python3 - <<'PY'
 import os
 import re
+import shlex
 import sys
 
 dir_path = os.environ["OMS_SF_DIR"]
+strict = os.environ.get("OMS_SF_STRICT") == "1"
 path = os.path.join(dir_path, "SKILL.md")
 if not os.path.isfile(path):
     print("missing SKILL.md")
@@ -84,10 +90,17 @@ except ValueError:
     print("unterminated frontmatter")
     sys.exit(1)
 meta = {}
+metadata_map = {}
+in_metadata = False
 for line in lines[1:end]:
-    match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
-    if match:
-        meta[match.group(1)] = match.group(2).strip()
+    top = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+    if top:
+        meta[top.group(1)] = top.group(2).strip()
+        in_metadata = top.group(1) == "metadata"
+        continue
+    nested = re.match(r"^[ \t]+([A-Za-z0-9_-]+):\s*(.*)$", line)
+    if in_metadata and nested:
+        metadata_map[nested.group(1)] = nested.group(2).strip()
 name = meta.get("name", "")
 directory_name = os.path.basename(dir_path)
 if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", directory_name):
@@ -103,24 +116,48 @@ if len(lines) > 500:
     print("over the 500-line body budget (%d)" % len(lines))
     sys.exit(1)
 # Optional verification contract: a repo command whose success is the skill's
-# evidence. Syntax-only here — the harness records and reminds, it never
-# executes standing context on its own.
-if "verify" in meta:
-    verify = meta["verify"]
+# evidence. Its portable home is metadata.verify; top-level verify: stays
+# readable for skills stored before that convention. Syntax-only here — the
+# harness records and reminds, it never executes standing context on its own.
+for where, declared in (("metadata verify", metadata_map), ("verify", meta)):
+    if "verify" not in declared:
+        continue
+    verify = declared["verify"]
     if not verify:
-        print("verify: declared but empty")
+        print("%s: declared but empty" % where)
         sys.exit(1)
-    import shlex
     try:
         if not shlex.split(verify):
             raise ValueError
     except ValueError:
-        print("verify: is not a parseable command: %r" % verify)
+        print("%s: is not a parseable command: %r" % (where, verify))
+        sys.exit(1)
+if strict:
+    if len(name) > 64 or "--" in name:
+        print("name must be 1-64 chars with no consecutive hyphens")
+        sys.exit(1)
+    if len(meta.get("description", "")) > 1024:
+        print("description exceeds the 1024-character budget")
+        sys.exit(1)
+    if len(meta.get("compatibility", "")) > 500:
+        print("compatibility exceeds the 500-character budget")
+        sys.exit(1)
+    known = {"name", "description", "license", "compatibility", "metadata",
+             "allowed-tools"}
+    for key in meta:
+        if key in known:
+            continue
+        if key == "verify":
+            print("verify belongs under the metadata: map (portable extension slot)")
+        else:
+            print("non-portable frontmatter field %r — put extensions under metadata:" % key)
         sys.exit(1)
 PY
 }
 
 # The declared verify contract of one skill dir, empty when none.
+# metadata.verify is the portable form and wins; legacy top-level verify:
+# keeps working for skills stored before the metadata convention.
 skill_verify_contract() {
   local dir="$1"
   OMS_SF_DIR="$dir" python3 - <<'PY' 2>/dev/null || true
@@ -136,11 +173,21 @@ try:
     end = lines.index("---", 1)
 except ValueError:
     raise SystemExit
+legacy = ""
+in_metadata = False
 for line in lines[1:end]:
-    match = re.match(r"^verify:\s*(.+)$", line)
-    if match:
-        print(match.group(1).strip())
-        break
+    top = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+    if top:
+        in_metadata = top.group(1) == "metadata"
+        if top.group(1) == "verify" and top.group(2).strip():
+            legacy = top.group(2).strip()
+        continue
+    nested = re.match(r"^[ \t]+verify:\s*(.+)$", line)
+    if in_metadata and nested:
+        print(nested.group(1).strip())
+        raise SystemExit
+if legacy:
+    print(legacy)
 PY
 }
 
@@ -248,7 +295,7 @@ cmd_add() {
     cat > "$dir/SKILL.md"
   fi
   local reason
-  if ! reason="$(validate_skill_dir "$dir")"; then
+  if ! reason="$(validate_skill_dir "$dir" 1)"; then
     rm -rf "$dir"
     fail "rejected $name: $reason"
   fi
@@ -281,6 +328,9 @@ cmd_validate() {
       continue
     fi
     echo "ok: $name"
+    if sed -n '2,/^---$/p' "$skill/SKILL.md" | grep -q '^verify:'; then
+      echo "note: $name: top-level verify is non-portable; declare it under metadata:"
+    fi
   done
   [ -n "$target" ] && [ "$checked" -eq 0 ] && fail "no such skill: $target"
   return "$rc"

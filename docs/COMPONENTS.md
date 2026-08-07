@@ -786,11 +786,17 @@ Skills checks (name matches directory, description substantial enough to
 route on, 500-line body budget) and the outbound scrubber, since a project
 skill is standing context for every later session in that repo; links are
 hidden from git through `project-private` and withdrawn when a skill goes
-invalid. `validate`/`list`/`show`/`remove`/`status` make the set reviewable,
-and the doctor reports per-repo health. A skill may declare a `verify:`
-frontmatter command — the evidence it expects; validation checks the syntax
-only, `status` counts declared contracts, `contracts` lists them, and
-`agent-task close` reminds about each one rather than executing it. The ML template installs
+invalid. `add` alone additionally holds the Agent Skills portable shape —
+spec name and description budgets, top-level frontmatter restricted to the
+spec field set with extensions under the `metadata:` map — so every newly
+forged skill is exportable as-is, while read paths stay lenient and never
+unlink what an older gate accepted. `validate`/`list`/`show`/`remove`/
+`status` make the set reviewable, and the doctor reports per-repo health. A
+skill may declare a verification contract — the evidence it expects — as
+`metadata.verify` (legacy top-level `verify:` stays readable, and `validate`
+notes the portable home); validation checks the syntax only, `status` counts
+declared contracts, `contracts` lists them, and `agent-task close` reminds
+about each one rather than executing it. The ML template installs
 `ml-experiment` (experiment-board duplicate check, pre-registered hypothesis
 runs, run-ledger gate, reproducibility capsule) and `dataset-safety`
 (manifest registration by declared group key, leakage and drift checks

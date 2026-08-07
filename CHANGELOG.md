@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Changed
+- Skill creation now enforces the Agent Skills portable shape at the gate.
+  `skill-forge add` rejects frontmatter outside the spec field set (pointing
+  extensions at the `metadata:` map), over-budget names (64 chars, no
+  consecutive hyphens) and descriptions (1024 chars); the verify contract's
+  portable home is `metadata.verify`, with legacy top-level `verify:` still
+  honored on every read path so an upgrade never unlinks stored skills.
+  `validate-skills.py` holds the repo catalog to the same shape
+  unconditionally, and the machine-conditional skills (`oms-slurm`,
+  `oms-gpu-workstation`) declare their environment needs in the spec's own
+  `compatibility:` field so the gating intent travels with the skill.
 - Global harness skills are namespaced `oms-*` (agent-harness →
   oms-agent-harness, oh-my-setting-ops → oms-ops, spec-interview, trace,
   trust-boundary, gpu-workstation, slurm likewise). Skills install into

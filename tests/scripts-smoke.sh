@@ -14716,11 +14716,14 @@ test_skill_forge_verify_contract_lifecycle() {
   local out
 
   make_committed_repo "$project"
+  # The portable contract form: metadata.verify, accepted by the strict add
+  # gate and carried through status, contracts, and the close reminder.
   cat > "$project/skill.md" <<'EOF'
 ---
 name: repo-build-check
 description: Build and test discipline for this repository, including the canonical check command and its expected green output.
-verify: bash scripts/check.sh
+metadata:
+  verify: bash scripts/check.sh
 ---
 
 # Repo build check
@@ -14729,7 +14732,7 @@ Run the canonical gate before claiming done.
 EOF
   "$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name repo-build-check --file "$project/skill.md" >/dev/null 2>&1 ||
-    fail "adding a skill with a verify contract should succeed"
+    fail "adding a skill with a metadata.verify contract should succeed"
 
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status)"
   printf '%s\n' "$out" | grep -q '1 with a verify contract' ||
@@ -14746,7 +14749,29 @@ EOF
     grep -q "declares verify contract: bash scripts/check.sh" ||
     fail "close should remind about the verify contract: $out"
 
-  # An empty contract is a validation failure, not a silent no-op.
+  # A pre-metadata skill with a top-level verify: (strict add now rejects
+  # the form, so plant it directly) stays valid, keeps its contract, and
+  # validate points at the portable home instead of unlinking it.
+  mkdir -p "$project/.oms/skills/legacy-contract"
+  cat > "$project/.oms/skills/legacy-contract/SKILL.md" <<'EOF'
+---
+name: legacy-contract
+description: A skill stored before the metadata convention whose top-level verify contract must stay honored.
+verify: make lint
+---
+
+body
+EOF
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate legacy-contract 2>&1)" ||
+    fail "a legacy top-level verify contract must stay valid: $out"
+  printf '%s\n' "$out" | grep -q 'top-level verify is non-portable' ||
+    fail "validate should advise moving the legacy contract: $out"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
+  printf '%s\n' "$out" | grep -q "legacy-contract	make lint" ||
+    fail "the legacy contract should still be listed: $out"
+
+  # An empty contract is a validation failure in either home, never a
+  # silent no-op.
   mkdir -p "$project/.oms/skills/bad-contract"
   cat > "$project/.oms/skills/bad-contract/SKILL.md" <<'EOF'
 ---
@@ -14761,6 +14786,102 @@ EOF
     fail "an empty verify contract must fail validation: $out"
   printf '%s\n' "$out" | grep -q 'verify: declared but empty' ||
     fail "empty-contract failure not explained: $out"
+  mkdir -p "$project/.oms/skills/bad-meta-contract"
+  cat > "$project/.oms/skills/bad-meta-contract/SKILL.md" <<'EOF'
+---
+name: bad-meta-contract
+description: A skill whose metadata verification contract is empty and must therefore fail validation.
+metadata:
+  verify:
+---
+
+body
+EOF
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate bad-meta-contract 2>&1)" &&
+    fail "an empty metadata.verify contract must fail validation: $out"
+  printf '%s\n' "$out" | grep -q 'metadata verify: declared but empty' ||
+    fail "empty metadata-contract failure not explained: $out"
+}
+
+test_skill_forge_add_enforces_portable_shape() {
+  local project="$TMP/sf-portable"
+  local out
+
+  make_committed_repo "$project"
+  # The strict gate is add-time only: frontmatter outside the Agent Skills
+  # field set is rejected with a pointer at the metadata: extension slot.
+  cat > "$project/skill.md" <<'EOF'
+---
+name: extra-field
+description: A sufficiently long description that certainly passes the forty character routing floor.
+author: someone
+---
+
+body
+EOF
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
+    --name extra-field --file "$project/skill.md" 2>&1)" &&
+    fail "an unknown top-level frontmatter field must be rejected at add: $out"
+  printf '%s\n' "$out" | grep -q "non-portable frontmatter field 'author'" ||
+    fail "unknown-field rejection not explained: $out"
+
+  # A new top-level verify: is steered to metadata rather than stored.
+  cat > "$project/skill.md" <<'EOF'
+---
+name: new-legacy
+description: A sufficiently long description that certainly passes the forty character routing floor.
+verify: make test
+---
+
+body
+EOF
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
+    --name new-legacy --file "$project/skill.md" 2>&1)" &&
+    fail "a new top-level verify must be rejected at add: $out"
+  printf '%s\n' "$out" | grep -q 'verify belongs under the metadata: map' ||
+    fail "top-level verify rejection should point at metadata: $out"
+
+  # Spec name and description budgets hold at the gate.
+  cat > "$project/skill.md" <<'EOF'
+---
+name: bad--name
+description: A sufficiently long description that certainly passes the forty character routing floor.
+---
+
+body
+EOF
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
+    --name bad--name --file "$project/skill.md" 2>&1)" &&
+    fail "consecutive hyphens must be rejected at add: $out"
+  printf '%s\n' "$out" | grep -q 'no consecutive hyphens' ||
+    fail "name-shape rejection not explained: $out"
+  python3 -c "print('---\nname: long-desc\ndescription: ' + 'x'*1100 + '\n---\n\nbody')" \
+    > "$project/skill.md"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
+    --name long-desc --file "$project/skill.md" 2>&1)" &&
+    fail "an over-budget description must be rejected at add: $out"
+  printf '%s\n' "$out" | grep -q '1024-character budget' ||
+    fail "description-budget rejection not explained: $out"
+
+  # Read paths stay lenient: a stored skill an older gate accepted keeps
+  # validating and linking after the strict gate ships.
+  mkdir -p "$project/.oms/skills/stored-nonportable"
+  cat > "$project/.oms/skills/stored-nonportable/SKILL.md" <<'EOF'
+---
+name: stored-nonportable
+description: A skill stored by an older forge with a frontmatter field the strict add gate would now reject.
+author: someone
+---
+
+body
+EOF
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate stored-nonportable 2>&1)" ||
+    fail "a stored non-portable skill must stay valid on read paths: $out"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" link)"
+  printf '%s\n' "$out" | grep -q '1 skill(s) linked' ||
+    fail "a stored non-portable skill must keep linking: $out"
+  [ -L "$project/.claude/skills/stored-nonportable" ] ||
+    fail "stored non-portable skill link missing"
 }
 
 test_support_bundle_redacts_and_omits() {

@@ -114,6 +114,25 @@ def main() -> int:
             # The description is the only routing signal most runtimes read;
             # a stub can never be matched against a task.
             errors.append(f"description too thin for routing: {source}/SKILL.md")
+        elif len(description) > 1024:
+            errors.append(f"description over the 1024-character budget: {source}/SKILL.md")
+        # Agent Skills portable shape: spec name constraints, the
+        # compatibility budget, and no top-level fields outside the spec set
+        # (extensions belong under metadata:). The catalog is repo-owned, so
+        # unlike forge read paths this gate can be unconditionally strict.
+        if actual_name and (
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?", actual_name)
+            or "--" in actual_name
+        ):
+            errors.append(f"name outside spec constraints (1-64, kebab, no --): {source}/SKILL.md")
+        if len(metadata.get("compatibility", "")) > 500:
+            errors.append(f"compatibility over the 500-character budget: {source}/SKILL.md")
+        known_fields = {"name", "description", "license", "compatibility",
+                        "metadata", "allowed-tools"}
+        for field in sorted(set(metadata) - known_fields):
+            errors.append(
+                f"non-portable frontmatter field '{field}' (extensions belong under metadata:): {source}/SKILL.md"
+            )
         body_lines = len(content.splitlines())
         if body_lines > 500:
             # Spec budget: keep the always-loadable body small, push detail

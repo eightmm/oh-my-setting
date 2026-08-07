@@ -1,6 +1,7 @@
 ---
 name: oms-slurm
 description: Work on a Slurm cluster through the private cluster reference and the harness job tools instead of re-probing the cluster every time. Use for sbatch/srun submissions, queue or partition questions, node and GPU availability, job monitoring, and post-job log review. Skip on machines without Slurm.
+compatibility: Requires a Slurm cluster (sinfo on PATH) and an oh-my-setting install for the oms job tools.
 ---
 
 # Slurm

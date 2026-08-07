@@ -99,9 +99,11 @@ oms skill-forge remove flaky-itest
 ```
 
 The forge validates before storing: frontmatter `name` matching the
-directory, a description of at least 40 characters (that is what routing
-reads), a 500-line budget, and a sensitive-content scrub. An optional
-`verify:` frontmatter command declares the evidence the skill expects;
+directory, a description of 40-1024 characters (that is what routing
+reads), a 500-line budget, only Agent Skills frontmatter fields at top
+level (put extensions under the `metadata:` map), and a sensitive-content
+scrub. An optional verification contract declares the evidence the skill
+expects — declare it as `metadata:` then an indented `verify: <command>`;
 `agent-task close` reminds about it and never executes it.
 
 Scope: project-specific procedure only. Machine and cluster facts
