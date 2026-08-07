@@ -31,6 +31,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   used.
 
 ### Added
+- `oms artifact-index resolve-superseded` mechanically resolves failed
+  artifact rows whose exact patch bytes the same provider later admitted or
+  landed — the rows triage already annotates with `superseded-by` and an
+  exact resolve command a human had to run by hand. Strictly narrower than
+  the advisory annotation (byte identity + provider identity; sweeping by
+  failure class stays rejected), idempotent, `--dry-run` supported.
 - A split project identity can be merged. `oms journal identity` shows the
   pinned identity against what the current parser detects (a pin taken before
   SSH-remote normalization, or before a remote existed, splits one project

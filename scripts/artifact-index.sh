@@ -31,7 +31,7 @@ REASON=""
 
 usage() {
   cat <<'EOF'
-Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|validate|migrate|prune|import] [N]
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|validate|migrate|prune|import] [N]
 
 Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.
@@ -53,6 +53,14 @@ Commands:
                  delegations into review-fed and direct cohorts.
   resolve        Resolve the failed outcomes selected by --event-id, which may
                  be repeated to clear a triaged batch in one locked call.
+  resolve-superseded
+                 Resolve every unresolved failure whose exact patch bytes were
+                 later admitted or landed by the same provider — the mechanical
+                 half of the triage annotation, written for you. Deliberately
+                 narrower than the advisory `superseded-by` line: a winner from
+                 a different provider, and every failure the bytes do not
+                 answer (timeout, auth, missing binary), stays in the queue for
+                 a human. Idempotent; add --dry-run to list without writing.
   validate       Validate schema, lineage ids, paths, and references.
   migrate        Idempotently upgrade legacy rows and recover unique basenames.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
@@ -72,7 +80,8 @@ Options:
   --files        With prune, delete orphaned artifact/patch files.
   --stale        With prune, drop index rows referencing deleted files. Age is
                  not the question here, so this ignores --keep.
-  --dry-run      With prune, print row/file changes without changing them.
+  --dry-run      With prune, print row/file changes without changing them. With
+                 resolve-superseded, list the resolutions it would append.
   --review-uptake With telemetry, partition kind=delegate rows in the same
                  window into review-fed (a recorded source artifact, internal
                  or external) and direct cohorts, and report each cohort's
@@ -132,7 +141,7 @@ while [ "$#" -gt 0 ]; do
       AS_JSON=1
       shift
       ;;
-    list|latest|latest-run|failures|unresolved|telemetry|resolve|validate|migrate|prune)
+    list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|validate|migrate|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
@@ -158,6 +167,11 @@ fi
 if { [ "$ACTION" = "validate" ] || [ "$ACTION" = "migrate" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
   fail "unknown argument: $LIMIT"
 fi
+# The sweep answers every superseded row in the index, so a window would only
+# hide work it already decided is mechanical.
+if [ "$ACTION" = "resolve-superseded" ] && [ "$LIMIT_SET" -eq 1 ]; then
+  fail "unknown argument: $LIMIT"
+fi
 if [ "$ACTION" = "resolve" ]; then
   [ "$TARGET_EVENT_COUNT" -gt 0 ] || fail "resolve requires --event-id"
 else
@@ -174,8 +188,8 @@ fi
 if [ "$PRUNE_STALE" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--stale is only valid with prune"
 fi
-if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ]; then
-  fail "--dry-run is only valid with prune"
+if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ] && [ "$ACTION" != "resolve-superseded" ]; then
+  fail "--dry-run is only valid with prune or resolve-superseded"
 fi
 if [ "$REVIEW_UPTAKE" -eq 1 ] && [ "$ACTION" != "telemetry" ]; then
   fail "--review-uptake is only valid with telemetry"
@@ -209,6 +223,17 @@ artifact_index_telemetry() {
 if [ ! -s "$INDEX_FILE" ]; then
   if [ "$ACTION" = "telemetry" ]; then
     artifact_index_telemetry
+    exit 0
+  fi
+  # Automatic sweeps run wherever the harness runs, including repos that have
+  # produced no artifact yet: nothing recorded is nothing superseded, which is
+  # a no-op rather than the error a hand-typed query deserves.
+  if [ "$ACTION" = "resolve-superseded" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "artifact-index: 0 superseded failure(s) would be resolved (dry run)"
+    else
+      echo "artifact-index: 0 superseded failure(s) resolved"
+    fi
     exit 0
   fi
   # A machine consumer wants an empty view, not an error, when nothing has run
@@ -771,11 +796,19 @@ EOF
   exit 0
 fi
 
-python3 - "$INDEX_FILE" "$ACTION" "$LIMIT" "$AS_JSON" <<'EOF'
-import json, os, re, sys
+# resolve-superseded rides the same block as the read views on purpose: the
+# supersession join it writes from has to be the one triage prints, and a second
+# copy of that join would be free to drift away from it. Only this action takes
+# the index lock, because only this action appends.
+artifact_index_view() {
+  OMS_ARTIFACT_PROVIDER="${OMS_AGENT:-unknown}" \
+    python3 - "$INDEX_FILE" "$ACTION" "$LIMIT" "$AS_JSON" \
+      "$ROOT_LIB/artifact-index-retention.py" "$DRY_RUN" <<'EOF'
+import datetime, json, os, re, runpy, shutil, sys, tempfile, uuid
 
 path, action, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 as_json = sys.argv[4] == "1"
+retention_helper, dry_run = sys.argv[5], sys.argv[6] == "1"
 all_rows = []
 with open(path) as f:
     for line in f:
@@ -871,6 +904,113 @@ for i in range(len(all_rows) - 1, -1, -1):
         event_id = r.get("event_id")
         if winner and isinstance(event_id, str) and event_id:
             superseded_by[event_id] = winner
+
+
+if action == "resolve-superseded":
+    # Auto-resolution is strictly narrower than the advisory annotation above:
+    # the winner must also carry the same provider string, because supersession
+    # across sibling providers was rejected as a claim a machine may make. No
+    # exit code is swept as a class — a timeout row clears only when its exact
+    # bytes later succeeded, which is the same evidence every other row needs.
+    writer = os.environ.get("OMS_ARTIFACT_PROVIDER", "unknown")
+    # `resolve` refuses a second resolution on the looser test below, so the
+    # sweep has to skip what resolve would refuse: a resolution row with
+    # imperfect lineage leaves status() saying "unresolved" forever, and
+    # answering that every run would append a duplicate every run.
+    claimed = set()
+    for r in all_rows:
+        if r.get("kind") != "artifact-resolution":
+            continue
+        for key in ("resolves_event_id", "parent_event_id"):
+            value = r.get(key)
+            if isinstance(value, str) and value:
+                claimed.add(value)
+
+    def sweepable(r):
+        event_id = r.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            return False
+        # A duplicated id never reaches status "resolved", so resolving it
+        # would re-append on every run instead of settling.
+        if id_counts.get(event_id) != 1 or event_id in claimed:
+            return False
+        if r.get("schema") != 1 or status(r) != "unresolved":
+            return False
+        # Rows resolve would reject keep their "run migrate first" triage line
+        # instead of failing the sweep: one unrepaired row is not a reason to
+        # leave every mechanical resolution unwritten.
+        if any(r.get(key) in (None, "") for key in ("operation_id", "artifact_id", "ts", "kind")):
+            return False
+        return isinstance(r.get("provider"), str)
+
+    pending = []
+    for r in all_rows:
+        winner = superseded_by.get(r.get("event_id"))
+        if not winner or not sweepable(r):
+            continue
+        winner_entry = by_id.get(winner)
+        if not winner_entry or winner_entry[1].get("provider") != r.get("provider"):
+            continue
+        pending.append((r.get("event_id"), r, winner))
+
+    if dry_run:
+        for event_id, _target, winner in pending:
+            print("artifact-index: would resolve %s (superseded by %s)" % (event_id, winner))
+        print("artifact-index: %d superseded failure(s) would be resolved (dry run)" % len(pending))
+        sys.exit(0)
+    if not pending:
+        print("artifact-index: 0 superseded failure(s) resolved")
+        sys.exit(0)
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(path, "a", encoding="utf-8") as handle:
+        for event_id, target, winner in pending:
+            handle.write(json.dumps({
+                "schema": 1,
+                "event_id": "evt_resolve_" + uuid.uuid4().hex,
+                "operation_id": target.get("operation_id"),
+                "artifact_id": target.get("artifact_id"),
+                "ts": now,
+                "kind": "artifact-resolution",
+                "provider": writer,
+                "exit": 0,
+                "parent_event_id": event_id,
+                "resolves_event_id": event_id,
+                "resolution": "resolved",
+                "reason": "superseded by %s (same patch bytes later succeeded)" % winner,
+            }, ensure_ascii=False, allow_nan=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    # Same retention envelope as the hand-driven resolve path: an automatic
+    # writer must not be the one that grows the index past its bound.
+    try:
+        keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
+        high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
+    except ValueError:
+        keep, high = 1000, 1200
+    if keep > 0 and high >= keep:
+        with open(path, "rb") as handle:
+            lines = handle.readlines()
+        if len(lines) > high:
+            lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
+            real = os.path.realpath(path)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real))
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    out.writelines(lines[-keep:])
+                shutil.copymode(real, tmp)
+                os.replace(tmp, real)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+    for event_id, _target, winner in pending:
+        print("artifact-index: resolved %s (superseded by %s)" % (event_id, winner))
+    print("artifact-index: %d superseded failure(s) resolved" % len(pending))
+    sys.exit(0)
 
 
 def triage_line(r):
@@ -1037,3 +1177,10 @@ for r in rows:
     if action == "unresolved":
         print(triage_line(r))
 EOF
+}
+
+if [ "$ACTION" = "resolve-superseded" ]; then
+  oms_with_file_lock "$INDEX_FILE" artifact_index_view
+else
+  artifact_index_view
+fi
