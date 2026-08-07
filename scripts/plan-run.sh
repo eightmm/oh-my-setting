@@ -70,7 +70,9 @@ Options:
 
 The selected task must declare allowed_paths and a mechanical verify command.
 One invocation executes at most one task and never commits, pushes, publishes,
-adds dependencies, or recursively delegates.
+adds dependencies, or recursively delegates. Before claiming, a pre-flight
+agent-plan reclaim frees claims whose heartbeat is past OMS_PLAN_CLAIM_TTL, so
+a task abandoned by a dead worker is runnable again without a separate call.
 EOF
 }
 
@@ -161,6 +163,22 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Pre-flight: free claims whose heartbeat is past the TTL. Reads already
+# present such a claim as expired, but the stored row still says "claimed", and
+# the --id path below requires a ready task. A caller that only ever runs
+# plan-run never invokes reclaim, so a dead worker would park its task forever.
+# Guarded and tolerant: if this cannot run, the claim simply stays put. Skipped
+# for a dry run (which must not write) and for a plan-bound executor, whose
+# task is required to STAY claimed.
+if [ "$DRY_RUN" -eq 0 ] && [ -z "$EXECUTOR_PLAN_TASK" ]; then
+  preflight="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" reclaim 2>/dev/null || true)"
+  case "$preflight" in
+    ""|*"reclaimed 0 task"*) ;;
+    *) echo "plan-run: pre-flight reclaim of expired claim(s)"
+       printf '%s\n' "$preflight" ;;
+  esac
+fi
 
 if [ "$USE_NEXT" -eq 1 ]; then
   if [ "$DRY_RUN" -eq 1 ]; then

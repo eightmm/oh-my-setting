@@ -37,8 +37,9 @@ claimed/running plan task is released back to ready), archived task packets,
 handoff digests, local tracked-state checkpoints, hook events/sessions,
 stale open runs (no spine event in --days; a close event is appended), run
 capsules of runs that are NOT open, abandoned change-guards (dead owner pid
-or aged snapshot), terminal/draft executor souls, resolved failure rows, closed
-conversation threads;
+or aged snapshot), terminal/draft executor souls, retired failure rows
+(resolved, or automatic hook rows past OMS_HOOK_FAIL_TTL — the same predicate
+fail-ledger reads with), closed conversation threads;
 artifact index/files are delegated
 to artifact-index prune. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
@@ -311,15 +312,24 @@ $(find "$OMS/runs" -mindepth 1 -maxdepth 1 -type d -mtime +"$DAYS" 2>/dev/null)
 EOF
 fi
 
-# 4) Resolved failure rows older than --days: compact failures.jsonl, keeping
-#    every unresolved fingerprint and any row newer than the threshold.
+# 4) Retired failure rows older than --days: compact failures.jsonl, keeping
+#    every fingerprint that still reads as open and any row newer than the
+#    threshold. Retirement is fail-ledger's read-time view, not a second
+#    opinion: a fingerprint is retired when it was resolved, or when every
+#    failure still standing is an automatic hook row past its TTL. Without
+#    that second arm the hook rows that read-time expiry retires would sit in
+#    the file forever, and the two mechanisms would not compose.
 fail_ledger="$OMS/failures.jsonl"
 if [ -f "$fail_ledger" ]; then
+  hook_fail_ttl="${OMS_HOOK_FAIL_TTL:-86400}"
+  case "$hook_fail_ttl" in *[!0-9]*|"") hook_fail_ttl=86400 ;; esac
   before="$(wc -l < "$fail_ledger" | tr -d ' ')"
-  compacted="$(OMS_DAYS="$DAYS" python3 - "$fail_ledger" <<'PY'
-import json, os, sys, time
+  compacted="$(OMS_DAYS="$DAYS" OMS_HOOK_TTL="$hook_fail_ttl" python3 - "$fail_ledger" <<'PY'
+import calendar, json, os, sys, time
 days = int(os.environ["OMS_DAYS"])
+ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 cutoff = time.time() - days * 86400
+now = time.time()
 rows = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     line = line.strip()
@@ -328,8 +338,22 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
             rows.append(json.loads(line))
         except Exception:
             rows.append(None)
-# Resolved fingerprints (final state resolved).
-state = {}
+
+# Retirement predicate, textually identical in fail-ledger.sh (record's repeat
+# count, check, list) and in gc.sh's failure compaction: read-time expiry and
+# gc compose only while all four agree on which rows are retired.
+def hook_expired(r):
+    if r.get("kind") != "hook" or r.get("event") != "fail":
+        return False
+    try:
+        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False   # an unreadable stamp is never grounds for retirement
+    return (now - t) >= ttl
+
+# Replay the ledger the way `fail-ledger check` does; a fingerprint whose open
+# count lands on zero is retired.
+open_fails = {}
 for r in rows:
     if not isinstance(r, dict):
         continue
@@ -338,9 +362,12 @@ for r in rows:
         continue
     ev = r.get("event")
     if ev == "resolved":
-        state[fp] = True
+        open_fails[fp] = 0
     elif ev == "fail":
-        state[fp] = False
+        open_fails.setdefault(fp, 0)
+        if not hook_expired(r):
+            open_fails[fp] += 1
+retired = {fp: count == 0 for fp, count in open_fails.items()}
 
 def old(r):
     try:
@@ -355,8 +382,8 @@ for r in rows:
         kept.append(r)
         continue
     fp = r.get("fingerprint")
-    # Drop only resolved-fingerprint rows that are older than the cutoff.
-    if fp and state.get(fp) and old(r):
+    # Drop only retired-fingerprint rows that are older than the cutoff.
+    if fp and retired.get(fp) and old(r):
         continue
     kept.append(r)
 sys.stdout.write("\n".join(json.dumps(r, ensure_ascii=False) for r in kept if isinstance(r, dict)))

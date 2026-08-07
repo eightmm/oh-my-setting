@@ -59,6 +59,14 @@ resolve  Mark a fingerprint fixed so it stops warning; --how records how it
 list     One line per fingerprint (count, last exit, resolved); --unresolved
          shows only still-failing ones, --json emits a schema-1 JSON object.
 
+kind=hook rows are filed automatically for every failed shell command, so
+nothing ever resolves them by hand. They retire on a read-time TTL instead:
+OMS_HOOK_FAIL_TTL seconds (default 86400) after a hook failure was recorded it
+stops counting as open in check/record/list, and list prints it as EXPIRED
+rather than dropping it. Deliberately recorded kinds never expire. Reads never
+rewrite the ledger; gc.sh carries the same predicate, so retired rows are
+compacted away on the normal retention schedule.
+
 Never records sensitive-looking commands/summaries (blocked, like memory).
 EOF
 }
@@ -73,8 +81,23 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 # pattern worth an outside read.
 unresolved_fails_for() {
   OMS_FP="$1" python3 - "$LEDGER" <<'COUNT'
-import json, os, sys
+import calendar, json, os, sys, time
 fp = os.environ["OMS_FP"]
+ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
+now = time.time()
+
+# Retirement predicate, textually identical in fail-ledger.sh (record's repeat
+# count, check, list) and in gc.sh's failure compaction: read-time expiry and
+# gc compose only while all four agree on which rows are retired.
+def hook_expired(r):
+    if r.get("kind") != "hook" or r.get("event") != "fail":
+        return False
+    try:
+        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False   # an unreadable stamp is never grounds for retirement
+    return (now - t) >= ttl
+
 fails = 0
 try:
     handle = open(sys.argv[1], encoding="utf-8", errors="replace")
@@ -91,7 +114,7 @@ for line in handle:
     event = row.get("event")
     if event == "resolved":
         fails = 0
-    elif event == "fail":
+    elif event == "fail" and not hook_expired(row):
         fails += 1
 print(fails)
 COUNT
@@ -163,6 +186,12 @@ esac
 STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
 LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
 
+# Read-time retirement clock for automatic hook rows. The deployed baseline is
+# not measured yet, so the default sits behind an override.
+HOOK_FAIL_TTL="${OMS_HOOK_FAIL_TTL:-86400}"
+case "$HOOK_FAIL_TTL" in *[!0-9]*|"") HOOK_FAIL_TTL=86400 ;; esac
+export OMS_HOOK_TTL="$HOOK_FAIL_TTL"
+
 # Failed commands routinely carry absolute paths; refusing them lost the
 # failure memory this ledger exists for. Machine paths are normalized instead
 # of blocked, on every action so fingerprints of the stored and looked-up text
@@ -217,9 +246,24 @@ PY
     [ -f "$LEDGER" ] || exit 0
     fp="$(fingerprint_of "$CMD")"
     OMS_FP="$fp" OMS_STATE_FP="$(state_fingerprint)" python3 - "$LEDGER" <<'PY'
-import json, os, sys
+import calendar, json, os, sys, time
 fp = os.environ["OMS_FP"]
 current_state = os.environ["OMS_STATE_FP"]
+ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
+now = time.time()
+
+# Retirement predicate, textually identical in fail-ledger.sh (record's repeat
+# count, check, list) and in gc.sh's failure compaction: read-time expiry and
+# gc compose only while all four agree on which rows are retired.
+def hook_expired(r):
+    if r.get("kind") != "hook" or r.get("event") != "fail":
+        return False
+    try:
+        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False   # an unreadable stamp is never grounds for retirement
+    return (now - t) >= ttl
+
 fails = 0
 last = None
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
@@ -234,6 +278,10 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         fails = 0
         last = None
     elif ev == "fail":
+        # A retired hook row blocks nothing and is not the failure a caller
+        # would be shown; the row itself stays on disk for gc to reclaim.
+        if hook_expired(r):
+            continue
         fails += 1
         last = r
 if fails > 0 and last is not None:
@@ -291,9 +339,24 @@ PY
       exit 0
     fi
     OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" python3 - "$LEDGER" <<'PY'
-import json, os, sys
+import calendar, json, os, sys, time
 unresolved_only = os.environ.get("OMS_UNRESOLVED") == "1"
 as_json = os.environ.get("OMS_JSON") == "1"
+ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
+now = time.time()
+
+# Retirement predicate, textually identical in fail-ledger.sh (record's repeat
+# count, check, list) and in gc.sh's failure compaction: read-time expiry and
+# gc compose only while all four agree on which rows are retired.
+def hook_expired(r):
+    if r.get("kind") != "hook" or r.get("event") != "fail":
+        return False
+    try:
+        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False   # an unreadable stamp is never grounds for retirement
+    return (now - t) >= ttl
+
 agg = {}
 order = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
@@ -305,27 +368,38 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if not fp:
         continue
     if fp not in agg:
-        agg[fp] = {"count": 0, "last": None, "resolved": False, "how": None}
+        agg[fp] = {"count": 0, "last": None, "resolved": False, "how": None,
+                   "expired": 0, "last_expired": None}
         order.append(fp)
     ev = r.get("event")
     if ev == "resolved":
         agg[fp]["resolved"] = True
         agg[fp]["count"] = 0
         agg[fp]["how"] = r.get("how")
+        agg[fp]["expired"] = 0
+        agg[fp]["last_expired"] = None
     elif ev == "fail":
-        agg[fp]["count"] += 1
-        agg[fp]["last"] = r
+        # A retired row is counted apart, never dropped: the fingerprint still
+        # prints, tagged EXPIRED, with the failure that retired it.
+        if hook_expired(r):
+            agg[fp]["expired"] += 1
+            agg[fp]["last_expired"] = r
+        else:
+            agg[fp]["count"] += 1
+            agg[fp]["last"] = r
         agg[fp]["resolved"] = False
         agg[fp]["how"] = None
 rows = []
 for fp in order:
     d = agg[fp]
+    # --unresolved answers "what is still failing", and a retired row is not.
     if unresolved_only and (d["resolved"] or d["count"] == 0):
         continue
-    last = d["last"] or {}
+    last = d["last"] or d["last_expired"] or {}
     row = {
         "fingerprint": fp,
         "resolved": d["resolved"],
+        "expired": not d["resolved"] and d["count"] == 0 and d["expired"] > 0,
         "count": d["count"],
         "exit": last.get("exit"),
         "ts": last.get("ts"),
@@ -333,6 +407,8 @@ for fp in order:
         "cmd": last.get("cmd"),
         "summary": last.get("summary"),
     }
+    if d["expired"]:
+        row["expired_count"] = d["expired"]
     if last.get("next"):
         row["next"] = last["next"]
     if d.get("how"):
@@ -342,13 +418,21 @@ if as_json:
     print(json.dumps({"schema": 1, "failures": rows}, ensure_ascii=False))
 else:
     for r in rows:
-        tag = "resolved" if r["resolved"] else "OPEN"
+        if r["resolved"]:
+            tag = "resolved"
+        elif r["expired"]:
+            tag = "EXPIRED"
+        else:
+            tag = "OPEN"
         print("%s  %-8s count=%d exit=%s  %s" % (
             r["fingerprint"], tag, r["count"],
             "-" if r["exit"] is None else r["exit"],
             (r["summary"] or r["cmd"] or "")[:80]))
         if r.get("next"):
             print("  next: %s" % r["next"])
+        if r.get("expired_count"):
+            print("  retired: %d hook failure(s) older than %ds; blocks nothing"
+                  % (r["expired_count"], ttl))
         if r["resolved"] and r.get("how"):
             print("  fixed: %s" % r["how"])
 PY

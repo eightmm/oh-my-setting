@@ -6,6 +6,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+- Read-time expiry is now the primary retirement mechanism for the two state
+  families that only ever accumulated. A `kind=hook` fail-ledger row older
+  than `OMS_HOOK_FAIL_TTL` (default 24h) counts zero toward open failures in
+  `check`/`list`/record's advise hint and renders tagged EXPIRED rather than
+  vanishing; gc compacts it under the same predicate, so the file finally
+  shrinks. A plan claim whose heartbeat is older than `OMS_PLAN_CLAIM_TTL`
+  (default 1h, per-task override wins) reads as expired on every read path
+  and `ready`/`next` offer the task again — mirroring the one pattern in the
+  tree that never went stale (agent-thread's advisory pointer). `plan-run`
+  reclaims dead claims pre-flight. Mutating verbs, running/review states,
+  and non-hook ledger kinds are untouched.
+
 ### Fixed
 - Patch admission has a structural floor when no scope is supplied. The scope
   gate used to SKIP without a task/executor scope, so nothing constrained
