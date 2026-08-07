@@ -258,9 +258,11 @@ except ValueError:
     budget = 4000
 text = text.strip()
 if len(text.encode("utf-8")) > budget:
-    # Cut on a character boundary; the artifact keeps the full text.
-    cut = text.encode("utf-8")[:budget].decode("utf-8", "ignore")
-    text = cut + "\n[truncated: see artifact]"
+    # Keep the tail, cut on a character boundary: provider CLIs narrate tools
+    # first and answer last, so the head of a long turn is the noise and the
+    # tail is the content. The artifact keeps the full text.
+    cut = text.encode("utf-8")[-budget:].decode("utf-8", "ignore")
+    text = "[earlier output truncated: see artifact]\n" + cut
 
 seq = 0
 if os.path.isfile(path):

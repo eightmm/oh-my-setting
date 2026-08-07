@@ -86,6 +86,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   row whose fingerprint accumulates repeats per provider, and a named
   summary line. Exit-0 non-answers thread but never reach the ledger;
   quorum semantics are untouched.
+- Quoted provider output keeps the answer end, not the banner end. Every
+  byte-capped quote of another provider's output — debate rounds, synthesis
+  files, thread turn excerpts — used to keep a head slice, but provider CLIs
+  stream banners and tool narration first and put the actual answer last:
+  round-4's synthesis spent its full 16KiB codex quote on exec noise while
+  the ship-order recommendation sat in the omitted 167KB tail, and the same
+  head-cut reduced antigravity's thread excerpt to "I will view..." lines.
+  Capped quotes and oversized thread turns now keep the tail (the truncation
+  marker moves to the omitted side and names the leading bytes it dropped);
+  head-keep remains for git diffs, whose hunks lead with the most context.
 - `ci-status` stops giving a false all-clear. An unauthenticated or
   unreachable `gh` used to print "no runs for <branch>" and exit 0 —
   indistinguishable from a branch with no CI, at the one tool whose stated

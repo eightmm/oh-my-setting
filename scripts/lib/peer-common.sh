@@ -630,18 +630,24 @@ ma_prompt_quote_bytes() {
   printf '%s\n' "$value"
 }
 
-# Emit the complete file when it fits. Otherwise keep a deterministic prefix
-# plus a compact omission record. The marker is intentionally outside the
-# configured content budget, with a bounded (<128 byte) wrapper allowance.
+# Emit the complete file when it fits. Otherwise keep a deterministic slice
+# plus a compact omission record: the head by default, or the tail when the
+# caller passes keep=tail. Provider CLIs stream banners and tool logs first
+# and put the actual answer last, so a head slice of their output spends the
+# whole budget on noise and drops the answer — quoting keeps the tail. The
+# marker is intentionally outside the configured content budget, with a
+# bounded (<128 byte) wrapper allowance, and sits on the omitted side so a
+# reader knows which end is missing.
 ma_emit_bounded_prompt_file() {
   local file="$1"
   local budget="$2"
   local label="$3"
   local setting="$4"
+  local keep="${5:-head}"
   local bytes
   local omitted
-  local prefix
-  local prefix_bytes
+  local slice
+  local slice_bytes
 
   bytes="$(LC_ALL=C wc -c < "$file" | tr -d ' ')"
   if [ "$bytes" -le "$budget" ]; then
@@ -649,14 +655,28 @@ ma_emit_bounded_prompt_file() {
     return 0
   fi
 
-  prefix="$(agent_memory_mktemp)" || return 1
-  agent_memory_truncate_bytes "$budget" < "$file" > "$prefix"
-  prefix_bytes="$(LC_ALL=C wc -c < "$prefix" | tr -d ' ')"
-  cat "$prefix"
-  omitted=$((bytes - prefix_bytes))
-  printf '\n[TRUNCATED: %s omitted %s bytes; %s=%s]\n' \
-    "$label" "$omitted" "$setting" "$budget"
-  rm -f "$prefix"
+  slice="$(agent_memory_mktemp)" || return 1
+  if [ "$keep" = tail ]; then
+    # Drop the slice's first line: tail -c can start mid-character, and a
+    # partial line reads as provider content when it is an accident of the
+    # cut. A single line larger than the whole budget keeps the raw cut
+    # instead — losing everything to neatness would be worse.
+    tail -c "$budget" "$file" | sed 1d > "$slice"
+    [ -s "$slice" ] || tail -c "$budget" "$file" > "$slice"
+    slice_bytes="$(LC_ALL=C wc -c < "$slice" | tr -d ' ')"
+    omitted=$((bytes - slice_bytes))
+    printf '[TRUNCATED: %s omitted %s leading bytes; %s=%s]\n' \
+      "$label" "$omitted" "$setting" "$budget"
+    cat "$slice"
+  else
+    agent_memory_truncate_bytes "$budget" < "$file" > "$slice"
+    slice_bytes="$(LC_ALL=C wc -c < "$slice" | tr -d ' ')"
+    cat "$slice"
+    omitted=$((bytes - slice_bytes))
+    printf '\n[TRUNCATED: %s omitted %s bytes; %s=%s]\n' \
+      "$label" "$omitted" "$setting" "$budget"
+  fi
+  rm -f "$slice"
 }
 
 # Returns 0 on success, 1 on git failure, 3 on sensitive-looking content.
@@ -901,7 +921,7 @@ ma_sanitize_quoted_output() {
     done < "$tmp"
   } > "$sanitized"
   budget="$(ma_prompt_quote_bytes)"
-  ma_emit_bounded_prompt_file "$sanitized" "$budget" "provider output" "OMS_PROMPT_QUOTE_BYTES"
+  ma_emit_bounded_prompt_file "$sanitized" "$budget" "provider output" "OMS_PROMPT_QUOTE_BYTES" tail
   rm -f "$tmp" "$sanitized"
 }
 

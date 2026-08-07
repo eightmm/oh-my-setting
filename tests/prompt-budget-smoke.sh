@@ -31,13 +31,16 @@ assert_contains() {
   grep -Fq "$text" "$file" || fail "$(basename "$file") missing: $text"
 }
 
+# The marker layout mirrors real provider output: banner/tool noise first,
+# the actual answer last. Quoting must keep the -FINAL-ANSWER end.
 write_artifact() {
   local file="$1"
   local prefix="$2"
   {
     printf '# provider ask\n\n## Output\n\n'
-    printf '%s\n' "$prefix"
+    printf '%s-PREAMBLE\n' "$prefix"
     awk 'BEGIN { for (i = 0; i < 24; i++) printf "evidence-%04d-abcdefghijklmnopqrstuvwxyz0123456789\n", i }'
+    printf '%s-FINAL-ANSWER\n' "$prefix"
     printf '\n## Exit\n\n0\n'
   } > "$file"
 }
@@ -94,13 +97,18 @@ test_quoted_output_budget_and_small_passthrough() {
   cmp -s "$small" "$small_out" || fail "small sanitized quote should pass through unchanged"
 
   {
-    printf 'opening quote evidence\n'
+    printf 'opening banner noise\n'
     awk 'BEGIN { for (i = 0; i < 24; i++) printf "quote-evidence-%04d-abcdefghijklmnopqrstuvwxyz0123456789\n", i }'
+    printf 'closing answer evidence\n'
   } > "$large"
   OMS_PROMPT_QUOTE_BYTES=384 ma_sanitize_quoted_output < "$large" > "$capped"
   assert_bounded "$capped" 384
-  assert_contains "$capped" 'opening quote evidence'
+  assert_contains "$capped" 'closing answer evidence'
+  if grep -Fq 'opening banner noise' "$capped"; then
+    fail "a capped quote must drop the head, not the answer at the tail"
+  fi
   assert_contains "$capped" '[TRUNCATED: provider output omitted '
+  assert_contains "$capped" ' leading bytes; '
   assert_contains "$capped" 'OMS_PROMPT_QUOTE_BYTES=384'
 }
 
@@ -119,8 +127,11 @@ test_debate_and_synthesis_use_quote_budget() {
   MA_DEBATE_SECTIONS='Answer:'
   OMS_PROMPT_QUOTE_BYTES=320
   write_debate_prompt "$debate" codex 2 "$self" "claude:$other"
-  assert_contains "$debate" 'SELF-BEGIN-EVIDENCE'
-  assert_contains "$debate" 'OTHER-BEGIN-EVIDENCE'
+  assert_contains "$debate" 'SELF-BEGIN-EVIDENCE-FINAL-ANSWER'
+  assert_contains "$debate" 'OTHER-BEGIN-EVIDENCE-FINAL-ANSWER'
+  if grep -Fq -- '-PREAMBLE' "$debate"; then
+    fail "debate quotes must spend the budget on the answer end, not the preamble"
+  fi
   [ "$(grep -Fc '[TRUNCATED: provider output omitted ' "$debate")" -eq 2 ] ||
     fail "debate should cap each quoted provider output"
 
@@ -134,8 +145,11 @@ test_debate_and_synthesis_use_quote_budget() {
   last_arts=("$self" "$other")
   provider_names=(codex claude)
   ma_write_synthesis "$synth"
-  assert_contains "$synth" 'SELF-BEGIN-EVIDENCE'
-  assert_contains "$synth" 'OTHER-BEGIN-EVIDENCE'
+  assert_contains "$synth" 'SELF-BEGIN-EVIDENCE-FINAL-ANSWER'
+  assert_contains "$synth" 'OTHER-BEGIN-EVIDENCE-FINAL-ANSWER'
+  if grep -Fq -- '-PREAMBLE' "$synth"; then
+    fail "synthesis quotes must keep the answer end, not the preamble"
+  fi
   [ "$(grep -Fc '[TRUNCATED: provider output omitted ' "$synth")" -eq 2 ] ||
     fail "synthesis should cap each quoted provider output"
 }
