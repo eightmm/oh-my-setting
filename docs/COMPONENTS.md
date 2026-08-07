@@ -324,8 +324,12 @@ stamped with a start time (optional `OMS_GUARD_PID` owner pid);
 throwaway worktree and runs a checks ladder (applies cleanly → task/executor
 scope, deny first → shell/python/json syntax → verifier integrity →
 verification contract) before it lands; ADMIT/REJECT verdict, recorded in the
-artifact index; `--allow-verifier-change` overrides only the self-certification
-guard
+artifact index. When no task/executor scope is supplied, a structural floor
+replaces the scope gate's old silent SKIP: a patch that adds a top-level file
+or moves a file across directories rejects, `--allow-restructure` (forwarded
+by `patch-land` and `peer-delegate`) permits deliberate restructuring, and a
+supplied-but-empty scope gets the floor too. `--allow-verifier-change`
+overrides only the self-certification guard
 
 **Patch landing (`patch-land.sh`)** — The one mutating step that composes
 admission: clean-tree check → `patch-admit` ADMIT gate → lease-fenced `landing`
@@ -352,9 +356,11 @@ success/resolved/unresolved outcome status without conflating sibling
 providers, and each unresolved row now prints the exact resolve command that
 clears it, annotated `superseded-by: evt_X` when the failed patch's exact
 bytes (`patch_sha256`, never the path; an empty-patch digest never matches)
-were later admitted or landed — advisory only, judgment stays with the agent,
-and no supersession is ever claimed across sibling providers within an
-operation. Retention keeps or evicts target-resolution pairs atomically instead
+were later admitted or landed. The annotation stays advisory across sibling
+providers, but the strictly narrower case — byte identity AND provider
+identity — is mechanically resolvable: `resolve-superseded` sweeps those rows
+idempotently (`--dry-run` lists), and `oms inbox --fix-safe` runs the sweep
+as its third safe repair. Retention keeps or evicts target-resolution pairs atomically instead
 of leaving dangling lineage, and state/doctor surface corrupt rows or invalid
 contracts. External files are represented by name/hash descriptors, not host
 paths. `validate`, atomic idempotent `migrate`, operation-aware `latest-run`,
@@ -472,7 +478,12 @@ a content-free git-state hash; `check` blocks the unchanged failure but permits
 a retry after tracked state changes, `resolve` (by `--fingerprint` or by
 `--cmd`, since a caller that just watched a command pass holds the
 command)/`list` (`list --json` for machines); sensitive commands refused.
-Surfaced in `oms state`. `agent-task verify` files a row when the stored gate
+Surfaced in `oms state`. Hook-written rows retire by reading, not by sweep:
+a `kind=hook` row older than `OMS_HOOK_FAIL_TTL` (default 24h) counts zero
+toward open failures in `check`/`list`/the advise hint and renders tagged
+EXPIRED, gc compacts it under the same predicate, and the hook refuses to
+record commands naming session-scoped scratch paths (`/tmp/claude-<uid>/…`)
+whose fingerprints no later session could recompute. `agent-task verify` files a row when the stored gate
 fails — with the failing line, written by the shell, no model involvement — and
 clears it when the same gate later passes, which is what puts the primary
 agent's own verification on the ledger instead of only harness-mediated paths.
@@ -591,7 +602,11 @@ skipped-verification reason that remains non-green, `rotate`, legacy migration,
 and collision-safe archives; closing promotes the outcome into memory
 
 **Task plan (`agent-plan.sh`)** — Shared schema-2 DAG with dependencies, scope,
-verify command, and per-claim lease epoch/token. Harness workers carry the
+verify command, and per-claim lease epoch/token. Expiry lives in the read
+path: a claim whose heartbeat is older than `OMS_PLAN_CLAIM_TTL` (default 1h,
+per-task ttl wins) reads as EXPIRED on every view and `ready`/`next` offer
+the task again, `plan-run` reclaims dead claims pre-flight, and running /
+review states stay opt-in exactly as with `reclaim`. Harness workers carry the
 captured token through start/review/release; only reviewed work with
 artifact/patch evidence may enter `landing`, and only landing may finish.
 `next --json` provides an atomic machine-readable claim for `plan-run`; reclaim
@@ -615,7 +630,13 @@ user scope); Antigravity imports it as the `oh-my-setting` plugin, generated
 with absolute paths at install time because `agy plugin install` copies the
 plugin directory verbatim. Headless agy needs the consult permission profile,
 which now includes `mcp(*)` (scoped mcp targets do not match on 1.1.9).
-Strictly read-only: each tool maps to a fixed read-only subcommand, digest
+Two action tools amend the read-only contract deliberately:
+`oms_peer_start` launches `consult`/`advise`/`peer-ask` detached (the run
+survives the server; a status file written on verb exit is the completion
+authority) and `oms_peer_result` polls it — running with a log tail, then
+done with the answer — so peer consultation is a native tool call whose
+minutes-long wait never blocks a synchronous MCP call. Otherwise read-only:
+each remaining tool maps to a fixed read-only subcommand, digest
 reads take bare file names only, output is bounded.
 `oms update --probe-agy-surfaces` is how the plugin ever grows beyond MCP:
 once per agy binary fingerprint, a throwaway-HOME probe must mechanically
@@ -736,10 +757,11 @@ contains partitions, nodes, current-user associations/accounts, QOS/limits, a
 captured queue view, and exact configured CPU/memory/time defaults
 
 **Skill catalog** — Every install exposes the same compact, general-purpose
-set: `agent-harness`, `oh-my-setting-ops`, `spec-interview`, `trace`, and
-`trust-boundary`. Consultation, independent diff review, and isolated write
-delegation are internal `agent-harness` routes; their `oms` commands remain
-separate because their authority differs. `trust-boundary` is a
+set, namespaced so shared skill roots stay collision-free and ownership is
+legible: `oms-agent-harness`, `oms-ops`, `oms-spec-interview`, `oms-trace`,
+and `oms-trust-boundary`. Consultation, independent diff review, and isolated write
+delegation are internal `oms-agent-harness` routes; their `oms` commands remain
+separate because their authority differs. `oms-trust-boundary` is a
 language-neutral security method for material trust boundaries, not a broad
 framework checklist.
 
@@ -747,10 +769,10 @@ framework checklist.
 `"requires": ["cmd", ...]`; `link.sh` installs the skill only where every
 listed command resolves on PATH and withdraws it when a machine loses one,
 the router skips its triggers there (never naming a skill the session cannot
-load), and the doctor reports the skip as a note. `slurm` (requires `sinfo`)
+load), and the doctor reports the skip as a note. `oms-slurm` (requires `sinfo`)
 answers cluster questions from the private reference — partitions, node/GPU
 inventory, and the `sacctmgr` account/QOS limits — instead of re-probing
-nodes each session; `gpu-workstation` (requires `nvidia-smi`) checks VRAM
+nodes each session; `oms-gpu-workstation` (requires `nvidia-smi`) checks VRAM
 first, serializes runs through the tsp queue, and triages CUDA OOM in a
 fixed order. Machines without those commands see exactly the five general
 skills.
@@ -826,9 +848,15 @@ complete gate as its safe default. After branch protection requires `gate`,
 states explicitly that GitHub Actions remains authoritative; ambiguous pushes
 fall back to the full local gate.
 
-**CI status (`ci-status.sh`)** — Prints the latest CI conclusion for the
-current branch and exits nonzero on a failed run, so a red push can't go
-unnoticed; `record` appends the conclusion to `.oms/ci.jsonl` (deduped by sha)
+**CI status (`ci-status.sh`)** — Prints the CI conclusion for the current
+branch's HEAD and exits nonzero on a failed run, so a red push can't go
+unnoticed. CI is keyed to the commit in hand: an unpushed HEAD reads
+`unpushed (N commits ahead — push to get CI)`, a pushed HEAD with no run yet
+reads unknown/pending, and a prior commit's result renders as history rather
+than a stale-current nag (repo-state and inbox follow the same model; where
+push state is unknowable the old stale rendering deliberately remains). A
+failing `gh` — unauthenticated, unreachable — reports itself and exits 2
+instead of printing a false "no runs"; `record` appends the conclusion to `.oms/ci.jsonl` (deduped by sha)
 so a later session / `oms state` sees "CI failed on <sha>" instead of the
 result vanishing. `tick` is a fail-open boundary observer used by prompt and
 allowed Stop hooks only for GitHub-backed adopted repos: a completed current
@@ -875,7 +903,16 @@ returns to the prior success. Foreign checkouts cannot mutate the canonical
 install. Linux/macOS/WSL use symlinks; Windows Git Bash defaults to verified
 copies with sidecar ownership hashes, so an untouched stale copy can be updated
 without hiding the original user backup while a user-edited copy is preserved.
-Native PowerShell is outside the Bash harness boundary
+Native PowerShell is outside the Bash harness boundary. The installer's hook
+registrations live in one HOOK_SURFACES manifest stamped `HOOKS_SCHEMA` into
+the receipt (`install-claude-hooks.sh --print-expected` emits it as JSON);
+`oms doctor --surfaces` compares that expected list against the LIVE
+settings file and per-event evidence in `.oms/hooks/events.jsonl` without
+delegating to the installed checkout — an old install must not certify
+itself — and exits nonzero on a missing registration. The default doctor
+also names displaced user configs (`<managed target>.backup.*`) with their
+restore path, and a gate test hashes the manifest so registration changes
+force a schema bump
 
 **`oms` dispatcher (`scripts/oms`)** — One stable entrypoint on PATH: the
 public allowlist controls both `oms list` and dispatch (`run` aliases

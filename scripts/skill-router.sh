@@ -106,7 +106,10 @@ if plan.get("accept"):
         )
         raise SystemExit(0)
 failures = load("OMS_SH_FAILURES")
-rows = [f for f in failures.get("failures", []) if not f.get("resolved")]
+# Expired hook rows read as retired everywhere else; the daily nag must not
+# count what `check` and `list` no longer hold against anyone.
+rows = [f for f in failures.get("failures", [])
+        if not f.get("resolved") and not f.get("expired")]
 if len(rows) >= 2:
     print(
         "[oms] %d unresolved fail-ledger rows here — run `oms fail-ledger"
