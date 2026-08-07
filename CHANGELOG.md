@@ -7,6 +7,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The Notion journal mirrors only the repos you chose. Two fixes with one
+  cause: the passive journal boundaries (prompt tick, Stop finish) ran in any
+  git repo and seeded `.oms` there, so a repo that was merely cloned got a
+  journal and — Notion config being global — a page on the human-facing
+  journal. The passive boundaries are now adopted-repos-only and never seed
+  (deliberate front doors like `oms journal` and `run-ledger` still do), and
+  `oms journal configure --exclude-repo PATH` / `--include-repo PATH` curates
+  the mirror per repo: an excluded repo keeps its local journal but never
+  syncs, `status` reports the exclusion, and the list survives reconfigure.
 - Antigravity surfaces are certified per binary before any hook ships.
   `oms update --probe-agy-surfaces` runs a throwaway-HOME probe that must
   mechanically prove schema acceptance, actual headless `PreInvocation`/`Stop`

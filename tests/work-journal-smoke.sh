@@ -618,4 +618,58 @@ assert row["notion"]["keyring"] == "file", row["notion"]
 assert row["notion"]["cli_command"].endswith("/ntn"), row["notion"]
 PY
 
+# --- Passive observers never seed an unadopted repo, and the Notion mirror
+# honors the per-repo exclusion list (the human surface is curated: a repo
+# that was merely cloned does not belong on it even when sessions ran there).
+unadopted="$TMP/unadopted"
+mkdir -p "$unadopted"
+git -C "$unadopted" init -q
+git -C "$unadopted" config user.name "Test"
+git -C "$unadopted" config user.email "test@example.com"
+work_journal_prompt_tick "$unadopted" >/dev/null 2>&1 || true
+[ ! -e "$unadopted/.oms" ] ||
+  fail "a prompt tick must not seed .oms in an unadopted repo"
+work_journal_finish "$unadopted" >/dev/null 2>&1 || true
+[ ! -e "$unadopted/.oms" ] ||
+  fail "a Stop finish must not seed .oms in an unadopted repo"
+mkdir -p "$unadopted/.oms"
+work_journal_prompt_tick "$unadopted" >/dev/null 2>&1 || true
+[ -d "$unadopted/.oms/work-journal" ] ||
+  fail "an adopted repo must still get its journal on the first tick"
+
+exclusion_cfg="$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
+mkdir -p "$(dirname "$exclusion_cfg")"
+python3 - "$exclusion_cfg" "$unadopted" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema_version": 1,
+        "managed_by": "oh-my-setting",
+        "notion": {
+            "data_source_id": "ea343dea-4a66-4421-9653-dfc4fe68ed10",
+            "excluded_repos": [sys.argv[2]],
+        },
+    }, handle)
+PY
+"$ROOT/scripts/journal.sh" status --repo "$unadopted" --json | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["notion"]["excluded"] is True, row["notion"]
+' || fail "status must report an excluded repo"
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --force >/dev/null 2>&1 ||
+  fail "sync in an excluded repo must stay a quiet no-op"
+[ ! -e "$unadopted/.oms/work-journal/sync/notion.json" ] ||
+  fail "an excluded repo must not accumulate Notion sync state"
+"$ROOT/scripts/journal.sh" status --repo "$repo" --json | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["notion"]["excluded"] is False, row["notion"]
+' || fail "a repo not on the list must not read as excluded"
+"$ROOT/scripts/journal.sh" configure --include-repo "$unadopted" |
+  grep -q "excludes no repos" ||
+  fail "configure --include-repo must clear the exclusion"
+"$ROOT/scripts/journal.sh" configure --exclude-repo "$unadopted" |
+  grep -q "excludes 1 repo" ||
+  fail "configure --exclude-repo must add and report the exclusion"
+
 echo "work-journal-smoke: ok"

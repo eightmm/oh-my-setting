@@ -104,6 +104,11 @@ work_journal_prompt_tick() {
   repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
   repo="${repo//$'\r'/}"
   repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
+  # Passive observer: a prompt in a repo the harness was never adopted into
+  # must not seed .oms — every other hook already follows adopted-repos-only,
+  # and seeding here is how merely-cloned repos ended up mirrored to Notion.
+  # Deliberate front doors (oms journal, run-ledger, agent-task) still seed.
+  [ -d "$repo/.oms" ] || return 0
   set -- tick --repo "$repo" --local-only
   case "${OMS_WORK_JOURNAL_DIGEST:-1}" in
     0|false|FALSE|no|NO|off|OFF) ;;
@@ -140,6 +145,9 @@ work_journal_finish() {
   repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
   repo="${repo//$'\r'/}"
   repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
+  # Same adopted-repos-only rule as the prompt tick: a Stop in an unadopted
+  # repo must not seed .oms.
+  [ -d "$repo/.oms" ] || return 0
   if ! work_journal_call_local "$repo" tick --repo "$repo" --local-only >/dev/null 2>&1; then
     echo "warning: Work Journal finish materialization degraded" >&2
     return 0

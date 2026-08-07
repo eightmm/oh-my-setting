@@ -398,7 +398,12 @@ rollover catch-up, retries at most one pending Notion item within two seconds,
 and injects a bounded once-per-local-day digest into agent context
 (`OMS_WORK_JOURNAL_DIGEST=0` opts out). Work-time observers never call Notion;
 an allowed top-level Stop captures final `HEAD` and force-syncs only today's
-daily page.
+daily page. The passive boundaries — prompt tick and Stop finish — run in
+adopted repos only and never seed `.oms`: chatting once inside a merely-cloned
+repo used to create journal state there and, with Notion configured globally,
+mirror that repo onto the human-facing journal. Deliberate front doors
+(`oms journal`, `run-ledger`, `agent-task`) still seed, since invoking them in
+a repo is the adoption act.
 `oms journal show --today|--week|--blockers|--recent N [--json]` is the agent
 read path over the derived summaries and event index;
 `oms journal status|rebuild|sync|configure`
@@ -414,7 +419,13 @@ sanitization excludes transcripts, raw logs, environments, diffs, credentials,
 and unobserved facts. Notion export stores only nonsecret connection metadata
 at install, delegates credentials to the official `ntn` CLI and OS keychain,
 mirrors summaries as native blocks, upserts by stable key and content hash,
-and leaves failed sync pending without changing local lifecycle results. Remote
+and leaves failed sync pending without changing local lifecycle results. The
+mirror is curated per repo: `oms journal configure --exclude-repo PATH`
+(repeatable; `--include-repo` reverses it) keeps a repo's journal local-only —
+the Notion page is the human surface for the user's own work, and a cloned
+repo does not belong on it even when sessions ran there. Exclusion survives
+reconfigure, `status` reports it, and an excluded repo's sync is a quiet
+no-op before any credential is touched. Remote
 work has its own non-blocking lock and bounded tick budget, so it never owns the
 canonical append/materialization lock. Design, setup, responsibility
 boundaries, examples, fallback behavior, and the cross-machine duplicate limit

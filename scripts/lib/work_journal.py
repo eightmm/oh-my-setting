@@ -874,6 +874,78 @@ def notion_auth_available(settings: Mapping[str, Any]) -> bool:
     return bool(shutil.which(command) or pathlib.Path(command).is_file())
 
 
+def _canonical_repo_path(entry: str) -> str:
+    return str(pathlib.Path(str(entry)).expanduser().resolve())
+
+
+def notion_excluded_repos() -> List[str]:
+    """Repos whose journal stays local: the Notion page is the human surface
+    for the user's own work, and a repo that was merely cloned does not belong
+    on it even when sessions ran there. Kept outside notion_settings() because
+    that dict is splatted into NotionJournalExporter.from_config."""
+    config = load_work_journal_config()
+    notion = config.get("notion") if isinstance(config.get("notion"), Mapping) else {}
+    entries: List[str] = []
+    raw = notion.get("excluded_repos") if isinstance(notion, Mapping) else None
+    if isinstance(raw, list):
+        entries.extend(str(item) for item in raw if str(item or "").strip())
+    env = os.environ.get("OMS_WORK_JOURNAL_NOTION_EXCLUDE", "")
+    entries.extend(part for part in env.split(":") if part.strip())
+    resolved: List[str] = []
+    for entry in entries:
+        try:
+            resolved.append(_canonical_repo_path(entry))
+        except OSError:
+            continue
+    return resolved
+
+
+def notion_repo_excluded(repo: pathlib.Path) -> bool:
+    try:
+        needle = str(pathlib.Path(repo).resolve())
+    except OSError:
+        return False
+    return needle in set(notion_excluded_repos())
+
+
+def update_notion_exclusions(
+    add: Iterable[str], remove: Iterable[str]
+) -> List[str]:
+    path = work_journal_config_path()
+    config = load_work_journal_config()
+    notion = config.get("notion") if isinstance(config.get("notion"), Mapping) else None
+    if not path.is_file() or not isinstance(notion, Mapping):
+        raise JournalError(
+            "Notion is not configured; run configure --discover first"
+        )
+    result = set()
+    raw = notion.get("excluded_repos")
+    if isinstance(raw, list):
+        for item in raw:
+            if str(item or "").strip():
+                result.add(_canonical_repo_path(str(item)))
+    # Canonical absolute paths make later membership checks plain equality;
+    # resolve() tolerates a path that no longer exists, so a deleted clone can
+    # still be listed or removed.
+    for entry in add:
+        result.add(_canonical_repo_path(entry))
+    for entry in remove:
+        result.discard(_canonical_repo_path(entry))
+    updated = dict(notion)
+    if result:
+        updated["excluded_repos"] = sorted(result)
+    else:
+        updated.pop("excluded_repos", None)
+    new_config = dict(config)
+    new_config["notion"] = updated
+    atomic_write_json(path, new_config)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return sorted(result)
+
+
 def discover_notion_target() -> str:
     settings = notion_settings()
     settings["auth_mode"] = "ntn"
@@ -939,6 +1011,17 @@ def configure_notion(
         "properties": dict(DEFAULT_NOTION_PROPERTIES),
         "sync_mode": "finalized",
     }
+    # A reconfigure rewrites the whole file, so the exclusion list must be
+    # carried over or it silently vanishes on the next configure --discover.
+    prior = load_work_journal_config()
+    prior_notion = (
+        prior.get("notion") if isinstance(prior.get("notion"), Mapping) else {}
+    )
+    prior_excluded = (
+        prior_notion.get("excluded_repos") if isinstance(prior_notion, Mapping) else None
+    )
+    if isinstance(prior_excluded, list) and prior_excluded:
+        notion_config["excluded_repos"] = [str(item) for item in prior_excluded]
     # ntn is a durable, non-secret transport choice. Environment credentials
     # need no persisted marker, and omitting one also avoids implying that an
     # unvalidated target has a usable credential.
@@ -2090,6 +2173,7 @@ class JournalStore:
                 "configured": bool(
                     settings["data_source_id"] or settings["database_id"]
                 ),
+                "excluded": notion_repo_excluded(self.repo),
                 "credential_present": notion_auth_available(settings),
                 "auth_mode": settings.get("auth_mode") or "",
                 "target_kind": "data_source"
@@ -2359,6 +2443,10 @@ class JournalStore:
         return "\n".join(lines)
 
     def sync_notion(self, *, force: bool = False, today_only: bool = False) -> None:
+        # Checked before auth so an excluded repo never spends a credential
+        # lookup, and the exclusion is testable without one.
+        if notion_repo_excluded(self.repo):
+            return
         settings = notion_settings()
         if not notion_auth_available(settings) or not (
             settings["data_source_id"] or settings["database_id"]
@@ -2992,6 +3080,8 @@ def _build_parser() -> argparse.ArgumentParser:
     target = configure.add_mutually_exclusive_group(required=True)
     target.add_argument("--data-source-id")
     target.add_argument("--discover", action="store_true")
+    target.add_argument("--exclude-repo", action="append")
+    target.add_argument("--include-repo", action="append")
     configure.add_argument("--no-validate", action="store_true")
     status = sub.add_parser("status")
     status.add_argument("--repo", default=".")
@@ -3134,6 +3224,17 @@ def _run_autodistill(store: JournalStore) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "configure":
+        if args.exclude_repo or args.include_repo:
+            excluded = update_notion_exclusions(
+                args.exclude_repo or [], args.include_repo or []
+            )
+            if excluded:
+                print("notion sync excludes %d repo(s):" % len(excluded))
+                for entry in excluded:
+                    print("  %s" % entry)
+            else:
+                print("notion sync excludes no repos")
+            return 0
         data_source_id = (
             discover_notion_target() if args.discover else args.data_source_id
         )
