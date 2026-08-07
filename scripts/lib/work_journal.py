@@ -2159,9 +2159,18 @@ class JournalStore:
                             sync_counts[state] += 1
             except (OSError, UnicodeError, ValueError, TypeError):
                 sync_counts["failed"] += 1
+        detected_id, detected_name = project_identity(self.repo)
         return {
             "repo": str(self.repo),
             "enabled": True,
+            "project": {
+                "id": self.project_id,
+                "name": self.project_name,
+                "detected_id": detected_id,
+                "detected_name": detected_name,
+                "drift": self.project_id != detected_id
+                or self.project_name != detected_name,
+            },
             "event_count": summary["event_count"],
             "active_event_count": summary["active_event_count"],
             "events_bytes": size,
@@ -3086,6 +3095,10 @@ def _build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status")
     status.add_argument("--repo", default=".")
     status.add_argument("--json", action="store_true")
+    identity = sub.add_parser("identity")
+    identity.add_argument("--repo", default=".")
+    identity.add_argument("--json", action="store_true")
+    identity.add_argument("--adopt-detected", action="store_true")
     rebuild = sub.add_parser("rebuild")
     rebuild.add_argument("--repo", default=".")
     materialize = sub.add_parser("materialize")
@@ -3269,6 +3282,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             print("Work Journal")
             print("- repo: %s" % result["repo"])
+            project = result.get("project") or {}
+            drift_note = ""
+            if project.get("drift"):
+                drift_note = (
+                    " — detected %s; `oms journal identity --adopt-detected` merges"
+                    % project.get("detected_name")
+                )
+            print(
+                "- project: %s (%s)%s"
+                % (project.get("name"), project.get("id"), drift_note)
+            )
             print("- events: %s (%s bytes)" % (result["event_count"], result["events_bytes"]))
             print(
                 "- summaries: %s daily, %s weekly"
@@ -3293,6 +3317,72 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "rebuilt: %s events, %s daily, %s weekly"
             % (result["event_count"], len(result["daily"]), len(result["weekly"]))
         )
+        return 0
+    if args.command == "identity":
+        detected_id, detected_name = project_identity(store.repo)
+        pinned_id, pinned_name = store._existing_project_identity()
+        drift = pinned_id is not None and (
+            pinned_id != detected_id or pinned_name != detected_name
+        )
+        if args.adopt_detected:
+            if pinned_id is not None and not drift:
+                print(
+                    "identity already canonical: %s (%s)"
+                    % (pinned_name, pinned_id)
+                )
+                return 0
+            atomic_write_json(
+                store.project_path,
+                {
+                    "schema_version": 1,
+                    "project_id": detected_id,
+                    "project_name": detected_name,
+                },
+            )
+            # The mirror is disposable by contract ("the mirror can be
+            # discarded and resynchronized"); dropping the mapping makes the
+            # next sync find pages by the NEW keys through the remote key
+            # lookup instead of patching old-identity pages in place. Events
+            # stay append-only: old rows keep their historical identity, and
+            # the rebuild re-keys every derived view under the new pin.
+            try:
+                store.notion_state_path.unlink()
+            except FileNotFoundError:
+                pass
+            rebuilt = JournalStore(args.repo).rebuild()
+            print(
+                "adopted: %s (%s) — was %s (%s); rebuilt %s events, %s daily, %s weekly"
+                % (
+                    detected_name,
+                    detected_id,
+                    pinned_name or "unpinned",
+                    pinned_id or "-",
+                    rebuilt["event_count"],
+                    len(rebuilt["daily"]),
+                    len(rebuilt["weekly"]),
+                )
+            )
+            print("next: oms journal sync --force")
+            return 0
+        row = {
+            "pinned_id": pinned_id,
+            "pinned_name": pinned_name,
+            "detected_id": detected_id,
+            "detected_name": detected_name,
+            "drift": drift,
+        }
+        if args.json:
+            print(json.dumps(row, ensure_ascii=False, sort_keys=True))
+            return 0
+        print("pinned:   %s (%s)" % (pinned_name or "(none)", pinned_id or "-"))
+        print("detected: %s (%s)" % (detected_name, detected_id))
+        if drift:
+            print(
+                "drift: yes — `oms journal identity --adopt-detected` re-pins,"
+                " rebuilds, and resets the Notion mapping"
+            )
+        else:
+            print("drift: no")
         return 0
     if args.command == "materialize":
         store.materialize()

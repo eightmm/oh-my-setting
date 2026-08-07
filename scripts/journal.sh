@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PYTHON_ENTRY="$ROOT/scripts/lib/work_journal.py"
 
 case "${1:-}" in
-  status|show|rebuild|sync|distill)
+  status|show|rebuild|sync|distill|identity)
     command_name="$1"
     repo="."
     previous=""

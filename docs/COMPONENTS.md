@@ -425,7 +425,15 @@ mirror is curated per repo: `oms journal configure --exclude-repo PATH`
 the Notion page is the human surface for the user's own work, and a cloned
 repo does not belong on it even when sessions ran there. Exclusion survives
 reconfigure, `status` reports it, and an excluded repo's sync is a quiet
-no-op before any credential is touched. Remote
+no-op before any credential is touched. Project identity is pinned in
+`project.json` at first use, and `oms journal identity` shows the pin against
+what the current parser detects — a pin taken before SSH remotes normalized
+(or before a remote existed) splits one project into two Notion identities.
+`--adopt-detected` merges deliberately: it re-pins, resets the disposable
+Notion mapping so the next sync finds pages by the new keys, and rebuilds
+every derived view under the new identity while the event log stays
+append-only with its historical stamps. `status` names the remedy whenever
+pin and detection drift. Remote
 work has its own non-blocking lock and bounded tick budget, so it never owns the
 canonical append/materialization lock. Design, setup, responsibility
 boundaries, examples, fallback behavior, and the cross-machine duplicate limit

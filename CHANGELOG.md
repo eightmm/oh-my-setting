@@ -7,6 +7,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- A split project identity can be merged. `oms journal identity` shows the
+  pinned identity against what the current parser detects (a pin taken before
+  SSH-remote normalization, or before a remote existed, splits one project
+  into two Notion identities), and `--adopt-detected` merges deliberately:
+  re-pin, reset the disposable Notion mapping, rebuild the derived views —
+  the event log stays append-only with its historical stamps. `status`
+  surfaces the drift with its remedy.
 - The Notion journal mirrors only the repos you chose. Two fixes with one
   cause: the passive journal boundaries (prompt tick, Stop finish) ran in any
   git repo and seeded `.oms` there, so a repo that was merely cloned got a

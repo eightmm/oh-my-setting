@@ -672,4 +672,41 @@ assert row["notion"]["excluded"] is False, row["notion"]
   grep -q "excludes 1 repo" ||
   fail "configure --exclude-repo must add and report the exclusion"
 
+# --- Project identity: drift between the pinned and detected identity is
+# visible, and --adopt-detected re-pins, resets the Notion mapping, and
+# rebuilds the derived views — events stay append-only throughout.
+idrepo="$TMP/identity-repo"
+mkdir -p "$idrepo"
+git -C "$idrepo" init -q
+git -C "$idrepo" config user.name "Test"
+git -C "$idrepo" config user.email "test@example.com"
+mkdir -p "$idrepo/.oms/work-journal/sync"
+printf '{"schema_version":1,"project_id":"proj_legacy0000000000000","project_name":"legacy"}\n' \
+  > "$idrepo/.oms/work-journal/project.json"
+printf '{"schema_version":1,"target_fingerprint":"x","summaries":{}}\n' \
+  > "$idrepo/.oms/work-journal/sync/notion.json"
+"$ROOT/scripts/journal.sh" identity --repo "$idrepo" --json | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["drift"] is True, row
+assert row["pinned_name"] == "legacy", row
+assert row["detected_name"] == "identity-repo", row
+' || fail "identity must report drift between a legacy pin and detection"
+"$ROOT/scripts/journal.sh" status --repo "$idrepo" | grep -q "adopt-detected" ||
+  fail "status must surface identity drift with its remedy"
+"$ROOT/scripts/journal.sh" identity --repo "$idrepo" --adopt-detected |
+  grep -q "adopted: identity-repo" ||
+  fail "adopt-detected must re-pin to the detected identity"
+[ ! -e "$idrepo/.oms/work-journal/sync/notion.json" ] ||
+  fail "adopt-detected must reset the disposable Notion mapping"
+"$ROOT/scripts/journal.sh" identity --repo "$idrepo" --json | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["drift"] is False, row
+assert row["pinned_name"] == "identity-repo", row
+' || fail "after adoption the pin must match detection"
+"$ROOT/scripts/journal.sh" identity --repo "$idrepo" --adopt-detected |
+  grep -q "already canonical" ||
+  fail "a second adoption must be an explicit no-op"
+
 echo "work-journal-smoke: ok"
