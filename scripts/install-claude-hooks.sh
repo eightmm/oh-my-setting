@@ -13,12 +13,80 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SETTINGS="${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 REMOVE=0
+PRINT_EXPECTED=0
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
 
-if [ "${OMS_INSTALL_LOCK_HELD:-0}" != "1" ]; then
+# --- expected hook surfaces --------------------------------------------------
+#
+# The one place that says which Claude Code events this harness registers a
+# hook on. The upsert loop below installs exactly these rows, and
+# --print-expected emits the same rows as JSON, so a doctor can compare a live
+# settings.json against what a given checkout would install rather than against
+# a list it carries separately. An installed doctor holding its own copy could
+# not see a surface added after it was installed, which is how two hooks stayed
+# unregistered while the doctor reported the registration complete.
+#
+# Rows are event|script|matcher|timeout. An empty matcher or timeout field is
+# omitted from the registration; the command is always `bash $ROOT/scripts/
+# <script>`. Blank lines and # comments are ignored, so the reason a surface
+# exists lives next to the surface.
+#
+# HOOKS_SCHEMA is bumped whenever a row changes. It is stamped into the install
+# receipt at install/update time, which is what lets `doctor --surfaces` say
+# "the installed harness predates this list" instead of silently comparing
+# against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
+# set and fails until the bump and the recorded hash move together.
+HOOKS_SCHEMA=1
+HOOK_SURFACES='
+UserPromptSubmit|skill-router.sh||
+Stop|turn-guard.sh||12
+
+# Failed Bash commands feed the shared failure memory and surface what it
+# already knows. Matcher-scoped so other tools failures never pay for it; a 5s
+# ceiling so a wedged ledger cannot stall the turn.
+PostToolUseFailure|fail-ledger-hook.sh|Bash|5
+
+# The same script on the success event closes the loop: a command that passes
+# resolves the row its failure wrote, so the ledger stops needing a human sweep
+# to stay readable. Same matcher and ceiling; a repo with no failure history
+# costs one stat.
+PostToolUse|fail-ledger-hook.sh|Bash|5
+
+# Compaction discards transcript detail; snapshot a handoff digest first. The
+# hook is best-effort and self-bounded, but a ceiling keeps a huge transcript
+# from stalling compaction.
+PreCompact|precompact-handoff.sh||30
+
+# A session that ends below the pressure bands and without ever compacting is
+# the common case, and it used to capture nothing. Same script, same ceiling:
+# it reads the event name off the payload and dedupes against a capture from
+# the last few minutes.
+SessionEnd|precompact-handoff.sh||30
+
+# A resuming session starts knowing its active task, newest handoff, open
+# failures, and live-peer status instead of rediscovering them.
+SessionStart|resume-hook.sh||10
+
+# Only content-free counters and bounded identifiers are retained. Keep every
+# event under the recommended five-second synchronous hook budget.
+SessionStart|telemetry-hook.sh||5
+PostToolUse|telemetry-hook.sh||5
+SubagentStop|telemetry-hook.sh||5
+SessionEnd|telemetry-hook.sh||5
+'
+
+# --print-expected is a read-only report about this checkout. It answers before
+# the install lock and before the canonical-owner check on purpose: the doctor
+# that needs the list is usually running from a workspace that does not own the
+# install, and that is exactly the case worth reporting on.
+case " $* " in
+  *" --print-expected "*) PRINT_EXPECTED=1 ;;
+esac
+
+if [ "$PRINT_EXPECTED" = "0" ] && [ "${OMS_INSTALL_LOCK_HELD:-0}" != "1" ]; then
   oms_with_file_lock "$(oms_install_receipt_path)" \
     env OMS_INSTALL_LOCK_HELD=1 bash "$ROOT/scripts/install-claude-hooks.sh" "$@"
   exit $?
@@ -26,7 +94,7 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: install-claude-hooks.sh [--remove] [--settings PATH]
+Usage: install-claude-hooks.sh [--remove] [--settings PATH] [--print-expected]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PreCompact/SessionEnd
@@ -41,22 +109,75 @@ Options:
   --remove          Remove the oh-my-setting hook entries instead.
   --settings PATH   Settings file (default: ~/.claude/settings.json,
                     override with OMS_CLAUDE_SETTINGS).
+  --print-expected  Print this checkout's expected event/script surfaces as
+                    JSON and exit, changing nothing.
   -h, --help        Show help.
 EOF
 }
 
 fail() { echo "error: $*" >&2; exit 2; }
 
+# The manifest becomes structured rows in exactly one place. Both the upserts
+# below and --print-expected consume this JSON, so the list a doctor compares
+# against is the list that would actually be installed.
+print_expected_json() {
+  OMS_CH_ROOT="$ROOT" OMS_CH_SURFACES="$HOOK_SURFACES" \
+    OMS_CH_HOOKS_SCHEMA="$HOOKS_SCHEMA" python3 <<'PY'
+import json, os, sys
+
+root = os.environ["OMS_CH_ROOT"]
+surfaces = []
+for line in os.environ["OMS_CH_SURFACES"].splitlines():
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split("|")
+    if len(parts) != 4:
+        sys.stderr.write("error: malformed hook surface row: %s\n" % line)
+        sys.exit(2)
+    event, script, matcher, timeout = (part.strip() for part in parts)
+    if not event or not script:
+        sys.stderr.write("error: hook surface row needs an event and a script: %s\n" % line)
+        sys.exit(2)
+    surfaces.append({
+        "event": event,
+        "script": script,
+        "matcher": matcher or None,
+        "timeout": int(timeout) if timeout else None,
+        "command": "bash %s/scripts/%s" % (root, script),
+    })
+json.dump(
+    {
+        "schema": 1,
+        "hooks_schema": int(os.environ["OMS_CH_HOOKS_SCHEMA"]),
+        "root": root,
+        "surfaces": surfaces,
+    },
+    sys.stdout,
+    indent=2,
+    sort_keys=True,
+)
+sys.stdout.write("\n")
+PY
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --remove) REMOVE=1; shift ;;
     --settings) [ "$#" -ge 2 ] || fail "--settings requires a path"; SETTINGS="$2"; shift 2 ;;
+    --print-expected) PRINT_EXPECTED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+
+if [ "$PRINT_EXPECTED" = "1" ]; then
+  print_expected_json
+  exit 0
+fi
+
 [ -f "$ROOT/scripts/skill-router.sh" ] || fail "skill-router.sh not found under $ROOT"
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
 [ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
@@ -79,25 +200,17 @@ if [ "$REMOVE" = 1 ] && [ ! -f "$SETTINGS" ]; then
 fi
 mkdir -p "$(dirname "$SETTINGS")"
 
+EXPECTED_JSON="$(print_expected_json)"
+
 OMS_CH_SETTINGS="$SETTINGS" OMS_CH_REMOVE="$REMOVE" \
-  OMS_CH_SKILL_CMD="bash $ROOT/scripts/skill-router.sh" \
-  OMS_CH_GUARD_CMD="bash $ROOT/scripts/turn-guard.sh" \
-  OMS_CH_FAIL_CMD="bash $ROOT/scripts/fail-ledger-hook.sh" \
-  OMS_CH_PRECOMPACT_CMD="bash $ROOT/scripts/precompact-handoff.sh" \
-  OMS_CH_RESUME_CMD="bash $ROOT/scripts/resume-hook.sh" \
-  OMS_CH_TELEMETRY_CMD="bash $ROOT/scripts/telemetry-hook.sh" \
+  OMS_CH_EXPECTED="$EXPECTED_JSON" \
   OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" \
   OMS_CH_SUBAGENT_STATUS_PATH="$ROOT/scripts/claude-subagent-statusline.py" python3 <<'PY'
 import json, os, shlex, sys, tempfile
 
 path = os.environ["OMS_CH_SETTINGS"]
 remove = os.environ["OMS_CH_REMOVE"] == "1"
-skill_cmd = os.environ["OMS_CH_SKILL_CMD"]
-guard_cmd = os.environ["OMS_CH_GUARD_CMD"]
-fail_cmd = os.environ["OMS_CH_FAIL_CMD"]
-precompact_cmd = os.environ["OMS_CH_PRECOMPACT_CMD"]
-resume_cmd = os.environ["OMS_CH_RESUME_CMD"]
-telemetry_cmd = os.environ["OMS_CH_TELEMETRY_CMD"]
+expected = json.loads(os.environ["OMS_CH_EXPECTED"])["surfaces"]
 status_cmd = "python3 %s" % shlex.quote(os.environ["OMS_CH_STATUS_PATH"])
 subagent_status_cmd = "python3 %s" % shlex.quote(
     os.environ["OMS_CH_SUBAGENT_STATUS_PATH"]
@@ -194,39 +307,11 @@ if remove:
         del settings["subagentStatusLine"]
     action = "removed"
 else:
-    upsert("UserPromptSubmit", "skill-router.sh", skill_cmd)
-    upsert("Stop", "turn-guard.sh", guard_cmd, timeout=12)
-    # Failed Bash commands feed the shared failure memory and surface what it
-    # already knows. Matcher-scoped so other tools' failures never pay for it;
-    # a 5s ceiling so a wedged ledger cannot stall the turn.
-    upsert(
-        "PostToolUseFailure", "fail-ledger-hook.sh", fail_cmd,
-        matcher="Bash", timeout=5,
-    )
-    # The same script on the success event closes the loop: a command that
-    # passes resolves the row its failure wrote, so the ledger stops needing a
-    # human sweep to stay readable. Same matcher and ceiling; a repo with no
-    # failure history costs one stat.
-    upsert(
-        "PostToolUse", "fail-ledger-hook.sh", fail_cmd,
-        matcher="Bash", timeout=5,
-    )
-    # Compaction discards transcript detail; snapshot a handoff digest first.
-    # The hook is best-effort and self-bounded, but a ceiling keeps a huge
-    # transcript from stalling compaction.
-    upsert("PreCompact", "precompact-handoff.sh", precompact_cmd, timeout=30)
-    # A session that ends below the pressure bands and without ever compacting
-    # is the common case, and it used to capture nothing. Same script, same
-    # ceiling: it reads the event name off the payload and dedupes against a
-    # capture from the last few minutes.
-    upsert("SessionEnd", "precompact-handoff.sh", precompact_cmd, timeout=30)
-    # A resuming session starts knowing its active task, newest handoff,
-    # open failures, and live-peer status instead of rediscovering them.
-    upsert("SessionStart", "resume-hook.sh", resume_cmd, timeout=10)
-    # Only content-free counters and bounded identifiers are retained. Keep
-    # every event under the recommended five-second synchronous hook budget.
-    for event in ("SessionStart", "PostToolUse", "SubagentStop", "SessionEnd"):
-        upsert(event, "telemetry-hook.sh", telemetry_cmd, timeout=5)
+    for surface in expected:
+        upsert(
+            surface["event"], surface["script"], surface["command"],
+            matcher=surface["matcher"], timeout=surface["timeout"],
+        )
     if "statusLine" not in settings:
         settings["statusLine"] = {"type": "command", "command": status_cmd}
     elif status_ours(
@@ -269,3 +354,71 @@ except Exception:
     raise
 print("claude-settings: %s oh-my-setting hooks/HUDs (%s)" % (action, path))
 PY
+
+# Record which surface list this registration came from. link.sh rewrites the
+# whole receipt on every install and update and knows nothing about hooks, and
+# this script always runs after it, so the stamp has to happen here and on
+# every non-remove run — including the "already current" path, which is the
+# common case for an update that changes no command paths.
+#
+# Without it, an installed harness whose expected list predates the source's
+# looks identical to one that is current, which is precisely the drift that let
+# two hooks stay unregistered while the doctor reported ok.
+stamp_receipt_hooks_schema() {
+  local receipt
+  local owner
+
+  receipt="$(oms_install_receipt_path)"
+  [ -f "$receipt" ] || return 0
+  # Only the canonical owner may speak for the install; another checkout
+  # running --remove is not evidence about what the owner registered.
+  owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null)" || return 0
+  [ "$owner" = "$ROOT" ] || return 0
+
+  OMS_CH_HOOKS_SCHEMA="$HOOKS_SCHEMA" OMS_CH_REMOVE="$REMOVE" \
+    python3 - "$receipt" <<'PY'
+import json, os, sys, tempfile
+
+receipt = sys.argv[1]
+value = None if os.environ["OMS_CH_REMOVE"] == "1" else int(
+    os.environ["OMS_CH_HOOKS_SCHEMA"]
+)
+try:
+    with open(receipt, encoding="utf-8") as fh:
+        row = json.load(fh)
+except Exception:
+    sys.exit(1)
+if not isinstance(row, dict):
+    sys.exit(1)
+if value is None:
+    if "hooks_schema" not in row:
+        sys.exit(0)
+    row.pop("hooks_schema")
+else:
+    if row.get("hooks_schema") == value:
+        sys.exit(0)
+    row["hooks_schema"] = value
+
+parent = os.path.dirname(receipt) or "."
+fd, tmp = tempfile.mkstemp(prefix=".install.", suffix=".tmp", dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(row, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, receipt)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
+# Best-effort: a receipt this script could not stamp is a stale doctor warning,
+# not a failed hook registration, and install.sh already treats this script's
+# exit status as pass/fail for the registration itself.
+stamp_receipt_hooks_schema ||
+  echo "warning: could not record hooks_schema in the install receipt" >&2

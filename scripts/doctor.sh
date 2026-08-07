@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 REPAIR=0
+SURFACES=0
 MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
 MODEL_DOCTOR_STRICT=0
@@ -23,7 +24,7 @@ ORIGINAL_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: doctor.sh [--repair] [--live-models] [--strict-diversity]
+Usage: doctor.sh [--repair] [--surfaces] [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
@@ -33,15 +34,24 @@ adds bounded account-visible catalog probes, while --strict-diversity requires
 at least two usable independent model families. An invalid or unavailable
 receipt owner is never replaced automatically.
 
+--surfaces is a standalone read-only report: for every hook surface this
+checkout would register, it compares the source list, the live settings.json,
+and the harness event stream, and exits nonzero when a registration is
+missing. Unlike the rest of the doctor it never delegates to the receipt
+owner, because an installed doctor can only check the surfaces it shipped
+with.
+
 Environment:
   OH_MY_SETTING_MODEL_DOCTOR=auto|0|1  Auto-detect, disable, or force the
                                       local model capability check.
+  OMS_SURFACE_EVIDENCE_DAYS=N         --surfaces evidence window (default 14).
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repair) REPAIR=1; shift ;;
+    --surfaces) SURFACES=1; shift ;;
     --live-models)
       MODEL_DOCTOR_MODE=1
       MODEL_DOCTOR_LIVE=1
@@ -64,6 +74,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$SURFACES" = "1" ] && [ "$REPAIR" = "1" ]; then
+  echo "error: --surfaces is a read-only report; run --repair separately" >&2
+  exit 2
+fi
+
 RECEIPT="$(oms_install_receipt_path)"
 RECEIPT_STATE="missing"
 INSTALL_ROOT="$ROOT"
@@ -76,7 +91,12 @@ if [ -f "$RECEIPT" ]; then
   fi
 fi
 
-if [ "$RECEIPT_STATE" = "valid" ] && [ "$ROOT" != "$INSTALL_ROOT" ] &&
+# --surfaces deliberately opts out of the delegation below. Handing the report
+# to the installed checkout would ask the old harness whether it is old: its
+# expected list is the stale one, so it certifies itself. The whole value of
+# the report is that it runs from a newer source against the live settings.
+if [ "$SURFACES" = "0" ] && [ "$RECEIPT_STATE" = "valid" ] &&
+   [ "$ROOT" != "$INSTALL_ROOT" ] &&
    [ -x "$INSTALL_ROOT/scripts/doctor.sh" ]; then
   echo "delegating doctor to canonical owner: $INSTALL_ROOT"
   exec "$INSTALL_ROOT/scripts/doctor.sh" "${ORIGINAL_ARGS[@]}"
@@ -565,6 +585,237 @@ EOF
   fi
 }
 
+# Three layers have to agree before a hook surface is actually live: the list
+# this checkout would install, the registrations in the live settings.json, and
+# whether the hook has been heard from lately. check_claude_hooks above only
+# compares the first two, and against a list it carries itself — so an install
+# that predates a new surface reports "registered" for a set that no longer
+# matches the source. This section asks the source for the list instead.
+check_hook_surfaces() {
+  local settings="${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+  local project_dir="${OMS_DOCTOR_PROJECT_DIR:-$PWD}"
+  local expected
+  local receipt_schema="skip"
+  local status=0
+  local errlog
+
+  printf '\n# hook surfaces\n'
+  echo "source: $ROOT"
+  echo "settings: $settings"
+  # stdout carries the JSON and nothing else; a diagnostic merged into it would
+  # be indistinguishable from a malformed list.
+  errlog="$(mktemp "${TMPDIR:-/tmp}/oms-surfaces.XXXXXX")"
+  if ! expected="$("$ROOT/scripts/install-claude-hooks.sh" --print-expected 2>"$errlog")"; then
+    echo "fail: cannot read the expected surface list from $ROOT"
+    sed -n '1,3p' "$errlog" | sed 's/^/  /'
+    rm -f "$errlog"
+    FAILED=1
+    return 0
+  fi
+  rm -f "$errlog"
+  if [ "$INSTALL_ROOT" != "$ROOT" ]; then
+    echo "note: installed harness runs from $INSTALL_ROOT"
+  fi
+  # Unlike the rest of the doctor this does not require a valid receipt: the
+  # source-versus-live comparison is meaningful for a bare checkout too, and
+  # the receipt only contributes the schema stamp.
+  if [ "$RECEIPT_STATE" = "valid" ]; then
+    receipt_schema="$(oms_install_receipt_field hooks_schema "$RECEIPT" 2>/dev/null ||
+      printf 'absent')"
+  fi
+
+  OMS_DOCTOR_EXPECTED="$expected" \
+  OMS_DOCTOR_SETTINGS="$settings" \
+  OMS_DOCTOR_EVENTS="$project_dir/.oms/hooks/events.jsonl" \
+  OMS_DOCTOR_RECEIPT_SCHEMA="$receipt_schema" \
+  OMS_DOCTOR_EVIDENCE_DAYS="${OMS_SURFACE_EVIDENCE_DAYS:-14}" \
+    python3 <<'PY' || status=$?
+import datetime, json, os, shlex, sys
+
+expected = json.loads(os.environ["OMS_DOCTOR_EXPECTED"])
+settings_path = os.environ["OMS_DOCTOR_SETTINGS"]
+events_path = os.environ["OMS_DOCTOR_EVENTS"]
+receipt_schema = os.environ["OMS_DOCTOR_RECEIPT_SCHEMA"].strip()
+days = int(os.environ["OMS_DOCTOR_EVIDENCE_DAYS"])
+
+# Which action in the harness event stream proves a given hook ran. A hook
+# that writes no event has nothing to check, and silence from one of those is
+# normal — so it is reported as an absent stream, never as a fault.
+EVIDENCE = {
+    "skill-router.sh": "route",
+    "turn-guard.sh": "turn_guard",
+    "telemetry-hook.sh": "telemetry",
+}
+
+hooks = {}
+if not os.path.isfile(settings_path):
+    print("fail: settings file absent")
+else:
+    try:
+        with open(settings_path, encoding="utf-8") as fh:
+            settings = json.load(fh)
+        hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
+    except Exception as exc:
+        print("fail: settings file is not readable JSON (%s)" % exc)
+
+def registered(event, script):
+    for entry in hooks.get(event) or []:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks", []) or []:
+            command = str(hook.get("command", ""))
+            try:
+                argv = shlex.split(command)
+            except ValueError:
+                argv = command.split()
+            if script in {os.path.basename(a.replace("\\", "/")) for a in argv}:
+                return True
+    return False
+
+# Last time each action was recorded. Timestamps are fixed-width UTC
+# ("2026-08-07T04:57:48Z"), so string order is time order and no parsing is
+# needed — datetime.fromisoformat rejects the trailing Z before Python 3.11.
+last = {}
+has_stream = os.path.isfile(events_path)
+if has_stream:
+    with open(events_path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            action, ts = row.get("action"), row.get("ts")
+            if not isinstance(action, str) or not isinstance(ts, str):
+                continue
+            keys = [action]
+            # Telemetry fires on four events from one script; the row names
+            # which, so this is per-surface evidence rather than "the script
+            # ran at some point".
+            if action == "telemetry" and isinstance(row.get("hook"), str):
+                keys.append("telemetry:%s" % row["hook"])
+            for key in keys:
+                if ts > last.get(key, ""):
+                    last[key] = ts
+else:
+    print("note: no harness event stream at %s; evidence unchecked" % events_path)
+
+cutoff = (
+    datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+missing = 0
+stale = 0
+for surface in expected["surfaces"]:
+    event, script = surface["event"], surface["script"]
+    label = "%s -> %s" % (event, script)
+    if not registered(event, script):
+        print("MISSING REGISTRATION: %s" % label)
+        missing += 1
+        continue
+    action = EVIDENCE.get(script)
+    if action is None:
+        print("ok: %s (registered; no evidence stream)" % label)
+        continue
+    if not has_stream:
+        print("ok: %s (registered; evidence unavailable)" % label)
+        continue
+    key = "telemetry:%s" % event if action == "telemetry" else action
+    seen = last.get(key)
+    if seen is None:
+        print("no-recent-evidence: %s (registered; no %s event recorded)" % (label, action))
+        stale += 1
+    elif seen < cutoff:
+        print("no-recent-evidence: %s (registered; last %s %s)" % (label, action, seen))
+        stale += 1
+    else:
+        print("ok: %s (registered; last %s %s)" % (label, action, seen))
+
+source_schema = expected["hooks_schema"]
+if receipt_schema == "skip":
+    print("note: no valid install receipt; hooks_schema %d unverified" % source_schema)
+elif receipt_schema == "absent":
+    print(
+        "warn: install receipt records no hooks_schema (source is %d); the "
+        "installed harness predates this surface list" % source_schema
+    )
+elif receipt_schema != str(source_schema):
+    print(
+        "warn: install receipt hooks_schema %s != source %d; re-run "
+        "install-claude-hooks.sh from the canonical checkout"
+        % (receipt_schema, source_schema)
+    )
+else:
+    print("ok: hooks_schema %d matches the install receipt" % source_schema)
+
+# Only a missing registration is a failure. Silence can be normal — a machine
+# that has not compacted, a repository nobody worked in this fortnight — and a
+# schema stamp is a staleness hint, not a broken surface.
+if stale:
+    print("note: %d registered surface(s) have no evidence within %d day(s)" % (stale, days))
+if missing:
+    print("hint: run %s/scripts/install-claude-hooks.sh" % expected["root"])
+    sys.exit(1)
+sys.exit(0)
+PY
+  [ "$status" -eq 0 ] || FAILED=1
+}
+
+# The managed global targets this install claims, HOME-relative, as recorded at
+# install time. Falls back to the three rule files, which is what every install
+# has had since before the receipt carried an inventory.
+managed_target_inventory() {
+  local out=""
+
+  if [ "$RECEIPT_STATE" = "valid" ]; then
+    out="$(python3 - "$RECEIPT" <<'PY' || true
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        targets = json.load(fh).get("managed_targets")
+except Exception:
+    sys.exit(1)
+if not isinstance(targets, list):
+    sys.exit(1)
+for target in targets:
+    if isinstance(target, str) and target and not target.startswith("/"):
+        print(target)
+PY
+)"
+    out="$(oms_strip_cr "$out")"
+  fi
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+  else
+    printf '%s\n' ".claude/CLAUDE.md" ".codex/AGENTS.md" ".gemini/AGENTS.md"
+  fi
+}
+
+# scripts/link.sh moves a pre-existing user file to <target>.backup.<stamp>
+# before linking ours in. That file is the user's own configuration, parked
+# where nothing reads it again and nothing mentions it again. Name it here so
+# leaving it there is a decision rather than an accident. Not a failure: the
+# install is correct, the user's old rules are merely no longer in effect.
+check_displaced_config() {
+  local target
+  local backup
+
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    for backup in "$HOME/$target".backup.*; do
+      [ -e "$backup" ] || continue
+      echo "displaced user config: $backup (restore: oms uninstall, or merge it)"
+    done
+  done <<EOF
+$(managed_target_inventory)
+EOF
+}
+
 harness_relpath() {
   local project_dir="$1"
   local path="$2"
@@ -902,6 +1153,16 @@ case "$MODEL_DOCTOR_MODE" in
     ;;
 esac
 
+if [ "$SURFACES" = "1" ]; then
+  check_hook_surfaces
+  if [ "$FAILED" -ne 0 ]; then
+    echo "surfaces: failed"
+    exit 1
+  fi
+  echo "surfaces: ok"
+  exit 0
+fi
+
 check_install_receipt
 check_snapshots
 
@@ -1000,6 +1261,7 @@ check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.gemini/antigravity/skills"
 check_path "$HOME/.oh-my-setting-prompts" "$INSTALL_ROOT/prompts"
 check_path "$HOME/.local/bin/oms" "$INSTALL_ROOT/scripts/oms"
+check_displaced_config
 
 if ! "$ROOT/scripts/skill-doctor.sh"; then
   FAILED=1

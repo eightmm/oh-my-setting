@@ -48,6 +48,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   used.
 
 ### Added
+- `oms doctor --surfaces` proves the wiring instead of trusting it. The
+  installer's hook registrations now live in one HOOK_SURFACES manifest with
+  a HOOKS_SCHEMA stamp (`--print-expected` emits it as JSON; the receipt
+  records the stamp), and the new doctor report compares that expected list
+  against the LIVE settings file and per-event evidence in
+  `.oms/hooks/events.jsonl` — deliberately without delegating to the
+  installed checkout, whose stale expected list is exactly how a 14-commit
+  install drift stayed invisible behind "doctor: ok". A gate test hashes the
+  manifest so changing registrations without bumping HOOKS_SCHEMA fails. The
+  default doctor also names displaced user configs
+  (`<managed target>.backup.*`) with their restore path.
 - The MCP server gains two action tools, so peer consultation feels like a
   native tool call instead of a shell command: `oms_peer_start` launches
   `consult`/`advise`/`peer-ask` detached (a run survives the server; targets
