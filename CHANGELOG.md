@@ -7,6 +7,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Fixed
+- Patch admission has a structural floor when no scope is supplied. The scope
+  gate used to SKIP without a task/executor scope, so nothing constrained
+  destination paths — a malformed worker patch once moved two test files to
+  the repo root and passed admission. An unscoped patch that adds a top-level
+  file or moves a file across directories now rejects; `--allow-restructure`
+  (also forwarded by `patch-land`) permits deliberate restructuring. A
+  supplied scope keeps today's behavior; an empty scope gets the floor.
+- The Notion journal mirror keeps its own promise: evidence bullets are
+  stripped even though the emitter indents them (the anchor missed `  - `,
+  leaking full commit and handoff hashes to the human page), and bullet
+  dedup now spans the whole document in presented order instead of resetting
+  per section (the same commits rendered three times). A realistic day
+  shrank from ~5.2KB to ~0.8KB with zero hex leaks.
+- The journal language default is locale-derived instead of hardcoded
+  Korean: env `OMS_WORK_JOURNAL_LANG` > `oms journal configure --lang` >
+  locale (`ko*` → Korean) > English. Existing Korean-locale machines are
+  unaffected; explicitly pin with `configure --lang ko` elsewhere.
 - The turn guard's per-turn block cap works again. The Stop payload carries
   no turn id, so the cap was keyed on an empty string and became a
   once-per-session fuse (live evidence: 5 interventions vs 47 suppressions).

@@ -130,9 +130,38 @@ _HEADINGS = {
 _EMPTY_MARKERS = {"- 기록 없음", "- none", "- none recorded"}
 
 
+def _locale_language() -> str:
+    """Language implied by the environment's locale, or empty.
+
+    Read from the environment strings rather than the locale module: the
+    answer must not depend on which locales happen to be generated on the
+    machine, and hooks inherit these variables verbatim.
+    """
+
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        value = os.environ.get(name, "").strip()
+        if not value:
+            continue
+        tag = re.split(r"[._@-]", value)[0].lower()
+        return tag if tag in _HEADINGS else ""
+    return ""
+
+
 def journal_language() -> str:
+    """Label language for rendered summaries.
+
+    Resolution order: the environment override, the language pinned in the
+    Work Journal config, the machine locale, then English. The pinned config
+    exists because the two can legitimately disagree — a journal is written in
+    its author's language, not in the language their shell reports — and
+    because hooks render in whatever environment the lifecycle script
+    inherited, where a shell variable cannot be assumed.
+    """
+
     value = os.environ.get("OMS_WORK_JOURNAL_LANG", "").strip().lower()
-    return value if value in _HEADINGS else "ko"
+    if value in _HEADINGS:
+        return value
+    return configured_journal_language() or _locale_language() or "en"
 
 
 def _headings() -> Dict[str, str]:
@@ -208,33 +237,32 @@ def notion_presentation(content: str) -> str:
     event-id citation, commit bullets carry their hashes, and one packet
     update can emit near-identical bullets from its update and close events.
     Notion is the surface the human actually reads, so the mirror drops the
-    trailing ``[wj_...]`` citations and the ``Commit <hash>:`` prefixes,
-    folds bullets that differ only by citation, removes sections that say
-    nothing, and floats decisions, blockers, and next priorities above the
-    progress listing. Deterministic text transforms only — nothing is
+    trailing ``[wj_...]`` citations, the ``Commit <hash>:`` prefixes and the
+    raw evidence bullets, floats decisions, blockers, and next priorities
+    above the progress listing, folds a bullet that several sections repeat
+    down to its single highest-ranked section, and removes sections left
+    saying nothing. Deterministic text transforms only — nothing is
     summarized or rewritten, and the local files keep full provenance.
     """
 
     citation = re.compile(r"\s*\[wj_[0-9a-f]{8,}.*\]\s*$")
     commit_prefix = re.compile(r"^- ((?:작업|work): )?Commit [0-9a-f]{7,40}: ")
-    evidence_bullet = re.compile(r"^- (관련 evidence|related evidence): ")
+    # The renderer indents an evidence bullet under its work item, so this
+    # anchor has to tolerate leading space; a top-level-only anchor let full
+    # commit hashes and handoff digests through to the human page.
+    evidence_bullet = re.compile(r"^\s*- (관련 evidence|related evidence): ")
     lines: List[str] = []
-    seen: set = set()
     for line in content.splitlines():
-        if line.startswith("#"):
-            seen = set()
+        # Raw evidence references (full hashes, task ids) are the local
+        # provenance layer, not reading material.
+        if evidence_bullet.match(line):
+            continue
         if line.startswith("- "):
-            # Raw evidence references (full hashes, task ids) are the local
-            # provenance layer, not reading material.
-            if evidence_bullet.match(line):
-                continue
-            stripped = commit_prefix.sub(
-                lambda m: "- " + (m.group(1) or ""), citation.sub("", line)
+            lines.append(
+                commit_prefix.sub(
+                    lambda m: "- " + (m.group(1) or ""), citation.sub("", line)
+                )
             )
-            if stripped in seen:
-                continue
-            seen.add(stripped)
-            lines.append(stripped)
         else:
             lines.append(line)
 
@@ -248,12 +276,37 @@ def notion_presentation(content: str) -> str:
         else:
             preamble.append(line)
 
+    ordered = sorted(sections, key=lambda s: _NOTION_SECTION_RANK.get(s["title"], 3))
+
+    # The same fact reaches progress, verified, and by-project listings, so a
+    # per-section fold left the reader the same bullet three times. Folding
+    # runs over the reordered sections rather than the source order: the
+    # section the reader meets first is the one that keeps the bullet.
+    seen: set = set()
+
+    def fold(block: Iterable[str]) -> List[str]:
+        kept: List[str] = []
+        for line in block:
+            if line.startswith("- ") and line not in _EMPTY_MARKERS:
+                if line in seen:
+                    continue
+                seen.add(line)
+            kept.append(line)
+        return kept
+
+    preamble = fold(preamble)
+    for section in ordered:
+        section["lines"] = fold(section["lines"])
+
     def says_nothing(section: Dict[str, Any]) -> bool:
-        body = [l for l in section["lines"][1:] if l.strip()]
+        # A heading left behind by the fold — including the ``### project``
+        # heading of an emptied by-project section — is not a body.
+        body = [
+            l for l in section["lines"][1:] if l.strip() and not l.startswith("#")
+        ]
         return not body or all(l in _EMPTY_MARKERS for l in body)
 
-    kept = [s for s in sections if not says_nothing(s)]
-    ordered = sorted(kept, key=lambda s: _NOTION_SECTION_RANK.get(s["title"], 3))
+    ordered = [s for s in ordered if not says_nothing(s)]
 
     out = list(preamble)
     for section in ordered:
@@ -783,6 +836,48 @@ def load_work_journal_config() -> Dict[str, Any]:
     return dict(row)
 
 
+def configured_journal_language() -> str:
+    """Language pinned in the config file, or empty when none applies.
+
+    Rendering must never fail over a configuration read, so an unreadable or
+    unsupported config resolves like an absent one; the explicit commands that
+    write the file still report the error.
+    """
+
+    try:
+        config = load_work_journal_config()
+    except JournalError:
+        return ""
+    value = str(config.get("language") or "").strip().lower()
+    return value if value in _HEADINGS else ""
+
+
+def set_journal_language(language: str) -> pathlib.Path:
+    """Pin the rendered-summary language durably and return the config path."""
+
+    value = str(language or "").strip().lower()
+    if value not in _HEADINGS:
+        raise JournalError("unsupported journal language: %s" % language)
+    path = work_journal_config_path()
+    config = dict(load_work_journal_config())
+    if not config:
+        config = {
+            "schema_version": CONFIG_SCHEMA_VERSION,
+            "managed_by": "oh-my-setting",
+            # A language-only pin still carries the Notion object: the loader
+            # rejects a file without one, and every other reader goes through
+            # it.
+            "notion": {},
+        }
+    config["language"] = value
+    atomic_write_json(path, config)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path
+
+
 def notion_settings() -> Dict[str, Any]:
     config = load_work_journal_config()
     notion = config.get("notion") if isinstance(config.get("notion"), Mapping) else {}
@@ -1033,14 +1128,18 @@ def configure_notion(
         # not from whichever shell happened to run configure.
         if settings.get("keyring") == "file":
             notion_config["keyring"] = "file"
-    atomic_write_json(
-        path,
-        {
-            "schema_version": CONFIG_SCHEMA_VERSION,
-            "managed_by": "oh-my-setting",
-            "notion": notion_config,
-        },
-    )
+    written = {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "managed_by": "oh-my-setting",
+        "notion": notion_config,
+    }
+    # Same reason as the exclusion list: a whole-file rewrite must carry the
+    # language pin or reconfiguring Notion silently reverts the journal to the
+    # machine locale.
+    prior_language = str(prior.get("language") or "").strip().lower()
+    if prior_language in _HEADINGS:
+        written["language"] = prior_language
+    atomic_write_json(path, written)
     try:
         path.chmod(0o600)
     except OSError:
@@ -3091,6 +3190,10 @@ def _build_parser() -> argparse.ArgumentParser:
     target.add_argument("--discover", action="store_true")
     target.add_argument("--exclude-repo", action="append")
     target.add_argument("--include-repo", action="append")
+    # argparse rejects a typo here with a visible message; the __main__ guard
+    # deliberately swallows JournalError text, which a human-facing flag
+    # cannot afford.
+    target.add_argument("--lang", choices=sorted(_HEADINGS))
     configure.add_argument("--no-validate", action="store_true")
     status = sub.add_parser("status")
     status.add_argument("--repo", default=".")
@@ -3237,6 +3340,11 @@ def _run_autodistill(store: JournalStore) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "configure":
+        if args.lang:
+            path = set_journal_language(args.lang)
+            print("journal language: %s (%s)" % (args.lang, path))
+            print("run `oms journal rebuild` to re-render existing summaries")
+            return 0
         if args.exclude_repo or args.include_repo:
             excluded = update_notion_exclusions(
                 args.exclude_repo or [], args.include_repo or []

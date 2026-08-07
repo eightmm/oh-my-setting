@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -45,6 +47,13 @@ def base_event(source_id: str = "source-1", occurred_at: str = "2026-07-31T02:00
 
 class JournalTestCase(unittest.TestCase):
     def setUp(self):
+        # These cases assert Korean labels, which are no longer the fixed
+        # default: pin the language so the runner's locale cannot decide it.
+        language = mock.patch.dict(
+            os.environ, {"OMS_WORK_JOURNAL_LANG": "ko"}, clear=False
+        )
+        language.start()
+        self.addCleanup(language.stop)
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-test."))
         self.repo = self.tmp / "demo"
         self.repo.mkdir()
@@ -776,6 +785,59 @@ class JournalTestCase(unittest.TestCase):
         daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
         self.assertIn("## 핵심 진전", daily)
 
+    def test_notion_mirror_of_a_rendered_day_carries_no_raw_reference(self):
+        sha = "0e0390aa95893b50e14bdf78d60f5c5d3090cf8d"
+        handoff = "b" * 64
+        payload = base_event("evidence-leak")
+        payload["evidence"] = [
+            {"type": "git-commit", "ref": sha},
+            {"type": "handoff", "ref": handoff},
+        ]
+        self.store.record_event(payload)
+        self.store.materialize()
+        daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+        # The local file is the evidence layer and keeps both references,
+        # including the indented bullet the mirror has to drop.
+        self.assertIn("  - 관련 evidence: git-commit:%s" % sha, daily)
+
+        rendered = wj.notion_presentation(daily)
+        self.assertNotRegex(rendered, r"[0-9a-f]{40}")
+        self.assertNotIn(handoff, rendered)
+        self.assertNotIn("관련 evidence", rendered)
+        self.assertIn("- 작업: focused verification passed", rendered)
+
+    def test_notion_mirror_folds_a_bullet_into_its_highest_ranked_section(self):
+        alpha = base_event("alpha")
+        alpha["outcome"] = {"summary": "alpha check passed", "status": "success"}
+        beta = base_event("beta", "2026-07-31T02:30:00Z")
+        beta["outcome"] = {"summary": "beta still open", "status": "recorded"}
+        beta["verification_status"] = "not_verified"
+        self.store.record_event(alpha)
+        self.store.record_event(beta)
+        self.store.materialize()
+        daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+        # Progress and verified/unverified list the same facts locally.
+        self.assertEqual(2, daily.count("- alpha check passed"))
+
+        rendered = wj.notion_presentation(daily)
+        self.assertEqual(1, rendered.count("- alpha check passed"))
+        self.assertEqual(1, rendered.count("- beta still open"))
+        # 검증된 것 and 아직 검증되지 않은 것 outrank 핵심 진전, which the
+        # source file lists first, so the fold has to follow the presented
+        # order rather than the file order.
+        self.assertLess(
+            rendered.index("## 검증된 것"), rendered.index("- alpha check passed")
+        )
+        self.assertLess(
+            rendered.index("## 아직 검증되지 않은 것"),
+            rendered.index("- beta still open"),
+        )
+        # Having given up every bullet, the duplicate progress listing goes.
+        self.assertNotIn("## 핵심 진전", rendered)
+        # The by-project section keeps its own labeled bullets and heading.
+        self.assertIn("### demo", rendered)
+        self.assertIn("- 작업: alpha check passed", rendered)
+
     def test_project_identity_is_create_once_and_recoverable_from_events(self):
         self.store.record_event(base_event("identity"))
         original = self.store.project_id
@@ -855,6 +917,104 @@ class NotionTransportPersistenceTest(unittest.TestCase):
             self.assertEqual("os", settings["keyring"])
 
 
+class JournalLanguageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-lang."))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.config = self.tmp / "work-journal.json"
+
+    def env(self, **overrides):
+        # An empty string reads as unset everywhere in the resolution chain,
+        # so the matrix stays independent of the runner's own locale.
+        base = {
+            "OMS_WORK_JOURNAL_CONFIG": str(self.config),
+            "OMS_WORK_JOURNAL_LANG": "",
+            "LC_ALL": "",
+            "LC_MESSAGES": "",
+            "LANG": "",
+        }
+        base.update(overrides)
+        return mock.patch.dict(os.environ, base, clear=False)
+
+    def test_resolution_order_env_then_config_then_locale_then_english(self):
+        with self.env(LANG="en_US.UTF-8"):
+            wj.set_journal_language("ko")
+            # A config pin beats a machine locale that says otherwise: the
+            # journal is written in its author's language.
+            self.assertEqual("ko", wj.journal_language())
+            with mock.patch.dict(
+                os.environ, {"OMS_WORK_JOURNAL_LANG": "en"}, clear=False
+            ):
+                self.assertEqual("en", wj.journal_language())
+        self.config.unlink()
+        with self.env(LANG="ko_KR.UTF-8"):
+            self.assertEqual("ko", wj.journal_language())
+        with self.env(LANG="en_US.UTF-8"):
+            self.assertEqual("en", wj.journal_language())
+        with self.env(LC_ALL="C.UTF-8", LANG="ko_KR.UTF-8"):
+            self.assertEqual("en", wj.journal_language())
+        with self.env():
+            self.assertEqual("en", wj.journal_language())
+
+    def test_pinned_language_reaches_the_rendered_summary(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        with self.env(LANG="ko_KR.UTF-8"):
+            wj.set_journal_language("en")
+            store = wj.JournalStore(
+                repo,
+                timezone_name="Asia/Seoul",
+                clock=lambda: NOW,
+                project_id="proj_lang",
+                project_name="lang",
+            )
+            store.record_event(base_event("lang"))
+            store.materialize()
+        daily = (store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+        self.assertIn("## Key progress", daily)
+        self.assertNotIn("핵심 진전", daily)
+
+    def cli(self, *argv):
+        """Run the CLI front door, keeping its output out of the test log."""
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = wj.main(list(argv))
+        return status, out.getvalue()
+
+    def test_configure_lang_is_a_front_door_that_survives_notion_rewrite(self):
+        with self.env():
+            status, out = self.cli("configure", "--lang", "ko")
+            self.assertEqual(0, status)
+            self.assertIn("journal language: ko", out)
+            self.assertIn("rebuild", out)
+            stored = json.loads(self.config.read_text(encoding="utf-8"))
+            self.assertEqual("ko", stored["language"])
+            # The Notion object is present but empty, so every other reader
+            # still loads the file.
+            self.assertEqual({}, stored["notion"])
+            self.assertEqual("ko", wj.journal_language())
+            # A typo has to be visibly rejected: the __main__ guard swallows
+            # JournalError text, so argparse owns this message.
+            with self.assertRaises(SystemExit):
+                self.cli("configure", "--lang", "kr")
+
+            # Reconfiguring Notion rewrites the whole file; the pin survives.
+            wj.configure_notion("0" * 32, validate=False)
+            stored = json.loads(self.config.read_text(encoding="utf-8"))
+            self.assertEqual("ko", stored["language"])
+            self.assertEqual("0" * 32, stored["notion"]["data_source_id"])
+            self.assertEqual("ko", wj.journal_language())
+
+    def test_unreadable_config_falls_back_instead_of_failing_the_render(self):
+        self.config.write_text("{damaged", encoding="utf-8")
+        with self.env(LANG="ko_KR.UTF-8"):
+            self.assertEqual("", wj.configured_journal_language())
+            self.assertEqual("ko", wj.journal_language())
+            with self.assertRaises(wj.JournalError):
+                wj.set_journal_language("en")
+
+
 class NotionPresentationTest(unittest.TestCase):
     def test_strips_citations_and_folds_citation_only_duplicates(self):
         content = "\n".join(
@@ -898,27 +1058,37 @@ class NotionPresentationTest(unittest.TestCase):
                 "## 프로젝트별 작업",
                 "### proj",
                 "- 작업: Commit 0e0390aa9589: test: capture status output",
-                "- 관련 evidence: git-commit:0e0390aa95893b50e14bdf78d60f5c5d3090cf8d",
-                "- 결과: recorded",
+                "  - 관련 evidence: git-commit:0e0390aa95893b50e14bdf78d60f5c5d3090cf8d",
+                "  - 결과: recorded",
+                "- 작업: second item",
+                "  - 결과: recorded",
             ]
         )
         rendered = wj.notion_presentation(content)
         self.assertIn("- 작업: test: capture status output", rendered)
         self.assertNotIn("Commit 0e0390aa9589", rendered)
         self.assertNotIn("관련 evidence", rendered)
-        self.assertIn("- 결과: recorded", rendered)
+        # The indented sub-bullets that are not evidence stay, and repeat as
+        # often as the work items they belong to.
+        self.assertEqual(2, rendered.count("  - 결과: recorded"))
 
-    def test_dedup_scope_resets_per_section(self):
+    def test_dedup_spans_sections_and_follows_the_presented_order(self):
         content = "\n".join(
             [
-                "## A",
+                "## 핵심 진전",
                 "- same line [wj_0392687b9e2ed75e; source x; evidence y]",
-                "## B",
+                "- progress only [wj_a9286f0d548fa0aa; source x; evidence y]",
+                "## 의사결정",
                 "- same line [wj_767833cf7f99e79b; source x; evidence y]",
             ]
         )
         rendered = wj.notion_presentation(content)
-        self.assertEqual(rendered.count("- same line"), 2)
+        self.assertEqual(1, rendered.count("- same line"))
+        # 의사결정 is presented first, so it keeps the shared bullet even
+        # though the source file lists it under 핵심 진전 first.
+        self.assertLess(rendered.index("## 의사결정"), rendered.index("- same line"))
+        self.assertLess(rendered.index("- same line"), rendered.index("## 핵심 진전"))
+        self.assertIn("- progress only", rendered)
 
 
 if __name__ == "__main__":

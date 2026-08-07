@@ -109,9 +109,11 @@ Daily files use this stable shape:
 ## 다음 우선순위
 ```
 
-Korean labels are the default. Set `OMS_WORK_JOURNAL_LANG=en` and run
-`oms journal rebuild --repo .` to render existing daily/weekly views with
-English labels. This changes only derived Markdown, never canonical events.
+Labels follow the environment: `OMS_WORK_JOURNAL_LANG` wins, then
+`oms journal configure --lang ko|en`, then the locale (`ko*` renders Korean),
+then English. After changing the language, run `oms journal rebuild --repo .`
+to re-render existing daily/weekly views. This changes only derived Markdown,
+never canonical events.
 
 Weekly files group progress, verified outcomes, repeated blockers, decisions,
 comparable experiment series, and next priorities directly from structured
