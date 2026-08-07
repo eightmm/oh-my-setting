@@ -30,6 +30,7 @@ VERIFY_CMD=""
 NO_VERIFY=0
 ARTIFACT_DIR=""
 APPLY=0
+ALLOW_RESTRUCTURE=0
 KEEP_WORKTREE=0
 INCLUDE_MEMORY=0
 INCLUDE_TASK=1
@@ -98,6 +99,9 @@ Options:
                        Default: 0 (one-shot).
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
+  --allow-restructure  Forward to the landing gate: permit an unscoped patch
+                       that adds top-level files or moves files across
+                       directories (normally rejected by the structural floor).
   --keep-worktree      Keep the worktree for manual inspection.
   --memory             Attach shared harness memory.
   --task               Attach the active task packet (default for writes).
@@ -233,6 +237,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --apply)
       APPLY=1
+      shift
+      ;;
+    --allow-restructure)
+      ALLOW_RESTRUCTURE=1
       shift
       ;;
     --keep-worktree)
@@ -1158,6 +1166,7 @@ elif [ "$APPLY" = 1 ]; then
     [ -n "$VERIFY_CMD" ] && land_args+=(--verify "$VERIFY_CMD")
     [ -n "$PLAN_TASK_ID" ] && land_args+=(--plan-task "$PLAN_TASK_ID")
     [ -n "$EXECUTOR_ID" ] && land_args+=(--executor "$EXECUTOR_ID")
+  [ "$ALLOW_RESTRUCTURE" = 1 ] && land_args+=(--allow-restructure)
     if bash "$land_script" "${land_args[@]}" >/dev/null; then
       applied=1
     else

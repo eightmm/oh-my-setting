@@ -72,7 +72,8 @@ run_council() {  # run_council PROJECT BIN_DIR THREAD OUT ERR [ENV...]
   local rc=0
   shift 5
 
-  HOME="$project/home" NVM_DIR="$project/home/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  home_dir="$project/home"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 "$@" \
     "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
@@ -174,7 +175,8 @@ test_dry_run_records_no_durable_failure() {
   # rest of the harness already behaves; the durable failure ledger must not,
   # because no provider command ever ran.
   rc=0
-  HOME="$project/home" NVM_DIR="$project/home/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  home_dir="$project/home"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OH_MY_SETTING_ASK_DRY_RUN=1 \
     "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
@@ -212,7 +214,8 @@ EOF
 
   # One call is a council of one: a thread that keeps only the calls that
   # worked is not the conversation of record it claims to be.
-  HOME="$project/home" NVM_DIR="$project/home/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  home_dir="$project/home"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/agent-call.sh" \
     --repo "$project" \
     --artifact-dir "$project/artifacts" \

@@ -3222,6 +3222,7 @@ EOF
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --apply \
+    --allow-restructure \
     --prompt "Create delegated file" >/dev/null
 
   [ -f "$project/delegated.txt" ] || fail "applied patch should create delegated.txt in main tree"
@@ -5806,7 +5807,7 @@ test_link_idempotent_does_not_create_second_backup() {
 
 test_link_enabled_skill_membership_is_pipefail_safe() {
   local enabled_sources
-  local source="custom-skills/oh-my-setting-ops"
+  local source="custom-skills/oms-ops"
 
   # Quiet grep exits as soon as it finds the first line. If a producer is still
   # writing a pipe, pipefail turns that expected early close into EPIPE and the
@@ -5907,7 +5908,7 @@ test_unlink_restores_backup_from_legacy_global_link() {
 
 test_link_skills_round_trip_restores_existing_skill_dir() {
   local home_dir="$TMP/link-skill-round-trip-home"
-  local skill_name="spec-interview"
+  local skill_name="oms-spec-interview"
   local target="$home_dir/.claude/skills/$skill_name"
   local backup
 
@@ -5979,9 +5980,9 @@ test_link_and_unlink_with_home_override() {
   assert_symlink_to "$home_dir/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
   assert_symlink_to "$home_dir/.claude/CLAUDE.md" "$ROOT/rules/global-AGENTS.md"
   assert_symlink_to "$home_dir/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
-  assert_symlink_to "$home_dir/.codex/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
-  assert_symlink_to "$home_dir/.claude/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
-  assert_symlink_to "$home_dir/.gemini/antigravity/skills/agent-harness" "$ROOT/custom-skills/agent-harness"
+  assert_symlink_to "$home_dir/.codex/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
+  assert_symlink_to "$home_dir/.claude/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
+  assert_symlink_to "$home_dir/.gemini/antigravity/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
   assert_symlink_to "$home_dir/.codex/skills/peer-ask" "$home_dir/old-skills/peer-ask"
   if find "$home_dir/.codex/skills" -maxdepth 1 -name 'peer-ask.backup.*' | grep -q .; then
     fail "retired peer skill must not replace or back up a foreign skill"
@@ -5999,7 +6000,7 @@ test_link_and_unlink_with_home_override() {
 
   assert_symlink_to "$home_dir/.codex/skills/peer-ask" "$home_dir/old-skills/peer-ask"
   [ ! -e "$home_dir/.gemini/AGENTS.md" ] || fail "gemini AGENTS.md not unlinked"
-  [ ! -e "$home_dir/.gemini/antigravity/skills/spec-interview" ] ||
+  [ ! -e "$home_dir/.gemini/antigravity/skills/oms-spec-interview" ] ||
     fail "antigravity skills not unlinked"
 }
 
@@ -6063,30 +6064,157 @@ EOF
   assert_file_contains "$home_dir/out" "$home_dir/.agents/skills/shared/SKILL.md"
 }
 
+# Global skills install into roots the user and other tools also write to, so
+# an unprefixed name is a collision the install cannot resolve. The prefix is
+# the contract; these three tests hold each end of it: what gets installed,
+# what a previous install left behind, and what the catalog is allowed to ship.
+test_link_installs_namespaced_skill_names() {
+  local home_dir="$TMP/link-namespaced-skills"
+  local root
+  local name
+
+  HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+
+  for root in "$home_dir/.codex/skills" "$home_dir/.claude/skills" \
+    "$home_dir/.gemini/antigravity/skills"; do
+    for name in oms-agent-harness oms-ops oms-spec-interview oms-trace \
+      oms-trust-boundary; do
+      assert_symlink_to "$root/$name" "$ROOT/custom-skills/$name"
+    done
+    # The unprefixed names are what the collision risk was: a fresh install
+    # must not create them, under any linking path.
+    for name in agent-harness oh-my-setting-ops spec-interview trace \
+      trust-boundary slurm gpu-workstation; do
+      [ ! -L "$root/$name" ] && [ ! -e "$root/$name" ] ||
+        fail "link installed a superseded skill name: $root/$name"
+    done
+  done
+}
+
+test_unlink_removes_superseded_skill_name() {
+  local home_dir="$TMP/unlink-superseded-skills"
+  local skills="$home_dir/.claude/skills"
+
+  mkdir -p "$skills" "$home_dir/user-trace"
+  printf 'a skill the user wrote\n' > "$home_dir/user-trace/SKILL.md"
+  ln -s "$ROOT/custom-skills/agent-harness" "$skills/agent-harness"
+  ln -s "$home_dir/user-trace" "$skills/trace"
+
+  HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
+
+  [ ! -L "$skills/agent-harness" ] ||
+    fail "uninstall left a superseded skill name linked into this checkout"
+  # An old name is not a claim on the directory: only entries this checkout
+  # owns are removable, and the user's own skill happens to hold one.
+  assert_symlink_to "$skills/trace" "$home_dir/user-trace"
+}
+
+test_skill_doctor_reports_superseded_skill_names() {
+  local home_dir="$TMP/skill-doctor-legacy"
+
+  mkdir -p "$home_dir/.claude/skills/agent-harness" "$home_dir/.agents/skills"
+  cat > "$home_dir/.claude/skills/agent-harness/SKILL.md" <<'EOF'
+---
+name: agent-harness
+description: A skill directory a previous install left under its old name.
+---
+EOF
+  # The other shape of the same leftover: a link whose renamed source is gone.
+  # `-e` is false for it and the SKILL.md scan skips it, so only an explicit
+  # legacy-name probe finds it.
+  ln -s "$ROOT/custom-skills/oh-my-setting-ops" \
+    "$home_dir/.agents/skills/oh-my-setting-ops"
+
+  HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/out" 2>&1 ||
+    fail "a superseded skill name is advisory, not a doctor failure: $(cat "$home_dir/out")"
+
+  assert_file_contains "$home_dir/out" \
+    "warn: legacy skill name 'agent-harness' at $home_dir/.claude/skills/agent-harness"
+  assert_file_contains "$home_dir/out" "superseded by 'oms-agent-harness'"
+  assert_file_contains "$home_dir/out" \
+    "warn: legacy skill name 'oh-my-setting-ops' at $home_dir/.agents/skills/oh-my-setting-ops"
+  assert_file_contains "$home_dir/out" "superseded by 'oms-ops'"
+  assert_file_contains "$home_dir/out" "skill-doctor: ok"
+
+  rm -rf "$home_dir/.claude/skills/agent-harness" \
+    "$home_dir/.agents/skills/oh-my-setting-ops"
+  HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/clean" 2>&1 ||
+    fail "a clean install should pass the doctor: $(cat "$home_dir/clean")"
+  assert_file_contains "$home_dir/clean" "no skills installed under a superseded name"
+}
+
+test_global_skill_names_are_namespaced() {
+  local renames
+
+  python3 "$ROOT/scripts/validate-skills.py" "$ROOT" >"$TMP/validate-skills.out" 2>&1 ||
+    fail "the skill catalog should validate: $(cat "$TMP/validate-skills.out")"
+
+  renames="$(bash -c '. "$1/scripts/lib/agent-install-state.sh"; oms_ops_legacy_skill_renames' \
+    _ "$ROOT")" || fail "the rename table should be readable"
+
+  OMS_T_RENAMES="$renames" python3 - "$ROOT" <<'PY' || fail "skill names are not namespaced"
+import json
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root / "skills.manifest.json").read_text(encoding="utf-8"))
+rows = manifest["skills"]
+assert rows, "the manifest ships no skills"
+
+# The old names, still reachable from installs made before the rename. None of
+# them may return as a shipped skill: the rename table would then claim a live
+# name is superseded, and the doctor would tell users to delete a current one.
+renames = dict(
+    line.split(":", 1)
+    for line in os.environ["OMS_T_RENAMES"].split()
+    if ":" in line
+)
+assert len(renames) >= 5, renames
+
+for row in rows:
+    name = row["name"]
+    source = row["source"]
+    assert name.startswith("oms-"), "global skill is not namespaced: %s" % name
+    assert source == "custom-skills/%s" % name, (name, source)
+    assert (root / source / "SKILL.md").is_file(), source
+    assert name not in renames, "a superseded name is shipped again: %s" % name
+
+shipped = {row["name"] for row in rows}
+missing = set(renames.values()) - shipped
+assert not missing, "the rename table points at skills that do not exist: %s" % sorted(missing)
+PY
+}
+
 test_cleanup_dry_run_and_apply() {
   local home_dir="$TMP/cleanup-home"
   mkdir -p "$home_dir/.codex/skills" "$home_dir/.agents/skills" \
     "$home_dir/.pi/agent/skills" "$home_dir/.gemini"
-  ln -s "$ROOT/custom-skills/trace" \
-    "$home_dir/.codex/skills/trace.backup.legacy"
-  ln -s "$ROOT/custom-skills/trust-boundary" \
-    "$home_dir/.agents/skills/trust-boundary"
+  ln -s "$ROOT/custom-skills/oms-trace" \
+    "$home_dir/.codex/skills/oms-trace.backup.legacy"
+  ln -s "$ROOT/custom-skills/oms-trust-boundary" \
+    "$home_dir/.agents/skills/oms-trust-boundary"
+  # A skill installed before the `oms-` namespace. The current-name sweep
+  # cannot see it, and its source is gone, so only the rename table removes it.
   ln -s "$ROOT/custom-skills/spec-interview" \
     "$home_dir/.pi/agent/skills/spec-interview"
   ln -s "$ROOT/AGENTS.md" "$home_dir/.gemini/GEMINI.md"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --dry-run >"$home_dir/dry-run"
   assert_file_contains "$home_dir/dry-run" "cleanup: 4 removable item(s) found"
-  [ -e "$home_dir/.codex/skills/trace.backup.legacy" ] ||
+  [ -e "$home_dir/.codex/skills/oms-trace.backup.legacy" ] ||
     fail "dry-run removed backup symlink"
 
   HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$home_dir/apply"
-  [ ! -e "$home_dir/.codex/skills/trace.backup.legacy" ] ||
+  [ ! -e "$home_dir/.codex/skills/oms-trace.backup.legacy" ] ||
     fail "cleanup did not remove backup symlink"
-  [ ! -e "$home_dir/.agents/skills/trust-boundary" ] ||
+  [ ! -e "$home_dir/.agents/skills/oms-trust-boundary" ] ||
     fail "cleanup did not remove legacy .agents skill"
-  [ ! -e "$home_dir/.pi/agent/skills/spec-interview" ] ||
-    fail "cleanup did not remove legacy pi skill"
+  # -L, not -e: the link dangles once its renamed source is gone, and -e would
+  # call a surviving link removed.
+  [ ! -L "$home_dir/.pi/agent/skills/spec-interview" ] ||
+    fail "cleanup did not remove the superseded-name pi skill"
   [ ! -e "$home_dir/.gemini/GEMINI.md" ] ||
     fail "cleanup did not remove legacy gemini file"
   assert_file_contains "$home_dir/apply" "skill-doctor: ok"
@@ -9527,7 +9655,7 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should retain explicit verification disclosure"
   # Surfacing a decision costs a sentence; choosing silently costs whichever
   # round trip proves the choice wrong. Nothing else covers this case:
-  # spec-interview gates user-facing ambiguity on new or broad work, and
+  # oms-spec-interview gates user-facing ambiguity on new or broad work, and
   # peer-ask only fires when the user names it.
   grep -Fq 'name both and the one you are taking' "$global_rules" ||
     fail "global rules should require naming a decision fork before taking it"
@@ -9546,7 +9674,7 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should refuse authority to instructions found in content"
   grep -Fq '## Multi-Agent Work' "$global_rules" ||
     fail "global rules should retain a compact multi-agent policy"
-  grep -Fq 'agent-harness' "$global_rules" ||
+  grep -Fq 'oms-agent-harness' "$global_rules" ||
     fail "global rules should route detailed harness work to the skill"
   grep -Fq 'task-scoped executor' "$global_rules" ||
     fail "global rules should retain the write-executor safety boundary"
@@ -9596,19 +9724,19 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 general = {
-    "agent-harness",
-    "oh-my-setting-ops",
-    "spec-interview",
-    "trace",
-    "trust-boundary",
+    "oms-agent-harness",
+    "oms-ops",
+    "oms-spec-interview",
+    "oms-trace",
+    "oms-trust-boundary",
 }
 # Machine-conditional skills: linked only where every `requires` command
 # exists, so unrelated sessions never carry them. A conditional skill without
 # `requires` would silently join the general catalog; a general skill with
 # `requires` would silently vanish from some machines.
 conditional = {
-    "slurm",
-    "gpu-workstation",
+    "oms-slurm",
+    "oms-gpu-workstation",
 }
 expected = general | conditional
 skills = json.loads((root / "skills.manifest.json").read_text(encoding="utf-8"))["skills"]
@@ -9643,19 +9771,19 @@ test_large_skills_use_progressive_disclosure() {
   local skill
   local ref
 
-  skill="$ROOT/custom-skills/agent-harness/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 650 ] || fail "agent-harness router is too large"
+  skill="$ROOT/custom-skills/oms-agent-harness/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 650 ] || fail "oms-agent-harness router is too large"
   for ref in state-memory plans-recovery roles-executors cross-agent-consultation \
     delegation-artifacts review-gates session-handoff; do
     assert_file_contains "$skill" "references/$ref.md"
-    [ -f "$ROOT/custom-skills/agent-harness/references/$ref.md" ] || fail "missing agent-harness reference: $ref"
+    [ -f "$ROOT/custom-skills/oms-agent-harness/references/$ref.md" ] || fail "missing oms-agent-harness reference: $ref"
   done
   for command in "oms consult" "oms peer-review --gate" "oms peer-delegate --to NAME"; do
     assert_file_contains "$skill" "$command"
   done
 
-  skill="$ROOT/custom-skills/spec-interview/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "spec-interview router is too large"
+  skill="$ROOT/custom-skills/oms-spec-interview/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "oms-spec-interview router is too large"
   for ref in question-ui project-bootstrap spec-templates; do
     assert_file_contains "$skill" "references/$ref.md"
   done
@@ -9663,14 +9791,14 @@ test_large_skills_use_progressive_disclosure() {
   # A method, not a catalogue: the whole value is the contract, the evidence
   # ranking, and the three commands it hands off to. Anything longer is prose
   # nobody reads while a run is broken.
-  skill="$ROOT/custom-skills/trace/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 300 ] || fail "trace front door is too large"
+  skill="$ROOT/custom-skills/oms-trace/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 300 ] || fail "oms-trace front door is too large"
   for tool in "oms fail-ledger check --cmd" "oms consult --all" "oms advise --prompt"; do
     assert_file_contains "$skill" "$tool"
   done
 
-  skill="$ROOT/custom-skills/trust-boundary/SKILL.md"
-  [ "$(wc -w < "$skill" | tr -d ' ')" -le 400 ] || fail "trust-boundary method is too large"
+  skill="$ROOT/custom-skills/oms-trust-boundary/SKILL.md"
+  [ "$(wc -w < "$skill" | tr -d ' ')" -le 400 ] || fail "oms-trust-boundary method is too large"
   assert_file_contains "$skill" "trust boundary"
   assert_file_contains "$skill" "negative-path"
   # And the tools must still accept those forms. Prose that names an interface
@@ -9678,18 +9806,18 @@ test_large_skills_use_progressive_disclosure() {
   # field name left resolved failures looking open, and a hardcoded schema
   # version told every project to run a command that could not help it.
   "$ROOT/scripts/fail-ledger.sh" --help 2>&1 | grep -Eq 'check[[:space:]]+--cmd' ||
-    fail "trace cites fail-ledger check --cmd, which the tool no longer documents"
+    fail "oms-trace cites fail-ledger check --cmd, which the tool no longer documents"
   "$ROOT/scripts/agent-consult.sh" --help 2>&1 | grep -Eq '^[[:space:]]+--all' ||
-    fail "trace cites consult --all, which the tool no longer documents"
+    fail "oms-trace cites consult --all, which the tool no longer documents"
   "$ROOT/scripts/advise.sh" --help 2>&1 | grep -Eq '^[[:space:]]+--prompt TEXT' ||
-    fail "trace cites advise --prompt, which the tool no longer documents"
+    fail "oms-trace cites advise --prompt, which the tool no longer documents"
 }
 
 test_policy_layers_match_compact_global_rules() {
   local file
 
   for file in \
-    "$ROOT/custom-skills/agent-harness/SKILL.md" \
+    "$ROOT/custom-skills/oms-agent-harness/SKILL.md" \
     "$ROOT/docs/COMPONENTS.md" \
     "$ROOT/scripts/advise.sh"; do
     if grep -Eq 'before declaring (work )?done' "$file"; then
@@ -9700,11 +9828,11 @@ test_policy_layers_match_compact_global_rules() {
   done
 
   grep -Fq 'Bounded changes with a clear local contract do not require an interview.' \
-    "$ROOT/custom-skills/spec-interview/SKILL.md" ||
-    fail "spec-interview should exempt clear bounded changes"
+    "$ROOT/custom-skills/oms-spec-interview/SKILL.md" ||
+    fail "oms-spec-interview should exempt clear bounded changes"
   [ "$(grep -Fxc 'Bounded changes with a clear local contract do not require an interview.' \
-    "$ROOT/custom-skills/spec-interview/SKILL.md")" = "1" ] ||
-    fail "spec-interview should state the bounded-change exemption once"
+    "$ROOT/custom-skills/oms-spec-interview/SKILL.md")" = "1" ] ||
+    fail "oms-spec-interview should state the bounded-change exemption once"
   for file in \
     "$ROOT/templates/project-general-AGENTS.md" \
     "$ROOT/templates/project-ml-AGENTS.md"; do
@@ -10356,14 +10484,14 @@ test_skill_router_matches_and_dedupes() {
   # Trigger match suggests the mapped skill once.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" || fail "router should suggest oh-my-setting-ops"
+  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should suggest oms-ops"
   [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "route"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "task"'
   # A later turn in the same session may need the skill reminder again.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" || fail "router should re-suggest a skill on a later turn"
+  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should re-suggest a skill on a later turn"
   # Duplicate delivery of the same hook event stays silent.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
@@ -10371,15 +10499,15 @@ test_skill_router_matches_and_dedupes() {
   # Payloads without turn_id cannot safely persist a per-turn dedupe key.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" || fail "router should hint without turn_id"
+  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should hint without turn_id"
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oh-my-setting-ops" ||
+  printf '%s' "$out" | grep -Fq "oms-ops" ||
     fail "router must not suppress later identical prompts when turn_id is absent"
   # Multiple peer intents collapse to the one harness front door.
   out="$(printf '{"prompt":"peer review하고 의견 물어봐","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "agent-harness" || fail "peer intents should route to agent-harness"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" || fail "peer intents should route to oms-agent-harness"
   if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
     fail "retired peer skill names must not be suggested"
   fi
@@ -10393,14 +10521,14 @@ test_skill_router_separates_consultation_from_delegation() {
   make_committed_repo "$project"
   out="$(printf '{"prompt":"codex한테 의견 물어봐","session_id":"ask1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'agent-harness' || fail "consultation should route to agent-harness"
+  printf '%s' "$out" | grep -Fq 'oms-agent-harness' || fail "consultation should route to oms-agent-harness"
   if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
     fail "consultation must not expose a retired peer skill"
   fi
 
   out="$(printf '{"prompt":"codex한테 시켜: README 고쳐","session_id":"write1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'agent-harness' || fail "write delegation should route to agent-harness"
+  printf '%s' "$out" | grep -Fq 'oms-agent-harness' || fail "write delegation should route to oms-agent-harness"
   if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
     fail "write delegation must not expose a retired peer skill"
   fi
@@ -10424,8 +10552,8 @@ test_skill_router_routes_trust_boundary_precisely() {
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh" \
         2> "$d/router-stderr.txt")"
-    printf '%s' "$out" | grep -Fq 'trust-boundary' ||
-      fail "router should suggest trust-boundary for: $prompt (out: $out; stderr: $(cat "$d/router-stderr.txt" 2>/dev/null))"
+    printf '%s' "$out" | grep -Fq 'oms-trust-boundary' ||
+      fail "router should suggest oms-trust-boundary for: $prompt (out: $out; stderr: $(cat "$d/router-stderr.txt" 2>/dev/null))"
   done <<'EOF'
 threat model this webhook before release
 이 결제 권한의 보안 경계를 검토해줘
@@ -10441,8 +10569,8 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"security-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Fq 'trust-boundary'; then
-      fail "router must not suggest trust-boundary for: $prompt ($out)"
+    if printf '%s' "$out" | grep -Fq 'oms-trust-boundary'; then
+      fail "router must not suggest oms-trust-boundary for: $prompt ($out)"
     fi
   done <<'EOF'
 rename the internal boundary helper
@@ -10468,8 +10596,8 @@ test_skill_router_keeps_trace_off_ordinary_test_talk() {
     out="$(printf '{"prompt":"%s","session_id":"router-pos-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    printf '%s' "$out" | grep -Fq 'skill hint: trace' ||
-      fail "router should suggest trace for: $prompt ($out)"
+    printf '%s' "$out" | grep -Fq 'skill hint: oms-trace' ||
+      fail "router should suggest oms-trace for: $prompt ($out)"
   done <<'EOF'
 원인 추적 좀 해줘
 what is the root cause of this crash
@@ -10484,8 +10612,8 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"router-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Fq 'trace'; then
-      fail "router must not suggest trace for: $prompt ($out)"
+    if printf '%s' "$out" | grep -Fq 'oms-trace'; then
+      fail "router must not suggest oms-trace for: $prompt ($out)"
     fi
   done <<'EOF'
 add a regression test for this helper
@@ -10542,7 +10670,7 @@ test_skill_router_plain_question_leaves_no_state() {
   make_committed_repo "$project"
   out="$(printf '{"prompt":"oh-my-setting이 뭐야","session_id":"plain1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oh-my-setting-ops' || fail "plain question should still receive a skill hint"
+  printf '%s' "$out" | grep -Fq 'oms-ops' || fail "plain question should still receive a skill hint"
   assert_not_exists "$project/.oms"
 }
 
