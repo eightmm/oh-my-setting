@@ -181,7 +181,6 @@ plan-from-spec
 plan-run
 project-doctor
 project-private
-provider-contract
 provider-permissions
 remove-project-template
 repo-state

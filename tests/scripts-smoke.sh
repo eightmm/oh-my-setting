@@ -14517,7 +14517,7 @@ test_provider_contract_check_passes_without_providers() {
   # A machine with no provider CLIs and no registrations is healthy: loader
   # parity and fail-open still verify, MCP checks become notes.
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="/usr/bin:/bin" \
-    bash "$ROOT/scripts/provider-contract.sh" --check 2>&1)" ||
+    bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" ||
     fail "provider-contract should pass with no providers: $out"
   printf '%s\n' "$out" | grep -q 'ok: loader parity (general)' ||
     fail "general loader parity not verified: $out"
@@ -14556,7 +14556,7 @@ EOF
   # to catch, even when each registration is individually valid.
   rc=0
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
-    bash "$ROOT/scripts/provider-contract.sh" 2>&1)" || rc=$?
+    bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "drifted registrations should exit 1 (rc=$rc): $out"
   printf '%s\n' "$out" | grep -q 'fail: mcp parity' ||
     fail "parity drift not reported: $out"
@@ -14567,7 +14567,7 @@ command = "python3"
 args = ["$srv1/oms-mcp-server.py"]
 EOF
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
-    bash "$ROOT/scripts/provider-contract.sh" 2>&1)" ||
+    bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" ||
     fail "aligned registrations should pass: $out"
   printf '%s\n' "$out" | grep -q 'ok: mcp parity' ||
     fail "parity ok line missing: $out"

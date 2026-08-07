@@ -13,7 +13,7 @@ set -euo pipefail
 # seed no .oms state in an unadopted directory). Read-only outside its own
 # temp fixture; a missing provider CLI is a note, never a failure.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 usage() {
   cat <<'EOF'

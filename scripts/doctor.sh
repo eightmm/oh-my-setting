@@ -24,7 +24,7 @@ ORIGINAL_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: doctor.sh [--repair] [--surfaces] [--live-models] [--strict-diversity]
+Usage: doctor.sh [--repair] [--surfaces] [--contract] [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
@@ -52,6 +52,12 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --repair) REPAIR=1; shift ;;
     --surfaces) SURFACES=1; shift ;;
+    --contract)
+      # The cross-CLI conformance fixture (loader parity, MCP registration
+      # parity, fail-open hook no-ops) is slower than a health pass and runs
+      # only when asked — never as part of a bare doctor.
+      exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/provider-contract.sh" --check
+      ;;
     --live-models)
       MODEL_DOCTOR_MODE=1
       MODEL_DOCTOR_LIVE=1

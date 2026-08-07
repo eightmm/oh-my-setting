@@ -6,6 +6,26 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Removed
+- Every duplicate entrance and dead compatibility layer left the verb
+  surface, with no shims. `code-source`/`github-source` are gone entirely
+  (nothing routed agents to them). The hidden compat dispatch for
+  consolidated names (`run-capsule`, `write-machine-snapshot`,
+  `github-source`, `import-agent-result`, `install-autoupdate`,
+  `uninstall-autoupdate`, `generate-slurm-reference`, and the
+  `generate-slurm-skill` alias) is closed — the scripts remain as internal
+  implementation behind their front doors (`oms run capsule`, `snapshot`,
+  `artifact-index import`, `auto-update`), but only the front door
+  dispatches. The consult verb answers to exactly one name: `oms consult`
+  (script `consult.sh`; the `agent-consult` name is gone, MCP action tools
+  updated). `provider-contract` folded into `oms doctor --contract`. The
+  dead model-tier layer was removed end to end: `--tiers`, `--model-class`,
+  and `--no-model-fallback` flags (previously warn-and-ignore no-ops), the
+  `OMS_MODEL_CLASS_REQUEST`/`OMS_MODEL_ROLE_CLASS` env plumbing nothing set,
+  and the `OMS_MULTI_AGENT_*` tombstone guards. Removed flags now fail as
+  unknown arguments; name models with `--model` or
+  `PROVIDER:model=NAME` targets.
+
 ### Changed
 - The harness now notices recurring successful tool usage, not only repeated
   failures. The fail-ledger hook appends a content-free `{family, day}` row
