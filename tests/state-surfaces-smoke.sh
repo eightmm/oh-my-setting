@@ -72,6 +72,200 @@ assert json.loads(inbox["content"][0]["text"])["schema"] == 1, inbox
 PY
 }
 
+# --- MCP peer action tools --------------------------------------------------
+
+# One JSON-RPC exchange against the server in the fixture's world: the stub
+# provider on PATH, HOME and locks inside TMP so a real consult run cannot
+# reach the developer's own state, and the session markers unset so provider
+# selection is the test's choice rather than the shell it runs in.
+peer_rpc() {
+  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX \
+    HOME="$TMP/peer-home" PATH="$TMP/peer-bin:$PATH" \
+    OMS_LOCK_DIR="$TMP/peer-locks" OMS_LOCK_FORCE_MKDIR=1 \
+    STUB_GATE="$TMP/peer-gate" \
+    python3 "$ROOT/scripts/oms-mcp-server.py" > "$1"
+}
+
+peer_field() {  # peer_field FILE FIELD -> that field of a single tool result
+  OMS_T_OUT="$1" OMS_T_FIELD="$2" python3 - <<'PY'
+import json, os
+msg = json.loads(open(os.environ["OMS_T_OUT"], encoding="utf-8").read())
+print(json.loads(msg["result"]["content"][0]["text"])[os.environ["OMS_T_FIELD"]])
+PY
+}
+
+test_mcp_peer_actions_start_detached_and_poll() {
+  local repo="$TMP/peer-repo"
+  local out="$TMP/peer-out"
+  local operation
+  local waited=0
+
+  make_repo "$repo"
+  mkdir -p "$TMP/peer-bin" "$TMP/peer-home" "$TMP/peer-locks"
+  # The fixture peer waits for the gate before answering, which is what makes
+  # "started but not finished" a state the test can observe instead of race.
+  cat > "$TMP/peer-bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+tries=0
+while [ ! -f "$STUB_GATE" ] && [ "$tries" -lt 120 ]; do
+  sleep 1
+  tries=$((tries + 1))
+done
+printf 'STUB-ANSWER: the fixture peer replied\n'
+EOF
+  chmod +x "$TMP/peer-bin/codex"
+  rm -f "$TMP/peer-gate"
+
+  {
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"   "}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"q","providers":"--sandbox"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"../../../etc"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"is the gate open","providers":"codex"}}}\n' "$repo"
+  } | peer_rpc "$out"
+
+  OMS_T_OUT="$out" OMS_T_REPO="$repo" python3 - <<'PY' || fail "peer action tools did not match the contract"
+import json, os
+
+by_id = {}
+with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
+    for line in fh:
+        msg = json.loads(line)
+        by_id[msg.get("id")] = msg
+
+tools = {t["name"]: t for t in by_id[1]["result"]["tools"]}
+# The read-only surface every client already binds must survive the addition.
+assert {"oms_inbox", "oms_task_state", "oms_fail_ledger", "oms_handoffs",
+        "oms_handoff_show", "oms_journal"} <= set(tools), sorted(tools)
+start = tools["oms_peer_start"]["inputSchema"]
+assert set(start["required"]) == {"kind", "prompt"}, start
+assert sorted(start["properties"]["kind"]["enum"]) == ["advise", "ask", "consult"], start
+assert "providers" in start["properties"], start
+result = tools["oms_peer_result"]["inputSchema"]
+assert result["required"] == ["operation"], result
+# The description has to teach the pattern, or a model blocks on a 25-minute run.
+assert "oms_peer_result" in tools["oms_peer_start"]["description"], tools
+
+empty = by_id[2]["result"]
+assert empty["isError"], empty
+assert "prompt is required" in empty["content"][0]["text"], empty
+# A target becomes argv: a flag-shaped one must never reach the verb.
+bad_target = by_id[3]["result"]
+assert bad_target["isError"], bad_target
+assert "PROVIDER" in bad_target["content"][0]["text"], bad_target
+escape = by_id[4]["result"]
+assert escape["isError"], escape
+assert "operation must be an id" in escape["content"][0]["text"], escape
+
+started = by_id[5]["result"]
+assert not started["isError"], started
+payload = json.loads(started["content"][0]["text"])
+assert payload["started"] is True, payload
+assert payload["kind"] == "consult", payload
+assert payload["artifact_dir"].endswith("/.oms/artifacts/consult"), payload
+assert payload["operation"] in payload["run_dir"], payload
+assert os.path.isdir(payload["run_dir"]), payload
+assert os.path.isfile(payload["log"]), payload
+PY
+
+  operation="$(
+    OMS_T_OUT="$out" python3 - <<'PY'
+import json, os
+with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
+    for line in fh:
+        msg = json.loads(line)
+        if msg.get("id") == 5:
+            print(json.loads(msg["result"]["content"][0]["text"])["operation"])
+PY
+  )"
+  [ -n "$operation" ] || fail "oms_peer_start returned no operation id"
+
+  # The run outlives the server that started it: the process above has exited,
+  # and this is a new one reading nothing but the filesystem.
+  printf '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"%s"}}}\n' \
+    "$repo" "$operation" | peer_rpc "$out"
+  [ "$(peer_field "$out" status)" = running ] ||
+    fail "a gated consult must report running, not done"
+  peer_field "$out" log_tail >/dev/null ||
+    fail "a running consult must carry a log tail"
+
+  : > "$TMP/peer-gate"
+  while :; do
+    printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"%s"}}}\n' \
+      "$repo" "$operation" | peer_rpc "$out"
+    [ "$(peer_field "$out" status)" = "done" ] && break
+    waited=$((waited + 1))
+    [ "$waited" -lt 60 ] || fail "the released consult never completed"
+    sleep 1
+  done
+
+  OMS_T_OUT="$out" python3 - <<'PY' || fail "a finished consult did not report its answer"
+import json, os
+
+msg = json.loads(open(os.environ["OMS_T_OUT"], encoding="utf-8").read())
+assert not msg["result"]["isError"], msg
+payload = json.loads(msg["result"]["content"][0]["text"])
+assert payload["exit"] == 0, payload
+assert "STUB-ANSWER: the fixture peer replied" in payload["answer"], payload
+assert payload["artifacts"], payload
+for path in payload["artifacts"]:
+    assert "/.oms/artifacts/consult/" in path, payload
+    assert os.path.isfile(path), payload
+PY
+}
+
+# An advisor prompt tells the peer what shape to answer in, so the artifact
+# quotes a "## Output" heading long before the peer says anything. Reading the
+# sections forward returned that template as the answer.
+test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt() {
+  local repo="$TMP/peer-sections"
+  local run="$repo/.oms/artifacts/mcp/advise-20200101T000000Z-abcdef01"
+  local artifact="$repo/.oms/artifacts/advise/codex-probe.md"
+  local out="$TMP/peer-sections-out"
+
+  make_repo "$repo"
+  mkdir -p "$run" "$repo/.oms/artifacts/advise" "$TMP/peer-home" "$TMP/peer-bin"
+  cat > "$artifact" <<'EOF'
+# codex advise
+
+- started: 2020-01-01T00:00:00Z
+
+## Prompt
+
+Answer in this shape:
+
+## Output
+
+VERDICT: proceed | revise | stop
+
+## Output
+
+REAL-ANSWER: the advisor spoke
+
+## Exit
+
+0
+EOF
+  printf 'artifact: %s\n' "$artifact" > "$run/run.log"
+  printf '0\n' > "$run/status"
+
+  printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"advise-20200101T000000Z-abcdef01"}}}\n' \
+    "$repo" | peer_rpc "$out"
+
+  OMS_T_OUT="$out" python3 - <<'PY' || fail "the answer must be the peer's, not the prompt it was given"
+import json, os
+
+payload = json.loads(
+    json.loads(open(os.environ["OMS_T_OUT"], encoding="utf-8").read())
+    ["result"]["content"][0]["text"]
+)
+assert payload["status"] == "done", payload
+assert payload["exit"] == 0, payload
+assert payload["answer"] == "REAL-ANSWER: the advisor spoke", payload
+PY
+}
+
 # --- claude/codex registration ---------------------------------------------
 
 test_install_mcp_registers_and_is_idempotent() {
@@ -559,22 +753,22 @@ test_conditional_skills_link_only_where_required_commands_exist() {
 
   # Without the commands: base skills link, conditional skills do not.
   PATH="$toolbox" HOME="$home" bash "$ROOT/scripts/link.sh" >/dev/null
-  [ -e "$home/.codex/skills/agent-harness" ] || fail "base skill missing"
-  [ ! -e "$home/.codex/skills/slurm" ] ||
-    fail "slurm skill linked without sinfo"
-  [ ! -e "$home/.codex/skills/gpu-workstation" ] ||
-    fail "gpu-workstation linked without nvidia-smi"
+  [ -e "$home/.codex/skills/oms-agent-harness" ] || fail "base skill missing"
+  [ ! -e "$home/.codex/skills/oms-slurm" ] ||
+    fail "oms-slurm skill linked without sinfo"
+  [ ! -e "$home/.codex/skills/oms-gpu-workstation" ] ||
+    fail "oms-gpu-workstation linked without nvidia-smi"
 
   # With the commands: both conditional skills appear.
   PATH="$stub:$toolbox" HOME="$home" bash "$ROOT/scripts/link.sh" >/dev/null
-  [ -e "$home/.codex/skills/slurm" ] || fail "slurm skill not linked with sinfo"
-  [ -e "$home/.codex/skills/gpu-workstation" ] ||
-    fail "gpu-workstation not linked with nvidia-smi"
+  [ -e "$home/.codex/skills/oms-slurm" ] || fail "oms-slurm skill not linked with sinfo"
+  [ -e "$home/.codex/skills/oms-gpu-workstation" ] ||
+    fail "oms-gpu-workstation not linked with nvidia-smi"
 
   # Machine lost the commands: the next link converges by removing them.
   out="$(PATH="$toolbox" HOME="$home" bash "$ROOT/scripts/link.sh")"
-  [ ! -e "$home/.codex/skills/slurm" ] ||
-    fail "slurm link should be removed once sinfo is gone"
+  [ ! -e "$home/.codex/skills/oms-slurm" ] ||
+    fail "oms-slurm link should be removed once sinfo is gone"
   printf '%s' "$out" | grep -Fq "unlinked disabled skill" ||
     fail "removal should be reported: $out"
 }
@@ -594,13 +788,13 @@ test_router_skips_conditional_skill_without_command() {
 
   out="$(printf '%s' "$payload" | PATH="$stub:$toolbox" \
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "slurm" ||
-    fail "router should suggest slurm when sinfo exists: $out"
+  printf '%s' "$out" | grep -Fq "oms-slurm" ||
+    fail "router should suggest oms-slurm when sinfo exists: $out"
 
   out="$(printf '%s' "$payload" | PATH="$toolbox" \
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "slurm"; then
-    fail "router must not suggest slurm without sinfo: $out"
+  if printf '%s' "$out" | grep -Fq "oms-slurm"; then
+    fail "router must not suggest oms-slurm without sinfo: $out"
   fi
 }
 
@@ -848,6 +1042,8 @@ test_slurm_reference_rename_keeps_compat() {
 }
 
 test_mcp_server_protocol
+test_mcp_peer_actions_start_detached_and_poll
+test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt
 test_install_mcp_registers_and_is_idempotent
 test_install_agy_plugin_bakes_absolute_paths
 test_agy_surfaces_are_certified_before_hooks_ship

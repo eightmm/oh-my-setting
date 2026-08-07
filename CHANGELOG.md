@@ -48,6 +48,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   used.
 
 ### Added
+- The MCP server gains two action tools, so peer consultation feels like a
+  native tool call instead of a shell command: `oms_peer_start` launches
+  `consult`/`advise`/`peer-ask` detached (a run survives the server; targets
+  are whitelisted, the operation id is path-safe) and returns immediately;
+  `oms_peer_result` polls the filesystem — `running` with a log tail, then
+  `done` with the answer. A status file written on verb exit, not the
+  artifact, is the completion authority, so a run that fails before any
+  artifact exists still resolves. The server's read-only contract is
+  deliberately amended: it can start consultations; it still cannot modify
+  repo files.
 - `oms artifact-index resolve-superseded` mechanically resolves failed
   artifact rows whose exact patch bytes the same provider later admitted or
   landed — the rows triage already annotates with `superseded-by` and an
