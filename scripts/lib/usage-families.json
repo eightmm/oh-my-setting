@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "comment": "Tool-domain families for the content-free usage counter. The fail-ledger hook appends {family, day} rows when a Bash command matches a pattern; the skill-router's daily hint proposes forging a skill when an uncovered family recurs. covered_by names a global skill whose linked presence silences the family; project skills silence a family when their SKILL.md matches its pattern or key.",
+  "families": {
+    "slurm": {
+      "pattern": "\\b(sbatch|squeue|sinfo|sacct|srun|scancel)\\b",
+      "covered_by": "oms-slurm"
+    },
+    "gpu": {
+      "pattern": "\\b(nvidia-smi|tsp)\\b",
+      "covered_by": "oms-gpu-workstation"
+    },
+    "chem": {
+      "pattern": "\\b(rdkit|meeko|obabel|openbabel|pymol|openmm|mdtraj|vina|smina|gnina)\\b"
+    },
+    "containers": {
+      "pattern": "\\b(docker|podman|apptainer|singularity)\\b"
+    },
+    "k8s": {
+      "pattern": "\\b(kubectl|helm)\\b"
+    }
+  }
+}

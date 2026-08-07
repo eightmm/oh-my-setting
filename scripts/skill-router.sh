@@ -61,8 +61,13 @@ state_hint() {
   OMS_SH_TASK="$task" OMS_SH_FAILURES="$failures" OMS_SH_SKILLS="$skills" \
     OMS_SH_LEDGER="$repo/.oms/failures.jsonl" \
     OMS_SH_PLAN="$repo/.oms/plan/tasks.json" \
-    OMS_SH_PROGRESS="$repo/.oms/plan/progress.jsonl" python3 - <<'PY' 2>/dev/null || true
-import json, os
+    OMS_SH_PROGRESS="$repo/.oms/plan/progress.jsonl" \
+    OMS_SH_USAGE="$repo/.oms/usage.jsonl" \
+    OMS_SH_SKILLS_DIR="$repo/.oms/skills" \
+    OMS_SH_FAMILIES="$ROOT/scripts/lib/usage-families.json" \
+    OMS_SH_USAGE_ROOTS="${OMS_USAGE_SKILL_ROOTS:-$HOME/.claude/skills:$HOME/.agents/skills}" \
+    python3 - <<'PY' 2>/dev/null || true
+import datetime, glob, json, os, re
 
 def load(name):
     try:
@@ -152,6 +157,94 @@ if os.environ.get("OMS_SH_SKILLS") == "0":
             " skill records the lesson — `oms skill-forge add --name NAME`"
             " turns it into standing context." % lessons
         )
+        raise SystemExit(0)
+
+# Recurring successful usage with no covering skill is the signal the ledger
+# can never see: a domain the sessions keep working in without standing
+# context. Coverage matches each family's own pattern (plus its key) against
+# project skills, so a forged skill silences its family whatever the agent
+# named it; a linked global skill (covered_by) silences it machine-wide.
+# Propose only — recurrence is not importance, the judgment stays with the
+# agent. Rows past OMS_USAGE_TTL read as expired; gc compacts under the same
+# predicate.
+try:
+    with open(os.environ.get("OMS_SH_FAMILIES", ""), encoding="utf-8") as fh:
+        fam_table = json.load(fh).get("families", {})
+except (OSError, ValueError):
+    fam_table = {}
+usage = {}
+try:
+    ttl = int(os.environ.get("OMS_USAGE_TTL") or 2592000)
+except ValueError:
+    ttl = 2592000
+today = datetime.date.today()
+try:
+    with open(os.environ.get("OMS_SH_USAGE", ""), encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            fam, day = row.get("family"), row.get("day")
+            if not fam or fam not in fam_table:
+                continue
+            try:
+                age = (today - datetime.date.fromisoformat(day)).days * 86400
+            except (TypeError, ValueError):
+                continue   # an unreadable day reads as expired
+            if age > ttl or age < 0:
+                continue
+            counts = usage.setdefault(fam, {})
+            try:
+                counts[day] = counts.get(day, 0) + int(row.get("count") or 1)
+            except (TypeError, ValueError):
+                counts[day] = counts.get(day, 0) + 1
+except OSError:
+    usage = {}
+if usage:
+    min_hits = int(os.environ.get("OMS_USAGE_HINT_MIN") or 6)
+    min_days = int(os.environ.get("OMS_USAGE_HINT_DAYS") or 2)
+    roots = [r for r in (os.environ.get("OMS_SH_USAGE_ROOTS") or "").split(":") if r]
+    skill_texts = []
+    skills_dir = os.environ.get("OMS_SH_SKILLS_DIR") or ""
+    for path in glob.glob(os.path.join(skills_dir, "*", "SKILL.md")):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                skill_texts.append(
+                    (os.path.basename(os.path.dirname(path)), fh.read().lower())
+                )
+        except OSError:
+            continue
+
+    def covered(fam, spec):
+        by = spec.get("covered_by")
+        if by and any(os.path.isdir(os.path.join(r, by)) for r in roots):
+            return True
+        pattern = spec.get("pattern") or ""
+        for name, text in skill_texts:
+            if fam in name or fam in text:
+                return True
+            try:
+                if pattern and re.search(pattern, text):
+                    return True
+            except re.error:
+                continue
+        return False
+
+    for fam in sorted(usage):
+        day_counts = usage[fam]
+        total = sum(day_counts.values())
+        if total < min_hits or len(day_counts) < min_days:
+            continue
+        if covered(fam, fam_table.get(fam) or {}):
+            continue
+        print(
+            "[oms] '%s' tooling recurred %dx over %d day(s) with no covering"
+            " skill — if a real lesson repeats with it, `oms skill-forge add`"
+            " gives future sessions a warm start (recurrence isn't"
+            " importance; your judgment)." % (fam, total, len(day_counts))
+        )
+        break
 PY
 }
 

@@ -401,6 +401,63 @@ PY
   fi
 fi
 
+# 4.4) Usage rows: the content-free family counter the fail-ledger hook
+#      appends on matched Bash calls. The reader (skill-router's usage hint)
+#      drops rows past OMS_USAGE_TTL at read time — this compaction uses the
+#      SAME predicate (unreadable day reads as expired too) and collapses
+#      same-day rows into count rows the reader already sums, so the file
+#      stops growing without the two mechanisms disagreeing.
+usage_file="$OMS/usage.jsonl"
+if [ -f "$usage_file" ] && [ ! -L "$usage_file" ]; then
+  usage_ttl="${OMS_USAGE_TTL:-2592000}"
+  case "$usage_ttl" in *[!0-9]*|"") usage_ttl=2592000 ;; esac
+  usage_before="$(wc -l < "$usage_file" | tr -d ' ')"
+  usage_compacted="$(OMS_TTL="$usage_ttl" python3 - "$usage_file" <<'PY'
+import datetime, json, os, sys
+ttl = int(os.environ.get("OMS_TTL") or 2592000)
+today = datetime.date.today()
+counts = {}
+order = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        row = json.loads(line)
+    except Exception:
+        continue
+    fam, day = row.get("family"), row.get("day")
+    if not fam or not day:
+        continue
+    try:
+        age = (today - datetime.date.fromisoformat(day)).days * 86400
+    except (TypeError, ValueError):
+        continue
+    if age > ttl or age < 0:
+        continue
+    key = (fam, day)
+    if key not in counts:
+        order.append(key)
+    try:
+        counts[key] = counts.get(key, 0) + int(row.get("count") or 1)
+    except (TypeError, ValueError):
+        counts[key] = counts.get(key, 0) + 1
+for fam, day in order:
+    print(json.dumps({"schema": 1, "family": fam, "day": day,
+                      "count": counts[(fam, day)]}, sort_keys=True))
+PY
+)"
+  usage_after="$(printf '%s' "$usage_compacted" | awk 'END { print NR + 0 }')"
+  if [ "$usage_after" -lt "$usage_before" ]; then
+    printf -- '- usage: compact %s -> %s rows\n' "$usage_before" "$usage_after"
+    removed=$((removed + 1))
+    if [ "$DRY_RUN" = 0 ]; then
+      printf '%s' "$usage_compacted" > "$usage_file"
+      [ -z "$usage_compacted" ] || printf '\n' >> "$usage_file"
+    fi
+  fi
+fi
+
 # 4.5) Abandoned change-guards: a guard whose opt-in owner pid is dead, or
 #    whose snapshot is older than --days, is a corpse from a crashed session —
 #    without this it reads as "Change-guard: ACTIVE" in repo-state forever.

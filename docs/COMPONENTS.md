@@ -805,7 +805,16 @@ before training) this way, so ML discipline exists only in ML repos.
 most — and `agent-task close` hints at promoting a lesson once a repeated
 failure has been resolved in the repo. Until a repo holds its first project
 skill, the skill router's daily state hint offers the forge on the same
-signal, so the habit does not depend on using agent tasks.
+signal, so the habit does not depend on using agent tasks. Successful
+recurrence is watched too: the fail-ledger hook counts content-free
+tool-domain families (`scripts/lib/usage-families.json` → `.oms/usage.jsonl`,
+family and day only, never the command; read-only first tokens count as
+mention, not use), and when an uncovered family recurs across days the same
+daily hint proposes a forge — silenced by any project skill matching the
+family's pattern or a linked `covered_by` global skill, expired past
+`OMS_USAGE_TTL` at read time with gc compacting under the same predicate.
+Propose-only: recurrence is not importance, and the judgment stays with the
+agent.
 
 ## Code sources
 

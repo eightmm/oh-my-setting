@@ -721,6 +721,92 @@ test_router_state_hint_offers_forge_for_resolved_repeats() {
   fi
 }
 
+test_router_hints_on_recurring_uncovered_usage() {
+  local repo="$TMP/usage-hint-repo"
+  local payload out yesterday roots
+
+  make_repo "$repo"
+  roots="$TMP/usage-empty-roots"
+  mkdir -p "$roots"
+  payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
+
+  # The hook writes the counter: a live PostToolUse payload appends a
+  # content-free {family, day} row — never the command itself.
+  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
+    OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
+  grep -q '"family": "chem"' "$repo/.oms/usage.jsonl" ||
+    fail "the hook should append a chem usage row"
+  # A read-only command that merely mentions a family token is not use.
+  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"grep -rn rdkit src/"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
+    OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
+  [ "$(grep -c '"family": "chem"' "$repo/.oms/usage.jsonl")" = 1 ] ||
+    fail "a grep mentioning rdkit must not count as chem usage"
+
+  # Threshold needs recurrence across days; seed yesterday, raw and count rows.
+  yesterday="$(python3 -c 'import datetime; print((datetime.date.today()-datetime.timedelta(days=1)).isoformat())')"
+  for _ in 1 2 3 4; do
+    printf '{"schema": 1, "family": "chem", "day": "%s"}\n' "$yesterday" \
+      >> "$repo/.oms/usage.jsonl"
+  done
+  printf '{"schema": 1, "family": "chem", "day": "%s", "count": 2}\n' "$yesterday" \
+    >> "$repo/.oms/usage.jsonl"
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" OMS_USAGE_SKILL_ROOTS="$roots" TMPDIR="$TMP" \
+    bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "'chem' tooling recurred" ||
+    fail "recurring uncovered usage should surface the forge proposal: $out"
+
+  # A forged skill silences its family by pattern match, whatever the agent
+  # named it — this SKILL.md never says "chem".
+  mkdir -p "$repo/.oms/skills/ligand-ingestion"
+  cat > "$repo/.oms/skills/ligand-ingestion/SKILL.md" <<'EOF'
+---
+name: ligand-ingestion
+description: How this repository loads docking outputs through meeko and rdkit conversions, including malformed-molecule defense.
+---
+
+Use meeko RDKitMolCreate for DLG/PDBQT conversion.
+EOF
+  rm -f "$repo/.oms/hooks/state-hint."*
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" OMS_USAGE_SKILL_ROOTS="$roots" TMPDIR="$TMP" \
+    bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq "tooling recurred"; then
+    fail "a project skill matching the family pattern must silence the hint: $out"
+  fi
+
+  # A family owned by a linked global skill (covered_by) never hints.
+  for _ in 1 2 3 4; do
+    printf '{"schema": 1, "family": "gpu", "day": "%s"}\n' "$yesterday" \
+      >> "$repo/.oms/usage.jsonl"
+  done
+  for _ in 1 2 3; do
+    printf '{"schema": 1, "family": "gpu", "day": "%s"}\n' "$(date +%Y-%m-%d)" \
+      >> "$repo/.oms/usage.jsonl"
+  done
+  mkdir -p "$roots/oms-gpu-workstation"
+  rm -f "$repo/.oms/hooks/state-hint."*
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" OMS_USAGE_SKILL_ROOTS="$roots" TMPDIR="$TMP" \
+    bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq "tooling recurred"; then
+    fail "a linked global skill must silence its family: $out"
+  fi
+
+  # gc compacts under the reader's own TTL predicate: expired rows drop,
+  # same-day rows collapse into count rows the reader sums.
+  printf '{"schema": 1, "family": "gpu", "day": "2020-01-01"}\n' \
+    >> "$repo/.oms/usage.jsonl"
+  out="$(bash "$ROOT/scripts/gc.sh" --repo "$repo" --apply)"
+  printf '%s' "$out" | grep -q 'usage: compact' ||
+    fail "gc should compact usage rows: $out"
+  if grep -q '2020-01-01' "$repo/.oms/usage.jsonl"; then
+    fail "gc must drop usage rows past the TTL"
+  fi
+  grep -q '"count": 6' "$repo/.oms/usage.jsonl" ||
+    fail "gc should collapse same-day rows into summed count rows: $(cat "$repo/.oms/usage.jsonl")"
+}
+
 # --- machine-conditional skills ---------------------------------------------
 
 # A deterministic PATH: real tools by symlink, nothing else — so a command's
@@ -1052,6 +1138,7 @@ test_update_probe_flag_reaches_the_probe
 test_router_state_hint_on_unresolved_failures
 test_router_state_hint_skips_unadopted_repo
 test_router_state_hint_offers_forge_for_resolved_repeats
+test_router_hints_on_recurring_uncovered_usage
 test_conditional_skills_link_only_where_required_commands_exist
 test_router_skips_conditional_skill_without_command
 test_skill_forge_stores_links_and_hides

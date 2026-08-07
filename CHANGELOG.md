@@ -7,6 +7,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Changed
+- The harness now notices recurring successful tool usage, not only repeated
+  failures. The fail-ledger hook appends a content-free `{family, day}` row
+  to `.oms/usage.jsonl` when a Bash command matches a tool-domain family
+  (`scripts/lib/usage-families.json`; read-only first tokens like `grep`
+  count as mention, not use), and the skill-router's once-a-day state hint
+  proposes forging a project skill when an uncovered family recurs across
+  days — coverage is matched by the family's own pattern against project
+  skills (so a forged skill silences its family whatever it was named) or by
+  a linked `covered_by` global skill. Propose-only by design: recurrence is
+  not importance, and the judgment stays with the agent. Rows expire at read
+  time past `OMS_USAGE_TTL` (30d default) and gc compacts them under the
+  same predicate into summed count rows; `OMS_USAGE_TRACK=0` disables the
+  counter, `OMS_USAGE_HINT_MIN`/`OMS_USAGE_HINT_DAYS` tune the threshold.
 - Skill creation now enforces the Agent Skills portable shape at the gate.
   `skill-forge add` rejects frontmatter outside the spec field set (pointing
   extensions at the `metadata:` map), over-budget names (64 chars, no

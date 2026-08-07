@@ -43,11 +43,22 @@ case "${OMS_FAIL_LEDGER_RESOLVE:-1}" in
   0|false|FALSE|no|NO|off|OFF) ledger="" ;;
 esac
 
+# Content-free usage counter: rows carry a family name and a day, never the
+# command. skill-router's daily hint reads them to propose forging a skill
+# for a domain that keeps recurring without one. OMS_USAGE_TRACK=0 disables.
+usage_file="$root/.oms/usage.jsonl"
+case "${OMS_USAGE_TRACK:-1}" in
+  0|false|FALSE|no|NO|off|OFF) usage_file="" ;;
+esac
+
 # One python3 pass decides everything: which side of the ledger this event is,
 # and — on the success side — whether the fingerprint has an open failure at
 # all. Deliberately not a `check` call: resolving needs no git state
 # fingerprint, so this never computes one.
-parsed="$(OMS_FLH_PAYLOAD="$payload" OMS_FLH_LEDGER="$ledger" python3 - <<'PY' 2>/dev/null || true
+parsed="$(OMS_FLH_PAYLOAD="$payload" OMS_FLH_LEDGER="$ledger" \
+  OMS_FLH_USAGE="$usage_file" OMS_FLH_FAMILIES="$ROOT/scripts/lib/usage-families.json" \
+  python3 - <<'PY' 2>/dev/null || true
+import datetime
 import hashlib
 import json
 import os
@@ -64,6 +75,37 @@ command = tool_input.get("command") if isinstance(tool_input, dict) else None
 if not isinstance(command, str) or not command.strip():
     raise SystemExit(0)
 command = command.replace("\n", " ")[:2000]
+
+# Usage counter, before any branch can bail: every Bash call in an adopted
+# repo is an observation. A read-only first token is a mention, not use —
+# `grep rdkit` must not count toward the chem family. Guarded so counter
+# trouble can never touch the resolve/record paths, and silent on stdout,
+# which belongs to the positional parse protocol below.
+try:
+    usage_path = os.environ.get("OMS_FLH_USAGE") or ""
+    if usage_path:
+        first = os.path.basename(re.split(r"\s+", command.strip())[0])
+        readers = {"grep", "egrep", "fgrep", "rg", "sed", "awk", "cat",
+                   "head", "tail", "less", "wc", "find", "echo", "printf",
+                   "ls", "stat", "file", "diff"}
+        if first not in readers:
+            with open(os.environ.get("OMS_FLH_FAMILIES") or "",
+                      encoding="utf-8") as handle:
+                families = json.load(handle).get("families", {})
+            lowered = command.lower()
+            day = datetime.date.today().isoformat()
+            hits = [name for name, spec in families.items()
+                    if isinstance(spec, dict) and spec.get("pattern")
+                    and re.search(spec["pattern"], lowered)]
+            if hits:
+                with open(usage_path, "a", encoding="utf-8") as handle:
+                    for name in hits:
+                        handle.write(json.dumps(
+                            {"schema": 1, "family": name, "day": day},
+                            sort_keys=True) + "\n")
+except Exception:
+    pass
+
 response = row.get("tool_response")
 exit_code = None
 if isinstance(response, dict):
