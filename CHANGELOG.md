@@ -6,6 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Fixed
+- The fail-ledger hook refuses fingerprints no session can recompute: a
+  failed command that names a session-scoped scratch path
+  (`/tmp/claude-<uid>/...`) is not recorded — the row would be open forever
+  by construction, and such rows were the largest class of permanent ledger
+  noise. The deliberate `record` verb is unaffected.
+- Smoke-test fixtures stop naming the author's real username; the sensitive
+  path literals now use the fictional-user pattern their neighbors already
+  used.
+
 ### Added
 - A split project identity can be merged. `oms journal identity` shows the
   pinned identity against what the current parser detects (a pin taken before

@@ -2269,7 +2269,7 @@ test_peer_export_only_blocks_sensitive_prompt() {
     --artifact-dir "$artifact_dir" \
     --providers claude \
     --export-only \
-    --prompt "Assess private path /hom""e/jaemin/secret" \
+    --prompt "Assess private path /hom""e/researcher/secret" \
     >"$project/out" 2>"$project/error"; then
     fail "sensitive prompt should block export"
   fi
@@ -3302,7 +3302,7 @@ test_agent_memory_append_show_and_rejects_sensitive() {
   fi
 
   if HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
-    --repo "$project" append --agent codex --text "private path /hom""e/jaemin/secret" \
+    --repo "$project" append --agent codex --text "private path /hom""e/researcher/secret" \
     >"$project/sensitive-out" 2>"$project/sensitive-err"; then
     fail "sensitive-looking memory note should be rejected"
   fi
@@ -3854,7 +3854,7 @@ test_agent_task_init_context_and_rejects_sensitive() {
     'verification: none — run `oms agent-task verify` before building on this packet'
 
   if "$ROOT/scripts/agent-task.sh" \
-    --repo "$project" append --text "private path /hom""e/jaemin/secret" \
+    --repo "$project" append --text "private path /hom""e/researcher/secret" \
     >"$project/sensitive-out" 2>"$project/sensitive-err"; then
     fail "sensitive-looking task note should be rejected"
   fi
@@ -4137,7 +4137,7 @@ test_agent_call_outbound_scrubber_blocks_private_path() {
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --to codex \
-    --prompt "Assess private path /hom""e/jaemin/secret" \
+    --prompt "Assess private path /hom""e/researcher/secret" \
     >"$project/out" 2>"$project/error"; then
     fail "private-path outbound prompt should be blocked"
   fi
@@ -4327,7 +4327,7 @@ test_agent_call_export_only_blocks_sensitive_without_artifacts() {
     --artifact-dir "$artifact_dir" \
     --to codex \
     --export-only \
-    --prompt "Assess private path /hom""e/jaemin/secret" \
+    --prompt "Assess private path /hom""e/researcher/secret" \
     >"$project/out" 2>"$project/error" || rc=$?
 
   [ "$rc" = "3" ] || fail "sensitive export should exit 3, got $rc"
@@ -5315,7 +5315,7 @@ test_scrubber_no_function_name_bypass() {
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --to codex \
-    --prompt "contains_sensitive_content notes /hom""e/jaemin/secret" \
+    --prompt "contains_sensitive_content notes /hom""e/researcher/secret" \
     >"$project/out" 2>"$project/error"; then
     fail "scrubber symbol on the same line must not bypass the block"
   fi
