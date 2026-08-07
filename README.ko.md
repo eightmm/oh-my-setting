@@ -26,6 +26,11 @@ Notion 대상을 자동 발견하며, 비대화형 설치는 후속 명령을 �
 리셋 카운트다운이 붙는 사용량, 비용, Git 상태)가 설치되고, Codex에는 사용자가
 직접 정한 footer가 없을 때 같은 목적의 내장 footer가 기본 설정된다.
 
+설치는 전역 에이전트 규칙 파일 세 개 — `~/.claude/CLAUDE.md`,
+`~/.codex/AGENTS.md`, `~/.gemini/AGENTS.md` — 를 관리한다. 기존 파일이 있으면
+`<파일>.backup.<타임스탬프>`로 이동되고(설치 시 안내되며 `oms doctor`가
+보고한다), 설치가 유지되는 동안 적용되지 않으며, `oms uninstall`이 복원한다.
+
 | 호스트 | 필요 | 관리 파일 |
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ (또는 uv) | symlink |

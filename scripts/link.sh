@@ -64,6 +64,9 @@ backup_if_needed() {
     # marker must not travel into the backup or claim that it is removable.
     oms_install_remove_marker "$target"
     oms_install_remove_marker "$backup"
+    # Displacement is silent data-wise but must not be silent user-wise: the
+    # file stops applying for the whole lifetime of the install.
+    echo "note: moved your existing $target to $backup; it is no longer in effect (oms uninstall restores it, or merge it into the managed file)"
   fi
 }
 

@@ -27,6 +27,12 @@ install prints the follow-up commands and continues. Claude Code gets compact
 main and subagent HUDs (model/effort, context, rate-limit countdowns, cost, Git
 state); Codex gets the equivalent native footer when it has no user footer.
 
+The install manages the three global agent rule files — `~/.claude/CLAUDE.md`,
+`~/.codex/AGENTS.md`, and `~/.gemini/AGENTS.md`. A pre-existing file is moved
+to `<file>.backup.<timestamp>` (announced at install time and reported by
+`oms doctor`), stops applying while the install is active, and is restored by
+`oms uninstall`.
+
 | Host | Needs | Managed files |
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ (or uv) | symlinks |

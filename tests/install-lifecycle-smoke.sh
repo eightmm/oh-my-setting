@@ -89,7 +89,10 @@ export PATH="$bin:$PATH"
 
 notion_data_source_id="ea343dea-4a66-4421-9653-dfc4fe68ed10"
 (cd "$HOME" && bash "$upstream/install.sh" --no-tools --peer-permissions \
-  --notion-data-source "$notion_data_source_id")
+  --notion-data-source "$notion_data_source_id") > "$TMP/install-out.txt" 2>&1 ||
+  { cat "$TMP/install-out.txt" >&2; fail "install failed"; }
+grep -Fq "note: moved your existing" "$TMP/install-out.txt" ||
+  fail "displacing existing rules must be announced at install time"
 dest="$HOME/.oh-my-setting"
 [ -d "$dest/.git" ] || fail "install did not clone the fixture"
 # Same reason as HOME: the checkout is the source side of every ownership
