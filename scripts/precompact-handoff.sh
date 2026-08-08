@@ -77,7 +77,11 @@ if [ -n "$session" ]; then
   fi
 fi
 
-args=(capture --agent "$AGENT" --cwd "$cwd" --note "$note")
+# missing-session-policy skip: a worker-style session id that never wrote a
+# transcript is a structural no-op, not a failure — without this, every such
+# SessionEnd minted a ledger row and the row's "run manually" hint failed
+# for the same reason, minting more.
+args=(capture --agent "$AGENT" --cwd "$cwd" --note "$note" --missing-session-policy skip)
 # With an explicit session id, capture that session or nothing: guessing the
 # newest session in this cwd could snapshot a concurrent session's work under
 # this one's label. Newest-for-cwd runs only when the payload named no session.

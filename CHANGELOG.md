@@ -86,6 +86,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   row whose fingerprint accumulates repeats per provider, and a named
   summary line. Exit-0 non-answers thread but never reach the ledger;
   quorum semantics are untouched.
+- The handoff hook no longer files a failure for a session that never had a
+  transcript. Worker-style session ids fire SessionEnd without writing a
+  transcript file, and the capture hook minted a fail-ledger row on every
+  such firing — one chronic id reached count=8 — while the row's "run
+  manually" hint failed for the same structural reason. Absence is now its
+  own resolver exit, and the hook passes `--missing-session-policy skip`:
+  transcript absent means a quiet skip (note, exit 0, no digest, no ledger
+  row). A manual capture of a missing session still fails hard, and real
+  capture failures — sensitive refusal, parse errors — still reach the
+  ledger through the hook unchanged.
 - Council seats without an explicit reasoning effort work again. Auto
   effort resolves to "provider default" (an empty value), but the codex and
   claude command builders passed the flag through anyway — codex refuses

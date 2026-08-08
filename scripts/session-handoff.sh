@@ -29,6 +29,14 @@ TURNS="${OMS_HANDOFF_TURNS:-6}"
 # manual capture can lower it.
 MIN_USER_TURNS=2
 
+# What to do when the named session has no transcript on disk at all. The
+# automatic hook passes skip: worker-style session ids fire SessionEnd
+# without ever writing a transcript, so capture can never succeed, retrying
+# is meaningless, and a ledger row per firing is pure noise. Everything that
+# is a real capture failure — sensitive refusal, parse errors, unreadable
+# files — is unaffected by this policy and still fails.
+MISSING_POLICY=fail
+
 usage() {
   cat <<'EOF'
 Usage: session-handoff.sh <capture|list|show> [options]
@@ -49,6 +57,13 @@ capture options:
   --out FILE       Write digest here instead of the default handoffs dir.
   --min-user-turns N  Skip the capture when the session has fewer than N real
                    user turns (default: 2; 0 captures anything).
+  --missing-session-policy skip|fail
+                   What to do when the named session has no transcript on
+                   disk at all (default: fail, exit 2). The automatic hook
+                   passes skip: worker-style session ids fire hooks without
+                   ever writing a transcript, so the capture becomes a quiet
+                   no-op instead of a daily ledger row. Real capture
+                   failures (sensitive refusal, parse errors) always fail.
   --allow-sensitive  Write the digest even if it looks sensitive (default:
                    refuse, since the digest is meant for another agent).
 
@@ -66,6 +81,14 @@ EOF
 fail() {
   echo "error: $*" >&2
   exit 2
+}
+
+# Absence is its own exit (3), distinct from failure (2), so cmd_capture can
+# apply --missing-session-policy to "the transcript simply is not there"
+# without ever softening a real failure.
+absent() {
+  echo "error: $*" >&2
+  exit 3
 }
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
@@ -96,11 +119,11 @@ resolve_claude_session() {
   dir="$(claude_project_dir "$cwd")"
   if [ -n "$id" ]; then
     local path="$dir/$id.jsonl"
-    [ -f "$path" ] || fail "claude session not found: $path"
+    [ -f "$path" ] || absent "claude session not found: $path"
     printf '%s\n' "$path"
     return 0
   fi
-  [ -d "$dir" ] || fail "no claude sessions for cwd: $cwd ($dir)"
+  [ -d "$dir" ] || absent "no claude sessions for cwd: $cwd ($dir)"
   newest_file "$dir"/*.jsonl
 }
 
@@ -111,7 +134,7 @@ resolve_codex_session() {
     local hit
     hit="$(find "$CODEX_HOME/sessions" "$CODEX_HOME/archived_sessions" \
       -type f -name "*$id*.jsonl" 2>/dev/null | head -n 1)"
-    [ -n "$hit" ] || fail "codex session not found for id: $id"
+    [ -n "$hit" ] || absent "codex session not found for id: $id"
     printf '%s\n' "$hit"
     return 0
   fi
@@ -146,7 +169,7 @@ PY
   done <<EOF
 $(find "$CODEX_HOME/sessions" "$CODEX_HOME/archived_sessions" -type f -name 'rollout-*.jsonl' -exec ls -1t {} + 2>/dev/null)
 EOF
-  fail "no codex session matched cwd: $cwd"
+  absent "no codex session matched cwd: $cwd"
 }
 
 digest_claude() {
@@ -283,7 +306,7 @@ digest_antigravity() {
   local cwd="$1"
   local id="$2"
   local hist="$GEMINI_HOME/antigravity-cli/history.jsonl"
-  [ -f "$hist" ] || fail "no antigravity history: $hist"
+  [ -f "$hist" ] || absent "no antigravity history: $hist"
   OMS_TURNS="$TURNS" OMS_MATCH_CWD="$cwd" OMS_MATCH_ID="$id" python3 - "$hist" <<'PY'
 import json, os, sys
 
@@ -445,29 +468,55 @@ cmd_capture() {
         MIN_USER_TURNS="$2"; shift 2
         ;;
       --allow-sensitive) ALLOW_SENSITIVE=1; shift ;;
+      --missing-session-policy)
+        [ "$#" -ge 2 ] || fail "--missing-session-policy requires skip or fail"
+        case "$2" in
+          skip|fail) MISSING_POLICY="$2" ;;
+          *) fail "--missing-session-policy must be skip or fail: $2" ;;
+        esac
+        shift 2
+        ;;
       *) fail "unknown capture argument: $1" ;;
     esac
   done
   AGENT="${AGENT:-claude}"
   CWD="$(cd "$CWD" 2>/dev/null && pwd || printf '%s' "$CWD")"
 
-  local source="" session_id="$SESSION" extract ts handoff_hash
+  # Resolver exit 3 means the session transcript is absent. Under skip the
+  # capture becomes a quiet no-op (exit 0, note, no digest, no ledger row);
+  # under fail (manual callers) it stays the hard error it always was.
+  session_absent_check() {
+    [ "$1" -ne 0 ] || return 0
+    if [ "$1" -eq 3 ] && [ "$MISSING_POLICY" = skip ]; then
+      echo "session-handoff: skipped $AGENT capture: session transcript absent (--missing-session-policy skip)" >&2
+      exit 0
+    fi
+    exit 2
+  }
+
+  local source="" session_id="$SESSION" extract ts handoff_hash rc
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   case "$AGENT" in
     claude)
-      source="$(resolve_claude_session "$CWD" "$SESSION")"
+      rc=0
+      source="$(resolve_claude_session "$CWD" "$SESSION")" || rc=$?
+      session_absent_check "$rc"
       session_id="$(basename "$source" .jsonl)"
       extract="$(digest_claude "$source")"
       ;;
     codex)
-      source="$(resolve_codex_session "$CWD" "$SESSION")"
+      rc=0
+      source="$(resolve_codex_session "$CWD" "$SESSION")" || rc=$?
+      session_absent_check "$rc"
       session_id="${SESSION:-$(basename "$source" .jsonl)}"
       extract="$(digest_codex "$source")"
       ;;
     antigravity|agy)
       AGENT="antigravity"
       source="$GEMINI_HOME/antigravity-cli/history.jsonl"
-      extract="$(digest_antigravity "$CWD" "$SESSION")"
+      rc=0
+      extract="$(digest_antigravity "$CWD" "$SESSION")" || rc=$?
+      session_absent_check "$rc"
       session_id="${SESSION:-latest}"
       ;;
     *)

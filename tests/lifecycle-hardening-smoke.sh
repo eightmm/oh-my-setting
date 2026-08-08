@@ -167,6 +167,58 @@ test_session_end_handoff_honors_child_and_opt_out_gates() {
 # The hook now fires on every session end, so the floor is what keeps a
 # one-prompt session from evicting a substantive digest from the resume hook's
 # newest-handoff slot.
+# A worker-style session id fires SessionEnd without ever writing a
+# transcript. That capture can never succeed: the hook must skip quietly
+# (exit 0, no digest, no ledger row) instead of minting a failure row per
+# firing whose "run manually" hint fails the same way. A manual capture of a
+# missing session stays a hard error, and a session that EXISTS but carries
+# secrets still goes to the ledger through the hook — absence is the only
+# thing the policy softens.
+test_absent_session_skips_hook_capture_but_fails_manual() {
+  local repo="$TMP/handoff-absent"
+  local claude_home="$TMP/handoff-absent-home"
+  local err="$TMP/handoff-absent.err"
+  local vector
+
+  mkdir -p "$repo/.oms" "$claude_home/projects"
+  printf '*\n' > "$repo/.oms/.gitignore"
+
+  # Hook path: session id with no transcript anywhere -> quiet skip.
+  fire_handoff_hook "$repo" "$claude_home" ghost-worker-1 SessionEnd ||
+    fail "the hook must exit 0 for an absent session transcript"
+  [ "$(digest_count "$repo")" = 0 ] ||
+    fail "an absent session must not produce a digest"
+  [ ! -f "$repo/.oms/failures.jsonl" ] ||
+    fail "an absent session must not mint a fail-ledger row"
+
+  # Manual path: same absence stays a hard failure naming the session.
+  if OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/session-handoff.sh" capture \
+      --agent claude --cwd "$repo" --session ghost-worker-1 \
+      >/dev/null 2>"$err"; then
+    fail "a manual capture of a missing session must fail"
+  fi
+  assert_contains "$err" "claude session not found"
+
+  # Real failures keep the fail-open contract: a sensitive transcript through
+  # the hook still records a ledger row (policy touches absence only).
+  local project_dir
+  project_dir="$claude_home/projects/$(printf '%s' "$repo" | sed 's#/#-#g')"
+  mkdir -p "$project_dir"
+  vector="AK""IAIOSFODNN7EXAMPLE"
+  cat > "$project_dir/sess-secret.jsonl" <<EOF
+{"type":"user","cwd":"$repo","message":{"role":"user","content":"deploy with $vector"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Deployed."}]}}
+{"type":"user","cwd":"$repo","message":{"role":"user","content":"now roll it back"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Rolled back."}]}}
+EOF
+  fire_handoff_hook "$repo" "$claude_home" sess-secret SessionEnd ||
+    fail "the hook stays exit 0 on a refused capture"
+  [ -f "$repo/.oms/failures.jsonl" ] ||
+    fail "a refused sensitive capture must still reach the fail-ledger"
+  grep -q "session-handoff capture" "$repo/.oms/failures.jsonl" ||
+    fail "the ledger row must name the capture"
+}
+
 test_handoff_capture_floors_trivial_sessions() {
   local repo="$TMP/handoff-floor"
   local claude_home="$TMP/handoff-floor-home"
@@ -573,6 +625,7 @@ PY
 test_session_end_captures_a_handoff_digest
 test_session_end_handoff_honors_child_and_opt_out_gates
 test_handoff_capture_floors_trivial_sessions
+test_absent_session_skips_hook_capture_but_fails_manual
 test_claude_hooks_register_and_verify_session_end_handoff
 test_receipt_preserves_snapshot_modes
 test_machine_snapshot_cli_and_permissions
