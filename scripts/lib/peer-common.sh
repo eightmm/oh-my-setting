@@ -943,7 +943,11 @@ ma_provider_attempt() {
     codex)
       cmd=(codex exec)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
-      cmd+=(-c "model_reasoning_effort=\"$effort\"")
+      # Empty effort means "auto: let the provider default decide" — passing
+      # it through as -c model_reasoning_effort="" makes codex refuse the
+      # whole config ("reasoning_effort must not be empty") and killed every
+      # no-effort council seat while the dry-run smokes stayed green.
+      [ -z "$effort" ] || cmd+=(-c "model_reasoning_effort=\"$effort\"")
       if [ "$access" = write ]; then
         cmd+=(--sandbox workspace-write -)
       else
@@ -955,7 +959,8 @@ ma_provider_attempt() {
       [ "$access" != write ] || permission=acceptEdits
       cmd=(claude)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
-      cmd+=(--effort "$effort")
+      # Same empty-effort contract as the codex branch above.
+      [ -z "$effort" ] || cmd+=(--effort "$effort")
       cmd+=(--permission-mode "$permission" -p)
       ;;
     antigravity|agy)

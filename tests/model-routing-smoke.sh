@@ -22,4 +22,51 @@ printf '%s\n' "$out" | grep -Fxq 'Model B' || fail 'catalog chain missing distin
 out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_CLASS_REQUEST=deep OMS_MODEL_EXPLICIT='' OMS_REASONING_EFFORT_REQUEST=auto bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex; printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_RESOLVED_CLASS"' 2>"$TMP/warn.err")"
 [ "$out" = 'provider-default|provider-default' ] || fail "legacy class request must not change the route: $out"
 if grep -q 'model tiers' "$TMP/warn.err"; then fail 'removed tier layer must not warn'; fi
+
+# Auto effort resolves to "" (provider default). The REAL invocation must then
+# omit the effort flag entirely: codex refuses -c model_reasoning_effort=""
+# outright ("reasoning_effort must not be empty"), which silently killed every
+# no-effort council seat while the dry-run smokes stayed green. Recorder stubs
+# exercise the live command build, not the dry-run shortcut.
+cat > "$TMP/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CODEX_ARGV_OUT"
+cat >/dev/null
+echo stub answer with enough substance to count
+EOF
+cat > "$TMP/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CLAUDE_ARGV_OUT"
+cat >/dev/null
+echo stub answer with enough substance to count
+EOF
+chmod +x "$TMP/bin/codex" "$TMP/bin/claude"
+mkdir -p "$TMP/invoke-repo/.oms" "$TMP/locks" "$TMP/home"
+git -C "$TMP/invoke-repo" init -q
+export OMS_LOCK_DIR="$TMP/locks" OMS_LOCK_FORCE_MKDIR=1
+
+# HOME + NVM_DIR isolation: load_user_tool_paths prepends $HOME/.local/bin
+# and the nvm bin dir ahead of the stub PATH, which would silently invoke
+# the dev machine's real CLIs instead of the recorders.
+invoke() {  # invoke ARGS...
+  env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+    CODEX_ARGV_OUT="$TMP/codex.argv" CLAUDE_ARGV_OUT="$TMP/claude.argv" \
+    OMS_CAPABILITY_DIR="$TMP/cap" OMS_LOCK_DIR="$TMP/locks" OMS_LOCK_FORCE_MKDIR=1 \
+    bash "$ROOT/scripts/agent-call.sh" --repo "$TMP/invoke-repo" "$@" >/dev/null 2>&1
+}
+
+invoke --to codex --prompt "argv probe" || fail 'auto-effort codex call failed'
+[ -s "$TMP/codex.argv" ] || fail 'codex recorder stub was not invoked'
+if grep -q 'model_reasoning_effort' "$TMP/codex.argv"; then
+  fail 'auto effort must omit the codex effort flag, not pass it empty'
+fi
+invoke --to codex --reasoning-effort high --prompt "argv probe" ||
+  fail 'high-effort codex call failed'
+grep -q 'model_reasoning_effort="high"' "$TMP/codex.argv" ||
+  fail 'explicit effort must still reach codex'
+invoke --to claude --prompt "argv probe" || fail 'auto-effort claude call failed'
+[ -s "$TMP/claude.argv" ] || fail 'claude recorder stub was not invoked'
+if grep -q -- '--effort' "$TMP/claude.argv"; then
+  fail 'auto effort must omit the claude effort flag, not pass it empty'
+fi
 echo 'model-routing-smoke: ok'

@@ -86,6 +86,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   row whose fingerprint accumulates repeats per provider, and a named
   summary line. Exit-0 non-answers thread but never reach the ledger;
   quorum semantics are untouched.
+- Council seats without an explicit reasoning effort work again. Auto
+  effort resolves to "provider default" (an empty value), but the codex and
+  claude command builders passed the flag through anyway — codex refuses
+  `-c model_reasoning_effort=""` outright, so every no-effort council seat
+  died on arrival while the dry-run smokes stayed green (advise survived
+  only because it defaults to high explicitly). Empty effort now omits the
+  flag for both providers, matching the guard antigravity already had, and
+  model-routing-smoke gained recorder-stub invocations that assert against
+  the REAL command line, under HOME/NVM_DIR isolation so the dev machine's
+  own CLIs cannot shadow the stubs.
 - A missing provider binary no longer holds the whole harness at an old
   commit. A receipt with codex_plugin=1 on a machine whose codex binary is
   gone made every update — including the daily auto-update timer — apply,
