@@ -87,8 +87,10 @@ ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 now = time.time()
 
 # Retirement predicate, textually identical in fail-ledger.sh (record's repeat
-# count, check, list) and in gc.sh's failure compaction: read-time expiry and
-# gc compose only while all four agree on which rows are retired.
+# count, check, list), gc.sh's failure compaction, repo-state.sh (both its
+# sites), and resume-hook.sh's failure line: read-time expiry and gc compose
+# only while every site agrees on which rows are retired — including >= at
+# the boundary, where one drifted site once disagreed by exactly one second.
 def hook_expired(r):
     if r.get("kind") != "hook" or r.get("event") != "fail":
         return False
@@ -253,8 +255,10 @@ ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 now = time.time()
 
 # Retirement predicate, textually identical in fail-ledger.sh (record's repeat
-# count, check, list) and in gc.sh's failure compaction: read-time expiry and
-# gc compose only while all four agree on which rows are retired.
+# count, check, list), gc.sh's failure compaction, repo-state.sh (both its
+# sites), and resume-hook.sh's failure line: read-time expiry and gc compose
+# only while every site agrees on which rows are retired — including >= at
+# the boundary, where one drifted site once disagreed by exactly one second.
 def hook_expired(r):
     if r.get("kind") != "hook" or r.get("event") != "fail":
         return False
@@ -346,8 +350,10 @@ ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 now = time.time()
 
 # Retirement predicate, textually identical in fail-ledger.sh (record's repeat
-# count, check, list) and in gc.sh's failure compaction: read-time expiry and
-# gc compose only while all four agree on which rows are retired.
+# count, check, list), gc.sh's failure compaction, repo-state.sh (both its
+# sites), and resume-hook.sh's failure line: read-time expiry and gc compose
+# only while every site agrees on which rows are retired — including >= at
+# the boundary, where one drifted site once disagreed by exactly one second.
 def hook_expired(r):
     if r.get("kind") != "hook" or r.get("event") != "fail":
         return False

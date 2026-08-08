@@ -73,9 +73,26 @@ fi
 # Unresolved failures: one line, newest row's summary and suggested next.
 ledger="$cwd/.oms/failures.jsonl"
 if [ -s "$ledger" ]; then
-  fail_line="$(python3 - "$ledger" <<'PY' 2>/dev/null
-import json, sys
-rows = {}
+  fail_line="$(OMS_HOOK_TTL="${OMS_HOOK_FAIL_TTL:-86400}" python3 - "$ledger" <<'PY' 2>/dev/null
+import calendar, json, os, sys, time
+
+ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
+now = time.time()
+
+# Retirement predicate, textually identical to fail-ledger/gc/repo-state:
+# an expired hook row is retired at read time. This block used to re-parse
+# the ledger raw and announced rows every other surface had already
+# retired: 30 at session start while inbox showed 24.
+def hook_expired(r):
+    if r.get("kind") != "hook" or r.get("event") != "fail":
+        return False
+    try:
+        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return False   # an unreadable stamp is never grounds for retirement
+    return (now - t) >= ttl
+
+rows, counts = {}, {}
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
         for line in fh:
@@ -90,25 +107,47 @@ try:
             # may carry a resolved flag instead (same reading as skill-router).
             if row.get("event") == "resolved" or row.get("resolved") is True:
                 rows.pop(fp, None)
-            else:
+                counts.pop(fp, None)
+            elif not hook_expired(row):
                 rows[fp] = row
+                counts[fp] = counts.get(fp, 0) + 1
 except OSError:
     sys.exit(0)
 if not rows:
     sys.exit(0)
-newest = max(rows.values(), key=lambda r: r.get("ts") or "")
-bits = ["- failures: %d unresolved" % len(rows)]
-summary = (newest.get("summary") or newest.get("cmd") or "").strip()
-if summary:
-    bits.append("latest: %s" % summary[:120])
-nxt = (newest.get("next") or "").strip()
-if nxt:
-    bits.append("next: %s" % nxt[:120])
-print("; ".join(bits))
+# A hook row seen once is retiring noise; deliberate records and recurring
+# hook failures are the actionable set (same split as repo-state/inbox).
+actionable = {fp: r for fp, r in rows.items()
+              if r.get("kind") != "hook" or counts.get(fp, 0) >= 2}
+retiring = len(rows) - len(actionable)
+if actionable:
+    newest = max(actionable.values(), key=lambda r: r.get("ts") or "")
+    head = "- failures: %d actionable" % len(actionable)
+    if retiring:
+        head += " (+%d retiring on TTL)" % retiring
+    bits = [head]
+    summary = (newest.get("summary") or newest.get("cmd") or "").strip()
+    if summary:
+        bits.append("latest: %s" % summary[:120])
+    nxt = (newest.get("next") or "").strip()
+    if nxt:
+        bits.append("next: %s" % nxt[:120])
+    print("; ".join(bits))
+else:
+    print("- failures: %d one-shot hook failure(s), auto-retire on TTL" % retiring)
 PY
 )" || fail_line=""
   [ -z "$fail_line" ] || append "$fail_line"
 fi
+
+# Auto-update attention: the session start is where a silently failing or
+# stalled daily updater finally meets a human. Shared verdict; ok and
+# disabled stay quiet.
+au_line="$("$ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
+case "$au_line" in
+  "attention: ok"*|"attention: disabled"*|"") ;;
+  *) append "- auto-update ${au_line#attention: }" ;;
+esac
 
 # Peer-session advisory: another session hash with hook events in this cwd in
 # the last 15 minutes means a live neighbor. The incident this prevents:

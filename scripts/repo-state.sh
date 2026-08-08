@@ -71,6 +71,12 @@ fi
 # counts as tracked/hidden/exposed) rather than a second copy of the rules here.
 PRIVATE_JSON="$("$ROOT/scripts/project-private.sh" --repo "$REPO" status --json 2>/dev/null || true)"
 
+# The shared auto-update verdict rides the state so inbox stays a pure
+# derivation of repo-state while still surfacing a dying updater — the state
+# an agent resuming here most needs to distrust.
+AUTOUPDATE_ATTENTION="$("$ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
+
+OMS_RS_AUTOUPDATE="$AUTOUPDATE_ATTENTION" \
 OMS_RS_REPO="$REPO" \
 OMS_RS_JSON="$AS_JSON" \
 OMS_RS_PRIVATE="$PRIVATE_JSON" \
@@ -375,13 +381,14 @@ for r in fail_rows:
         fagg[fp]["resolved"] = True
         fagg[fp]["count"] = 0
     elif r.get("event") == "fail":
-        # Same read-time predicate as fail-ledger check/list: an expired
-        # hook row contributes nothing to the open count. Unparseable ts is
-        # never grounds for retirement.
+        # Same read-time predicate as fail-ledger check/list (>= at the
+        # boundary, like every other site): an expired hook row contributes
+        # nothing to the open count. Unparseable ts is never grounds for
+        # retirement.
         if r.get("kind") == "hook":
             fail_epoch = epoch(r.get("ts") or "")
             if fail_epoch is not None and \
-                    now - fail_epoch > int(os.environ["OMS_RS_HOOK_FAIL_TTL"]):
+                    now - fail_epoch >= int(os.environ["OMS_RS_HOOK_FAIL_TTL"]):
                 continue
         fagg[fp]["count"] += 1
         fagg[fp]["resolved"] = False
@@ -392,9 +399,30 @@ for fp in forder:
     if d["resolved"] or d["count"] == 0:
         continue
     last = d["last"] or {}
+    # A hook row seen once is expected one-shot noise on its way to TTL
+    # retirement; anything else — a deliberate record, or a hook failure
+    # that repeats — is actionable. Recurring hook rows stay TTL-retiring
+    # AND actionable: recurrence is the signal, retirement the janitor.
+    retiring = (last.get("kind") == "hook") and d["count"] < 2
     open_fails.append({"fingerprint": fp, "count": d["count"],
+                       "kind": last.get("kind") or "",
+                       "retiring": retiring,
                        "summary": (last.get("summary") or last.get("cmd", ""))[:80]})
-state["failures"] = {"open": open_fails[-5:], "open_total": len(open_fails)}
+actionable_total = sum(1 for f in open_fails if not f["retiring"])
+state["failures"] = {"open": open_fails[-5:], "open_total": len(open_fails),
+                     "actionable_total": actionable_total,
+                     "retiring_total": len(open_fails) - actionable_total}
+
+# --- Install attention (auto-update) ----------------------------------------
+au = os.environ.get("OMS_RS_AUTOUPDATE") or ""
+verdict, detail = "", ""
+if au.startswith("attention: "):
+    body = au[len("attention: "):]
+    parts = body.split(" — ", 1)
+    verdict = parts[0].strip()
+    detail = parts[1].strip() if len(parts) > 1 else ""
+state["install"] = {"auto_update": verdict or "unknown",
+                    "auto_update_detail": detail[:160]}
 
 # --- CI for HEAD, keyed by (branch, sha) ------------------------------------
 # A recorded conclusion is evidence about the commit it ran on. Three unlike

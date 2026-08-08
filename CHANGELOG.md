@@ -191,6 +191,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   used.
 
 ### Added
+- Failure and updater attention now say who deserves it. Every surface that
+  counts unresolved failures — repo-state, inbox, and the session-start
+  resume block — shares one split: a hook row seen once is `retiring`
+  (one-shot noise on its way to 24h TTL retirement, P3), while deliberate
+  records and recurring hook failures are `actionable` (P1). The resume
+  block previously re-parsed the ledger raw with no TTL at all and
+  announced rows every other surface had retired (30 at session start vs
+  inbox's 24), and repo-state's TTL boundary disagreed with the other four
+  sites by exactly one second (`>` vs `>=`) — both now carry the one
+  predicate the fail-ledger contract comment names site by site. And the
+  lesson of the weeks-dead lab timer became a surface:
+  `oms auto-update attention` renders one verdict over intent, wiring, and
+  outcome (disabled / unwired / no-run / failed / overdue / ok) that
+  status, repo-state, inbox (P1 failed/overdue, P2 unwired/no-run), and
+  the resume hook all consume — an opted-out machine with a historical
+  failure file stays quiet, a dying updater meets a human at session start.
 - Debate rounds exchange positions once, then deltas. Round 2 still crosses
   each seat's bounded full answer, but every later round now quotes only the
   "Changed from previous round" / "Remaining disagreements" sections of each

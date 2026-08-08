@@ -134,6 +134,8 @@ auto_update_status() {
   if [ ! -f "$state_file" ]; then
     printf -- '- status: not checked\n'
     printf -- '- command: %s/scripts/auto-update.sh check\n' "$INSTALL_ROOT"
+    value="$("$INSTALL_ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
+    [ -z "$value" ] || printf -- '- %s\n' "$value"
     return 0
   fi
 
@@ -158,6 +160,10 @@ auto_update_status() {
     [ -n "$value" ] || continue
     printf -- '- %s: %s\n' "$key" "$value"
   done
+  # The shared attention verdict, so status can never disagree with inbox
+  # or the resume hook about whether the updater needs a human.
+  value="$("$INSTALL_ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
+  [ -z "$value" ] || printf -- '- %s\n' "$value"
 }
 
 task_section_value() {

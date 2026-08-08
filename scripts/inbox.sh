@@ -149,10 +149,42 @@ if unresolved:
     add(30, "P1", "unresolved-artifacts", "%d unresolved artifact outcome(s)" % unresolved,
         "oms artifact-index --repo . unresolved", unresolved)
 
-open_failures = int(state.get("failures", {}).get("open_total", 0) or 0)
-if open_failures:
-    add(40, "P1", "open-failures", "%d unresolved failure fingerprint(s)" % open_failures,
-        "oms fail-ledger --repo . list", open_failures)
+# A failing or stalled auto-updater is machine state, but it is exactly what
+# an agent resuming this repo needs to distrust (a weeks-dead timer once hid
+# an entire release behind "doctor: ok"). failed/overdue act now; a missing
+# trigger or never-run state is setup debt.
+install = state.get("install", {})
+au = str(install.get("auto_update", "") or "")
+au_detail = str(install.get("auto_update_detail", "") or "")
+if au in ("failed", "overdue"):
+    add(45, "P1", "auto-update-" + au,
+        "install auto-update is %s%s" % (au, ": " + au_detail if au_detail else ""),
+        "oms auto-update status", 1)
+elif au in ("unwired", "no-run"):
+    add(20, "P2", "auto-update-" + au,
+        "install auto-update is %s%s" % (au, ": " + au_detail if au_detail else ""),
+        "oms auto-update status", 1)
+
+failures = state.get("failures", {})
+open_failures = int(failures.get("open_total", 0) or 0)
+# actionable/retiring: a hook row seen once auto-retires on its TTL and is
+# not worth P1 attention; deliberate records and recurring hook failures
+# are. An older repo-state without the split falls back to the old count.
+actionable = failures.get("actionable_total")
+retiring = int(failures.get("retiring_total", 0) or 0)
+if actionable is None:
+    actionable = open_failures
+    retiring = 0
+actionable = int(actionable or 0)
+if actionable:
+    label = "%d actionable failure fingerprint(s)" % actionable
+    if retiring:
+        label += " (+%d retiring on TTL)" % retiring
+    add(40, "P1", "open-failures", label, "oms fail-ledger --repo . list", actionable)
+elif retiring:
+    add(15, "P3", "retiring-failures",
+        "%d one-shot hook failure(s) auto-retire on their TTL" % retiring,
+        "oms fail-ledger --repo . list", retiring)
 
 stale_reviews = plan.get("stale_review", [])
 if stale_reviews:

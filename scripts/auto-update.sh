@@ -29,6 +29,10 @@ Modes:
           Re-runs link.sh, but intentionally skips tool (re)installation;
           use update.sh --tools when install-tools.sh should be covered too.
   status  Print the last recorded auto-update state.
+  attention
+          One-line verdict over intent, wiring, and outcome: disabled,
+          unwired, no-run, failed, overdue, or ok. Shared by status,
+          repo-state, inbox, and the resume hook; always exits 0.
   install Register the user-level auto-update trigger (systemd timer/cron).
   remove  Remove the auto-update trigger.
 
@@ -86,6 +90,74 @@ auto_update_error_line() {
   local line
   line="$(printf '%s\n' "$output" | grep -E '^(error|fatal):' | tail -n 1 | head -c 200)"
   printf '%s' "${line:-exit $status}"
+}
+
+# One shared verdict over intent (receipt), wiring (trigger), and outcome
+# (state file), so status, repo-state, inbox, and the resume hook can never
+# disagree about whether the updater needs attention. Field incident behind
+# it: a daily apply timer failed for weeks and the only trace was this
+# file's status line, which nobody reads. Reporting only; always exit 0.
+# Intent is judged first — an opted-out or non-owner checkout is `disabled`
+# no matter what a historical status file says.
+print_attention() {
+  local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
+  local timer_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/oh-my-setting-autoupdate.timer"
+  local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
+  local overdue="${OMS_AUTO_UPDATE_OVERDUE:-172800}"
+  local owner enabled wired=0 status last_run message age now epoch_last
+
+  owner="$(auto_update_receipt_field "$receipt" source_root 2>/dev/null || true)"
+  if [ -z "$owner" ] ||
+     [ "$(cd "$owner" 2>/dev/null && pwd -P || true)" != "$(cd "$ROOT" && pwd -P)" ]; then
+    echo "attention: disabled — this checkout does not own the install receipt"
+    return 0
+  fi
+  enabled="$(auto_update_receipt_field "$receipt" components.auto_update 2>/dev/null || true)"
+  if [ "$enabled" = "false" ]; then
+    echo "attention: disabled — receipt opts out of auto-update"
+    return 0
+  fi
+
+  [ -f "$timer_file" ] && wired=1
+  if [ "$wired" = 0 ]; then
+    if [ -n "$cron_file" ]; then
+      grep -Fq "auto-update.sh" "$cron_file" 2>/dev/null && wired=1
+    elif command -v crontab >/dev/null 2>&1; then
+      crontab -l 2>/dev/null | grep -Fq "auto-update.sh" && wired=1
+    fi
+  fi
+  if [ "$wired" = 0 ]; then
+    echo "attention: unwired — auto-update is enabled but no timer or cron trigger is installed (run: auto-update.sh install)"
+    return 0
+  fi
+
+  if [ ! -f "$STATE_FILE" ]; then
+    echo "attention: no-run — trigger installed but no update run recorded yet"
+    return 0
+  fi
+  status="$(awk -F= '$1 == "status" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE")"
+  last_run="$(awk -F= '$1 == "last_run" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE")"
+  message="$(awk -F= '$1 == "message" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE")"
+  if [ "$status" = "failed" ]; then
+    echo "attention: failed — ${message:-last update run failed}${last_run:+ (last run $last_run)}"
+    return 0
+  fi
+  if [ -n "$last_run" ]; then
+    now="$(date -u +%s)"
+    epoch_last="$(python3 -c 'import calendar,sys,time
+try:
+    print(calendar.timegm(time.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")))
+except Exception:
+    raise SystemExit(1)' "$last_run" 2>/dev/null || true)"
+    if [ -n "$epoch_last" ]; then
+      age=$((now - epoch_last))
+      if [ "$age" -ge "$overdue" ]; then
+        echo "attention: overdue — last run $last_run is older than ${overdue}s; the trigger may be dead"
+        return 0
+      fi
+    fi
+  fi
+  echo "attention: ok${last_run:+ — last run $last_run}"
 }
 
 write_state() {
@@ -392,6 +464,10 @@ case "$MODE" in
     ;;
   status)
     print_status
+    exit 0
+    ;;
+  attention)
+    print_attention
     exit 0
     ;;
   check|apply) ;;
