@@ -1322,11 +1322,27 @@ ma_target_budget_check() {
 # How many independent model families answered. Two answers from one family are
 # the same opinion twice: a council that reports only a count invites reading
 # within-family replication as corroboration.
+# A seat that dropped during debate still contributed the answer being
+# synthesized (its last good round rides the synthesis by design).
+ma_seat_dropped_in_debate() {
+  local name="$1" d
+  for d in "${dropped_names[@]+${dropped_names[@]}}"; do
+    [ "$d" = "$name" ] && return 0
+  done
+  return 1
+}
+
 ma_answered_families() {
   local i provider selected family families=""
 
   for i in "${!provider_names[@]}"; do
-    [ "${alive[i]}" = 1 ] || continue
+    # alive alone undercounted: a two-family debate that lost one seat in
+    # its final round reported "1 family — treat agreement as replication"
+    # about a synthesis that held both families' answers. Round-1 failures
+    # and non-answers contributed nothing and stay excluded.
+    if [ "${alive[i]}" != 1 ]; then
+      ma_seat_dropped_in_debate "${provider_names[i]}" || continue
+    fi
     provider="$(ma_target_provider "${provider_names[i]}")"
     selected=""
     [ ! -f "${last_arts[i]}" ] ||

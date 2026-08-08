@@ -86,6 +86,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   row whose fingerprint accumulates repeats per provider, and a named
   summary line. Exit-0 non-answers thread but never reach the ledger;
   quorum semantics are untouched.
+- A seat dropped during debate still counts toward the answered-family
+  tally. Its last good answer rides the synthesis by design, but the family
+  count only looked at seats still alive, so a two-family debate that lost
+  one seat in its final round (codex, exit 124 at the wall clock, full
+  answer written) reported "1 family — treat agreement as replication"
+  about a synthesis holding both families. Round-1 failures and non-answers
+  still count nothing.
 - The handoff hook no longer files a failure for a session that never had a
   transcript. Worker-style session ids fire SessionEnd without writing a
   transcript file, and the capture hook minted a fail-ledger row on every

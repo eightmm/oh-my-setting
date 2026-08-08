@@ -182,4 +182,18 @@ ma_run_debate_rounds
   fail "a moving seat must keep the debate running (stable=$debate_stable_round)"
 [ -f "$ARTIFACT_DIR/codex-stable-$timestamp-r4.md" ] || fail "budgeted rounds must all run"
 
+# --- a debate-dropped seat still counts toward answered families -------------
+# Its last good answer rides the synthesis, so a two-family debate that lost
+# one seat in the final round must not report "1 family: replication".
+provider_names=(codex antigravity)
+alive=(1 0)
+dropped_names=(antigravity)
+last_arts=("$self" "$other")
+fams="$(ma_answered_families)"
+[ "$fams" = 2 ] || fail "a dropped seat's family must still count (got $fams)"
+# A seat that never answered (round-1 non-answer/failure) still counts nothing.
+dropped_names=()
+fams="$(ma_answered_families)"
+[ "$fams" = 1 ] || fail "a never-answered seat must not count (got $fams)"
+
 echo "debate-delta-smoke: ok"
