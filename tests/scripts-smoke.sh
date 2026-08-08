@@ -11280,7 +11280,7 @@ test_resume_hook_prints_bounded_resume_block() {
   printf '%s\n' "$out" | grep -q 'verify: bash tests/x.sh' || fail "missing verify command"
   printf '%s\n' "$out" | grep -q 'session-handoff show claude-abc.md' ||
     fail "missing handoff pointer"
-  printf '%s\n' "$out" | grep -q 'failures: 1 unresolved' || fail "missing failure line"
+  printf '%s\n' "$out" | grep -q 'failures: 1 actionable' || fail "missing failure line"
   printf '%s\n' "$out" | grep -q 'peers: another session' || fail "missing peer warning"
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
 
