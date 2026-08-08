@@ -479,10 +479,138 @@ PY
   fi
 }
 
+test_missing_codex_degrades_and_dead_ref_follows_default() {
+  local source="$TMP/degrade-source"
+  local installed="$TMP/degrade-installed"
+  local home="$TMP/degrade-home"
+  local receipt="$home/.config/oh-my-setting/install.json"
+  local first next
+
+  git clone -q "$ROOT" "$source"
+  git -C "$source" checkout -qB main
+  cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
+  cp "$ROOT/scripts/link.sh" "$source/scripts/link.sh"
+  cp "$ROOT/scripts/unlink.sh" "$source/scripts/unlink.sh"
+  cp "$ROOT/scripts/doctor.sh" "$source/scripts/doctor.sh"
+  cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
+  cp "$ROOT/scripts/claude-statusline.py" "$source/scripts/claude-statusline.py"
+  cp "$ROOT/scripts/claude-subagent-statusline.py" "$source/scripts/claude-subagent-statusline.py"
+  cp "$ROOT/scripts/telemetry-hook.sh" "$source/scripts/telemetry-hook.sh"
+  cp "$ROOT/scripts/precompact-handoff.sh" "$source/scripts/precompact-handoff.sh"
+  cp "$ROOT/scripts/resume-hook.sh" "$source/scripts/resume-hook.sh"
+  cp "$ROOT/scripts/install-mcp.sh" "$source/scripts/install-mcp.sh"
+  cp "$ROOT/scripts/install-agy-plugin.sh" "$source/scripts/install-agy-plugin.sh"
+  cp "$ROOT/scripts/oms-mcp-server.py" "$source/scripts/oms-mcp-server.py"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
+  cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
+  cp "$ROOT/scripts/lib/agent-install-state.sh" "$source/scripts/lib/agent-install-state.sh"
+  git -C "$source" add -A
+  git -C "$source" commit -qm "fixture: degrade base" || true
+  first="$(git -C "$source" rev-parse HEAD)"
+
+  git clone -q "$source" "$installed"
+  mkdir -p "$home"
+  # The receipt wants the codex plugin; the restricted PATH below has no
+  # codex binary. That exact pair held a real machine at an old commit
+  # through daily apply -> fail -> rollback.
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_PROFILE=minimal OH_MY_SETTING_REF=edge \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=1 \
+    OH_MY_SETTING_AUTO_UPDATE=0 "$installed/scripts/link.sh" >/dev/null
+
+  printf 'advance\n' > "$source/advance-marker"
+  git -C "$source" add advance-marker
+  git -C "$source" commit -qm "fixture: advance"
+  next="$(git -C "$source" rev-parse HEAD)"
+
+  # env -u NVM_DIR: the doctor widens PATH via $HOME/.local/bin and NVM_DIR;
+  # an inherited real NVM_DIR would resurface the dev machine's npm-installed
+  # codex inside the fixture and the guard under test would never fire.
+  env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools \
+    >"$TMP/degrade.out" 2>&1 ||
+    { cat "$TMP/degrade.out" >&2; fail "missing codex must not fail the core update"; }
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$next" ] ||
+    fail "degraded update did not reach the new commit"
+  grep -Fq 'codex plugin refresh skipped' "$TMP/degrade.out" ||
+    fail "the degradation must be named, not silent"
+  [ "$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["components"]["codex_plugin"]).lower())' "$receipt")" = true ] ||
+    fail "degradation must keep the codex_plugin intent in the receipt"
+
+  # A pinned ref that resolves nowhere follows the origin default branch for
+  # the run, loudly, instead of failing forever on an unattended timer.
+  printf 'advance again\n' >> "$source/advance-marker"
+  git -C "$source" add advance-marker
+  git -C "$source" commit -qm "fixture: advance again"
+  next="$(git -C "$source" rev-parse HEAD)"
+  env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --ref ghost-branch --no-tools \
+    >"$TMP/deadref.out" 2>&1 ||
+    { cat "$TMP/deadref.out" >&2; fail "a dead pinned ref must heal to the default branch"; }
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$next" ] ||
+    fail "dead-ref update did not follow the default branch"
+  grep -Fq 'install ref ghost-branch no longer resolves anywhere' "$TMP/deadref.out" ||
+    fail "the dead-ref fallback must be named"
+}
+
+test_auto_update_failure_message_names_the_error() {
+  local repo="$TMP/errmsg-auto"
+  local home="$TMP/errmsg-home"
+  local receipt="$home/.config/oh-my-setting/install.json"
+  local commit state
+
+  mkdir -p "$repo/scripts/lib" "$repo/local" "$home/.config/oh-my-setting"
+  cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/platform.sh" "$repo/scripts/lib/platform.sh"
+  cp "$ROOT/scripts/lib/managed-target.py" "$repo/scripts/lib/managed-target.py"
+  # An update that fails the way the real one did: a plain error line that
+  # the old state message ("receipt ref apply failed") used to bury.
+  cat > "$repo/scripts/update.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "linking things"
+echo "error: codex command is required" >&2
+exit 1
+EOF
+  chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
+  git -C "$repo" init -q
+  git -C "$repo" checkout -qb main
+  git -C "$repo" add .
+  git -C "$repo" commit -qm "fixture: errmsg auto update"
+  commit="$(git -C "$repo" rev-parse HEAD)"
+  python3 - "$receipt" "$repo" "$commit" <<'PY'
+import json, sys
+json.dump({"schema": 2, "source_root": sys.argv[2], "commit": sys.argv[3],
+           "channel": "main", "profile": "custom", "ref": "main",
+           "components": {}, "managed_targets": [], "plugin": {}},
+          open(sys.argv[1], "w"))
+PY
+  state="$repo/local/auto-update.status"
+
+  if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$repo/scripts/auto-update.sh" apply >/dev/null 2>&1; then
+    fail "failing update must fail the apply run"
+  fi
+  grep -Fq 'message=apply failed: error: codex command is required' "$state" ||
+    fail "apply state message must carry the real error: $(grep '^message=' "$state")"
+
+  if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$repo/scripts/auto-update.sh" check >/dev/null 2>&1; then
+    fail "failing update must fail the check run"
+  fi
+  grep -Fq 'message=check failed: error: codex command is required' "$state" ||
+    fail "check state message must carry the real error: $(grep '^message=' "$state")"
+  [ "$(grep -c '^message=' "$state")" = 1 ] ||
+    fail "a multi-line failure must not corrupt the key=value state file"
+}
+
 test_schema1_receipt_migrates_to_profiled_schema2
 test_update_rolls_back_and_supports_explicit_rollback
 test_doctor_failure_restores_previous_plugin_payload
 test_schema1_update_preserves_channel_pin_and_cron
 test_signal_during_doctor_rolls_back_transaction
 test_detached_schema2_auto_update_check
+test_missing_codex_degrades_and_dead_ref_follows_default
+test_auto_update_failure_message_names_the_error
 echo "update-v04-smoke: ok"

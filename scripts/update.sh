@@ -250,6 +250,20 @@ fetch_target() {
     target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$INSTALL_REF^{commit}" || true)"
     [ -n "$target_ref" ] || target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "origin/$INSTALL_REF^{commit}" || true)"
     [ -n "$target_ref" ] || target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "$INSTALL_REF^{commit}" || true)"
+    if [ -z "$target_ref" ]; then
+      # The pinned ref resolves nowhere — not a tag, not on origin, not
+      # local. For an unattended daily timer, an unsatisfiable pin must not
+      # mean failing forever at an aging commit: follow the origin default
+      # branch this run, loudly, without rewriting the receipt (the pin
+      # stays visible and wins again the moment it resolves).
+      git -C "$ROOT" remote set-head origin -a >/dev/null 2>&1 || true
+      remote_head="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+      if [ -n "$remote_head" ]; then
+        target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "$remote_head^{commit}" || true)"
+      fi
+      [ -z "$target_ref" ] ||
+        echo "note: install ref $INSTALL_REF no longer resolves anywhere; following default branch ${remote_head#origin/} this run" >&2
+    fi
     [ -n "$target_ref" ] || { echo "error: cannot resolve install ref: $INSTALL_REF" >&2; return 1; }
     printf '%s\n' "$target_ref"
   fi
@@ -368,7 +382,13 @@ restore_previous() {
     git -C "$ROOT" checkout --detach "$current" >/dev/null 2>&1
   fi
   if [ "$PREVIOUS_CODEX_PLUGIN" = "1" ]; then
-    "$ROOT/scripts/install-codex-plugin.sh" >/dev/null 2>&1 || rollback_failed=1
+    if command -v codex >/dev/null 2>&1; then
+      "$ROOT/scripts/install-codex-plugin.sh" >/dev/null 2>&1 || rollback_failed=1
+    else
+      # Same degradation as reconcile_core: a missing codex cannot make a
+      # rollback report "external component needs repair" forever.
+      echo "note: codex binary missing; codex plugin restore skipped" >&2
+    fi
   elif command -v codex >/dev/null 2>&1; then
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null 2>&1 || rollback_failed=1
   fi
@@ -406,7 +426,16 @@ reconcile_core() {
   "$ROOT/scripts/link.sh" || return 1
   if [ "$CLAUDE_HOOKS" = "1" ]; then "$ROOT/scripts/install-claude-hooks.sh" || return 1; else "$ROOT/scripts/install-claude-hooks.sh" --remove || return 1; fi
   if [ "$CODEX_PLUGIN" = "1" ]; then
-    "$ROOT/scripts/install-codex-plugin.sh" || return 1
+    if command -v codex >/dev/null 2>&1; then
+      "$ROOT/scripts/install-codex-plugin.sh" || return 1
+    else
+      # A provider binary that is gone must degrade its own component, not
+      # hold the whole harness at an old commit: a receipt with
+      # codex_plugin=1 on a codex-less machine made the daily auto-update
+      # apply, fail, and roll back every day. The receipt keeps the intent;
+      # the next update that finds codex on PATH restores the plugin.
+      echo "note: codex binary missing; codex plugin refresh skipped (receipt keeps codex_plugin=1)" >&2
+    fi
   elif command -v codex >/dev/null 2>&1; then
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null 2>&1 || return 1
   fi

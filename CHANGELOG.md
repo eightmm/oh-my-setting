@@ -86,6 +86,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   row whose fingerprint accumulates repeats per provider, and a named
   summary line. Exit-0 non-answers thread but never reach the ledger;
   quorum semantics are untouched.
+- A missing provider binary no longer holds the whole harness at an old
+  commit. A receipt with codex_plugin=1 on a machine whose codex binary is
+  gone made every update — including the daily auto-update timer — apply,
+  fail at the plugin refresh, and roll back, forever; one real install sat
+  months behind exactly this way. The update now skips the codex plugin
+  refresh with a loud note when the binary is absent (the receipt keeps the
+  intent and the next update that finds codex restores it), the rollback
+  path gets the same degradation instead of reporting "external component
+  needs repair", and the doctor already tolerated the absence. Two related
+  repairs ride along: auto-update's failure state now records the update's
+  actual last error/fatal line instead of the fixed string "receipt ref
+  apply failed" (which buried "codex command is required" under a message
+  about refs and misdirected the diagnosis), and a pinned install ref that
+  no longer resolves anywhere follows the origin default branch for that
+  run, loudly and without rewriting the receipt, instead of failing forever
+  on an unattended timer.
 - Quoted provider output keeps the answer end, not the banner end. Every
   byte-capped quote of another provider's output — debate rounds, synthesis
   files, thread turn excerpts — used to keep a head slice, but provider CLIs

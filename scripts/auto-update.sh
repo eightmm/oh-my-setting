@@ -77,6 +77,17 @@ log_msg() {
   printf '%s %s\n' "$(now_utc)" "$*" >> "$LOG_FILE"
 }
 
+# One line naming why an update run failed, safe for the key=value state
+# file: the last error:/fatal: line of the captured output, byte-capped;
+# the exit code when the output carries no such line.
+auto_update_error_line() {
+  local output="$1"
+  local status="$2"
+  local line
+  line="$(printf '%s\n' "$output" | grep -E '^(error|fatal):' | tail -n 1 | head -c 200)"
+  printf '%s' "${line:-exit $status}"
+}
+
 write_state() {
   local status="$1"
   local message="$2"
@@ -178,7 +189,8 @@ receipt_transaction_update() {
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
-      write_state failed "receipt ref check failed: $output" "$current" "" "$upstream"
+      write_state failed "check failed: $(auto_update_error_line "$output" "$status")" \
+        "$current" "" "$upstream"
       print_status
       return "$status"
     fi
@@ -202,7 +214,11 @@ receipt_transaction_update() {
   [ -z "$output" ] || printf '%s\n' "$output"
   remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ "$status" -ne 0 ]; then
-    write_state failed "receipt ref apply failed" "$current" "$remote" "$upstream"
+    # Name the actual failure. The old fixed string ("receipt ref apply
+    # failed") buried a plain "codex command is required" under a message
+    # about refs, and the misdiagnosis it invites costs more than the line.
+    write_state failed "apply failed: $(auto_update_error_line "$output" "$status")" \
+      "$current" "$remote" "$upstream"
     return "$status"
   fi
   if [ "$current" = "$remote" ]; then
