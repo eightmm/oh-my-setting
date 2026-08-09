@@ -54,6 +54,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   local failed
   local good
   local before_receipt="$TMP/receipt-before"
+  local expected_status=0
 
   git clone -q "$ROOT" "$source"
   # Pull-request checkouts are detached. Give the fixture an explicit default
@@ -65,6 +66,8 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   cp "$ROOT/scripts/link.sh" "$source/scripts/link.sh"
   cp "$ROOT/scripts/unlink.sh" "$source/scripts/unlink.sh"
   cp "$ROOT/scripts/doctor.sh" "$source/scripts/doctor.sh"
+  cp "$ROOT/tools.lock.json" "$source/tools.lock.json"
+  cp "$ROOT/scripts/lib/tool-lock.py" "$source/scripts/lib/tool-lock.py"
   # The doctor verifies the hook registration the installer writes, so the two
   # must come from the same tree — a working-tree doctor against a HEAD-clone
   # installer fails on any hook the working tree added.
@@ -78,6 +81,9 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   cp "$ROOT/scripts/install-agy-plugin.sh" "$source/scripts/install-agy-plugin.sh"
   cp "$ROOT/scripts/oms-mcp-server.py" "$source/scripts/oms-mcp-server.py"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   cp "$ROOT/scripts/lib/agent-install-state.sh" "$source/scripts/lib/agent-install-state.sh"
@@ -141,6 +147,20 @@ test_update_rolls_back_and_supports_explicit_rollback() {
     fail "plain update re-enabled a disabled Claude hook"
   [ ! -e "$home/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
     fail "plain update re-enabled a disabled update timer"
+
+  cp "$receipt" "$TMP/expected-target-receipt"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$first" PATH="/usr/bin:/bin" \
+    "$installed/scripts/update.sh" --no-tools >"$TMP/expected-target.out" 2>&1 ||
+    expected_status=$?
+  [ "$expected_status" = 75 ] ||
+    fail "an update target changed after preflight should exit 75, got $expected_status"
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$good" ] ||
+    fail "expected-target refusal changed HEAD"
+  cmp -s "$receipt" "$TMP/expected-target-receipt" ||
+    fail "expected-target refusal changed the receipt"
+  grep -Fq 'update target changed after preflight' "$TMP/expected-target.out" ||
+    fail "expected-target refusal was not explained"
 
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --rollback --no-tools >/dev/null
@@ -213,6 +233,9 @@ test_doctor_failure_restores_previous_plugin_payload() {
   mkdir -p "$source/scripts/lib" "$bin" "$(dirname "$receipt")" "$(dirname "$codex_config")"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   for script in link install-claude-hooks install-autoupdate uninstall-autoupdate install-tools install-mcp install-agy-plugin; do
@@ -301,7 +324,9 @@ test_schema1_update_preserves_channel_pin_and_cron() {
     scripts/precompact-handoff.sh scripts/resume-hook.sh \
     scripts/install-mcp.sh scripts/install-agy-plugin.sh \
     scripts/oms-mcp-server.py \
-    scripts/lib/install-contract.sh scripts/lib/platform.sh \
+    tools.lock.json scripts/lib/tool-lock.py \
+    scripts/lib/install-contract.sh scripts/lib/install-lifecycle-lock.sh \
+    scripts/lib/file-lock.sh scripts/lib/poll.sh scripts/lib/platform.sh \
     scripts/lib/managed-target.py scripts/lib/agent-install-state.sh; do
     cp "$ROOT/$file" "$source/$file"
   done
@@ -385,6 +410,9 @@ test_signal_during_doctor_rolls_back_transaction() {
   mkdir -p "$source/scripts/lib" "$(dirname "$receipt")" "$home/.codex"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
   cat > "$source/scripts/link.sh" <<'EOF'
 #!/usr/bin/env bash
 mkdir -p "$HOME/.codex"
@@ -445,6 +473,8 @@ test_detached_schema2_auto_update_check() {
 
   mkdir -p "$repo/scripts/lib" "$repo/local" "$home/.config/oh-my-setting"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$repo/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$repo/scripts/lib/managed-target.py"
@@ -479,12 +509,128 @@ PY
   fi
 }
 
-test_missing_codex_degrades_and_dead_ref_follows_default() {
+test_schema2_auto_update_apply_skips_dirty_and_diverged() {
+  local repo="$TMP/schema2-skip-auto"
+  local home="$TMP/schema2-skip-home"
+  local receipt="$home/.config/oh-my-setting/install.json"
+  local state="$home/auto-update.status"
+  local marker="$home/apply-called"
+  local base target current holder i
+
+  mkdir -p "$repo/scripts/lib" "$home/.config/oh-my-setting"
+  cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
+  cat > "$repo/scripts/update.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = --check ]; then
+  current="$(git rev-parse HEAD)"
+  printf 'current: %s\n' "${current:0:7}"
+  printf 'update-check: available %s -> %s\n' "$current" "$OMS_TEST_UPDATE_TARGET"
+  exit 0
+fi
+if [ -n "${OMS_TEST_UPDATE_APPLY_TARGET:-}" ] &&
+   [ "${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-}" != "$OMS_TEST_UPDATE_APPLY_TARGET" ]; then
+  echo "error: update target changed after preflight: expected ${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-none}, actual $OMS_TEST_UPDATE_APPLY_TARGET" >&2
+  exit 75
+fi
+printf 'apply\n' >> "$OMS_TEST_UPDATE_MARKER"
+EOF
+  chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
+  git -C "$repo" init -q
+  git -C "$repo" checkout -qb main
+  git -C "$repo" config user.name test
+  git -C "$repo" config user.email test@example.com
+  printf 'base\n' > "$repo/value"
+  git -C "$repo" add .
+  git -C "$repo" commit -qm base
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  git -C "$repo" checkout -qb upstream "$base"
+  printf 'upstream\n' > "$repo/value"
+  git -C "$repo" commit -qam upstream
+  target="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" checkout -q main
+  printf 'local\n' > "$repo/value"
+  git -C "$repo" commit -qam local
+  current="$(git -C "$repo" rev-parse HEAD)"
+
+  python3 - "$receipt" "$repo" "$current" <<'PY'
+import json, sys
+json.dump({"schema": 2, "source_root": sys.argv[2], "commit": sys.argv[3],
+           "channel": "main", "profile": "custom", "ref": "main",
+           "components": {}, "managed_targets": [], "plugin": {}},
+          open(sys.argv[1], "w"))
+PY
+
+  printf 'dirty\n' > "$repo/uncommitted"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto.log" \
+    OMS_TEST_UPDATE_TARGET="$target" OMS_TEST_UPDATE_MARKER="$marker" \
+    "$repo/scripts/auto-update.sh" apply > "$home/dirty.out"
+  grep -Fq 'auto-update: skipped' "$home/dirty.out" ||
+    fail "schema-2 auto-update did not skip a dirty checkout"
+  grep -Fq 'status=skipped' "$state" || fail "dirty schema-2 skip was not recorded"
+  [ ! -e "$marker" ] || fail "dirty schema-2 auto-update invoked the mutating updater"
+
+  rm -f "$repo/uncommitted"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto.log" \
+    OMS_TEST_UPDATE_TARGET="$target" OMS_TEST_UPDATE_MARKER="$marker" \
+    "$repo/scripts/auto-update.sh" apply > "$home/diverged.out"
+  grep -Fq 'auto-update: skipped' "$home/diverged.out" ||
+    fail "schema-2 auto-update did not skip a diverged checkout"
+  grep -Fq 'diverged' "$state" || fail "diverged schema-2 skip reason was not recorded"
+  [ ! -e "$marker" ] || fail "diverged schema-2 auto-update invoked the mutating updater"
+
+  # A schema-2 receipt used to return before the legacy lock path, so two
+  # timers could overlap the checkout/receipt transaction. Hold the shared
+  # apply lock and prove this path observes the same non-blocking boundary.
+  git -C "$repo" reset -q --hard "$base"
+  rm -f "$marker" "$home/lock-ready"
+  HOME="$home" OMS_LOCK_DIR="$home/locks" OMS_LOCK_FORCE_MKDIR=1 \
+    bash -c '. "$1"; oms_hold_file_lock "$2" 7 || exit; : > "$3"; sleep 10' \
+      _ "$repo/scripts/lib/file-lock.sh" "$repo/local/auto-update.apply" \
+      "$home/lock-ready" &
+  holder=$!
+  i=0
+  while [ ! -f "$home/lock-ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$home/lock-ready" ] || { kill "$holder" 2>/dev/null || true; fail "lock holder did not start"; }
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto.log" \
+    OMS_TEST_UPDATE_TARGET="$target" OMS_TEST_UPDATE_MARKER="$marker" \
+    OMS_LOCK_DIR="$home/locks" OMS_LOCK_FORCE_MKDIR=1 \
+    "$repo/scripts/auto-update.sh" apply > "$home/locked.out"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  grep -Fq 'auto-update: skipped (another run in progress)' "$home/locked.out" ||
+    fail "schema-2 auto-update ignored the shared apply lock"
+  [ ! -e "$marker" ] || fail "locked schema-2 auto-update invoked the mutating updater"
+
+  # The ref is resolved twice (preflight and transactional update). If it is
+  # force-moved between them, the second target must not replace the commit
+  # whose ancestry was actually checked.
+  rm -f "$marker"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto.log" \
+    OMS_TEST_UPDATE_TARGET="$target" OMS_TEST_UPDATE_APPLY_TARGET="$current" \
+    OMS_TEST_UPDATE_MARKER="$marker" OMS_LOCK_DIR="$home/locks" OMS_LOCK_FORCE_MKDIR=1 \
+    "$repo/scripts/auto-update.sh" apply > "$home/retargeted.out"
+  grep -Fq 'auto-update: skipped (target changed during preflight)' "$home/retargeted.out" ||
+    fail "schema-2 auto-update did not skip a ref changed after ancestry preflight"
+  grep -Fq 'status=skipped' "$state" || fail "retargeted schema-2 skip was not recorded"
+  [ ! -e "$marker" ] || fail "retargeted schema-2 auto-update applied an unchecked target"
+}
+
+test_missing_codex_degrades_and_dead_ref_is_fail_closed() {
   local source="$TMP/degrade-source"
   local installed="$TMP/degrade-installed"
   local home="$TMP/degrade-home"
   local receipt="$home/.config/oh-my-setting/install.json"
-  local first next
+  local first next before_dead_ref out rc=0
 
   git clone -q "$ROOT" "$source"
   git -C "$source" checkout -qB main
@@ -492,6 +638,8 @@ test_missing_codex_degrades_and_dead_ref_follows_default() {
   cp "$ROOT/scripts/link.sh" "$source/scripts/link.sh"
   cp "$ROOT/scripts/unlink.sh" "$source/scripts/unlink.sh"
   cp "$ROOT/scripts/doctor.sh" "$source/scripts/doctor.sh"
+  cp "$ROOT/tools.lock.json" "$source/tools.lock.json"
+  cp "$ROOT/scripts/lib/tool-lock.py" "$source/scripts/lib/tool-lock.py"
   cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
   cp "$ROOT/scripts/claude-statusline.py" "$source/scripts/claude-statusline.py"
   cp "$ROOT/scripts/claude-subagent-statusline.py" "$source/scripts/claude-subagent-statusline.py"
@@ -502,6 +650,9 @@ test_missing_codex_degrades_and_dead_ref_follows_default() {
   cp "$ROOT/scripts/install-agy-plugin.sh" "$source/scripts/install-agy-plugin.sh"
   cp "$ROOT/scripts/oms-mcp-server.py" "$source/scripts/oms-mcp-server.py"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$source/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$source/scripts/lib/managed-target.py"
   cp "$ROOT/scripts/lib/agent-install-state.sh" "$source/scripts/lib/agent-install-state.sh"
@@ -538,20 +689,34 @@ test_missing_codex_degrades_and_dead_ref_follows_default() {
   [ "$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["components"]["codex_plugin"]).lower())' "$receipt")" = true ] ||
     fail "degradation must keep the codex_plugin intent in the receipt"
 
-  # A pinned ref that resolves nowhere follows the origin default branch for
-  # the run, loudly, instead of failing forever on an unattended timer.
+  # A pin that resolves nowhere is an integrity boundary: an unattended run
+  # must not silently switch channels. The operator may choose the origin
+  # default branch for one run, but only through an explicit flag.
   printf 'advance again\n' >> "$source/advance-marker"
   git -C "$source" add advance-marker
   git -C "$source" commit -qm "fixture: advance again"
   next="$(git -C "$source" rev-parse HEAD)"
+  before_dead_ref="$(git -C "$installed" rev-parse HEAD)"
+  rc=0
+  out="$(env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    OMS_INSTALL_RECEIPT="$receipt" PATH="/usr/bin:/bin" \
+    "$installed/scripts/update.sh" --ref ghost-branch --no-tools 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dead pinned ref followed the default branch without consent: $out"
+  [ "$(git -C "$installed" rev-parse HEAD)" = "$before_dead_ref" ] ||
+    fail "a dead pinned ref changed the installed commit"
+  printf '%s' "$out" | grep -Fq 'cannot resolve pinned install ref: ghost-branch' ||
+    fail "the dead-ref failure did not name the pin: $out"
+  printf '%s' "$out" | grep -Fq -- '--fallback-to-edge' ||
+    fail "the dead-ref failure did not name the explicit recovery: $out"
+
   env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
-    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --ref ghost-branch --no-tools \
-    >"$TMP/deadref.out" 2>&1 ||
-    { cat "$TMP/deadref.out" >&2; fail "a dead pinned ref must heal to the default branch"; }
+    PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --ref ghost-branch \
+    --fallback-to-edge --no-tools >"$TMP/deadref.out" 2>&1 ||
+    { cat "$TMP/deadref.out" >&2; fail "explicit dead-ref fallback must follow the default branch"; }
   [ "$(git -C "$installed" rev-parse HEAD)" = "$next" ] ||
-    fail "dead-ref update did not follow the default branch"
-  grep -Fq 'install ref ghost-branch no longer resolves anywhere' "$TMP/deadref.out" ||
-    fail "the dead-ref fallback must be named"
+    fail "explicit dead-ref fallback did not follow the default branch"
+  grep -Fq -- '--fallback-to-edge follows default branch' "$TMP/deadref.out" ||
+    fail "the explicit dead-ref fallback must be named"
 }
 
 test_auto_update_failure_message_names_the_error() {
@@ -562,6 +727,8 @@ test_auto_update_failure_message_names_the_error() {
 
   mkdir -p "$repo/scripts/lib" "$repo/local" "$home/.config/oh-my-setting"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
   cp "$ROOT/scripts/lib/platform.sh" "$repo/scripts/lib/platform.sh"
   cp "$ROOT/scripts/lib/managed-target.py" "$repo/scripts/lib/managed-target.py"
@@ -611,6 +778,7 @@ test_doctor_failure_restores_previous_plugin_payload
 test_schema1_update_preserves_channel_pin_and_cron
 test_signal_during_doctor_rolls_back_transaction
 test_detached_schema2_auto_update_check
-test_missing_codex_degrades_and_dead_ref_follows_default
+test_schema2_auto_update_apply_skips_dirty_and_diverged
+test_missing_codex_degrades_and_dead_ref_is_fail_closed
 test_auto_update_failure_message_names_the_error
 echo "update-v04-smoke: ok"

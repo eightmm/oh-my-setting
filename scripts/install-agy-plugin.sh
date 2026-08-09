@@ -347,15 +347,50 @@ case "$MODE" in
 esac
 
 if ! command -v "$AGY_BIN" >/dev/null 2>&1; then
+  if [ "$REMOVE" = "1" ]; then
+    echo "error: agy CLI is required to inspect and remove the Antigravity plugin" >&2
+    exit 1
+  fi
   [ "$MODE" = "1" ] && fail "agy is not installed"
   echo "agy-plugin: note: agy CLI absent; skipped"
   exit 0
 fi
 
 if [ "$REMOVE" = "1" ]; then
-  "$AGY_BIN" plugin uninstall oh-my-setting >/dev/null 2>&1 || true
-  echo "agy-plugin: uninstalled (if present)"
-  exit 0
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+  state=0
+  out="$("$AGY_BIN" plugin list 2>/dev/null)" || state=2
+  if [ "$state" -eq 0 ]; then
+    printf '%s\n' "$out" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    imports = data["imports"]
+    if not isinstance(imports, list):
+        raise TypeError("imports is not a list")
+except Exception:
+    sys.exit(2)
+sys.exit(0 if any(row.get("name") == "oh-my-setting" for row in imports if isinstance(row, dict)) else 1)
+' || state=$?
+  fi
+  case "$state" in
+    0)
+      if ! "$AGY_BIN" plugin uninstall oh-my-setting >/dev/null 2>&1; then
+        echo "error: could not uninstall the Antigravity plugin" >&2
+        exit 1
+      fi
+      echo "agy-plugin: uninstalled"
+      exit 0
+      ;;
+    1)
+      echo "agy-plugin: already absent"
+      exit 0
+      ;;
+    *)
+      echo "error: could not inspect the Antigravity plugin state" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"

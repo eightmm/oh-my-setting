@@ -470,7 +470,7 @@ PY
 
 test_gc_bounds_old_checkpoint_and_hook_state() {
   local repo="$TMP/retention"
-  local checkpoint_id out
+  local checkpoint_id out landing_dir
 
   make_repo "$repo"
   checkpoint_id="$(cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json |
@@ -482,10 +482,25 @@ test_gc_bounds_old_checkpoint_and_hook_state() {
 not-json-is-preserved
 EOF
   printf '{}\n' > "$repo/.oms/hooks/sessions/old.json"
+  landing_dir="$repo/.oms/landing-patches"
+  mkdir -p "$landing_dir" "$repo/.oms/artifacts"
+  printf 'terminal\n' > "$landing_dir/land-terminal.patch"
+  printf 'live\n' > "$landing_dir/land-live.patch"
+  printf 'referenced\n' > "$landing_dir/land-referenced.patch"
+  cat > "$repo/.oms/landings.jsonl" <<EOF
+{"schema":1,"ts":"2020-01-01T00:00:00Z","landing_id":"land-terminal","event":"intent","patch":"$landing_dir/land-terminal.patch"}
+{"schema":1,"ts":"2020-01-01T00:00:01Z","landing_id":"land-terminal","event":"complete"}
+{"schema":1,"ts":"2020-01-01T00:00:00Z","landing_id":"land-live","event":"intent","patch":"$landing_dir/land-live.patch"}
+{"schema":1,"ts":"2020-01-01T00:00:00Z","landing_id":"land-referenced","event":"intent","patch":"$landing_dir/land-referenced.patch"}
+{"schema":1,"ts":"2020-01-01T00:00:01Z","landing_id":"land-referenced","event":"abandoned"}
+EOF
+  printf '%s\n' '{"patch":".oms/landing-patches/land-referenced.patch"}' \
+    > "$repo/.oms/artifacts/index.jsonl"
   python3 - "$repo/.oms/checkpoints/$checkpoint_id/meta.json" \
-    "$repo/.oms/hooks/sessions/old.json" <<'PY'
+    "$repo/.oms/hooks/sessions/old.json" "$landing_dir/land-terminal.patch" \
+    "$landing_dir/land-live.patch" "$landing_dir/land-referenced.patch" <<'PY'
 import json, os, sys, time
-meta_path, session_path = sys.argv[1:]
+meta_path, session_path, *landing_paths = sys.argv[1:]
 with open(meta_path, encoding="utf-8") as handle:
     meta = json.load(handle)
 meta["created_at"] = "2020-01-01T00:00:00Z"
@@ -494,6 +509,8 @@ with open(meta_path, "w", encoding="utf-8", newline="\n") as handle:
     handle.write("\n")
 old = time.time() - 10 * 86400
 os.utime(session_path, (old, old))
+for path in landing_paths:
+    os.utime(path, (old, old))
 PY
 
   out="$(bash "$ROOT/scripts/gc.sh" --repo "$repo" --days 1 --dry-run)"
@@ -503,6 +520,8 @@ PY
     fail "gc did not report old hook-event compaction"
   printf '%s' "$out" | grep -Fq 'hook-session:' ||
     fail "gc did not report the old hook session"
+  printf '%s' "$out" | grep -Fq 'landing-patch:' ||
+    fail "gc did not report an unreferenced terminal landing snapshot"
   [ -d "$repo/.oms/checkpoints/$checkpoint_id" ] ||
     fail "gc dry-run removed a checkpoint"
 
@@ -511,6 +530,12 @@ PY
     fail "gc apply kept an expired checkpoint"
   [ ! -e "$repo/.oms/hooks/sessions/old.json" ] ||
     fail "gc apply kept an expired hook session"
+  [ ! -e "$landing_dir/land-terminal.patch" ] ||
+    fail "gc apply kept an expired terminal landing snapshot"
+  [ -e "$landing_dir/land-live.patch" ] ||
+    fail "gc removed a snapshot whose landing is still recoverable"
+  [ -e "$landing_dir/land-referenced.patch" ] ||
+    fail "gc removed a terminal snapshot still referenced by the artifact index"
   grep -Fq '"session":"new"' "$repo/.oms/hooks/events.jsonl" ||
     fail "gc removed the current hook event"
   grep -Fq 'not-json-is-preserved' "$repo/.oms/hooks/events.jsonl" ||
@@ -518,6 +543,47 @@ PY
   if grep -Fq '"session":"old"' "$repo/.oms/hooks/events.jsonl"; then
     fail "gc kept the expired hook event"
   fi
+
+  # Frozen landing retention is a safety decision. One malformed landing or
+  # artifact row makes the reference set unknowable, so apply mode must keep
+  # every candidate and fail instead of silently deleting evidence.
+  printf 'corrupt-input-guard\n' > "$landing_dir/land-corrupt.patch"
+  python3 - "$landing_dir/land-corrupt.patch" <<'PY'
+import os, sys, time
+old = time.time() - 10 * 86400
+os.utime(sys.argv[1], (old, old))
+PY
+  cat >> "$repo/.oms/landings.jsonl" <<EOF
+{"schema":1,"ts":"2020-01-01T00:00:00Z","landing_id":"land-corrupt","event":"intent","patch":"$landing_dir/land-corrupt.patch"}
+{"schema":1,"ts":"2020-01-01T00:00:01Z","landing_id":"land-corrupt","event":"complete"}
+not-json
+EOF
+  if bash "$ROOT/scripts/gc.sh" --repo "$repo" --days 1 --apply \
+    >"$TMP/gc-corrupt.out" 2>&1; then
+    fail "gc accepted malformed landing retention input"
+  fi
+  [ -e "$landing_dir/land-corrupt.patch" ] ||
+    fail "gc deleted frozen evidence after malformed landing input"
+
+  sed '$d' "$repo/.oms/landings.jsonl" > "$TMP/landings-valid.jsonl"
+  mv "$TMP/landings-valid.jsonl" "$repo/.oms/landings.jsonl"
+  printf 'corrupt-artifact-guard\n' > "$landing_dir/land-corrupt-index.patch"
+  cat >> "$repo/.oms/landings.jsonl" <<EOF
+{"schema":1,"ts":"2020-01-01T00:00:00Z","landing_id":"land-corrupt-index","event":"intent","patch":"$landing_dir/land-corrupt-index.patch"}
+{"schema":1,"ts":"2020-01-01T00:00:01Z","landing_id":"land-corrupt-index","event":"complete"}
+EOF
+  printf 'not-json\n' > "$repo/.oms/artifacts/index.jsonl"
+  python3 - "$landing_dir/land-corrupt-index.patch" <<'PY'
+import os, sys, time
+old = time.time() - 10 * 86400
+os.utime(sys.argv[1], (old, old))
+PY
+  if bash "$ROOT/scripts/gc.sh" --repo "$repo" --days 1 --apply \
+    >"$TMP/gc-corrupt-index.out" 2>&1; then
+    fail "gc accepted malformed artifact retention input"
+  fi
+  [ -e "$landing_dir/land-corrupt-index.patch" ] ||
+    fail "gc deleted frozen evidence after malformed artifact input"
 }
 
 test_native_hook_telemetry_is_content_free_and_correlated

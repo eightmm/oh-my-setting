@@ -183,11 +183,38 @@ EOF
     --prompt 'Assess work' >/dev/null 2>"$repo/read.err" || rc=$?
   [ "$rc" = 2 ] || fail "read executor should fail"
   contains "$repo/read.err" 'executors require write mode'
+
+  # The executor records provider-default for provenance, but loading it must
+  # not turn the sentinel into an exact model with an implicit retry to the
+  # same default route.
+  create_executor "$repo" default1 EXECUTOR-DEFAULT-MODEL
+  cat > "$bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+count=0
+[ ! -f "$CAPTURE_DIR/default.count" ] || count="$(cat "$CAPTURE_DIR/default.count")"
+count=$((count + 1))
+printf '%s\n' "$count" > "$CAPTURE_DIR/default.count"
+echo 'Selected model is at capacity. Please try a different model.' >&2
+exit 1
+EOF
+  chmod +x "$bin/codex"
+  rc=0
+  CAPTURE_DIR="$capture" HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$repo" --executor default1 \
+      --artifact-dir "$repo/default-artifacts" --no-verify --prompt 'default route' \
+      >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "capacity-only default executor should fail"
+  [ "$(cat "$capture/default.count")" = 1 ] ||
+    fail "provider-default executor was replayed as an explicit fallback"
 }
 
 test_scope() {
   local repo="$TMP/scope" plan="$ROOT/scripts/agent-plan.sh" rc=0
   make_repo "$repo"
+  printf '/*.patch\n/*-report.md\n/lease.proposal.md\n/*.err\n' > "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" commit -qm 'ignore test artifacts'
   mkdir -p "$repo/src/private"
   printf 'private\n' > "$repo/src/private/secret.txt"
   git -C "$repo" add src/private/secret.txt

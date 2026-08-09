@@ -3,10 +3,11 @@ set -euo pipefail
 
 # Retention sweep for repo-local .oms state. Only artifact-index prune reclaims
 # anything today; capsules, task archives, handoff digests, hook
-# telemetry/session state, local checkpoints, orphaned delegation markers, and
-# resolved failure rows otherwise grow unbounded over a repo's lifetime. This
-# sweeps the SAFE, clearly-transient families by age and never touches live
-# state (open runs, the active task, unresolved failures, active claims).
+# telemetry/session state, local checkpoints, supervised runtime logs, frozen
+# landing snapshots, orphaned delegation markers, and resolved failure rows otherwise grow unbounded over a
+# repo's lifetime. This sweeps the SAFE, clearly-transient families by age and
+# never touches live state (open runs, active attempts, the active task,
+# unresolved failures, active claims).
 # --dry-run by default, mirroring cleanup.sh.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
@@ -35,6 +36,9 @@ Options:
 Swept (older than --days): orphaned delegation markers (dead pid; a coupled
 claimed/running plan task is released back to ready), archived task packets,
 handoff digests, local tracked-state checkpoints, hook events/sessions,
+terminal supervisor runtime records outside the repository (durable lifecycle
+events and attempt specs remain),
+terminal frozen landing patches no longer referenced by the artifact index,
 stale open runs (no spine event in --days; a close event is appended), run
 capsules of runs that are NOT open, abandoned change-guards (dead owner pid
 or aged snapshot), terminal/draft executor souls, retired failure rows
@@ -60,6 +64,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$DAYS" in *[!0-9]*|"") fail "--days must be a non-negative integer" ;; esac
+[ "$DAYS" -le 36500 ] || fail "--days must be at most 36500"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
@@ -77,6 +82,14 @@ printf '%s\n' "$executor_gc_out"
 executor_changes="$(printf '%s\n' "$executor_gc_out" | awk '/^executor-gc: [0-9]+ (candidate|removed)/ {n=$2} END {print n+0}')"
 removed=$((removed + executor_changes))
 
+supervisor_gc_args=(--repo "$STATE_ROOT" gc --older-than-days "$DAYS")
+[ "$DRY_RUN" = 1 ] || supervisor_gc_args+=(--apply)
+supervisor_gc_out="$("$ROOT/scripts/agent-supervisor.sh" "${supervisor_gc_args[@]}")"
+printf '%s\n' "$supervisor_gc_out"
+supervisor_changes="$(printf '%s\n' "$supervisor_gc_out" |
+  awk '/^would delete: att_/ || /^deleted: att_/ {n++} END {print n+0}')"
+removed=$((removed + supervisor_changes))
+
 note_remove() {  # note_remove KIND PATH
   printf -- '- %s: %s\n' "$1" "$2"
   removed=$((removed + 1))
@@ -84,6 +97,159 @@ note_remove() {  # note_remove KIND PATH
     rm -rf "$2"
   fi
 }
+
+# 0.5) A landing freezes caller-owned patch bytes before admission so verifier
+# code cannot swap the approved object. Keep that snapshot while recovery is
+# outstanding and while the artifact index still cites it; once both durable
+# records say it is terminal/unreferenced, it is transient storage like an old
+# supervisor log. The same non-blocking landing lock prevents GC from racing a
+# live apply or recovery. A busy landing is expected and simply defers cleanup.
+landing_patch_gc_locked() {
+  python3 - "$STATE_ROOT" "$OMS/landings.jsonl" "$OMS/artifacts/index.jsonl" \
+    "$DAYS" "$DRY_RUN" <<'PY'
+import json
+import os
+import stat
+import sys
+import time
+
+repo, landings_path, index_path, days_raw, dry_raw = sys.argv[1:]
+patch_root = os.path.realpath(os.path.join(repo, ".oms", "landing-patches"))
+if not os.path.isdir(patch_root) or os.path.islink(os.path.join(repo, ".oms", "landing-patches")):
+    raise SystemExit(0)
+
+
+def inside(path, root):
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+intents = {}
+seen_intents = set()
+terminal = set()
+try:
+    landing_lines = open(landings_path, encoding="utf-8", errors="replace")
+except OSError as exc:
+    raise SystemExit("cannot read landing retention input: %s" % exc)
+with landing_lines:
+    for line_number, line in enumerate(landing_lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (TypeError, ValueError):
+            raise SystemExit("malformed landing row at line %d" % line_number)
+        if not isinstance(row, dict):
+            raise SystemExit("non-object landing row at line %d" % line_number)
+        landing_id = row.get("landing_id")
+        if not isinstance(landing_id, str) or not landing_id:
+            raise SystemExit("landing row %d has no landing_id" % line_number)
+        event = row.get("event")
+        if event == "intent":
+            if not isinstance(row.get("patch"), str) or not row["patch"]:
+                raise SystemExit("landing intent %s has no patch" % landing_id)
+            seen_intents.add(landing_id)
+            value = row["patch"]
+            candidate = value if os.path.isabs(value) else os.path.join(repo, value)
+            real = os.path.realpath(candidate)
+            if inside(real, patch_root):
+                previous = intents.get(landing_id)
+                if previous is not None and previous != real:
+                    raise SystemExit("landing %s has conflicting intent paths" % landing_id)
+                intents[landing_id] = real
+        elif event in ("complete", "abandoned"):
+            if landing_id not in seen_intents:
+                raise SystemExit("landing %s is terminal without an intent" % landing_id)
+            terminal.add(landing_id)
+        elif event in ("applied-pending-receipt", "not-applied-pending-receipt"):
+            if landing_id not in seen_intents:
+                raise SystemExit("landing %s has a receipt event without an intent" % landing_id)
+        else:
+            raise SystemExit("landing %s has unknown event %r" % (landing_id, event))
+
+active_paths = {
+    path for landing_id, path in intents.items() if landing_id not in terminal
+}
+terminal_paths = {
+    path for landing_id, path in intents.items() if landing_id in terminal
+}
+
+referenced = set()
+try:
+    index_lines = open(index_path, encoding="utf-8", errors="replace")
+except FileNotFoundError:
+    index_lines = None
+except OSError as exc:
+    raise SystemExit("cannot read artifact retention input: %s" % exc)
+if index_lines is not None:
+    with index_lines:
+        for line_number, line in enumerate(index_lines, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError):
+                raise SystemExit("malformed artifact row at line %d" % line_number)
+            if not isinstance(row, dict):
+                raise SystemExit("non-object artifact row at line %d" % line_number)
+            for key in ("artifact", "patch", "source"):
+                value = row.get(key)
+                if value in (None, ""):
+                    continue
+                if not isinstance(value, str):
+                    raise SystemExit("artifact row %d has invalid %s path" % (line_number, key))
+                candidate = value if os.path.isabs(value) else os.path.join(repo, value)
+                real = os.path.realpath(candidate)
+                if inside(real, patch_root):
+                    referenced.add(real)
+
+cutoff = time.time() - int(days_raw) * 86400
+dry_run = dry_raw == "1"
+removed = False
+for path in sorted(terminal_paths - active_paths - referenced):
+    name = os.path.basename(path)
+    if not (name.startswith("land-") and name.endswith(".patch")):
+        continue
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError:
+        continue
+    if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
+        continue
+    print("- landing-patch: %s" % path)
+    if not dry_run:
+        os.unlink(path)
+        removed = True
+if removed:
+    try:
+        directory = os.open(patch_root, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        pass
+PY
+}
+
+if [ -f "$OMS/landings.jsonl" ] && [ -d "$OMS/landing-patches" ]; then
+  landing_gc_out=""
+  landing_gc_status=0
+  landing_gc_out="$(oms_try_file_lock "$OMS/landings.jsonl" landing_patch_gc_locked)" ||
+    landing_gc_status=$?
+  case "$landing_gc_status" in
+    0)
+      [ -z "$landing_gc_out" ] || printf '%s\n' "$landing_gc_out"
+      landing_gc_changes="$(printf '%s\n' "$landing_gc_out" |
+        awk '/^- landing-patch: / {n++} END {print n+0}')"
+      removed=$((removed + landing_gc_changes))
+      ;;
+    75) echo "- landing-patch: skipped while a landing or recovery is active" ;;
+    *) echo "error: gc: frozen landing patch maintenance failed" >&2; exit "$landing_gc_status" ;;
+  esac
+fi
 
 # 1) Orphaned delegation markers: a dead pid means a crashed worker. A live
 #    pid is an in-flight delegation and is never swept (regardless of age).

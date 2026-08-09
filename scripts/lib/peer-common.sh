@@ -126,13 +126,15 @@ EOF
 # Run "$@" under a wall clock. SIGTERM alone is not a bound — a CLI that traps
 # or ignores it survives the timeout — so pass --kill-after (SIGKILL
 # escalation) when the binary supports it (GNU coreutils does; busybox may
-# not, probed once per process). With no timeout binary at all the guard
-# silently degrades to nothing, so OMS_REQUIRE_TIMEOUT=1 turns that into a
-# refusal instead of a warning.
+# not, probed once per process). Stock macOS has neither binary, so the Python
+# 3.9 floor supplies a process-group fallback. With neither mechanism, refuse
+# instead of launching an unbounded provider or verifier.
 ma_run_bounded() {
   local wall="$1"
   local label="$2"
   local tbin=""
+  local pybin="${OMS_PYTHON_BIN:-}"
+  local helper="${OMS_RUN_BOUNDED_HELPER:-}"
   shift 2
 
   if command -v timeout >/dev/null 2>&1; then
@@ -154,14 +156,19 @@ ma_run_bounded() {
     else
       "$tbin" "$wall" "$@"
     fi
-  elif [ "${OMS_REQUIRE_TIMEOUT:-0}" = 1 ]; then
-    echo "error: no timeout/gtimeout binary and OMS_REQUIRE_TIMEOUT=1; refusing unbounded $label call" >&2
-    return 127
   else
-    # Callers merge stderr into the artifact, so the missing guard is visible
-    # there instead of silently running a hung provider CLI forever.
-    echo "warning: no timeout/gtimeout binary; $label call runs unbounded (set OMS_REQUIRE_TIMEOUT=1 to refuse)" >&2
-    "$@"
+    [ -n "$pybin" ] || pybin="$(command -v python3 2>/dev/null || true)"
+    [ -n "$helper" ] || helper="$(ma_scripts_dir)/lib/run-bounded.py"
+    if [ -n "$pybin" ] && [ -f "$helper" ]; then
+      "$pybin" "$helper" "$wall" "${OMS_PEER_KILL_AFTER:-15}" "$label" "$@"
+    else
+      if [ "${OMS_REQUIRE_TIMEOUT:-0}" = 1 ]; then
+        echo "error: no timeout/gtimeout binary or Python fallback and OMS_REQUIRE_TIMEOUT=1; refusing unbounded $label call" >&2
+      else
+        echo "error: no timeout/gtimeout binary or Python fallback; refusing unbounded $label call" >&2
+      fi
+      return 127
+    fi
   fi
 }
 
@@ -213,7 +220,7 @@ ma_agy_read_cleanup() {
 
 # Verification commands (test suites) get their own, longer wall clock than
 # provider calls; a hung verify otherwise wedges the delegation or review gate
-# indefinitely. GNU timeout exits 124 on expiry, which callers already treat
+# indefinitely. Every timeout backend exits 124 on expiry, which callers treat
 # as a normal nonzero verify failure.
 run_verify_with_timeout() {
   ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$@"
@@ -292,7 +299,7 @@ ma_write_harness_context() {
       if [ -n "$model_lines" ]; then
         printf '### available models\n'
         printf '%s' "$model_lines"
-        printf 'Use --model and --effort on a later call to select explicitly.\n\n'
+        printf 'Use --model and --reasoning-effort on a later call to select explicitly.\n\n'
       fi
     fi
     if [ "$include_memory" -eq 1 ]; then
@@ -427,6 +434,7 @@ ma_append_artifact_index() {
   OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_EXECUTOR_ID="${OMS_EXECUTOR_ID:-}" OMS_INDEX_SOUL_SHA256="${OMS_SOUL_SHA256:-}" \
+  OMS_INDEX_ATTEMPT_ID="${OMS_ATTEMPT_ID:-${OMS_LAST_ATTEMPT_ID:-}}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
   OMS_INDEX_MODEL_CLASS="${OMS_MODEL_RESOLVED_CLASS:-}" \
   OMS_INDEX_REQUESTED_MODEL="${OMS_MODEL_PRIMARY:-}" \
@@ -507,6 +515,9 @@ if delegation_id:
 executor_id = safe_id(os.environ.get("OMS_INDEX_EXECUTOR_ID", ""))
 if executor_id:
     row["executor_id"] = executor_id
+attempt_id = safe_id(os.environ.get("OMS_INDEX_ATTEMPT_ID", ""))
+if attempt_id:
+    row["attempt_id"] = attempt_id
 soul_sha256 = os.environ.get("OMS_INDEX_SOUL_SHA256", "")
 if re.match(r"^[0-9a-f]{64}$", soul_sha256):
     row["soul_sha256"] = soul_sha256
@@ -514,7 +525,7 @@ parent_event_id = safe_id(os.environ.get("OMS_INDEX_PARENT_EVENT_ID", ""))
 if parent_event_id:
     row["parent_event_id"] = parent_event_id
 model_class = os.environ.get("OMS_INDEX_MODEL_CLASS", "")
-if model_class in ("fast", "balanced", "deep"):
+if model_class in ("explicit", "provider-default", "fast", "balanced", "deep"):
     row["model_class"] = model_class
 def bounded_model(name):
     value = os.environ.get(name, "")
@@ -537,11 +548,12 @@ row["fallback_used"] = os.environ.get("OMS_INDEX_FALLBACK_USED", "0") == "1"
 reasoning_effort = os.environ.get("OMS_INDEX_REASONING_EFFORT", "")
 selected_reasoning_effort = os.environ.get("OMS_INDEX_SELECTED_REASONING_EFFORT", "")
 fallback_reasoning_effort = os.environ.get("OMS_INDEX_FALLBACK_REASONING_EFFORT", "")
-if reasoning_effort in ("low", "medium", "high"):
+valid_efforts = ("low", "medium", "high", "xhigh", "max", "ultra")
+if reasoning_effort in valid_efforts:
     row["reasoning_effort"] = reasoning_effort
-if selected_reasoning_effort in ("low", "medium", "high"):
+if selected_reasoning_effort in valid_efforts:
     row["selected_reasoning_effort"] = selected_reasoning_effort
-if fallback_reasoning_effort in ("low", "medium", "high"):
+if fallback_reasoning_effort in valid_efforts:
     row["fallback_reasoning_effort"] = fallback_reasoning_effort
 row.update(path_fields("artifact", artifact_raw))
 row.update(path_fields("patch", patch_raw))
@@ -979,11 +991,11 @@ ma_provider_attempt() {
       # repo wrote to the origin path, and the same worker without --add-dir
       # wrote to ~/.gemini/antigravity-cli/scratch.
       cmd+=(--add-dir "$workdir")
-      # The tier is normally carried by the model variant — "Gemini 3.6 Flash
-      # (High)" is the high-effort model — so the flag stays off the auto path
-      # and nothing is said twice. A caller who names an effort outright means
-      # it, and this CLI does take --effort, so pass it through.
-      [ "${OMS_REASONING_EXPLICIT:-0}" != 1 ] || cmd+=(--effort "$effort")
+      # Auto leaves effort to the provider. A caller who names an effort
+      # explicitly gets the capability-validated CLI flag. A capacity fallback
+      # with no frozen fallback effort receives the provider default, so never
+      # pass an empty flag value.
+      [ -z "$effort" ] || cmd+=(--effort "$effort")
       cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}")
       cmd+=(--print "$(cat "$prompt_file")")
       ;;
@@ -1071,7 +1083,7 @@ PY
 # Run one provider with a resolved model and at most one capacity-only fallback.
 # For write access the retry is allowed only when the first attempt left the
 # isolated worktree unchanged.
-ma_run_routed_provider() {
+ma_run_routed_provider_inner() {
   local provider="$1"
   local access="$2"
   local prompt_file="$3"
@@ -1112,81 +1124,62 @@ ma_run_routed_provider() {
     "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
   cat "$attempt_file" >> "$artifact"
 
-  # One model's safeguard firing on a message is a property of that model, not a
-  # judgement on the request: the error says the safeguards are deliberately
-  # broad and can flag legitimate coding and biology work, and it names the
-  # remedy — change the model. Do that once, on a genuinely different model
-  # rather than the same one under an alias, and record it.
-  if [ -n "${OMS_MODEL_DISTINCT_CHAIN:-}" ] &&
+  # Catalog recovery belongs only to an unpinned provider-default route. An
+  # explicit --model is an exact reproducibility contract, so it records the
+  # failure and stops instead of silently changing the caller's choice.
+  if [ "$status" -ne 0 ] &&
+    ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" &&
     oms_model_is_model_safeguard_output "$attempt_file"; then
-    # Walk the tier's other models rather than trying one: the same broad
-    # filter can flag the second model as readily as the first, and stopping
-    # after one step leaves the work undone for no reason the caller can act
-    # on. Bounded — the chain is short and each step is a real provider call.
     local safeguard_tries=0
     local safeguard_cap="${OMS_MODEL_SAFEGUARD_RETRIES:-2}"
     local safeguard_next safeguard_prev
+    OMS_MODEL_FALLBACK_REASON="model-safeguard"
     case "$safeguard_cap" in *[!0-9]*|"") safeguard_cap=2 ;; esac
     safeguard_prev="$OMS_MODEL_SELECTED"
-    while IFS= read -r safeguard_next; do
-      [ -n "$safeguard_next" ] || continue
-      [ "$safeguard_tries" -lt "$safeguard_cap" ] || break
-      oms_model_is_model_safeguard_output "$attempt_file" || break
-      if [ "$access" = write ]; then
-        after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
-        [ -n "$before" ] && [ "$after" = "$before" ] || break
-      fi
-      safeguard_tries=$((safeguard_tries + 1))
-      OMS_MODEL_FALLBACK_USED=1
-      OMS_MODEL_FALLBACK_REASON="model-safeguard"
-      OMS_MODEL_SELECTED="$safeguard_next"
-      printf '\nmodel-fallback: reason=model-safeguard selected=%s\n' \
-        "$OMS_MODEL_SELECTED" >> "$artifact"
-      echo "note: $safeguard_prev safeguards flagged this message; retrying on $OMS_MODEL_SELECTED" >&2
-      safeguard_prev="$OMS_MODEL_SELECTED"
-      : > "$attempt_file"
-      status=0
-      ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
-        "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
-      cat "$attempt_file" >> "$artifact"
-    done <<EOF
+    if [ -n "${OMS_MODEL_DISTINCT_CHAIN:-}" ]; then
+      while IFS= read -r safeguard_next; do
+        [ -n "$safeguard_next" ] || continue
+        [ "$safeguard_tries" -lt "$safeguard_cap" ] || break
+        ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" || break
+        oms_model_is_model_safeguard_output "$attempt_file" || break
+        if [ "$access" = write ]; then
+          after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
+          [ -n "$before" ] && [ "$after" = "$before" ] || break
+        fi
+        safeguard_tries=$((safeguard_tries + 1))
+        OMS_MODEL_FALLBACK_USED=1
+        OMS_MODEL_SELECTED="$safeguard_next"
+        printf '\nmodel-fallback: reason=model-safeguard selected=%s\n' \
+          "$OMS_MODEL_SELECTED" >> "$artifact"
+        echo "note: $safeguard_prev safeguards flagged this message; retrying on $OMS_MODEL_SELECTED" >&2
+        safeguard_prev="$OMS_MODEL_SELECTED"
+        : > "$attempt_file"
+        status=0
+        ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
+          "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
+        cat "$attempt_file" >> "$artifact"
+      done <<EOF
 $OMS_MODEL_DISTINCT_CHAIN
 EOF
+    fi
     if [ "$status" -ne 0 ] && oms_model_is_model_safeguard_output "$attempt_file"; then
-      echo "note: every model in this tier flagged the message; nothing left to try" >&2
-      printf '\nmodel-result: every model in the tier flagged this message\n' >> "$artifact"
+      echo "note: model safeguard stopped the selected route; no eligible model remains" >&2
+      printf '\nmodel-result: model safeguard stopped the selected route\n' >> "$artifact"
     fi
   fi
 
-  # A decline is the provider's decision about the request, not a fault to route
-  # around. Say so plainly and stop: re-sending the same request to another
-  # model until one answers would be a way past that decision, and a repair
-  # round would only reword it into the same wall.
-  if oms_model_is_policy_decline_output "$attempt_file"; then
-    OMS_MODEL_FALLBACK_REASON="policy-declined"
-    printf '\nmodel-result: declined by %s (%s); not retried on another model\n' \
-      "$provider" "$OMS_MODEL_SELECTED" >> "$artifact"
-    echo "note: $provider declined this request on $OMS_MODEL_SELECTED; it was not re-sent to another model" >&2
-    export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
-    [ "$access" != read ] || [ "$provider" != antigravity ] ||
-      ma_agy_read_cleanup "$state_repo" "$isolated_dir"
-    return "$status"
-  fi
-
-  # A name the provider does not recognise is not a busy model: the same tier
-  # under a name that still resolves is what is wanted, not a cheaper tier.
-  # Claude Code decides this locally in about two seconds, so the retry is
-  # nearly free — and without it, a pinned model rotating out of the catalog
-  # turns every call to that tier into a hard failure.
-  if [ "$status" -ne 0 ] && [ -n "${OMS_MODEL_ALTERNATE:-}" ] &&
+  # Unknown-name recovery is catalog-backed only for provider-default routes.
+  # Exact model requests retain the failure instead of changing the model.
+  if [ "$status" -ne 0 ] &&
+    ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" &&
     oms_model_is_unknown_model_output "$attempt_file"; then
+    OMS_MODEL_FALLBACK_REASON="model-unavailable"
     if [ "$access" = write ]; then
       after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
       [ -n "$before" ] && [ "$after" = "$before" ] || OMS_MODEL_ALTERNATE=""
     fi
     if [ -n "$OMS_MODEL_ALTERNATE" ]; then
       OMS_MODEL_FALLBACK_USED=1
-      OMS_MODEL_FALLBACK_REASON="model-unavailable"
       OMS_MODEL_SELECTED="$OMS_MODEL_ALTERNATE"
       printf '\nmodel-fallback: reason=model-unavailable selected=%s\n' \
         "$OMS_MODEL_SELECTED" >> "$artifact"
@@ -1198,7 +1191,9 @@ EOF
     fi
   fi
 
-  if [ "$status" -ne 0 ] && oms_model_is_capacity_output "$attempt_file"; then
+  if [ "$status" -ne 0 ] &&
+    ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" &&
+    oms_model_is_capacity_output "$attempt_file"; then
     if [ -z "$OMS_MODEL_FALLBACK" ]; then
       OMS_MODEL_FALLBACK_REASON=capacity-no-fallback
     elif [ "$access" = write ]; then
@@ -1237,6 +1232,24 @@ EOF
     fi
   fi
 
+  # A decline is the provider's decision about the request, not a fault to route
+  # around. Check the final attempt too: a safeguard, unavailable-name, or
+  # capacity recovery can itself return a policy decline.
+  if oms_model_is_policy_decline_output "$attempt_file" "$prompt_file"; then
+    # Provider CLIs can print a refusal and still exit zero. Normalize policy
+    # declines to a dedicated non-retryable status so an outer automatic
+    # provider failover cannot mistake the refusal for an infrastructure miss.
+    status=4
+    OMS_MODEL_FALLBACK_REASON="policy-declined"
+    printf '\nmodel-result: declined by %s (%s); not retried on another model\n' \
+      "$provider" "$OMS_MODEL_SELECTED" >> "$artifact"
+    echo "note: $provider declined this request on $OMS_MODEL_SELECTED; it was not re-sent to another model" >&2
+    export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
+    [ "$access" != read ] || [ "$provider" != antigravity ] ||
+      ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+    return "$status"
+  fi
+
   export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
   printf '\nmodel-result: selected=%s effort=%s fallback_used=%s reason=%s\n' \
     "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$OMS_MODEL_FALLBACK_USED" \
@@ -1244,6 +1257,109 @@ EOF
   rm -f "$attempt_file"
   if [ -n "$isolated_dir" ]; then
     ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+  fi
+  return "$status"
+}
+
+# Put every real provider dispatch on the durable lifecycle stream. When a
+# supervisor already exported OMS_ATTEMPT_ID it remains the sole lifecycle
+# owner; this layer contributes measured usage but cannot terminalize the
+# outer attempt. Direct read calls can finish immediately. A direct write call
+# stays working after provider exit so peer-delegate can bind verifying/review
+# or failure to the declared verifier result instead of reporting false success.
+ma_run_routed_provider() {
+  local provider="$1"
+  local access="$2"
+  local artifact="$4"
+  local origin="$6"
+  local state_repo="$7"
+  local status=0
+  local started_seconds="$SECONDS"
+  local OMS_ATTEMPT_ID="${OMS_ATTEMPT_ID:-}"
+  local OMS_ATTEMPT_OWNED=0
+  local events
+  local token_count=""
+  local duration_ms=0
+  local -a start_args
+  local -a usage_args
+
+  [ "$provider" != agy ] || provider=antigravity
+  events="$(ma_scripts_dir)/agent-events.sh"
+  if [ -n "$state_repo" ] && [ -x "$events" ]; then
+    if [ -z "$OMS_ATTEMPT_ID" ]; then
+      start_args=(--repo "$state_repo" start --provider "$provider" --tool "$origin")
+      [ -z "${OMS_TASK_ID:-}" ] || start_args+=(--task-id "$OMS_TASK_ID")
+      [ -z "${OMS_RUN_ID:-}" ] || start_args+=(--run-id "$OMS_RUN_ID")
+      [ -z "${OMS_ATTEMPT_MAX_WALL_SECONDS:-}" ] ||
+        start_args+=(--max-wall-seconds "$OMS_ATTEMPT_MAX_WALL_SECONDS")
+      [ -z "${OMS_ATTEMPT_MAX_TOKENS:-}" ] ||
+        start_args+=(--max-tokens "$OMS_ATTEMPT_MAX_TOKENS")
+      [ -z "${OMS_ATTEMPT_MAX_COST_MICROUSD:-}" ] ||
+        start_args+=(--max-cost-microusd "$OMS_ATTEMPT_MAX_COST_MICROUSD")
+      OMS_ATTEMPT_ID="$("$events" "${start_args[@]}")" || return 2
+      OMS_ATTEMPT_OWNED=1
+      "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
+        --state starting --actor provider-router --idempotency-key routed-starting >/dev/null || return 2
+      "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
+        --state working --actor provider-router --idempotency-key routed-working >/dev/null || return 2
+    fi
+    export OMS_ATTEMPT_ID
+  fi
+
+  ma_run_routed_provider_inner "$@" || status=$?
+
+  if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ] && [ -x "$events" ]; then
+    duration_ms=$(((SECONDS - started_seconds) * 1000))
+    token_count="$(python3 - "$artifact" <<'PY' 2>/dev/null || true
+import re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+except OSError:
+    text = ""
+found = re.findall(r"(?im)^tokens used[ \t]*\r?\n[ \t]*([0-9][0-9,]*)[ \t]*$", text)
+if found:
+    # The artifact contains every bounded retry, so the informational metric
+    # must be cumulative rather than silently charging only the final route.
+    print(sum(int(value.replace(",", "")) for value in found))
+PY
+)"
+    usage_args=(--repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" \
+      --actor provider-output-parser)
+    # A supervisor reports the complete attempt wall time after the worker
+    # exits. Nested provider calls still report tokens, but not overlapping
+    # duration samples that would inflate the aggregate.
+    [ "${OMS_ATTEMPT_SUPERVISED:-0}" = 1 ] || usage_args+=(--duration-ms "$duration_ms")
+    [ -z "$token_count" ] || usage_args+=(--tokens "$token_count")
+    # Parsed provider output is cumulative observability only. It is not an
+    # authenticated hard-budget source because provider text and trusted-local
+    # worker processes share this boundary.
+    if [ "${OMS_ATTEMPT_SUPERVISED:-0}" != 1 ] || [ -n "$token_count" ]; then
+      "$events" "${usage_args[@]}" >/dev/null || status=2
+    fi
+    if [ "$OMS_ATTEMPT_OWNED" = 1 ]; then
+      if [ "$status" -eq 0 ]; then
+        if [ "$access" = read ]; then
+          "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
+            --state verifying --actor provider-router --idempotency-key routed-verifying >/dev/null || status=2
+        fi
+        if [ "$status" -eq 0 ] && [ "$access" = read ]; then
+          "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
+            --state review --actor provider-router --idempotency-key routed-review >/dev/null || status=2
+        fi
+        if [ "$status" -eq 0 ] && [ "$access" = read ]; then
+          "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
+            --state "done" --actor provider-router --idempotency-key routed-done >/dev/null || status=2
+        fi
+      else
+        "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
+          --state failed --reason-code provider_failed --actor provider-router \
+          --idempotency-key routed-failed >/dev/null || status=2
+      fi
+    fi
+    OMS_LAST_ATTEMPT_ID="$OMS_ATTEMPT_ID"
+    OMS_LAST_ATTEMPT_OWNED="$OMS_ATTEMPT_OWNED"
+    export OMS_LAST_ATTEMPT_ID OMS_LAST_ATTEMPT_OWNED
   fi
   return "$status"
 }
@@ -1375,9 +1491,7 @@ run_provider() {
   target_model="$(ma_target_model "$target")"
 
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # A phase the caller declared outranks the tool's own kind: without this the
-  # label of the script (ask, call, review) decides the tier for every pass it
-  # makes, so a deep question asked through agent-call routes as a plain call.
+  # Operation is provenance metadata; it no longer selects a model.
   OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
   export OMS_MODEL_OPERATION
   # A target may carry its own model (codex:model=NAME), so one council can
@@ -1478,10 +1592,8 @@ ma_export_round1() {
       *) fail "unsupported provider: $provider" ;;
     esac
     [ "$provider" != agy ] || provider=antigravity
-    # A phase the caller declared outranks the tool's own kind: without this the
-# label of the script (ask, call, review) decides the tier for every pass it
-# makes, so a deep question asked through agent-call routes as a plain call.
-OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
+    # Operation is provenance metadata; it no longer selects a model.
+    OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
     export OMS_MODEL_OPERATION
     oms_model_prepare "$provider" || return $?
     total=$((total + 1))
@@ -1500,7 +1612,7 @@ OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_K
       printf '\n## Prompt\n\n'
       cat "$prompt_file"
       printf '\n\n## Output\n\n'
-      printf 'EXPORTED: paste the Prompt section into %s, then import the answer with import-agent-result.sh.\n' "$provider"
+      printf 'EXPORTED: paste the Prompt section into %s, then import with `oms artifact-index import`.\n' "$provider"
       printf 'Preserve the selected model route recorded above during the manual call.\n'
       printf '\n\n## Exit\n\n0\n'
     } > "$artifact"
@@ -1568,8 +1680,8 @@ ma_run_round1() {
     [ -n "$provider" ] || continue
     ma_target_validate "$provider" || exit $?
     total=$((total + 1))
-    # Label the artifact with the tier too, so a panel that asks one CLI twice
-    # does not write both answers to the same name.
+    # Include the model label so a panel that asks one CLI twice does not write
+    # both answers to the same name.
     artifact="$ARTIFACT_DIR/$(ma_target_label "$provider" "$(ma_target_model "$provider")")-$slug-$timestamp.md"
     run_provider "$provider" "$prompt_file" "$artifact" &
     pids+=("$!")

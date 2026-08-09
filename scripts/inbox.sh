@@ -122,6 +122,36 @@ if stale:
     add(10, "P1", "stale-plan-claim", "%d expired plan claim(s)" % len(stale),
         "oms agent-plan --repo . reclaim", len(stale))
 
+operations = state.get("agent_operations", {})
+operation_states = operations.get("by_state", {})
+if not operations.get("healthy", True):
+    add(5, "P1", "agent-lifecycle-corrupt", "agent lifecycle stream is invalid",
+        "oms agent-events --repo . validate")
+for state_name, code, summary, command, order, priority in (
+    ("blocked", "agent-blocked", "blocked agent attempt(s)",
+     "oms agent-events --repo . list --state blocked", 11, "P1"),
+    ("waiting_input", "agent-waiting-input", "agent attempt(s) waiting for input",
+     "oms agent-events --repo . list --state waiting_input", 12, "P1"),
+    ("waiting_approval", "agent-waiting-approval", "agent attempt(s) waiting for approval",
+     "oms agent-events --repo . list --state waiting_approval", 13, "P1"),
+    ("queued", "agent-queued", "queued agent attempt(s) not yet dispatched",
+     "oms agent-supervisor --repo . dispatch", 14, "P2"),
+    ("review", "agent-review", "agent attempt(s) ready for review",
+     "oms agent-events --repo . list --state review", 15, "P2"),
+):
+    count = int(operation_states.get(state_name, 0) or 0)
+    if count:
+        add(order, priority, code, "%d %s" % (count, summary), command, count)
+
+approvals = state.get("approvals", {})
+if not approvals.get("healthy", True):
+    add(6, "P1", "approval-store-corrupt", "private approval stream is invalid",
+        "oms approval-inbox --repo . validate")
+pending_approvals = int(approvals.get("pending", 0) or 0)
+if pending_approvals:
+    add(16, "P1", "pending-approval", "%d approval action(s) need a decision or completion" % pending_approvals,
+        "oms approval-inbox --repo . list --pending", pending_approvals)
+
 ci = state.get("ci", {})
 ci_state = ci.get("state")
 if ci_state == "current" and ci.get("conclusion") in (

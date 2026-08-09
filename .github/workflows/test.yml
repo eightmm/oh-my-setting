@@ -99,12 +99,26 @@ jobs:
       - name: BSD userland fixtures
         run: bash tests/bsd-portability-smoke.sh
 
+  # README promises Python 3.9+. Newer parsers can emulate most of that
+  # grammar, but only a real 3.9 interpreter proves the no-tomllib HUD path.
+  python39:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+      - name: Python 3.9 compatibility
+        run: |
+          bash scripts/check-python.sh
+          bash tests/codex-hud-config-smoke.sh
+
   # Branch protection targets only this fixed name. Matrix child check names
   # can change as shards are rebalanced; this job fails closed on every failed,
   # cancelled, or skipped dependency.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, install_e2e, portability_macos]
+    needs: [lint, focused, smoke_shard, install_e2e, portability_macos, python39]
     runs-on: ubuntu-latest
     steps:
       - name: require every verification job
@@ -114,6 +128,7 @@ jobs:
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           PORTABILITY_MACOS_RESULT: ${{ needs.portability_macos.result }}
+          PYTHON39_RESULT: ${{ needs.python39.result }}
         run: |
           status=0
           for result in \
@@ -121,7 +136,8 @@ jobs:
             "$FOCUSED_RESULT" \
             "$SMOKE_SHARD_RESULT" \
             "$INSTALL_E2E_RESULT" \
-            "$PORTABILITY_MACOS_RESULT"; do
+            "$PORTABILITY_MACOS_RESULT" \
+            "$PYTHON39_RESULT"; do
             if [ "$result" != success ]; then
               echo "required job result: $result" >&2
               status=1

@@ -8,10 +8,9 @@ REF="${OH_MY_SETTING_REF:-$INSTALLER_DEFAULT_REF}"
 PROFILE="${OH_MY_SETTING_PROFILE:-minimal}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
-# The three provider CLIs, gh, and ntn are what the harness is for: a council with one
-# installed peer is not a council, and ci-status has nothing to
-# talk to without gh. Installing them is the default, not an opt-in flag nobody
-# passes. --no-tools remains for a machine that cannot or must not have them.
+# The provider CLIs, gh, and ntn are the executable half of the harness. An
+# initial install without them is an incomplete product, so setup fails rather
+# than recording a partial profile.
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 CONNECT_SERVICES="${OH_MY_SETTING_CONNECT_SERVICES:-auto}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
@@ -24,16 +23,20 @@ AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
 PEER_PERMISSIONS="${OH_MY_SETTING_PEER_PERMISSIONS:-0}"
 NOTION_DATA_SOURCE_ID="${OH_MY_SETTING_NOTION_DATA_SOURCE_ID:-${OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID:-}}"
+# Re-exec protocol marker. A standalone source installer holds the lifecycle
+# lock itself when the selected ref predates this protocol; current checkouts
+# adopt the same lock across exec without opening a second mutation window.
+# shellcheck disable=SC2034
+OMS_INSTALL_LIFECYCLE_PROTOCOL=1
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--full] [--no-tools] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
+Usage: install.sh [--ref REF] [--full] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
 
 Options:
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
   --full              Install provider tools, machine snapshot, and update timer.
   --tools             Install Node, uv, provider CLIs, gh, and ntn (already the default).
-  --no-tools          Skip them; doctor then treats every provider CLI as optional.
   --connect-services  Require interactive gh and Notion login plus journal linking.
   --no-connect-services
                       Skip account login and automatic journal discovery.
@@ -45,10 +48,11 @@ Options:
                       Select the Work Journal Notion mirror. Authentication is
                       owned by ntn and is never persisted by oh-my-setting.
   --peer-permissions  Grant Antigravity the standing consult permissions
-                      (read_file(*), command(*)) so headless council calls are
-                      not auto-denied. Writes the user's Antigravity settings
-                      with a .bak beside it. Without this flag the installer
-                      only reports what a headless peer would be denied.
+                      (read_file(*), command(*)) in its user-global
+                      settings so headless council calls are not auto-denied.
+                      All-MCP wildcard access stays approval-gated.
+                      Tracks only newly added rules for surgical uninstall and
+                      keeps a one-time .bak. Without this flag, only reports.
   --star              Offer the optional GitHub star prompt.
   --no-star           Skip the star prompt (compatibility; default).
   --help              Show this help.
@@ -62,7 +66,6 @@ Environment:
   OH_MY_SETTING_PEER_PERMISSIONS=1 Grant Antigravity consult permissions.
   OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
-  OH_MY_SETTING_INSTALL_TOOLS=0    Skip the Node/uv/provider CLI/gh/ntn install (default: 1).
   OH_MY_SETTING_CONNECT_SERVICES=auto|required|0
                                    Auto-connect in an interactive terminal,
                                    require connection, or skip it (default: auto).
@@ -95,10 +98,6 @@ while [ "$#" -gt 0 ]; do
     --tools)
       [ "$PROFILE" = "full" ] || PROFILE=custom
       INSTALL_TOOLS=1
-      ;;
-    --no-tools)
-      [ "$PROFILE" = "full" ] || PROFILE=custom
-      INSTALL_TOOLS=0
       ;;
     --connect-services)
       [ "$PROFILE" = "full" ] || PROFILE=custom
@@ -161,6 +160,14 @@ case "$PROFILE" in
   minimal|full|custom) ;;
   *) echo "error: OH_MY_SETTING_PROFILE must be minimal, full, or custom" >&2; exit 2 ;;
 esac
+case "$INSTALL_TOOLS" in
+  1) ;;
+  0)
+    echo "error: tool installation is required; OH_MY_SETTING_INSTALL_TOOLS=0 is no longer supported" >&2
+    exit 2
+    ;;
+  *) echo "error: OH_MY_SETTING_INSTALL_TOOLS must be 1" >&2; exit 2 ;;
+esac
 case "$PEER_PERMISSIONS" in
   0|1) ;;
   *) echo "error: OH_MY_SETTING_PEER_PERMISSIONS must be 0 or 1" >&2; exit 2 ;;
@@ -196,6 +203,447 @@ export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE"
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
 export OH_MY_SETTING_PEER_PERMISSIONS="$PEER_PERMISSIONS"
 export OH_MY_SETTING_NOTION_DATA_SOURCE_ID="$NOTION_DATA_SOURCE_ID"
+
+# A checkout invocation uses the shared helper. The documented curl/pipe form
+# has only this file before the first clone, so it carries the same mkdir-lock
+# protocol inline until the freshly selected checkout can adopt it.
+INSTALL_ENTRY_DIR=""
+INSTALL_ENTRY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" ||
+  INSTALL_ENTRY_DIR=""
+if [ -n "$INSTALL_ENTRY_DIR" ] &&
+   [ -f "$INSTALL_ENTRY_DIR/scripts/lib/install-lifecycle-lock.sh" ]; then
+  # shellcheck source=scripts/lib/install-lifecycle-lock.sh
+  . "$INSTALL_ENTRY_DIR/scripts/lib/install-lifecycle-lock.sh"
+else
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL=0
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH=""
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER=""
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID=""
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START=""
+  OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_PATH=""
+  OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_OWNER=""
+
+  oms_install_lifecycle_inline_claim_release() {
+    local recorded=""
+    local claim="$OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_PATH"
+    [ -n "$claim" ] || return 0
+    if [ -d "$claim" ] && [ ! -L "$claim" ]; then
+      recorded="$(oms_install_lifecycle_lock_read \
+        "$claim/owner")"
+      if [ "$recorded" = "$OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_OWNER" ]; then
+        rm -f "$claim/pid" "$claim/pid-start" "$claim/started" "$claim/owner"
+        rmdir "$claim" 2>/dev/null || return 75
+        rmdir "$(dirname "$claim")" 2>/dev/null || true
+      fi
+    fi
+    OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_PATH=""
+    OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_OWNER=""
+  }
+
+  oms_install_lifecycle_lock_process_start() {
+    local pid="$1"
+    local line=""
+    local rest=""
+    local value=""
+
+    case "$(uname -s 2>/dev/null || true)" in
+      MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    esac
+
+    if [ -r "/proc/$pid/stat" ]; then
+      IFS= read -r line < "/proc/$pid/stat" || line=""
+      rest="${line##*) }"
+      if [ "$rest" != "$line" ]; then
+        value="$(printf '%s\n' "$rest" | awk 'NF >= 20 { print $20; exit }')"
+        case "$value" in
+          *[!0-9]*|"") ;;
+          *) printf 'proc:%s\n' "$value"; return 0 ;;
+        esac
+      fi
+    fi
+    value="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || true)"
+    value="$(printf '%s\n' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/ /g')"
+    [ -n "$value" ] && printf 'ps:%s\n' "$value"
+  }
+
+  oms_install_lifecycle_lock_current_identity() {
+    local pid=""
+    local process_start=""
+
+    if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ] 2>/dev/null &&
+       [ -n "${BASHPID:-}" ]; then
+      pid="$BASHPID"
+    else
+      if ! IFS= read -r pid < <(
+        sh -c 'printf "%s\n" "$PPID"' 2>/dev/null
+      ); then
+        return 75
+      fi
+      pid="${pid//$'\r'/}"
+    fi
+    case "$pid" in *[!0-9]*|"") return 75 ;; esac
+    process_start="$(oms_install_lifecycle_lock_process_start "$pid")"
+    process_start="${process_start//$'\r'/}"
+    OMS_INSTALL_LIFECYCLE_CURRENT_PID="$pid"
+    OMS_INSTALL_LIFECYCLE_CURRENT_PID_START="$process_start"
+  }
+
+  oms_install_lifecycle_lock_path() {
+    local raw="${OMS_INSTALL_LIFECYCLE_LOCK:-${OMS_LOCK_DIR:-$HOME/.cache/oh-my-setting/locks}/install-lifecycle.lock.d}"
+    local parent
+    local name
+
+    case "$raw" in /*) ;; *) raw="$PWD/$raw" ;; esac
+    parent="$(dirname "$raw")"
+    name="$(basename "$raw")"
+    if [ "$name" != "install-lifecycle.lock.d" ]; then
+      echo "error: invalid install lifecycle lock path: $raw" >&2
+      return 75
+    fi
+    mkdir -p "$parent" || return
+    parent="$(cd "$parent" && pwd -P)" || return
+    printf '%s/%s\n' "$parent" "$name"
+  }
+
+  oms_install_lifecycle_lock_timeout() {
+    local timeout="${OMS_INSTALL_LIFECYCLE_LOCK_TIMEOUT:-${OMS_LOCK_TIMEOUT:-300}}"
+
+    case "$timeout" in *[!0-9]*|"") timeout=300 ;; esac
+    [ "$timeout" -gt 0 ] || timeout=300
+    printf '%s\n' "$timeout"
+  }
+
+  oms_install_lifecycle_lock_read() {
+    local value=""
+
+    [ -f "$1" ] && value="$(sed -n '1p' "$1" 2>/dev/null || true)"
+    printf '%s\n' "${value//$'\r'/}"
+  }
+
+  oms_install_lifecycle_inline_claim_stale() {
+    local claim="$1" timeout="$2" now="$3"
+    local pid pid_start actual_start started
+    pid="$(oms_install_lifecycle_lock_read "$claim/pid")"
+    pid_start="$(oms_install_lifecycle_lock_read "$claim/pid-start")"
+    started="$(oms_install_lifecycle_lock_read "$claim/started")"
+    case "$pid" in
+      *[!0-9]*|"")
+        case "$started" in
+          *[!0-9]*|"")
+            started="$(basename "$claim")"
+            started="${started%%.*}"
+            case "$started" in *[!0-9]*|"") return 1 ;; esac
+            [ $((now - started)) -ge "$timeout" ]
+            ;;
+          *) [ $((now - started)) -ge "$timeout" ] ;;
+        esac
+        ;;
+      *)
+        if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+        if [ -n "$pid_start" ]; then
+          actual_start="$(oms_install_lifecycle_lock_process_start "$pid")"
+          actual_start="${actual_start//$'\r'/}"
+          [ -n "$actual_start" ] && [ "$actual_start" != "$pid_start" ]
+          return $?
+        fi
+        return 1
+        ;;
+    esac
+  }
+
+  oms_install_lifecycle_inline_claim_acquire() {
+    local path="$1" timeout="$2" owner="$3" start="$4"
+    local root="$1.recovery-claims.d" name claim candidate candidate_name
+    local now elapsed first tick_owner
+    local -a names=()
+
+    [ ! -L "$root" ] || return 75
+    mkdir -p "$root" || return 75
+    [ -d "$root" ] && [ ! -L "$root" ] || return 75
+    name="$(date +%s).$owner"
+    claim="$root/$name"
+    mkdir "$claim" 2>/dev/null || return 75
+    if ! printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" > "$claim/pid" ||
+       ! printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" > "$claim/pid-start" ||
+       ! printf '%s\n' "$(date +%s)" > "$claim/started" ||
+       ! printf '%s\n' "$owner" > "$claim/owner"; then
+      rm -f "$claim/pid" "$claim/pid-start" "$claim/started" "$claim/owner"
+      rmdir "$claim" 2>/dev/null || true
+      return 75
+    fi
+    OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_PATH="$claim"
+    OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_OWNER="$owner"
+
+    while :; do
+      now="$(date +%s)"
+      elapsed=$((now - start))
+      names=()
+      for candidate in "$root"/*; do
+        [ -e "$candidate" ] || continue
+        [ -d "$candidate" ] && [ ! -L "$candidate" ] || {
+          oms_install_lifecycle_inline_claim_release || true
+          return 75
+        }
+        if [ "$candidate" != "$claim" ] &&
+           oms_install_lifecycle_inline_claim_stale "$candidate" "$timeout" "$now"; then
+          tick_owner="$(oms_install_lifecycle_lock_read "$candidate/owner")"
+          rm -f "$candidate/pid" "$candidate/pid-start" \
+            "$candidate/started" "$candidate/owner"
+          rmdir "$candidate" 2>/dev/null || true
+          [ ! -e "$candidate" ] || [ "$(oms_install_lifecycle_lock_read \
+            "$candidate/owner")" != "$tick_owner" ] || return 75
+        fi
+        [ -d "$candidate" ] || continue
+        candidate_name="$(basename "$candidate")"
+        names+=("$candidate_name")
+      done
+      first="$(printf '%s\n' "${names[@]}" | LC_ALL=C sort | sed -n '1p')"
+      if [ "$first" = "$name" ] && [ -d "$claim" ] &&
+         [ "$(oms_install_lifecycle_lock_read "$claim/owner")" = "$owner" ]; then
+        return 0
+      fi
+      [ "$elapsed" -lt "$timeout" ] || {
+        oms_install_lifecycle_inline_claim_release || true
+        return 75
+      }
+      sleep 1
+    done
+  }
+
+  oms_install_lifecycle_lock_adopt() {
+    local path="$1"
+    local recorded_owner
+    local recorded_pid
+    local recorded_pid_start
+
+    [ "${OMS_INSTALL_LIFECYCLE_LOCK_HELD:-0}" = 1 ] || return 1
+    [ "${OMS_INSTALL_LIFECYCLE_LOCK_PATH:-}" = "$path" ] || return 1
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    recorded_owner="$(oms_install_lifecycle_lock_read "$path/owner")"
+    recorded_pid="$(oms_install_lifecycle_lock_read "$path/pid")"
+    recorded_pid_start="$(oms_install_lifecycle_lock_read "$path/pid-start")"
+    [ -n "${OMS_INSTALL_LIFECYCLE_LOCK_OWNER:-}" ] || return 1
+    [ "$recorded_owner" = "$OMS_INSTALL_LIFECYCLE_LOCK_OWNER" ] || return 1
+    oms_install_lifecycle_lock_current_identity || return 1
+    [ "$recorded_pid" = "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" ] || return 1
+    if [ -n "$recorded_pid_start" ]; then
+      [ -n "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" ] || return 1
+      [ "$recorded_pid_start" = "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" ] || return 1
+    fi
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL=1
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH="$path"
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER="$recorded_owner"
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID="$recorded_pid"
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START="$recorded_pid_start"
+  }
+
+  oms_install_lifecycle_lock_acquire() {
+    local action="${1:-mutate the install}"
+    local path
+    local timeout
+    local owner
+    local start
+    local now
+    local elapsed
+    local pid
+    local pid_start
+    local actual_pid_start
+    local recorded_started
+    local stale
+    local stale_path
+    local recorded_owner
+    local snapshot
+    local current_snapshot
+
+    oms_install_lifecycle_inline_initialize() {
+      if ! {
+        printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" > "$path/pid" &&
+        printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" > "$path/pid-start" &&
+        printf '%s\n' "$(date +%s)" > "$path/started" &&
+        printf '%s\n' "$owner" > "$path/owner"
+      }; then
+        rm -rf "$path"
+        return 75
+      fi
+    }
+
+    path="$(oms_install_lifecycle_lock_path)" || return 75
+    if oms_install_lifecycle_lock_adopt "$path"; then
+      return 0
+    fi
+    timeout="$(oms_install_lifecycle_lock_timeout)"
+    oms_install_lifecycle_lock_current_identity || {
+      echo "error: could not determine install lifecycle process identity" >&2
+      return 75
+    }
+    owner="$OMS_INSTALL_LIFECYCLE_CURRENT_PID.$(date +%s).${RANDOM:-0}"
+    start="$(date +%s)"
+    oms_install_lifecycle_inline_claim_acquire "$path" "$timeout" "$owner" "$start" ||
+      return 75
+    while :; do
+      now="$(date +%s)"
+      elapsed=$((now - start))
+      if mkdir "$path" 2>/dev/null; then
+        if ! oms_install_lifecycle_inline_initialize; then
+          oms_install_lifecycle_inline_claim_release || true
+          echo "error: could not initialize install lifecycle lock: $path" >&2
+          return 75
+        fi
+        oms_install_lifecycle_inline_claim_release || return 75
+        OMS_INSTALL_LIFECYCLE_LOCK_LOCAL=1
+        OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH="$path"
+        OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER="$owner"
+        OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID="$OMS_INSTALL_LIFECYCLE_CURRENT_PID"
+        OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START="$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START"
+        OMS_INSTALL_LIFECYCLE_LOCK_HELD=1
+        OMS_INSTALL_LIFECYCLE_LOCK_PATH="$path"
+        OMS_INSTALL_LIFECYCLE_LOCK_OWNER="$owner"
+        export OMS_INSTALL_LIFECYCLE_LOCK_HELD OMS_INSTALL_LIFECYCLE_LOCK_PATH \
+          OMS_INSTALL_LIFECYCLE_LOCK_OWNER
+        return 0
+      fi
+
+      if [ -L "$path" ] || [ ! -d "$path" ]; then
+        oms_install_lifecycle_inline_claim_release || true
+        echo "error: install lifecycle lock is not a directory: $path" >&2
+        return 75
+      fi
+
+      stale=0
+      pid="$(oms_install_lifecycle_lock_read "$path/pid")"
+      recorded_owner="$(oms_install_lifecycle_lock_read "$path/owner")"
+      pid_start="$(oms_install_lifecycle_lock_read "$path/pid-start")"
+      recorded_started="$(oms_install_lifecycle_lock_read "$path/started")"
+      snapshot="$recorded_owner|$pid|$pid_start|$recorded_started"
+      case "$pid" in
+        *[!0-9]*|"")
+          case "$recorded_started" in
+            *[!0-9]*|"")
+              [ "$elapsed" -ge "$timeout" ] && stale=1
+              ;;
+            *)
+              if [ "$elapsed" -ge "$timeout" ] ||
+                 [ $((now - recorded_started)) -ge "$timeout" ]; then
+                stale=1
+              fi
+              ;;
+          esac
+          ;;
+        *)
+          if ! kill -0 "$pid" 2>/dev/null; then
+            stale=1
+          else
+            if [ -n "$pid_start" ]; then
+              actual_pid_start="$(oms_install_lifecycle_lock_process_start "$pid")"
+              actual_pid_start="${actual_pid_start//$'\r'/}"
+              if [ -n "$actual_pid_start" ] &&
+                 [ "$pid_start" != "$actual_pid_start" ]; then
+                stale=1
+              fi
+            fi
+          fi
+          ;;
+      esac
+      if [ "$stale" = 1 ]; then
+        if [ -n "${OMS_TEST_INSTALL_LIFECYCLE_STALE_BARRIER:-}" ]; then
+          printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" > \
+            "$OMS_TEST_INSTALL_LIFECYCLE_STALE_BARRIER.ready"
+          while [ ! -e "$OMS_TEST_INSTALL_LIFECYCLE_STALE_BARRIER.release" ]; do
+            sleep 1
+          done
+        fi
+        current_snapshot="$(
+          printf '%s|%s|%s|%s\n' \
+            "$(oms_install_lifecycle_lock_read "$path/owner")" \
+            "$(oms_install_lifecycle_lock_read "$path/pid")" \
+            "$(oms_install_lifecycle_lock_read "$path/pid-start")" \
+            "$(oms_install_lifecycle_lock_read "$path/started")"
+        )"
+        stale_path="$path.stale.$OMS_INSTALL_LIFECYCLE_CURRENT_PID.$now.$RANDOM"
+        if [ "$current_snapshot" = "$snapshot" ] &&
+           mv "$path" "$stale_path" 2>/dev/null; then
+          rm -rf "$stale_path"
+          if mkdir "$path" 2>/dev/null && oms_install_lifecycle_inline_initialize; then
+            oms_install_lifecycle_inline_claim_release || return 75
+            OMS_INSTALL_LIFECYCLE_LOCK_LOCAL=1
+            OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH="$path"
+            OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER="$owner"
+            OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID="$OMS_INSTALL_LIFECYCLE_CURRENT_PID"
+            OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START="$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START"
+            OMS_INSTALL_LIFECYCLE_LOCK_HELD=1
+            OMS_INSTALL_LIFECYCLE_LOCK_PATH="$path"
+            OMS_INSTALL_LIFECYCLE_LOCK_OWNER="$owner"
+            export OMS_INSTALL_LIFECYCLE_LOCK_HELD OMS_INSTALL_LIFECYCLE_LOCK_PATH \
+              OMS_INSTALL_LIFECYCLE_LOCK_OWNER
+            return 0
+          fi
+        fi
+      fi
+      if [ "$elapsed" -ge "$timeout" ]; then
+        oms_install_lifecycle_inline_claim_release || true
+        echo "error: could not acquire lock for install lifecycle ($action) after ${timeout}s: $path" >&2
+        echo "error: install lifecycle lock is busy: $path" >&2
+        return 75
+      fi
+      sleep 1
+    done
+  }
+
+  oms_install_lifecycle_lock_release() {
+    local recorded_owner
+    local recorded_pid
+    local recorded_pid_start
+
+    oms_install_lifecycle_inline_claim_release || true
+    [ "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL" = 1 ] || return 0
+    oms_install_lifecycle_lock_current_identity || return 0
+    [ "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" = "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID" ] ||
+      return 0
+    if [ -n "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START" ]; then
+      [ "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" = \
+        "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START" ] || return 0
+    fi
+    if [ -d "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH" ] &&
+       [ ! -L "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH" ]; then
+      recorded_owner="$(oms_install_lifecycle_lock_read \
+        "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH/owner")"
+      recorded_pid="$(oms_install_lifecycle_lock_read \
+        "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH/pid")"
+      recorded_pid_start="$(oms_install_lifecycle_lock_read \
+        "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH/pid-start")"
+      if [ "$recorded_owner" = "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER" ] &&
+         [ "$recorded_pid" = "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID" ] &&
+         [ "$recorded_pid_start" = "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START" ]; then
+        rm -f "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH/pid" \
+          "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH/pid-start" \
+          "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH/started" \
+          "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH/owner"
+        rmdir "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH" 2>/dev/null ||
+          echo "warning: install lifecycle lock directory was not empty: $OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH" >&2
+      fi
+    fi
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL=0
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH=""
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER=""
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID=""
+    OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START=""
+    unset OMS_INSTALL_LIFECYCLE_LOCK_HELD OMS_INSTALL_LIFECYCLE_LOCK_PATH \
+      OMS_INSTALL_LIFECYCLE_LOCK_OWNER
+  }
+fi
+
+install_lifecycle_exit() {
+  local code=$?
+
+  trap - EXIT HUP INT TERM
+  oms_install_lifecycle_lock_release
+  exit "$code"
+}
+trap install_lifecycle_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+oms_install_lifecycle_lock_acquire install || exit $?
 
 run_as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -233,13 +681,20 @@ install_git_if_missing() {
 }
 
 load_user_tool_paths() {
+  local locked_node=""
+  local managed_node_bin=""
+
   export PATH="$HOME/.local/bin:$PATH"
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
-  if [ -s "$NVM_DIR/nvm.sh" ]; then
-    # shellcheck disable=SC1091
-    . "$NVM_DIR/nvm.sh"
-    nvm use default >/dev/null 2>&1 || true
+  if [ -x "$DEST/scripts/lib/tool-lock.py" ] && [ -f "$DEST/tools.lock.json" ]; then
+    locked_node="$(python3 "$DEST/scripts/lib/tool-lock.py" \
+      --lock "$DEST/tools.lock.json" get node.version | tr -d '\r')"
+    managed_node_bin="$NVM_DIR/versions/node/v$locked_node/bin"
+    if [ -x "$managed_node_bin/node" ] &&
+       [ "$("$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then
+      export PATH="$managed_node_bin:$PATH"
+    fi
   fi
 }
 
@@ -320,6 +775,22 @@ ensure_python3() {
 
 install_git_if_missing
 
+# Reinstall is also an update path. Refuse before fetch/checkout so a local
+# edit or untracked file in the managed checkout can never be hidden, collided
+# with, or later purged by an apparently routine setup rerun.
+if [ -d "$DEST/.git" ]; then
+  install_dirty="$(git -C "$DEST" status --porcelain --untracked-files=all 2>/dev/null)" || {
+    echo "error: cannot inspect existing checkout before reinstall: $DEST" >&2
+    exit 1
+  }
+  if [ -n "$install_dirty" ]; then
+    echo "error: refusing to reinstall over a dirty managed checkout: $DEST" >&2
+    printf '%s\n' "$install_dirty" | sed -n '1,20p' >&2
+    echo "error: commit, stash, or move these files, then retry" >&2
+    exit 1
+  fi
+fi
+
 if [ "$REF" = "edge" ]; then
   if [ -d "$DEST/.git" ]; then
     git -C "$DEST" fetch --prune origin
@@ -357,7 +828,13 @@ fi
 # Continue from the updated checkout so old piped/local installers do not run stale logic.
 if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   export OH_MY_SETTING_REEXECED=1
-  exec bash "$DEST/install.sh"
+  if grep -Fq 'OMS_INSTALL_LIFECYCLE_PROTOCOL=1' "$DEST/install.sh"; then
+    exec bash "$DEST/install.sh"
+  fi
+  # An older selected ref cannot adopt the lock. Keep it in this parent while
+  # the old installer runs as a child, then release it on our EXIT trap.
+  bash "$DEST/install.sh"
+  exit $?
 fi
 
 # One failure past this point can leave a partial install: tools present but
@@ -373,24 +850,23 @@ install_failed() {
     echo "recover: rerun this installer, or run $DEST/scripts/doctor.sh --repair to fix links from the receipt"
   } >&2
 }
-trap 'install_failed "$?"' EXIT
+install_lifecycle_exit() {
+  local code=$?
+
+  trap - EXIT HUP INT TERM
+  install_failed "$code"
+  oms_install_lifecycle_lock_release
+  exit "$code"
+}
+trap install_lifecycle_exit EXIT
 
 # shellcheck disable=SC1091
 . "$DEST/scripts/lib/platform.sh"
 ensure_python3
 
-if [ "$INSTALL_TOOLS" = "1" ]; then
-  "$DEST/scripts/install-tools.sh"
-  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
-  load_user_tool_paths
-elif [ "$INSTALL_TOOLS" = "0" ]; then
-  echo "skipping tool install: OH_MY_SETTING_INSTALL_TOOLS=0"
-  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
-  load_user_tool_paths
-else
-  echo "error: OH_MY_SETTING_INSTALL_TOOLS must be 0 or 1" >&2
-  exit 2
-fi
+"$DEST/scripts/install-tools.sh"
+export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
+load_user_tool_paths
 
 case "$CODEX_PLUGIN" in
   auto)
@@ -457,6 +933,7 @@ fi
 # instead of leaving that to be discovered after the first silent council.
 if command -v agy >/dev/null 2>&1; then
   if [ "$PEER_PERMISSIONS" = "1" ]; then
+    echo "granting Antigravity user-global consult permissions: read_file(*), command(*) (all-MCP access remains approval-gated)"
     "$DEST/scripts/provider-permissions.sh" --apply --profile consult ||
       echo "warning: peer permission grant failed (install continues)" >&2
   elif ! "$DEST/scripts/provider-permissions.sh" --check; then
@@ -481,16 +958,6 @@ elif [ "$AUTO_UPDATE" = "0" ]; then
 else
   echo "error: OH_MY_SETTING_AUTO_UPDATE must be 0 or 1" >&2
   exit 2
-fi
-
-if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
-  cat <<'EOF'
-
-If this shell still cannot find npm-installed CLIs, open a new shell or run:
-  export NVM_DIR="$HOME/.nvm"
-  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-  nvm use default
-EOF
 fi
 
 prompt_star_repo() {

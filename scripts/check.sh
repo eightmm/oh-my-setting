@@ -30,7 +30,21 @@ unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
 # must resolve identically from a desktop shell and from the auto-update timer,
 # so the production path cannot key off an ambient XDG variable (file-lock.sh).
 CHECK_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/oms-check-runtime.XXXXXX")"
-trap 'rm -rf "$CHECK_RUNTIME"' EXIT HUP INT TERM
+CHECK_STATE_GUARD_ACTIVE=0
+cleanup_check_runtime() {
+  local rc=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  if [ "$CHECK_STATE_GUARD_ACTIVE" = 1 ] && ! verify_oms_state; then
+    rc=1
+  fi
+  rm -rf "$CHECK_RUNTIME"
+  exit "$rc"
+}
+trap cleanup_check_runtime EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 export XDG_CACHE_HOME="${OMS_CHECK_CACHE_HOME:-$CHECK_RUNTIME/cache}"
 export OMS_LOCK_DIR="${OMS_CHECK_LOCK_DIR:-$CHECK_RUNTIME/locks}"
 mkdir -p "$XDG_CACHE_HOME" "$OMS_LOCK_DIR"
@@ -153,6 +167,90 @@ if [ "$RUN_LINT" = 1 ] && ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
   exit 1
 fi
 
+# No suite may write into this checkout's own .oms state. A test that forgets
+# --repo defaults to the working directory. hooks/ and work-journal/ are
+# excluded because the live session writes them independently of the gate.
+# The inventory covers contents, child-entry modes, symlinks, and empty dirs.
+oms_state_fingerprint() {
+  [ -d "$ROOT/.oms" ] || return 0
+  python3 - "$ROOT/.oms" <<'PY' | tr -d '\r'
+import hashlib
+import json
+import os
+import stat
+import sys
+
+root = os.path.realpath(sys.argv[1])
+ambient = {"hooks", "work-journal"}
+entries = []
+
+for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    if base == root:
+        dirs[:] = [name for name in dirs if name not in ambient]
+
+    traversable = []
+    for name in sorted(dirs):
+        path = os.path.join(base, name)
+        rel = os.path.relpath(path, root).replace(os.sep, "/")
+        try:
+            info = os.lstat(path)
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISLNK(info.st_mode):
+                entries.append((rel, "link", mode, os.readlink(path)))
+            else:
+                entries.append((rel, "dir", mode, ""))
+                traversable.append(name)
+        except OSError as exc:
+            entries.append((rel, "error", 0, exc.__class__.__name__))
+    dirs[:] = traversable
+
+    for name in sorted(files):
+        path = os.path.join(base, name)
+        rel = os.path.relpath(path, root).replace(os.sep, "/")
+        try:
+            info = os.lstat(path)
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISLNK(info.st_mode):
+                entries.append((rel, "link", mode, os.readlink(path)))
+            elif stat.S_ISREG(info.st_mode):
+                digest = hashlib.sha256()
+                with open(path, "rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                entries.append((rel, "file", mode, digest.hexdigest()))
+            else:
+                entries.append((rel, "other", mode, ""))
+        except OSError as exc:
+            entries.append((rel, "error", 0, exc.__class__.__name__))
+
+for entry in sorted(entries):
+    print(json.dumps(entry, ensure_ascii=True, separators=(",", ":")))
+PY
+}
+
+STATE_BEFORE="$CHECK_RUNTIME/oms-state.before"
+STATE_AFTER="$CHECK_RUNTIME/oms-state.after"
+verify_oms_state() {
+  local fingerprint_rc=0
+  [ "$CHECK_STATE_GUARD_ACTIVE" = 1 ] || return 0
+  CHECK_STATE_GUARD_ACTIVE=0
+  oms_state_fingerprint > "$STATE_AFTER" || fingerprint_rc=$?
+  if [ "$fingerprint_rc" -ne 0 ]; then
+    echo "check: could not inspect this checkout's .oms state" >&2
+    return "$fingerprint_rc"
+  fi
+  if ! cmp -s "$STATE_BEFORE" "$STATE_AFTER"; then
+    echo "check: a suite wrote into this checkout's .oms state" >&2
+    echo "a test that omits --repo defaults to the working directory; give it a" >&2
+    echo "temporary repo instead. First changed inventory entries:" >&2
+    diff -u "$STATE_BEFORE" "$STATE_AFTER" | sed -n '1,40p' >&2 || true
+    return 1
+  fi
+  return 0
+}
+oms_state_fingerprint > "$STATE_BEFORE"
+CHECK_STATE_GUARD_ACTIVE=1
+
 # One line per stage on success, full output on failure: the gate is read by an
 # agent between edits, and a green run has nothing to say beyond "ok".
 stage() {  # stage NAME COMMAND...
@@ -190,24 +288,10 @@ if [ "$RUN_LINT" = 1 ]; then
 fi
 
 if [ "$MODE" = lint ]; then
+  verify_oms_state
   echo "check: ok (lint only)"
   exit 0
 fi
-
-# No suite may write into this checkout's own .oms state. A test that forgets to
-# pass --repo defaults to the working directory, and one that did quietly filed
-# three council artifacts here on every gate run for weeks. scripts-smoke has its
-# own leak check, but it only covers that file — the offender was in a different
-# suite, so the guard belongs at the gate.
-#
-# hooks/ is excluded: the live agent session running this gate appends its own
-# events there mid-run, which is the session's business, not a suite's.
-oms_state_fingerprint() {
-  [ -d "$ROOT/.oms" ] || { printf 'absent\n'; return 0; }
-  (cd "$ROOT/.oms" && find . -path ./hooks -prune -o -type f -print 2>/dev/null |
-    LC_ALL=C sort | cksum)
-}
-STATE_BEFORE="$(oms_state_fingerprint)"
 
 if [ "$RUN_QUICK" = 1 ]; then
   git rev-parse --verify "$QUICK_FROM^{tree}" >/dev/null 2>&1 || {
@@ -258,6 +342,7 @@ if [ "$RUN_QUICK" = 1 ]; then
     stage bash-compat-changed bash scripts/check-bash32.sh "${quick_shell_files[@]}"
   fi
   stage python-syntax bash scripts/check-python.sh
+  stage codex-hud-config bash tests/codex-hud-config-smoke.sh
   [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh
   stage source-distribution bash tests/source-distribution-smoke.sh
   stage platform-portability bash tests/platform-portability-smoke.sh
@@ -274,13 +359,25 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage autonomy-failure bash tests/autonomy-failure-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
+  stage execution-profile bash tests/execution-profile-smoke.sh
+  stage herdr-adapter bash tests/herdr-adapter-smoke.sh
+  stage codex-hud-config bash tests/codex-hud-config-smoke.sh
   stage models-surface bash tests/models-smoke.sh
   stage model-doctor bash tests/model-doctor-smoke.sh
   stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
   stage update-v04 bash tests/update-v04-smoke.sh
   stage state-surfaces bash tests/state-surfaces-smoke.sh
+  stage operator-tools bash tests/operator-tools-smoke.sh
   stage functional-evolution bash tests/functional-evolution-smoke.sh
   stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
+  stage lifecycle-events bash tests/lifecycle-events-smoke.sh
+  stage supervisor bash tests/supervisor-smoke.sh
+  stage lifecycle-provider-integration bash tests/lifecycle-provider-integration-smoke.sh
+  stage install-lifecycle-lock bash tests/install-lifecycle-lock-smoke.sh
+  stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
+  stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
+  stage tool-lock bash tests/tool-lock-smoke.sh
+  stage provider-permissions-mcp-boundary bash tests/provider-permissions-mcp-boundary-smoke.sh
   stage atomic-state bash tests/atomic-state-smoke.sh
   stage advisor-routing bash tests/advisor-routing-smoke.sh
   stage advisor-session bash tests/advisor-session-smoke.sh
@@ -298,6 +395,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
   stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
   stage patch-admit-structural bash tests/patch-admit-structural-smoke.sh
+  stage patch-land-approval bash tests/patch-land-approval-smoke.sh
   stage ci-status bash tests/ci-status-smoke.sh
   stage read-time-expiry bash tests/read-time-expiry-smoke.sh
   stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
@@ -317,12 +415,7 @@ if [ "$RUN_SMOKE" = 1 ]; then
   fi
 fi
 
-if [ "$(oms_state_fingerprint)" != "$STATE_BEFORE" ]; then
-  echo "check: a suite wrote into this checkout's .oms state" >&2
-  echo "a test that omits --repo defaults to the working directory; give it a" >&2
-  echo "temporary repo instead. Inspect with: git status --short .oms" >&2
-  exit 1
-fi
+verify_oms_state
 
 case "$MODE" in
   focused) echo "check: ok (focused only)" ;;

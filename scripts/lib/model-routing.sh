@@ -15,6 +15,10 @@ oms_model_validate_name() {
     echo "error: model name contains control characters" >&2
     return 2
   fi
+  if [ "$value" = provider-default ]; then
+    echo "error: provider-default is reserved; omit --model to use the provider default" >&2
+    return 2
+  fi
 }
 
 # Syntax only. Provider and model support are checked against the capability
@@ -95,6 +99,7 @@ oms_model_prepare() {
   local explicit_fallback="${OMS_MODEL_FALLBACK_EXPLICIT:-}"
   local effort_requested="${OMS_REASONING_EFFORT_REQUEST:-auto}"
   local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
+  local candidate filtered_chain=""
 
   [ "$provider" != agy ] || provider=antigravity
   oms_model_validate_name "$explicit" || return $?
@@ -134,13 +139,31 @@ oms_model_prepare() {
   OMS_MODEL_FALLBACK=""
   if [ -n "$explicit_fallback" ]; then
     OMS_MODEL_FALLBACK="$explicit_fallback"
-  elif [ -n "$explicit" ]; then
-    OMS_MODEL_FALLBACK="provider-default"
   fi
   OMS_REASONING_FALLBACK="$effort_fallback_explicit"
   OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
-  OMS_MODEL_ALTERNATE="$(oms_model_alternative "$provider" "$OMS_MODEL_PRIMARY" || true)"
-  OMS_MODEL_DISTINCT_CHAIN="$(oms_model_distinct_chain "$provider" "$OMS_MODEL_PRIMARY" || true)"
+  OMS_MODEL_ALTERNATE=""
+  OMS_MODEL_DISTINCT_CHAIN=""
+  if [ -z "$explicit" ]; then
+    OMS_MODEL_ALTERNATE="$(oms_model_alternative "$provider" "$OMS_MODEL_PRIMARY" || true)"
+    OMS_MODEL_DISTINCT_CHAIN="$(oms_model_distinct_chain "$provider" "$OMS_MODEL_PRIMARY" || true)"
+    # Provider-default effort validation uses the catalog-wide union because
+    # no model has been selected yet. Once recovery names an exact model, keep
+    # only candidates whose own scale accepts that effort.
+    if [ -n "$OMS_REASONING_RESOLVED" ]; then
+      while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if oms_reasoning_provider_validate "$provider" "$OMS_REASONING_RESOLVED" \
+          "$candidate" >/dev/null 2>&1; then
+          filtered_chain="${filtered_chain}${filtered_chain:+$'\n'}$candidate"
+        fi
+      done <<EOF
+$OMS_MODEL_DISTINCT_CHAIN
+EOF
+      OMS_MODEL_DISTINCT_CHAIN="$filtered_chain"
+      OMS_MODEL_ALTERNATE="$(printf '%s\n' "$filtered_chain" | sed -n '1p')"
+    fi
+  fi
   OMS_MODEL_SELECTED="$OMS_MODEL_PRIMARY"
   OMS_MODEL_FALLBACK_USED=0
   OMS_MODEL_FALLBACK_REASON=""
@@ -173,7 +196,27 @@ oms_model_is_model_safeguard_output() {
 # regardless of what the request happens to be.
 oms_model_is_policy_decline_output() {
   local file="$1"
-  grep -Eiq "violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|\"?stop_reason\"?: ?\"?refusal" "$file"
+  local prompt="${2:-}"
+  local pattern='violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal'
+  if [ ! -f "$prompt" ]; then
+    grep -Eiq "$pattern" "$file"
+    return $?
+  fi
+
+  # Some provider CLIs echo the full prompt before the answer. A quoted policy
+  # sentence is input data, not a refusal. Subtract prompt lines as a multiset,
+  # so an identical line emitted once more by the provider remains a refusal.
+  LC_ALL=C awk '
+    FNR == NR { prompt[$0]++; next }
+    {
+      lower = tolower($0)
+      if (lower ~ /violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal/) {
+        if (prompt[$0] > 0) prompt[$0]--
+        else declined = 1
+      }
+    }
+    END { exit(declined ? 0 : 1) }
+  ' "$prompt" "$file"
 }
 
 oms_model_is_capacity_output() {

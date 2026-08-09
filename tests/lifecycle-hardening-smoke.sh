@@ -461,60 +461,188 @@ test_tsp_fallback_requires_opt_in() {
 test_tool_upgrade_refreshes_existing_clis() {
   local bin="$TMP/tool-bin"
   local home="$TMP/tool-home"
-  mkdir -p "$bin" "$home/.local/bin"
-  for cmd in node claude codex agy uv gh; do
+  local tool_lock="$TMP/tool-lock.json"
+  local fixtures="$TMP/tool-fixtures"
+  local npm_prefix="$home/npm-prefix"
+  local npm_root="$npm_prefix/lib/node_modules"
+  mkdir -p "$bin" "$home/.local/bin" "$fixtures" "$npm_root" "$npm_prefix/bin"
+  for cmd in node claude codex agy uv uvx gh; do
     cat > "$bin/$cmd" <<EOF
 #!/usr/bin/env bash
-if [ "$cmd" = node ] && [ "\${1:-}" = -p ]; then echo 22; else echo '$cmd 1.0'; fi
+if [ "$cmd" = node ] && [ "\${1:-}" = -p ]; then
+  echo 24
+elif [ "$cmd" = node ] && [ "\${1:-}" = --version ]; then
+  echo v24.18.0
+elif [ "$cmd" = uv ] || [ "$cmd" = uvx ]; then
+  echo 'uv 0.12.3'
+elif [ "$cmd" = agy ]; then
+  echo 'agy 1.1.11'
+elif [ "$cmd" = gh ]; then
+  echo 'gh version 2.97.0'
+else
+  echo '$cmd 1.0'
+fi
 EOF
     chmod +x "$bin/$cmd"
   done
+
+  # Build tiny npm wrapper/native packages and bind their exact bytes into a
+  # copied lock. This exercises the full offline install without a registry or
+  # trusting the host npm cache.
+  python3 - "$ROOT/tools.lock.json" "$tool_lock" "$fixtures" <<'PY'
+import base64
+import hashlib
+import io
+import json
+import re
+import sys
+import tarfile
+from pathlib import Path
+
+source, target, fixture_root = map(Path, sys.argv[1:])
+row = json.loads(source.read_text(encoding="utf-8"))
+fixture_root.mkdir(parents=True, exist_ok=True)
+mapping = {}
+
+
+def package(spec, name, version, install_script=False):
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", spec).strip("-")
+    path = fixture_root / (stem + ".tgz")
+    manifest = json.dumps({"name": name, "version": version}).encode()
+    with tarfile.open(path, "w:gz") as archive:
+        directory = tarfile.TarInfo("package")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        archive.addfile(directory)
+        item = tarfile.TarInfo("package/package.json")
+        item.size = len(manifest)
+        archive.addfile(item, io.BytesIO(manifest))
+        if install_script:
+            script = b"// fixture install script\n"
+            item = tarfile.TarInfo("package/install.cjs")
+            item.size = len(script)
+            archive.addfile(item, io.BytesIO(script))
+    integrity = "sha512-" + base64.b64encode(
+        hashlib.sha512(path.read_bytes()).digest()
+    ).decode()
+    mapping[spec] = {"filename": path.name, "integrity": integrity}
+    return integrity
+
+
+for key, value in row["npm"].items():
+    spec = "%s@%s" % (value["package"], value["version"])
+    value["integrity"] = package(
+        spec, value["package"], value["version"], key in ("claude", "ntn")
+    )
+    for native in value.get("native", {}).values():
+        native_spec = "%s@%s" % (native["package"], native["version"])
+        if native_spec not in mapping:
+            native["integrity"] = package(
+                native_spec, native["package"], native["version"]
+            )
+        else:
+            native["integrity"] = mapping[native_spec]["integrity"]
+
+target.write_text(json.dumps(row), encoding="utf-8")
+(fixture_root / "mapping.json").write_text(json.dumps(mapping), encoding="utf-8")
+PY
+
   cat > "$bin/npm" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
 printf '%s\n' "$*" >> "$OMS_TEST_NPM_LOG"
-[ "$1 $2 $3" = "config get prefix" ] && printf '%s\n' "$OMS_TEST_NPM_PREFIX"
-exit 0
+
+case "${1:-}" in
+  config)
+    [ "${2:-} ${3:-}" = "get prefix" ] && printf '%s\n' "$OMS_TEST_NPM_PREFIX"
+    exit 0
+    ;;
+  prefix)
+    printf '%s\n' "$OMS_TEST_NPM_PREFIX"
+    exit 0
+    ;;
+  root)
+    printf '%s\n' "$OMS_TEST_NPM_ROOT"
+    exit 0
+    ;;
+  list)
+    package=""
+    for arg in "$@"; do package="$arg"; done
+    python3 - "$OMS_TEST_NPM_ROOT/$package/package.json" "$package" <<'PY'
+import json, sys
+try:
+    version = json.load(open(sys.argv[1], encoding="utf-8"))["version"]
+except (OSError, KeyError, json.JSONDecodeError):
+    print('{"dependencies": {}}')
+else:
+    print(json.dumps({"dependencies": {sys.argv[2]: {"version": version}}}))
+PY
+    exit 0
+    ;;
+  pack)
+    spec="$2"
+    destination=""
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --pack-destination ]; then
+        destination="$2"
+        shift
+      fi
+      shift
+    done
+    python3 - "$OMS_TEST_NPM_FIXTURES" "$spec" "$destination" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+root, spec, destination = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+row = json.loads((root / "mapping.json").read_text(encoding="utf-8"))[spec]
+shutil.copy2(root / row["filename"], destination / row["filename"])
+print(json.dumps([row]))
+PY
+    exit 0
+    ;;
+  install)
+    package_file=""
+    for arg in "$@"; do package_file="$arg"; done
+    identity="$(python3 - "$package_file" <<'PY'
+import json, sys, tarfile
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    manifest = json.load(archive.extractfile("package/package.json"))
+print(manifest["name"])
+print(manifest["version"])
+PY
+)"
+    package="$(printf '%s\n' "$identity" | sed -n '1p')"
+    version="$(printf '%s\n' "$identity" | sed -n '2p')"
+    python3 "$OMS_TEST_TOOL_LOCK_HELPER" --lock "$OH_MY_SETTING_TOOL_LOCK" \
+      install-npm-payload --file "$package_file" \
+      --dest "$OMS_TEST_NPM_ROOT/$package" --root "$OMS_TEST_NPM_ROOT" \
+      --name "$package" --version "$version" >/dev/null
+    case "$package" in
+      @anthropic-ai/claude-code) binary=claude ;;
+      @openai/codex) binary=codex ;;
+      ntn) binary=ntn ;;
+      *) exit 2 ;;
+    esac
+    mkdir -p "$OMS_TEST_NPM_PREFIX/bin"
+    printf '#!/usr/bin/env bash\necho "%s %s"\n' "$binary" "$version" \
+      > "$OMS_TEST_NPM_PREFIX/bin/$binary"
+    chmod +x "$OMS_TEST_NPM_PREFIX/bin/$binary"
+    exit 0
+    ;;
+esac
+exit 2
 EOF
-  cat > "$bin/curl" <<'EOF'
-#!/usr/bin/env bash
-output=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = -o ]; then
-    output="$2"
-    shift
-  fi
-  shift
-done
-if [ -n "$output" ]; then
-  : > "$output"
-else
-  printf '{"tag_name":"v1.0.0"}\n'
-fi
-EOF
-  cat > "$bin/tar" <<'EOF'
-#!/usr/bin/env bash
-dest=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = -C ]; then
-    dest="$2"
-    shift
-  fi
-  shift
-done
-mkdir -p "$dest/gh_1.0.0_linux_amd64/bin"
-cat > "$dest/gh_1.0.0_linux_amd64/bin/gh" <<'GH'
-#!/usr/bin/env bash
-if [ "${1:-}" = auth ]; then exit 1; fi
-echo 'gh version 1.0.0'
-GH
-chmod +x "$dest/gh_1.0.0_linux_amd64/bin/gh"
-EOF
-  chmod +x "$bin/npm" "$bin/curl" "$bin/tar"
-  OMS_TEST_NPM_LOG="$TMP/npm.log" OMS_TEST_NPM_PREFIX="$home" HOME="$home" \
+  chmod +x "$bin/npm"
+  OMS_TEST_NPM_LOG="$TMP/npm.log" OMS_TEST_NPM_PREFIX="$npm_prefix" \
+    OMS_TEST_NPM_ROOT="$npm_root" OMS_TEST_NPM_FIXTURES="$fixtures" HOME="$home" \
+    OMS_TEST_TOOL_LOCK_HELPER="$ROOT/scripts/lib/tool-lock.py" \
+    OH_MY_SETTING_TOOL_LOCK="$tool_lock" \
     NVM_DIR="$home/.nvm" OH_MY_SETTING_UPGRADE_ANTIGRAVITY=0 \
     PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-tools.sh" --upgrade >/dev/null
-  assert_contains "$TMP/npm.log" "install -g @anthropic-ai/claude-code"
-  assert_contains "$TMP/npm.log" "install -g @openai/codex"
+  assert_contains "$TMP/npm.log" "pack @anthropic-ai/claude-code@2.1.226"
+  assert_contains "$TMP/npm.log" "pack @openai/codex@0.147.0"
+  assert_contains "$TMP/npm.log" "--cache"
+  assert_contains "$TMP/npm.log" "--offline"
 }
 
 test_branch_receipt_auto_update_uses_transaction() {
@@ -556,6 +684,9 @@ test_update_refreshes_snapshot_policy() {
   mkdir -p "$source/scripts/lib" "$(dirname "$receipt")"
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$source/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$source/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$source/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$source/scripts/lib/poll.sh"
   for script in install-claude-hooks install-codex-plugin install-autoupdate uninstall-autoupdate doctor install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$source/scripts/$script.sh"
     chmod +x "$source/scripts/$script.sh"

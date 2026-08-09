@@ -52,7 +52,7 @@ Options:
   --role NAME          Write mode: reusable strategy profile.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --reasoning-effort E auto, low, medium, or high.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --artifact-dir PATH  Override artifact directory.
   --verify CMD         Write mode only: verification command in worker worktree.
   --no-verify          Write mode only: skip default scripts/check.sh verification.
@@ -71,22 +71,21 @@ Options:
   --ml-context         Attach the compact ML context digest.
   --thread ID          Join a cross-agent thread: prior turns are injected and
                        the exchange is appended (agent-thread.sh).
-  --operation NAME     Declare the work phase so the tier follows the work
-                       (plan/advise/decision → deep, ask/review/implement →
-                       balanced, call/verify/check → fast).
+  --operation NAME     Record the work phase in artifacts; it does not select
+                       a model.
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable task context.
   --no-ml-context      Disable --ml-context (compatibility).
   --export-only        Read mode only: write the provider prompt artifact and
                        do not call CLI. Import the answer later with
-                       import-agent-result.sh.
+                       `oms artifact-index import`.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write artifacts without calling provider CLIs.
   -h, --help           Show help.
 
 Environment:
   OH_MY_SETTING_AGENT_RUN_DRY_RUN=1  Same as --dry-run.
-  OMS_PEER_TIMEOUT=5m         Provider wall-clock timeout (GNU timeout).
+  OMS_PEER_TIMEOUT=5m         Provider wall-clock timeout.
 EOF
 }
 

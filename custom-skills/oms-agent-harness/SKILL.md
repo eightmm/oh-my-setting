@@ -32,7 +32,7 @@ worktree writes, and repository writes.
 | put a reviewed change into the tree | `oms patch-admit`, then `oms patch-land` | repo write |
 | run one provider pass at a known boundary | `oms agent-run --mode read\|write` | read or worktree write |
 | keep a worker in one persona across calls | `oms agent-role`, `oms agent-executor` | — |
-| choose a provider model or effort | inspect `oms models`, then pass `--model`/`--effort`; see the routing reference | — |
+| choose a provider model or effort | inspect `oms models`, then pass `--model`/`--reasoning-effort`; see the routing reference | — |
 | decide whether you are done or should continue | see the autonomy reference | — |
 
 `oms list` catalogs every tool; each answers `oms <tool> --help`.

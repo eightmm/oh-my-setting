@@ -9,6 +9,7 @@ FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 REPAIR=0
 SURFACES=0
+TOOL_LOCK_ONLY=0
 MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
 MODEL_DOCTOR_STRICT=0
@@ -24,7 +25,7 @@ ORIGINAL_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: doctor.sh [--repair] [--surfaces] [--contract] [--live-models] [--strict-diversity]
+Usage: doctor.sh [--repair] [--surfaces] [--tool-lock] [--contract] [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
@@ -41,6 +42,9 @@ missing. Unlike the rest of the doctor it never delegates to the receipt
 owner, because an installed doctor can only check the surfaces it shipped
 with.
 
+--tool-lock is a standalone read-only validation of the exact versions,
+download URLs, and payload digests owned by tools.lock.json.
+
 Environment:
   OH_MY_SETTING_MODEL_DOCTOR=auto|0|1  Auto-detect, disable, or force the
                                       local model capability check.
@@ -52,6 +56,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --repair) REPAIR=1; shift ;;
     --surfaces) SURFACES=1; shift ;;
+    --tool-lock) TOOL_LOCK_ONLY=1; shift ;;
     --contract)
       # The cross-CLI conformance fixture (loader parity, MCP registration
       # parity, fail-open hook no-ops) is slower than a health pass and runs
@@ -84,13 +89,38 @@ if [ "$SURFACES" = "1" ] && [ "$REPAIR" = "1" ]; then
   echo "error: --surfaces is a read-only report; run --repair separately" >&2
   exit 2
 fi
+if [ "$TOOL_LOCK_ONLY" = "1" ] && [ "$REPAIR" = "1" ]; then
+  echo "error: --tool-lock is a read-only report; run --repair separately" >&2
+  exit 2
+fi
 
 RECEIPT="$(oms_install_receipt_path)"
+if [ "$REPAIR" = 1 ]; then
+  # shellcheck source=scripts/lib/install-lifecycle-lock.sh
+  . "$ROOT/scripts/lib/install-lifecycle-lock.sh"
+fi
+doctor_lifecycle_exit() {
+  local code=$?
+
+  trap - EXIT HUP INT TERM
+  oms_install_lifecycle_lock_release
+  exit "$code"
+}
+if [ "$REPAIR" = 1 ]; then
+  trap doctor_lifecycle_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  oms_install_lifecycle_lock_acquire "doctor --repair" || exit $?
+fi
+
 RECEIPT_STATE="missing"
+RECEIPT_SCHEMA=0
 INSTALL_ROOT="$ROOT"
 if [ -f "$RECEIPT" ]; then
   if INSTALL_ROOT="$(oms_install_receipt_owner "$RECEIPT")"; then
     RECEIPT_STATE="valid"
+    RECEIPT_SCHEMA="$(oms_install_receipt_field schema "$RECEIPT" 2>/dev/null || printf 0)"
   else
     RECEIPT_STATE="invalid"
     INSTALL_ROOT="$ROOT"
@@ -101,11 +131,279 @@ fi
 # to the installed checkout would ask the old harness whether it is old: its
 # expected list is the stale one, so it certifies itself. The whole value of
 # the report is that it runs from a newer source against the live settings.
-if [ "$SURFACES" = "0" ] && [ "$RECEIPT_STATE" = "valid" ] &&
+if [ "$SURFACES" = "0" ] && [ "$TOOL_LOCK_ONLY" = "0" ] &&
+   [ "$RECEIPT_STATE" = "valid" ] &&
    [ "$ROOT" != "$INSTALL_ROOT" ] &&
    [ -x "$INSTALL_ROOT/scripts/doctor.sh" ]; then
   echo "delegating doctor to canonical owner: $INSTALL_ROOT"
   exec "$INSTALL_ROOT/scripts/doctor.sh" "${ORIGINAL_ARGS[@]}"
+fi
+
+check_tool_lock() {
+  local lock_root="$1"
+  local lock_path="${OH_MY_SETTING_TOOL_LOCK:-$lock_root/tools.lock.json}"
+  local helper="$lock_root/scripts/lib/tool-lock.py"
+  local schema=""
+
+  if [ ! -f "$lock_path" ] || [ ! -x "$helper" ] ||
+     ! python3 "$helper" --lock "$lock_path" validate >/dev/null; then
+    echo "fail: tool lock: invalid schema or contract ($lock_path)" >&2
+    return 1
+  fi
+  schema="$(python3 "$helper" --lock "$lock_path" get schema | tr -d '\r')"
+  echo "ok: tool lock: valid schema $schema"
+}
+
+tool_lock_value() {
+  python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
+    --lock "${OH_MY_SETTING_TOOL_LOCK:-$INSTALL_ROOT/tools.lock.json}" get "$1" |
+    tr -d '\r'
+}
+
+command_has_locked_version() {  # COMMAND EXPECTED
+  local output
+  output="$("$1" --version 2>/dev/null | tr -d '\r' || true)"
+  printf '%s' "$output" | python3 -c '
+import re, sys
+expected = re.escape(sys.argv[1].lstrip("v"))
+raise SystemExit(0 if re.search(r"(?<![0-9A-Za-z.+-])v?%s(?![0-9A-Za-z.+-])" % expected, sys.stdin.read()) else 1)
+' "$2"
+}
+
+report_tool_drift() {  # LABEL DETAIL
+  if [ "$REQUIRE_TOOLS" = 1 ]; then
+    echo "fail: tool version drift: $1 ($2)"
+    FAILED=1
+  else
+    echo "warn: tool version drift: $1 ($2)"
+  fi
+}
+
+check_locked_command_version() {  # LABEL COMMAND LOCK_FIELD
+  local label="$1" command="$2" field="$3" expected
+  command -v "$command" >/dev/null 2>&1 || return 0
+  expected="$(tool_lock_value "$field")" || return 1
+  if command_has_locked_version "$command" "$expected"; then
+    echo "ok: tool version $label $expected"
+  else
+    report_tool_drift "$label" "expected $expected"
+  fi
+}
+
+installed_npm_version_for_doctor() {  # PACKAGE
+  local listing
+  listing="$(npm list -g --depth=0 --json "$1" 2>/dev/null || true)"
+  printf '%s' "$listing" | python3 -c '
+import json, sys
+try:
+    row = json.load(sys.stdin)
+    value = row.get("dependencies", {}).get(sys.argv[1], {}).get("version", "")
+except (AttributeError, json.JSONDecodeError):
+    value = ""
+if isinstance(value, str):
+    print(value)
+' "$1" | tr -d '\r'
+}
+
+normalize_doctor_npm_path() {  # PATH_FROM_NATIVE_NPM
+  local value="${1//$'\r'/}"
+  if oms_platform_is_windows; then
+    command -v cygpath >/dev/null 2>&1 || return 1
+    value="$(cygpath -u "$value" | tr -d '\r')"
+  fi
+  if [ -d "$value" ]; then
+    (cd "$value" && pwd -P)
+  else
+    printf '%s\n' "$value"
+  fi
+}
+
+doctor_npm_global_bin() {
+  local prefix
+  prefix="$(npm prefix -g 2>/dev/null | tr -d '\r')" || return 1
+  prefix="$(normalize_doctor_npm_path "$prefix")" || return 1
+  if oms_platform_is_windows; then
+    printf '%s\n' "$prefix"
+  else
+    printf '%s/bin\n' "$prefix"
+  fi
+}
+
+doctor_npm_global_root() {
+  local value
+  value="$(npm root -g 2>/dev/null | tr -d '\r')" || return 1
+  normalize_doctor_npm_path "$value"
+}
+
+doctor_locked_platform() {
+  local os arch
+  if oms_platform_is_windows; then os=windows
+  else
+    case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) return 1 ;; esac
+  fi
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  printf '%s-%s\n' "$os" "$arch"
+}
+
+doctor_npm_shim_targets() {  # SHIM GLOBAL_BIN BINARY
+  local shim="$1" global_bin="$2" binary="$3" line candidate quoted
+  [ -f "$shim" ] && [ ! -L "$shim" ] || return 1
+  [ "$(sed -n '1p' "$shim")" = '#!/usr/bin/env bash' ] || return 1
+  [ "$(sed -n '4p' "$shim")" = \
+    '# managed by oh-my-setting; rewritten on every tool update' ] || return 1
+  line="$(sed -n '6p' "$shim")"
+  for candidate in "$global_bin/$binary" "$global_bin/$binary.exe" \
+      "$global_bin/$binary.cmd"; do
+    [ -f "$candidate" ] || continue
+    printf -v quoted '%q' "$candidate"
+    [ "$line" = "exec $quoted \"\$@\"" ] && return 0
+  done
+  return 1
+}
+
+check_locked_npm_version() {  # NAME
+  local name="$1" package binary expected installed resolved global_bin local_shim
+  local global_root package_root helper platform alias native_package native_version
+  command -v npm >/dev/null 2>&1 || return 0
+  package="$(tool_lock_value "npm.$name.package")" || return 1
+  binary="$(tool_lock_value "npm.$name.binary")" || return 1
+  expected="$(tool_lock_value "npm.$name.version")" || return 1
+  command -v "$binary" >/dev/null 2>&1 || return 0
+  installed="$(installed_npm_version_for_doctor "$package")"
+  if [ "$installed" != "$expected" ]; then
+    report_tool_drift "$binary" "npm package ${installed:-missing}, expected $expected"
+    return 0
+  fi
+  global_root="$(doctor_npm_global_root)" || {
+    report_tool_drift "$binary" "cannot resolve the npm global package directory"
+    return 0
+  }
+  package_root="$global_root/$package"
+  helper="$INSTALL_ROOT/scripts/lib/tool-lock.py"
+  if ! python3 "$helper" --lock \
+      "${OH_MY_SETTING_TOOL_LOCK:-$INSTALL_ROOT/tools.lock.json}" verify-installed-npm \
+      --path "$package_root" --name "$package" --version "$expected" >/dev/null; then
+    report_tool_drift "$binary" "installed wrapper manifest does not match the lock"
+    return 0
+  fi
+  case "$name" in
+    claude|codex)
+      platform="$(doctor_locked_platform)" || {
+        report_tool_drift "$binary" "unsupported native payload platform"
+        return 0
+      }
+      if [ "$name" = claude ]; then
+        case "$platform" in
+          linux-*)
+            if [ "$(node -p 'process.report && process.report.getReport().header.glibcVersionRuntime ? "glibc" : "musl"' 2>/dev/null | tr -d '\r')" = musl ]; then
+              platform="$platform-musl"
+            fi
+            ;;
+        esac
+      fi
+      alias="$(tool_lock_value "npm.$name.native.$platform.alias")" || return 1
+      native_package="$(tool_lock_value "npm.$name.native.$platform.package")" || return 1
+      native_version="$(tool_lock_value "npm.$name.native.$platform.version")" || return 1
+      if ! python3 "$helper" --lock \
+          "${OH_MY_SETTING_TOOL_LOCK:-$INSTALL_ROOT/tools.lock.json}" verify-installed-npm \
+          --path "$package_root/node_modules/$alias" --name "$native_package" \
+          --version "$native_version" >/dev/null; then
+        report_tool_drift "$binary" "platform-native payload does not match the lock"
+        return 0
+      fi
+      ;;
+  esac
+  if [ -e "$package_root.oh-my-setting-transaction" ] ||
+     [ -e "$package_root.oh-my-setting-backup" ]; then
+    report_tool_drift "$binary" "interrupted npm transaction residue is present"
+    return 0
+  fi
+  global_bin="$(doctor_npm_global_bin)" || {
+    report_tool_drift "$binary" "cannot resolve the npm global binary directory"
+    return 0
+  }
+  if [ -d "$global_bin/.$binary.oh-my-setting-backup" ]; then
+    report_tool_drift "$binary" "interrupted npm binary transaction residue is present"
+    return 0
+  fi
+  resolved="$(command -v "$binary" 2>/dev/null | tr -d '\r')"
+  local_shim="$HOME/.local/bin/$binary"
+  case "$resolved" in
+    "$global_bin/$binary"|"$global_bin/$binary.exe"|"$global_bin/$binary.cmd") ;;
+    "$local_shim")
+      doctor_npm_shim_targets "$local_shim" "$global_bin" "$binary" || {
+        report_tool_drift "$binary" "PATH command is not the managed npm package"
+        return 0
+      }
+      ;;
+    *)
+      report_tool_drift "$binary" "PATH command is not the managed npm package"
+      return 0
+      ;;
+  esac
+  if command_has_locked_version "$binary" "$expected"; then
+    echo "ok: tool version $binary $expected (npm managed)"
+  else
+    report_tool_drift "$binary" "command does not match npm package $expected"
+  fi
+}
+
+doctor_sha256_file() {
+  python3 - "$1" <<'PY' | tr -d '\r'
+import hashlib, sys
+value = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        value.update(chunk)
+print(value.hexdigest())
+PY
+}
+
+check_locked_direct_version() {  # LABEL COMMAND LOCK_FIELD
+  local label="$1" command="$2" field="$3" expected resolved owner recorded actual
+  command -v "$command" >/dev/null 2>&1 || return 0
+  expected="$(tool_lock_value "$field")" || return 1
+  if ! command_has_locked_version "$command" "$expected"; then
+    report_tool_drift "$label" "expected $expected"
+    return 0
+  fi
+  resolved="$(command -v "$command" 2>/dev/null | tr -d '\r')"
+  owner="$resolved.oh-my-setting-managed"
+  if [ -f "$owner" ]; then
+    recorded="$(sed -n 's/^sha256=//p' "$owner")"
+    actual="$(doctor_sha256_file "$resolved" 2>/dev/null || true)"
+    if [ -n "$actual" ] && [ "$recorded" = "$actual" ]; then
+      echo "ok: tool version $label $expected (managed digest)"
+    else
+      report_tool_drift "$label" "managed binary digest changed"
+    fi
+  else
+    echo "note: tool version $label $expected (external; version only, bytes not authenticated)"
+  fi
+  if [ -e "$resolved.oh-my-setting-stage" ] ||
+     [ -e "$resolved.oh-my-setting-backup" ]; then
+    report_tool_drift "$label" "interrupted direct-tool transaction residue is present"
+  fi
+}
+
+check_tool_versions() {
+  check_locked_command_version node node node.version
+  check_locked_direct_version uv uv uv.version
+  check_locked_direct_version uvx uvx uv.version
+  check_locked_npm_version claude
+  check_locked_npm_version codex
+  check_locked_npm_version ntn
+  check_locked_direct_version agy agy antigravity.version
+  check_locked_direct_version gh gh gh.version
+}
+
+if [ "$TOOL_LOCK_ONLY" = "1" ]; then
+  check_tool_lock "$ROOT"
+  exit $?
 fi
 
 codex_plugin_installed() {
@@ -114,9 +412,48 @@ codex_plugin_installed() {
       python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; sys.exit(0 if any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null
 }
 
+repair_receipt_bool() {
+  local key="$1"
+  local value
+
+  value="$(oms_install_receipt_field "components.$key" "$RECEIPT")" || return
+  case "$value" in
+    true) printf '1\n' ;;
+    false) printf '0\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+hydrate_repair_from_receipt() {
+  local auto_update_mode
+  local link_mode
+
+  [ "$RECEIPT_STATE" = valid ] && [ "$RECEIPT_SCHEMA" = 2 ] || return 0
+  OH_MY_SETTING_PROFILE="$(oms_install_receipt_field profile "$RECEIPT")" || return
+  OH_MY_SETTING_REF="$(oms_install_receipt_field ref "$RECEIPT")" || return
+  link_mode="$(oms_install_receipt_field link_mode "$RECEIPT" 2>/dev/null || true)"
+  case "$link_mode" in copy|symlink) ;; *) link_mode=auto ;; esac
+  OH_MY_SETTING_LINK_MODE="$link_mode"
+  OMS_INSTALL_PREVIOUS_COMMIT="$(oms_install_receipt_field previous_commit "$RECEIPT")" || return
+  OH_MY_SETTING_INSTALL_TOOLS="$(repair_receipt_bool tools)" || return
+  OH_MY_SETTING_CLAUDE_HOOKS="$(repair_receipt_bool claude_hooks)" || return
+  OH_MY_SETTING_CODEX_PLUGIN="$(repair_receipt_bool codex_plugin)" || return
+  OH_MY_SETTING_AUTO_UPDATE="$(repair_receipt_bool auto_update)" || return
+  OH_MY_SETTING_GENERATE_MACHINE="$(oms_install_receipt_mode machine_snapshot 0 "$RECEIPT")"
+  OH_MY_SETTING_GENERATE_SLURM="$(oms_install_receipt_mode slurm_snapshot 0 "$RECEIPT")"
+  auto_update_mode="$(oms_install_receipt_field component_modes.auto_update "$RECEIPT" 2>/dev/null || true)"
+  case "$auto_update_mode" in check|apply) ;; *) auto_update_mode=check ;; esac
+  OH_MY_SETTING_AUTO_UPDATE_MODE="$auto_update_mode"
+  export OH_MY_SETTING_PROFILE OH_MY_SETTING_REF OH_MY_SETTING_LINK_MODE \
+    OMS_INSTALL_PREVIOUS_COMMIT OH_MY_SETTING_INSTALL_TOOLS \
+    OH_MY_SETTING_CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN \
+    OH_MY_SETTING_AUTO_UPDATE OH_MY_SETTING_AUTO_UPDATE_MODE \
+    OH_MY_SETTING_GENERATE_MACHINE OH_MY_SETTING_GENERATE_SLURM
+}
+
 repair_install() {
   local repair_root="$INSTALL_ROOT"
-  local plugin_mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
+  local plugin_mode
 
   if [ "$RECEIPT_STATE" = "invalid" ]; then
     echo "error: refusing repair with invalid install receipt: $RECEIPT" >&2
@@ -129,32 +466,59 @@ repair_install() {
     echo "hint: restore that checkout or run scripts/link.sh from the intended owner" >&2
     return 1
   fi
+  hydrate_repair_from_receipt || {
+    echo "error: could not hydrate repair settings from install receipt: $RECEIPT" >&2
+    return 1
+  }
+  plugin_mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
   echo "repairing canonical links from: $repair_root"
   "$repair_root/scripts/link.sh"
-  if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ] &&
-     [ -x "$repair_root/scripts/install-claude-hooks.sh" ]; then
-    "$repair_root/scripts/install-claude-hooks.sh"
+  if [ -x "$repair_root/scripts/install-claude-hooks.sh" ]; then
+    if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ]; then
+      "$repair_root/scripts/install-claude-hooks.sh"
+    else
+      "$repair_root/scripts/install-claude-hooks.sh" --remove
+    fi
   fi
-  if [ -x "$repair_root/scripts/install-codex-plugin.sh" ] &&
-     { [ "$plugin_mode" = "1" ] ||
-       { [ "$plugin_mode" = "auto" ] && codex_plugin_installed; }; }; then
-    "$repair_root/scripts/install-codex-plugin.sh"
+  if [ -x "$repair_root/scripts/install-codex-plugin.sh" ]; then
+    if [ "$plugin_mode" = "1" ] ||
+       { [ "$plugin_mode" = "auto" ] && codex_plugin_installed; }; then
+      if command -v codex >/dev/null 2>&1; then
+        "$repair_root/scripts/install-codex-plugin.sh"
+      else
+        echo "note: codex binary missing; codex plugin repair skipped (receipt keeps codex_plugin=1)" >&2
+      fi
+    elif [ "$plugin_mode" = "0" ] && command -v codex >/dev/null 2>&1; then
+      "$repair_root/scripts/install-codex-plugin.sh" --remove
+    fi
   fi
 }
 
 if [ "$REPAIR" = "1" ]; then
   repair_install
+  oms_install_lifecycle_lock_release
+  trap - EXIT HUP INT TERM
   exec "$ROOT/scripts/doctor.sh" "${MODEL_DOCTOR_ARGS[@]}"
 fi
 
 load_user_tool_paths() {
+  local locked_node=""
+  local managed_node_bin=""
+
   export PATH="$HOME/.local/bin:$PATH"
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
-  if [ -s "$NVM_DIR/nvm.sh" ]; then
-    # shellcheck disable=SC1091
-    . "$NVM_DIR/nvm.sh"
-    nvm use default >/dev/null 2>&1 || true
+  # The installed Node payload has a lock-derived stable path. Reading it
+  # directly avoids executing a mutable, unrelated nvm.sh during diagnosis.
+  if [ -x "$INSTALL_ROOT/scripts/lib/tool-lock.py" ] &&
+     [ -f "$INSTALL_ROOT/tools.lock.json" ]; then
+    locked_node="$(python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
+      --lock "$INSTALL_ROOT/tools.lock.json" get node.version 2>/dev/null | tr -d '\r' || true)"
+    managed_node_bin="$NVM_DIR/versions/node/v$locked_node/bin"
+    if [ -n "$locked_node" ] && [ -x "$managed_node_bin/node" ] &&
+       [ "$("$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then
+      export PATH="$managed_node_bin:$PATH"
+    fi
   fi
 }
 
@@ -1177,13 +1541,14 @@ check_cmd curl
 check_cmd node
 check_cmd npm
 check_cmd uv
+check_cmd uvx
 check_cmd claude
 check_cmd codex
 check_cmd agy
 check_cmd ntn
 # gh is installed by default now, so it is required on the same terms as the
-# provider CLIs: REQUIRE_TOOLS=1 fails on it, and a machine that deliberately
-# skipped the tool install still only sees "optional missing".
+# provider CLIs: REQUIRE_TOOLS=1 fails on it. Standalone diagnostics may still
+# set REQUIRE_TOOLS=0 to inventory an incomplete or damaged installation.
 check_cmd gh
 # Presence is installable; authentication is an interactive browser flow, so it
 # can only ever be reported. An unauthenticated gh is the state in which
@@ -1253,6 +1618,12 @@ check_optional_cmd scancel
 
 check_antigravity_permissions
 check_model_capabilities
+
+if ! check_tool_lock "$INSTALL_ROOT"; then
+  FAILED=1
+else
+  check_tool_versions
+fi
 
 check_path "$INSTALL_ROOT/rules/global-AGENTS.md"
 check_path "$INSTALL_ROOT/skills.manifest.json"

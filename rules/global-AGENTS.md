@@ -53,16 +53,16 @@ contracts.
 
 - Give each worker one bounded strategy profile, scope, and success criteria;
   the parent owns admission, verification, commit, push, and synthesis.
-- Route harness and native workers by phase: deep planning/gates, balanced
-  implementation/review, fast routine analysis. Spawned workers default one
-  model tier below; judgment roles stay at session tier.
+- Match workers to the task: keep judgment-heavy planning and review on the
+  session model; use cheaper workers only for bounded routine analysis.
+  Preserve frozen model routes and explicit fallback choices.
 - Run commands/tests directly; never spawn agents merely to execute them.
   Delegate independent judgment or disjoint writes, launched in parallel.
 - Use a task-scoped executor only for substantial writes; workers cannot widen
   authority or recursively delegate.
 - Consult an advisor at irreversible decisions, repeated failures, release
-  gates; `oms advise` reaches another model family — same-family adds a tier,
-  not independence.
+  gates; `oms advise` reaches another model family — same-family advice adds
+  evidence, not independence.
 
 ## Harness
 
@@ -70,7 +70,7 @@ contracts.
   `.oms/` manually; forge repeating fixes into project skills
   (`oms skill-forge`).
 - Peer CLIs: `claude`, `codex`, `agy`. Cross-model work
-  uses `peer-ask`, `peer-review`, `peer-delegate`, `agent-consult`, `advise` —
+  uses `peer-ask`, `peer-review`, `peer-delegate`, `consult`, `advise` —
   never raw CLI calls.
 - Hooks are install-wired; inspect live wiring, not prose.
 

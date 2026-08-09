@@ -76,7 +76,7 @@ Options:
   --repo PATH          Git repo to work on. Default: current directory.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --reasoning-effort E auto, low, medium, or high. Auto follows model class.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit
                        marks the delegation failed. Default: when the project
@@ -122,6 +122,9 @@ Options:
 
 Environment:
   OH_MY_SETTING_DELEGATE_DRY_RUN=1  Same as --dry-run.
+  OMS_DELEGATE_WORKTREE_ROOT  Parent for temporary delegated worktrees. Default:
+                             $XDG_CACHE_HOME/oh-my-setting/worktrees, else
+                             ~/.cache/oh-my-setting/worktrees.
   OMS_WORKER_GUARD_OFF=1     Skip the worker-authority check entirely.
   OMS_WORKER_GUARD_MAX_FILES=20000
                              Cap the untracked/ignored stat scan; a truncated
@@ -142,7 +145,7 @@ It is detection, not a sandbox: it cannot prevent a write, and it cannot see a
 write that is undone before the worker exits, anything the worker reads
 (inherited tokens, ssh agents), or anything it does outside the repository
 (HOME, /tmp, a surviving background process). Those need process isolation.
-  OMS_PEER_TIMEOUT=5m        Worker wall-clock timeout (GNU timeout).
+  OMS_PEER_TIMEOUT=5m        Worker wall-clock timeout.
 EOF
 }
 
@@ -377,10 +380,18 @@ if [ -n "$EXECUTOR_ID" ]; then
   executor_verify="$(printf '%s' "$executor_values" | cut -f6)"
   EXECUTOR_SOUL_SHA="$(printf '%s' "$executor_values" | cut -f7)"
   executor_strategy="$(printf '%s' "$executor_values" | cut -f8)"
+  executor_model_class="$(printf '%s' "$executor_values" | cut -f9)"
   executor_model="$(printf '%s' "$executor_values" | cut -f10)"
   executor_fallback_model="$(printf '%s' "$executor_values" | cut -f11)"
   executor_reasoning_effort="$(printf '%s' "$executor_values" | cut -f12)"
   executor_fallback_reasoning_effort="$(printf '%s' "$executor_values" | cut -f13)"
+  # Executors store the resolved route for provenance. For an unpinned route
+  # that value is the provider-default sentinel, not a user-supplied model.
+  # Normalize old and new metadata before checking the caller contract so a
+  # default executor does not accidentally become an explicit model request.
+  if [ "$executor_model_class" = provider-default ] && [ "$executor_model" = provider-default ]; then
+    executor_model=""
+  fi
   [ "$executor_provider" = "$TO" ] || fail "executor provider is $executor_provider, not $TO"
   [ "$executor_state" = "frozen" ] || fail "executor $EXECUTOR_ID is $executor_state, not frozen"
   [ "$executor_mode" = "worktree-write" ] ||
@@ -399,7 +410,6 @@ if [ -n "$EXECUTOR_ID" ]; then
   elif [ "$REASONING_EFFORT_EXPLICIT" = 0 ]; then
     REASONING_EFFORT=auto
   fi
-  [ "$TO" != antigravity ] || REASONING_EFFORT=auto
   if [ -n "$executor_plan" ]; then
     [ -z "$PLAN_TASK_ID" ] || [ "$PLAN_TASK_ID" = "$executor_plan" ] || fail "--plan-task conflicts with executor"
     PLAN_TASK_ID="$executor_plan"
@@ -495,7 +505,33 @@ oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null
 prompt_file="$(mktemp)" || fail "mktemp failed"
 repair_prompt_file="$prompt_file.repair"
 verify_out="$prompt_file.verify"
-worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-delegate.XXXXXX")" || fail "mktemp failed"
+delegate_root_is_default=0
+if [ -n "${OMS_DELEGATE_WORKTREE_ROOT:-}" ]; then
+  delegate_worktree_root="$OMS_DELEGATE_WORKTREE_ROOT"
+else
+  delegate_worktree_root="${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/worktrees"
+  delegate_root_is_default=1
+fi
+case "$delegate_worktree_root" in
+  /*) ;;
+  *) fail "delegate worktree root must be an absolute path: $delegate_worktree_root" ;;
+esac
+if [ "$delegate_root_is_default" = 1 ] && [ -L "$delegate_worktree_root" ]; then
+  fail "default delegate worktree root must not be a symbolic link: $delegate_worktree_root"
+fi
+delegate_old_umask="$(umask)"
+umask 077
+if ! mkdir -p "$delegate_worktree_root"; then
+  umask "$delegate_old_umask"
+  fail "could not create delegate worktree root: $delegate_worktree_root"
+fi
+umask "$delegate_old_umask"
+if [ "$delegate_root_is_default" = 1 ]; then
+  chmod 700 "$delegate_worktree_root" ||
+    fail "could not make default delegate worktree root private: $delegate_worktree_root"
+fi
+worktree_parent="$(mktemp -d "$delegate_worktree_root/oh-my-setting-delegate.XXXXXX")" ||
+  fail "mktemp failed in delegate worktree root: $delegate_worktree_root"
 worktree="$worktree_parent/wt"
 worktree_created=0
 cleanup_done=0
@@ -710,12 +746,65 @@ fi
 # the artifact. Sets worker_status. OMS_STATE_REPO points harness state tools
 # (agent-memory/task/plan) at the primary repo's .oms — the throwaway worktree
 # has none — and OMS_AGENT attributes any worker-written notes to the provider.
+delegate_attempt_transition() {  # STATE REASON KEY
+  local state="$1" reason="$2" key="$3" events
+  local -a args
+
+  [ "$worker_attempt_owned" = 1 ] || return 0
+  [ -n "$worker_attempt_id" ] || return 0
+  events="$(ma_scripts_dir)/agent-events.sh"
+  args=(--repo "$REPO" transition --attempt "$worker_attempt_id" \
+    --state "$state" --actor peer-delegate --idempotency-key "$key")
+  [ -z "$reason" ] || args+=(--reason-code "$reason")
+  if "$events" "${args[@]}" >/dev/null; then
+    worker_attempt_state="$state"
+    return 0
+  fi
+  echo "error: could not record delegated attempt $worker_attempt_id -> $state" >&2
+  return 2
+}
+
+delegate_attempt_fail_if_live() {  # REASON KEY
+  case "$worker_attempt_state" in
+    working|verifying|review)
+      delegate_attempt_transition failed "$1" "$2"
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+delegate_attempt_finish_without_verify() {
+  if [ "$worker_status" -eq 0 ]; then
+    if ! delegate_attempt_transition review "" delegate-review-no-verify; then
+      worker_status=2
+      delegate_attempt_fail_if_live lifecycle_transition_failed \
+        delegate-review-no-verify-failed || true
+    fi
+  elif [ "$worker_attempt_state" = working ]; then
+    delegate_attempt_fail_if_live provider_blocked delegate-provider-blocked ||
+      worker_status=2
+  fi
+}
+
 run_worker() {
   local prompt="$1"
   worker_status=0
   [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
+  OMS_LAST_ATTEMPT_ID=""
+  OMS_LAST_ATTEMPT_OWNED=0
   ma_run_routed_provider "$TO" write "$prompt" "$artifact" "$worktree" \
     peer-delegate "$REPO" "$timestamp" || worker_status=$?
+  worker_attempt_id="${OMS_LAST_ATTEMPT_ID:-}"
+  worker_attempt_owned="${OMS_LAST_ATTEMPT_OWNED:-0}"
+  if [ "$worker_attempt_owned" = 1 ]; then
+    if [ "$worker_status" -eq 0 ]; then
+      worker_attempt_state=working
+    else
+      worker_attempt_state=failed
+    fi
+  else
+    worker_attempt_state=""
+  fi
   if [ "$route_captured" = 0 ]; then
     route_captured=1
     route_class="$OMS_MODEL_RESOLVED_CLASS"
@@ -740,23 +829,21 @@ run_worker() {
     policy-declined:*)
       # The provider declined the request. A repair round re-sends it, which is
       # not repair — it is asking again until the answer changes.
-      route_capacity_terminal=1
+      route_retry_terminal=1
       ;;
-    capacity:*|capacity-no-fallback:*|capacity-dirty-worktree:*|model-unavailable:*)
+    capacity:*|capacity-no-fallback:*|capacity-dirty-worktree:*|model-unavailable:*|model-safeguard:*)
       # Both the pinned name and its alias failed, or the model is busy: either
       # way the brief is not the problem, so a repair round would only re-run
       # the same route into the same wall.
-      [ "$worker_status" -eq 0 ] || route_capacity_terminal=1
+      [ "$worker_status" -eq 0 ] || route_retry_terminal=1
       ;;
   esac
   if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$worker_status" -eq 0 ]; then
     OMS_MODEL_EXPLICIT="$OMS_MODEL_SELECTED"
     OMS_MODEL_FALLBACK_EXPLICIT=""
-    OMS_MODEL_NO_FALLBACK=1
     OMS_REASONING_EFFORT_REQUEST="$OMS_REASONING_SELECTED"
-    [ "$TO" != antigravity ] || OMS_REASONING_EFFORT_REQUEST=auto
     OMS_REASONING_FALLBACK_EXPLICIT=""
-    export OMS_MODEL_EXPLICIT OMS_MODEL_FALLBACK_EXPLICIT OMS_MODEL_NO_FALLBACK
+    export OMS_MODEL_EXPLICIT OMS_MODEL_FALLBACK_EXPLICIT
     export OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
   fi
 }
@@ -774,6 +861,15 @@ run_verify() {
   local verify_pid
 
   : > "$verify_out"
+  if [ "$worker_status" -eq 0 ]; then
+    if ! delegate_attempt_transition verifying "" delegate-verifying; then
+      worker_status=2
+      verify_status=2
+      delegate_attempt_fail_if_live lifecycle_transition_failed \
+        delegate-verifying-failed || true
+      return
+    fi
+  fi
   set +e
   (cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY_CMD") > "$verify_out" 2>&1 &
   verify_pid="$!"
@@ -782,6 +878,18 @@ run_verify() {
   set -e
   cat "$verify_out" >> "$artifact"
   printf '\n- verify exit: %s\n' "$verify_status" >> "$artifact"
+  if [ "$worker_status" -eq 0 ]; then
+    if [ "$verify_status" -eq 0 ]; then
+      if ! delegate_attempt_transition review "" delegate-review; then
+        worker_status=2
+        delegate_attempt_fail_if_live lifecycle_transition_failed \
+          delegate-review-failed || true
+      fi
+    elif ! delegate_attempt_fail_if_live verification_failed \
+        delegate-verification-failed; then
+      worker_status=2
+    fi
+  fi
 }
 
 # Repair brief: the original task plus the failure evidence, addressed to the
@@ -823,8 +931,11 @@ write_repair_prompt() {
 }
 
 worker_status=0
+worker_attempt_id=""
+worker_attempt_owned=0
+worker_attempt_state=""
 route_captured=0
-route_capacity_terminal=0
+route_retry_terminal=0
 route_class=""
 route_primary=""
 route_fallback=""
@@ -913,6 +1024,12 @@ if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ]; then
 fi
 
 verify_status=0
+if [ -z "$VERIFY_CMD" ]; then
+  delegate_attempt_finish_without_verify
+elif [ "$worker_status" -ne 0 ] && [ "$worker_attempt_state" = working ]; then
+  delegate_attempt_fail_if_live provider_blocked delegate-provider-blocked ||
+    worker_status=2
+fi
 if [ -n "$VERIFY_CMD" ]; then
   printf '\n\n## Verify\n\n- command: %s\n\n' "$VERIFY_CMD" >> "$artifact"
   if [ "$DRY_RUN" = "1" ]; then
@@ -995,7 +1112,7 @@ advise_after_repeated_failure() {
 repair_used=0
 if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] &&
    [ "$worker_status" -ne 126 ] &&
-   [ "$route_capacity_terminal" = 0 ]; then
+   [ "$route_retry_terminal" = 0 ]; then
   while [ "$repair_used" -lt "$REPAIR" ] && { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
     repair_used=$((repair_used + 1))
     write_repair_prompt "$repair_prompt_file"
@@ -1020,6 +1137,8 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
     if [ -n "$VERIFY_CMD" ]; then
       printf '\n\n## Verify (repair %s)\n\n- command: %s\n\n' "$repair_used" "$VERIFY_CMD" >> "$artifact"
       run_verify
+    else
+      delegate_attempt_finish_without_verify
     fi
     echo "repair $repair_used: worker exit $worker_status, verify exit $verify_status"
   done
@@ -1060,6 +1179,8 @@ if [ -n "$worker_guard_dir" ]; then
   fi
   worker_guard_changed="$worker_guard_hard"
   if [ -n "$worker_guard_changed" ]; then
+    delegate_attempt_fail_if_live worker_authority_violation \
+      delegate-worker-authority-violation || worker_status=2
     KEEP_WORKTREE=1
     {
       printf '\n\n## Worker authority violation\n\n'
@@ -1134,7 +1255,7 @@ elif [ "$APPLY" = 1 ]; then
     [ -n "$VERIFY_CMD" ] && land_args+=(--verify "$VERIFY_CMD")
     [ -n "$PLAN_TASK_ID" ] && land_args+=(--plan-task "$PLAN_TASK_ID")
     [ -n "$EXECUTOR_ID" ] && land_args+=(--executor "$EXECUTOR_ID")
-  [ "$ALLOW_RESTRUCTURE" = 1 ] && land_args+=(--allow-restructure)
+    [ "$ALLOW_RESTRUCTURE" = 1 ] && land_args+=(--allow-restructure)
     if bash "$land_script" "${land_args[@]}" >/dev/null; then
       applied=1
     else
@@ -1191,6 +1312,7 @@ if [ "$KEEP_WORKTREE" = 1 ]; then
 fi
 
 if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+  delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
   [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" --reason "worker or verify failed" >/dev/null || true
   [ -z "$EXECUTOR_ID" ] || executor_finalized=1
   plan_transition release

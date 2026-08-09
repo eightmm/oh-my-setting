@@ -53,8 +53,8 @@ Options:
                        the reported family count makes explicit.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/ask.
   --model MODEL        Exact model; requires exactly one provider.
-  --fallback-model M   Explicit fallback; requires exactly one provider.
-  --reasoning-effort E auto, low, medium, or high.
+  --fallback-model M   One-shot capacity fallback; requires one provider.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.
   --memory             Attach shared harness memory.
@@ -78,14 +78,14 @@ Options:
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
-                       import-agent-result.sh.
+                       `oms artifact-index import`.
   --print-timeout DUR  Timeout for print mode wait. Default: 5m.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
 
 Environment:
   OH_MY_SETTING_ASK_DRY_RUN=1   Same as --dry-run.
-  OMS_PEER_TIMEOUT=5m    Per-provider wall-clock timeout (GNU timeout).
+  OMS_PEER_TIMEOUT=5m    Per-provider wall-clock timeout.
   OMS_PEER_PRINT_TIMEOUT=5m Timeout for print mode wait (agy).
 EOF
 }

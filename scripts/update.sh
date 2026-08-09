@@ -22,12 +22,15 @@ INSTALL_REF_OVERRIDE=""
 CHECK_ONLY=0
 ROLLBACK=0
 PROBE_AGY=0
+FALLBACK_TO_EDGE=0
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
+# shellcheck source=scripts/lib/install-lifecycle-lock.sh
+. "$ROOT/scripts/lib/install-lifecycle-lock.sh"
 
 usage() {
   cat <<'EOF'
-Usage: update.sh [--check] [--rollback] [--ref REF] [--tools] [--no-tools] [--no-doctor] [--probe-agy-surfaces] [-h|--help]
+Usage: update.sh [--check] [--rollback] [--ref REF] [--fallback-to-edge] [--tools] [--no-tools] [--no-doctor] [--probe-agy-surfaces] [-h|--help]
 
 Update transactionally, preserving the installed component profile. Link or
 doctor failure restores the previous commit, links, and install receipt.
@@ -36,6 +39,9 @@ Options:
   --check       Fetch and report whether the configured ref has changed.
   --rollback    Restore the previous successful commit from the receipt.
   --ref REF     Switch to an explicit branch, tag, or commit.
+  --fallback-to-edge
+                If a pinned ref is missing, follow origin's default branch for
+                this run only. Without this flag, a missing pin fails closed.
   --tools       Refresh Node/uv/provider tools after the core update commits.
   --no-tools    Skip tool refresh (default).
   --no-doctor   Skip the post-update doctor (disables its rollback gate).
@@ -64,6 +70,7 @@ while [ "$#" -gt 0 ]; do
       INSTALL_REF_OVERRIDE="$2"
       shift 2
       ;;
+    --fallback-to-edge) FALLBACK_TO_EDGE=1; shift ;;
     --tools) SKIP_TOOLS=0; shift ;;
     --no-tools) SKIP_TOOLS=1; shift ;;
     --no-doctor) SKIP_DOCTOR=1; shift ;;
@@ -81,6 +88,10 @@ done
   echo "error: --rollback and --ref cannot be combined" >&2
   exit 2
 }
+[ "$ROLLBACK" != "1" ] || [ "$FALLBACK_TO_EDGE" != "1" ] || {
+  echo "error: --rollback and --fallback-to-edge cannot be combined" >&2
+  exit 2
+}
 
 # Surface certification is an operator question about the installed Antigravity
 # binary, not a step of the update transaction: it spends one bounded provider
@@ -91,6 +102,21 @@ if [ "$PROBE_AGY" = "1" ]; then
     exit 2
   fi
   exec "$ROOT/scripts/install-agy-plugin.sh" --probe-surfaces
+fi
+
+update_lifecycle_exit() {
+  local code=$?
+
+  trap - EXIT HUP INT TERM
+  oms_install_lifecycle_lock_release
+  exit "$code"
+}
+if [ "$CHECK_ONLY" != 1 ]; then
+  trap update_lifecycle_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  oms_install_lifecycle_lock_acquire update || exit $?
 fi
 
 oms_install_require_owner "$ROOT" "update the install" || exit 1
@@ -251,20 +277,24 @@ fetch_target() {
     [ -n "$target_ref" ] || target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "origin/$INSTALL_REF^{commit}" || true)"
     [ -n "$target_ref" ] || target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "$INSTALL_REF^{commit}" || true)"
     if [ -z "$target_ref" ]; then
-      # The pinned ref resolves nowhere — not a tag, not on origin, not
-      # local. For an unattended daily timer, an unsatisfiable pin must not
-      # mean failing forever at an aging commit: follow the origin default
-      # branch this run, loudly, without rewriting the receipt (the pin
-      # stays visible and wins again the moment it resolves).
-      git -C "$ROOT" remote set-head origin -a >/dev/null 2>&1 || true
-      remote_head="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
-      if [ -n "$remote_head" ]; then
-        target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "$remote_head^{commit}" || true)"
+      if [ "$FALLBACK_TO_EDGE" != "1" ]; then
+        echo "error: cannot resolve pinned install ref: $INSTALL_REF" >&2
+        echo "hint: rerun with --fallback-to-edge to follow origin's default branch for this run" >&2
+        return 1
       fi
-      [ -z "$target_ref" ] ||
-        echo "note: install ref $INSTALL_REF no longer resolves anywhere; following default branch ${remote_head#origin/} this run" >&2
+      git -C "$ROOT" remote set-head origin -a >/dev/null
+      remote_head="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+      [ -n "$remote_head" ] || {
+        echo "error: cannot resolve origin default branch for --fallback-to-edge" >&2
+        return 1
+      }
+      target_ref="$(git -C "$ROOT" rev-parse --verify --quiet "$remote_head^{commit}" || true)"
+      [ -n "$target_ref" ] || {
+        echo "error: cannot resolve origin default branch for --fallback-to-edge" >&2
+        return 1
+      }
+      echo "warning: pinned install ref $INSTALL_REF does not resolve; --fallback-to-edge follows default branch ${remote_head#origin/} for this run" >&2
     fi
-    [ -n "$target_ref" ] || { echo "error: cannot resolve install ref: $INSTALL_REF" >&2; return 1; }
     printf '%s\n' "$target_ref"
   fi
 }
@@ -286,6 +316,15 @@ fi
 if [ "$CHECK_ONLY" = "1" ]; then
   if [ "$current" = "$target" ]; then echo "update-check: up_to_date $current"; else echo "update-check: available $current -> $target"; fi
   exit 0
+fi
+
+# auto-update checks ancestry against one fetched commit before entering this
+# transaction. A named ref can move between those fetches; never apply a
+# different, unchecked commit. Exit 75 is a normal auto-update skip signal.
+if [ -n "${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-}" ] &&
+   [ "$target" != "$OH_MY_SETTING_UPDATE_EXPECTED_TARGET" ]; then
+  echo "error: update target changed after preflight: expected $OH_MY_SETTING_UPDATE_EXPECTED_TARGET, actual $target" >&2
+  exit 75
 fi
 
 if [ -n "$dirty" ]; then
@@ -367,7 +406,11 @@ for managed_path in \
   snapshot_managed_target "$(oms_install_marker_path "$managed_path")"
 done
 
-cleanup_update_tmp() { rm -f "$receipt_backup"; rm -rf "$managed_backup"; }
+cleanup_update_tmp() {
+  rm -f "$receipt_backup"
+  rm -rf "$managed_backup"
+  oms_install_lifecycle_lock_release
+}
 TRANSACTION_ACTIVE=0
 trap cleanup_update_tmp EXIT
 

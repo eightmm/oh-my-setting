@@ -238,9 +238,9 @@ branch_upstream() {
   printf '%s\t%s\t%s\n' "$remote" "refs/remotes/$remote/$remote_branch" "$remote/$remote_branch"
 }
 
-receipt_transaction_update() {
+receipt_transaction_context() {
   local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
-  local schema ref owner current output status remote message upstream
+  local schema ref owner
 
   schema="$(auto_update_receipt_field "$receipt" schema 2>/dev/null || true)"
   ref="$(auto_update_receipt_field "$receipt" ref 2>/dev/null || true)"
@@ -250,8 +250,16 @@ receipt_transaction_update() {
       command -v cygpath >/dev/null 2>&1 && owner="$(cygpath -u "$owner")"
       ;;
   esac
-  [ "$schema" = 2 ] && [ -n "$ref" ] || return 75
-  [ -n "$owner" ] && [ "$(cd "$owner" 2>/dev/null && pwd -P || true)" = "$(cd "$ROOT" && pwd -P)" ] || return 75
+  [ "$schema" = 2 ] && [ -n "$ref" ] || return 1
+  [ -n "$owner" ] && [ "$(cd "$owner" 2>/dev/null && pwd -P || true)" = "$(cd "$ROOT" && pwd -P)" ] || return 1
+  RECEIPT_TRANSACTION_REF="$ref"
+}
+
+receipt_transaction_update() {
+  local ref="${RECEIPT_TRANSACTION_REF:-}"
+  local current output status remote message upstream base latest expected
+
+  [ -n "$ref" ] || return 2
   current="$(git -C "$ROOT" rev-parse HEAD)"
   upstream="ref:$ref"
 
@@ -279,12 +287,76 @@ receipt_transaction_update() {
     return 0
   fi
 
+  # Schema-2 installs resolve their target through update.sh rather than a
+  # branch upstream. Apply the same unattended safety contract as the legacy
+  # path: dirty, ahead, and diverged checkouts are normal skips, not failures.
+  # Check first so the target commit is fetched without mutating the checkout.
+  if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+    write_state skipped "dirty tree; auto-apply skipped" "$current" "" "$upstream"
+    echo "auto-update: skipped (dirty tree)"
+    return 0
+  fi
+
   set +e
-  output="$($ROOT/scripts/update.sh --no-tools 2>&1)"
+  output="$($ROOT/scripts/update.sh --check 2>&1)"
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    write_state failed "apply failed: $(auto_update_error_line "$output" "$status")" \
+      "$current" "" "$upstream"
+    print_status
+    return "$status"
+  fi
+  remote="$(printf '%s\n' "$output" | awk '/^update-check: up_to_date /{print $3} /^update-check: available /{print $NF}' | tail -n 1)"
+  if [ -z "$remote" ] || ! git -C "$ROOT" cat-file -e "$remote^{commit}" 2>/dev/null; then
+    write_state failed "apply failed: update target was not reported" \
+      "$current" "$remote" "$upstream"
+    print_status
+    return 1
+  fi
+  if [ "$current" = "$remote" ]; then
+    write_state up_to_date "already up to date" "$current" "$remote" "$upstream"
+    print_status
+    return 0
+  fi
+  expected="$remote"
+
+  base="$(git -C "$ROOT" merge-base "$current" "$remote" 2>/dev/null || true)"
+  if [ "$base" != "$current" ]; then
+    if [ "$base" = "$remote" ]; then
+      write_state skipped "local checkout is ahead of $upstream" "$current" "$remote" "$upstream"
+      echo "auto-update: skipped (local checkout is ahead)"
+    else
+      write_state skipped "local checkout diverged from $upstream" "$current" "$remote" "$upstream"
+      echo "auto-update: skipped (diverged from upstream)"
+    fi
+    return 0
+  fi
+
+  # Close the fetch-to-apply race. A user edit or another updater changing HEAD
+  # during preflight should make this run stand down, never feed a stale target
+  # into the mutating transaction.
+  latest="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$latest" != "$current" ] || [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+    write_state skipped "checkout changed during preflight; auto-apply skipped" "$latest" "$remote" "$upstream"
+    echo "auto-update: skipped (checkout changed during preflight)"
+    return 0
+  fi
+
+  set +e
+  output="$(OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$expected" \
+    "$ROOT/scripts/update.sh" --no-tools 2>&1)"
   status=$?
   set -e
   [ -z "$output" ] || printf '%s\n' "$output"
   remote="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$status" -eq 75 ] &&
+     printf '%s\n' "$output" | grep -Fq 'error: update target changed after preflight:'; then
+    write_state skipped "target changed during preflight; auto-apply skipped" \
+      "$current" "$expected" "$upstream"
+    echo "auto-update: skipped (target changed during preflight)"
+    return 0
+  fi
   if [ "$status" -ne 0 ]; then
     # Name the actual failure. The old fixed string ("receipt ref apply
     # failed") buried a plain "codex command is required" under a message
@@ -478,11 +550,31 @@ case "$MODE" in
 esac
 
 require_git_checkout
-set +e
-receipt_transaction_update
-receipt_status=$?
-set -e
-[ "$receipt_status" = 75 ] || exit "$receipt_status"
+# Both receipt-driven and legacy apply paths mutate the same checkout and
+# install receipt. Resolve schema-2 ownership before taking their shared,
+# non-blocking transaction lock; check mode stays read-only and lock-free.
+if receipt_transaction_context; then
+  if [ "$MODE" = apply ]; then
+    # shellcheck source=scripts/lib/file-lock.sh
+    . "$ROOT/scripts/lib/file-lock.sh"
+    set +e
+    oms_try_file_lock "$APPLY_LOCK_TARGET" receipt_transaction_update
+    receipt_status=$?
+    set -e
+    if [ "$receipt_status" = 75 ]; then
+      local_commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+      write_state skipped "another auto-update run is in progress" "$local_commit"
+      echo "auto-update: skipped (another run in progress)"
+      exit 0
+    fi
+  else
+    set +e
+    receipt_transaction_update
+    receipt_status=$?
+    set -e
+  fi
+  exit "$receipt_status"
+fi
 upstream_info="$(branch_upstream)" || {
   print_status
   exit 0

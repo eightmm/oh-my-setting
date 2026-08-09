@@ -63,7 +63,7 @@ Options:
   --soul-file FILE   Model-generated behavioral specialization for create.
   --model MODEL      Exact provider model.
   --fallback-model M Explicit one-shot capacity fallback model.
-  --reasoning-effort E auto, low, medium, or high; frozen at create time.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra; frozen.
   --reason TEXT      Failure reason for fail.
   --days N           Retention age for gc. Default: 30.
   --dry-run          Print executor gc removals without deleting (default).

@@ -55,7 +55,7 @@ done
 
 oms_install_require_owner "$ROOT" "modify the Codex plugin" || exit 1
 
-command -v codex >/dev/null 2>&1 || fail "codex command is required"
+[ "$REMOVE" = "1" ] || command -v codex >/dev/null 2>&1 || fail "codex command is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$MARKETPLACE_FILE" ] || fail "missing marketplace: $MARKETPLACE_FILE"
 [ -d "$MARKETPLACE_ROOT" ] || fail "missing marketplace root: $MARKETPLACE_ROOT"
@@ -103,6 +103,36 @@ marketplace_root() {
     awk -v name="$MARKETPLACE_NAME" '$1 == name { print $2; exit }'
 }
 
+codex_marketplace_state() {
+  local out
+
+  out="$(codex plugin marketplace list 2>/dev/null)" || return 2
+  printf '%s\n' "$out" |
+    awk -v name="$MARKETPLACE_NAME" '$1 == name { found=1 } END { exit(found ? 0 : 1) }'
+}
+
+codex_plugin_state() {
+  local out
+
+  out="$(codex plugin list --json 2>/dev/null)" || return 2
+  printf '%s\n' "$out" |
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    installed = data["installed"]
+    if not isinstance(installed, list):
+        raise TypeError("installed is not a list")
+except Exception:
+    sys.exit(2)
+target = sys.argv[1]
+sys.exit(0 if any(
+    isinstance(row, dict) and row.get("pluginId") == target and row.get("installed")
+    for row in installed
+) else 1)
+' "$PLUGIN_NAME@$MARKETPLACE_NAME" 2>/dev/null
+}
+
 installed_plugin_root() {
   codex plugin list --json 2>/dev/null |
     python3 -c '
@@ -125,16 +155,7 @@ for plugin in data.get("installed", []):
 }
 
 plugin_is_installed() {
-  codex plugin list --json 2>/dev/null |
-    python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-target = sys.argv[1]
-sys.exit(0 if any(p.get("pluginId") == target and p.get("installed") for p in data.get("installed", [])) else 1)
-' "$PLUGIN_NAME@$MARKETPLACE_NAME" 2>/dev/null
+  codex_plugin_state
 }
 
 plugin_cache_is_current() {
@@ -198,9 +219,47 @@ install_plugin() {
 }
 
 if [ "$REMOVE" = "1" ]; then
-  run_cmd codex plugin remove "$PLUGIN_NAME@$MARKETPLACE_NAME" || true
-  run_cmd codex plugin marketplace remove "$MARKETPLACE_NAME" || true
-  configure_hud remove
+  remove_failed=0
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "error: codex CLI is required to inspect and remove its plugin and marketplace" >&2
+    remove_failed=1
+  else
+    plugin_state=0
+    codex_plugin_state || plugin_state=$?
+    case "$plugin_state" in
+      0)
+        if ! run_cmd codex plugin remove "$PLUGIN_NAME@$MARKETPLACE_NAME"; then
+          echo "error: could not remove Codex plugin $PLUGIN_NAME@$MARKETPLACE_NAME" >&2
+          remove_failed=1
+        fi
+        ;;
+      1) echo "codex-plugin: plugin already absent" ;;
+      *)
+        echo "error: could not inspect Codex plugin $PLUGIN_NAME@$MARKETPLACE_NAME" >&2
+        remove_failed=1
+        ;;
+    esac
+    marketplace_state=0
+    codex_marketplace_state || marketplace_state=$?
+    case "$marketplace_state" in
+      0)
+        if ! run_cmd codex plugin marketplace remove "$MARKETPLACE_NAME"; then
+          echo "error: could not remove Codex marketplace $MARKETPLACE_NAME" >&2
+          remove_failed=1
+        fi
+        ;;
+      1) echo "codex-plugin: marketplace already absent" ;;
+      *)
+        echo "error: could not inspect Codex marketplace $MARKETPLACE_NAME" >&2
+        remove_failed=1
+        ;;
+    esac
+  fi
+  if ! configure_hud remove; then
+    echo "error: could not remove the managed Codex HUD" >&2
+    remove_failed=1
+  fi
+  [ "$remove_failed" -eq 0 ] || exit 1
   echo "codex-plugin: removed $PLUGIN_NAME@$MARKETPLACE_NAME"
   exit 0
 fi

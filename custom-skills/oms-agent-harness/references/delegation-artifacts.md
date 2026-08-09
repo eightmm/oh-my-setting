@@ -10,18 +10,14 @@ oms agent-run --to codex --repo . --mode write --prompt "Implement the bounded f
 The harness leaves model choice to the provider unless the caller passes an
 explicit `--model`. Use `oms models` to inspect cached provider catalogs,
 `--model` for an exact model, and `--fallback-model` for an explicit backup.
-Only a recognized capacity error
-may retry, at most once; a write attempt that changed its worktree is never
-retried, including changes to ignored files. Antigravity read fallback receives
-a freshly recreated isolation worktree. Provider/class mappings can be overridden with variables such as
-`OMS_MODEL_CODEX_FAST`, `OMS_MODEL_CLAUDE_BALANCED`, and
-`OMS_MODEL_ANTIGRAVITY_DEEP`.
+Only a recognized capacity error may use that backup, at most once; a write
+attempt that changed its worktree is never retried, including changes to
+ignored files. See [model-routing.md](model-routing.md) for catalog recovery.
 
 Reasoning effort is passed only when named with `--reasoning-effort` and is
-validated against the selected model's cached scale. Use `--reasoning-effort` for
-Codex or Claude. Antigravity exposes effort through its model variants rather
-than a separate flag, so select an explicit Low/Medium/High model there. If a
-custom variant does not identify its effort, provenance leaves effort unset.
+validated against the selected model's cached scale. Codex, Claude, and
+Antigravity receive the provider-specific control only when their capability
+snapshot reports support.
 
 Read mode cannot edit the repo. Write mode uses an isolated worktree and
 returns an artifact log plus patch; workers cannot commit or push. Outbound
@@ -32,8 +28,8 @@ Use `--export-only` for read calls/reviews when another provider must not be
 called directly; the export records the validated model route. Then import the
 answer with `oms artifact-index import`.
 
-Artifacts are indexed under `.oms/artifacts/index.jsonl`, including selected
-model class/model, reasoning effort, and fallback outcome. Inspect with:
+Artifacts are indexed under `.oms/artifacts/index.jsonl`, including the
+selected model route, reasoning effort, and fallback outcome. Inspect with:
 
 ```bash
 oms artifact-index --repo . latest

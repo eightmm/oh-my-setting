@@ -329,7 +329,8 @@ EOF
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T --verify true >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
 
-  HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" --plan-task t1 --no-verify \
     >"$project/out" 2>"$project/err" &
   dpid=$!
@@ -370,15 +371,19 @@ PY
     fail "gc should sweep the orphan marker"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "ready"' ||
     fail "gc should release the crashed worker's plan task"
-  # The SIGKILLed delegate cannot clean its worktree tmpdir. Remove the leaked
-  # dir (matched by its residue marker pointing at THIS test repo) — otherwise
-  # the NEXT suite run's doctor residue check sees it and fails.
+  # The SIGKILLed delegate cannot clean its managed worktree directory. The
+  # shared residue cleaner must scan the private delegate root as well as
+  # TMPDIR, remove the exact marked directory, and prune its Git registration.
   local leaked
-  for leaked in "${TMPDIR:-/tmp}"/oh-my-setting-delegate.*; do
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
+    "$ROOT/scripts/cleanup.sh" --apply >"$project/cleanup.out"
+  for leaked in "$home_dir/.cache/oh-my-setting/worktrees"/oh-my-setting-delegate.*; do
     [ -d "$leaked" ] || continue
     grep -Fq "repo=$project" "$leaked/.oh-my-setting-tmp" 2>/dev/null || continue
-    rm -rf "$leaked"
+    fail "cleanup left a crashed delegate worktree: $leaked"
   done
+  grep -Fq 'dead harness temp dir' "$project/cleanup.out" ||
+    fail "cleanup did not report the crashed delegate worktree: $(tr '\n' ' ' < "$project/cleanup.out")"
   git -C "$project" worktree prune >/dev/null 2>&1 || true
 }
 
@@ -398,7 +403,7 @@ setup_doctor_home() {
   cat > "$home_dir/.gemini/antigravity-cli/settings.json" <<'JSON'
 {
   "permissions": {
-    "allow": ["command(*)", "read_file(*)", "mcp(*)"]
+    "allow": ["command(*)", "read_file(*)"]
   }
 }
 JSON
@@ -1581,7 +1586,7 @@ JSON
 test_doctor_clean_harness_state_has_no_warnings() {
   local project="$TMP/doctor-harness-clean"
   local home_dir="$TMP/doctor-home-clean"
-  local out
+  local out harness_out
 
   setup_doctor_home "$home_dir"
   mkdir -p "$project/.oms/artifacts" "$project/.oms/task" "$project/.oms/memory"
@@ -1600,7 +1605,10 @@ test_doctor_clean_harness_state_has_no_warnings() {
   printf '%s' "$out" | grep -Fq 'ok: artifact index references' || fail "missing reference ok"
   printf '%s' "$out" | grep -Fq 'ok: harness task/memory sensitive scan' ||
     fail "missing sensitive scan ok"
-  if printf '%s' "$out" | grep -Fq 'warn:'; then
+  # This case owns the harness-state section, not the developer machine's
+  # optional external tool versions. Keep host drift from masking its scope.
+  harness_out="$(printf '%s\n' "$out" | sed -n '/^# harness state/,$p')"
+  if printf '%s' "$harness_out" | grep -Fq 'warn:'; then
     fail "clean harness state should not warn: $out"
   fi
 }
@@ -1751,15 +1759,17 @@ test_installer_enables_auto_update_by_default() {
 }
 
 test_installer_installs_provider_clis_by_default() {
-  # The council is the product: an install that leaves the peers to be added
-  # later ships a harness with one voice. Assert the default rather than the
-  # flag, because the flag is what nobody passes.
+  # The council is the product: initial setup must not record a partial harness
+  # with its peers and service CLIs omitted.
   grep -Fq 'INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"' "$ROOT/install.sh" ||
-    fail "installer must install Node/uv/provider CLIs/gh/ntn by default"
-  grep -Fq -- '--no-tools' "$ROOT/install.sh" ||
-    fail "installer must keep an explicit escape hatch from the tool install"
-  for tool in '"@anthropic-ai/claude-code" "claude"' '"@openai/codex" "codex"' \
-      '"ntn" "ntn"' 'install_antigravity' 'install_gh'; do
+    fail "installer must require Node/uv/provider CLIs/gh/ntn"
+  if grep -Fq -- '--no-tools' "$ROOT/install.sh"; then
+    fail "installer must not expose an incomplete no-tools profile"
+  fi
+  # npm package/binary identities now come from tools.lock.json; this script
+  # must invoke each locked logical tool plus the direct installers.
+  for tool in 'install_npm_global claude' 'install_npm_global codex' \
+      'install_npm_global ntn' 'install_antigravity' 'install_gh'; do
     grep -Fq "$tool" "$ROOT/scripts/install-tools.sh" ||
       fail "install-tools must cover $tool"
   done
@@ -3136,9 +3146,11 @@ test_delegate_embeds_review_findings() {
 
 test_delegate_fake_worker_apply() {
   local project="$TMP/delegate-apply"
-  local artifact_dir="$project/artifacts"
-  local bin_dir="$project/bin"
-  local home_dir="$project/home"
+  # Landing requires the main tree to stay clean, including untracked files;
+  # keep caller-selected artifacts outside the repository for this success case.
+  local artifact_dir="$TMP/delegate-apply-artifacts"
+  local bin_dir="$TMP/delegate-apply-bin"
+  local home_dir="$TMP/delegate-apply-home"
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
@@ -6246,6 +6258,9 @@ test_update_refreshes_tools_only_when_requested() {
   mkdir -p "$project/scripts/lib" "$bin"
   cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$project/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor install-autoupdate uninstall-autoupdate install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
     chmod +x "$project/scripts/$script.sh"
@@ -6305,6 +6320,9 @@ test_update_auto_refreshes_only_installed_codex_plugin() {
   mkdir -p "$project/scripts/lib" "$bin"
   cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$project/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor install-autoupdate uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
     chmod +x "$project/scripts/$script.sh"
@@ -6874,6 +6892,9 @@ test_update_preserves_auto_update_mode() {
   mkdir -p "$project/scripts/lib" "$bin"
   cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$project/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$project/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
     chmod +x "$project/scripts/$script.sh"
@@ -8601,17 +8622,64 @@ EOF
   assert_file_contains "$project/err-bounds" "--repair must be 0-3"
 }
 
-test_run_with_timeout_warns_when_unbounded() {
+test_run_with_timeout_uses_python_fallback() {
   local out="$TMP/rwt-out"
   local err="$TMP/rwt-err"
+  local python_bin
 
-  # With no timeout/gtimeout on PATH the call must still run, but the missing
-  # wall-clock guard must be visible on stderr (call sites merge it into the
-  # artifact), never a silent unbounded hang.
-  bash -c ". '$ROOT/scripts/lib/peer-common.sh'; PATH='' run_with_timeout echo fallback-ran" \
-    >"$out" 2>"$err" || fail "run_with_timeout without a timeout binary should still run the command"
-  assert_file_contains "$out" "fallback-ran"
-  assert_file_contains "$err" "runs unbounded"
+  python_bin="$(command -v python3)"
+  # Stock macOS has no timeout/gtimeout. The Python 3.9 floor supplies the
+  # same wall clock without stealing the provider prompt from stdin.
+  printf 'stdin-survived\n' |
+    OMS_PYTHON_BIN="$python_bin" \
+    OMS_RUN_BOUNDED_HELPER="$ROOT/scripts/lib/run-bounded.py" \
+    bash -c '. "$1"; PATH=""; run_with_timeout /bin/sh -c '\''IFS= read -r line; printf "stdin:%s\n" "$line"'\''' \
+      _ "$ROOT/scripts/lib/peer-common.sh" >"$out" 2>"$err" ||
+    fail "Python timeout fallback should run a bounded command"
+  assert_file_contains "$out" "stdin:stdin-survived"
+  if grep -Fq 'runs unbounded' "$err"; then
+    fail "Python timeout fallback still reported an unbounded call"
+  fi
+}
+
+test_python_timeout_fallback_kills_the_process_group() {
+  local pid_file="$TMP/rwt-python-pids"
+  local out="$TMP/rwt-python-timeout"
+  local child_script="$TMP/rwt-ignore-term-child.sh"
+  local python_bin rc=0 parent child i
+
+  python_bin="$(command -v python3)"
+  cat > "$child_script" <<'EOF'
+#!/bin/sh
+trap '' TERM
+/bin/sleep 30
+EOF
+  chmod +x "$child_script"
+  OMS_PYTHON_BIN="$python_bin" \
+    OMS_RUN_BOUNDED_HELPER="$ROOT/scripts/lib/run-bounded.py" \
+    bash -c '. "$1"; PATH=""; OMS_PEER_TIMEOUT=1s OMS_PEER_KILL_AFTER=1s run_with_timeout /bin/sh -c '\''"$1" & child=$!; printf "%s %s\n" "$$" "$child" > "$2"; wait'\'' _ "$2" "$3"' \
+      _ "$ROOT/scripts/lib/peer-common.sh" "$child_script" "$pid_file" >"$out" 2>&1 || rc=$?
+  [ "$rc" = 124 ] || fail "Python timeout fallback should exit 124, got $rc: $(cat "$out")"
+  [ -s "$pid_file" ] || fail "Python timeout fallback fixture did not start"
+  read -r parent child < "$pid_file"
+  i=0
+  while { kill -0 "$parent" 2>/dev/null || kill -0 "$child" 2>/dev/null; } && [ "$i" -lt 40 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  ! kill -0 "$parent" 2>/dev/null || fail "timed-out parent process survived"
+  ! kill -0 "$child" 2>/dev/null || fail "timed-out child process survived"
+}
+
+test_python_timeout_fallback_bounds_verifier() {
+  local python_bin rc=0
+
+  python_bin="$(command -v python3)"
+  OMS_PYTHON_BIN="$python_bin" \
+    OMS_RUN_BOUNDED_HELPER="$ROOT/scripts/lib/run-bounded.py" \
+    bash -c '. "$1"; PATH=""; OMS_PEER_VERIFY_TIMEOUT=1s OMS_PEER_KILL_AFTER=1s run_verify_with_timeout /bin/sleep 30' \
+      _ "$ROOT/scripts/lib/peer-common.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 124 ] || fail "Python verifier timeout fallback should exit 124, got $rc"
 }
 
 test_scrubber_blocks_json_quoted_secret() {
@@ -8901,8 +8969,15 @@ test_oms_dispatcher_lists_and_dispatches() {
   out="$("$bin/oms" list)" || fail "oms list should succeed"
   printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
   printf '%s' "$out" | grep -Eq '^agent-run ' || fail "oms list should include agent-run"
+  for public in agent-events agent-supervisor approval-inbox execution-profile herdr-adapter \
+    open-in ops-cockpit otel-export semantic-eval; do
+    printf '%s\n' "$out" | grep -Eq "^${public} " ||
+      fail "oms list should include new public tool: $public"
+    "$bin/oms" "$public" --help >/dev/null 2>&1 ||
+      fail "oms should dispatch new public tool: $public"
+  done
   for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
-    generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule uninstall-autoupdate write-machine-snapshot; do
+    generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule tool-lock uninstall-autoupdate write-machine-snapshot; do
     if printf '%s' "$out" | grep -Eq "^${hidden} "; then
       fail "oms list should hide internal/deprecated tool: $hidden"
     fi
@@ -8920,6 +8995,9 @@ test_oms_dispatcher_lists_and_dispatches() {
   fi
   if "$bin/oms" ../oms >/dev/null 2>&1; then
     fail "oms must reject path-like tool names"
+  fi
+  if "$bin/oms" lib/tool-lock >/dev/null 2>&1; then
+    fail "oms must reject the internal lib/tool-lock implementation"
   fi
   for hidden in skill-router turn-guard check-bash32 install-tools \
     run-capsule generate-slurm-skill generate-slurm-reference github-source \
@@ -9310,6 +9388,8 @@ PY
 
 test_patch_land_admits_then_applies() {
   local project="$TMP/patch-land"
+  local ok_patch="$TMP/patch-land-ok.patch"
+  local evil_patch="$TMP/patch-land-evil.patch"
 
   make_committed_repo "$project"
   mkdir -p "$project/scripts"
@@ -9318,10 +9398,10 @@ test_patch_land_admits_then_applies() {
   git -C "$project" add scripts/check.sh
   git -C "$project" commit -q -m "add check"
   printf 'landed\n' >> "$project/file.txt"
-  git -C "$project" diff > "$project/ok.patch"
+  git -C "$project" diff > "$ok_patch"
   git -C "$project" checkout -q file.txt
 
-  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/ok.patch" >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" >/dev/null 2>&1 ) ||
     fail "a clean-tree benign patch should land"
   grep -Fq landed "$project/file.txt" || fail "patch-land should apply the patch to the tree"
   grep -Fq '"kind": "patch-land"' "$project/.oms/artifacts/index.jsonl" ||
@@ -9331,16 +9411,16 @@ test_patch_land_admits_then_applies() {
   git -C "$project" checkout -q file.txt
   git -C "$project" reset -q --hard HEAD
   printf 'dirty\n' >> "$project/file.txt"
-  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/ok.patch" >/dev/null 2>&1 ); then
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" >/dev/null 2>&1 ); then
     fail "patch-land must refuse a dirty main tree"
   fi
   git -C "$project" checkout -q file.txt
 
   # A verifier-touching patch is rejected by admission and never applied.
   printf 'echo pwned\n' >> "$project/scripts/check.sh"
-  git -C "$project" diff > "$project/evil.patch"
+  git -C "$project" diff > "$evil_patch"
   git -C "$project" checkout -q scripts/check.sh
-  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/evil.patch" >/dev/null 2>&1 ); then
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$evil_patch" >/dev/null 2>&1 ); then
     fail "patch-land must not land a patch the admission gate rejects"
   fi
   if grep -Fq pwned "$project/scripts/check.sh"; then
@@ -9350,16 +9430,18 @@ test_patch_land_admits_then_applies() {
 
 test_patch_land_finishes_plan_task() {
   local project="$TMP/patch-land-plan"
+  local patch="$TMP/patch-land-plan.patch"
+  local artifact="$TMP/patch-land-plan-review.md"
 
   make_committed_repo "$project"
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
   printf 'work\n' >> "$project/file.txt"
-  git -C "$project" diff > "$project/p.patch"
+  git -C "$project" diff > "$patch"
   git -C "$project" checkout -q file.txt
-  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" review --id t1 --artifact "$project/review.md" --patch "$project/p.patch" >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" review --id t1 --artifact "$artifact" --patch "$patch" >/dev/null )
 
-  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$project/p.patch" --plan-task t1 --verify "true" >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$patch" --plan-task t1 --verify "true" >/dev/null 2>&1 ) ||
     fail "patch-land --plan-task should land"
   [ "$(python3 -c "import json;print(json.load(open('$project/.oms/plan/tasks.json'))['tasks']['t1']['state'])")" = "done" ] ||
     fail "a successful land should finish the coupled plan task"
@@ -9617,8 +9699,8 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should route detailed harness work to the skill"
   grep -Fq 'task-scoped executor' "$global_rules" ||
     fail "global rules should retain the write-executor safety boundary"
-  grep -Fq 'harness and native workers by phase' "$global_rules" ||
-    fail "global rules should route harness and native subagents by phase"
+  grep -Fq 'Match workers to the task' "$global_rules" ||
+    fail "global rules should route workers by task and judgment needs"
   grep -Fq 'Run commands/tests directly' "$global_rules" ||
     fail "global rules should avoid model workers for routine command execution"
   if grep -Eq '^## (Model Tiering|Native Subagent Strategies|Run Provenance & Coordination)$' "$global_rules"; then
@@ -10205,21 +10287,24 @@ test_change_guard_status_flags_stale() {
 
 test_patch_land_reject_records_and_resolves_fail_ledger() {
   local project="$TMP/land-ledger"
+  local err1="$TMP/land-ledger.err1"
+  local out2="$TMP/land-ledger.out2"
+  local err2="$TMP/land-ledger.err2"
 
   make_committed_repo "$project"
   printf 'change\n' >> "$project/file.txt"
   ( cd "$project" && git diff > "$TMP/land-ledger.patch" && git checkout -- file.txt )
   local rc=0
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$TMP/land-ledger.patch" --verify false ) \
-    >/dev/null 2>"$project/err1" || rc=$?
+    >/dev/null 2>"$err1" || rc=$?
   [ "$rc" = "1" ] || fail "rejected land should exit 1, got $rc"
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list ) | grep -Fq "patch-land REJECT" ||
     fail "rejection should be recorded in the fail-ledger"
   # Second attempt warns about the known rejection, then lands and resolves it.
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$TMP/land-ledger.patch" --verify true ) \
-    >"$project/out2" 2>"$project/err2" || fail "admissible retry should land"
-  assert_file_contains "$project/err2" "rejected before"
-  assert_file_contains "$project/out2" "LANDED"
+    >"$out2" 2>"$err2" || fail "admissible retry should land"
+  assert_file_contains "$err2" "rejected before"
+  assert_file_contains "$out2" "LANDED"
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) | grep -Fq "patch-land REJECT" &&
     fail "successful land should resolve the recorded rejection"
   assert_file_contains "$project/file.txt" "change"
@@ -10227,6 +10312,8 @@ test_patch_land_reject_records_and_resolves_fail_ledger() {
 
 test_patch_land_plan_task_supplies_patch() {
   local project="$TMP/land-plan-patch"
+  local out="$TMP/land-plan.out"
+  local err="$TMP/land-plan.err"
 
   make_committed_repo "$project"
   printf 'from-plan\n' >> "$project/file.txt"
@@ -10237,8 +10324,8 @@ test_patch_land_plan_task_supplies_patch() {
   "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t1 --artifact "$TMP/land-plan.md" --patch "$TMP/land-plan.patch" >/dev/null
 
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t1 --verify true ) \
-    >"$project/out" 2>"$project/err" || fail "--plan-task with stored patch should land"
-  assert_file_contains "$project/err" "using patch from plan task t1"
+    >"$out" 2>"$err" || fail "--plan-task with stored patch should land"
+  assert_file_contains "$err" "using patch from plan task t1"
   assert_file_contains "$project/file.txt" "from-plan"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "done"' ||
     fail "landed plan task should be done"
@@ -11337,6 +11424,7 @@ test_install_codex_plugin_registers_marketplace() {
   local bin="$d/bin"
   local log="$d/codex.log"
   local codex_home="$d/codex-home"
+  local status out
 
   mkdir -p "$bin" "$codex_home"
   cat > "$codex_home/config.toml" <<'EOF'
@@ -11347,13 +11435,45 @@ EOF
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CODEX_LOG"
 if [ "$1 $2 $3" = "plugin marketplace list" ]; then
+  [ "${OMS_TEST_CODEX_LOOKUP_FAIL:-}" != marketplace ] || exit 24
+  if [ -f "$CODEX_HOME/.test-marketplace-installed" ]; then
+    printf 'oh-my-setting-local %s\n' "$OMS_TEST_MARKETPLACE_ROOT"
+  fi
   exit 0
 fi
+case "$1 $2" in
+  "plugin list")
+    [ "${OMS_TEST_CODEX_LOOKUP_FAIL:-}" != plugin ] || exit 24
+    if [ -f "$CODEX_HOME/.test-plugin-installed" ]; then
+      printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'
+    else
+      printf '%s\n' '{"installed":[]}'
+    fi
+    ;;
+  "plugin add")
+    touch "$CODEX_HOME/.test-plugin-installed"
+    ;;
+  "plugin remove")
+    [ "${OMS_TEST_CODEX_REMOVE_FAIL:-0}" != 1 ] || exit 23
+    [ -f "$CODEX_HOME/.test-plugin-installed" ] || exit 25
+    rm -f "$CODEX_HOME/.test-plugin-installed"
+    ;;
+esac
+case "$1 $2 $3" in
+  "plugin marketplace add")
+    touch "$CODEX_HOME/.test-marketplace-installed"
+    ;;
+  "plugin marketplace remove")
+    [ -f "$CODEX_HOME/.test-marketplace-installed" ] || exit 25
+    rm -f "$CODEX_HOME/.test-marketplace-installed"
+    ;;
+esac
 exit 0
 EOF
   chmod +x "$bin/codex"
 
-  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
   assert_file_contains "$log" "plugin marketplace list"
   assert_file_contains "$log" "plugin marketplace add $ROOT"
@@ -11374,7 +11494,8 @@ assert row["tui"]["status_line"][-1] == "git-branch"
 PY
 
   : > "$log"
-  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
   assert_file_contains "$log" "plugin remove oh-my-setting@oh-my-setting-local"
   assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
@@ -11387,15 +11508,78 @@ PY
 [tui]
 status_line = ["model", "current-dir"]
 EOF
-  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
   assert_file_contains "$codex_home/config.toml" 'status_line = ["model", "current-dir"]'
   if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
     fail "Codex installer should preserve a user-owned status line"
   fi
-  CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="$bin:/usr/bin:/bin" \
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
   assert_file_contains "$codex_home/config.toml" 'status_line = ["model", "current-dir"]'
+
+  cat > "$codex_home/config.toml" <<'EOF'
+[tui]
+# >>> oh-my-setting managed Codex HUD >>>
+status_line = ["model-with-reasoning", "context-remaining", "five-hour-limit", "weekly-limit", "git-branch"]
+# <<< oh-my-setting managed Codex HUD <<<
+EOF
+  touch "$codex_home/.test-plugin-installed" "$codex_home/.test-marketplace-installed"
+  : > "$log"
+  status=0
+  out="$(CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" OMS_TEST_CODEX_REMOVE_FAIL=1 \
+    "$ROOT/scripts/install-codex-plugin.sh" --remove 2>&1)" || status=$?
+  [ "$status" -ne 0 ] || fail "Codex plugin removal failure was reported as success"
+  assert_file_contains "$log" "plugin remove oh-my-setting@oh-my-setting-local"
+  assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
+  if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
+    fail "Codex plugin failure prevented independent managed HUD cleanup"
+  fi
+  if printf '%s' "$out" | grep -Fq 'codex-plugin: removed'; then
+    fail "Codex plugin removal printed false success"
+  fi
+
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null ||
+    fail "Codex plugin removal could not recover after a partial failure"
+  : > "$log"
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null ||
+    fail "already-absent Codex plugin removal should be idempotent"
+  if grep -Eq '^plugin (remove|marketplace remove)' "$log"; then
+    fail "already-absent Codex plugin removal invoked a destructive command"
+  fi
+
+  touch "$codex_home/.test-plugin-installed" "$codex_home/.test-marketplace-installed"
+  : > "$log"
+  status=0
+  out="$(CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" OMS_TEST_CODEX_LOOKUP_FAIL=plugin \
+    "$ROOT/scripts/install-codex-plugin.sh" --remove 2>&1)" || status=$?
+  [ "$status" -ne 0 ] || fail "Codex plugin state lookup failure was ignored"
+  [ -f "$codex_home/.test-plugin-installed" ] ||
+    fail "Codex plugin lookup failure mutated the plugin"
+  assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null ||
+    fail "Codex removal could not recover after a state lookup failure"
+
+  cat > "$codex_home/config.toml" <<'EOF'
+[tui]
+# >>> oh-my-setting managed Codex HUD >>>
+status_line = ["model-with-reasoning", "context-remaining", "five-hour-limit", "weekly-limit", "git-branch"]
+# <<< oh-my-setting managed Codex HUD <<<
+EOF
+  status=0
+  out="$(CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" --remove 2>&1)" || status=$?
+  [ "$status" -ne 0 ] || fail "missing codex CLI was accepted during plugin removal"
+  if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
+    fail "missing codex CLI prevented independent managed HUD cleanup"
+  fi
 }
 
 test_codex_plugin_has_no_vague_default_prompt() {
@@ -11451,6 +11635,17 @@ test_doctor_auto_repairs_installed_codex_plugin() {
   mkdir -p "$home" "$bin"
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
     "$ROOT/scripts/link.sh" >/dev/null
+  python3 - "$receipt" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["components"]["codex_plugin"] = True
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
   version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
     "$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json")"
   cache="$home/.codex/plugins/cache/oh-my-setting-local/oh-my-setting/$version"
@@ -11529,7 +11724,7 @@ exit 91
 EOF
   chmod +x "$foreign/scripts/skill-doctor.sh"
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
-    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    PATH="/usr/bin:/bin" OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
     OH_MY_SETTING_CLAUDE_HOOKS=0 \
     "$foreign/scripts/doctor.sh" >"$d/doctor" ||
     fail "a foreign checkout should validate the canonical receipt owner"
@@ -11537,7 +11732,7 @@ EOF
 
   ln -sfn "$foreign/AGENTS.md" "$home/.codex/AGENTS.md"
   HOME="$home" XDG_CONFIG_HOME="$d/config" OMS_INSTALL_RECEIPT="$receipt" \
-    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    PATH="/usr/bin:/bin" OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
     OH_MY_SETTING_CLAUDE_HOOKS=0 \
     "$foreign/scripts/doctor.sh" --repair >"$d/repair" ||
     fail "doctor --repair should relink from the valid canonical owner"
@@ -12852,7 +13047,7 @@ assert [a["provider"] for a in answers] == ["codex"], answers
 
 test_patch_land_records_a_recoverable_transaction() {
   local project="$TMP/landing-txn"
-  local patch="$project/change.patch"
+  local patch="$TMP/landing-txn.patch"
 
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
@@ -13145,8 +13340,9 @@ test_agent_call_declares_its_work_phase() {
 
 test_patch_land_completes_only_when_its_records_land() {
   local project="$TMP/landing-receipts"
-  local patch="$project/change.patch"
+  local patch="$TMP/landing-receipts.patch"
   local out
+  local rc=0
 
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
@@ -13156,8 +13352,9 @@ test_patch_land_completes_only_when_its_records_land() {
   : > "$project/.oms/artifacts/index.jsonl"
   chmod 444 "$project/.oms/artifacts/index.jsonl"
 
-  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" ||
-    fail "the apply itself should still succeed: $out"
+  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "an applied patch with missing receipts must not report terminal success: $out"
   printf '%s' "$out" | grep -Fq 'records are incomplete' ||
     fail "an unwritable lineage row must be reported: $out"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land with missing records must not be complete"
@@ -13180,7 +13377,7 @@ PY
 
 test_patch_land_refuses_a_tree_that_moved_during_admission() {
   local project="$TMP/landing-toctou"
-  local patch="$project/change.patch"
+  local patch="$TMP/landing-toctou.patch"
   local out
   local rc
 
@@ -13916,7 +14113,7 @@ test_thread_pointer_does_not_cross_tasks() {
 
 test_landing_refuses_to_apply_without_a_recorded_intent() {
   local project="$TMP/landing-failclosed"
-  local patch="$project/change.patch"
+  local patch="$TMP/landing-failclosed.patch"
   local rc=0
   local out
 
@@ -13955,7 +14152,7 @@ test_provider_permissions_grants_only_what_is_missing() {
   python3 - "$settings" <<'PY' || fail "apply must write exactly the profile's rules"
 import json, sys
 allow = json.load(open(sys.argv[1]))["permissions"]["allow"]
-assert allow == ["read_file(*)", "command(*)", "mcp(*)",
+assert allow == ["read_file(*)", "command(*)",
                  "write_file(/tmp)", "unsandboxed(uv)"], allow
 PY
 
@@ -13982,6 +14179,308 @@ PY
   out="$(PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
     --allow-command '*' --settings "$settings" 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "a wildcard sandbox escape should be refused: $out"
+}
+
+test_peer_delegate_uses_managed_private_worktree_root() {
+  local project="$TMP/delegate-private-root"
+  local home_dir="$TMP/delegate-private-home"
+  local cache_dir="$TMP/delegate-private-cache"
+  local managed_root="$cache_dir/oh-my-setting/worktrees"
+  local out worktree worktree_parent
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir" "$cache_dir"
+  out="$(HOME="$home_dir" XDG_CACHE_HOME="$cache_dir" \
+    OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --repo "$project" --to codex --prompt 'private root regression' \
+      --no-verify --keep-worktree 2>&1)" ||
+    fail "delegate dry-run should create an inspectable worktree: $out"
+  worktree="$(printf '%s\n' "$out" | sed -n 's/^worktree kept: //p' | tail -n 1)"
+  [ -n "$worktree" ] || fail "delegate did not report its kept worktree: $out"
+  case "$worktree" in
+    "$managed_root"/*/wt) ;;
+    *) fail "delegate worktree escaped the managed root: $worktree" ;;
+  esac
+  [ -d "$managed_root" ] && [ ! -L "$managed_root" ] ||
+    fail "managed delegate root must be a real directory"
+  python3 - "$managed_root" <<'PY' || fail "managed delegate root must be mode 0700"
+import os, stat, sys
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o700
+PY
+
+  worktree_parent="$(dirname "$worktree")"
+  git -C "$project" worktree remove --force "$worktree" >/dev/null 2>&1 ||
+    fail "could not clean the kept delegate worktree"
+  rm -rf "$worktree_parent"
+}
+
+test_provider_permissions_apply_preserves_a_concurrent_settings_edit() {
+  local dir="$TMP/provider-perms-apply-cas"
+  local settings="$dir/settings.json"
+  local managed="$settings.oh-my-setting-permissions.json"
+  local bin="$dir/bin"
+  local pythonpath="$dir/pythonpath"
+  local ready="$dir/backup-copy-ready"
+  local continue="$dir/backup-copy-continue"
+  local out="$dir/apply.out"
+  local pid rc=0 attempts=0
+
+  mkdir -p "$bin" "$pythonpath"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/agy"
+  chmod +x "$bin/agy"
+  cat > "$settings" <<'EOF'
+{
+  "theme": "user-before",
+  "permissions": {
+    "allow": ["read_file(*)", "user(existing)"]
+  }
+}
+EOF
+
+  # Pause the standard-library backup copy after apply has read its snapshot.
+  # This is process-local dependency injection: production code gets no test
+  # hook, while the fixture can deterministically land a concurrent edit in
+  # the old read -> write gap.
+  cat > "$pythonpath/shutil.py" <<'PY'
+import os
+import time
+
+
+def rmtree(path, ignore_errors=False, onerror=None):
+    # tempfile only captures this symbol while provider-permissions uses
+    # mkstemp; no temporary-directory cleanup runs in this fixture.
+    raise AssertionError("unexpected shutil.rmtree call: %s" % path)
+
+
+def copyfileobj(source, target, length=1024 * 1024):
+    ready = os.environ["OMS_TEST_PP_COPY_READY"]
+    proceed = os.environ["OMS_TEST_PP_COPY_CONTINUE"]
+    with open(ready, "w", encoding="utf-8") as handle:
+        handle.write("ready\n")
+    deadline = time.time() + 10
+    while not os.path.exists(proceed):
+        if time.time() >= deadline:
+            raise RuntimeError("timed out waiting for concurrent edit")
+        time.sleep(0.01)
+    while True:
+        chunk = source.read(length)
+        if not chunk:
+            return
+        target.write(chunk)
+PY
+
+  env PYTHONPATH="$pythonpath" OMS_TEST_PP_COPY_READY="$ready" \
+    OMS_TEST_PP_COPY_CONTINUE="$continue" PATH="$bin:$PATH" \
+    "$ROOT/scripts/provider-permissions.sh" --apply --profile consult \
+    --settings "$settings" >"$out" 2>&1 &
+  pid=$!
+  while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 500 ] || break
+    sleep 0.01
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$continue"
+    wait "$pid" || true
+    fail "permission apply did not reach the concurrent-edit boundary: $(cat "$out")"
+  fi
+
+  PYTHONPATH='' python3 - "$settings" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    cfg = json.load(handle)
+cfg["theme"] = "user-during-apply"
+cfg["permissions"]["allow"].append("user(during-apply)")
+fd, temporary = tempfile.mkstemp(prefix=".concurrent-settings.",
+                                 dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(cfg, handle, indent=2)
+        handle.write("\n")
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+  : > "$continue"
+  wait "$pid" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "permission apply overwrote a concurrent settings edit"
+  grep -Fq 'settings changed during permission apply' "$out" ||
+    fail "concurrent permission refusal was not explained: $(cat "$out")"
+  python3 - "$settings" <<'PY' || fail "concurrent permission edit was not preserved"
+import json
+import sys
+
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+assert cfg["theme"] == "user-during-apply", cfg
+assert cfg["permissions"]["allow"] == [
+    "read_file(*)", "user(existing)", "user(during-apply)"
+], cfg
+PY
+  [ ! -e "$managed" ] ||
+    fail "failed permission apply claimed ownership it did not grant"
+}
+
+test_provider_permissions_tracks_and_revokes_only_managed_rules() {
+  local dir="$TMP/provider-perms-managed"
+  local settings="$dir/settings.json"
+  local managed="$settings.oh-my-setting-permissions.json"
+  local bin="$dir/bin"
+  local before after out rc=0 victim victim_before
+
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/agy"
+  chmod +x "$bin/agy"
+  cat > "$settings" <<'EOF'
+{
+  "theme": "user-before",
+  "permissions": {
+    "allow": ["read_file(*)", "user(existing)"]
+  }
+}
+EOF
+
+  for help_command in \
+      "$ROOT/install.sh --help" \
+      "$ROOT/scripts/provider-permissions.sh --help"; do
+    out="$(bash -c "$help_command")" || fail "permission help failed: $help_command"
+    for rule in 'read_file(*)' 'command(*)'; do
+      printf '%s' "$out" | grep -Fq "$rule" ||
+        fail "permission consent omitted $rule: $help_command"
+    done
+    if printf '%s' "$out" | grep -Fq 'mcp(*)'; then
+      fail "permission consent must not advertise an all-MCP grant: $help_command"
+    fi
+  done
+
+  PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" \
+    --apply --profile consult --settings "$settings" >/dev/null ||
+    fail "managed consult permission apply failed"
+  python3 - "$settings" "$managed" <<'PY' || fail "permission ownership was recorded incorrectly"
+import json, sys
+settings, managed = sys.argv[1:]
+cfg = json.load(open(settings, encoding="utf-8"))
+assert cfg["theme"] == "user-before", cfg
+assert cfg["permissions"]["allow"] == [
+    "read_file(*)", "user(existing)", "command(*)"
+], cfg
+state = json.load(open(managed, encoding="utf-8"))
+assert state == {"schema": 1, "rules": ["command(*)"]}, state
+backup = json.load(open(settings + ".bak", encoding="utf-8"))
+assert backup["permissions"]["allow"] == ["read_file(*)", "user(existing)"], backup
+PY
+
+  # Changes after installation are user-owned. A duplicate of one managed rule
+  # represents a later user grant; removal may consume only the occurrence the
+  # sidecar owns, not every equal string in the list.
+  python3 - "$settings" <<'PY'
+import json, sys
+path = sys.argv[1]
+cfg = json.load(open(path, encoding="utf-8"))
+cfg["theme"] = "user-after"
+cfg["permissions"]["allow"].extend(["user(after)", "command(*)"])
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(cfg, handle, indent=2)
+    handle.write("\n")
+PY
+
+  PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" \
+    --apply --profile consult --settings "$settings" >/dev/null ||
+    fail "repeated permission apply should be idempotent"
+  python3 - "$settings.bak" <<'PY' || fail "repeat apply overwrote the original backup"
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+assert cfg["theme"] == "user-before", cfg
+assert "user(after)" not in cfg["permissions"]["allow"], cfg
+PY
+
+  # Removal is local JSON surgery and must work even when agy is no longer on
+  # PATH. It removes only sidecar-owned occurrences and then deletes the sidecar.
+  PATH="/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" \
+    --remove --settings "$settings" >/dev/null ||
+    fail "managed permission removal failed without agy"
+  [ ! -e "$managed" ] || fail "managed permission sidecar survived removal"
+  python3 - "$settings" <<'PY' || fail "permission removal overwrote user rules"
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+assert cfg["theme"] == "user-after", cfg
+assert cfg["permissions"]["allow"] == [
+    "read_file(*)", "user(existing)", "user(after)", "command(*)"
+], cfg
+PY
+
+  before="$(cksum < "$settings")"
+  PATH="/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" \
+    --remove --settings "$settings" >/dev/null ||
+    fail "repeated permission removal should be idempotent"
+  after="$(cksum < "$settings")"
+  [ "$before" = "$after" ] || fail "idempotent removal rewrote user settings"
+
+  printf '{not-json\n' > "$managed"
+  before="$(cksum < "$settings")"
+  rc=0
+  out="$(PATH="/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" \
+    --remove --settings "$settings" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid permission ownership state was ignored"
+  after="$(cksum < "$settings")"
+  [ "$before" = "$after" ] || fail "failed permission removal mutated settings"
+  printf '%s' "$out" | grep -Fq 'managed permission state' ||
+    fail "invalid permission ownership failure was not explained: $out"
+  rm -f "$managed"
+
+  # Ownership metadata is privileged input: following a planted sidecar
+  # symlink could otherwise turn uninstall into an arbitrary-file rewriter.
+  victim="$dir/user-owned.json"
+  printf '%s\n' '{"schema":1,"rules":["command(*)"]}' > "$victim"
+  if ln -s "$victim" "$managed" 2>/dev/null; then
+    before="$(cksum < "$settings")"
+    victim_before="$(cksum < "$victim")"
+    rc=0
+    out="$(PATH="/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" \
+      --remove --settings "$settings" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || fail "a symbolic-link ownership sidecar was trusted"
+    [ "$before" = "$(cksum < "$settings")" ] ||
+      fail "symbolic-link ownership failure mutated settings"
+    [ "$victim_before" = "$(cksum < "$victim")" ] ||
+      fail "symbolic-link ownership failure mutated its target"
+    printf '%s' "$out" | grep -Fq 'symbolic link' ||
+      fail "symbolic-link ownership refusal was not explained: $out"
+    rm -f "$managed" "$victim"
+  fi
+
+  python3 - "$managed" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema": 1,
+        "rules": ["command(*)"],
+        "removal": {
+            "before_sha256": "0" * 64,
+            "after_sha256": "1" * 64,
+        },
+    }, handle)
+PY
+  before="$(cksum < "$settings")"
+  rc=0
+  out="$(PATH="/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" \
+    --remove --settings "$settings" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale permission-removal journal was replayed"
+  [ "$before" = "$(cksum < "$settings")" ] ||
+    fail "stale permission-removal journal overwrote concurrent user edits"
+  [ -f "$managed" ] || fail "failed permission-removal retry lost ownership state"
+  printf '%s' "$out" | grep -Fq 'settings changed' ||
+    fail "stale permission-removal journal failure was not explained: $out"
+  rm -f "$managed"
 }
 
 test_provider_permissions_toolchains_follow_the_machine() {
@@ -14444,7 +14943,7 @@ EOF
 
 test_landing_refuses_while_another_landing_holds_the_repo() {
   local project="$TMP/landing-serialized"
-  local patch="$project/change.patch"
+  local patch="$TMP/landing-serialized.patch"
   local holder_pid
   local waited=0
   local rc=0
@@ -14480,7 +14979,7 @@ test_landing_refuses_while_another_landing_holds_the_repo() {
   wait "$holder_pid" 2>/dev/null || true
 
   [ "$rc" != 0 ] || fail "a concurrent landing should be refused: $out"
-  printf '%s' "$out" | grep -Fq 'another landing is in progress' ||
+  printf '%s' "$out" | grep -Fq 'another landing or recovery is in progress' ||
     fail "the refusal should name the reason: $out"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "the refused landing must not have applied anything"

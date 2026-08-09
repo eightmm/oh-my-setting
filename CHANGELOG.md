@@ -27,6 +27,32 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `PROVIDER:model=NAME` targets.
 
 ### Changed
+- Initial setup now requires the provider/service toolchain instead of exposing
+  a partial `--no-tools` install. Exact releases and payload integrity are
+  repository-owned in `tools.lock.json`; downloaded artifacts are verified
+  before extraction or execution. Uninstall keeps those external tools, but
+  stops before unlink or purge when any managed integration removal fails.
+- Antigravity permission consent now names both user-global grants; all-MCP
+  access remains approval-gated. Apply tracks only newly added rules; uninstall
+  revokes those without restoring a stale whole-file backup over later edits.
+  Delegate exceptions reject command lines, wildcards, and rule injection;
+  worktree parents are normalized absolute paths.
+- Install, update, doctor repair, and uninstall now share one user-wide
+  lifecycle lock. Dirty managed checkouts fail closed, pinned-ref update
+  failures require an explicit edge fallback, and dirty purge requires an
+  explicit destructive uninstall override. Lock ownership survives `exec`,
+  but a Bash subshell cannot adopt or release its parent's live lock.
+- Exact `--model` routes no longer switch to a catalog or provider default;
+  only an explicit `--fallback-model` gets one capacity retry. Provider-default
+  routes retain bounded catalog safeguard recovery, filtered by each model's
+  effort scale. Prompt echoes no longer masquerade as policy decisions.
+- Receipt-driven auto-update now shares one apply lock, skips dirty/ahead/
+  diverged state, and refuses a ref that moves after ancestry preflight.
+  Provider and verifier calls use a Python 3.9 wall-clock fallback when GNU
+  `timeout` is absent instead of running forever.
+- The gate now fingerprints `.oms` contents, modes, links, and directories.
+  Python 3.9 gets a real CI leg, and the Codex HUD refuses unvalidated existing
+  TOML when neither `tomllib` nor `tomli` is available.
 - The harness now notices recurring successful tool usage, not only repeated
   failures. The fail-ledger hook appends a content-free `{family, day}` row
   to `.oms/usage.jsonl` when a Bash command matches a tool-domain family
@@ -77,6 +103,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- Direct write attempts now reach review only after their verifier passes.
+  Supervisor cancellation is monotonic across launch; POSIX process groups and
+  Windows kill-on-close Job Objects are reaped, and stale supervisor queues
+  missing a runtime record reconcile to blocked. Lifecycle locks detect PID
+  reuse and recheck a stale generation under a crash-safe recovery lock.
+- Patch approvals now bind the verifier hash/mode, ML mode, frozen executor and
+  soul, plus every admission exception. Worktree-residue cleanup derives and
+  validates its managed child instead of trusting a worker-written path. Exact
+  approval checks no longer disappear under optimized Python.
+- Operator exports reject wrong-typed telemetry, never parent spans across
+  traces, and publish no-clobber files atomically. Semantic evaluation freezes
+  spec/patch bytes, requires explicit host-check consent, bounds process output
+  and descendants, and treats local judge provenance as advisory.
 - A dead council seat is bookkept like a live one. A timed-out or failed
   seat used to reach only the artifact index — the thread the next agent
   reads as the conversation of record silently missed the seat, no
@@ -198,6 +237,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   used.
 
 ### Added
+- Durable attempt events, a bounded supervisor, private one-use CAS approvals,
+  execution-profile preflight, and an optional Herdr adapter with no landing
+  authority.
+- Probed VS Code/Stably Orca/Codex launch plans, a read-only operations cockpit,
+  local content-free OTLP JSONL export, and advisory semantic patch evaluation.
 - Failure and updater attention now say who deserves it. Every surface that
   counts unresolved failures — repo-state, inbox, and the session-start
   resume block — shares one split: a hook row seen once is `retiring`

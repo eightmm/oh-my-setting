@@ -76,10 +76,29 @@ PRIVATE_JSON="$("$ROOT/scripts/project-private.sh" --repo "$REPO" status --json 
 # an agent resuming here most needs to distrust.
 AUTOUPDATE_ATTENTION="$("$ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
 
+RS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-repo-state.XXXXXX")"
+trap 'rm -rf "$RS_TMP"' EXIT HUP INT TERM
+LIFECYCLE_HEALTHY=1
+"$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json \
+  > "$RS_TMP/lifecycle.json" 2>/dev/null || {
+    LIFECYCLE_HEALTHY=0
+    printf '[]\n' > "$RS_TMP/lifecycle.json"
+  }
+APPROVAL_HEALTHY=1
+"$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json \
+  > "$RS_TMP/approvals.json" 2>/dev/null || {
+    APPROVAL_HEALTHY=0
+    printf '[]\n' > "$RS_TMP/approvals.json"
+  }
+
 OMS_RS_AUTOUPDATE="$AUTOUPDATE_ATTENTION" \
 OMS_RS_REPO="$REPO" \
 OMS_RS_JSON="$AS_JSON" \
 OMS_RS_PRIVATE="$PRIVATE_JSON" \
+OMS_RS_LIFECYCLE_FILE="$RS_TMP/lifecycle.json" \
+OMS_RS_LIFECYCLE_HEALTHY="$LIFECYCLE_HEALTHY" \
+OMS_RS_APPROVAL_FILE="$RS_TMP/approvals.json" \
+OMS_RS_APPROVAL_HEALTHY="$APPROVAL_HEALTHY" \
 OMS_RS_PLAN_TTL="${OMS_PLAN_CLAIM_TTL:-3600}" \
 OMS_RS_HOOK_FAIL_TTL="${OMS_HOOK_FAIL_TTL:-86400}" \
 OMS_RS_REVIEW_TTL="${OMS_PLAN_REVIEW_TTL:-86400}" \
@@ -148,6 +167,68 @@ def oms(*parts):
 # Machine consumers key on this the way artifact-index/model-doctor do;
 # bump it only with a deliberate output-contract change.
 state = {"schema": 1}
+
+# --- Durable agent attempts and private approvals ---------------------------
+def load_json_file(path, fallback):
+    try:
+        value = json.load(open(path, encoding="utf-8"))
+        return value if isinstance(value, type(fallback)) else fallback
+    except Exception:
+        return fallback
+
+
+attempts = load_json_file(os.environ["OMS_RS_LIFECYCLE_FILE"], [])
+attempt_by_state = {}
+for attempt in attempts:
+    key = str(attempt.get("state") or "unknown")
+    attempt_by_state[key] = attempt_by_state.get(key, 0) + 1
+attention_states = {"waiting_input", "waiting_approval", "blocked"}
+agent_operations = {
+    "healthy": os.environ["OMS_RS_LIFECYCLE_HEALTHY"] == "1",
+    "total": len(attempts),
+    "active": sum(not bool(item.get("terminal")) for item in attempts),
+    "by_state": attempt_by_state,
+    "needs_attention": [
+        {key: item.get(key) for key in (
+            "attempt_id", "state", "provider", "tool", "task_id", "reason_code", "updated_at"
+        ) if item.get(key) not in (None, "")}
+        for item in attempts if item.get("state") in attention_states
+    ][-10:],
+    "latest": [
+        {key: item.get(key) for key in (
+            "attempt_id", "state", "provider", "tool", "task_id", "reason_code", "updated_at"
+        ) if item.get(key) not in (None, "")}
+        for item in attempts[-5:]
+    ],
+}
+state["agent_operations"] = agent_operations
+
+approval_rows = load_json_file(os.environ["OMS_RS_APPROVAL_FILE"], [])
+approval_by_state = {}
+pending_approvals = []
+effective_expired = 0
+for item in approval_rows:
+    approval_state = str(item.get("state") or "unknown")
+    expires = epoch(item.get("expires_at", ""))
+    if approval_state == "requested" and expires is not None and expires <= now:
+        effective_expired += 1
+        approval_state = "expired"
+    approval_by_state[approval_state] = approval_by_state.get(approval_state, 0) + 1
+    if approval_state in {"requested", "approved", "consuming"}:
+        pending_approvals.append({
+            key: item.get(key) for key in (
+                "approval_id", "version", "state", "action", "object_id", "summary",
+                "attempt_id", "task_id", "expires_at", "updated_at"
+            ) if item.get(key) not in (None, "")
+        })
+state["approvals"] = {
+    "healthy": os.environ["OMS_RS_APPROVAL_HEALTHY"] == "1",
+    "total": len(approval_rows),
+    "pending": len(pending_approvals),
+    "effective_expired": effective_expired,
+    "by_state": approval_by_state,
+    "latest_pending": pending_approvals[-5:],
+}
 
 # --- Active task packet: Goal + Next Step -----------------------------------
 task = {"present": False}
@@ -734,6 +815,29 @@ else:
         line("  current: none")
     if r["open"]:
         line("  open: %s" % ", ".join(r["open"]))
+
+    ops = state["agent_operations"]
+    if ops["total"] or not ops["healthy"]:
+        line("\n## Agent operations (%d total, %d active)" % (ops["total"], ops["active"]))
+        if not ops["healthy"]:
+            line("  CORRUPT lifecycle stream (run: oms agent-events validate)")
+        if ops["by_state"]:
+            line("  by state: %s" % ", ".join(
+                "%s=%d" % (key, value) for key, value in sorted(ops["by_state"].items())))
+        for entry in ops["needs_attention"]:
+            line("  ATTENTION %s %s %s/%s" % (
+                entry.get("attempt_id", "?"), entry.get("state", "?"),
+                entry.get("tool", "?"), entry.get("provider", "-") or "-"))
+
+    approvals = state["approvals"]
+    if approvals["pending"] or not approvals["healthy"]:
+        line("\n## Approvals (%d pending)" % approvals["pending"])
+        if not approvals["healthy"]:
+            line("  CORRUPT private approval stream (run: oms approval-inbox validate)")
+        for entry in approvals["latest_pending"]:
+            line("  %s v%s %s %s" % (
+                entry.get("approval_id", "?"), entry.get("version", "?"),
+                entry.get("state", "?"), entry.get("summary", "")))
 
     dl = state["delegations"]
     if dl:

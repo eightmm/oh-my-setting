@@ -39,6 +39,9 @@ test_mcp_server_protocol() {
     printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"oms_handoff_show","arguments":{"repo":"%s","file":"../escape"}}}\n' "$repo"
     printf '%s\n' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}'
     printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_inbox","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"oms_repo_state","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"oms_agent_operations","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"oms_approvals","arguments":{"repo":"%s"}}}\n' "$repo"
   } | python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "MCP protocol exchange did not match the contract"
@@ -58,7 +61,8 @@ assert init["serverInfo"]["name"] == "oh-my-setting", init
 assert by_id[6]["result"]["protocolVersion"] == "2025-03-26", by_id[6]
 tools = {t["name"] for t in by_id[2]["result"]["tools"]}
 assert {"oms_inbox", "oms_task_state", "oms_fail_ledger", "oms_handoffs",
-        "oms_handoff_show", "oms_journal"} <= tools, tools
+        "oms_handoff_show", "oms_journal", "oms_repo_state",
+        "oms_agent_operations", "oms_approvals"} <= tools, tools
 task = by_id[3]["result"]
 assert not task["isError"], task
 assert json.loads(task["content"][0]["text"])["schema"] == 1, task
@@ -69,6 +73,15 @@ assert by_id[5]["error"]["code"] == -32602, by_id[5]
 inbox = by_id[7]["result"]
 assert not inbox["isError"], inbox
 assert json.loads(inbox["content"][0]["text"])["schema"] == 1, inbox
+repo_state = by_id[8]["result"]
+assert not repo_state["isError"], repo_state
+assert "agent_operations" in json.loads(repo_state["content"][0]["text"]), repo_state
+operations = by_id[9]["result"]
+assert not operations["isError"], operations
+assert json.loads(operations["content"][0]["text"]) == [], operations
+approvals = by_id[10]["result"]
+assert not approvals["isError"], approvals
+assert json.loads(approvals["content"][0]["text"]) == [], approvals
 PY
 }
 
@@ -276,20 +289,31 @@ test_install_mcp_registers_and_is_idempotent() {
   : > "$log"
   # Stubs: `mcp get` succeeds (printing the registered command) only after a
   # marker that `mcp add` writes — the real CLIs' visible contract.
-  local cli
+  local cli status out
   for cli in claude codex; do
     cat > "$bin/$cli" <<EOF
 #!/usr/bin/env bash
 echo "$cli \$*" >> "$log"
 case "\$1 \$2" in
   "mcp get")
-    [ -f "$TMP/$cli.registered" ] || exit 1
+    if [ "\${OMS_TEST_MCP_LOOKUP_FAIL:-}" = "$cli" ]; then
+      echo "could not read $cli MCP configuration" >&2
+      exit 24
+    fi
+    if [ ! -f "$TMP/$cli.registered" ]; then
+      echo "No MCP server named oh-my-setting" >&2
+      exit 1
+    fi
     cat "$TMP/$cli.registered"
     ;;
   "mcp add")
     printf '%s\n' "\$*" > "$TMP/$cli.registered"
     ;;
-  "mcp remove") rm -f "$TMP/$cli.registered" ;;
+  "mcp remove")
+    [ "\${OMS_TEST_MCP_REMOVE_FAIL:-}" != "$cli" ] || exit 23
+    [ -f "$TMP/$cli.registered" ] || exit 25
+    rm -f "$TMP/$cli.registered"
+    ;;
 esac
 exit 0
 EOF
@@ -313,10 +337,62 @@ EOF
   [ ! -f "$TMP/claude.registered" ] || fail "claude registration was not removed"
   [ ! -f "$TMP/codex.registered" ] || fail "codex registration was not removed"
 
-  # No CLIs on PATH: notes, exit 0.
+  : > "$log"
+  PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null ||
+    fail "already-absent MCP removal should be idempotent"
+  if grep -Fq "mcp remove" "$log"; then
+    fail "already-absent MCP removal still invoked a destructive command"
+  fi
+
+  for cli in claude codex; do
+    printf 'registered\n' > "$TMP/claude.registered"
+    printf 'registered\n' > "$TMP/codex.registered"
+    : > "$log"
+    status=0
+    out="$(OMS_TEST_MCP_REMOVE_FAIL="$cli" PATH="$bin:/usr/bin:/bin" \
+      bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
+    [ "$status" -ne 0 ] || fail "$cli MCP removal failure was reported as success"
+    [ -f "$TMP/$cli.registered" ] || fail "$cli failure fixture unexpectedly removed its registration"
+    grep -Fq "claude mcp remove" "$log" && grep -Fq "codex mcp remove" "$log" ||
+      fail "MCP removal did not attempt every present provider after $cli failed"
+    if printf '%s' "$out" | grep -Fq "mcp: $cli registration removed"; then
+      fail "$cli MCP removal printed false success"
+    fi
+
+    PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null ||
+      fail "MCP removal could not recover after a partial failure for $cli"
+    [ ! -f "$TMP/claude.registered" ] && [ ! -f "$TMP/codex.registered" ] ||
+      fail "MCP retry left a registration after $cli failed"
+  done
+
+  for cli in claude codex; do
+    printf 'registered\n' > "$TMP/claude.registered"
+    printf 'registered\n' > "$TMP/codex.registered"
+    : > "$log"
+    status=0
+    out="$(OMS_TEST_MCP_LOOKUP_FAIL="$cli" PATH="$bin:/usr/bin:/bin" \
+      bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
+    [ "$status" -ne 0 ] || fail "$cli MCP state lookup failure was ignored"
+    [ -f "$TMP/$cli.registered" ] || fail "$cli lookup failure mutated its registration"
+    grep -Fq "claude mcp get" "$log" && grep -Fq "codex mcp get" "$log" ||
+      fail "MCP state lookup failure stopped the independent provider check"
+
+    PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null ||
+      fail "MCP removal could not recover after a state lookup failure for $cli"
+  done
+
+  # No CLIs on PATH is non-fatal while installing, but removal cannot claim it
+  # cleaned state it had no command with which to inspect.
   PATH="/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" > "$TMP/mcp-none" ||
     fail "missing CLIs must be notes, not failures"
   grep -Fq "claude CLI absent" "$TMP/mcp-none" || fail "missing claude should be noted"
+  status=0
+  out="$(PATH="/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
+  [ "$status" -ne 0 ] || fail "missing MCP CLIs were accepted during removal"
+  printf '%s' "$out" | grep -Fq "claude CLI is required" ||
+    fail "missing claude removal did not explain its recovery requirement"
+  printf '%s' "$out" | grep -Fq "codex CLI is required" ||
+    fail "missing codex removal did not attempt every provider"
 }
 
 # --- antigravity plugin -----------------------------------------------------
@@ -325,6 +401,7 @@ test_install_agy_plugin_bakes_absolute_paths() {
   local bin="$TMP/agy-bin"
   local log="$TMP/agy-log"
   local capture="$TMP/agy-plugin-copy"
+  local status
 
   # A throwaway HOME: the installer reaches into the installed plugin to
   # retract stale hooks, and a test must never do that to the real one.
@@ -334,6 +411,23 @@ test_install_agy_plugin_bakes_absolute_paths() {
 echo "agy \$*" >> "$log"
 if [ "\$1 \$2" = "plugin install" ]; then
   cp "\$3"/* "$capture/"
+  touch "$TMP/agy.registered"
+fi
+if [ "\$1 \$2" = "plugin list" ]; then
+  if [ "\${OMS_TEST_AGY_LOOKUP_FAIL:-0}" = 1 ]; then
+    echo "could not read Antigravity plugin state" >&2
+    exit 24
+  fi
+  if [ -f "$TMP/agy.registered" ]; then
+    printf '%s\n' '{"imports":[{"name":"oh-my-setting"}]}'
+  else
+    printf '%s\n' '{"imports":[]}'
+  fi
+fi
+if [ "\$1 \$2" = "plugin uninstall" ]; then
+  [ "\${OMS_TEST_AGY_REMOVE_FAIL:-0}" != 1 ] || exit 23
+  [ -f "$TMP/agy.registered" ] || exit 25
+  rm -f "$TMP/agy.registered"
 fi
 exit 0
 EOF
@@ -371,6 +465,41 @@ PY
   grep -Fq "agy plugin uninstall oh-my-setting" "$log" ||
     fail "removal should call agy plugin uninstall"
 
+  : > "$log"
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null ||
+    fail "already-absent Antigravity removal should be idempotent"
+  if grep -Fq "plugin uninstall" "$log"; then
+    fail "already-absent Antigravity removal still invoked uninstall"
+  fi
+
+  touch "$TMP/agy.registered"
+  status=0
+  OMS_TEST_AGY_REMOVE_FAIL=1 PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-remove-fail" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "agy plugin removal failure was reported as success"
+  if grep -Fq 'agy-plugin: uninstalled' "$TMP/agy-remove-fail"; then
+    fail "agy plugin removal printed false success"
+  fi
+
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null ||
+    fail "Antigravity removal could not recover after a partial failure"
+
+  touch "$TMP/agy.registered"
+  : > "$log"
+  status=0
+  OMS_TEST_AGY_LOOKUP_FAIL=1 PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-lookup-fail" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "Antigravity state lookup failure was ignored"
+  [ -f "$TMP/agy.registered" ] || fail "Antigravity lookup failure mutated the plugin"
+  if grep -Fq "plugin uninstall" "$log"; then
+    fail "Antigravity lookup failure still attempted uninstall"
+  fi
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null ||
+    fail "Antigravity removal could not recover after a lookup failure"
+
   PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OH_MY_SETTING_AGY_PLUGIN=0 \
     bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-skip" ||
     fail "explicit skip should exit 0"
@@ -380,6 +509,10 @@ PY
     bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-absent" ||
     fail "absent agy in auto mode must be a note"
   grep -Fq "agy CLI absent" "$TMP/agy-absent" || fail "absent agy should be noted"
+  status=0
+  PATH="/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-remove-absent" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "missing agy CLI was accepted during removal"
 }
 
 # --- antigravity surface certification --------------------------------------

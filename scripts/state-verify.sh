@@ -74,6 +74,16 @@ if [ -f "$REPO/.oms/artifacts/index.jsonl" ]; then
 else
   : > "$TMP/artifact.out"
 fi
+LIFECYCLE_EXIT=0
+if [ -f "$REPO/.oms/lifecycle/events.jsonl" ]; then
+  "$ROOT/scripts/agent-events.sh" --repo "$REPO" validate \
+    > "$TMP/lifecycle.out" 2>&1 || LIFECYCLE_EXIT=$?
+else
+  : > "$TMP/lifecycle.out"
+fi
+APPROVAL_EXIT=0
+"$ROOT/scripts/approval-inbox.sh" --repo "$REPO" validate \
+  > "$TMP/approval.out" 2>&1 || APPROVAL_EXIT=$?
 "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json \
   > "$TMP/task.json" 2>/dev/null || printf '{}' > "$TMP/task.json"
 "$ROOT/scripts/journal.sh" status --repo "$REPO" --json \
@@ -81,6 +91,7 @@ fi
 
 OMS_SV_REPO="$REPO" OMS_SV_TMP="$TMP" OMS_SV_JSON="$AS_JSON" \
 OMS_SV_RUN_EXIT="$RUN_VALIDATE_EXIT" OMS_SV_ARTIFACT_EXIT="$ARTIFACT_EXIT" \
+OMS_SV_LIFECYCLE_EXIT="$LIFECYCLE_EXIT" OMS_SV_APPROVAL_EXIT="$APPROVAL_EXIT" \
 python3 <<'PY'
 import glob
 import json
@@ -144,6 +155,16 @@ elif artifact_exit != 0:
     if not bad and not stale:
         finding("fail", "artifacts", "artifact-index validate failed",
                 "oms artifact-index --repo %s validate" % repo)
+
+# --- delegated: durable worker lifecycle and private approval CAS -----------
+lifecycle_exit = int(os.environ["OMS_SV_LIFECYCLE_EXIT"])
+if lifecycle_exit != 0:
+    finding("fail", "lifecycle", "agent lifecycle stream is invalid",
+            "oms agent-events --repo %s validate" % repo)
+approval_exit = int(os.environ["OMS_SV_APPROVAL_EXIT"])
+if approval_exit != 0:
+    finding("fail", "approvals", "private approval stream or its permissions are invalid",
+            "oms approval-inbox --repo %s validate" % repo)
 
 # --- task packet: contradictions the status command tolerates ---
 task = load_json("task.json")
@@ -236,7 +257,12 @@ if as_json:
         "adopted": True,
         "findings": findings,
         "summary": {"fail": fails, "warn": warns},
-        "delegated": {"run_validate_exit": run_exit, "artifact_index_exit": artifact_exit},
+        "delegated": {
+            "run_validate_exit": run_exit,
+            "artifact_index_exit": artifact_exit,
+            "lifecycle_exit": lifecycle_exit,
+            "approval_exit": approval_exit,
+        },
     }, indent=2, sort_keys=True))
 else:
     for f in findings:

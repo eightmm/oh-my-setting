@@ -72,20 +72,27 @@ grep -Fq 'state=review' "$TMP/review.out" || fail "review result missing"
 # prove plan-run --land itself uses patch-land and finishes the second task.
 "$ROOT/scripts/patch-land.sh" --repo "$repo" --plan-task t1 --verify 'bash scripts/check.sh t1' >/dev/null
 grep -Fxq one "$repo/delegated.txt" || fail "reviewed patch did not land"
+# Landing deliberately leaves reviewable working-tree bytes. Commit the first
+# task before asking a second task to land: patch-land now treats untracked
+# files as dirty and must never stack a new admission onto them.
+git -C "$repo" add delegated.txt
+git -C "$repo" commit -qm 'test: commit first reviewed task'
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --next --land >"$TMP/land.out"
 grep -Fq 'state=done' "$TMP/land.out" || fail "land result missing"
 "$PLAN" --repo "$repo" show --id t2 | grep -Fq '"state": "done"' || fail "t2 not done"
 grep -Fxq two "$repo/delegated2.txt" || fail "plan-run --land did not apply patch"
 grep -Fq '"kind": "patch-land"' "$repo/.oms/artifacts/index.jsonl" || fail "landing lineage missing"
+git -C "$repo" add delegated2.txt
+git -C "$repo" commit -qm 'test: commit second reviewed task'
 
 # A plan-bound executor freezes an existing claim lease. plan-run must accept
 # that exact claimed task instead of requiring a new, incompatible lease.
 "$PLAN" --repo "$repo" add --id executor --title executor \
   --allowed executor.txt --verify 'bash scripts/check.sh executor' >/dev/null
 "$PLAN" --repo "$repo" claim --id executor --provider codex >/dev/null
-printf '# Specialization\n\nImplement only the claimed executor task.\n' > "$repo/executor-soul.md"
+printf '# Specialization\n\nImplement only the claimed executor task.\n' > "$TMP/executor-soul.md"
 "$ROOT/scripts/agent-executor.sh" create --repo "$repo" --id plan-executor \
-  --provider codex --plan-task executor --soul-file "$repo/executor-soul.md" >/dev/null
+  --provider codex --plan-task executor --soul-file "$TMP/executor-soul.md" >/dev/null
 "$ROOT/scripts/agent-executor.sh" freeze --repo "$repo" --id plan-executor >/dev/null
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
   --id executor --executor plan-executor >"$TMP/executor.out"
@@ -99,7 +106,7 @@ grep -Fq 'state=review' "$TMP/executor.out" || fail "plan executor result missin
 "$PLAN" --repo "$repo" claim --id executor-preflight --provider codex >/dev/null
 preflight_lease="$($PLAN --repo "$repo" show --id executor-preflight | python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])')"
 "$ROOT/scripts/agent-executor.sh" create --repo "$repo" --id preflight-executor \
-  --provider codex --plan-task executor-preflight --soul-file "$repo/executor-soul.md" >/dev/null
+  --provider codex --plan-task executor-preflight --soul-file "$TMP/executor-soul.md" >/dev/null
 "$ROOT/scripts/agent-executor.sh" freeze --repo "$repo" --id preflight-executor >/dev/null
 rc=0
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \

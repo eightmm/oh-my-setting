@@ -20,6 +20,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 python3 - scripts scripts/lib templates tests <<'PY'
+import ast
 import pathlib
 import sys
 
@@ -29,7 +30,11 @@ for directory in sys.argv[1:]:
     for path in sorted(pathlib.Path(directory).glob("*.py")):
         checked += 1
         try:
-            compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            source = path.read_text(encoding="utf-8")
+            # CI also runs this under Python 3.9; on newer interpreters pin the
+            # grammar floor so a local lint pass cannot accept newer syntax.
+            ast.parse(source, filename=str(path), mode="exec", feature_version=9)
+            compile(source, str(path), "exec")
         except (SyntaxError, ValueError) as exc:
             failed = 1
             print("error: %s: %s" % (path, exc), file=sys.stderr)

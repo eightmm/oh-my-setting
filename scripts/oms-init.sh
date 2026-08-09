@@ -149,7 +149,7 @@ fi
 echo "- Distill verified repo lessons (build quirks, test invocation, domain rules) into project skills: 'oms skill-forge add --name NAME' — evidence-backed only, all three CLIs load them natively."
 if [ "$style" = "ml" ]; then
   echo "- ML repo: 'oms data-manifest check --name <manifest>' then 'oms data-manifest leakage --name <manifest>' before training when registered splits exist;"
-  echo "  wrap runs in 'oms run-ledger' / 'oms run-capsule' and claim on 'oms experiment-board'."
+  echo "  wrap runs in 'oms run-ledger' / 'oms run capsule' and claim on 'oms experiment-board'."
 fi
 echo "- Reusable worker personas: 'oms agent-role list' (create with 'agent-role --name NAME init')."
 if [ "$private_state" = "exposed" ]; then

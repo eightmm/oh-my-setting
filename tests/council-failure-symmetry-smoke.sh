@@ -23,13 +23,6 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYST
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com
 export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
 
-# The dead seat is produced by the wall clock itself, so without a timeout
-# binary there is no failure to record and the stub would hang the suite.
-if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
-  echo "council-failure-symmetry-smoke: skipped (no timeout/gtimeout binary)"
-  exit 0
-fi
-
 make_repo() {
   local dir="$1"
   mkdir -p "$dir"

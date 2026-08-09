@@ -1,0 +1,248 @@
+{
+  "schema": 2,
+  "updated_at": "2026-08-09",
+  "node": {
+    "version": "24.18.0",
+    "platforms": {
+      "darwin-amd64": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-x64.tar.gz",
+        "sha256": "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
+        "archive": "tar.gz"
+      },
+      "darwin-arm64": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz",
+        "sha256": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+        "archive": "tar.gz"
+      },
+      "linux-amd64": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.gz",
+        "sha256": "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
+        "archive": "tar.gz"
+      },
+      "linux-arm64": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-arm64.tar.gz",
+        "sha256": "6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508",
+        "archive": "tar.gz"
+      }
+    }
+  },
+  "nvm": {
+    "version": "v0.40.6",
+    "url": "https://github.com/nvm-sh/nvm/archive/refs/tags/v0.40.6.tar.gz",
+    "sha256": "17302cad7feedb1ad33ba738f93d2176a90970724f22de119603624fcbdec1a2",
+    "script_sha256": "baad94563757afa5147950e3dfa272f06b6307e1a7d92c553f8438959b5165fe"
+  },
+  "uv": {
+    "version": "0.12.3",
+    "platforms": {
+      "darwin-amd64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.3/uv-x86_64-apple-darwin.tar.gz",
+        "sha256": "4c9f52262a14da336e4a42ed24992d12d0c956acde87619e4611d321dffa602b",
+        "archive": "tar.gz"
+      },
+      "darwin-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.3/uv-aarch64-apple-darwin.tar.gz",
+        "sha256": "546f7f8a6c70ff13a3a9d2bc958db3427298cebf3e0cb756f9177133b7068843",
+        "archive": "tar.gz"
+      },
+      "linux-amd64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.3/uv-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "600cf9a742aca00d292673b16b5acffaa7b8c269a364ad0c2e79498dcb1fe101",
+        "archive": "tar.gz"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.3/uv-aarch64-unknown-linux-gnu.tar.gz",
+        "sha256": "bb66cb52e7b1823aed1183630d8d8e5c958840d584a4c55ec10a4cfc168dcca2",
+        "archive": "tar.gz"
+      },
+      "windows-amd64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.3/uv-x86_64-pc-windows-msvc.zip",
+        "sha256": "b23350c79e8ad0192b8124af13a0f17e8d4e4549524785e1aef389ae5a06990e",
+        "archive": "zip"
+      },
+      "windows-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.3/uv-aarch64-pc-windows-msvc.zip",
+        "sha256": "4343217d668727b8a8eb5cad92389a1d2eeead93c89940d1b955ba1bb15462eb",
+        "archive": "zip"
+      }
+    }
+  },
+  "npm": {
+    "claude": {
+      "package": "@anthropic-ai/claude-code",
+      "binary": "claude",
+      "version": "2.1.226",
+      "integrity": "sha512-mUkA81SbzATHFsHNz/rPy3Itw0D0S9kQMsIUJ3qPGwpNJMqPePyDP6xnWHI0jfFlspVjs8r/GfolMUyiy8P1FQ==",
+      "native": {
+        "darwin-amd64": {
+          "alias": "@anthropic-ai/claude-code-darwin-x64",
+          "package": "@anthropic-ai/claude-code-darwin-x64",
+          "version": "2.1.226",
+          "integrity": "sha512-F5P/1sh3Ts9xncj8h5UT6qF+OZxRRt1pKTaiG8vj2gQ0ZRFO5Att6Z917s6Zyu9T7AKDDzYSlqMh+TWq6CjgzQ=="
+        },
+        "darwin-arm64": {
+          "alias": "@anthropic-ai/claude-code-darwin-arm64",
+          "package": "@anthropic-ai/claude-code-darwin-arm64",
+          "version": "2.1.226",
+          "integrity": "sha512-/vIgn1GB6SiOHMcx7zVDZej2Vk+hDr2qkd4aKTryoPm2THorWW3lPpCkzoa4OArg5na1K+eNhGdenhefWthtsw=="
+        },
+        "linux-amd64": {
+          "alias": "@anthropic-ai/claude-code-linux-x64",
+          "package": "@anthropic-ai/claude-code-linux-x64",
+          "version": "2.1.226",
+          "integrity": "sha512-zDdtV2tzCfngxKXJLj5/UYHtCVa/yA/L0vF5dBx3w1dx5tcA8+AlyRp3qcsd/gYU7hbI/gS5OoA7C8XqJR9YtA=="
+        },
+        "linux-arm64": {
+          "alias": "@anthropic-ai/claude-code-linux-arm64",
+          "package": "@anthropic-ai/claude-code-linux-arm64",
+          "version": "2.1.226",
+          "integrity": "sha512-/USq3R28PunkjZZfyweEgUAlR7npgrruZmb47j3oRRxlFWk5Jurj+THiwhl/AKxUgkxaxb35cr6DCAeXNlQ/jg=="
+        },
+        "linux-amd64-musl": {
+          "alias": "@anthropic-ai/claude-code-linux-x64-musl",
+          "package": "@anthropic-ai/claude-code-linux-x64-musl",
+          "version": "2.1.226",
+          "integrity": "sha512-CvnTDnKAIYy0uQD+AhS6V73MeIMrg94SgS1f/GfDADP1TUyJ1wFxmn/uqZZ6hPiCApJw17ZPxln+yg+gYP4mjA=="
+        },
+        "linux-arm64-musl": {
+          "alias": "@anthropic-ai/claude-code-linux-arm64-musl",
+          "package": "@anthropic-ai/claude-code-linux-arm64-musl",
+          "version": "2.1.226",
+          "integrity": "sha512-neGXBM0tHY7GZ1ZIXZgN3gIUcpLOl0fEONJ9MccpmPKViuUeBQTBKdJQCqCbFwJbIr/XDzaSVifhUdfoUkRdlA=="
+        },
+        "windows-amd64": {
+          "alias": "@anthropic-ai/claude-code-win32-x64",
+          "package": "@anthropic-ai/claude-code-win32-x64",
+          "version": "2.1.226",
+          "integrity": "sha512-GKsVA35zgwzoYNjZIlw09aaiBwlRp6e/EJxsGX6sTv2HQQ8r3JicQy1RS1bJUoMgb/J6c8W5lY25kEQQkbv/2g=="
+        },
+        "windows-arm64": {
+          "alias": "@anthropic-ai/claude-code-win32-arm64",
+          "package": "@anthropic-ai/claude-code-win32-arm64",
+          "version": "2.1.226",
+          "integrity": "sha512-gTvIQfzZLUjscoZsGyrPVdzJwTOB2NduBIcQ0tPp2JTm5nGKhc8RubE02O1kCZwF2WkdClMdobLr3bNqLg4XuA=="
+        }
+      }
+    },
+    "codex": {
+      "package": "@openai/codex",
+      "binary": "codex",
+      "version": "0.147.0",
+      "integrity": "sha512-EQLEXecAG2ptxI7UpBMo2TR/ga5596/c/OsYF/0LoUDh5JANZ7IoGqlzBEWbuEVQ76JePIbtTW/ihCkp1a7Z3w==",
+      "native": {
+        "darwin-amd64": {
+          "alias": "@openai/codex-darwin-x64",
+          "package": "@openai/codex",
+          "version": "0.147.0-darwin-x64",
+          "integrity": "sha512-Tb8McE5SvJIH0Vs5R6sq7u+quiC931yan2KOOl6km1OdZ82+Wi7eF5XrSFPs5CF7xCgoIK4Vs+byMbT5hN+ZUw=="
+        },
+        "darwin-arm64": {
+          "alias": "@openai/codex-darwin-arm64",
+          "package": "@openai/codex",
+          "version": "0.147.0-darwin-arm64",
+          "integrity": "sha512-BEUVkiOW7kLcRyrMLfAr/h9wF8sRVJyZDy6OHtVn6QGDXiv3BvAZVTY1Pu9xF7KdIdkYXbp4uayN0aDQQaAUJw=="
+        },
+        "linux-amd64": {
+          "alias": "@openai/codex-linux-x64",
+          "package": "@openai/codex",
+          "version": "0.147.0-linux-x64",
+          "integrity": "sha512-0W9MBxPpWW0cSkNqrTDN2jR7rzzT7oNMhQY5446lT2Lw5cz5yhDTck4Va9rjkQEm+HlFzP/dmEMSZbXfJsINmw=="
+        },
+        "linux-arm64": {
+          "alias": "@openai/codex-linux-arm64",
+          "package": "@openai/codex",
+          "version": "0.147.0-linux-arm64",
+          "integrity": "sha512-SLC1JXw2TYfr/c3HhrJubyyLelq7vTOLWVmiThFA+z0+WgzCPmaseJ/kzDD3Gge/TO7fCnnj7UcPmC0d2c8XAg=="
+        },
+        "windows-amd64": {
+          "alias": "@openai/codex-win32-x64",
+          "package": "@openai/codex",
+          "version": "0.147.0-win32-x64",
+          "integrity": "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4KFZAM+pRz9JbM4Rr498CjtbNgTOjWvDJ+DXvIBSfOPA=="
+        },
+        "windows-arm64": {
+          "alias": "@openai/codex-win32-arm64",
+          "package": "@openai/codex",
+          "version": "0.147.0-win32-arm64",
+          "integrity": "sha512-e2ZstJ8zT8Rm1nvR7CUVO+Gr3cTChE41+VfOzGhynzDXEoW0wfbjUQbc2bWbh1arG94LMm4y3dqBtUIbSrfeGA=="
+        }
+      }
+    },
+    "ntn": {
+      "package": "ntn",
+      "binary": "ntn",
+      "version": "0.21.9",
+      "integrity": "sha512-HroNznpwiY/g2Wev7QqohLI0vVsLLaAcNAbWiIgWRqf5NZO2d7EeRy+Qe7lpwdXw1eapRmk7LBpA4ymcbK5aiw=="
+    }
+  },
+  "antigravity": {
+    "version": "1.1.11",
+    "platforms": {
+      "darwin-amd64": {
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/darwin-x64/cli_mac_x64.tar.gz",
+        "sha512": "1222bd04db54e8d407f58041e459c5c674ce13350b33b62eaed942d46016db14224ad524b32433ac2bd6c310c95193f94f32cd67d663b252ad4f5697729ac9ba",
+        "archive": "tar.gz"
+      },
+      "darwin-arm64": {
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/darwin-arm/cli_mac_arm64.tar.gz",
+        "sha512": "8a410e20350a5d225526fde43168a3742625dad30f43d254423df8d947a4b6f879ead126801a527e3ff255c508ed2d5edc6352cefb488a849c8885c0895cd21f",
+        "archive": "tar.gz"
+      },
+      "linux-amd64": {
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/linux-x64/cli_linux_x64.tar.gz",
+        "sha512": "32d64529cf035ab9790352069dd0df4525d7c920b42872de1775e65455e77fd983b37a6dee81a6345b060c98d5f350729bb5e2ae881bbda80f46b7487af4588d",
+        "archive": "tar.gz"
+      },
+      "linux-arm64": {
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/linux-arm/cli_linux_arm64.tar.gz",
+        "sha512": "fb1acacdbde606a60a8002b6dc0a8c9800bb84aef3add069f843f6ffa3efaafe4a52fce440505c6f16aebd6b1257cce5ecfaec2dbab21732c625943422318cdb",
+        "archive": "tar.gz"
+      },
+      "windows-amd64": {
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/windows-x64/cli_windows_x64.exe",
+        "sha512": "d8725d28d5e4d1e8fe17d6646da2ea02620d56a292e682201dce60b965856e5b8e220f17ea72ff44f3ae38ae8137a18b56786a54fbbae02fe30c452fc5dadda1",
+        "archive": "binary"
+      },
+      "windows-arm64": {
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/windows-arm/cli_windows_arm64.exe",
+        "sha512": "3f3eafd9b9c3097774606beb6fddf702323c1a3cb7d3b54c3c325427e6094009988093f05302868bbdc5eee8d87c96588a0d4d4601a318d0e4ce0e3003c457c2",
+        "archive": "binary"
+      }
+    }
+  },
+  "gh": {
+    "version": "2.97.0",
+    "platforms": {
+      "darwin-amd64": {
+        "url": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_macOS_amd64.zip",
+        "sha256": "63298c998cc2a924c9e254c6af6a1caad6ece281122687a91f079bc0a462700e",
+        "archive": "zip"
+      },
+      "darwin-arm64": {
+        "url": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_macOS_arm64.zip",
+        "sha256": "a58b8fd77b417a38f47a0b54d1370c59b0fcdb324ccc9ca002b0998f7c4c999e",
+        "archive": "zip"
+      },
+      "linux-amd64": {
+        "url": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.tar.gz",
+        "sha256": "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112",
+        "archive": "tar.gz"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_arm64.tar.gz",
+        "sha256": "73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5",
+        "archive": "tar.gz"
+      },
+      "windows-amd64": {
+        "url": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_windows_amd64.zip",
+        "sha256": "35d7fe05c4dd1411ffda1e73dfc7c6f44b75c936ca51fa6595c657fdc0350cec",
+        "archive": "zip"
+      },
+      "windows-arm64": {
+        "url": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_windows_arm64.zip",
+        "sha256": "3e2d4a166da4ee5020c592737b65eec0e724946d5d5b962f5fe59d99116dc4bf",
+        "archive": "zip"
+      }
+    }
+  }
+}

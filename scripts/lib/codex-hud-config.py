@@ -65,7 +65,17 @@ def validate_toml(text: str) -> None:
         try:
             import tomli as tomllib  # type: ignore
         except ImportError:
-            return
+            # Fresh Python 3.9/3.10 installs have no stdlib TOML parser. The
+            # helper can still prove the two shapes it owns, but must never
+            # trust an arbitrary existing user config and then rewrite it.
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            managed = ["[tui]", BEGIN, STATUS_LINE, END]
+            if not lines or lines == ["[tui]"] or lines == managed:
+                return
+            raise ConfigError(
+                "TOML validation requires Python 3.11+ or the tomli package "
+                "on Python 3.9-3.10"
+            )
     try:
         tomllib.loads(text)
     except Exception as exc:

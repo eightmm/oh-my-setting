@@ -35,6 +35,7 @@ NEW_THREAD=0
 TOPIC=""
 QUIET=0
 PASSTHROUGH=()
+EXPLICIT_MODEL_OPTION=0
 
 usage() {
   cat <<'EOF'
@@ -56,6 +57,9 @@ Options:
                        allowed and each answer is recorded separately.
   --all                Ask every installed peer (not the caller) in parallel
                        and record all answers in the thread.
+  --model MODEL        Exact model; requires one plain, explicit --to PROVIDER.
+  --fallback-model M   One-shot capacity fallback; same target requirement.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --thread ID          Use this thread. Default: the current one, created on
                        first use so a series of consults stays one conversation.
   --new-thread         Start a fresh thread even if one is current.
@@ -103,7 +107,12 @@ while [ "$#" -gt 0 ]; do
     --ml-context) PASSTHROUGH+=(--ml-context); shift ;;
     --quiet) QUIET=1; shift ;;
     --dry-run) DRY_RUN=1; PASSTHROUGH+=(--dry-run); shift ;;
-    --model|--fallback-model|--reasoning-effort)
+    --model|--fallback-model)
+      [ "$#" -ge 2 ] || fail "$1 requires a value"
+      EXPLICIT_MODEL_OPTION=1
+      PASSTHROUGH+=("$1" "$2")
+      shift 2 ;;
+    --reasoning-effort)
       [ "$#" -ge 2 ] || fail "$1 requires a value"; PASSTHROUGH+=("$1" "$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -121,6 +130,14 @@ fi
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 [ "$ALL" -eq 0 ] || [ "${#TARGETS_EXPLICIT[@]}" -eq 0 ] ||
   fail "--all and --to are mutually exclusive"
+if [ "$EXPLICIT_MODEL_OPTION" -eq 1 ]; then
+  if [ "$ALL" -ne 0 ] || [ "${#TARGETS_EXPLICIT[@]}" -ne 1 ]; then
+    fail "--model/--fallback-model requires exactly one explicit --to PROVIDER"
+  fi
+  case "${TARGETS_EXPLICIT[0]}" in
+    *:model=*) fail "--model/--fallback-model conflicts with PROVIDER:model=NAME" ;;
+  esac
+fi
 
 provider_cli_available() {
   case "$1" in
@@ -258,6 +275,10 @@ consult_with_failover() {
   fi
   if [ "$rc" -eq 3 ]; then
     echo "consult: $first blocked by the outbound gate; not retrying another peer" >&2
+    return "$rc"
+  fi
+  if [ "$rc" -eq 4 ]; then
+    echo "consult: $first declined the request by policy; not retrying another peer" >&2
     return "$rc"
   fi
   next=""

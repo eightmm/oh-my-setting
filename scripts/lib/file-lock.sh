@@ -59,24 +59,302 @@ oms_file_lock_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# A PID alone is not an identity: after a crash the OS may reuse it while the
+# mkdir lock remains. Record a process-start token where the host exposes one,
+# and compare it before treating a live PID as the original holder. Linux's
+# /proc token is numeric and boot-relative; the portable fallback is the
+# locale-stable ps start time used by macOS/BSD and Git Bash when available.
+oms_file_lock_process_start_token() {
+  local pid="$1"
+  local line=""
+  local rest=""
+  local start_value=""
+
+  case "$pid" in
+    *[!0-9]*|"") return 1 ;;
+  esac
+
+  if [ -r "/proc/$pid/stat" ]; then
+    line="$(sed -n '1p' "/proc/$pid/stat" 2>/dev/null || true)"
+    # comm is parenthesized and may contain spaces or ')' characters. Remove
+    # through the final ') '; the twentieth remaining field is starttime (22).
+    case "$line" in
+      *') '*)
+        rest="${line##*) }"
+        # shellcheck disable=SC2086 # /proc fields are deliberately split.
+        set -- $rest
+        if [ "$#" -ge 20 ]; then
+          shift 19
+          case "$1" in
+            *[!0-9]*|"") ;;
+            *) printf 'proc:%s\n' "$1"; return 0 ;;
+          esac
+        fi
+        ;;
+    esac
+  fi
+
+  start_value="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null |
+    tr -d '\r' | awk '{$1=$1; print; exit}' || true)"
+  [ -n "$start_value" ] || return 1
+  printf 'ps:%s\n' "$start_value"
+}
+
+OMS_FILE_LOCK_CURRENT_PID=""
+OMS_FILE_LOCK_CURRENT_START=""
+
+oms_file_lock_set_current_identity() {
+  local pid=""
+
+  # BASHPID identifies the current subshell on modern Bash. Stock Bash 3.2 has
+  # no BASHPID and $$ remains the parent's value inside (...), so ask a
+  # short-lived child for its PPID while keeping the read assignment here.
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ] 2>/dev/null &&
+      [ -n "${BASHPID:-}" ]; then
+    pid="$BASHPID"
+  else
+    if ! IFS= read -r pid < <(
+      sh -c 'printf "%s\n" "$PPID"' 2>/dev/null
+    ); then
+      return 75
+    fi
+    pid="${pid//$'\r'/}"
+  fi
+  case "$pid" in
+    *[!0-9]*|"") return 75 ;;
+  esac
+  OMS_FILE_LOCK_CURRENT_PID="$pid"
+  OMS_FILE_LOCK_CURRENT_START="$(
+    oms_file_lock_process_start_token "$OMS_FILE_LOCK_CURRENT_PID" 2>/dev/null || true
+  )"
+  OMS_FILE_LOCK_CURRENT_START="${OMS_FILE_LOCK_CURRENT_START//$'\r'/}"
+}
+
+oms_file_lock_mkdir_write_identity() {
+  local lock_dir="$1"
+  local owner_id="$2"
+
+  oms_file_lock_set_current_identity
+  # owner is the immutable generation discriminator used by stale reclaimers.
+  # Write it first so a crash during metadata initialization cannot make two
+  # complete generations look alike.
+  {
+    printf '%s\n' "$owner_id" > "$lock_dir/owner"
+    printf '%s\n' "$OMS_FILE_LOCK_CURRENT_PID" > "$lock_dir/pid"
+    if [ -n "$OMS_FILE_LOCK_CURRENT_START" ]; then
+      printf '%s\n' "$OMS_FILE_LOCK_CURRENT_START" > "$lock_dir/process-start"
+    fi
+    printf '%s\n' "$(date +%s)" > "$lock_dir/started"
+  } || {
+    rm -rf "$lock_dir"
+    return 75
+  }
+}
+
 oms_file_lock_mkdir_stale() {
   local lock_dir="$1"
   local timeout="$2"
   local now="$3"
   local pid=""
+  local saved_process_start=""
+  local current_process_start=""
+  local owner=""
   local started=""
 
   [ -d "$lock_dir" ] || return 1
+  [ -f "$lock_dir/owner" ] && owner="$(sed -n '1p' "$lock_dir/owner" 2>/dev/null || true)"
   [ -f "$lock_dir/pid" ] && pid="$(sed -n '1p' "$lock_dir/pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && ! oms_file_lock_pid_alive "$pid"; then
-    return 0
-  fi
+  case "$pid" in
+    *[!0-9]*|"") ;;
+    *)
+      if ! oms_file_lock_pid_alive "$pid"; then
+        return 0
+      fi
+      [ -f "$lock_dir/process-start" ] &&
+        saved_process_start="$(sed -n '1p' "$lock_dir/process-start" 2>/dev/null || true)"
+      if [ -n "$saved_process_start" ]; then
+        current_process_start="$(
+          oms_file_lock_process_start_token "$pid" 2>/dev/null || true
+        )"
+        current_process_start="${current_process_start//$'\r'/}"
+        if [ -n "$current_process_start" ] &&
+            [ "$current_process_start" != "$saved_process_start" ]; then
+          return 0
+        fi
+      fi
+      # A live matching holder is authoritative regardless of lock age. The
+      # timeout bounds waiting; it is never a lease expiry.
+      return 1
+      ;;
+  esac
 
   [ -f "$lock_dir/started" ] && started="$(sed -n '1p' "$lock_dir/started" 2>/dev/null || true)"
   case "$started" in
     *[!0-9]*|"") return 1 ;;
   esac
+  # Missing/partial legacy metadata is reclaimable by age only when it has an
+  # owner generation that contenders can compare before rename.
+  [ -n "$owner" ] || return 1
   [ $((now - started)) -ge "$timeout" ]
+}
+
+oms_file_lock_mkdir_generation() {
+  local lock_dir="$1"
+  local owner=""
+  local pid=""
+  local process_start=""
+  local started=""
+
+  [ -d "$lock_dir" ] || return 1
+  [ -f "$lock_dir/owner" ] && owner="$(sed -n '1p' "$lock_dir/owner" 2>/dev/null || true)"
+  if [ -n "$owner" ]; then
+    printf 'owner:%s\n' "$owner"
+    return 0
+  fi
+
+  [ -f "$lock_dir/pid" ] && pid="$(sed -n '1p' "$lock_dir/pid" 2>/dev/null || true)"
+  [ -f "$lock_dir/process-start" ] &&
+    process_start="$(sed -n '1p' "$lock_dir/process-start" 2>/dev/null || true)"
+  [ -f "$lock_dir/started" ] && started="$(sed -n '1p' "$lock_dir/started" 2>/dev/null || true)"
+  [ -n "$pid$process_start$started" ] || return 1
+  printf 'legacy:%s:%s:%s\n' "$pid" "$process_start" "$started"
+}
+
+# A stale-recovery contender is a unique bakery claim. A PID/start-token in the
+# claim name makes even a crash before metadata initialization observable. Dead
+# claims are ignored, so killing an elected reclaimer cannot wedge a generation.
+oms_file_lock_reclaim_claim_live() {
+  local claim_dir="$1"
+  local claim_name=""
+  local pid=""
+  local saved_start_sum=""
+  local current_start=""
+  local current_start_sum=""
+  local remainder=""
+
+  [ -d "$claim_dir" ] && [ ! -L "$claim_dir" ] || return 1
+  claim_name="$(basename "$claim_dir")"
+  pid="${claim_name%%.*}"
+  remainder="${claim_name#*.}"
+  [ "$remainder" != "$claim_name" ] || return 1
+  saved_start_sum="${remainder%%.*}"
+  case "$pid" in
+    *[!0-9]*|"") return 1 ;;
+  esac
+  oms_file_lock_pid_alive "$pid" || return 1
+
+  if [ "$saved_start_sum" != none ]; then
+    current_start="$(oms_file_lock_process_start_token "$pid" 2>/dev/null || true)"
+    current_start="${current_start//$'\r'/}"
+    if [ -n "$current_start" ]; then
+      current_start_sum="$(printf '%s' "$current_start" | cksum |
+        awk '{print $1 "-" $2}')"
+      [ "$current_start_sum" = "$saved_start_sum" ] || return 1
+    fi
+  fi
+  return 0
+}
+
+# Reclaim one observed stale generation. Lamport bakery claims elect one live
+# observer without a crash-prone canonical guard. A loser must re-read the
+# canonical path, so it can never rename the winner's newly-created live lock.
+oms_file_lock_mkdir_reclaim() {
+  local lock_dir="$1"
+  local timeout="$2"
+  local now="$3"
+  local generation=""
+  local current_generation=""
+  local reclaim_queue=""
+  local claim_name=""
+  local claim_dir=""
+  local start_sum="none"
+  local ticket=1
+  local max_ticket=0
+  local other=""
+  local other_name=""
+  local other_pid=""
+  local other_ticket=""
+  local choosing=""
+  local blocked=0
+  local stale_dir=""
+  local reclaimed=1
+
+  oms_file_lock_mkdir_stale "$lock_dir" "$timeout" "$now" || return 1
+  generation="$(oms_file_lock_mkdir_generation "$lock_dir" 2>/dev/null || true)"
+  generation="${generation//$'\r'/}"
+  [ -n "$generation" ] || return 1
+
+  oms_file_lock_set_current_identity || return 1
+  if [ -n "$OMS_FILE_LOCK_CURRENT_START" ]; then
+    start_sum="$(printf '%s' "$OMS_FILE_LOCK_CURRENT_START" | cksum |
+      awk '{print $1 "-" $2}')"
+  fi
+  reclaim_queue="$lock_dir.reclaim-queue"
+  mkdir -p "$reclaim_queue" 2>/dev/null || return 1
+  [ -d "$reclaim_queue" ] && [ ! -L "$reclaim_queue" ] || return 1
+  claim_name="$OMS_FILE_LOCK_CURRENT_PID.$start_sum.$(date +%s).${RANDOM:-0}"
+  claim_dir="$reclaim_queue/$claim_name"
+  mkdir "$claim_dir" 2>/dev/null || return 1
+  if ! printf '1\n' > "$claim_dir/choosing" ||
+     ! printf '%s\n' "$generation" > "$claim_dir/generation"; then
+    rm -rf "$claim_dir"
+    return 1
+  fi
+
+  # Choose one greater than the currently published ticket. Simultaneous
+  # choosers may tie; their distinct numeric PIDs provide the total order.
+  for other in "$reclaim_queue"/*; do
+    [ "$other" != "$claim_dir" ] || continue
+    oms_file_lock_reclaim_claim_live "$other" || continue
+    other_ticket="$(sed -n '1p' "$other/ticket" 2>/dev/null || true)"
+    case "$other_ticket" in
+      *[!0-9]*|"") continue ;;
+    esac
+    [ "$other_ticket" -le "$max_ticket" ] || max_ticket="$other_ticket"
+  done
+  ticket=$((max_ticket + 1))
+  if ! printf '%s\n' "$ticket" > "$claim_dir/ticket" ||
+     ! printf '0\n' > "$claim_dir/choosing"; then
+    rm -rf "$claim_dir"
+    return 1
+  fi
+
+  for other in "$reclaim_queue"/*; do
+    [ "$other" != "$claim_dir" ] || continue
+    oms_file_lock_reclaim_claim_live "$other" || continue
+    choosing="$(sed -n '1p' "$other/choosing" 2>/dev/null || true)"
+    other_ticket="$(sed -n '1p' "$other/ticket" 2>/dev/null || true)"
+    case "$other_ticket" in
+      *[!0-9]*|"") blocked=1; break ;;
+    esac
+    [ "$choosing" = 0 ] || { blocked=1; break; }
+    other_name="$(basename "$other")"
+    other_pid="${other_name%%.*}"
+    if [ "$other_ticket" -lt "$ticket" ] ||
+       { [ "$other_ticket" -eq "$ticket" ] &&
+         [ "$other_pid" -lt "$OMS_FILE_LOCK_CURRENT_PID" ]; }; then
+      blocked=1
+      break
+    fi
+  done
+  if [ "$blocked" = 1 ]; then
+    rm -rf "$claim_dir"
+    return 1
+  fi
+
+  current_generation="$(oms_file_lock_mkdir_generation "$lock_dir" 2>/dev/null || true)"
+  current_generation="${current_generation//$'\r'/}"
+  if [ "$current_generation" = "$generation" ] &&
+      oms_file_lock_mkdir_stale "$lock_dir" "$timeout" "$now"; then
+    stale_dir="$lock_dir.stale.$OMS_FILE_LOCK_CURRENT_PID.$(date +%s).${RANDOM:-0}"
+    if [ ! -e "$stale_dir" ] && [ ! -L "$stale_dir" ] &&
+        mv "$lock_dir" "$stale_dir" 2>/dev/null; then
+      rm -rf "$stale_dir"
+      reclaimed=0
+    fi
+  fi
+  rm -rf "$claim_dir"
+  return "$reclaimed"
 }
 
 oms_file_lock_mkdir_release() {
@@ -99,25 +377,18 @@ oms_file_lock_mkdir_acquire() {
   local now
   local elapsed
   local remaining
-  local stale_dir
 
   start="$(date +%s)"
   while :; do
     if mkdir "$lock_dir" 2>/dev/null; then
-      printf '%s\n' "$$" > "$lock_dir/pid"
-      printf '%s\n' "$(date +%s)" > "$lock_dir/started"
-      printf '%s\n' "$owner_id" > "$lock_dir/owner"
+      oms_file_lock_mkdir_write_identity "$lock_dir" "$owner_id" || return $?
       return 0
     fi
 
     now="$(date +%s)"
     elapsed=$((now - start))
-    if oms_file_lock_mkdir_stale "$lock_dir" "$timeout" "$now"; then
-      stale_dir="$lock_dir.stale.$$"
-      if mv "$lock_dir" "$stale_dir" 2>/dev/null; then
-        rm -rf "$stale_dir"
-        continue
-      fi
+    if oms_file_lock_mkdir_reclaim "$lock_dir" "$timeout" "$now"; then
+      continue
     fi
 
     if [ "$elapsed" -ge "$timeout" ]; then
@@ -136,8 +407,9 @@ oms_with_file_lock_mkdir() {
   local owner_id
   shift 3
 
-  owner_id="$$.$(date +%s).${RANDOM:-0}"
   (
+    oms_file_lock_set_current_identity
+    owner_id="$OMS_FILE_LOCK_CURRENT_PID.$(date +%s).${RANDOM:-0}"
     oms_file_lock_mkdir_acquire "$state_file" "$lock_dir" "$timeout" "$owner_id" || exit $?
     lock_cleanup_done=0
     oms_file_lock_cleanup() {
@@ -164,23 +436,16 @@ oms_try_file_lock_mkdir_acquire() {
   local timeout="$2"
   local owner_id="$3"
   local now
-  local stale_dir
 
   while :; do
     if mkdir "$lock_dir" 2>/dev/null; then
-      printf '%s\n' "$$" > "$lock_dir/pid"
-      printf '%s\n' "$(date +%s)" > "$lock_dir/started"
-      printf '%s\n' "$owner_id" > "$lock_dir/owner"
+      oms_file_lock_mkdir_write_identity "$lock_dir" "$owner_id" || return $?
       return 0
     fi
 
     now="$(date +%s)"
-    if oms_file_lock_mkdir_stale "$lock_dir" "$timeout" "$now"; then
-      stale_dir="$lock_dir.stale.$$"
-      if mv "$lock_dir" "$stale_dir" 2>/dev/null; then
-        rm -rf "$stale_dir"
-        continue
-      fi
+    if oms_file_lock_mkdir_reclaim "$lock_dir" "$timeout" "$now"; then
+      continue
     fi
 
     return 75
@@ -193,8 +458,9 @@ oms_try_file_lock_mkdir() {
   local owner_id
   shift 3
 
-  owner_id="$$.$(date +%s).${RANDOM:-0}"
   (
+    oms_file_lock_set_current_identity
+    owner_id="$OMS_FILE_LOCK_CURRENT_PID.$(date +%s).${RANDOM:-0}"
     oms_try_file_lock_mkdir_acquire "$lock_dir" "$timeout" "$owner_id" || exit $?
     lock_cleanup_done=0
     oms_file_lock_cleanup() {
@@ -248,7 +514,8 @@ oms_hold_file_lock() {
     OMS_HELD_LOCK_KIND="flock"
     return 0
   fi
-  owner_id="$$.$(date +%s).${RANDOM:-0}"
+  oms_file_lock_set_current_identity
+  owner_id="$OMS_FILE_LOCK_CURRENT_PID.$(date +%s).${RANDOM:-0}"
   oms_try_file_lock_mkdir_acquire "$lock_path" "$(oms_file_lock_timeout)" "$owner_id" ||
     return 75
   OMS_HELD_LOCK_KIND="mkdir"

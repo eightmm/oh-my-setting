@@ -91,6 +91,33 @@ TOOLS = [
         "properties": REPO_PROPERTY,
     },
     {
+        "name": "oms_repo_state",
+        "description": (
+            "Complete read-only repository control-plane projection, including"
+            " attempts, approvals, plans, runs, artifacts, CI, and recovery."
+        ),
+        "argv": ["bash", "scripts/repo-state.sh", "--json"],
+        "properties": REPO_PROPERTY,
+    },
+    {
+        "name": "oms_agent_operations",
+        "description": (
+            "Durable lifecycle projection for all supervised and direct agent"
+            " attempts, including state, usage, lineage, and budgets."
+        ),
+        "argv": ["bash", "scripts/agent-events.sh", "list", "--json"],
+        "properties": REPO_PROPERTY,
+    },
+    {
+        "name": "oms_approvals",
+        "description": (
+            "Public projection of pending one-time approvals; grant secrets"
+            " and private hashes are never returned."
+        ),
+        "argv": ["bash", "scripts/approval-inbox.sh", "list", "--pending", "--json"],
+        "properties": REPO_PROPERTY,
+    },
+    {
         "name": "oms_task_state",
         "description": (
             "Current task packet of the repository: id, status, last"

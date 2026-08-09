@@ -59,7 +59,7 @@ Options:
   --executor ID   Use a frozen task-scoped executor soul.
   --model MODEL   Exact provider model; disables implicit fallback.
   --fallback-model M  Explicit one-shot capacity fallback model.
-  --reasoning-effort E  auto, low, medium, or high.
+  --reasoning-effort E  auto, low, medium, high, xhigh, max, or ultra.
   --repo PATH     Target repo (default: current directory).
   --dry-run       Show the selected task and command without claiming/calling.
   -h, --help      Show help.

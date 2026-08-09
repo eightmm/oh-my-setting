@@ -72,8 +72,8 @@ Options:
                        warning.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
   --model MODEL        Exact model; requires exactly one provider.
-  --fallback-model M   Explicit fallback; requires exactly one provider.
-  --reasoning-effort E auto, low, medium, or high.
+  --fallback-model M   One-shot capacity fallback; requires one provider.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --no-diff            Do not attach git diff/status context.
   --memory             Attach shared harness memory.
   --task               Attach the active task handoff packet.
@@ -104,7 +104,7 @@ Options:
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
-                       import-agent-result.sh.
+                       `oms artifact-index import`.
   --synthesize [P]     After provider reviews, run a synthesis pass with
                        provider P (codex|claude|antigravity). Default: claude.
   --print-timeout DUR  Timeout for print mode wait. Default: 5m.
@@ -113,7 +113,7 @@ Options:
 
 Environment:
   OH_MY_SETTING_REVIEW_DRY_RUN=1   Same as --dry-run.
-  OMS_PEER_TIMEOUT=5m       Per-provider wall-clock timeout (GNU timeout).
+  OMS_PEER_TIMEOUT=5m       Per-provider wall-clock timeout.
   OMS_PEER_PRINT_TIMEOUT=5m Timeout for print mode wait (agy).
 EOF
 }
@@ -491,12 +491,6 @@ if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } && [ -n "$SYNTHESIZE" ]; the
   [ "$sole_provider" = "$SYNTHESIZE" ] ||
     fail "--model cannot be reused by a different synthesis provider"
 fi
-if [ "$REASONING_EFFORT" != auto ] && {
-     printf '%s' "$PROVIDERS" | tr ',' '\n' | grep -Eq '^[[:space:]]*(antigravity|agy)[[:space:]]*$' ||
-     [ "$SYNTHESIZE" = antigravity ] || [ "$SYNTHESIZE" = agy ];
-   }; then
-  fail "explicit reasoning effort is unavailable for Antigravity; select a Low/Medium/High model variant"
-fi
 export OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
@@ -695,11 +689,11 @@ if [ "$GATE" -eq 1 ]; then
         cd "$REPO" || exit 1
         # Review routing belongs to provider calls, not to the project's own
         # verifier. Leaking it changes nested harness tests and can make an
-        # otherwise clean gate depend on which review tier ran immediately
+        # otherwise clean gate depend on which review route ran immediately
         # before it.
         unset OMS_MODEL_OPERATION OMS_MODEL_OPERATION_REQUEST
         unset OMS_MODEL_EXPLICIT
-        unset OMS_MODEL_FALLBACK_EXPLICIT OMS_MODEL_NO_FALLBACK
+        unset OMS_MODEL_FALLBACK_EXPLICIT
         unset OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
         run_verify_with_timeout bash -c "$VERIFY_CMD"
       ) >> "$gate_verify_artifact" 2>&1

@@ -486,6 +486,144 @@ EOF
     fail "default smoke output became noisy: $(cat "$quiet_out")"
 }
 
+test_gate_fingerprints_full_oms_state() {
+  local gate="$TMP/check-state-gate"
+  local base head mutation out status
+
+  mkdir -p "$gate/scripts" "$gate/tests"
+  cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-python.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-bash32.sh"
+  cat > "$gate/fake-shellcheck" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${OMS_TEST_CHECK_MUTATION:-}" in
+  lint) printf 'after\n' > .oms/state ;;
+esac
+EOF
+  chmod +x "$gate/fake-shellcheck"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/codex-hud-config-smoke.sh"
+  for suite in source-distribution-smoke.sh platform-portability-smoke.sh \
+      bsd-portability-smoke.sh functional-evolution-smoke.sh; do
+    cat > "$gate/tests/$suite" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[ "${0##*/}" = source-distribution-smoke.sh ] || exit 0
+case "${OMS_TEST_CHECK_MUTATION:-}" in
+  content) printf 'after\n' > "$root/.oms/state" ;;
+  symlink) ln -s state "$root/.oms/state-link" ;;
+  directory) mkdir "$root/.oms/empty-state" ;;
+  mode) chmod 700 "$root/.oms/state" ;;
+  failed-content) printf 'after\n' > "$root/.oms/state"; exit 29 ;;
+  hooks) mkdir -p "$root/.oms/hooks"; printf 'ambient\n' >> "$root/.oms/hooks/events.jsonl" ;;
+  journal) mkdir -p "$root/.oms/work-journal"; printf 'ambient\n' >> "$root/.oms/work-journal/index.json" ;;
+esac
+EOF
+  done
+  git -C "$gate" init -q
+  git -C "$gate" config user.name test
+  git -C "$gate" config user.email test@example.com
+  printf 'one\n' > "$gate/README.md"
+  git -C "$gate" add .
+  git -C "$gate" commit -qm base
+  base="$(git -C "$gate" rev-parse HEAD)"
+  printf 'two\n' >> "$gate/README.md"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/changed.sh"
+  git -C "$gate" add README.md tests/changed.sh
+  git -C "$gate" commit -qm head
+  head="$(git -C "$gate" rev-parse HEAD)"
+
+  for mutation in content symlink directory mode lint failed-content; do
+    rm -rf "$gate/.oms"
+    mkdir -p "$gate/.oms"
+    printf 'before\n' > "$gate/.oms/state"
+    status=0
+    out="$(cd "$gate" && OMS_SHELLCHECK_BIN="$gate/fake-shellcheck" \
+      OMS_TEST_CHECK_MUTATION="$mutation" \
+      bash scripts/check.sh --quick --changed-from "$base" --changed-to "$head" 2>&1)" || status=$?
+    [ "$status" -ne 0 ] || fail "check gate missed .oms $mutation mutation"
+    printf '%s' "$out" | grep -Fq "a suite wrote into this checkout's .oms state" ||
+      fail "check gate did not explain .oms $mutation mutation: $out"
+  done
+
+  # These two trees belong to the live session and Work Journal, not to the
+  # suite under test. Their ambient writes must not make a clean gate flaky.
+  for mutation in hooks journal; do
+    rm -rf "$gate/.oms"
+    mkdir -p "$gate/.oms"
+    printf 'before\n' > "$gate/.oms/state"
+    (cd "$gate" && OMS_SHELLCHECK_BIN="$gate/fake-shellcheck" \
+      OMS_TEST_CHECK_MUTATION="$mutation" \
+      bash scripts/check.sh --quick --changed-from "$base" --changed-to "$head" >/dev/null) ||
+      fail "check gate treated ambient $mutation state as a suite leak"
+  done
+
+  # A live session may create only an ignored ambient tree while the gate is
+  # running. That must compare equal to an initially absent .oms directory.
+  rm -rf "$gate/.oms"
+  (cd "$gate" && OMS_SHELLCHECK_BIN="$gate/fake-shellcheck" \
+    OMS_TEST_CHECK_MUTATION=hooks \
+    bash scripts/check.sh --quick --changed-from "$base" --changed-to "$head" >/dev/null) ||
+    fail "check gate treated ambient-only .oms creation as a suite leak"
+}
+
+test_uninstall_stops_before_unlink_on_removal_failure() {
+  local checkout="$TMP/uninstall-removal-failure"
+  local log="$TMP/uninstall-removal-failure.log"
+  local out="$TMP/uninstall-removal-failure.out"
+  local status=0 name
+
+  mkdir -p "$checkout/scripts/lib" "$checkout/.git" "$TMP/uninstall-home"
+  cp "$ROOT/scripts/uninstall.sh" "$checkout/scripts/uninstall.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$checkout/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$checkout/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$checkout/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$checkout/scripts/lib/poll.sh"
+  for name in uninstall-autoupdate install-claude-hooks install-codex-plugin install-mcp install-agy-plugin provider-permissions unlink journal; do
+    cat > "$checkout/scripts/$name.sh" <<'EOF'
+#!/usr/bin/env bash
+name="${0##*/}"
+printf '%s\n' "$name" >> "$OMS_TEST_OPS_LOG"
+case ",${OMS_TEST_REMOVAL_FAILS:-}," in
+  *",$name,"*) exit 23 ;;
+esac
+EOF
+    chmod +x "$checkout/scripts/$name.sh"
+  done
+
+  HOME="$TMP/uninstall-home" OMS_TEST_OPS_LOG="$log" \
+    OMS_TEST_REMOVAL_FAILS="install-claude-hooks.sh,install-mcp.sh,provider-permissions.sh" \
+    "$checkout/scripts/uninstall.sh" --yes --purge --purge-dirty > "$out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "uninstall ignored integration removal failures"
+  [ -d "$checkout" ] || fail "uninstall purged its recovery checkout after a removal failure"
+  for name in uninstall-autoupdate.sh install-claude-hooks.sh install-codex-plugin.sh install-mcp.sh install-agy-plugin.sh provider-permissions.sh; do
+    grep -Fxq "$name" "$log" || fail "uninstall stopped before attempting $name"
+  done
+  if grep -Eq '^(unlink|journal)\.sh$' "$log"; then
+    fail "uninstall crossed the unlink/purge boundary after a removal failure"
+  fi
+  if grep -Fq 'purged ' "$out"; then
+    fail "uninstall printed purge success after a removal failure"
+  fi
+
+  : > "$log"
+  : > "$out"
+  status=0
+  HOME="$TMP/uninstall-home" OMS_TEST_OPS_LOG="$log" \
+    OMS_TEST_REMOVAL_FAILS="journal.sh" \
+    "$checkout/scripts/uninstall.sh" --yes --purge --purge-dirty > "$out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "uninstall ignored Work Journal disconnect failure"
+  [ -d "$checkout" ] || fail "uninstall purged its recovery checkout after Journal failure"
+  grep -Fxq "journal.sh" "$log" || fail "purge did not attempt managed Work Journal cleanup"
+  if grep -Fxq "unlink.sh" "$log"; then
+    fail "uninstall crossed the unlink boundary after Journal failure"
+  fi
+  if grep -Fq 'purged ' "$out"; then
+    fail "uninstall printed purge success after Journal failure"
+  fi
+}
+
 test_install_owner_guards_and_stale_status() {
   local home_dir="$TMP/install-owner-home"
   local receipt="$home_dir/install.json"
@@ -498,6 +636,9 @@ test_install_owner_guards_and_stale_status() {
   write_install_receipt "$receipt" "$canonical"
   cp "$ROOT/scripts/update.sh" "$foreign/scripts/update.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$foreign/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" "$foreign/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$foreign/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$foreign/scripts/lib/poll.sh"
   cat > "$foreign/scripts/link.sh" <<'EOF'
 #!/usr/bin/env bash
 touch "$OMS_TEST_MUTATION_MARKER"
@@ -512,7 +653,7 @@ exit 0
 EOF
   chmod +x "$bin_dir/git"
   status=0
-  PATH="$bin_dir:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" \
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" \
     OMS_TEST_MUTATION_MARKER="$TMP/update-mutated" OH_MY_SETTING_CLAUDE_HOOKS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
     "$foreign/scripts/update.sh" --no-tools --no-doctor > "$TMP/foreign-update.out" 2>&1 || status=$?
@@ -529,7 +670,8 @@ EOF
   cp "$ROOT/scripts/uninstall.sh" "$foreign/scripts/uninstall.sh"
   chmod +x "$foreign/scripts/uninstall.sh"
   status=0
-  OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_OPS_LOG="$TMP/uninstall-ops" \
+  HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_TEST_OPS_LOG="$TMP/uninstall-ops" \
     "$foreign/scripts/uninstall.sh" --yes > "$TMP/foreign-uninstall.out" 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "foreign uninstall should refuse canonical install mutation"
   [ ! -e "$TMP/uninstall-ops" ] || fail "foreign uninstall ran global removal steps"
@@ -577,6 +719,8 @@ test_artifact_resolution_and_dashboard_statuses
 test_artifact_retention_corruption_and_source_tracking
 test_smoke_runner_tail_and_signal_cleanup
 test_smoke_runner_reports_bounded_opt_in_timings
+test_gate_fingerprints_full_oms_state
+test_uninstall_stops_before_unlink_on_removal_failure
 test_install_owner_guards_and_stale_status
 "$ROOT/tests/executor-smoke.sh"
 

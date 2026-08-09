@@ -39,7 +39,7 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/call.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --reasoning-effort E auto, low, medium, or high (default: auto).
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra (default: auto).
   --memory             Attach shared harness memory.
   --task               Attach the active task handoff packet.
   --ml-context         Attach the compact ML context digest.
@@ -50,14 +50,14 @@ Options:
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).
   --export-only        Write the provider prompt artifact and do not call CLI.
-                       Import the answer later with import-agent-result.sh.
+                       Import the answer later with `oms artifact-index import`.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt artifact without calling the CLI.
   -h, --help           Show help.
 
 Environment:
   OH_MY_SETTING_CALL_DRY_RUN=1    Same as --dry-run.
-  OMS_PEER_TIMEOUT=5m      Provider wall-clock timeout (GNU timeout).
+  OMS_PEER_TIMEOUT=5m      Provider wall-clock timeout.
 EOF
 }
 
@@ -263,7 +263,7 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
     printf '\n## Prompt\n\n'
     cat "$prompt_file"
     printf '\n\n## Output\n\n'
-    printf 'EXPORTED: paste the Prompt section into %s, then import the answer with import-agent-result.sh.\n' "$TO"
+    printf 'EXPORTED: paste the Prompt section into %s, then import with `oms artifact-index import`.\n' "$TO"
     printf 'Preserve the selected model route recorded above during the manual call.\n'
     printf '\n\n## Exit\n\n0\n'
   } > "$artifact"

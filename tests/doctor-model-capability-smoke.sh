@@ -16,6 +16,8 @@ mkdir -p "$fixture/scripts/lib" "$fixture/rules" "$fixture/.agents/plugins" \
   "$fixture/prompts" "$home/.codex/skills" "$home/.claude/skills" \
   "$home/.gemini/antigravity/skills" "$home/.local/bin" "$bin" "$project"
 cp "$ROOT/scripts/doctor.sh" "$fixture/scripts/doctor.sh"
+cp "$ROOT/scripts/lib/tool-lock.py" "$fixture/scripts/lib/tool-lock.py"
+cp "$ROOT/tools.lock.json" "$fixture/tools.lock.json"
 chmod +x "$fixture/scripts/doctor.sh"
 
 cat > "$fixture/scripts/lib/agent-memory-common.sh" <<'EOF_STUB'

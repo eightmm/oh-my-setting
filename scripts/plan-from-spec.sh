@@ -23,7 +23,7 @@ Usage: plan-from-spec.sh [--repo PATH] [--to PROVIDER] [--max-tasks N]
        plan-from-spec.sh [--repo PATH] --apply PROPOSAL.json
 
 Read the repository's PROJECT.md contract (Goal/Scope/Non-goals, Commands,
-Verification) and ask a deep-tier peer to decompose the remaining work into
+Verification) and ask the selected peer to decompose the remaining work into
 plan tasks. The result is written as a PROPOSAL under .oms/plan/ and printed
 for review — nothing touches the task board until --apply.
 
