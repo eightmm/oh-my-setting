@@ -39,6 +39,9 @@ THREAD_ID=""
 TASK_ID=""
 PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
+TERMINALIZE_RESUMED_REPAIR=0
+plan_started=0
+plan_finalized=0
 plan_brief_file=""
 REPAIR=0
 MODEL=""
@@ -115,6 +118,10 @@ Options:
                        Without --prompt/--brief-file the task's stored brief
                        becomes the worker prompt, and without --verify the
                        task's verify command becomes the contract.
+  --terminalize-resumed-repair
+                       Internal plan-run contract: this is the one permitted
+                       same-lease landing repair. On failure, atomically block
+                       that exact plan lease instead of releasing it to ready.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
   --dry-run            Write prompt and empty patch without calling the CLI.
@@ -134,13 +141,21 @@ Environment:
                              reported but does not fail the run: it cannot be
                              told apart from the user editing their own repo
                              while the worker ran.
+  OMS_WORKER_AUTHORITY_EXCLUSIVE=1
+                             When no sibling can write owner state, compare and
+                             restore the full primary .oms authority surface.
+                             Unsafe for ordinary parallel multi-agent work.
 
 The worker-authority check compares the primary repo's tracked state, untracked
 and ignored files (by stat, not by reading them), local git config, remotes,
 refs, object-store/worktree/submodule metadata, and hooks around the worker.
 Shared .oms state is checked by its contract rather than by equality: workers
-may append to the JSONL families, but rewriting rows already there, truncating
-them, or deleting a state file is a violation.
+receive no primary state capability; the default guard nevertheless tolerates
+JSONL growth because it cannot attribute a sibling agent's append. Rewriting
+existing rows, truncating them, or deleting a state file is a violation.
+For a plan-bound operation, the default guard also binds the complete selected
+task/lease and executor/soul objects across the provider window. Other tasks
+and executors may move concurrently; this operation's authority may not.
 It is detection, not a sandbox: it cannot prevent a write, and it cannot see a
 write that is undone before the worker exits, anything the worker reads
 (inherited tokens, ssh agents), or anything it does outside the repository
@@ -278,6 +293,10 @@ while [ "$#" -gt 0 ]; do
       PLAN_TASK_ID="$2"
       shift 2
       ;;
+    --terminalize-resumed-repair)
+      TERMINALIZE_RESUMED_REPAIR=1
+      shift
+      ;;
     --artifact-dir)
       [ "$#" -ge 2 ] || fail "--artifact-dir requires path"
       ARTIFACT_DIR="$2"
@@ -302,6 +321,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ]; then
+  [ -n "$PLAN_TASK_ID" ] ||
+    fail "--terminalize-resumed-repair requires --plan-task"
+  [ -n "$REVIEW_ARTIFACT" ] ||
+    fail "--terminalize-resumed-repair requires --review-artifact"
+  [ "$DRY_RUN" != 1 ] ||
+    fail "--terminalize-resumed-repair is not valid for --dry-run"
+fi
+
 # Stamp every artifact-index row from this delegation with the plan/task id so
 # the run can be traced back to its subtask (ma_append_artifact_index reads it).
 [ -n "$PLAN_TASK_ID" ] && [ -z "$TASK_ID" ] && TASK_ID="$PLAN_TASK_ID"
@@ -320,6 +348,39 @@ plan_transition() {
     echo "error: plan $action rejected for task $PLAN_TASK_ID (stale lease or invalid state)" >&2
     return 1
   fi
+}
+
+plan_failure_transition() {
+  if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ]; then
+    # A resumed landing repair is already the task's one permitted correction.
+    # Keep the current lease until this atomic transition parks it; exposing a
+    # ready row here lets another runner mint a lease and call the provider a
+    # second time before plan-run can observe the failure.
+    if plan_transition block --reason "bounded landing repair failed"; then
+      plan_finalized=1
+      return 0
+    fi
+  else
+    if plan_transition release; then
+      plan_finalized=1
+      return 0
+    fi
+  fi
+  return 1
+}
+
+plan_publish_review() {
+  # The plan receipt is the durable authority used by a later plan-run
+  # continuation. Stamp the exact frozen executor identity with the patch so a
+  # caller cannot omit or swap that executor when landing reviewed work.
+  local artifact_path="$1"
+  local patch_path="$2"
+  local -a receipt_args=(--artifact "$artifact_path" --patch "$patch_path")
+  if [ -n "$EXECUTOR_ID" ]; then
+    receipt_args+=(--executor-id "$EXECUTOR_ID" --executor-soul-sha256 "$EXECUTOR_SOUL_SHA")
+  fi
+  plan_transition review "${receipt_args[@]}"
+  plan_finalized=1
 }
 
 case "$TO" in
@@ -439,6 +500,38 @@ if [ -n "$PLAN_TASK_ID" ] && [ "$DRY_RUN" != "1" ]; then
       python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))'
   )" || fail "could not read lease for plan task $PLAN_TASK_ID"
 fi
+if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ]; then
+  resume_plan_json="$("$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" \
+    show --id "$PLAN_TASK_ID" 2>/dev/null)" ||
+    fail "cannot read resumed repair task $PLAN_TASK_ID"
+  if ! OMS_RESUME_PLAN_JSON="$resume_plan_json" python3 - \
+    "$PLAN_TASK_ID" "$TO" "$PLAN_LEASE_ID" "$REVIEW_ARTIFACT" <<'PY'
+import json
+import os
+import sys
+
+task = json.loads(os.environ["OMS_RESUME_PLAN_JSON"])
+repair = task.get("repair_count")
+evidence = (task.get("repair_artifact", ""), task.get("artifact", ""))
+valid = (
+    task.get("id") == sys.argv[1]
+    and task.get("state") == "claimed"
+    and task.get("provider") == sys.argv[2]
+    and bool(sys.argv[3])
+    and task.get("lease_id") == sys.argv[3]
+    and task.get("review_lease_id") == sys.argv[3]
+    and not isinstance(repair, bool)
+    and repair == 1
+    and all(isinstance(value, str) for value in evidence)
+    and sys.argv[4] in evidence
+)
+if not valid:
+    raise SystemExit(1)
+PY
+  then
+    fail "--terminalize-resumed-repair does not match the exact one-shot plan receipt"
+  fi
+fi
 
 # --plan-task without an explicit brief/verify hydrates both from the plan:
 # the task's stored brief becomes the worker prompt and its verify command
@@ -535,10 +628,61 @@ worktree_parent="$(mktemp -d "$delegate_worktree_root/oh-my-setting-delegate.XXX
 worktree="$worktree_parent/wt"
 worktree_created=0
 cleanup_done=0
+worker_identity_physical=""
+worker_identity_git_dir=""
+worker_identity_common_dir=""
+worker_identity_gitfile_sha=""
+worker_identity_backpointer_sha=""
+worker_identity_worktree_stat=""
+worker_identity_gitdir_stat=""
+worker_identity_failed=0
+worker_identity_detail=""
 oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
+cleanup_delegated_worktree() {
+  local cleanup_identity_detail=""
+
+  if [ "$worktree_created" != 1 ]; then
+    if [ "$KEEP_WORKTREE" = 0 ] && [ -n "$worktree_parent" ]; then
+      rm -rf "$worktree_parent"
+      worktree_parent=""
+    fi
+    return 0
+  fi
+  [ "$KEEP_WORKTREE" = 0 ] || return 0
+  if [ -n "$worker_identity_physical" ] &&
+    cleanup_identity_detail="$(oms_worker_worktree_identity_check "$REPO" "$worktree" \
+      "$worker_identity_physical" "$worker_identity_git_dir" \
+      "$worker_identity_common_dir" "$worker_identity_gitfile_sha" \
+      "$worker_identity_backpointer_sha" "$worker_identity_worktree_stat" \
+      "$worker_identity_gitdir_stat" 2>/dev/null)"; then
+    if git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1; then
+      worktree_created=0
+      rm -rf "$worktree_parent"
+      worktree_parent=""
+      [ -z "$liveness_file" ] || rm -f "$liveness_file"
+      liveness_file=""
+      return 0
+    fi
+    cleanup_identity_detail="registered worktree removal failed"
+  elif [ -z "$cleanup_identity_detail" ]; then
+    cleanup_identity_detail="delegated worktree identity was never established"
+  fi
+
+  KEEP_WORKTREE=1
+  worker_identity_failed=1
+  worker_identity_detail="cleanup: $cleanup_identity_detail"
+  echo "error: delegated worktree identity changed before cleanup: $cleanup_identity_detail" >&2
+  echo "error: $worktree_parent preserved for inspection; cleanup did not follow the replaced pathname" >&2
+  return 1
+}
+
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ] &&
+    [ "$plan_started" = 1 ] && [ "$plan_finalized" = 0 ]; then
+    plan_failure_transition >/dev/null 2>&1 || true
+  fi
   if [ "$executor_started" = 1 ] && [ "$executor_finalized" = 0 ] && [ -n "$EXECUTOR_ID" ]; then
     "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" \
       --reason "delegation exited before executor finalization" >/dev/null 2>&1 || true
@@ -550,12 +694,7 @@ cleanup() {
   # Remove the liveness marker; a leftover file means the process died without
   # cleanup (a crashed orphan), which oms state / gc can then flag by dead pid.
   [ -z "$liveness_file" ] || rm -f "$liveness_file"
-  if [ "$worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
-    git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
-  fi
-  if [ "$KEEP_WORKTREE" = 0 ]; then
-    rm -rf "$worktree_parent"
-  fi
+  cleanup_delegated_worktree || true
 }
 cleanup_signal() {
   local code="$1"
@@ -636,11 +775,22 @@ if ! ma_validate_outbound_prompt "$prompt_file"; then
   echo "blocked: $TO sensitive outbound context -> $artifact"
   echo "artifact: $artifact"
   echo "patch: $patch_file"
-  plan_transition release
+  plan_failure_transition
   exit 3
 fi
 git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
+if ! oms_worker_worktree_identity_capture "$REPO" "$worktree"; then
+  KEEP_WORKTREE=1
+  fail "could not establish delegated worktree identity: $OMS_WORKER_IDENTITY_DETAIL"
+fi
+worker_identity_physical="$OMS_WORKER_IDENTITY_PHYSICAL"
+worker_identity_git_dir="$OMS_WORKER_IDENTITY_GIT_DIR"
+worker_identity_common_dir="$OMS_WORKER_IDENTITY_COMMON_DIR"
+worker_identity_gitfile_sha="$OMS_WORKER_IDENTITY_GITFILE_SHA"
+worker_identity_backpointer_sha="$OMS_WORKER_IDENTITY_BACKPOINTER_SHA"
+worker_identity_worktree_stat="$OMS_WORKER_IDENTITY_WORKTREE_STAT"
+worker_identity_gitdir_stat="$OMS_WORKER_IDENTITY_GITDIR_STAT"
 oms_seed_local_agent_files "$REPO" "$worktree"
 
 # The worktree is built from HEAD, so the worker cannot see uncommitted work.
@@ -743,9 +893,33 @@ fi
 } > "$artifact"
 
 # Runs the worker CLI in the worktree on a prompt file; output is appended to
-# the artifact. Sets worker_status. OMS_STATE_REPO points harness state tools
-# (agent-memory/task/plan) at the primary repo's .oms — the throwaway worktree
-# has none — and OMS_AGENT attributes any worker-written notes to the provider.
+# the artifact. Sets worker_status. The child receives provider attribution and
+# task context, but owner state/lease/executor receipt variables are stripped;
+# proposed state changes return through the artifact and patch for owner review.
+worker_worktree_require_identity() {  # PHASE
+  local phase="$1"
+  local detail=""
+
+  if detail="$(oms_worker_worktree_identity_check "$REPO" "$worktree" \
+    "$worker_identity_physical" "$worker_identity_git_dir" \
+    "$worker_identity_common_dir" "$worker_identity_gitfile_sha" \
+    "$worker_identity_backpointer_sha" "$worker_identity_worktree_stat" \
+    "$worker_identity_gitdir_stat" 2>/dev/null)"; then
+    return 0
+  fi
+  [ -n "$detail" ] || detail="delegated worktree identity validation failed"
+  if [ "$worker_identity_failed" = 0 ]; then
+    printf '\n\n## Delegated worktree identity violation\n\n- phase: %s\n- %s\n- worktree parent preserved for inspection: %s\n' \
+      "$phase" "$detail" "$worktree_parent" >> "$artifact"
+  fi
+  worker_identity_failed=1
+  worker_identity_detail="$phase: $detail"
+  KEEP_WORKTREE=1
+  echo "error: delegated worktree identity changed before $phase: $detail" >&2
+  echo "error: $worktree_parent preserved for inspection; the replaced pathname will not be used" >&2
+  return 1
+}
+
 delegate_attempt_transition() {  # STATE REASON KEY
   local state="$1" reason="$2" key="$3" events
   local -a args
@@ -788,12 +962,32 @@ delegate_attempt_finish_without_verify() {
 
 run_worker() {
   local prompt="$1"
+  local local_authority_detail=""
+  local authority_line=""
   worker_status=0
+  if ! worker_worktree_require_identity "provider launch"; then
+    worker_status=125
+    route_retry_terminal=1
+    return 0
+  fi
   [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
   OMS_LAST_ATTEMPT_ID=""
   OMS_LAST_ATTEMPT_OWNED=0
   ma_run_routed_provider "$TO" write "$prompt" "$artifact" "$worktree" \
     peer-delegate "$REPO" "$timestamp" || worker_status=$?
+  if [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; then
+    local_authority_detail="$(awk '
+      /^BLOCKED: delegated worker changed owner authority shared-state$/ { seen=1; next }
+      seen && NF { print; count += 1; if (count >= 8) exit }
+    ' "$artifact" 2>/dev/null || true)"
+    echo "error: $TO changed owner authority shared-state" >&2
+    while IFS= read -r authority_line; do
+      [ -z "$authority_line" ] || echo "error: shared-state: $authority_line" >&2
+    done <<EOF
+$local_authority_detail
+EOF
+    route_retry_terminal=1
+  fi
   worker_attempt_id="${OMS_LAST_ATTEMPT_ID:-}"
   worker_attempt_owned="${OMS_LAST_ATTEMPT_OWNED:-0}"
   if [ "$worker_attempt_owned" = 1 ]; then
@@ -851,6 +1045,7 @@ run_worker() {
 # Capture the patch before running --verify so verification byproducts
 # (caches, build output) do not leak into the patch.
 capture_patch() {
+  worker_worktree_require_identity "patch capture" || return 1
   git -C "$worktree" add -A
   git -C "$worktree" diff --cached --binary > "$patch_file"
 }
@@ -861,6 +1056,12 @@ run_verify() {
   local verify_pid
 
   : > "$verify_out"
+  if ! worker_worktree_require_identity "verification"; then
+    worker_status=125
+    verify_status=125
+    route_retry_terminal=1
+    return 0
+  fi
   if [ "$worker_status" -eq 0 ]; then
     if ! delegate_attempt_transition verifying "" delegate-verifying; then
       worker_status=2
@@ -949,11 +1150,14 @@ route_selected_reasoning=""
   "$(ma_scripts_dir)/agent-executor.sh" start --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_started=1
 plan_transition start
+plan_started=1
 
 # Snapshot the surfaces a worker is not supposed to touch. Scope enforcement
 # only inspects the patch it returns, so a write around the patch — the primary
 # worktree, git config, remotes, refs, hooks — was previously invisible.
 worker_guard_dir=""
+worker_operation_snapshot_sha=""
+worker_guard_worktree_physical=""
 if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   # This run's own writes are the harness moving, not the worker: the artifact
   # directory, and our own stdout/stderr when the caller redirected them into
@@ -977,8 +1181,34 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   done
   exec 9>&- 8>&-
   export OMS_WORKER_GUARD_EXCLUDE
+  worker_guard_worktree_physical="$worker_identity_physical"
+  [ -n "$worker_guard_worktree_physical" ] ||
+    fail "could not resolve delegated worktree identity for the worker guard"
   worker_guard_dir="$worktree_parent/worker-guard"
-  if oms_worker_surface_snapshot "$REPO" "$worker_guard_dir"; then
+  if oms_worker_surface_snapshot "$REPO" "$worker_guard_dir" \
+    "$worker_guard_worktree_physical"; then
+    if [ -n "$PLAN_TASK_ID$EXECUTOR_ID" ] &&
+      ! oms_worker_operation_snapshot "$REPO" \
+        "$worker_guard_dir/current-operation.json" \
+        "$PLAN_TASK_ID" "$PLAN_LEASE_ID" "$EXECUTOR_ID" "$EXECUTOR_SOUL_SHA"; then
+      # Do not restore JSON from this snapshot: a long-running task may have
+      # been legitimately reclaimed by another lease owner in this interval.
+      plan_failure_transition >/dev/null 2>&1 || true
+      if [ -n "$EXECUTOR_ID" ] && [ "$executor_started" = 1 ]; then
+        "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
+          --id "$EXECUTOR_ID" --reason "current authority snapshot failed" \
+          >/dev/null 2>&1 || true
+        executor_finalized=1
+      fi
+      fail "could not bind current plan/executor authority before provider start"
+    fi
+    if [ -f "$worker_guard_dir/current-operation.json" ]; then
+      worker_operation_snapshot_sha="$(
+        oms_sha256_file "$worker_guard_dir/current-operation.json" 2>/dev/null || true
+      )"
+      [ -n "$worker_operation_snapshot_sha" ] ||
+        fail "could not hash current plan/executor authority snapshot"
+    fi
     # A bounded scan must say it was bounded: silent truncation reads as full
     # coverage exactly where coverage matters.
     if grep -q '^TRUNCATED.*(ignored)' "$worker_guard_dir/files" 2>/dev/null; then
@@ -1004,7 +1234,11 @@ else
   fi
 fi
 
-capture_patch
+if ! capture_patch; then
+  worker_status=125
+  route_retry_terminal=1
+  : > "$patch_file"
+fi
 
 # A worker can exit 0 having produced only its own reason for doing nothing —
 # a denied tool it could not prompt for, a missing login. Exit status says the
@@ -1125,6 +1359,12 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
     # Restore the worktree to the captured patch state: undo tracked-file
     # mutations from verify and drop its untracked byproducts, so the next
     # capture_patch cannot sweep verification residue into the patch.
+    if ! worker_worktree_require_identity "repair reset"; then
+      worker_status=125
+      verify_status=125
+      route_retry_terminal=1
+      break
+    fi
     git -C "$worktree" checkout -- . 2>/dev/null || true
     git -C "$worktree" clean -fdx >/dev/null 2>&1 || true
     {
@@ -1133,7 +1373,13 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
       printf '\n\n### Output\n\n'
     } >> "$artifact"
     run_worker "$repair_prompt_file"
-    capture_patch
+    if ! capture_patch; then
+      worker_status=125
+      verify_status=125
+      route_retry_terminal=1
+      : > "$patch_file"
+      break
+    fi
     if [ -n "$VERIFY_CMD" ]; then
       printf '\n\n## Verify (repair %s)\n\n- command: %s\n\n' "$repair_used" "$VERIFY_CMD" >> "$artifact"
       run_verify
@@ -1149,7 +1395,12 @@ fi
 # worker already wrote outside its worktree, so the run fails and the worktree
 # is kept for inspection.
 if [ -n "$worker_guard_dir" ]; then
-  worker_guard_changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir")"
+  worker_guard_changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
+    "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")"
+  if ! worker_worktree_require_identity "final worker guard"; then
+    printf '%s\n' "$worker_identity_detail" > "$worker_guard_dir/worktree-identity-detail"
+    worker_guard_changed="${worker_guard_changed:+$worker_guard_changed, }worktree-identity"
+  fi
   # Not every surface can be attributed. Nobody else edits git config, remotes,
   # refs, hooks, object-store metadata, or rewrites append-only state while a
   # delegation runs, so those are the worker. Untracked/ignored files and
@@ -1187,6 +1438,12 @@ if [ -n "$worker_guard_dir" ]; then
       printf -- '- changed outside the worktree: %s\n' "$worker_guard_changed"
       [ ! -s "$worker_guard_dir/state-detail" ] ||
         printf -- '- shared state: %s\n' "$(tr '\n' ';' < "$worker_guard_dir/state-detail")"
+      [ ! -s "$worker_guard_dir/current-operation-detail" ] ||
+        printf -- '- current operation: %s\n' \
+          "$(tr '\n' ';' < "$worker_guard_dir/current-operation-detail")"
+      [ ! -s "$worker_guard_dir/worktree-identity-detail" ] ||
+        printf -- '- worktree identity: %s\n' \
+          "$(tr '\n' ';' < "$worker_guard_dir/worktree-identity-detail")"
       printf -- '- worktree kept for inspection\n'
     } >> "$artifact"
     echo "error: $TO changed protected state outside its worktree: $worker_guard_changed" >&2
@@ -1195,7 +1452,21 @@ if [ -n "$worker_guard_dir" ]; then
         [ -z "$detail" ] || echo "error: shared state: $detail" >&2
       done < "$worker_guard_dir/state-detail"
     fi
-    echo "error: worktree kept at $worktree; nothing from this run should be landed" >&2
+    if [ -s "$worker_guard_dir/current-operation-detail" ]; then
+      while IFS= read -r detail; do
+        [ -z "$detail" ] || echo "error: current-operation: $detail" >&2
+      done < "$worker_guard_dir/current-operation-detail"
+      echo "error: current-operation authority was not restored; a concurrent lease owner may exist, so inspect plan/executor state" >&2
+    fi
+    if [ -s "$worker_guard_dir/worktree-identity-detail" ]; then
+      while IFS= read -r detail; do
+        [ -z "$detail" ] || echo "error: worktree identity: $detail" >&2
+      done < "$worker_guard_dir/worktree-identity-detail"
+      echo "error: worktree parent preserved for inspection at $worktree_parent" >&2
+    else
+      echo "error: worktree kept at $worktree" >&2
+    fi
+    echo "error: nothing from this run should be landed" >&2
     (cd "$REPO" && "$(ma_scripts_dir)/fail-ledger.sh" record --kind delegate \
       --cmd "peer-delegate --to $TO worker-authority" --exit 1 \
       --summary "worker changed protected state: $worker_guard_changed") >/dev/null 2>&1 || true
@@ -1203,8 +1474,23 @@ if [ -n "$worker_guard_dir" ]; then
     [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
       --id "$EXECUTOR_ID" --reason "worker changed protected state" >/dev/null 2>&1 || true
     executor_finalized=1
-    plan_transition release
+    plan_failure_transition
     exit 1
+  fi
+fi
+
+# Remove the checkout while success is still provisional. The EXIT trap also
+# uses the same identity check for failures and signals, but a trap cannot turn
+# an otherwise successful shell exit into a failure. Doing the safe removal
+# here ensures a last-moment pathname/backpointer swap blocks receipts and
+# landing instead of merely leaving a warning during teardown.
+if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ] &&
+  [ "$verify_status" -eq 0 ]; then
+  if ! cleanup_delegated_worktree; then
+    worker_status=125
+    route_retry_terminal=1
+    printf '\n\n## Delegated worktree identity violation\n\n- phase: cleanup\n- %s\n- worktree parent preserved for inspection: %s\n' \
+      "$worker_identity_detail" "$worktree_parent" >> "$artifact"
   fi
 fi
 
@@ -1247,7 +1533,7 @@ elif [ "$APPLY" = 1 ]; then
     # the reviewed artifact/patch to the current lease; patch-land then fences
     # review -> landing -> done and records landing lineage/failure memory.
     if [ -n "$PLAN_TASK_ID" ]; then
-      plan_transition review --artifact "$artifact" --patch "$patch_file"
+      plan_publish_review "$artifact" "$patch_file"
       plan_reviewed=1
     fi
     land_script="$(ma_scripts_dir)/patch-land.sh"
@@ -1315,7 +1601,7 @@ if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
   delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
   [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" --reason "worker or verify failed" >/dev/null || true
   [ -z "$EXECUTOR_ID" ] || executor_finalized=1
-  plan_transition release
+  plan_failure_transition
   exit 1
 fi
 [ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] ||
@@ -1326,7 +1612,7 @@ if [ "$applied" = 1 ]; then
 elif [ "$plan_reviewed" = 1 ]; then
   : # A rejected landing deliberately remains in review for repair/inspection.
 else
-  plan_transition review --artifact "$artifact" --patch "$patch_file"
+  plan_publish_review "$artifact" "$patch_file"
 fi
 if [ "$APPLY" = 1 ] && [ "$DRY_RUN" != "1" ] && [ "$applied" = 0 ]; then
   echo "error: worker succeeded but requested landing did not complete" >&2

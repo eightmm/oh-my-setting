@@ -85,6 +85,75 @@ assert json.loads(approvals["content"][0]["text"]) == [], approvals
 PY
 }
 
+test_mcp_server_bounds_requests_before_effects() {
+  local repo="$TMP/mcp-bounds-repo"
+  local out="$TMP/mcp-bounds-out"
+
+  mkdir -p "$repo"
+  OMS_T_REPO="$repo" python3 - <<'PY' |
+import json, os, sys
+
+repo = os.environ["OMS_T_REPO"]
+stream = sys.stdout.buffer
+# This line is larger than the server's request cap. The following valid ping
+# proves it drains only that line and keeps serving without retaining it.
+stream.write(b"{" + (b"x" * 262144) + b"\n")
+stream.write(b"[]\n")
+stream.write(b"\xff\n")
+oversized_prompt = {
+    "jsonrpc": "2.0",
+    "id": 91,
+    "method": "tools/call",
+    "params": {
+        "name": "oms_peer_start",
+        "arguments": {
+            "repo": repo,
+            "kind": "ask",
+            "prompt": "p" * 65537,
+        },
+    },
+}
+stream.write(json.dumps(oversized_prompt).encode("utf-8") + b"\n")
+# Both records fit under the line cap but used to terminate the whole server:
+# the first exceeds the JSON decoder's nesting depth, and the second reaches
+# the platform with a single overlong path component.
+stream.write((b"[" * 100000) + b"0" + (b"]" * 100000) + b"\n")
+long_repo = {
+    "jsonrpc": "2.0",
+    "id": 92,
+    "method": "tools/call",
+    "params": {
+        "name": "oms_inbox",
+        "arguments": {"repo": "r" * 10000},
+    },
+}
+stream.write(json.dumps(long_repo).encode("utf-8") + b"\n")
+stream.write(b'{"jsonrpc":"2.0","id":93,"method":"ping"}\n')
+PY
+    python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
+
+  OMS_T_OUT="$out" python3 - <<'PY' || fail "MCP request bounds did not fail closed"
+import json, os
+
+rows = [json.loads(line) for line in open(os.environ["OMS_T_OUT"], encoding="utf-8")]
+assert len(rows) == 7, rows
+assert rows[0]["error"]["code"] == -32600, rows[0]
+assert "byte limit" in rows[0]["error"]["message"], rows[0]
+assert rows[1]["error"]["code"] == -32600, rows[1]
+assert rows[2]["error"]["code"] == -32700, rows[2]
+prompt = rows[3]
+assert prompt["id"] == 91 and prompt["result"]["isError"], prompt
+assert "prompt exceeds" in prompt["result"]["content"][0]["text"], prompt
+assert rows[4]["error"]["code"] == -32700, rows[4]
+long_path = rows[5]
+assert long_path["id"] == 92 and long_path["result"]["isError"], long_path
+assert "repo exceeds" in long_path["result"]["content"][0]["text"], long_path
+assert rows[6] == {"jsonrpc": "2.0", "id": 93, "result": {}}, rows[6]
+PY
+  [ ! -e "$repo/.oms" ] ||
+    fail "oversized prompt created MCP state before it was rejected"
+}
+
 # --- MCP peer action tools --------------------------------------------------
 
 # One JSON-RPC exchange against the server in the fixture's world: the stub
@@ -1261,6 +1330,7 @@ test_slurm_generator_has_one_front_door() {
 }
 
 test_mcp_server_protocol
+test_mcp_server_bounds_requests_before_effects
 test_mcp_peer_actions_start_detached_and_poll
 test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt
 test_install_mcp_registers_and_is_idempotent

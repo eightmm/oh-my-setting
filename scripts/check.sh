@@ -358,6 +358,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage autonomy-verification bash tests/autonomy-verification-smoke.sh
   stage autonomy-failure bash tests/autonomy-failure-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
+  stage goal-drive-recovery bash tests/goal-drive-recovery-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
   stage execution-profile bash tests/execution-profile-smoke.sh
   stage herdr-adapter bash tests/herdr-adapter-smoke.sh
@@ -395,6 +396,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
   stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
   stage patch-admit-structural bash tests/patch-admit-structural-smoke.sh
+  stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
   stage patch-land-approval bash tests/patch-land-approval-smoke.sh
   stage ci-status bash tests/ci-status-smoke.sh
   stage read-time-expiry bash tests/read-time-expiry-smoke.sh

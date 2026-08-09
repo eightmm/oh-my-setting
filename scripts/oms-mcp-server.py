@@ -38,6 +38,10 @@ FALLBACK_PROTOCOL = "2025-06-18"
 # (newer handshakes, task extensions) it has never implemented.
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26")
 OUTPUT_LIMIT = 60_000
+MAX_REQUEST_BYTES = 256 * 1024
+MAX_PROMPT_BYTES = 64 * 1024
+MAX_PATH_BYTES = 4 * 1024
+MAX_ARGUMENT_BYTES = 16 * 1024
 
 # Peer consultation: which front-door verb each kind runs, and where that verb
 # writes its answer artifacts. Started detached, polled from disk.
@@ -254,11 +258,30 @@ def tool_definitions() -> list[dict]:
     return defs
 
 
+def text_argument(
+    arguments: dict, name: str, limit: int = MAX_ARGUMENT_BYTES
+) -> tuple[str, str]:
+    """Read one bounded UTF-8 string without invoking arbitrary __str__."""
+    value = arguments.get(name)
+    if value is None:
+        return "", ""
+    if not isinstance(value, str):
+        return "", "error: %s must be a string" % name
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return "", "error: %s must be valid UTF-8 text" % name
+    if size > limit:
+        return "", "error: %s exceeds %d-byte limit" % (name, limit)
+    if "\x00" in value:
+        return "", "error: %s contains a NUL byte" % name
+    return value, ""
+
+
 def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
-    repo = str(arguments.get("repo") or Path.cwd())
-    repo_path = Path(repo)
-    if not repo_path.is_dir():
-        return "error: no such repository directory: %s" % repo, True
+    repo_path, err = resolve_repo(arguments)
+    if err:
+        return err, True
     argv = [
         arg if arg == "bash" else str(ROOT / arg) if arg.startswith("scripts/") else arg
         for arg in tool["argv"]
@@ -267,7 +290,9 @@ def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
         argv.append("--blockers")
     positional = tool.get("positional")
     if positional:
-        value = str(arguments.get(positional, ""))
+        value, err = text_argument(arguments, positional, MAX_PATH_BYTES)
+        if err:
+            return err, True
         # Bare digest names only: this tool reads .oms/handoffs/<name>, and a
         # path here would turn a state reader into an arbitrary-file reader.
         if not value or value.startswith("-") or "/" in value or "\\" in value:
@@ -293,9 +318,15 @@ def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
 
 
 def resolve_repo(arguments: dict) -> tuple[Path, str]:
-    repo = Path(str(arguments.get("repo") or Path.cwd()))
-    if not repo.is_dir():
-        return repo, "error: no such repository directory: %s" % repo
+    raw, err = text_argument(arguments, "repo", MAX_PATH_BYTES)
+    if err:
+        return Path("."), err
+    try:
+        repo = Path(raw) if raw else Path.cwd()
+        if not repo.is_dir():
+            return repo, "error: no such repository directory: %s" % repo
+    except (OSError, ValueError) as exc:
+        return Path("."), "error: invalid repository path: %s" % exc
     return repo, ""
 
 
@@ -309,14 +340,14 @@ def ensure_oms_ignore(repo: Path) -> None:
         ignore.write_text("*\n", encoding="utf-8")
 
 
-def peer_targets(raw) -> tuple[list[str], str]:
+def peer_targets(raw: str) -> tuple[list[str], str]:
     """Validate PROVIDER[:model=NAME] entries before they become argv.
 
     A target reaches the verb as an argument, so an unchecked value could pass
     a flag of its own; only the shapes the verbs document get through.
     """
     targets = []
-    for entry in str(raw or "").split(","):
+    for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
             continue
@@ -357,14 +388,28 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     repo, err = resolve_repo(arguments)
     if err:
         return err, True
-    kind = str(arguments.get("kind") or "")
+    kind, err = text_argument(arguments, "kind", 64)
+    if err:
+        return err, True
     spec = PEER_KINDS.get(kind)
     if spec is None:
         return "error: kind must be one of: %s" % ", ".join(sorted(PEER_KINDS)), True
-    prompt = str(arguments.get("prompt") or "").strip()
+    raw_prompt = arguments.get("prompt")
+    if not isinstance(raw_prompt, str):
+        return "error: prompt must be a string", True
+    try:
+        prompt_bytes = raw_prompt.encode("utf-8")
+    except UnicodeEncodeError:
+        return "error: prompt must be valid UTF-8 text", True
+    if len(prompt_bytes) > MAX_PROMPT_BYTES:
+        return "error: prompt exceeds %d-byte limit" % MAX_PROMPT_BYTES, True
+    prompt = raw_prompt.strip()
     if not prompt:
         return "error: prompt is required: a consultation needs a question", True
-    targets, err = peer_targets(arguments.get("providers"))
+    raw_targets, err = text_argument(arguments, "providers")
+    if err:
+        return err, True
+    targets, err = peer_targets(raw_targets)
     if err:
         return err, True
 
@@ -393,7 +438,7 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         return "error: %s" % exc, True
     try:
         launcher.wait(timeout=30)
@@ -484,7 +529,9 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     repo, err = resolve_repo(arguments)
     if err:
         return err, True
-    operation = str(arguments.get("operation") or "")
+    operation, err = text_argument(arguments, "operation", 128)
+    if err:
+        return err, True
     # The id names a directory under .oms/artifacts/mcp. Accepting anything but
     # the generated shape would turn a run reader into an arbitrary-path reader.
     if not OPERATION_RE.match(operation):
@@ -549,14 +596,51 @@ def response(msg_id, result=None, error=None) -> dict:
 
 
 def handle(message: dict):
+    if not isinstance(message, dict):
+        return response(
+            None, error={"code": -32600, "message": "invalid request: expected object"}
+        )
     method = message.get("method")
     msg_id = message.get("id")
+    if isinstance(msg_id, (bool, dict, list)):
+        return response(
+            None, error={"code": -32600, "message": "invalid request: invalid id"}
+        )
+    if isinstance(msg_id, str):
+        try:
+            id_size = len(msg_id.encode("utf-8"))
+        except UnicodeEncodeError:
+            return response(
+                None, error={"code": -32600, "message": "invalid request: invalid id"}
+            )
+        if id_size > 1024:
+            return response(
+                None, error={"code": -32600, "message": "invalid request: id is too long"}
+            )
     if method is None or not isinstance(method, str):
-        return None
+        return response(
+            msg_id, error={"code": -32600, "message": "invalid request: method must be a string"}
+        )
+    try:
+        method_size = len(method.encode("utf-8"))
+    except UnicodeEncodeError:
+        return response(
+            msg_id, error={"code": -32600, "message": "invalid request: invalid method"}
+        )
+    if method_size > 128:
+        return response(
+            msg_id, error={"code": -32600, "message": "invalid request: method is too long"}
+        )
     if msg_id is None:
         return None  # notification (e.g. notifications/initialized)
     if method == "initialize":
-        params = message.get("params") or {}
+        params = message.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return response(
+                msg_id, error={"code": -32602, "message": "invalid params: expected object"}
+            )
         requested = params.get("protocolVersion")
         if isinstance(requested, str) and requested in SUPPORTED_PROTOCOLS:
             protocol = requested
@@ -575,9 +659,30 @@ def handle(message: dict):
     if method == "tools/list":
         return response(msg_id, {"tools": tool_definitions()})
     if method == "tools/call":
-        params = message.get("params") or {}
+        params = message.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return response(
+                msg_id, error={"code": -32602, "message": "invalid params: expected object"}
+            )
         name = params.get("name")
-        arguments = params.get("arguments") or {}
+        try:
+            name_size = len(name.encode("utf-8")) if isinstance(name, str) else -1
+        except UnicodeEncodeError:
+            name_size = -1
+        if name_size < 0 or name_size > 128:
+            return response(
+                msg_id, error={"code": -32602, "message": "invalid tool name"}
+            )
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return response(
+                msg_id,
+                error={"code": -32602, "message": "invalid arguments: expected object"},
+            )
         for tool in TOOLS:
             if tool["name"] == name:
                 # State tools are one fixed argv; action tools run their own
@@ -602,19 +707,53 @@ def handle(message: dict):
 
 
 def main() -> int:
-    for line in sys.stdin:
-        line = line.strip()
+    stream = sys.stdin.buffer
+    while True:
+        raw = stream.readline(MAX_REQUEST_BYTES + 1)
+        if not raw:
+            break
+        if len(raw) > MAX_REQUEST_BYTES:
+            # Drain only the remainder of this record in bounded chunks, then
+            # resume at the next JSON-RPC line. Never parse, echo, or retain the
+            # oversized payload.
+            while raw and not raw.endswith(b"\n"):
+                raw = stream.readline(MAX_REQUEST_BYTES + 1)
+            reply = response(
+                None,
+                error={
+                    "code": -32600,
+                    "message": "request exceeds %d-byte limit" % MAX_REQUEST_BYTES,
+                },
+            )
+            print(json.dumps(reply), flush=True)
+            continue
+        try:
+            line = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            reply = response(None, error={"code": -32700, "message": "parse error"})
+            print(json.dumps(reply), flush=True)
+            continue
         if not line:
             continue
         try:
             message = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             reply = response(
                 None, error={"code": -32700, "message": "parse error"}
             )
             print(json.dumps(reply), flush=True)
             continue
-        reply = handle(message)
+        try:
+            reply = handle(message)
+        except (OSError, RecursionError, UnicodeError, ValueError):
+            # A malformed field must fail only its own request. Filesystem path
+            # limits vary by platform, and deeply shaped values can exceed
+            # Python's recursion limit even inside the overall byte bound.
+            msg_id = message.get("id") if isinstance(message, dict) else None
+            reply = response(
+                msg_id,
+                error={"code": -32602, "message": "invalid or oversized request field"},
+            )
         if reply is not None:
             print(json.dumps(reply, ensure_ascii=False), flush=True)
     return 0

@@ -187,15 +187,182 @@ for problem in problems[:5]:
 PY
 }
 
+# Freeze only the authority owned by this delegated operation. The surrounding
+# plan/executor files are shared: a sibling may legitimately move another task
+# while this provider runs, so comparing either whole file would turn normal
+# parallel work into a violation. The selected task lease and executor soul are
+# fencing identities; snapshot their complete JSON objects after the harness
+# moves them to running, then compare those objects semantically before any
+# review receipt or landing is published.
+oms_worker_operation_snapshot() {  # REPO OUT PLAN_TASK LEASE EXECUTOR SOUL
+  local repo="$1"
+  local out="$2"
+  local plan_task="${3:-}"
+  local lease="${4:-}"
+  local executor="${5:-}"
+  local soul="${6:-}"
+  local tmp="$out.tmp.$$"
+
+  OMS_WG_REPO="$repo" OMS_WG_PLAN_TASK="$plan_task" OMS_WG_LEASE="$lease" \
+    OMS_WG_EXECUTOR="$executor" OMS_WG_SOUL="$soul" \
+    python3 - <<'PY' > "$tmp" || { rm -f "$tmp"; return 1; }
+import hashlib, json, os, sys
+
+repo = os.environ["OMS_WG_REPO"]
+task_id = os.environ["OMS_WG_PLAN_TASK"]
+lease = os.environ["OMS_WG_LEASE"]
+executor_id = os.environ["OMS_WG_EXECUTOR"]
+soul = os.environ["OMS_WG_SOUL"]
+
+def load_regular(path, label):
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise SystemExit("error: %s authority is not a regular file" % label)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, TypeError, ValueError) as exc:
+        raise SystemExit("error: cannot read %s authority: %s" % (label, exc))
+    if not isinstance(value, dict):
+        raise SystemExit("error: %s authority is not an object" % label)
+    return value
+
+snapshot = {"schema": 1, "plan": None, "executor": None}
+if task_id:
+    plan = load_regular(os.path.join(repo, ".oms", "plan", "tasks.json"), "plan")
+    tasks = plan.get("tasks")
+    task = tasks.get(task_id) if isinstance(tasks, dict) else None
+    if not isinstance(task, dict):
+        raise SystemExit("error: current plan task %s is missing" % task_id)
+    if not lease or task.get("lease_id") != lease:
+        raise SystemExit("error: current plan task %s lease changed before provider start" % task_id)
+    snapshot["plan"] = {"task_id": task_id, "lease_id": lease, "task": task}
+elif lease:
+    raise SystemExit("error: current operation has a lease without a plan task")
+
+if executor_id:
+    path = os.path.join(repo, ".oms", "executors", executor_id, "meta.json")
+    meta = load_regular(path, "executor %s" % executor_id)
+    if meta.get("executor_id") != executor_id:
+        raise SystemExit("error: current executor id changed before provider start")
+    if not soul or meta.get("soul_sha256") != soul:
+        raise SystemExit("error: current executor soul changed before provider start")
+    soul_path = os.path.join(repo, ".oms", "executors", executor_id, "SOUL.md")
+    if os.path.islink(soul_path) or not os.path.isfile(soul_path):
+        raise SystemExit("error: current executor soul is not a regular file")
+    try:
+        with open(soul_path, "rb") as handle:
+            soul_file_sha = hashlib.sha256(handle.read()).hexdigest()
+    except OSError as exc:
+        raise SystemExit("error: cannot read current executor soul: %s" % exc)
+    if soul_file_sha != soul:
+        raise SystemExit("error: current executor soul file does not match metadata")
+    snapshot["executor"] = {
+        "executor_id": executor_id,
+        "soul_sha256": soul,
+        "soul_file_sha256": soul_file_sha,
+        "meta": meta,
+    }
+elif soul:
+    raise SystemExit("error: current operation has a soul without an executor")
+
+json.dump(snapshot, sys.stdout, ensure_ascii=False, sort_keys=True,
+          separators=(",", ":"))
+sys.stdout.write("\n")
+PY
+  mv "$tmp" "$out"
+}
+
+oms_worker_operation_violations() {  # REPO SNAPSHOT
+  local repo="$1"
+  local snapshot="$2"
+
+  [ -f "$snapshot" ] || return 0
+  OMS_WG_REPO="$repo" OMS_WG_OPERATION_SNAPSHOT="$snapshot" python3 - <<'PY'
+import hashlib, json, os
+
+repo = os.environ["OMS_WG_REPO"]
+snapshot_path = os.environ["OMS_WG_OPERATION_SNAPSHOT"]
+
+def load_regular(path):
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise OSError("not a regular file")
+    with open(path, encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError("not an object")
+    return value
+
+def changed_fields(before, after):
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return ["object-shape"]
+    return sorted(key for key in set(before) | set(after)
+                  if key not in before or key not in after or before[key] != after[key])
+
+try:
+    expected = load_regular(snapshot_path)
+except (OSError, TypeError, ValueError):
+    print("current operation snapshot became unreadable")
+    raise SystemExit(0)
+
+plan_expected = expected.get("plan")
+if isinstance(plan_expected, dict):
+    task_id = plan_expected.get("task_id", "")
+    plan_path = os.path.join(repo, ".oms", "plan", "tasks.json")
+    try:
+        plan = load_regular(plan_path)
+        tasks = plan.get("tasks")
+        current = tasks.get(task_id) if isinstance(tasks, dict) else None
+        if not isinstance(current, dict):
+            raise KeyError(task_id)
+    except (OSError, TypeError, ValueError, KeyError):
+        print("plan task %s was deleted or became unreadable" % task_id)
+    else:
+        fields = changed_fields(plan_expected.get("task"), current)
+        if fields:
+            print("plan task %s changed: %s" % (task_id, ", ".join(fields)))
+        elif current.get("lease_id") != plan_expected.get("lease_id"):
+            print("plan task %s lease no longer matches its operation fence" % task_id)
+
+executor_expected = expected.get("executor")
+if isinstance(executor_expected, dict):
+    executor_id = executor_expected.get("executor_id", "")
+    meta_path = os.path.join(repo, ".oms", "executors", executor_id, "meta.json")
+    try:
+        current = load_regular(meta_path)
+    except (OSError, TypeError, ValueError):
+        print("executor %s was deleted or became unreadable" % executor_id)
+    else:
+        fields = changed_fields(executor_expected.get("meta"), current)
+        if fields:
+            print("executor %s changed: %s" % (executor_id, ", ".join(fields)))
+        elif current.get("soul_sha256") != executor_expected.get("soul_sha256"):
+            print("executor %s soul no longer matches its operation fence" % executor_id)
+    soul_path = os.path.join(repo, ".oms", "executors", executor_id, "SOUL.md")
+    try:
+        if os.path.islink(soul_path) or not os.path.isfile(soul_path):
+            raise OSError("not a regular file")
+        with open(soul_path, "rb") as handle:
+            current_soul_sha = hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        print("executor %s soul file was deleted or became unreadable" % executor_id)
+    else:
+        if current_soul_sha != executor_expected.get("soul_file_sha256"):
+            print("executor %s soul file changed" % executor_id)
+PY
+}
+
 oms_worker_surface_diff() {
   local repo="$1"
   local before_dir="$2"
+  local operation_snapshot_sha="${3:-}"
+  local current_worktree_physical="${4:-}"
   local changed=""
   local name
 
   for name in config remotes refs tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
-    if ! oms_worker_surface_capture_one "$repo" "$name" | cmp -s - "$before_dir/$name"; then
+    if ! oms_worker_surface_capture_one "$repo" "$name" \
+      "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
       changed="${changed:+$changed, }$name"
     fi
   done
@@ -204,12 +371,313 @@ oms_worker_surface_diff() {
   # an exported variable would die with the subshell.
   oms_worker_state_violations "$repo" "$before_dir/omsstate" > "$before_dir/state-detail"
   [ ! -s "$before_dir/state-detail" ] || changed="${changed:+$changed, }shared-state"
+  if [ -n "$operation_snapshot_sha" ]; then
+    if [ ! -f "$before_dir/current-operation.json" ] ||
+      [ "$(oms_sha256_file "$before_dir/current-operation.json" 2>/dev/null || true)" != "$operation_snapshot_sha" ]; then
+      printf 'current operation snapshot was changed or deleted\n' \
+        > "$before_dir/current-operation-detail"
+    else
+      oms_worker_operation_violations "$repo" "$before_dir/current-operation.json" \
+        > "$before_dir/current-operation-detail"
+    fi
+    [ ! -s "$before_dir/current-operation-detail" ] ||
+      changed="${changed:+$changed, }current-operation"
+  fi
   printf '%s\n' "$changed"
+}
+
+# A parallel delegate owns a temporary linked worktree in the same repository.
+# Its add/remove is harness lifecycle, not a provider reaching into Git
+# metadata. Ignore only registrations backed by a live private marker whose
+# physical repo/worktree pair passes the residue validator and whose metadata
+# directory is that worktree's real Git backpointer. The current worker's own
+# registration is never ignored: a commit there moves its detached HEAD and
+# otherwise collapses into an empty successful patch.
+oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE
+  local repo="$1"
+  local entry="$2"
+  local current_worktree_physical="${3:-}"
+  local metadata_dir
+  local metadata_physical=""
+  local gitdir_file
+  local gitfile=""
+  local wt_path=""
+  local wt_physical=""
+  local worktree_git_dir=""
+  local residue_dir=""
+  local marker=""
+  local marker_kind=""
+  local marker_pid=""
+  local marker_repo=""
+  local marker_worktree=""
+  local marker_temporary=""
+  local repo_physical=""
+  local base=""
+
+  command -v oms_harness_safe_residue_worktree >/dev/null 2>&1 || return 1
+  command -v oms_harness_temp_bases >/dev/null 2>&1 || return 1
+  metadata_dir="$(dirname "$entry")"
+  gitdir_file="$metadata_dir/gitdir"
+  [ -f "$gitdir_file" ] && [ ! -L "$gitdir_file" ] || return 1
+  gitfile="$(sed -n '1p' "$gitdir_file" 2>/dev/null || true)"
+  gitfile="${gitfile//$'\r'/}"
+  case "$gitfile" in
+    */.git) wt_path="${gitfile%/.git}" ;;
+    *) return 1 ;;
+  esac
+  wt_physical="$(oms_harness_physical_dir "$wt_path" 2>/dev/null || true)"
+  [ -n "$wt_physical" ] || return 1
+  [ -z "$current_worktree_physical" ] ||
+    [ "$wt_physical" != "$current_worktree_physical" ] || return 1
+  [ -f "$wt_physical/.git" ] && [ ! -L "$wt_physical/.git" ] || return 1
+  metadata_physical="$(oms_harness_physical_dir "$metadata_dir" 2>/dev/null || true)"
+  [ -n "$metadata_physical" ] || return 1
+  worktree_git_dir="$(
+    oms_harness_git_path_physical "$wt_physical" --git-dir 2>/dev/null || true
+  )"
+  [ -n "$worktree_git_dir" ] &&
+    [ "$metadata_physical" = "$worktree_git_dir" ] || return 1
+  residue_dir="$(dirname "$wt_physical")"
+  marker="$residue_dir/.oh-my-setting-tmp"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_kind="$(oms_harness_read_marker_value "$marker" kind)"
+  marker_pid="$(oms_harness_read_marker_value "$marker" pid)"
+  marker_repo="$(oms_harness_read_marker_value "$marker" repo)"
+  marker_worktree="$(oms_harness_read_marker_value "$marker" worktree)"
+  marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
+  [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
+  case "$marker_pid" in *[!0-9]*|"") return 1 ;; esac
+  kill -0 "$marker_pid" 2>/dev/null || return 1
+  repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
+  [ -n "$repo_physical" ] || return 1
+
+  while IFS= read -r base; do
+    [ -n "$base" ] || continue
+    if oms_harness_safe_residue_worktree "$base" "$residue_dir" \
+        "$marker_repo" "$marker_worktree" &&
+      [ "$OMS_HARNESS_SAFE_RESIDUE_REPO" = "$repo_physical" ] &&
+      [ "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" = "$wt_physical" ]; then
+      return 0
+    fi
+  done <<EOF
+$(oms_harness_temp_bases)
+EOF
+  return 1
+}
+
+# Capture and later re-check the delegated checkout's identity. A provider owns
+# the files inside this directory, but it must not be able to rename the
+# directory and replace the old pathname with a symlink to the primary checkout:
+# every later `git -C "$worktree"` would otherwise follow that new target. The
+# real directory and gitdir device/inode identities, common-dir, the regular
+# `.git` file, and Git's regular backpointer must all stay bound to their
+# pre-provider receipt.
+# Results are globals so callers do not need to serialize pathnames through a
+# delimiter (a repository pathname may legally contain tabs or newlines).
+OMS_WORKER_IDENTITY_PHYSICAL=""
+OMS_WORKER_IDENTITY_GIT_DIR=""
+OMS_WORKER_IDENTITY_COMMON_DIR=""
+OMS_WORKER_IDENTITY_GITFILE_SHA=""
+OMS_WORKER_IDENTITY_BACKPOINTER_SHA=""
+OMS_WORKER_IDENTITY_WORKTREE_STAT=""
+OMS_WORKER_IDENTITY_GITDIR_STAT=""
+OMS_WORKER_IDENTITY_DETAIL=""
+
+oms_worker_worktree_identity_capture() {  # REPO WORKTREE
+  local repo="$1"
+  local worker_tree="$2"
+  local physical=""
+  local git_dir=""
+  local common_dir=""
+  local repo_common=""
+  local gitfile_line=""
+  local gitfile_target=""
+  local gitfile_target_physical=""
+  local backpointer_file=""
+  local backpointer=""
+  local backpointer_parent=""
+  local backpointer_physical=""
+  local gitfile_sha=""
+  local backpointer_sha=""
+  local identity_stats=""
+  local identity_tab=""
+  local worktree_stat=""
+  local gitdir_stat=""
+
+  OMS_WORKER_IDENTITY_PHYSICAL=""
+  OMS_WORKER_IDENTITY_GIT_DIR=""
+  OMS_WORKER_IDENTITY_COMMON_DIR=""
+  OMS_WORKER_IDENTITY_GITFILE_SHA=""
+  OMS_WORKER_IDENTITY_BACKPOINTER_SHA=""
+  OMS_WORKER_IDENTITY_WORKTREE_STAT=""
+  OMS_WORKER_IDENTITY_GITDIR_STAT=""
+  OMS_WORKER_IDENTITY_DETAIL=""
+
+  physical="$(oms_harness_physical_dir "$worker_tree" 2>/dev/null || true)"
+  if [ -z "$physical" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree path is missing, moved, or symbolic"
+    return 1
+  fi
+  if [ ! -f "$worker_tree/.git" ] || [ -L "$worker_tree/.git" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree .git is not a regular backpointer file"
+    return 1
+  fi
+
+  gitfile_line="$(sed -n '1p' "$worker_tree/.git" 2>/dev/null || true)"
+  gitfile_line="${gitfile_line//$'\r'/}"
+  case "$gitfile_line" in
+    "gitdir: "*) gitfile_target="${gitfile_line#gitdir: }" ;;
+    *)
+      OMS_WORKER_IDENTITY_DETAIL="delegated worktree .git backpointer is malformed"
+      return 1
+      ;;
+  esac
+  case "$gitfile_target" in
+    /*|[A-Za-z]:/*) ;;
+    *) gitfile_target="$worker_tree/$gitfile_target" ;;
+  esac
+  gitfile_target_physical="$(
+    oms_harness_physical_dir "$gitfile_target" 2>/dev/null || true
+  )"
+  git_dir="$(oms_harness_git_path_physical "$worker_tree" --git-dir 2>/dev/null || true)"
+  common_dir="$(
+    oms_harness_git_path_physical "$worker_tree" --git-common-dir 2>/dev/null || true
+  )"
+  repo_common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null || true)"
+  if [ -z "$git_dir" ] || [ "$gitfile_target_physical" != "$git_dir" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree .git no longer points to its actual gitdir"
+    return 1
+  fi
+  if [ -z "$common_dir" ] || [ -z "$repo_common" ] ||
+    [ "$common_dir" != "$repo_common" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree no longer belongs to the primary common gitdir"
+    return 1
+  fi
+  case "$git_dir" in
+    "$common_dir"/worktrees/*)
+      case "${git_dir#"$common_dir"/worktrees/}" in
+        ""|*/*)
+          OMS_WORKER_IDENTITY_DETAIL="delegated worktree gitdir has an invalid registration path"
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      OMS_WORKER_IDENTITY_DETAIL="delegated worktree gitdir is outside the common worktree registry"
+      return 1
+      ;;
+  esac
+
+  backpointer_file="$git_dir/gitdir"
+  if [ ! -f "$backpointer_file" ] || [ -L "$backpointer_file" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree registry gitdir is not a regular backpointer file"
+    return 1
+  fi
+  backpointer="$(sed -n '1p' "$backpointer_file" 2>/dev/null || true)"
+  backpointer="${backpointer//$'\r'/}"
+  case "$backpointer" in
+    */.git) backpointer_parent="${backpointer%/.git}" ;;
+    *)
+      OMS_WORKER_IDENTITY_DETAIL="delegated worktree registry backpointer is malformed"
+      return 1
+      ;;
+  esac
+  case "$backpointer_parent" in
+    /*|[A-Za-z]:/*) ;;
+    *) backpointer_parent="$git_dir/$backpointer_parent" ;;
+  esac
+  backpointer_physical="$(
+    oms_harness_physical_dir "$backpointer_parent" 2>/dev/null || true
+  )"
+  if [ "$backpointer_physical" != "$physical" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree registry does not point back to the current checkout"
+    return 1
+  fi
+
+  gitfile_sha="$(oms_sha256_file "$worker_tree/.git" 2>/dev/null || true)"
+  backpointer_sha="$(oms_sha256_file "$backpointer_file" 2>/dev/null || true)"
+  if [ -z "$gitfile_sha" ] || [ -z "$backpointer_sha" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree backpointer could not be hashed"
+    return 1
+  fi
+  if ! identity_stats="$(python3 - "$physical" "$git_dir" <<'PY'
+import os
+import stat
+import sys
+
+values = []
+for path in sys.argv[1:]:
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise SystemExit(2)
+    values.append("%s:%s" % (info.st_dev, info.st_ino))
+print("\t".join(values))
+PY
+  )"; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree inode identity could not be read"
+    return 1
+  fi
+  # Native Windows Python writes CRLF, and the same worktree can have more than
+  # one path spelling. Paths were canonicalized above; strip CR only from this
+  # compact device/inode receipt before comparing it across provider phases.
+  identity_stats="$(printf '%s' "$identity_stats" | tr -d '\r')"
+  identity_tab="$(printf '\t')"
+  case "$identity_stats" in
+    *"$identity_tab"*) ;;
+    *)
+      OMS_WORKER_IDENTITY_DETAIL="delegated worktree inode identity is malformed"
+      return 1
+      ;;
+  esac
+  worktree_stat="${identity_stats%%"$identity_tab"*}"
+  gitdir_stat="${identity_stats#*"$identity_tab"}"
+  if [ -z "$worktree_stat" ] || [ -z "$gitdir_stat" ]; then
+    OMS_WORKER_IDENTITY_DETAIL="delegated worktree inode identity is incomplete"
+    return 1
+  fi
+
+  OMS_WORKER_IDENTITY_PHYSICAL="$physical"
+  OMS_WORKER_IDENTITY_GIT_DIR="$git_dir"
+  OMS_WORKER_IDENTITY_COMMON_DIR="$common_dir"
+  OMS_WORKER_IDENTITY_GITFILE_SHA="$gitfile_sha"
+  OMS_WORKER_IDENTITY_BACKPOINTER_SHA="$backpointer_sha"
+  OMS_WORKER_IDENTITY_WORKTREE_STAT="$worktree_stat"
+  OMS_WORKER_IDENTITY_GITDIR_STAT="$gitdir_stat"
+  return 0
+}
+
+oms_worker_worktree_identity_check() {  # REPO WORKTREE PHYSICAL GITDIR COMMON GITFILE_SHA BACKPOINTER_SHA WORKTREE_STAT GITDIR_STAT
+  local repo="$1"
+  local worker_tree="$2"
+  local expected_physical="$3"
+  local expected_git_dir="$4"
+  local expected_common_dir="$5"
+  local expected_gitfile_sha="$6"
+  local expected_backpointer_sha="$7"
+  local expected_worktree_stat="$8"
+  local expected_gitdir_stat="$9"
+
+  if ! oms_worker_worktree_identity_capture "$repo" "$worker_tree"; then
+    printf '%s\n' "$OMS_WORKER_IDENTITY_DETAIL"
+    return 1
+  fi
+  if [ "$OMS_WORKER_IDENTITY_PHYSICAL" != "$expected_physical" ] ||
+    [ "$OMS_WORKER_IDENTITY_GIT_DIR" != "$expected_git_dir" ] ||
+    [ "$OMS_WORKER_IDENTITY_COMMON_DIR" != "$expected_common_dir" ] ||
+    [ "$OMS_WORKER_IDENTITY_GITFILE_SHA" != "$expected_gitfile_sha" ] ||
+    [ "$OMS_WORKER_IDENTITY_BACKPOINTER_SHA" != "$expected_backpointer_sha" ] ||
+    [ "$OMS_WORKER_IDENTITY_WORKTREE_STAT" != "$expected_worktree_stat" ] ||
+    [ "$OMS_WORKER_IDENTITY_GITDIR_STAT" != "$expected_gitdir_stat" ]; then
+    printf 'delegated worktree physical path, inode, or Git backpointer changed\n'
+    return 1
+  fi
+  return 0
 }
 
 oms_worker_surface_capture_one() {
   local repo="$1"
   local name="$2"
+  local current_worktree_physical="${3:-}"
   local git_dir
 
   git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
@@ -321,7 +789,12 @@ if not os.path.isdir(root):
     raise SystemExit(0)
 rows = []
 for base, dirs, files in os.walk(root):
-    dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(base, d)))
+    # Delegation markers are ephemeral owner liveness. A sibling legitimately
+    # creates/removes them while this worker runs; the exclusive provider-window
+    # guard covers their boundary when a caller explicitly guarantees quiescence.
+    dirs[:] = sorted(d for d in dirs
+                     if not os.path.islink(os.path.join(base, d))
+                     and not (base == root and d == "delegations"))
     for name in sorted(files):
         path = os.path.join(base, name)
         rel = os.path.relpath(path, root).replace(os.sep, "/")
@@ -371,11 +844,40 @@ PY
           fi
         done
         if [ -d "$git_dir/worktrees" ]; then
-          find "$git_dir/worktrees" -maxdepth 2 \( -name gitdir -o -name HEAD \) -type f \
-            -print 2>/dev/null | LC_ALL=C sort |
+          # Walk registry entries themselves rather than only regular HEAD and
+          # gitdir leaves. `find -type f` silently skipped a symlink directory,
+          # even though Git follows it as a duplicate worktree registration.
+          # A live sibling is exempt only after its real gitdir/backpointer and
+          # private liveness marker pass the validator above; every symlink and
+          # every other registry entry remains part of the hard gitmeta surface.
+          find "$git_dir/worktrees" -mindepth 1 -maxdepth 1 -print 2>/dev/null |
+            LC_ALL=C sort |
             while IFS= read -r wt; do
-              printf 'worktree %s %s\n' "${wt#"$git_dir"/}" \
-                "$(oms_sha256_file "$wt" 2>/dev/null || printf 'unreadable')"
+              if [ -L "$wt" ]; then
+                printf 'worktree-link %s %s\n' "${wt#"$git_dir"/}" \
+                  "$(readlink "$wt" 2>/dev/null | oms_sha256_stream || printf 'unreadable')"
+                continue
+              fi
+              if [ ! -d "$wt" ]; then
+                printf 'worktree-entry %s non-directory\n' "${wt#"$git_dir"/}"
+                continue
+              fi
+              if oms_worker_gitmeta_is_live_managed_worktree "$repo" "$wt/gitdir" \
+                "$current_worktree_physical"; then
+                continue
+              fi
+              printf 'worktree-dir %s\n' "${wt#"$git_dir"/}"
+              for meta in "$wt/gitdir" "$wt/HEAD"; do
+                if [ -L "$meta" ]; then
+                  printf 'worktree-link %s %s\n' "${meta#"$git_dir"/}" \
+                    "$(readlink "$meta" 2>/dev/null | oms_sha256_stream || printf 'unreadable')"
+                elif [ -f "$meta" ]; then
+                  printf 'worktree %s %s\n' "${meta#"$git_dir"/}" \
+                    "$(oms_sha256_file "$meta" 2>/dev/null || printf 'unreadable')"
+                elif [ -e "$meta" ]; then
+                  printf 'worktree-entry %s non-regular\n' "${meta#"$git_dir"/}"
+                fi
+              done
             done
         fi
         if [ -d "$git_dir/modules" ]; then
@@ -404,10 +906,12 @@ PY
 oms_worker_surface_snapshot() {
   local repo="$1"
   local dir="$2"
+  local current_worktree_physical="${3:-}"
   local name
 
   mkdir -p "$dir" || return 1
   for name in config remotes refs tracked files gitmeta hooks omsstate; do
-    oms_worker_surface_capture_one "$repo" "$name" > "$dir/$name" 2>/dev/null || true
+    oms_worker_surface_capture_one "$repo" "$name" \
+      "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
   done
 }

@@ -66,8 +66,40 @@ fi
 if "$plan" --repo "$plan_repo" finish --id t1 >/dev/null 2>&1; then
   fail "review task reached done without landing"
 fi
-"$plan" --repo "$plan_repo" land --id t1 >/dev/null
-"$plan" --repo "$plan_repo" finish --id t1 >/dev/null
+review_lease="$(python3 - "$plan_repo/.oms/plan/tasks.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    task = json.load(handle)["tasks"]["t1"]
+print(task["review_lease_id"])
+PY
+)"
+patch_sha="$(python3 - "$patch" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+)"
+"$plan" --repo "$plan_repo" land --id t1 --lease-id "$review_lease" \
+  --expected-review-patch "$patch" \
+  --expected-review-patch-sha256 "$patch_sha" \
+  --expected-review-verify true \
+  --expected-review-executor-id "" \
+  --expected-review-executor-soul-sha256 "" \
+  --expected-review-lease-id "$review_lease" >/dev/null
+if "$plan" --repo "$plan_repo" finish --id t1 --lease-id "$review_lease" \
+  >/dev/null 2>&1; then
+  fail "landed task finished without an exact landing receipt"
+fi
+landing_receipt_sha="$("$plan" --repo "$plan_repo" show --id t1 | python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)
+for name in ("state", "updated", "claim_expired", "claim_age_s"):
+    d.pop(name, None)
+print(hashlib.sha256(json.dumps(
+ d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
+')"
+"$plan" --repo "$plan_repo" finish --id t1 --lease-id "$review_lease" \
+  --expected-landing-receipt-sha256 "$landing_receipt_sha" >/dev/null
 "$plan" --repo "$plan_repo" show --id t1 | grep -Fq '"state": "done"' ||
   fail "reviewed landing could not finish"
 

@@ -39,6 +39,9 @@ SCOPE_FORBIDDEN=""
 worktree_parent=""
 worktree=""
 worktree_created=0
+floor_worktree_parent=""
+floor_worktree=""
+floor_worktree_created=0
 cleanup_done=0
 
 usage() {
@@ -58,11 +61,12 @@ Options:
   --plan-task ID  Enforce this agent-plan task's allowed/forbidden paths.
   --executor ID   Enforce a frozen executor's scope and soul hash.
   --keep-worktree  Keep the worktree for inspection.
-  --allow-verifier-change  Admit a patch that modifies the verify command's
-                 own files (normally rejected: it could self-certify).
+  --allow-verifier-change  Permit a patch that modifies the verify command's
+                 own files. The base-owned verification floor still runs.
   --allow-test-reduction  Admit a patch that net-removes test assertions or
                  deletes a test file (normally rejected: passing by deleting
-                 the check is the other way to self-certify).
+                 the check is the other way to self-certify). The base-owned
+                 verification floor still runs.
   --allow-restructure  Admit a patch that adds a new top-level file or moves a
                  file across directories (normally rejected when no scope is
                  supplied: nothing else says where the patch may write).
@@ -70,9 +74,10 @@ Options:
 
 Ladder: patch applies cleanly (not stale) -> changed files stay in scope ->
 changed shell files parse (bash -n) -> patch does not weaken the tests ->
-patch does not modify its own verifier -> verification command passes. Exit 0
-only if every gate passes. Without --plan-task/--executor there is no declared
-scope, so the structural floor stands in for it: keep the existing layout.
+candidate verification passes -> changed verification surfaces also pass with
+those changes restored from HEAD. Exit 0 only if every gate passes. Without
+--plan-task/--executor there is no declared scope, so the structural floor
+stands in for it: keep the existing layout.
 EOF
 }
 
@@ -84,6 +89,12 @@ fail() {
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  if [ -n "$floor_worktree" ] && [ "$floor_worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
+    git -C "$REPO" worktree remove --force "$floor_worktree" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$floor_worktree_parent" ] && [ "$KEEP_WORKTREE" = 0 ]; then
+    rm -rf "$floor_worktree_parent"
+  fi
   if [ -n "$worktree" ] && [ "$worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
   fi
@@ -151,6 +162,7 @@ if [ -n "$EXECUTOR_ID" ]; then
   export OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_SOUL_SHA256="$executor_soul_sha"
 fi
 
+base_full_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 base_sha="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo 'no-commit')"
 patch_sha="$(oms_sha256_stream < "$PATCH" 2>/dev/null | cut -c1-16)"
 [ -n "$patch_sha" ] || patch_sha="nohash"
@@ -188,17 +200,31 @@ rm -f "$secret_scan_file"
 
 changed_files=""
 verify_out=""
+floor_verify_out=""
 verify_mode=""
 if [ "$apply_ok" = 1 ]; then
   oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null 2>&1 || true
   worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")" || fail "mktemp failed"
   worktree="$worktree_parent/wt"
   oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
-  if git -C "$REPO" worktree add --quiet --detach "$worktree" HEAD >/dev/null 2>&1; then
+  if git -C "$REPO" worktree add --quiet --detach "$worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
     worktree_created=1
     # Local-only agent files (project-private.sh) are not in HEAD; the verify
     # command may read PROJECT.md, so seed them the same way delegate does.
     oms_seed_local_agent_files "$REPO" "$worktree"
+    # Auto-detection belongs to the trusted base, not to the patch being
+    # admitted. Otherwise deleting or rewriting check.sh can also rewrite the
+    # command that is supposed to judge that patch.
+    if [ -z "$VERIFY" ] && [ -x "$worktree/scripts/check.sh" ]; then
+      verify_mode=""
+      if oms_check_sh_has_fast_mode "$worktree/scripts/check.sh"; then
+        verify_mode="fast"
+      fi
+      if [ "$ML" = 1 ] && oms_check_sh_has_ml_smoke "$worktree/scripts/check.sh"; then
+        verify_mode="ml-smoke"
+      fi
+      VERIFY="bash scripts/check.sh${verify_mode:+ $verify_mode}"
+    fi
     # The apply into the worktree must succeed, otherwise the syntax/verify
     # gates below would run against the UNPATCHED tree and pass vacuously. Gate
     # 1 only checks apply against HEAD; the worktree tree state can still differ.
@@ -334,31 +360,19 @@ EOF
     [ "$syntax_ok" = 1 ] && record "syntax" "PASS" "$syntax_detail" \
       || record "syntax" "FAIL" "$syntax_detail"
 
-    # --- Gate 3: verification contract --------------------------------------
-    if [ -z "$VERIFY" ] && [ -x "$worktree/scripts/check.sh" ]; then
-      # A check.sh without a `fast` arm (this repo's own, for one) must get the
-      # gate's default invocation, not an argument it rejects.
-      verify_mode=""
-      if oms_check_sh_has_fast_mode "$worktree/scripts/check.sh"; then
-        verify_mode="fast"
-      fi
-      if [ "$ML" = 1 ] && oms_check_sh_has_ml_smoke "$worktree/scripts/check.sh"; then
-        verify_mode="ml-smoke"
-      fi
-      VERIFY="bash scripts/check.sh${verify_mode:+ $verify_mode}"
-    fi
-
-    # --- Gate 3a: the patch must not modify its own verifier ----------------
-    # Gate 3 runs VERIFY inside the PATCHED worktree, so a patch that rewrites
-    # the verify entrypoint (e.g. scripts/check.sh -> exit 0) would certify
-    # itself. Flag a changed file if VERIFY names it (by path or basename, so
-    # `cd scripts && bash check.sh` and absolute spellings do not bypass it) or
-    # if it is a common build entrypoint whose edit silently changes what
-    # "verify" does. --allow-verifier-change is the explicit override.
+    # --- Gate 3a: identify the automatic verification surface ---------------
+    # A candidate verifier is allowed to exercise its own proposed tests, but
+    # it cannot be the only authority over them. The floor below treats paths
+    # directly named by VERIFY, common verifier configs, and test/spec paths as
+    # one surface. This scan is independent of both --allow-* flags: overrides
+    # may permit the edit, but they never suppress the base-owned second run.
     verifier_hit=""
-    if [ -n "$VERIFY" ] && [ "$ALLOW_VERIFIER_CHANGE" = 0 ] && command -v python3 >/dev/null 2>&1; then
-      verifier_hit="$(OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" python3 - <<'PY'
+    verification_surface=""
+    surface_scan=""
+    if [ -n "$VERIFY" ] && command -v python3 >/dev/null 2>&1; then
+      surface_scan="$(OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" python3 - <<'PY' | tr -d '\r'
 import os
+import re
 try:
     import shlex
     toks = shlex.split(os.environ["OMS_VERIFY"])
@@ -373,15 +387,34 @@ for t in toks:
 ENTRY = {"check.sh", "Makefile", "makefile", "GNUmakefile", "package.json",
          "pyproject.toml", "tox.ini", "noxfile.py", "conftest.py",
          "setup.py", "setup.cfg", "justfile", "Justfile"}
+# Top-level verifiers commonly fan out to repo-owned helpers without naming
+# them in the command (for example check.sh -> check-python.sh). Treat the
+# conventional helper family as verifier authority wherever it lives. This is
+# intentionally narrower than a generic "contains check" rule so ordinary
+# product modules such as checksum.py do not become false verification gates.
+HELPER_PATH = re.compile(
+    r"(^|/)(?:run[-_.])?(?:checks?|tests?|verify|lint)"
+    r"(?:[-_.][^/]*)?\.(?:sh|bash|py|js|cjs|mjs|ts|tsx|rb|pl|ps1)$",
+    re.IGNORECASE,
+)
+TEST_PATH = re.compile(
+    r"(^|/)(tests?|spec)(/|$)|(^|/)test_[^/]+$|"
+    r"[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$"
+)
 for f in os.environ["OMS_CHANGED"].splitlines():
-    f = f.strip()
     if not f:
         continue
-    if f in named or os.path.basename(f) in named or os.path.basename(f) in ENTRY:
-        print(f)
-        break
+    direct = f in named or os.path.basename(f) in named
+    common = os.path.basename(f) in ENTRY or bool(HELPER_PATH.search(f))
+    if direct or common:
+        print("verifier\t" + f)
+    if direct or common or TEST_PATH.search(f):
+        print("surface\t" + f)
 PY
 )"
+      surface_tab="$(printf '\t')"
+      verifier_hit="$(printf '%s\n' "$surface_scan" | awk -F "$surface_tab" '$1 == "verifier" {print substr($0, length($1) + 2); exit}')"
+      verification_surface="$(printf '%s\n' "$surface_scan" | awk -F "$surface_tab" '$1 == "surface" {print substr($0, length($1) + 2)}')"
     fi
     # --- Gate 3b: the patch must not quietly weaken the tests ---------------
     # Gate 3a protects the verify *entrypoint*, which leaves the other way to
@@ -445,18 +478,97 @@ PY
       record "tests" "PASS" "patch does not net-remove test assertions"
     fi
 
-    if [ -n "$verifier_hit" ]; then
-      record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change)"
-      record "verify" "SKIP" "not run: verifier integrity gate failed"
+    surface_detail="$(printf '%s\n' "$verification_surface" | awk '
+      NF { printf "%s%s", separator, $0; separator=", " }
+      END { if (separator != "") print "" }
+    ')"
+    if [ -n "$verifier_hit" ] && [ "$ALLOW_VERIFIER_CHANGE" = 0 ]; then
+      record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change; base floor still required)"
+    elif [ -n "$verifier_hit" ]; then
+      record "verifier" "PASS" "verifier change permitted; base floor still required: $verifier_hit"
+    elif [ -n "$verification_surface" ]; then
+      record "verifier" "PASS" "verification surface change requires base floor: $surface_detail"
     elif [ -n "$VERIFY" ]; then
-      record "verifier" "PASS" "patch leaves the verify command's files untouched"
-      if verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
+      record "verifier" "PASS" "patch leaves the verification surface untouched"
+    fi
+
+    # Do not execute candidate-controlled project code after a policy or
+    # integrity gate has already rejected the patch. A modified verifier can
+    # have host-side effects even when the final verdict says REJECT. Explicit
+    # overrides turn their respective gates into PASS and intentionally allow
+    # the candidate run; otherwise both verification projections stay inert.
+    preverify_failed=0
+    case "$ladder" in *"	FAIL	"*) preverify_failed=1 ;; esac
+    if [ -n "$VERIFY" ]; then
+      if [ "$preverify_failed" = 1 ]; then
+        record "verify" "SKIP" "pre-verification policy or integrity gate failed"
+      elif verify_out="$(cd "$worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
         record "verify" "PASS" "$VERIFY"
       else
         record "verify" "FAIL" "$VERIFY"
       fi
     else
-      record "verify" "SKIP" "no --verify and no scripts/check.sh"
+      record "verify" "SKIP" "no --verify and no base scripts/check.sh"
+    fi
+
+    # If any automatic verification surface changed, apply the complete patch
+    # to a second worktree at the same HEAD, restore only that surface from the
+    # base, and run the identical command. Product changes remain in place, so
+    # a helper that made a broken candidate pass fails under base-owned checks.
+    if [ "$preverify_failed" = 1 ]; then
+      record "verify-floor" "SKIP" "pre-verification policy or integrity gate failed"
+    elif [ -n "$VERIFY" ] && [ -n "$verification_surface" ]; then
+      if floor_worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")"; then
+        floor_worktree="$floor_worktree_parent/wt"
+        oms_harness_mark_tmpdir "$floor_worktree_parent" "$REPO" "$floor_worktree"
+        if git -C "$REPO" worktree add --quiet --detach "$floor_worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
+          floor_worktree_created=1
+          oms_seed_local_agent_files "$REPO" "$floor_worktree"
+          if git -C "$floor_worktree" apply --binary "$PATCH" >/dev/null 2>&1; then
+            floor_restore_ok=1
+            floor_restore_detail=""
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              if git -C "$floor_worktree" cat-file -e "HEAD:$f" >/dev/null 2>&1; then
+                if ! git -C "$floor_worktree" checkout --quiet --force HEAD -- "$f" >/dev/null 2>&1 ||
+                  ! git -C "$floor_worktree" diff --quiet HEAD -- "$f"; then
+                  floor_restore_ok=0
+                  floor_restore_detail="could not restore tracked surface path: $f"
+                  break
+                fi
+              else
+                if ! git -C "$floor_worktree" clean -fdx -- "$f" >/dev/null 2>&1 ||
+                  [ -e "$floor_worktree/$f" ] || [ -L "$floor_worktree/$f" ]; then
+                  floor_restore_ok=0
+                  floor_restore_detail="could not remove added surface path: $f"
+                  break
+                fi
+              fi
+            done <<EOF
+$verification_surface
+EOF
+            if [ "$floor_restore_ok" = 1 ]; then
+              if floor_verify_out="$(cd "$floor_worktree" && run_verify_with_timeout bash -c "$VERIFY" 2>&1)"; then
+                record "verify-floor" "PASS" "$VERIFY (restored from HEAD: $surface_detail)"
+              else
+                record "verify-floor" "FAIL" "$VERIFY (restored from HEAD: $surface_detail)"
+              fi
+            else
+              record "verify-floor" "FAIL" "$floor_restore_detail"
+            fi
+          else
+            record "verify-floor" "FAIL" "patch did not apply to the base-floor worktree"
+          fi
+        else
+          record "verify-floor" "FAIL" "could not create the base-floor worktree"
+        fi
+      else
+        record "verify-floor" "FAIL" "could not allocate the base-floor worktree"
+      fi
+    elif [ -n "$VERIFY" ]; then
+      record "verify-floor" "SKIP" "verification surface unchanged"
+    else
+      record "verify-floor" "SKIP" "no verification command"
     fi
     else
       record "apply-worktree" "FAIL" "patch did not apply to the admission worktree (tree state differs from HEAD)"
@@ -497,6 +609,9 @@ mkdir -p "$(dirname "$REPORT")"
   fi
   if [ -n "$verify_out" ]; then
     printf '\n## Verify output (tail)\n\n```\n%s\n```\n' "$(printf '%s' "$verify_out" | tail -n 40)"
+  fi
+  if [ -n "$floor_verify_out" ]; then
+    printf '\n## Base-floor verify output (tail)\n\n```\n%s\n```\n' "$(printf '%s' "$floor_verify_out" | tail -n 40)"
   fi
 } > "$REPORT"
 

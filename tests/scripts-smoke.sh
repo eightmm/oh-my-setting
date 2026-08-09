@@ -121,6 +121,88 @@ assert_symlink_to() {
     fail "$path should link to $target, got $(readlink "$path")"
 }
 
+agent_plan_land_reviewed() {
+  local repo="$1"
+  local id="$2"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local patch lease verify executor soul patch_sha
+
+  patch="$(python3 - "$repo/.oms/plan/tasks.json" "$id" patch <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    tasks = json.load(handle)["tasks"]
+task = tasks[sys.argv[2]]
+value = task.get(sys.argv[3], "")
+if not isinstance(value, str):
+    raise SystemExit("non-string plan receipt")
+print(value, end="")
+PY
+)"
+  lease="$(python3 - "$repo/.oms/plan/tasks.json" "$id" review_lease_id <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    task = json.load(handle)["tasks"][sys.argv[2]]
+print(task.get(sys.argv[3], ""), end="")
+PY
+)"
+  verify="$(python3 - "$repo/.oms/plan/tasks.json" "$id" verify <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    task = json.load(handle)["tasks"][sys.argv[2]]
+print(task.get(sys.argv[3], ""), end="")
+PY
+)"
+  executor="$(python3 - "$repo/.oms/plan/tasks.json" "$id" executor_id <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    task = json.load(handle)["tasks"][sys.argv[2]]
+print(task.get(sys.argv[3], ""), end="")
+PY
+)"
+  soul="$(python3 - "$repo/.oms/plan/tasks.json" "$id" executor_soul_sha256 <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    task = json.load(handle)["tasks"][sys.argv[2]]
+print(task.get(sys.argv[3], ""), end="")
+PY
+)"
+  patch_sha="$(python3 - "$repo" "$patch" <<'PY'
+import hashlib, os, sys
+path = sys.argv[2]
+if not os.path.isabs(path):
+    path = os.path.join(sys.argv[1], path)
+with open(path, "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+)"
+
+  "$plan" --repo "$repo" land --id "$id" --lease-id "$lease" \
+    --expected-review-patch "$patch" \
+    --expected-review-patch-sha256 "$patch_sha" \
+    --expected-review-verify "$verify" \
+    --expected-review-executor-id "$executor" \
+    --expected-review-executor-soul-sha256 "$soul" \
+    --expected-review-lease-id "$lease"
+}
+
+agent_plan_finish_landed() {
+  local repo="$1"
+  local id="$2"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local receipt
+
+  receipt="$("$plan" --repo "$repo" show --id "$id" | python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)
+for name in ("state", "updated", "claim_expired", "claim_age_s"):
+    d.pop(name, None)
+print(hashlib.sha256(json.dumps(
+ d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
+')"
+  "$plan" --repo "$repo" finish --id "$id" \
+    --expected-landing-receipt-sha256 "$receipt"
+}
+
 test_poll_interval_adapts_to_elapsed_and_remaining() {
   . "$ROOT/scripts/lib/poll.sh"
 
@@ -3880,9 +3962,10 @@ test_agent_plan_dag_and_ready() {
     fail "claiming P2 with unfinished dep P1 must fail"
   fi
   "$SH" --repo "$d" claim --id P1 --provider codex >/dev/null || fail "claim P1 failed"
+  printf 'fixture\n' > "$d/change.patch"
   "$SH" --repo "$d" review --id P1 --artifact artifact.md --patch change.patch >/dev/null || fail "review P1 failed"
-  "$SH" --repo "$d" land --id P1 >/dev/null || fail "land P1 failed"
-  "$SH" --repo "$d" finish --id P1 >/dev/null || fail "finish P1 failed"
+  agent_plan_land_reviewed "$d" P1 >/dev/null || fail "land P1 failed"
+  agent_plan_finish_landed "$d" P1 >/dev/null || fail "finish P1 failed"
 
   out="$("$SH" --repo "$d" ready)"
   [ "$out" = "P2" ] || fail "P2 should be ready after P1 done, got: $out"
@@ -3976,9 +4059,10 @@ test_agent_plan_next_and_brief() {
   [ "$rc" = 3 ] || fail "next with no actionable task should exit 3, got $rc"
 
   # --claim without --provider is an error.
+  printf 'fixture\n' > "$d/change.patch"
   "$SH" --repo "$d" review --id P1 --artifact artifact.md --patch change.patch >/dev/null
-  "$SH" --repo "$d" land --id P1 >/dev/null
-  "$SH" --repo "$d" finish --id P1 >/dev/null
+  agent_plan_land_reviewed "$d" P1 >/dev/null
+  agent_plan_finish_landed "$d" P1 >/dev/null
   if "$SH" --repo "$d" next --claim >/dev/null 2>&1; then
     fail "next --claim without --provider must fail"
   fi
@@ -9086,7 +9170,7 @@ test_verify_timeout_bounds_hung_verify() {
   printf '%s' "$out" | grep -Fq "exit=124" || fail "a hung verify should fail with timeout exit 124"
 }
 
-test_delegate_worker_receives_state_env() {
+test_delegate_worker_does_not_receive_primary_state_env() {
   local project="$TMP/delegate-state-env"
   local bin_dir="$project/bin"
   local home_dir="$project/home"
@@ -9110,7 +9194,10 @@ EOF
     --prompt "Report harness env" >/dev/null 2>&1 ||
     fail "stub delegation should succeed"
   assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'agent=codex'
-  assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'delegate-state-env'
+  assert_one_artifact_contains "$project/artifacts" 'codex-report-harness-env-*.patch' 'state_repo= agent=codex'
+  if grep -Fq "$project" "$project"/artifacts/*.patch; then
+    fail "write worker patch must not contain the primary state path"
+  fi
 }
 
 test_agy_read_pass_cannot_write_repo() {
@@ -9192,8 +9279,8 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
 
   # The verifier gate protects the entrypoint, which leaves the other way to
   # self-certify open: delete the assertions and the suite passes honestly. The
-  # point of this test is that verify and verifier both PASS here — without the
-  # tests gate the patch lands.
+  # The verifier itself would pass, but once the tests gate rejects the patch
+  # admission must not execute candidate-controlled project code at all.
   make_committed_repo "$project"
   mkdir -p "$project/tests" "$project/scripts"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
@@ -9212,8 +9299,10 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
   report="$(ls -t "$project"/.oms/artifacts/admit/*.md | head -n 1)"
   assert_file_contains "$report" "tests: FAIL"
   assert_file_contains "$report" "assertion line(s) removed"
-  # The hole this closes: everything else was happy.
-  assert_file_contains "$report" "verify: PASS"
+  # The hole this closes: the verifier contract is valid, but rejected
+  # candidate code remains inert until the explicit override below.
+  assert_file_contains "$report" "verify: SKIP"
+  assert_file_contains "$report" "pre-verification policy or integrity gate failed"
   assert_file_contains "$report" "verifier: PASS"
   ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/weaken.patch" --allow-test-reduction >/dev/null 2>&1 ) ||
     fail "--allow-test-reduction should admit the same patch"
@@ -9348,7 +9437,7 @@ test_agent_plan_touch_prevents_reclaim() {
   local project="$TMP/plan-touch"
 
   make_committed_repo "$project"
-  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x --verify true >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
   OMS_ID=t1 python3 - "$project/.oms/plan/tasks.json" <<'PY'
 import json, os, sys
@@ -9434,11 +9523,12 @@ test_patch_land_finishes_plan_task() {
   local artifact="$TMP/patch-land-plan-review.md"
 
   make_committed_repo "$project"
-  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 --title x --verify true >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
   printf 'work\n' >> "$project/file.txt"
   git -C "$project" diff > "$patch"
   git -C "$project" checkout -q file.txt
+  printf 'review\n' > "$artifact"
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" review --id t1 --artifact "$artifact" --patch "$patch" >/dev/null )
 
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$patch" --plan-task t1 --verify "true" >/dev/null 2>&1 ) ||
@@ -10319,8 +10409,9 @@ test_patch_land_plan_task_supplies_patch() {
   printf 'from-plan\n' >> "$project/file.txt"
   ( cd "$project" && git diff > "$TMP/land-plan.patch" && git checkout -- file.txt )
   "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal g >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T --verify true >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  printf 'review\n' > "$TMP/land-plan.md"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" review --id t1 --artifact "$TMP/land-plan.md" --patch "$TMP/land-plan.patch" >/dev/null
 
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t1 --verify true ) \
@@ -10330,7 +10421,7 @@ test_patch_land_plan_task_supplies_patch() {
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | grep -Fq '"state": "done"' ||
     fail "landed plan task should be done"
   # Without a stored patch it must fail loudly, not guess.
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t2 --title T2 >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t2 --title T2 --verify true >/dev/null
   local rc=0
   ( cd "$project" && "$ROOT/scripts/patch-land.sh" --plan-task t2 ) >/dev/null 2>"$project/err2" || rc=$?
   [ "$rc" = "2" ] || fail "--plan-task without stored patch should exit 2, got $rc"
@@ -10346,7 +10437,7 @@ test_patch_land_rejects_stale_review_patch_lease() {
   printf 'stale-work\n' >> "$project/file.txt"
   (cd "$project" && git diff > "$TMP/land-stale-review.patch" && git checkout -- file.txt)
   "$plan" --repo "$project" init --goal g >/dev/null
-  "$plan" --repo "$project" add --id t1 --title T >/dev/null
+  "$plan" --repo "$project" add --id t1 --title T --verify true >/dev/null
   "$plan" --repo "$project" claim --id t1 --provider codex >/dev/null
   "$plan" --repo "$project" review --id t1 --patch "$TMP/land-stale-review.patch" >/dev/null
   "$plan" --repo "$project" reclaim --include-review --ttl 0 >/dev/null
@@ -13069,18 +13160,25 @@ PY
 test_patch_land_recovers_an_interrupted_land() {
   local project="$TMP/landing-crash"
   local patch="$project/change.patch"
+  local base_sha patch_sha
   local out
 
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
   ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+  base_sha="$(git -C "$project" rev-parse HEAD | tr -d '\r')"
+  patch_sha="$(python3 - "$patch" <<'PY'
+import hashlib, pathlib, sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
 
   # Crash between apply and the records that follow it: the tree moved, the
   # lineage row and the completion never happened.
   mkdir -p "$project/.oms"
   printf '*\n' > "$project/.oms/.gitignore"
-  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-crash","event":"intent","patch":"%s","base_sha":"x","task":"","lease":""}\n' \
-    "$patch" > "$project/.oms/landings.jsonl"
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-crash","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":""}\n' \
+    "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
   git -C "$project" apply --binary "$patch"
 
   out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
@@ -13108,15 +13206,22 @@ test_patch_land_recovers_an_interrupted_land() {
 test_patch_land_abandons_a_landing_that_never_applied() {
   local project="$TMP/landing-abandoned"
   local patch="$project/change.patch"
+  local base_sha patch_sha
   local out
 
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
   ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
+  base_sha="$(git -C "$project" rev-parse HEAD | tr -d '\r')"
+  patch_sha="$(python3 - "$patch" <<'PY'
+import hashlib, pathlib, sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
   mkdir -p "$project/.oms"
   printf '*\n' > "$project/.oms/.gitignore"
-  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-never","event":"intent","patch":"%s","base_sha":"x","task":"","lease":""}\n' \
-    "$patch" > "$project/.oms/landings.jsonl"
+  printf '{"schema":1,"ts":"2026-07-26T00:00:00Z","landing_id":"land-never","event":"intent","patch":"%s","patch_sha":"%s","base_sha":"%s","task":"","lease":"","plan_receipt_sha":"","plan_done_receipt_sha":"","approval":"","approval_version":""}\n' \
+    "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
 
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
   printf '%s' "$out" | grep -Fq 'never applied' ||
@@ -13763,6 +13868,421 @@ EOF
     fail "the worker's work should still come back as a patch"
 }
 
+test_delegate_rejects_a_worker_commit_in_its_managed_worktree() {
+  local project="$TMP/worker-guard-own-commit"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'committed by delegated worker\n' >> file.txt
+git add file.txt
+git -c user.email=t@example.com -c user.name=t commit -qm delegated-commit
+echo "committed inside the managed worktree"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "a worker commit must not turn into an empty successful delegation: $out"
+  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+    fail "the worker's own HEAD mutation should be a gitmeta violation: $out"
+  printf '%s' "$out" | grep -Fq 'nothing from this run should be landed' ||
+    fail "the failed commit must explicitly block landing: $out"
+  if printf '%s\n' "$out" | grep -q '^patch: '; then
+    fail "a worker commit must not be returned as an empty successful patch: $out"
+  fi
+}
+
+test_delegate_rejects_replaced_managed_worktree_path() {
+  local project="$TMP/worker-guard-own-path"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local verify_marker="$TMP/worker-guard-own-path-verify-ran"
+  local out
+  local rc=0
+  local registered
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+original="\$PWD"
+cd "\$(dirname "\$original")"
+mv "\$original" "\$original.moved"
+ln -s "$project" "\$original"
+echo "replaced the managed worktree pathname"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_OFF=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --verify ": > '$verify_marker'" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "a replaced worktree pathname must fail before capture or verify: $out"
+  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+    fail "the changed worktree identity should be named: $out"
+  [ ! -e "$verify_marker" ] ||
+    fail "verification ran after the delegated worktree identity changed"
+  git -C "$project" diff --quiet HEAD -- ||
+    fail "identity failure let the harness change the primary worktree"
+  git -C "$project" diff --cached --quiet HEAD -- ||
+    fail "identity failure let capture_patch stage the primary index"
+
+  registered="$(git -C "$project" worktree list --porcelain | grep -c '^worktree ' || true)"
+  if [ "${registered:-0}" -gt 1 ]; then
+    printf '%s' "$out" | grep -Fq 'preserved for inspection' ||
+      fail "a registration that could not be removed safely was left without recovery guidance: $out"
+  fi
+}
+
+test_delegate_rejects_recreated_managed_worktree_inode() {
+  local project="$TMP/worker-guard-own-inode"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local verify_marker="$TMP/worker-guard-own-inode-verify-ran"
+  local out
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+original="$PWD"
+cd "$(dirname "$original")"
+mv "$original" "$original.moved"
+mkdir "$original"
+cp "$original.moved/.git" "$original/.git"
+echo "recreated the managed worktree at the same pathname"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_OFF=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --verify ": > '$verify_marker'" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "a same-path replacement with copied backpointer bytes must fail: $out"
+  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+    fail "the changed checkout inode should be named as an identity violation: $out"
+  [ ! -e "$verify_marker" ] ||
+    fail "verification ran after the delegated checkout inode changed"
+  git -C "$project" diff --quiet HEAD -- ||
+    fail "checkout inode failure changed the primary worktree"
+  git -C "$project" diff --cached --quiet HEAD -- ||
+    fail "checkout inode failure changed the primary index"
+}
+
+test_delegate_rejects_recreated_managed_gitdir_inode() {
+  local project="$TMP/worker-guard-gitdir-inode"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local verify_marker="$TMP/worker-guard-gitdir-inode-verify-ran"
+  local out
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+git_dir="$(git rev-parse --git-dir)"
+mv "$git_dir" "$git_dir.moved"
+mkdir "$git_dir"
+cp -R "$git_dir.moved/." "$git_dir/"
+echo "recreated the managed gitdir at the same pathname"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_OFF=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --verify ": > '$verify_marker'" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "a same-path gitdir replacement with copied bytes must fail: $out"
+  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+    fail "the changed gitdir inode should be named as an identity violation: $out"
+  [ ! -e "$verify_marker" ] ||
+    fail "verification ran after the delegated gitdir inode changed"
+  git -C "$project" diff --quiet HEAD -- ||
+    fail "gitdir inode failure changed the primary worktree"
+  git -C "$project" diff --cached --quiet HEAD -- ||
+    fail "gitdir inode failure changed the primary index"
+}
+
+test_delegate_rejects_worktree_path_replaced_during_verify() {
+  local project="$TMP/worker-guard-verify-path"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local verifier="$TMP/worker-guard-verify-path.sh"
+  local out
+  local rc=0
+  local registered
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'ordinary worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+  cat > "$verifier" <<EOF
+#!/usr/bin/env bash
+set -eu
+original="\$PWD"
+cd "\$(dirname "\$original")"
+mv "\$original" "\$original.moved"
+ln -s "$project" "\$original"
+echo "verify replaced the managed worktree pathname"
+EOF
+  chmod +x "$verifier"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --verify "bash '$verifier'" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "a pathname replaced by candidate verification must fail the final guard: $out"
+  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed before final worker guard' ||
+    fail "the final guard did not name the post-verify identity change: $out"
+  git -C "$project" diff --quiet HEAD -- ||
+    fail "post-verify identity failure changed the primary worktree"
+  git -C "$project" diff --cached --quiet HEAD -- ||
+    fail "post-verify identity failure changed the primary index"
+  registered="$(git -C "$project" worktree list --porcelain | grep -c '^worktree ' || true)"
+  if [ "${registered:-0}" -gt 1 ]; then
+    printf '%s' "$out" | grep -Fq 'preserved for inspection' ||
+      fail "post-verify identity failure left a registration without recovery guidance: $out"
+  fi
+}
+
+test_delegate_does_not_export_owner_authority_to_worker() {
+  local project="$TMP/worker-authority-env"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+for name in OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+  OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE; do
+  eval "value=\${$name:-}"
+  if [ -n "$value" ]; then
+    echo "authority variable leaked: $name"
+    exit 91
+  fi
+done
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TASK_ID=caller-task OMS_PLAN_LEASE_ID=caller-lease \
+    OMS_EXECUTOR_ID=caller-executor OMS_SOUL_SHA256=caller-soul \
+    OMS_WORKER_AUTHORITY_EXCLUSIVE=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || fail "owner authority should be stripped, not break the worker: $out"
+  if printf '%s' "$out" | grep -Fq 'authority variable leaked'; then
+    fail "delegated worker received owner authority: $out"
+  fi
+}
+
+test_default_worker_guard_binds_current_plan_and_executor_authority() {
+  local project="$TMP/worker-current-authority"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local soul="$TMP/worker-current-authority-soul.md"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal current-authority >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  printf '# Specialization\n\nEdit only the claimed file.\n' > "$soul"
+  "$ROOT/scripts/agent-executor.sh" create --repo "$project" --id guarded-executor \
+    --provider codex --plan-task guarded --soul-file "$soul" >/dev/null
+  "$ROOT/scripts/agent-executor.sh" freeze --repo "$project" \
+    --id guarded-executor >/dev/null
+
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" \
+  "$project/.oms/executors/guarded-executor/meta.json" <<'PY'
+import json, os, sys, tempfile
+
+def replace(path, mutate):
+    row = json.load(open(path, encoding="utf-8"))
+    mutate(row)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(row, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+def mutate_plan(plan):
+    task = plan["tasks"]["guarded"]
+    task["allowed_paths"] = ["/"]
+    task["verify"] = ":"
+    task["lease_id"] = "lease_forged"
+    task["review_lease_id"] = "lease_forged"
+    task["executor_id"] = "forged-executor"
+    task["executor_soul_sha256"] = "0" * 64
+
+def mutate_executor(meta):
+    meta["allowed_paths"] = ["/"]
+    meta["verify"] = ":"
+    meta["lease_id"] = "lease_forged"
+    meta["soul_sha256"] = "1" * 64
+
+replace(sys.argv[1], mutate_plan)
+replace(sys.argv[2], mutate_executor)
+PY
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --executor guarded-executor --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "default guard accepted a rewrite of current plan/executor authority: $out"
+  printf '%s' "$out" | grep -Fq 'current-operation' ||
+    fail "current authority rewrite did not name its boundary: $out"
+  for detail in \
+    'plan task guarded changed' \
+    'allowed_paths' \
+    'executor_id' \
+    'executor_soul_sha256' \
+    'lease_id' \
+    'verify' \
+    'executor guarded-executor changed' \
+    'soul_sha256'; do
+    printf '%s' "$out" | grep -Fq "$detail" ||
+      fail "current authority report omitted $detail: $out"
+  done
+  if [ -f "$project/.oms/artifacts/index.jsonl" ]; then
+    python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' ||
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert not any(row.get("kind") == "delegate" and row.get("exit") == 0 for row in rows), rows
+PY
+      fail "authority-mutating worker published a successful delegate receipt"
+  fi
+}
+
+test_current_operation_snapshot_is_not_worker_rewritable() {
+  local project="$TMP/worker-current-snapshot"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal snapshot-integrity >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+plan["tasks"]["guarded"]["allowed_paths"] = ["/"]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+rm -f "\$(dirname "\$PWD")/worker-guard/current-operation.json"
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "worker deleted the current-operation snapshot and bypassed the guard"
+  printf '%s' "$out" | grep -Fq 'current operation snapshot was changed or deleted' ||
+    fail "snapshot deletion was not reported: $out"
+}
+
+test_current_operation_guard_allows_a_sibling_task_transition() {
+  local project="$TMP/worker-current-authority-sibling"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local barrier="$TMP/worker-current-authority-barrier"
+  local pid rc=0 ticks=0
+
+  make_guard_repo "$project"
+  mkdir -p "$barrier"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal sibling-safe >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id current \
+    --title current --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id sibling \
+    --title sibling --allowed sibling.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id current \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'worker edit\n' >> file.txt
+: > "$OMS_TEST_BARRIER/ready"
+while [ ! -f "$OMS_TEST_BARRIER/release" ]; do sleep 0.05; done
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_BARRIER="$barrier" OMS_PEER_TIMEOUT=15 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task current --no-verify > "$barrier/out" 2> "$barrier/err" &
+  pid=$!
+  while [ ! -f "$barrier/ready" ] && [ "$ticks" -lt 300 ] &&
+    kill -0 "$pid" 2>/dev/null; do
+    ticks=$((ticks + 1))
+    sleep 0.05
+  done
+  if [ ! -f "$barrier/ready" ]; then
+    : > "$barrier/release"
+    wait "$pid" 2>/dev/null || true
+    fail "current-operation fixture did not reach its provider barrier: $(cat "$barrier/err")"
+  fi
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id sibling \
+    --provider claude >/dev/null
+  : > "$barrier/release"
+  wait "$pid" || rc=$?
+  [ "$rc" = 0 ] ||
+    fail "a sibling task transition was attributed to the current worker: $(cat "$barrier/err")"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id current |
+    grep -Fq '"state": "review"' || fail "current task did not publish its review"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id sibling |
+    grep -Fq '"state": "claimed"' || fail "sibling task transition was lost"
+}
+
 make_guard_repo() {  # make_guard_repo DIR — repo with an ignored directory
   local dir="$1"
 
@@ -13788,6 +14308,7 @@ run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>o
   chmod +x "$dir-bin/codex"
   out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$dir-bin:/usr/bin:/bin" \
     OMS_WORKER_GUARD_STRICT="${OMS_WORKER_GUARD_STRICT:-0}" \
+    OMS_WORKER_AUTHORITY_EXCLUSIVE="${OMS_WORKER_AUTHORITY_EXCLUSIVE:-0}" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$dir" --to codex --prompt x \
     --no-verify 2>&1)" || rc=$?
   printf '%s\t%s' "$rc" "$out"
@@ -13839,6 +14360,102 @@ test_worker_guard_sees_object_store_and_metadata_writes() {
     fail "an exclude-file edit should be named: $result"
 }
 
+test_worker_guard_rejects_duplicate_live_managed_worktree_metadata() {
+  local project="$TMP/guard-gitmeta-duplicate"
+  local managed_root="$TMP/guard-gitmeta-managed-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local sibling="$sibling_parent/wt"
+  local common_dir
+  local real_metadata
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  mkdir -p "$sibling_parent"
+  git -C "$project" worktree add --quiet --detach "$sibling" HEAD >/dev/null 2>&1 ||
+    fail "could not create the live managed sibling fixture"
+  {
+    printf 'kind=oh-my-setting-temp\n'
+    printf 'pid=%s\n' "$$"
+    printf 'repo=%s\n' "$project"
+    printf 'worktree=%s\n' "$sibling"
+    printf 'temporary=1\n'
+  } > "$sibling_parent/.oh-my-setting-tmp"
+  common_dir="$(git -C "$project" rev-parse --git-common-dir)"
+  case "$common_dir" in /*) ;; *) common_dir="$project/$common_dir" ;; esac
+  real_metadata="$(git -C "$sibling" rev-parse --git-dir)"
+  case "$real_metadata" in /*) ;; *) real_metadata="$sibling/$real_metadata" ;; esac
+
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+mkdir -p "$common_dir/worktrees/rogue-duplicate"
+printf '%s\\n' "$sibling/.git" > "$common_dir/worktrees/rogue-duplicate/gitdir"
+cp "$real_metadata/HEAD" "$common_dir/worktrees/rogue-duplicate/HEAD"
+echo "planted duplicate managed metadata"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "duplicate metadata must not inherit a live sibling's managed exemption: $out"
+  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+    fail "duplicate managed-looking metadata should be a gitmeta violation: $out"
+}
+
+test_worker_guard_rejects_symlink_worktree_metadata() {
+  local project="$TMP/guard-gitmeta-symlink"
+  local managed_root="$TMP/guard-gitmeta-symlink-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local sibling="$sibling_parent/wt"
+  local common_dir
+  local real_metadata
+  local real_metadata_name
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  mkdir -p "$sibling_parent"
+  git -C "$project" worktree add --quiet --detach "$sibling" HEAD >/dev/null 2>&1 ||
+    fail "could not create the live sibling fixture for symlink metadata"
+  {
+    printf 'kind=oh-my-setting-temp\n'
+    printf 'pid=%s\n' "$$"
+    printf 'repo=%s\n' "$project"
+    printf 'worktree=%s\n' "$sibling"
+    printf 'temporary=1\n'
+  } > "$sibling_parent/.oh-my-setting-tmp"
+  common_dir="$(git -C "$project" rev-parse --git-common-dir)"
+  case "$common_dir" in /*) ;; *) common_dir="$project/$common_dir" ;; esac
+  real_metadata="$(git -C "$sibling" rev-parse --git-dir)"
+  case "$real_metadata" in /*) ;; *) real_metadata="$sibling/$real_metadata" ;; esac
+  real_metadata_name="$(basename "$real_metadata")"
+
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+ln -s "$real_metadata_name" "$common_dir/worktrees/rogue-link"
+echo "planted symlink worktree metadata"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "symlink worktree metadata must be a hard guard violation: $out"
+  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+    fail "symlink worktree metadata should be named as gitmeta: $out"
+}
+
 test_worker_guard_reports_a_bounded_scan() {
   local project="$TMP/guard-budget"
   local out
@@ -13861,7 +14478,7 @@ test_worker_guard_reports_a_bounded_scan() {
     fail "a truncated scan must say so: $out"
 }
 
-test_worker_guard_enforces_append_only_shared_state() {
+test_worker_guard_rejects_any_worker_authority_state_change() {
   local project="$TMP/guard-state"
   local result
 
@@ -13873,11 +14490,35 @@ test_worker_guard_enforces_append_only_shared_state() {
   printf '{"schema":1,"thread":"t1","seq":1,"role":"answer","text":"first"}\n' \
     > "$project/.oms/threads/t1.jsonl"
 
-  # Workers are handed OMS_STATE_REPO precisely so they can append; that must
-  # keep working or the guard would break the contract it protects.
-  result="$(run_guarded_worker "$project" \
+  # A delegated worker returns an artifact and patch; it has no authority to
+  # write the primary control plane. Even a syntactically valid append can
+  # forge a lifecycle/landing record that later readers treat as authority.
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$project" \
     "printf '{\"schema\":1,\"fingerprint\":\"def\",\"exit\":1}\n' >> $project/.oms/failures.jsonl")"
-  [ "${result%%	*}" = 0 ] || fail "appending to shared state must stay allowed: $result"
+  [ "${result%%	*}" != 0 ] || fail "appending primary authority state should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'shared-state' ||
+    fail "an appended authority row should name the shared-state surface: $result"
+  if grep -Fq '"fingerprint":"def"' "$project/.oms/failures.jsonl"; then
+    fail "the appended authority row should be rolled back"
+  fi
+
+  # Rewritten JSON state is equally authoritative. Presence-only checks let a
+  # worker widen its path scope or replace the lease that patch-land trusts.
+  local plan_rewrite="$TMP/guard-state-plan-rewrite"
+  make_guard_repo "$plan_rewrite"
+  mkdir -p "$plan_rewrite/.oms/plan"
+  printf '{"tasks":[{"id":"t1","allowed_paths":["src/"]}]}\n' \
+    > "$plan_rewrite/.oms/plan/tasks.json"
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$plan_rewrite" \
+    "printf '{\"tasks\":[{\"id\":\"t1\",\"allowed_paths\":[\"/\"]}]}\\n' > $plan_rewrite/.oms/plan/tasks.json")"
+  [ "${result%%	*}" != 0 ] || fail "rewriting plan authority should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'plan/tasks.json' ||
+    fail "the rewritten authority file should be named: $result"
+  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+    fail "parent failure bookkeeping must not be blamed on the plan-mutating worker: $result"
+  fi
+  grep -Fq '"allowed_paths":["src/"]' "$plan_rewrite/.oms/plan/tasks.json" ||
+    fail "rewritten plan authority should be restored"
 
   # Rewriting rows already there is how a worker would erase the failure that
   # blocks its retry, or forge a turn another agent reads as evidence.
@@ -13887,23 +14528,234 @@ test_worker_guard_enforces_append_only_shared_state() {
   printf '*\n' > "$rewrite/.oms/.gitignore"
   printf '{"schema":1,"fingerprint":"abc","exit":1,"cmd":"pytest"}\n' \
     > "$rewrite/.oms/failures.jsonl"
-  result="$(run_guarded_worker "$rewrite" \
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$rewrite" \
     "printf '{\"schema\":1,\"fingerprint\":\"zzz\",\"exit\":0}\n' > $rewrite/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "rewriting shared state should fail the run: $result"
   printf '%s' "$result" | grep -Fq 'shared-state' ||
     fail "the shared-state surface should be named: $result"
-  printf '%s' "$result" | grep -Fq 'failures.jsonl was truncated' ||
+  printf '%s' "$result" | grep -Fq 'failures.jsonl changed' ||
     fail "the violation should name the file and what happened: $result"
+  grep -Fq '"fingerprint":"abc"' "$rewrite/.oms/failures.jsonl" ||
+    fail "rewritten shared state should be restored"
 
   local removed="$TMP/guard-state-deleted"
   make_guard_repo "$removed"
   mkdir -p "$removed/.oms"
   printf '*\n' > "$removed/.oms/.gitignore"
   printf '{"schema":1,"fingerprint":"abc","exit":1}\n' > "$removed/.oms/failures.jsonl"
-  result="$(run_guarded_worker "$removed" "rm -f $removed/.oms/failures.jsonl")"
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$removed" \
+    "rm -f $removed/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "deleting shared state should fail the run: $result"
   printf '%s' "$result" | grep -Fq 'was deleted' ||
     fail "a deleted state file should be named: $result"
+  grep -Fq '"fingerprint":"abc"' "$removed/.oms/failures.jsonl" ||
+    fail "deleted shared state should be restored"
+}
+
+test_worker_authority_guard_restores_primary_state() {
+  local project="$TMP/guard-state-restore"
+  local state="$project/.oms/authority"
+  local result
+
+  make_guard_repo "$project"
+  mkdir -p "$state" "$project/.oms/hooks" "$project/.oms/work-journal"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf 'original content\n' > "$state/content.txt"
+  printf 'restore this file\n' > "$state/deleted.txt"
+  printf 'mode stays stable\n' > "$state/mode.txt"
+  printf 'target a\n' > "$state/target-a"
+  printf 'target b\n' > "$state/target-b"
+  chmod 0750 "$state"
+  chmod 0750 "$project/.oms"
+  chmod 0600 "$state/mode.txt"
+  ln -s target-a "$state/current"
+
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$project" "
+printf 'worker rewrite\\n' > $state/content.txt
+printf 'worker creation\\n' > $state/created.txt
+rm -f $state/deleted.txt
+chmod 0777 $state/mode.txt
+chmod 0700 $state
+chmod 0777 $project/.oms
+rm -f $state/current
+ln -s target-b $state/current
+printf 'ambient hook\\n' > $project/.oms/hooks/worker-event
+printf 'ambient journal\\n' > $project/.oms/work-journal/worker-event
+")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "authority mutation should block the delegated worker: $result"
+  printf '%s' "$result" | grep -Fq 'owner authority shared-state' ||
+    fail "authority mutation should report the provider-window boundary: $result"
+  for detail in \
+    'authority changed' \
+    'authority/content.txt changed' \
+    'authority/created.txt was created' \
+    'authority/current changed' \
+    'authority/deleted.txt was deleted' \
+    'authority/mode.txt changed' \
+    '.oms root changed'; do
+    printf '%s' "$result" | grep -Fq "$detail" ||
+      fail "authority report lost the actual worker mutation ($detail): $result"
+  done
+  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+    fail "parent failure bookkeeping must not enter the provider mutation report: $result"
+  fi
+  printf '%s' "$result" | grep -Fq 'restored from pre-provider snapshot' ||
+    fail "authority report should confirm successful rollback: $result"
+
+  [ "$(cat "$state/content.txt")" = "original content" ] ||
+    fail "rewritten authority content was not restored"
+  if [ -e "$state/created.txt" ] || [ -L "$state/created.txt" ]; then
+    fail "worker-created authority state was not removed"
+  fi
+  [ "$(cat "$state/deleted.txt")" = "restore this file" ] ||
+    fail "worker-deleted authority state was not restored"
+  [ "$(readlink "$state/current")" = target-a ] ||
+    fail "replaced authority symlink was not restored"
+  python3 - "$state" <<'PY' || fail "authority modes were not restored"
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+assert stat.S_IMODE(os.lstat(root).st_mode) == 0o750
+assert stat.S_IMODE(os.lstat(os.path.join(root, "mode.txt")).st_mode) == 0o600
+assert stat.S_IMODE(os.lstat(os.path.dirname(root)).st_mode) == 0o750
+PY
+
+  # These two trees are ambient telemetry, not landing/lease/scope authority.
+  [ "$(cat "$project/.oms/hooks/worker-event")" = "ambient hook" ] ||
+    fail "hooks exclusion should remain outside authority rollback"
+  [ "$(cat "$project/.oms/work-journal/worker-event")" = "ambient journal" ] ||
+    fail "work-journal exclusion should remain outside authority rollback"
+
+  # Replacing `.oms` itself must not make the manifest walk the symlink target.
+  # Because the telemetry roots disappear with the container, the disaster
+  # path restores their pre-provider bytes along with authority state.
+  local replaced="$TMP/guard-state-root-replaced"
+  local outside="$TMP/guard-state-root-outside"
+  make_guard_repo "$replaced"
+  mkdir -p "$replaced/.oms/authority" "$replaced/.oms/hooks" \
+    "$replaced/.oms/work-journal" "$outside"
+  printf '*\n' > "$replaced/.oms/.gitignore"
+  printf 'root authority\n' > "$replaced/.oms/authority/value"
+  printf 'original hook\n' > "$replaced/.oms/hooks/events.jsonl"
+  printf 'original journal\n' > "$replaced/.oms/work-journal/index.json"
+  printf 'external target\n' > "$outside/foreign.txt"
+  chmod 0750 "$replaced/.oms"
+
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$replaced" "
+rm -rf $replaced/.oms
+ln -s $outside $replaced/.oms
+printf 'outside remains outside\\n' > $outside/worker-marker
+")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "replacing the authority root should block the delegated worker: $result"
+  printf '%s' "$result" | grep -Fq '.oms root changed' ||
+    fail "root replacement should be named without traversing it: $result"
+  if printf '%s' "$result" | grep -Fq 'foreign.txt'; then
+    fail "authority scan followed the worker-planted root symlink: $result"
+  fi
+  if [ -L "$replaced/.oms" ] || [ ! -d "$replaced/.oms" ]; then
+    fail "the authority root directory was not restored"
+  fi
+  [ "$(cat "$replaced/.oms/authority/value")" = "root authority" ] ||
+    fail "authority bytes lost when the root was replaced"
+  grep -Fq 'original hook' "$replaced/.oms/hooks/events.jsonl" ||
+    fail "hook telemetry lost when the root was replaced"
+  grep -Fq 'original journal' "$replaced/.oms/work-journal/index.json" ||
+    fail "work-journal telemetry lost when the root was replaced"
+  [ "$(cat "$outside/worker-marker")" = "outside remains outside" ] ||
+    fail "rollback should not mutate the planted symlink target"
+}
+
+test_parallel_delegates_do_not_erase_each_others_authority_state() {
+  local project="$TMP/guard-state-parallel"
+  local barrier="$TMP/guard-state-parallel-barrier"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local pid_a pid_b rc_a=0 rc_b=0 ticks=0
+  local artifact_a artifact_b patch_a patch_b index
+
+  make_guard_repo "$project"
+  mkdir -p "$barrier"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+prompt="$(cat)"
+case "$prompt" in
+  *parallel-a*) name=a ;;
+  *parallel-b*) name=b ;;
+  *) echo "unexpected parallel test prompt"; exit 90 ;;
+esac
+printf 'worker %s edit\n' "$name" >> file.txt
+: > "$OMS_TEST_BARRIER/$name.ready"
+while [ ! -f "$OMS_TEST_BARRIER/$name.release" ]; do sleep 0.05; done
+echo "parallel worker $name done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  # Start B first so its snapshots are complete before A exists. FIFO release
+  # below then proves B tolerates A's live managed worktree appearing during its
+  # guard window, rather than merely getting a before/after state that matches.
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_BARRIER="$barrier" OMS_PEER_TIMEOUT=15 OMS_OPERATION_ID=parallel-b \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+      --prompt parallel-b --no-verify > "$barrier/b.out" 2> "$barrier/b.err" &
+  pid_b=$!
+  while [ ! -f "$barrier/b.ready" ] && [ "$ticks" -lt 300 ] &&
+    kill -0 "$pid_b" 2>/dev/null; do
+    ticks=$((ticks + 1))
+    sleep 0.05
+  done
+  if [ ! -f "$barrier/b.ready" ]; then
+    : > "$barrier/b.release"
+    wait "$pid_b" 2>/dev/null || true
+    fail "first parallel delegate did not reach the provider barrier: $(cat "$barrier/b.err")"
+  fi
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_BARRIER="$barrier" OMS_PEER_TIMEOUT=15 OMS_OPERATION_ID=parallel-a \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+      --prompt parallel-a --no-verify > "$barrier/a.out" 2> "$barrier/a.err" &
+  pid_a=$!
+  ticks=0
+  while [ ! -f "$barrier/a.ready" ] && [ "$ticks" -lt 300 ] &&
+    kill -0 "$pid_a" 2>/dev/null; do
+    ticks=$((ticks + 1))
+    sleep 0.05
+  done
+  if [ ! -f "$barrier/a.ready" ]; then
+    : > "$barrier/a.release"
+    : > "$barrier/b.release"
+    wait "$pid_a" 2>/dev/null || true
+    wait "$pid_b" 2>/dev/null || true
+    fail "second parallel delegate did not overlap at the provider barrier: $(cat "$barrier/a.err" "$barrier/b.err")"
+  fi
+
+  # FIFO completion is the harder case: B's outer guard began before A's
+  # managed worktree existed, and ends while A is still live. That registration
+  # and A's liveness state are owner-managed concurrency, not worker tampering.
+  : > "$barrier/b.release"
+  wait "$pid_b" || rc_b=$?
+  artifact_b="$(sed -n 's/^artifact: //p' "$barrier/b.out" | sed -n '1p')"
+  patch_b="$(sed -n 's/^patch: //p' "$barrier/b.out" | sed -n '1p')"
+  : > "$barrier/a.release"
+  wait "$pid_a" || rc_a=$?
+  artifact_a="$(sed -n 's/^artifact: //p' "$barrier/a.out" | sed -n '1p')"
+  patch_a="$(sed -n 's/^patch: //p' "$barrier/a.out" | sed -n '1p')"
+  [ "$rc_a" = 0 ] && [ "$rc_b" = 0 ] ||
+    fail "well-behaved parallel delegates should both pass (a=$rc_a b=$rc_b): $(cat "$barrier/a.err" "$barrier/b.err")"
+  [ -s "$artifact_a" ] && [ -s "$artifact_b" ] && [ -s "$patch_a" ] && [ -s "$patch_b" ] ||
+    fail "parallel delegates lost an artifact or patch (a=$artifact_a/$patch_a b=$artifact_b/$patch_b)"
+  assert_file_contains "$artifact_a" 'parallel worker a done'
+  assert_file_contains "$artifact_b" 'parallel worker b done'
+  index="$project/.oms/artifacts/index.jsonl"
+  assert_file_contains "$index" "$(basename "$artifact_a")"
+  assert_file_contains "$index" "$(basename "$artifact_b")"
+  if grep -Fq 'changed owner authority shared-state' "$barrier/a.err" "$barrier/b.err"; then
+    fail "sibling owner writes must not be attributed to either worker"
+  fi
 }
 
 test_worker_guard_sees_submodule_and_worktree_metadata() {
@@ -14024,7 +14876,7 @@ test_shared_memory_writes_are_append_only() {
   [ -f "$project/.oms/memory/summary.md" ] || fail "compact should produce a summary"
 }
 
-test_worker_guard_holds_shared_memory_to_the_contract() {
+test_worker_guard_keeps_shared_memory_parent_owned() {
   local project="$TMP/guard-memory"
   local result
 
@@ -14032,10 +14884,19 @@ test_worker_guard_holds_shared_memory_to_the_contract() {
   HOME="$project-home" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
     --agent codex --text "prefer scripts/check.sh before done" >/dev/null
 
-  # Appending is the whole point of handing a worker OMS_STATE_REPO.
-  result="$(run_guarded_worker "$project" \
+  # Memory is evidence consumed by later agents. A worker reports proposed
+  # notes in its artifact; the owner decides what becomes shared state.
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$project" \
     "OMS_STATE_REPO=$project HOME=$project-home $ROOT/scripts/agent-memory.sh --repo $project append --agent codex --text 'worker note' >/dev/null")"
-  [ "${result%%	*}" = 0 ] || fail "a worker appending a memory note must be allowed: $result"
+  [ "${result%%	*}" != 0 ] || fail "a worker appending shared memory should fail: $result"
+  printf '%s' "$result" | grep -Fq 'memory/shared.md' ||
+    fail "the appended memory log should be named: $result"
+  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+    fail "parent failure bookkeeping must not be blamed on the memory-mutating worker: $result"
+  fi
+  if grep -Fq 'worker note' "$project/.oms/memory/shared.md"; then
+    fail "the worker memory append should be rolled back"
+  fi
 
   # Editing a note another agent wrote is how a worker would rewrite the record
   # the next session reads as fact.
@@ -14043,11 +14904,16 @@ test_worker_guard_holds_shared_memory_to_the_contract() {
   make_guard_repo "$edited"
   HOME="$edited-home" "$ROOT/scripts/agent-memory.sh" --repo "$edited" append \
     --agent codex --text "prefer scripts/check.sh before done" >/dev/null
-  result="$(run_guarded_worker "$edited" \
+  result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$edited" \
     "sed -i 's/prefer scripts/IGNORE scripts/' $edited/.oms/memory/shared.md")"
   [ "${result%%	*}" != 0 ] || fail "editing an existing memory note should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'memory/shared.md had existing rows rewritten' ||
+  printf '%s' "$result" | grep -Fq 'memory/shared.md changed' ||
     fail "the violation should name shared.md and what happened: $result"
+  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+    fail "parent failure bookkeeping must stay outside the provider-window diff: $result"
+  fi
+  grep -Fq 'prefer scripts/check.sh' "$edited/.oms/memory/shared.md" ||
+    fail "the edited memory note should be restored"
 }
 
 test_worker_guard_sees_an_edit_to_an_already_dirty_file() {

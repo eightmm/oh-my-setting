@@ -28,6 +28,22 @@ TTL=""
 REASON=""
 ARTIFACT=""
 PATCH=""
+EXECUTOR_ID=""
+EXECUTOR_SOUL_SHA256=""
+EXPECTED_REVIEW_PATCH=""
+EXPECTED_REVIEW_PATCH_SHA256=""
+EXPECTED_REVIEW_VERIFY=""
+EXPECTED_REVIEW_EXECUTOR_ID=""
+EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256=""
+EXPECTED_REVIEW_LEASE_ID=""
+EXPECTED_LANDING_RECEIPT_SHA256=""
+EXPECTED_REVIEW_PATCH_SET=0
+EXPECTED_REVIEW_PATCH_SHA256_SET=0
+EXPECTED_REVIEW_VERIFY_SET=0
+EXPECTED_REVIEW_EXECUTOR_ID_SET=0
+EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256_SET=0
+EXPECTED_REVIEW_LEASE_ID_SET=0
+EXPECTED_LANDING_RECEIPT_SHA256_SET=0
 DEPENDS=""
 ALLOWED=""
 FORBIDDEN=""
@@ -57,10 +73,24 @@ Commands:
   touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
                                      claimed_at so a live worker is not reclaimed.
   review --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
+         [--executor-id ID --executor-soul-sha256 SHA256]
                                      Move a claimed/running task to review.
-  land   --id ID [--lease-id TOKEN]  Fence admitted review work while applying it.
+  repair --id ID [--lease-id TOKEN] [--artifact PATH]
+                                     Re-enter a reviewed task under the same
+                                     lease for one explicitly bounded repair.
+                                     Prior artifact/patch evidence is retained
+                                     until a new review replaces it. --artifact
+                                     stores the failed gate output for recovery.
+  land   --id ID --lease-id TOKEN    Fence the exact admitted review receipt.
+         --expected-review-patch PATH --expected-review-patch-sha256 SHA256
+         --expected-review-verify CMD --expected-review-lease-id TOKEN
+         --expected-review-executor-id ID
+         --expected-review-executor-soul-sha256 SHA256
   finish --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
-                                     Mark a landed task done.
+         --expected-landing-receipt-sha256 SHA256
+                                     Mark the exact landed receipt done. The
+                                     receipt is checked atomically under the
+                                     plan lock before the transition.
   block  --id ID --reason TEXT       Mark a task blocked.
   release --id ID                    Requeue a claimed/running/review task to ready (worker died).
   reclaim [--ttl SECONDS] [--include-running] [--include-review]
@@ -91,7 +121,8 @@ Commands:
          [--json]                    Emit the selected task as JSON for safe
                                      composition by another harness command.
 
-State: ready -> claimed -> running -> review -> landing -> done. Any -> blocked (block);
+State: ready -> claimed -> running -> review -> landing -> done. An explicit
+repair moves review -> claimed without minting a lease. Any -> blocked (block);
 blocked -> ready (reopen); claimed/running/review -> ready (release).
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 
@@ -121,6 +152,32 @@ while [ "$#" -gt 0 ]; do
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
     --artifact) [ "$#" -ge 2 ] || fail "--artifact requires path"; ARTIFACT="$2"; shift 2 ;;
     --patch) [ "$#" -ge 2 ] || fail "--patch requires path"; PATCH="$2"; shift 2 ;;
+    --executor-id) [ "$#" -ge 2 ] || fail "--executor-id requires id"; EXECUTOR_ID="$2"; shift 2 ;;
+    --executor-soul-sha256) [ "$#" -ge 2 ] || fail "--executor-soul-sha256 requires hash"; EXECUTOR_SOUL_SHA256="$2"; shift 2 ;;
+    --expected-review-patch)
+      [ "$#" -ge 2 ] || fail "--expected-review-patch requires path"
+      EXPECTED_REVIEW_PATCH="$2"; EXPECTED_REVIEW_PATCH_SET=1; shift 2 ;;
+    --expected-review-patch-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-review-patch-sha256 requires hash"
+      EXPECTED_REVIEW_PATCH_SHA256="$2"; EXPECTED_REVIEW_PATCH_SHA256_SET=1; shift 2 ;;
+    --expected-review-verify)
+      [ "$#" -ge 2 ] || fail "--expected-review-verify requires command"
+      EXPECTED_REVIEW_VERIFY="$2"; EXPECTED_REVIEW_VERIFY_SET=1; shift 2 ;;
+    --expected-review-executor-id)
+      [ "$#" -ge 2 ] || fail "--expected-review-executor-id requires value"
+      EXPECTED_REVIEW_EXECUTOR_ID="$2"; EXPECTED_REVIEW_EXECUTOR_ID_SET=1; shift 2 ;;
+    --expected-review-executor-soul-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-review-executor-soul-sha256 requires value"
+      EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256="$2"; EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256_SET=1; shift 2 ;;
+    --expected-review-lease-id)
+      [ "$#" -ge 2 ] || fail "--expected-review-lease-id requires value"
+      EXPECTED_REVIEW_LEASE_ID="$2"; EXPECTED_REVIEW_LEASE_ID_SET=1; shift 2 ;;
+    --expected-landing-receipt-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-landing-receipt-sha256 requires hash"
+      EXPECTED_LANDING_RECEIPT_SHA256="$2"
+      EXPECTED_LANDING_RECEIPT_SHA256_SET=1
+      shift 2
+      ;;
     --depends) [ "$#" -ge 2 ] || fail "--depends requires list"; DEPENDS="$2"; shift 2 ;;
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires list"; ALLOWED="$2"; shift 2 ;;
     --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
@@ -134,7 +191,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|add|claim|start|touch|review|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief|accept)
+    init|add|claim|start|touch|review|repair|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief|accept)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -173,8 +230,24 @@ fi
 # `next --claim` from different agents cannot both win the same task (the write
 # itself is atomic, but the read-decide-write critical section is not).
 export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
+  OMS_REPO="$REPO" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
+  OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_EXECUTOR_SOUL_SHA256="$EXECUTOR_SOUL_SHA256" \
+  OMS_EXPECTED_REVIEW_PATCH="$EXPECTED_REVIEW_PATCH" \
+  OMS_EXPECTED_REVIEW_PATCH_SHA256="$EXPECTED_REVIEW_PATCH_SHA256" \
+  OMS_EXPECTED_REVIEW_VERIFY="$EXPECTED_REVIEW_VERIFY" \
+  OMS_EXPECTED_REVIEW_EXECUTOR_ID="$EXPECTED_REVIEW_EXECUTOR_ID" \
+  OMS_EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256="$EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256" \
+  OMS_EXPECTED_REVIEW_LEASE_ID="$EXPECTED_REVIEW_LEASE_ID" \
+  OMS_EXPECTED_LANDING_RECEIPT_SHA256="$EXPECTED_LANDING_RECEIPT_SHA256" \
+  OMS_EXPECTED_REVIEW_PATCH_SET="$EXPECTED_REVIEW_PATCH_SET" \
+  OMS_EXPECTED_REVIEW_PATCH_SHA256_SET="$EXPECTED_REVIEW_PATCH_SHA256_SET" \
+  OMS_EXPECTED_REVIEW_VERIFY_SET="$EXPECTED_REVIEW_VERIFY_SET" \
+  OMS_EXPECTED_REVIEW_EXECUTOR_ID_SET="$EXPECTED_REVIEW_EXECUTOR_ID_SET" \
+  OMS_EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256_SET="$EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256_SET" \
+  OMS_EXPECTED_REVIEW_LEASE_ID_SET="$EXPECTED_REVIEW_LEASE_ID_SET" \
+  OMS_EXPECTED_LANDING_RECEIPT_SHA256_SET="$EXPECTED_LANDING_RECEIPT_SHA256_SET" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
   OMS_VERIFY="$VERIFY" OMS_ACCEPT="$ACCEPT" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
   OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW" \
@@ -182,7 +255,7 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
 
 plan_run() {
 python3 <<'PY'
-import datetime, json, os, re, secrets, sys, tempfile
+import datetime, hashlib, json, os, re, secrets, sys, tempfile
 
 SCHEMA = 3
 path = os.environ["OMS_PLAN_FILE"]
@@ -207,6 +280,10 @@ def load():
     for task in d["tasks"].values():
         task.setdefault("lease_epoch", 0)
         task.setdefault("lease_id", "")
+        task.setdefault("repair_count", 0)
+        task.setdefault("repair_artifact", "")
+        task.setdefault("executor_id", "")
+        task.setdefault("executor_soul_sha256", "")
     return d
 
 def save(d):
@@ -329,7 +406,9 @@ if act == "add":
         "verify": env("OMS_VERIFY"),
         "role": env("OMS_ROLE"),
         "provider": "", "ttl": "", "artifact": "", "patch": "", "reason": "",
-        "lease_epoch": 0, "lease_id": "", "review_lease_id": "",
+        "executor_id": "", "executor_soul_sha256": "",
+        "lease_epoch": 0, "lease_id": "", "review_lease_id": "", "repair_count": 0,
+        "repair_artifact": "",
         "created": ts, "updated": ts,
     }
     save(d); print("plan: added %s (%s)" % (i, title)); sys.exit(0)
@@ -339,7 +418,7 @@ def get_task(i):
     if not t: die("no such task: %s" % i)
     return t
 
-if act in ("claim", "start", "finish", "review", "land", "block", "release", "reopen", "show", "touch"):
+if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "reopen", "show", "touch"):
     i = require_id(); t = get_task(i)
     if act == "touch":
         # Heartbeat: a live worker refreshes claimed_at so reclaim's TTL clock
@@ -359,7 +438,7 @@ if act in ("claim", "start", "finish", "review", "land", "block", "release", "re
             die("task %s has unfinished dependencies: %s" % (i, ", ".join(pending)))
         issue_lease(t)
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
-                 claimed_at=ts, reason="")
+                 claimed_at=ts, reason="", repair_artifact="")
     elif act == "start":
         if t["state"] != "claimed": die("task %s is %s; claim it first" % (i, t["state"]))
         require_current_lease(t)
@@ -368,17 +447,107 @@ if act in ("claim", "start", "finish", "review", "land", "block", "release", "re
         if t["state"] not in ("claimed", "running"):
             die("task %s is %s; only a claimed/running task can go to review" % (i, t["state"]))
         require_current_lease(t)
+        executor_id = env("OMS_EXECUTOR_ID")
+        executor_soul = env("OMS_EXECUTOR_SOUL_SHA256")
+        if bool(executor_id) != bool(executor_soul):
+            die("task %s review executor receipt requires both id and soul hash" % i)
+        if executor_id and not ID_RE.match(executor_id):
+            die("--executor-id must match [A-Za-z0-9._-]+")
+        if executor_soul and not re.match(r"^[0-9a-f]{64}$", executor_soul):
+            die("--executor-soul-sha256 must be a lowercase SHA-256")
+        # A repair is the same review lease re-entering claimed state. It may
+        # replace the patch evidence, but it cannot shed or swap the executor
+        # that produced the prior review. A fresh lease may establish a new
+        # receipt after an ordinary release/reclaim.
+        same_review_lease = bool(t.get("lease_id")) and t.get("review_lease_id", "") == t.get("lease_id", "")
+        if t.get("repair_count", 0) and same_review_lease:
+            if executor_id != t.get("executor_id", "") or executor_soul != t.get("executor_soul_sha256", ""):
+                die("task %s repaired review must keep the exact executor receipt" % i)
         t.update(state="review", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""),
-                 review_lease_id=t.get("lease_id", ""))
+                 review_lease_id=t.get("lease_id", ""), executor_id=executor_id,
+                 executor_soul_sha256=executor_soul, repair_artifact="")
+    elif act == "repair":
+        # A landing gate can reject already-reviewed work and ask for one
+        # bounded repair. Reuse the exact lease that produced the review so no
+        # stale worker or wider claim is created. Keep the prior evidence until
+        # the repaired worker publishes a replacement review; if it fails, the
+        # caller can still inspect the patch that triggered the repair.
+        if t["state"] != "review":
+            die("task %s is %s; only reviewed work can enter repair" % (i, t["state"]))
+        if not env("OMS_LEASE_ID"):
+            die("task %s repair requires the exact review --lease-id" % i)
+        require_current_lease(t)
+        if not t.get("lease_id") or t.get("review_lease_id", "") != t.get("lease_id", ""):
+            die("task %s review patch lease mismatch; repair is stale" % i)
+        if not t.get("artifact") or not t.get("patch"):
+            die("task %s review is missing artifact/patch evidence" % i)
+        repair_count = t.get("repair_count", 0)
+        if isinstance(repair_count, bool) or not isinstance(repair_count, int) or repair_count < 0:
+            die("task %s has an invalid repair counter" % i)
+        if repair_count >= 1:
+            die("task %s bounded review repair was already used" % i)
+        t.update(state="claimed", claimed_at=ts, reason="", repair_count=1,
+                 repair_artifact=env("OMS_ARTIFACT") or t.get("repair_artifact", ""))
     elif act == "land":
         if t["state"] != "review":
             die("task %s is %s; only reviewed work can enter landing" % (i, t["state"]))
+        expected_fields = (
+            "PATCH", "PATCH_SHA256", "VERIFY", "EXECUTOR_ID",
+            "EXECUTOR_SOUL_SHA256", "LEASE_ID",
+        )
+        missing = [name.lower().replace("_", "-") for name in expected_fields
+                   if env("OMS_EXPECTED_REVIEW_%s_SET" % name) != "1"]
+        if missing:
+            die("task %s land requires the complete expected review receipt: %s" %
+                (i, ", ".join(missing)))
+        if not env("OMS_LEASE_ID"):
+            die("task %s land requires the current --lease-id" % i)
         require_current_lease(t)
-        if t.get("review_lease_id", "") != t.get("lease_id", ""):
+        expected_lease = env("OMS_EXPECTED_REVIEW_LEASE_ID")
+        if (not expected_lease or expected_lease != env("OMS_LEASE_ID") or
+                t.get("review_lease_id", "") != expected_lease or
+                t.get("lease_id", "") != expected_lease):
             die("task %s review patch lease mismatch; patch is stale" % i)
         if not t.get("artifact") or not t.get("patch"):
             die("task %s review is missing artifact/patch evidence" % i)
+        expected_patch = env("OMS_EXPECTED_REVIEW_PATCH")
+        stored_patch = t.get("patch", "")
+        if not isinstance(stored_patch, str) or stored_patch != expected_patch:
+            die("task %s reviewed patch path changed during admission" % i)
+        expected_sha = env("OMS_EXPECTED_REVIEW_PATCH_SHA256")
+        if not re.match(r"^[0-9a-f]{64}$", expected_sha):
+            die("--expected-review-patch-sha256 must be a lowercase SHA-256")
+        patch_path = stored_patch
+        if not os.path.isabs(patch_path):
+            patch_path = os.path.join(env("OMS_REPO"), patch_path)
+        digest = hashlib.sha256()
+        try:
+            with open(patch_path, "rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        except (OSError, TypeError) as exc:
+            die("task %s reviewed patch cannot be hashed: %s" % (i, exc))
+        if digest.hexdigest() != expected_sha:
+            die("task %s reviewed patch bytes changed during admission" % i)
+        stored_verify = t.get("verify", "")
+        if (not isinstance(stored_verify, str) or
+                stored_verify.replace("\r", "") != env("OMS_EXPECTED_REVIEW_VERIFY").replace("\r", "")):
+            die("task %s verify contract changed during admission" % i)
+        expected_executor = env("OMS_EXPECTED_REVIEW_EXECUTOR_ID")
+        expected_soul = env("OMS_EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256")
+        if bool(expected_executor) != bool(expected_soul):
+            die("expected review executor receipt requires both id and soul hash")
+        if expected_executor and not ID_RE.match(expected_executor):
+            die("--expected-review-executor-id must match [A-Za-z0-9._-]+")
+        if expected_soul and not re.match(r"^[0-9a-f]{64}$", expected_soul):
+            die("--expected-review-executor-soul-sha256 must be a lowercase SHA-256")
+        if (t.get("executor_id", "") != expected_executor or
+                t.get("executor_soul_sha256", "") != expected_soul):
+            die("task %s executor review receipt changed during admission" % i)
         t["state"] = "landing"
     elif act == "finish":
         # Done is a landing receipt, not a worker self-report. patch-land owns
@@ -386,6 +555,19 @@ if act in ("claim", "start", "finish", "review", "land", "block", "release", "re
         if t["state"] != "landing":
             die("task %s is %s; finish only after reviewed work enters landing" % (i, t["state"]))
         require_current_lease(t)
+        if env("OMS_EXPECTED_LANDING_RECEIPT_SHA256_SET") != "1":
+            die("task %s finish requires --expected-landing-receipt-sha256" % i)
+        expected_receipt = env("OMS_EXPECTED_LANDING_RECEIPT_SHA256")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_receipt):
+            die("--expected-landing-receipt-sha256 must be a lowercase SHA-256")
+        landing_receipt = dict(t)
+        for name in ("state", "updated", "claim_expired", "claim_age_s"):
+            landing_receipt.pop(name, None)
+        actual_receipt = hashlib.sha256(json.dumps(
+            landing_receipt, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False).encode()).hexdigest()
+        if actual_receipt != expected_receipt:
+            die("task %s landing receipt changed; stale finish rejected" % i)
         t.update(state="done", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""))
     elif act == "block":

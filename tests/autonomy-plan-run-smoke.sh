@@ -37,9 +37,28 @@ cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 prompt="$(cat)"
 [ -z "${CALL_LOG:-}" ] || printf 'call\n' >> "$CALL_LOG"
+[ -z "${STEAL_TASK:-}" ] || [ "${OMS_TASK_ID:-}" != "$STEAL_TASK" ] || {
+  "$STEAL_PLAN" --repo "$STEAL_REPO" release --id "$STEAL_TASK" \
+    --lease-id "$STEAL_LEASE" >/dev/null
+  "$STEAL_PLAN" --repo "$STEAL_REPO" claim --id "$STEAL_TASK" \
+    --provider codex >/dev/null
+  echo worker-stole-fresh-lease >&2
+  exit 9
+}
+[ -z "${FAIL_TASK:-}" ] || [ "${OMS_TASK_ID:-}" != "$FAIL_TASK" ] || {
+  echo worker-failed >&2
+  exit 9
+}
+[ -z "${SLOW_TASK:-}" ] || [ "${OMS_TASK_ID:-}" != "$SLOW_TASK" ] || {
+  : > "$SLOW_STARTED"
+  trap 'exit 143' TERM
+  while :; do sleep 1; done
+}
 case "${OMS_TASK_ID:-}:$prompt" in
   t2:*) printf 'two\n' > delegated2.txt ;;
-  executor:*) printf 'executor\n' > executor.txt ;;
+  executor:*|executor-recovery:*) printf 'executor\n' > executor.txt ;;
+  resume-fail:*|fresh-fail:*) printf 'repair\n' > repair.txt ;;
+  repair-signal:*) printf 'signal-repair\n' > signal-repair.txt ;;
   g1:*) printf 'goal-one\n' > goal1.txt ;;
   g2:*) printf 'goal-two\n' > goal2.txt ;;
   *) printf 'one\n' > delegated.txt ;;
@@ -68,9 +87,20 @@ grep -Fq 'state=review' "$TMP/review.out" || fail "review result missing"
 "$PLAN" --repo "$repo" show --id t1 | grep -Fq '"state": "review"' || fail "t1 not in review"
 [ ! -e "$repo/delegated.txt" ] || fail "review-default mutated the main tree"
 
-# Land the reviewed first task through the public boundary to unlock t2, then
-# prove plan-run --land itself uses patch-land and finishes the second task.
-"$ROOT/scripts/patch-land.sh" --repo "$repo" --plan-task t1 --verify 'bash scripts/check.sh t1' >/dev/null
+# Continue the reviewed first task through plan-run itself. A review
+# continuation must try its stored patch before asking the provider to do the
+# same work again; this is the handoff goal-drive uses after durable intent.
+continue_calls="$TMP/review-continuation-calls"
+if CALL_LOG="$continue_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to claude --id t1 --land >/dev/null 2>&1; then
+  fail "review continuation accepted a different repair provider"
+fi
+[ ! -e "$continue_calls" ] || fail "provider mismatch reached a worker call"
+CALL_LOG="$continue_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id t1 --land >"$TMP/continue-review.out"
+[ ! -e "$continue_calls" ] || fail "review continuation called the provider before landing"
+grep -Fq 'continuing stored review' "$TMP/continue-review.out" ||
+  fail "review continuation was not reported"
 grep -Fxq one "$repo/delegated.txt" || fail "reviewed patch did not land"
 # Landing deliberately leaves reviewable working-tree bytes. Commit the first
 # task before asking a second task to land: patch-land now treats untracked
@@ -99,6 +129,315 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
 grep -Fq 'state=review' "$TMP/executor.out" || fail "plan executor result missing"
 "$PLAN" --repo "$repo" show --id executor | grep -Fq '"state": "review"' ||
   fail "plan executor did not preserve review"
+executor_soul_sha="$("$ROOT/scripts/agent-executor.sh" show --repo "$repo" --id plan-executor |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["soul_sha256"])')"
+"$PLAN" --repo "$repo" show --id executor | python3 -c '
+import json, sys
+d=json.load(sys.stdin)
+assert d.get("executor_id") == "plan-executor", d
+assert d.get("executor_soul_sha256") == sys.argv[1], d
+' "$executor_soul_sha" || fail "plan review did not retain its executor receipt"
+
+# A review produced under a frozen executor must not be continued as ordinary
+# plan work or under a different executor. Dry-run makes this a mutation-free
+# regression for the selection/authority boundary itself.
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
+  --id executor --land --dry-run >"$TMP/executor-missing.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "executor-bound review continued without --executor"
+"$ROOT/scripts/agent-executor.sh" create --repo "$repo" --id other-executor \
+  --provider codex --task-id other --allowed executor.txt \
+  --verify 'bash scripts/check.sh executor' --soul-file "$TMP/executor-soul.md" >/dev/null
+"$ROOT/scripts/agent-executor.sh" freeze --repo "$repo" --id other-executor >/dev/null
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
+  --id executor --executor other-executor --land --dry-run \
+  >"$TMP/executor-mismatch.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "executor-bound review continued under a different executor"
+
+# A stored review can also take its single landing-repair pass with the same
+# terminal executor. Re-arming changes only lifecycle state/counter: task,
+# lease, soul, provider, route, scope, and verifier stay frozen. The first
+# action is the stored landing, so exactly one provider call is made here.
+"$ROOT/scripts/agent-executor.sh" show --repo "$repo" --id plan-executor > "$TMP/executor-before-repair.json"
+printf 'dirt\n' >> "$repo/README.md"
+executor_repair_calls="$TMP/executor-repair-calls"
+rc=0
+CALL_LOG="$executor_repair_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id executor --executor plan-executor \
+  --land --auto-repair >"$TMP/executor-repair.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "dirty tree unexpectedly accepted the executor repair landing"
+grep -Fq 'continuing stored review' "$TMP/executor-repair.out" ||
+  fail "executor review did not use the stored patch first"
+[ -f "$executor_repair_calls" ] || fail "executor repair never called the provider"
+[ "$(wc -l < "$executor_repair_calls" | tr -d ' ')" = 1 ] ||
+  fail "executor review continuation made more than one repair call"
+"$ROOT/scripts/agent-executor.sh" show --repo "$repo" --id plan-executor > "$TMP/executor-after-repair.json"
+if ! python3 - "$TMP/executor-before-repair.json" "$TMP/executor-after-repair.json" <<'PY'
+import json, sys
+before=json.load(open(sys.argv[1], encoding="utf-8"))
+after=json.load(open(sys.argv[2], encoding="utf-8"))
+authority=("executor_id","provider","strategy","mode","task_id","plan_task",
+           "lease_id","base_sha","allowed_paths","forbidden_paths","verify",
+           "model_class","model","fallback_model","reasoning_effort",
+           "fallback_reasoning_effort","soul_sha256")
+assert all(before.get(key) == after.get(key) for key in authority), (before, after)
+assert before.get("state") == "done", before
+assert after.get("state") == "done" and after.get("repair_count") == 1, after
+PY
+then
+  fail "executor repair widened or replaced its frozen contract"
+fi
+if "$ROOT/scripts/agent-executor.sh" repair --repo "$repo" --id plan-executor >/dev/null 2>&1; then
+  fail "executor repair exceeded its one-shot contract"
+fi
+"$PLAN" --repo "$repo" show --id executor | grep -Fq '"state": "review"' ||
+  fail "failed second landing did not preserve the repaired review"
+git -C "$repo" checkout -q README.md
+
+# A crash after the plan has entered its one-shot repair, but before its
+# terminal executor is re-armed, leaves a durable half-transition. The next
+# identical invocation must reconcile that exact task/lease/executor/soul and
+# continue the already-counted repair; it must not mint a lease or consume a
+# second repair.
+"$PLAN" --repo "$repo" add --id executor-recovery --title executor-recovery \
+  --allowed executor.txt --verify 'bash scripts/check.sh executor' >/dev/null
+"$PLAN" --repo "$repo" claim --id executor-recovery --provider codex >/dev/null
+recovery_lease="$($PLAN --repo "$repo" show --id executor-recovery |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])')"
+"$ROOT/scripts/agent-executor.sh" create --repo "$repo" --id recovery-executor \
+  --provider codex --plan-task executor-recovery --soul-file "$TMP/executor-soul.md" >/dev/null
+"$ROOT/scripts/agent-executor.sh" freeze --repo "$repo" --id recovery-executor >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
+  --id executor-recovery --executor recovery-executor >/dev/null
+printf 'dirt\n' >> "$repo/README.md"
+rc=0
+OMS_PLAN_RUN_TEST_STOP_AFTER_PLAN_REPAIR=1 HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id executor-recovery \
+  --executor recovery-executor --land --auto-repair \
+  >"$TMP/executor-recovery-stop.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "repair crash fixture should stop at 75, got $rc"
+"$PLAN" --repo "$repo" show --id executor-recovery |
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "claimed" and d["repair_count"] == 1, d
+assert d["lease_id"] == sys.argv[1] and d["review_lease_id"] == sys.argv[1], d
+assert d["executor_id"] == "recovery-executor" and d["executor_soul_sha256"], d
+assert d.get("repair_artifact"), d' \
+    "$recovery_lease" || fail "interrupted plan repair lost its exact receipt"
+"$ROOT/scripts/agent-executor.sh" show --repo "$repo" --id recovery-executor |
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "done" and d.get("repair_count", 0) == 0, d' ||
+  fail "crash fixture unexpectedly re-armed the executor"
+git -C "$repo" checkout -q README.md
+rc=0
+OMS_PLAN_RUN_TEST_STOP_AFTER_EXECUTOR_REPAIR=1 HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id executor-recovery \
+  --executor recovery-executor --land --auto-repair \
+  >"$TMP/executor-recovery-rearmed.out" 2>&1 || rc=$?
+[ "$rc" = 76 ] || fail "reconciled executor crash fixture should stop at 76, got $rc"
+"$ROOT/scripts/agent-executor.sh" show --repo "$repo" --id recovery-executor |
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "frozen" and d["repair_count"] == 1, d' ||
+  fail "interrupted reconciliation did not leave one reusable executor repair"
+"$PLAN" --repo "$repo" show --id executor-recovery |
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "claimed" and d["repair_count"] == 1, d
+assert d["lease_id"] == sys.argv[1], d' "$recovery_lease" ||
+  fail "executor reconciliation changed the plan repair authority"
+recovery_calls="$TMP/executor-recovery-calls"
+CALL_LOG="$recovery_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id executor-recovery \
+  --executor recovery-executor --land --auto-repair \
+  >"$TMP/executor-recovery-resume.out" 2>&1 ||
+  fail "interrupted repair did not reconcile: $(tail -8 "$TMP/executor-recovery-resume.out")"
+grep -Fq 'resuming interrupted bounded repair' "$TMP/executor-recovery-resume.out" ||
+  fail "repair reconciliation was not reported"
+[ "$(wc -l < "$recovery_calls" | tr -d ' ')" = 1 ] ||
+  fail "repair recovery made more than its one remaining provider call"
+"$PLAN" --repo "$repo" show --id executor-recovery |
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "done" and d["repair_count"] == 1, d
+assert d["lease_id"] == sys.argv[1], d' "$recovery_lease" ||
+  fail "repair recovery changed its lease or repair count"
+"$ROOT/scripts/agent-executor.sh" show --repo "$repo" --id recovery-executor |
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "done" and d["repair_count"] == 1, d' ||
+  fail "repair recovery re-armed the executor more than once"
+git -C "$repo" add executor.txt
+git -C "$repo" commit -qm 'test: commit recovered executor repair'
+
+# A resumed one-shot repair remains terminal when its provider fails. The
+# delegated worker must block the exact repair lease before returning failure;
+# exposing an intermediate ready row lets another runner claim and call the
+# provider again. The bound executor converges to failed under the same frozen
+# repair contract.
+resume_repo="$TMP/resume-failure-repo"
+mkdir -p "$resume_repo"
+git -C "$resume_repo" init -q
+git -C "$resume_repo" config user.email test@example.com
+git -C "$resume_repo" config user.name Test
+printf 'base\n' > "$resume_repo/README.md"
+git -C "$resume_repo" add README.md
+git -C "$resume_repo" commit -qm base
+
+# The first (non-resumed) plan-level landing repair has the same one-shot
+# authority as a recovered repair. A failed provider must block inside
+# peer-delegate before returning; it may never expose ready for the parent to
+# patch up afterward.
+"$PLAN" --repo "$resume_repo" init --goal resume-failure --accept false >/dev/null
+"$PLAN" --repo "$resume_repo" add --id fresh-fail --title fresh-fail \
+  --allowed repair.txt --verify 'grep -Fxq repair repair.txt' >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$resume_repo" --to codex \
+  --id fresh-fail >/dev/null
+fresh_lease="$($PLAN --repo "$resume_repo" show --id fresh-fail |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])')"
+printf 'dirt\n' >> "$resume_repo/README.md"
+fresh_fail_calls="$TMP/fresh-fail-calls"
+rc=0
+FAIL_TASK=fresh-fail CALL_LOG="$fresh_fail_calls" HOME="$home" \
+  PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$resume_repo" --to codex \
+  --id fresh-fail --land --auto-repair >"$TMP/fresh-fail.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "failed first landing repair unexpectedly succeeded"
+[ "$(wc -l < "$fresh_fail_calls" | tr -d ' ')" = 1 ] ||
+  fail "first one-shot repair made more than one provider call"
+grep -Fq 'plan: fresh-fail -> blocked' "$TMP/fresh-fail.out" ||
+  fail "first failed repair did not block inside delegated execution"
+if grep -Fq 'plan: fresh-fail -> ready' "$TMP/fresh-fail.out"; then
+  fail "first failed repair exposed an intermediate ready state"
+fi
+"$PLAN" --repo "$resume_repo" show --id fresh-fail | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "blocked" and d["repair_count"] == 1, d
+assert d["lease_id"] == sys.argv[1] and d["review_lease_id"] == sys.argv[1], d
+' "$fresh_lease" || fail "first failed repair lost its exact blocked receipt"
+git -C "$resume_repo" checkout -q README.md
+
+# TERM after the repair provider starts follows the same terminal contract.
+# plan-run kills its child first; peer-delegate must park the exact lease in
+# its own signal cleanup before the parent can release anything.
+"$PLAN" --repo "$resume_repo" add --id repair-signal --title repair-signal \
+  --allowed signal-repair.txt \
+  --verify 'grep -Fxq signal-repair signal-repair.txt' >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$resume_repo" --to codex \
+  --id repair-signal >/dev/null
+signal_repair_lease="$($PLAN --repo "$resume_repo" show --id repair-signal |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])')"
+printf 'dirt\n' >> "$resume_repo/README.md"
+slow_started="$TMP/repair-signal-started"
+SLOW_TASK=repair-signal SLOW_STARTED="$slow_started" HOME="$home" \
+  PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$resume_repo" --to codex \
+  --id repair-signal --land --auto-repair >"$TMP/repair-signal.out" 2>&1 &
+repair_signal_pid="$!"
+for _ in 1 2 3 4 5; do [ -e "$slow_started" ] && break; sleep 1; done
+[ -e "$slow_started" ] || fail "repair signal fixture never reached its provider"
+kill -TERM "$repair_signal_pid"
+rc=0
+wait "$repair_signal_pid" || rc=$?
+[ "$rc" = 143 ] || fail "repair signal exit should be 143, got $rc"
+"$PLAN" --repo "$resume_repo" show --id repair-signal | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "blocked" and d["repair_count"] == 1, d
+assert d["lease_id"] == sys.argv[1] and d["review_lease_id"] == sys.argv[1], d
+' "$signal_repair_lease" || fail "signaled repair exposed or lost its exact lease"
+git -C "$resume_repo" checkout -q README.md
+
+"$PLAN" --repo "$resume_repo" add --id resume-fail --title resume-fail \
+  --allowed repair.txt --verify 'grep -Fxq repair repair.txt' >/dev/null
+"$PLAN" --repo "$resume_repo" claim --id resume-fail --provider codex >/dev/null
+resume_lease="$($PLAN --repo "$resume_repo" show --id resume-fail |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])')"
+"$ROOT/scripts/agent-executor.sh" create --repo "$resume_repo" --id resume-fail-executor \
+  --provider codex --plan-task resume-fail --soul-file "$TMP/executor-soul.md" >/dev/null
+"$ROOT/scripts/agent-executor.sh" freeze --repo "$resume_repo" \
+  --id resume-fail-executor >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$resume_repo" --to codex \
+  --id resume-fail --executor resume-fail-executor >/dev/null
+printf 'dirt\n' >> "$resume_repo/README.md"
+rc=0
+OMS_PLAN_RUN_TEST_STOP_AFTER_PLAN_REPAIR=1 HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$resume_repo" --to codex --id resume-fail \
+  --executor resume-fail-executor --land --auto-repair \
+  >"$TMP/resume-fail-stop.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "resume failure fixture should stop after durable repair, got $rc"
+git -C "$resume_repo" checkout -q README.md
+resume_fail_calls="$TMP/resume-fail-calls"
+rc=0
+FAIL_TASK=resume-fail CALL_LOG="$resume_fail_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$resume_repo" --to codex --id resume-fail \
+  --executor resume-fail-executor --land --auto-repair \
+  >"$TMP/resume-fail.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "failed resumed repair unexpectedly succeeded"
+[ -s "$resume_fail_calls" ] || fail "failed resumed repair never called its provider"
+[ "$(wc -l < "$resume_fail_calls" | tr -d ' ')" = 1 ] ||
+  fail "resumed one-shot repair made a second provider call"
+grep -Fq 'plan: resume-fail -> blocked' "$TMP/resume-fail.out" ||
+  fail "delegated resumed repair did not block its exact lease before returning"
+if grep -Fq 'plan: resume-fail -> ready' "$TMP/resume-fail.out"; then
+  fail "delegated resumed repair exposed an intermediate ready state"
+fi
+"$PLAN" --repo "$resume_repo" show --id resume-fail | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "blocked" and d["repair_count"] == 1, d
+assert d["lease_id"] == sys.argv[1] and d["review_lease_id"] == sys.argv[1], d
+' "$resume_lease" || fail "failed resumed repair was exposed as ready work"
+"$ROOT/scripts/agent-executor.sh" show --repo "$resume_repo" --id resume-fail-executor |
+  python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["state"] == "failed" and d["repair_count"] == 1, d' ||
+  fail "failed resumed repair did not terminalize its executor"
+resume_calls_before="$(wc -l < "$resume_fail_calls" | tr -d ' ')"
+rc=0
+FAIL_TASK=resume-fail CALL_LOG="$resume_fail_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$resume_repo" --to codex --id resume-fail \
+  --executor resume-fail-executor --land --auto-repair --retry-known \
+  >"$TMP/resume-fail-repeat.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "blocked resumed repair unexpectedly ran again"
+[ "$(wc -l < "$resume_fail_calls" | tr -d ' ')" = "$resume_calls_before" ] ||
+  fail "a later plan-run called the failed one-shot repair provider again"
+rc=0
+FAIL_TASK=resume-fail CALL_LOG="$resume_fail_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$ROOT/scripts/goal-drive.sh" --repo "$resume_repo" --to codex --max-cycles 1 \
+  >"$TMP/resume-fail-goal.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "goal-drive should park behind the blocked one-shot repair, got $rc"
+[ "$(wc -l < "$resume_fail_calls" | tr -d ' ')" = "$resume_calls_before" ] ||
+  fail "goal-drive called the failed one-shot repair provider again"
+
+# Blocking the released row is fenced by the original repair lease. If a
+# sibling wins a fresh claim first, the stale repair runner must fail closed
+# instead of overwriting that new owner.
+printf 'prior\n' > "$TMP/resume-race-artifact"
+: > "$TMP/resume-race.patch"
+"$PLAN" --repo "$resume_repo" add --id resume-race --title resume-race \
+  --allowed race.txt --verify true >/dev/null
+"$PLAN" --repo "$resume_repo" claim --id resume-race --provider codex >/dev/null
+resume_race_lease="$($PLAN --repo "$resume_repo" show --id resume-race |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])')"
+"$PLAN" --repo "$resume_repo" start --id resume-race --lease-id "$resume_race_lease" >/dev/null
+"$PLAN" --repo "$resume_repo" review --id resume-race --lease-id "$resume_race_lease" \
+  --artifact "$TMP/resume-race-artifact" --patch "$TMP/resume-race.patch" >/dev/null
+"$PLAN" --repo "$resume_repo" repair --id resume-race --lease-id "$resume_race_lease" >/dev/null
+resume_race_calls="$TMP/resume-race-calls"
+rc=0
+STEAL_TASK=resume-race STEAL_PLAN="$PLAN" STEAL_REPO="$resume_repo" \
+  STEAL_LEASE="$resume_race_lease" CALL_LOG="$resume_race_calls" \
+  HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$resume_repo" --to codex --id resume-race --land --auto-repair \
+  >"$TMP/resume-race.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "stale repair terminalization unexpectedly succeeded"
+[ "$(wc -l < "$resume_race_calls" | tr -d ' ')" = 1 ] ||
+  fail "fresh-lease race made a second provider call"
+"$PLAN" --repo "$resume_repo" show --id resume-race | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "claimed" and d["lease_id"] and d["lease_id"] != sys.argv[1], d
+' "$resume_race_lease" || fail "stale repair runner overwrote a fresh sibling lease"
 
 # A preflight refusal must not release a claim owned by a frozen executor; its
 # lease remains the authority for a corrected retry.
@@ -129,6 +468,39 @@ grep -Fq 'non-empty allowed_paths' "$TMP/unsafe.err" || fail "unsafe refusal rea
 # Dry-run selects but never claims or calls the provider.
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id unsafe --dry-run >"$TMP/dry.out" 2>"$TMP/dry.err" || true
 "$PLAN" --repo "$repo" show --id unsafe | grep -Fq '"state": "ready"' || fail "dry-run changed plan state"
+
+# A reviewed-patch repair is a one-shot transition under the exact review
+# lease. It retains the prior artifact/patch until a replacement review exists,
+# rejects a stale lease, and cannot be used for an unbounded third pass.
+printf 'prior artifact\n' > "$TMP/prior-artifact"
+printf 'prior patch\n' > "$TMP/prior-patch"
+"$PLAN" --repo "$repo" add --id repair-fence --title repair-fence \
+  --allowed repair.txt --verify true >/dev/null
+"$PLAN" --repo "$repo" claim --id repair-fence --provider codex >/dev/null
+repair_lease="$($PLAN --repo "$repo" show --id repair-fence |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+"$PLAN" --repo "$repo" start --id repair-fence --lease-id "$repair_lease" >/dev/null
+"$PLAN" --repo "$repo" review --id repair-fence --lease-id "$repair_lease" \
+  --artifact "$TMP/prior-artifact" --patch "$TMP/prior-patch" >/dev/null
+if "$PLAN" --repo "$repo" repair --id repair-fence --lease-id lease_stale >/dev/null 2>&1; then
+  fail "stale lease entered reviewed-patch repair"
+fi
+"$PLAN" --repo "$repo" repair --id repair-fence --lease-id "$repair_lease" >/dev/null
+"$PLAN" --repo "$repo" show --id repair-fence |
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["state"] == "claimed" and d["lease_id"] == sys.argv[1]
+assert d["artifact"] == sys.argv[2] and d["patch"] == sys.argv[3]
+assert d["repair_count"] == 1' \
+    "$repair_lease" "$TMP/prior-artifact" "$TMP/prior-patch" ||
+  fail "repair transition widened the lease or discarded prior evidence"
+"$PLAN" --repo "$repo" start --id repair-fence --lease-id "$repair_lease" >/dev/null
+"$PLAN" --repo "$repo" review --id repair-fence --lease-id "$repair_lease" >/dev/null
+if "$PLAN" --repo "$repo" repair --id repair-fence --lease-id "$repair_lease" >/dev/null 2>&1; then
+  fail "review repair exceeded its one-shot contract"
+fi
+"$PLAN" --repo "$repo" block --id repair-fence --lease-id "$repair_lease" \
+  --reason "repair transition tested" >/dev/null
 
 # An unchanged failed task contract is not silently repeated.
 "$PLAN" --repo "$repo" add --id known --title known --allowed known.txt --verify true >/dev/null
@@ -188,12 +560,17 @@ wait "$runner_pid" || rc=$?
 "$PLAN" --repo "$repo" add --id t9 --title autorepair \
   --allowed delegated.txt --verify 'bash scripts/check.sh t1' >/dev/null
 printf 'dirt\n' >> "$repo/README.md"
+auto_repair_calls="$TMP/auto-repair-calls"
 rc=0
-HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex \
+CALL_LOG="$auto_repair_calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex \
   --id t9 --land --auto-repair >"$TMP/t9.out" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail "auto-repair on an unlandable tree should exit nonzero"
 grep -Fq "one auto-repair round" "$TMP/t9.out" ||
   fail "auto-repair round not attempted: $(tail -5 "$TMP/t9.out")"
+[ -f "$auto_repair_calls" ] || fail "auto-repair never called the provider"
+[ "$(wc -l < "$auto_repair_calls" | tr -d ' ')" = 2 ] ||
+  fail "auto-repair did not make exactly two provider calls: $(cat "$TMP/t9.out")"
 grep -Fq "parked task=t9" "$TMP/t9.out" ||
   fail "task should park after the bounded repair: $(tail -5 "$TMP/t9.out")"
 bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list |

@@ -27,7 +27,9 @@ ROOT_LIB="$ROOT/scripts/lib"
 
 REPO="$PWD"
 PATCH=""
+PATCH_FROM_PLAN=0
 VERIFY=""
+VERIFY_EXPLICIT=0
 ML=0
 PLAN_TASK=""
 EXECUTOR_ID=""
@@ -35,6 +37,15 @@ PLAN_LEASE_ID=""
 PLAN_REVIEW_LEASE_ID=""
 PLAN_STATE=""
 PLAN_JSON=""
+PLAN_REVIEW_PATCH=""
+PLAN_REVIEW_PATCH_STORED=""
+PLAN_REVIEW_PATCH_SHA=""
+PLAN_REVIEW_RECEIPT_SHA=""
+PLAN_DONE_RECEIPT_SHA=""
+PLAN_REVIEW_EXECUTOR_ID=""
+PLAN_REVIEW_EXECUTOR_SOUL_SHA=""
+PLAN_VERIFY=""
+PLAN_VERIFY_RAW=""
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
 ALLOW_RESTRUCTURE=0
@@ -50,6 +61,13 @@ FROZEN_PATCH=""
 FROZEN_PATCH_PERSIST=0
 LANDING_BASE=""
 executor_soul_sha=""
+intent_plan_receipt_sha=""
+intent_plan_done_receipt_sha=""
+intent_patch_sha=""
+intent_base_sha=""
+intent_receipt_sha=""
+intent_has_complete=0
+intent_has_abandoned=0
 
 usage() {
   cat <<'EOF'
@@ -108,7 +126,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --patch) [ "$#" -ge 2 ] || fail "--patch requires a file"; PATCH="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
-    --verify) [ "$#" -ge 2 ] || fail "--verify requires a command"; VERIFY="$2"; shift 2 ;;
+    --verify)
+      [ "$#" -ge 2 ] || fail "--verify requires a command"
+      VERIFY="$2"; VERIFY_EXPLICIT=1; shift 2 ;;
     --ml) ML=1; shift ;;
     --plan-task)
       [ "$#" -ge 2 ] || fail "--plan-task requires id"
@@ -133,7 +153,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
+REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 
 LANDINGS="$REPO/.oms/landings.jsonl"
@@ -144,6 +164,13 @@ landing_append() {  # landing_append EVENT [KEY=VALUE...]
   mkdir -p "$(dirname "$LANDINGS")"
   agent_memory_ensure_oms_ignore "$REPO" 2>/dev/null || true
   OMS_LD_EVENT="$event" OMS_LD_ID="$LANDING_ID" OMS_LD_FILE="$LANDINGS" \
+    OMS_LD_PATCH="$intent_patch" OMS_LD_PATCH_SHA="$intent_patch_sha" \
+    OMS_LD_BASE_SHA="$intent_base_sha" OMS_LD_TASK="$intent_task" \
+    OMS_LD_LEASE="$intent_lease" OMS_LD_PLAN_RECEIPT_SHA="$intent_plan_receipt_sha" \
+    OMS_LD_PLAN_DONE_RECEIPT_SHA="$intent_plan_done_receipt_sha" \
+    OMS_LD_APPROVAL="$intent_approval" \
+    OMS_LD_APPROVAL_VERSION="$intent_approval_version" \
+    OMS_LD_RECEIPT_SHA="$intent_receipt_sha" \
     python3 - "$@" <<'PY'
 import json, os, sys, time
 
@@ -152,6 +179,16 @@ row = {
     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "landing_id": os.environ["OMS_LD_ID"],
     "event": os.environ["OMS_LD_EVENT"],
+    "patch": os.environ["OMS_LD_PATCH"],
+    "patch_sha": os.environ["OMS_LD_PATCH_SHA"],
+    "base_sha": os.environ["OMS_LD_BASE_SHA"],
+    "task": os.environ["OMS_LD_TASK"],
+    "lease": os.environ["OMS_LD_LEASE"],
+    "plan_receipt_sha": os.environ["OMS_LD_PLAN_RECEIPT_SHA"],
+    "plan_done_receipt_sha": os.environ["OMS_LD_PLAN_DONE_RECEIPT_SHA"],
+    "approval": os.environ["OMS_LD_APPROVAL"],
+    "approval_version": os.environ["OMS_LD_APPROVAL_VERSION"],
+    "receipt_sha": os.environ["OMS_LD_RECEIPT_SHA"],
 }
 for pair in sys.argv[1:]:
     key, _, value = pair.partition("=")
@@ -176,15 +213,61 @@ if directory_fd is not None:
 PY
 }
 
-# Intents with no terminal row. Prints one JSON object per line, oldest first.
+landing_receipt_hash() {
+  OMS_LD_ID="$LANDING_ID" OMS_LD_PATCH="$intent_patch" \
+    OMS_LD_PATCH_SHA="$intent_patch_sha" OMS_LD_BASE_SHA="$intent_base_sha" \
+    OMS_LD_TASK="$intent_task" OMS_LD_LEASE="$intent_lease" \
+    OMS_LD_PLAN_RECEIPT_SHA="$intent_plan_receipt_sha" \
+    OMS_LD_PLAN_DONE_RECEIPT_SHA="$intent_plan_done_receipt_sha" \
+    OMS_LD_APPROVAL="$intent_approval" \
+    OMS_LD_APPROVAL_VERSION="$intent_approval_version" python3 <<'PY' | tr -d '\r'
+import hashlib, json, os
+row = {
+    "schema": 1,
+    "landing_id": os.environ["OMS_LD_ID"],
+    "patch": os.environ["OMS_LD_PATCH"],
+    "patch_sha": os.environ["OMS_LD_PATCH_SHA"],
+    "base_sha": os.environ["OMS_LD_BASE_SHA"],
+    "task": os.environ["OMS_LD_TASK"],
+    "lease": os.environ["OMS_LD_LEASE"],
+    "plan_receipt_sha": os.environ["OMS_LD_PLAN_RECEIPT_SHA"],
+    "plan_done_receipt_sha": os.environ["OMS_LD_PLAN_DONE_RECEIPT_SHA"],
+    "approval": os.environ["OMS_LD_APPROVAL"],
+    "approval_version": os.environ["OMS_LD_APPROVAL_VERSION"],
+}
+raw = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+print(hashlib.sha256(raw.encode()).hexdigest())
+PY
+}
+
+# Every first intent, annotated with terminal hints. Terminal rows are appendable
+# worker-visible evidence, not authority: recovery still proves the patch/tree
+# and external receipts before treating either outcome as closed.
 landing_outstanding() {
   [ -f "$LANDINGS" ] || return 0
   OMS_LD_FILE="$LANDINGS" python3 <<'PY'
-import json, os
+import hashlib, json, os
+
+receipt_fields = (
+    "landing_id", "patch", "patch_sha", "base_sha", "task", "lease",
+    "plan_receipt_sha", "plan_done_receipt_sha", "approval",
+    "approval_version",
+)
+
+def canonical(row):
+    values = {"schema": 1}
+    for name in receipt_fields:
+        value = row.get(name, "")
+        if not isinstance(value, str):
+            raise ValueError(name)
+        values[name] = value
+    raw = json.dumps(values, ensure_ascii=False, sort_keys=True,
+                     separators=(",", ":"))
+    return values, hashlib.sha256(raw.encode()).hexdigest()
 
 intents = {}
 order = []
-done = set()
+terminals = {}
 with open(os.environ["OMS_LD_FILE"], encoding="utf-8", errors="replace") as f:
     for line in f:
         line = line.strip()
@@ -202,12 +285,31 @@ with open(os.environ["OMS_LD_FILE"], encoding="utf-8", errors="replace") as f:
         if row.get("event") == "intent":
             if lid not in intents:
                 order.append(lid)
-            intents[lid] = row
+                intents[lid] = row
         elif row.get("event") in ("complete", "abandoned"):
-            done.add(lid)
+            terminals.setdefault(lid, []).append(row)
 for lid in order:
-    if lid not in done:
-        print(json.dumps(intents[lid], ensure_ascii=False))
+    row = dict(intents[lid])
+    try:
+        expected, digest = canonical(row)
+    except (TypeError, ValueError):
+        expected, digest = None, ""
+    exact = set()
+    if expected is not None:
+        for terminal in terminals.get(lid, []):
+            if terminal.get("schema") != 1:
+                continue
+            try:
+                terminal_values, terminal_digest = canonical(terminal)
+            except (TypeError, ValueError):
+                continue
+            if (terminal_values == expected and terminal_digest == digest
+                    and terminal.get("receipt_sha") == digest):
+                exact.add(terminal.get("event"))
+    row["_receipt_sha"] = digest
+    row["_has_complete"] = "complete" in exact
+    row["_has_abandoned"] = "abandoned" in exact
+    print(json.dumps(row, ensure_ascii=False))
 PY
 }
 
@@ -230,37 +332,249 @@ approval_recover_finish() {  # approval_recover_finish ID VERSION consumed|faile
     --consumer patch-land-recovery >/dev/null
 }
 
-plan_release_recover() {  # plan_release_recover TASK LEASE
-  local task="$1"
-  local lease="$2"
-  local release_cmd state
-  [ -n "$task" ] || return 0
-  release_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$task")
-  [ -n "$lease" ] && release_cmd+=(--lease-id "$lease")
-  if "${release_cmd[@]}" >/dev/null 2>&1; then
-    return 0
-  fi
-  # A prior interrupted recovery may already have released it. Treat only the
-  # exact converged state as success; missing/wrong-lease tasks remain visible.
-  state="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$task" 2>/dev/null |
-    sed -n 's/^[[:space:]]*"state":[[:space:]]*"\([a-z]*\)".*/\1/p' | sed -n '1p')"
-  [ "$state" = ready ]
+approval_terminal_converged() {  # approval_terminal_converged complete|abandoned
+  local outcome="$1"
+  local row
+  [ -n "$intent_approval" ] || return 0
+  [ -n "$intent_approval_version" ] || return 1
+  row="$("$ROOT/scripts/approval-inbox.sh" --repo "$REPO" show \
+    --approval "$intent_approval" --json 2>/dev/null)" || return 1
+  OMS_LD_APPROVAL_ROW="$row" OMS_LD_OUTCOME="$outcome" \
+    OMS_LD_APPROVAL_VERSION="$intent_approval_version" \
+    OMS_LD_PATCH_SHA="$intent_patch_sha" OMS_LD_BASE_SHA="$intent_base_sha" \
+    OMS_LD_TASK="$intent_task" OMS_LD_LEASE="$intent_lease" python3 <<'PY'
+import json, os
+try:
+    row = json.loads(os.environ["OMS_LD_APPROVAL_ROW"])
+    version = int(os.environ["OMS_LD_APPROVAL_VERSION"])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if not isinstance(row, dict):
+    raise SystemExit(1)
+bound = (
+    row.get("patch_sha", "") == os.environ["OMS_LD_PATCH_SHA"],
+    row.get("base_sha", "") == os.environ["OMS_LD_BASE_SHA"],
+    row.get("task_id", "") == os.environ["OMS_LD_TASK"],
+    row.get("lease_id", "") == os.environ["OMS_LD_LEASE"],
+)
+if not all(bound):
+    raise SystemExit(1)
+if os.environ["OMS_LD_OUTCOME"] == "complete":
+    ok = row.get("state") == "consumed" and row.get("version") == version + 1
+else:
+    ok = (
+        row.get("state") == "failed" and row.get("version") == version + 1
+    ) or (
+        row.get("state") == "approved" and row.get("version") == version - 1
+    ) or (
+        # A rejected attempt leaves its approved grant reusable. A later exact
+        # landing may consume it, or time may expire it; those later durable
+        # states do not reopen the earlier abandoned landing receipt.
+        row.get("state") == "consumed" and row.get("version") == version + 1
+    ) or (
+        row.get("state") == "expired" and row.get("version") == version
+    )
+raise SystemExit(0 if ok else 1)
+PY
 }
 
-finish_not_applied_receipts() {  # finish_not_applied_receipts REASON
+plan_receipt_values() {  # plan_receipt_values TASK
+  local task_json
+  task_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$1" 2>/dev/null)" || return 1
+  printf '%s' "$task_json" | python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)
+state=d.get("state", "")
+lease=d.get("lease_id", "")
+for name in ("state", "updated", "claim_expired", "claim_age_s"):
+    d.pop(name, None)
+digest=hashlib.sha256(json.dumps(
+ d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
+print(state + "\t" + lease + "\t" + digest)
+' | tr -d '\r'
+}
+
+plan_complete_receipt_converged() {
+  local values state lease receipt_sha
+  [ -n "$intent_task" ] || return 0
+  [ -n "$intent_plan_done_receipt_sha" ] || return 1
+  values="$(plan_receipt_values "$intent_task")" || return 1
+  state="$(printf '%s' "$values" | cut -f1)"
+  lease="$(printf '%s' "$values" | cut -f2)"
+  receipt_sha="$(printf '%s' "$values" | cut -f3)"
+  [ "$state" = "done" ] && [ "$lease" = "$intent_lease" ] &&
+    [ "$receipt_sha" = "$intent_plan_done_receipt_sha" ]
+}
+
+plan_landing_receipt_converged() {
+  local values state lease receipt_sha
+  [ -n "$intent_task" ] || return 0
+  [ -n "$intent_plan_receipt_sha" ] || return 1
+  values="$(plan_receipt_values "$intent_task")" || return 1
+  state="$(printf '%s' "$values" | cut -f1)"
+  lease="$(printf '%s' "$values" | cut -f2)"
+  receipt_sha="$(printf '%s' "$values" | cut -f3)"
+  [ "$state" = "landing" ] && [ "$lease" = "$intent_lease" ] &&
+    [ "$receipt_sha" = "$intent_plan_receipt_sha" ]
+}
+
+plan_superseding_landing_receipt_converged() {
+  local values state lease receipt_sha
+  [ -n "$intent_task" ] || return 1
+  [ -n "$intent_plan_receipt_sha" ] || return 1
+  values="$(plan_receipt_values "$intent_task")" || return 1
+  state="$(printf '%s' "$values" | cut -f1)"
+  lease="$(printf '%s' "$values" | cut -f2)"
+  receipt_sha="$(printf '%s' "$values" | cut -f3)"
+  # A same-lease replacement can already own `landing` when recovery reaches
+  # an older intent. Result bytes are not identity: two reviews can produce the
+  # same tree while carrying different artifact/patch receipts.
+  [ "$state" = "landing" ] && [ "$lease" = "$intent_lease" ] &&
+    [ "$receipt_sha" != "$intent_plan_receipt_sha" ]
+}
+
+plan_superseding_done_receipt_converged() {
+  local values state lease receipt_sha
+  [ -n "$intent_task" ] || return 1
+  [ -n "$intent_plan_done_receipt_sha" ] || return 1
+  values="$(plan_receipt_values "$intent_task")" || return 1
+  state="$(printf '%s' "$values" | cut -f1)"
+  lease="$(printf '%s' "$values" | cut -f2)"
+  receipt_sha="$(printf '%s' "$values" | cut -f3)"
+  # `done` alone is not authority for this landing. The same lease can publish
+  # a replacement review and complete that different receipt while an older
+  # intent is outstanding. Preserve that durable winner instead of borrowing
+  # its state to create lineage for the stale intent.
+  [ "$state" = "done" ] && [ "$lease" = "$intent_lease" ] &&
+    [ "$receipt_sha" != "$intent_plan_done_receipt_sha" ]
+}
+
+plan_abandoned_receipt_converged() {
+  local values state lease receipt_sha
+  [ -n "$intent_task" ] || return 0
+  [ -n "$intent_plan_receipt_sha" ] || return 1
+  values="$(plan_receipt_values "$intent_task")" || return 1
+  state="$(printf '%s' "$values" | cut -f1)"
+  lease="$(printf '%s' "$values" | cut -f2)"
+  receipt_sha="$(printf '%s' "$values" | cut -f3)"
+  if [ "$state" = ready ] && [ -z "$lease" ]; then
+    return 0
+  fi
+  case "$state" in review|landing|claimed|running|blocked)
+    [ "$receipt_sha" != "$intent_plan_receipt_sha" ]
+    return
+    ;;
+    done)
+      [ -n "$intent_plan_done_receipt_sha" ] &&
+        [ "$lease" = "$intent_lease" ] &&
+        [ "$receipt_sha" != "$intent_plan_done_receipt_sha" ]
+      return
+      ;;
+  esac
+  return 1
+}
+
+complete_terminal_converged() {
+  landing_lineage_exists "$intent_patch" "$intent_patch_sha" || return 1
+  plan_complete_receipt_converged || return 1
+  approval_terminal_converged complete
+}
+
+abandoned_terminal_converged() {
+  plan_abandoned_receipt_converged || return 1
+  approval_terminal_converged abandoned
+}
+
+plan_release_recover() {  # plan_release_recover TASK LEASE REVIEW_RECEIPT_SHA [PRESERVE]
+  local task="$1"
+  local lease="$2"
+  local expected_receipt_sha="${3:-}"
+  local preserve="${4:-0}"
+  local release_cmd values state current_lease current_receipt_sha
+  [ -n "$task" ] || return 0
+  [ "$preserve" != 1 ] || return 0
+  values="$(plan_receipt_values "$task")" || return 1
+  state="$(printf '%s' "$values" | cut -f1)"
+  current_lease="$(printf '%s' "$values" | cut -f2)"
+  current_receipt_sha="$(printf '%s' "$values" | cut -f3)"
+
+  case "$state" in
+    ready)
+      [ -z "$current_lease" ]
+      return
+      ;;
+    review|landing)
+      # Only the exact review object frozen into the intent may be released.
+      # A same-lease repair can replace patch/artifact evidence without changing
+      # the lease or even enter its own landing state; that newer receipt is
+      # authoritative and must survive.
+      if [ -z "$expected_receipt_sha" ] ||
+        [ "$current_receipt_sha" != "$expected_receipt_sha" ]; then
+        [ -n "$expected_receipt_sha" ] && return 0
+        return 1
+      fi
+      ;;
+    claimed|running|blocked)
+      # A differing receipt is a later repair/terminal state. Preserve it. An
+      # exact review receipt cannot legitimately have one of these states.
+      [ -n "$expected_receipt_sha" ] || return 1
+      [ "$current_receipt_sha" != "$expected_receipt_sha" ] || return 1
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+
+  release_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" release --id "$task")
+  [ -n "$lease" ] && release_cmd+=(--lease-id "$lease")
+  "${release_cmd[@]}" >/dev/null 2>&1
+}
+
+finish_not_applied_receipts() {  # finish_not_applied_receipts REASON [PRESERVE_PLAN]
   local reason="$1"
+  local preserve_plan="${2:-0}"
   local receipts_ok=1
   if ! approval_recover_finish "$intent_approval" "$intent_approval_version" failed; then
     receipts_ok=0
     echo "warning: patch-land: could not finalize unapplied approval ${intent_approval:-none}" >&2
   fi
-  if ! plan_release_recover "$intent_task" "$intent_lease"; then
-    receipts_ok=0
-    echo "warning: patch-land: could not release unapplied plan task ${intent_task:-none}" >&2
+  if [ "$preserve_plan" != 1 ]; then
+    if ! plan_release_recover "$intent_task" "$intent_lease" \
+      "$intent_plan_receipt_sha"; then
+      receipts_ok=0
+      echo "warning: patch-land: could not release unapplied plan task ${intent_task:-none}" >&2
+    fi
   fi
   if [ "$receipts_ok" = 1 ]; then
-    landing_append abandoned "reason=$reason"
-    return $?
+    if [ "$intent_has_abandoned" != 1 ]; then
+      landing_append abandoned "reason=$reason" || return $?
+    fi
+    return 0
+  fi
+  landing_append not-applied-pending-receipt "reason=$reason" || true
+  return 1
+}
+
+finish_superseded_plan_receipts() {  # REASON
+  local reason="$1"
+  local receipts_ok=1
+  # A replacement exact done receipt owns the plan task. Never release or
+  # rewrite it. The same applies while that replacement still owns `landing`.
+  # Only converge this intent's approval side, then bind a canonical abandoned
+  # terminal to the stale receipt.
+  if ! approval_terminal_converged abandoned; then
+    if ! approval_recover_finish "$intent_approval" "$intent_approval_version" failed; then
+      receipts_ok=0
+      echo "warning: patch-land: could not finalize superseded approval ${intent_approval:-none}" >&2
+    fi
+  fi
+  if ! approval_terminal_converged abandoned; then
+    receipts_ok=0
+  fi
+  if [ "$receipts_ok" = 1 ]; then
+    if [ "$intent_has_abandoned" != 1 ]; then
+      landing_append abandoned "reason=$reason" || return $?
+    fi
+    return 0
   fi
   landing_append not-applied-pending-receipt "reason=$reason" || true
   return 1
@@ -361,6 +675,13 @@ if [ "$RECOVER" = 1 ]; then
     intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))')"
     intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))')"
     intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))')"
+    intent_plan_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_receipt_sha",""))' | tr -d '\r')"
+    intent_plan_done_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_done_receipt_sha",""))' | tr -d '\r')"
+    intent_patch_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch_sha",""))' | tr -d '\r')"
+    intent_base_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("base_sha",""))' | tr -d '\r')"
+    intent_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("_receipt_sha",""))' | tr -d '\r')"
+    intent_has_complete="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_complete") is True else 0)' | tr -d '\r')"
+    intent_has_abandoned="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_abandoned") is True else 0)' | tr -d '\r')"
     intent_approval="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval",""))')"
     intent_approval_version="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_version",""))')"
     if [ -z "$intent_patch" ] || [ ! -f "$intent_patch" ]; then
@@ -372,7 +693,6 @@ if [ "$RECOVER" = 1 ]; then
     # Recovery decides from the tree whether THIS patch went in. A patch file
     # that has changed since the intent cannot answer that question, and
     # guessing either way writes a false record: leave it for a human.
-    intent_patch_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch_sha",""))')"
     current_patch_sha="$(oms_sha256_file "$intent_patch" 2>/dev/null || printf 'unknown')"
     if [ -n "$intent_patch_sha" ] && [ "$intent_patch_sha" != "unknown" ] &&
       [ "$intent_patch_sha" != "$current_patch_sha" ]; then
@@ -381,24 +701,76 @@ if [ "$RECOVER" = 1 ]; then
       needs_manual=$((needs_manual + 1))
       continue
     fi
+    if [ "$intent_has_complete" = 1 ] && complete_terminal_converged; then
+      echo "patch-land: $LANDING_ID already complete (durable receipts converged)" >&2
+      continue
+    fi
+    if [ "$intent_has_abandoned" = 1 ] && abandoned_terminal_converged; then
+      echo "patch-land: $LANDING_ID already abandoned (durable receipts converged)" >&2
+      continue
+    fi
+    # Forward/reverse apply only describes the current tree. Once HEAD leaves
+    # the intent's exact base, another commit can independently introduce (or
+    # remove) identical bytes. Historical terminals above have durable external
+    # receipts; an open intent has no such authority and must remain untouched
+    # for manual recovery rather than claiming the newer commit as its landing.
+    current_intent_base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | tr -d '\r' || printf 'unborn')"
+    if [ -z "$intent_base_sha" ] || [ "$current_intent_base" != "$intent_base_sha" ]; then
+      echo "error: landing $LANDING_ID: HEAD no longer matches its exact intent base" >&2
+      echo "error: recorded ${intent_base_sha:-missing}, now $current_intent_base; preserve the open intent for manual recovery" >&2
+      needs_manual=$((needs_manual + 1))
+      continue
+    fi
+    if plan_superseding_done_receipt_converged; then
+      if finish_superseded_plan_receipts superseded-done; then
+        echo "patch-land: landing $LANDING_ID superseded by a different exact done receipt" >&2
+        abandoned=$((abandoned + 1))
+      else
+        echo "error: landing $LANDING_ID has a superseding done receipt but approval convergence failed" >&2
+        needs_manual=$((needs_manual + 1))
+      fi
+      continue
+    fi
+    if plan_superseding_landing_receipt_converged; then
+      if finish_superseded_plan_receipts superseded-landing; then
+        echo "patch-land: landing $LANDING_ID superseded by a different exact landing receipt" >&2
+        abandoned=$((abandoned + 1))
+      else
+        echo "error: landing $LANDING_ID has a superseding landing receipt but approval convergence failed" >&2
+        needs_manual=$((needs_manual + 1))
+      fi
+      continue
+    fi
     # Applied content reverse-applies cleanly; unapplied content does not.
     if git -C "$REPO" apply --binary --reverse --check "$intent_patch" >/dev/null 2>&1; then
       rec_ok=1
-      if ! record_landing_lineage_once "$intent_patch" "$current_patch_sha" "$intent_task"; then
+      if [ -n "$intent_task" ]; then
+        if plan_complete_receipt_converged; then
+          : # The interrupted run already published this exact done receipt.
+        elif plan_landing_receipt_converged; then
+          finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$intent_task" --patch "$intent_patch")
+          [ -n "$intent_lease" ] && finish_cmd+=(--lease-id "$intent_lease")
+          finish_cmd+=(--expected-landing-receipt-sha256 "$intent_plan_receipt_sha")
+          if "${finish_cmd[@]}" >/dev/null 2>&1; then
+            if ! plan_complete_receipt_converged; then
+              rec_ok=0
+              echo "warning: patch-land: recovered plan task $intent_task has an unexpected done receipt" >&2
+            fi
+          elif plan_complete_receipt_converged; then
+            : # A concurrent recovery already finished this exact receipt.
+          else
+            rec_ok=0
+            echo "warning: patch-land: recovery could not finish the exact plan receipt for $intent_task" >&2
+          fi
+        else
+          rec_ok=0
+          echo "warning: patch-land: recovery found a different plan landing receipt for $intent_task" >&2
+        fi
+      fi
+      if [ "$rec_ok" = 1 ] &&
+        ! record_landing_lineage_once "$intent_patch" "$current_patch_sha" "$intent_task"; then
         rec_ok=0
         echo "warning: patch-land: recovery could not verify or record lineage for $LANDING_ID" >&2
-      fi
-      if [ -n "$intent_task" ]; then
-        finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$intent_task" --patch "$intent_patch")
-        [ -n "$intent_lease" ] && finish_cmd+=(--lease-id "$intent_lease")
-        if ! "${finish_cmd[@]}" >/dev/null 2>&1; then
-          # Already finished by the interrupted run is success, not a failure.
-          if [ "$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$intent_task" 2>/dev/null |
-            sed -n 's/^[[:space:]]*"state":[[:space:]]*"\([a-z]*\)".*/\1/p' | sed -n '1p')" != "done" ]; then
-            rec_ok=0
-            echo "warning: patch-land: recovery could not finish plan task $intent_task" >&2
-          fi
-        fi
       fi
       if [ "$rec_ok" = 1 ]; then
         if ! approval_recover_finish "$intent_approval" "$intent_approval_version" consumed; then
@@ -407,7 +779,10 @@ if [ "$RECOVER" = 1 ]; then
         fi
       fi
       if [ "$rec_ok" = 1 ]; then
-        if landing_append complete recovered=1; then
+        if [ "$intent_has_complete" = 1 ]; then
+          echo "patch-land: recovered $LANDING_ID (patch was applied; receipts already complete)" >&2
+          recovered=$((recovered + 1))
+        elif landing_append complete recovered=1; then
           echo "patch-land: recovered $LANDING_ID (patch was applied)" >&2
           recovered=$((recovered + 1))
         else
@@ -462,26 +837,71 @@ if [ -n "$PLAN_TASK" ]; then
   PLAN_JSON="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$PLAN_TASK" 2>/dev/null)" ||
     fail "cannot read plan task $PLAN_TASK"
   PLAN_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))')" ||
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' | tr -d '\r')" ||
     fail "cannot read lease for plan task $PLAN_TASK"
   PLAN_REVIEW_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("review_lease_id", ""))')" ||
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("review_lease_id", ""))' | tr -d '\r')" ||
     fail "cannot read review lease for plan task $PLAN_TASK"
   PLAN_STATE="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')" ||
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' | tr -d '\r')" ||
     fail "cannot read state for plan task $PLAN_TASK"
-  if [ -z "$VERIFY" ]; then
-    VERIFY="$(printf '%s' "$PLAN_JSON" |
-      python3 -c 'import json,sys; print(json.load(sys.stdin).get("verify", ""))')" ||
-      fail "cannot read verify contract for plan task $PLAN_TASK"
+  PLAN_REVIEW_PATCH="$(printf '%s' "$PLAN_JSON" | python3 -c '
+import json,sys
+value=json.load(sys.stdin).get("patch", "")
+if not isinstance(value, str) or "\x00" in value or "\n" in value or "\r" in value:
+    raise SystemExit(1)
+print(value)
+' | tr -d '\r')" || fail "cannot read reviewed patch for plan task $PLAN_TASK"
+  PLAN_REVIEW_PATCH_STORED="$PLAN_REVIEW_PATCH"
+  PLAN_REVIEW_RECEIPT_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)
+for name in ("state", "updated", "claim_expired", "claim_age_s"):
+    d.pop(name, None)
+print(hashlib.sha256(json.dumps(
+ d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
+' | tr -d '\r')" || fail "cannot hash review receipt for plan task $PLAN_TASK"
+  PLAN_REVIEW_EXECUTOR_ID="$(printf '%s' "$PLAN_JSON" | python3 -c '
+import json,re,sys
+value=json.load(sys.stdin).get("executor_id", "")
+if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9._-]+", value)):
+    raise SystemExit(1)
+print(value)
+' | tr -d '\r')" || fail "cannot read executor receipt for plan task $PLAN_TASK"
+  PLAN_REVIEW_EXECUTOR_SOUL_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
+import json,re,sys
+value=json.load(sys.stdin).get("executor_soul_sha256", "")
+if not isinstance(value, str) or (value and not re.fullmatch(r"[0-9a-f]{64}", value)):
+    raise SystemExit(1)
+print(value)
+' | tr -d '\r')" || fail "cannot read executor soul receipt for plan task $PLAN_TASK"
+  PLAN_VERIFY_RAW="$(printf '%s' "$PLAN_JSON" | python3 -c '
+import json,sys
+value=json.load(sys.stdin).get("verify", "")
+if not isinstance(value, str) or "\x00" in value:
+    raise SystemExit(1)
+sys.stdout.write(value + "__OMS_PLAN_VERIFY_END_9f31c8__")
+' | tr -d '\r')" || fail "cannot read verify contract for plan task $PLAN_TASK"
+  case "$PLAN_VERIFY_RAW" in
+    *"__OMS_PLAN_VERIFY_END_9f31c8__") ;;
+    *) fail "cannot decode verify contract for plan task $PLAN_TASK" ;;
+  esac
+  PLAN_VERIFY="${PLAN_VERIFY_RAW%__OMS_PLAN_VERIFY_END_9f31c8__}"
+  [ -n "$PLAN_VERIFY" ] || fail "plan task $PLAN_TASK has no stored verify contract"
+  if [ "$VERIFY_EXPLICIT" = 1 ]; then
+    VERIFY="${VERIFY//$'\r'/}"
+    [ "$VERIFY" = "$PLAN_VERIFY" ] ||
+      fail "--verify does not match plan task $PLAN_TASK review contract"
+  else
+    VERIFY="$PLAN_VERIFY"
   fi
 fi
 
 # --plan-task alone is enough when delegate already stamped the patch path on
 # the task: read it back instead of making the reviewer copy it by hand.
 if [ -z "$PATCH" ] && [ -n "$PLAN_TASK" ]; then
-  PATCH="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys;print(json.load(sys.stdin).get("patch",""))' 2>/dev/null || true)"
+  PATCH="$PLAN_REVIEW_PATCH"
+  PATCH_FROM_PLAN=1
   [ -n "$PATCH" ] || fail "--patch omitted and plan task $PLAN_TASK has no stored patch path"
   echo "patch-land: using patch from plan task $PLAN_TASK: $PATCH" >&2
 fi
@@ -491,12 +911,46 @@ fi
     fail "plan task $PLAN_TASK is $PLAN_STATE, not review"
   [ -n "$PLAN_LEASE_ID" ] && [ "$PLAN_REVIEW_LEASE_ID" = "$PLAN_LEASE_ID" ] ||
     fail "plan task $PLAN_TASK has a stale review lease"
+  [ -n "$PLAN_REVIEW_PATCH" ] ||
+    fail "plan task $PLAN_TASK review has no stored patch evidence"
+  case "$PLAN_REVIEW_PATCH" in
+    /*) ;;
+    *) PLAN_REVIEW_PATCH="$REPO/$PLAN_REVIEW_PATCH" ;;
+  esac
+  PLAN_REVIEW_PATCH="$(cd "$(dirname "$PLAN_REVIEW_PATCH")" && pwd -P)/$(basename "$PLAN_REVIEW_PATCH")" ||
+    fail "cannot resolve stored review patch for plan task $PLAN_TASK"
+  [ "$PATCH_FROM_PLAN" = 0 ] || PATCH="$PLAN_REVIEW_PATCH"
+  if [ ! -f "$PLAN_REVIEW_PATCH" ] || [ ! -r "$PLAN_REVIEW_PATCH" ]; then
+    fail "plan task $PLAN_TASK stored patch is missing or unreadable"
+  fi
+  if [ -z "$PLAN_REVIEW_EXECUTOR_ID$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ]; then
+    [ -z "$EXECUTOR_ID" ] ||
+      fail "plan task $PLAN_TASK review has no executor receipt for --executor $EXECUTOR_ID"
+  else
+    if [ -z "$PLAN_REVIEW_EXECUTOR_ID" ] || [ -z "$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ]; then
+      fail "plan task $PLAN_TASK has an incomplete executor review receipt"
+    fi
+    [ -n "$EXECUTOR_ID" ] ||
+      fail "plan task $PLAN_TASK review requires --executor $PLAN_REVIEW_EXECUTOR_ID"
+    [ "$EXECUTOR_ID" = "$PLAN_REVIEW_EXECUTOR_ID" ] ||
+      fail "executor $EXECUTOR_ID does not match plan review executor $PLAN_REVIEW_EXECUTOR_ID"
+    if [ -z "$executor_soul_sha" ] || [ "$executor_soul_sha" != "$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ]; then
+      fail "executor $EXECUTOR_ID soul does not match the plan review receipt"
+    fi
+  fi
 }
 [ -f "$PATCH" ] || fail "patch not found: $PATCH"
-PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
+PATCH="$(cd "$(dirname "$PATCH")" && pwd -P)/$(basename "$PATCH")"
 SOURCE_PATCH="$PATCH"
 PATCH_SHA="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
 [ -n "$PATCH_SHA" ] || fail "cannot hash patch: $PATCH"
+if [ -n "$PLAN_TASK" ]; then
+  PLAN_REVIEW_PATCH_SHA="$(oms_sha256_file "$PLAN_REVIEW_PATCH" 2>/dev/null || true)"
+  [ -n "$PLAN_REVIEW_PATCH_SHA" ] ||
+    fail "cannot hash stored review patch for plan task $PLAN_TASK"
+  [ "$PATCH_SHA" = "$PLAN_REVIEW_PATCH_SHA" ] ||
+    fail "patch bytes do not match plan task $PLAN_TASK review"
+fi
 APPROVAL_PROFILE="${OMS_EXECUTION_PROFILE:-trusted-local}"
 case "$APPROVAL_PROFILE" in
   trusted-local|isolated|remote) ;;
@@ -596,6 +1050,28 @@ chmod 600 "$FROZEN_PATCH" 2>/dev/null || true
 PATCH="$FROZEN_PATCH"
 PATCH_SHA="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
 [ -n "$PATCH_SHA" ] || fail "cannot hash frozen patch: $PATCH"
+frozen_patch_matches() {
+  local current_sha
+  current_sha="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
+  [ -n "$current_sha" ] && [ "$current_sha" = "$PATCH_SHA" ]
+}
+if [ -n "$PLAN_TASK" ]; then
+  PLAN_REVIEW_PATCH_SHA="$(oms_sha256_file "$PLAN_REVIEW_PATCH" 2>/dev/null || true)"
+  [ -n "$PLAN_REVIEW_PATCH_SHA" ] ||
+    fail "cannot rehash stored review patch for plan task $PLAN_TASK"
+  [ "$PATCH_SHA" = "$PLAN_REVIEW_PATCH_SHA" ] ||
+    fail "frozen patch bytes no longer match plan task $PLAN_TASK review"
+  PLAN_DONE_RECEIPT_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)
+d["patch"]=sys.argv[1]
+for name in ("state", "updated", "claim_expired", "claim_age_s"):
+    d.pop(name, None)
+print(hashlib.sha256(json.dumps(
+ d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
+' "$FROZEN_PATCH" | tr -d '\r')" ||
+    fail "cannot hash expected done receipt for plan task $PLAN_TASK"
+fi
 LANDING_BASE="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')"
 
 if [ -n "$APPROVAL_VERSION" ]; then
@@ -622,6 +1098,7 @@ except (KeyError, TypeError, ValueError, json.JSONDecodeError):
 if not isinstance(row, dict):
     raise SystemExit(1)
 expected_attempt = os.environ["OMS_LAND_ATTEMPT"]
+stored_attempt = row.get("attempt_id", "")
 matches = (
     row.get("approval_id") == os.environ["OMS_LAND_APPROVAL_ID"],
     row.get("version") == expected_version,
@@ -634,7 +1111,7 @@ matches = (
     row.get("lease_id", "") == os.environ["OMS_LAND_LEASE"],
     row.get("profile") == os.environ["OMS_LAND_PROFILE"],
     row.get("parameters", {}) == expected_parameters,
-    not expected_attempt or row.get("attempt_id", "") == expected_attempt,
+    not stored_attempt or (bool(expected_attempt) and stored_attempt == expected_attempt),
 )
 if not all(matches):
     raise SystemExit(1)
@@ -685,6 +1162,12 @@ if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=all)" ]; then
 fi
 
 # --- Admission gate (the trust boundary) ------------------------------------
+# Candidate verification runs project code with the caller's host permissions.
+# Even though the landing copy is private, a same-UID verifier can still find
+# and rewrite it. Bind admission and apply to the digest captured above: check
+# immediately before handing it to the gate and again when the gate returns.
+frozen_patch_matches ||
+  fail "frozen patch changed before admission; refusing to verify moved bytes"
 admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ -n "$VERIFY" ] && admit_cmd+=(--verify "$VERIFY")
 [ "$ML" = 1 ] && admit_cmd+=(--ml)
@@ -703,6 +1186,8 @@ if ! "${admit_cmd[@]}" >/dev/null; then
     echo "warning: patch-land: could not record rejection in fail-ledger" >&2
   exit 1
 fi
+frozen_patch_matches ||
+  fail "frozen patch changed during admission; verified bytes were not applied"
 
 # --- Apply ------------------------------------------------------------------
 # Recheck the reviewed tree, then persist the intent before changing the plan
@@ -717,22 +1202,21 @@ fi
 
 [ -z "$APPROVAL_ID" ] || APPROVAL_CONSUMING_VERSION="$((APPROVAL_VERSION + 1))"
 intent_patch="$PATCH"
+intent_patch_sha="$PATCH_SHA"
+intent_base_sha="$LANDING_BASE"
 intent_task="$PLAN_TASK"
 intent_lease="$PLAN_LEASE_ID"
+intent_plan_receipt_sha="$PLAN_REVIEW_RECEIPT_SHA"
+intent_plan_done_receipt_sha="$PLAN_DONE_RECEIPT_SHA"
 intent_approval="$APPROVAL_ID"
 intent_approval_version="$APPROVAL_CONSUMING_VERSION"
+intent_receipt_sha="$(landing_receipt_hash)" ||
+  fail "cannot hash the canonical landing intent receipt"
 # Fail closed: an unrecordable intent means a crash after the apply would be
 # indistinguishable from nothing having happened, which is the exact failure
 # the transaction exists to prevent. Refuse rather than apply blind.
 FROZEN_PATCH_PERSIST=1
-if ! landing_append intent \
-  "patch=$PATCH" \
-  "patch_sha=$(oms_sha256_file "$PATCH" 2>/dev/null || printf 'unknown')" \
-  "base_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')" \
-  "task=$PLAN_TASK" \
-  "lease=$PLAN_LEASE_ID" \
-  "approval=$APPROVAL_ID" \
-  "approval_version=$APPROVAL_CONSUMING_VERSION"; then
+if ! landing_append intent; then
   FROZEN_PATCH_PERSIST=0
   fail "cannot record the landing intent in $LANDINGS; refusing to apply"
 fi
@@ -741,10 +1225,19 @@ fi
 # reviewer still cannot land after reclaim/re-claim, and a failed fence now
 # converges through the same not-applied receipt path as crash recovery.
 if [ -n "$PLAN_TASK" ]; then
-  land_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" land --id "$PLAN_TASK")
-  [ -n "$PLAN_LEASE_ID" ] && land_cmd+=(--lease-id "$PLAN_LEASE_ID")
+  land_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" land --id "$PLAN_TASK" \
+    --lease-id "$PLAN_LEASE_ID" \
+    --expected-review-patch "$PLAN_REVIEW_PATCH_STORED" \
+    --expected-review-patch-sha256 "$PLAN_REVIEW_PATCH_SHA" \
+    --expected-review-verify "$PLAN_VERIFY" \
+    --expected-review-executor-id "$PLAN_REVIEW_EXECUTOR_ID" \
+    --expected-review-executor-soul-sha256 "$PLAN_REVIEW_EXECUTOR_SOUL_SHA" \
+    --expected-review-lease-id "$PLAN_REVIEW_LEASE_ID")
   if ! "${land_cmd[@]}" >/dev/null; then
-    if ! finish_not_applied_receipts plan-fence-rejected; then
+    # agent-plan's compare-and-set is atomic: a rejected fence never entered
+    # landing. In particular, do not release a same-lease repair review that
+    # superseded the admitted receipt while its verifier was running.
+    if ! finish_not_applied_receipts plan-fence-rejected 1; then
       echo "warning: patch-land: plan fence failed and recovery receipts remain incomplete" >&2
     fi
     echo "patch-land: plan task lease/state changed; not applied" >&2
@@ -761,6 +1254,16 @@ if [ -n "$APPROVAL_ID" ]; then
     fi
     fail "approval token was rejected; patch was not applied"
   fi
+fi
+
+# Keep the last authority-changing steps (plan fence and approval reservation)
+# from reopening the same race. Recovery can safely converge both receipts
+# because the intent is already durable and the tree is still untouched.
+if ! frozen_patch_matches; then
+  if ! finish_not_applied_receipts patch-changed-before-apply; then
+    echo "warning: patch-land: changed patch left plan/approval receipts incomplete" >&2
+  fi
+  fail "frozen patch changed after admission; verified bytes were not applied"
 fi
 
 if ! git -C "$REPO" apply --binary "$PATCH"; then
@@ -807,6 +1310,7 @@ fi
 if [ -n "$PLAN_TASK" ]; then
   finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$PLAN_TASK" --patch "$PATCH")
   [ -n "$PLAN_LEASE_ID" ] && finish_cmd+=(--lease-id "$PLAN_LEASE_ID")
+  finish_cmd+=(--expected-landing-receipt-sha256 "$PLAN_REVIEW_RECEIPT_SHA")
   if "${finish_cmd[@]}" >/dev/null 2>&1; then
     echo "patch-land: plan task $PLAN_TASK -> done" >&2
   else

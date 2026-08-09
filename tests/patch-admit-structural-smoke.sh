@@ -67,7 +67,8 @@ contains "$TMP/r1.md" "scope: SKIP"
 contains "$TMP/r1.md" "syntax: PASS"
 contains "$TMP/r1.md" "tests: PASS"
 contains "$TMP/r1.md" "verifier: PASS"
-contains "$TMP/r1.md" "verify: PASS"
+contains "$TMP/r1.md" "verify: SKIP"
+contains "$TMP/r1.md" "pre-verification policy or integrity gate failed"
 
 # (2) The same patch is admissible once the restructure is declared.
 "$ADMIT" --repo "$repo" --patch "$TMP/rename.patch" --verify true \
@@ -105,5 +106,6 @@ contains "$TMP/r5.md" "scope: FAIL"
 contains "$TMP/r5.md" "outside allowed paths: foo.sh"
 contains "$TMP/r5.md" "structure: SKIP"
 lacks "$TMP/r5.md" "structure: FAIL"
+contains "$TMP/r5.md" "verify: SKIP"
 
 echo "patch-admit-structural-smoke: ok"

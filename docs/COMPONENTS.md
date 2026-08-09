@@ -146,11 +146,32 @@ A write delegation:
 5. Optionally uses bounded repair rounds with the prior failure attached.
 
 The worker does not see the caller's uncommitted changes. `patch-admit` checks
-applicability, path scope, sensitive content, syntax, verifier integrity, and
-the stored test contract in another temporary worktree. `patch-land` is the
-single mutation boundary and requires a clean main tree (including untracked
-files) plus lease checks. A policy can require a one-use, exact-action approval;
-`--request-approval` creates the request without applying the patch.
+applicability, path scope, sensitive content, syntax, and the stored test
+contract in another temporary worktree. If a patch changes its verifier,
+tests, or common verification config, admission also runs the same command in
+a second projection with that verification surface restored from HEAD.
+Conventional repo-owned check/test/verify/lint helpers are included even when
+the top-level command does not name them directly. A failed pre-verification
+policy/integrity gate skips project-code execution; an explicit override opts
+into the corresponding candidate run.
+`patch-land` is the single mutation boundary and requires a clean main tree
+(including untracked files) plus lease checks. A policy can require a one-use,
+exact-action approval; `--request-approval` creates the request without applying
+the patch.
+
+Write providers receive task context but not the primary `.oms` pointer,
+attempt/lease capability, or executor capability. The default guard preserves
+parallel agent state, rejects destructive rewrites, and binds the selected
+task/lease plus executor/soul objects exactly while other tasks may move. A
+caller that guarantees no sibling writer may set
+`OMS_WORKER_AUTHORITY_EXCLUSIVE=1` for complete authority-state comparison and
+rollback. Plan landing and completion require the reviewed patch bytes,
+verifier, lease, and any executor ID/soul receipt to match exactly inside the
+plan lock. The delegated checkout's physical identity and both Git
+backpointers are rechecked
+at every mutation boundary, including cleanup. Landing terminal rows close a
+transaction only when their canonical receipt and durable plan, approval, and
+lineage outcome also converge.
 
 ```bash
 oms peer-delegate --to codex --prompt "Implement the bounded change."
@@ -205,11 +226,20 @@ machines.
 draft spec and does not alter the plan until the proposal is explicitly
 applied. `oms plan-run` claims and executes at most one ready task. `oms
 goal-drive` repeats within a cycle cap and acceptance command; it is not an
-unbounded autonomous loop.
+unbounded autonomous loop. Before landing, `goal-drive` freezes the reviewed
+patch and appends a commit intent. A restart reconciles an unapplied, applied,
+or already committed intent without calling the provider again. Publication
+builds the frozen tree in a private index, creates the commit without repository
+commit hooks, and compare-and-sets `HEAD` against the recorded parent while
+holding Git's index lock. A staged index that differs from the frozen base is
+preserved and parks the run instead of being overwritten.
 
 Frozen executors combine a reusable role with task-specific scope, base SHA,
 lease, model route, and verify command. They are write-only and cannot widen
-their own authority or recursively delegate.
+their own authority or recursively delegate. A failed landing may re-arm the
+same reviewed task and executor once, without changing that frozen contract;
+provider failure or signal exit blocks that repair before it can become
+claimable again, including after a restart.
 
 Recovery tools include:
 
@@ -228,7 +258,7 @@ oms gc
 | Front door | Actual boundary |
 |---|---|
 | `agent-events`, `agent-supervisor` | Append-only attempt lifecycle and bounded `trusted-local` execution. Resume creates a child attempt; reconcile closes stale supervisor-owned queues that lost their runtime record. The supervisor never lands, commits, or pushes. |
-| `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, lease, profile, verifier hash/mode, ML mode, executor+soul, and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
+| `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode, executor+soul, and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
 | `execution-profile`, `herdr-adapter` | Environment/CLI contract preflight and optional pane/agent control. They are not a sandbox or landing authority. |
 | `open-in`, `ops-cockpit` | Probed VS Code/Stably Orca/Codex launch plans and a read-only, non-atomic operational summary. |
 | `otel-export`, `semantic-eval` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; advisory patch evaluation from trusted host checks plus a self-reported judge result. |
@@ -286,7 +316,8 @@ chooses a connector or tracked summary.
   install added.
   HUD/session-capture parity is not claimed.
 - MCP: shared state reads plus background peer actions that can incur provider
-  cost and write `.oms` artifacts.
+  cost and write `.oms` artifacts. Stdio records and prompts are byte-bounded;
+  oversized input is rejected before provider argv or prompt files are built.
 
 Integration removal failures propagate to `oms uninstall`; successful-looking
 messages are emitted only after the corresponding CLI confirms removal.
@@ -315,5 +346,6 @@ declared mechanical gate.
   choices; review the lock and pin the source ref for higher assurance.
 - Policy handling classifies provider text. Unfamiliar or localized refusal
   wording can be reported as an ordinary provider failure.
-- Version publication, commits, pushes, and pull requests remain explicit owner
-  actions.
+- Version publication, pushes, and pull requests remain explicit owner actions.
+  `goal-drive` may create a local commit only inside its bounded acceptance
+  loop; it never pushes or releases that commit.

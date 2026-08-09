@@ -47,8 +47,14 @@ Commands:
   list      List executor id/state/provider/strategy.
   start     Move frozen -> running after rechecking hash and task lease.
   done      Move running -> done.
+  repair    Re-arm done -> frozen exactly once under the same soul/task/lease
+            contract for a bounded reviewed-patch repair.
   fail      Move frozen/running -> failed; accepts --reason.
   gc        Remove aged draft/done/failed executors; keeps frozen/running.
+
+Repair accepts only the first done state whose exact frozen plan task has
+entered repair under the same lease. A failed executor and the second done
+state are terminal and cannot be re-armed.
 
 Options:
   --repo PATH        State repository. Default: PWD or OMS_STATE_REPO.
@@ -80,7 +86,7 @@ need_id() {
 DAYS=30
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    create|validate|freeze|brief|show|list|start|done|fail|gc)
+    create|validate|freeze|brief|show|list|start|done|repair|fail|gc)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
     --id) [ "$#" -ge 2 ] || fail "--id requires value"; ID="$2"; shift 2 ;;
@@ -259,7 +265,7 @@ d={"schema":1,"executor_id":os.environ["OMS_EXECUTOR_ID"],"state":"draft",
 "fallback_model":os.environ["OMS_EXECUTOR_FALLBACK_MODEL"],
 "reasoning_effort":os.environ["OMS_EXECUTOR_REASONING_EFFORT"],
 "fallback_reasoning_effort":os.environ["OMS_EXECUTOR_FALLBACK_REASONING_EFFORT"],
-"soul_sha256":"","created_at":now,"updated_at":now,"reason":""}
+"soul_sha256":"","repair_count":0,"created_at":now,"updated_at":now,"reason":""}
 with open(os.environ["OMS_EXECUTOR_META"],"w",encoding="utf-8") as f: json.dump(d,f,indent=2,ensure_ascii=False)
 PY
   if ! OMS_EXECUTOR_TMP="$tmp" OMS_EXECUTOR_DIR="$DIR" python3 <<'PY'
@@ -337,6 +343,64 @@ os.replace(tmp,p)
 PY
 }
 
+repair_once() {
+  # The executor contract itself is immutable. This transition changes only
+  # lifecycle state, timestamp, and its one-shot counter; validation before and
+  # after the locked write proves the same soul and plan lease still apply.
+  OMS_EXECUTOR_META="$META" python3 <<'PY'
+import json, os, tempfile, time
+p=os.environ["OMS_EXECUTOR_META"]
+d=json.load(open(p,encoding="utf-8"))
+count=d.get("repair_count",0)
+if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+    raise SystemExit("error: executor repair counter is invalid")
+if d.get("state") == "frozen" and count == 1:
+    # The plan row is the durable repair intent. A crash after this metadata
+    # transition must be retryable without re-arming or incrementing again.
+    raise SystemExit(0)
+if d.get("state") != "done":
+    raise SystemExit("error: executor state %s cannot enter repair" % d.get("state"))
+if count >= 1:
+    raise SystemExit("error: executor bounded repair was already used")
+d["state"]="frozen"
+d["repair_count"]=1
+d["updated_at"]=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p))
+with os.fdopen(fd,"w",encoding="utf-8") as f:
+    json.dump(d,f,indent=2,ensure_ascii=False)
+os.replace(tmp,p)
+PY
+}
+
+validate_plan_repair_contract() {
+  # Re-arming a terminal executor is only meaningful for the exact plan lease
+  # that just entered its one-shot repair state. An unbound executor would make
+  # the caller, not frozen metadata, choose the repaired task and scope.
+  python3 - "$META" "$REPO/.oms/plan/tasks.json" <<'PY'
+import json, sys
+meta=json.load(open(sys.argv[1],encoding="utf-8"))
+plan=json.load(open(sys.argv[2],encoding="utf-8"))
+task_id=meta.get("plan_task","")
+task=plan.get("tasks",{}).get(task_id,{})
+if not task_id or not task:
+    raise SystemExit("error: executor repair requires its frozen plan task")
+checks=(
+    task.get("id") == meta.get("task_id"),
+    task.get("state") == "claimed",
+    task.get("lease_id") == meta.get("lease_id") and bool(meta.get("lease_id")),
+    task.get("provider") == meta.get("provider"),
+    task.get("verify","") == meta.get("verify",""),
+    task.get("allowed_paths",[]) == meta.get("allowed_paths",[]),
+    task.get("forbidden_paths",[]) == meta.get("forbidden_paths",[]),
+    task.get("repair_count",0) == 1,
+    task.get("executor_id","") == meta.get("executor_id","") and bool(meta.get("executor_id")),
+    task.get("executor_soul_sha256","") == meta.get("soul_sha256","") and bool(meta.get("soul_sha256")),
+)
+if not all(checks):
+    raise SystemExit("error: executor repair no longer matches the exact plan repair contract")
+PY
+}
+
 if [ "$ACTION" = "freeze" ]; then
   require_worktree_write_mode
   state="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("state",""))' "$META")"
@@ -379,6 +443,16 @@ fi
 case "$ACTION" in
   start) require_worktree_write_mode; validate_frozen; validate_plan_lease; oms_with_file_lock "$META.lock" update_state frozen running ;;
   done) validate_soul_hash; oms_with_file_lock "$META.lock" update_state running "done" ;;
+  repair)
+    require_worktree_write_mode
+    validate_frozen
+    validate_plan_lease
+    validate_plan_repair_contract
+    oms_with_file_lock "$META.lock" repair_once
+    validate_frozen
+    validate_plan_lease
+    validate_plan_repair_contract
+    ;;
   fail) validate_soul_hash; oms_with_file_lock "$META.lock" update_state frozen,running failed ;;
   *) fail "unsupported action: $ACTION" ;;
 esac

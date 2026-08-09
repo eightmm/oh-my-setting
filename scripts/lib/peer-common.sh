@@ -386,14 +386,272 @@ ma_export_child_env() {
   local origin="$2"
   local state_repo="${3:-}"
   local call_id="${4:-}"
+  local access="${5:-read}"
   local parent_agent="${OMS_AGENT:-unknown}"
 
+  # Provider children receive context, never the owner's capabilities. A write
+  # worker can derive the primary checkout from Git metadata even when the
+  # prompt omits its path, so removing these variables is not an OS sandbox;
+  # it prevents accidental/confused-deputy use while the repository guards
+  # detect a direct reach-around. Read passes retain a read-only state pointer.
+  unset OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+    OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE
   export OMS_HARNESS_CHILD=1
   export OMS_HARNESS_ORIGIN="$origin"
   export OMS_HARNESS_PARENT_AGENT="$parent_agent"
   export OMS_AGENT="$provider"
-  [ -z "$state_repo" ] || export OMS_STATE_REPO="$state_repo"
+  [ "$access" != read ] || [ -z "$state_repo" ] || export OMS_STATE_REPO="$state_repo"
   [ -z "$call_id" ] || export OMS_HARNESS_CALL_ID="$call_id"
+}
+
+# Freeze the primary control-plane state around one explicitly exclusive write
+# provider. Equality and rollback are unsafe during ordinary multi-agent work:
+# a sibling can legitimately publish plan, memory, lifecycle, or artifact state
+# while this provider runs, and snapshots cannot attribute those bytes after the
+# fact. Callers may opt in with OMS_WORKER_AUTHORITY_EXCLUSIVE=1 only when they
+# guarantee that owner authority is quiescent. The default outer repository
+# guard remains non-destructive and compares append-only state by contract.
+# Ambient hook and Work Journal contents are excluded: only their top-level
+# type/mode stays protected because neither subtree is landing, lease, scope,
+# or approval data.
+ma_authority_state_snapshot() {  # REPO OUTPUT
+  local repo="$1"
+  local output="$2"
+
+  OMS_AUTHORITY_REPO="$repo" python3 - <<'PY' > "$output"
+import hashlib
+import json
+import os
+import stat
+
+root = os.path.join(os.path.realpath(os.environ["OMS_AUTHORITY_REPO"]), ".oms")
+excluded = {"hooks", "work-journal"}
+rows = []
+
+def describe(path, rel, hash_content=True):
+    info = os.lstat(path)
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISLNK(info.st_mode):
+        return [rel, "link", mode, os.readlink(path)]
+    if stat.S_ISDIR(info.st_mode):
+        return [rel, "dir", mode, ""]
+    if stat.S_ISREG(info.st_mode):
+        digest = ""
+        if hash_content:
+            value = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    value.update(chunk)
+            digest = value.hexdigest()
+        return [rel, "file", mode, digest]
+    return [rel, "other", mode, ""]
+
+if not os.path.lexists(root):
+    rows.append([".", "absent", 0, ""])
+else:
+    root_row = describe(root, ".")
+    rows.append(root_row)
+    # The root row is authoritative, and a worker-planted root symlink must
+    # never turn this scanner into a traversal of an external target.
+    if root_row[1] == "dir":
+        for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+            if base == root:
+                kept = []
+                for name in sorted(dirs):
+                    if name in excluded:
+                        rows.append(describe(os.path.join(base, name), name, False))
+                    else:
+                        kept.append(name)
+                dirs[:] = kept
+            traversable = []
+            for name in sorted(dirs):
+                path = os.path.join(base, name)
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                row = describe(path, rel)
+                rows.append(row)
+                if row[1] == "dir":
+                    traversable.append(name)
+            dirs[:] = traversable
+            for name in sorted(files):
+                path = os.path.join(base, name)
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                if base == root and name in excluded:
+                    rows.append(describe(path, rel, False))
+                else:
+                    rows.append(describe(path, rel))
+
+for row in sorted(rows):
+    print(json.dumps(row, ensure_ascii=True, separators=(",", ":")))
+PY
+}
+
+# Keep a private byte-for-byte recovery copy for the same authority surface the
+# manifest fingerprints. The provider has not started yet, and the caller
+# guarantees no parent authority writes in this narrow window. Hooks and Work
+# Journal bytes are copied only as disaster recovery for a destroyed `.oms`
+# root; their live contents remain outside the normal comparison and rollback.
+ma_authority_state_backup() {  # REPO BACKUP_DIR
+  local repo="$1"
+  local backup="$2"
+
+  python3 - "$repo" "$backup" <<'PY'
+import os
+import shutil
+import stat
+import sys
+
+repo = os.path.realpath(sys.argv[1])
+backup = sys.argv[2]
+root = os.path.join(repo, ".oms")
+tree = os.path.join(backup, "tree")
+
+if os.path.lexists(root):
+    info = os.lstat(root)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise RuntimeError(".oms authority root is not a real directory")
+
+    shutil.copytree(root, tree, symlinks=True)
+    root_state = "dir"
+else:
+    os.mkdir(tree, 0o700)
+    root_state = "absent"
+
+with open(os.path.join(backup, "root-state"), "w", encoding="ascii") as handle:
+    handle.write(root_state + "\n")
+PY
+}
+
+ma_authority_state_diff() {  # BEFORE AFTER
+  local before="$1"
+  local after="$2"
+
+  python3 - "$before" "$after" <<'PY'
+import json
+import sys
+
+def load(path):
+    rows = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            rows[row[0]] = row[1:]
+    return rows
+
+before = load(sys.argv[1])
+after = load(sys.argv[2])
+details = []
+for path in sorted(set(before) | set(after)):
+    label = ".oms root" if path == "." else path
+    if path not in before:
+        details.append("%s was created" % label)
+    elif path not in after:
+        details.append("%s was deleted" % label)
+    elif before[path] != after[path]:
+        details.append("%s changed" % label)
+for detail in details[:8]:
+    print(detail)
+PY
+}
+
+# Replace owner-authority entries with the pre-provider recovery copy. Removal
+# is lstat-based and never follows a worker-planted symlink. With a surviving
+# real root, telemetry contents stay live when their top-level type/mode is
+# intact. A missing/replaced root gets the full backup so telemetry is not lost
+# as collateral damage; writes after that pre-provider copy cannot be recovered.
+ma_authority_state_restore() {  # REPO BACKUP_DIR
+  local repo="$1"
+  local backup="$2"
+
+  python3 - "$repo" "$backup" <<'PY'
+import os
+import shutil
+import stat
+import sys
+
+repo = os.path.realpath(sys.argv[1])
+backup = sys.argv[2]
+root = os.path.join(repo, ".oms")
+tree = os.path.join(backup, "tree")
+excluded = {"hooks", "work-journal"}
+
+with open(os.path.join(backup, "root-state"), encoding="ascii") as handle:
+    root_state = handle.read().strip()
+if root_state not in {"absent", "dir"}:
+    raise RuntimeError("invalid authority backup root state")
+
+def remove_any(path):
+    info = os.lstat(path)
+    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+        def make_writable_and_retry(function, failed_path, error):
+            failed_info = os.lstat(failed_path)
+            if stat.S_ISLNK(failed_info.st_mode):
+                raise error[1]
+            os.chmod(failed_path, stat.S_IRWXU)
+            function(failed_path)
+        shutil.rmtree(path, onerror=make_writable_and_retry)
+    else:
+        try:
+            os.unlink(path)
+        except PermissionError:
+            if stat.S_ISLNK(info.st_mode):
+                raise
+            os.chmod(path, stat.S_IRWXU)
+            os.unlink(path)
+
+def signature(path):
+    if not os.path.lexists(path):
+        return ("absent", 0, "")
+    info = os.lstat(path)
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISLNK(info.st_mode):
+        return ("link", mode, os.readlink(path))
+    if stat.S_ISDIR(info.st_mode):
+        return ("dir", mode, "")
+    if stat.S_ISREG(info.st_mode):
+        return ("file", mode, "")
+    return ("other", mode, "")
+
+def copy_entry(source, target):
+    info = os.lstat(source)
+    if stat.S_ISLNK(info.st_mode):
+        os.symlink(os.readlink(source), target)
+    elif stat.S_ISDIR(info.st_mode):
+        shutil.copytree(source, target, symlinks=True)
+    elif stat.S_ISREG(info.st_mode):
+        shutil.copy2(source, target, follow_symlinks=False)
+    else:
+        raise RuntimeError("unsupported authority backup entry: " + source)
+
+root_is_real_dir = False
+if os.path.lexists(root):
+    root_info = os.lstat(root)
+    root_is_real_dir = stat.S_ISDIR(root_info.st_mode) and not stat.S_ISLNK(root_info.st_mode)
+
+if root_state == "absent":
+    if os.path.lexists(root):
+        remove_any(root)
+elif not root_is_real_dir:
+    # The root itself was deleted or type-replaced. Restore the complete copy,
+    # including pre-provider telemetry; never inspect a planted symlink target.
+    if os.path.lexists(root):
+        remove_any(root)
+    shutil.copytree(tree, root, symlinks=True)
+else:
+    os.chmod(root, stat.S_IMODE(os.lstat(root).st_mode) | stat.S_IRWXU)
+    names = set(os.listdir(root)) | set(os.listdir(tree))
+    for name in sorted(names):
+        current = os.path.join(root, name)
+        source = os.path.join(tree, name)
+        # Contents below these telemetry roots are ambient. Preserve them when
+        # their top-level boundary signature is unchanged.
+        if name in excluded and signature(current) == signature(source):
+            continue
+        if os.path.lexists(current):
+            remove_any(current)
+        if os.path.lexists(source):
+            copy_entry(source, current)
+    os.chmod(root, stat.S_IMODE(os.lstat(tree).st_mode))
+PY
 }
 
 ma_append_artifact_index() {
@@ -949,6 +1207,13 @@ ma_provider_attempt() {
   local state_repo="$9"
   local call_id="${10}"
   local permission
+  local status=0
+  local authority_before=""
+  local authority_after=""
+  local authority_backup=""
+  local authority_diff=""
+  local authority_restore_detail=""
+  local authority_keep_backup=0
   local -a cmd
 
   case "$provider" in
@@ -1002,13 +1267,81 @@ ma_provider_attempt() {
     *) echo "error: unsupported provider: $provider" > "$output_file"; return 2 ;;
   esac
 
+  if [ "$access" = write ] && [ -n "$state_repo" ] &&
+    [ "${OMS_WORKER_GUARD_OFF:-0}" != 1 ] &&
+    [ "${OMS_WORKER_AUTHORITY_EXCLUSIVE:-0}" = 1 ]; then
+    authority_backup="$(mktemp -d "${TMPDIR:-/tmp}/oms-authority.XXXXXX")" || {
+      printf 'BLOCKED: could not allocate owner authority recovery state\n' > "$output_file"
+      OMS_WORKER_AUTHORITY_VIOLATION=1
+      export OMS_WORKER_AUTHORITY_VIOLATION
+      return 125
+    }
+    chmod 0700 "$authority_backup" || {
+      rm -rf "$authority_backup"
+      printf 'BLOCKED: could not protect owner authority recovery state\n' > "$output_file"
+      OMS_WORKER_AUTHORITY_VIOLATION=1
+      export OMS_WORKER_AUTHORITY_VIOLATION
+      return 125
+    }
+    authority_before="$authority_backup/manifest"
+    authority_after="$(agent_memory_mktemp)" || {
+      rm -rf "$authority_backup"
+      printf 'BLOCKED: could not allocate owner authority comparison state\n' > "$output_file"
+      OMS_WORKER_AUTHORITY_VIOLATION=1
+      export OMS_WORKER_AUTHORITY_VIOLATION
+      return 125
+    }
+    if ! ma_authority_state_backup "$state_repo" "$authority_backup" ||
+      ! ma_authority_state_snapshot "$state_repo" "$authority_before"; then
+      printf 'BLOCKED: could not freeze owner authority state before worker launch\n' \
+        > "$output_file"
+      rm -rf "$authority_backup"
+      rm -f "$authority_after"
+      OMS_WORKER_AUTHORITY_VIOLATION=1
+      export OMS_WORKER_AUTHORITY_VIOLATION
+      return 125
+    fi
+  fi
+
   (
-    ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id"
+    ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
     cd "$workdir" || exit 1
     run_with_timeout "${cmd[@]}" < "$prompt_file"
   ) > "$output_file" 2>&1 &
   local pid="$!"
-  if wait "$pid"; then return 0; else return $?; fi
+
+  if wait "$pid"; then status=0; else status=$?; fi
+  if [ -n "$authority_before" ]; then
+    if ! ma_authority_state_snapshot "$state_repo" "$authority_after"; then
+      authority_diff="owner authority state became unreadable"
+    elif ! cmp -s "$authority_before" "$authority_after"; then
+      authority_diff="$(ma_authority_state_diff "$authority_before" "$authority_after" 2>/dev/null || true)"
+      [ -n "$authority_diff" ] || authority_diff="owner authority manifest changed"
+    fi
+    if [ -n "$authority_diff" ]; then
+      if ma_authority_state_restore "$state_repo" "$authority_backup" &&
+        ma_authority_state_snapshot "$state_repo" "$authority_after" &&
+        cmp -s "$authority_before" "$authority_after"; then
+        authority_restore_detail="owner authority state restored from pre-provider snapshot"
+      else
+        authority_restore_detail="RESTORE FAILED: owner authority state does not match the pre-provider snapshot; recovery copy kept at $authority_backup"
+        authority_keep_backup=1
+      fi
+    fi
+    [ "$authority_keep_backup" = 1 ] || rm -rf "$authority_backup"
+    rm -f "$authority_after"
+  fi
+  if [ -n "$authority_diff" ]; then
+    {
+      printf '\nBLOCKED: delegated worker changed owner authority shared-state\n'
+      printf '%s\n' "$authority_diff"
+      printf '%s\n' "$authority_restore_detail"
+    } >> "$output_file"
+    OMS_WORKER_AUTHORITY_VIOLATION=1
+    export OMS_WORKER_AUTHORITY_VIOLATION
+    return 125
+  fi
+  return "$status"
 }
 
 # Return a canonical comma list with one independent entry per provider.
@@ -1098,6 +1431,8 @@ ma_run_routed_provider_inner() {
   local status
   local isolated_dir=""
 
+  OMS_WORKER_AUTHORITY_VIOLATION=0
+  export OMS_WORKER_AUTHORITY_VIOLATION
   [ "$provider" != agy ] || provider=antigravity
   oms_model_prepare "$provider" || return $?
   attempt_file="$(agent_memory_mktemp)" || return 1
@@ -1123,6 +1458,13 @@ ma_run_routed_provider_inner() {
   ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
     "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
   cat "$attempt_file" >> "$artifact"
+
+  # An authority breach is not a provider/model failure. Never route the same
+  # process against another model after it touched owner state.
+  if [ "$OMS_WORKER_AUTHORITY_VIOLATION" = 1 ]; then
+    rm -f "$attempt_file"
+    return "${status:-125}"
+  fi
 
   # Catalog recovery belongs only to an unpinned provider-default route. An
   # explicit --model is an exact reproducibility contract, so it records the

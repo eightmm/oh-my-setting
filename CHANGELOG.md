@@ -27,6 +27,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `PROVIDER:model=NAME` targets.
 
 ### Changed
+- The bounded goal driver now freezes each reviewed patch, records a durable
+  commit intent, resumes interrupted landing without another provider call,
+  and publishes only the expected tree with ref and index compare-and-set,
+  preserving concurrent staged bytes. A rejected landing may use one
+  same-contract repair; failure or signal exit blocks it before re-claim.
+- Write delegation withholds owner capability receipts from provider children,
+  binds the selected plan/executor and worktree identity, and keeps parallel
+  sibling state appendable. Patch admission adds a base-owned verification
+  floor whenever tests, verifier helpers, or verification config change.
 - Initial setup now requires the provider/service toolchain instead of exposing
   a partial `--no-tools` install. Exact releases and payload integrity are
   repository-owned in `tools.lock.json`; downloaded artifacts are verified
@@ -103,6 +112,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- Approval consumption is attempt-bound, landing recovery requires canonical
+  receipts plus durable state, and the MCP server rejects malformed or
+  oversized requests without terminating its stdio loop.
 - Direct write attempts now reach review only after their verifier passes.
   Supervisor cancellation is monotonic across launch; POSIX process groups and
   Windows kill-on-close Job Objects are reaped, and stale supervisor queues

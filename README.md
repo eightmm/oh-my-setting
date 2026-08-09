@@ -94,12 +94,13 @@ door per capability; the full catalog is `oms list`, documented in
   advisors, outbound scrubbing
 - **Delegating writes** — isolated worktree delegation, an admission ladder,
   one mutation boundary, hash-frozen executor souls and worker-authority
-  fingerprints
+  fingerprints, with primary authority receipts withheld from write children
 - **Agent state and handoff** — Work Journal with daily summaries and an
   optional Notion mirror, a prioritized attention inbox, pre-compaction
   handoffs, source-validated shared memory, reversible tracked-state
   checkpoints, task packets with executed verification, and a failure ledger
-  that names an advisor after repeats
+  that names an advisor after repeats, plus commit intents that resume after a
+  landing interruption without calling the provider again
 - **ML and HPC** — run spine and reproducibility capsules, pre-registered
   hypothesis runs, dataset leakage manifests, Slurm reconcile and GPU queue
 - **Providers and models** — cached capability probing, provider defaults or
