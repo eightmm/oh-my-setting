@@ -155,6 +155,17 @@ done
 # present in an argv value; all other control characters are rejected below.
 command -v python3 >/dev/null 2>&1 ||
   fail "python3 is required to validate provider permission paths"
+# On a Windows host, HOME/XDG/TMPDIR-derived defaults arrive in the native or
+# mixed spelling (C:/...), which the absolute-path check below rightly
+# rejects — so every --apply and --check died before touching the settings.
+# Convert to the POSIX spelling the rule text wants before validating.
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      WORKTREE_PARENT="$(cygpath -u "$WORKTREE_PARENT" | tr -d '\r')"
+    fi
+    ;;
+esac
 if normalized_worktree_parent="$(OMS_PP_WORKTREE_PARENT="$WORKTREE_PARENT" python3 - <<'PY'
 import os
 import posixpath
