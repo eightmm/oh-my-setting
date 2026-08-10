@@ -278,6 +278,12 @@ then
     "$TMP/install-out.txt" >&2 || tail -n 60 "$TMP/install-out.txt" >&2
   ls -la "$HOME/.gemini/antigravity-cli/" >&2 || true
   "$dest/scripts/provider-permissions.sh" --check >&2 || true
+  # The product and this test must be reading the same bytes; name both views.
+  echo "test view of $antigravity_settings:" >&2
+  cat "$antigravity_settings" >&2 || true
+  OMS_ANTIGRAVITY_SETTINGS="$antigravity_settings" \
+    "$dest/scripts/provider-permissions.sh" --print >&2 || true
+  find "$TMP" \( -name "*.oh-my-setting-permissions.json" -o -name "settings.json.bak" \) >&2 || true
   fail "--peer-permissions did not track only its new consult grants"
 fi
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" ||
