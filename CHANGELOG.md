@@ -158,9 +158,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   settings: Git-for-Windows converts environment values that look like POSIX
   paths when spawning native binaries, so the worktree-parent default
   crossed to native Python as C:\... and the absolute-path validation
-  rejected it. The path now crosses base64-encoded (which conversion leaves
-  alone), the validation names the value it rejected, and the settings path
-  is normalized to the mixed form that every python spelling resolves.
+  rejected it — while the settings canonicalizer's env-crossed input was
+  rewritten into a ghost tree under the Git installation root, so apply
+  granted rules into a file nothing else reads. Every path and rule list
+  that crosses to python now travels base64-encoded (which the rewrite
+  leaves alone), the validation names the value it rejected, checks name
+  their resolved settings path, and the settings path is normalized to the
+  mixed drive form that every python spelling resolves.
 - The lifecycle lock no longer leaks — or silently loses mutual exclusion —
   on stock Bash 3.2 hosts. The 3.2 identity fallback probed its own pid
   through a substitution fork without exec'ing into it, so real 3.2 (macOS
