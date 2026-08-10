@@ -124,6 +124,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- The gate no longer lies to the harness itself. A council seat or delegated
+  worker that ran `check.sh` inherited its own `OMS_HARNESS_CHILD=1` session
+  identity, which suppresses auto-task creation by design — so the autonomy
+  fixtures failed from inside any harness-mediated call while the operator's
+  gate stayed green (one seat-run verify row recorded exit 2 on a green
+  tree). `check.sh` now scrubs the harness session capability variables the
+  same way it scrubs the invoking git context, the autonomy suite scrubs
+  them in its own prelude for direct runs, and the route fixture is hermetic
+  even to explicitly inherited identity. A suite that needs child semantics
+  sets the variables explicitly.
 - Approval consumption is attempt-bound, landing recovery requires canonical
   receipts plus durable state, and the MCP server rejects malformed or
   oversized requests without terminating its stdio loop.

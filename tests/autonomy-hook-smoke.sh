@@ -9,6 +9,17 @@ export XDG_CACHE_HOME="$TMP/cache"
 export TMPDIR="$TMP/runtime"
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$TMPDIR"
 
+# Every fixture here assumes operator-shell semantics: a harness child's
+# inherited session identity suppresses auto-task and hook behavior by
+# design, which is the invoker's state, not the fixture's. check.sh scrubs
+# these for gate runs; scrub them here too so a direct run from a council
+# seat or worker shell sees the same suite. A test that needs child
+# semantics sets the variables explicitly.
+unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
+  OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+  OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
+  OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
+
 fail() {
   echo "autonomy-hook-smoke: $*" >&2
   exit 1
@@ -68,13 +79,22 @@ route_prompt() {
   local session="$2"
   local turn="$3"
   local prompt="$4"
-  OMS_AUTO_TASK=1 OMS_AGENT=test OMS_HOOK_PAYLOAD="$(
-    python3 - "$repo" "$session" "$turn" "$prompt" <<'PY'
+  # The invoking shell may itself be a harness child (a council seat running
+  # this suite); its session identity and capability variables are not part
+  # of any fixture. Scrub them so the route sees only what the test sets.
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
+      OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+      OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
+      OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
+    OMS_AUTO_TASK=1 OMS_AGENT=test OMS_HOOK_PAYLOAD="$(
+      python3 - "$repo" "$session" "$turn" "$prompt" <<'PY'
 import json, sys
 print(json.dumps({"cwd": sys.argv[1], "session_id": sys.argv[2],
                   "turn_id": sys.argv[3], "prompt": sys.argv[4]}))
 PY
-  )" python3 "$ROOT/scripts/lib/hook_state.py" route --manifest "$repo/manifest.json"
+    )" python3 "$ROOT/scripts/lib/hook_state.py" route --manifest "$repo/manifest.json"
+  )
 }
 
 task_id() {
@@ -207,8 +227,27 @@ test_fail_ledger_hook_resolves_on_success() {
   [ ! -d "$TMP/hook-plain/.oms" ] || fail "the hook must not seed .oms"
 }
 
+test_route_is_hermetic_to_inherited_harness_session() {
+  local repo="$TMP/repo-child-env"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  printf '{"skills":[]}\n' > "$repo/manifest.json"
+
+  # A council seat or delegated worker that runs this suite inherits its own
+  # session capability variables, and OMS_HARNESS_CHILD=1 suppresses auto-task
+  # by design. The invoker's identity is not part of any fixture: the recorded
+  # 2026-08-10 red gate was exactly a seat-run suite failing here while the
+  # operator's gate was green.
+  OMS_HARNESS_CHILD=1 OMS_HARNESS_ORIGIN=ask OMS_STATE_REPO="$TMP/elsewhere" \
+    OMS_PLAN_LEASE_ID=lease_test OMS_ATTEMPT_ID=attempt_test \
+    route_prompt "$repo" session-child turn-1 "Goal: Ship hermetic"
+  [ -n "$(task_id "$repo")" ] ||
+    fail "inherited harness-child identity suppressed the fixture's auto-task"
+}
+
 test_classifier_boundaries
 test_verification_disclosure_boundaries
 test_explicit_goal_rotation
 test_fail_ledger_hook_resolves_on_success
+test_route_is_hermetic_to_inherited_harness_session
 echo "autonomy-hook-smoke: ok"

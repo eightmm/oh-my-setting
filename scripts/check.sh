@@ -23,6 +23,19 @@ cd "$ROOT"
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
   GIT_OBJECT_DIRECTORY GIT_QUARANTINE_PATH GIT_PREFIX
 
+# The same hermeticity applies to the harness's own session identity. A
+# harness child (council seat, delegated worker) inherits capability
+# variables, and OMS_HARNESS_CHILD=1 suppresses auto-task creation by design
+# — so autonomy fixtures fail from inside any harness-mediated call while
+# passing from an operator shell: the gate lies to the harness itself
+# (recorded 2026-08-10, a seat-run verify went red in 81s on a green tree).
+# The invoking session is not part of any fixture; a suite that needs child
+# semantics sets the variables explicitly.
+unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
+  OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+  OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
+  OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
+
 # Keep lock/capability caches out of the invoking user's HOME. Several focused
 # suites intentionally create temporary repos but use shared lifecycle helpers;
 # one check run should be hermetic without duplicating HOME setup in every file.
