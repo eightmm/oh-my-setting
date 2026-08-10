@@ -569,4 +569,63 @@ assert row["semantic_outcome"] == "incomplete", row
 assert any("invalid JSON" in reason for reason in row["reasons"]), row
 PY
 
+# --- Cockpit observations block --------------------------------------------
+
+obs_repo="$TMP/obs-repo"
+mkdir -p "$obs_repo"
+git -C "$obs_repo" init -q
+printf 'base\n' > "$obs_repo/file.txt"
+git -C "$obs_repo" add file.txt
+git -C "$obs_repo" -c user.email=t@example.com -c user.name=t commit -qm init
+mkdir -p "$obs_repo/.oms/hooks"
+python3 - "$obs_repo" <<'PY'
+import json, pathlib, sys
+
+repo = pathlib.Path(sys.argv[1])
+rows = [
+    {"action": "turn_guard", "status": "block_unverified", "agent": "claude",
+     "turn_obs": "aaaa", "turn_obs_source": "route", "eligible": True},
+    {"action": "turn_guard", "status": "allow_verified", "agent": "claude",
+     "turn_obs": "aaaa", "turn_obs_source": "route", "eligible": True},
+    {"action": "turn_guard", "status": "block_unverified", "agent": "claude",
+     "turn_obs": "bbbb", "turn_obs_source": "route", "eligible": True},
+    {"action": "turn_guard", "status": "allow", "agent": "codex",
+     "turn_obs": "cccc", "turn_obs_source": "payload", "eligible": False},
+    {"action": "turn_guard", "status": "allow"},
+]
+with (repo / ".oms/hooks/events.jsonl").open("w", encoding="utf-8") as fh:
+    for row in rows:
+        fh.write(json.dumps(row) + "\n")
+(repo / ".oms/usage.jsonl").write_text(
+    json.dumps({"family": "gpu", "day": "2026-08-10"}) + "\n", encoding="utf-8")
+PY
+(cd "$obs_repo" && bash "$ROOT/scripts/fail-ledger.sh" record --kind hook \
+  --cmd "hook: obs" --exit 1 --summary observed) >/dev/null
+
+bash "$ROOT/scripts/ops-cockpit.sh" --repo "$obs_repo" --json > "$TMP/obs-cockpit.json"
+python3 - "$TMP/obs-cockpit.json" <<'PY' || fail "cockpit observations contract failed"
+import json
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+obs = row["observations"]
+guard = obs["guard"]
+assert guard["instrumented_rows"] == 4, guard
+assert guard["uninstrumented_rows"] == 1, guard
+assert guard["eligible_turns"] == 2, guard
+assert guard["blocked_turns"] == 2, guard
+assert guard["corrected_after_block"] == 1, guard
+assert guard["by_agent"]["claude"] == 3, guard
+failures = obs["failures"]
+assert failures["hook_rows"] == 1, failures
+assert failures["hook_open"] == 1, failures
+usage = obs["usage"]
+assert usage["file_present"] is True, usage
+assert usage["rows"] == 1, usage
+assert usage["families"] == {"gpu": 1}, usage
+PY
+text="$(bash "$ROOT/scripts/ops-cockpit.sh" --repo "$obs_repo")"
+printf '%s\n' "$text" | grep -Fq 'observations:' ||
+  fail "cockpit text observations line missing: $text"
+
 echo 'operator-tools-smoke: ok'

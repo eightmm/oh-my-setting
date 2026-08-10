@@ -59,6 +59,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   typed row (falling back to `verdicts --json` over pre-feature artifacts) —
   rendered provider Markdown is no longer interpreted as machine state
   outside peer-review's own parser.
+- The pending observation decisions became measurable without new judgment
+  surfaces. Every turn-guard outcome row now carries a content-free
+  observation identity (`turn_obs`, hashed from the session and the routed
+  prompt's monotonic sequence when the Stop payload has no turn id) plus its
+  eligibility, so a block and its corrected continuation pair mechanically —
+  guard semantics and the block budget are unchanged. `ops-cockpit` gains an
+  `observations` block (same object in text and `--json`): guard turns
+  blocked/corrected with pre-instrumentation rows disclosed as
+  uninstrumented, fail-ledger hook-row retirement (open/expired/recurred),
+  and usage-family exposure. No thresholds, no tuning — the keep/kill
+  judgment stays with the operator.
 - Initial setup now requires the provider/service toolchain instead of exposing
   a partial `--no-tools` install. Exact releases and payload integrity are
   repository-owned in `tools.lock.json`; downloaded artifacts are verified

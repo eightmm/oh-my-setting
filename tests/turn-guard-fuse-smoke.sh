@@ -232,8 +232,49 @@ test_allowed_turn_stays_silent() {
   [ -z "$out" ] || fail "a verified turn must produce no notice: $out"
 }
 
+test_guard_rows_carry_observation_identity() {
+  local project="$TMP/obs/project"
+  local out
+
+  make_dirty_repo "$project"
+  route_prompt "$project" s-obs ""
+
+  out="$(run_stop "$ROOT/scripts/turn-guard.sh" "$project" s-obs)"
+  assert_contains "$out" '"decision": "block"' "unverified turn blocks"
+  # The corrected delivery continues the same turn with a verification line.
+  out="$(printf '{"hook_event_name":"Stop","session_id":"s-obs","cwd":"%s","stop_hook_active":true,"last_assistant_message":"Verification: bash tests passed."}' \
+    "$project" | bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "verified continuation must stay silent: $out"
+
+  python3 - "$project/.oms/hooks/events.jsonl" <<'PY' || fail "observation identity missing or unpaired"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+guard = [r for r in rows if r.get("action") == "turn_guard"]
+block = [r for r in guard if r.get("status") == "block_unverified"]
+corrected = [r for r in guard if r.get("status") == "allow_verified"]
+assert block and corrected, guard
+assert all(r.get("turn_obs") and r.get("eligible") is True for r in block + corrected), guard
+# The corrected allow rides the same observation key as its block, so a rate
+# reader can pair them without content.
+assert block[-1]["turn_obs"] == corrected[-1]["turn_obs"], (block, corrected)
+PY
+
+  # A fresh routed prompt opens a new observation key.
+  route_prompt "$project" s-obs ""
+  out="$(run_stop "$ROOT/scripts/turn-guard.sh" "$project" s-obs)"
+  assert_contains "$out" '"decision": "block"' "next routed turn blocks"
+  python3 - "$project/.oms/hooks/events.jsonl" <<'PY' || fail "route boundary did not advance the observation key"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+blocks = [r for r in rows
+          if r.get("action") == "turn_guard" and r.get("status") == "block_unverified"]
+assert len(blocks) >= 2 and blocks[-1]["turn_obs"] != blocks[-2]["turn_obs"], blocks
+PY
+}
+
 test_missing_turn_id_spends_one_block_per_turn
 test_payload_turn_id_keeps_previous_behaviour
+test_guard_rows_carry_observation_identity
 test_unreadable_helper_reports_an_unguarded_turn
 test_unparseable_verdict_reports_an_unguarded_turn
 test_crashing_guard_command_reports_an_unguarded_turn

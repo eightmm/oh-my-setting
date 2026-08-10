@@ -77,6 +77,106 @@ def read_list_surface(script: str, args: List[str]) -> List[Dict[str, Any]]:
     return value
 
 
+def read_jsonl_tail(path: Path, limit: int) -> List[Dict[str, Any]]:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def read_observations(repo: str, limit: int) -> Dict[str, Any]:
+    """The pending observation decisions, made measurable in one place.
+
+    Advisory projections only: turn-guard intervention pairing, fail-ledger
+    hook-row retirement, and usage-family exposure. No thresholds and no
+    tuning — the keep/kill judgment stays with the operator. Guard rows
+    written before instrumentation carry no observation key and are counted
+    as uninstrumented rather than silently folded in.
+    """
+    oms = Path(repo) / ".oms"
+
+    guard = {
+        "instrumented_rows": 0,
+        "uninstrumented_rows": 0,
+        "eligible_turns": 0,
+        "blocked_turns": 0,
+        "corrected_after_block": 0,
+        "by_agent": {},
+    }
+    eligible_keys = set()
+    blocked_keys = set()
+    corrected_keys = set()
+    for row in read_jsonl_tail(oms / "hooks" / "events.jsonl", limit):
+        if row.get("action") != "turn_guard":
+            continue
+        obs = row.get("turn_obs")
+        if not isinstance(obs, str) or not obs:
+            guard["uninstrumented_rows"] += 1
+            continue
+        guard["instrumented_rows"] += 1
+        agent = str(row.get("agent") or "?")
+        guard["by_agent"][agent] = guard["by_agent"].get(agent, 0) + 1
+        status = row.get("status")
+        if row.get("eligible") is True:
+            eligible_keys.add(obs)
+        if status == "block_unverified":
+            blocked_keys.add(obs)
+        elif status == "allow_verified" and obs in blocked_keys:
+            corrected_keys.add(obs)
+    guard["eligible_turns"] = len(eligible_keys)
+    guard["blocked_turns"] = len(blocked_keys)
+    guard["corrected_after_block"] = len(corrected_keys)
+
+    ledger = read_surface("fail-ledger.sh", ["--repo", repo, "list", "--json"])
+    hook_rows = [
+        row
+        for row in (ledger.get("failures") or [])
+        if isinstance(row, dict) and row.get("kind") == "hook"
+    ]
+    failures = {
+        "hook_rows": len(hook_rows),
+        "hook_open": sum(
+            1 for row in hook_rows if not row.get("resolved") and not row.get("expired")
+        ),
+        "hook_expired": sum(1 for row in hook_rows if row.get("expired")),
+        "hook_recurred": sum(
+            1 for row in hook_rows if isinstance(row.get("count"), int) and row["count"] > 1
+        ),
+    }
+
+    usage_path = oms / "usage.jsonl"
+    usage_rows = read_jsonl_tail(usage_path, limit)
+    families: Dict[str, int] = {}
+    for row in usage_rows:
+        family = row.get("family")
+        if not isinstance(family, str) or not family:
+            continue
+        count = row.get("count")
+        families[family] = families.get(family, 0) + (
+            count if isinstance(count, int) and count > 0 else 1
+        )
+    usage = {
+        "file_present": usage_path.is_file(),
+        "rows": len(usage_rows),
+        "families": families,
+    }
+
+    return {"guard": guard, "failures": failures, "usage": usage}
+
+
 def count_priorities(items: List[Dict[str, Any]]) -> Dict[str, int]:
     counts = {"P1": 0, "P2": 0, "P3": 0}
     for item in items:
@@ -195,6 +295,7 @@ def build_report(repo: str, limit: int) -> Dict[str, Any]:
         "telemetry": telemetry,
         "lifecycle": lifecycle,
         "approval": approval,
+        "observations": read_observations(repo, limit),
     }
 
 
@@ -230,6 +331,19 @@ def emit_text(report: Dict[str, Any]) -> None:
     tokens = (usage.get("provider_reported_tokens") or {}).get("total", 0)
     wall = (usage.get("wall_seconds") or {}).get("total", 0)
     print("usage: operations=%s tokens=%s wall-seconds=%s" % (operations, tokens, wall))
+    observations = report["observations"]
+    obs_guard = observations["guard"]
+    print(
+        "observations: guard-turns=%d blocked=%d corrected=%d hook-fails=%d/%d usage-rows=%d"
+        % (
+            obs_guard["eligible_turns"],
+            obs_guard["blocked_turns"],
+            obs_guard["corrected_after_block"],
+            observations["failures"]["hook_open"],
+            observations["failures"]["hook_rows"],
+            observations["usage"]["rows"],
+        )
+    )
     for item in report["inbox"].get("items", [])[:3]:
         print("%s %s: %s" % (item.get("priority"), item.get("code"), item.get("summary")))
         print("  next: %s" % item.get("command"))

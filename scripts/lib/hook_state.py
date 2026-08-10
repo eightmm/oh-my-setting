@@ -798,6 +798,13 @@ def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> 
     # Without a payload turn id both sides are empty, so the old equality read
     # every prompt as the same turn and carried a spent block budget forever.
     same_turn = bool(turn_id) and previous_turn == turn_id
+    # A routed prompt is the one stable turn boundary every host shares, so a
+    # monotonic route sequence gives guard telemetry a content-free per-turn
+    # identity even when the Stop payload carries no id. Telemetry only: the
+    # block budget stays keyed by guard_turn_key.
+    route_seq = previous.get("route_seq")
+    if isinstance(route_seq, bool) or not isinstance(route_seq, int) or route_seq < 0:
+        route_seq = 0
     state = {
         "schema": 1,
         "updated_at": utc_now(),
@@ -810,6 +817,7 @@ def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> 
         "guard": bool(route["guard"]),
         "guard_blocks": previous.get("guard_blocks", {}) if same_turn else {},
         "stop_seq": previous.get("stop_seq", 0),
+        "route_seq": route_seq if same_turn else route_seq + 1,
     }
     write_json_atomic(state_path, state)
     append_event(
@@ -1301,22 +1309,39 @@ def cmd_guard(_: argparse.Namespace) -> int:
     workflow = str(state.get("workflow") or "unknown")
     guard = bool(state.get("guard"))
     should_guard = guard and (risk == "high" or os.environ.get("OMS_TURN_GUARD_STRICT") == "1")
+
+    # Observation identity for every guard outcome: content-free, and purely
+    # telemetry — the block budget below still uses guard_turn_key unchanged.
+    # Without a payload turn id, the routed prompt's sequence anchors the key,
+    # so a block and its corrected continuation share one identity while the
+    # next routed turn opens a new one.
+    turn_key, key_source, stop_seq = guard_turn_key(payload, state)
+    obs_route_seq = state.get("route_seq")
+    if isinstance(obs_route_seq, bool) or not isinstance(obs_route_seq, int) or obs_route_seq < 0:
+        obs_route_seq = 0
+    if key_source == "payload":
+        obs_source = "payload"
+        obs_key = turn_key
+    else:
+        obs_source = "route"
+        obs_key = "route-%d:%s" % (obs_route_seq, turn_key)
+    turn_obs = sha256_text(session_hash(payload) + ":" + obs_key)[:16]
+
     if not should_guard:
-        append_event(repo, payload, action="turn_guard", status="allow", workflow=workflow, risk=risk, dirty=dirty)
+        append_event(repo, payload, action="turn_guard", status="allow", workflow=workflow, risk=risk, dirty=dirty, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=False)
         return 0
 
     if has_verification_disclosure(assistant_message(payload)):
-        append_event(repo, payload, action="turn_guard", status="allow_verified", workflow=workflow, risk=risk, dirty=dirty)
+        append_event(repo, payload, action="turn_guard", status="allow_verified", workflow=workflow, risk=risk, dirty=dirty, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=True)
         return 0
 
-    turn_key, key_source, stop_seq = guard_turn_key(payload, state)
     blocks = state.get("guard_blocks")
     if not isinstance(blocks, dict):
         blocks = {}
     count = int(blocks.get(turn_key, 0) or 0)
     limit = max_blocks_per_turn()
     if count >= limit:
-        append_event(repo, payload, action="turn_guard", status="allow_block_limit", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source)
+        append_event(repo, payload, action="turn_guard", status="allow_block_limit", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=True)
         return 0
 
     blocks[turn_key] = count + 1
@@ -1324,7 +1349,7 @@ def cmd_guard(_: argparse.Namespace) -> int:
     state["stop_seq"] = stop_seq
     state["updated_at"] = utc_now()
     write_json_atomic(state_path, state)
-    append_event(repo, payload, action="turn_guard", status="block_unverified", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source)
+    append_event(repo, payload, action="turn_guard", status="block_unverified", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=True)
     reason = (
         "oh-my-setting turn guard: high-risk "
         + workflow
