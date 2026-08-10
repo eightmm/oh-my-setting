@@ -284,6 +284,9 @@ then
   OMS_ANTIGRAVITY_SETTINGS="$antigravity_settings" \
     "$dest/scripts/provider-permissions.sh" --print >&2 || true
   find "$TMP" \( -name "*.oh-my-setting-permissions.json" -o -name "settings.json.bak" \) >&2 || true
+  # A native python that received the POSIX spelling unconverted resolves it
+  # against the drive root; name any ghost tree it may have created there.
+  find /c/c /c/tmp "$TMP/../c" -maxdepth 12 -name "settings.json*" 2>/dev/null >&2 || true
   fail "--peer-permissions did not track only its new consult grants"
 fi
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" ||

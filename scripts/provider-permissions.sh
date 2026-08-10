@@ -594,6 +594,7 @@ if [ "$missing" = "UNREADABLE" ]; then
 fi
 
 if [ -z "$missing" ] && [ "$MODE" != apply ]; then
+  echo "settings: $SETTINGS"
   echo "ok: antigravity headless read permissions"
   [ "$PROFILE" != delegate ] || echo "ok: antigravity delegate write permissions"
   exit 0
