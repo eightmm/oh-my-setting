@@ -32,6 +32,19 @@ so asking for the budgeted rounds is safe when the disagreement warrants
 them. If policy forbids direct provider calls, use `--export-only` and import
 the answer with `oms artifact-index import`.
 
+For a debate, raise the wall clock before launching — seats doing real
+verification die at the default 5m and their round is lost (a dropped seat's
+last answer still rides the synthesis, but it cannot rebut anyone):
+
+```bash
+OMS_PEER_TIMEOUT=900 oms peer-ask --repo-context --debate 2 \
+  --providers codex,claude,antigravity --print-timeout 10m \
+  --thread topic-slug --prompt "..."
+```
+
+`--providers` also pins models per seat (`codex:model=NAME`); same-provider
+seats share one model family, which the reported family count makes explicit.
+
 ## Advisor that reads your history
 
 `oms advise` is the decision-point advisor (VERDICT/RISKS/MISSING/NEXT). Add
