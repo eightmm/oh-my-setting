@@ -21,9 +21,9 @@ SETTINGS="${OMS_ANTIGRAVITY_SETTINGS:-$HOME/.gemini/antigravity-cli/settings.jso
 # Every path or rule list that crosses to python travels base64-encoded:
 # Git Bash's MSYS runtime rewrites environment values that look like POSIX
 # paths when it spawns a native binary, and that rewrite sent these values
-# to ghost locations under the Git installation root (observed as
-# C:/Program Files/Git/C/Users/... on CI). Base64 crosses every runtime
-# untouched; python decodes the exact bytes bash produced.
+# to ghost locations under the Git installation root (drive-letter hybrids,
+# observed on CI). Base64 crosses every runtime untouched; python decodes
+# the exact bytes bash produced.
 oms_pp_b64() {
   printf '%s' "$1" | base64 | tr -d '\r\n'
 }
