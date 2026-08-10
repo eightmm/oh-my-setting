@@ -166,15 +166,24 @@ case "$(uname -s 2>/dev/null || true)" in
     fi
     ;;
 esac
-if normalized_worktree_parent="$(OMS_PP_WORKTREE_PARENT="$WORKTREE_PARENT" python3 - <<'PY'
+# The value crosses to a possibly native Windows Python. Git-for-Windows
+# converts environment values that look like POSIX paths when spawning
+# native binaries, so /tmp/... arrives as C:\... and the absolute-path check
+# below rejected every default on Windows. Base64 does not look like a path,
+# so it crosses untouched; python's stdout crosses back unconverted.
+worktree_parent_b64="$(printf '%s' "$WORKTREE_PARENT" | base64 | tr -d '\r\n')"
+if normalized_worktree_parent="$(OMS_PP_WORKTREE_PARENT_B64="$worktree_parent_b64" python3 - <<'PY'
+import base64
 import os
 import posixpath
 import sys
 import unicodedata
 
-raw = os.environ["OMS_PP_WORKTREE_PARENT"]
+raw = base64.b64decode(
+    os.environ["OMS_PP_WORKTREE_PARENT_B64"].encode("ascii")).decode("utf-8")
 if not raw.startswith("/"):
-    print("error: --worktree-parent must be an absolute path", file=sys.stderr)
+    print("error: --worktree-parent must be an absolute path: %r" % raw,
+          file=sys.stderr)
     sys.exit(2)
 if any(ord(char) < 32 or ord(char) == 127 or
        unicodedata.category(char) in ("Zl", "Zp") for char in raw):

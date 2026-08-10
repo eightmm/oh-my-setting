@@ -153,12 +153,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `XDG_CONFIG_HOME` into its runtime the way it already redirects the cache:
   GitHub runners export it globally, so a fixture's `HOME` override never
   hid the runner-global install receipt an earlier suite had written, and
-  uninstall fixtures failed the canonical-owner check only in CI. And
-  Antigravity permission grants reach a possibly native Windows Python
-  through the environment, where Git Bash does not convert POSIX paths the
-  way it converts argv — apply was reading and writing a ghost settings
-  file on another drive spelling while the real one stayed untouched; the
-  settings path is now normalized to the mixed form on Windows.
+  uninstall fixtures failed the canonical-owner check only in CI. And every
+  Antigravity permission apply and check died on Windows before touching the
+  settings: Git-for-Windows converts environment values that look like POSIX
+  paths when spawning native binaries, so the worktree-parent default
+  crossed to native Python as C:\... and the absolute-path validation
+  rejected it. The path now crosses base64-encoded (which conversion leaves
+  alone), the validation names the value it rejected, and the settings path
+  is normalized to the mixed form that every python spelling resolves.
 - The lifecycle lock no longer leaks — or silently loses mutual exclusion —
   on stock Bash 3.2 hosts. The 3.2 identity fallback probed its own pid
   through a substitution fork without exec'ing into it, so real 3.2 (macOS
