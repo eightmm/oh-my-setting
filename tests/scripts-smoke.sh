@@ -14283,6 +14283,372 @@ EOF
     grep -Fq '"state": "claimed"' || fail "sibling task transition was lost"
 }
 
+test_current_operation_guard_restores_same_lease_tampering() {
+  local project="$TMP/worker-current-restore"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local soul="$TMP/worker-current-restore-soul.md"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal restore-authority >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  printf '# Specialization\n\nEdit only the claimed file.\n' > "$soul"
+  "$ROOT/scripts/agent-executor.sh" create --repo "$project" --id guarded-executor \
+    --provider codex --plan-task guarded --soul-file "$soul" >/dev/null
+  "$ROOT/scripts/agent-executor.sh" freeze --repo "$project" \
+    --id guarded-executor >/dev/null
+
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" \
+  "$project/.oms/executors/guarded-executor/meta.json" <<'PY'
+import json, os, sys, tempfile
+
+def replace(path, mutate):
+    row = json.load(open(path, encoding="utf-8"))
+    mutate(row)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(row, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+def mutate_plan(plan):
+    # The live lease stays: an in-place authority rewrite under the
+    # operation's own lease has no legitimate author.
+    task = plan["tasks"]["guarded"]
+    task["allowed_paths"] = ["/"]
+    task["verify"] = ":"
+    task["executor_id"] = "forged-executor"
+
+def mutate_executor(meta):
+    meta["allowed_paths"] = ["/"]
+    meta["verify"] = ":"
+
+replace(sys.argv[1], mutate_plan)
+replace(sys.argv[2], mutate_executor)
+PY
+printf 'tampered soul\n' > "$project/.oms/executors/guarded-executor/SOUL.md"
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --executor guarded-executor --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "a restored authority rewrite must still fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+    fail "plan restoration was not named: $out"
+  printf '%s' "$out" | grep -Fq 'restored: executor guarded-executor' ||
+    fail "executor restoration was not named: $out"
+  python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
+import json, sys
+task = json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["guarded"]
+assert task["verify"] == "true", task
+assert task["allowed_paths"] == ["file.txt"], task
+assert task.get("executor_id", "") == "", task
+assert task["state"] == "ready", task
+assert task.get("lease_id", "") == "", task
+PY
+    fail "tampered task authority survived or release did not run on the repaired row: $out"
+  python3 - "$project/.oms/executors/guarded-executor/meta.json" \
+    "$project/.oms/executors/guarded-executor/SOUL.md" <<'PY' ||
+import hashlib, json, sys
+meta = json.load(open(sys.argv[1], encoding="utf-8"))
+assert meta.get("verify", "") != ":", meta
+assert meta.get("allowed_paths") != ["/"], meta
+assert meta["state"] == "failed", meta
+soul = open(sys.argv[2], "rb").read()
+assert hashlib.sha256(soul).hexdigest() == meta["soul_sha256"], meta
+PY
+    fail "tampered executor authority or soul bytes survived: $out"
+  grep -Fq 'Edit only the claimed file.' \
+    "$project/.oms/executors/guarded-executor/SOUL.md" ||
+    fail "tampered soul bytes were not restored"
+}
+
+test_current_operation_guard_restores_a_deleted_task() {
+  local project="$TMP/worker-current-deleted-task"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal deleted-task >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+# No verb deletes a task; absence is always the worker.
+del plan["tasks"]["guarded"]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a deleted task must still fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+    fail "the deleted task restoration was not named: $out"
+  printf '%s' "$out" | grep -Fq 'task was deleted' ||
+    fail "the deletion was not named as the restore cause: $out"
+  # The resurrected row must round-trip through agent-plan's own verbs:
+  # release ran on it with the operation's lease and re-offered it clean.
+  python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
+import json, sys
+task = json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["guarded"]
+assert task["verify"] == "true", task
+assert task["allowed_paths"] == ["file.txt"], task
+assert task["state"] == "ready", task
+assert task.get("lease_id", "") == "", task
+PY
+    fail "the resurrected task did not survive its own release: $out"
+}
+
+test_current_operation_guard_restores_a_deleted_executor() {
+  local project="$TMP/worker-current-deleted-executor"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local soul="$TMP/worker-current-deleted-executor-soul.md"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal deleted-executor >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  printf '# Specialization\n\nEdit only the claimed file.\n' > "$soul"
+  "$ROOT/scripts/agent-executor.sh" create --repo "$project" --id guarded-executor \
+    --provider codex --plan-task guarded --soul-file "$soul" >/dev/null
+  "$ROOT/scripts/agent-executor.sh" freeze --repo "$project" \
+    --id guarded-executor >/dev/null
+
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+rm -rf "$project/.oms/executors/guarded-executor"
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --executor guarded-executor --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a deleted executor must still fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'restored: executor guarded-executor meta' ||
+    fail "the deleted executor meta restoration was not named: $out"
+  printf '%s' "$out" | grep -Fq 'restored: executor guarded-executor soul file' ||
+    fail "the deleted soul restoration was not named: $out"
+  # The recreated directory must satisfy agent-executor's own verbs: the
+  # violation path ran `fail`, which validates the restored soul hash.
+  python3 - "$project/.oms/executors/guarded-executor/meta.json" \
+    "$project/.oms/executors/guarded-executor/SOUL.md" <<'PY' ||
+import hashlib, json, sys
+meta = json.load(open(sys.argv[1], encoding="utf-8"))
+assert meta["state"] == "failed", meta
+soul = open(sys.argv[2], "rb").read()
+assert hashlib.sha256(soul).hexdigest() == meta["soul_sha256"], meta
+PY
+    fail "the recreated executor did not survive its own fail transition: $out"
+  grep -Fq 'Edit only the claimed file.' \
+    "$project/.oms/executors/guarded-executor/SOUL.md" ||
+    fail "the restored soul bytes are wrong"
+}
+
+test_current_operation_guard_restores_authority_under_forged_lease() {
+  local project="$TMP/worker-current-forged-lease"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal forged-lease >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+task = plan["tasks"]["guarded"]
+# A forged claim row imitating a legitimate re-lease, wrapped around a
+# weakened verifier. Reclaim preserves authority fields, so without restore
+# the weak verifier would survive into the next legitimate claim.
+task["verify"] = ":"
+task["allowed_paths"] = ["/"]
+task["lease_id"] = "lease_forged"
+task["lease_epoch"] = int(task.get("lease_epoch", 0)) + 1
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a forged lease must still fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+    fail "authority fields under a forged lease were not restored: $out"
+  printf '%s' "$out" | grep -Fq 'kept: plan task guarded claim fields' ||
+    fail "the kept claim fields were not named for inspection: $out"
+  python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
+import json, sys
+task = json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["guarded"]
+assert task["verify"] == "true", task
+assert task["allowed_paths"] == ["file.txt"], task
+assert task["lease_id"] == "lease_forged", task
+assert task["state"] == "running", task
+PY
+    fail "forged-lease restore scope was wrong (authority restored, claim kept): $out"
+}
+
+test_current_operation_guard_keeps_an_operator_block() {
+  local project="$TMP/worker-current-block"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal operator-block >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+task = plan["tasks"]["guarded"]
+# Same lease, blocked state: indistinguishable from an operator's mid-run
+# block, so the hold must survive while the weakened verifier does not.
+task["state"] = "blocked"
+task["reason"] = "operator hold"
+task["verify"] = ":"
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a blocked-state rewrite must still fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+    fail "the weakened verifier next to a block was not restored: $out"
+  printf '%s' "$out" | grep -Fq 'kept: plan task guarded operator block' ||
+    fail "the preserved block was not named: $out"
+  python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
+import json, sys
+task = json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["guarded"]
+assert task["verify"] == "true", task
+assert task["state"] == "blocked", task
+assert task["reason"] == "operator hold", task
+PY
+    fail "operator block exemption scope was wrong: $out"
+}
+
+test_current_operation_restore_refuses_a_worker_written_snapshot() {
+  local project="$TMP/worker-current-snapshot-forged"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal forged-snapshot >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+plan["tasks"]["guarded"]["verify"] = ":"
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+printf '{"schema":2,"plan":{"task_id":"guarded","lease_id":"lease_forged","task":{"verify":":"}},"executor":null}\n' \
+  > "\$(dirname "\$PWD")/worker-guard/current-operation.json"
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a rewritten snapshot must still fail the run: $out"
+  printf '%s' "$out" | grep -Fq 'current operation snapshot was changed or deleted' ||
+    fail "the rewritten snapshot was not detected: $out"
+  printf '%s' "$out" | grep -Fq 'restore refused' ||
+    fail "restore from an untrusted snapshot was not refused: $out"
+  if printf '%s' "$out" | grep -Fq 'restored: plan task guarded'; then
+    fail "worker-written snapshot bytes were installed as authority: $out"
+  fi
+  python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
+import json, sys
+task = json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]["guarded"]
+assert task["verify"] == ":", task
+PY
+    fail "an untrusted snapshot should leave tampered state for inspection: $out"
+}
+
 make_guard_repo() {  # make_guard_repo DIR — repo with an ignored directory
   local dir="$1"
 

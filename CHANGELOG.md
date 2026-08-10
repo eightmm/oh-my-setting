@@ -36,6 +36,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   binds the selected plan/executor and worktree identity, and keeps parallel
   sibling state appendable. Patch admission adds a base-owned verification
   floor whenever tests, verifier helpers, or verification config change.
+- A worker-authority violation now repairs the operation's own frozen
+  authority from the pre-launch snapshot instead of leaving the tampered
+  bytes for manual recovery. Authority and evidence fields — scope, verifier,
+  executor receipt and soul bytes, review evidence — always restore: no
+  legitimate writer moves them mid-run, and reclaim preserves them, so a
+  forged claim row would otherwise carry a weakened verifier into the next
+  legitimate claim. Claim-cycle fields restore only under the operation's own
+  live lease (an operator block and heartbeat survive) and are kept and named
+  for inspection when the lease itself moved, because a new lease owner may
+  be legitimate. A snapshot whose bytes no longer match the pre-launch hash
+  refuses restoration outright. Repair never admits the worker's output: the
+  delegation still fails.
 - Initial setup now requires the provider/service toolchain instead of exposing
   a partial `--no-tools` install. Exact releases and payload integrity are
   repository-owned in `tools.lock.json`; downloaded artifacts are verified

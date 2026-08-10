@@ -206,7 +206,7 @@ oms_worker_operation_snapshot() {  # REPO OUT PLAN_TASK LEASE EXECUTOR SOUL
   OMS_WG_REPO="$repo" OMS_WG_PLAN_TASK="$plan_task" OMS_WG_LEASE="$lease" \
     OMS_WG_EXECUTOR="$executor" OMS_WG_SOUL="$soul" \
     python3 - <<'PY' > "$tmp" || { rm -f "$tmp"; return 1; }
-import hashlib, json, os, sys
+import base64, hashlib, json, os, sys
 
 repo = os.environ["OMS_WG_REPO"]
 task_id = os.environ["OMS_WG_PLAN_TASK"]
@@ -226,7 +226,9 @@ def load_regular(path, label):
         raise SystemExit("error: %s authority is not an object" % label)
     return value
 
-snapshot = {"schema": 1, "plan": None, "executor": None}
+# Schema 2 adds soul_b64 so post-violation recovery can restore the frozen
+# soul bytes, not merely detect that they changed.
+snapshot = {"schema": 2, "plan": None, "executor": None}
 if task_id:
     plan = load_regular(os.path.join(repo, ".oms", "plan", "tasks.json"), "plan")
     tasks = plan.get("tasks")
@@ -251,15 +253,17 @@ if executor_id:
         raise SystemExit("error: current executor soul is not a regular file")
     try:
         with open(soul_path, "rb") as handle:
-            soul_file_sha = hashlib.sha256(handle.read()).hexdigest()
+            soul_bytes = handle.read()
     except OSError as exc:
         raise SystemExit("error: cannot read current executor soul: %s" % exc)
+    soul_file_sha = hashlib.sha256(soul_bytes).hexdigest()
     if soul_file_sha != soul:
         raise SystemExit("error: current executor soul file does not match metadata")
     snapshot["executor"] = {
         "executor_id": executor_id,
         "soul_sha256": soul,
         "soul_file_sha256": soul_file_sha,
+        "soul_b64": base64.b64encode(soul_bytes).decode("ascii"),
         "meta": meta,
     }
 elif soul:
@@ -348,6 +352,274 @@ if isinstance(executor_expected, dict):
     else:
         if current_soul_sha != executor_expected.get("soul_file_sha256"):
             print("executor %s soul file changed" % executor_id)
+PY
+}
+
+# Repair the operation's own frozen authority after a violation, using only
+# the snapshot this process hashed before the provider started. The
+# discrimination is field-scoped, not clock-scoped: the claim-cycle fields
+# (state/provider/ttl/claimed_at/reason/lease_id/lease_epoch) are the only
+# surface a legitimate writer can move mid-run — an operator block, a
+# heartbeat, a release/reclaim handoff — so under a changed lease they are
+# kept and named rather than guessed. Authority and evidence fields have no
+# legitimate mid-run writer under any lease, and reclaim preserves them, so a
+# forged claim row would otherwise carry a weakened verifier or scope into
+# the next legitimate claim. Those always restore. The run still fails either
+# way: this repairs owner state, it never admits the worker's output.
+OMS_COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+oms_worker_operation_restore() {  # REPO SNAPSHOT EXPECTED_SHA
+  local repo="$1"
+  local snapshot="$2"
+  local expected_sha="${3:-}"
+  local actual_sha=""
+  local plan_file="$repo/.oms/plan/tasks.json"
+  local executor_id=""
+  local meta_path
+  local status=0
+
+  # The snapshot sits in the worker-writable worktree parent. Bytes that no
+  # longer match the pre-launch hash are the worker's; restoring them would
+  # install attacker authority under the owner's own lock.
+  actual_sha="$(oms_sha256_file "$snapshot" 2>/dev/null || true)"
+  if [ -z "$expected_sha" ] || [ -z "$actual_sha" ] ||
+    [ "$actual_sha" != "$expected_sha" ]; then
+    echo "restore refused: current-operation snapshot is untrusted (changed or deleted); plan/executor state left for inspection"
+    return 1
+  fi
+  if ! command -v oms_with_file_lock >/dev/null 2>&1; then
+    # shellcheck source=scripts/lib/file-lock.sh
+    . "$OMS_COMMON_LIB_DIR/file-lock.sh"
+  fi
+  # The writers' own lock keys, taken sequentially, never nested.
+  oms_with_file_lock "$plan_file" oms_worker_operation_restore_plan \
+    "$repo" "$snapshot" || status=1
+  executor_id="$(OMS_WG_OPERATION_SNAPSHOT="$snapshot" python3 - <<'PY' | tr -d '\r'
+import json, os
+try:
+    with open(os.environ["OMS_WG_OPERATION_SNAPSHOT"], encoding="utf-8") as fh:
+        executor = json.load(fh).get("executor")
+    print(executor.get("executor_id", "") if isinstance(executor, dict) else "")
+except Exception:
+    print("")
+PY
+)"
+  if [ -n "$executor_id" ]; then
+    case "$executor_id" in
+      *[!A-Za-z0-9._-]*)
+        echo "restore refused: snapshot executor id is malformed; executor state left for inspection"
+        return 1
+        ;;
+    esac
+    meta_path="$repo/.oms/executors/$executor_id/meta.json"
+    oms_with_file_lock "$meta_path.lock" oms_worker_operation_restore_executor \
+      "$repo" "$snapshot" || status=1
+  fi
+  return "$status"
+}
+
+oms_worker_operation_restore_plan() {  # REPO SNAPSHOT (under the plan file lock)
+  local repo="$1"
+  local snapshot="$2"
+
+  OMS_WG_REPO="$repo" OMS_WG_OPERATION_SNAPSHOT="$snapshot" python3 - <<'PY'
+import datetime, json, os, tempfile
+
+repo = os.environ["OMS_WG_REPO"]
+snapshot_path = os.environ["OMS_WG_OPERATION_SNAPSHOT"]
+ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# The fields a legitimate writer can move while this operation's worker runs.
+# Everything outside this set is authority or evidence.
+CLAIM_FIELDS = {"state", "provider", "ttl", "claimed_at", "reason",
+                "lease_id", "lease_epoch", "updated"}
+
+def refuse(msg):
+    print(msg)
+    raise SystemExit(1)
+
+with open(snapshot_path, encoding="utf-8") as fh:
+    expected = json.load(fh)
+plan_expected = expected.get("plan")
+if not isinstance(plan_expected, dict):
+    raise SystemExit(0)
+task_id = plan_expected.get("task_id", "")
+expected_task = plan_expected.get("task")
+if not task_id or not isinstance(expected_task, dict):
+    refuse("restore refused: snapshot plan entry is malformed; plan state left for inspection")
+
+plan_file = os.path.join(repo, ".oms", "plan", "tasks.json")
+try:
+    if os.path.islink(plan_file) or not os.path.isfile(plan_file):
+        raise OSError("not a regular file")
+    with open(plan_file, encoding="utf-8") as fh:
+        plan = json.load(fh)
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    if not isinstance(tasks, dict):
+        raise ValueError("not an object")
+except (OSError, TypeError, ValueError):
+    # Only this task's object is snapshotted; a destroyed plan file cannot be
+    # rebuilt from it without fabricating the rest of the plan.
+    refuse("restore refused: plan file unreadable; plan task %s left for inspection" % task_id)
+
+def parses_ts(value):
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        return True
+    except Exception:
+        return False
+
+MISSING = object()
+current = tasks.get(task_id)
+restored = []
+if not isinstance(current, dict):
+    # No verb deletes a task; absence is always the worker.
+    tasks[task_id] = dict(expected_task)
+    restored = ["all fields (task was deleted)"]
+else:
+    same_lease = current.get("lease_id", "") == expected_task.get("lease_id", "")
+    for key in sorted(set(expected_task) | set(current)):
+        if key in CLAIM_FIELDS:
+            continue
+        if current.get(key, MISSING) == expected_task.get(key, MISSING):
+            continue
+        if key in expected_task:
+            current[key] = expected_task[key]
+        else:
+            current.pop(key, None)
+        restored.append(key)
+    if same_lease:
+        blocked = current.get("state") == "blocked"
+        kept_heartbeat = False
+        for key in sorted(CLAIM_FIELDS - {"updated"}):
+            if current.get(key, MISSING) == expected_task.get(key, MISSING):
+                continue
+            if blocked and key in ("state", "reason"):
+                continue
+            if key == "claimed_at" and isinstance(current.get(key), str) \
+                    and parses_ts(current[key]):
+                kept_heartbeat = True
+                continue
+            if key in expected_task:
+                current[key] = expected_task[key]
+            else:
+                current.pop(key, None)
+            restored.append(key)
+        if blocked and (current.get("state", MISSING) != expected_task.get("state", MISSING)
+                        or current.get("reason", MISSING) != expected_task.get("reason", MISSING)):
+            print("kept: plan task %s operator block (state, reason)" % task_id)
+        if kept_heartbeat:
+            print("kept: plan task %s claimed_at heartbeat" % task_id)
+    else:
+        moved = sorted(key for key in CLAIM_FIELDS - {"updated"}
+                       if current.get(key, MISSING) != expected_task.get(key, MISSING))
+        if moved:
+            print("kept: plan task %s claim fields under a changed lease: %s "
+                  "(a legitimate new owner may exist; inspect plan state)"
+                  % (task_id, ", ".join(moved)))
+
+if restored:
+    row = tasks[task_id]
+    row["updated"] = ts
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(plan_file))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, plan_file)
+    except Exception:
+        os.unlink(tmp)
+        raise
+    print("restored: plan task %s fields: %s" % (task_id, ", ".join(restored)))
+PY
+}
+
+oms_worker_operation_restore_executor() {  # REPO SNAPSHOT (under the meta lock)
+  local repo="$1"
+  local snapshot="$2"
+
+  OMS_WG_REPO="$repo" OMS_WG_OPERATION_SNAPSHOT="$snapshot" python3 - <<'PY'
+import base64, hashlib, json, os, tempfile
+
+repo = os.environ["OMS_WG_REPO"]
+snapshot_path = os.environ["OMS_WG_OPERATION_SNAPSHOT"]
+status = 0
+
+with open(snapshot_path, encoding="utf-8") as fh:
+    expected = json.load(fh)
+executor = expected.get("executor")
+if not isinstance(executor, dict):
+    raise SystemExit(0)
+executor_id = executor.get("executor_id", "")
+expected_meta = executor.get("meta")
+if not executor_id or not isinstance(expected_meta, dict):
+    print("restore refused: snapshot executor entry is malformed; executor state left for inspection")
+    raise SystemExit(1)
+
+exec_dir = os.path.join(repo, ".oms", "executors", executor_id)
+meta_path = os.path.join(exec_dir, "meta.json")
+try:
+    if os.path.islink(meta_path) or not os.path.isfile(meta_path):
+        raise OSError("not a regular file")
+    with open(meta_path, encoding="utf-8") as fh:
+        current_meta = json.load(fh)
+    if not isinstance(current_meta, dict):
+        raise ValueError("not an object")
+except (OSError, TypeError, ValueError):
+    current_meta = None
+
+if current_meta != expected_meta:
+    os.makedirs(exec_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=exec_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(expected_meta, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, meta_path)
+    except Exception:
+        os.unlink(tmp)
+        raise
+    if current_meta is None:
+        print("restored: executor %s meta (was deleted or unreadable)" % executor_id)
+    else:
+        MISSING = object()
+        fields = sorted(k for k in set(current_meta) | set(expected_meta)
+                        if current_meta.get(k, MISSING) != expected_meta.get(k, MISSING))
+        print("restored: executor %s meta fields: %s" % (executor_id, ", ".join(fields)))
+
+soul_path = os.path.join(exec_dir, "SOUL.md")
+expected_soul_sha = executor.get("soul_file_sha256", "")
+soul_b64 = executor.get("soul_b64")
+try:
+    if os.path.islink(soul_path) or not os.path.isfile(soul_path):
+        raise OSError("not a regular file")
+    with open(soul_path, "rb") as fh:
+        current_soul_sha = hashlib.sha256(fh.read()).hexdigest()
+except OSError:
+    current_soul_sha = ""
+if expected_soul_sha and current_soul_sha != expected_soul_sha:
+    soul_bytes = None
+    if isinstance(soul_b64, str):
+        try:
+            soul_bytes = base64.b64decode(soul_b64.encode("ascii"), validate=True)
+        except Exception:
+            soul_bytes = None
+    # Bytes must round-trip to the hash frozen before launch; a schema-1
+    # snapshot has no bytes, so the tampered soul stays for inspection.
+    if soul_bytes is None or hashlib.sha256(soul_bytes).hexdigest() != expected_soul_sha:
+        print("restore refused: soul bytes unavailable in this snapshot; executor %s soul left for inspection" % executor_id)
+        status = 1
+    else:
+        os.makedirs(exec_dir, exist_ok=True)
+        if os.path.islink(soul_path):
+            os.unlink(soul_path)
+        fd, tmp = tempfile.mkstemp(dir=exec_dir)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(soul_bytes)
+            os.replace(tmp, soul_path)
+        except Exception:
+            os.unlink(tmp)
+            raise
+        print("restored: executor %s soul file" % executor_id)
+raise SystemExit(status)
 PY
 }
 

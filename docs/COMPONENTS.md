@@ -162,7 +162,11 @@ the patch.
 Write providers receive task context but not the primary `.oms` pointer,
 attempt/lease capability, or executor capability. The default guard preserves
 parallel agent state, rejects destructive rewrites, and binds the selected
-task/lease plus executor/soul objects exactly while other tasks may move. A
+task/lease plus executor/soul objects exactly while other tasks may move. On a
+violation the failing run also repairs the operation's own authority from its
+hash-verified pre-launch snapshot: scope, verifier, executor receipt, soul
+bytes, and review evidence always restore, while claim-cycle fields restore
+only under the operation's own lease and are otherwise kept and named. A
 caller that guarantees no sibling writer may set
 `OMS_WORKER_AUTHORITY_EXCLUSIVE=1` for complete authority-state comparison and
 rollback. Plan landing and completion require the reviewed patch bytes,

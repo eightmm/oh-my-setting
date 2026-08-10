@@ -156,6 +156,12 @@ existing rows, truncating them, or deleting a state file is a violation.
 For a plan-bound operation, the default guard also binds the complete selected
 task/lease and executor/soul objects across the provider window. Other tasks
 and executors may move concurrently; this operation's authority may not.
+On a violation the run fails and the operation's own authority is repaired
+from the pre-launch snapshot: authority and evidence fields always restore,
+while claim-cycle fields restore only under the operation's own lease
+(keeping an operator block and heartbeat) and are kept and named for
+inspection when the lease itself moved. A snapshot whose bytes no longer
+match the pre-launch hash refuses restoration.
 It is detection, not a sandbox: it cannot prevent a write, and it cannot see a
 write that is undone before the worker exits, anything the worker reads
 (inherited tokens, ssh agents), or anything it does outside the repository
@@ -1191,8 +1197,10 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
       ! oms_worker_operation_snapshot "$REPO" \
         "$worker_guard_dir/current-operation.json" \
         "$PLAN_TASK_ID" "$PLAN_LEASE_ID" "$EXECUTOR_ID" "$EXECUTOR_SOUL_SHA"; then
-      # Do not restore JSON from this snapshot: a long-running task may have
-      # been legitimately reclaimed by another lease owner in this interval.
+      # Binding failed before the provider started, so no trusted frozen
+      # snapshot exists to repair from — post-run recovery restores only from
+      # the snapshot this process hashed at launch. The lease may also have
+      # legitimately moved before the freeze; fail and release instead.
       plan_failure_transition >/dev/null 2>&1 || true
       if [ -n "$EXECUTOR_ID" ] && [ "$executor_started" = 1 ]; then
         "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
@@ -1433,6 +1441,16 @@ if [ -n "$worker_guard_dir" ]; then
     delegate_attempt_fail_if_live worker_authority_violation \
       delegate-worker-authority-violation || worker_status=2
     KEEP_WORKTREE=1
+    if [ -s "$worker_guard_dir/current-operation-detail" ]; then
+      # Repair the operation's own authority before the failure transition so
+      # release and executor fail act on the restored row, not the worker's
+      # bytes. The run still fails: this repairs owner state, it never admits
+      # the worker's output.
+      oms_worker_operation_restore "$REPO" \
+        "$worker_guard_dir/current-operation.json" \
+        "$worker_operation_snapshot_sha" \
+        > "$worker_guard_dir/current-operation-recovery" || true
+    fi
     {
       printf '\n\n## Worker authority violation\n\n'
       printf -- '- changed outside the worktree: %s\n' "$worker_guard_changed"
@@ -1441,6 +1459,9 @@ if [ -n "$worker_guard_dir" ]; then
       [ ! -s "$worker_guard_dir/current-operation-detail" ] ||
         printf -- '- current operation: %s\n' \
           "$(tr '\n' ';' < "$worker_guard_dir/current-operation-detail")"
+      [ ! -s "$worker_guard_dir/current-operation-recovery" ] ||
+        printf -- '- current operation recovery: %s\n' \
+          "$(tr '\n' ';' < "$worker_guard_dir/current-operation-recovery")"
       [ ! -s "$worker_guard_dir/worktree-identity-detail" ] ||
         printf -- '- worktree identity: %s\n' \
           "$(tr '\n' ';' < "$worker_guard_dir/worktree-identity-detail")"
@@ -1456,7 +1477,13 @@ if [ -n "$worker_guard_dir" ]; then
       while IFS= read -r detail; do
         [ -z "$detail" ] || echo "error: current-operation: $detail" >&2
       done < "$worker_guard_dir/current-operation-detail"
-      echo "error: current-operation authority was not restored; a concurrent lease owner may exist, so inspect plan/executor state" >&2
+      if [ -s "$worker_guard_dir/current-operation-recovery" ]; then
+        while IFS= read -r detail; do
+          [ -z "$detail" ] || echo "error: current-operation: $detail" >&2
+        done < "$worker_guard_dir/current-operation-recovery"
+      else
+        echo "error: current-operation recovery produced no outcome; inspect plan/executor state" >&2
+      fi
     fi
     if [ -s "$worker_guard_dir/worktree-identity-detail" ]; then
       while IFS= read -r detail; do

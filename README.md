@@ -94,7 +94,8 @@ door per capability; the full catalog is `oms list`, documented in
   advisors, outbound scrubbing
 - **Delegating writes** — isolated worktree delegation, an admission ladder,
   one mutation boundary, hash-frozen executor souls and worker-authority
-  fingerprints, with primary authority receipts withheld from write children
+  fingerprints with snapshot-backed authority repair on violation, and
+  primary authority receipts withheld from write children
 - **Agent state and handoff** — Work Journal with daily summaries and an
   optional Notion mirror, a prioritized attention inbox, pre-compaction
   handoffs, source-validated shared memory, reversible tracked-state

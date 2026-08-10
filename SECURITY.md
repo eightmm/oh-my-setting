@@ -101,8 +101,21 @@ plan lease, or executor capability variables. The default guard preserves
 parallel owner work while rejecting rewrites, truncation, and deletion of
 existing shared-state evidence. For a plan-bound delegation it also binds the
 complete selected task/lease and executor/soul objects while allowing sibling
-tasks to move. A mismatch fails before a review or landing is published; it is
-not auto-restored because a new lease owner may now be legitimate. If the caller
+tasks to move. A mismatch fails before a review or landing is published, and
+the operation's own frozen authority is then repaired from the pre-launch
+snapshot this process hashed: authority and evidence fields (scope, verifier,
+executor receipt and soul bytes, review evidence) always restore, because no
+legitimate writer moves them mid-run and a later reclaim would otherwise
+inherit them; claim-cycle fields restore only while the task still carries
+this operation's lease — keeping an operator block and heartbeat — and are
+kept and named for inspection when the lease itself moved, because a new
+lease owner may be legitimate. A snapshot whose bytes no longer match the
+pre-launch hash refuses restoration, and a deleted or unreadable plan file is
+not rebuilt from the single-task snapshot. Restoration repairs owner state
+only; the delegation still fails. This does not weaken the reconcile posture
+above: restoration is possible here only because the owning process hash-pins
+the snapshot before launch, whereas a stale reservation's outcome is genuinely
+unknown and stays that way. If the caller
 guarantees no sibling state writer, `OMS_WORKER_AUTHORITY_EXCLUSIVE=1`
 additionally compares and restores the full owner-authority surface. Enabling
 that mode during parallel work can discard legitimate sibling writes. Neither

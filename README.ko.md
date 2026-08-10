@@ -88,7 +88,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   프로젝트 자체 검사가 뒤를 받치는 리뷰 게이트, 결정 시점 advisor, 발신 전
   민감정보 scrub
 - **쓰기 위임** — 격리 worktree 위임, admission 사다리, 단일 변이 경계,
-  해시 동결 executor soul과 워커 권한 지문, primary 권한 환경변수 미전달
+  해시 동결 executor soul과 워커 권한 지문, 위반 시 스냅샷 기반 권한 복구,
+  primary 권한 환경변수 미전달
 - **Agent 상태와 핸드오프** — 일간 요약과 선택적 Notion mirror가 있는 Work
   Journal, 우선순위 attention inbox, compaction 직전 세션 핸드오프, 출처를
   재검증하는 공유 메모리, 되돌릴 수 있는 tracked-state checkpoint, 검증이
