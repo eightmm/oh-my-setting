@@ -146,6 +146,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- The lifecycle lock no longer leaks — or silently loses mutual exclusion —
+  on stock Bash 3.2 hosts. The 3.2 identity fallback probed its own pid
+  through a substitution fork without exec'ing into it, so real 3.2 (macOS
+  `/bin/bash`) recorded a different, already-dead pid on every call: adopt
+  and release never matched their own lock, the installer stale-took-over
+  itself mid-run, the exit path left the lock behind (the macOS e2e leak),
+  and the same pattern in the shared file lock could displace live locks as
+  stale. The probe child now execs into the substitution fork so its PPID is
+  the calling shell, in all three sites (install.sh inline,
+  install-lifecycle-lock.sh, file-lock.sh) — verified against a real Bash
+  3.2 container, with an unset-BASHPID fallback leg added to the lock smoke
+  (modern Bash execs substitutions anyway, which is why only real 3.2 hosts
+  ever saw it). The install smoke's npm fixture also models the Windows npm
+  layout (binaries at the prefix root, where managed_npm_binary looks),
+  which had sent the Windows e2e to a real registry download that its
+  offline npm stub correctly refused.
 - The gate no longer lies to the harness itself. A council seat or delegated
   worker that ran `check.sh` inherited its own `OMS_HARNESS_CHILD=1` session
   identity, which suppresses auto-task creation by design — so the autonomy

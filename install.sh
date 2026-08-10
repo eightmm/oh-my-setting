@@ -274,12 +274,13 @@ else
        [ -n "${BASHPID:-}" ]; then
       pid="$BASHPID"
     else
-      if ! IFS= read -r pid < <(
-        sh -c 'printf "%s\n" "$PPID"' 2>/dev/null
-      ); then
-        return 75
-      fi
+      # exec makes the probe child the substitution fork itself, so its PPID
+      # is this shell. Stock Bash 3.2 otherwise hands sh an ephemeral
+      # intermediate fork, and the recorded pid is dead before adopt or
+      # release ever compares it (the 2026-08-10 macOS e2e lock leak).
+      pid="$(exec sh -c 'printf "%s\n" "$PPID"' 2>/dev/null)" || pid=""
       pid="${pid//$'\r'/}"
+      [ -n "$pid" ] || return 75
     fi
     case "$pid" in *[!0-9]*|"") return 75 ;; esac
     process_start="$(oms_install_lifecycle_lock_process_start "$pid")"

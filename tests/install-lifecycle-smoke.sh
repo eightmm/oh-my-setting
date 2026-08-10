@@ -184,6 +184,14 @@ printf '%s\\n' 'codex 0.147.0'
         body = "#!/usr/bin/env bash\necho '%s %s'\n" % (row["binary"], row["version"])
     binary.write_text(body, encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Real npm puts binaries under PREFIX/bin on POSIX but at the PREFIX root
+    # on Windows, and managed_npm_binary looks only in the platform's place.
+    # Write both so the reuse decision finds the managed binary on every
+    # host; the extra copy is inert where unused.
+    windows_binary = prefix / row["binary"]
+    windows_binary.write_text(body, encoding="utf-8")
+    windows_binary.chmod(
+        windows_binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 PY
 {
   printf '%s\n' '#!/usr/bin/env bash'
@@ -223,7 +231,10 @@ printf '%s\n' "fixture-dead-owner" > "$lifecycle_lock/owner"
 (cd "$HOME" && bash "$standalone_installer" --peer-permissions \
   --notion-data-source "$notion_data_source_id") > "$TMP/install-out.txt" 2>&1 ||
   { cat "$TMP/install-out.txt" >&2; fail "install failed"; }
-[ ! -e "$lifecycle_lock" ] || fail "successful install leaked its lifecycle lock"
+[ ! -e "$lifecycle_lock" ] || {
+  tail -n 40 "$TMP/install-out.txt" >&2
+  fail "successful install leaked its lifecycle lock"
+}
 grep -Fq "note: moved your existing" "$TMP/install-out.txt" ||
   fail "displacing existing rules must be announced at install time"
 dest="$HOME/.oh-my-setting"
@@ -618,6 +629,14 @@ printf '%s\\n' 'codex 0.147.0'
         body = "#!/usr/bin/env bash\necho '%s %s'\n" % (row["binary"], row["version"])
     binary.write_text(body, encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Real npm puts binaries under PREFIX/bin on POSIX but at the PREFIX root
+    # on Windows, and managed_npm_binary looks only in the platform's place.
+    # Write both so the reuse decision finds the managed binary on every
+    # host; the extra copy is inert where unused.
+    windows_binary = prefix / row["binary"]
+    windows_binary.write_text(body, encoding="utf-8")
+    windows_binary.chmod(
+        windows_binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 PY
 {
   printf '%s\n' '#!/usr/bin/env bash'

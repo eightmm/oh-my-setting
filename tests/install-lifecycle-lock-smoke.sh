@@ -73,6 +73,51 @@ OMS_TEST_LOCK_HELPER="$ROOT/scripts/lib/install-lifecycle-lock.sh" \
 [ ! -e "$OMS_INSTALL_LIFECYCLE_LOCK" ] ||
   fail "the exec adoption path leaked its lifecycle lock"
 
+# Stock macOS Bash 3.2 has no BASHPID, so identity falls back to a child
+# probe. A probe measured through a substitution fork returns a different,
+# already-dead pid on every call: adopt and release then never match, the
+# installer stale-takes-over its own live lock mid-run, and the exit path
+# leaves the lock behind (the 2026-08-10 macOS e2e leak). `unset BASHPID` is
+# sticky for a whole modern-Bash session, so a child script exercises the
+# fallback on every host.
+cat > "$TMP/fallback-identity.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+unset BASHPID
+. "$OMS_TEST_LOCK_HELPER"
+oms_install_lifecycle_lock_current_identity || exit 75
+first="$OMS_INSTALL_LIFECYCLE_CURRENT_PID"
+oms_install_lifecycle_lock_current_identity || exit 75
+second="$OMS_INSTALL_LIFECYCLE_CURRENT_PID"
+[ "$first" = "$second" ] || { echo "identity unstable: $first vs $second" >&2; exit 1; }
+[ "$first" = "$$" ] || { echo "identity is not this shell: $first vs $$" >&2; exit 1; }
+EOF
+OMS_TEST_LOCK_HELPER="$ROOT/scripts/lib/install-lifecycle-lock.sh" \
+  bash "$TMP/fallback-identity.sh" ||
+  fail "the Bash 3.2 identity fallback is not a stable shell identity"
+
+cat > "$TMP/fallback-owner.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+unset BASHPID
+. "$OMS_TEST_LOCK_HELPER"
+oms_install_lifecycle_lock_acquire "test fallback exec owner"
+exec bash "$OMS_TEST_LOCK_ADOPTER"
+EOF
+cat > "$TMP/fallback-adopter.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+unset BASHPID
+. "$OMS_TEST_LOCK_HELPER"
+oms_install_lifecycle_lock_acquire "test fallback exec adoption"
+oms_install_lifecycle_lock_release
+EOF
+OMS_TEST_LOCK_HELPER="$ROOT/scripts/lib/install-lifecycle-lock.sh" \
+  OMS_TEST_LOCK_ADOPTER="$TMP/fallback-adopter.sh" bash "$TMP/fallback-owner.sh" ||
+  fail "the fallback exec handoff could not adopt and release its own lock"
+[ ! -e "$OMS_INSTALL_LIFECYCLE_LOCK" ] ||
+  fail "the fallback exec adoption path leaked its lifecycle lock"
+
 exercise_reclaim_gate() {
   local mode="$1" driver="$2"
   local barrier="$TMP/$mode-barrier"

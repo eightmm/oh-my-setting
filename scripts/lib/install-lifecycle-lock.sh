@@ -47,14 +47,16 @@ oms_install_lifecycle_lock_current_identity() {
      [ -n "${BASHPID:-}" ]; then
     pid="$BASHPID"
   else
-    # Keep the assignment in this shell. A $(...) probe would measure the
-    # short-lived command-substitution process instead of its caller.
-    if ! IFS= read -r pid < <(
-      sh -c 'printf "%s\n" "$PPID"' 2>/dev/null
-    ); then
-      return 75
-    fi
+    # The probe child must BECOME the substitution fork (exec), so its PPID
+    # is this shell. Without exec, stock Bash 3.2 gives sh a fresh
+    # intermediate fork as parent: every call then returns a different,
+    # already-dead pid, adopt and release never match their own lock, and
+    # the installer leaks it after stale-taking-over itself (the 2026-08-10
+    # macOS e2e leak). Modern Bash happens to exec substitutions anyway,
+    # which is why only real 3.2 hosts saw it.
+    pid="$(exec sh -c 'printf "%s\n" "$PPID"' 2>/dev/null)" || pid=""
     pid="${pid//$'\r'/}"
+    [ -n "$pid" ] || return 75
   fi
   case "$pid" in
     *[!0-9]*|"") return 75 ;;

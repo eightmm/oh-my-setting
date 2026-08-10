@@ -108,17 +108,18 @@ oms_file_lock_set_current_identity() {
 
   # BASHPID identifies the current subshell on modern Bash. Stock Bash 3.2 has
   # no BASHPID and $$ remains the parent's value inside (...), so ask a
-  # short-lived child for its PPID while keeping the read assignment here.
+  # short-lived child for its PPID. The child must BECOME the substitution
+  # fork (exec) so its PPID is this shell: without exec, real Bash 3.2 hands
+  # sh an ephemeral intermediate fork and every call returns a different,
+  # already-dead pid — stale detection then displaces live locks (the
+  # 2026-08-10 macOS lifecycle-lock leak was this pattern one file over).
   if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ] 2>/dev/null &&
       [ -n "${BASHPID:-}" ]; then
     pid="$BASHPID"
   else
-    if ! IFS= read -r pid < <(
-      sh -c 'printf "%s\n" "$PPID"' 2>/dev/null
-    ); then
-      return 75
-    fi
+    pid="$(exec sh -c 'printf "%s\n" "$PPID"' 2>/dev/null)" || pid=""
     pid="${pid//$'\r'/}"
+    [ -n "$pid" ] || return 75
   fi
   case "$pid" in
     *[!0-9]*|"") return 75 ;;

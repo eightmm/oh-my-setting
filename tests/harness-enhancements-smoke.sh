@@ -598,7 +598,8 @@ EOF
   [ "$status" -ne 0 ] || fail "uninstall ignored integration removal failures"
   [ -d "$checkout" ] || fail "uninstall purged its recovery checkout after a removal failure"
   for name in uninstall-autoupdate.sh install-claude-hooks.sh install-codex-plugin.sh install-mcp.sh install-agy-plugin.sh provider-permissions.sh; do
-    grep -Fxq "$name" "$log" || fail "uninstall stopped before attempting $name"
+    grep -Fxq "$name" "$log" 2>/dev/null ||
+      fail "uninstall stopped before attempting $name: $(tail -n 25 "$out" 2>/dev/null)"
   done
   if grep -Eq '^(unlink|journal)\.sh$' "$log"; then
     fail "uninstall crossed the unlink/purge boundary after a removal failure"
