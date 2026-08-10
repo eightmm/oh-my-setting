@@ -592,7 +592,8 @@ EOF
     chmod +x "$checkout/scripts/$name.sh"
   done
 
-  HOME="$TMP/uninstall-home" OMS_TEST_OPS_LOG="$log" \
+  HOME="$TMP/uninstall-home" XDG_CONFIG_HOME="$TMP/uninstall-home/.config" \
+    OMS_TEST_OPS_LOG="$log" \
     OMS_TEST_REMOVAL_FAILS="install-claude-hooks.sh,install-mcp.sh,provider-permissions.sh" \
     "$checkout/scripts/uninstall.sh" --yes --purge --purge-dirty > "$out" 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "uninstall ignored integration removal failures"
@@ -611,7 +612,8 @@ EOF
   : > "$log"
   : > "$out"
   status=0
-  HOME="$TMP/uninstall-home" OMS_TEST_OPS_LOG="$log" \
+  HOME="$TMP/uninstall-home" XDG_CONFIG_HOME="$TMP/uninstall-home/.config" \
+    OMS_TEST_OPS_LOG="$log" \
     OMS_TEST_REMOVAL_FAILS="journal.sh" \
     "$checkout/scripts/uninstall.sh" --yes --purge --purge-dirty > "$out" 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "uninstall ignored Work Journal disconnect failure"

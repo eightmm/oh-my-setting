@@ -274,6 +274,8 @@ backup = json.load(open(settings + ".bak", encoding="utf-8"))
 assert backup["permissions"]["allow"] == ["read_file(*)", "user(existing)"], backup
 PY
 then
+  tail -n 30 "$TMP/install-out.txt" >&2
+  ls -la "$HOME/.gemini/antigravity-cli/" >&2 || true
   fail "--peer-permissions did not track only its new consult grants"
 fi
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" ||

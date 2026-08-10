@@ -136,7 +136,9 @@ if [ "$SURFACES" = "0" ] && [ "$TOOL_LOCK_ONLY" = "0" ] &&
    [ "$ROOT" != "$INSTALL_ROOT" ] &&
    [ -x "$INSTALL_ROOT/scripts/doctor.sh" ]; then
   echo "delegating doctor to canonical owner: $INSTALL_ROOT"
-  exec "$INSTALL_ROOT/scripts/doctor.sh" "${ORIGINAL_ARGS[@]}"
+  # Plus-form: Bash 3.2 + set -u errors on an empty array expansion, and a
+  # bare `doctor.sh` delegation carries no arguments at all.
+  exec "$INSTALL_ROOT/scripts/doctor.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 fi
 
 check_tool_lock() {
@@ -498,7 +500,9 @@ if [ "$REPAIR" = "1" ]; then
   repair_install
   oms_install_lifecycle_lock_release
   trap - EXIT HUP INT TERM
-  exec "$ROOT/scripts/doctor.sh" "${MODEL_DOCTOR_ARGS[@]}"
+  # Bash 3.2 + set -u treats an empty array expansion as unbound; the
+  # plus-form keeps the re-exec working on stock macOS bash.
+  exec "$ROOT/scripts/doctor.sh" ${MODEL_DOCTOR_ARGS[@]+"${MODEL_DOCTOR_ARGS[@]}"}
 fi
 
 load_user_tool_paths() {
@@ -596,7 +600,7 @@ check_model_capabilities() {
   fi
   [ "$MODEL_DOCTOR_LIVE" = "0" ] || args+=(--live-models)
   [ "$MODEL_DOCTOR_STRICT" = "0" ] || args+=(--strict-diversity)
-  if output="$("$INSTALL_ROOT/scripts/model-doctor.sh" "${args[@]}" 2>&1)"; then
+  if output="$("$INSTALL_ROOT/scripts/model-doctor.sh" ${args[@]+"${args[@]}"} 2>&1)"; then
     printf '%s\n' "$output"
   else
     printf '%s\n' "$output"

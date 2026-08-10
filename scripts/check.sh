@@ -59,8 +59,15 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export XDG_CACHE_HOME="${OMS_CHECK_CACHE_HOME:-$CHECK_RUNTIME/cache}"
+# Config gets the same treatment: the install receipt resolves through
+# XDG_CONFIG_HOME before HOME, and GitHub runners export it globally — so a
+# fixture's HOME override never hid the runner-global receipt an earlier
+# suite had written, and uninstall fixtures failed the canonical-owner check
+# only in CI. Redirecting it also keeps suites from reading or writing the
+# invoking user's real config.
+export XDG_CONFIG_HOME="${OMS_CHECK_CONFIG_HOME:-$CHECK_RUNTIME/config}"
 export OMS_LOCK_DIR="${OMS_CHECK_LOCK_DIR:-$CHECK_RUNTIME/locks}"
-mkdir -p "$XDG_CACHE_HOME" "$OMS_LOCK_DIR"
+mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$OMS_LOCK_DIR"
 
 # These tune only the outer scripts-smoke runner. Do not export them into the
 # focused suites or into scripts-smoke's test bodies.

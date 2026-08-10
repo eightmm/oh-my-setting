@@ -146,6 +146,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- Three platform failures the lifecycle-lock leak had been masking in CI.
+  Stock Bash 3.2 + `set -u` treats an empty array expansion as unbound, so
+  a bare `doctor.sh` delegation, the post-repair re-exec, and the
+  model-doctor call now use the plus-form guard. The check gate redirects
+  `XDG_CONFIG_HOME` into its runtime the way it already redirects the cache:
+  GitHub runners export it globally, so a fixture's `HOME` override never
+  hid the runner-global install receipt an earlier suite had written, and
+  uninstall fixtures failed the canonical-owner check only in CI. And
+  Antigravity permission grants reach a possibly native Windows Python
+  through the environment, where Git Bash does not convert POSIX paths the
+  way it converts argv — apply was reading and writing a ghost settings
+  file on another drive spelling while the real one stayed untouched; the
+  settings path is now normalized to the mixed form on Windows.
 - The lifecycle lock no longer leaks — or silently loses mutual exclusion —
   on stock Bash 3.2 hosts. The 3.2 identity fallback probed its own pid
   through a substitution fork without exec'ing into it, so real 3.2 (macOS
