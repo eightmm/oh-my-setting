@@ -17,6 +17,16 @@ ROOT="$(cd "$ROOT" && pwd)"
 MODE=check
 PROFILE=consult
 SETTINGS="${OMS_ANTIGRAVITY_SETTINGS:-$HOME/.gemini/antigravity-cli/settings.json}"
+
+# Every path or rule list that crosses to python travels base64-encoded:
+# Git Bash's MSYS runtime rewrites environment values that look like POSIX
+# paths when it spawns a native binary, and that rewrite sent these values
+# to ghost locations under the Git installation root (observed as
+# C:/Program Files/Git/C/Users/... on CI). Base64 crosses every runtime
+# untouched; python decodes the exact bytes bash produced.
+oms_pp_b64() {
+  printf '%s' "$1" | base64 | tr -d '\r\n'
+}
 MANAGED=""
 if [ -n "${OMS_DELEGATE_WORKTREE_ROOT:-}" ]; then
   WORKTREE_PARENT="$OMS_DELEGATE_WORKTREE_ROOT"
@@ -226,10 +236,12 @@ oms_pp_canonical_settings_path() {
     *) raw="$PWD/$raw" ;;
   esac
   while :; do
-    normalized="$(OMS_PP_PATH="$raw" python3 - <<'PY'
+    normalized="$(OMS_PP_PATH_B64="$(oms_pp_b64 "$raw")" python3 - <<'PY'
+import base64
 import os
 import posixpath
-print(posixpath.normpath("/" + os.environ["OMS_PP_PATH"].lstrip("/")))
+raw = base64.b64decode(os.environ["OMS_PP_PATH_B64"].encode("ascii")).decode("utf-8")
+print(posixpath.normpath("/" + raw.lstrip("/")))
 PY
 )" || return $?
     normalized="${normalized//$'\r'/}"
@@ -244,10 +256,12 @@ PY
     done
     physical="$(cd "$cursor" && pwd -P)" || return 1
     physical="${physical//$'\r'/}"
-    candidate="$(OMS_PP_PATH="$physical$suffix/$leaf" python3 - <<'PY'
+    candidate="$(OMS_PP_PATH_B64="$(oms_pp_b64 "$physical$suffix/$leaf")" python3 - <<'PY'
+import base64
 import os
 import posixpath
-print(posixpath.normpath("/" + os.environ["OMS_PP_PATH"].lstrip("/")))
+raw = base64.b64decode(os.environ["OMS_PP_PATH_B64"].encode("ascii")).decode("utf-8")
+print(posixpath.normpath("/" + raw.lstrip("/")))
 PY
 )" || return $?
     candidate="${candidate//$'\r'/}"
@@ -342,7 +356,9 @@ remove_managed_permissions() {
   # The sidecar is the ownership boundary. Each recorded rule accounts for at
   # most one equal list entry, so a same-named grant appended later by the user
   # remains. A tiny removal journal makes a failed write/unlink retry-safe.
-  if removed="$(OMS_PP_SETTINGS="$SETTINGS" OMS_PP_MANAGED="$MANAGED" python3 - <<'PY'
+  if removed="$(OMS_PP_SETTINGS_B64="$(oms_pp_b64 "$SETTINGS")" \
+    OMS_PP_MANAGED_B64="$(oms_pp_b64 "$MANAGED")" python3 - <<'PY'
+import base64
 import hashlib
 import json
 import os
@@ -350,8 +366,8 @@ import stat
 import sys
 import tempfile
 
-settings = os.environ["OMS_PP_SETTINGS"]
-managed = os.environ["OMS_PP_MANAGED"]
+settings = base64.b64decode(os.environ["OMS_PP_SETTINGS_B64"].encode("ascii")).decode("utf-8")
+managed = base64.b64decode(os.environ["OMS_PP_MANAGED_B64"].encode("ascii")).decode("utf-8")
 
 
 def atomic_bytes(path, payload, follow_symlink=False):
@@ -539,10 +555,11 @@ required() {
 
 REQUIRED="$(required)"
 
-missing="$(OMS_PP_SETTINGS="$SETTINGS" OMS_PP_REQUIRED="$REQUIRED" python3 - <<'PY'
-import json, os, sys
+missing="$(OMS_PP_SETTINGS_B64="$(oms_pp_b64 "$SETTINGS")" \
+  OMS_PP_REQUIRED_B64="$(oms_pp_b64 "$REQUIRED")" python3 - <<'PY'
+import base64, json, os, sys
 
-path = os.environ["OMS_PP_SETTINGS"]
+path = base64.b64decode(os.environ["OMS_PP_SETTINGS_B64"].encode("ascii")).decode("utf-8")
 try:
     with open(path, encoding="utf-8") as handle:
         cfg = json.load(handle)
@@ -579,7 +596,9 @@ def satisfied(rule):
                 return True
     return False
 
-for rule in os.environ["OMS_PP_REQUIRED"].split("\n"):
+required = base64.b64decode(
+    os.environ["OMS_PP_REQUIRED_B64"].encode("ascii")).decode("utf-8")
+for rule in required.split("\n"):
     rule = rule.strip()
     if rule and not satisfied(rule):
         print(rule)
@@ -624,8 +643,10 @@ apply_managed_permissions() {
 
   command -v python3 >/dev/null 2>&1 ||
     fail "python3 is required to grant managed antigravity permissions"
-  if added="$(OMS_PP_SETTINGS="$SETTINGS" OMS_PP_MANAGED="$MANAGED" \
-    OMS_PP_REQUIRED="$REQUIRED" python3 - <<'PY'
+  if added="$(OMS_PP_SETTINGS_B64="$(oms_pp_b64 "$SETTINGS")" \
+    OMS_PP_MANAGED_B64="$(oms_pp_b64 "$MANAGED")" \
+    OMS_PP_REQUIRED_B64="$(oms_pp_b64 "$REQUIRED")" python3 - <<'PY'
+import base64
 import io
 import json
 import os
@@ -634,10 +655,11 @@ import stat
 import sys
 import tempfile
 
-settings = os.environ["OMS_PP_SETTINGS"]
-managed = os.environ["OMS_PP_MANAGED"]
+settings = base64.b64decode(os.environ["OMS_PP_SETTINGS_B64"].encode("ascii")).decode("utf-8")
+managed = base64.b64decode(os.environ["OMS_PP_MANAGED_B64"].encode("ascii")).decode("utf-8")
 required = [
-    rule.strip() for rule in os.environ["OMS_PP_REQUIRED"].split("\n")
+    rule.strip() for rule in base64.b64decode(
+        os.environ["OMS_PP_REQUIRED_B64"].encode("ascii")).decode("utf-8").split("\n")
     if rule.strip()
 ]
 
