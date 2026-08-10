@@ -48,6 +48,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   be legitimate. A snapshot whose bytes no longer match the pre-launch hash
   refuses restoration outright. Repair never admits the worker's output: the
   delegation still fails.
+- Review gate verdicts are typed once at the boundary that judges them.
+  `peer-review.sh verdicts` gains `--json` (same collector, same 0/1/2 exit
+  contract), and a gate run now enriches its existing `review-outcome` row
+  with a `review` object: per-seat provider/verdict/confidence/round/blocked
+  reason, the mechanical `gate_verify_exit`, and the frozen reviewed-diff
+  hash. One extraction pass feeds prose, JSON, and the row alike, and a gate
+  whose typed outcome fails to compose fails closed instead of publishing a
+  thin row. Session handoffs now source their Open dissents block from the
+  typed row (falling back to `verdicts --json` over pre-feature artifacts) —
+  rendered provider Markdown is no longer interpreted as machine state
+  outside peer-review's own parser.
 - Initial setup now requires the provider/service toolchain instead of exposing
   a partial `--no-tools` install. Exact releases and payload integrity are
   repository-owned in `tools.lock.json`; downloaded artifacts are verified

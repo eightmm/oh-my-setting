@@ -40,7 +40,7 @@ DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 usage() {
   cat <<'EOF'
 Usage: peer-review.sh [options] --prompt TEXT
-       peer-review.sh verdicts [artifact-dir]
+       peer-review.sh verdicts [--json] [artifact-dir]
 
 Ask the same review question to Codex, Claude Code, and Antigravity, then persist
 each answer as an artifact.
@@ -134,10 +134,15 @@ EOF
 review_verdicts() {
   local vdir="$1"
   local forced_run_id="${2:-}"
+  local json_out="${3:-}"
+  local json_stdout="${4:-0}"
   local latest run_id base provider suf r f verdict overall found reason
   # bash 3.2 has no associative arrays; track one "provider<TAB>round<TAB>file"
   # record per candidate and pick the highest round per provider at the end.
   local vrecords="" providers
+  # One extraction pass feeds prose, JSON, and the typed outcome row alike:
+  # a second parser is where verdict drift starts.
+  local seat_rows="" seat_round
 
   [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
   if [ -n "$forced_run_id" ]; then
@@ -159,7 +164,7 @@ review_verdicts() {
     [ "$run_id" != "$latest" ] || { echo "error: cannot parse run id from $(basename "$latest")" >&2; exit 2; }
   fi
 
-  echo "run: $run_id"
+  [ "$json_stdout" = 1 ] || echo "run: $run_id"
   # Per provider, judge the FINAL artifact: highest debate round, else base.
   for f in "$vdir"/*-"$run_id".md "$vdir"/*-"$run_id"-r[0-9]*.md; do
     [ -e "$f" ] || continue
@@ -191,9 +196,14 @@ review_verdicts() {
     f="$(printf '%s' "$vrecords" | awk -F '\t' -v p="$provider" \
       '$1==p && $2+0>=mr {mr=$2+0; file=$3} END{print file}')"
     [ -n "$f" ] || continue
+    seat_round="$(printf '%s' "$vrecords" | awk -F '\t' -v p="$provider" \
+      '$1==p && $2+0>=mr {mr=$2+0} END{print mr+0}')"
     found=$((found + 1))
     if ! grep -q '^## Exit' "$f"; then
-      echo "$provider: incomplete (no exit section; run likely died — re-run the review)"
+      [ "$json_stdout" = 1 ] ||
+        echo "$provider: incomplete (no exit section; run likely died — re-run the review)"
+      seat_rows="$seat_rows$provider	incomplete		$seat_round	$(basename "$f")
+"
       overall=2
       continue
     fi
@@ -209,9 +219,15 @@ review_verdicts() {
     suffix=""
     [ -z "$confidence" ] || suffix=" (confidence $confidence)"
     case "$verdict" in
-      pass) echo "$provider: pass$suffix" ;;
+      pass)
+        [ "$json_stdout" = 1 ] || echo "$provider: pass$suffix"
+        seat_rows="$seat_rows$provider	pass	$confidence	$seat_round	$(basename "$f")
+"
+        ;;
       fail)
-        echo "$provider: fail$suffix"
+        [ "$json_stdout" = 1 ] || echo "$provider: fail$suffix"
+        seat_rows="$seat_rows$provider	fail	$confidence	$seat_round	$(basename "$f")
+"
         if [ "$overall" -ne 2 ]; then overall=1; fi
         ;;
       *)
@@ -225,23 +241,74 @@ review_verdicts() {
           [ "$(ma_answer_quality "$f")" != "blocked" ] ||
           reason="$(ma_answer_block_reason "$f")"
         if [ -n "$reason" ]; then
-          echo "$provider: no-verdict (blocked: $reason)"
+          [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (blocked: $reason)"
         else
-          echo "$provider: no-verdict (complete but no GATE line)"
+          [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (complete but no GATE line)"
         fi
+        seat_rows="$seat_rows$provider	no-verdict		$seat_round	$(basename "$f")	$(printf '%s' "$reason" | tr '\t\n' '  ' | cut -c1-200)
+"
         overall=2
         ;;
     esac
   done
   [ "$found" -gt 0 ] || { echo "error: no provider artifacts for run $run_id" >&2; exit 2; }
+  if [ -n "$json_out" ] || [ "$json_stdout" = 1 ]; then
+    # Rows travel via the environment, never interpolated into the python
+    # source: block reasons quote untrusted provider output.
+    if ! OMS_VERDICTS_RUN="$run_id" OMS_VERDICTS_OVERALL="$overall" \
+      OMS_VERDICTS_JSON_OUT="$json_out" OMS_VERDICTS_ROWS="$seat_rows" python3 - <<'PY'
+import json, os, sys
+
+rows = os.environ.get("OMS_VERDICTS_ROWS", "")
+seats = []
+for line in rows.splitlines():
+    if not line.strip():
+        continue
+    parts = (line.split("\t") + ["", "", "", "", "", ""])[:6]
+    provider, verdict, confidence, rnd, artifact, reason = parts
+    seat = {
+        "provider": provider,
+        "verdict": verdict,
+        "confidence": float(confidence) if confidence else None,
+        "round": int(rnd) if rnd.isdigit() else 0,
+        "artifact": artifact,
+    }
+    if reason:
+        seat["blocked_reason"] = reason
+    seats.append(seat)
+data = {
+    "run": os.environ["OMS_VERDICTS_RUN"],
+    "overall": int(os.environ["OMS_VERDICTS_OVERALL"]),
+    "seats": seats,
+}
+out = os.environ.get("OMS_VERDICTS_JSON_OUT", "")
+text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+if out:
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+else:
+    print(text)
+PY
+    then
+      echo "error: could not serialize the typed verdicts; failing closed" >&2
+      exit 2
+    fi
+  fi
   exit "$overall"
 }
 
 # Verdict inspection for gate loops: one line per provider from the latest
 # run group, with died-mid-run detection (artifact without an exit section).
+# --json emits the same collector's output as one JSON object for machine
+# consumers; the exit contract (0/1/2) is identical in both modes.
 if [ "${1:-}" = "verdicts" ]; then
   shift
-  review_verdicts "${1:-$PWD/.oms/artifacts/review}"
+  VERDICTS_JSON_STDOUT=0
+  if [ "${1:-}" = "--json" ]; then
+    VERDICTS_JSON_STDOUT=1
+    shift
+  fi
+  review_verdicts "${1:-$PWD/.oms/artifacts/review}" "" "" "$VERDICTS_JSON_STDOUT"
 fi
 
 validate_provider_list() {
@@ -571,6 +638,10 @@ else
 fi
 
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$diff_file" "$status_file"
+# Freeze the reviewed-diff identity now: the typed outcome row must bind the
+# exact bytes the seats judged, not whatever the tree holds at exit.
+REVIEW_DIFF_SHA=""
+[ ! -s "$diff_file" ] || REVIEW_DIFF_SHA="$(ma_sha256_file "$diff_file" 2>/dev/null || true)"
 if [ "$GATE" -eq 1 ]; then
   write_gate_instruction >> "$prompt_file"
   MA_DEBATE_GATE_INSTRUCTION="$(write_gate_instruction)"
@@ -654,7 +725,8 @@ fi
 record_review_outcome() {
   local review_rc="$1"
   local verified="$2"
-  local summary status
+  local verdict_json_file="${3:-}"
+  local summary status payload=""
 
   if [ "$review_rc" -eq 0 ]; then
     summary="Peer review outcome passed"
@@ -663,7 +735,32 @@ record_review_outcome() {
     summary="Peer review outcome failed"
     status="failure"
   fi
-  ma_append_artifact_index "$REPO" review-outcome local "$review_rc" "$synth_file" || true
+  if [ -n "$verdict_json_file" ] && [ -s "$verdict_json_file" ]; then
+    # The gate authored these verdicts itself one extraction pass ago, so a
+    # payload that no longer composes is a bug, and the row must not go out
+    # thin while looking authoritative: fail the gate loudly.
+    payload="$(OMS_REVIEW_GATE_VERIFY_EXIT="${gate_verify_exit:-}" \
+      OMS_REVIEW_DIFF_SHA256="$REVIEW_DIFF_SHA" \
+      python3 - "$verdict_json_file" <<'PY'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+if not isinstance(data, dict) or not isinstance(data.get("seats"), list):
+    raise SystemExit("typed verdicts are not an object with seats")
+gate_verify = os.environ.get("OMS_REVIEW_GATE_VERIFY_EXIT", "")
+data["gate_verify_exit"] = int(gate_verify) if gate_verify.lstrip("-").isdigit() else None
+diff_sha = os.environ.get("OMS_REVIEW_DIFF_SHA256", "")
+if diff_sha:
+    data["diff_sha256"] = diff_sha
+print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+PY
+)" || fail "typed review outcome could not be composed; failing closed"
+    OMS_INDEX_REVIEW_OUTCOME_JSON="$payload" ma_append_artifact_index \
+      "$REPO" review-outcome local "$review_rc" "$synth_file" ||
+      fail "typed review outcome was not recorded; failing closed"
+  else
+    ma_append_artifact_index "$REPO" review-outcome local "$review_rc" "$synth_file" || true
+  fi
   work_journal_observe "$REPO" peer-review "$synth_file" \
     --source-id "$OMS_OPERATION_ID:outcome" --event-type patch_review \
     --outcome "$summary" --outcome-status "$status" \
@@ -709,19 +806,29 @@ if [ "$GATE" -eq 1 ]; then
     fi
   fi
   verdict_rc=0
-  ( review_verdicts "$ARTIFACT_DIR" "$timestamp" ) || verdict_rc=$?
+  verdict_json_file="$(mktemp)" || fail "mktemp failed"
+  ( review_verdicts "$ARTIFACT_DIR" "$timestamp" "$verdict_json_file" ) || verdict_rc=$?
+  # A structural failure exits before the collector serializes; the row then
+  # goes out without a payload, which is honest. A clean pass with no typed
+  # outcome is the inconsistent state that must fail closed.
+  if [ "$verdict_rc" -eq 0 ] && [ ! -s "$verdict_json_file" ]; then
+    echo "error: gate verdicts produced no typed outcome; failing closed" >&2
+    verdict_rc=2
+  fi
   # Mechanical failure beats reviewer consensus; a died provider (2) still
   # takes precedence so the round gets re-run first.
   if [ "$verdict_rc" -eq 0 ] && [ "$gate_verify_exit" -ne 0 ]; then
     echo "gate: fail (mechanical verify failed despite reviewer pass)"
-    record_review_outcome 1 failed
+    record_review_outcome 1 failed "$verdict_json_file"
+    rm -f "$verdict_json_file"
     exit 1
   fi
   if [ "$verdict_rc" -eq 0 ]; then
-    record_review_outcome 0 passed
+    record_review_outcome 0 passed "$verdict_json_file"
   else
-    record_review_outcome "$verdict_rc" failed
+    record_review_outcome "$verdict_rc" failed "$verdict_json_file"
   fi
+  rm -f "$verdict_json_file"
   exit "$verdict_rc"
 fi
 

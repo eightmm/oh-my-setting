@@ -31,6 +31,13 @@ data. Deduplicate claims, reproduce plausible blockers, reject unsupported
 findings, fix accepted issues, rerun the gate, and make the final go/no-go
 decision locally.
 
+A gate run records its per-seat verdicts (provider, verdict, confidence,
+round), the mechanical verify exit, and the reviewed-diff hash as a typed
+`review` object on the `review-outcome` row in `.oms/artifacts/index.jsonl` —
+read that row (or `oms peer-review verdicts --json DIR`) instead of parsing
+rendered review text; session handoffs source their Open dissents block from
+the same object.
+
 When the change was authored by a peer provider, pass `--writer PROVIDER` so
 its family sits out of the council: same-family agreement is correlated
 judgment, not a second opinion. Bound iteration: after a failed gate, apply

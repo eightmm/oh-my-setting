@@ -863,6 +863,48 @@ test_review_verdicts_subcommand() {
   printf '%s' "$out" | grep -Fq 'antigravity: pass' || fail "slug containing -r9 must be treated as base artifact"
 }
 
+test_review_verdicts_json_mode() {
+  local dir="$TMP/verdicts-json"
+  local run="20260611T000000Z-43"
+  local out
+  local rc=0
+
+  mkdir -p "$dir/mixed" "$dir/debate"
+  printf '# codex review\n\n## Output\n\nexactly one line: GATE: pass or GATE: fail.\nCONFIDENCE: 0.9\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$dir/mixed/codex-x-$run.md"
+  printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
+    > "$dir/mixed/claude-x-$run.md"
+  printf '# antigravity review\n\n## Output\n\npartial output then death\n' \
+    > "$dir/mixed/antigravity-x-$run.md"
+
+  out="$("$ROOT/scripts/peer-review.sh" verdicts --json "$dir/mixed")" && rc=0 || rc=$?
+  [ "$rc" = "2" ] || fail "json mode must keep the exit contract, got $rc"
+  OMS_TEST_JSON="$out" python3 - <<'PY' || fail "json verdicts wrong: $out"
+import json, os
+data = json.loads(os.environ["OMS_TEST_JSON"])
+seats = {s["provider"]: s for s in data["seats"]}
+assert data["overall"] == 2, data
+assert seats["codex"]["verdict"] == "pass", seats
+assert seats["codex"]["confidence"] == 0.9, seats
+assert seats["claude"]["verdict"] == "fail", seats
+assert seats["claude"]["confidence"] is None, seats
+assert seats["antigravity"]["verdict"] == "incomplete", seats
+PY
+
+  # Final-round selection and the -r9 slug guard hold in json mode too.
+  printf '# c\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' > "$dir/debate/codex-x-$run.md"
+  printf '# c\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' > "$dir/debate/codex-x-$run-r2.md"
+  printf '# c\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' > "$dir/debate/antigravity-fix-r9-thing-$run.md"
+  out="$("$ROOT/scripts/peer-review.sh" verdicts --json "$dir/debate")" || true
+  OMS_TEST_JSON="$out" python3 - <<'PY' || fail "json debate selection wrong: $out"
+import json, os
+data = json.loads(os.environ["OMS_TEST_JSON"])
+seats = {s["provider"]: s for s in data["seats"]}
+assert seats["codex"]["verdict"] == "pass" and seats["codex"]["round"] == 2, seats
+assert seats["antigravity"]["round"] == 0, seats
+PY
+}
+
 test_job_digest_log_mode() {
   local dir="$TMP/job-digest"
   mkdir -p "$dir"
@@ -2180,6 +2222,42 @@ test_peer_review_gate_fail_exits() {
   [ "$rc" = "1" ] || fail "gate fail should exit 1, got $rc"
   assert_file_contains "$project/out" 'antigravity: fail'
   assert_file_contains "$project/out" 'claude: pass'
+}
+
+test_peer_review_gate_records_typed_outcome() {
+  local project="$TMP/review-gate-typed"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  write_fake_review_gate_provider "$bin_dir" antigravity fail
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude,antigravity \
+    --no-diff \
+    --gate \
+    --prompt "Typed outcome" >"$project/out" 2>&1 || rc=$?
+  [ "$rc" = "1" ] || fail "split gate should exit 1, got $rc: $(cat "$project/out")"
+  # The outcome row carries the seats the gate itself judged — downstream
+  # consumers read this, never the rendered prose.
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' ||
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+rows = [r for r in rows if r.get("kind") == "review-outcome"]
+assert rows, "no review-outcome row"
+review = rows[-1].get("review")
+assert isinstance(review, dict), rows[-1]
+seats = {s["provider"]: s["verdict"] for s in review["seats"]}
+assert seats == {"claude": "pass", "antigravity": "fail"}, seats
+assert "gate_verify_exit" in review, review
+PY
+    fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
 }
 
 test_peer_review_gate_missing_exits() {
@@ -7498,6 +7576,41 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   assert_file_contains "$out" "bash scripts/check.sh --focused-only"
   assert_file_contains "$out" "## Open dissents"
   assert_file_contains "$out" "codex: pass"
+  assert_file_contains "$out" "claude: fail"
+}
+
+test_session_handoff_dissents_from_typed_outcome() {
+  local home="$TMP/sh-typed-home"
+  local cwd="$TMP/sh-typed-proj"
+  local proj sess out
+
+  # A typed review-outcome row and NO review artifacts: the dissent block
+  # must come from the typed row, not from re-parsing rendered Markdown.
+  mkdir -p "$cwd/.oms/artifacts"
+  python3 - "$cwd/.oms/artifacts/index.jsonl" <<'PY'
+import json, sys
+row = {"kind": "review-outcome", "provider": "local", "exit": 1,
+       "review": {"seats": [
+           {"provider": "codex", "verdict": "pass", "confidence": 0.8, "round": 2},
+           {"provider": "claude", "verdict": "fail", "confidence": None, "round": 2}],
+           "gate_verify_exit": 0}}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(row) + "\n")
+PY
+  proj="$home/projects/$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9.' '-')"
+  sess="$proj/cccccccc-1111-2222-3333-444444444444.jsonl"
+  mkdir -p "$proj"
+  {
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"continue the feature"}}'
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"paused at review"}]}}'
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"resume where it stopped"}}'
+  } > "$sess"
+
+  out="$(OMS_CLAUDE_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd" --out "$home/digest.md" 2>/dev/null)"
+  [ -f "$out" ] || fail "typed-dissent digest not written"
+  assert_file_contains "$out" "## Open dissents"
+  assert_file_contains "$out" "codex: pass (confidence 0.8)"
   assert_file_contains "$out" "claude: fail"
 }
 

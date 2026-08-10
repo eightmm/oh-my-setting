@@ -813,6 +813,25 @@ if selected_reasoning_effort in valid_efforts:
     row["selected_reasoning_effort"] = selected_reasoning_effort
 if fallback_reasoning_effort in valid_efforts:
     row["fallback_reasoning_effort"] = fallback_reasoning_effort
+# The typed review outcome rides the row the gate already writes — one
+# entrance, enriched, never a second schema. Only record_review_outcome sets
+# this variable, and it composed the payload itself one step earlier, so a
+# malformed value here is a caller bug and fails the append rather than
+# publishing a row that looks authoritative while missing its seats.
+review_payload = os.environ.get("OMS_INDEX_REVIEW_OUTCOME_JSON", "")
+if review_payload:
+    if len(review_payload) > 16384:
+        sys.stderr.write("error: typed review outcome payload exceeds 16KiB\n")
+        sys.exit(3)
+    try:
+        review_obj = json.loads(review_payload)
+    except ValueError:
+        sys.stderr.write("error: typed review outcome payload is not JSON\n")
+        sys.exit(3)
+    if not isinstance(review_obj, dict) or not isinstance(review_obj.get("seats"), list):
+        sys.stderr.write("error: typed review outcome payload has no seats\n")
+        sys.exit(3)
+    row["review"] = review_obj
 row.update(path_fields("artifact", artifact_raw))
 row.update(path_fields("patch", patch_raw))
 row.update(path_fields("source", source_raw))

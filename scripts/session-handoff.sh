@@ -420,7 +420,7 @@ append_resume_contract() {
   local repo="$1"
   local out="$2"
   local verify_cmd=""
-  local verdicts=""
+  local dissent_seats=""
   local task_file="$repo/.oms/task/current.md"
 
   if [ -s "$task_file" ]; then
@@ -430,24 +430,72 @@ append_resume_contract() {
       inside && NF { print }
     ' "$task_file" 2>/dev/null || true)"
   fi
-  if [ -d "$repo/.oms/artifacts/review" ]; then
-    verdicts="$("$ROOT/scripts/peer-review.sh" verdicts \
+  # The gate records its seats on the review-outcome row; consume that typed
+  # object. Rendered review prose is never machine state here.
+  local review_json=""
+  review_json="$(python3 - "$repo" <<'PY' 2>/dev/null || true
+import json, os, sys
+
+index = os.path.join(sys.argv[1], ".oms", "artifacts", "index.jsonl")
+review = None
+try:
+    with open(index, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("kind") == "review-outcome" and isinstance(row.get("review"), dict):
+                review = row["review"]
+except OSError:
+    raise SystemExit(0)
+if review is not None:
+    print(json.dumps(review, ensure_ascii=False, separators=(",", ":")))
+PY
+)"
+  if [ -z "$review_json" ] && [ -d "$repo/.oms/artifacts/review" ]; then
+    # Artifacts that predate the typed outcome row are stored user state;
+    # parse them through the one parser peer-review owns, still consuming
+    # JSON rather than grepping rendered lines.
+    review_json="$("$ROOT/scripts/peer-review.sh" verdicts --json \
       "$repo/.oms/artifacts/review" 2>/dev/null || true)"
   fi
+  [ -z "$review_json" ] ||
+    dissent_seats="$(OMS_HANDOFF_VERDICTS_JSON="$review_json" python3 - <<'PY' 2>/dev/null || true
+import json, os
+
+try:
+    data = json.loads(os.environ.get("OMS_HANDOFF_VERDICTS_JSON", ""))
+except ValueError:
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    raise SystemExit(0)
+seats = [s for s in data.get("seats", []) if isinstance(s, dict)]
+verdicts = [s.get("verdict") for s in seats]
+if "pass" in verdicts and "fail" in verdicts:
+    for seat in seats:
+        line = "%s: %s" % (seat.get("provider", "?"), seat.get("verdict", "?"))
+        confidence = seat.get("confidence")
+        if isinstance(confidence, (int, float)):
+            line += " (confidence %s)" % confidence
+        print(line)
+PY
+)"
   {
     if [ -n "$verify_cmd" ]; then
       printf '\n## Resume contract\n\n'
       printf 'Run before building on this handoff:\n\n'
       printf '```bash\n%s\n```\n' "$verify_cmd"
     fi
-    if [ -n "$verdicts" ] &&
-      printf '%s' "$verdicts" | grep -q ': pass' &&
-      printf '%s' "$verdicts" | grep -q ': fail'; then
+    if [ -n "$dissent_seats" ]; then
       printf '\n## Open dissents\n\n'
       printf 'The last review round ended split. Acknowledge each verdict —\n'
       printf 'agree, override with reasons, or escalate — before landing\n'
       printf 'related work; do not silently re-derive consensus.\n\n'
-      printf '%s\n' "$verdicts"
+      printf '%s\n' "$dissent_seats"
     fi
   } >> "$out"
 }
