@@ -17,19 +17,6 @@ ROOT="$(cd "$ROOT" && pwd)"
 MODE=check
 PROFILE=consult
 SETTINGS="${OMS_ANTIGRAVITY_SETTINGS:-$HOME/.gemini/antigravity-cli/settings.json}"
-# Git Bash converts POSIX paths in a native tool's argv but not in
-# environment values, and this path reaches a possibly native Windows Python
-# through the environment: unconverted, python resolves /c/... against the
-# current drive and reads and writes a ghost settings file while the real one
-# stays untouched. The mixed form (C:/...) names the same file to bash, MSYS
-# python, and native python alike.
-case "$(uname -s 2>/dev/null || true)" in
-  MINGW*|MSYS*|CYGWIN*)
-    if command -v cygpath >/dev/null 2>&1; then
-      SETTINGS="$(cygpath -m "$SETTINGS" | tr -d '\r')"
-    fi
-    ;;
-esac
 MANAGED=""
 if [ -n "${OMS_DELEGATE_WORKTREE_ROOT:-}" ]; then
   WORKTREE_PARENT="$OMS_DELEGATE_WORKTREE_ROOT"
@@ -264,6 +251,20 @@ if canonical_settings="$(oms_pp_canonical_settings_path "$SETTINGS")"; then
 else
   fail "could not canonicalize Antigravity settings path: $SETTINGS"
 fi
+# The canonical path is POSIX (/c/...) under Git Bash, and it reaches a
+# possibly native Windows Python through the environment — where Git Bash
+# converts argv but not env values. Unconverted, python resolves /c/...
+# against the current drive and reads and writes a ghost settings file while
+# the real one stays untouched. The mixed form (C:/...) names the same file
+# to bash, MSYS python, and native python alike. After canonicalization on
+# purpose: the canonicalizer's cd/pwd walk expects the POSIX spelling.
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      SETTINGS="$(cygpath -m "$SETTINGS" | tr -d '\r')"
+    fi
+    ;;
+esac
 
 # Keep ownership state beside the canonical settings path being widened. This is
 # intentionally separate from the install receipt: provider-permissions can be
