@@ -350,26 +350,6 @@ oms_model_catalog_key() {
   LC_ALL=C printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9'
 }
 
-# Is MODEL in the provider's live catalog? Exit 2 means "no catalog known",
-# which is not the same as absent and must not be treated as one.
-oms_capability_model_available() {
-  local provider="$1" model="$2"
-  local catalog key line
-  catalog="$(oms_capability_models "$provider" 2>/dev/null)" || return 2
-  [ -n "$catalog" ] || return 2
-  key="$(oms_model_catalog_key "$model")"
-  [ -n "$key" ] || return 2
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$(oms_model_catalog_key "$line")" in
-      "$key") return 0 ;;
-    esac
-  done <<EOF
-$catalog
-EOF
-  return 1
-}
-
 # Every effort any of a provider's models accepts, in scale order. Empty when
 # the catalog says nothing per model.
 oms_capability_effort_union() {

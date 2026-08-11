@@ -22,22 +22,6 @@ oms_provider_binary() {
   esac
 }
 
-oms_provider_required_flags() {
-  local provider
-  provider="$(oms_provider_normalize "$1")" || return $?
-  case "$provider" in
-    codex)
-      printf '%s\n' --model --sandbox
-      ;;
-    claude)
-      printf '%s\n' --model --permission-mode --effort
-      ;;
-    antigravity)
-      printf '%s\n' --model --print --sandbox --print-timeout
-      ;;
-  esac
-}
-
 # How a provider takes its thinking control, and the scale it is declared to
 # accept. These are the starting point, not the answer: model-capability.sh
 # probes the installed CLI and the probe wins where it can see. `config` cannot

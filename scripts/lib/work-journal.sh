@@ -158,26 +158,3 @@ work_journal_finish() {
   return 0
 }
 
-work_journal_tick() {
-  local repo="$1"
-  local sync_after=1
-  local argument
-  shift
-
-  work_journal_enabled || return 0
-  [ "${OMS_WORK_JOURNAL_ACTIVE:-0}" != 1 ] || return 0
-  repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
-  repo="${repo//$'\r'/}"
-  repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
-  for argument in "$@"; do
-    [ "$argument" != "--local-only" ] || sync_after=0
-  done
-  if ! work_journal_call_local "$repo" tick --repo "$repo" "$@" >/dev/null 2>&1; then
-    echo "warning: Work Journal materialization degraded; primary lifecycle result is unchanged" >&2
-    return 0
-  fi
-  if [ "$sync_after" = 1 ] && ! work_journal_sync "$repo" >/dev/null 2>&1; then
-    echo "warning: Work Journal mirror degraded; local journal is preserved" >&2
-  fi
-  return 0
-}

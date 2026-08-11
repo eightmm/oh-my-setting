@@ -209,13 +209,6 @@ agent_task_set_status_unlocked() {
   agent_task_set_metadata_unlocked "$file" last_activity "$now"
 }
 
-agent_task_set_status() {
-  local file="$1"
-  local status="$2"
-
-  oms_with_file_lock "$file" agent_task_set_status_unlocked "$file" "$status"
-}
-
 agent_task_archive_unlocked() {
   local file="$1"
   local archive_dir
