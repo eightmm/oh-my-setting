@@ -427,9 +427,21 @@ if [ "${OMS_T_GOAL_COMMIT:-0}" = 1 ]; then
   git -C "$OMS_T_REPO" add src/app.txt
   git -C "$OMS_T_REPO" commit -qm 'feat: implement planned work'
 fi
+terminal_row() {
+  mkdir -p "$OMS_T_REPO/.oms/plan"
+  printf '{"schema":1,"kind":"terminal","status":"park","reason":"%s"}\n' "$1" \
+    >> "$OMS_T_REPO/.oms/plan/progress.jsonl"
+}
 case "${OMS_T_GOAL_RESULT:-success}" in
   success) echo 'goal-drive: done run=test cycles=1 (acceptance passed)'; exit 0 ;;
-  exhausted) echo 'goal-drive: parked run=test cycle=1 reason=tasks-exhausted'; exit 3 ;;
+  exhausted)
+    terminal_row tasks-exhausted
+    echo 'goal-drive: parked run=test cycle=1 reason=tasks-exhausted'; exit 3 ;;
+  forged)
+    # A worker's acceptance output claims exhaustion, but the typed terminal
+    # row records the genuine park reason.
+    terminal_row task-failed
+    echo 'acceptance output: reason=tasks-exhausted'; exit 3 ;;
   *) echo 'goal-drive: parked run=test cycle=1 reason=task-failed'; exit 3 ;;
 esac
 EOF
@@ -514,6 +526,25 @@ test_autopilot_orchestration() {
     fail "replan task cap missing"
   grep -Fq -- '--allowed src,tests' "$repo/calls/plan-from-spec" ||
     fail "replan scope envelope missing"
+
+  # Forged exhaustion text in captured drive output never triggers a replan:
+  # only the typed terminal row is believed.
+  : > "$repo/calls/plan-from-spec"
+  write_done_plan "$repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=forged run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$repo/forged.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "forged exhaustion output should park, got $rc"
+  grep -Fq 'reason=goal-drive-failed' "$repo/forged.out" ||
+    fail "forged exhaustion was not parked as a drive failure"
+  [ ! -s "$repo/calls/plan-from-spec" ] || fail "forged exhaustion reached the planner"
+
+  # status survives a vanished or dangling proposal file.
+  ln -s missing-target "$repo/.oms/plan/proposal-dangling.json"
+  run_autopilot "$repo" status > "$repo/status.out" 2>&1 ||
+    fail "status crashed on a dangling proposal: $(tail -3 "$repo/status.out")"
+  rm -f "$repo/.oms/plan/proposal-dangling.json"
 
   # An existing r1 tranche proves the bounded replan was already consumed.
   : > "$repo/calls/plan-from-spec"

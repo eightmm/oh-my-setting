@@ -181,7 +181,14 @@ PY
   python3 - "$REPO/.oms/plan" <<'PY'
 import json, pathlib, sys
 directory = pathlib.Path(sys.argv[1])
-proposals = sorted(directory.glob("proposal-*.json"), key=lambda path: (path.stat().st_mtime, path.name)) if directory.is_dir() else []
+def sort_key(path):
+    # A proposal can vanish or dangle between glob and stat; diagnostics must
+    # never crash at exactly the moment an operator needs them.
+    try:
+        return (path.stat().st_mtime, path.name)
+    except OSError:
+        return (0, path.name)
+proposals = sorted(directory.glob("proposal-*.json"), key=sort_key) if directory.is_dir() else []
 if proposals:
     latest = proposals[-1]
     try:
@@ -504,8 +511,33 @@ current_accept_sha="$(printf '%s' "$current_accept" | oms_sha256_stream)" ||
 [ "$current_accept_sha" = "$accept_sha" ] ||
   park "acceptance-changed" "review the changed acceptance command"
 
+# goal-drive's own park appends its typed terminal row to the progress log
+# AFTER anything a worker's acceptance command may have printed, so the latest
+# kind=terminal row is authoritative where captured stdout is forgeable. A
+# missing or unreadable row is no reason at all (fail-closed).
+drive_terminal_reason() {
+  [ -f "$PROGRESS_FILE" ] || return 0
+  python3 - "$PROGRESS_FILE" <<'PY' | tr -d '\r'
+import json, sys
+latest = None
+try:
+    with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("kind") == "terminal":
+                latest = row
+except OSError:
+    latest = None
+if latest is not None and isinstance(latest.get("reason"), str):
+    print(latest["reason"])
+PY
+}
+
 if [ "$drive_rc" -ne 0 ]; then
-  if [ "$drive_rc" -eq 3 ] && grep -Fq 'reason=tasks-exhausted' "$drive_out"; then
+  if [ "$drive_rc" -eq 3 ] && [ "$(drive_terminal_reason)" = tasks-exhausted ]; then
     [ "$(plan_view all-done)" = 1 ] ||
       park "tasks-exhausted-with-unfinished-work" "inspect the plan state"
     [ "$(plan_view has-r1)" = 0 ] ||
