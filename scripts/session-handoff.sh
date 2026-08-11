@@ -431,13 +431,18 @@ append_resume_contract() {
     ' "$task_file" 2>/dev/null || true)"
   fi
   # The gate records its seats on the review-outcome row; consume that typed
-  # object. Rendered review prose is never machine state here.
+  # object. Rendered review prose is never machine state here. An open
+  # dissent is the latest GENUINE split (exit and overall both 1 — an
+  # incomplete round is not a disagreement) whose event no
+  # artifact-resolution receipt has retired; a later non-split gate must not
+  # bury a split nobody acknowledged, and a resolved one must stop nagging.
   local review_json=""
   review_json="$(python3 - "$repo" <<'PY' 2>/dev/null || true
 import json, os, sys
 
 index = os.path.join(sys.argv[1], ".oms", "artifacts", "index.jsonl")
-review = None
+resolved = set()
+rows = []
 try:
     with open(index, encoding="utf-8") as fh:
         for line in fh:
@@ -448,12 +453,33 @@ try:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if row.get("kind") == "review-outcome" and isinstance(row.get("review"), dict):
-                review = row["review"]
+            if not isinstance(row, dict):
+                continue
+            if row.get("kind") == "artifact-resolution":
+                target = row.get("resolves_event_id")
+                if isinstance(target, str) and target:
+                    resolved.add(target)
+            elif row.get("kind") == "review-outcome" and isinstance(row.get("review"), dict):
+                rows.append(row)
 except OSError:
     raise SystemExit(0)
-if review is not None:
-    print(json.dumps(review, ensure_ascii=False, separators=(",", ":")))
+
+best = None
+for row in rows:
+    review = row["review"]
+    seats = [s for s in review.get("seats", []) if isinstance(s, dict)]
+    verdicts = [s.get("verdict") for s in seats]
+    if "pass" not in verdicts or "fail" not in verdicts:
+        continue
+    if row.get("exit") != 1 or review.get("overall") != 1:
+        continue
+    event_id = row.get("event_id")
+    if isinstance(event_id, str) and event_id in resolved:
+        continue
+    best = {"overall": 1, "seats": seats,
+            "event_id": event_id if isinstance(event_id, str) else ""}
+if best is not None:
+    print(json.dumps(best, ensure_ascii=False, separators=(",", ":")))
 PY
 )"
   if [ -z "$review_json" ] && [ -d "$repo/.oms/artifacts/review" ]; then
@@ -475,6 +501,8 @@ if not isinstance(data, dict):
     raise SystemExit(0)
 seats = [s for s in data.get("seats", []) if isinstance(s, dict)]
 verdicts = [s.get("verdict") for s in seats]
+if data.get("overall") != 1:
+    raise SystemExit(0)
 if "pass" in verdicts and "fail" in verdicts:
     for seat in seats:
         line = "%s: %s" % (seat.get("provider", "?"), seat.get("verdict", "?"))
@@ -482,6 +510,11 @@ if "pass" in verdicts and "fail" in verdicts:
         if isinstance(confidence, (int, float)):
             line += " (confidence %s)" % confidence
         print(line)
+    event_id = data.get("event_id")
+    if isinstance(event_id, str) and event_id:
+        print("event: %s" % event_id)
+        print('resolve: oms artifact-index resolve --event-id %s --reason "<how it was settled>"'
+              % event_id)
 PY
 )"
   {

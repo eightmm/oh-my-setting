@@ -7584,18 +7584,47 @@ test_session_handoff_dissents_from_typed_outcome() {
   local cwd="$TMP/sh-typed-proj"
   local proj sess out
 
-  # A typed review-outcome row and NO review artifacts: the dissent block
-  # must come from the typed row, not from re-parsing rendered Markdown.
+  # Typed review-outcome rows and NO review artifacts: the dissent block must
+  # come from the typed rows, not from re-parsing rendered Markdown, and it
+  # must select the latest UNRESOLVED genuine split — a resolved split (an
+  # artifact-resolution receipt names its event) and an incomplete round
+  # (overall=2) are not open dissents, and a later non-split gate must not
+  # bury an older split that nobody acknowledged.
   mkdir -p "$cwd/.oms/artifacts"
   python3 - "$cwd/.oms/artifacts/index.jsonl" <<'PY'
 import json, sys
-row = {"kind": "review-outcome", "provider": "local", "exit": 1,
-       "review": {"seats": [
-           {"provider": "codex", "verdict": "pass", "confidence": 0.8, "round": 2},
-           {"provider": "claude", "verdict": "fail", "confidence": None, "round": 2}],
-           "gate_verify_exit": 0}}
+
+rows = [
+    # A resolved split: its receipt below retires it.
+    {"schema": 1, "kind": "review-outcome", "provider": "local", "exit": 1,
+     "event_id": "evt_resolved_split",
+     "review": {"overall": 1, "gate_verify_exit": 0, "seats": [
+         {"provider": "codex", "verdict": "pass", "confidence": 0.9, "round": 1},
+         {"provider": "claude", "verdict": "fail", "confidence": None, "round": 1}]}},
+    {"schema": 1, "kind": "artifact-resolution", "provider": "local", "exit": 0,
+     "event_id": "evt_receipt", "resolves_event_id": "evt_resolved_split"},
+    # The open split this digest must carry.
+    {"schema": 1, "kind": "review-outcome", "provider": "local", "exit": 1,
+     "event_id": "evt_open_split",
+     "review": {"overall": 1, "gate_verify_exit": 0, "seats": [
+         {"provider": "codex", "verdict": "pass", "confidence": 0.8, "round": 2},
+         {"provider": "claude", "verdict": "fail", "confidence": None, "round": 2}]}},
+    # An incomplete later round: pass+fail+incomplete is overall=2, not a split.
+    {"schema": 1, "kind": "review-outcome", "provider": "local", "exit": 2,
+     "event_id": "evt_incomplete",
+     "review": {"overall": 2, "gate_verify_exit": 0, "seats": [
+         {"provider": "codex", "verdict": "pass", "confidence": 0.7, "round": 1},
+         {"provider": "claude", "verdict": "fail", "confidence": None, "round": 1},
+         {"provider": "antigravity", "verdict": "incomplete", "confidence": None, "round": 1}]}},
+    # A later all-pass gate must not bury the unacknowledged split above.
+    {"schema": 1, "kind": "review-outcome", "provider": "local", "exit": 0,
+     "event_id": "evt_green",
+     "review": {"overall": 0, "gate_verify_exit": 0, "seats": [
+         {"provider": "codex", "verdict": "pass", "confidence": 0.9, "round": 1}]}},
+]
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
-    fh.write(json.dumps(row) + "\n")
+    for row in rows:
+        fh.write(json.dumps(row) + "\n")
 PY
   proj="$home/projects/$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9.' '-')"
   sess="$proj/cccccccc-1111-2222-3333-444444444444.jsonl"
@@ -7612,6 +7641,18 @@ PY
   assert_file_contains "$out" "## Open dissents"
   assert_file_contains "$out" "codex: pass (confidence 0.8)"
   assert_file_contains "$out" "claude: fail"
+  # The selected split names its event and the exact resolution entrance.
+  assert_file_contains "$out" "evt_open_split"
+  assert_file_contains "$out" "artifact-index"
+  if grep -Fq "evt_resolved_split" "$out"; then
+    fail "a resolved split reached the digest despite its receipt"
+  fi
+  if grep -Fq "confidence 0.9" "$out"; then
+    fail "a resolved or non-split row's seats reached the digest"
+  fi
+  if grep -Fq "antigravity: incomplete" "$out"; then
+    fail "an incomplete round was rendered as an open split"
+  fi
 }
 
 test_session_handoff_codex_digest() {
