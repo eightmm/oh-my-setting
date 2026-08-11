@@ -15,6 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$PWD"
 ACTION=""
 PROPOSAL=""
+PROPOSAL_SHA=""
 PLANNER="claude"
 WORKER="codex"
 REVIEWER=""
@@ -36,7 +37,7 @@ DRAFT_PR_TOOL="${OMS_AUTOPILOT_DRAFT_PR:-$ROOT/scripts/draft-pr.sh}"
 usage() {
   cat <<'EOF'
 Usage: autopilot.sh [options] propose
-       autopilot.sh [options] run [--proposal FILE]
+       autopilot.sh [options] run [--proposal FILE --expected-proposal-sha256 SHA]
        autopilot.sh [--repo PATH] status
 
 Coordinate a confirmed PROJECT.md through a reviewed plan, bounded goal-drive,
@@ -45,10 +46,13 @@ one optional remainder proposal, semantic review, and optionally a Draft PR.
   propose                 Generate an initial proposal, or one r1- remainder
                           proposal after every current task is done. Exits 4
                           because a parent must review the exact proposal.
-  run [--proposal FILE]   Atomically apply a reviewed proposal when supplied,
-                          drive the plan, and finish locally or publish a Draft
-                          PR. Task exhaustion may emit the sole r1- proposal
-                          and exit 4. Every other unsafe stop exits 3.
+  run [--proposal FILE --expected-proposal-sha256 SHA]
+                          Atomically apply a reviewed proposal when supplied
+                          (the digest of the reviewed bytes is required and
+                          rechecked against a read-once snapshot), drive the
+                          plan, and finish locally or publish a Draft PR. Task
+                          exhaustion may emit the sole r1- proposal and exit 4.
+                          Every other unsafe stop exits 3.
   status                  Show the current plan and latest drive terminal row.
 
 Options:
@@ -70,10 +74,12 @@ Options:
   --draft-pr              After acceptance/review, prepare and publish an exact
                           create-only Draft PR. Never merges or releases.
 
-Generated proposals never apply themselves. `run --proposal FILE` is the
-parent's exact approval boundary. Proposal bytes and the plan CAS are checked
-inside one atomic plan update; PROJECT.md, HEAD, and the allowed envelope are
-bound to that durable plan and rechecked on every resume. A run started on the
+Generated proposals never apply themselves. `run --proposal FILE
+--expected-proposal-sha256 SHA` is the parent's exact approval boundary: the
+digest printed at propose time must come back, and the bytes are snapshotted
+once and verified before anything reads them. Proposal bytes and the plan CAS
+are checked inside one atomic plan update; PROJECT.md, HEAD, and the allowed
+envelope are bound to that durable plan and rechecked on every resume. A run started on the
 named base first switches to a deterministic local feature branch.
 EOF
 }
@@ -93,6 +99,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --proposal) [ "$#" -ge 2 ] || fail "--proposal requires a file"; PROPOSAL="$2"; shift 2 ;;
+    --expected-proposal-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a digest"
+      PROPOSAL_SHA="$2"; shift 2 ;;
     --planner) [ "$#" -ge 2 ] || fail "--planner requires a provider"; PLANNER="$2"; shift 2 ;;
     --worker) [ "$#" -ge 2 ] || fail "--worker requires a provider"; WORKER="$2"; shift 2 ;;
     --reviewer) [ "$#" -ge 2 ] || fail "--reviewer requires a provider"; REVIEWER="$2"; shift 2 ;;
@@ -135,6 +144,13 @@ case "$REPLAN_TASKS" in *[!0-9]*|"") fail "--replan-tasks must be 1..2" ;; esac
 [ "$REPLAN_TASKS" -ge 1 ] && [ "$REPLAN_TASKS" -le 2 ] || fail "--replan-tasks must be 1..2"
 case "$REVIEW_MODE" in shadow|gate|off) ;; *) fail "--review-mode must be shadow, gate, or off" ;; esac
 case "$REMOTE" in *[!A-Za-z0-9._-]*|"") fail "--remote has unsafe characters" ;; esac
+if [ -n "$PROPOSAL_SHA" ]; then
+  case "$PROPOSAL_SHA" in
+    *[!0-9a-f]*|"") fail "--expected-proposal-sha256 must be a lowercase SHA-256" ;;
+  esac
+  [ "${#PROPOSAL_SHA}" -eq 64 ] ||
+    fail "--expected-proposal-sha256 must be a lowercase SHA-256"
+fi
 
 if [ "$ACTION" != status ] && [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
   fail "a harness child cannot start or resume parent autopilot authority"
@@ -318,15 +334,30 @@ PY
 propose_tasks() {  # PREFIX MAX
   local prefix="$1"
   local max_tasks="$2"
-  local args
+  local args out rc proposal_path proposal_digest
 
   [ -n "$ALLOWED" ] || fail "--allowed is required to generate a proposal"
   args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED")
   [ -z "$prefix" ] || args+=(--id-prefix "$prefix")
-  local rc=0
-  "$PLAN_FROM_SPEC" "${args[@]}" || rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
+  out="$(autopilot_mktemp)" || fail "mktemp failed"
+  rc=0
+  OMS_AUTOPILOT=1 "$PLAN_FROM_SPEC" "${args[@]}" > "$out" 2>&1 || rc=$?
+  cat "$out"
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$out"
+    return "$rc"
+  fi
+  proposal_path="$(sed -n 's/^plan-from-spec: proposed .* -> //p' "$out" | tail -n 1)"
+  proposal_digest="$(sed -n 's/^plan-from-spec: proposal sha256: //p' "$out" | tail -n 1)"
+  rm -f "$out"
+  proposal_path="${proposal_path//$'\r'/}"
+  proposal_digest="${proposal_digest//$'\r'/}"
+  [ -n "$proposal_path" ] && [ -n "$proposal_digest" ] ||
+    fail "the proposal was generated without a path/digest receipt"
   echo "autopilot: proposal awaits parent review"
+  echo "autopilot: after review, resume with:"
+  echo "  oms autopilot --repo $REPO --allowed $ALLOWED --base ${BASE:-<base-branch>} run \\"
+  echo "    --proposal $proposal_path --expected-proposal-sha256 $proposal_digest"
   return 4
 }
 
@@ -346,6 +377,18 @@ git check-ref-format --branch "$BASE" >/dev/null 2>&1 || fail "--base is not a v
 
 if [ -n "$PROPOSAL" ]; then
   [ -n "$ALLOWED" ] || fail "run --proposal requires the reviewed --allowed envelope"
+  [ -n "$PROPOSAL_SHA" ] ||
+    fail "run --proposal requires --expected-proposal-sha256 from the reviewed proposal"
+  # Read the reviewed bytes exactly once into private scratch. Every later
+  # consumer (tranche metadata, validation, atomic apply) sees this snapshot,
+  # so a swap of the operator-named file after review changes nothing.
+  proposal_snapshot="$AUTOPILOT_TMPDIR/proposal.json"
+  cat -- "$PROPOSAL" > "$proposal_snapshot" 2>/dev/null ||
+    fail "cannot read the proposal file"
+  snapshot_sha="$(oms_sha256_file "$proposal_snapshot")" || fail "cannot hash the proposal"
+  [ "$snapshot_sha" = "$PROPOSAL_SHA" ] ||
+    fail "proposal bytes do not match the reviewed --expected-proposal-sha256"
+  PROPOSAL="$proposal_snapshot"
   proposal_meta="$(proposal_info "$PROPOSAL")" || fail "proposal metadata/tasks are invalid"
   proposal_meta="${proposal_meta//$'\r'/}"
   prefix="$(printf '%s\n' "$proposal_meta" | sed -n 1p)"
@@ -362,15 +405,18 @@ if [ -n "$PROPOSAL" ]; then
     fi
   fi
   apply_cap="$INITIAL_TASKS"
-  apply_args=(--repo "$REPO" --apply "$PROPOSAL" --max-tasks "$apply_cap" --allowed "$ALLOWED")
+  apply_args=(--repo "$REPO" --apply "$PROPOSAL" \
+    --expected-proposal-sha256 "$PROPOSAL_SHA" \
+    --max-tasks "$apply_cap" --allowed "$ALLOWED")
   if [ "$prefix" = r1- ]; then
     apply_cap="$REPLAN_TASKS"
-    apply_args=(--repo "$REPO" --apply "$PROPOSAL" --max-tasks "$apply_cap" \
-      --allowed "$ALLOWED" --id-prefix r1-)
+    apply_args=(--repo "$REPO" --apply "$PROPOSAL" \
+      --expected-proposal-sha256 "$PROPOSAL_SHA" \
+      --max-tasks "$apply_cap" --allowed "$ALLOWED" --id-prefix r1-)
   elif [ -n "$prefix" ]; then
     fail "unsupported proposal tranche prefix: $prefix"
   fi
-  "$PLAN_FROM_SPEC" "${apply_args[@]}"
+  OMS_AUTOPILOT=1 "$PLAN_FROM_SPEC" "${apply_args[@]}"
 fi
 
 [ -f "$PLAN_FILE" ] || fail "no approved plan; run autopilot propose first"

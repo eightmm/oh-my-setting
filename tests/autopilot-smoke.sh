@@ -441,7 +441,9 @@ cat > "$proposal" <<'JSON'
 {"schema":1,"kind":"agent-plan-proposal","tasks":[{"id":"r1-finish","title":"fix: finish remainder","allowed":["src/"],"verify":"true","depends":["t1"]}]}
 JSON
 echo "plan-from-spec: proposed 1 task(s) -> $proposal"
-echo "review the list, then: oms plan-from-spec --repo $OMS_T_REPO --apply $proposal"
+echo "plan-from-spec: proposal sha256: $(python3 -c \
+  'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' \
+  "$proposal")"
 EOF
 
 cat > "$bin/peer-review" <<'EOF'
@@ -501,6 +503,8 @@ test_autopilot_orchestration() {
     > "$repo/replan.out" 2>&1 || rc=$?
   [ "$rc" = 4 ] || fail "task exhaustion should propose one bounded replan, got $rc"
   grep -Fq 'proposal-r1.json' "$repo/replan.out" || fail "replan proposal pointer missing"
+  grep -Fq -- '--expected-proposal-sha256' "$repo/replan.out" ||
+    fail "the printed continuation does not bind the proposal digest"
   grep -Fq -- '--id-prefix r1-' "$repo/calls/plan-from-spec" ||
     fail "replan did not fence generated ids"
   grep -Fq -- '--max-tasks 2' "$repo/calls/plan-from-spec" ||
@@ -655,9 +659,27 @@ PY
 {"schema":1,"kind":"agent-plan-proposal","id_prefix":"r1-","allowed_envelope":["src","tests"],"tasks":[{"id":"r1-second","title":"fix: second remainder","allowed":["src"],"verify":"true","depends":[]}]}
 JSON
   rc=0
-  run_autopilot "$repo" run --proposal "$second_proposal" --allowed 'src,tests' \
-    --worker codex --base main >/dev/null 2>&1 || rc=$?
+  run_autopilot "$repo" run --proposal "$second_proposal" \
+    --expected-proposal-sha256 "$(sha256_file "$second_proposal")" \
+    --allowed 'src,tests' --worker codex --base main >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "direct second remainder should be rejected, got $rc"
+
+  # The parent's reviewed digest is required, and bytes that no longer match
+  # it are refused before any metadata or apply read.
+  rc=0
+  run_autopilot "$repo" run --proposal "$second_proposal" --allowed 'src,tests' \
+    --worker codex --base main > "$repo/no-digest.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a proposal without the reviewed digest should be rejected, got $rc"
+  grep -Fq 'requires --expected-proposal-sha256' "$repo/no-digest.out" ||
+    fail "missing digest was rejected for the wrong reason"
+  rc=0
+  run_autopilot "$repo" run --proposal "$second_proposal" \
+    --expected-proposal-sha256 \
+    0000000000000000000000000000000000000000000000000000000000000000 \
+    --allowed 'src,tests' --worker codex --base main > "$repo/bad-digest.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "swapped proposal bytes should be rejected, got $rc"
+  grep -Fq 'do not match the reviewed' "$repo/bad-digest.out" ||
+    fail "digest mismatch was rejected for the wrong reason"
 
   local bad_prefix="$contract_repo/.oms/plan/bad-prefix.json"
   local bad_spec bad_plan bad_base

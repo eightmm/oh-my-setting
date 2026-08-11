@@ -18,6 +18,7 @@ APPLY_FILE=""
 MAX_TASKS=6
 ID_PREFIX=""
 ALLOWED_ENVELOPE=""
+EXPECTED_PROPOSAL_SHA=""
 
 usage() {
   cat <<'EOF'
@@ -40,6 +41,10 @@ for review — nothing touches the task board until --apply.
   --apply FILE    Append a reviewed proposal's tasks to the plan. Creates the
                   plan (goal + acceptance from PROJECT.md) when absent; an
                   existing plan and its acceptance command are never replaced.
+  --expected-proposal-sha256 SHA
+                  With --apply: the digest of the exact reviewed proposal
+                  bytes. Apply fails when the file no longer matches, binding
+                  the parent's review to what actually executes.
 
 A PROJECT.md still in `- State: draft` is refused: decomposing an unconfirmed
 spec automates guessing.
@@ -64,6 +69,9 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--allowed requires paths"
       ALLOWED_ENVELOPE="$2"; shift 2 ;;
     --apply) [ "$#" -ge 2 ] || fail "--apply requires a file"; APPLY_FILE="$2"; shift 2 ;;
+    --expected-proposal-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a digest"
+      EXPECTED_PROPOSAL_SHA="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -81,6 +89,15 @@ case "$ID_PREFIX" in
   "") ;;
   *[!A-Za-z0-9._-]*) fail "--id-prefix must match [A-Za-z0-9._-]+" ;;
 esac
+
+if [ -n "$EXPECTED_PROPOSAL_SHA" ]; then
+  [ -n "$APPLY_FILE" ] || fail "--expected-proposal-sha256 requires --apply"
+  case "$EXPECTED_PROPOSAL_SHA" in
+    *[!0-9a-f]*|"") fail "--expected-proposal-sha256 must be a lowercase SHA-256" ;;
+  esac
+  [ "${#EXPECTED_PROPOSAL_SHA}" -eq 64 ] ||
+    fail "--expected-proposal-sha256 must be a lowercase SHA-256"
+fi
 
 # Shared validator: a proposal is usable only when every task is mechanically
 # safe to hand to plan-run (id shape, non-empty scope, non-empty verify,
@@ -274,7 +291,13 @@ PY
   # order, remain the same reviewed boundary.
   apply_allowed="${ALLOWED_ENVELOPE:-$proposal_allowed}"
   [ -n "$apply_allowed" ] || apply_allowed=.
-  proposal_sha="$(oms_sha256_file "$APPLY_FILE")" || fail "cannot hash proposal"
+  if [ -n "$EXPECTED_PROPOSAL_SHA" ]; then
+    # The parent reviewed exact bytes; agent-plan re-reads the file and
+    # refuses any drift from this digest inside its atomic apply.
+    proposal_sha="$EXPECTED_PROPOSAL_SHA"
+  else
+    proposal_sha="$(oms_sha256_file "$APPLY_FILE")" || fail "cannot hash proposal"
+  fi
 
   "$ROOT/scripts/agent-plan.sh" --repo "$REPO" apply-proposal \
     --proposal "$APPLY_FILE" \
@@ -282,7 +305,11 @@ PY
     --expected-plan-sha256 "$expected_plan_sha" \
     --goal "${goal:-see PROJECT.md}" --accept "$accept" \
     --allowed-envelope "$apply_allowed" --max-tasks "$MAX_TASKS" >/dev/null
-  echo "plan-from-spec: $count task(s) applied; drive with: oms goal-drive --repo $REPO"
+  if [ "${OMS_AUTOPILOT:-0}" = 1 ]; then
+    echo "plan-from-spec: $count task(s) applied"
+  else
+    echo "plan-from-spec: $count task(s) applied; drive with: oms goal-drive --repo $REPO"
+  fi
   exit 0
 fi
 
@@ -424,7 +451,9 @@ out="$(validate_proposal "$proposal")" || {
 }
 out="${out//$'\r'/}"
 count="${out#ok }"
+proposal_digest="$(oms_sha256_file "$proposal")" || fail "cannot hash the proposal"
 echo "plan-from-spec: proposed $count task(s) -> $proposal"
+echo "plan-from-spec: proposal sha256: $proposal_digest"
 python3 - "$proposal" <<'PY'
 import json, sys
 for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
@@ -432,5 +461,9 @@ for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
     print("  %-14s %s  [allowed: %s] [verify: %s] [depends: %s]" % (
         t["id"], t["title"], ",".join(t["allowed"]), t["verify"], deps))
 PY
-echo "review the list, then: oms plan-from-spec --repo $REPO --apply $proposal"
+# Under autopilot the sole continuation is the digest-bound autopilot run,
+# which the parent prints itself; standalone advice would bypass that entrance.
+if [ "${OMS_AUTOPILOT:-0}" != 1 ]; then
+  echo "review the list, then: oms plan-from-spec --repo $REPO --apply $proposal --expected-proposal-sha256 $proposal_digest"
+fi
 exit 0
