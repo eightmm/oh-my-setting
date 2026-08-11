@@ -335,7 +335,7 @@ SLOW_TASK=repair-signal SLOW_STARTED="$slow_started" HOME="$home" \
   PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$resume_repo" --to codex \
   --id repair-signal --land --auto-repair >"$TMP/repair-signal.out" 2>&1 &
 repair_signal_pid="$!"
-for _ in 1 2 3 4 5; do [ -e "$slow_started" ] && break; sleep 1; done
+for _ in $(seq 1 50); do [ -e "$slow_started" ] && break; sleep 0.1; done
 [ -e "$slow_started" ] || fail "repair signal fixture never reached its provider"
 kill -TERM "$repair_signal_pid"
 rc=0
@@ -544,7 +544,7 @@ CHILD_STARTED="$TMP/child-started" CHILD_CLEANED="$TMP/child-cleaned" \
   HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id signal \
   >"$TMP/signal.out" 2>"$TMP/signal.err" &
 runner_pid="$!"
-for _ in 1 2 3 4 5; do [ -e "$TMP/child-started" ] && break; sleep 1; done
+for _ in $(seq 1 50); do [ -e "$TMP/child-started" ] && break; sleep 0.1; done
 [ -e "$TMP/child-started" ] || fail "signal fixture child did not start"
 kill -TERM "$runner_pid"
 rc=0

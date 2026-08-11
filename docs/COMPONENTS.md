@@ -346,6 +346,11 @@ declared mechanical gate.
 - Native PowerShell is not a supported shell; Windows support means Git Bash.
 - Full non-Linux behavior is strongest on the install lifecycle; most public
   tools run their comprehensive suites on Linux plus portability fixtures.
+- On the exercised Windows surface (install, update, doctor, journal status,
+  uninstall), paths cross to python as argv — which Git Bash converts — or
+  base64-encoded where a value must survive the environment
+  (provider-permissions). A new script on that surface must pick one of
+  those two crossings; plain env path values reach native python rewritten.
 - Locked upstream artifacts and the `edge` source ref remain supply-chain
   choices; review the lock and pin the source ref for higher assurance.
 - Policy handling classifies provider text. Unfamiliar or localized refusal
