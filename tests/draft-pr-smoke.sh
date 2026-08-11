@@ -1012,8 +1012,8 @@ EOF
     fail "viewer mismatch still created the source branch"
   fi
 
-  # A worker-planted local pre-push hook must never execute under the
-  # publisher's credentials: the create-only push suppresses hooks and signing.
+  # A worker-planted local pre-push hook must never execute with the
+  # publisher's authority, so the create-only push suppresses hooks and signing.
   repo="$TMP/hook-suppress"
   bare="$TMP/hook-suppress.git"
   make_repo "$repo" "$bare"
