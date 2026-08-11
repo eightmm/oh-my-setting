@@ -104,6 +104,8 @@ if text.count(start) != 1 or text.count(end) != 1:
     raise SystemExit("focused/smoke gate boundaries changed")
 focused = text.split(start, 1)[1].split(end, 1)[0]
 expected = {
+    "autopilot": "autopilot-smoke.sh",
+    "draft-pr": "draft-pr-smoke.sh",
     "lifecycle-events": "lifecycle-events-smoke.sh",
     "supervisor": "supervisor-smoke.sh",
     "lifecycle-provider-integration": "lifecycle-provider-integration-smoke.sh",

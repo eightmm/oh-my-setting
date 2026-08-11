@@ -1964,6 +1964,23 @@ test_doctor_fails_on_corrupt_operations_state() {
     fail "clean operations state should pass: $out"
   printf '%s' "$out" | grep -Fq 'ok: lifecycle and approval streams' ||
     fail "doctor did not report the operations streams: $out"
+
+  # A dead or unreadable validator is not a green stream: swallowing its
+  # failure into "ok" is the exact fail-open this check exists to close.
+  rc=0
+  out="$(OMS_DOCTOR_STATE_VERIFY="$TMP/doctor-ops-broken-verify.sh" \
+    run_doctor_for_project "$clean" "$home_dir")" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "doctor reported ok while its operations validator was missing: $out"
+  printf '%s' "$out" | grep -Fq 'operations validator' ||
+    fail "doctor did not name the dead validator: $out"
+  printf 'exit 3\n' > "$TMP/doctor-ops-broken-verify.sh"
+  chmod +x "$TMP/doctor-ops-broken-verify.sh"
+  rc=0
+  out="$(OMS_DOCTOR_STATE_VERIFY="$TMP/doctor-ops-broken-verify.sh" \
+    run_doctor_for_project "$clean" "$home_dir")" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "doctor reported ok over a crashing operations validator: $out"
 }
 
 test_doctor_uses_canonical_artifact_validation() {
@@ -9240,8 +9257,8 @@ test_oms_dispatcher_lists_and_dispatches() {
   out="$("$bin/oms" list)" || fail "oms list should succeed"
   printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
   printf '%s' "$out" | grep -Eq '^agent-run ' || fail "oms list should include agent-run"
-  for public in agent-events agent-supervisor approval-inbox execution-profile herdr-adapter \
-    open-in ops-cockpit otel-export semantic-eval; do
+  for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
+    execution-profile herdr-adapter open-in ops-cockpit otel-export semantic-eval; do
     printf '%s\n' "$out" | grep -Eq "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
@@ -10815,6 +10832,20 @@ test_skill_router_matches_and_dedupes() {
   if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
     fail "retired peer skill names must not be suggested"
   fi
+  # The documented natural-language autopilot request must reach the harness
+  # skill that owns its proposal approval and remote-write boundaries.
+  out="$(printf '{"prompt":"확정된 PROJECT.md를 구현해서 Draft PR까지 만들어줘","session_id":"r3","turn_id":"t4","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "confirmed spec to Draft PR should route to oms-agent-harness"
+  out="$(printf '{"prompt":"Implement the confirmed project spec and open a draft PR","session_id":"r4","turn_id":"t5","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "English autopilot paraphrase should route to oms-agent-harness"
+  out="$(printf '{"prompt":"확정된 프로젝트 스펙을 구현하고 Draft PR을 만들어줘","session_id":"r5","turn_id":"t6","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "Korean autopilot paraphrase should route to oms-agent-harness"
 }
 
 test_skill_router_separates_consultation_from_delegation() {

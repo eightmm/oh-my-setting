@@ -157,6 +157,7 @@ apply-project-template
 approval-inbox
 artifact-index
 auto-update
+autopilot
 change-guard
 checkpoint
 ci-status
@@ -164,6 +165,7 @@ cleanup
 consult
 data-manifest
 doctor
+draft-pr
 execution-profile
 experiment-board
 fail-ledger

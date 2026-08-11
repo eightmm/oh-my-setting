@@ -6,6 +6,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+- A bounded coding autopilot now carries a confirmed `PROJECT.md` through an
+  explicitly reviewed, atomically applied plan, one capped remainder proposal,
+  existing landing/acceptance gates, and cross-family semantic review. Its
+  optional durable publisher can only create an absent branch at the exact
+  verified HEAD and open or recover the matching Draft PR; it cannot update,
+  merge, mark ready, tag, or release. It scans the complete outbound object
+  history and permanently retires an intent changed by its verifier.
+
 ### Removed
 - Every duplicate entrance and dead compatibility layer left the verb
   surface, with no shims. `code-source`/`github-source` are gone entirely

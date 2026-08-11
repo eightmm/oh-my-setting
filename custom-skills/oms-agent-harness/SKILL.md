@@ -1,9 +1,9 @@
 ---
 name: oms-agent-harness
 description: >
-  Shared state and multi-agent coordination for resume, memory, plans, recovery,
-  roles/executors, provider/model routing, peer consultation, independent diff
-  review, isolated write delegation, patch landing, artifacts, and session
+  Multi-agent coordination for resume, memory, plans, recovery, roles/executors,
+  provider/model routing, peer consultation, independent review, isolated write
+  delegation, patch landing, bounded coding autopilot, Draft PRs, artifacts, and
   handoff across Codex, Claude Code, and Antigravity.
 ---
 
@@ -26,6 +26,7 @@ worktree writes, and repository writes.
 | act irreversibly, or fail the same way twice | `oms fail-ledger check --cmd "…"`, then `oms advise` | read |
 | hand work to another model | `oms peer-delegate --to NAME` (returns a patch) | worktree write |
 | split work so several agents can proceed | `oms agent-plan add`, then `oms plan-run` | worktree write |
+| implement a confirmed spec through a Draft PR | review `oms autopilot … propose`; run `oms autopilot … --proposal FILE --base BASE --draft-pr run` | repo, create-only remote |
 | judge a diff before it goes anywhere | `oms peer-review --gate` | read |
 | ask what agents cost or how often they verified/delegated | `oms artifact-index telemetry` (routes, outcomes, native activity, tokens, wall time) | read |
 | preserve local staged/unstaged state before a risky edit | `oms checkpoint create --label "…"`; restore is dry-run unless `--apply` | repo write |

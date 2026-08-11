@@ -65,6 +65,10 @@ interview to `PROJECT.md`, a template, and a doctor; an existing repo gets
 inspected first and interviewed only for gaps; an ongoing project gets a status
 report and the next step.
 
+Once `PROJECT.md` is confirmed, you can ask the agent to carry it through a
+reviewed task proposal, bounded implementation, acceptance checks, and a Draft
+PR. Generated work never approves itself, and merge/release stay separate.
+
 ## What You Can Say
 
 ```text
@@ -73,6 +77,7 @@ Apply the oh-my-setting ml template.              # or: general, slurm
 Run a peer review of the current diff.
 Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
+Take this confirmed PROJECT.md through implementation to a Draft PR.
 Ask another agent about this split policy, and keep the thread.
 Check this dataset's group split for leakage before I train.
 Frame this as a hypothesis-driven experiment before I launch the run.
@@ -112,7 +117,8 @@ door per capability; the full catalog is `oms list`, documented in
   child-attempt resume, a bounded supervisor, one-use approvals,
   `trusted-local`/`isolated`/`remote` preflight, optional Herdr control and
   VS Code/Stably Orca/Codex launchers, a read-only cockpit, local OTLP JSONL,
-  and advisory semantic evaluation
+  advisory semantic evaluation, and a bounded coding autopilot whose only
+  built-in remote-write path creates a branch plus Draft PR
 - **Maintenance** — transactional update with rollback, doctor, one full
   verification gate plus a protected-branch quick pre-push mode
 

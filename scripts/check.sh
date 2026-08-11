@@ -378,6 +378,8 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage autonomy-verification bash tests/autonomy-verification-smoke.sh
   stage autonomy-failure bash tests/autonomy-failure-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
+  stage autopilot bash tests/autopilot-smoke.sh
+  stage draft-pr bash tests/draft-pr-smoke.sh
   stage goal-drive-recovery bash tests/goal-drive-recovery-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
   stage execution-profile bash tests/execution-profile-smoke.sh

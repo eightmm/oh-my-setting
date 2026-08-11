@@ -139,4 +139,55 @@ if grep -Fq "$LEAK" "$repo/.oms/plan/progress.jsonl"; then
   fail "acceptance output leaked raw into progress receipts"
 fi
 
+# --- draft-pr intent: verifier text is durable and therefore strict --------
+repo="$TMP/draft-pr"; mk_repo "$repo"
+git -C "$repo" branch -M main
+printf '/.oms/\n' > "$repo/.gitignore"
+git -C "$repo" add .gitignore
+git -C "$repo" commit -qm ignore
+bare="$TMP/draft-pr.git"
+git init -q --bare "$bare"
+git -C "$repo" remote add origin "$bare"
+git -C "$repo" push -q -u origin main
+git -C "$repo" checkout -qb codex/durable-writer
+git -C "$repo" commit -q --allow-empty -m 'feat: fixture'
+real_git="$(command -v git)"
+mkdir -p "$TMP/draft-bin"
+cat > "$TMP/draft-bin/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *' remote get-url --push --all origin') echo 'git@github.com:eightmm/oh-my-setting.git'; exit 0 ;;
+  *' remote get-url --all origin') echo 'git@github.com:eightmm/oh-my-setting.git'; exit 0 ;;
+esac
+translated=()
+for arg in "\$@"; do
+  [ "\$arg" != 'git@github.com:eightmm/oh-my-setting.git' ] || arg="$bare"
+  translated+=("\$arg")
+done
+exec "$real_git" "\${translated[@]}"
+EOF
+cat > "$TMP/draft-bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'auth status') exit 0 ;;
+  'repo view') printf '{"nameWithOwner":"eightmm/oh-my-setting","viewerPermission":"WRITE"}\n' ;;
+  'api --hostname') printf 'fixture-user\n' ;;
+  *) exit 9 ;;
+esac
+EOF
+chmod +x "$TMP/draft-bin/git" "$TMP/draft-bin/gh"
+if OMS_GIT_BIN="$TMP/draft-bin/git" OMS_GH_BIN="$TMP/draft-bin/gh" \
+    bash "$ROOT/scripts/draft-pr.sh" --repo "$repo" prepare --base main \
+      --verify "printf '%s' '$LEAK' >/dev/null" >/dev/null 2>&1; then
+  fail "draft-pr must refuse a secret-bearing durable verifier"
+fi
+if OMS_GIT_BIN="$TMP/draft-bin/git" OMS_GH_BIN="$TMP/draft-bin/gh" \
+    bash "$ROOT/scripts/draft-pr.sh" --repo "$repo" prepare --base main \
+      --verify "printf '%s' '$MPATH' >/dev/null" >/dev/null 2>&1; then
+  fail "draft-pr must refuse a machine-path-bearing durable verifier"
+fi
+if [ -d "$repo/.oms/publish" ] && grep -R -Eq "$LEAK|sentinel-user" "$repo/.oms/publish"; then
+  fail "sentinel leaked into a Draft PR publication intent"
+fi
+
 echo "durable-writers-contract-smoke: ok"

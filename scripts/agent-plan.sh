@@ -56,6 +56,11 @@ INCLUDE_RUNNING=0
 INCLUDE_REVIEW=0
 LEASE_ID="${OMS_PLAN_LEASE_ID:-}"
 AS_JSON=0
+PROPOSAL=""
+EXPECTED_PROPOSAL_SHA256=""
+EXPECTED_PLAN_SHA256=""
+ALLOWED_ENVELOPE=""
+MAX_TASKS=""
 
 usage() {
   cat <<'EOF'
@@ -65,6 +70,15 @@ Commands:
   init   --goal TEXT [--accept CMD]  Create/replace the plan with a goal and an
                                      optional goal-level acceptance command —
                                      the executable definition of done.
+  apply-proposal --proposal FILE --expected-proposal-sha256 SHA256
+         --expected-plan-sha256 absent|SHA256
+         [--goal TEXT --accept CMD] --allowed-envelope "p1,p2"
+         [--max-tasks N]
+                                     Atomically create/append every task in a
+                                     reviewed proposal. The plan CAS, proposal
+                                     digest, scope envelope, dependencies, and
+                                     duplicate definitions are checked under
+                                     the plan lock. Exact replay is idempotent.
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
          [--verify CMD] [--role NAME]
@@ -184,6 +198,19 @@ while [ "$#" -gt 0 ]; do
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --accept) [ "$#" -ge 2 ] || fail "--accept requires command"; ACCEPT="$2"; shift 2 ;;
+    --proposal) [ "$#" -ge 2 ] || fail "--proposal requires a file"; PROPOSAL="$2"; shift 2 ;;
+    --expected-proposal-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a value"
+      EXPECTED_PROPOSAL_SHA256="$2"; shift 2 ;;
+    --expected-plan-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-plan-sha256 requires a value"
+      EXPECTED_PLAN_SHA256="$2"; shift 2 ;;
+    --allowed-envelope)
+      [ "$#" -ge 2 ] || fail "--allowed-envelope requires paths"
+      ALLOWED_ENVELOPE="$2"; shift 2 ;;
+    --max-tasks)
+      [ "$#" -ge 2 ] || fail "--max-tasks requires a count"
+      MAX_TASKS="$2"; shift 2 ;;
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
     --lease-id) [ "$#" -ge 2 ] || fail "--lease-id requires value"; LEASE_ID="$2"; shift 2 ;;
     --claim) CLAIM=1; shift ;;
@@ -191,7 +218,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|add|claim|start|touch|review|repair|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief|accept)
+    init|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief|accept)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -204,6 +231,13 @@ if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
     fail "unknown provider: use codex, claude, or antigravity (agy)"
 fi
+
+case "$ACTION" in
+  init|apply-proposal|add)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
+      fail "$ACTION is parent-only; a harness child cannot change plan topology"
+    ;;
+esac
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -223,6 +257,34 @@ if [ -n "$GOAL$ACCEPT" ]; then
     fail "goal/acceptance text looks sensitive; pass credentials via environment, not command text"
   fi
   rm -f "$scan"
+fi
+
+if [ "$ACTION" = apply-proposal ]; then
+  [ -n "$PROPOSAL" ] || fail "apply-proposal requires --proposal"
+  [ -f "$PROPOSAL" ] && [ ! -L "$PROPOSAL" ] ||
+    fail "proposal must be a regular non-symlink file"
+  case "$EXPECTED_PROPOSAL_SHA256" in
+    *[!0-9a-f]*|"") fail "apply-proposal requires a lowercase --expected-proposal-sha256" ;;
+  esac
+  [ "${#EXPECTED_PROPOSAL_SHA256}" -eq 64 ] ||
+    fail "--expected-proposal-sha256 must be a lowercase SHA-256"
+  case "$EXPECTED_PLAN_SHA256" in
+    absent) ;;
+    *[!0-9a-f]*|"") fail "apply-proposal requires --expected-plan-sha256 absent|SHA256" ;;
+    *)
+      [ "${#EXPECTED_PLAN_SHA256}" -eq 64 ] ||
+        fail "--expected-plan-sha256 must be absent or a lowercase SHA-256"
+      ;;
+  esac
+  [ -n "$ALLOWED_ENVELOPE" ] || fail "apply-proposal requires --allowed-envelope"
+  case "${MAX_TASKS:-12}" in
+    *[!0-9]*|"") fail "--max-tasks must be an integer" ;;
+  esac
+  [ "${MAX_TASKS:-12}" -ge 1 ] && [ "${MAX_TASKS:-12}" -le 12 ] ||
+    fail "--max-tasks must be 1..12"
+  if agent_memory_file_has_secret_content "$PROPOSAL"; then
+    fail "proposal looks sensitive; task contracts must not persist credentials"
+  fi
 fi
 
 # All mutations and queries run in one python process: load -> act -> (write|print).
@@ -251,16 +313,20 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
   OMS_VERIFY="$VERIFY" OMS_ACCEPT="$ACCEPT" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
   OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW" \
-  OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON" OMS_CLAIM_TTL="$CLAIM_TTL"
+  OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON" OMS_CLAIM_TTL="$CLAIM_TTL" \
+  OMS_EXPECTED_PROPOSAL_SHA256="$EXPECTED_PROPOSAL_SHA256" \
+  OMS_EXPECTED_PLAN_SHA256="$EXPECTED_PLAN_SHA256" \
+  OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}"
 
 plan_run() {
-python3 <<'PY'
-import datetime, hashlib, json, os, re, secrets, sys, tempfile
+python3 - "$PROPOSAL" <<'PY'
+import datetime, hashlib, json, os, re, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
 path = os.environ["OMS_PLAN_FILE"]
 act = os.environ["OMS_ACTION"]
 ts = os.environ["OMS_TS"]
+proposal_path = sys.argv[1]
 def env(k): return os.environ.get(k, "")
 
 STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
@@ -299,10 +365,54 @@ def save(d):
 def split_list(s):
     return [x.strip() for x in re.split(r"[,\s]+", s) if x.strip()]
 
+def read_regular_bytes(filename, label, maximum):
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(filename, flags)
+    except OSError as exc:
+        die("cannot open %s: %s" % (label, exc))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            die("%s must be a regular file" % label)
+        if info.st_size > maximum:
+            die("%s exceeds %d bytes" % (label, maximum))
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(1024 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                die("%s exceeds %d bytes" % (label, maximum))
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+def reject_controls(value, label):
+    if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
+        die("%s contains a control or format character" % label)
+
+def clean_rel(value, label):
+    if not isinstance(value, str):
+        die("%s must be a string" % label)
+    reject_controls(value, label)
+    value = value.strip().replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    value = value.rstrip("/") or "."
+    if (value.startswith("/") or re.match(r"^[A-Za-z]:", value) or
+            (value != "." and any(part in ("", ".", "..") for part in value.split("/")))):
+        die("%s must be a normalized repo-relative path" % label)
+    return value
+
 def require_id():
     i = env("OMS_ID")
     if not i: die("--id is required for %s" % act)
-    if not ID_RE.match(i): die("--id must match [A-Za-z0-9._-]+")
+    if not ID_RE.fullmatch(i): die("--id must match [A-Za-z0-9._-]+")
     return i
 
 def deps_done(d, t):
@@ -391,9 +501,253 @@ if act == "init":
     d = {"schema": SCHEMA, "goal": env("OMS_GOAL"), "accept": env("OMS_ACCEPT"), "tasks": {}}
     save(d); print("plan: initialized (%s)" % path); sys.exit(0)
 
+if act == "apply-proposal":
+    def sha256_file(filename):
+        digest = hashlib.sha256()
+        with open(filename, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    envelope = [clean_rel(item, "allowed envelope")
+                for item in split_list(env("OMS_ALLOWED_ENVELOPE"))]
+    if not envelope:
+        die("allowed envelope is empty")
+
+    def inside_envelope(value):
+        candidate = clean_rel(value, "proposal allowed path")
+        return any(root == "." or candidate == root or candidate.startswith(root + "/")
+                   for root in envelope)
+
+    proposal_bytes = read_regular_bytes(proposal_path, "proposal", 1024 * 1024)
+    expected_proposal = env("OMS_EXPECTED_PROPOSAL_SHA256")
+    if hashlib.sha256(proposal_bytes).hexdigest() != expected_proposal:
+        die("proposal bytes changed after review")
+    try:
+        proposal = json.loads(proposal_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        die("cannot read proposal: %s" % exc)
+    if not isinstance(proposal, dict) or proposal.get("schema") != 1:
+        die("proposal has an unsupported schema")
+    if proposal.get("kind") != "agent-plan-proposal":
+        die("proposal kind is not agent-plan-proposal")
+    top_keys = {
+        "schema", "kind", "spec_sha256", "plan_sha256", "base_sha",
+        "id_prefix", "allowed_envelope", "tasks",
+    }
+    if set(proposal) != top_keys:
+        die("proposal fields do not match the exact reviewed schema")
+
+    proposal_spec = proposal.get("spec_sha256")
+    proposal_plan = proposal.get("plan_sha256")
+    proposal_base = proposal.get("base_sha")
+    proposal_prefix = proposal.get("id_prefix")
+    proposal_envelope = proposal.get("allowed_envelope")
+    if (not isinstance(proposal_spec, str) or len(proposal_spec) != 64 or
+            any(ch not in "0123456789abcdef" for ch in proposal_spec)):
+        die("proposal spec_sha256 is invalid")
+    if (not isinstance(proposal_base, str) or len(proposal_base) not in (40, 64) or
+            any(ch not in "0123456789abcdef" for ch in proposal_base)):
+        die("proposal base_sha is invalid")
+    if proposal_plan != env("OMS_EXPECTED_PLAN_SHA256"):
+        die("proposal plan digest does not match the apply CAS")
+    if not isinstance(proposal_prefix, str) or (proposal_prefix and not ID_RE.fullmatch(proposal_prefix)):
+        die("proposal id prefix is invalid")
+    if not isinstance(proposal_envelope, list) or any(not isinstance(x, str) for x in proposal_envelope):
+        die("proposal allowed envelope is invalid")
+    reviewed_envelope = sorted(set(
+        clean_rel(item, "proposal allowed envelope") for item in proposal_envelope
+    )) or ["."]
+    if reviewed_envelope != sorted(set(envelope)):
+        die("proposal allowed envelope does not match the apply boundary")
+
+    spec_path = os.path.join(env("OMS_REPO"), "PROJECT.md")
+    spec_bytes = read_regular_bytes(spec_path, "PROJECT.md", 1024 * 1024)
+    if hashlib.sha256(spec_bytes).hexdigest() != proposal_spec:
+        die("PROJECT.md changed after proposal review")
+    try:
+        spec_text = spec_bytes.decode("utf-8")
+    except UnicodeError:
+        die("PROJECT.md must be UTF-8")
+    state_match = re.search(r"(?m)^- State:[ \t]*([^\r\n]+?)[ \t]*\r?$", spec_text)
+    if not state_match or state_match.group(1) not in ("confirmed", "active"):
+        die("PROJECT.md must be confirmed before plan topology is applied")
+    raw_tasks = proposal.get("tasks")
+    max_tasks = int(env("OMS_MAX_TASKS") or "12")
+    if not isinstance(raw_tasks, list) or not raw_tasks or len(raw_tasks) > max_tasks:
+        die("proposal tasks must contain 1..%d entries" % max_tasks)
+
+    prepared = []
+    seen = []
+    for index, raw in enumerate(raw_tasks):
+        if not isinstance(raw, dict):
+            die("proposal task %d must be an object" % index)
+        if set(raw) != {"id", "title", "allowed", "verify", "depends"}:
+            die("proposal task %d fields do not match the exact reviewed schema" % index)
+        task_id = raw.get("id")
+        title = raw.get("title")
+        verify = raw.get("verify")
+        if not isinstance(task_id, str) or not ID_RE.fullmatch(task_id):
+            die("proposal task %d has an invalid id" % index)
+        if task_id in seen:
+            die("proposal task ids must be unique")
+        if not isinstance(title, str) or not title.strip():
+            die("proposal task %s has no title" % task_id)
+        reject_controls(title, "proposal task %s title" % task_id)
+        if not isinstance(verify, str) or not verify.strip():
+            die("proposal task %s has no verify command" % task_id)
+        reject_controls(verify, "proposal task %s verify" % task_id)
+        if proposal_prefix and not task_id.startswith(proposal_prefix):
+            die("proposal task %s does not match id prefix %s" % (task_id, proposal_prefix))
+        allowed = raw.get("allowed")
+        if not isinstance(allowed, list) or not allowed:
+            die("proposal task %s has no allowed paths" % task_id)
+        cleaned_allowed = [clean_rel(item, "proposal task %s allowed path" % task_id)
+                           for item in allowed]
+        if not all(inside_envelope(item) for item in cleaned_allowed):
+            die("proposal task %s widens the allowed path envelope" % task_id)
+        forbidden = raw.get("forbidden") or []
+        if not isinstance(forbidden, list):
+            die("proposal task %s forbidden paths must be a list" % task_id)
+        cleaned_forbidden = [clean_rel(item, "proposal task %s forbidden path" % task_id)
+                             for item in forbidden]
+        depends = raw.get("depends") or []
+        if (not isinstance(depends, list) or any(not isinstance(dep, str) for dep in depends)
+                or any(not ID_RE.fullmatch(dep) for dep in depends)
+                or len(depends) != len(set(depends))):
+            die("proposal task %s dependencies must be ids" % task_id)
+        for dep in depends:
+            if dep in seen:
+                continue
+            if dep not in tasks:
+                die("proposal task %s depends on unknown/later task %s" % (task_id, dep))
+            if tasks[dep].get("state") != "done":
+                die("proposal task %s depends on unfinished existing task %s" % (task_id, dep))
+        role = raw.get("role") or ""
+        if not isinstance(role, str):
+            die("proposal task %s role must be a string" % task_id)
+        reject_controls(role, "proposal task %s role" % task_id)
+        prepared.append({
+            "id": task_id, "title": title.strip(), "depends": list(depends),
+            "allowed_paths": cleaned_allowed, "forbidden_paths": cleaned_forbidden,
+            "verify": verify, "role": role,
+        })
+        seen.append(task_id)
+
+    contract = d.get("project_contract")
+    if contract is not None:
+        if (not isinstance(contract, dict) or contract.get("schema") != 1 or
+                contract.get("spec_sha256") != proposal_spec or
+                contract.get("allowed_envelope") != reviewed_envelope):
+            die("existing plan project contract does not match the reviewed proposal")
+
+    immutable = ("id", "title", "depends", "allowed_paths", "forbidden_paths", "verify", "role")
+    already = [item["id"] in tasks for item in prepared]
+    if any(already):
+        if not all(already):
+            die("proposal is partially present; refusing a non-atomic recovery")
+        for item in prepared:
+            current = tasks[item["id"]]
+            if any(current.get(name, "" if name in ("verify", "role") else []) != item[name]
+                   for name in immutable):
+                die("existing task %s does not match the reviewed proposal" % item["id"])
+        if env("OMS_GOAL") and d.get("goal", "") != env("OMS_GOAL"):
+            die("existing plan goal does not match proposal replay")
+        if env("OMS_ACCEPT") and d.get("accept", "") != env("OMS_ACCEPT"):
+            die("existing plan acceptance does not match proposal replay")
+        # A HEAD-relaxed replay is read-only and is allowed only after the
+        # reviewed project contract was already persisted by the first apply.
+        if contract is not None:
+            print("plan: proposal already applied (%s)" % ",".join(seen))
+            sys.exit(0)
+
+    try:
+        current_head = subprocess.check_output(
+            ["git", "-C", env("OMS_REPO"), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode("ascii").strip()
+    except (OSError, subprocess.CalledProcessError, UnicodeError):
+        die("cannot resolve the repository HEAD")
+    if current_head != proposal_base:
+        die("repository HEAD changed after proposal review")
+
+    expected_plan = env("OMS_EXPECTED_PLAN_SHA256")
+    if os.path.exists(path):
+        actual_plan = sha256_file(path)
+        if expected_plan != actual_plan:
+            die("plan changed after proposal review")
+        if env("OMS_GOAL") and d.get("goal", "") != env("OMS_GOAL"):
+            die("existing plan goal changed after proposal review")
+        if env("OMS_ACCEPT") and d.get("accept", "") != env("OMS_ACCEPT"):
+            die("existing plan acceptance changed after proposal review")
+    else:
+        if expected_plan != "absent":
+            die("proposal expected an existing plan")
+        if not env("OMS_GOAL") or not env("OMS_ACCEPT"):
+            die("initial proposal apply requires --goal and --accept")
+        d = {
+            "schema": SCHEMA,
+            "goal": env("OMS_GOAL"),
+            "accept": env("OMS_ACCEPT"),
+            "project_contract": {
+                "schema": 1,
+                "spec_sha256": proposal_spec,
+                "allowed_envelope": reviewed_envelope,
+            },
+            "tasks": {},
+        }
+        tasks = d["tasks"]
+
+    if contract is None:
+        # Adoption of an older manual plan is a first apply, not a replay: it
+        # stays behind the proposal's HEAD + plan CAS and admits no extra task.
+        if tasks:
+            proposed_ids = set(item["id"] for item in prepared)
+            extra_ids = sorted(set(tasks) - proposed_ids)
+            if extra_ids:
+                die("legacy plan has task(s) absent from the reviewed proposal: %s" %
+                    ", ".join(extra_ids))
+            for current_id, current_task in tasks.items():
+                current_allowed = current_task.get("allowed_paths") or []
+                if not current_allowed or not all(inside_envelope(item) for item in current_allowed):
+                    die("existing task %s is outside the reviewed project contract" % current_id)
+        d["project_contract"] = {
+            "schema": 1,
+            "spec_sha256": proposal_spec,
+            "allowed_envelope": reviewed_envelope,
+        }
+        if prepared and all(item["id"] in tasks for item in prepared):
+            save(d)
+            print("plan: proposal already applied (%s)" % ",".join(seen))
+            sys.exit(0)
+
+    for item in prepared:
+        task_id = item["id"]
+        tasks[task_id] = {
+            "id": task_id, "title": item["title"], "state": "ready",
+            "depends": item["depends"], "allowed_paths": item["allowed_paths"],
+            "forbidden_paths": item["forbidden_paths"], "verify": item["verify"],
+            "role": item["role"], "provider": "", "ttl": "", "artifact": "",
+            "patch": "", "reason": "", "executor_id": "",
+            "executor_soul_sha256": "", "lease_epoch": 0, "lease_id": "",
+            "review_lease_id": "", "repair_count": 0, "repair_artifact": "",
+            "created": ts, "updated": ts,
+        }
+    save(d)
+    print("plan: proposal applied %s" % ",".join(seen))
+    sys.exit(0)
+
 if act == "add":
     i = require_id(); title = env("OMS_TITLE")
     if not title: die("--title is required for add")
+    reject_controls(title, "task title")
+    reject_controls(env("OMS_VERIFY"), "task verify")
+    reject_controls(env("OMS_ROLE"), "task role")
+    if d.get("project_contract") is not None:
+        die("contract-bound plans accept new tasks only through a reviewed proposal")
     if i in tasks: die("task already exists: %s" % i)
     depends = split_list(env("OMS_DEPENDS"))
     unknown = [x for x in depends if x not in tasks]
@@ -451,7 +805,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         executor_soul = env("OMS_EXECUTOR_SOUL_SHA256")
         if bool(executor_id) != bool(executor_soul):
             die("task %s review executor receipt requires both id and soul hash" % i)
-        if executor_id and not ID_RE.match(executor_id):
+        if executor_id and not ID_RE.fullmatch(executor_id):
             die("--executor-id must match [A-Za-z0-9._-]+")
         if executor_soul and not re.match(r"^[0-9a-f]{64}$", executor_soul):
             die("--executor-soul-sha256 must be a lowercase SHA-256")
@@ -541,7 +895,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         expected_soul = env("OMS_EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256")
         if bool(expected_executor) != bool(expected_soul):
             die("expected review executor receipt requires both id and soul hash")
-        if expected_executor and not ID_RE.match(expected_executor):
+        if expected_executor and not ID_RE.fullmatch(expected_executor):
             die("--expected-review-executor-id must match [A-Za-z0-9._-]+")
         if expected_soul and not re.match(r"^[0-9a-f]{64}$", expected_soul):
             die("--expected-review-executor-soul-sha256 must be a lowercase SHA-256")
@@ -707,6 +1061,12 @@ if act == "list":
 
 if act == "status":
     if d.get("goal"): print("goal: %s" % d["goal"])
+    contract = d.get("project_contract")
+    if isinstance(contract, dict) and contract.get("spec_sha256"):
+        print("contract: PROJECT.md %s scope=%s" % (
+            str(contract["spec_sha256"])[:12],
+            ",".join(contract.get("allowed_envelope") or []) or "?",
+        ))
     if d.get("accept"):
         print("accept: %s" % d["accept"])
         progress_path = os.path.join(os.path.dirname(path), "progress.jsonl")

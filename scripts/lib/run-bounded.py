@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable POSIX wall clock for provider and verifier subprocesses."""
+"""Portable POSIX wall clock with an optional child address-space limit."""
 
 from __future__ import annotations
 
@@ -9,6 +9,12 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Optional
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - the caller fails closed off POSIX
+    resource = None  # type: ignore[assignment]
 
 
 def seconds(value: str) -> float:
@@ -25,6 +31,17 @@ def seconds(value: str) -> float:
 
 def normalized_returncode(returncode: int) -> int:
     return 128 + (-returncode) if returncode < 0 else returncode
+
+
+def memory_limit() -> Optional[int]:
+    raw = os.environ.get("OMS_RUN_BOUNDED_MAX_MEMORY_BYTES", "")
+    if not raw:
+        return None
+    if not re.fullmatch(r"[0-9]+", raw) or int(raw) <= 0:
+        raise ValueError("invalid OMS_RUN_BOUNDED_MAX_MEMORY_BYTES")
+    if resource is None or not hasattr(resource, "RLIMIT_AS"):
+        raise RuntimeError("address-space limits are unavailable")
+    return int(raw)
 
 
 def main() -> int:
@@ -44,19 +61,32 @@ def main() -> int:
     try:
         wall = seconds(sys.argv[1])
         kill_after = seconds(sys.argv[2])
+        max_memory = memory_limit()
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
+    except RuntimeError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 127
     label = sys.argv[3]
     command = sys.argv[4:]
+    def apply_limits() -> None:
+        if max_memory is not None:
+            assert resource is not None
+            resource.setrlimit(resource.RLIMIT_AS, (max_memory, max_memory))
+
     try:
         # Inherit all three streams. In particular, provider prompts arrive on
         # stdin; a communicate()/PIPE wrapper would consume or buffer them.
-        process = subprocess.Popen(command, start_new_session=True)
+        process = subprocess.Popen(
+            command,
+            start_new_session=True,
+            preexec_fn=apply_limits if max_memory is not None else None,
+        )
     except FileNotFoundError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 127
-    except (OSError, PermissionError) as exc:
+    except (OSError, PermissionError, subprocess.SubprocessError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 126
 

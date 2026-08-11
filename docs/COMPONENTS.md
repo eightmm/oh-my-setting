@@ -238,6 +238,31 @@ commit hooks, and compare-and-sets `HEAD` against the recorded parent while
 holding Git's index lock. A staged index that differs from the frozen base is
 preserved and parks the run instead of being overwritten.
 
+`oms autopilot` composes those boundaries. It proposes an initial plan for
+parent review, atomically applies only that exact proposal, drives the approved
+tasks, and may propose one `r1-` remainder tranche of at most two tasks. The
+mechanical acceptance command remains the hard gate; cross-family semantic
+review defaults to advisory shadow mode and can be made a gate explicitly. Its
+base is frozen to a commit before the drive, so a moved branch name cannot make
+the whole-change review empty.
+With `--draft-pr`, `oms draft-pr` rechecks the clean HEAD, tree, remote base,
+GitHub identity, write permission, and verifier before a create-only push and
+Draft PR. Every introduced Git object, including trees, is scanned for
+credential-shaped and machine-private content; defaults cap this at 20,000
+objects, 32 MiB per object, 256 MiB total, and a 180-second scan budget with
+fixed termination escalation; Git history traversal also runs under a 512 MiB
+process-memory ceiling. Hosts without both controls park before traversal.
+Temporary payloads are removed before parking.
+Hidden/sparse index entries and Git grafts are refused. Its local intent records
+a pre-push uncertainty phase, and verifier mutation terminally spends that
+intent, so a deleted branch is not recreated
+after an interrupted or tampered push; it cannot update an existing remote
+branch, merge, mark ready, tag, or release. Starting on the base branch
+creates a deterministic local `codex/autopilot-<spec-digest>` branch before the
+first drive cycle, with or without Draft PR publication. A failed or ambiguous
+push spends that intent; retry from a new branch name rather than risk replaying
+an effect whose absence cannot be proven permanently.
+
 Frozen executors combine a reusable role with task-specific scope, base SHA,
 lease, model route, and verify command. They are write-only and cannot widen
 their own authority or recursively delegate. A failed landing may re-arm the
@@ -266,6 +291,7 @@ oms gc
 | `execution-profile`, `herdr-adapter` | Environment/CLI contract preflight and optional pane/agent control. They are not a sandbox or landing authority. |
 | `open-in`, `ops-cockpit` | Probed VS Code/Stably Orca/Codex launch plans and a read-only, non-atomic operational summary. Its `observations` block projects the pending observation decisions — turn-guard intervention pairing, fail-ledger hook-row retirement, usage-family exposure — with no thresholds or tuning. |
 | `otel-export`, `semantic-eval` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; advisory patch evaluation from trusted host checks plus a self-reported judge result. |
+| `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |
 
 `trusted-local` inherits host files, credentials, processes, and network.
 `isolated` only checks an existing Docker daemon and local image; `remote` only
@@ -355,6 +381,16 @@ declared mechanical gate.
   choices; review the lock and pin the source ref for higher assurance.
 - Policy handling classifies provider text. Unfamiliar or localized refusal
   wording can be reported as an ordinary provider failure.
-- Version publication, pushes, and pull requests remain explicit owner actions.
-  `goal-drive` may create a local commit only inside its bounded acceptance
-  loop; it never pushes or releases that commit.
+- Version publication, merge, and release remain explicit owner actions.
+  `goal-drive` only creates local commits. `draft-pr publish` is the narrow
+  exception for a verified create-only branch and Draft PR; it never updates
+  an existing branch or advances the PR.
+- Draft publication still trusts repository-local pre-push hooks. The publisher
+  scans all new history objects before intent creation and again after its
+  verifier, disables implicit tag and submodule pushes, and binds the `gh`
+  viewer, while Git transport credentials may identify a different account.
+- GitHub creates pull requests from branch names, not caller-supplied expected
+  object IDs. The publisher checks both refs immediately before and after the
+  request and parks on drift, but another authorized GitHub writer can still
+  move a ref in that request window; restrict writers or protect those branches
+  when that residual race is unacceptable.

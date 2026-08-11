@@ -61,6 +61,10 @@ agent가 상태를 판별해 분기한다. 빈 디렉터리는 spec 인터뷰 �
 템플릿 → doctor로, 기존 repo는 코드를 먼저 읽고 빈 곳만 인터뷰하며, 진행 중
 프로젝트는 상태와 다음 할 일을 보고한다.
 
+`PROJECT.md`를 확정한 뒤에는 검토한 작업 제안 → 제한된 구현 → 합격 검사 →
+Draft PR까지 맡길 수 있다. 생성된 작업이 스스로 승인되지는 않으며 merge와
+release는 별도 권한으로 남는다.
+
 ## 이렇게 말하면 된다
 
 ```text
@@ -69,6 +73,7 @@ oh-my-setting ml 템플릿 적용해줘.                 # 또는 general, slurm
 지금 diff 피어 리뷰 돌려줘.
 세 모델에게 debate 한 라운드로 물어봐: vector DB냐 pgvector냐?
 이거 codex한테 위임해줘: scripts/train.py에 입력 검증 추가.
+확정된 PROJECT.md를 구현해서 Draft PR까지 만들어줘.
 이 split 정책 다른 에이전트한테 물어보고 thread 유지해줘.
 학습 전에 이 데이터셋 group split leakage 확인해줘.
 런 돌리기 전에 가설 기반 실험으로 정리해줘.
@@ -104,7 +109,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 - **운영과 실행 경계** — 영속 attempt 이벤트와 child-attempt 재개, 제한된
   supervisor, 한 번만 쓰는 승인, `trusted-local`/`isolated`/`remote` 사전 점검,
   선택적 Herdr 제어와 VS Code·Stably Orca·Codex 열기, 읽기 전용 cockpit,
-  로컬 OTLP JSONL, advisory semantic 평가
+  로컬 OTLP JSONL, advisory semantic 평가, 기본 제공 원격 쓰기 경로가 새
+  브랜치와 Draft PR 생성뿐인 제한된 코딩 autopilot
 - **유지보수** — 롤백 가능한 트랜잭션 업데이트, doctor, 하나의 전체 검증
   게이트와 보호 브랜치용 빠른 pre-push 모드
 
