@@ -174,6 +174,18 @@ write_au_receipt "$TMP/not-the-owner" true
 out="$(attention env)"
 case "$out" in "attention: disabled"*) ;; *) fail "a non-owner checkout must read disabled: $out" ;; esac
 
+# A state file with no readable status is a torn write or corruption, not a
+# green light: an empty file used to fall through to "attention: ok",
+# masking a failed run at the exact moment its state was being rewritten.
+write_au_receipt "$ROOT" true
+printf 'auto-update.sh apply\n' > "$au_cron"
+: > "$au_state"
+out="$(attention env)"
+case "$out" in "attention: unknown"*) ;; *) fail "an empty state file must read unknown, not ok: $out" ;; esac
+printf 'garbage without a key\n' > "$au_state"
+out="$(attention env)"
+case "$out" in "attention: unknown"*) ;; *) fail "an unreadable state file must read unknown: $out" ;; esac
+
 # End to end: the verdict rides repo-state into inbox as a P1 item.
 write_au_receipt "$ROOT" true
 printf 'auto-update.sh apply\n' > "$au_cron"

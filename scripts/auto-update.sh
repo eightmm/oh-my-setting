@@ -135,9 +135,22 @@ print_attention() {
     echo "attention: no-run — trigger installed but no update run recorded yet"
     return 0
   fi
-  status="$(awk -F= '$1 == "status" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE")"
-  last_run="$(awk -F= '$1 == "last_run" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE")"
-  message="$(awk -F= '$1 == "message" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE")"
+  # One file open for all three fields: three separate opens could mix two
+  # generations of the file even after the writer became atomic.
+  state_parsed="$(awk -F= '
+    $1 == "status" && !s { s = substr($0, index($0, "=") + 1) }
+    $1 == "last_run" && !l { l = substr($0, index($0, "=") + 1) }
+    $1 == "message" && !m { m = substr($0, index($0, "=") + 1) }
+    END { print s; print l; print m }
+  ' "$STATE_FILE")"
+  status="$(printf '%s\n' "$state_parsed" | sed -n 1p)"
+  last_run="$(printf '%s\n' "$state_parsed" | sed -n 2p)"
+  message="$(printf '%s\n' "$state_parsed" | sed -n 3p)"
+  if [ -z "$status" ]; then
+    # No readable status is a torn write or corruption, never a green light.
+    echo "attention: unknown — state file has no readable status (empty or mid-write); recheck after the next run"
+    return 0
+  fi
   if [ "$status" = "failed" ]; then
     echo "attention: failed — ${message:-last update run failed}${last_run:+ (last run $last_run)}"
     return 0
@@ -168,6 +181,11 @@ write_state() {
   local upstream="${5:-}"
 
   mkdir -p "$(dirname "$STATE_FILE")"
+  # Stage beside the file and publish with one rename: status.sh, the inbox
+  # ranker, and attention read this without a lock, and a truncate-in-place
+  # write let a torn read mask a failed run as ok. Overlapping check/apply
+  # runs resolve by last completion; the rename keeps every observed state a
+  # complete one.
   {
     printf 'last_run=%s\n' "$(now_utc)"
     printf 'mode=%s\n' "$MODE"
@@ -177,7 +195,9 @@ write_state() {
     [ -n "$local_commit" ] && printf 'local=%s\n' "$local_commit"
     [ -n "$remote_commit" ] && printf 'remote=%s\n' "$remote_commit"
     [ -n "$upstream" ] && printf 'upstream=%s\n' "$upstream"
-  } > "$STATE_FILE"
+    :
+  } > "$STATE_FILE.tmp.$$"
+  mv -f "$STATE_FILE.tmp.$$" "$STATE_FILE"
   log_msg "$MODE: $status: $message"
 }
 
@@ -604,8 +624,8 @@ oms_try_file_lock "$APPLY_LOCK_TARGET" auto_update_apply_locked "$remote" "$remo
 apply_status=$?
 set -e
 if [ "$apply_status" = "75" ]; then
-  local_commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
-  write_state skipped "another auto-update run is in progress" "$local_commit" "" "$upstream"
+  # The live run owns the state file; a loser that wrote "skipped" here could
+  # land after the winner's real outcome and overwrite it.
   echo "auto-update: skipped (another run in progress)"
   exit 0
 fi
