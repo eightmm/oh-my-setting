@@ -450,13 +450,16 @@ print(json.dumps({
     ensure_tmpdir
     apply_updates
     # A previous successful run must not survive a re-verification failure or
-    # explicit skip as a stale green status.
-    agent_task_set_status "$TASK_FILE" active
-    verify_cmd="$(awk '
-      $0 == "## Verify" { inside = 1; next }
-      inside && /^## / { exit }
-      inside && NF { print }
-    ' "$TASK_FILE")"
+    # explicit skip as a stale green status. The command runs long and
+    # unlocked, so snapshot the contract AND the task identity in one locked
+    # read: every outcome below is recorded only through a compare-and-set on
+    # that identity, or a packet rotated mid-run would inherit a pass it
+    # never earned.
+    verify_snapshot="$(mktemp "$OMS_TASK_TMPDIR/verify-snapshot.XXXXXX")" || exit 1
+    agent_task_verify_snapshot "$TASK_FILE" "$verify_snapshot" || exit 1
+    verify_task_id="$(sed -n '1p' "$verify_snapshot")"
+    verify_cmd="$(sed -n '2,$p' "$verify_snapshot")"
+    rm -f "$verify_snapshot"
     if [ -n "$SKIP_VERIFY_REASON" ]; then
       note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || exit 1
       {
@@ -465,7 +468,12 @@ print(json.dumps({
         printf 'reason: %s\n' "$SKIP_VERIFY_REASON"
         printf 'recorded_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       } > "$note_file"
-      agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
+      if ! agent_task_verify_finalize "$TASK_FILE" "$verify_task_id" "$AGENT" \
+        "$note_file" "" "" active; then
+        rm -f "$note_file"
+        echo "error: task rotated during verification; skip note not recorded (rerun on the successor)" >&2
+        exit 4
+      fi
       rm -f "$note_file"
       work_journal_observe "$REPO" agent-task "$TASK_FILE" --operation verify
       echo "task: verification skipped; task remains active ($TASK_FILE)"
@@ -493,7 +501,13 @@ print(json.dumps({
       printf 'finished_at: %s\n' "$verify_finished"
       printf 'duration_seconds: %s\n' "$((verify_finished_epoch - verify_started_epoch))"
     } > "$note_file"
-    agent_task_append_bullet "$TASK_FILE" "## Verification" "$AGENT" "$note_file"
+    if ! agent_task_verify_finalize "$TASK_FILE" "$verify_task_id" "$AGENT" \
+      "$note_file" "" "" active; then
+      rm -f "$note_file"
+      echo "error: task rotated during verification; outcome belongs to the retired packet and was not recorded (exit $verify_rc)" >&2
+      rm -f "$verify_log"
+      exit 4
+    fi
     rm -f "$note_file"
     # This is where the primary agent's own gate actually runs, and until now
     # nothing recorded it: the failure ledger only ever saw harness-mediated
@@ -531,11 +545,26 @@ print(json.dumps({
     rm -f "$verify_log"
     # Bind the pass to the tree it passed on and to the contract that ran, so a
     # later edit downgrades this to stale instead of staying green forever.
-    agent_task_set_metadata "$TASK_FILE" verified_state \
-      "$(oms_git_state_fingerprint "$REPO" 2>/dev/null || printf 'unknown')"
-    agent_task_set_metadata "$TASK_FILE" verified_cmd_sha \
-      "$(printf '%s\n' "$verify_cmd" | oms_sha256_stream 2>/dev/null || printf '')"
-    agent_task_set_status "$TASK_FILE" verified
+    # The pass note, both receipts, and the status move land in one locked
+    # compare-and-set on the task identity the run started with.
+    verified_note="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || exit 1
+    {
+      printf 'command: %s\n' "$verify_cmd"
+      printf 'exit: 0\n'
+      printf 'started_at: %s\n' "$verify_started"
+      printf 'finished_at: %s\n' "$verify_finished"
+      printf 'duration_seconds: %s\n' "$((verify_finished_epoch - verify_started_epoch))"
+    } > "$verified_note"
+    if ! agent_task_verify_finalize "$TASK_FILE" "$verify_task_id" "$AGENT" \
+      "$verified_note" \
+      "$(oms_git_state_fingerprint "$REPO" 2>/dev/null || printf 'unknown')" \
+      "$(printf '%s\n' "$verify_cmd" | oms_sha256_stream 2>/dev/null || printf '')" \
+      verified; then
+      rm -f "$verified_note"
+      echo "error: task rotated during verification; the pass belongs to the retired packet and was not recorded (rerun verify on the successor)" >&2
+      exit 4
+    fi
+    rm -f "$verified_note"
     work_journal_observe "$REPO" agent-task "$TASK_FILE" --operation verify
     echo "task: verified $TASK_FILE"
     ;;

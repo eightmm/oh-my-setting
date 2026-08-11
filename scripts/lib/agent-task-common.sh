@@ -525,6 +525,54 @@ agent_task_append_bullet_unlocked() {
   agent_task_touch_updated_unlocked "$file"
 }
 
+# Verification runs long and unlocked; identity decides whether its outcome
+# may be recorded. Snapshot the contract and the task identity in one locked
+# read so the run binds to exactly one task generation, and finalize with a
+# compare-and-set on that identity so a packet rotated mid-run never inherits
+# an outcome it did not earn.
+agent_task_verify_snapshot_unlocked() {  # FILE OUT
+  local file="$1"
+  local out="$2"
+
+  agent_task_set_status_unlocked "$file" active
+  {
+    printf '%s\n' "$(agent_task_metadata_value "$file" task_id 2>/dev/null || true)"
+    awk '
+      $0 == "## Verify" { inside = 1; next }
+      inside && /^## / { exit }
+      inside && NF { print }
+    ' "$file"
+  } > "$out"
+}
+
+agent_task_verify_snapshot() {  # FILE OUT
+  oms_with_file_lock "$1" agent_task_verify_snapshot_unlocked "$1" "$2"
+}
+
+agent_task_verify_finalize_unlocked() {  # FILE EXPECTED_ID AGENT NOTE STATE_FP CMD_SHA STATUS
+  local file="$1"
+  local expected_id="$2"
+  local agent="$3"
+  local note_file="$4"
+  local state_fp="$5"
+  local cmd_sha="$6"
+  local status="$7"
+  local current_id
+
+  current_id="$(agent_task_metadata_value "$file" task_id 2>/dev/null || true)"
+  [ "$current_id" = "$expected_id" ] || return 75
+  agent_task_append_bullet_unlocked "$file" "## Verification" "$agent" "$note_file"
+  if [ "$status" = verified ]; then
+    agent_task_set_metadata_unlocked "$file" verified_state "$state_fp"
+    agent_task_set_metadata_unlocked "$file" verified_cmd_sha "$cmd_sha"
+    agent_task_set_status_unlocked "$file" verified
+  fi
+}
+
+agent_task_verify_finalize() {  # FILE EXPECTED_ID AGENT NOTE STATE_FP CMD_SHA STATUS
+  oms_with_file_lock "$1" agent_task_verify_finalize_unlocked "$@"
+}
+
 agent_task_append_bullet() {
   local file="$1"
   local section="$2"

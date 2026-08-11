@@ -103,4 +103,37 @@ print(hashlib.sha256(json.dumps(
 "$plan" --repo "$plan_repo" show --id t1 | grep -Fq '"state": "done"' ||
   fail "reviewed landing could not finish"
 
+# --- verify certifies only the task generation it started on ---------------
+# The command runs long and unlocked; if the packet rotates underneath it,
+# recording the outcome on the successor forges a pass the successor never
+# earned.
+race_repo="$TMP/verify-race"
+race_barrier="$TMP/verify-race-barrier"
+mkdir -p "$race_repo" "$race_barrier"
+"$task" --repo "$race_repo" init --goal race \
+  --verify ": > '$race_barrier/started'; while [ ! -e '$race_barrier/release' ]; do sleep 0.1; done; exit 0" >/dev/null
+first_id="$(awk '$1=="-" && $2=="task_id:" {print $3; exit}' "$race_repo/.oms/task/current.md")"
+[ -n "$first_id" ] || fail "race fixture has no task id"
+"$task" --repo "$race_repo" verify > "$TMP/verify-race.out" 2>&1 &
+verify_pid=$!
+for _ in $(seq 1 100); do [ -e "$race_barrier/started" ] && break; sleep 0.1; done
+[ -e "$race_barrier/started" ] || {
+  kill "$verify_pid" 2>/dev/null || true
+  fail "verify never reached its barrier"
+}
+"$task" --repo "$race_repo" rotate --goal successor >/dev/null
+second_id="$(awk '$1=="-" && $2=="task_id:" {print $3; exit}' "$race_repo/.oms/task/current.md")"
+[ -n "$second_id" ] && [ "$second_id" != "$first_id" ] || fail "rotate did not mint a new task"
+: > "$race_barrier/release"
+race_rc=0
+wait "$verify_pid" || race_rc=$?
+[ "$race_rc" -ne 0 ] || fail "verify certified a task it did not start on"
+grep -Fq 'rotated' "$TMP/verify-race.out" ||
+  fail "verify did not name the rotation: $(cat "$TMP/verify-race.out")"
+"$task" --repo "$race_repo" status | grep -Fq 'status: active' ||
+  fail "the successor inherited a verified status it never earned"
+if grep -Fq 'duration_seconds' "$race_repo/.oms/task/current.md"; then
+  fail "the successor inherited the predecessor's verification evidence"
+fi
+
 echo "autonomy verification smoke: ok"
