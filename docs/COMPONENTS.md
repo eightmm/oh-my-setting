@@ -259,9 +259,16 @@ intent, so a deleted branch is not recreated
 after an interrupted or tampered push; it cannot update an existing remote
 branch, merge, mark ready, tag, or release. Starting on the base branch
 creates a deterministic local `oms/autopilot-<spec-digest>` branch before the
-first drive cycle, with or without Draft PR publication. A failed or ambiguous
+first drive cycle, with or without Draft PR publication; any other checked-out
+branch parks rather than being silently driven. A failed or ambiguous
 push spends that intent; retry from a new branch name rather than risk replaying
-an effect whose absence cannot be proven permanently.
+an effect whose absence cannot be proven permanently. The two publication
+recovery cases: an interrupted but unspent intent replays with
+`oms draft-pr --repo REPO --intent INTENT publish`; a spent or terminal intent
+never replays — rename the work branch once
+(`git branch -m oms/autopilot-<digest> oms/autopilot-<digest>-r2`, which the
+checkout guard accepts) and rerun `oms autopilot run` to review and prepare a
+fresh intent on the new name.
 
 Frozen executors combine a reusable role with task-specific scope, base SHA,
 lease, model route, and verify command. They are write-only and cannot widen

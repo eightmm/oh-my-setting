@@ -36,6 +36,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `PROVIDER:model=NAME` targets.
 
 ### Changed
+- The autopilot approval boundary is now byte-exact: `propose` prints the
+  proposal's sha256 and the complete digest-bound continuation command, and
+  `run --proposal` requires `--expected-proposal-sha256` back, snapshots the
+  file once into private scratch, verifies it before any metadata read, and
+  forwards the parent digest through `plan-from-spec` into the atomic apply.
+  Under autopilot, `plan-from-spec` stops advertising its standalone
+  apply/drive continuations so the digest-bound entrance is the only printed
+  next step; the standalone advice itself now carries the digest flag.
+- The semantic review verdict is durable evidence instead of console text:
+  `draft-pr prepare` accepts a bounded `--review-evidence` disclosure and
+  renders it in the PR body — which the publisher already verifies remotely
+  by digest on every publish and replay — and autopilot threads the review
+  mode, outcome, and reviewer through it, including an honest
+  `mode=off outcome=skipped` when the operator chose no review.
 - The bounded goal driver now freezes each reviewed patch, records a durable
   commit intent, resumes interrupted landing without another provider call,
   and publishes only the expected tree with ref and index compare-and-set,
@@ -155,6 +169,33 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- The Draft-PR publisher now queries and creates pull requests with the
+  unqualified `--head BRANCH` form: the previous owner-qualified syntax is
+  rejected by `gh pr list` outright and by `gh pr create` for organization
+  owners, which could strand a successful push in a permanent
+  create-then-park replay loop. The create-only push also runs with
+  `--no-verify --no-signed`, so a repository-local pre-push hook or signing
+  configuration planted during a worker's legitimate write phase never
+  executes under the publisher's credentials; remote-side rejections stay
+  visible and correctly labeled.
+- Autopilot's replan trigger no longer trusts captured drive output, which a
+  worker's acceptance command can forge: exhaustion is read from the typed
+  terminal row goal-drive appends to the progress log, and a missing row
+  fails closed. `autopilot status` survives proposal files that vanish or
+  dangle mid-listing. Autopilot also refuses to drive an arbitrary
+  checked-out branch: only the base, the deterministic
+  `oms/autopilot-<spec-digest>` work branch (renamed once from the old
+  `codex/` prefix), or a `-suffix` recovery branch of that contract may
+  receive implementation commits.
+- A dead operations validator now fails closed. Doctor treats a missing,
+  crashing, or unreadable lifecycle/approvals validator as a fatal finding
+  with the failing name instead of reading ok, and `state-verify` records
+  task/journal status-engine failures as fail findings rather than silently
+  skipping those checks.
+- Every task verification outcome lands through a task-identity
+  compare-and-set: `agent-task verify` snapshots the contract and task id
+  under one lock, and a packet rotated mid-verification inherits nothing —
+  the caller exits naming the rotation instead of blessing the wrong task.
 - Doctor no longer reports `doctor: ok` over corrupt operations authority.
   Lifecycle events and private approvals had validators in `state-verify`
   that doctor never consulted; their fail findings are now fatal in the
