@@ -56,7 +56,10 @@ EOF
   git -C "$repo" add .gitignore PROJECT.md src/app.txt
   git -C "$repo" commit -qm base
   git -C "$repo" branch -M main
-  git -C "$repo" switch -qc codex/fixture
+  # The deterministic work branch for this fixture contract: autopilot only
+  # drives its own oms/autopilot-<spec-digest> branch (or the base).
+  git -C "$repo" switch -qc \
+    "oms/autopilot-$(sha256_file "$repo/PROJECT.md" | cut -c1-12)"
 }
 
 write_proposal() {
@@ -665,6 +668,30 @@ PY
     > "$branch_repo/branch.out" 2>&1 || fail "base-branch publish path should start safely"
   [ "$(git -C "$branch_repo" branch --show-current)" != main ] ||
     fail "autopilot left implementation commits on the base branch"
+  case "$(git -C "$branch_repo" branch --show-current)" in
+    oms/autopilot-*) ;;
+    *) fail "publish path did not create the provider-neutral work branch" ;;
+  esac
+
+  # An arbitrary checked-out branch is never silently driven; a -suffix
+  # recovery branch of the same contract resumes.
+  local foreign_repo="$TMP/foreign-branch"
+  make_repo "$foreign_repo"
+  mkdir -p "$foreign_repo/calls"
+  write_done_plan "$foreign_repo" true
+  git -C "$foreign_repo" switch -qc feature-x
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
+    --base main > "$foreign_repo/foreign.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a foreign work branch should park, got $rc"
+  grep -Fq 'reason=foreign-work-branch' "$foreign_repo/foreign.out" ||
+    fail "foreign branch park reason missing"
+  [ ! -f "$foreign_repo/calls/goal-drive" ] || fail "a foreign branch reached goal-drive"
+  git -C "$foreign_repo" switch -qc \
+    "oms/autopilot-$(sha256_file "$foreign_repo/PROJECT.md" | cut -c1-12)-r2"
+  OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
+    --base main > "$foreign_repo/recovery.out" 2>&1 ||
+    fail "a recovery-suffix branch of the same contract should resume"
 
   # A second remainder proposal is rejected even when passed directly, and
   # proposal metadata cannot claim r1- while carrying ordinary ids.

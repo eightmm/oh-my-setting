@@ -449,8 +449,17 @@ ensure_work_branch() {
     fail "autopilot requires a branch, not detached HEAD"
   current="${current//$'\r'/}"
   git check-ref-format --branch "$current" >/dev/null 2>&1 || fail "current branch is invalid"
-  [ "$current" = "$BASE" ] || return 0
-  target="codex/autopilot-$(printf '%.12s' "$BOUND_SPEC_SHA")"
+  target="oms/autopilot-$(printf '%.12s' "$BOUND_SPEC_SHA")"
+  if [ "$current" != "$BASE" ]; then
+    # Only the deterministic work branch of THIS contract, or one of its
+    # -suffix recovery branches, may be driven. An arbitrary checked-out
+    # branch must never silently receive implementation commits.
+    case "$current" in
+      "$target"|"$target"-*) return 0 ;;
+    esac
+    park "foreign-work-branch" \
+      "checkout $BASE, $target, or a $target-* recovery branch, then rerun"
+  fi
   current_head="$(git -C "$REPO" rev-parse HEAD)"
   if git -C "$REPO" show-ref --verify --quiet "refs/heads/$target"; then
     target_head="$(git -C "$REPO" rev-parse "refs/heads/$target")"

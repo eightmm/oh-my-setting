@@ -258,7 +258,7 @@ a pre-push uncertainty phase, and verifier mutation terminally spends that
 intent, so a deleted branch is not recreated
 after an interrupted or tampered push; it cannot update an existing remote
 branch, merge, mark ready, tag, or release. Starting on the base branch
-creates a deterministic local `codex/autopilot-<spec-digest>` branch before the
+creates a deterministic local `oms/autopilot-<spec-digest>` branch before the
 first drive cycle, with or without Draft PR publication. A failed or ambiguous
 push spends that intent; retry from a new branch name rather than risk replaying
 an effect whose absence cannot be proven permanently.

@@ -79,18 +79,23 @@ For the full bounded path, use the two-step approval boundary:
 ```bash
 oms autopilot --repo . --allowed 'src,tests,docs' propose
 oms autopilot --repo . --allowed 'src,tests,docs' --base main \
-  --proposal .oms/plan/proposal-...json --draft-pr run
+  --proposal .oms/plan/proposal-...json \
+  --expected-proposal-sha256 <digest printed by propose> --draft-pr run
 ```
 
-The first command exits with a proposal for the parent to review. The second
-atomically applies those exact bytes, drives the existing loop, permits at most
+The first command exits with a proposal for the parent to review and prints
+the proposal's sha256 plus the exact continuation; the second requires that
+digest back and atomically applies only bytes that still match it, drives the
+existing loop, permits at most
 one `r1-` remainder proposal, re-runs acceptance, and uses a different-family
 semantic review in shadow mode. `--review-mode gate` makes that review blocking.
 `--draft-pr` is the only built-in remote-write path: an immutable local intent
 creates a new branch and Draft PR and can be replayed after interruption. It has
 no branch update, merge, ready, tag, or release operation. If the run starts on the base
-branch, autopilot first creates `codex/autopilot-<spec-digest>` locally so
-implementation commits never land on that base.
+branch, autopilot first creates `oms/autopilot-<spec-digest>` locally so
+implementation commits never land on that base; from any other branch it
+parks unless the branch is that deterministic name or one of its `-suffix`
+recovery branches.
 
 Each cycle: acceptance command (pass = done) → one `plan-run --next --land` →
 commit of exactly the admitted patch's paths, task title as subject. It
