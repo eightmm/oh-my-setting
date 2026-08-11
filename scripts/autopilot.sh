@@ -540,6 +540,7 @@ assert_final_snapshot() {
 }
 
 review_rc=0
+review_evidence="mode=off outcome=skipped reviewer=none"
 if [ "$REVIEW_MODE" != off ]; then
   review_out="$(autopilot_mktemp)" || fail "mktemp failed"
   "$PEER_REVIEW" --repo "$REPO" --base "$review_base_sha" \
@@ -550,11 +551,14 @@ if [ "$REVIEW_MODE" != off ]; then
   rm -f "$review_out"
   if [ "$review_rc" -eq 0 ]; then
     echo "autopilot: semantic review: pass"
+    review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER"
   elif [ "$REVIEW_MODE" = shadow ]; then
     if [ "$review_rc" -eq 1 ]; then
       echo "autopilot: semantic review: advisory fail"
+      review_evidence="mode=shadow outcome=advisory-fail reviewer=$REVIEWER"
     else
       echo "autopilot: semantic review: advisory incomplete"
+      review_evidence="mode=shadow outcome=advisory-incomplete reviewer=$REVIEWER"
     fi
   else
     park "semantic-review-failed" "inspect the typed review outcome"
@@ -575,7 +579,8 @@ if [ "$DRAFT_PR" -eq 1 ]; then
   "$DRAFT_PR_TOOL" prepare --repo "$REPO" --remote "$REMOTE" --base "$BASE" \
     --verify "$accept_cmd" --expected-head "$final_head" --expected-tree "$final_tree" \
     --expected-base-sha "$review_base_sha" \
-    --expected-spec-sha256 "$spec_sha" > "$prepare_out"
+    --expected-spec-sha256 "$spec_sha" \
+    --review-evidence "$review_evidence" > "$prepare_out"
   cat "$prepare_out"
   intent="$(sed -n 's/^intent: //p' "$prepare_out" | tail -n 1)"
   rm -f "$prepare_out"

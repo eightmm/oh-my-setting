@@ -30,6 +30,7 @@ EXPECTED_HEAD=""
 EXPECTED_TREE=""
 EXPECTED_BASE_SHA=""
 EXPECTED_SPEC_SHA256=""
+REVIEW_EVIDENCE=""
 REMOTE_SLUG=""
 REMOTE_FETCH_URL=""
 REMOTE_PUSH_URL=""
@@ -65,6 +66,10 @@ recovers the exact Draft PR.
   --expected-tree SHA      Optional caller-frozen tree for prepare.
   --expected-base-sha SHA  Optional caller-frozen remote base for prepare.
   --expected-spec-sha256 H Optional PROJECT.md guard for prepare/publish.
+  --review-evidence TEXT   Optional semantic-review disclosure for prepare,
+                           rendered in the PR body (which the publisher
+                           verifies remotely by digest). Absence renders as
+                           "not requested".
 
 Exit 2 means the request violates the contract. Exit 3 means local checks,
 authentication, permissions, verification, or remote state prevented a safe
@@ -105,6 +110,9 @@ while [ "$#" -gt 0 ]; do
     --expected-spec-sha256)
       [ "$#" -ge 2 ] || fail "--expected-spec-sha256 requires a digest"
       EXPECTED_SPEC_SHA256="$2"; shift 2 ;;
+    --review-evidence)
+      [ "$#" -ge 2 ] || fail "--review-evidence requires a summary"
+      REVIEW_EVIDENCE="$2"; shift 2 ;;
     prepare|publish)
       [ -z "$ACTION" ] || fail "multiple actions: $ACTION, $1"
       ACTION="$1"; shift ;;
@@ -129,6 +137,13 @@ done
 if [ -n "$EXPECTED_SPEC_SHA256" ]; then
   case "$EXPECTED_SPEC_SHA256" in *[!0-9a-f]*) fail "expected spec digest must be lowercase SHA-256" ;; esac
   [ "${#EXPECTED_SPEC_SHA256}" -eq 64 ] || fail "expected spec digest must be 64 characters"
+fi
+if [ -n "$REVIEW_EVIDENCE" ]; then
+  [ "$ACTION" = prepare ] || fail "--review-evidence applies to prepare only"
+  [ "${#REVIEW_EVIDENCE}" -le 200 ] ||
+    fail "--review-evidence must be at most 200 characters"
+  [ -z "${REVIEW_EVIDENCE//[A-Za-z0-9._= -]/}" ] ||
+    fail "--review-evidence allows only letters, digits, and [._= -]"
 fi
 validate_scan_limit "$SCAN_TIMEOUT_S" OMS_DRAFT_SCAN_TIMEOUT_S 3600
 validate_scan_limit "$SCAN_MAX_OBJECTS" OMS_DRAFT_SCAN_MAX_OBJECTS 200000
@@ -807,6 +822,7 @@ prepare() {
     "$GIT" -C "$REPO" log --reverse --format='- %s' "$base_sha..$head"
     printf '\n## Verification\n\n'
     printf -- '- Local acceptance passed for `%s`.\n' "$(printf '%.12s' "$head")"
+    printf -- '- Semantic review: %s.\n' "${REVIEW_EVIDENCE:-not requested}"
     printf -- '- This remains a Draft PR; merge and release require separate authority.\n'
   } > "$body_file"
   title_scan_rc=0

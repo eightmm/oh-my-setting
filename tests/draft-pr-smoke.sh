@@ -449,6 +449,10 @@ PY
   grep -Fq -- '--draft' "$repo/gh.log" || fail "PR was not forced to draft"
   grep -Fq -- '--no-follow-tags' "$repo/git.log" || fail "push did not disable implicit tags"
   grep -Fq -- '--recurse-submodules=no' "$repo/git.log" || fail "push did not disable submodule writes"
+  grep -Fq -- '--no-verify' "$repo/git.log" || fail "push did not suppress local hooks"
+  grep -Fq -- '--no-signed' "$repo/git.log" || fail "push did not suppress signing"
+  grep -Fq 'Semantic review: not requested.' "$repo/pr-created.body" ||
+    fail "the PR body does not disclose the absent semantic review"
   if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/tags/v-test; then
     fail "ambient push.followTags created a forbidden remote tag"
   fi
@@ -508,6 +512,26 @@ PY
   run_draft_pr "$denied" prepare --remote origin --base main --verify true \
     >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "dirty tree should be a contract error, got $rc"
+
+  # A caller-supplied semantic-review disclosure rides the hashed PR body
+  # end to end, and unsafe evidence text is a contract error.
+  local evidence_repo="$TMP/evidence"
+  local evidence_bare="$TMP/evidence.git"
+  make_repo "$evidence_repo" "$evidence_bare"
+  : > "$evidence_repo/git.log"; : > "$evidence_repo/gh.log"
+  rc=0
+  run_draft_pr "$evidence_repo" prepare --remote origin --base main --verify true \
+    --review-evidence 'mode=shadow outcome=$(pwned)' >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "unsafe review evidence should be a contract error, got $rc"
+  run_draft_pr "$evidence_repo" prepare --remote origin --base main --verify true \
+    --review-evidence 'mode=shadow outcome=advisory-fail reviewer=claude' \
+    > "$evidence_repo/prepare.out" || fail "evidence prepare failed"
+  intent="$(sed -n 's/^intent: //p' "$evidence_repo/prepare.out" | tail -n 1)"
+  run_draft_pr "$evidence_repo" publish --intent "$intent" \
+    > "$evidence_repo/publish.out" || fail "evidence publish failed"
+  grep -Fq 'Semantic review: mode=shadow outcome=advisory-fail reviewer=claude.' \
+    "$evidence_repo/pr-created.body" ||
+    fail "the PR body does not carry the semantic review disclosure"
 }
 
 test_remote_and_recovery_hardening() {

@@ -587,6 +587,9 @@ PY
     fail "draft intent was not prepared: $(cat "$repo/calls/draft-pr")"
   grep -Fq 'publish --repo' "$repo/calls/draft-pr" ||
     fail "draft intent was not published: $(cat "$repo/calls/draft-pr")"
+  grep -Fq -- '--review-evidence mode=shadow outcome=advisory-fail reviewer=claude' \
+    "$repo/calls/draft-pr" ||
+    fail "the advisory review outcome was not disclosed to prepare"
 
   : > "$repo/calls/draft-pr"
   rc=0
@@ -595,6 +598,18 @@ PY
     --base main --draft-pr --review-mode gate > "$repo/gate.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "strict semantic gate should park, got $rc"
   [ ! -s "$repo/calls/draft-pr" ] || fail "failed semantic gate reached remote publish"
+
+  # Off mode is an operator choice that is disclosed, not hidden: no reviewer
+  # call happens and the publication intent carries the skip verbatim.
+  : > "$repo/calls/draft-pr"
+  : > "$repo/calls/peer-review"
+  OMS_T_GOAL_RESULT=success run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' \
+    --base main --draft-pr --review-mode off > "$repo/off.out" 2>&1 ||
+    fail "review-mode off should complete the publish path"
+  [ ! -s "$repo/calls/peer-review" ] || fail "review-mode off still called the reviewer"
+  grep -Fq -- '--review-evidence mode=off outcome=skipped reviewer=none' \
+    "$repo/calls/draft-pr" || fail "the skipped review was not disclosed to prepare"
 
   # Shadow applies only to semantic dissent. A verifier that becomes red
   # during review remains a hard stop, and reviewer-side writes invalidate the
