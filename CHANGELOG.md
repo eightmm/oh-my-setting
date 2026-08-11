@@ -36,6 +36,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `PROVIDER:model=NAME` targets.
 
 ### Changed
+- Autopilot recovery is now bound to one unique final drive result, its durable
+  receipt row, and the selected work branch. `propose` requires the base, so
+  its paste-ready, shell-quoted continuation preserves every effective option;
+  proposals must be regular non-symlink files no larger than 1 MiB. Recovery uses strict
+  `-rN` names, checks raw Git paths in the complete branch diff against the
+  approved envelope, and parks on competing lineages. Goal-drive disables hooks
+  for all child Git work and atomically replaces patch leaves from a validated
+  directory handle. Repeated Draft PR preparation prints an exact publish
+  command only for an unblocked intent.
 - The machine snapshot now records the local job queue: a `tsp queue` line
   (availability and slot count) joins the Slurm line, and every install
   writes the local-only snapshot by default (`OH_MY_SETTING_GENERATE_MACHINE=0`
@@ -191,7 +200,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   dangle mid-listing. Autopilot also refuses to drive an arbitrary
   checked-out branch: only the base, the deterministic
   `oms/autopilot-<spec-digest>` work branch (renamed once from the old
-  `codex/` prefix), or a `-suffix` recovery branch of that contract may
+  `codex/` prefix), or a strict `-rN` recovery branch of that contract may
   receive implementation commits.
 - A dead operations validator now fails closed. Doctor treats a missing,
   crashing, or unreadable lifecycle/approvals validator as a fatal finding

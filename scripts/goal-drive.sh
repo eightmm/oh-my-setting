@@ -25,10 +25,11 @@ REPO="$PWD"
 PROVIDER="codex"
 MAX_CYCLES=3
 AUTO_REPAIR=0
+RUN_ID_OVERRIDE=""
 
 usage() {
   cat <<'EOF'
-Usage: goal-drive.sh [--repo PATH] [--to PROVIDER] [--max-cycles N] [--auto-repair]
+Usage: goal-drive.sh [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID] [--auto-repair]
 
 Drive an existing agent-plan toward its acceptance command: each cycle runs
 acceptance first (pass = done), otherwise executes exactly one plan task via
@@ -45,6 +46,7 @@ it parked; a later run whose acceptance passes resolves those park rows.
   --repo PATH     Repository (default: current directory). Tree must be clean.
   --to PROVIDER   Worker for plan-run delegation (default: codex).
   --max-cycles N  Hard cycle cap (default 3, max 10).
+  --run-id ID      Optional caller correlation receipt (1..64 safe characters).
   --auto-repair   Run one same-lease repair delegation after a failed landing,
                   then retry landing once before parking.
 EOF
@@ -61,6 +63,10 @@ while [ "$#" -gt 0 ]; do
       case "$2" in *[!0-9]*|"") fail "--max-cycles requires a positive integer" ;; esac
       [ "$2" -ge 1 ] && [ "$2" -le 10 ] || fail "--max-cycles must be 1..10"
       MAX_CYCLES="$2"; shift 2 ;;
+    --run-id)
+      [ "$#" -ge 2 ] || fail "--run-id requires an id"
+      [ -n "$2" ] || fail "--run-id requires a non-empty id"
+      RUN_ID_OVERRIDE="$2"; shift 2 ;;
     --auto-repair) AUTO_REPAIR=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -70,6 +76,32 @@ done
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
   fail "unknown provider: use codex, claude, or antigravity (agy)"
+if [ -n "$RUN_ID_OVERRIDE" ]; then
+  case "$RUN_ID_OVERRIDE" in
+    *[!A-Za-z0-9._-]*) fail "--run-id has unsafe characters" ;;
+  esac
+  [ "${#RUN_ID_OVERRIDE}" -le 64 ] || fail "--run-id must be at most 64 characters"
+fi
+
+# Repository hooks are mutable code outside the reviewed task/verifier
+# contract. Disable them for this process and every Git subprocess launched by
+# plan delegation, admission, landing, and exact ref publication. Preserve any
+# caller-supplied command-scope Git config entries and append the stronger
+# hooksPath setting last.
+GOAL_GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-0}"
+case "$GOAL_GIT_CONFIG_COUNT" in
+  0|[1-9]|[1-9][0-9]*) ;;
+  *) fail "GIT_CONFIG_COUNT must be a canonical non-negative integer" ;;
+esac
+[ "$GOAL_GIT_CONFIG_COUNT" -le 64 ] || fail "GIT_CONFIG_COUNT is too large"
+GOAL_HOOK_KEY="GIT_CONFIG_KEY_$GOAL_GIT_CONFIG_COUNT"
+GOAL_HOOK_VALUE="GIT_CONFIG_VALUE_$GOAL_GIT_CONFIG_COUNT"
+printf -v "$GOAL_HOOK_KEY" '%s' core.hooksPath
+printf -v "$GOAL_HOOK_VALUE" '%s' /dev/null
+export "${GOAL_HOOK_KEY?}" "${GOAL_HOOK_VALUE?}"
+GIT_CONFIG_COUNT=$((GOAL_GIT_CONFIG_COUNT + 1))
+export GIT_CONFIG_COUNT
+
 PLAN_FILE="$REPO/.oms/plan/tasks.json"
 PROGRESS="$REPO/.oms/plan/progress.jsonl"
 [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; create one first (agent-plan init/add)"
@@ -89,7 +121,11 @@ ACCEPT_CMD="$(read_accept_cmd)"
 [ -n "$ACCEPT_CMD" ] ||
   fail "plan has no acceptance command; set one: agent-plan init --goal ... --accept CMD"
 ACCEPT_SNAPSHOT="$(printf '%s' "$ACCEPT_CMD" | oms_sha256_stream 2>/dev/null || echo unhashed)"
-RUN_ID="gd-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_ID="${RUN_ID_OVERRIDE:-gd-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+TERMINAL_RECEIPT="$(python3 -c 'import os; print(os.urandom(32).hex())' | tr -d '\r')" ||
+  fail "cannot generate a private terminal receipt"
+case "$TERMINAL_RECEIPT" in *[!0-9a-f]*|"") fail "invalid terminal receipt" ;; esac
+[ "${#TERMINAL_RECEIPT}" -eq 64 ] || fail "invalid terminal receipt"
 CYCLE=0
 INTENT_ID=""
 INTENT_TASK=""
@@ -124,7 +160,9 @@ TASK_RECEIPT_REPAIR_COUNT=0
 TASK_RECEIPT_SHA=""
 
 terminal_row() {  # STATUS REASON
+  [ "${OMS_GOAL_DRIVE_TEST_FAIL_TERMINAL_APPEND:-0}" != 1 ] || return 1
   OMS_GD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_GD_RUN="$RUN_ID" \
+    OMS_GD_RECEIPT="$TERMINAL_RECEIPT" \
     OMS_GD_CYCLE="$CYCLE" OMS_GD_STATUS="$1" OMS_GD_REASON="$2" \
     OMS_GD_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unborn)" \
     python3 -c '
@@ -132,15 +170,27 @@ import json, os
 print(json.dumps({
     "schema": 1, "kind": "terminal", "ts": os.environ["OMS_GD_TS"],
     "run_id": os.environ["OMS_GD_RUN"], "cycle": int(os.environ["OMS_GD_CYCLE"]),
+    "receipt": os.environ["OMS_GD_RECEIPT"],
     "base_sha": os.environ["OMS_GD_SHA"], "status": os.environ["OMS_GD_STATUS"],
     "reason": os.environ["OMS_GD_REASON"],
 }, ensure_ascii=False))
-' >> "$PROGRESS" 2>/dev/null || true
+' >> "$PROGRESS" 2>/dev/null
+}
+
+terminal_result() {  # STATUS REASON
+  case "$1" in park|done) ;; *) return 1 ;; esac
+  case "$2" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#2}" -le 128 ] || return 1
+  printf 'goal-drive: terminal-v1 run=%s receipt=%s status=%s reason=%s\n' \
+    "$RUN_ID" "$TERMINAL_RECEIPT" "$1" "$2"
 }
 
 park() {  # REASON NEXT
   local recorded
-  terminal_row park "$1"
+  if ! terminal_row park "$1"; then
+    echo "error: cannot durably append the goal-drive terminal row" >&2
+    exit 2
+  fi
   # The ledger fingerprints the command, and `goal-drive $RUN_ID` made every
   # park a singleton: its digit mask only collapses runs of 8+ digits, so the
   # RUN_ID's time-of-day and pid survive and the count per fingerprint can
@@ -156,6 +206,13 @@ park() {  # REASON NEXT
   # send that line to /dev/null — the threshold crossing has to be visible at
   # the one moment the run is ending on it.
   printf '%s\n' "$recorded" | grep -F 'oms advise' || true
+  # This canonical result is the one final non-empty output line. The caller
+  # treats duplicates or trailing child output as a safe failure, and uses the
+  # mutable progress row only to cross-check this bound status and reason.
+  if ! terminal_result park "$1"; then
+    echo "error: cannot emit the goal-drive terminal result" >&2
+    exit 2
+  fi
   exit 3
 }
 
@@ -724,14 +781,31 @@ for key,value in assignments.items(): print("%s=%s" % (key,shlex.quote(value)))
   eval "$values"
 }
 
+patch_leaf_replace() {  # SOURCE_BASENAME DEST_BASENAME
+  python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+try:
+    os.replace(sys.argv[1], sys.argv[2])
+    mode = os.lstat(sys.argv[2]).st_mode
+except (OSError, ValueError):
+    raise SystemExit(1)
+if not stat.S_ISREG(mode):
+    raise SystemExit(1)
+PY
+}
+
 intent_prepare() {  # TASK PATCH BASE SUFFIX [REUSE_INTENT_ID]
   local task="$1"
   local source_patch="$2"
   local base="$3"
   local suffix="${4:-}"
   local reuse_id="${5:-}"
-  local frozen_dir frozen_abs frozen_tmp patch_rel paths_json task_patch_sha source_patch_sha
-  local receipt_sha repo_physical frozen_physical prior_task prior_base prior_lease
+  local frozen_dir frozen_abs frozen_name patch_rel paths_json task_patch_sha source_patch_sha
+  local receipt_sha repo_physical plan_physical frozen_physical frozen_after
+  local prior_task prior_base prior_lease
   local prior_verify_sha prior_provider
 
   prior_task="$INTENT_TASK"
@@ -781,20 +855,60 @@ intent_prepare() {  # TASK PATCH BASE SUFFIX [REUSE_INTENT_ID]
   INTENT_PROVIDER="$PROVIDER"
   INTENT_ID="${reuse_id:-$RUN_ID-$CYCLE-$task}"
   frozen_dir="$REPO/.oms/plan/commit-patches"
-  mkdir -p "$frozen_dir"
-  chmod 700 "$frozen_dir" 2>/dev/null || true
   repo_physical="$(cd "$REPO" && pwd -P)"
+  plan_physical="$(cd "$REPO/.oms/plan" 2>/dev/null && pwd -P)" ||
+    park "unsafe-patch-path" "repo-local .oms/plan must be a real directory"
+  [ "$plan_physical" = "$repo_physical/.oms/plan" ] ||
+    park "unsafe-patch-path" "the plan directory must not cross a symlink boundary"
+  if [ -e "$frozen_dir" ] || [ -L "$frozen_dir" ]; then
+    if [ ! -d "$frozen_dir" ] || [ -L "$frozen_dir" ]; then
+      park "unsafe-patch-path" "the frozen patch directory must be a real directory"
+    fi
+  else
+    # Anchor creation to the already-open plan directory. If another same-UID
+    # process swaps the absolute path before `cd`, the physical identity check
+    # fails; if it swaps after `cd`, relative mkdir still targets the original
+    # directory handle. This is portable to the documented Git Bash path where
+    # Python dir_fd/openat support is not uniform.
+    (
+      cd "$REPO/.oms/plan" 2>/dev/null || exit 1
+      [ "$(pwd -P)" = "$plan_physical" ] || exit 1
+      umask 077
+      mkdir commit-patches
+    ) ||
+      park "freeze-patch-failed" "create a writable repo-local patch directory"
+  fi
   frozen_physical="$(cd "$frozen_dir" && pwd -P)"
   [ "$frozen_physical" = "$repo_physical/.oms/plan/commit-patches" ] ||
     park "unsafe-patch-path" "the frozen patch directory must not cross a symlink boundary"
-  frozen_abs="$frozen_dir/$INTENT_ID${suffix:+-$suffix}.patch"
-  frozen_tmp="$(mktemp "$frozen_dir/.goal-patch.XXXXXX")" ||
-    park "freeze-patch-failed" "preserve the reviewed patch and retry on a writable local state directory"
-  if ! cp "$source_patch" "$frozen_tmp" || ! mv "$frozen_tmp" "$frozen_abs"; then
+  frozen_name="$INTENT_ID${suffix:+-$suffix}.patch"
+  case "$frozen_name" in ""|*/*|.|..) park "unsafe-patch-path" "invalid frozen patch name" ;; esac
+  # Keep every write relative to a cwd whose physical identity was checked
+  # after entry. os.replace uses rename semantics for the final component, so
+  # a planted directory symlink is replaced as a leaf (or safely rejected by
+  # the platform) instead of being followed like `mv temp symlink-to-directory`.
+  if ! (
+    cd "$frozen_dir" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$frozen_physical" ] || exit 1
+    umask 077
+    frozen_tmp="$(mktemp .goal-patch.XXXXXX)" || exit 1
+    if cp "$source_patch" "$frozen_tmp" &&
+       chmod 600 "$frozen_tmp" &&
+       patch_leaf_replace "$frozen_tmp" "./$frozen_name"; then
+      exit 0
+    fi
     rm -f "$frozen_tmp" 2>/dev/null || true
+    exit 1
+  ); then
     park "freeze-patch-failed" "preserve the reviewed patch and retry on a writable local state directory"
   fi
-  chmod 600 "$frozen_abs" 2>/dev/null || true
+  frozen_after="$(cd "$frozen_dir" 2>/dev/null && pwd -P)" ||
+    park "unsafe-patch-path" "the frozen patch directory changed after the write"
+  [ "$frozen_after" = "$frozen_physical" ] ||
+    park "unsafe-patch-path" "the frozen patch directory changed after the write"
+  frozen_abs="$frozen_dir/$frozen_name"
+  [ -f "$frozen_abs" ] && [ ! -L "$frozen_abs" ] ||
+    park "unsafe-patch-path" "the frozen patch must be a regular non-symlink file"
   patch_rel="${frozen_abs#"$REPO"/}"
   [ "$patch_rel" != "$frozen_abs" ] || park "unsafe-patch-path" "the frozen patch must stay inside repo-local .oms"
   INTENT_PATCH="$patch_rel"
@@ -1059,7 +1173,8 @@ intent_publish_exact() {  # PATCH EXPECTED_TREE MESSAGE
     intent_index_lock_release
     return 1
   fi
-  INTENT_NEW_COMMIT="$(git -C "$REPO" commit-tree "$expected_tree" -p "$INTENT_BASE" \
+  INTENT_NEW_COMMIT="$(git -c core.hooksPath=/dev/null -C "$REPO" \
+    commit-tree "$expected_tree" -p "$INTENT_BASE" \
     -m "$message" 2>/dev/null | tr -d '\r')" || {
     INTENT_INDEX_ERROR="commit-object-failed"
     intent_index_lock_release
@@ -1070,7 +1185,8 @@ intent_publish_exact() {  # PATCH EXPECTED_TREE MESSAGE
     intent_index_lock_release
     return 1
   fi
-  if ! git -C "$REPO" update-ref -m "goal-drive: $INTENT_TASK" \
+  if ! git -c core.hooksPath=/dev/null -C "$REPO" \
+    update-ref -m "goal-drive: $INTENT_TASK" \
     HEAD "$INTENT_NEW_COMMIT" "$INTENT_BASE"; then
     INTENT_INDEX_ERROR="head-moved-before-publication"
     intent_index_lock_release
@@ -1499,9 +1615,16 @@ while :; do
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept 2>&1)" || accept_rc=$?
   printf '%s\n' "$accept_out" | tail -n 3
   if [ "$accept_rc" -eq 0 ]; then
-    terminal_row "done" acceptance-pass
+    if ! terminal_row "done" acceptance-pass; then
+      echo "error: cannot durably append the goal-drive terminal row" >&2
+      exit 2
+    fi
     resolve_parks
     echo "goal-drive: done run=$RUN_ID cycles=$CYCLE (acceptance passed)"
+    if ! terminal_result "done" acceptance-pass; then
+      echo "error: cannot emit the goal-drive terminal result" >&2
+      exit 2
+    fi
     exit 0
   fi
   [ "$accept_rc" -eq 3 ] ||

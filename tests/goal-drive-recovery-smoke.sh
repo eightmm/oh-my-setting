@@ -750,18 +750,235 @@ cat > "$hook_repo/.git/hooks/pre-commit" <<'EOF'
 printf 'foreign hook bytes\n' > foreign-hook.txt
 git add foreign-hook.txt
 EOF
-chmod +x "$hook_repo/.git/hooks/pre-commit"
+cat > "$hook_repo/.git/hooks/reference-transaction" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${1:-missing}" >> reference-transaction-hook.txt
+exit 1
+EOF
+chmod +x "$hook_repo/.git/hooks/pre-commit" \
+  "$hook_repo/.git/hooks/reference-transaction"
 git -C "$hook_repo" config core.hooksPath "$hook_repo/.git/hooks"
+rc=0
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$hook_calls" "$ROOT/scripts/goal-drive.sh" --repo "$hook_repo" \
-  --to codex --max-cycles 2 > "$TMP/commit-hook.out" 2>&1 ||
-  fail "exact commit publisher failed with a mutating pre-commit hook"
+  --to codex --max-cycles 2 > "$TMP/commit-hook.out" 2>&1 || rc=$?
+[ ! -e "$hook_repo/reference-transaction-hook.txt" ] ||
+  fail "autonomous commit executed a rejecting reference-transaction hook"
+[ "$rc" = 0 ] ||
+  fail "exact commit publisher failed with disabled commit hooks"
 [ "$(wc -l < "$hook_calls" | tr -d ' ')" = 1 ] ||
   fail "commit-hook fixture made a duplicate provider call"
 [ ! -e "$hook_repo/foreign-hook.txt" ] ||
   fail "autonomous commit executed a mutating pre-commit hook"
 [ -z "$(git -C "$hook_repo" ls-tree --name-only HEAD -- foreign-hook.txt)" ] ||
   fail "autonomous commit included bytes created by a Git hook"
+
+# A terminal result without its durable row is not success. Acceptance already
+# passes, so no provider or landing work is needed before the injected append
+# failure.
+terminal_write_repo="$TMP/terminal-write-failure"
+make_case "$terminal_write_repo" tracked
+printf 'autonomous-tracked\n' > "$terminal_write_repo/tracked.txt"
+git -C "$terminal_write_repo" add tracked.txt
+git -C "$terminal_write_repo" commit -qm 'test: satisfy acceptance before drive'
+terminal_write_calls="$TMP/terminal-write-failure-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$terminal_write_calls" OMS_GOAL_DRIVE_TEST_FAIL_TERMINAL_APPEND=1 \
+  "$ROOT/scripts/goal-drive.sh" \
+  --repo "$terminal_write_repo" --to codex --max-cycles 1 \
+  --run-id terminal-write-failure > "$TMP/terminal-write-failure.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "terminal append failure should fail closed, got $rc"
+[ ! -s "$terminal_write_calls" ] ||
+  fail "terminal append failure fixture unexpectedly called the provider"
+if grep -Fq 'goal-drive: done' "$TMP/terminal-write-failure.out"; then
+  fail "terminal append failure was reported as a successful drive"
+fi
+
+# Freezing reviewed bytes is a private repository write. A planted
+# commit-patches symlink must park before chmod or file creation can mutate its
+# external directory target. Windows Git Bash can lack symlink privilege, so
+# only that unavailable primitive skips this fixture.
+patch_link_repo="$TMP/commit-patches-symlink"
+make_case "$patch_link_repo" tracked
+patch_link_calls="$TMP/commit-patches-symlink-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$patch_link_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$patch_link_repo" --to codex \
+  --max-cycles 2 > "$TMP/commit-patches-symlink-review.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] ||
+  fail "commit-patches symlink fixture did not stop after review"
+[ "$(wc -l < "$patch_link_calls" | tr -d ' ')" = 1 ] ||
+  fail "commit-patches symlink review made a duplicate provider call"
+patch_link_outside="$TMP/commit-patches-external"
+patch_link_sentinel="$patch_link_outside/user-owned.txt"
+patch_link_expected="$TMP/commit-patches-external.expected"
+mkdir -p "$patch_link_outside"
+printf 'user-owned external bytes\n' > "$patch_link_sentinel"
+cp "$patch_link_sentinel" "$patch_link_expected"
+chmod 751 "$patch_link_outside"
+patch_link_mode="$(stat -c '%a' "$patch_link_outside" 2>/dev/null ||
+  stat -f '%Lp' "$patch_link_outside" 2>/dev/null)"
+[ -n "$patch_link_mode" ] || fail "could not read external fixture mode"
+[ ! -e "$patch_link_repo/.oms/plan/commit-patches" ] &&
+  [ ! -L "$patch_link_repo/.oms/plan/commit-patches" ] ||
+  fail "commit-patches symlink fixture path already exists"
+if ln -s "$patch_link_outside" \
+  "$patch_link_repo/.oms/plan/commit-patches" 2>/dev/null; then
+  rc=0
+  HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+    CALL_LOG="$patch_link_calls" "$ROOT/scripts/goal-drive.sh" \
+    --repo "$patch_link_repo" --to codex --max-cycles 2 \
+    > "$TMP/commit-patches-symlink.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] ||
+    fail "commit-patches symlink should park, got $rc"
+  grep -Fq 'reason=unsafe-patch-path' "$TMP/commit-patches-symlink.out" ||
+    fail "commit-patches symlink did not report unsafe-patch-path"
+  [ "$(wc -l < "$patch_link_calls" | tr -d ' ')" = 1 ] ||
+    fail "commit-patches symlink resume called the provider again"
+  [ "$patch_link_mode" = \
+    "$(stat -c '%a' "$patch_link_outside" 2>/dev/null ||
+      stat -f '%Lp' "$patch_link_outside" 2>/dev/null)" ] ||
+    fail "unsafe commit-patches path changed the external directory mode"
+  cmp -s "$patch_link_expected" "$patch_link_sentinel" ||
+    fail "unsafe commit-patches path changed external bytes"
+  [ "$(find "$patch_link_outside" ! -path "$patch_link_outside" -print |
+    wc -l | tr -d ' ')" = 1 ] ||
+    fail "unsafe commit-patches path created external entries"
+else
+  echo "goal-drive-recovery-smoke: skip commit-patches symlink fixture (symlinks unavailable)" >&2
+fi
+
+# A planted final patch leaf may itself point at an external directory. Plain
+# `mv temp leaf` follows that directory symlink and creates an external entry;
+# the freeze transaction must atomically replace the leaf instead.
+patch_leaf_repo="$TMP/commit-patch-leaf-symlink"
+make_case "$patch_leaf_repo" tracked
+patch_leaf_calls="$TMP/commit-patch-leaf-symlink-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$patch_leaf_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$patch_leaf_repo" --to codex \
+  --max-cycles 2 > "$TMP/commit-patch-leaf-review.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "commit-patch leaf fixture did not stop after review"
+patch_leaf_dir="$patch_leaf_repo/.oms/plan/commit-patches"
+patch_leaf_path="$patch_leaf_dir/leaf-symlink-1-tracked.patch"
+patch_leaf_outside="$TMP/commit-patch-leaf-external"
+patch_leaf_sentinel="$patch_leaf_outside/user-owned.txt"
+patch_leaf_expected="$TMP/commit-patch-leaf-external.expected"
+patch_leaf_head_before="$(git -C "$patch_leaf_repo" rev-parse HEAD)"
+mkdir -p "$patch_leaf_dir" "$patch_leaf_outside"
+printf 'leaf-external user bytes\n' > "$patch_leaf_sentinel"
+cp "$patch_leaf_sentinel" "$patch_leaf_expected"
+chmod 751 "$patch_leaf_outside"
+patch_leaf_mode="$(stat -c '%a' "$patch_leaf_outside" 2>/dev/null ||
+  stat -f '%Lp' "$patch_leaf_outside" 2>/dev/null)"
+if ln -s "$patch_leaf_outside" "$patch_leaf_path" 2>/dev/null &&
+   [ -L "$patch_leaf_path" ]; then
+  rc=0
+  HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+    CALL_LOG="$patch_leaf_calls" "$ROOT/scripts/goal-drive.sh" \
+    --repo "$patch_leaf_repo" --to codex --max-cycles 2 \
+    --run-id leaf-symlink > "$TMP/commit-patch-leaf.out" 2>&1 || rc=$?
+  case "$rc" in
+    0)
+      [ -f "$patch_leaf_path" ] && [ ! -L "$patch_leaf_path" ] ||
+        fail "final patch leaf was not replaced by the frozen regular file"
+      [ "$(git -C "$patch_leaf_repo" rev-list --count \
+        "$patch_leaf_head_before..HEAD" | tr -d '\r')" = 1 ] ||
+        fail "final patch leaf recovery did not publish exactly one commit"
+      ;;
+    3)
+      grep -Fq 'reason=freeze-patch-failed' "$TMP/commit-patch-leaf.out" ||
+        fail "platform-safe leaf refusal used the wrong park reason"
+      [ "$(git -C "$patch_leaf_repo" rev-parse HEAD)" = "$patch_leaf_head_before" ] ||
+        fail "platform-safe leaf refusal moved HEAD"
+      ;;
+    *) fail "final patch leaf symlink did not fail safely, got $rc" ;;
+  esac
+  [ -z "$(git -C "$patch_leaf_repo" status --porcelain)" ] ||
+    fail "final patch leaf handling changed the worktree"
+  [ "$(wc -l < "$patch_leaf_calls" | tr -d ' ')" = 1 ] ||
+    fail "commit-patch leaf recovery called the provider again"
+  [ "$patch_leaf_mode" = \
+    "$(stat -c '%a' "$patch_leaf_outside" 2>/dev/null ||
+      stat -f '%Lp' "$patch_leaf_outside" 2>/dev/null)" ] ||
+    fail "final patch leaf symlink changed the external directory mode"
+  cmp -s "$patch_leaf_expected" "$patch_leaf_sentinel" ||
+    fail "final patch leaf symlink changed external bytes"
+  [ "$(find "$patch_leaf_outside" ! -path "$patch_leaf_outside" -print |
+    wc -l | tr -d ' ')" = 1 ] ||
+    fail "final patch leaf symlink created an external entry"
+else
+  echo "goal-drive-recovery-smoke: skip final patch leaf symlink fixture (symlinks unavailable)" >&2
+fi
+
+# Race the directory after goal-drive has entered the validated directory but
+# before mktemp creates the patch. Relative writes must remain on the original
+# directory handle; the replacement symlink target stays untouched and the
+# changed absolute lookup parks before the frozen path is consumed.
+patch_race_repo="$TMP/commit-patches-race"
+make_case "$patch_race_repo" tracked
+patch_race_calls="$TMP/commit-patches-race-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$patch_race_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$patch_race_repo" --to codex \
+  --max-cycles 2 > "$TMP/commit-patches-race-review.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "commit-patches race fixture did not stop after review"
+patch_race_dir="$patch_race_repo/.oms/plan/commit-patches"
+patch_race_parked="$patch_race_repo/.oms/plan/commit-patches.original"
+patch_race_outside="$TMP/commit-patches-race-external"
+patch_race_sentinel="$patch_race_outside/user-owned.txt"
+patch_race_expected="$TMP/commit-patches-race-external.expected"
+patch_race_marker="$TMP/commit-patches-race-swapped"
+patch_race_bin="$TMP/commit-patches-race-bin"
+real_mktemp="$(command -v mktemp)"
+mkdir -p "$patch_race_outside" "$patch_race_bin"
+printf 'race-external user bytes\n' > "$patch_race_sentinel"
+cp "$patch_race_sentinel" "$patch_race_expected"
+chmod 751 "$patch_race_outside"
+patch_race_mode="$(stat -c '%a' "$patch_race_outside" 2>/dev/null ||
+  stat -f '%Lp' "$patch_race_outside" 2>/dev/null)"
+cat > "$patch_race_bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *' .goal-patch.XXXXXX '*)
+    if mv "$OMS_T_PATCH_DIR" "$OMS_T_PATCH_PARKED" 2>/dev/null &&
+       ln -s "$OMS_T_PATCH_OUTSIDE" "$OMS_T_PATCH_DIR" 2>/dev/null; then
+      : > "$OMS_T_PATCH_SWAPPED"
+    fi
+    ;;
+esac
+exec "$OMS_T_REAL_MKTEMP" "$@"
+EOF
+chmod +x "$patch_race_bin/mktemp"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$patch_race_bin:$bin:/usr/bin:/bin" \
+  CALL_LOG="$patch_race_calls" OMS_T_REAL_MKTEMP="$real_mktemp" \
+  OMS_T_PATCH_DIR="$patch_race_dir" OMS_T_PATCH_PARKED="$patch_race_parked" \
+  OMS_T_PATCH_OUTSIDE="$patch_race_outside" OMS_T_PATCH_SWAPPED="$patch_race_marker" \
+  "$ROOT/scripts/goal-drive.sh" --repo "$patch_race_repo" --to codex \
+  --max-cycles 2 > "$TMP/commit-patches-race.out" 2>&1 || rc=$?
+if [ -f "$patch_race_marker" ]; then
+  [ "$rc" = 3 ] || fail "commit-patches path race should park, got $rc"
+  grep -Fq 'reason=unsafe-patch-path' "$TMP/commit-patches-race.out" ||
+    fail "commit-patches path race did not report unsafe-patch-path"
+  [ "$(wc -l < "$patch_race_calls" | tr -d ' ')" = 1 ] ||
+    fail "commit-patches path race called the provider again"
+  [ "$patch_race_mode" = \
+    "$(stat -c '%a' "$patch_race_outside" 2>/dev/null ||
+      stat -f '%Lp' "$patch_race_outside" 2>/dev/null)" ] ||
+    fail "commit-patches path race changed the external directory mode"
+  cmp -s "$patch_race_expected" "$patch_race_sentinel" ||
+    fail "commit-patches path race changed external bytes"
+  [ "$(find "$patch_race_outside" ! -path "$patch_race_outside" -print |
+    wc -l | tr -d ' ')" = 1 ] ||
+    fail "commit-patches path race created an external entry"
+else
+  echo "goal-drive-recovery-smoke: skip commit-patches race fixture (directory swap unavailable)" >&2
+fi
 
 # A real rename patch names both the removed and added path. Git's default
 # rename detection may report only the destination from `diff --name-only`;
@@ -799,7 +1016,8 @@ rename_before="$(git -C "$rename_repo" rev-parse HEAD)"
 rename_calls="$TMP/rename-intent-calls"
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$rename_calls" "$ROOT/scripts/goal-drive.sh" --repo "$rename_repo" \
-  --to codex --max-cycles 2 > "$TMP/rename-intent.out" 2>&1 ||
+  --to codex --max-cycles 2 --run-id exact-run-receipt \
+  > "$TMP/rename-intent.out" 2>&1 ||
   fail "valid autonomous rename intent did not commit: $(tail -8 "$TMP/rename-intent.out")"
 [ "$(wc -l < "$rename_calls" | tr -d ' ')" = 1 ] ||
   fail "rename intent called the provider more than once"
@@ -811,5 +1029,12 @@ printf '%s\n' "$rename_status" | grep -Eq '^R[0-9]+[[:space:]]+old\.txt[[:space:
   fail "rename intent commit did not preserve old/new rename lineage"
 [ -z "$(git -C "$rename_repo" status --porcelain)" ] ||
   fail "rename intent left the repository dirty"
+python3 - "$rename_repo/.oms/plan/progress.jsonl" <<'PY' || fail "caller-supplied run id did not bind the terminal receipt"
+import json, sys
+
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+terminal = [row for row in rows if row.get("kind") == "terminal"]
+assert terminal and terminal[-1].get("run_id") == "exact-run-receipt", terminal
+PY
 
 echo "goal-drive-recovery-smoke: ok"

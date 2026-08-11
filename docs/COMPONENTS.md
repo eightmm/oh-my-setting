@@ -236,7 +236,11 @@ or already committed intent without calling the provider again. Publication
 builds the frozen tree in a private index, creates the commit without repository
 commit hooks, and compare-and-sets `HEAD` against the recorded parent while
 holding Git's index lock. A staged index that differs from the frozen base is
-preserved and parks the run instead of being overwritten.
+preserved and parks the run instead of being overwritten. Repository hooks are
+disabled for every child Git operation in the drive, not only the final ref
+update. Frozen patch creation enters the validated physical directory, uses
+relative writes, and atomically replaces the final leaf without following a
+directory symlink; a changed absolute lookup parks before consumption.
 
 `oms autopilot` composes those boundaries. It proposes an initial plan for
 parent review, atomically applies only that exact proposal, drives the approved
@@ -244,7 +248,12 @@ tasks, and may propose one `r1-` remainder tranche of at most two tasks. The
 mechanical acceptance command remains the hard gate; cross-family semantic
 review defaults to advisory shadow mode and can be made a gate explicitly. Its
 base is frozen to a commit before the drive, so a moved branch name cannot make
-the whole-change review empty.
+the whole-change review empty. Each drive ends with one unique canonical result
+that binds its internal receipt, status, and reason; the durable terminal row
+must match it before the remainder tranche is authorized. `propose` requires
+the base; its printed continuation is shell-safe, retains every effective
+option, and accepts only a regular non-symlink proposal snapshot of at most
+1 MiB.
 With `--draft-pr`, `oms draft-pr` rechecks the clean HEAD, tree, remote base,
 GitHub identity, write permission, and verifier before a create-only push and
 Draft PR. Every introduced Git object, including trees, is scanned for
@@ -260,12 +269,18 @@ after an interrupted or tampered push; it cannot update an existing remote
 branch, merge, mark ready, tag, or release. Starting on the base branch
 creates a deterministic local `oms/autopilot-<spec-digest>` branch before the
 first drive cycle, with or without Draft PR publication; any other checked-out
-branch parks rather than being silently driven. A failed or ambiguous
+branch parks rather than being silently driven. Recovery branches use strict
+`-rN` names, and the complete committed diff from the reviewed base must stay
+inside the plan envelope. That selected branch is frozen through review, and a
+base-branch restart parks when a matching recovery branch already exists
+instead of creating a competing lineage. A failed or ambiguous
 push spends that intent; retry from a new branch name rather than risk replaying
 an effect whose absence cannot be proven permanently. The two publication
 recovery cases: an interrupted but unspent intent replays with
 `oms draft-pr --repo REPO --intent INTENT publish`; a spent or terminal intent
-never replays — rename the work branch once
+never replays. Repeated preparation prints that exact, shell-safe replay command
+only for an unblocked regular intent; otherwise it parks without advertising
+publication. For a spent intent, rename the work branch once
 (`git branch -m oms/autopilot-<digest> oms/autopilot-<digest>-r2`, which the
 checkout guard accepts) and rerun `oms autopilot run` to review and prepare a
 fresh intent on the new name.

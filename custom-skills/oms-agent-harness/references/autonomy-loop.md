@@ -77,15 +77,16 @@ silently; a `State: draft` spec is refused outright.
 For the full bounded path, use the two-step approval boundary:
 
 ```bash
-oms autopilot --repo . --allowed 'src,tests,docs' propose
+oms autopilot --repo . --allowed 'src,tests,docs' --base main propose
 oms autopilot --repo . --allowed 'src,tests,docs' --base main \
   --proposal .oms/plan/proposal-...json \
   --expected-proposal-sha256 <digest printed by propose> --draft-pr run
 ```
 
 The first command exits with a proposal for the parent to review and prints
-the proposal's sha256 plus the exact continuation; the second requires that
-digest back and atomically applies only bytes that still match it, drives the
+the proposal's sha256 plus a shell-safe continuation containing every effective
+option. The second accepts only a regular non-symlink proposal of at most 1 MiB,
+requires that digest back, atomically applies only matching bytes, drives the
 existing loop, permits at most
 one `r1-` remainder proposal, re-runs acceptance, and uses a different-family
 semantic review in shadow mode. `--review-mode gate` makes that review blocking.
@@ -94,8 +95,12 @@ creates a new branch and Draft PR and can be replayed after interruption. It has
 no branch update, merge, ready, tag, or release operation. If the run starts on the base
 branch, autopilot first creates `oms/autopilot-<spec-digest>` locally so
 implementation commits never land on that base; from any other branch it
-parks unless the branch is that deterministic name or one of its `-suffix`
-recovery branches.
+parks unless the branch is that deterministic name or one of its strict `-rN`
+recovery branches. Raw Git paths in the complete branch diff must stay inside
+the reviewed envelope. A unique final result binds the private run receipt,
+status, and reason to this invocation and must match the durable terminal row.
+The selected work branch stays fixed through review, and a matching recovery
+branch found from the base must be resumed explicitly rather than forked.
 
 Each cycle: acceptance command (pass = done) → one `plan-run --next --land` →
 commit of exactly the admitted patch's paths, task title as subject. It

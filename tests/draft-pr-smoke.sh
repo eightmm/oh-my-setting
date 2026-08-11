@@ -928,8 +928,8 @@ EOF
   # Re-running prepare for the same deterministic HEAD must not execute a
   # verifier against an existing intent. The existing bytes remain publishable
   # only through the dedicated replay path.
-  repo="$TMP/repeated-prepare"
-  bare="$TMP/repeated-prepare.git"
+  repo="$TMP/repeated prepare"
+  bare="$TMP/repeated prepare.git"
   make_repo "$repo" "$bare"
   : > "$repo/git.log"; : > "$repo/gh.log"
   cat > "$repo/.git/hooks/tamper-on-prepare-replay" <<'EOF'
@@ -952,7 +952,7 @@ EOF
     --verify .git/hooks/tamper-on-prepare-replay > "$repo/repeat-first.out" ||
     fail "repeat-prepare fixture initial intent failed"
   intent="$(sed -n 's/^intent: //p' "$repo/repeat-first.out" | tail -n 1)"
-  local repeat_before
+  local repeat_before resume_cmd resume_bin resume_argv repeat_saved
   repeat_before="$(sha256_file "$intent")"
   : > "$repo/.git/tamper-on-prepare-replay-now"
   rc=0
@@ -961,8 +961,71 @@ EOF
   [ "$rc" = 3 ] || fail "second prepare of an existing intent should park, got $rc"
   grep -Fq 'reason=intent-already-prepared' "$repo/repeat-second.out" ||
     fail "second prepare did not identify the existing exact intent"
+  [ "$(grep -c '^draft-pr: next:' "$repo/repeat-second.out")" = 1 ] ||
+    fail "second prepare should print exactly one resume command"
+  resume_cmd="$(sed -n 's/^draft-pr: next: //p' "$repo/repeat-second.out")"
+  [ -n "$resume_cmd" ] || fail "second prepare did not print its exact publish command"
+  case "$resume_cmd" in
+    'oms draft-pr '*) ;;
+    *) fail "second prepare next line is prose, not an oms draft-pr command" ;;
+  esac
+
+  # The recovery line is a command for an operator to paste, not explanatory
+  # prose. Execute it against a capture-only oms shim so shell quoting must
+  # preserve the repository and intent as one argv each even though both paths
+  # contain spaces.
+  resume_bin="$repo/.git/resume-bin"
+  resume_argv="$repo/.git/resume-argv"
+  mkdir -p "$resume_bin"
+  cat > "$resume_bin/oms" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "$OMS_T_RESUME_ARGV"
+EOF
+  chmod +x "$resume_bin/oms"
+  PATH="$resume_bin:$PATH" OMS_T_RESUME_ARGV="$resume_argv" \
+    bash -c "$resume_cmd" || fail "printed publish command was not shell executable"
+  python3 - "$resume_argv" "$repo" "$intent" <<'PY' || fail "printed publish command did not round-trip its exact argv"
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    fields = handle.read().split(b"\0")
+assert fields[-1] == b"", fields
+argv = [field.decode("utf-8") for field in fields[:-1]]
+assert argv == [
+    "draft-pr", "--repo", sys.argv[2], "--intent", sys.argv[3], "publish"
+], argv
+PY
   [ "$repeat_before" = "$(sha256_file "$intent")" ] ||
     fail "second prepare allowed its verifier to mutate the existing intent"
+
+  # A deterministic slot with terminal poison, or a symlink in place of the
+  # reviewed regular file, must never advertise that slot as publishable.
+  : > "$intent.blocked"
+  rc=0
+  run_draft_pr "$repo" prepare --remote origin --base main \
+    --verify .git/hooks/tamper-on-prepare-replay > "$repo/repeat-blocked.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "blocked existing intent should park, got $rc"
+  if grep '^draft-pr: next:' "$repo/repeat-blocked.out" | grep -Fq 'oms draft-pr'; then
+    fail "blocked intent exposed a publish resume command"
+  fi
+  [ "$repeat_before" = "$(sha256_file "$intent")" ] ||
+    fail "blocked prepare ran its verifier against the existing intent"
+  rm -f "$intent.blocked"
+
+  repeat_saved="$repo/.git/repeat-intent.saved"
+  mv "$intent" "$repeat_saved"
+  ln -s "$repeat_saved" "$intent"
+  rc=0
+  run_draft_pr "$repo" prepare --remote origin --base main \
+    --verify .git/hooks/tamper-on-prepare-replay > "$repo/repeat-symlink.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "symlink existing intent should park, got $rc"
+  if grep '^draft-pr: next:' "$repo/repeat-symlink.out" | grep -Fq 'oms draft-pr'; then
+    fail "symlink intent exposed a publish resume command"
+  fi
+  [ "$repeat_before" = "$(sha256_file "$repeat_saved")" ] ||
+    fail "symlink prepare ran its verifier against the intent target"
+  rm -f "$intent"
+  mv "$repeat_saved" "$intent"
   rm -f "$repo/.git/tamper-on-prepare-replay-now"
   run_draft_pr "$repo" publish --intent "$intent" > "$repo/repeat-publish.out" ||
     fail "untouched existing intent did not remain publishable"

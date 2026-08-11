@@ -63,7 +63,7 @@ Options:
                           from the worker.
   --allowed PATHS         Immutable comma-separated task path envelope.
                           Required whenever a proposal may be generated.
-  --base BRANCH           Review/PR base branch. Required for run.
+  --base BRANCH           Review/PR base branch. Required for propose and run.
   --remote NAME           Git remote for base resolution and Draft PR (origin).
   --max-cycles N          goal-drive cycle cap, 1..10 (default: 10).
   --initial-tasks N       Initial proposal cap, 1..12 (default: 6).
@@ -77,7 +77,8 @@ Options:
 Generated proposals never apply themselves. `run --proposal FILE
 --expected-proposal-sha256 SHA` is the parent's exact approval boundary: the
 digest printed at propose time must come back, and the bytes are snapshotted
-once and verified before anything reads them. Proposal bytes and the plan CAS
+once from a regular non-symlink file of at most 1 MiB and verified before
+anything reads them. Proposal bytes and the plan CAS
 are checked inside one atomic plan update; PROJECT.md, HEAD, and the allowed
 envelope are bound to that durable plan and rechecked on every resume. A run started on the
 named base first switches to a deterministic local feature branch.
@@ -220,6 +221,98 @@ autopilot_mktemp() {
   mktemp "$AUTOPILOT_TMPDIR/item.XXXXXX"
 }
 
+autopilot_shell_join() {  # ARGV...
+  python3 - "$@" <<'PY' | tr -d '\r'
+import shlex, sys
+print(" ".join(shlex.quote(value) for value in sys.argv[1:]))
+PY
+}
+
+snapshot_regular_proposal() {  # SOURCE DEST
+  python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+limit = 1024 * 1024
+source_fd = None
+destination_fd = None
+destination_created = False
+
+class ProposalError(Exception):
+    pass
+
+def identity(value):
+    return (value.st_dev, value.st_ino)
+
+try:
+    before = os.lstat(source)
+    if not stat.S_ISREG(before.st_mode):
+        raise ProposalError("proposal must be a regular non-symlink file")
+    if before.st_size > limit:
+        raise ProposalError("proposal exceeds the 1 MiB snapshot limit")
+
+    flags = os.O_RDONLY
+    for name in ("O_BINARY", "O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= getattr(os, name, 0)
+    source_fd = os.open(source, flags)
+    opened = os.fstat(source_fd)
+    if not stat.S_ISREG(opened.st_mode) or identity(before) != identity(opened):
+        raise ProposalError("proposal changed while its snapshot was opened")
+    if opened.st_size > limit:
+        raise ProposalError("proposal exceeds the 1 MiB snapshot limit")
+
+    payload = bytearray()
+    while len(payload) <= limit:
+        chunk = os.read(source_fd, min(65536, limit + 1 - len(payload)))
+        if not chunk:
+            break
+        payload.extend(chunk)
+    if len(payload) > limit:
+        raise ProposalError("proposal exceeds the 1 MiB snapshot limit")
+
+    after = os.lstat(source)
+    if (not stat.S_ISREG(after.st_mode) or
+            identity(opened) != identity(after)):
+        raise ProposalError("proposal changed while it was snapshotted")
+
+    output_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    output_flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    destination_fd = os.open(destination, output_flags, 0o600)
+    destination_created = True
+    view = memoryview(payload)
+    while view:
+        written = os.write(destination_fd, view)
+        if written <= 0:
+            raise OSError("short snapshot write")
+        view = view[written:]
+except ProposalError as exc:
+    print("error: %s" % exc, file=sys.stderr)
+    if destination_created:
+        try:
+            os.unlink(destination)
+        except OSError:
+            pass
+    raise SystemExit(2)
+except (OSError, ValueError):
+    print("error: cannot safely snapshot the proposal file", file=sys.stderr)
+    if destination_created:
+        try:
+            os.unlink(destination)
+        except OSError:
+            pass
+    raise SystemExit(2)
+finally:
+    for descriptor in (destination_fd, source_fd):
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+PY
+}
+
 [ -f "$SPEC" ] || fail "PROJECT.md is required; complete the project spec first"
 spec_state="$(sed -n 's/^- State:[[:space:]]*//p' "$SPEC" | sed -n 1p)"
 spec_state="${spec_state//$'\r'/}"
@@ -341,7 +434,7 @@ PY
 propose_tasks() {  # PREFIX MAX
   local prefix="$1"
   local max_tasks="$2"
-  local args out rc proposal_path proposal_digest
+  local args out rc proposal_path proposal_digest continuation continuation_line
 
   [ -n "$ALLOWED" ] || fail "--allowed is required to generate a proposal"
   args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED")
@@ -361,14 +454,28 @@ propose_tasks() {  # PREFIX MAX
   proposal_digest="${proposal_digest//$'\r'/}"
   [ -n "$proposal_path" ] && [ -n "$proposal_digest" ] ||
     fail "the proposal was generated without a path/digest receipt"
+  continuation=(oms autopilot --repo "$REPO" --planner "$PLANNER" \
+    --worker "$WORKER" --reviewer "$REVIEWER" --allowed "$ALLOWED" \
+    --base "$BASE" --remote "$REMOTE" \
+    --max-cycles "$MAX_CYCLES" --initial-tasks "$INITIAL_TASKS" \
+    --replan-tasks "$REPLAN_TASKS" --review-mode "$REVIEW_MODE")
+  [ "$AUTO_REPAIR" -eq 0 ] || continuation+=(--auto-repair)
+  [ "$DRAFT_PR" -eq 0 ] || continuation+=(--draft-pr)
+  continuation+=(run --proposal "$proposal_path" \
+    --expected-proposal-sha256 "$proposal_digest")
+  continuation_line="$(autopilot_shell_join "${continuation[@]}")" ||
+    fail "cannot render the proposal continuation"
+  continuation_line="${continuation_line//$'\r'/}"
   echo "autopilot: proposal awaits parent review"
   echo "autopilot: after review, resume with:"
-  echo "  oms autopilot --repo $REPO --allowed $ALLOWED --base ${BASE:-<base-branch>} run \\"
-  echo "    --proposal $proposal_path --expected-proposal-sha256 $proposal_digest"
+  printf '  %s\n' "$continuation_line"
   return 4
 }
 
 if [ "$ACTION" = propose ]; then
+  [ -n "$BASE" ] || fail "propose requires --base so its continuation is executable"
+  git check-ref-format --branch "$BASE" >/dev/null 2>&1 ||
+    fail "--base is not a valid branch name"
   if [ ! -f "$PLAN_FILE" ]; then
     propose_tasks "" "$INITIAL_TASKS" || exit $?
   fi
@@ -390,8 +497,10 @@ if [ -n "$PROPOSAL" ]; then
   # consumer (tranche metadata, validation, atomic apply) sees this snapshot,
   # so a swap of the operator-named file after review changes nothing.
   proposal_snapshot="$AUTOPILOT_TMPDIR/proposal.json"
-  cat -- "$PROPOSAL" > "$proposal_snapshot" 2>/dev/null ||
-    fail "cannot read the proposal file"
+  proposal_snapshot_rc=0
+  snapshot_regular_proposal "$PROPOSAL" "$proposal_snapshot" ||
+    proposal_snapshot_rc=$?
+  [ "$proposal_snapshot_rc" -eq 0 ] || exit "$proposal_snapshot_rc"
   snapshot_sha="$(oms_sha256_file "$proposal_snapshot")" || fail "cannot hash the proposal"
   [ "$snapshot_sha" = "$PROPOSAL_SHA" ] ||
     fail "proposal bytes do not match the reviewed --expected-proposal-sha256"
@@ -451,7 +560,7 @@ git -C "$REPO" merge-base --is-ancestor "$review_base_sha" HEAD 2>/dev/null ||
   fail "the frozen base commit is not an ancestor of the implementation branch"
 
 ensure_work_branch() {
-  local current target current_head target_head
+  local current target current_head target_head recovery_branch recovery_suffix
   current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
     fail "autopilot requires a branch, not detached HEAD"
   current="${current//$'\r'/}"
@@ -459,15 +568,36 @@ ensure_work_branch() {
   target="oms/autopilot-$(printf '%.12s' "$BOUND_SPEC_SHA")"
   if [ "$current" != "$BASE" ]; then
     # Only the deterministic work branch of THIS contract, or one of its
-    # -suffix recovery branches, may be driven. An arbitrary checked-out
+    # strict -rN recovery branches, may be driven. An arbitrary checked-out
     # branch must never silently receive implementation commits.
+    [ "$current" != "$target" ] || return 0
     case "$current" in
-      "$target"|"$target"-*) return 0 ;;
+      "$target"-r*)
+        recovery_suffix="${current#"$target-r"}"
+        case "$recovery_suffix" in
+          ""|0*|*[!0-9]*) ;;
+          *) return 0 ;;
+        esac
+        ;;
     esac
     park "foreign-work-branch" \
-      "checkout $BASE, $target, or a $target-* recovery branch, then rerun"
+      "checkout $BASE, $target, or a $target-rN recovery branch, then rerun"
   fi
   current_head="$(git -C "$REPO" rev-parse HEAD)"
+  recovery_branch="$(git -C "$REPO" for-each-ref --sort=refname \
+    --format='%(refname:short)' "refs/heads/$target-r*" |
+    while IFS= read -r candidate; do
+      candidate="${candidate//$'\r'/}"
+      recovery_suffix="${candidate#"$target-r"}"
+      case "$recovery_suffix" in ""|0*|*[!0-9]*) continue ;; esac
+      printf '%s\n' "$candidate"
+      break
+    done)" ||
+    park "autopilot-branch-inspection-failed" "inspect the local work branches"
+  recovery_branch="${recovery_branch//$'\r'/}"
+  [ -z "$recovery_branch" ] ||
+    park "autopilot-recovery-branch-exists" \
+      "checkout $recovery_branch and rerun the same autopilot command"
   if git -C "$REPO" show-ref --verify --quiet "refs/heads/$target"; then
     target_head="$(git -C "$REPO" rev-parse "refs/heads/$target")"
     [ "$target_head" = "$current_head" ] ||
@@ -485,22 +615,69 @@ ensure_work_branch() {
   bind_plan_contract
 }
 
+work_branch_scope_check() {
+  python3 - "$REPO" "$review_base_sha" "$ALLOWED" <<'PY'
+import os
+import subprocess
+import sys
+
+repo, base, allowed_text = sys.argv[1:]
+try:
+    raw = subprocess.check_output([
+        "git", "-C", repo, "diff", "--name-only", "--no-renames", "-z",
+        base, "HEAD", "--",
+    ], stderr=subprocess.DEVNULL)
+except (OSError, subprocess.CalledProcessError):
+    raise SystemExit(2)
+
+allowed = allowed_text.split(",")
+for value in raw.split(b"\0"):
+    if not value:
+        continue
+    # `git ... -z` always uses '/' as its tree separator. On POSIX a
+    # backslash is a literal filename byte, so normalizing it would turn a
+    # root file such as `src\\escape` into a false member of allowed `src`.
+    path = os.fsdecode(value)
+    if not any(root == "." or path == root or path.startswith(root + "/")
+               for root in allowed):
+        raise SystemExit(3)
+PY
+}
+
 # Keep the named base immutable across interrupted local runs as well as Draft
 # PR runs. That makes the frozen whole-change review base durable by topology:
 # goal-drive commits only on the deterministic feature branch.
 ensure_work_branch
+work_branch="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
+  fail "autopilot requires a branch after work-branch selection"
+work_branch="${work_branch//$'\r'/}"
+work_branch_scope_rc=0
+work_branch_scope_check || work_branch_scope_rc=$?
+case "$work_branch_scope_rc" in
+  0) ;;
+  3) park "work-branch-outside-scope" "remove or separately review history outside $ALLOWED" ;;
+  *) park "work-branch-scope-unreadable" "inspect the complete branch diff from the reviewed base" ;;
+esac
 spec_sha="$BOUND_SPEC_SHA"
 accept_cmd="$(plan_view accept)"
 accept_cmd="${accept_cmd//$'\r'/}"
 [ -n "$accept_cmd" ] || fail "approved plan has no acceptance command"
 accept_sha="$(printf '%s' "$accept_cmd" | oms_sha256_stream)" || fail "cannot hash acceptance command"
 
-drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES")
+drive_run_id="ap-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
+  --run-id "$drive_run_id")
 [ "$AUTO_REPAIR" -eq 0 ] || drive_args+=(--auto-repair)
 drive_out="$(autopilot_mktemp)" || fail "mktemp failed"
 drive_rc=0
 "$GOAL_DRIVE" "${drive_args[@]}" > "$drive_out" 2>&1 || drive_rc=$?
 cat "$drive_out"
+
+current_work_branch="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
+  park "branch-changed-after-drive" "restore $work_branch and inspect the drive"
+current_work_branch="${current_work_branch//$'\r'/}"
+[ "$current_work_branch" = "$work_branch" ] ||
+  park "branch-changed-after-drive" "restore $work_branch and inspect the drive"
 
 current_spec_sha="$(oms_sha256_file "$SPEC")" || park "spec-unreadable" "restore PROJECT.md"
 [ "$current_spec_sha" = "$spec_sha" ] || park "spec-changed" "review the changed project contract"
@@ -511,33 +688,78 @@ current_accept_sha="$(printf '%s' "$current_accept" | oms_sha256_stream)" ||
 [ "$current_accept_sha" = "$accept_sha" ] ||
   park "acceptance-changed" "review the changed acceptance command"
 
-# goal-drive's own park appends its typed terminal row to the progress log
-# AFTER anything a worker's acceptance command may have printed, so the latest
-# kind=terminal row is authoritative where captured stdout is forgeable. A
-# missing or unreadable row is no reason at all (fail-closed).
-drive_terminal_reason() {
+# goal-drive binds its receipt, status, and reason in one canonical final line
+# written by the parent after its durable row. Captured child output may contain
+# arbitrary text, so a duplicate prefix or any later non-empty line invalidates
+# the result. The mutable progress ledger only cross-checks the exact result;
+# it never selects the reason that can spend the bounded replan tranche.
+drive_terminal_park_reason() {  # RUN_ID OUTPUT
   [ -f "$PROGRESS_FILE" ] || return 0
-  python3 - "$PROGRESS_FILE" <<'PY' | tr -d '\r'
-import json, sys
-latest = None
+  python3 - "$1" "$2" "$PROGRESS_FILE" <<'PY' | tr -d '\r'
+import json
+import re
+import sys
+
+run_id, output_path, progress_path = sys.argv[1:]
+prefix = "goal-drive: terminal-v1 "
+pattern = re.compile(
+    r"goal-drive: terminal-v1 run=([A-Za-z0-9._-]{1,64}) "
+    r"receipt=([0-9a-f]{64}) status=(park|done) "
+    r"reason=([A-Za-z0-9._-]{1,128})")
+candidate = None
+candidate_line = None
+last_nonempty = None
+prefix_count = 0
 try:
-    with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+    with open(output_path, encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\r\n")
+            if line:
+                last_nonempty = line
+            if line.startswith(prefix):
+                prefix_count += 1
+                match = pattern.fullmatch(line)
+                if match is not None:
+                    candidate = match.groups()
+                    candidate_line = line
+except OSError:
+    raise SystemExit(0)
+
+if (prefix_count != 1 or candidate is None or
+        candidate_line != last_nonempty):
+    raise SystemExit(0)
+result_run, receipt, status, reason = candidate
+if result_run != run_id or status != "park":
+    raise SystemExit(0)
+
+matched = False
+try:
+    with open(progress_path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             try:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict) and row.get("kind") == "terminal":
-                latest = row
+            if (isinstance(row, dict) and row.get("schema") == 1 and
+                    row.get("kind") == "terminal" and
+                    row.get("run_id") == result_run and
+                    row.get("receipt") == receipt and
+                    row.get("status") == status and
+                    row.get("reason") == reason):
+                matched = True
+                break
 except OSError:
-    latest = None
-if latest is not None and isinstance(latest.get("reason"), str):
-    print(latest["reason"])
+    matched = False
+if matched:
+    print(reason)
 PY
 }
 
 if [ "$drive_rc" -ne 0 ]; then
-  if [ "$drive_rc" -eq 3 ] && [ "$(drive_terminal_reason)" = tasks-exhausted ]; then
+  drive_park_reason="$(drive_terminal_park_reason "$drive_run_id" "$drive_out")"
+  drive_park_reason="${drive_park_reason//$'\r'/}"
+  if [ "$drive_rc" -eq 3 ] &&
+    [ "$drive_park_reason" = tasks-exhausted ]; then
     [ "$(plan_view all-done)" = 1 ] ||
       park "tasks-exhausted-with-unfinished-work" "inspect the plan state"
     [ "$(plan_view has-r1)" = 0 ] ||
@@ -570,6 +792,11 @@ assert_final_snapshot() {
   local current
   [ -z "$(git -C "$REPO" status --porcelain)" ] ||
     park "tree-changed-after-acceptance" "inspect the foreign work"
+  current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
+    park "branch-changed-after-review" "restore $work_branch and repeat whole-change review"
+  current="${current//$'\r'/}"
+  [ "$current" = "$work_branch" ] ||
+    park "branch-changed-after-review" "restore $work_branch and repeat whole-change review"
   current="$(git -C "$REPO" rev-parse HEAD)"; current="${current//$'\r'/}"
   [ "$current" = "$final_head" ] || park "head-changed-after-review" "repeat whole-change review"
   current="$(git -C "$REPO" rev-parse 'HEAD^{tree}')"; current="${current//$'\r'/}"

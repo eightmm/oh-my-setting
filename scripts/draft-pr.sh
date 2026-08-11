@@ -89,6 +89,13 @@ park() {
   exit 3
 }
 
+draft_shell_join() {  # ARGV...
+  python3 - "$@" <<'PY' | tr -d '\r'
+import shlex, sys
+print(" ".join(shlex.quote(value) for value in sys.argv[1:]))
+PY
+}
+
 validate_scan_limit() {  # VALUE NAME MAX
   case "$1" in *[!0-9]*|"") fail "$2 must be a positive integer" ;; esac
   [ "$1" -gt 0 ] && [ "$1" -le "$3" ] ||
@@ -696,6 +703,7 @@ prepare() {
   local branch slug head tree base_sha ahead source_sha title publish_dir safe_branch branch_digest
   local body_file title_file intent_path fetch_url push_url viewer_login verifier_scan verifier_rc
   local verifier_scan_rc title_scan_rc body_scan_rc topology_rc ahead_rc old_umask
+  local resume_safe resume_cmd
 
   [ -n "$BASE" ] || fail "prepare requires --base"
   [ -n "$VERIFY" ] || fail "prepare requires --verify"
@@ -730,7 +738,24 @@ prepare() {
   if [ -e "$intent_path" ] || [ -L "$intent_path" ] ||
      [ -e "$intent_path.blocked" ] || [ -L "$intent_path.blocked" ] ||
      [ -e "$intent_path.push-attempted" ] || [ -L "$intent_path.push-attempted" ]; then
-    park "intent-already-prepared" "publish the existing exact intent or use a new branch name"
+    resume_safe=0
+    if [ -f "$intent_path" ] && [ ! -L "$intent_path" ] &&
+       [ ! -e "$intent_path.blocked" ] && [ ! -L "$intent_path.blocked" ]; then
+      if { [ ! -e "$intent_path.push-attempted" ] &&
+           [ ! -L "$intent_path.push-attempted" ]; } ||
+         { [ -f "$intent_path.push-attempted" ] &&
+           [ ! -L "$intent_path.push-attempted" ]; }; then
+        resume_safe=1
+      fi
+    fi
+    if [ "$resume_safe" -eq 1 ]; then
+      resume_cmd="$(draft_shell_join oms draft-pr --repo "$REPO" \
+        --intent "$intent_path" publish)" ||
+        fail "cannot render the exact publish continuation"
+      resume_cmd="${resume_cmd//$'\r'/}"
+      park "intent-already-prepared" "$resume_cmd"
+    fi
+    park "intent-already-prepared" "inspect the terminal intent slot or use a new branch name"
   fi
   if ! "$GIT" -C "$REPO" cat-file -e "$base_sha^{commit}" 2>/dev/null; then
     draft_run_remote "$GIT" -C "$REPO" fetch --no-tags "$REMOTE_FETCH_URL" \

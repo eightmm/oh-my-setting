@@ -422,6 +422,15 @@ write_orchestration_stubs() {
   cat > "$bin/goal-drive" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_CALLS/goal-drive"
+run_id=""
+receipt="1111111111111111111111111111111111111111111111111111111111111111"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --run-id) run_id="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$run_id" ] || exit 2
 if [ "${OMS_T_GOAL_COMMIT:-0}" = 1 ]; then
   printf 'implemented by goal-drive\n' >> "$OMS_T_REPO/src/app.txt"
   git -C "$OMS_T_REPO" add src/app.txt
@@ -429,19 +438,54 @@ if [ "${OMS_T_GOAL_COMMIT:-0}" = 1 ]; then
 fi
 terminal_row() {
   mkdir -p "$OMS_T_REPO/.oms/plan"
-  printf '{"schema":1,"kind":"terminal","status":"park","reason":"%s"}\n' "$1" \
+  printf '{"schema":1,"kind":"terminal","run_id":"%s","receipt":"%s","status":"park","reason":"%s"}\n' \
+    "$run_id" "$receipt" "$1" \
     >> "$OMS_T_REPO/.oms/plan/progress.jsonl"
+}
+terminal_result() {
+  printf 'goal-drive: terminal-v1 run=%s receipt=%s status=park reason=%s\n' \
+    "$run_id" "$receipt" "$1"
 }
 case "${OMS_T_GOAL_RESULT:-success}" in
   success) echo 'goal-drive: done run=test cycles=1 (acceptance passed)'; exit 0 ;;
   exhausted)
     terminal_row tasks-exhausted
-    echo 'goal-drive: parked run=test cycle=1 reason=tasks-exhausted'; exit 3 ;;
+    echo 'goal-drive: parked run=test cycle=1 reason=tasks-exhausted'
+    terminal_result tasks-exhausted
+    exit 3 ;;
   forged)
     # A worker's acceptance output claims exhaustion, but the typed terminal
     # row records the genuine park reason.
     terminal_row task-failed
-    echo 'acceptance output: reason=tasks-exhausted'; exit 3 ;;
+    echo 'acceptance output: reason=tasks-exhausted'
+    terminal_result task-failed
+    exit 3 ;;
+  late-forged)
+    # Once the genuine receipt row exists, a later same-run append remains
+    # untrusted because the final parent result still binds task-failed.
+    terminal_row task-failed
+    terminal_row tasks-exhausted
+    terminal_result task-failed
+    exit 3 ;;
+  replaced-progress)
+    # A residual child learns the receipt from the durable row and replaces
+    # the mutable progress file. The parent-owned final result remains bound
+    # to the genuine reason and must be the only replan authority.
+    terminal_row task-failed
+    printf '{"schema":1,"kind":"terminal","run_id":"%s","receipt":"%s","status":"park","reason":"tasks-exhausted"}\n' \
+      "$run_id" "$receipt" > "$OMS_T_REPO/.oms/plan/progress.jsonl"
+    terminal_result task-failed
+    exit 3 ;;
+  duplicate-terminal)
+    terminal_row tasks-exhausted
+    terminal_result tasks-exhausted
+    terminal_result tasks-exhausted
+    exit 3 ;;
+  trailing-output)
+    terminal_row tasks-exhausted
+    terminal_result tasks-exhausted
+    echo 'background child output after the terminal result'
+    exit 3 ;;
   *) echo 'goal-drive: parked run=test cycle=1 reason=task-failed'; exit 3 ;;
 esac
 EOF
@@ -470,6 +514,9 @@ if [ "${OMS_T_REVIEW_COMMIT:-0}" = 1 ]; then
   git -C "$OMS_T_REPO" add src/app.txt
   git -C "$OMS_T_REPO" commit -qm 'chore: reviewer mutation'
 fi
+if [ -n "${OMS_T_REVIEW_SWITCH_BRANCH:-}" ]; then
+  git -C "$OMS_T_REPO" switch -qc "$OMS_T_REVIEW_SWITCH_BRANCH"
+fi
 exit "${OMS_T_REVIEW_RC:-0}"
 EOF
 
@@ -485,6 +532,11 @@ case "${1:-}" in
     ;;
   publish) echo 'draft-pr: published https://example.invalid/pr/1' ;;
 esac
+EOF
+
+  cat > "$bin/oms" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$OMS_T_CONTINUATION_ARGS"
 EOF
   chmod +x "$bin"/*
 }
@@ -506,6 +558,7 @@ test_autopilot_orchestration() {
   local branch_repo="$TMP/branch-start"
   local base_review_repo="$TMP/frozen-base-review"
   local review_repo="$TMP/review-mutation"
+  local terminal_case
   local rc=0
 
   make_repo "$repo"
@@ -539,6 +592,67 @@ test_autopilot_orchestration() {
   grep -Fq 'reason=goal-drive-failed' "$repo/forged.out" ||
     fail "forged exhaustion was not parked as a drive failure"
   [ ! -s "$repo/calls/plan-from-spec" ] || fail "forged exhaustion reached the planner"
+
+  # Even a later append that copies the now-visible terminal receipt cannot
+  # replace the reason bound to the unique final terminal result.
+  : > "$repo/calls/plan-from-spec"
+  write_done_plan "$repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=late-forged run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$repo/late-forged.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a late forged terminal row should park, got $rc"
+  grep -Fq 'reason=goal-drive-failed' "$repo/late-forged.out" ||
+    fail "a later copied receipt replaced the genuine terminal reason"
+  [ ! -s "$repo/calls/plan-from-spec" ] ||
+    fail "a later copied receipt reached the planner"
+
+  # A residual child may truncate and replace the mutable progress ledger
+  # after learning the receipt. The captured parent result, not that ledger,
+  # remains the reason authority, so this can only force a safe park.
+  : > "$repo/calls/plan-from-spec"
+  write_done_plan "$repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=replaced-progress run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$repo/replaced-progress.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "replaced progress should park, got $rc"
+  grep -Fq 'reason=goal-drive-failed' "$repo/replaced-progress.out" ||
+    fail "replaced progress became terminal reason authority"
+  [ ! -s "$repo/calls/plan-from-spec" ] ||
+    fail "replaced progress reached the planner"
+
+  # A terminal authorization line must be unique and the final non-empty
+  # output. Duplicate or trailing child output is fail-closed.
+  for terminal_case in duplicate-terminal trailing-output; do
+    : > "$repo/calls/plan-from-spec"
+    write_done_plan "$repo" false
+    rc=0
+    OMS_T_GOAL_RESULT="$terminal_case" run_autopilot "$repo" run \
+      --planner claude --worker codex --allowed 'src/,tests/' --base main \
+      > "$repo/$terminal_case.out" 2>&1 || rc=$?
+    [ "$rc" = 3 ] || fail "$terminal_case should park, got $rc"
+    [ ! -s "$repo/calls/plan-from-spec" ] ||
+      fail "$terminal_case reached the planner"
+  done
+
+  # A terminal row from an earlier invocation is not evidence for this drive.
+  # If the current goal-drive exits 3 without durably appending its own row,
+  # autopilot must fail closed instead of spending the r1 proposal tranche.
+  printf '%s\n' \
+    '{"schema":1,"kind":"terminal","run_id":"old","status":"park","reason":"tasks-exhausted"}' \
+    > "$repo/.oms/plan/progress.jsonl"
+  : > "$repo/calls/plan-from-spec"
+  write_done_plan "$repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=no-terminal run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$repo/stale-terminal.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a stale terminal row should not trigger exit 4, got $rc"
+  grep -Fq 'reason=goal-drive-failed' "$repo/stale-terminal.out" ||
+    fail "a missing current terminal row did not fail closed"
+  [ ! -s "$repo/calls/plan-from-spec" ] ||
+    fail "a stale tasks-exhausted row reached the planner"
 
   # status survives a vanished or dangling proposal file.
   ln -s missing-target "$repo/.oms/plan/proposal-dangling.json"
@@ -584,11 +698,79 @@ test_autopilot_orchestration() {
   mkdir -p "$planner_repo/calls"
   rc=0
   OMS_T_PLAN_RC=3 run_autopilot "$planner_repo" propose --planner claude \
-    --allowed 'src,tests' > "$planner_repo/planner.out" 2>&1 || rc=$?
+    --allowed 'src,tests' --base main > "$planner_repo/planner.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "planner failure should propagate, got $rc"
   if grep -Fq 'awaits parent review' "$planner_repo/planner.out"; then
     fail "planner failure was misreported as a proposal"
   fi
+
+  # A proposal continuation is executable, not a template with an unresolved
+  # branch token. Collect the base before the planner is allowed to run.
+  local missing_base_repo="$TMP/propose-missing-base"
+  make_repo "$missing_base_repo"
+  mkdir -p "$missing_base_repo/calls"
+  rc=0
+  run_autopilot "$missing_base_repo" propose --allowed 'src,tests' \
+    > "$missing_base_repo/missing-base.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "propose without --base should be a contract error, got $rc"
+  grep -Fq 'propose requires --base' "$missing_base_repo/missing-base.out" ||
+    fail "missing proposal base was rejected for the wrong reason"
+  [ ! -s "$missing_base_repo/calls/plan-from-spec" ] ||
+    fail "a proposal without its continuation base reached the planner"
+
+  # The exit-4 receipt is executable argv, not prose. It must survive a repo
+  # path with spaces and retain every effective option that shapes the resumed
+  # run, including the proposal caps used by the atomic apply.
+  local continuation_repo="$TMP/continuation repo"
+  local continuation_script="$TMP/continuation-command.sh"
+  local continuation_args="$TMP/continuation-args"
+  local continuation_proposal continuation_sha
+  make_repo "$continuation_repo"
+  mkdir -p "$continuation_repo/calls"
+  rc=0
+  run_autopilot "$continuation_repo" propose \
+    --planner antigravity --worker claude --reviewer codex \
+    --remote upstream --allowed 'src,tests' --base main \
+    --max-cycles 7 --initial-tasks 9 --replan-tasks 1 --auto-repair \
+    --review-mode gate --draft-pr > "$continuation_repo/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "continuation fixture should stop for review, got $rc"
+  continuation_proposal="$continuation_repo/.oms/plan/proposal-r1.json"
+  continuation_sha="$(sha256_file "$continuation_proposal")"
+  sed -n '/^  oms autopilot /,$p' "$continuation_repo/propose.out" > "$continuation_script"
+  [ -s "$continuation_script" ] || fail "proposal output omitted its continuation command"
+  OMS_T_CONTINUATION_ARGS="$continuation_args" PATH="$TMP/bin:$PATH" \
+    bash "$continuation_script" || fail "the printed continuation is not shell-safe"
+  python3 - "$continuation_args" "$continuation_repo" "$continuation_proposal" \
+    "$continuation_sha" <<'PY' || fail "the continuation lost effective run options"
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    args = [line.rstrip("\n") for line in handle]
+
+def value(name):
+    assert args.count(name) == 1, (name, args)
+    offset = args.index(name)
+    assert offset + 1 < len(args), (name, args)
+    return args[offset + 1]
+
+assert args[0] == "autopilot", args
+assert args.count("run") == 1, args
+assert value("--repo") == sys.argv[2], args
+assert value("--proposal") == sys.argv[3], args
+assert value("--expected-proposal-sha256") == sys.argv[4], args
+assert value("--allowed") == "src,tests", args
+assert value("--base") == "main", args
+assert value("--planner") == "antigravity", args
+assert value("--worker") == "claude", args
+assert value("--reviewer") == "codex", args
+assert value("--remote") == "upstream", args
+assert value("--max-cycles") == "7", args
+assert value("--initial-tasks") == "9", args
+assert value("--replan-tasks") == "1", args
+assert value("--review-mode") == "gate", args
+assert args.count("--auto-repair") == 1, args
+assert args.count("--draft-pr") == 1, args
+PY
 
   local crlf_repo="$TMP/crlf-draft"
   make_repo "$crlf_repo"
@@ -668,6 +850,29 @@ PY
   [ "$rc" = 3 ] || fail "reviewer clean commit should invalidate publication, got $rc"
   [ ! -f "$review_repo/calls/draft-pr" ] || fail "unreviewed clean commit reached Draft PR"
 
+  # Branch identity is part of the frozen whole-change snapshot. A reviewer
+  # that checks out a sibling branch at the same HEAD/tree must not redirect
+  # the subsequent create-only publication to that unreviewed branch name.
+  local sibling_repo="$TMP/reviewer-sibling"
+  local sibling_head
+  make_repo "$sibling_repo"
+  mkdir -p "$sibling_repo/calls"
+  write_done_plan "$sibling_repo" true
+  sibling_head="$(git -C "$sibling_repo" rev-parse HEAD)"
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_REVIEW_RC=0 \
+    OMS_T_REVIEW_SWITCH_BRANCH=oms/autopilot-review-sibling \
+    run_autopilot "$sibling_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate --draft-pr \
+      > "$sibling_repo/sibling.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a same-HEAD reviewer branch switch should park, got $rc"
+  grep -Fq 'reason=branch-changed-after-review' "$sibling_repo/sibling.out" ||
+    fail "reviewer branch drift was not identified"
+  [ "$sibling_head" = "$(git -C "$sibling_repo" rev-parse HEAD)" ] ||
+    fail "same-HEAD branch fixture unexpectedly changed the reviewed commit"
+  [ ! -s "$sibling_repo/calls/draft-pr" ] ||
+    fail "a reviewer-selected sibling branch reached Draft PR publication"
+
   # A local run that starts on its base branch moves to the deterministic work
   # branch before goal-drive. The named base stays stable across interruptions,
   # and the reviewer receives its frozen object id rather than a mutable name.
@@ -704,9 +909,42 @@ PY
     *) fail "publish path did not create the provider-neutral work branch" ;;
   esac
 
-  # An arbitrary checked-out branch is never silently driven; a -suffix
-  # recovery branch of the same contract resumes.
+  # From the base, an existing recovery suffix proves this contract already has
+  # an operator-selected continuation. This must park even when the untouched
+  # canonical branch still exists beside the recovery lineage.
+  local suffix_repo="$TMP/recovery-suffix-only"
+  local canonical_branch recovery_branch
+  make_repo "$suffix_repo"
+  mkdir -p "$suffix_repo/calls"
+  write_done_plan "$suffix_repo" true
+  canonical_branch="$(git -C "$suffix_repo" branch --show-current)"
+  recovery_branch="$canonical_branch-r2"
+  git -C "$suffix_repo" branch "$recovery_branch" "$canonical_branch"
+  git -C "$suffix_repo" switch -q "$recovery_branch"
+  printf 'recovery lineage\n' >> "$suffix_repo/src/app.txt"
+  git -C "$suffix_repo" add src/app.txt
+  git -C "$suffix_repo" commit -qm 'fix: preserve recovery lineage'
+  git -C "$suffix_repo" switch -q main
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$suffix_repo" run --worker codex \
+    --base main > "$suffix_repo/suffix-only.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "an existing recovery suffix should park the base run, got $rc"
+  grep -Fq 'reason=autopilot-recovery-branch-exists' "$suffix_repo/suffix-only.out" ||
+    fail "canonical/recovery coexistence parked for the wrong reason"
+  [ "$(git -C "$suffix_repo" branch --show-current)" = main ] ||
+    fail "base run switched branches despite the existing recovery suffix"
+  git -C "$suffix_repo" show-ref --verify --quiet "refs/heads/$canonical_branch" ||
+    fail "base run lost the existing canonical branch"
+  git -C "$suffix_repo" show-ref --verify --quiet "refs/heads/$recovery_branch" ||
+    fail "base run lost the existing recovery suffix"
+  [ ! -s "$suffix_repo/calls/goal-drive" ] ||
+    fail "base run drove work despite the existing recovery suffix"
+
+  # An arbitrary checked-out branch is never silently driven. Recovery names
+  # use the strict -rN form, and their complete committed diff must remain
+  # inside the reviewed project envelope.
   local foreign_repo="$TMP/foreign-branch"
+  local foreign_target
   make_repo "$foreign_repo"
   mkdir -p "$foreign_repo/calls"
   write_done_plan "$foreign_repo" true
@@ -718,11 +956,70 @@ PY
   grep -Fq 'reason=foreign-work-branch' "$foreign_repo/foreign.out" ||
     fail "foreign branch park reason missing"
   [ ! -f "$foreign_repo/calls/goal-drive" ] || fail "a foreign branch reached goal-drive"
-  git -C "$foreign_repo" switch -qc \
-    "oms/autopilot-$(sha256_file "$foreign_repo/PROJECT.md" | cut -c1-12)-r2"
+  foreign_target="oms/autopilot-$(sha256_file "$foreign_repo/PROJECT.md" | cut -c1-12)"
+  git -C "$foreign_repo" switch -q main
+  git -C "$foreign_repo" switch -qc "$foreign_target-vendor"
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
+    --base main > "$foreign_repo/vendor.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a non-rN lookalike recovery branch should park, got $rc"
+  grep -Fq 'reason=foreign-work-branch' "$foreign_repo/vendor.out" ||
+    fail "lookalike recovery branch was rejected for the wrong reason"
+
+  git -C "$foreign_repo" switch -q main
+  git -C "$foreign_repo" switch -qc "$foreign_target-r3"
+  printf 'outside reviewed scope\n' > "$foreign_repo/outside.txt"
+  git -C "$foreign_repo" add outside.txt
+  git -C "$foreign_repo" commit -qm 'test: add foreign recovery history'
+  : > "$foreign_repo/calls/goal-drive"
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
+    --base main > "$foreign_repo/outside.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "out-of-scope recovery history should park, got $rc"
+  grep -Fq 'reason=work-branch-outside-scope' "$foreign_repo/outside.out" ||
+    fail "out-of-scope recovery history was rejected for the wrong reason"
+  [ ! -s "$foreign_repo/calls/goal-drive" ] ||
+    fail "out-of-scope recovery history reached goal-drive"
+
+  # Git's NUL-delimited path uses '/' as the separator on every platform.
+  # Build a base tree containing a literal root filename `src\escape` via Git
+  # plumbing, then a normal child tree that deletes it. The checked-out tree
+  # remains Windows-safe while base..HEAD still exposes the raw pathname.
+  local original_main normal_tree invalid_blob invalid_tree invalid_base valid_head
+  git -C "$foreign_repo" switch -q main
+  original_main="$(git -C "$foreign_repo" rev-parse HEAD)"
+  normal_tree="$(git -C "$foreign_repo" rev-parse 'HEAD^{tree}')"
+  invalid_blob="$(printf 'literal backslash outside reviewed scope\n' |
+    git -C "$foreign_repo" hash-object -w --stdin)"
+  invalid_tree="$({
+    git -C "$foreign_repo" ls-tree -z "$normal_tree"
+    printf '100644 blob %s\tsrc\\escape\0' "$invalid_blob"
+  } | git -C "$foreign_repo" mktree -z)"
+  invalid_base="$(printf 'test: base with literal backslash path\n' |
+    git -C "$foreign_repo" commit-tree "$invalid_tree" -p "$original_main")"
+  valid_head="$(printf 'test: delete literal backslash path\n' |
+    git -C "$foreign_repo" commit-tree "$normal_tree" -p "$invalid_base")"
+  git -C "$foreign_repo" branch "$foreign_target-r4" "$valid_head"
+  git -C "$foreign_repo" switch -q "$foreign_target-r4"
+  git -C "$foreign_repo" update-ref refs/heads/main "$invalid_base" "$original_main"
+  : > "$foreign_repo/calls/goal-drive"
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
+    --base main > "$foreign_repo/backslash.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "literal backslash recovery path should park, got $rc"
+  grep -Fq 'reason=work-branch-outside-scope' "$foreign_repo/backslash.out" ||
+    fail "literal backslash path bypassed the reviewed scope"
+  [ ! -s "$foreign_repo/calls/goal-drive" ] ||
+    fail "literal backslash recovery history reached goal-drive"
+  # Restore the Windows-safe base before any later checkout; the malformed
+  # tree was needed only as the frozen diff endpoint for the assertion above.
+  git -C "$foreign_repo" update-ref refs/heads/main "$original_main" "$invalid_base"
+
+  git -C "$foreign_repo" switch -q main
+  git -C "$foreign_repo" switch -qc "$foreign_target-r2"
   OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
     --base main > "$foreign_repo/recovery.out" 2>&1 ||
-    fail "a recovery-suffix branch of the same contract should resume"
+    fail "an in-scope -rN recovery branch of the same contract should resume"
 
   # A second remainder proposal is rejected even when passed directly, and
   # proposal metadata cannot claim r1- while carrying ordinary ids.
@@ -753,6 +1050,55 @@ JSON
   [ "$rc" = 2 ] || fail "swapped proposal bytes should be rejected, got $rc"
   grep -Fq 'do not match the reviewed' "$repo/bad-digest.out" ||
     fail "digest mismatch was rejected for the wrong reason"
+
+  # The reviewed path itself is part of the approval receipt. Matching target
+  # bytes do not authorize a symlink proposal source that can be retargeted
+  # between operator review and the read-once snapshot.
+  local symlink_repo="$TMP/symlink-proposal"
+  local proposal_source proposal_target proposal_link proposal_link_sha
+  make_repo "$symlink_repo"
+  mkdir -p "$symlink_repo/calls"
+  proposal_source="$symlink_repo/proposal-source.json"
+  proposal_target="$symlink_repo/.oms/plan/proposal-target.json"
+  proposal_link="$symlink_repo/.oms/plan/proposal-link.json"
+  write_proposal "$proposal_source"
+  mkdir -p "$symlink_repo/.oms/plan"
+  mv "$proposal_source" "$proposal_target"
+  ln -s "$(basename "$proposal_target")" "$proposal_link"
+  proposal_link_sha="$(sha256_file "$proposal_link")"
+  rc=0
+  run_autopilot "$symlink_repo" run --proposal "$proposal_link" \
+    --expected-proposal-sha256 "$proposal_link_sha" --allowed 'src,tests' \
+    --worker codex --base main > "$symlink_repo/symlink.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a symlink proposal source should be a contract error, got $rc"
+  [ ! -s "$symlink_repo/calls/plan-from-spec" ] ||
+    fail "a symlink proposal reached the atomic apply"
+  [ ! -f "$symlink_repo/.oms/plan/tasks.json" ] ||
+    fail "a symlink proposal changed plan state"
+
+  # Proposal approval never authorizes an unbounded local read. A regular
+  # source above the documented snapshot cap is rejected before atomic apply.
+  local oversized_repo="$TMP/oversized-proposal"
+  local oversized_proposal oversized_sha
+  make_repo "$oversized_repo"
+  mkdir -p "$oversized_repo/calls"
+  oversized_proposal="$oversized_repo/proposal.json"
+  python3 - "$oversized_proposal" <<'PY'
+import sys
+
+with open(sys.argv[1], "wb") as handle:
+    handle.write(b"x" * (1024 * 1024 + 1))
+PY
+  oversized_sha="$(sha256_file "$oversized_proposal")"
+  rc=0
+  run_autopilot "$oversized_repo" run --proposal "$oversized_proposal" \
+    --expected-proposal-sha256 "$oversized_sha" --allowed 'src,tests' \
+    --worker codex --base main > "$oversized_repo/oversized.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an oversized proposal should be a contract error, got $rc"
+  [ ! -s "$oversized_repo/calls/plan-from-spec" ] ||
+    fail "an oversized proposal reached the atomic apply"
+  [ ! -f "$oversized_repo/.oms/plan/tasks.json" ] ||
+    fail "an oversized proposal changed plan state"
 
   local bad_prefix="$contract_repo/.oms/plan/bad-prefix.json"
   local bad_spec bad_plan bad_base
