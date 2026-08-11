@@ -146,6 +146,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- Doctor no longer reports `doctor: ok` over corrupt operations authority.
+  Lifecycle events and private approvals had validators in `state-verify`
+  that doctor never consulted; their fail findings are now fatal in the
+  harness-state section, while every other family keeps its deliberate
+  warning-only contract. Session handoffs also stopped mislabeling review
+  outcomes: the Open dissents block now selects the latest genuine split
+  (exit and overall both 1) that no artifact-resolution receipt has retired,
+  names its event id and the exact resolve command, and no longer lets a
+  later non-split gate bury an unacknowledged split or an incomplete round
+  pose as one. The updater's status file lands atomically and an unreadable
+  status reads `attention: unknown` instead of ok, and a contending
+  auto-update run no longer overwrites the live run's outcome with
+  "skipped".
 - The failure ledger survives its own garbage collection. GC compacted
   `failures.jsonl` outside the lock every writer takes, published by
   truncate-redirect through a shell variable — losing any append that landed

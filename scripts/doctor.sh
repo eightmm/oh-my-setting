@@ -1492,8 +1492,47 @@ check_harness_state() {
   check_harness_run_state "$project_dir"
   check_harness_memory_db "$project_dir"
   check_harness_sensitive_files "$project_dir"
+  check_harness_operations_state "$project_dir"
   check_harness_residue "$project_dir"
   check_harness_project_skills "$project_dir"
+}
+
+# Lifecycle events and private approvals are operations authority: recovery
+# and landing decisions read them, so corruption there is a doctor failure,
+# not a warning. state-verify owns their validators; only its lifecycle and
+# approval fail findings become fatal here — every other family keeps its
+# deliberate warning-only contract under the checks above.
+check_harness_operations_state() {
+  local project_dir="$1"
+  local verify_script="$ROOT/scripts/state-verify.sh"
+  local ops_findings=""
+  local line
+
+  [ -x "$verify_script" ] || verify_script="$INSTALL_ROOT/scripts/state-verify.sh"
+  [ -x "$verify_script" ] || {
+    echo "warn: state-verify.sh unavailable; lifecycle/approval streams unchecked"
+    return 0
+  }
+  ops_findings="$("$verify_script" --repo "$project_dir" --json 2>/dev/null |
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for f in data.get("findings", []):
+    if isinstance(f, dict) and f.get("level") == "fail" and \
+       f.get("family") in ("lifecycle", "approvals"):
+        print("%s: %s" % (f.get("family"), f.get("message")))
+' 2>/dev/null || true)"
+  if [ -n "$ops_findings" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] || echo "fail: $line"
+    done <<< "$ops_findings"
+    FAILED=1
+  else
+    echo "ok: lifecycle and approval streams"
+  fi
 }
 
 # Project skills are standing context for every future session in this repo;

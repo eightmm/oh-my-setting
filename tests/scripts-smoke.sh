@@ -1937,6 +1937,35 @@ test_doctor_accepts_a_database_the_tool_just_built() {
   fi
 }
 
+test_doctor_fails_on_corrupt_operations_state() {
+  local project="$TMP/doctor-ops-corrupt"
+  local home_dir="$TMP/doctor-home-ops"
+  local out
+  local rc=0
+
+  # Lifecycle and approval streams are operations authority: their
+  # validators exist in state-verify, and doctor used to report `doctor: ok`
+  # over a corrupt stream because it never consulted them.
+  setup_doctor_home "$home_dir"
+  mkdir -p "$project/.oms/lifecycle"
+  printf '*\n' > "$project/.oms/.gitignore"
+  printf 'this is not a lifecycle row\n' > "$project/.oms/lifecycle/events.jsonl"
+
+  out="$(run_doctor_for_project "$project" "$home_dir")" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "doctor reported ok over a corrupt lifecycle stream: $out"
+  printf '%s' "$out" | grep -Fq 'lifecycle' ||
+    fail "doctor did not name the corrupt lifecycle stream: $out"
+
+  # A clean project still reports the streams as ok.
+  local clean="$TMP/doctor-ops-clean"
+  mkdir -p "$clean/.oms"
+  printf '*\n' > "$clean/.oms/.gitignore"
+  out="$(run_doctor_for_project "$clean" "$home_dir")" ||
+    fail "clean operations state should pass: $out"
+  printf '%s' "$out" | grep -Fq 'ok: lifecycle and approval streams' ||
+    fail "doctor did not report the operations streams: $out"
+}
+
 test_doctor_uses_canonical_artifact_validation() {
   local project="$TMP/doctor-artifact-contract"
   local home_dir="$TMP/doctor-artifact-contract-home"
