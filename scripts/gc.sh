@@ -421,7 +421,7 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         order.append(rid)
     try:
         # timegm, not mktime: the stamps are UTC, and reading them as local
-        # time shifted the cutoff by the host's UTC offset.
+        # time shifted the cutoff by the host UTC offset.
         ts = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
     except Exception:
         ts = None
