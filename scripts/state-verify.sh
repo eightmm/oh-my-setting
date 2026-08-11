@@ -84,14 +84,24 @@ fi
 APPROVAL_EXIT=0
 "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" validate \
   > "$TMP/approval.out" 2>&1 || APPROVAL_EXIT=$?
+# An absent task or unconfigured journal exits 0 with its own shape; a
+# nonzero exit is the engine failing. Falling back to {} silently skipped
+# every task/journal check while the summary still said clean — record the
+# engine failure as a finding instead, like every delegated engine above.
+TASK_STATUS_EXIT=0
 "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json \
-  > "$TMP/task.json" 2>/dev/null || printf '{}' > "$TMP/task.json"
+  > "$TMP/task.json" 2>/dev/null || TASK_STATUS_EXIT=$?
+[ "$TASK_STATUS_EXIT" = 0 ] || printf '{}' > "$TMP/task.json"
+JOURNAL_STATUS_EXIT=0
 "$ROOT/scripts/journal.sh" status --repo "$REPO" --json \
-  > "$TMP/journal.json" 2>/dev/null || printf '{}' > "$TMP/journal.json"
+  > "$TMP/journal.json" 2>/dev/null || JOURNAL_STATUS_EXIT=$?
+[ "$JOURNAL_STATUS_EXIT" = 0 ] || printf '{}' > "$TMP/journal.json"
 
 OMS_SV_REPO="$REPO" OMS_SV_TMP="$TMP" OMS_SV_JSON="$AS_JSON" \
 OMS_SV_RUN_EXIT="$RUN_VALIDATE_EXIT" OMS_SV_ARTIFACT_EXIT="$ARTIFACT_EXIT" \
 OMS_SV_LIFECYCLE_EXIT="$LIFECYCLE_EXIT" OMS_SV_APPROVAL_EXIT="$APPROVAL_EXIT" \
+OMS_SV_TASK_STATUS_EXIT="$TASK_STATUS_EXIT" \
+OMS_SV_JOURNAL_STATUS_EXIT="$JOURNAL_STATUS_EXIT" \
 python3 <<'PY'
 import glob
 import json
@@ -165,6 +175,19 @@ approval_exit = int(os.environ["OMS_SV_APPROVAL_EXIT"])
 if approval_exit != 0:
     finding("fail", "approvals", "private approval stream or its permissions are invalid",
             "oms approval-inbox --repo %s validate" % repo)
+
+# A status engine that failed outright means every check over its family
+# below ran against an empty object — say so instead of reading as clean.
+task_status_exit = int(os.environ["OMS_SV_TASK_STATUS_EXIT"])
+if task_status_exit != 0:
+    finding("fail", "task", "agent-task status failed (exit %d); task checks were skipped"
+            % task_status_exit,
+            "oms agent-task --repo %s status --json" % repo)
+journal_status_exit = int(os.environ["OMS_SV_JOURNAL_STATUS_EXIT"])
+if journal_status_exit != 0:
+    finding("fail", "journal", "journal status failed (exit %d); journal checks were skipped"
+            % journal_status_exit,
+            "oms journal status --repo %s --json" % repo)
 
 # --- task packet: contradictions the status command tolerates ---
 task = load_json("task.json")

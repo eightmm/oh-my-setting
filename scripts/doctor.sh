@@ -1504,27 +1504,54 @@ check_harness_state() {
 # deliberate warning-only contract under the checks above.
 check_harness_operations_state() {
   local project_dir="$1"
-  local verify_script="$ROOT/scripts/state-verify.sh"
+  local verify_script="${OMS_DOCTOR_STATE_VERIFY:-$ROOT/scripts/state-verify.sh}"
+  local verify_json=""
+  local verify_rc=0
   local ops_findings=""
   local line
 
-  [ -x "$verify_script" ] || verify_script="$INSTALL_ROOT/scripts/state-verify.sh"
-  [ -x "$verify_script" ] || {
-    echo "warn: state-verify.sh unavailable; lifecycle/approval streams unchecked"
+  if [ ! -x "$verify_script" ] && [ -z "${OMS_DOCTOR_STATE_VERIFY:-}" ]; then
+    verify_script="$INSTALL_ROOT/scripts/state-verify.sh"
+  fi
+  # A dead validator is not a green stream. Swallowing its absence or crash
+  # into "ok" was the exact fail-open this check exists to close.
+  if [ ! -x "$verify_script" ]; then
+    echo "fail: operations validator unavailable: $verify_script"
+    FAILED=1
     return 0
-  }
-  ops_findings="$("$verify_script" --repo "$project_dir" --json 2>/dev/null |
-    python3 -c '
+  fi
+  verify_json="$("$verify_script" --repo "$project_dir" --json 2>/dev/null)" ||
+    verify_rc=$?
+  # Exit 1 means findings exist — that is data. Anything else is a validator
+  # that did not complete its judgment.
+  case "$verify_rc" in
+    0|1) ;;
+    *)
+      echo "fail: operations validator exited $verify_rc; lifecycle/approval streams unverified"
+      FAILED=1
+      return 0
+      ;;
+  esac
+  ops_findings="$(printf '%s\n' "$verify_json" | python3 -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
+    print("__UNREADABLE__")
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    print("__UNREADABLE__")
     raise SystemExit(0)
 for f in data.get("findings", []):
     if isinstance(f, dict) and f.get("level") == "fail" and \
        f.get("family") in ("lifecycle", "approvals"):
         print("%s: %s" % (f.get("family"), f.get("message")))
-' 2>/dev/null || true)"
+')" || ops_findings="__UNREADABLE__"
+  if [ "$ops_findings" = "__UNREADABLE__" ]; then
+    echo "fail: operations validator returned unreadable output; lifecycle/approval streams unverified"
+    FAILED=1
+    return 0
+  fi
   if [ -n "$ops_findings" ]; then
     while IFS= read -r line; do
       [ -z "$line" ] || echo "fail: $line"
