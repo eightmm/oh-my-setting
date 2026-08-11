@@ -385,10 +385,14 @@ declared mechanical gate.
   `goal-drive` only creates local commits. `draft-pr publish` is the narrow
   exception for a verified create-only branch and Draft PR; it never updates
   an existing branch or advances the PR.
-- Draft publication still trusts repository-local pre-push hooks. The publisher
-  scans all new history objects before intent creation and again after its
-  verifier, disables implicit tag and submodule pushes, and binds the `gh`
-  viewer, while Git transport credentials may identify a different account.
+- Draft publication pushes with `--no-verify --no-signed`, so repository-local
+  pre-push hooks and worker-writable signing configuration never execute under
+  the publisher's credentials. The publisher scans all new history objects
+  before intent creation and again after its verifier, disables implicit tag
+  and submodule pushes, and binds the `gh` viewer. Residue: repository-local
+  transport configuration (for example `core.sshCommand`) still shapes the
+  push at same-UID tier, and Git transport credentials may identify a
+  different account.
 - GitHub creates pull requests from branch names, not caller-supplied expected
   object IDs. The publisher checks both refs immediately before and after the
   request and parks on drift, but another authorized GitHub writer can still

@@ -861,9 +861,13 @@ intent_field() {  # NAME
 }
 
 query_prs() {  # SLUG BRANCH OUTPUT
-  local owner="${1%%/*}"
+  # gh rejects "<owner>:<branch>" for pr list --head, and pr create's
+  # owner-qualified form breaks on organization owners; publication is
+  # same-repository only, so the unqualified branch name is the exact form.
+  # A same-named fork PR widening this list is fail-closed downstream:
+  # inspect-pr refuses multiple rows and non-exact/cross-repository rows.
   GH_HOST=github.com draft_run_github "$GH" pr list --repo "github.com/$1" \
-    --head "$owner:$2" --state all --limit 10 \
+    --head "$2" --state all --limit 10 \
     --json number,url,state,isDraft,title,body,headRefName,headRefOid,baseRefName,baseRefOid,isCrossRepository \
     > "$3" 2>/dev/null ||
     park "github-pr-query-failed" "check GitHub connectivity and permission"
@@ -1039,7 +1043,12 @@ publish_locked() {
     [ "$current_state" = "$state_sha" ] ||
       park "intent-state-raced-before-push" "inspect the publication intent"
     push_rc=0
-    draft_run_push "$GIT" -C "$REPO" push --no-follow-tags --recurse-submodules=no \
+    # The worker's legitimate write phase can plant .git/hooks/pre-push or set
+    # push.gpgSign/gpg.program in worker-writable .git/config; both would run
+    # arbitrary code under the publisher's credentials at push time. Suppress
+    # hooks and signing; verification already happened against the frozen tree.
+    draft_run_push "$GIT" -C "$REPO" push --no-verify --no-signed \
+      --no-follow-tags --recurse-submodules=no \
       --force-with-lease="refs/heads/$branch:" "$push_url" \
       "$head:refs/heads/$branch" > "$push_out" 2>&1 || push_rc=$?
     current_sha="$(remote_ref_sha "$push_url" "$branch")"
@@ -1106,7 +1115,7 @@ publish_locked() {
     create_out="$(agent_memory_mktemp)" || { rm -f "$body_file" "$pr_json"; fail "cannot allocate PR diagnostics"; }
     create_rc=0
     GH_HOST=github.com draft_run_github "$GH" pr create --repo "github.com/$slug" \
-      --draft --base "$BASE" --head "${slug%%/*}:$branch" \
+      --draft --base "$BASE" --head "$branch" \
       --title "$title" --body-file "$body_file" > "$create_out" 2>&1 || create_rc=$?
     if [ "$create_rc" -ne 0 ]; then
       echo "--- Draft PR create output (last 20 lines) ---" >&2

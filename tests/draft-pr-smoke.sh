@@ -127,6 +127,20 @@ write_gh_stub() {
   cat > "$path" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_GH_LOG"
+# gh does not support "<owner>:<branch>" for pr list --head, and the
+# owner-qualified create form breaks on organization owners. The stub is
+# strict so the unsupported forms cannot silently return to the publisher.
+case "${1:-} ${2:-}" in
+  'pr list'|'pr create')
+    prev=''
+    for arg in "$@"; do
+      if [ "$prev" = --head ]; then
+        case "$arg" in *:*) echo 'unsupported owner-qualified --head' >&2; exit 64 ;; esac
+      fi
+      prev="$arg"
+    done
+    ;;
+esac
 case "${1:-} ${2:-}" in
   'auth status')
     [ "${OMS_T_GH_AUTH:-ok}" = ok ] || { echo 'not logged in' >&2; exit 4; }
@@ -974,7 +988,32 @@ EOF
     fail "viewer mismatch still created the source branch"
   fi
 
-  # A local pre-push rejection is visible and is not mislabeled as a remote
+  # A worker-planted local pre-push hook must never execute under the
+  # publisher's credentials: the create-only push suppresses hooks and signing.
+  repo="$TMP/hook-suppress"
+  bare="$TMP/hook-suppress.git"
+  make_repo "$repo" "$bare"
+  : > "$repo/git.log"; : > "$repo/gh.log"
+  run_draft_pr "$repo" prepare --remote origin --base main --verify true \
+    > "$repo/hook-prepare.out" || fail "hook-suppress fixture prepare failed"
+  intent="$(sed -n 's/^intent: //p' "$repo/hook-prepare.out" | tail -n 1)"
+  cat > "$repo/.git/hooks/pre-push" <<'EOF'
+#!/usr/bin/env bash
+: > .git/pre-push-fired
+echo 'fixture pre-push gate failed' >&2
+exit 7
+EOF
+  chmod +x "$repo/.git/hooks/pre-push"
+  rc=0
+  run_draft_pr "$repo" publish --intent "$intent" > "$repo/hook-publish.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "publish must suppress local pre-push hooks, got $rc"
+  if [ -e "$repo/.git/pre-push-fired" ]; then
+    fail "the planted pre-push hook executed during publish"
+  fi
+  "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture ||
+    fail "hook-suppressed publication did not create the source branch"
+
+  # A remote-side rejection is visible and is not mislabeled as a remote
   # race; no remote ref is left behind.
   repo="$TMP/hook-reject"
   bare="$TMP/hook-reject.git"
@@ -983,21 +1022,21 @@ EOF
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/hook-prepare.out" || fail "hook fixture prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/hook-prepare.out" | tail -n 1)"
-  cat > "$repo/.git/hooks/pre-push" <<'EOF'
+  cat > "$bare/hooks/pre-receive" <<'EOF'
 #!/usr/bin/env bash
-echo 'fixture pre-push gate failed' >&2
+echo 'fixture pre-receive gate failed' >&2
 exit 7
 EOF
-  chmod +x "$repo/.git/hooks/pre-push"
+  chmod +x "$bare/hooks/pre-receive"
   rc=0
   run_draft_pr "$repo" publish --intent "$intent" > "$repo/hook-publish.out" 2>&1 || rc=$?
-  [ "$rc" = 3 ] || fail "pre-push rejection should park, got $rc"
-  grep -Fq 'fixture pre-push gate failed' "$repo/hook-publish.out" ||
-    fail "pre-push diagnostics were hidden"
+  [ "$rc" = 3 ] || fail "remote rejection should park, got $rc"
+  grep -Fq 'fixture pre-receive gate failed' "$repo/hook-publish.out" ||
+    fail "remote rejection diagnostics were hidden"
   grep -Fq 'reason=create-only-push-rejected' "$repo/hook-publish.out" ||
-    fail "pre-push rejection was mislabeled"
+    fail "remote rejection was mislabeled"
   if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture; then
-    fail "failed pre-push hook still created the source branch"
+    fail "rejected push still created the source branch"
   fi
   local push_attempts
   push_attempts="$(grep -c ' push ' "$repo/git.log" || true)"
