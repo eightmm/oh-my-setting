@@ -355,6 +355,10 @@ test_machine_snapshot_cli_and_permissions() {
   OH_MY_SETTING_MACHINE_SNAPSHOT="$out" "$ROOT/scripts/write-machine-snapshot.sh" --dry-run > "$TMP/machine-dry"
   [ ! -e "$out" ] || fail "machine --dry-run wrote output"
   assert_contains "$TMP/machine-dry" "Schema: 1"
+  # Queue facts live in the snapshot, not in skills: the tsp line must always
+  # render, as availability or an explicit not-detected.
+  grep -Eq '^- tsp queue: .+' "$TMP/machine-dry" ||
+    fail "machine snapshot must name the tsp queue state"
   OH_MY_SETTING_MACHINE_SNAPSHOT="$out" "$ROOT/scripts/write-machine-snapshot.sh" >/dev/null
   [ "$(stat -c '%a' "$out" 2>/dev/null || stat -f '%Lp' "$out")" = 600 ] ||
     fail "machine snapshot is not private"

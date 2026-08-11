@@ -7,7 +7,9 @@ INSTALLER_DEFAULT_REF="edge"
 REF="${OH_MY_SETTING_REF:-$INSTALLER_DEFAULT_REF}"
 PROFILE="${OH_MY_SETTING_PROFILE:-minimal}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
-GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-0}"
+# Default auto: skills that plan GPU/Slurm/tsp work read local/machine.md, so
+# every install writes the local-only snapshot unless explicitly opted out.
+GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
 # The provider CLIs, gh, and ntn are the executable half of the harness. An
 # initial install without them is an incomplete product, so setup fails rather
 # than recording a partial profile.
@@ -42,7 +44,8 @@ Options:
                       Skip account login and automatic journal discovery.
   --auto-update       Install the apply-mode update timer (already the default).
   --no-auto-update    Skip the auto-update trigger.
-  --machine-snapshot  Generate local machine metadata.
+  --machine-snapshot  Generate local machine metadata (already the default;
+                      opt out with OH_MY_SETTING_GENERATE_MACHINE=0).
   --slurm-snapshot    Generate local Slurm cluster metadata when available.
   --notion-data-source ID
                       Select the Work Journal Notion mirror. Authentication is
@@ -64,7 +67,7 @@ Environment:
   OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hooks and usage HUD.
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto  Skip, require, or auto-detect Codex plugin setup.
   OH_MY_SETTING_PEER_PERMISSIONS=1 Grant Antigravity consult permissions.
-  OH_MY_SETTING_GENERATE_MACHINE=1 Generate a machine snapshot.
+  OH_MY_SETTING_GENERATE_MACHINE=0 Skip the machine snapshot (default: auto).
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
   OH_MY_SETTING_CONNECT_SERVICES=auto|required|0
                                    Auto-connect in an interactive terminal,

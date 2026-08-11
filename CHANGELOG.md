@@ -36,6 +36,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `PROVIDER:model=NAME` targets.
 
 ### Changed
+- The machine snapshot now records the local job queue: a `tsp queue` line
+  (availability and slot count) joins the Slurm line, and every install
+  writes the local-only snapshot by default (`OH_MY_SETTING_GENERATE_MACHINE=0`
+  opts out) — the GPU/Slurm/tsp discipline skills read it, so the file they
+  reference now exists wherever they are installed. Queue and hardware facts
+  stay in the snapshot, not in rules.
 - The autopilot approval boundary is now byte-exact: `propose` prints the
   proposal's sha256 and the complete digest-bound continuation command, and
   `run --proposal` requires `--expected-proposal-sha256` back, snapshots the

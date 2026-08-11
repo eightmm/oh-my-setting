@@ -198,6 +198,19 @@ slurm_status() {
   fi
 }
 
+tsp_status() {
+  local slots
+  if command -v tsp >/dev/null 2>&1; then
+    slots="$(tsp -S 2>/dev/null | sed -n 1p | tr -d '[:space:]')" || slots=""
+    case "$slots" in
+      ''|*[!0-9]*) printf 'available\n' ;;
+      *) printf 'available (%s slot(s))\n' "$slots" ;;
+    esac
+  else
+    printf 'not detected\n'
+  fi
+}
+
 tool_path() {
   local name="$1"
   if command -v "$name" >/dev/null 2>&1; then
@@ -220,6 +233,7 @@ render_snapshot() {
   printf -- '- Python: %s\n' "$(first_line python3 --version || printf 'not detected')"
   printf -- '- uv: %s\n' "$(first_line uv --version || printf 'not detected')"
   printf -- '- Slurm: %s\n' "$(slurm_status)"
+  printf -- '- tsp queue: %s\n' "$(tsp_status)"
   printf '\n## Local Agent CLI Paths\n\n'
   printf -- '- Codex CLI: %s\n' "$(tool_path codex)"
   printf -- '- Claude Code CLI: %s\n' "$(tool_path claude)"
