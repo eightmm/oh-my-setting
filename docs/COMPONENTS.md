@@ -407,6 +407,18 @@ declared mechanical gate.
   `goal-drive` only creates local commits. `draft-pr publish` is the narrow
   exception for a verified create-only branch and Draft PR; it never updates
   an existing branch or advances the PR.
+- Recovery-branch admission is a continuity guard, not an ownership proof:
+  autopilot accepts only the deterministic branch or a strict
+  `oms/autopilot-<spec-digest>-rN` branch descended from the reviewed base,
+  with a clean in-envelope diff and the configured final gates, but no durable
+  receipt attests which process created that local branch. Inspect any
+  unexpected matching branch before checkout or resume; use
+  `--review-mode gate` when provenance is uncertain.
+- Frozen-patch path validation rejects static symlinks and detects the
+  exercised directory-swap windows, but it is not a portable `dirfd`/`openat`
+  transaction. A hostile same-UID process may still win a check-to-write race
+  around `.oms/plan/commit-patches`; do not run `goal-drive` with untrusted
+  same-account writers, and use OS isolation when that threat is in scope.
 - Draft publication pushes with `--no-verify --no-signed`, so repository-local
   pre-push hooks and worker-writable signing configuration never execute under
   the publisher's credentials. The publisher scans all new history objects
