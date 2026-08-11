@@ -210,21 +210,30 @@ class NotionJournalTest(unittest.TestCase):
             transport.calls[1][2]["parent"],
         )
 
+    def human_exporter(self, transport, **extra):
+        options = {
+            "to" + "ken": "secret-" + "token",
+            "data_source_id": "data-source-id",
+            "transport": transport,
+            "sleep": lambda _seconds: None,
+            "timeout": 0.25,
+            "project_property": "Project",
+            "kind_property": "Kind",
+            "period_property": "Period",
+            "blocker_property": "Has Blocker",
+        }
+        options.update(extra)
+        return notion.NotionJournalExporter(**options)
+
     def test_optional_human_properties_are_written_when_configured(self):
-        transport = FakeTransport([{"results": []}, {"id": "page-created"}])
-        exporter = notion.NotionJournalExporter(
-            **{
-                "to" + "ken": "secret-" + "token",
-                "data_source_id": "data-source-id",
-                "transport": transport,
-                "sleep": lambda _seconds: None,
-                "timeout": 0.25,
-                "project_property": "Project",
-                "kind_property": "Kind",
-                "period_property": "Period",
-                "blocker_property": "Has Blocker",
-            }
+        transport = FakeTransport(
+            [
+                {"results": []},
+                {"properties": {"Project": {"type": "rich_text"}}},
+                {"id": "page-created"},
+            ]
         )
+        exporter = self.human_exporter(transport)
         exporter.upsert(
             "key",
             "title",
@@ -235,7 +244,7 @@ class NotionJournalTest(unittest.TestCase):
             period="2026-07-31",
             has_blocker=True,
         )
-        properties = transport.calls[1][2]["properties"]
+        properties = transport.calls[2][2]["properties"]
         self.assertEqual(
             "oh-my-setting",
             properties["Project"]["rich_text"][0]["text"]["content"],
@@ -243,6 +252,158 @@ class NotionJournalTest(unittest.TestCase):
         self.assertEqual("Daily", properties["Kind"]["select"]["name"])
         self.assertEqual("2026-07-31", properties["Period"]["date"]["start"])
         self.assertTrue(properties["Has Blocker"]["checkbox"])
+
+    def test_project_select_conversion_adapts_the_payload(self):
+        transport = FakeTransport(
+            [
+                {"results": []},
+                {"properties": {"Project": {"type": "select"}}},
+                {"id": "page-created"},
+            ]
+        )
+        exporter = self.human_exporter(transport)
+        exporter.upsert(
+            "key",
+            "title",
+            "hash",
+            "content",
+            project_name="team, alpha " + "x" * 200,
+            kind="daily",
+            period="2026-07-31",
+        )
+        option = transport.calls[2][2]["properties"]["Project"]["select"]["name"]
+        self.assertNotIn(",", option)
+        self.assertLessEqual(len(option), 100)
+        self.assertTrue(option.startswith("team  alpha"))
+
+    def test_optional_columns_follow_the_live_schema(self):
+        absent = FakeTransport(
+            [
+                {"results": []},
+                {"properties": {"Project": {"type": "rich_text"}}},
+                {"id": "page-created"},
+            ]
+        )
+        exporter = self.human_exporter(
+            absent,
+            sessions_property="Sessions",
+            commits_property="Commits",
+            verified_property="Verified",
+        )
+        exporter.upsert(
+            "key",
+            "title",
+            "hash",
+            "content",
+            project_name="oh-my-setting",
+            sessions=["sess-alpha-one", "sess-beta-two"],
+            commits=3,
+            verified=2,
+        )
+        properties = absent.calls[2][2]["properties"]
+        self.assertNotIn("Sessions", properties)
+        self.assertNotIn("Commits", properties)
+        self.assertNotIn("Verified", properties)
+
+        present = FakeTransport(
+            [
+                {"results": []},
+                {
+                    "properties": {
+                        "Project": {"type": "rich_text"},
+                        "Sessions": {"type": "rich_text"},
+                        "Commits": {"type": "number"},
+                        "Verified": {"type": "number"},
+                    }
+                },
+                {"id": "page-created"},
+            ]
+        )
+        exporter = self.human_exporter(
+            present,
+            sessions_property="Sessions",
+            commits_property="Commits",
+            verified_property="Verified",
+        )
+        exporter.upsert(
+            "key",
+            "title",
+            "hash",
+            "content",
+            project_name="oh-my-setting",
+            sessions=["sess-alpha-one", "sess-beta-two"],
+            commits=3,
+            verified=2,
+        )
+        properties = present.calls[2][2]["properties"]
+        self.assertEqual(
+            "sess-alp, sess-bet",
+            properties["Sessions"]["rich_text"][0]["text"]["content"],
+        )
+        self.assertEqual(3, properties["Commits"]["number"])
+        self.assertEqual(2, properties["Verified"]["number"])
+
+    def test_schema_fetch_failure_fails_closed_before_any_write(self):
+        transport = FakeTransport(
+            [
+                {"results": []},
+                notion.NotionTransportError("schema unavailable"),
+            ]
+        )
+        exporter = self.human_exporter(transport)
+        with self.assertRaises(notion.NotionTransportError):
+            exporter.upsert(
+                "key", "title", "hash", "content", project_name="oh-my-setting"
+            )
+        for method, path, _payload, _timeout in transport.calls:
+            self.assertFalse(
+                method == "POST" and path == "/v1/pages",
+                "no page may be written on an unknown schema",
+            )
+
+    def test_validate_target_tolerates_select_project_and_absent_optionals(self):
+        schema = {
+            "properties": {
+                "Name": {"type": "title"},
+                "Work Journal Key": {"type": "rich_text"},
+                "Content Hash": {"type": "rich_text"},
+                "Project": {"type": "select"},
+                "Kind": {"type": "select"},
+                "Period": {"type": "date"},
+                "Has Blocker": {"type": "checkbox"},
+            }
+        }
+        exporter = self.human_exporter(
+            FakeTransport([schema]),
+            sessions_property="Sessions",
+            commits_property="Commits",
+            verified_property="Verified",
+        )
+        self.assertEqual({"status": "valid"}, exporter.validate_target())
+
+        wrong_typed = {
+            "properties": dict(
+                schema["properties"], Commits={"type": "rich_text"}
+            )
+        }
+        exporter = self.human_exporter(
+            FakeTransport([wrong_typed]),
+            commits_property="Commits",
+        )
+        with self.assertRaises(notion.NotionTransportError):
+            exporter.validate_target()
+
+    def test_quote_lines_render_as_callout_blocks(self):
+        children = notion.NotionJournalExporter._summary_children(
+            "## 의사결정\n\n> going with map-style sharding\n"
+        )
+        callouts = [c for c in children if c["type"] == "callout"]
+        self.assertEqual(1, len(callouts))
+        self.assertEqual(
+            "going with map-style sharding",
+            callouts[0]["callout"]["rich_text"][0]["text"]["content"],
+        )
+        self.assertEqual("emoji", callouts[0]["callout"]["icon"]["type"])
 
     def test_update_known_page(self):
         transport = FakeTransport(

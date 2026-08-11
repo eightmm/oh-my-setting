@@ -45,6 +45,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   for all child Git work and atomically replaces patch leaves from a validated
   directory handle. Repeated Draft PR preparation prints an exact publish
   command only for an unblocked intent.
+- The Notion Work Journal mirror is session-traceable and schema-adaptive.
+  Daily pages gain a collapsed Sessions section (each session id with its
+  event count and the `oms session-handoff list` pointer), decision bullets
+  render as callouts so the page opens on judgment, and the exporter reads
+  the live target schema before writing: converting the Project column to a
+  select box in the Notion UI switches the payload on the next sync, and
+  optional Sessions (rich text), Commits, and Verified (number) columns are
+  written only where the user's database actually carries them — an older
+  database is never asked to change. An unreadable schema fails the sync
+  closed instead of guessing a payload type.
 - The machine snapshot now records the local job queue: a `tsp queue` line
   (availability and slot count) joins the Slurm line, and every install
   writes the local-only snapshot by default (`OH_MY_SETTING_GENERATE_MACHINE=0`

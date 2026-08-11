@@ -838,6 +838,48 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("### demo", rendered)
         self.assertIn("- 작업: alpha check passed", rendered)
 
+    def test_daily_sessions_section_and_decision_callout_marks(self):
+        alpha = base_event("alpha")
+        alpha["correlation"] = {"session_id": "sess-alpha-one"}
+        alpha["decision"] = "going with map-style sharding"
+        beta = base_event("beta", "2026-07-31T02:30:00Z")
+        beta["correlation"] = {"session_id": "sess-alpha-one"}
+        self.store.record_event(alpha)
+        self.store.record_event(beta)
+        self.store.materialize()
+        daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+        self.assertIn("## 세션", daily)
+        self.assertIn("- sess-alpha-one (2 event(s))", daily)
+        self.assertIn("oms session-handoff list", daily)
+
+        rendered = wj.notion_presentation(daily)
+        # The decision keeps its text but trades its bullet for a quote mark,
+        # which the exporter renders as a callout.
+        self.assertIn("> going with map-style sharding", rendered)
+        self.assertNotIn("- going with map-style sharding", rendered)
+        # Sessions are reference material: they rank below the verified work.
+        self.assertLess(
+            rendered.index("## 검증된 것"), rendered.index("## 세션")
+        )
+
+    def test_daily_period_aggregates_count_sessions_commits_verified(self):
+        alpha = base_event("alpha")
+        alpha["correlation"] = {"session_id": "sess-alpha-one"}
+        commit = base_event("commit-1", "2026-07-31T03:00:00Z")
+        commit["event_type"] = "commit"
+        commit["verification_status"] = "not_verified"
+        commit["correlation"] = {"session_id": "sess-beta-two"}
+        self.store.record_event(alpha)
+        self.store.record_event(commit)
+        self.store.materialize()
+        aggregates = self.store._period_aggregates("daily", "2026-07-31")
+        self.assertEqual(
+            ["sess-alpha-one", "sess-beta-two"], aggregates["sessions"]
+        )
+        self.assertEqual(1, aggregates["commits"])
+        self.assertEqual(1, aggregates["verified"])
+        self.assertEqual({}, self.store._period_aggregates("weekly", "2026-W31"))
+
     def test_project_identity_is_create_once_and_recoverable_from_events(self):
         self.store.record_event(base_event("identity"))
         original = self.store.project_id
@@ -1039,8 +1081,11 @@ class NotionPresentationTest(unittest.TestCase):
         rendered = wj.notion_presentation(content)
         self.assertNotIn("wj_", rendered)
         self.assertNotIn("[REDACTED]", rendered)
-        self.assertEqual(rendered.count("- decided the thing"), 1)
-        self.assertIn("- another decision", rendered)
+        # Decision bullets trade their dash for a quote mark (the exporter
+        # renders those as callouts); the fold still collapses duplicates.
+        self.assertEqual(rendered.count("> decided the thing"), 1)
+        self.assertNotIn("- decided the thing", rendered)
+        self.assertIn("> another decision", rendered)
         self.assertIn("# Daily Work Journal — 2026-08-01", rendered)
         # Commit bullets lose their hash prefix but keep the message.
         self.assertIn("- test: capture status output", rendered)
@@ -1083,11 +1128,13 @@ class NotionPresentationTest(unittest.TestCase):
             ]
         )
         rendered = wj.notion_presentation(content)
-        self.assertEqual(1, rendered.count("- same line"))
         # 의사결정 is presented first, so it keeps the shared bullet even
-        # though the source file lists it under 핵심 진전 first.
-        self.assertLess(rendered.index("## 의사결정"), rendered.index("- same line"))
-        self.assertLess(rendered.index("- same line"), rendered.index("## 핵심 진전"))
+        # though the source file lists it under 핵심 진전 first — and as the
+        # decision copy it carries the quote mark instead of the dash.
+        self.assertEqual(1, rendered.count("> same line"))
+        self.assertNotIn("- same line", rendered)
+        self.assertLess(rendered.index("## 의사결정"), rendered.index("> same line"))
+        self.assertLess(rendered.index("> same line"), rendered.index("## 핵심 진전"))
         self.assertIn("- progress only", rendered)
 
 

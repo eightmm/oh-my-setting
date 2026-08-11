@@ -103,6 +103,8 @@ _HEADINGS = {
         "trends": "비교 가능한 실험 추세",
         "weekly_next": "다음 주 우선순위",
         "repeated": "반복 %d회",
+        "sessions": "세션",
+        "sessions_restore": "복원: `oms session-handoff list`로 해당 세션의 핸드오프를 찾을 수 있음",
     },
     "en": {
         "empty": "- none recorded",
@@ -125,6 +127,8 @@ _HEADINGS = {
         "trends": "Comparable metric trends",
         "weekly_next": "Next week priorities",
         "repeated": "repeated %d times",
+        "sessions": "Sessions",
+        "sessions_restore": "restore: `oms session-handoff list` locates each session's handoff",
     },
 }
 _EMPTY_MARKERS = {"- 기록 없음", "- none", "- none recorded"}
@@ -176,6 +180,10 @@ DEFAULT_NOTION_PROPERTIES = {
     "kind": "Kind",
     "period": "Period",
     "blocker": "Has Blocker",
+    # Optional columns: written only when the user's database carries them.
+    "sessions": "Sessions",
+    "commits": "Commits",
+    "verified": "Verified",
 }
 _NOTION_ID_RE = re.compile(
     r"^(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})$"
@@ -227,6 +235,7 @@ _NOTION_SECTION_RANK = {
     "핵심 진전": 5, "Key progress": 5,
     "프로젝트별 작업": 5, "Work by project": 5,
     "프로젝트별 진전": 5, "Progress by project": 5,
+    "세션": 6, "Sessions": 6,
 }
 
 
@@ -307,6 +316,18 @@ def notion_presentation(content: str) -> str:
         return not body or all(l in _EMPTY_MARKERS for l in body)
 
     ordered = [s for s in ordered if not says_nothing(s)]
+
+    # Decisions are the page's judgment layer: mark their bullets as quotes so
+    # the exporter renders them as callouts instead of one more bullet list.
+    # Deterministic transform only — the text itself is untouched.
+    for section in ordered:
+        if _NOTION_SECTION_RANK.get(section["title"], 3) == 0:
+            section["lines"] = [
+                "> " + line[2:]
+                if line.startswith("- ") and line not in _EMPTY_MARKERS
+                else line
+                for line in section["lines"]
+            ]
 
     out = list(preamble)
     for section in ordered:
@@ -951,6 +972,18 @@ def notion_settings() -> Dict[str, Any]:
         "blocker_property": configured(
             "blocker", "OMS_WORK_JOURNAL_NOTION_BLOCKER_PROPERTY"
         ),
+        # Optional columns default to their canonical names: the exporter
+        # writes them only when the target database actually carries them, so
+        # an unconfigured or older database is never asked to change.
+        "sessions_property": configured(
+            "sessions", "OMS_WORK_JOURNAL_NOTION_SESSIONS_PROPERTY", "Sessions"
+        ),
+        "commits_property": configured(
+            "commits", "OMS_WORK_JOURNAL_NOTION_COMMITS_PROPERTY", "Commits"
+        ),
+        "verified_property": configured(
+            "verified", "OMS_WORK_JOURNAL_NOTION_VERIFIED_PROPERTY", "Verified"
+        ),
         "timeout": float(
             os.environ.get("OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS", "10")
         ),
@@ -1090,6 +1123,9 @@ def configure_notion(
             "kind_property": DEFAULT_NOTION_PROPERTIES["kind"],
             "period_property": DEFAULT_NOTION_PROPERTIES["period"],
             "blocker_property": DEFAULT_NOTION_PROPERTIES["blocker"],
+            "sessions_property": DEFAULT_NOTION_PROPERTIES["sessions"],
+            "commits_property": DEFAULT_NOTION_PROPERTIES["commits"],
+            "verified_property": DEFAULT_NOTION_PROPERTIES["verified"],
         }
     )
     if validate and notion_auth_available(settings):
@@ -1263,6 +1299,26 @@ def render_daily(period: str, events: Sequence[Mapping[str, Any]]) -> str:
         for event in ordered
         if event.get("next_action")
     ]
+    session_ids: List[str] = []
+    for event in ordered:
+        sid = str((event.get("correlation") or {}).get("session_id") or "").strip()
+        if sid and sid not in session_ids:
+            session_ids.append(sid)
+    sessions = [
+        "- %s (%d event(s))"
+        % (
+            sid,
+            sum(
+                1
+                for event in ordered
+                if str((event.get("correlation") or {}).get("session_id") or "")
+                == sid
+            ),
+        )
+        for sid in session_ids
+    ]
+    if sessions:
+        sessions.append("- %s" % labels["sessions_restore"])
 
     sections: List[str] = [
         "# Daily Work Journal — %s" % period,
@@ -1300,6 +1356,10 @@ def render_daily(period: str, events: Sequence[Mapping[str, Any]]) -> str:
         "## %s" % labels["next"],
         "",
         *_empty_or_lines(next_actions),
+        "",
+        "## %s" % labels["sessions"],
+        "",
+        *_empty_or_lines(sessions),
         "",
     ]
     return "\n".join(sections)
@@ -2364,6 +2424,36 @@ class JournalStore:
             raise JournalError("indexed Work Journal summary is unavailable")
         return str(row[0])
 
+    def _period_aggregates(self, kind: str, period: str) -> Dict[str, Any]:
+        """Mirror-facing counts for one daily period: sessions, commits,
+        verified. Weekly pages keep their existing properties (a week of
+        session ids is a listing, not a column)."""
+
+        if kind != "daily":
+            return {}
+        self._ensure_index_database()
+        with sqlite3.connect(str(self.index_db_path)) as connection:
+            rows = connection.execute(
+                "SELECT payload FROM events WHERE active = 1 AND local_date = ?"
+                " ORDER BY occurred_at, event_id",
+                (period,),
+            ).fetchall()
+        sessions: List[str] = []
+        commits = 0
+        verified = 0
+        for raw in rows:
+            event = self._decode_indexed_event(str(raw[0]))
+            sid = str(
+                (event.get("correlation") or {}).get("session_id") or ""
+            ).strip()
+            if sid and sid not in sessions:
+                sessions.append(sid)
+            if event.get("event_type") == "commit":
+                commits += 1
+            if event.get("verification_status") == "passed":
+                verified += 1
+        return {"sessions": sessions, "commits": commits, "verified": verified}
+
     def summary_text(self, kind: str, period: str) -> Optional[str]:
         """Indexed summary content, or None when the period has no events."""
 
@@ -2577,6 +2667,9 @@ class JournalStore:
                             "kind_property",
                             "period_property",
                             "blocker_property",
+                            "sessions_property",
+                            "commits_property",
+                            "verified_property",
                         )
                     },
                 }
@@ -2645,6 +2738,7 @@ class JournalStore:
                 content = notion_presentation(
                     self._summary_content(row["kind"], row["period"])
                 )
+                aggregates = self._period_aggregates(row["kind"], row["period"])
                 result = exporter.upsert(
                     row["summary_key"],
                     row["title"],
@@ -2658,6 +2752,9 @@ class JournalStore:
                     kind=row["kind"],
                     period=row["period"],
                     has_blocker=row["has_blocker"],
+                    sessions=aggregates.get("sessions"),
+                    commits=aggregates.get("commits"),
+                    verified=aggregates.get("verified"),
                 )
                 state["summaries"][row["summary_key"]] = {
                     "status": "synced",

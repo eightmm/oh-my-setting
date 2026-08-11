@@ -36,6 +36,7 @@ NOTION_COLLAPSED_SECTIONS = frozenset(
         "프로젝트별 진전", "Progress by project",
         "완료하거나 검증한 작업", "Completed or verified",
         "아직 검증되지 않은 것", "Not yet verified",
+        "세션", "Sessions",
     }
 )
 NOTION_MAX_INLINE_RETRY_DELAY = 2.0
@@ -274,6 +275,9 @@ class NotionJournalExporter:
         kind_property="",
         period_property="",
         blocker_property="",
+        sessions_property="",
+        commits_property="",
+        verified_property="",
         now=time.time,
         monotonic=time.monotonic,
         **compatibility,
@@ -319,6 +323,12 @@ class NotionJournalExporter:
         self._kind_property = self._redact_access(kind_property).strip()
         self._period_property = self._redact_access(period_property).strip()
         self._blocker_property = self._redact_access(blocker_property).strip()
+        self._sessions_property = self._redact_access(sessions_property).strip()
+        self._commits_property = self._redact_access(commits_property).strip()
+        self._verified_property = self._redact_access(verified_property).strip()
+        # Live target schema (property name -> type), fetched at most once per
+        # exporter instance and only when an adaptive property is configured.
+        self._schema_types = None
         self.enabled = bool(
             self._collection_id
             and (self._access_value or self._auth_mode == "ntn")
@@ -372,6 +382,9 @@ class NotionJournalExporter:
         kind_property="",
         period_property="",
         blocker_property="",
+        sessions_property="",
+        commits_property="",
+        verified_property="",
         now=time.time,
         monotonic=time.monotonic,
         **compatibility,
@@ -395,6 +408,9 @@ class NotionJournalExporter:
             kind_property=kind_property,
             period_property=period_property,
             blocker_property=blocker_property,
+            sessions_property=sessions_property,
+            commits_property=commits_property,
+            verified_property=verified_property,
             now=now,
             monotonic=monotonic,
             **compatibility,
@@ -412,6 +428,9 @@ class NotionJournalExporter:
         kind="",
         period="",
         has_blocker=False,
+        sessions=None,
+        commits=None,
+        verified=None,
     ):
         if not self.enabled:
             return {"status": "disabled"}
@@ -428,6 +447,11 @@ class NotionJournalExporter:
             "kind": self._redact_access(kind),
             "period": self._redact_access(period),
             "has_blocker": bool(has_blocker),
+            "sessions": [
+                self._redact_access(str(sid)) for sid in (sessions or []) if sid
+            ],
+            "commits": commits,
+            "verified": verified,
         }
 
         if not safe_key:
@@ -473,9 +497,30 @@ class NotionJournalExporter:
         )
         return {"status": "synced", "page_id": created_page_id}
 
-    def validate_target(self):
-        if not self.enabled:
-            raise ValueError("Notion credentials and target are required")
+    def _property_expectations(self):
+        """Configured property -> (allowed types, required).
+
+        One shared interpretation for validate_target and the lazy
+        upsert-time schema read, so the two can never disagree about what a
+        compatible target looks like. Project tolerates the user's existing
+        rich_text column or a select conversion made in the Notion UI; the
+        optional columns may be absent entirely (older databases are saved
+        user state and are never asked to change).
+        """
+        return (
+            (self._title_property, ("title",), True),
+            (self._key_property, ("rich_text",), True),
+            (self._hash_property, ("rich_text",), True),
+            (self._project_property, ("rich_text", "select"), True),
+            (self._kind_property, ("select",), True),
+            (self._period_property, ("date",), True),
+            (self._blocker_property, ("checkbox",), True),
+            (self._sessions_property, ("rich_text",), False),
+            (self._commits_property, ("number",), False),
+            (self._verified_property, ("number",), False),
+        )
+
+    def _fetch_schema_types(self):
         collection_id = urllib.parse.quote(self._collection_id, safe="")
         path = (
             "/v1/data_sources/{}".format(collection_id)
@@ -486,20 +531,43 @@ class NotionJournalExporter:
         properties = response.get("properties", {})
         if not isinstance(properties, Mapping):
             raise NotionTransportError("Notion target schema is unavailable")
-        expected = (
-            (self._title_property, "title"),
-            (self._key_property, "rich_text"),
-            (self._hash_property, "rich_text"),
-            (self._project_property, "rich_text"),
-            (self._kind_property, "select"),
-            (self._period_property, "date"),
-            (self._blocker_property, "checkbox"),
+        types = {}
+        for name, value in properties.items():
+            if isinstance(value, Mapping) and value.get("type"):
+                types[str(name)] = str(value["type"])
+        return types
+
+    def _ensure_schema_types(self):
+        if self._schema_types is None:
+            self._schema_types = self._fetch_schema_types()
+        return self._schema_types
+
+    def _needs_schema(self):
+        # Static-typed columns need no live read; only type-adaptive project
+        # and the optional columns make the write depend on the target shape.
+        return bool(
+            self._project_property
+            or self._sessions_property
+            or self._commits_property
+            or self._verified_property
         )
-        for name, expected_type in expected:
+
+    def validate_target(self):
+        if not self.enabled:
+            raise ValueError("Notion credentials and target are required")
+        types = self._fetch_schema_types()
+        self._schema_types = types
+        for name, allowed, required in self._property_expectations():
             if not name:
                 continue
-            value = properties.get(name)
-            if not isinstance(value, Mapping) or value.get("type") != expected_type:
+            actual = types.get(name)
+            if actual is None:
+                if required:
+                    raise NotionTransportError(
+                        "Notion target schema is incompatible"
+                    )
+                continue
+            if actual not in allowed:
                 raise NotionTransportError("Notion target schema is incompatible")
         return {"status": "valid"}
 
@@ -746,11 +814,53 @@ class NotionJournalExporter:
                 ]
             },
         }
+        schema_types = (
+            self._ensure_schema_types() if self._needs_schema() else {}
+        )
         if self._project_property and metadata.get("project_name"):
-            properties[self._project_property] = {
-                "rich_text": [
-                    NotionJournalExporter._text_object(metadata["project_name"])
-                ]
+            # The live column type decides the payload: the user may convert
+            # Project to a select box in the Notion UI at any time and the
+            # mirror adapts on the next sync. A column the schema no longer
+            # names is skipped — the page still lands and validate_target is
+            # the surface that diagnoses the rename.
+            project_type = schema_types.get(self._project_property)
+            if project_type == "select":
+                option = (
+                    str(metadata["project_name"]).replace(",", " ").strip()[:100]
+                )
+                if option:
+                    properties[self._project_property] = {
+                        "select": {"name": option}
+                    }
+            elif project_type == "rich_text":
+                properties[self._project_property] = {
+                    "rich_text": [
+                        NotionJournalExporter._text_object(
+                            metadata["project_name"]
+                        )
+                    ]
+                }
+        if self._sessions_property and metadata.get("sessions") and (
+            schema_types.get(self._sessions_property) == "rich_text"
+        ):
+            listed = ", ".join(
+                str(sid)[:8] for sid in metadata["sessions"] if str(sid)
+            )[:1900]
+            if listed:
+                properties[self._sessions_property] = {
+                    "rich_text": [NotionJournalExporter._text_object(listed)]
+                }
+        if self._commits_property and metadata.get("commits") is not None and (
+            schema_types.get(self._commits_property) == "number"
+        ):
+            properties[self._commits_property] = {
+                "number": int(metadata["commits"])
+            }
+        if self._verified_property and metadata.get("verified") is not None and (
+            schema_types.get(self._verified_property) == "number"
+        ):
+            properties[self._verified_property] = {
+                "number": int(metadata["verified"])
             }
         if self._kind_property and metadata.get("kind"):
             properties[self._kind_property] = {
@@ -850,6 +960,7 @@ class NotionJournalExporter:
             todo = re.match(r"^-\s+\[([ xX])\]\s+(.+)$", line)
             bullet = re.match(r"^-\s+(.+)$", line)
             numbered = re.match(r"^\d+\.\s+(.+)$", line)
+            quote = re.match(r"^>\s+(.+)$", line)
             if line == "---":
                 close_toggle()
                 emit({"object": "block", "type": "divider", "divider": {}})
@@ -888,6 +999,14 @@ class NotionJournalExporter:
                     "to_do",
                     todo.group(2),
                     checked=todo.group(1).lower() == "x",
+                )
+            elif quote:
+                # Quoted lines carry the judgment layer (decisions); a callout
+                # keeps them visually distinct from the listing bullets.
+                append_text_blocks(
+                    "callout",
+                    quote.group(1),
+                    icon={"type": "emoji", "emoji": "\U0001f4a1"},
                 )
             elif bullet:
                 append_text_blocks("bulleted_list_item", bullet.group(1))

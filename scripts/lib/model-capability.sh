@@ -371,7 +371,7 @@ oms_capability_effort_union() {
 # catalog knows nothing about this model's scale, not that it has none.
 oms_capability_model_efforts() {
   local provider="$1" model="$2"
-  local file key line
+  local file key
   provider="$(oms_provider_normalize "$provider")" || return 2
   file="$(oms_capability_cache_dir)/$provider.efforts"
   [ -f "$file" ] || return 1
