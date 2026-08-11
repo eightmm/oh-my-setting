@@ -6847,8 +6847,12 @@ test_auto_update_apply_lock_contention_skips_without_pull() {
   XDG_RUNTIME_DIR="$runtime" HOME="$home_dir" OMS_LOCK_FORCE_MKDIR=1 \
     "$work/scripts/auto-update.sh" apply >"$TMP/auto-lock-out" 2>"$TMP/auto-lock-err"
   assert_file_contains "$TMP/auto-lock-out" "auto-update: skipped (another run in progress)"
-  assert_file_contains "$work/local/auto-update.status" "status=skipped"
-  assert_file_contains "$work/local/auto-update.status" "another auto-update run is in progress"
+  # The live run owns the state file: a loser that recorded "skipped" here
+  # could land after the winner's real outcome and overwrite a failure with
+  # a green-looking skip. The loser reports to its caller and writes nothing.
+  if [ -e "$work/local/auto-update.status" ]; then
+    fail "a contending apply wrote state it does not own: $(cat "$work/local/auto-update.status")"
+  fi
   [ "$(git -C "$work" rev-parse HEAD)" = "$old_full" ] ||
     fail "lock contention apply should not pull"
 }
