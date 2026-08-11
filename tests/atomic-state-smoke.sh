@@ -62,6 +62,46 @@ done
 wait "$writer"
 [ "$empty" = 0 ] || fail "a reader observed an empty task file during writes"
 
+# The derived memory summary has unlocked prompt readers, so its refresh must
+# also land as one same-directory rename: truncate-then-append exposed a
+# header-only summary to any reader racing the refresh. Canary, not proof,
+# like the task-file leg above.
+# shellcheck source=scripts/lib/agent-memory-common.sh
+. "$ROOT/scripts/lib/agent-memory-common.sh"
+mkdir -p "$TMP/repo/.oms/memory"
+memory_file="$TMP/repo/.oms/memory/shared.md"
+i=1
+while [ "$i" -le 200 ]; do
+  printf '## note-%s\nbody line %s for the summary canary\n\n' "$i" "$i"
+  i=$((i + 1))
+done > "$memory_file"
+summary_file="$(agent_memory_summary_file "$memory_file")"
+agent_memory_refresh_summary "$memory_file" project >/dev/null 2>&1 ||
+  fail "summary refresh failed"
+grep -q '^- ' "$summary_file" || fail "summary refresh produced no body"
+(
+  i=1
+  while [ "$i" -le 60 ]; do
+    agent_memory_refresh_summary "$memory_file" project >/dev/null 2>&1
+    i=$((i + 1))
+  done
+) &
+summary_writer=$!
+summary_partial=0
+i=1
+while [ "$i" -le 400 ]; do
+  if [ -s "$summary_file" ] && ! grep -q '^- ' "$summary_file"; then
+    summary_partial=1
+  fi
+  [ -s "$summary_file" ] || summary_partial=1
+  i=$((i + 1))
+done
+wait "$summary_writer"
+[ "$summary_partial" = 0 ] ||
+  fail "a reader observed a header-only or empty summary during refresh"
+leftovers="$(find "$TMP/repo/.oms/memory" -name '.oms-replace.*' | wc -l | tr -d ' ')"
+[ "$leftovers" = 0 ] || fail "summary refresh leaked replace scratch"
+
 # A crashed writer's scratch is reclaimed by gc rather than left forever; a
 # fresh scratch (a writer that may still be alive) is not.
 crashed="$TMP/repo/.oms/task/.oms-replace.crashed"

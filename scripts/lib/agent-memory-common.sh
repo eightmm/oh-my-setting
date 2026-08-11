@@ -527,9 +527,18 @@ agent_memory_refresh_summary_write() {
   local summary_file="$1"
   local scope="$2"
   local body_file="$3"
+  local staged
 
-  agent_memory_write_summary_header "$summary_file" "$scope"
-  cat "$body_file" >> "$summary_file"
+  # Prompt readers take no lock, so the swap must be one same-directory
+  # rename: truncate-then-append exposed a header-only summary to any reader
+  # racing the refresh. The lock above still serializes writers.
+  staged="$(agent_memory_mktemp_beside "$summary_file")" || return 1
+  agent_memory_write_summary_header "$staged" "$scope"
+  if ! cat "$body_file" >> "$staged"; then
+    rm -f "$staged"
+    return 1
+  fi
+  mv "$staged" "$summary_file"
 }
 
 agent_memory_refresh_summary() {

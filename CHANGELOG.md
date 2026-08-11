@@ -146,6 +146,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- The derived memory summary refresh is atomic for its unlocked readers. The
+  refresh staged only the body beside the target, then truncated the live
+  `summary.md` and appended — so a prompt reader racing the refresh could
+  inject a header-only or empty summary as provider context. Header and body
+  now assemble beside the target and land as one same-directory rename, with
+  the summary canary joining the atomic-state regression.
 - Three platform failures the lifecycle-lock leak had been masking in CI.
   Stock Bash 3.2 + `set -u` treats an empty array expansion as unbound, so
   a bare `doctor.sh` delegation, the post-repair re-exec, and the
