@@ -403,7 +403,7 @@ fi
 #    event is older than --days is over; append a terminal close event.
 if [ -f "$OMS/runs/spine.jsonl" ]; then
   stale_open="$(OMS_DAYS="$DAYS" python3 - "$OMS/runs/spine.jsonl" <<'PY'
-import json, os, sys, time
+import calendar, json, os, sys, time
 cutoff = time.time() - int(os.environ["OMS_DAYS"]) * 86400
 last, closed, order = {}, set(), []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
@@ -420,7 +420,9 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if rid not in last:
         order.append(rid)
     try:
-        ts = time.mktime(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+        # timegm, not mktime: the stamps are UTC, and reading them as local
+        # time shifted the cutoff by the host's UTC offset.
+        ts = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
     except Exception:
         ts = None
     if ts is not None and ts > last.get(rid, 0):
@@ -489,21 +491,44 @@ fail_ledger="$OMS/failures.jsonl"
 if [ -f "$fail_ledger" ]; then
   hook_fail_ttl="${OMS_HOOK_FAIL_TTL:-86400}"
   case "$hook_fail_ttl" in *[!0-9]*|"") hook_fail_ttl=86400 ;; esac
-  before="$(wc -l < "$fail_ledger" | tr -d ' ')"
-  compacted="$(OMS_DAYS="$DAYS" OMS_HOOK_TTL="$hook_fail_ttl" python3 - "$fail_ledger" <<'PY'
+  # Snapshot, compaction, and publish run under the writers' own lock: the
+  # old unlocked truncate-publish permanently lost any append that landed
+  # between snapshot and publish, stripped the terminal newline through
+  # command substitution (fusing the next locked append onto the last row),
+  # and silently erased malformed lines — exactly the evidence a refusal
+  # must preserve. Python stages beside the ledger with its newline intact
+  # and the rename is the only publish; JSONL never rides a shell variable.
+  failures_gc_locked() {
+    local before after stage py_status=0
+    before="$(wc -l < "$fail_ledger" | tr -d ' ')"
+    stage="$(mktemp "$(dirname "$fail_ledger")/.oms-replace.XXXXXX")" || return 1
+    OMS_DAYS="$DAYS" OMS_HOOK_TTL="$hook_fail_ttl" \
+      python3 - "$fail_ledger" "$stage" <<'PY' || py_status=$?
 import calendar, json, os, sys, time
 days = int(os.environ["OMS_DAYS"])
 ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 cutoff = time.time() - days * 86400
 now = time.time()
 rows = []
+malformed = False
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     line = line.strip()
-    if line:
-        try:
-            rows.append(json.loads(line))
-        except Exception:
-            rows.append(None)
+    if not line:
+        continue
+    try:
+        row = json.loads(line)
+    except Exception:
+        malformed = True
+        continue
+    if not isinstance(row, dict):
+        malformed = True
+        continue
+    rows.append(row)
+
+# A ledger with unreadable lines is evidence in an unknown state: publishing
+# any compaction would erase those lines forever. Refuse without writing.
+if malformed:
+    raise SystemExit(3)
 
 # Retirement predicate, textually identical in fail-ledger.sh (record repeat
 # count, check, list) and in the gc failure compaction: read-time expiry and
@@ -521,8 +546,6 @@ def hook_expired(r):
 # count lands on zero is retired.
 open_fails = {}
 for r in rows:
-    if not isinstance(r, dict):
-        continue
     fp = r.get("fingerprint")
     if not fp:
         continue
@@ -536,35 +559,61 @@ for r in rows:
 retired = {fp: count == 0 for fp, count in open_fails.items()}
 
 def old(r):
+    # timegm, not mktime: the stamps are UTC, and reading them as local time
+    # shifted the retention cutoff by the host's UTC offset.
     try:
-        t = time.mktime(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
     except Exception:
         return False
     return t < cutoff
 
-kept = []
-for r in rows:
-    if not isinstance(r, dict):
-        kept.append(r)
-        continue
-    fp = r.get("fingerprint")
-    # Drop only retired-fingerprint rows that are older than the cutoff.
-    if fp and retired.get(fp) and old(r):
-        continue
-    kept.append(r)
-sys.stdout.write("\n".join(json.dumps(r, ensure_ascii=False) for r in kept if isinstance(r, dict)))
-if kept:
-    sys.stdout.write("\n")
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    for r in rows:
+        fp = r.get("fingerprint")
+        # Drop only retired-fingerprint rows that are older than the cutoff.
+        if fp and retired.get(fp) and old(r):
+            continue
+        out.write(json.dumps(r, ensure_ascii=False) + "\n")
 PY
-)"
-  after="$(printf '%s' "$compacted" | awk 'END { print NR + 0 }')"
-  if [ "$after" -lt "$before" ]; then
-    printf -- '- failures: compact %s -> %s rows\n' "$before" "$after"
-    removed=$((removed + 1))
-    if [ "$DRY_RUN" = 0 ]; then
-      printf '%s' "$compacted" > "$fail_ledger"
-    fi
-  fi
+    case "$py_status" in
+      0)
+        after="$(wc -l < "$stage" | tr -d ' ')"
+        if [ "$after" -lt "$before" ]; then
+          printf -- '- failures: compact %s -> %s rows\n' "$before" "$after"
+          if [ "$DRY_RUN" = 0 ]; then
+            mv "$stage" "$fail_ledger"
+          else
+            rm -f "$stage"
+          fi
+        else
+          rm -f "$stage"
+        fi
+        ;;
+      3)
+        rm -f "$stage"
+        printf -- '- failures: compaction refused (malformed rows preserved for inspection)\n'
+        ;;
+      *)
+        rm -f "$stage"
+        return "$py_status"
+        ;;
+    esac
+  }
+  failures_gc_status=0
+  failures_gc_out="$(oms_try_file_lock "$fail_ledger" failures_gc_locked)" ||
+    failures_gc_status=$?
+  case "$failures_gc_status" in
+    0)
+      if [ -n "$failures_gc_out" ]; then
+        printf '%s\n' "$failures_gc_out"
+        case "$failures_gc_out" in
+          *'failures: compact '*) removed=$((removed + 1)) ;;
+        esac
+      fi
+      ;;
+    75) echo "- failures: skipped while another writer holds the ledger" ;;
+    *) echo "error: gc: failure-ledger compaction failed" >&2; exit "$failures_gc_status" ;;
+  esac
 fi
 
 # 4.4) Usage rows: the content-free family counter the fail-ledger hook
@@ -577,8 +626,16 @@ usage_file="$OMS/usage.jsonl"
 if [ -f "$usage_file" ] && [ ! -L "$usage_file" ]; then
   usage_ttl="${OMS_USAGE_TTL:-2592000}"
   case "$usage_ttl" in *[!0-9]*|"") usage_ttl=2592000 ;; esac
-  usage_before="$(wc -l < "$usage_file" | tr -d ' ')"
-  usage_compacted="$(OMS_TTL="$usage_ttl" python3 - "$usage_file" <<'PY'
+  # Same publish discipline as the failure ledger above: the hook appends
+  # under the writers' lock, so compaction snapshots and publishes under
+  # that lock too, staged beside the file with its terminal newline. Rows
+  # that fail this file's own read predicate (unreadable family/day) are
+  # dropped, matching the reader's documented contract.
+  usage_gc_locked() {
+    local before after stage py_status=0
+    before="$(wc -l < "$usage_file" | tr -d ' ')"
+    stage="$(mktemp "$(dirname "$usage_file")/.oms-replace.XXXXXX")" || return 1
+    OMS_TTL="$usage_ttl" python3 - "$usage_file" "$stage" <<'PY' || py_status=$?
 import datetime, json, os, sys
 ttl = int(os.environ.get("OMS_TTL") or 2592000)
 today = datetime.date.today()
@@ -608,20 +665,42 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         counts[key] = counts.get(key, 0) + int(row.get("count") or 1)
     except (TypeError, ValueError):
         counts[key] = counts.get(key, 0) + 1
+out = open(sys.argv[2], "w", encoding="utf-8")
 for fam, day in order:
-    print(json.dumps({"schema": 1, "family": fam, "day": day,
-                      "count": counts[(fam, day)]}, sort_keys=True))
+    out.write(json.dumps({"schema": 1, "family": fam, "day": day,
+                      "count": counts[(fam, day)]}, sort_keys=True) + "\n")
 PY
-)"
-  usage_after="$(printf '%s' "$usage_compacted" | awk 'END { print NR + 0 }')"
-  if [ "$usage_after" -lt "$usage_before" ]; then
-    printf -- '- usage: compact %s -> %s rows\n' "$usage_before" "$usage_after"
-    removed=$((removed + 1))
-    if [ "$DRY_RUN" = 0 ]; then
-      printf '%s' "$usage_compacted" > "$usage_file"
-      [ -z "$usage_compacted" ] || printf '\n' >> "$usage_file"
+    if [ "$py_status" -ne 0 ]; then
+      rm -f "$stage"
+      return "$py_status"
     fi
-  fi
+    after="$(wc -l < "$stage" | tr -d ' ')"
+    if [ "$after" -lt "$before" ]; then
+      printf -- '- usage: compact %s -> %s rows\n' "$before" "$after"
+      if [ "$DRY_RUN" = 0 ]; then
+        mv "$stage" "$usage_file"
+      else
+        rm -f "$stage"
+      fi
+    else
+      rm -f "$stage"
+    fi
+  }
+  usage_gc_status=0
+  usage_gc_out="$(oms_try_file_lock "$usage_file" usage_gc_locked)" ||
+    usage_gc_status=$?
+  case "$usage_gc_status" in
+    0)
+      if [ -n "$usage_gc_out" ]; then
+        printf '%s\n' "$usage_gc_out"
+        case "$usage_gc_out" in
+          *'usage: compact '*) removed=$((removed + 1)) ;;
+        esac
+      fi
+      ;;
+    75) echo "- usage: skipped while another writer holds the file" ;;
+    *) echo "error: gc: usage compaction failed" >&2; exit "$usage_gc_status" ;;
+  esac
 fi
 
 # 4.5) Abandoned change-guards: a guard whose opt-in owner pid is dead, or

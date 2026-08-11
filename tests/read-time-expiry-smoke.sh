@@ -161,6 +161,94 @@ grep -Fq 'oms-test-verify-old' "$ledger" ||
   fail "gc dropped an aged but unresolved non-hook row"
 
 # ---------------------------------------------------------------------------
+# PART 2b: gc's ledger publish is guarded. The compaction must land with a
+# terminal newline (a bare printf publish glued the next locked append onto
+# the last row), refuse to publish when any line is malformed (publishing
+# would erase the evidence), skip while another writer holds the ledger, and
+# age rows in UTC (mktime read the UTC stamp as local time, shifting the
+# retention cutoff by the host's offset).
+# ---------------------------------------------------------------------------
+age_fail_rows() {  # age_fail_rows LEDGER CMD_SUBSTRING SECONDS_AGO
+  OMS_MATCH="$2" OMS_AGE="$3" python3 - "$1" <<'PY'
+import datetime, json, os, sys
+match = os.environ["OMS_MATCH"]
+stamp = (datetime.datetime.now(datetime.timezone.utc)
+         - datetime.timedelta(seconds=int(os.environ["OMS_AGE"]))
+         ).strftime("%Y-%m-%dT%H:%M:%SZ")
+out = []
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if match in (row.get("cmd") or "") and row.get("event") == "fail":
+            row["ts"] = stamp
+        out.append(json.dumps(row, ensure_ascii=False))
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out) + "\n")
+PY
+}
+
+seed_retired_row() {  # seed_retired_row REPO CMD SECONDS_AGO
+  "$LEDGER_SH" --repo "$1" record --cmd "$2" --exit 1 --kind cmd >/dev/null
+  "$LEDGER_SH" --repo "$1" resolve --cmd "$2" --how test >/dev/null
+  age_fail_rows "$1/.oms/failures.jsonl" "$2" "$3"
+}
+
+if [ "$(tail -c 1 "$ledger" | od -An -c | tr -d ' ')" != '\n' ]; then
+  fail "gc compaction published the ledger without a terminal newline"
+fi
+record 'oms-test-after-compact' cmd >/dev/null
+"$LEDGER_SH" --repo "$repo" list 2>&1 | grep -Fq 'oms-test-after-compact' ||
+  fail "an append after compaction was not parseable (row fusion)"
+
+mal_repo="$TMP/mal-repo"
+new_repo "$mal_repo"
+seed_retired_row "$mal_repo" 'oms-test-mal-resolved' "$FORTY_DAYS"
+printf 'this line is not-json evidence\n' >> "$mal_repo/.oms/failures.jsonl"
+mal_out="$("$GC_SH" --repo "$mal_repo" --days 30 --apply)"
+grep -Fq 'not-json evidence' "$mal_repo/.oms/failures.jsonl" ||
+  fail "gc erased a malformed ledger line instead of preserving it"
+printf '%s\n' "$mal_out" | grep -Fq 'failures: compaction refused' ||
+  fail "gc did not name its refusal on a malformed ledger: $mal_out"
+
+lock_repo="$TMP/lock-repo"
+new_repo "$lock_repo"
+seed_retired_row "$lock_repo" 'oms-test-lock-resolved' "$FORTY_DAYS"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
+export OMS_LOCK_DIR="$TMP/locks"
+OMS_LOCK_FORCE_MKDIR=1 oms_with_file_lock "$lock_repo/.oms/failures.jsonl" sleep 3 &
+lock_holder=$!
+sleep 0.3
+lock_out="$(OMS_LOCK_FORCE_MKDIR=1 "$GC_SH" --repo "$lock_repo" --days 30 --apply)"
+wait "$lock_holder"
+printf '%s\n' "$lock_out" | grep -Fq 'failures: skipped' ||
+  fail "gc compacted the ledger under a live writer lock: $lock_out"
+grep -Fq 'oms-test-lock-resolved' "$lock_repo/.oms/failures.jsonl" ||
+  fail "gc dropped rows despite skipping under a live lock"
+
+# A retired fail row aged just INSIDE the retention window must survive gc in
+# an east-of-UTC zone (mktime read it as already past the cutoff), and one
+# aged just OUTSIDE must be dropped in a west-of-UTC zone (mktime read it as
+# still inside). Resolved rows carry no cmd, so the cmd string counts exactly
+# the fail row: one while it lives, zero once dropped.
+tz_east="$TMP/tz-east"
+new_repo "$tz_east"
+seed_retired_row "$tz_east" 'oms-test-tz-inside' $((30 * 86400 - 21600))
+TZ=Asia/Seoul "$GC_SH" --repo "$tz_east" --days 30 --apply >/dev/null
+[ "$(grep -c 'oms-test-tz-inside' "$tz_east/.oms/failures.jsonl")" = 1 ] ||
+  fail "gc dropped an inside-window row under an east-of-UTC timezone"
+
+tz_west="$TMP/tz-west"
+new_repo "$tz_west"
+seed_retired_row "$tz_west" 'oms-test-tz-outside' $((30 * 86400 + 21600))
+TZ=America/Los_Angeles "$GC_SH" --repo "$tz_west" --days 30 --apply >/dev/null
+[ "$(grep -c 'oms-test-tz-outside' "$tz_west/.oms/failures.jsonl" || true)" = 0 ] ||
+  fail "gc kept an outside-window retired row under a west-of-UTC timezone"
+
+# ---------------------------------------------------------------------------
 # PART 3: plan claims read as expired, and plan-run frees them pre-flight.
 # ---------------------------------------------------------------------------
 prepo="$TMP/plan-repo"

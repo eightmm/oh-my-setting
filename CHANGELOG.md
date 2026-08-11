@@ -146,6 +146,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- The failure ledger survives its own garbage collection. GC compacted
+  `failures.jsonl` outside the lock every writer takes, published by
+  truncate-redirect through a shell variable — losing any append that landed
+  mid-compaction, stripping the terminal newline so the next locked append
+  fused two JSON rows, and silently erasing malformed lines a later pass
+  would have needed as evidence. Compaction now snapshots, compacts, and
+  publishes under the writers' lock via a beside-the-file stage and one
+  rename, refuses outright when any line is malformed, and skips with a note
+  while another writer holds the ledger; the usage counter compaction gets
+  the same discipline. GC retention cutoffs also read their UTC stamps as
+  UTC (`timegm`, not `mktime`) — east of UTC the ledger and run-record
+  floors fired hours early, west of UTC hours late.
 - The derived memory summary refresh is atomic for its unlocked readers. The
   refresh staged only the body beside the target, then truncated the live
   `summary.md` and appended — so a prompt reader racing the refresh could
