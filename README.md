@@ -117,8 +117,8 @@ door per capability; the full catalog is `oms list`, documented in
   child-attempt resume, a bounded supervisor, one-use approvals,
   `trusted-local`/`isolated`/`remote` preflight, optional Herdr control and
   VS Code/Stably Orca/Codex launchers, a read-only cockpit, local OTLP JSONL,
-  advisory semantic evaluation, and a bounded coding autopilot whose only
-  built-in remote-write path creates a branch plus Draft PR
+  advisory semantic evaluation, and an agent-managed bounded coding loop whose
+  only built-in remote-write path creates a branch plus Draft PR
 - **Maintenance** — transactional update with rollback, doctor, one full
   verification gate plus a protected-branch quick pre-push mode
 

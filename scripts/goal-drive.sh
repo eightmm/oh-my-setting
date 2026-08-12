@@ -260,7 +260,7 @@ park() {  # REASON NEXT
     --cmd "goal-drive park reason=$1 accept=$ACCEPT_SNAPSHOT" --exit 3 \
     --summary "parked: $1 ($RUN_ID)" --next "$2" 2>&1 >/dev/null || true)"
   echo "goal-drive: parked run=$RUN_ID cycle=$CYCLE reason=$1"
-  echo "goal-drive: next: $2"
+  echo "goal-drive: parent-agent next: $2"
   # record names `oms advise` once the same park repeats, and this used to
   # send that line to /dev/null — the threshold crossing has to be visible at
   # the one moment the run is ending on it.

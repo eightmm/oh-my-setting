@@ -46,6 +46,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `PROVIDER:model=NAME` targets.
 
 ### Changed
+- OMS is now an explicit agent-side control plane: users provide goals, constraints,
+  and material authority while the top-level parent handles proposal review,
+  digest admission, execution, recovery, and state inspection internally.
+  Agent hints no longer hand parked-run commands to the end user; natural
+  goal-only implementation requests route to the harness. Exact proposal and
+  recovery continuations remain intact as parent-agent safety boundaries.
 - Autopilot hardening now binds the full local authority chain: provider routes
   and timeouts live in a durable resumable run receipt; workers cannot invoke
   the commit driver; commit recovery compare-and-sets the reviewed symbolic

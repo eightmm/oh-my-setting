@@ -680,6 +680,11 @@ test_autopilot_orchestration() {
   grep -Fq 'proposal-r1.json' "$repo/replan.out" || fail "replan proposal pointer missing"
   grep -Fq -- '--expected-proposal-sha256' "$repo/replan.out" ||
     fail "the printed continuation does not bind the proposal digest"
+  grep -Fq 'parent-agent continuation' "$repo/replan.out" ||
+    fail "the proposal continuation should be labeled as parent-agent control"
+  if grep -Eiq '(user|operator).*(run|copy|paste)|you (run|copy|paste)' "$repo/replan.out"; then
+    fail "autopilot should not delegate its continuation to the end user"
+  fi
   grep -Fq -- '--id-prefix r1-' "$repo/calls/plan-from-spec" ||
     fail "replan did not fence generated ids"
   grep -Fq -- '--max-tasks 2' "$repo/calls/plan-from-spec" ||
@@ -818,7 +823,7 @@ test_autopilot_orchestration() {
   OMS_T_PLAN_RC=3 run_autopilot "$planner_repo" propose --planner claude \
     --allowed 'src,tests' --base main > "$planner_repo/planner.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "planner failure should propagate, got $rc: $(tail -5 "$planner_repo/planner.out")"
-  if grep -Fq 'awaits parent review' "$planner_repo/planner.out"; then
+  if grep -Fq 'awaits parent-agent review' "$planner_repo/planner.out"; then
     fail "planner failure was misreported as a proposal"
   fi
   run_autopilot "$planner_repo" status > "$planner_repo/planner-status.out" 2>&1 ||
@@ -933,6 +938,8 @@ PY
     fail "valid outer receipt should be visible in status"
   grep -Fq 'outer run: stage=proposal-review' "$continuation_repo/status.out" ||
     fail "status omitted the outer proposal-review stage"
+  grep -Fq 'parent-agent continuation:' "$continuation_repo/status.out" ||
+    fail "status should label recovery argv as parent-agent control"
   grep -Fq -- '--provider-timeout 17m' "$continuation_repo/status.out" ||
     fail "status did not reconstruct the bound outer continuation"
   rc=0
@@ -956,7 +963,7 @@ PY
     fail "status should diagnose an unsafe receipt without crashing"
   grep -Fq 'outer run: invalid receipt' "$continuation_repo/status-symlink.out" ||
     fail "status trusted a symlink outer receipt"
-  if grep -Fq 'outer continuation:' "$continuation_repo/status-symlink.out"; then
+  if grep -Fq 'parent-agent continuation:' "$continuation_repo/status-symlink.out"; then
     fail "invalid outer receipt exposed a continuation"
   fi
 

@@ -968,9 +968,9 @@ EOF
   [ "$rc" = 3 ] || fail "second prepare of an existing intent should park, got $rc"
   grep -Fq 'reason=intent-already-prepared' "$repo/repeat-second.out" ||
     fail "second prepare did not identify the existing exact intent"
-  [ "$(grep -c '^draft-pr: next:' "$repo/repeat-second.out")" = 1 ] ||
+  [ "$(grep -c '^draft-pr: parent-agent next:' "$repo/repeat-second.out")" = 1 ] ||
     fail "second prepare should print exactly one resume command"
-  resume_cmd="$(sed -n 's/^draft-pr: next: //p' "$repo/repeat-second.out")"
+  resume_cmd="$(sed -n 's/^draft-pr: parent-agent next: //p' "$repo/repeat-second.out")"
   [ -n "$resume_cmd" ] || fail "second prepare did not print its exact publish command"
   case "$resume_cmd" in
     'oms draft-pr '*) ;;
@@ -1012,7 +1012,7 @@ PY
   run_draft_pr "$repo" prepare --remote origin --base main \
     --verify .git/hooks/tamper-on-prepare-replay > "$repo/repeat-blocked.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "blocked existing intent should park, got $rc"
-  if grep '^draft-pr: next:' "$repo/repeat-blocked.out" | grep -Fq 'oms draft-pr'; then
+  if grep '^draft-pr: parent-agent next:' "$repo/repeat-blocked.out" | grep -Fq 'oms draft-pr'; then
     fail "blocked intent exposed a publish resume command"
   fi
   [ "$repeat_before" = "$(sha256_file "$intent")" ] ||
@@ -1026,7 +1026,7 @@ PY
   run_draft_pr "$repo" prepare --remote origin --base main \
     --verify .git/hooks/tamper-on-prepare-replay > "$repo/repeat-symlink.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "symlink existing intent should park, got $rc"
-  if grep '^draft-pr: next:' "$repo/repeat-symlink.out" | grep -Fq 'oms draft-pr'; then
+  if grep '^draft-pr: parent-agent next:' "$repo/repeat-symlink.out" | grep -Fq 'oms draft-pr'; then
     fail "symlink intent exposed a publish resume command"
   fi
   [ "$repeat_before" = "$(sha256_file "$repeat_saved")" ] ||

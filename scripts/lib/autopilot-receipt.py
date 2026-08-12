@@ -1242,7 +1242,7 @@ def main() -> int:
             validate_live(row, args.repo)
             print("outer run: stage=%s receipt=%s" % (row["stage"], digest(payload)))
             if args.continuation and row["stage"] != "done":
-                print("outer continuation:")
+                print("parent-agent continuation:")
                 print("  " + " ".join(shlex.quote(value) for value in option_args(row)))
             return 0
         row = row_from_args(args)

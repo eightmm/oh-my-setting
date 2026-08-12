@@ -242,9 +242,11 @@ update. Frozen patch creation enters the validated physical directory, uses
 relative writes, and atomically replaces the final leaf without following a
 directory symlink; a changed absolute lookup parks before consumption.
 
-`oms autopilot` composes those boundaries. It proposes an initial plan for
-parent review, atomically applies only that exact proposal, drives the approved
-tasks, and may propose one `r1-` remainder tranche of at most two tasks. The
+`oms autopilot` is an agent-side control plane: the end user states the goal and
+authority while the top-level parent performs every transition below. It
+proposes an initial plan for parent review, atomically applies only that exact
+proposal, drives the approved tasks, and may propose one `r1-` remainder tranche
+of at most two tasks. The
 mechanical acceptance command remains the hard gate. Custom acceptance commands
 bind their declared `Required check files` and reject verifier mutation; Draft
 PR publication defaults cross-family semantic review to a blocking gate. Its
@@ -283,8 +285,8 @@ never replays. Repeated preparation prints that exact, shell-safe replay command
 only for an unblocked regular intent; otherwise it parks without advertising
 publication. For a spent intent, rename the work branch once
 (`git branch -m oms/autopilot-<digest> oms/autopilot-<digest>-r2`, which the
-checkout guard accepts) and rerun `oms autopilot run` to review and prepare a
-fresh intent on the new name.
+checkout guard accepts); the parent then resumes review and preparation on the
+new name. This recovery procedure is agent-facing, not an end-user handoff.
 
 Frozen executors combine a reusable role with task-specific scope, base SHA,
 lease, model route, and verify command. They are write-only and cannot widen

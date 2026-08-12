@@ -106,19 +106,19 @@ if plan.get("accept"):
     if last_terminal and last_terminal.get("status") == "park":
         outer = os.path.join(os.path.dirname(os.environ.get("OMS_SH_PLAN", "")),
                              "autopilot-run.json")
-        # The receipt itself is validated by `oms autopilot status`. Here it is
-        # only a routing discriminator: never tell an operator to bypass a
-        # present parent orchestration contract with a bare goal-drive call.
+        # The receipt itself is validated by autopilot status. Here it is only
+        # a routing discriminator: direct the parent to the outer contract
+        # without exposing recovery commands as an end-user procedure.
         if os.path.isfile(outer) and not os.path.islink(outer):
             print(
-                "[oms] autopilot parked (%s) — run `oms autopilot --repo ."
-                " status` for the validated outer continuation."
+                "[oms] autopilot parked (%s) — parent agent: inspect and resume"
+                " the validated autopilot receipt internally."
                 % (last_terminal.get("reason") or "?")
             )
             raise SystemExit(0)
         print(
-            "[oms] goal parked (%s) — review .oms/plan/progress.jsonl, then"
-            " resume with `oms goal-drive`."
+            "[oms] goal parked (%s) — parent agent: inspect the plan state and"
+            " resume it internally."
             % (last_terminal.get("reason") or "?")
         )
         raise SystemExit(0)

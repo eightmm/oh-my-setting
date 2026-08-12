@@ -881,8 +881,11 @@ test_router_state_hint_surfaces_parked_goal() {
   rm -f "$repo/.oms/hooks/state-hint."*
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms autopilot --repo . status' ||
-    fail "a parked outer run should prefer autopilot recovery: $out"
+  printf '%s' "$out" | grep -Fq 'parent agent: inspect and resume the validated autopilot receipt internally' ||
+    fail "a parked outer run should assign recovery to the parent agent: $out"
+  if printf '%s' "$out" | grep -Eq 'run `oms|resume with `oms|review \.oms'; then
+    fail "a parked outer run should not expose recovery commands to the user: $out"
+  fi
   if printf '%s' "$out" | grep -Fq 'resume with `oms goal-drive`'; then
     fail "outer autopilot park was downgraded to a bare goal-drive resume"
   fi

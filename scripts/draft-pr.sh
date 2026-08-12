@@ -123,7 +123,7 @@ fail() {
 
 park() {
   echo "draft-pr: parked reason=$1" >&2
-  [ -z "${2:-}" ] || echo "draft-pr: next: $2" >&2
+  [ -z "${2:-}" ] || echo "draft-pr: parent-agent next: $2" >&2
   exit 3
 }
 

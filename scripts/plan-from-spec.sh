@@ -507,7 +507,7 @@ PY
   if [ "${OMS_AUTOPILOT:-0}" = 1 ]; then
     echo "plan-from-spec: $count task(s) applied"
   else
-    echo "plan-from-spec: $count task(s) applied; drive with: oms goal-drive --repo $REPO"
+    echo "plan-from-spec: $count task(s) applied; parent-agent next: oms goal-drive --repo $REPO"
   fi
   exit 0
 fi

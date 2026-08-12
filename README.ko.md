@@ -110,7 +110,7 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   supervisor, 한 번만 쓰는 승인, `trusted-local`/`isolated`/`remote` 사전 점검,
   선택적 Herdr 제어와 VS Code·Stably Orca·Codex 열기, 읽기 전용 cockpit,
   로컬 OTLP JSONL, advisory semantic 평가, 기본 제공 원격 쓰기 경로가 새
-  브랜치와 Draft PR 생성뿐인 제한된 코딩 autopilot
+  브랜치와 Draft PR 생성뿐인 agent 관리형 제한 코딩 루프
 - **유지보수** — 롤백 가능한 트랜잭션 업데이트, doctor, 하나의 전체 검증
   게이트와 보호 브랜치용 빠른 pre-push 모드
 

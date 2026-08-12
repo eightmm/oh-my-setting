@@ -4648,6 +4648,10 @@ EOF
   # Apply: plan initialized from PROJECT.md (goal + acceptance) plus the tasks.
   "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --apply "$proposal" >"$project/apply-out" 2>&1 ||
     fail "apply should succeed: $(tail -4 "$project/apply-out")"
+  assert_file_contains "$project/apply-out" "parent-agent next: oms goal-drive"
+  if grep -Fq 'plan-from-spec: next:' "$project/apply-out"; then
+    fail "standalone apply should not present the continuation as an end-user step"
+  fi
   "$ROOT/scripts/agent-plan.sh" --repo "$project" status >"$project/plan-status"
   assert_file_contains "$project/plan-status" "accept: bash tests/run.sh"
   assert_file_contains "$project/plan-status" "ready now: t1"
@@ -10584,6 +10588,28 @@ test_large_skills_use_progressive_disclosure() {
     fail "oms-trace cites advise --prompt, which the tool no longer documents"
 }
 
+test_harness_is_an_agent_owned_control_plane() {
+  local global_rules="$ROOT/rules/global-AGENTS.md"
+  local skill="$ROOT/custom-skills/oms-agent-harness/SKILL.md"
+  local autonomy="$ROOT/custom-skills/oms-agent-harness/references/autonomy-loop.md"
+  local historical_audit="$ROOT/docs/AUTOPILOT-GAP-AUDIT.md"
+
+  for file in "$global_rules" "$skill"; do
+    assert_file_contains "$file" "agent-side control plane"
+    assert_file_contains "$file" "Never ask users to copy"
+  done
+  assert_file_contains "$autonomy" "Parent control-plane contract"
+  assert_file_contains "$autonomy" "Exit 4 is an"
+  assert_file_contains "$autonomy" "internal parent-review boundary"
+  assert_file_contains "$skill" "route internally"
+  assert_file_contains "$skill" "oms-spec-interview"
+  assert_file_contains "$historical_audit" "Historical Autopilot Gap Audit"
+  assert_file_contains "$historical_audit" "Historical confirmed gaps (resolved)"
+  if grep -Fq 'HUMAN-APPROVED plan' "$autonomy"; then
+    fail "the autonomy contract should assign plan admission to the parent agent"
+  fi
+}
+
 test_policy_layers_match_compact_global_rules() {
   local file
 
@@ -11314,6 +11340,14 @@ test_skill_router_matches_and_dedupes() {
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
     fail "Korean autonomous-coding trigger should route to oms-agent-harness"
+  out="$(printf '{"prompt":"확정된 목표대로 알아서 구현하고 검증까지 마무리해줘","session_id":"r9","turn_id":"t10","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "Korean agent-owned implementation request should route to oms-agent-harness"
+  out="$(printf '{"prompt":"Take this confirmed goal through implementation and verification","session_id":"r10","turn_id":"t11","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "English agent-owned implementation request should route to oms-agent-harness"
 }
 
 test_skill_router_separates_consultation_from_delegation() {

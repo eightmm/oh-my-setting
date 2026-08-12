@@ -640,6 +640,11 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
   --repo "$repo" --to codex >"$TMP/gd-park.out" 2>&1 || rc=$?
 [ "$rc" = 3 ] || fail "exhausted plan should park with exit 3, got $rc"
 grep -Fq 'reason=tasks-exhausted' "$TMP/gd-park.out" || fail "park reason missing"
+grep -Fq 'goal-drive: parent-agent next:' "$TMP/gd-park.out" ||
+  fail "park recovery should be addressed to the parent agent"
+if grep -Fq 'goal-drive: next:' "$TMP/gd-park.out"; then
+  fail "park recovery should not look like an end-user instruction"
+fi
 grep -Fq '"reason": "tasks-exhausted"' "$repo/.oms/plan/progress.jsonl" ||
   fail "terminal park row missing"
 bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list | grep -Fq 'parked: tasks-exhausted' ||

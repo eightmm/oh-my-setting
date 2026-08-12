@@ -1,4 +1,4 @@
-# Autopilot Gap Audit
+# Historical Autopilot Gap Audit
 
 Audit snapshot: product source at `7573a01`, 2026-08-12. This was a real local
 `propose -> parent review -> run -> recovery` exercise in a dedicated worktree.
@@ -15,6 +15,9 @@ to challenge the findings independently of the document-producing worker.
 > those controls; wording such as “remain” describes the audited snapshot, not
 > the hardened release. Hard token/cost enforcement and effects outside the
 > repository still require provider/OS support and remain explicit limits.
+> Current behavior and the agent-owned operating contract live in
+> `docs/COMPONENTS.md` and
+> `custom-skills/oms-agent-harness/references/autonomy-loop.md`.
 
 Severity is relative to the documented trusted-local agent boundary. High can
 cross an OMS authority or repository boundary. Medium can falsely weaken a
@@ -28,12 +31,12 @@ bytes, source `HEAD`, spec digest, plan CAS, and path envelope are bound; worker
 return isolated patches; commits are local; final acceptance and semantic review
 precede the optional create-only Draft PR path.
 
-It is not yet safe enough to describe as unattended autonomous coding. Three
-High defects remain in `goal-drive`: a harness child can inherit landing/commit
-authority, commit publication is not bound to the symbolic branch identity, and
-the progress ledger follows a symlink outside the repository. Acceptance and
-whole-branch scope also have incomplete end-to-end binding. Recovery and
-evaluation are safe-stopping but too lossy for reliable long runs.
+At the audited commit, three High defects made it unsafe to describe as
+unattended autonomous coding. They were in `goal-drive`: a harness child could
+inherit landing/commit authority, commit publication was not bound to symbolic
+branch identity, and the progress ledger followed a symlink outside the
+repository. Acceptance and whole-branch scope also lacked end-to-end binding;
+recovery and evaluation stopped safely but were too lossy for reliable runs.
 
 The live exercise did not reach semantic review. It parked safely, but only
 after exposing fixed provider timeouts, oversized task decomposition, a missing
@@ -65,7 +68,10 @@ These stops protected the tree, but the operator needed provider substitution,
 an advisor, a timeout override, ledger resolution, and a lower-level plan-run
 recovery. That is too much manual protocol knowledge for an autopilot surface.
 
-## Confirmed gaps
+## Historical confirmed gaps (resolved)
+
+Every G1–G11 finding and imperative below describes source `7573a01`; it is
+retained as audit evidence, not as a current backlog.
 
 ### G1 — High — a harness child can invoke parent commit authority
 
@@ -190,7 +196,7 @@ workflow must remain an explicit parent action.
 - Draft publication is create-only and cannot update an existing branch, merge,
   mark ready, tag, or release.
 
-## Evaluation coverage
+## Historical evaluation coverage
 
 `tests/autopilot-smoke.sh` and `tests/goal-drive-recovery-smoke.sh` both passed
 on the audit snapshot. They strongly cover proposal CAS/replay, malformed input,
@@ -209,7 +215,7 @@ typed gate verdict. The stored acceptance command was also executed directly
 and reproduced the Markdown-backtick failure in G11. No live GitHub publication
 was attempted.
 
-## Recommended order
+## Historical recommended order
 
 1. Close G1–G3: parent-only commit entrypoints, explicit-ref CAS, no-follow
    durable state.

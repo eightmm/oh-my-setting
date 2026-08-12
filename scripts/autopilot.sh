@@ -136,7 +136,7 @@ park() {
       echo "autopilot: warning: outer receipt could not record the park" >&2
   fi
   echo "autopilot: parked reason=$1" >&2
-  [ -z "${2:-}" ] || echo "autopilot: next: $2" >&2
+  [ -z "${2:-}" ] || echo "autopilot: parent-agent next: $2" >&2
   exit 3
 }
 
@@ -810,8 +810,8 @@ PY
   continuation_line="$(autopilot_shell_join "${continuation[@]}")" ||
     fail "cannot render the proposal continuation"
   continuation_line="${continuation_line//$'\r'/}"
-  echo "autopilot: proposal awaits parent review"
-  echo "autopilot: after review, resume with:"
+  echo "autopilot: proposal awaits parent-agent review"
+  echo "autopilot: parent-agent continuation after review:"
   printf '  %s\n' "$continuation_line"
   return 4
 }

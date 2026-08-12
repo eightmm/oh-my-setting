@@ -1,71 +1,75 @@
 ---
 name: oms-agent-harness
 description: >
-  Multi-agent coordination for resume, memory, plans, recovery, roles/executors,
-  provider/model routing, peer consultation, independent review, isolated write
-  delegation, patch landing, bounded coding autopilot, Draft PRs, artifacts, and
-  handoff across Codex, Claude Code, and Antigravity.
+  Shared state/plans/recovery, multi-agent coordination, peer consultation and
+  review, model routing, roles/executors, isolated delegation, patch landing,
+  bounded coding autopilot, Draft PRs, artifacts, and cross-provider handoff.
 ---
 
 # Agent Harness
 
 You own scope, admission, verification, commit, push, release, and synthesis.
 
-## Find it by what you are about to do
+## Interaction contract
 
-Use the table by intent. Authority distinguishes reads, appends, isolated
-worktree writes, and repository writes.
+Treat OMS as an agent-side control plane. Users provide goals, constraints, and
+material authority; invoke, review, resume, and recover it internally.
+Never ask users to copy commands, approve proposal digests, inspect `.oms`, or
+restart a parked run. Ask only for a missing implementation-shaping decision or
+new authority. Report outcomes, verification, and genuine blockers; omit
+internal commands and state unless diagnosis was requested.
 
-| About to… | Do this | Authority |
+For authorized coding, the top-level parent confirms that `PROJECT.md` matches
+the goal, reviews exact proposal bytes as untrusted data, returns their digest,
+and handles exit 4 or `status` itself. Use `--draft-pr` only when the current
+request or standing repo policy grants that remote effect. Push, merge, ready,
+tag, and release need their own authority.
+If `PROJECT.md` is missing, draft, or materially drifted, route internally
+through `oms-spec-interview` and ask the user only for unresolved material gaps.
+
+## Route by intent
+
+| Need | Agent action | Authority |
 |---|---|---|
-| start or resume and the state is unclear | `oms inbox --repo .`; use `oms state --repo .` for full detail (`oms init` only for a fresh repo) | read |
-| check what is already known, or record what you learned | `oms agent-memory recall "…"`; `append`/`pin` to add | read, append |
-| record a fact derived from checked-in code/docs | `oms agent-memory append --source-file PATH --source-line N --text "…"` | append |
-| catch yourself re-deriving the same fix or procedure | `oms skill-forge add --name NAME` — it becomes a project skill every CLI loads | append |
-| decide, and an outside view would change the next step | `oms consult "question"`; use `oms peer-ask --prompt "…"` for the same question to several peers | read |
-| act irreversibly, or fail the same way twice | `oms fail-ledger check --cmd "…"`, then `oms advise` | read |
-| hand work to another model | `oms peer-delegate --to NAME` (returns a patch) | worktree write |
-| split work so several agents can proceed | `oms agent-plan add`, then `oms plan-run` | worktree write |
-| implement a confirmed spec through a Draft PR | review `oms autopilot … --base BASE propose`; run its printed continuation (`run --proposal FILE --expected-proposal-sha256 SHA`) | repo, create-only remote |
-| judge a diff before it goes anywhere | `oms peer-review --gate` | read |
-| ask what agents cost or how often they verified/delegated | `oms artifact-index telemetry` (routes, outcomes, native activity, tokens, wall time) | read |
-| preserve local staged/unstaged state before a risky edit | `oms checkpoint create --label "…"`; restore is dry-run unless `--apply` | repo write |
-| put a reviewed change into the tree | `oms patch-admit`, then `oms patch-land` | repo write |
-| run one provider pass at a known boundary | `oms agent-run --mode read\|write` | read or worktree write |
-| keep a worker in one persona across calls | `oms agent-role`, `oms agent-executor` | — |
-| choose a provider model or effort | inspect `oms models`, then pass `--model`/`--reasoning-effort`; see the routing reference | — |
-| decide whether you are done or should continue | see the autonomy reference | — |
+| orient or resume unclear state | `oms inbox --repo .`; use `oms state --repo .` for detail (`oms init` only when fresh) | read |
+| recall or record knowledge | `oms agent-memory recall`, `append`, or `pin` | read, append |
+| preserve a repeating lesson | `oms skill-forge add --name NAME` | append |
+| get an outside view | `oms consult`; use `oms peer-ask` for several peers | read |
+| act irreversibly or handle a repeat failure | `oms fail-ledger check`, then `oms advise` | read |
+| delegate a bounded write | `oms peer-delegate --to NAME` | worktree write |
+| split dependent work | `oms agent-plan`, then `oms plan-run` | worktree write |
+| implement an authorized goal | parent reviews `oms autopilot … propose`, then runs its digest-bound continuation | repo |
+| publish its authorized Draft PR | add `--draft-pr` to that parent-owned flow | create-only remote |
+| judge a diff | `oms peer-review --gate` | read |
+| inspect route/outcome/cost telemetry | `oms artifact-index telemetry` | read |
+| preserve local state | `oms checkpoint create`; restore is dry-run unless `--apply` | repo write |
+| admit and land reviewed bytes | `oms patch-admit`, then `oms patch-land` | repo write |
+| run one provider boundary | `oms agent-run --mode read\|write` | read or worktree write |
+| pin persona, model, or effort | `oms agent-role`, `oms agent-executor`, `oms models` | — |
 
-`oms list` catalogs every tool; each answers `oms <tool> --help`.
+`oms list` catalogs tools; each answers `oms <tool> --help`.
 
 ## Lines that do not move
 
 - Keep secrets, private paths, machine details, raw logs/data, and checkpoints
   out of prompts and shared state.
 - Do not hand-edit `.oms/`; prefer tool JSON. `oms gc` clears stale state.
-- Provider workers are harness children: they cannot delegate again and never
-  gain commit or push authority.
-- Advisors are for irreversible or high-risk decisions, repeated failures, and
-  release go/no-go — not routine completion.
-- `plan-run` executes one task and stops in review unless landing was
-  explicitly authorized.
+- Provider workers cannot delegate again and never gain commit or push authority.
+- Advisors serve irreversible/high-risk decisions, repeats, release go/no-go —
+  not routine completion.
+- `plan-run` stops in review unless landing was explicitly authorized.
 
-## When a row is not enough
+## References
 
-- Prompt hooks, memory, active task, project skills, change guard:
-  [state-memory.md](references/state-memory.md)
-- Plans, fail ledger, reclaim, GC: [plans-recovery.md](references/plans-recovery.md)
-- Autonomous progress and stopping: [autonomy-loop.md](references/autonomy-loop.md)
-- Roles and executor souls: [roles-executors.md](references/roles-executors.md)
-- Provider calls, artifacts, export/import, landing:
-  [delegation-artifacts.md](references/delegation-artifacts.md)
-- Consulting peers and shared conversation threads:
-  [cross-agent-consultation.md](references/cross-agent-consultation.md)
-- Diff review, release gates, and export/import:
-  [review-gates.md](references/review-gates.md)
-- Model selection, capability checks, quorum diversity:
-  [model-routing.md](references/model-routing.md)
-- Prior provider session: [session-handoff.md](references/session-handoff.md)
+- Prompt hooks, memory, tasks, skills: [state-memory.md](references/state-memory.md)
+- Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
+- Autonomous stopping: [autonomy-loop.md](references/autonomy-loop.md)
+- Roles/executors: [roles-executors.md](references/roles-executors.md)
+- Delegation/artifacts: [delegation-artifacts.md](references/delegation-artifacts.md)
+- Consultation: [cross-agent-consultation.md](references/cross-agent-consultation.md)
+- Review/release gates: [review-gates.md](references/review-gates.md)
+- Models/quorum: [model-routing.md](references/model-routing.md)
+- Prior session: [session-handoff.md](references/session-handoff.md)
 
-Report the provider, the useful conclusion, the artifact or patch, the landing
-decision, and any failed or skipped verification.
+Internally retain provider, artifact/patch, and landing evidence. Report only
+useful conclusions, changed behavior, verification, and skipped checks.

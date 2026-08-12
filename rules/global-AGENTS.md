@@ -12,9 +12,8 @@ contracts.
 
 - Inspect first. Infer reversible details locally; ask when authority, interface,
   or risk changes.
-- When two defensible approaches exist and the choice gets encoded across files
-  or interfaces, name both and the one you are taking, then proceed. Stop only
-  when hard to reverse; no stateable second option means no fork — build.
+- When interfaces differ, name both and the one you are taking, then proceed.
+  Stop only when hard to reverse; otherwise build.
 - Preserve unrelated work and fail explicitly. Continue inspect -> act -> verify
   while safe in-scope work remains; bound retries.
 
@@ -33,8 +32,7 @@ contracts.
 - Use relevant skills; prefer local files, `rg`, shell, `git`.
 - Batch independent calls; serialize dependencies. Bound output; re-read after
   state changes.
-- Avoid the window's last 20% for large refactors and complex debugging; small
-  work is fine there.
+- Reserve the window's last 20% for small work, not refactors or complex debugging.
 
 ## Specification
 
@@ -42,10 +40,9 @@ contracts.
 
 ## Verification
 
-- Verify proportionally: syntax, focused behavior, broader checks; risky or
-  cross-cutting changes early.
-- Batch edits and tests at feature boundaries; avoid per-edit checks; run the
-  final gate once unless risk warrants more.
+- Verify syntax, focused behavior, then broader checks; test risky changes early.
+- Batch edits and tests at feature boundaries; run the final gate once unless
+  risk warrants more.
 - Report every skipped, failed, or impossible check. State changed behavior
   and evidence.
 
@@ -53,11 +50,11 @@ contracts.
 
 - Give each worker one bounded strategy profile, scope, and success criteria;
   the parent owns admission, verification, commit, push, and synthesis.
-- Match workers to the task: keep judgment-heavy planning and review on the
-  session model; use cheaper workers only for bounded routine analysis.
-  Preserve frozen model routes and explicit fallback choices.
-- Run commands/tests directly; never spawn agents merely to execute them.
-  Delegate independent judgment or disjoint writes, launched in parallel.
+- Match workers to the task: keep judgment-heavy planning/review on the session
+  model; cheaper workers handle bounded routine analysis. Preserve frozen routes
+  and fallbacks.
+- Run commands/tests directly. Delegate independent judgment or disjoint writes
+  in parallel.
 - Use a task-scoped executor only for substantial writes; workers cannot widen
   authority or recursively delegate.
 - Consult an advisor at irreversible decisions, repeated failures, release
@@ -66,6 +63,9 @@ contracts.
 
 ## Harness
 
+- OMS is an agent-side control plane. Never ask users to copy commands, inspect
+  `.oms`, or resume runs; handle those internally. Ask only for material
+  decisions or authority.
 - Use `oms-agent-harness` for workflows; `oms list` catalogs tools; never edit
   `.oms/` manually; forge repeating fixes into project skills
   (`oms skill-forge`).
