@@ -190,4 +190,64 @@ if [ -d "$repo/.oms/publish" ] && grep -R -Eq "$LEAK|sentinel-user" "$repo/.oms/
   fail "sentinel leaked into a Draft PR publication intent"
 fi
 
+# --- acceptance output body: normalized, redacted, symlink-refusing --------
+# A non-pass acceptance persists its output under .oms/plan/acceptance keyed by
+# the row's output digest. Repo-local git-ignored sink: machine paths
+# normalize, secrets redact, and the writer must not follow symlinks (G3
+# shape) at either the directory or the leaf.
+PLAN="$ROOT/scripts/agent-plan.sh"
+
+accept_repo="$TMP/accept-body"; mk_repo "$accept_repo"
+"$PLAN" --repo "$accept_repo" init --goal body-capture \
+  --accept "printf 'boom %s\n' '$MPATH'; false" >/dev/null
+rc=0; "$PLAN" --repo "$accept_repo" accept >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] || fail "failing acceptance should exit 3, got $rc"
+body_file="$(ls "$accept_repo/.oms/plan/acceptance/"*.log 2>/dev/null | head -n 1)"
+[ -n "$body_file" ] || fail "a failing acceptance must persist its output body"
+grep -q "boom" "$body_file" || fail "the body must carry the acceptance output"
+grep -q "sentinel-user" "$body_file" &&
+  fail "machine path must be normalized in the acceptance body" || true
+key="$(basename "$body_file" .log)"
+grep -q "\"output_sha256\": \"$key\"" "$accept_repo/.oms/plan/progress.jsonl" ||
+  fail "the body filename must match the acceptance row's output digest"
+
+accept_redact="$TMP/accept-redact"; mk_repo "$accept_redact"
+# The plan guard refuses secret text in the command itself, so the secret must
+# reach the writer the way it would in production: via the command's output.
+printf 'key %s\n' "$LEAK" > "$accept_redact/leak.txt"
+"$PLAN" --repo "$accept_redact" init --goal secret-capture \
+  --accept "cat leak.txt; false" >/dev/null
+"$PLAN" --repo "$accept_redact" accept >/dev/null 2>&1 || true
+secret_body="$(ls "$accept_redact/.oms/plan/acceptance/"*.log 2>/dev/null | head -n 1)"
+[ -n "$secret_body" ] || fail "a secret-bearing acceptance still persists a marker body"
+grep -q "$LEAK" "$secret_body" && fail "secret leaked into the acceptance body" || true
+grep -q "redacted:" "$secret_body" || fail "the secret body must be the redacted marker"
+
+accept_dirlink="$TMP/accept-dirlink"; mk_repo "$accept_dirlink"
+outside_dir="$TMP/outside-acceptance"; mkdir -p "$outside_dir"
+mkdir -p "$accept_dirlink/.oms/plan"
+ln -s "$outside_dir" "$accept_dirlink/.oms/plan/acceptance"
+"$PLAN" --repo "$accept_dirlink" init --goal dirlink --accept "echo dirlink-out; false" >/dev/null
+rc=0; "$PLAN" --repo "$accept_dirlink" accept >"$TMP/dirlink.out" 2>&1 || rc=$?
+[ "$rc" -eq 3 ] || fail "a symlinked acceptance dir must not change the verdict, got $rc"
+[ -z "$(ls -A "$outside_dir" 2>/dev/null)" ] ||
+  fail "acceptance body write escaped through a symlinked directory"
+grep -q "was not persisted" "$TMP/dirlink.out" ||
+  fail "the refused body write must be surfaced as a warning"
+
+accept_leaflink="$TMP/accept-leaflink"; mk_repo "$accept_leaflink"
+"$PLAN" --repo "$accept_leaflink" init --goal leaflink --accept "echo leaflink-out; false" >/dev/null
+"$PLAN" --repo "$accept_leaflink" accept >/dev/null 2>&1 || true
+leaf="$(ls "$accept_leaflink/.oms/plan/acceptance/"*.log 2>/dev/null | head -n 1)"
+[ -n "$leaf" ] || fail "leaflink fixture needs a first body file"
+outside_leaf="$TMP/outside-leaf.log"
+printf 'untouched\n' > "$outside_leaf"
+rm -f "$leaf"
+ln -s "$outside_leaf" "$leaf"
+"$PLAN" --repo "$accept_leaflink" accept >/dev/null 2>&1 || true
+grep -Fxq 'untouched' "$outside_leaf" ||
+  fail "acceptance body write followed a planted leaf symlink"
+[ ! -L "$leaf" ] || fail "the planted leaf symlink must be replaced by a regular file"
+grep -q "leaflink-out" "$leaf" || fail "the replaced leaf must carry the real body"
+
 echo "durable-writers-contract-smoke: ok"

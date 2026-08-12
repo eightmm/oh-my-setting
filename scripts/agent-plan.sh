@@ -1507,10 +1507,47 @@ print(json.dumps(row, ensure_ascii=False))
     rm -f "$out_tmp"
     fail "cannot durably append the acceptance receipt to progress.jsonl"
   }
-  echo "plan-accept: $verdict (exit $accept_exit, ${duration}s) base=$base_sha${integrity_reason:+ reason=$integrity_reason}"
+  # A non-pass verdict's output used to survive only as a stderr tail and the
+  # row's digest: diagnosing a parked run meant re-running the acceptance and
+  # hoping the environment had not moved. Persist the body under the digest the
+  # row already carries. Diagnostics, not evidence: the row's output_sha256
+  # stays the digest of the raw output, while the stored body is machine-path
+  # normalized (repo-local git-ignored sink contract) and replaced by a marker
+  # when it matches the sensitive-content guard.
+  accept_log=""
+  if [ "$verdict" != "pass" ] && [ "$out_digest" != unhashed ]; then
+    accept_log_dir="$REPO/.oms/plan/acceptance"
+    accept_log_key="$(printf '%s' "$out_digest" | cut -c1-16)"
+    mkdir -p "$accept_log_dir" 2>/dev/null || true
+    body_tmp="$(mktemp 2>/dev/null || true)"
+    if [ -n "$body_tmp" ]; then
+      if agent_memory_file_has_secret_content "$out_tmp"; then
+        printf 'redacted: acceptance output matched the sensitive-content guard\n' > "$body_tmp"
+      else
+        agent_memory_normalize_machine_paths < "$out_tmp" > "$body_tmp" 2>/dev/null || : > "$body_tmp"
+      fi
+    fi
+    if [ -n "$body_tmp" ] && [ -s "$body_tmp" ] &&
+      python3 "$ROOT/scripts/lib/durable-jsonl.py" write \
+        "$accept_log_dir/$accept_log_key.log" < "$body_tmp" 2>/dev/null; then
+      accept_log=".oms/plan/acceptance/$accept_log_key.log"
+      # Keep the newest 20 bodies. The prune runs only after a durable write
+      # proved the directory real, and removes by name inside it.
+      # shellcheck disable=SC2010,SC2012
+      ls -1t "$accept_log_dir" 2>/dev/null | grep '\.log$' | tail -n +21 |
+        while IFS= read -r stale_log; do
+          rm -f -- "$accept_log_dir/$stale_log" 2>/dev/null || true
+        done || true
+    else
+      echo "plan-accept: warning: acceptance output body was not persisted" >&2
+    fi
+    [ -z "$body_tmp" ] || rm -f "$body_tmp"
+  fi
+  echo "plan-accept: $verdict (exit $accept_exit, ${duration}s) base=$base_sha${integrity_reason:+ reason=$integrity_reason}${accept_log:+ output-log=$accept_log}"
   if [ "$verdict" != "pass" ]; then
     echo "--- acceptance output (last 20 lines) ---" >&2
     tail -n 20 "$out_tmp" >&2
+    [ -z "$accept_log" ] || echo "full output: $accept_log" >&2
     rm -f "$out_tmp"
     [ "$verdict" = fail ] && exit 3
     exit 2

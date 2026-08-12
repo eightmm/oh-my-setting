@@ -7,6 +7,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- A non-pass acceptance verdict now persists its output body under
+  `.oms/plan/acceptance/<output-digest>.log` (newest 20 kept), written with the
+  same no-follow temp-then-rename discipline as the progress ledger, machine-path
+  normalized and replaced by a marker when the sensitive-content guard matches.
+  The acceptance row and `plan-accept` line name the file, so a parked run is
+  diagnosable without re-running its gate.
 - Peer seat calls now consume the durable failure memory at the moment it can
   change a decision: a call on a seat with unresolved no-answer history warns
   on stderr and stamps a `seat-health:` line into the artifact before spending

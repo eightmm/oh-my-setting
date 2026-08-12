@@ -247,7 +247,7 @@ authority while the top-level parent performs every transition below. It
 proposes an initial plan for parent review, atomically applies only that exact
 proposal, drives the approved tasks, and may propose one `r1-` remainder tranche
 of at most two tasks. The
-mechanical acceptance command remains the hard gate. Custom acceptance commands
+mechanical acceptance command remains the hard gate. A non-pass acceptance persists its bounded, normalized output body under `.oms/plan/acceptance/` keyed by the receipt row's output digest. Custom acceptance commands
 bind their declared `Required check files` and reject verifier mutation; Draft
 PR publication defaults cross-family semantic review to a blocking gate. Its
 base is frozen to a commit before the drive, so a moved branch name cannot make

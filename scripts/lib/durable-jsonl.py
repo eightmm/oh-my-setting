@@ -23,11 +23,12 @@ def same_file(left, right):
 
 def checked_parent(path):
     target = os.path.abspath(path)
+    name = os.path.basename(target)
     parent = os.path.dirname(target)
     if not parent or not os.path.isdir(parent) or os.path.islink(parent):
-        fail("progress.jsonl parent must be a real directory")
+        fail("%s parent must be a real directory" % name)
     if os.path.realpath(parent) != parent:
-        fail("progress.jsonl parent must not cross a symlink boundary")
+        fail("%s parent must not cross a symlink boundary" % name)
     return target, parent
 
 
@@ -136,15 +137,78 @@ def append(path, data):
         os.close(directory)
 
 
+def write(path, data):
+    """Publish a whole body file with the same no-follow discipline as append.
+
+    Temp-then-rename inside the anchored physical directory: the rename is
+    cwd-relative, so a concurrent directory swap cannot redirect it, and a
+    symlink planted at the target name is replaced by the rename instead of
+    being followed — the content can only ever land in the real directory.
+    """
+    if not data or len(data) > MAX_ROW_BYTES:
+        fail("durable body must be 1..%d bytes" % MAX_ROW_BYTES)
+    target, parent = checked_parent(path)
+    name = os.path.basename(target)
+    try:
+        parent_before = os.lstat(parent)
+    except OSError as exc:
+        fail("cannot inspect %s parent: %s" % (name, exc))
+    if stat.S_ISLNK(parent_before.st_mode) or not stat.S_ISDIR(parent_before.st_mode):
+        fail("%s parent must be a real directory" % name)
+    try:
+        os.chdir(parent)
+        directory = os.open(".", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        fail("cannot anchor %s parent: %s" % (name, exc))
+    if not same_file(parent_before, os.fstat(directory)):
+        os.close(directory)
+        fail("%s parent changed before write" % name)
+    tmp_name = ".%s.tmp.%d" % (name, os.getpid())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(tmp_name, flags, 0o600)
+    except OSError as exc:
+        os.close(directory)
+        fail("cannot create %s temp safely: %s" % (name, exc))
+    try:
+        try:
+            written = os.write(descriptor, data)
+            if written != len(data):
+                fail("%s write was short" % name)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.rename(tmp_name, name)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        os.close(directory)
+        raise
+    try:
+        try:
+            os.fsync(directory)
+        except OSError as exc:
+            if exc.errno not in (errno.EBADF, errno.EINVAL, errno.ENOTSUP):
+                raise
+    finally:
+        os.close(directory)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("check", "append"))
+    parser.add_argument("action", choices=("check", "append", "write"))
     parser.add_argument("path")
     args = parser.parse_args()
     if args.action == "check":
         check_existing(args.path, True)
         return
     data = sys.stdin.buffer.read(MAX_ROW_BYTES + 1)
+    if args.action == "write":
+        write(args.path, data)
+        return
     append(args.path, data)
 
 
