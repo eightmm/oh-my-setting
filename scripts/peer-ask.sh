@@ -85,8 +85,9 @@ Options:
 
 Environment:
   OH_MY_SETTING_ASK_DRY_RUN=1   Same as --dry-run.
-  OMS_PEER_TIMEOUT=5m    Per-provider wall-clock timeout.
-  OMS_PEER_PRINT_TIMEOUT=5m Timeout for print mode wait (agy).
+  OMS_PEER_TIMEOUT       Per-provider wall-clock timeout (default: 10m).
+  OMS_PEER_PRINT_TIMEOUT Timeout for print mode wait (agy); tracks the verb
+                         wall default unless set.
 EOF
 }
 

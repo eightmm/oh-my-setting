@@ -327,6 +327,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   git diff --name-only --diff-filter=ACMR "$QUICK_FROM" "$QUICK_TO" -- > "$changed_file"
   quick_harness=0
   quick_models=0
+  quick_seats=0
   quick_skills=0
   quick_shell_files=()
   while IFS= read -r path; do
@@ -344,6 +345,11 @@ if [ "$RUN_QUICK" = 1 ]; then
     case "$path" in
       config/models.json|scripts/agent-call.sh|scripts/peer-ask.sh|scripts/lib/model-routing.sh|scripts/lib/peer-common.sh|tests/model-routing-smoke.sh)
         quick_models=1
+        ;;
+    esac
+    case "$path" in
+      scripts/lib/peer-common.sh|scripts/fail-ledger.sh|tests/seat-reliability-smoke.sh)
+        quick_seats=1
         ;;
     esac
     case "$path" in
@@ -371,6 +377,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   [ "$quick_harness" = 0 ] || stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   [ "$quick_models" = 0 ] || stage model-routing bash tests/model-routing-smoke.sh
   [ "$quick_models" = 0 ] || stage models-surface bash tests/models-smoke.sh
+  [ "$quick_seats" = 0 ] || stage seat-reliability bash tests/seat-reliability-smoke.sh
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
@@ -423,6 +430,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage ci-status bash tests/ci-status-smoke.sh
   stage read-time-expiry bash tests/read-time-expiry-smoke.sh
   stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
+  stage seat-reliability bash tests/seat-reliability-smoke.sh
   stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
   stage artifact-supersession bash tests/artifact-supersession-smoke.sh
 fi

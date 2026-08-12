@@ -73,7 +73,8 @@ Options:
 
 Environment:
   OMS_CONSULT_PROVIDER   Preferred peer (overridden by --to).
-  OMS_PEER_TIMEOUT=5m    Provider wall-clock timeout.
+  OMS_PEER_TIMEOUT       Provider wall-clock timeout (default: 20m; consult
+                         rides the call verb).
 EOF
 }
 

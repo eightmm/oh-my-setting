@@ -172,8 +172,23 @@ ma_run_bounded() {
   fi
 }
 
+# Verb-scoped wall-clock defaults instead of one global constant. The single
+# 5m default killed healthy seats doing long reasoning — a review seat died at
+# the wall three times and a consult needed 20m to answer — while the wall only
+# ever decides how long a *silent* seat may hold a slot: an answered call
+# returns early whatever the ceiling. OMS_PEER_TIMEOUT stays the explicit
+# override for every verb.
+ma_peer_timeout_default() {
+  case "${MA_KIND:-call}" in
+    ask) printf '10m\n' ;;
+    call|review) printf '20m\n' ;;
+    delegate) printf '30m\n' ;;
+    *) printf '5m\n' ;;
+  esac
+}
+
 run_with_timeout() {
-  ma_run_bounded "${OMS_PEER_TIMEOUT:-5m}" provider "$@"
+  ma_run_bounded "${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}" provider "$@"
 }
 
 # agy has no file-write-blocking flag: --sandbox restricts the terminal, not
@@ -1186,6 +1201,57 @@ ma_record_seat_failure() {
     >/dev/null 2>&1 || true
 }
 
+# Exit 3 when this seat has unresolved no-answer history, 0 otherwise. The
+# ledger's git-state clearing exists for repo commands, where a new commit can
+# plausibly fix the failure; a provider CLI does not recover because the repo
+# gained a commit, so the seat read ignores state. Quiet by design — callers
+# decide what the history means at their site.
+ma_seat_has_unresolved_failures() {
+  local provider="$1"
+  local status=0
+
+  "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" check \
+    --cmd "peer-${MA_KIND:-call} seat $provider" --ignore-state \
+    >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 3 ] || return 0
+  return 3
+}
+
+# Consume the durable failure memory at the moment it can still change a
+# decision: before this call spends its wall-clock on a seat that has been
+# dying. Warn-only by construction — stale health must never cost a council a
+# seat, and dropping a provider stays the operator's decision. The artifact
+# line makes the pre-call state durable next to the answer it preceded.
+ma_warn_known_seat_failures() {
+  local provider="$1" artifact="${2:-}"
+  local status=0
+
+  [ "${DRY_RUN:-0}" != "1" ] || return 0
+  ma_seat_has_unresolved_failures "$provider" || status=$?
+  [ "$status" -eq 3 ] || return 0
+  echo "warning: $provider ${MA_KIND:-call} seat has unresolved no-answer history; raise OMS_PEER_TIMEOUT or check/drop the seat (oms fail-ledger list --unresolved)" >&2
+  [ -z "$artifact" ] ||
+    printf 'seat-health: unresolved no-answer history before this call\n' >> "$artifact" 2>/dev/null || true
+  return 0
+}
+
+# The symmetric write: a seat that answers is no longer the seat the ledger
+# warns about, and a warning that never clears is noise that defeats the read.
+# Resolve only when an unresolved row exists, so routine successes do not grow
+# the ledger by one bookkeeping row per call.
+ma_resolve_seat_recovery() {
+  local provider="$1"
+  local status=0
+
+  [ "${DRY_RUN:-0}" != "1" ] || return 0
+  ma_seat_has_unresolved_failures "$provider" || status=$?
+  [ "$status" -eq 3 ] || return 0
+  "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" resolve \
+    --cmd "peer-${MA_KIND:-call} seat $provider" \
+    --how "seat answered again" >/dev/null 2>&1 || true
+  return 0
+}
+
 # Mask filesystem paths in quoted prior-round answers before they are re-sent in
 # a debate prompt. Providers cite absolute paths (file:// URLs, absolute home
 # paths) when they read the repo; those trip the outbound path guard and block the
@@ -1296,7 +1362,10 @@ ma_provider_attempt() {
       # with no frozen fallback effort receives the provider default, so never
       # pass an empty flag value.
       [ -z "$effort" ] || cmd+=(--effort "$effort")
-      cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-5m}")
+      # agy cuts itself off at --print-timeout regardless of the outer wall, so
+      # its default must track the verb default or a raised wall changes nothing
+      # for this seat: agy would still stop at its own five minutes.
+      cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-$(ma_peer_timeout_default)}")
       cmd+=(--print "$(cat "$prompt_file")")
       ;;
     *) echo "error: unsupported provider: $provider" > "$output_file"; return 2 ;;
@@ -1495,6 +1564,8 @@ ma_run_routed_provider_inner() {
   export OMS_WORKER_AUTHORITY_VIOLATION
   [ "$provider" != agy ] || provider=antigravity
   oms_model_prepare "$provider" || return $?
+  # After canonicalization: the ledger files seats under the canonical name.
+  ma_warn_known_seat_failures "$provider" "$artifact"
   attempt_file="$(agent_memory_mktemp)" || return 1
 
   if [ "$access" = read ] && [ "$provider" = antigravity ]; then
@@ -1742,6 +1813,10 @@ ma_run_routed_provider() {
   fi
 
   ma_run_routed_provider_inner "$@" || status=$?
+  # A zero exit is the liveness proof the no-answer rows claim is missing:
+  # whatever the answer's quality, the CLI ran and returned. Clear the seat's
+  # unresolved history here, at the same choke point every verb passes through.
+  [ "$status" -ne 0 ] || ma_resolve_seat_recovery "$provider"
 
   if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ] && [ -x "$events" ]; then
     duration_ms=$(((SECONDS - started_seconds) * 1000))
