@@ -23,6 +23,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   30m (agy's `--print-timeout` default tracks the same verb value) — because
   the single 5m default repeatedly killed healthy long-reasoning seats;
   `OMS_PEER_TIMEOUT` remains the explicit override everywhere.
+- `oms artifact-index resolve-recovered` extends the seat-recovery principle
+  to the artifact index: an unresolved exit-124 wall death whose provider and
+  kind later produced a strictly newer success resolves in one explicitly
+  invoked, idempotent sweep (`--dry-run` lists without writing), with each
+  resolution event naming both the failure and its recovery evidence. The
+  `unresolved` triage view carries an advisory `recovered-by: evt_X` line for
+  eligible rows, mirroring `superseded-by`. Every other failure class —
+  semantic failures, earlier-only successes, another seat's success — stays in
+  the queue for a human, and `resolve-superseded`'s exact-bytes contract is
+  unchanged.
 - A bounded coding autopilot now carries a confirmed `PROJECT.md` through an
   explicitly reviewed, atomically applied plan, one capped remainder proposal,
   existing landing/acceptance gates, and cross-family semantic review. Its

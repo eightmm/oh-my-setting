@@ -177,7 +177,7 @@ artifacts = state.get("artifacts", {})
 unresolved = int(artifacts.get("counts", {}).get("unresolved", 0) or 0)
 if unresolved:
     add(30, "P1", "unresolved-artifacts", "%d unresolved artifact outcome(s)" % unresolved,
-        "oms artifact-index --repo . unresolved", unresolved)
+        "oms artifact-index --repo . unresolved; oms artifact-index --repo . resolve-recovered --dry-run", unresolved)
 
 # A failing or stalled auto-updater is machine state, but it is exactly what
 # an agent resuming this repo needs to distrust (a weeks-dead timer once hid
