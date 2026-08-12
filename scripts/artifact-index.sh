@@ -31,7 +31,7 @@ REASON=""
 
 usage() {
   cat <<'EOF'
-Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|validate|migrate|prune|import] [N]
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|prune|import] [N]
 
 Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.
@@ -45,8 +45,9 @@ Commands:
   unresolved [N] Show the last N failures without a resolution event. Each row
                  is followed by the exact resolve command that clears it, and
                  by `superseded-by: evt_X` when the failed patch's exact bytes
-                 were later admitted or landed. The annotation is advisory —
-                 nothing is resolved for you.
+                 were later admitted or landed, or `recovered-by: evt_X` when
+                 an exit-124 failure's provider and kind later succeeded. The
+                 annotations are advisory — nothing is resolved for you.
   telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
                  over the retained window (default 1000). This does not infer
                  semantic task success. Add --review-uptake to also split
@@ -61,6 +62,12 @@ Commands:
                  a different provider, and every failure the bytes do not
                  answer (timeout, auth, missing binary), stays in the queue for
                  a human. Idempotent; add --dry-run to list without writing.
+  resolve-recovered
+                 Resolve every unresolved exit-124 failure with a strictly
+                 later exit-0 row from the same provider and kind. This records
+                 that the provider seat answered again; it does not treat a
+                 later answer as semantic success for any other failure class.
+                 Idempotent; add --dry-run to list without writing.
   validate       Validate schema, lineage ids, paths, and references.
   migrate        Idempotently upgrade legacy rows and recover unique basenames.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
@@ -81,7 +88,8 @@ Options:
   --stale        With prune, drop index rows referencing deleted files. Age is
                  not the question here, so this ignores --keep.
   --dry-run      With prune, print row/file changes without changing them. With
-                 resolve-superseded, list the resolutions it would append.
+                 resolve-superseded or resolve-recovered, list the resolutions
+                 it would append.
   --review-uptake With telemetry, partition kind=delegate rows in the same
                  window into review-fed (a recorded source artifact, internal
                  or external) and direct cohorts, and report each cohort's
@@ -141,7 +149,7 @@ while [ "$#" -gt 0 ]; do
       AS_JSON=1
       shift
       ;;
-    list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|validate|migrate|prune)
+    list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
@@ -169,7 +177,7 @@ if { [ "$ACTION" = "validate" ] || [ "$ACTION" = "migrate" ]; } && [ "$LIMIT_SET
 fi
 # The sweep answers every superseded row in the index, so a window would only
 # hide work it already decided is mechanical.
-if [ "$ACTION" = "resolve-superseded" ] && [ "$LIMIT_SET" -eq 1 ]; then
+if { [ "$ACTION" = "resolve-superseded" ] || [ "$ACTION" = "resolve-recovered" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
   fail "unknown argument: $LIMIT"
 fi
 if [ "$ACTION" = "resolve" ]; then
@@ -188,8 +196,8 @@ fi
 if [ "$PRUNE_STALE" -eq 1 ] && [ "$ACTION" != "prune" ]; then
   fail "--stale is only valid with prune"
 fi
-if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ] && [ "$ACTION" != "resolve-superseded" ]; then
-  fail "--dry-run is only valid with prune or resolve-superseded"
+if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ] && [ "$ACTION" != "resolve-superseded" ] && [ "$ACTION" != "resolve-recovered" ]; then
+  fail "--dry-run is only valid with prune, resolve-superseded, or resolve-recovered"
 fi
 if [ "$REVIEW_UPTAKE" -eq 1 ] && [ "$ACTION" != "telemetry" ]; then
   fail "--review-uptake is only valid with telemetry"
@@ -225,14 +233,22 @@ if [ ! -s "$INDEX_FILE" ]; then
     artifact_index_telemetry
     exit 0
   fi
-  # Automatic sweeps run wherever the harness runs, including repos that have
-  # produced no artifact yet: nothing recorded is nothing superseded, which is
-  # a no-op rather than the error a hand-typed query deserves.
+  # Explicit sweeps run wherever the harness runs, including repos that have
+  # produced no artifact yet: nothing recorded is a no-op rather than the error
+  # a hand-typed query deserves.
   if [ "$ACTION" = "resolve-superseded" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "artifact-index: 0 superseded failure(s) would be resolved (dry run)"
     else
       echo "artifact-index: 0 superseded failure(s) resolved"
+    fi
+    exit 0
+  fi
+  if [ "$ACTION" = "resolve-recovered" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "artifact-index: 0 recovered failure(s) would be resolved (dry run)"
+    else
+      echo "artifact-index: 0 recovered failure(s) resolved"
     fi
     exit 0
   fi
@@ -796,10 +812,10 @@ EOF
   exit 0
 fi
 
-# resolve-superseded rides the same block as the read views on purpose: the
-# supersession join it writes from has to be the one triage prints, and a second
-# copy of that join would be free to drift away from it. Only this action takes
-# the index lock, because only this action appends.
+# The mechanical resolvers ride the same block as the read views on purpose:
+# each join they write from has to be the one triage prints, and a second copy
+# of either join would be free to drift away from it. Only resolver actions take
+# the index lock, because only they append.
 artifact_index_view() {
   OMS_ARTIFACT_PROVIDER="${OMS_AGENT:-unknown}" \
     python3 - "$INDEX_FILE" "$ACTION" "$LIMIT" "$AS_JSON" \
@@ -881,6 +897,19 @@ def exit_ok(r):
     return not isinstance(value, bool) and isinstance(value, int) and value == 0
 
 
+def complete_schema_event(r):
+    event_id = r.get("event_id")
+    exit_value = r.get("exit")
+    if (r.get("schema") != 1 or not isinstance(event_id, str) or not event_id or
+            id_counts.get(event_id) != 1):
+        return False
+    if any(r.get(key) in (None, "") for key in ("operation_id", "artifact_id", "ts", "kind")):
+        return False
+    return (isinstance(r.get("provider"), str) and
+            not isinstance(exit_value, bool) and isinstance(exit_value, int) and
+            exit_value >= 0)
+
+
 # Mechanical supersession, advisory only: a failed patch-admit/delegate row
 # whose exact patch bytes were later admitted or landed. The join is on
 # patch_sha256 and never on the patch path, which gets rewritten in place
@@ -904,6 +933,37 @@ for i in range(len(all_rows) - 1, -1, -1):
         event_id = r.get("event_id")
         if winner and isinstance(event_id, str) and event_id:
             superseded_by[event_id] = winner
+
+
+# Seat recovery, advisory until explicitly resolved: an unresolved wall-clock
+# death is answered only by a strictly later complete success from the same
+# provider and the same kind. Physical index order is the audit order; timestamps
+# are descriptive and may collide or arrive with clock skew.
+claimed_resolution_targets = set()
+for r in all_rows:
+    if r.get("kind") != "artifact-resolution":
+        continue
+    for key in ("resolves_event_id", "parent_event_id"):
+        value = r.get(key)
+        if isinstance(value, str) and value:
+            claimed_resolution_targets.add(value)
+
+recovered_by = {}
+nearest_recovery = {}
+for i in range(len(all_rows) - 1, -1, -1):
+    r = all_rows[i]
+    if not complete_schema_event(r):
+        continue
+    key = (r.get("provider"), r.get("kind"))
+    if exit_ok(r):
+        nearest_recovery[key] = r.get("event_id")
+        continue
+    event_id = r.get("event_id")
+    if (r.get("exit") == 124 and status(r) == "unresolved" and
+            event_id not in claimed_resolution_targets):
+        winner = nearest_recovery.get(key)
+        if winner:
+            recovered_by[event_id] = winner
 
 
 if action == "resolve-superseded":
@@ -1013,13 +1073,90 @@ if action == "resolve-superseded":
     sys.exit(0)
 
 
+if action == "resolve-recovered":
+    writer = os.environ.get("OMS_ARTIFACT_PROVIDER", "unknown")
+    pending = []
+    for r in all_rows:
+        event_id = r.get("event_id")
+        winner = recovered_by.get(event_id)
+        if winner:
+            pending.append((event_id, r, winner))
+
+    if dry_run:
+        for event_id, _target, winner in pending:
+            print("artifact-index: would resolve %s (recovered by %s)" % (event_id, winner))
+        print("artifact-index: %d recovered failure(s) would be resolved (dry run)" % len(pending))
+        sys.exit(0)
+    if not pending:
+        print("artifact-index: 0 recovered failure(s) resolved")
+        sys.exit(0)
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(path, "a", encoding="utf-8") as handle:
+        for event_id, target, winner in pending:
+            handle.write(json.dumps({
+                "schema": 1,
+                "event_id": "evt_resolve_" + uuid.uuid4().hex,
+                "operation_id": target.get("operation_id"),
+                "artifact_id": target.get("artifact_id"),
+                "ts": now,
+                "kind": "artifact-resolution",
+                "provider": writer,
+                "exit": 0,
+                "parent_event_id": event_id,
+                "resolves_event_id": event_id,
+                "resolution": "resolved",
+                "reason": "recovered %s by %s (same provider and kind later succeeded)" %
+                          (event_id, winner),
+            }, ensure_ascii=False, allow_nan=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    # Match both existing resolution writers' retention envelope.
+    try:
+        keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
+        high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
+    except ValueError:
+        keep, high = 1000, 1200
+    if keep > 0 and high >= keep:
+        with open(path, "rb") as handle:
+            lines = handle.readlines()
+        if len(lines) > high:
+            lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
+            real = os.path.realpath(path)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real))
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    out.writelines(lines[-keep:])
+                shutil.copymode(real, tmp)
+                os.replace(tmp, real)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+    for event_id, _target, winner in pending:
+        print("artifact-index: resolved %s (recovered by %s)" % (event_id, winner))
+    print("artifact-index: %d recovered failure(s) resolved" % len(pending))
+    sys.exit(0)
+
+
 def triage_line(r):
     event_id = r.get("event_id")
     # A row resolve would reject is not worth printing a command for; migrate
     # is what mints the ids and schema resolve requires.
     if not isinstance(event_id, str) or not event_id or r.get("schema") != 1:
         return "  next: oms artifact-index migrate  (row is not a resolvable schema-1 event)"
+    recovered = recovered_by.get(event_id)
     winner = superseded_by.get(event_id)
+    if recovered:
+        line = ('  recovered-by: %s  next: oms artifact-index resolve '
+                '--event-id %s --reason "recovered by %s"' %
+                (recovered, event_id, recovered))
+        if winner:
+            line += "\n  superseded-by: %s" % winner
+        return line
     if winner:
         return ('  superseded-by: %s  next: oms artifact-index resolve '
                 '--event-id %s --reason "superseded by %s"' % (winner, event_id, winner))
@@ -1163,6 +1300,9 @@ def json_row(r):
     winner = superseded_by.get(r.get("event_id"))
     if winner:
         out["superseded_by"] = winner
+    recovery = recovered_by.get(r.get("event_id"))
+    if recovery:
+        out["recovered_by"] = recovery
     return out
 
 
@@ -1179,7 +1319,7 @@ for r in rows:
 EOF
 }
 
-if [ "$ACTION" = "resolve-superseded" ]; then
+if [ "$ACTION" = "resolve-superseded" ] || [ "$ACTION" = "resolve-recovered" ]; then
   oms_with_file_lock "$INDEX_FILE" artifact_index_view
 else
   artifact_index_view
