@@ -7,6 +7,15 @@ release, dependency, product code, or main-worktree change was authorized.
 Three role-separated read-only audits and three targeted cross-checks were used
 to challenge the findings independently of the document-producing worker.
 
+> Resolution note (2026-08-12): the hardening release following this audit
+> addresses G1–G11. The durable outer receipt, frozen acceptance-file manifest,
+> explicit branch-ref CAS, strict worker guard, complete-diff semantic gate,
+> and adversarial regressions are summarized in `CHANGELOG.md`. The numbered
+> sections below are retained as the evidence and threat model that motivated
+> those controls; wording such as “remain” describes the audited snapshot, not
+> the hardened release. Hard token/cost enforcement and effects outside the
+> repository still require provider/OS support and remain explicit limits.
+
 Severity is relative to the documented trusted-local agent boundary. High can
 cross an OMS authority or repository boundary. Medium can falsely weaken a
 gate, lose a safe continuation, or make bounded progress unreliable. Low is

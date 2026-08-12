@@ -137,6 +137,7 @@ review_verdicts() {
   local json_out="${3:-}"
   local json_stdout="${4:-0}"
   local latest run_id base provider suf r f verdict overall found reason
+  local requested_model selected_model model_family
   # bash 3.2 has no associative arrays; track one "provider<TAB>round<TAB>file"
   # record per candidate and pick the highest round per provider at the end.
   local vrecords="" providers
@@ -216,17 +217,28 @@ review_verdicts() {
     confidence="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
       grep -E '^[*[:space:]]*CONFIDENCE: (0(\.[0-9]+)?|1(\.0+)?)[*[:space:]]*$' |
       tail -n 1 | grep -oE '0(\.[0-9]+)?|1(\.0+)?' | tail -n 1)" || confidence=""
+    # Provider is the transport; model is the reviewed seat. Preserve both the
+    # route requested at dispatch and the final selected route after any
+    # bounded fallback so downstream cross-family claims are auditable.
+    requested_model="$(sed -n 's/^model-route: .* primary=\([^ ]*\) fallback=.*/\1/p' "$f" | sed -n 1p)"
+    selected_model="$(sed -n \
+      -e 's/^model-fallback: .* selected=\([^ ]*\).*/\1/p' \
+      -e 's/^model-result: selected=\([^ ]*\) .*/\1/p' \
+      -e 's/^model-result: declined by [^ ]* (\([^)]*\));.*/\1/p' \
+      "$f" | tail -n 1)"
+    [ -n "$selected_model" ] || selected_model="$requested_model"
+    model_family="$(oms_provider_model_family "$provider" "$selected_model" 2>/dev/null || printf unknown)"
     suffix=""
     [ -z "$confidence" ] || suffix=" (confidence $confidence)"
     case "$verdict" in
       pass)
         [ "$json_stdout" = 1 ] || echo "$provider: pass$suffix"
-        seat_rows="$seat_rows$provider	pass	$confidence	$seat_round	$(basename "$f")
+        seat_rows="$seat_rows$provider	pass	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
 "
         ;;
       fail)
         [ "$json_stdout" = 1 ] || echo "$provider: fail$suffix"
-        seat_rows="$seat_rows$provider	fail	$confidence	$seat_round	$(basename "$f")
+        seat_rows="$seat_rows$provider	fail	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
 "
         if [ "$overall" -ne 2 ]; then overall=1; fi
         ;;
@@ -245,7 +257,7 @@ review_verdicts() {
         else
           [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (complete but no GATE line)"
         fi
-        seat_rows="$seat_rows$provider	no-verdict		$seat_round	$(basename "$f")	$(printf '%s' "$reason" | tr '\t\n' '  ' | cut -c1-200)
+        seat_rows="$seat_rows$provider	no-verdict		$seat_round	$(basename "$f")	$(printf '%s' "$reason" | tr '\t\n' '  ' | cut -c1-200)	$requested_model	$selected_model	$model_family
 "
         overall=2
         ;;
@@ -264,8 +276,8 @@ seats = []
 for line in rows.splitlines():
     if not line.strip():
         continue
-    parts = (line.split("\t") + ["", "", "", "", "", ""])[:6]
-    provider, verdict, confidence, rnd, artifact, reason = parts
+    parts = (line.split("\t") + [""] * 9)[:9]
+    provider, verdict, confidence, rnd, artifact, reason, requested, selected, family = parts
     seat = {
         "provider": provider,
         "verdict": verdict,
@@ -275,6 +287,12 @@ for line in rows.splitlines():
     }
     if reason:
         seat["blocked_reason"] = reason
+    if requested:
+        seat["requested_model"] = requested
+    if selected:
+        seat["selected_model"] = selected
+    if family:
+        seat["model_family"] = family
     seats.append(seat)
 data = {
     "run": os.environ["OMS_VERDICTS_RUN"],
@@ -588,26 +606,64 @@ if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "
 fi
 
 load_user_tool_paths
-agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
-mkdir -p "$ARTIFACT_DIR"
-
 status_file="$(mktemp)" || fail "mktemp failed"
 diff_file="$(mktemp)" || fail "mktemp failed"
+raw_diff_file="$(mktemp)" || fail "mktemp failed"
 prompt_file="$(mktemp)" || fail "mktemp failed"
+gate_verify_temp="$(mktemp)" || fail "mktemp failed"
 debate_dir=""
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
-  rm -f "$status_file" "$diff_file" "$prompt_file"
+  rm -f "$status_file" "$diff_file" "$raw_diff_file" "$prompt_file" "$gate_verify_temp"
   if [ -n "$debate_dir" ]; then
     rm -rf "$debate_dir"
   fi
 }
 cleanup_signal() {
   local code="$1"
+  local direct_jobs parent_pgid job member pgid groups="" state tries
   trap - EXIT HUP INT TERM
+
+  # Capture provider-created process groups before terminating the direct jobs.
+  # Most non-interactive shells keep children in our group (which must never be
+  # signalled as a whole), but CLIs may create their own session/group and then
+  # spawn grandchildren. Kill those groups as well as the recursively found
+  # PIDs so a timeout helper cannot leave the real model process orphaned.
+  direct_jobs="$(jobs -pr || true)"
+  parent_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
+  case "$parent_pgid" in ''|*[!0-9]*) parent_pgid="" ;; esac
+  for job in $direct_jobs; do
+    for member in $job $(ma_descendant_pids "$job" || true); do
+      pgid="$(ps -o pgid= -p "$member" 2>/dev/null | tr -d '[:space:]' || true)"
+      case "$pgid" in ''|*[!0-9]*) continue ;; esac
+      [ -n "$parent_pgid" ] || continue
+      [ "$pgid" != "$parent_pgid" ] || continue
+      case " $groups " in *" $pgid "*) ;; *) groups="$groups $pgid" ;; esac
+    done
+  done
+  for pgid in $groups; do kill -TERM "-$pgid" 2>/dev/null || true; done
   ma_kill_jobs
+  for pgid in $groups; do kill -KILL "-$pgid" 2>/dev/null || true; done
+
+  # Reap direct children within a fixed one-second bound. A zombie/absent PID
+  # is safe to wait immediately; an uninterruptible survivor is reported and
+  # left for process teardown instead of wedging the signal handler forever.
+  for job in $direct_jobs; do
+    tries=0
+    while kill -0 "$job" 2>/dev/null && [ "$tries" -lt 20 ]; do
+      state="$(ps -o stat= -p "$job" 2>/dev/null | tr -d '[:space:]' || true)"
+      case "$state" in Z*|"") break ;; esac
+      sleep 0.05
+      tries=$((tries + 1))
+    done
+    state="$(ps -o stat= -p "$job" 2>/dev/null | tr -d '[:space:]' || true)"
+    case "$state" in
+      Z*|"") wait "$job" 2>/dev/null || true ;;
+      *) echo "warning: provider job $job did not reap before signal cleanup deadline" >&2 ;;
+    esac
+  done
   cleanup
   exit "$code"
 }
@@ -616,32 +672,86 @@ trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
 
+# Run the mechanical backstop before creating any repository-local review
+# artifacts or indexes. A verifier that asserts `.oms`/status purity therefore
+# judges the submitted tree, not peer-review's own bookkeeping.
+gate_verify_exit=0
+gate_verify_ran=0
+if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "gate verify: skipped (dry run)"
+  else
+    gate_verify_ran=1
+    {
+      printf '# gate verify\n\n'
+      printf -- '- command: %s\n' "$VERIFY_CMD"
+      printf -- '- started: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf '## Output\n\n'
+    } > "$gate_verify_temp"
+    set +e
+    (
+      cd "$REPO" || exit 1
+      unset OMS_MODEL_OPERATION OMS_MODEL_OPERATION_REQUEST
+      unset OMS_MODEL_EXPLICIT OMS_MODEL_FALLBACK_EXPLICIT
+      unset OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
+      run_verify_with_timeout bash -c "$VERIFY_CMD"
+    ) >> "$gate_verify_temp" 2>&1
+    gate_verify_exit=$?
+    set -e
+    printf '\n\n## Exit\n\n%s\n' "$gate_verify_exit" >> "$gate_verify_temp"
+  fi
+fi
+
+agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
+mkdir -p "$ARTIFACT_DIR"
+
 if [ "$NO_DIFF" -eq 0 ]; then
+  # External diff/textconv are mechanically disabled below. Clean filters are
+  # different: Git may execute them while preparing an ordinary diff, so raw
+  # config inspection rejects filters, includes, and fsmonitor first.
+  oms_git_assert_safe_execution_config "$REPO" diff-read ||
+    fail "unsafe Git execution config blocks review diff capture"
   ma_safe_status "$REPO" > "$status_file"
-  diff_rc=0
-  ma_safe_diff "$REPO" > "$diff_file" || diff_rc=$?
-  case "$diff_rc" in
-    0) ;;
-    3)
-      echo "external review skipped: sensitive-looking diff content detected" >&2
-      exit 3
-      ;;
-    *)
-      fail "git diff failed for $REPO"
-      ;;
-  esac
+  diff_base="$(ma_git_diff_base "$REPO")"
+  # The checkout is worker-writable. Never let diff.external, a per-path
+  # external driver, or textconv execute under the reviewer's authority or
+  # substitute forged bytes for the review/gate digest.
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    git -c core.fsmonitor=false -c diff.external= -C "$REPO" \
+    diff --no-ext-diff --no-textconv \
+    "$diff_base" -- "${MA_SAFE_PATHS[@]}" > "$raw_diff_file" ||
+    fail "git diff failed for $REPO"
+  if contains_sensitive_content "$raw_diff_file"; then
+    echo "external review skipped: sensitive-looking diff content detected" >&2
+    exit 3
+  fi
+  diff_budget="$(ma_prompt_diff_bytes)"
+  raw_diff_bytes="$(LC_ALL=C wc -c < "$raw_diff_file" | tr -d ' ')"
+  if [ "$GATE" -eq 1 ] && [ "$raw_diff_bytes" -gt "$diff_budget" ]; then
+    echo "error: blocking gate requires the complete diff; $raw_diff_bytes bytes exceed OMS_PROMPT_DIFF_BYTES=$diff_budget" >&2
+    echo "hint: raise OMS_PROMPT_DIFF_BYTES or split the change into a fully reviewable diff" >&2
+    exit 2
+  fi
+  ma_emit_bounded_prompt_file "$raw_diff_file" "$diff_budget" "git diff" \
+    "OMS_PROMPT_DIFF_BYTES" > "$diff_file"
   if grep -q '^??' "$status_file"; then
+    if [ "$GATE" -eq 1 ]; then
+      echo "error: blocking gate cannot review untracked file content; add intent-to-add or stage it so the complete diff is visible" >&2
+      exit 2
+    fi
     echo "warning: untracked files are listed in status but their content is not in the diff (git add -N <file> to include new files)" >&2
   fi
 else
   : > "$diff_file"
+  : > "$raw_diff_file"
 fi
 
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$diff_file" "$status_file"
 # Freeze the reviewed-diff identity now: the typed outcome row must bind the
 # exact bytes the seats judged, not whatever the tree holds at exit.
 REVIEW_DIFF_SHA=""
-[ ! -s "$diff_file" ] || REVIEW_DIFF_SHA="$(ma_sha256_file "$diff_file" 2>/dev/null || true)"
+[ "$NO_DIFF" -eq 1 ] || REVIEW_DIFF_SHA="$(ma_sha256_file "$raw_diff_file" 2>/dev/null || true)"
 if [ "$GATE" -eq 1 ]; then
   write_gate_instruction >> "$prompt_file"
   MA_DEBATE_GATE_INSTRUCTION="$(write_gate_instruction)"
@@ -769,41 +879,15 @@ PY
 
 if [ "$GATE" -eq 1 ]; then
   ma_print_run_summary
-  gate_verify_exit=0
-  if [ -n "$VERIFY_CMD" ]; then
-    if [ "$DRY_RUN" = "1" ]; then
-      echo "gate verify: skipped (dry run)"
-    else
+  if [ "$gate_verify_ran" -eq 1 ]; then
       gate_verify_artifact="$ARTIFACT_DIR/_verify-$slug-$timestamp.md"
-      {
-        printf '# gate verify\n\n'
-        printf -- '- command: %s\n' "$VERIFY_CMD"
-        printf -- '- started: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf '## Output\n\n'
-      } > "$gate_verify_artifact"
-      set +e
-      (
-        cd "$REPO" || exit 1
-        # Review routing belongs to provider calls, not to the project's own
-        # verifier. Leaking it changes nested harness tests and can make an
-        # otherwise clean gate depend on which review route ran immediately
-        # before it.
-        unset OMS_MODEL_OPERATION OMS_MODEL_OPERATION_REQUEST
-        unset OMS_MODEL_EXPLICIT
-        unset OMS_MODEL_FALLBACK_EXPLICIT
-        unset OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
-        run_verify_with_timeout bash -c "$VERIFY_CMD"
-      ) >> "$gate_verify_artifact" 2>&1
-      gate_verify_exit=$?
-      set -e
-      printf '\n\n## Exit\n\n%s\n' "$gate_verify_exit" >> "$gate_verify_artifact"
+      cp "$gate_verify_temp" "$gate_verify_artifact"
       ma_append_artifact_index "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" || true
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass"
       else
         echo "gate verify: fail (exit $gate_verify_exit) -> $gate_verify_artifact"
       fi
-    fi
   fi
   verdict_rc=0
   verdict_json_file="$(mktemp)" || fail "mktemp failed"

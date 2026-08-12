@@ -36,6 +36,7 @@ PLAN_TASK=""
 EXECUTOR_ID=""
 SCOPE_ALLOWED=""
 SCOPE_FORBIDDEN=""
+ACCEPTANCE_FILES=""
 worktree_parent=""
 worktree=""
 worktree_created=0
@@ -136,12 +137,17 @@ done
 REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
+oms_git_assert_safe_execution_config "$REPO" ||
+  fail "unsafe executable Git config; remove it before patch admission"
+oms_git_assert_plain_index "$REPO" ||
+  fail "Git index has hidden or unreadable entries; clear them before patch admission"
 
 if [ -n "$PLAN_TASK" ]; then
   case "$PLAN_TASK" in *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;; esac
   plan_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$PLAN_TASK")" || fail "cannot read plan task $PLAN_TASK"
   SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("allowed_paths",[])))')"
   SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
+  ACCEPTANCE_FILES="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("project_contract") or {}; print("\n".join(c.get("acceptance_files") or d.get("acceptance_files") or []))')"
   export OMS_TASK_ID="$PLAN_TASK"
 fi
 if [ -n "$EXECUTOR_ID" ]; then
@@ -207,7 +213,10 @@ if [ "$apply_ok" = 1 ]; then
   worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")" || fail "mktemp failed"
   worktree="$worktree_parent/wt"
   oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
-  if git -C "$REPO" worktree add --quiet --detach "$worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
+  if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+    -c core.fsmonitor=false -C "$REPO" worktree add --quiet --detach \
+    "$worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
     worktree_created=1
     # Local-only agent files (project-private.sh) are not in HEAD; the verify
     # command may read PROJECT.md, so seed them the same way delegate does.
@@ -238,7 +247,10 @@ if [ "$apply_ok" = 1 ]; then
     # the forbidden source side of the patch.
     changed_files="$({
       git -C "$REPO" apply --numstat "$PATCH" 2>/dev/null | awk -F '\t' '{print $3}'
-      git -C "$worktree" diff --name-only --no-renames HEAD -- 2>/dev/null
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
+        -C "$worktree" diff --no-ext-diff --no-textconv --name-only \
+        --no-renames HEAD -- 2>/dev/null
     } | LC_ALL=C sort -u)"
 
     # --- Gate 2: task/executor path scope ----------------------------------
@@ -370,7 +382,8 @@ EOF
     verification_surface=""
     surface_scan=""
     if [ -n "$VERIFY" ] && command -v python3 >/dev/null 2>&1; then
-      surface_scan="$(OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" python3 - <<'PY' | tr -d '\r'
+      surface_scan="$(OMS_VERIFY="$VERIFY" OMS_CHANGED="$changed_files" \
+        OMS_ACCEPTANCE_FILES="$ACCEPTANCE_FILES" python3 - <<'PY' | tr -d '\r'
 import os
 import re
 try:
@@ -384,6 +397,7 @@ for t in toks:
         named.add(t)
         named.add(t.lstrip("./"))
         named.add(os.path.basename(t))
+reviewed = set(x for x in os.environ.get("OMS_ACCEPTANCE_FILES", "").splitlines() if x)
 ENTRY = {"check.sh", "Makefile", "makefile", "GNUmakefile", "package.json",
          "pyproject.toml", "tox.ini", "noxfile.py", "conftest.py",
          "setup.py", "setup.cfg", "justfile", "Justfile"}
@@ -406,9 +420,10 @@ for f in os.environ["OMS_CHANGED"].splitlines():
         continue
     direct = f in named or os.path.basename(f) in named
     common = os.path.basename(f) in ENTRY or bool(HELPER_PATH.search(f))
-    if direct or common:
+    explicit = f in reviewed
+    if direct or common or explicit:
         print("verifier\t" + f)
-    if direct or common or TEST_PATH.search(f):
+    if direct or common or explicit or TEST_PATH.search(f):
         print("surface\t" + f)
 PY
 )"
@@ -521,7 +536,10 @@ PY
       if floor_worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")"; then
         floor_worktree="$floor_worktree_parent/wt"
         oms_harness_mark_tmpdir "$floor_worktree_parent" "$REPO" "$floor_worktree"
-        if git -C "$REPO" worktree add --quiet --detach "$floor_worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
+        if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+          GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+          -c core.fsmonitor=false -C "$REPO" worktree add --quiet --detach \
+          "$floor_worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
           floor_worktree_created=1
           oms_seed_local_agent_files "$REPO" "$floor_worktree"
           if git -C "$floor_worktree" apply --binary "$PATCH" >/dev/null 2>&1; then
@@ -530,8 +548,14 @@ PY
             while IFS= read -r f; do
               [ -n "$f" ] || continue
               if git -C "$floor_worktree" cat-file -e "HEAD:$f" >/dev/null 2>&1; then
-                if ! git -C "$floor_worktree" checkout --quiet --force HEAD -- "$f" >/dev/null 2>&1 ||
-                  ! git -C "$floor_worktree" diff --quiet HEAD -- "$f"; then
+                if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                  GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+                  -c core.fsmonitor=false -C "$floor_worktree" checkout \
+                  --quiet --force HEAD -- "$f" >/dev/null 2>&1 ||
+                  ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                  GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false \
+                  -c diff.external= -C "$floor_worktree" diff --no-ext-diff \
+                  --no-textconv --quiet HEAD -- "$f"; then
                   floor_restore_ok=0
                   floor_restore_detail="could not restore tracked surface path: $f"
                   break

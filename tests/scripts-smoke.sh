@@ -2306,6 +2306,269 @@ PY
     fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
 }
 
+test_peer_review_gate_binds_complete_diff_and_refuses_truncation() {
+  local project="$TMP/review-gate-complete-diff"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local expected_sha rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  printf '/artifacts/\n/truncated-artifacts/\n/bin/\n/out\n/truncated.out\n/provider-called\n' >> "$project/.git/info/exclude"
+  printf 'reviewed change\n' >> "$project/file.txt"
+  cat > "$project/.git/hostile-external-diff" <<'EOF'
+#!/usr/bin/env bash
+: > "$(git rev-parse --git-dir)/external-diff-fired"
+printf 'forged review diff\n'
+EOF
+  chmod +x "$project/.git/hostile-external-diff"
+  git -C "$project" config --local diff.external "$project/.git/hostile-external-diff"
+  expected_sha="$(git -c diff.external= -C "$project" diff --no-ext-diff --no-textconv HEAD -- | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PROMPT_DIFF_BYTES=65536 \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$artifact_dir" \
+    --providers claude --gate --no-verify --prompt "Bind the full diff" \
+    >"$project/out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "complete gate diff should pass, got $rc: $(cat "$project/out")"
+  [ ! -e "$project/.git/external-diff-fired" ] ||
+    fail "repository diff.external executed with reviewer authority"
+  python3 - "$project/.oms/artifacts/index.jsonl" "$expected_sha" <<'PY' ||
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+review = [row["review"] for row in rows if row.get("kind") == "review-outcome"][-1]
+assert review["diff_sha256"] == sys.argv[2], review
+seat = review["seats"][0]
+assert seat["requested_model"], seat
+assert seat["selected_model"], seat
+assert seat["model_family"] == "anthropic", seat
+PY
+    fail "typed gate outcome did not bind full diff/model provenance"
+
+  # A bounded prompt slice is useful for advisory review but is not enough for
+  # a blocking gate. The gate must stop before it asks a provider to judge an
+  # incomplete diff.
+  awk 'BEGIN { for (i = 0; i < 200; i++) print "more-diff-evidence-" i }' >> "$project/file.txt"
+  : > "$project/provider-called"
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+echo called >> "$HOME/provider-called"
+cat >/dev/null
+printf 'Findings:\nNo findings\nRisks:\nnone\nMissing tests:\nnone\nRecommendation:\nproceed\nGATE: pass\n'
+EOF
+  chmod +x "$bin_dir/claude"
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PROMPT_DIFF_BYTES=256 \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$project/truncated-artifacts" \
+    --providers claude --gate --no-verify --prompt "Do not judge a slice" \
+    >"$project/truncated.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "truncated gate diff must fail closed with exit 2, got $rc"
+  assert_file_contains "$project/truncated.out" "blocking gate requires the complete diff"
+  [ ! -s "$home_dir/provider-called" ] || fail "provider was called with a truncated gate diff"
+
+  # The final selected route is read from the provider artifact, not inferred
+  # from the transport name or copied from the requested primary.
+  local manual="$project/manual-artifacts"
+  mkdir -p "$manual"
+  cat > "$manual/antigravity-route-20260812T000000Z-42.md" <<'EOF'
+# antigravity review
+
+## Output
+
+model-route: class=explicit (explicit) primary=gemini-primary fallback=claude-fallback effort=high fallback_effort=medium
+model-fallback: reason=capacity selected=claude-fallback
+model-result: selected=claude-fallback effort=medium fallback_used=1 reason=capacity
+GATE: pass
+
+## Exit
+
+0
+EOF
+  "$ROOT/scripts/peer-review.sh" verdicts --json "$manual" > "$project/manual.json"
+  python3 - "$project/manual.json" <<'PY' || fail "fallback model provenance was not extracted"
+import json, sys
+seat = json.load(open(sys.argv[1], encoding="utf-8"))["seats"][0]
+assert seat["requested_model"] == "gemini-primary", seat
+assert seat["selected_model"] == "claude-fallback", seat
+assert seat["model_family"] == "anthropic", seat
+PY
+}
+
+test_peer_review_gate_refuses_untracked_content() {
+  local project="$TMP/review-gate-untracked"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  printf 'not present in git diff\n' > "$project/new_file.txt"
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$project/artifacts" \
+    --providers claude --gate --no-verify --prompt "Review every changed byte" \
+    > "$project/out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "gate with untracked content must fail closed, got $rc"
+  assert_file_contains "$project/out" "blocking gate cannot review untracked file content"
+}
+
+test_git_diff_readers_never_execute_clean_filters() {
+  local project="$TMP/diff-reader-filter"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local marker="$project/filter-fired"
+  local global_config="$project/global.gitconfig"
+  local out rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  printf 'file.txt filter=hostile\n' > "$project/.gitattributes"
+  git -C "$project" add .gitattributes
+  git -C "$project" -c user.name=t -c user.email=t@example.com \
+    commit -qm attributes
+  printf 'changed\n' >> "$project/file.txt"
+  cat > "$bin_dir/filter-command" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+cat
+EOF
+  chmod +x "$bin_dir/filter-command"
+
+  # A repository-local filter cannot be neutralized generically: reject it
+  # before either direct review or its provider runs.
+  git -C "$project" config --local filter.hostile.clean "$bin_dir/filter-command"
+  mkdir -p "$bin_dir/provider"
+  write_fake_review_gate_provider "$bin_dir/provider" claude pass
+  out="$(HOME="$home_dir" PATH="$bin_dir/provider:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" \
+    --artifact-dir "$project/artifacts" --providers claude --gate --no-verify \
+    --prompt 'Never execute clean filters' 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "peer-review accepted a local clean filter: $out"
+  [ ! -e "$marker" ] || fail "peer-review executed a local clean filter"
+  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+    fail "clean-filter refusal was unclear: $out"
+
+  # Generic safe diff capture also ignores trusted-global filter commands.
+  # The repository has no local executable config in this half of the fixture.
+  git -C "$project" config --local --unset filter.hostile.clean
+  cat > "$global_config" <<EOF
+[filter "hostile"]
+    clean = $bin_dir/filter-command
+EOF
+  GIT_CONFIG_GLOBAL="$global_config" bash -c \
+    ". '$ROOT/scripts/lib/peer-common.sh'; ma_safe_status '$project'" \
+    > "$project/safe.status" || fail "safe status capture rejected global filter fixture"
+  [ ! -e "$marker" ] || fail "ma_safe_status executed a trusted-global clean filter"
+  grep -Fq ' M file.txt' "$project/safe.status" ||
+    fail "safe status capture lost the tracked worktree change"
+
+  GIT_CONFIG_GLOBAL="$global_config" bash -c \
+    ". '$ROOT/scripts/lib/oms-common.sh'; oms_worker_surface_capture_one '$project' tracked" \
+    > "$project/tracked.surface" || fail "tracked surface capture failed"
+  [ ! -e "$marker" ] ||
+    fail "tracked worker-surface capture executed a trusted-global clean filter"
+  grep -Fq 'tracked-state ' "$project/tracked.surface" ||
+    fail "tracked worker-surface capture lost its raw fingerprint"
+
+  GIT_CONFIG_GLOBAL="$global_config" bash -c \
+    ". '$ROOT/scripts/lib/peer-common.sh'; ma_safe_diff '$project'" \
+    > "$project/safe.diff" || fail "safe diff capture rejected global filter fixture"
+  [ ! -e "$marker" ] || fail "ma_safe_diff executed a trusted-global clean filter"
+  grep -Fq '+changed' "$project/safe.diff" ||
+    fail "safe diff capture lost raw worktree content"
+}
+
+test_peer_review_signal_cleans_provider_processes() {
+  local project="$TMP/review-signal-cleanup"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local peer_pid provider_pid rc=0 i=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$HOME/provider.pid"
+trap '' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$bin_dir/claude"
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PEER_TIMEOUT=5m \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$artifact_dir" \
+    --providers claude --gate --no-verify --no-diff --prompt "Wait for signal" \
+    > "$project/out" 2>&1 &
+  peer_pid=$!
+  while [ ! -s "$home_dir/provider.pid" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$home_dir/provider.pid" ]; then
+    kill -TERM "$peer_pid" 2>/dev/null || true
+    wait "$peer_pid" 2>/dev/null || true
+    fail "fake review provider did not start"
+  fi
+  provider_pid="$(sed -n 1p "$home_dir/provider.pid")"
+  kill -TERM "$peer_pid"
+  wait "$peer_pid" || rc=$?
+  [ "$rc" = 143 ] || fail "TERM should exit peer-review with 143, got $rc"
+  i=0
+  while kill -0 "$provider_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$provider_pid" 2>/dev/null; then
+    kill -KILL "$provider_pid" 2>/dev/null || true
+    fail "peer-review TERM left provider process $provider_pid alive"
+  fi
+
+  # HUP and INT use the same teardown contract and keep their conventional
+  # shell exit codes. Re-run short-lived fixtures to pin the handler wiring.
+  local signal expected
+  for signal in HUP INT; do
+    rm -f "$home_dir/provider.pid"
+    if [ "$signal" = INT ]; then
+      # Non-interactive shells start asynchronous children with SIGINT ignored;
+      # reset it in a tiny exec wrapper so this exercises peer-review's INT
+      # trap rather than Bash's background-job launch semantics.
+      HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PEER_TIMEOUT=5m \
+        python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' \
+        "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$artifact_dir-$signal" \
+        --providers claude --gate --no-verify --no-diff --prompt "Wait for $signal" \
+        > "$project/out-$signal" 2>&1 &
+    else
+      HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PEER_TIMEOUT=5m \
+        "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$artifact_dir-$signal" \
+        --providers claude --gate --no-verify --no-diff --prompt "Wait for $signal" \
+        > "$project/out-$signal" 2>&1 &
+    fi
+    peer_pid=$!
+    i=0
+    while [ ! -s "$home_dir/provider.pid" ] && [ "$i" -lt 50 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -s "$home_dir/provider.pid" ] || fail "$signal provider did not start"
+    provider_pid="$(sed -n 1p "$home_dir/provider.pid")"
+    kill -"$signal" "$peer_pid"
+    rc=0
+    wait "$peer_pid" || rc=$?
+    case "$signal" in HUP) expected=129 ;; INT) expected=130 ;; esac
+    [ "$rc" = "$expected" ] || fail "$signal should exit $expected, got $rc"
+    i=0
+    while kill -0 "$provider_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if kill -0 "$provider_pid" 2>/dev/null; then
+      kill -KILL "$provider_pid" 2>/dev/null || true
+      fail "peer-review $signal left provider process $provider_pid alive"
+    fi
+  done
+}
+
 test_peer_review_gate_missing_exits() {
   local project="$TMP/review-gate-missing"
   local artifact_dir="$project/artifacts"
@@ -4341,7 +4604,9 @@ test_plan_from_spec_proposes_then_applies() {
   local rc=0
 
   make_committed_repo "$project"
-  mkdir -p "$bin_dir" "$home_dir"
+  mkdir -p "$bin_dir" "$home_dir" "$project/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"
+  chmod +x "$project/tests/run.sh"
   cat > "$project/PROJECT.md" <<'EOF'
 # PROJECT.md
 
@@ -4406,6 +4671,192 @@ EOF
     "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/bad-out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "unparseable answer should exit 3, got $rc"
   assert_file_contains "$project/bad-out" "could not extract a proposal"
+}
+
+test_plan_from_spec_normalizes_acceptance_and_binds_check_files() {
+  local project="$TMP/plan-from-spec-acceptance"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local proposal rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"
+  chmod +x "$project/tests/run.sh"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"tasks":[{"id":"t1","title":"test: bind acceptance","allowed":["tests/"],"verify":"bash tests/run.sh","depends":[]}]}\n'
+EOF
+  chmod +x "$bin_dir/codex"
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+## Status
+- State: confirmed
+## Project
+- Goal: bind the verifier
+- Scope: tests/
+- Non-goals: release
+## Commands
+- Test: ignored because Required checks is authoritative
+## Verification
+- Required checks: `bash tests/run.sh`
+EOF
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex \
+    --model planner-model --reasoning-effort high --provider-timeout 2m \
+    > "$project/out" 2>&1 ||
+    fail "wrapped standard acceptance should propose: $(cat "$project/out")"
+  assert_one_artifact_contains "$project/.oms/artifacts/call" \
+    'codex-decompose-the-remaining-work-for-this-repository-*.md' \
+    'model-route: class=explicit (explicit) primary=planner-model'
+  proposal="$(find "$project/.oms/plan" -name 'proposal-*.json' | head -n 1)"
+  python3 - "$proposal" <<'PY' || fail "proposal did not carry the acceptance surface"
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["acceptance_files"] == ["tests/run.sh"], data
+PY
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --apply "$proposal" >/dev/null ||
+    fail "wrapped acceptance proposal should apply"
+  python3 - "$project/.oms/plan/tasks.json" <<'PY' || fail "applied acceptance contract is wrong"
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["accept"] == "bash tests/run.sh", data
+assert data["project_contract"]["acceptance_files"] == ["tests/run.sh"], data
+PY
+
+  # Custom commands are allowed only when the spec names the regular files
+  # whose reviewed bytes define the check.
+  local custom="$TMP/plan-from-spec-custom-acceptance"
+  make_committed_repo "$custom"
+  mkdir -p "$custom/tests" "$custom/bin" "$custom/userdir"
+  printf 'print("ok")\n' > "$custom/tests/verify.py"
+  cp "$bin_dir/codex" "$custom/bin/codex"
+  cat > "$custom/PROJECT.md" <<'EOF'
+# PROJECT.md
+## Status
+- State: confirmed
+## Project
+- Goal: bind a custom verifier
+- Scope: tests/
+- Non-goals: release
+## Commands
+- Test: python3 tests/verify.py --strict
+## Verification
+- Required checks: python3 tests/verify.py --strict
+EOF
+  rc=0
+  HOME="$custom/userdir" NVM_DIR="$custom/userdir/.nvm" PATH="$custom/bin:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$custom" --to codex > "$custom/missing.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "custom acceptance without check files must fail, got $rc"
+  assert_file_contains "$custom/missing.out" "Required check files"
+  printf '%s\n' '- Required check files: ./tests/verify.py' >> "$custom/PROJECT.md"
+  HOME="$custom/userdir" NVM_DIR="$custom/userdir/.nvm" PATH="$custom/bin:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$custom" --to codex > "$custom/ok.out" 2>&1 ||
+    fail "custom acceptance with an explicit surface should propose: $(cat "$custom/ok.out")"
+  proposal="$(find "$custom/.oms/plan" -name 'proposal-*.json' | head -n 1)"
+  python3 - "$proposal" <<'PY' || fail "custom acceptance path was not normalized"
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8"))["acceptance_files"] == ["tests/verify.py"]
+PY
+}
+
+test_plan_from_spec_rejects_unsafe_executable_fields() {
+  local project="$TMP/plan-from-spec-unsafe-fields"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local vector rc
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"
+  chmod +x "$project/tests/run.sh"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+echo called >> "$HOME/provider-called"
+exit 99
+EOF
+  chmod +x "$bin_dir/codex"
+
+  for vector in \
+    '`bash tests/run.sh' \
+    '``bash tests/run.sh``' \
+    'echo `date`' \
+    'bash tests/run.sh \\'
+  do
+    cat > "$project/PROJECT.md" <<EOF
+# PROJECT.md
+## Status
+- State: confirmed
+## Project
+- Goal: reject unsafe commands
+- Scope: tests/
+- Non-goals: release
+## Verification
+- Required checks: $vector
+EOF
+    : > "$home_dir/provider-called"
+    rc=0
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex > "$project/reject.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "unsafe executable field should fail before planning ($vector), got $rc"
+    [ ! -s "$home_dir/provider-called" ] || fail "unsafe executable field reached the provider: $vector"
+  done
+
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+## Status
+- State: confirmed
+## Project
+- Goal: reject multiline commands
+- Scope: tests/
+- Non-goals: release
+## Verification
+- Required checks: bash tests/run.sh
+  && touch should-not-run
+EOF
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex > "$project/multiline.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "multiline executable field must fail, got $rc"
+  assert_file_contains "$project/multiline.out" "must stay on one Markdown line"
+
+  : > "$home_dir/provider-called"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex \
+    --provider-timeout 25h > "$project/timeout.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "planner timeout above 24h must fail, got $rc"
+  assert_file_contains "$project/timeout.out" "must not exceed 24h"
+  [ ! -s "$home_dir/provider-called" ] || fail "invalid timeout reached the provider"
+
+  # A regular leaf under a symlinked parent is still outside the reviewed
+  # repository surface and must be rejected before any provider call.
+  local outside="$TMP/plan-from-spec-outside-check"
+  mkdir -p "$outside"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$outside/run.sh"
+  ln -s "$outside" "$project/tests-linked"
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+## Status
+- State: confirmed
+## Project
+- Goal: reject symlink traversal
+- Scope: tests/
+- Non-goals: release
+## Verification
+- Required checks: bash tests-linked/run.sh
+- Required check files: tests-linked/run.sh
+EOF
+  : > "$home_dir/provider-called"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex \
+    > "$project/symlink.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "symlink-parent check surface must fail, got $rc"
+  assert_file_contains "$project/symlink.out" "must not traverse a symlink"
+  [ ! -s "$home_dir/provider-called" ] || fail "symlinked check surface reached the provider"
 }
 
 test_agent_call_provider_nonzero_writes_exit_and_index() {
@@ -8812,8 +9263,13 @@ EOF
 
   # Passing contract + passing reviewers -> gate passes. Provider routing is
   # private to the review calls and must not contaminate the project verifier.
+  # Review artifacts/indexes also must not exist until after verification: a
+  # repository purity check should judge the submitted tree, not this gate's
+  # own `.oms` bookkeeping.
+  rm -rf "$project/.oms"
   cat > "$project/scripts/check.sh" <<'EOF'
 #!/usr/bin/env bash
+[ ! -e .oms ]
 [ -z "${OMS_MODEL_OPERATION:-}" ]
 [ -z "${OMS_MODEL_CLASS_REQUEST:-}" ]
 [ -z "${OMS_REASONING_EFFORT_REQUEST:-}" ]
@@ -10846,6 +11302,18 @@ test_skill_router_matches_and_dedupes() {
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
     fail "Korean autopilot paraphrase should route to oms-agent-harness"
+  out="$(printf '{"prompt":"autopilot 돌려서 남은 일을 끝내줘","session_id":"r6","turn_id":"t7","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "literal English autopilot trigger should route to oms-agent-harness"
+  out="$(printf '{"prompt":"오토파일럿 돌려줘","session_id":"r7","turn_id":"t8","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "literal Korean autopilot trigger should route to oms-agent-harness"
+  out="$(printf '{"prompt":"자율 코딩으로 구현해줘","session_id":"r8","turn_id":"t9","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "Korean autonomous-coding trigger should route to oms-agent-harness"
 }
 
 test_skill_router_separates_consultation_from_delegation() {
@@ -14031,13 +14499,424 @@ EOF
   [ "$rc" != 0 ] || fail "config and hook tampering should fail the run: $out"
   printf '%s' "$out" | grep -Fq 'config' ||
     fail "local git config changes should be named: $out"
-  printf '%s' "$out" | grep -Fq 'hooks' ||
-    fail "an installed hook should be named: $out"
+  printf '%s' "$out" | grep -Eq 'hooks|execution-state' ||
+    fail "an installed hook/config mutation should name the earliest boundary: $out"
 
   # The refusal is durable memory, not just a message.
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
     grep -Fq 'worker changed protected state' ||
     fail "the violation should be recorded in the fail-ledger"
+}
+
+test_delegate_execution_config_guard_runs_before_git_capture() {
+  local project="$TMP/worker-exec-config"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local marker="$project/marker-fired"
+  local base_config="$TMP/worker-exec-config.base"
+  local out rc=0 mode
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  printf '/marker-fired\n' >> "$project/.git/info/exclude"
+  cp "$project/.git/config" "$base_config"
+
+  # Exercise real Git syntax, including named and deprecated dotted
+  # subsections. Each worker also edits the primary tree: a vulnerable guard
+  # would run the planted command while trying to capture that mutation.
+  for mode in fsmonitor diff-external diff-driver-escaped diff-driver-tab \
+    filter-quoted filter-dotted filter-tab includeif includeif-tab; do
+    cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'primary mutation\n' >> "$project/file.txt"
+case "$mode" in
+  fsmonitor)
+    git -C "$project" config --local core.fsmonitor "$bin_dir/marker"
+    ;;
+  diff-external)
+    git -C "$project" config --local diff.external "$bin_dir/marker"
+    ;;
+  diff-driver-escaped)
+    printf '\n[DiFf "hostile\\"quoted"]\n\ttextconv = $bin_dir/marker\n' >> "$project/.git/config"
+    ;;
+  diff-driver-tab)
+    printf '\n[diff\t"hostile"]\n\tcommand = $bin_dir/marker\n' >> "$project/.git/config"
+    ;;
+  filter-quoted)
+    git -C "$project" config --local filter.hostile.clean "$bin_dir/marker"
+    ;;
+  filter-dotted)
+    printf '\n[filter.hostile]\n\tclean = $bin_dir/marker\n' >> "$project/.git/config"
+    ;;
+  filter-tab)
+    printf '\n[filter\t"hostile"]\n\tprocess = $bin_dir/marker\n' >> "$project/.git/config"
+    ;;
+  includeif)
+    printf '\n[includeIf "gitdir:**"]\n\tpath = $project/missing.inc\n' >> "$project/.git/config"
+    ;;
+  includeif-tab)
+    printf '\n[includeIf\t"gitdir:**"]\n\tpath = $project/missing.inc\n' >> "$project/.git/config"
+    ;;
+esac
+echo done
+EOF
+    cat > "$bin_dir/marker" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+exit 0
+EOF
+    chmod +x "$bin_dir/codex" "$bin_dir/marker"
+    rc=0
+    out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+      --to codex --prompt x --no-verify 2>&1)" || rc=$?
+    [ "$rc" != 0 ] || fail "$mode execution config mutation passed: $out"
+    [ ! -e "$marker" ] || fail "$mode command executed during post-worker capture"
+    printf '%s' "$out" | grep -Fq 'execution-state' ||
+      fail "$mode did not name the raw execution-state boundary: $out"
+    # Restore raw trusted bytes without asking Git to parse hostile config.
+    cp "$base_config" "$project/.git/config"
+    git -c core.fsmonitor=false -c diff.external= -C "$project" checkout -- file.txt
+  done
+}
+
+test_delegate_rejects_linked_worktree_config_before_capture() {
+  local project="$TMP/worker-linked-exec-config"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local marker="$project/linked-marker-fired"
+  local out rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  printf '/linked-marker-fired\n' >> "$project/.git/info/exclude"
+  cat > "$bin_dir/marker" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+exit 0
+EOF
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+git config extensions.worktreeConfig true
+git config --worktree core.fsmonitor "$bin_dir/marker"
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/marker"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "linked-worktree execution config mutation passed: $out"
+  [ ! -e "$marker" ] || fail "linked-worktree fsmonitor ran during patch capture"
+  printf '%s' "$out" | grep -Fq 'execution-state' ||
+    fail "linked config violation did not name the boundary: $out"
+}
+
+test_delegate_capture_and_surface_never_execute_global_filters() {
+  local project="$TMP/delegate-global-filter"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local marker="$TMP/delegate-global-filter-fired"
+  local global_config="$TMP/delegate-global-filter.gitconfig"
+  local out rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/filter-command" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+cat
+EOF
+  cat > "$global_config" <<EOF
+[filter "hostile"]
+    clean = $bin_dir/filter-command
+    smudge = $bin_dir/filter-command
+EOF
+  # The worker changes both checkouts without using Git. Its own patch capture
+  # must not run the global filter, and the final primary-surface comparison
+  # must detect raw bytes without falling back to status/diff filters.
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'file.txt filter=hostile\n' > .gitattributes
+printf 'isolated worker edit\n' >> file.txt
+printf 'file.txt filter=hostile\n' > "$project/.gitattributes"
+printf 'primary worker edit\n' >> "$project/file.txt"
+echo done
+EOF
+  chmod +x "$bin_dir/filter-command" "$bin_dir/codex"
+
+  out="$(GIT_CONFIG_GLOBAL="$global_config" HOME="$home_dir" \
+    NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" \
+    --repo "$project" --to codex --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] ||
+    fail "primary tracked mutation should fail strict delegation: $out"
+  [ ! -e "$marker" ] ||
+    fail "delegate patch or protected-surface capture executed a global filter"
+  printf '%s' "$out" | grep -Fq 'outside its worktree: tracked' ||
+    fail "raw protected-surface capture lost the primary mutation: $out"
+}
+
+test_delegate_rejects_verifier_execution_config_before_repair() {
+  local project="$TMP/verifier-exec-config"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local marker="$project/verifier-marker-fired"
+  local out rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  printf '/verifier-marker-fired\n' >> "$project/.git/info/exclude"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'legitimate worker edit\n' >> file.txt
+echo done
+EOF
+  cat > "$bin_dir/marker" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+exit 0
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/marker"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --verify \
+    "git -C '$project' config --local diff.external '$bin_dir/marker'; printf verifier-mutation >> '$project/file.txt'; exit 1" \
+    --repair 1 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "verifier execution config mutation passed: $out"
+  [ ! -e "$marker" ] || fail "verifier-planted diff.external ran before repair"
+  printf '%s' "$out" | grep -Fq 'execution-state' ||
+    fail "verifier config violation did not name the boundary: $out"
+}
+
+test_delegate_allows_worker_staging_without_hidden_index_flags() {
+  local project="$TMP/worker-staged-positive"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'staged by worker\n' >> file.txt
+git add file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify 2>&1)" ||
+    fail "ordinary worker staging should remain valid: $out"
+  if printf '%s' "$out" | grep -Fq 'execution-state'; then
+    fail "ordinary staged index bytes were treated as hidden authority: $out"
+  fi
+}
+
+test_delegate_rejects_worker_hidden_index_before_capture() {
+  local project="$TMP/worker-hidden-index"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local marker="$project/hidden-index-marker-fired"
+  local out rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  printf '/hidden-index-marker-fired\n' >> "$project/.git/info/exclude"
+  cat > "$bin_dir/marker" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+exit 0
+EOF
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+git -C "$project" update-index --assume-unchanged file.txt
+printf 'hidden primary mutation\n' >> "$project/file.txt"
+git config extensions.worktreeConfig true
+git config --worktree diff.external "$bin_dir/marker"
+echo done
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/marker"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "worker hidden index/config mutation passed: $out"
+  [ ! -e "$marker" ] || fail "hidden-index companion command ran during capture"
+  printf '%s' "$out" | grep -Fq 'execution-state' ||
+    fail "hidden index mutation did not name raw boundary: $out"
+}
+
+test_delegate_preflights_strict_execution_config() {
+  local project="$TMP/worker-exec-config-preflight"
+  local marker="$project/preflight-marker-fired"
+  local bin_dir="$project/bin"
+  local out rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/marker" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+exit 0
+EOF
+  chmod +x "$bin_dir/marker"
+  git -C "$project" config --local core.fsmonitor "$bin_dir/marker"
+  out="$(PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_GUARD_STRICT=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "strict delegation accepted initial fsmonitor config"
+  [ ! -e "$marker" ] || fail "strict preflight executed initial fsmonitor"
+  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+    fail "strict preflight did not explain unsafe config: $out"
+
+  # extensions.worktreeConfig places main-worktree config in
+  # .git/config.worktree too; it must not be skipped when git-dir and
+  # common-dir have the same physical path.
+  git -C "$project" config --local --unset core.fsmonitor
+  git -C "$project" config extensions.worktreeConfig true
+  git -C "$project" config --worktree diff.external "$bin_dir/marker"
+  rc=0
+  out="$(PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_GUARD_STRICT=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "strict delegation accepted main config.worktree"
+  [ ! -e "$marker" ] || fail "strict preflight executed main config.worktree"
+  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+    fail "main config.worktree refusal was unclear: $out"
+}
+
+test_delegate_worktree_lifecycle_suppresses_checkout_hooks() {
+  local project="$TMP/delegate-checkout-hook"
+  local bin_dir="$project/bin"
+  local hook_dir="$TMP/delegate-checkout-hook-bin"
+  local home_dir="$project/home"
+  local marker="$TMP/delegate-checkout-hook-fired"
+  local counter="$TMP/delegate-checkout-hook-count"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$hook_dir" "$home_dir"
+  cat > "$hook_dir/post-checkout" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+EOF
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+n=0
+[ ! -f "$counter" ] || n=\$(cat "$counter")
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$counter"
+printf 'worker attempt %s\n' "\$n" >> file.txt
+if [ "\$n" = 1 ]; then
+  echo 'first attempt fails to exercise repair reset'
+  exit 1
+fi
+echo 'repair succeeded'
+EOF
+  chmod +x "$hook_dir/post-checkout" "$bin_dir/codex"
+  git -C "$project" config --local core.hooksPath "$hook_dir"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_GUARD_STRICT=1 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --prompt x --no-verify --repair 1 2>&1)" ||
+    fail "strict delegation with a normal hooksPath should succeed: $out"
+  [ "$(cat "$counter" 2>/dev/null || true)" = 2 ] ||
+    fail "delegate hook fixture did not exercise the repair reset: $out"
+  [ ! -e "$marker" ] ||
+    fail "delegate worktree add or repair checkout executed post-checkout"
+}
+
+test_agy_read_worktree_suppresses_checkout_hooks() {
+  local project="$TMP/agy-read-checkout-hook"
+  local hook_dir="$TMP/agy-read-checkout-hook-bin"
+  local marker="$TMP/agy-read-checkout-hook-fired"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$hook_dir"
+  cat > "$hook_dir/post-checkout" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+EOF
+  chmod +x "$hook_dir/post-checkout"
+  git -C "$project" config --local core.hooksPath "$hook_dir"
+
+  out="$(bash -c '. "$1"; d="$(ma_agy_read_dir "$2")"; [ -d "$d" ] || exit 1; printf "%s\n" "$d"; ma_agy_read_cleanup "$2" "$d"' \
+    _ "$ROOT/scripts/lib/peer-common.sh" "$project")" ||
+    fail "Antigravity read isolation worktree could not be created"
+  [ -n "$out" ] || fail "Antigravity read isolation returned no worktree"
+  [ ! -e "$marker" ] ||
+    fail "Antigravity read worktree creation executed post-checkout"
+}
+
+test_patch_admit_worktrees_suppress_checkout_hooks() {
+  local project="$TMP/admit-checkout-hook"
+  local hook_dir="$TMP/admit-checkout-hook-bin"
+  local marker="$TMP/admit-checkout-hook-fired"
+  local global_config="$TMP/admit-checkout-hook.gitconfig"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/tests"
+  printf 'base test surface\n' > "$project/tests/hook-smoke.txt"
+  git -C "$project" add tests/hook-smoke.txt
+  git -C "$project" commit -qm 'test surface'
+  git -C "$project" checkout -qb candidate
+  printf 'candidate test surface\n' >> "$project/tests/hook-smoke.txt"
+  printf 'tests/hook-smoke.txt filter=hostile\n' > "$project/.gitattributes"
+  git -C "$project" add .gitattributes
+  git -C "$project" commit -qam 'change test surface'
+  git -C "$project" diff main candidate > "$project/change.patch"
+  git -C "$project" checkout -q main
+  git -C "$project" branch -q -D candidate
+
+  mkdir -p "$hook_dir"
+  cat > "$hook_dir/post-checkout" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+EOF
+  cat > "$hook_dir/filter-command" <<EOF
+#!/usr/bin/env bash
+: > "$marker"
+cat
+EOF
+  cat > "$global_config" <<EOF
+[filter "hostile"]
+    clean = $hook_dir/filter-command
+    smudge = $hook_dir/filter-command
+EOF
+  chmod +x "$hook_dir/post-checkout" "$hook_dir/filter-command"
+  git -C "$project" config --local core.hooksPath "$hook_dir"
+
+  out="$(GIT_CONFIG_GLOBAL="$global_config" "$ROOT/scripts/patch-admit.sh" \
+    --repo "$project" --patch "$project/change.patch" --verify true \
+    --allow-restructure 2>&1)" ||
+    fail "patch admission with a normal hooksPath should succeed: $out"
+  [ ! -e "$marker" ] ||
+    fail "admission worktree lifecycle executed a checkout hook or global filter"
+  printf '%s' "$out" | grep -Fq 'patch-admit: ADMIT' ||
+    fail "hook-suppression fixture did not reach an admitted verdict: $out"
+}
+
+test_write_post_attempt_guard_rejects_an_injected_callback() {
+  local marker="$TMP/post-attempt-callback-fired"
+  local out rc=0
+
+  out="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; \
+    OMS_WRITE_POST_ATTEMPT_GUARD_FN='bad; : > $marker'; \
+    ma_write_post_attempt_guard write" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || fail "injected post-attempt callback was accepted"
+  [ ! -e "$marker" ] || fail "post-attempt callback string was evaluated"
+  printf '%s' "$out" | grep -Fq 'invalid write post-attempt guard function' ||
+    fail "invalid callback refusal was unclear: $out"
 }
 
 test_delegate_worker_guard_can_be_turned_off() {

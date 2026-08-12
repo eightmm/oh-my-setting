@@ -189,4 +189,83 @@ contains "$TMP/delete-entrypoint.md" "verify: FAIL"
 contains "$TMP/delete-entrypoint.md" "verify-floor: FAIL"
 contains "$TMP/delete-entrypoint.md" "scripts/check.sh"
 
+# A custom acceptance command can depend on a non-conventional data/helper
+# file that command-token heuristics cannot discover. The reviewed plan binds
+# that explicit surface, and admission must restore it for the base-owned run.
+mkdir -p "$repo/quality"
+cat > "$repo/quality/oracle.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+expected="$(sed -n 's/^expected=//p' quality/contract.data)"
+grep -qx "$expected" src/value.txt
+EOF
+printf 'expected=good\n' > "$repo/quality/contract.data"
+printf 'good\n' > "$repo/src/value.txt"
+chmod +x "$repo/quality/oracle.sh"
+git -C "$repo" add quality src/value.txt
+git -C "$repo" commit -qm custom-oracle
+
+# A reviewed plan task exposes its project contract through `show`. Build the
+# minimal frozen fixture directly: apply-proposal owns creation in production,
+# while this focused admission test does not need a provider/proposal round.
+mkdir -p "$repo/.oms/plan"
+cat > "$repo/.oms/plan/tasks.json" <<'EOF'
+{
+  "schema": 3,
+  "goal": "keep the custom oracle honest",
+  "accept": "bash quality/oracle.sh",
+  "project_contract": {
+    "schema": 1,
+    "spec_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "allowed_envelope": ["src", "quality"],
+    "acceptance_files": ["quality/contract.data", "quality/oracle.sh"]
+  },
+  "tasks": {
+    "custom-oracle-task": {
+      "id": "custom-oracle-task", "title": "change the product", "state": "ready",
+      "depends": [], "allowed_paths": ["src", "quality"], "forbidden_paths": [],
+      "verify": "bash quality/oracle.sh", "role": "", "provider": "", "ttl": "",
+      "artifact": "", "patch": "", "reason": "", "executor_id": "",
+      "executor_soul_sha256": "", "lease_epoch": 0, "lease_id": "",
+      "review_lease_id": "", "repair_count": 0, "repair_artifact": "",
+      "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"
+    }
+  }
+}
+EOF
+
+printf 'bad\n' > "$repo/src/value.txt"
+printf 'expected=bad\n' > "$repo/quality/contract.data"
+git -C "$repo" diff > "$TMP/custom-oracle.patch"
+git -C "$repo" checkout -q -- src/value.txt quality/contract.data
+
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/custom-oracle.patch" \
+  --plan-task custom-oracle-task --verify 'bash quality/oracle.sh' \
+  --allow-verifier-change --report "$TMP/custom-oracle.md" \
+  >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "reviewed custom acceptance surface bypass should be rejected, got exit $rc"
+contains "$TMP/custom-oracle.md" "verify: PASS"
+contains "$TMP/custom-oracle.md" "verify-floor: FAIL"
+contains "$TMP/custom-oracle.md" "quality/contract.data"
+
+# Worktree creation/checkouts can invoke worker-planted fsmonitor or content
+# filters under the admitting parent's authority. Refuse executable Git config
+# before the first such Git operation; the marker proves refusal came first.
+cat > "$repo/.git/hostile-fsmonitor" <<EOF
+#!/usr/bin/env bash
+: > "$TMP/admit-fsmonitor-fired"
+exit 0
+EOF
+chmod +x "$repo/.git/hostile-fsmonitor"
+git -C "$repo" config --local core.fsmonitor "$repo/.git/hostile-fsmonitor"
+rm -f "$TMP/admit-fsmonitor-fired"
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/benign.patch" \
+  --verify 'bash scripts/check.sh' --report "$TMP/hostile-config.md" \
+  > "$TMP/hostile-config.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "executable Git config should fail admission closed, got $rc"
+[ ! -e "$TMP/admit-fsmonitor-fired" ] ||
+  fail "patch admission executed worker-planted fsmonitor"
+
 echo "patch-admit-verifier-floor-smoke: ok"

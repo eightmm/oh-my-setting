@@ -412,6 +412,20 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REP
 REPO="$(oms_repo_root "$REPO")"
 git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
+# Worktree materialization itself checks out tracked content. Reject filter,
+# fsmonitor, and include execution surfaces even for a direct non-strict run;
+# external diff/textconv are harmless here and remain usable in that mode.
+oms_git_assert_safe_execution_config "$REPO" diff-read ||
+  fail "unsafe Git execution config blocks delegated worktree creation"
+# Strict/unattended delegation must be safe even when invoked directly rather
+# than through goal-drive/autopilot. Refuse executable repository config and
+# hidden index flags before porcelain or worktree setup consumes either.
+if [ "${OMS_WORKER_GUARD_STRICT:-0}" = 1 ]; then
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "unsafe Git execution config blocks strict delegation"
+  oms_git_assert_plain_index "$REPO" ||
+    fail "hidden Git index flags block strict delegation"
+fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
 
 # How deep this delegation sits. Nesting multiplies: a worker that delegates
@@ -784,7 +798,10 @@ if ! ma_validate_outbound_prompt "$prompt_file"; then
   plan_failure_transition
   exit 3
 fi
-git -C "$REPO" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+  -c core.fsmonitor=false -C "$REPO" \
+  worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
 if ! oms_worker_worktree_identity_capture "$REPO" "$worktree"; then
   KEEP_WORKTREE=1
@@ -1052,14 +1069,19 @@ EOF
 # (caches, build output) do not leak into the patch.
 capture_patch() {
   worker_worktree_require_identity "patch capture" || return 1
-  git -C "$worktree" add -A
-  git -C "$worktree" diff --cached --binary > "$patch_file"
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+    -c core.fsmonitor=false -C "$worktree" add -A
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
+    -C "$worktree" diff --no-ext-diff --no-textconv --cached --binary \
+    > "$patch_file"
 }
 
 # Runs VERIFY_CMD in the worktree; output goes to the artifact and is kept in
 # $verify_out for repair prompts. Sets verify_status.
 run_verify() {
-  local verify_pid
+  local verify_pid verify_child_status
 
   : > "$verify_out"
   if ! worker_worktree_require_identity "verification"; then
@@ -1083,6 +1105,18 @@ run_verify() {
   wait "$verify_pid"
   verify_status=$?
   set -e
+  verify_child_status="$verify_status"
+  if [ -n "$worker_guard_dir" ] && ! worker_execution_boundary_check; then
+    worker_boundary_failed=1
+    worker_status=125
+    verify_status=125
+    route_retry_terminal=1
+    KEEP_WORKTREE=1
+    cat "$verify_out" >> "$artifact"
+    printf '\n- verify exit: %s\n- post-verify Git execution boundary: blocked\n' \
+      "$verify_child_status" >> "$artifact"
+    return 0
+  fi
   cat "$verify_out" >> "$artifact"
   printf '\n- verify exit: %s\n' "$verify_status" >> "$artifact"
   if [ "$worker_status" -eq 0 ]; then
@@ -1164,6 +1198,8 @@ plan_started=1
 worker_guard_dir=""
 worker_operation_snapshot_sha=""
 worker_guard_worktree_physical=""
+worker_git_execution_snapshot_sha=""
+worker_worktree_execution_snapshot_sha=""
 if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   # This run's own writes are the harness moving, not the worker: the artifact
   # directory, and our own stdout/stderr when the caller redirected them into
@@ -1193,6 +1229,33 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   worker_guard_dir="$worktree_parent/worker-guard"
   if oms_worker_surface_snapshot "$REPO" "$worker_guard_dir" \
     "$worker_guard_worktree_physical"; then
+    if ! oms_git_execution_state_snapshot "$REPO" \
+      "$worker_guard_dir/git-execution-state"; then
+      fail "could not freeze Git execution config/index state before provider start"
+    fi
+    worker_git_execution_snapshot_sha="$(
+      oms_sha256_file "$worker_guard_dir/git-execution-state" 2>/dev/null || true
+    )"
+    [ -n "$worker_git_execution_snapshot_sha" ] ||
+      fail "could not hash Git execution config/index state snapshot"
+    if ! oms_git_execution_state_snapshot "$worktree" \
+      "$worker_guard_dir/worktree-git-execution-state" config-only; then
+      fail "could not freeze delegated worktree Git execution config"
+    fi
+    worker_worktree_execution_snapshot_sha="$(
+      oms_sha256_file "$worker_guard_dir/worktree-git-execution-state" \
+        2>/dev/null || true
+    )"
+    [ -n "$worker_worktree_execution_snapshot_sha" ] ||
+      fail "could not hash delegated worktree Git execution config snapshot"
+    oms_git_assert_safe_execution_config "$REPO" ||
+      fail "unsafe Git execution config blocks delegated provider start"
+    oms_git_assert_safe_execution_config "$worktree" ||
+      fail "unsafe delegated-worktree Git execution config blocks provider start"
+    oms_git_assert_plain_index "$REPO" ||
+      fail "hidden primary Git index flags block delegated provider start"
+    oms_git_assert_plain_index "$worktree" ||
+      fail "hidden delegated-worktree Git index flags block provider start"
     if [ -n "$PLAN_TASK_ID$EXECUTOR_ID" ] &&
       ! oms_worker_operation_snapshot "$REPO" \
         "$worker_guard_dir/current-operation.json" \
@@ -1228,6 +1291,24 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
     worker_guard_dir=""
   fi
 fi
+worker_execution_boundary_check() {
+  oms_git_execution_state_assert_unchanged "$REPO" \
+    "$worker_guard_dir/git-execution-state" \
+    "$worker_git_execution_snapshot_sha" || return 2
+  oms_git_execution_state_assert_unchanged "$worktree" \
+    "$worker_guard_dir/worktree-git-execution-state" \
+    "$worker_worktree_execution_snapshot_sha" || return 2
+  oms_git_assert_safe_execution_config "$REPO" || return 2
+  oms_git_assert_safe_execution_config "$worktree" || return 2
+  oms_git_assert_plain_index "$REPO" || return 2
+  # Worker-owned index bytes may legitimately change (`git add`); only hidden
+  # visibility flags are forbidden in the isolated checkout.
+  oms_git_assert_plain_index "$worktree" || return 2
+  return 0
+}
+if [ -n "$worker_guard_dir" ]; then
+  OMS_WRITE_POST_ATTEMPT_GUARD_FN=worker_execution_boundary_check
+fi
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
   echo "dry-run: $TO -> $artifact"
@@ -1242,7 +1323,23 @@ else
   fi
 fi
 
-if ! capture_patch; then
+worker_boundary_failed=0
+if [ -n "$worker_guard_dir" ]; then
+  # This is deliberately the first post-provider inspection. A worker can
+  # plant core.fsmonitor/diff.external and a primary-tree edit in one pass; any
+  # status/diff/ls-files before this raw comparison would execute the planted
+  # command with parent authority. Bind config bytes and the index before
+  # capturing either checkout.
+  if ! worker_execution_boundary_check; then
+    worker_boundary_failed=1
+  fi
+fi
+if [ "$worker_boundary_failed" = 1 ]; then
+  worker_status=125
+  route_retry_terminal=1
+  KEEP_WORKTREE=1
+  : > "$patch_file"
+elif ! capture_patch; then
   worker_status=125
   route_retry_terminal=1
   : > "$patch_file"
@@ -1276,6 +1373,9 @@ if [ -n "$VERIFY_CMD" ]; then
   printf '\n\n## Verify\n\n- command: %s\n\n' "$VERIFY_CMD" >> "$artifact"
   if [ "$DRY_RUN" = "1" ]; then
     printf 'DRY RUN: verify skipped.\n' >> "$artifact"
+  elif [ "$worker_boundary_failed" = 1 ]; then
+    printf 'SKIPPED: worker changed Git execution config/index state.\n' >> "$artifact"
+    verify_status=125
   else
     run_verify
   fi
@@ -1373,7 +1473,9 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
       route_retry_terminal=1
       break
     fi
-    git -C "$worktree" checkout -- . 2>/dev/null || true
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+      GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+      -c core.fsmonitor=false -C "$worktree" checkout -- . 2>/dev/null || true
     git -C "$worktree" clean -fdx >/dev/null 2>&1 || true
     {
       printf '\n\n## Repair %s\n\n### Prompt\n\n' "$repair_used"
@@ -1381,6 +1483,15 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
       printf '\n\n### Output\n\n'
     } >> "$artifact"
     run_worker "$repair_prompt_file"
+    if ! worker_execution_boundary_check; then
+      worker_boundary_failed=1
+      worker_status=125
+      verify_status=125
+      route_retry_terminal=1
+      KEEP_WORKTREE=1
+      : > "$patch_file"
+      break
+    fi
     if ! capture_patch; then
       worker_status=125
       verify_status=125
@@ -1391,6 +1502,7 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
     if [ -n "$VERIFY_CMD" ]; then
       printf '\n\n## Verify (repair %s)\n\n- command: %s\n\n' "$repair_used" "$VERIFY_CMD" >> "$artifact"
       run_verify
+      [ "$worker_boundary_failed" != 1 ] || break
     else
       delegate_attempt_finish_without_verify
     fi
@@ -1403,8 +1515,12 @@ fi
 # worker already wrote outside its worktree, so the run fails and the worktree
 # is kept for inspection.
 if [ -n "$worker_guard_dir" ]; then
-  worker_guard_changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
-    "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")"
+  if [ "$worker_boundary_failed" = 1 ]; then
+    worker_guard_changed="execution-state"
+  else
+    worker_guard_changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
+      "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")"
+  fi
   if ! worker_worktree_require_identity "final worker guard"; then
     printf '%s\n' "$worker_identity_detail" > "$worker_guard_dir/worktree-identity-detail"
     worker_guard_changed="${worker_guard_changed:+$worker_guard_changed, }worktree-identity"

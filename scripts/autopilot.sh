@@ -11,6 +11,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/model-routing.sh
+. "$ROOT/scripts/lib/model-routing.sh"
 
 REPO="$PWD"
 ACTION=""
@@ -27,12 +29,33 @@ INITIAL_TASKS=6
 REPLAN_TASKS=2
 AUTO_REPAIR=0
 REVIEW_MODE="shadow"
+REVIEW_MODE_EXPLICIT=0
 DRAFT_PR=0
+RETRY_KNOWN=0
+PROVIDER_TIMEOUT="5m"
+PLANNER_TIMEOUT=""
+WORKER_TIMEOUT=""
+REVIEWER_TIMEOUT=""
+PLANNER_MODEL=""
+WORKER_MODEL=""
+REVIEWER_MODEL=""
+PLANNER_FALLBACK_MODEL=""
+WORKER_FALLBACK_MODEL=""
+REVIEWER_FALLBACK_MODEL=""
+PLANNER_REASONING_EFFORT="auto"
+WORKER_REASONING_EFFORT="auto"
+REVIEWER_REASONING_EFFORT="auto"
+OUTER_RECEIPT=""
+OUTER_RECEIPT_READY=0
+APPROVED_PROPOSAL_PATH=""
+APPROVED_PROPOSAL_SHA=""
+review_base_sha=""
 
 PLAN_FROM_SPEC="${OMS_AUTOPILOT_PLAN_FROM_SPEC:-$ROOT/scripts/plan-from-spec.sh}"
 GOAL_DRIVE="${OMS_AUTOPILOT_GOAL_DRIVE:-$ROOT/scripts/goal-drive.sh}"
 PEER_REVIEW="${OMS_AUTOPILOT_PEER_REVIEW:-$ROOT/scripts/peer-review.sh}"
 DRAFT_PR_TOOL="${OMS_AUTOPILOT_DRAFT_PR:-$ROOT/scripts/draft-pr.sh}"
+RECEIPT_HELPER="$ROOT/scripts/lib/autopilot-receipt.py"
 
 usage() {
   cat <<'EOF'
@@ -69,8 +92,25 @@ Options:
   --initial-tasks N       Initial proposal cap, 1..12 (default: 6).
   --replan-tasks N        Sole r1- proposal cap, 1..2 (default: 2).
   --auto-repair           Allow goal-drive's one same-lease landing repair.
+  --retry-known           Explicitly retry a matching unresolved worker failure.
+  --provider-timeout DUR  Default per-provider wall clock (default: 5m; max 24h).
+  --planner-timeout DUR   Planner override for --provider-timeout.
+  --worker-timeout DUR    Worker override for --provider-timeout.
+  --reviewer-timeout DUR  Reviewer override for --provider-timeout.
+  --planner-model MODEL   Exact planner model.
+  --worker-model MODEL    Exact implementation model.
+  --reviewer-model MODEL  Exact semantic-review model.
+  --planner-fallback-model MODEL
+  --worker-fallback-model MODEL
+  --reviewer-fallback-model MODEL
+                          One-shot capacity fallback for that role.
+  --planner-reasoning-effort E
+  --worker-reasoning-effort E
+  --reviewer-reasoning-effort E
+                          auto, low, medium, high, xhigh, max, or ultra.
   --review-mode MODE      shadow (default), gate, or off. Shadow reports a
-                          semantic finding but cannot block a Draft PR.
+                          semantic finding. With --draft-pr, gate is the
+                          default unless this option is explicitly supplied.
   --draft-pr              After acceptance/review, prepare and publish an exact
                           create-only Draft PR. Never merges or releases.
 
@@ -91,6 +131,10 @@ fail() {
 }
 
 park() {
+  if [ "${OUTER_RECEIPT_READY:-0}" -eq 1 ]; then
+    outer_receipt_write parked >/dev/null 2>&1 ||
+      echo "autopilot: warning: outer receipt could not record the park" >&2
+  fi
   echo "autopilot: parked reason=$1" >&2
   [ -z "${2:-}" ] || echo "autopilot: next: $2" >&2
   exit 3
@@ -119,9 +163,49 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--replan-tasks requires a count"
       REPLAN_TASKS="$2"; shift 2 ;;
     --auto-repair) AUTO_REPAIR=1; shift ;;
+    --retry-known) RETRY_KNOWN=1; shift ;;
+    --provider-timeout)
+      [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
+      PROVIDER_TIMEOUT="$2"; shift 2 ;;
+    --planner-timeout)
+      [ "$#" -ge 2 ] || fail "--planner-timeout requires a duration"
+      PLANNER_TIMEOUT="$2"; shift 2 ;;
+    --worker-timeout)
+      [ "$#" -ge 2 ] || fail "--worker-timeout requires a duration"
+      WORKER_TIMEOUT="$2"; shift 2 ;;
+    --reviewer-timeout)
+      [ "$#" -ge 2 ] || fail "--reviewer-timeout requires a duration"
+      REVIEWER_TIMEOUT="$2"; shift 2 ;;
+    --planner-model)
+      [ "$#" -ge 2 ] || fail "--planner-model requires a model"
+      PLANNER_MODEL="$2"; shift 2 ;;
+    --worker-model)
+      [ "$#" -ge 2 ] || fail "--worker-model requires a model"
+      WORKER_MODEL="$2"; shift 2 ;;
+    --reviewer-model)
+      [ "$#" -ge 2 ] || fail "--reviewer-model requires a model"
+      REVIEWER_MODEL="$2"; shift 2 ;;
+    --planner-fallback-model)
+      [ "$#" -ge 2 ] || fail "--planner-fallback-model requires a model"
+      PLANNER_FALLBACK_MODEL="$2"; shift 2 ;;
+    --worker-fallback-model)
+      [ "$#" -ge 2 ] || fail "--worker-fallback-model requires a model"
+      WORKER_FALLBACK_MODEL="$2"; shift 2 ;;
+    --reviewer-fallback-model)
+      [ "$#" -ge 2 ] || fail "--reviewer-fallback-model requires a model"
+      REVIEWER_FALLBACK_MODEL="$2"; shift 2 ;;
+    --planner-reasoning-effort)
+      [ "$#" -ge 2 ] || fail "--planner-reasoning-effort requires a value"
+      PLANNER_REASONING_EFFORT="$2"; shift 2 ;;
+    --worker-reasoning-effort)
+      [ "$#" -ge 2 ] || fail "--worker-reasoning-effort requires a value"
+      WORKER_REASONING_EFFORT="$2"; shift 2 ;;
+    --reviewer-reasoning-effort)
+      [ "$#" -ge 2 ] || fail "--reviewer-reasoning-effort requires a value"
+      REVIEWER_REASONING_EFFORT="$2"; shift 2 ;;
     --review-mode)
       [ "$#" -ge 2 ] || fail "--review-mode requires shadow, gate, or off"
-      REVIEW_MODE="$2"; shift 2 ;;
+      REVIEW_MODE="$2"; REVIEW_MODE_EXPLICIT=1; shift 2 ;;
     --draft-pr) DRAFT_PR=1; shift ;;
     -h|--help) usage; exit 0 ;;
     propose|run|status)
@@ -133,9 +217,34 @@ done
 
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
+REPO="${REPO//$'\r'/}"
+REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository path"
+REPO="${REPO//$'\r'/}"
 PLAN_FILE="$REPO/.oms/plan/tasks.json"
 PROGRESS_FILE="$REPO/.oms/plan/progress.jsonl"
 SPEC="$REPO/PROJECT.md"
+OUTER_RECEIPT="$REPO/.oms/plan/autopilot-run.json"
+
+validate_duration() {  # VALUE LABEL
+  local value="$1" label="$2" seconds
+  case "$value" in
+    [1-9]|[1-9][0-9]*|[1-9]s|[1-9][0-9]*s|[1-9]m|[1-9][0-9]*m|[1-9]h|[1-9][0-9]*h) ;;
+    *) fail "$label must be a positive integer duration (s, m, or h)" ;;
+  esac
+  seconds="$(duration_seconds "$value")" || fail "$label is invalid"
+  seconds="${seconds//$'\r'/}"
+  [ "$seconds" -le 86400 ] || fail "$label must be at most 24h"
+}
+
+duration_seconds() {  # VALUE
+  python3 - "$1" <<'PY'
+import re, sys
+match = re.fullmatch(r"([1-9][0-9]*)([smh]?)", sys.argv[1])
+if not match:
+    raise SystemExit(2)
+print(int(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)])
+PY
+}
 
 case "$MAX_CYCLES" in *[!0-9]*|"") fail "--max-cycles must be 1..10" ;; esac
 [ "$MAX_CYCLES" -ge 1 ] && [ "$MAX_CYCLES" -le 10 ] || fail "--max-cycles must be 1..10"
@@ -143,8 +252,43 @@ case "$INITIAL_TASKS" in *[!0-9]*|"") fail "--initial-tasks must be 1..12" ;; es
 [ "$INITIAL_TASKS" -ge 1 ] && [ "$INITIAL_TASKS" -le 12 ] || fail "--initial-tasks must be 1..12"
 case "$REPLAN_TASKS" in *[!0-9]*|"") fail "--replan-tasks must be 1..2" ;; esac
 [ "$REPLAN_TASKS" -ge 1 ] && [ "$REPLAN_TASKS" -le 2 ] || fail "--replan-tasks must be 1..2"
+[ "$DRAFT_PR" -eq 0 ] || [ "$REVIEW_MODE_EXPLICIT" -eq 1 ] || REVIEW_MODE=gate
 case "$REVIEW_MODE" in shadow|gate|off) ;; *) fail "--review-mode must be shadow, gate, or off" ;; esac
 case "$REMOTE" in *[!A-Za-z0-9._-]*|"") fail "--remote has unsafe characters" ;; esac
+validate_duration "$PROVIDER_TIMEOUT" "--provider-timeout"
+[ -n "$PLANNER_TIMEOUT" ] || PLANNER_TIMEOUT="$PROVIDER_TIMEOUT"
+[ -n "$WORKER_TIMEOUT" ] || WORKER_TIMEOUT="$PROVIDER_TIMEOUT"
+[ -n "$REVIEWER_TIMEOUT" ] || REVIEWER_TIMEOUT="$PROVIDER_TIMEOUT"
+validate_duration "$PLANNER_TIMEOUT" "--planner-timeout"
+validate_duration "$WORKER_TIMEOUT" "--worker-timeout"
+validate_duration "$REVIEWER_TIMEOUT" "--reviewer-timeout"
+planner_seconds="$(duration_seconds "$PLANNER_TIMEOUT")"; planner_seconds="${planner_seconds//$'\r'/}"
+worker_seconds="$(duration_seconds "$WORKER_TIMEOUT")"; worker_seconds="${worker_seconds//$'\r'/}"
+reviewer_seconds="$(duration_seconds "$REVIEWER_TIMEOUT")"; reviewer_seconds="${reviewer_seconds//$'\r'/}"
+# A routed model call may spend primary + two safeguard recoveries + one
+# catalog alternate + one capacity fallback before returning.
+PLANNER_PHASE_WALL=$((planner_seconds * 5 + 60))
+# goal-drive may spend up to five bounded model attempts per cycle. It also performs one
+# separately supervised repair attempt when enabled. These are ceilings only;
+# every inner call retains the exact role timeout from the durable contract.
+worker_phase_attempts=$((MAX_CYCLES * 5))
+[ "$AUTO_REPAIR" -eq 0 ] || worker_phase_attempts=$((worker_phase_attempts + 5))
+WORKER_PHASE_WALL=$((worker_seconds * worker_phase_attempts + 60))
+REVIEWER_PHASE_WALL=$((reviewer_seconds * 5 + 60))
+# draft-pr has its own bounded verifier/network workflow and may legitimately
+# outlive one model-provider attempt. Keep the outer kill fence conservative
+# but bounded independently from --provider-timeout so it cannot truncate the
+# verifier's default 10 minute budget (or another documented bounded value).
+PUBLISH_PHASE_WALL=86400
+oms_model_validate_name "$PLANNER_MODEL" || exit $?
+oms_model_validate_name "$WORKER_MODEL" || exit $?
+oms_model_validate_name "$REVIEWER_MODEL" || exit $?
+oms_model_validate_name "$PLANNER_FALLBACK_MODEL" || exit $?
+oms_model_validate_name "$WORKER_FALLBACK_MODEL" || exit $?
+oms_model_validate_name "$REVIEWER_FALLBACK_MODEL" || exit $?
+oms_reasoning_validate "$PLANNER_REASONING_EFFORT" || exit $?
+oms_reasoning_validate "$WORKER_REASONING_EFFORT" || exit $?
+oms_reasoning_validate "$REVIEWER_REASONING_EFFORT" || exit $?
 if [ -n "$PROPOSAL_SHA" ]; then
   case "$PROPOSAL_SHA" in
     *[!0-9a-f]*|"") fail "--expected-proposal-sha256 must be a lowercase SHA-256" ;;
@@ -157,7 +301,30 @@ if [ "$ACTION" != status ] && [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
   fail "a harness child cannot start or resume parent autopilot authority"
 fi
 
+if [ "$ACTION" != status ]; then
+  # The wrapper itself checks out the deterministic work branch. Disable
+  # mutable repository hooks before that top-level Git effect, then let every
+  # descendant inherit the same command-scope guard.
+  AUTOPILOT_GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-0}"
+  case "$AUTOPILOT_GIT_CONFIG_COUNT" in
+    0|[1-9]|[1-9][0-9]*) ;;
+    *) fail "GIT_CONFIG_COUNT must be a canonical non-negative integer" ;;
+  esac
+  [ "$AUTOPILOT_GIT_CONFIG_COUNT" -lt 64 ] || fail "GIT_CONFIG_COUNT is too large"
+  AUTOPILOT_HOOK_KEY="GIT_CONFIG_KEY_$AUTOPILOT_GIT_CONFIG_COUNT"
+  AUTOPILOT_HOOK_VALUE="GIT_CONFIG_VALUE_$AUTOPILOT_GIT_CONFIG_COUNT"
+  printf -v "$AUTOPILOT_HOOK_KEY" '%s' core.hooksPath
+  printf -v "$AUTOPILOT_HOOK_VALUE" '%s' /dev/null
+  export "${AUTOPILOT_HOOK_KEY?}" "${AUTOPILOT_HOOK_VALUE?}"
+  GIT_CONFIG_COUNT=$((AUTOPILOT_GIT_CONFIG_COUNT + 1))
+  export GIT_CONFIG_COUNT
+fi
+
 if [ "$ACTION" = status ]; then
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "unsafe repository Git execution config"
+  oms_git_assert_plain_index "$REPO" ||
+    fail "skip-worktree/assume-unchanged flags make autopilot status unsafe"
   if [ -f "$PLAN_FILE" ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status
   else
@@ -201,17 +368,38 @@ if proposals:
     except (OSError, ValueError):
         print("latest proposal: %s (unreadable)" % latest)
 PY
+  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+    if ! python3 "$RECEIPT_HELPER" inspect "$OUTER_RECEIPT" \
+      --repo "$REPO" --continuation; then
+      echo "outer run: invalid receipt (no continuation)"
+    fi
+  fi
   exit 0
 fi
 
 AUTOPILOT_TMPDIR=""
+PHASE_SUPERVISOR_PID=""
 autopilot_cleanup() {
   [ -z "${AUTOPILOT_TMPDIR:-}" ] || rm -rf -- "$AUTOPILOT_TMPDIR"
 }
+autopilot_stop_phase() {  # SIGNAL
+  local signal_name="$1"
+  [ -n "${PHASE_SUPERVISOR_PID:-}" ] || return 0
+  kill -s "$signal_name" "$PHASE_SUPERVISOR_PID" 2>/dev/null || true
+  wait "$PHASE_SUPERVISOR_PID" 2>/dev/null || true
+  PHASE_SUPERVISOR_PID=""
+}
+autopilot_signal() {  # SIGNAL EXIT_CODE
+  local signal_name="$1" exit_code="$2"
+  trap - EXIT HUP INT TERM
+  autopilot_stop_phase "$signal_name"
+  autopilot_cleanup
+  exit "$exit_code"
+}
 trap autopilot_cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'autopilot_signal HUP 129' HUP
+trap 'autopilot_signal INT 130' INT
+trap 'autopilot_signal TERM 143' TERM
 AUTOPILOT_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-autopilot.XXXXXX")" ||
   fail "cannot allocate private autopilot scratch"
 case "$AUTOPILOT_TMPDIR" in ""|/|"${HOME:-/nonexistent}") fail "unsafe autopilot scratch path" ;; esac
@@ -221,11 +409,115 @@ autopilot_mktemp() {
   mktemp "$AUTOPILOT_TMPDIR/item.XXXXXX"
 }
 
+run_phase() {  # LABEL WALL_SECONDS COMMAND...
+  local label="$1" wall="$2" phase_rc=0
+  shift 2
+  OMS_AUTOPILOT_PHASE_WALL="$wall" \
+    python3 "$RECEIPT_HELPER" supervise --wall "$wall" --kill-after 1 \
+    --label "$label" -- bash "$@" &
+  PHASE_SUPERVISOR_PID=$!
+  if wait "$PHASE_SUPERVISOR_PID"; then
+    phase_rc=0
+  else
+    phase_rc=$?
+  fi
+  PHASE_SUPERVISOR_PID=""
+  return "$phase_rc"
+}
+
 autopilot_shell_join() {  # ARGV...
   python3 - "$@" <<'PY' | tr -d '\r'
 import shlex, sys
 print(" ".join(shlex.quote(value) for value in sys.argv[1:]))
 PY
+}
+
+resolve_review_base_sha() {
+  local ref sha
+  ref="refs/remotes/$REMOTE/$BASE"
+  if ! git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+    ref="refs/heads/$BASE"
+  fi
+  sha="$(git -C "$REPO" rev-parse --verify "$ref^{commit}" 2>/dev/null)" ||
+    fail "cannot resolve --base from refs/remotes/$REMOTE/$BASE or refs/heads/$BASE"
+  sha="${sha//$'\r'/}"
+  case "$sha" in *[!0-9a-f]*|"") fail "resolved base commit is invalid" ;; esac
+  case "${#sha}" in 40|64) ;; *) fail "resolved base commit has an unsupported object id" ;; esac
+  printf '%s\n' "$sha"
+}
+
+outer_receipt_branch() {
+  local current target
+  current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
+    fail "autopilot requires a branch for its outer receipt"
+  current="${current//$'\r'/}"
+  target="oms/autopilot-$(printf '%.12s' "$BOUND_SPEC_SHA")"
+  if [ "$current" = "$BASE" ]; then printf '%s\n' "$target"; else printf '%s\n' "$current"; fi
+}
+
+outer_receipt_write_locked() {  # STAGE
+  local stage="$1" expected="absent" receipt_branch now
+  local -a receipt_args
+  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+    expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || return $?
+    expected="${expected//$'\r'/}"
+  fi
+  receipt_branch="${work_branch:-}"
+  [ -n "$receipt_branch" ] || receipt_branch="$(outer_receipt_branch)" || return $?
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  receipt_args=(write "$OUTER_RECEIPT" --expected "$expected" --stage "$stage" \
+    --repo "$REPO" --spec-sha256 "$BOUND_SPEC_SHA" \
+    --planner "$PLANNER" --worker "$WORKER" --reviewer "$REVIEWER" \
+    --planner-model "$PLANNER_MODEL" --worker-model "$WORKER_MODEL" \
+    --reviewer-model "$REVIEWER_MODEL" \
+    --planner-fallback-model "$PLANNER_FALLBACK_MODEL" \
+    --worker-fallback-model "$WORKER_FALLBACK_MODEL" \
+    --reviewer-fallback-model "$REVIEWER_FALLBACK_MODEL" \
+    --planner-reasoning-effort "$PLANNER_REASONING_EFFORT" \
+    --worker-reasoning-effort "$WORKER_REASONING_EFFORT" \
+    --reviewer-reasoning-effort "$REVIEWER_REASONING_EFFORT" \
+    --provider-timeout "$PROVIDER_TIMEOUT" \
+    --planner-timeout "$PLANNER_TIMEOUT" --worker-timeout "$WORKER_TIMEOUT" \
+    --reviewer-timeout "$REVIEWER_TIMEOUT" --allowed "$ALLOWED" \
+    --base "$BASE" --base-sha "$review_base_sha" --remote "$REMOTE" \
+    --max-cycles "$MAX_CYCLES" --initial-tasks "$INITIAL_TASKS" \
+    --replan-tasks "$REPLAN_TASKS" --review-mode "$REVIEW_MODE" \
+    --proposal "$APPROVED_PROPOSAL_PATH" \
+    --proposal-sha256 "$APPROVED_PROPOSAL_SHA" \
+    --branch "$receipt_branch" --updated "$now")
+  [ "$AUTO_REPAIR" -eq 0 ] || receipt_args+=(--auto-repair)
+  [ "$RETRY_KNOWN" -eq 0 ] || receipt_args+=(--retry-known)
+  [ "$DRAFT_PR" -eq 0 ] || receipt_args+=(--draft-pr)
+  python3 "$RECEIPT_HELPER" "${receipt_args[@]}"
+}
+
+outer_receipt_write() {  # STAGE
+  local value
+  value="$(oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_write_locked "$1")" || return $?
+  value="${value//$'\r'/}"
+  OUTER_RECEIPT_READY=1
+  printf '%s\n' "$value"
+}
+
+outer_receipt_archive_done_locked() {
+  local metadata stage receipt_sha
+  metadata="$(python3 "$RECEIPT_HELPER" metadata "$OUTER_RECEIPT")" || return $?
+  metadata="${metadata//$'\r'/}"
+  stage="$(printf '%s\n' "$metadata" | awk -F '\t' '{print $1}')"
+  receipt_sha="$(printf '%s\n' "$metadata" | awk -F '\t' '{print $3}')"
+  [ "$stage" = "done" ] || return 4
+  python3 "$RECEIPT_HELPER" archive-done "$OUTER_RECEIPT" \
+    --repo "$REPO" --expected "$receipt_sha" >/dev/null
+}
+
+outer_receipt_prepare_new() {
+  local metadata stage
+  [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ] || return 0
+  metadata="$(python3 "$RECEIPT_HELPER" metadata "$OUTER_RECEIPT")" || return $?
+  metadata="${metadata//$'\r'/}"
+  stage="$(printf '%s\n' "$metadata" | awk -F '\t' '{print $1}')"
+  [ "$stage" = "done" ] || return 0
+  oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_archive_done_locked
 }
 
 snapshot_regular_proposal() {  # SOURCE DEST
@@ -320,7 +612,12 @@ case "$spec_state" in
   confirmed|active) ;;
   *) fail "PROJECT.md must be confirmed (legacy active is also accepted)" ;;
 esac
-dirty="$(git -C "$REPO" status --porcelain)"
+oms_git_assert_safe_execution_config "$REPO" ||
+  fail "unsafe repository Git execution config"
+oms_git_assert_plain_index "$REPO" ||
+  fail "skip-worktree/assume-unchanged flags are forbidden during autopilot"
+dirty="$(git -c core.fsmonitor=false -C "$REPO" \
+  status --porcelain --untracked-files=all)"
 [ -z "$dirty" ] || fail "tree is dirty; autopilot requires a dedicated clean worktree"
 
 PLANNER="$(oms_normalize_provider "$PLANNER")" || fail "unknown planner provider"
@@ -437,12 +734,31 @@ propose_tasks() {  # PREFIX MAX
   local args out rc proposal_path proposal_digest continuation continuation_line
 
   [ -n "$ALLOWED" ] || fail "--allowed is required to generate a proposal"
+  ALLOWED="$(normalize_allowed "$ALLOWED")" || fail "--allowed is not a safe path envelope"
+  [ -n "$BOUND_SPEC_SHA" ] || BOUND_SPEC_SHA="$(oms_sha256_file "$SPEC")" ||
+    fail "cannot hash PROJECT.md"
+  [ -n "$review_base_sha" ] || review_base_sha="$(resolve_review_base_sha)"
+  mkdir -p "$REPO/.oms/plan" || fail "cannot create the private plan directory"
+  APPROVED_PROPOSAL_PATH=""
+  APPROVED_PROPOSAL_SHA=""
+  outer_receipt_prepare_new || fail "cannot archive the completed outer receipt"
+  outer_receipt_write proposing >/dev/null ||
+    fail "cannot bind this planning call to the durable outer receipt"
   args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED")
   [ -z "$prefix" ] || args+=(--id-prefix "$prefix")
+  [ -z "$PLANNER_MODEL" ] || args+=(--model "$PLANNER_MODEL")
+  [ -z "$PLANNER_FALLBACK_MODEL" ] || args+=(--fallback-model "$PLANNER_FALLBACK_MODEL")
+  args+=(--reasoning-effort "$PLANNER_REASONING_EFFORT" \
+    --provider-timeout "$PLANNER_TIMEOUT")
   out="$(autopilot_mktemp)" || fail "mktemp failed"
   rc=0
-  OMS_AUTOPILOT=1 "$PLAN_FROM_SPEC" "${args[@]}" > "$out" 2>&1 || rc=$?
+  OMS_AUTOPILOT=1 run_phase planner "$PLANNER_PHASE_WALL" \
+    "$PLAN_FROM_SPEC" "${args[@]}" > "$out" 2>&1 || rc=$?
   cat "$out"
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "planner installed unsafe repository Git execution config"
+  oms_git_assert_plain_index "$REPO" ||
+    fail "planner installed hidden Git index flags"
   if [ "$rc" -ne 0 ]; then
     rm -f "$out"
     return "$rc"
@@ -454,12 +770,40 @@ propose_tasks() {  # PREFIX MAX
   proposal_digest="${proposal_digest//$'\r'/}"
   [ -n "$proposal_path" ] && [ -n "$proposal_digest" ] ||
     fail "the proposal was generated without a path/digest receipt"
+  proposal_path="$(python3 - "$REPO" "$proposal_path" <<'PY' | tr -d '\r'
+import os, sys
+value = sys.argv[2]
+if not os.path.isabs(value):
+    value = os.path.join(sys.argv[1], value)
+print(os.path.realpath(value))
+PY
+)" || fail "cannot resolve the proposal path"
+  APPROVED_PROPOSAL_PATH="$proposal_path"
+  APPROVED_PROPOSAL_SHA="$proposal_digest"
+  outer_receipt_write proposal-review >/dev/null ||
+    fail "cannot persist the outer proposal-review receipt"
   continuation=(oms autopilot --repo "$REPO" --planner "$PLANNER" \
     --worker "$WORKER" --reviewer "$REVIEWER" --allowed "$ALLOWED" \
     --base "$BASE" --remote "$REMOTE" \
     --max-cycles "$MAX_CYCLES" --initial-tasks "$INITIAL_TASKS" \
-    --replan-tasks "$REPLAN_TASKS" --review-mode "$REVIEW_MODE")
+    --replan-tasks "$REPLAN_TASKS" --provider-timeout "$PROVIDER_TIMEOUT" \
+    --planner-timeout "$PLANNER_TIMEOUT" --worker-timeout "$WORKER_TIMEOUT" \
+    --reviewer-timeout "$REVIEWER_TIMEOUT" \
+    --planner-reasoning-effort "$PLANNER_REASONING_EFFORT" \
+    --worker-reasoning-effort "$WORKER_REASONING_EFFORT" \
+    --reviewer-reasoning-effort "$REVIEWER_REASONING_EFFORT" \
+    --review-mode "$REVIEW_MODE")
+  [ -z "$PLANNER_MODEL" ] || continuation+=(--planner-model "$PLANNER_MODEL")
+  [ -z "$WORKER_MODEL" ] || continuation+=(--worker-model "$WORKER_MODEL")
+  [ -z "$REVIEWER_MODEL" ] || continuation+=(--reviewer-model "$REVIEWER_MODEL")
+  [ -z "$PLANNER_FALLBACK_MODEL" ] ||
+    continuation+=(--planner-fallback-model "$PLANNER_FALLBACK_MODEL")
+  [ -z "$WORKER_FALLBACK_MODEL" ] ||
+    continuation+=(--worker-fallback-model "$WORKER_FALLBACK_MODEL")
+  [ -z "$REVIEWER_FALLBACK_MODEL" ] ||
+    continuation+=(--reviewer-fallback-model "$REVIEWER_FALLBACK_MODEL")
   [ "$AUTO_REPAIR" -eq 0 ] || continuation+=(--auto-repair)
+  [ "$RETRY_KNOWN" -eq 0 ] || continuation+=(--retry-known)
   [ "$DRAFT_PR" -eq 0 ] || continuation+=(--draft-pr)
   continuation+=(run --proposal "$proposal_path" \
     --expected-proposal-sha256 "$proposal_digest")
@@ -482,6 +826,10 @@ if [ "$ACTION" = propose ]; then
   bind_plan_contract
   [ "$(plan_view all-done)" = 1 ] ||
     fail "current plan still has unfinished tasks; run it before proposing a remainder"
+  if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept >/dev/null 2>&1; then
+    echo "autopilot: acceptance already passes; no remainder proposal is needed"
+    exit 0
+  fi
   [ "$(plan_view has-r1)" = 0 ] || park "replan-budget-used" "inspect the remaining acceptance failure"
   propose_tasks r1- "$REPLAN_TASKS" || exit $?
 fi
@@ -490,6 +838,14 @@ fi
 git check-ref-format --branch "$BASE" >/dev/null 2>&1 || fail "--base is not a valid branch name"
 
 if [ -n "$PROPOSAL" ]; then
+  reviewed_proposal_path="$(python3 - "$REPO" "$PROPOSAL" <<'PY' | tr -d '\r'
+import os, sys
+value = sys.argv[2]
+if not os.path.isabs(value):
+    value = os.path.join(sys.argv[1], value)
+print(os.path.realpath(value))
+PY
+)" || fail "cannot resolve the reviewed proposal path"
   [ -n "$ALLOWED" ] || fail "run --proposal requires the reviewed --allowed envelope"
   [ -n "$PROPOSAL_SHA" ] ||
     fail "run --proposal requires --expected-proposal-sha256 from the reviewed proposal"
@@ -504,6 +860,15 @@ if [ -n "$PROPOSAL" ]; then
   snapshot_sha="$(oms_sha256_file "$proposal_snapshot")" || fail "cannot hash the proposal"
   [ "$snapshot_sha" = "$PROPOSAL_SHA" ] ||
     fail "proposal bytes do not match the reviewed --expected-proposal-sha256"
+  APPROVED_PROPOSAL_PATH="$reviewed_proposal_path"
+  APPROVED_PROPOSAL_SHA="$PROPOSAL_SHA"
+  ALLOWED="$(normalize_allowed "$ALLOWED")" ||
+    fail "--allowed is not a safe path envelope"
+  BOUND_SPEC_SHA="$(oms_sha256_file "$SPEC")" || fail "cannot hash PROJECT.md"
+  review_base_sha="$(resolve_review_base_sha)"
+  outer_receipt_prepare_new || fail "cannot prepare the durable proposal receipt"
+  outer_receipt_write proposal-review >/dev/null ||
+    fail "run options differ from the durable proposal-review receipt"
   PROPOSAL="$proposal_snapshot"
   proposal_meta="$(proposal_info "$PROPOSAL")" || fail "proposal metadata/tasks are invalid"
   proposal_meta="${proposal_meta//$'\r'/}"
@@ -532,25 +897,16 @@ if [ -n "$PROPOSAL" ]; then
   elif [ -n "$prefix" ]; then
     fail "unsupported proposal tranche prefix: $prefix"
   fi
-  OMS_AUTOPILOT=1 "$PLAN_FROM_SPEC" "${apply_args[@]}"
+  OMS_AUTOPILOT=1 run_phase proposal-apply "$PLANNER_PHASE_WALL" \
+    "$PLAN_FROM_SPEC" "${apply_args[@]}"
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "proposal apply installed unsafe repository Git execution config"
+  oms_git_assert_plain_index "$REPO" ||
+    fail "proposal apply installed hidden Git index flags"
 fi
 
 [ -f "$PLAN_FILE" ] || fail "no approved plan; run autopilot propose first"
 bind_plan_contract
-
-resolve_review_base_sha() {
-  local ref sha
-  ref="refs/remotes/$REMOTE/$BASE"
-  if ! git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
-    ref="refs/heads/$BASE"
-  fi
-  sha="$(git -C "$REPO" rev-parse --verify "$ref^{commit}" 2>/dev/null)" ||
-    fail "cannot resolve --base from refs/remotes/$REMOTE/$BASE or refs/heads/$BASE"
-  sha="${sha//$'\r'/}"
-  case "$sha" in *[!0-9a-f]*|"") fail "resolved base commit is invalid" ;; esac
-  case "${#sha}" in 40|64) ;; *) fail "resolved base commit has an unsupported object id" ;; esac
-  printf '%s\n' "$sha"
-}
 
 # A branch name is mutable. Freeze the reviewed commit before goal-drive can
 # advance the current branch, then use this exact object for semantic review
@@ -561,6 +917,10 @@ git -C "$REPO" merge-base --is-ancestor "$review_base_sha" HEAD 2>/dev/null ||
 
 ensure_work_branch() {
   local current target current_head target_head recovery_branch recovery_suffix
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "unsafe repository Git execution config before branch selection"
+  oms_git_assert_plain_index "$REPO" ||
+    fail "hidden Git index flags before branch selection"
   current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
     fail "autopilot requires a branch, not detached HEAD"
   current="${current//$'\r'/}"
@@ -610,7 +970,8 @@ ensure_work_branch() {
       park "autopilot-branch-create-failed" "create a clean feature branch"
     echo "autopilot: created local branch $target"
   fi
-  [ -z "$(git -C "$REPO" status --porcelain)" ] ||
+  [ -z "$(git -c core.fsmonitor=false -C "$REPO" \
+    status --porcelain --untracked-files=all)" ] ||
     park "dirty-after-branch" "inspect the branch checkout"
   bind_plan_contract
 }
@@ -624,8 +985,9 @@ import sys
 repo, base, allowed_text = sys.argv[1:]
 try:
     raw = subprocess.check_output([
-        "git", "-C", repo, "diff", "--name-only", "--no-renames", "-z",
-        base, "HEAD", "--",
+        "git", "-c", "core.fsmonitor=false", "-c", "diff.external=",
+        "-C", repo, "diff", "--no-ext-diff", "--no-textconv",
+        "--name-only", "--no-renames", "-z", base, "HEAD", "--",
     ], stderr=subprocess.DEVNULL)
 except (OSError, subprocess.CalledProcessError):
     raise SystemExit(2)
@@ -644,6 +1006,21 @@ for value in raw.split(b"\0"):
 PY
 }
 
+assert_work_branch_scope() {  # PARK_REASON HIDDEN_INDEX_PARK_REASON
+  local scope_rc=0
+  oms_git_assert_safe_execution_config "$REPO" ||
+    park "unsafe-git-execution-config" "remove executable repository Git config"
+  oms_git_assert_plain_index "$REPO" ||
+    park "$2" "clear skip-worktree/assume-unchanged flags and inspect tracked files"
+  work_branch_scope_check || scope_rc=$?
+  case "$scope_rc" in
+    0) return 0 ;;
+    3) park "$1" "remove or separately review history outside $ALLOWED" ;;
+    *) park "work-branch-scope-unreadable" \
+         "inspect the complete branch diff from the reviewed base" ;;
+  esac
+}
+
 # Keep the named base immutable across interrupted local runs as well as Draft
 # PR runs. That makes the frozen whole-change review base durable by topology:
 # goal-drive commits only on the deterministic feature branch.
@@ -651,13 +1028,12 @@ ensure_work_branch
 work_branch="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
   fail "autopilot requires a branch after work-branch selection"
 work_branch="${work_branch//$'\r'/}"
-work_branch_scope_rc=0
-work_branch_scope_check || work_branch_scope_rc=$?
-case "$work_branch_scope_rc" in
-  0) ;;
-  3) park "work-branch-outside-scope" "remove or separately review history outside $ALLOWED" ;;
-  *) park "work-branch-scope-unreadable" "inspect the complete branch diff from the reviewed base" ;;
-esac
+outer_receipt_prepare_new || fail "cannot prepare the durable run receipt"
+outer_receipt_write approved >/dev/null ||
+  fail "cannot bind this run to the durable outer receipt"
+outer_receipt_write driving >/dev/null ||
+  park "outer-receipt-write-failed" "inspect oms autopilot --repo . status"
+assert_work_branch_scope "work-branch-outside-scope" "hidden-index-flags"
 spec_sha="$BOUND_SPEC_SHA"
 accept_cmd="$(plan_view accept)"
 accept_cmd="${accept_cmd//$'\r'/}"
@@ -666,12 +1042,25 @@ accept_sha="$(printf '%s' "$accept_cmd" | oms_sha256_stream)" || fail "cannot ha
 
 drive_run_id="ap-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
-  --run-id "$drive_run_id")
+  --run-id "$drive_run_id" --provider-timeout "$WORKER_TIMEOUT" \
+  --reasoning-effort "$WORKER_REASONING_EFFORT" \
+  --expected-ref "refs/heads/$work_branch")
+[ -z "$WORKER_MODEL" ] || drive_args+=(--model "$WORKER_MODEL")
+[ -z "$WORKER_FALLBACK_MODEL" ] || drive_args+=(--fallback-model "$WORKER_FALLBACK_MODEL")
 [ "$AUTO_REPAIR" -eq 0 ] || drive_args+=(--auto-repair)
+[ "$RETRY_KNOWN" -eq 0 ] || drive_args+=(--retry-known)
 drive_out="$(autopilot_mktemp)" || fail "mktemp failed"
 drive_rc=0
-"$GOAL_DRIVE" "${drive_args[@]}" > "$drive_out" 2>&1 || drive_rc=$?
+OMS_WORKER_GUARD_STRICT=1 OMS_WORKER_GUARD_OFF=0 \
+  OMS_PEER_TIMEOUT="$WORKER_TIMEOUT" \
+  run_phase goal-drive "$WORKER_PHASE_WALL" \
+    "$GOAL_DRIVE" "${drive_args[@]}" > "$drive_out" 2>&1 || drive_rc=$?
 cat "$drive_out"
+oms_git_assert_safe_execution_config "$REPO" ||
+  park "unsafe-git-execution-config" "remove executable repository Git config"
+oms_git_assert_plain_index "$REPO" ||
+  park "hidden-index-flags-after-drive" \
+    "clear skip-worktree/assume-unchanged flags and inspect tracked files"
 
 current_work_branch="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
   park "branch-changed-after-drive" "restore $work_branch and inspect the drive"
@@ -687,13 +1076,15 @@ current_accept_sha="$(printf '%s' "$current_accept" | oms_sha256_stream)" ||
   park "acceptance-unhashable" "repair the plan contract"
 [ "$current_accept_sha" = "$accept_sha" ] ||
   park "acceptance-changed" "review the changed acceptance command"
+assert_work_branch_scope "work-branch-outside-scope-after-drive" \
+  "hidden-index-flags-after-drive"
 
 # goal-drive binds its receipt, status, and reason in one canonical final line
 # written by the parent after its durable row. Captured child output may contain
 # arbitrary text, so a duplicate prefix or any later non-empty line invalidates
 # the result. The mutable progress ledger only cross-checks the exact result;
 # it never selects the reason that can spend the bounded replan tranche.
-drive_terminal_park_reason() {  # RUN_ID OUTPUT
+drive_terminal_result() {  # RUN_ID OUTPUT -> STATUS<TAB>REASON
   [ -f "$PROGRESS_FILE" ] || return 0
   python3 - "$1" "$2" "$PROGRESS_FILE" <<'PY' | tr -d '\r'
 import json
@@ -729,7 +1120,7 @@ if (prefix_count != 1 or candidate is None or
         candidate_line != last_nonempty):
     raise SystemExit(0)
 result_run, receipt, status, reason = candidate
-if result_run != run_id or status != "park":
+if result_run != run_id:
     raise SystemExit(0)
 
 matched = False
@@ -751,20 +1142,23 @@ try:
 except OSError:
     matched = False
 if matched:
-    print(reason)
+    print("%s\t%s" % (status, reason))
 PY
 }
 
+drive_result="$(drive_terminal_result "$drive_run_id" "$drive_out")"
+drive_result="${drive_result//$'\r'/}"
+drive_status="$(printf '%s\n' "$drive_result" | awk -F '\t' '{print $1}')"
+drive_reason="$(printf '%s\n' "$drive_result" | awk -F '\t' '{print $2}')"
 if [ "$drive_rc" -ne 0 ]; then
-  drive_park_reason="$(drive_terminal_park_reason "$drive_run_id" "$drive_out")"
-  drive_park_reason="${drive_park_reason//$'\r'/}"
   if [ "$drive_rc" -eq 3 ] &&
-    [ "$drive_park_reason" = tasks-exhausted ]; then
+    [ "$drive_status" = park ] && [ "$drive_reason" = tasks-exhausted ]; then
     [ "$(plan_view all-done)" = 1 ] ||
       park "tasks-exhausted-with-unfinished-work" "inspect the plan state"
     [ "$(plan_view has-r1)" = 0 ] ||
       park "replan-budget-used" "inspect the remaining acceptance failure"
-    [ -z "$(git -C "$REPO" status --porcelain)" ] ||
+    [ -z "$(git -c core.fsmonitor=false -C "$REPO" \
+      status --porcelain --untracked-files=all)" ] ||
       park "dirty-before-replan" "preserve or remove foreign work"
     rm -f "$drive_out"
     propose_tasks r1- "$REPLAN_TASKS" || exit $?
@@ -772,6 +1166,11 @@ if [ "$drive_rc" -ne 0 ]; then
   rm -f "$drive_out"
   park "goal-drive-failed" "inspect the drive output and failure ledger"
 fi
+[ "$drive_status" = "done" ] && [ "$drive_reason" = acceptance-pass ] || {
+  rm -f "$drive_out"
+  park "goal-drive-result-invalid" \
+    "inspect the missing or mismatched goal-drive terminal receipt"
+}
 rm -f "$drive_out"
 
 # Re-run the exact acceptance receipt immediately before any semantic or remote
@@ -787,10 +1186,13 @@ final_head="${final_head//$'\r'/}"
 final_tree="${final_tree//$'\r'/}"
 git -C "$REPO" merge-base --is-ancestor "$review_base_sha" "$final_head" 2>/dev/null ||
   park "base-not-ancestor-after-drive" "rebase onto the reviewed base and repeat the run"
+assert_work_branch_scope "work-branch-outside-scope-before-review" \
+  "hidden-index-flags-before-review"
 
 assert_final_snapshot() {
   local current
-  [ -z "$(git -C "$REPO" status --porcelain)" ] ||
+  [ -z "$(git -c core.fsmonitor=false -C "$REPO" \
+    status --porcelain --untracked-files=all)" ] ||
     park "tree-changed-after-acceptance" "inspect the foreign work"
   current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
     park "branch-changed-after-review" "restore $work_branch and repeat whole-change review"
@@ -809,13 +1211,27 @@ assert_final_snapshot() {
 
 review_rc=0
 review_evidence="mode=off outcome=skipped reviewer=none"
+outer_receipt_write reviewing >/dev/null ||
+  park "outer-receipt-write-failed" "inspect oms autopilot --repo . status"
 if [ "$REVIEW_MODE" != off ]; then
   review_out="$(autopilot_mktemp)" || fail "mktemp failed"
-  "$PEER_REVIEW" --repo "$REPO" --base "$review_base_sha" \
-    --providers "$REVIEWER" --writer "$WORKER" --gate --verify "$accept_cmd" \
+  review_args=(--repo "$REPO" --base "$review_base_sha" \
+    --providers "$REVIEWER" --writer "$WORKER" --gate --verify "$accept_cmd")
+  [ -z "$REVIEWER_MODEL" ] || review_args+=(--model "$REVIEWER_MODEL")
+  [ -z "$REVIEWER_FALLBACK_MODEL" ] ||
+    review_args+=(--fallback-model "$REVIEWER_FALLBACK_MODEL")
+  review_args+=(--reasoning-effort "$REVIEWER_REASONING_EFFORT" \
     --prompt "Review whether the confirmed PROJECT.md goal and every explicit success criterion are satisfied by this whole change. Treat ambiguity as a finding; do not widen scope." \
-    > "$review_out" 2>&1 || review_rc=$?
+  )
+  OMS_PEER_TIMEOUT="$REVIEWER_TIMEOUT" \
+    run_phase peer-review "$REVIEWER_PHASE_WALL" \
+      "$PEER_REVIEW" "${review_args[@]}" > "$review_out" 2>&1 || review_rc=$?
   cat "$review_out"
+  oms_git_assert_safe_execution_config "$REPO" ||
+    park "unsafe-git-execution-config" "remove executable repository Git config"
+  oms_git_assert_plain_index "$REPO" ||
+    park "hidden-index-flags-after-review" \
+      "clear skip-worktree/assume-unchanged flags and inspect tracked files"
   rm -f "$review_out"
   if [ "$review_rc" -eq 0 ]; then
     echo "autopilot: semantic review: pass"
@@ -833,6 +1249,8 @@ if [ "$REVIEW_MODE" != off ]; then
   fi
 fi
 
+assert_work_branch_scope "work-branch-outside-scope-after-review" \
+  "hidden-index-flags-after-review"
 assert_final_snapshot
 # peer-review exit 1 can represent either semantic dissent or its own
 # mechanical verifier failure. Shadow mode keeps dissent advisory, but never
@@ -843,19 +1261,37 @@ fi
 assert_final_snapshot
 
 if [ "$DRAFT_PR" -eq 1 ]; then
+  outer_receipt_write publishing >/dev/null ||
+    park "outer-receipt-write-failed" "inspect oms autopilot --repo . status"
   prepare_out="$(autopilot_mktemp)" || fail "mktemp failed"
-  "$DRAFT_PR_TOOL" prepare --repo "$REPO" --remote "$REMOTE" --base "$BASE" \
+  run_phase draft-prepare "$PUBLISH_PHASE_WALL" \
+    "$DRAFT_PR_TOOL" prepare --repo "$REPO" --remote "$REMOTE" --base "$BASE" \
     --verify "$accept_cmd" --expected-head "$final_head" --expected-tree "$final_tree" \
     --expected-base-sha "$review_base_sha" \
     --expected-spec-sha256 "$spec_sha" \
     --review-evidence "$review_evidence" > "$prepare_out"
   cat "$prepare_out"
+  oms_git_assert_safe_execution_config "$REPO" ||
+    park "unsafe-git-execution-config" "remove executable repository Git config"
+  oms_git_assert_plain_index "$REPO" ||
+    park "hidden-index-flags-before-publication" \
+      "clear skip-worktree/assume-unchanged flags and inspect tracked files"
   intent="$(sed -n 's/^intent: //p' "$prepare_out" | tail -n 1)"
   rm -f "$prepare_out"
   [ -n "$intent" ] || park "draft-intent-missing" "inspect draft-pr prepare output"
+  assert_work_branch_scope "work-branch-outside-scope-before-publication" \
+    "hidden-index-flags-before-publication"
   assert_final_snapshot
-  "$DRAFT_PR_TOOL" publish --repo "$REPO" --intent "$intent"
+  run_phase draft-publish "$PUBLISH_PHASE_WALL" \
+    "$DRAFT_PR_TOOL" publish --repo "$REPO" --intent "$intent"
+  oms_git_assert_safe_execution_config "$REPO" ||
+    park "unsafe-git-execution-config" "remove executable repository Git config"
+  oms_git_assert_plain_index "$REPO" ||
+    park "hidden-index-flags-after-publication" \
+      "clear skip-worktree/assume-unchanged flags and inspect tracked files"
 fi
 
+outer_receipt_write "done" >/dev/null ||
+  park "outer-receipt-write-failed" "inspect oms autopilot --repo . status"
 echo "autopilot: done (acceptance passed)"
 exit 0

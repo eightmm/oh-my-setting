@@ -19,11 +19,17 @@ MAX_TASKS=6
 ID_PREFIX=""
 ALLOWED_ENVELOPE=""
 EXPECTED_PROPOSAL_SHA=""
+MODEL=""
+FALLBACK_MODEL=""
+REASONING_EFFORT=auto
+PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
 
 usage() {
   cat <<'EOF'
 Usage: plan-from-spec.sh [--repo PATH] [--to PROVIDER] [--max-tasks N]
                          [--id-prefix PREFIX] [--allowed PATHS]
+                         [--model MODEL] [--fallback-model MODEL]
+                         [--reasoning-effort E] [--provider-timeout DUR]
        plan-from-spec.sh [--repo PATH] --apply PROPOSAL.json
 
 Read the repository's PROJECT.md contract (Goal/Scope/Non-goals, Commands,
@@ -38,6 +44,13 @@ for review — nothing touches the task board until --apply.
                   autopilot replans use r1- so a second tranche is observable.
   --allowed PATHS Comma-separated immutable path envelope for every proposed
                   task. Stored in the proposal and rechecked during apply.
+  --model MODEL    Exact planner model forwarded to agent-call.
+  --fallback-model MODEL
+                  One-shot planner capacity fallback model.
+  --reasoning-effort E
+                  auto, low, medium, high, xhigh, max, or ultra.
+  --provider-timeout DUR
+                  Planner wall-clock timeout (for example 15m).
   --apply FILE    Append a reviewed proposal's tasks to the plan. Creates the
                   plan (goal + acceptance from PROJECT.md) when absent; an
                   existing plan and its acceptance command are never replaced.
@@ -68,6 +81,18 @@ while [ "$#" -gt 0 ]; do
     --allowed)
       [ "$#" -ge 2 ] || fail "--allowed requires paths"
       ALLOWED_ENVELOPE="$2"; shift 2 ;;
+    --model)
+      [ "$#" -ge 2 ] || fail "--model requires a value"
+      MODEL="$2"; shift 2 ;;
+    --fallback-model)
+      [ "$#" -ge 2 ] || fail "--fallback-model requires a value"
+      FALLBACK_MODEL="$2"; shift 2 ;;
+    --reasoning-effort)
+      [ "$#" -ge 2 ] || fail "--reasoning-effort requires a value"
+      REASONING_EFFORT="$2"; shift 2 ;;
+    --provider-timeout)
+      [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
+      PROVIDER_TIMEOUT="$2"; shift 2 ;;
     --apply) [ "$#" -ge 2 ] || fail "--apply requires a file"; APPLY_FILE="$2"; shift 2 ;;
     --expected-proposal-sha256)
       [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a digest"
@@ -76,6 +101,24 @@ while [ "$#" -gt 0 ]; do
     *) fail "unknown argument: $1" ;;
   esac
 done
+
+case "$REASONING_EFFORT" in
+  auto|low|medium|high|xhigh|max|ultra) ;;
+  *) fail "--reasoning-effort must be auto, low, medium, high, xhigh, max, or ultra" ;;
+esac
+printf '%s\n' "$PROVIDER_TIMEOUT" | grep -Eq '^[1-9][0-9]*([smh])?$' ||
+  fail "--provider-timeout must be a positive duration such as 15m"
+python3 - "$PROVIDER_TIMEOUT" <<'PY' ||
+import re, sys
+match = re.fullmatch(r"([1-9][0-9]*)(s|m|h)?", sys.argv[1])
+if not match:
+    raise SystemExit(1)
+value = int(match.group(1))
+unit = match.group(2) or "s"
+milliseconds = value * {"s": 1000, "m": 60000, "h": 3600000}[unit]
+raise SystemExit(0 if milliseconds <= 24 * 60 * 60 * 1000 else 1)
+PY
+  fail "--provider-timeout must not exceed 24h"
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 SPEC="$REPO/PROJECT.md"
@@ -113,7 +156,7 @@ except (OSError, ValueError) as exc:
     sys.exit(3)
 top_keys = {
     "schema", "kind", "spec_sha256", "plan_sha256", "base_sha",
-    "id_prefix", "allowed_envelope", "tasks",
+    "id_prefix", "allowed_envelope", "acceptance_files", "tasks",
 }
 if (not isinstance(data, dict) or set(data) != top_keys or data.get("schema") != 1 or
         data.get("kind") != "agent-plan-proposal"):
@@ -125,6 +168,14 @@ if not isinstance(tasks, list) or not tasks:
     sys.exit(3)
 if len(tasks) > int(sys.argv[2]):
     sys.stderr.write("proposal exceeds the task cap (%d)\n" % int(sys.argv[2]))
+    sys.exit(3)
+acceptance_files = data.get("acceptance_files")
+if (not isinstance(acceptance_files, list) or
+        any(not isinstance(item, str) or not item for item in acceptance_files) or
+        len(acceptance_files) > 64 or
+        any(len(item.encode("utf-8")) > 240 for item in acceptance_files) or
+        acceptance_files != sorted(set(acceptance_files))):
+    sys.stderr.write("proposal acceptance_files must be a sorted unique path list (max 64 paths, 240 bytes each)\n")
     sys.exit(3)
 id_re = re.compile(r"^[A-Za-z0-9._-]+$")
 prefix = sys.argv[3]
@@ -152,6 +203,9 @@ def clean_rel(value, label):
 try:
     envelope = [clean_rel(item, "allowed envelope")
                 for item in re.split(r"[,\s]+", envelope_text) if item.strip()]
+    normalized_acceptance = [clean_rel(item, "acceptance file") for item in acceptance_files]
+    if normalized_acceptance != acceptance_files or any(item == "." for item in normalized_acceptance):
+        raise ValueError("proposal acceptance_files must be normalized repo-relative file paths")
 except ValueError as exc:
     sys.stderr.write(str(exc) + "\n"); sys.exit(3)
 
@@ -236,6 +290,145 @@ spec_section() {  # HEADER -> section body
   awk -v h="## $1" '{ sub(/\r$/, "", $0) } $0 == h {f=1; next} /^## / {f=0} f' "$SPEC"
 }
 
+# Extract one executable acceptance line and the files whose reviewed bytes
+# define it. A complete single-backtick Markdown wrapper is presentation, not
+# shell syntax; every other backtick shape is rejected so command substitution
+# cannot hide inside a contract. Custom commands must name their verification
+# surface explicitly. Conventional project check entrypoints may derive it.
+acceptance_contract() {  # prints COMMAND, then comma-separated FILES
+  python3 - "$SPEC" "$REPO" <<'PY'
+import os, re, stat, sys, unicodedata
+
+spec, repo = sys.argv[1:]
+try:
+    text = open(spec, encoding="utf-8").read()
+except (OSError, UnicodeError) as exc:
+    sys.stderr.write("error: cannot read PROJECT.md: %s\n" % exc)
+    sys.exit(2)
+lines = text.splitlines()
+
+def section(name):
+    header = "## " + name
+    try:
+        start = lines.index(header) + 1
+    except ValueError:
+        return []
+    out = []
+    for index in range(start, len(lines)):
+        if lines[index].startswith("## "):
+            break
+        out.append((index, lines[index]))
+    return out
+
+def field(section_name, label):
+    found = []
+    pattern = re.compile(r"^- " + re.escape(label) + r":[ \t]*(.*)$")
+    body = section(section_name)
+    for offset, (line_no, line) in enumerate(body):
+        match = pattern.match(line)
+        if match:
+            found.append((offset, line_no, match.group(1)))
+    if len(found) > 1:
+        raise ValueError("PROJECT.md has multiple '- %s:' fields" % label)
+    if not found:
+        return None
+    offset, line_no, value = found[0]
+    # A Markdown list continuation silently turns one reviewed-looking line
+    # into a multi-line shell program in less strict parsers. Refuse any body
+    # before the next bullet/header instead of guessing how Markdown folds it.
+    for _, following in body[offset + 1:]:
+        if following.startswith("- "):
+            break
+        if following.strip():
+            raise ValueError("%s must stay on one Markdown line" % label)
+    return value.strip()
+
+def executable(value, label):
+    if value is None or not value:
+        return ""
+    if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
+        raise ValueError("%s contains a control or format character" % label)
+    ticks = value.count("`")
+    if ticks:
+        if ticks == 2 and value.startswith("`") and value.endswith("`") and len(value) > 2:
+            value = value[1:-1].strip()
+        else:
+            raise ValueError("%s has unmatched/multiple backticks or backtick substitution" % label)
+    if not value or value.endswith("\\"):
+        raise ValueError("%s is empty or continues onto another line" % label)
+    return value
+
+def clean_path(value):
+    if (not value or any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value) or
+            "\\" in value or value.startswith("/") or
+            re.match(r"^[A-Za-z]:", value)):
+        raise ValueError("Required check files must be normalized repo-relative paths")
+    while value.startswith("./"):
+        value = value[2:]
+    value = value.rstrip("/")
+    parts = value.split("/")
+    if not value or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("Required check files must be normalized repo-relative paths")
+    if len(value.encode("utf-8")) > 240:
+        raise ValueError("Required check file path exceeds 240 bytes")
+    path = os.path.join(repo, *parts)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise ValueError("Required check file does not exist: %s" % value)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("Required check file is not a regular non-symlink file: %s" % value)
+    physical_repo = os.path.realpath(repo)
+    physical_path = os.path.realpath(path)
+    if (physical_path != os.path.join(physical_repo, *parts) or
+            os.path.commonpath([physical_repo, physical_path]) != physical_repo):
+        raise ValueError("Required check file must not traverse a symlink: %s" % value)
+    return "/".join(parts)
+
+try:
+    raw_command = field("Verification", "Required checks")
+    if raw_command is None or not raw_command.strip():
+        raw_command = field("Commands", "Test")
+    command = executable(raw_command, "Required checks/Test")
+    if not command:
+        raise ValueError("PROJECT.md has no executable verification command")
+    raw_files = field("Verification", "Required check files")
+    files = []
+    if raw_files:
+        values = [part for part in re.split(r"[ \t,]+", raw_files.strip()) if part]
+        if len(values) > 64:
+            raise ValueError("Required check files accepts at most 64 paths")
+        files = sorted(set(clean_path(value) for value in values))
+    if not files:
+        # Only simple conventional entrances qualify for implicit discovery.
+        # Complex/composed commands need an explicit complete surface.
+        match = re.fullmatch(
+            r"(?:bash|sh)[ \t]+((?:scripts/check|tests/(?:run|check|test|tests))\.sh)"
+            r"(?:[ \t]+[-A-Za-z0-9_./:=]+)*", command)
+        if match:
+            files = [clean_path(match.group(1))]
+        else:
+            standard = (
+                r"make(?:[ \t]+(?:test|check))?",
+                r"(?:npm|pnpm|yarn|bun)[ \t]+(?:test|run[ \t]+test)",
+                r"(?:python3?|python)[ \t]+-m[ \t]+pytest(?:[ \t]+[-A-Za-z0-9_./:=]+)*",
+                r"pytest(?:[ \t]+[-A-Za-z0-9_./:=]+)*",
+                r"cargo[ \t]+test(?:[ \t]+[-A-Za-z0-9_./:=]+)*",
+                r"go[ \t]+test(?:[ \t]+[-A-Za-z0-9_./:=]+)*",
+                r"(?:mvn|gradle|\./gradlew)[ \t]+test(?:[ \t]+[-A-Za-z0-9_./:=]+)*",
+            )
+            if not any(re.fullmatch(pattern, command) for pattern in standard):
+                raise ValueError(
+                    "custom acceptance requires '- Required check files:' with every verifier input")
+except ValueError as exc:
+    sys.stderr.write("error: %s\n" % exc)
+    sys.exit(2)
+
+print(command)
+print(",".join(files))
+PY
+}
+
 if [ -n "$APPLY_FILE" ]; then
   [ -f "$APPLY_FILE" ] || fail "no proposal at $APPLY_FILE"
   proposal_meta="$(python3 - "$APPLY_FILE" <<'PY'
@@ -247,6 +440,7 @@ print(data.get("spec_sha256") or "-")
 print(data.get("plan_sha256") or "-")
 print(",".join(str(item) for item in allowed))
 print(data.get("id_prefix") or "")
+print(",".join(str(item) for item in (data.get("acceptance_files") or [])))
 PY
 )"
   proposal_meta="${proposal_meta//$'\r'/}"
@@ -254,6 +448,7 @@ PY
   proposal_plan_sha="$(printf '%s\n' "$proposal_meta" | sed -n 2p)"
   proposal_allowed="$(printf '%s\n' "$proposal_meta" | sed -n 3p)"
   proposal_prefix="$(printf '%s\n' "$proposal_meta" | sed -n 4p)"
+  proposal_accept_files="$(printf '%s\n' "$proposal_meta" | sed -n 5p)"
   if [ -n "$ID_PREFIX" ] && [ "$ID_PREFIX" != "$proposal_prefix" ]; then
     fail "--id-prefix does not match the reviewed proposal"
   fi
@@ -267,9 +462,12 @@ PY
   count="${out#ok }"
   [ -f "$SPEC" ] || fail "PROJECT.md is required to bind a proposal apply"
   goal="$(spec_field Goal)"
-  accept="$(spec_section Verification | sed -n 's/^- Required checks:[[:space:]]*//p' | sed -n 1p)"
-  [ -n "$accept" ] || accept="$(spec_section Commands | sed -n 's/^- Test:[[:space:]]*//p' | sed -n 1p)"
-  [ -n "$accept" ] || fail "PROJECT.md has no executable verification command"
+  acceptance_meta="$(acceptance_contract)" || exit 2
+  acceptance_meta="${acceptance_meta//$'\r'/}"
+  accept="$(printf '%s\n' "$acceptance_meta" | sed -n 1p)"
+  accept_files="$(printf '%s\n' "$acceptance_meta" | sed -n 2p)"
+  [ "$proposal_accept_files" = "$accept_files" ] ||
+    fail "proposal acceptance_files do not match the current PROJECT.md verification surface"
 
   current_spec_sha="$(oms_sha256_file "$SPEC")" || fail "cannot hash PROJECT.md"
   if [ -f "$PLAN_FILE" ]; then
@@ -304,6 +502,7 @@ PY
     --expected-proposal-sha256 "$proposal_sha" \
     --expected-plan-sha256 "$expected_plan_sha" \
     --goal "${goal:-see PROJECT.md}" --accept "$accept" \
+    --accept-files "$accept_files" \
     --allowed-envelope "$apply_allowed" --max-tasks "$MAX_TASKS" >/dev/null
   if [ "${OMS_AUTOPILOT:-0}" = 1 ]; then
     echo "plan-from-spec: $count task(s) applied"
@@ -322,6 +521,11 @@ case "$state" in
   "") fail "PROJECT.md has no '- State:' field" ;;
   *) fail "PROJECT.md State must be confirmed (legacy active is also accepted)" ;;
 esac
+
+acceptance_meta="$(acceptance_contract)" || exit 2
+acceptance_meta="${acceptance_meta//$'\r'/}"
+accept="$(printf '%s\n' "$acceptance_meta" | sed -n 1p)"
+accept_files="$(printf '%s\n' "$acceptance_meta" | sed -n 2p)"
 
 spec_sha="$(oms_sha256_file "$SPEC")" || fail "cannot hash PROJECT.md"
 if [ -f "$PLAN_FILE" ]; then
@@ -362,6 +566,9 @@ repo-relative path prefixes the task may touch; verify is one runnable command
 that fails while the task is unfinished; depends names only earlier tasks in
 the list or an existing DONE task; $scope_rule; never repeat or modify an
 existing task; prefer few, landable, independently verifiable tasks.
+Keep each task within roughly 180 changed lines by default so worker/review
+budgets can carry the full patch. If a genuinely indivisible task must exceed
+that budget, make the exception explicit in its title so parent review sees it.
 
 --- PROJECT.md contract ---
 State: $state
@@ -377,8 +584,11 @@ $plan_context
 --- end contract ---"
 
 raw="$(agent_memory_mktemp)" || fail "mktemp failed"
-if ! "$ROOT/scripts/agent-call.sh" --to "$PROVIDER" --repo "$REPO" \
-    --operation plan --prompt "$prompt" > "$raw" 2>&1; then
+call_args=(--to "$PROVIDER" --repo "$REPO" --operation plan --prompt "$prompt")
+[ -z "$MODEL" ] || call_args+=(--model "$MODEL")
+[ -z "$FALLBACK_MODEL" ] || call_args+=(--fallback-model "$FALLBACK_MODEL")
+[ "$REASONING_EFFORT" = auto ] || call_args+=(--reasoning-effort "$REASONING_EFFORT")
+if ! OMS_PEER_TIMEOUT="$PROVIDER_TIMEOUT" "$ROOT/scripts/agent-call.sh" "${call_args[@]}" > "$raw" 2>&1; then
   echo "error: decomposition call failed:" >&2
   tail -n 5 "$raw" >&2
   rm -f "$raw"
@@ -397,7 +607,7 @@ agent_memory_ensure_oms_ignore_for_path "$PLAN_DIR" 2>/dev/null || true
 proposal="$PLAN_DIR/proposal-$ts.json"
 if ! OMS_PLAN_SPEC_SHA="$spec_sha" OMS_PLAN_BEFORE_SHA="$plan_sha" \
   OMS_PLAN_BASE_SHA="$base_sha" OMS_PLAN_ID_PREFIX="$ID_PREFIX" \
-  OMS_PLAN_ALLOWED="$ALLOWED_ENVELOPE" \
+  OMS_PLAN_ALLOWED="$ALLOWED_ENVELOPE" OMS_PLAN_ACCEPT_FILES="$accept_files" \
   python3 - "$answer_artifact" > "$proposal" <<'PY'
 import json, os, re, sys
 
@@ -435,6 +645,7 @@ wrapped = {
     "base_sha": os.environ["OMS_PLAN_BASE_SHA"],
     "id_prefix": os.environ.get("OMS_PLAN_ID_PREFIX", ""),
     "allowed_envelope": allowed,
+    "acceptance_files": [item for item in os.environ.get("OMS_PLAN_ACCEPT_FILES", "").split(",") if item],
     "tasks": best.get("tasks"),
 }
 json.dump(wrapped, sys.stdout, ensure_ascii=False, indent=2)

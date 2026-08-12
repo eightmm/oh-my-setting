@@ -83,13 +83,20 @@ oms autopilot --repo . --allowed 'src,tests,docs' --base main \
   --expected-proposal-sha256 <digest printed by propose> --draft-pr run
 ```
 
+For longer work, pin the route and wall clock in the same reviewed envelope,
+for example `--worker-model MODEL --worker-reasoning-effort high
+--worker-timeout 20m --retry-known`. After interruption, run `oms autopilot
+--repo . status`; it validates the durable outer receipt before printing its
+exact continuation.
+
 The first command exits with a proposal for the parent to review and prints
 the proposal's sha256 plus a shell-safe continuation containing every effective
 option. The second accepts only a regular non-symlink proposal of at most 1 MiB,
 requires that digest back, atomically applies only matching bytes, drives the
 existing loop, permits at most
 one `r1-` remainder proposal, re-runs acceptance, and uses a different-family
-semantic review in shadow mode. `--review-mode gate` makes that review blocking.
+semantic review. Draft PR publication defaults to a blocking gate; use
+`--review-mode shadow` only as an explicit advisory choice.
 `--draft-pr` is the only built-in remote-write path: an immutable local intent
 creates a new branch and Draft PR and can be replayed after interruption. It has
 no branch update, merge, ready, tag, or release operation. If the run starts on the base
@@ -102,7 +109,10 @@ status, and reason to this invocation and must match the durable terminal row.
 The selected work branch stays fixed through review, and a matching recovery
 branch found from the base must be resumed explicitly rather than forked.
 
-Each cycle: acceptance command (pass = done) → one `plan-run --next --land` →
+For a custom/composed acceptance command, `PROJECT.md` must also name every
+repo-relative verifier file under `Required check files`; those bytes are bound
+to the proposal and protected during admission. Each cycle: acceptance command
+(pass = done) → one `plan-run --next --land` →
 commit of exactly the admitted patch's paths, task title as subject. It
 refuses a dirty tree, parks on task exhaustion, an acceptance command edited
 mid-run, tracked changes beyond the admitted patch, or an unchanged tree with
@@ -110,6 +120,7 @@ the same failing acceptance twice — every terminal leaves a reason row in
 `.oms/plan/progress.jsonl` and a fail-ledger entry when parked. The driver
 never generates or re-plans tasks, never pushes, and never reclaims leases:
 task decomposition and recovery stay with the parent. Acceptance pass means
-"the recorded command passed on this tree", nothing more — keep the command
-honest and out of worker reach, and spot-check the goal yourself before
-shipping.
+"the recorded bounded command and frozen verifier files passed without changing
+the bound Git-visible/index/declared-file surface", nothing more. Ignored paths
+and effects outside the repository remain a host-isolation concern; spot-check
+the goal before shipping.

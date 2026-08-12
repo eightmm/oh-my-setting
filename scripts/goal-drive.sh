@@ -20,16 +20,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/model-routing.sh
+. "$ROOT/scripts/lib/model-routing.sh"
 
 REPO="$PWD"
 PROVIDER="codex"
 MAX_CYCLES=3
 AUTO_REPAIR=0
 RUN_ID_OVERRIDE=""
+RETRY_KNOWN=0
+MODEL=""
+FALLBACK_MODEL=""
+REASONING_EFFORT=auto
+PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
+EXPECTED_REF=""
 
 usage() {
   cat <<'EOF'
-Usage: goal-drive.sh [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID] [--auto-repair]
+Usage: goal-drive.sh [--repo PATH] [--to PROVIDER] [--max-cycles N] [--run-id ID]
+                     [--auto-repair] [--retry-known] [--model MODEL]
+                     [--fallback-model MODEL] [--reasoning-effort E]
+                     [--provider-timeout DUR] [--expected-ref REF]
 
 Drive an existing agent-plan toward its acceptance command: each cycle runs
 acceptance first (pass = done), otherwise executes exactly one plan task via
@@ -49,6 +60,13 @@ it parked; a later run whose acceptance passes resolves those park rows.
   --run-id ID      Optional caller correlation receipt (1..64 safe characters).
   --auto-repair   Run one same-lease repair delegation after a failed landing,
                   then retry landing once before parking.
+  --retry-known   Forward the explicit unchanged-failure retry to plan-run.
+  --model MODEL   Exact worker model; disables implicit fallback.
+  --fallback-model M  Explicit one-shot capacity fallback model.
+  --reasoning-effort E  auto, low, medium, high, xhigh, max, or ultra.
+  --provider-timeout DUR Worker wall-clock timeout (for example 15m).
+  --expected-ref REF  Parent-bound full work ref (refs/heads/...). Goal-drive
+                      refuses acceptance, delegation, and commit on another ref.
 EOF
 }
 
@@ -68,14 +86,48 @@ while [ "$#" -gt 0 ]; do
       [ -n "$2" ] || fail "--run-id requires a non-empty id"
       RUN_ID_OVERRIDE="$2"; shift 2 ;;
     --auto-repair) AUTO_REPAIR=1; shift ;;
+    --retry-known) RETRY_KNOWN=1; shift ;;
+    --model) [ "$#" -ge 2 ] || fail "--model requires a value"; MODEL="$2"; shift 2 ;;
+    --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires a value"; FALLBACK_MODEL="$2"; shift 2 ;;
+    --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires a value"; REASONING_EFFORT="$2"; shift 2 ;;
+    --provider-timeout) [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"; PROVIDER_TIMEOUT="$2"; shift 2 ;;
+    --expected-ref) [ "$#" -ge 2 ] || fail "--expected-ref requires a ref"; EXPECTED_REF="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
+  fail "goal-drive is parent-only; a harness child cannot commit reviewed work"
+oms_model_validate_name "$MODEL" || exit $?
+oms_model_validate_name "$FALLBACK_MODEL" || exit $?
+oms_reasoning_validate "$REASONING_EFFORT" || exit $?
+PROVIDER_TIMEOUT_SECONDS="$(python3 - "$PROVIDER_TIMEOUT" <<'PY' | tr -d '\r'
+import re, sys
+match = re.fullmatch(r"([1-9][0-9]*)([smh]?)", sys.argv[1])
+if not match:
+    raise SystemExit(2)
+seconds = int(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+if seconds > 24 * 60 * 60:
+    raise SystemExit(2)
+print(seconds)
+PY
+)" || fail "--provider-timeout must be a positive duration up to 24h (for example 15m)"
+
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
   fail "unknown provider: use codex, claude, or antigravity (agy)"
+if [ -n "$EXPECTED_REF" ]; then
+  case "$EXPECTED_REF" in
+    refs/heads/*) ;;
+    *) fail "--expected-ref must be a full refs/heads/... ref" ;;
+  esac
+  expected_branch="${EXPECTED_REF#refs/heads/}"
+  git check-ref-format --branch "$expected_branch" >/dev/null 2>&1 ||
+    fail "--expected-ref is not a canonical branch ref"
+  [ "refs/heads/$expected_branch" = "$EXPECTED_REF" ] ||
+    fail "--expected-ref is not canonical"
+fi
 if [ -n "$RUN_ID_OVERRIDE" ]; then
   case "$RUN_ID_OVERRIDE" in
     *[!A-Za-z0-9._-]*) fail "--run-id has unsafe characters" ;;
@@ -105,6 +157,8 @@ export GIT_CONFIG_COUNT
 PLAN_FILE="$REPO/.oms/plan/tasks.json"
 PROGRESS="$REPO/.oms/plan/progress.jsonl"
 [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; create one first (agent-plan init/add)"
+python3 "$ROOT/scripts/lib/durable-jsonl.py" check "$PROGRESS" ||
+  fail "progress.jsonl must be a repo-local regular non-symlink file"
 
 read_accept_cmd() {
   python3 -c '
@@ -130,6 +184,7 @@ CYCLE=0
 INTENT_ID=""
 INTENT_TASK=""
 INTENT_BASE=""
+INTENT_REF=""
 INTENT_PATCH=""
 INTENT_PATCH_SHA=""
 INTENT_PATHS="[]"
@@ -159,6 +214,10 @@ TASK_RECEIPT_EXECUTOR_SOUL=""
 TASK_RECEIPT_REPAIR_COUNT=0
 TASK_RECEIPT_SHA=""
 
+progress_append() {
+  python3 "$ROOT/scripts/lib/durable-jsonl.py" append "$PROGRESS"
+}
+
 terminal_row() {  # STATUS REASON
   [ "${OMS_GOAL_DRIVE_TEST_FAIL_TERMINAL_APPEND:-0}" != 1 ] || return 1
   OMS_GD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_GD_RUN="$RUN_ID" \
@@ -174,7 +233,7 @@ print(json.dumps({
     "base_sha": os.environ["OMS_GD_SHA"], "status": os.environ["OMS_GD_STATUS"],
     "reason": os.environ["OMS_GD_REASON"],
 }, ensure_ascii=False))
-' >> "$PROGRESS" 2>/dev/null
+' | progress_append 2>/dev/null
 }
 
 terminal_result() {  # STATUS REASON
@@ -247,6 +306,106 @@ $fps
 EOF
 }
 
+# `status --porcelain` and ordinary diffs intentionally trust index hints.
+# skip-worktree and assume-unchanged can therefore hide tracked bytes from the
+# clean-tree, scope, and acceptance fences. Autonomous publication requires a
+# plain index; reject the hint itself before inspecting or consuming work.
+guard_plain_index() {
+  if ! python3 - "$REPO" <<'PY'
+import subprocess, sys
+
+raw = subprocess.check_output(
+    ["git", "-C", sys.argv[1], "ls-files", "-v", "-z"],
+    stderr=subprocess.DEVNULL)
+for entry in raw.split(b"\0"):
+    if not entry:
+        continue
+    flag = entry[:1]
+    if flag == b"S" or b"a" <= flag <= b"z":
+        raise SystemExit(2)
+PY
+  then
+    park "hidden-index-flags" "clear every skip-worktree/assume-unchanged bit, inspect the real tracked bytes, then retry"
+  fi
+}
+
+guard_git_authority() {
+  command -v oms_git_assert_safe_execution_config >/dev/null 2>&1 ||
+    fail "installed Git execution guard is unavailable"
+  command -v oms_git_assert_plain_index >/dev/null 2>&1 ||
+    fail "installed Git index guard is unavailable"
+  oms_git_assert_safe_execution_config "$REPO" ||
+    park "unsafe-git-execution-config" "remove executable local/worktree/command-scope Git config, then retry"
+  oms_git_assert_plain_index "$REPO" ||
+    park "hidden-index-flags" "clear every skip-worktree/assume-unchanged bit, inspect the real tracked bytes, then retry"
+  # Keep the local parser as defense in depth and as an explicit Bash 3.2 /
+  # older-install compatibility assertion for this commit-capable boundary.
+  guard_plain_index
+}
+
+guard_expected_ref() {
+  local current_ref
+  [ -z "$EXPECTED_REF" ] && return 0
+  current_ref="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')"
+  [ "$current_ref" = "$EXPECTED_REF" ] ||
+    park "expected-ref-moved" \
+      "restore $EXPECTED_REF; goal-drive authority does not follow same-SHA branch switches"
+}
+
+git_status_porcelain() {
+  git -c core.fsmonitor=false -C "$REPO" \
+    status --porcelain --untracked-files=all
+}
+
+# plan-run and the optional repair are long-lived, synchronous provider
+# phases. Run each in a fresh process group owned by a small supervisor; a
+# signal to goal-drive is forwarded, given a bounded grace period, escalated,
+# and reaped before the driver itself exits.
+GOAL_PHASE_PID=""
+GOAL_PHASE_OUT_TMP=""
+GOAL_PHASE_OUT=""
+goal_phase_forward_signal() {  # SIGNAL EXIT_CODE
+  local signal_name="$1" exit_code="$2"
+  trap - HUP INT TERM
+  if [ -n "$GOAL_PHASE_PID" ]; then
+    kill -s "$signal_name" "$GOAL_PHASE_PID" 2>/dev/null || true
+    wait "$GOAL_PHASE_PID" 2>/dev/null || true
+  fi
+  [ -z "$GOAL_PHASE_OUT_TMP" ] || rm -f "$GOAL_PHASE_OUT_TMP"
+  exit "$exit_code"
+}
+
+goal_phase_run() {  # COMMAND [ARGV...]; output -> GOAL_PHASE_OUT
+  local supervisor_rc=0 phase_rc phase_wall
+  GOAL_PHASE_OUT_TMP="$(agent_memory_mktemp)" || return 126
+  trap 'goal_phase_forward_signal HUP 129' HUP
+  trap 'goal_phase_forward_signal INT 130' INT
+  trap 'goal_phase_forward_signal TERM 143' TERM
+  set +e
+  # The provider already has its own shorter timeout. The outer wall is a
+  # fail-closed ceiling and, critically, uses one cross-platform supervisor
+  # implementation with POSIX process groups and Windows taskkill /T /F.
+  # Keep an explicit `bash script` in argv: native Windows Python cannot
+  # CreateProcess a shebang-only .sh file, while Git Bash is documented core.
+  # One routed delegation may consume primary + safeguard retry + explicit or
+  # capacity fallback attempts. Preserve the inner per-attempt timeout rather
+  # than cutting off a legitimate fallback sequence halfway through.
+  phase_wall=$((PROVIDER_TIMEOUT_SECONDS * 5 + 60))
+  python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
+    --wall "$phase_wall" --kill-after 1 --label goal-provider -- \
+    "$@" >"$GOAL_PHASE_OUT_TMP" 2>&1 &
+  GOAL_PHASE_PID=$!
+  wait "$GOAL_PHASE_PID" || supervisor_rc=$?
+  GOAL_PHASE_PID=""
+  trap - HUP INT TERM
+  set -e
+  GOAL_PHASE_OUT="$(cat "$GOAL_PHASE_OUT_TMP" 2>/dev/null || true)"
+  phase_rc="$supervisor_rc"
+  rm -f "$GOAL_PHASE_OUT_TMP"
+  GOAL_PHASE_OUT_TMP=""
+  return "$phase_rc"
+}
+
 # --- Durable land -> commit intent -----------------------------------------
 # plan-run deliberately does not commit. The old driver learned the patch path
 # only after plan-run had already landed it, leaving an unrecorded crash window
@@ -263,11 +422,12 @@ intent_write() {  # PHASE REASON
     OMS_GD_CYCLE="$CYCLE" OMS_GD_INTENT="$INTENT_ID" \
     OMS_GD_PHASE="$phase" OMS_GD_REASON="$reason" \
     OMS_GD_TASK="$INTENT_TASK" OMS_GD_BASE="$INTENT_BASE" \
+    OMS_GD_REF="$INTENT_REF" \
     OMS_GD_PATCH="$INTENT_PATCH" OMS_GD_PATCH_SHA="$INTENT_PATCH_SHA" \
     OMS_GD_PATHS="$INTENT_PATHS" OMS_GD_TITLE="$INTENT_TITLE" \
     OMS_GD_LEASE="$INTENT_LEASE" OMS_GD_VERIFY_SHA="$INTENT_VERIFY_SHA" \
     OMS_GD_PROVIDER="$INTENT_PROVIDER" \
-    python3 - <<'PY' >> "$PROGRESS"
+    python3 - <<'PY' | progress_append
 import json, os
 paths = json.loads(os.environ["OMS_GD_PATHS"])
 print(json.dumps({
@@ -281,6 +441,7 @@ print(json.dumps({
     "reason": os.environ["OMS_GD_REASON"],
     "task_id": os.environ["OMS_GD_TASK"],
     "base_sha": os.environ["OMS_GD_BASE"],
+    "head_ref": os.environ["OMS_GD_REF"],
     "patch": os.environ["OMS_GD_PATCH"],
     "patch_sha256": os.environ["OMS_GD_PATCH_SHA"],
     "paths": paths,
@@ -368,6 +529,14 @@ def validate(row):
     provider = text(row, "provider")
     lease = text(row, "lease_id")
     base = text(row, "base_sha")
+    head_ref = row.get("head_ref")
+    # A historical row does not prove which same-SHA branch owned publication
+    # authority. Never infer it from whichever checkout happens to resume.
+    head_ref_missing = head_ref is None
+    if head_ref_missing:
+        head_ref = ""
+    elif not isinstance(head_ref, str) or "\x00" in head_ref:
+        raise ValueError("head_ref")
     patch_sha = text(row, "patch_sha256")
     verify_sha = text(row, "verify_sha256")
     patch_rel = text(row, "patch")
@@ -376,7 +545,10 @@ def validate(row):
         raise ValueError("id")
     if phase not in open_phases or provider not in ("codex", "claude", "antigravity"):
         raise ValueError("phase/provider")
-    if not ident.fullmatch(lease) or not base_re.fullmatch(base):
+    if (not ident.fullmatch(lease) or not base_re.fullmatch(base) or
+            (not head_ref_missing and
+             (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", head_ref) or
+              ".." in head_ref or head_ref.endswith("/") or "//" in head_ref))):
         raise ValueError("lease/base")
     if not sha.fullmatch(patch_sha) or not sha.fullmatch(verify_sha):
         raise ValueError("hash")
@@ -457,10 +629,10 @@ def validate(row):
         raise ValueError("task patch")
     if task["executor_id"] or task["executor_soul_sha256"]:
         raise ValueError("executor receipt")
-    return (task_id, base, tree, patch_sha, lease, verify_sha, provider)
+    return (task_id, base, tree, patch_sha, lease, verify_sha, provider, head_ref)
 
 receipt_fields = (
-    "task_id", "base_sha", "patch", "patch_sha256", "paths", "title",
+    "task_id", "base_sha", "head_ref", "patch", "patch_sha256", "paths", "title",
     "provider", "lease_id", "verify_sha256",
 )
 
@@ -481,10 +653,10 @@ def open_transition_allowed(left, right):
         }
     return transition == ("repairing", "prepared") and same_repair_identity(left, right)
 
-def exact_commit_exists(base, tree):
+def exact_commit_exists(base, tree, head_ref):
     try:
         history = subprocess.check_output(
-            ["git", "-C", repo, "rev-list", "--first-parent", "HEAD"],
+            ["git", "-C", repo, "rev-list", "--first-parent", head_ref],
             stderr=subprocess.DEVNULL, text=True)
     except (OSError, subprocess.CalledProcessError):
         return False
@@ -511,11 +683,17 @@ def rebased_patch_on_current_lineage(active):
     relative = pathlib.PurePosixPath(active["patch"])
     patch = os.path.join(repo, *relative.parts)
     old_base = active["base_sha"]
+    head_ref = active.get("head_ref", "")
     task = tasks.get(active.get("task_id"), {})
     state = task.get("state") if isinstance(task, dict) else ""
     try:
+        symbolic = subprocess.check_output(
+            ["git", "-C", repo, "symbolic-ref", "-q", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True).strip()
+        if symbolic != head_ref:
+            return False
         current = subprocess.check_output(
-            ["git", "-C", repo, "rev-parse", "HEAD"],
+            ["git", "-C", repo, "rev-parse", head_ref],
             stderr=subprocess.DEVNULL, text=True).strip()
     except (OSError, subprocess.CalledProcessError):
         return False
@@ -524,7 +702,8 @@ def rebased_patch_on_current_lineage(active):
     if state == "review":
         try:
             dirty = subprocess.check_output(
-                ["git", "-C", repo, "status", "--porcelain"],
+                ["git", "-c", "core.fsmonitor=false", "-C", repo,
+                 "status", "--porcelain", "--untracked-files=all"],
                 stderr=subprocess.DEVNULL)
             if dirty:
                 return False
@@ -536,7 +715,7 @@ def rebased_patch_on_current_lineage(active):
         return False
     try:
         history = subprocess.check_output(
-            ["git", "-C", repo, "rev-list", "--first-parent", "HEAD", "--parents"],
+            ["git", "-C", repo, "rev-list", "--first-parent", head_ref, "--parents"],
             stderr=subprocess.DEVNULL, text=True)
     except (OSError, subprocess.CalledProcessError):
         return False
@@ -586,7 +765,7 @@ def terminal_allowed(active, terminal, authority):
         return False
     phase = terminal.get("phase")
     if phase == "committed" and active.get("phase") in ("prepared", "landed"):
-        return exact_commit_exists(authority[1], authority[2])
+        return exact_commit_exists(authority[1], authority[2], authority[7])
     if phase == "abandoned":
         return abandonment_allowed(active, terminal)
     return False
@@ -612,6 +791,7 @@ with open(progress, encoding="utf-8", errors="replace") as handle:
         chains[key].append(row)
 
 valid = []
+legacy_missing = False
 seen = set()
 for key in order:
     active = None
@@ -634,21 +814,27 @@ for key in order:
             else:
                 print("goal-drive: ignored invalid commit-intent transition %s" % key,
                       file=sys.stderr)
-        elif phase in ("committed", "abandoned") and active is not None:
-            if terminal_allowed(active, row, authority):
-                active = None
-                authority = None
-                closed = True
-            else:
-                print("goal-drive: ignored unauthoritative commit-intent terminal %s" % key,
-                      file=sys.stderr)
+        elif phase in ("committed", "abandoned"):
+            if active is not None:
+                if terminal_allowed(active, row, authority):
+                    active = None
+                    authority = None
+                    closed = True
+                else:
+                    print("goal-drive: ignored unauthoritative commit-intent terminal %s" % key,
+                          file=sys.stderr)
     if active is None:
+        continue
+    if active.get("head_ref") is None:
+        legacy_missing = True
         continue
     if authority in seen:
         continue
     seen.add(authority)
     valid.append(active)
-if len(valid) > 1:
+if legacy_missing:
+    print(json.dumps({"error": "legacy-open-intent-missing-head-ref"}))
+elif len(valid) > 1:
     print(json.dumps({"error": "multiple-open-intents", "count": len(valid)}))
 elif valid:
     print(json.dumps(valid[0], ensure_ascii=False))
@@ -658,6 +844,9 @@ PY
 load_intent() {  # JSON
   local values
   case "$1" in
+    *'"error": "legacy-open-intent-missing-head-ref"'*)
+      park "legacy-intent-missing-head-ref" "inspect and explicitly reconcile the historical commit intent; branch authority cannot be inferred safely"
+      ;;
     *'"error": "multiple-open-intents"'*)
       park "multiple-commit-intents" "inspect .oms/plan/progress.jsonl and reconcile each frozen patch manually"
       ;;
@@ -674,6 +863,7 @@ def text(name):
     return value
 intent_id=text("intent_id"); task_id=text("task_id")
 base_sha=text("base_sha"); patch=text("patch")
+head_ref=text("head_ref")
 patch_sha=text("patch_sha256"); title=text("title")
 lease=text("lease_id"); verify_sha=text("verify_sha256")
 provider=text("provider"); phase=text("phase")
@@ -681,6 +871,9 @@ if not ident.fullmatch(intent_id) or not ident.fullmatch(task_id): raise ValueEr
 if not base.fullmatch(base_sha) or not sha.fullmatch(patch_sha) or not sha.fullmatch(verify_sha):
     raise ValueError("hash")
 if not ident.fullmatch(lease): raise ValueError("lease")
+if (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", head_ref) or
+        ".." in head_ref or head_ref.endswith("/") or "//" in head_ref):
+    raise ValueError("head_ref")
 if provider not in ("codex", "claude", "antigravity"): raise ValueError("provider")
 if phase not in ("prepared", "repairing", "landed"): raise ValueError("phase")
 p=pathlib.PurePosixPath(patch)
@@ -699,6 +892,7 @@ for value in paths:
 normalized=sorted(set(normalized))
 assignments={
  "INTENT_ID":intent_id,"INTENT_TASK":task_id,"INTENT_BASE":base_sha,
+ "INTENT_REF":head_ref,
  "INTENT_PATCH":patch,"INTENT_PATCH_SHA":patch_sha,
  "INTENT_PATHS":json.dumps(normalized,ensure_ascii=True,separators=(",",":")),
  "INTENT_TITLE":title,"INTENT_LEASE":lease,"INTENT_VERIFY_SHA":verify_sha,
@@ -797,22 +991,24 @@ if not stat.S_ISREG(mode):
 PY
 }
 
-intent_prepare() {  # TASK PATCH BASE SUFFIX [REUSE_INTENT_ID]
+intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
   local task="$1"
   local source_patch="$2"
   local base="$3"
-  local suffix="${4:-}"
-  local reuse_id="${5:-}"
+  local head_ref="$4"
+  local suffix="${5:-}"
+  local reuse_id="${6:-}"
   local frozen_dir frozen_abs frozen_name patch_rel paths_json task_patch_sha source_patch_sha
   local receipt_sha repo_physical plan_physical frozen_physical frozen_after
   local prior_task prior_base prior_lease
-  local prior_verify_sha prior_provider
+  local prior_verify_sha prior_provider prior_ref
 
   prior_task="$INTENT_TASK"
   prior_base="$INTENT_BASE"
   prior_lease="$INTENT_LEASE"
   prior_verify_sha="$INTENT_VERIFY_SHA"
   prior_provider="$INTENT_PROVIDER"
+  prior_ref="$INTENT_REF"
 
   [ -s "$source_patch" ] || park "no-admitted-patch" "review the task artifact; its patch file is missing"
   load_task_receipt "$task" ||
@@ -833,7 +1029,8 @@ intent_prepare() {  # TASK PATCH BASE SUFFIX [REUSE_INTENT_ID]
     park "review-requires-executor" "goal-drive cannot consume an executor-bound review"
   if [ -n "$reuse_id" ]; then
     [ "$reuse_id" = "$INTENT_ID" ] && [ "$task" = "$prior_task" ] &&
-      [ "$base" = "$prior_base" ] && [ "$TASK_RECEIPT_LEASE" = "$prior_lease" ] &&
+      [ "$base" = "$prior_base" ] && [ "$head_ref" = "$prior_ref" ] &&
+      [ "$TASK_RECEIPT_LEASE" = "$prior_lease" ] &&
       [ "$PROVIDER" = "$prior_provider" ] &&
       [ "$(printf '%s' "$TASK_RECEIPT_VERIFY" | oms_sha256_stream)" = "$prior_verify_sha" ] ||
       park "repair-receipt-mismatch" "the repaired review changed its frozen task, base, lease, provider, or verifier"
@@ -845,10 +1042,13 @@ intent_prepare() {  # TASK PATCH BASE SUFFIX [REUSE_INTENT_ID]
     park "invalid-review-receipt" "the supplied patch differs from the task review receipt"
   [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ] ||
     park "head-moved" "HEAD moved before the reviewed patch could be frozen"
+  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$head_ref" ] ||
+    park "intent-ref-moved" "the checked-out branch changed before the reviewed patch could be frozen"
   git -C "$REPO" apply --check --binary "$source_patch" >/dev/null 2>&1 ||
     park "review-patch-base-mismatch" "the reviewed patch does not apply to its frozen base"
   INTENT_TASK="$task"
   INTENT_BASE="$base"
+  INTENT_REF="$head_ref"
   INTENT_TITLE="$TASK_RECEIPT_TITLE"
   INTENT_LEASE="$TASK_RECEIPT_LEASE"
   INTENT_VERIFY_SHA="$(printf '%s' "$TASK_RECEIPT_VERIFY" | oms_sha256_stream)"
@@ -928,8 +1128,12 @@ intent_prepare() {  # TASK PATCH BASE SUFFIX [REUSE_INTENT_ID]
 }
 
 intent_worktree_matches_head() {
-  git -C "$REPO" diff --quiet HEAD -- || return 1
-  [ -z "$(git -C "$REPO" ls-files --others --exclude-standard)" ]
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git -c core.fsmonitor=false -c diff.external= -C "$REPO" \
+      diff --no-ext-diff --no-textconv --quiet HEAD -- || return 1
+  [ -z "$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git -c core.fsmonitor=false -C "$REPO" \
+      ls-files --others --exclude-standard)" ]
 }
 
 intent_expected_tree() {  # PATCH
@@ -1149,7 +1353,7 @@ intent_publish_exact() {  # PATCH EXPECTED_TREE MESSAGE
   local patch_abs="$1"
   local expected_tree="$2"
   local message="$3"
-  local published_parent published_tree
+  local published_parent published_tree current_ref published_ref
 
   INTENT_NEW_COMMIT=""
   intent_index_lock_acquire || return 1
@@ -1165,6 +1369,12 @@ intent_publish_exact() {  # PATCH EXPECTED_TREE MESSAGE
   fi
   if [ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null | tr -d '\r')" != "$INTENT_BASE" ]; then
     INTENT_INDEX_ERROR="head-moved-before-publication"
+    intent_index_lock_release
+    return 1
+  fi
+  current_ref="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')"
+  if [ "$current_ref" != "$INTENT_REF" ]; then
+    INTENT_INDEX_ERROR="head-ref-moved-before-publication"
     intent_index_lock_release
     return 1
   fi
@@ -1187,14 +1397,17 @@ intent_publish_exact() {  # PATCH EXPECTED_TREE MESSAGE
   fi
   if ! git -c core.hooksPath=/dev/null -C "$REPO" \
     update-ref -m "goal-drive: $INTENT_TASK" \
-    HEAD "$INTENT_NEW_COMMIT" "$INTENT_BASE"; then
+    "$INTENT_REF" "$INTENT_NEW_COMMIT" "$INTENT_BASE"; then
     INTENT_INDEX_ERROR="head-moved-before-publication"
     intent_index_lock_release
     return 1
   fi
-  published_parent="$(git -C "$REPO" rev-parse HEAD^ 2>/dev/null | tr -d '\r' || true)"
-  published_tree="$(git -C "$REPO" rev-parse 'HEAD^{tree}' 2>/dev/null | tr -d '\r' || true)"
-  if [ "$published_parent" != "$INTENT_BASE" ] || [ "$published_tree" != "$expected_tree" ]; then
+  current_ref="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')"
+  published_ref="$(git -C "$REPO" rev-parse "$INTENT_REF" 2>/dev/null | tr -d '\r' || true)"
+  published_parent="$(git -C "$REPO" rev-parse "$INTENT_NEW_COMMIT^" 2>/dev/null | tr -d '\r' || true)"
+  published_tree="$(git -C "$REPO" rev-parse "$INTENT_NEW_COMMIT^{tree}" 2>/dev/null | tr -d '\r' || true)"
+  if [ "$current_ref" != "$INTENT_REF" ] || [ "$published_ref" != "$INTENT_NEW_COMMIT" ] ||
+    [ "$published_parent" != "$INTENT_BASE" ] || [ "$published_tree" != "$expected_tree" ]; then
     INTENT_INDEX_ERROR="published-commit-mismatch"
     intent_index_lock_release
     return 1
@@ -1219,6 +1432,8 @@ intent_publish_exact() {  # PATCH EXPECTED_TREE MESSAGE
 
 intent_commit() {  # LABEL
   local patch_abs msg after_dirty task_patch_sha verify_sha expected_tree publish_rc=0
+  guard_git_authority
+  guard_expected_ref
   patch_abs="$(intent_patch_file)" || park "unsafe-patch-path" "inspect the commit intent"
   [ -f "$patch_abs" ] || park "missing-intent-patch" "restore the frozen patch or reconcile manually"
   [ "$(oms_sha256_file "$patch_abs")" = "$INTENT_PATCH_SHA" ] ||
@@ -1238,14 +1453,19 @@ intent_commit() {  # LABEL
     park "invalid-commit-receipt" "the landed task no longer exactly matches the frozen commit intent"
   [ "$(git -C "$REPO" rev-parse HEAD)" = "$INTENT_BASE" ] ||
     park "intent-head-moved" "HEAD moved after the intent; inspect the current commit before recovery"
+  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$INTENT_REF" ] ||
+    park "intent-ref-moved" "the checked-out branch differs from the frozen commit intent"
   git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 ||
     park "intent-tree-ambiguous" "the working tree is not the exact applied patch; inspect it manually"
   intent_tree_matches "$patch_abs" ||
     park "commit-mismatch" "working-tree paths or bytes differ from the frozen patch; resolve by hand"
   expected_tree="$(intent_expected_tree "$patch_abs")" ||
     park "intent-tree-invalid" "the frozen patch could not produce its exact expected tree"
+  guard_expected_ref
   [ "$(git -C "$REPO" rev-parse HEAD)" = "$INTENT_BASE" ] ||
     park "intent-head-moved" "HEAD moved before the exact commit could be published"
+  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$INTENT_REF" ] ||
+    park "intent-ref-moved" "the checked-out branch changed before exact publication"
   intent_tree_matches "$patch_abs" ||
     park "commit-mismatch" "working-tree bytes changed before the exact commit could be published"
   msg="$(printf '%s' "${INTENT_TITLE:-$INTENT_TASK}" | tr -d '\000-\037' | sed 's/^[-[:space:]]*//' | cut -c1-72)"
@@ -1271,6 +1491,9 @@ intent_commit() {  # LABEL
     *:head-moved-before-publication)
       park "intent-head-moved" "HEAD moved while publishing the exact commit; inspect the current lineage"
       ;;
+    *:head-ref-moved-before-publication)
+      park "intent-ref-moved" "the checked-out branch changed while publishing; the frozen ref was not widened"
+      ;;
     *:worktree-changed-before-publication)
       park "commit-mismatch" "working-tree bytes changed before the exact commit could be published"
       ;;
@@ -1284,7 +1507,7 @@ intent_commit() {  # LABEL
       park "intent-commit-failed" "the exact commit/index transaction failed closed ($INTENT_INDEX_ERROR)"
       ;;
   esac
-  after_dirty="$(git -C "$REPO" status --porcelain)"
+  after_dirty="$(git_status_porcelain)"
   [ -z "$after_dirty" ] ||
     park "commit-incomplete" "tracked or untracked changes remain after the task commit"
   intent_write committed "exact-patch-committed"
@@ -1292,17 +1515,29 @@ intent_commit() {  # LABEL
 }
 
 intent_commit_already_present() {
-  local patch_abs parent expected_tree actual_tree align_rc=0
-  parent="$(git -C "$REPO" rev-parse HEAD^ 2>/dev/null || true)"
-  [ "$parent" = "$INTENT_BASE" ] || return 1
+  local patch_abs expected_tree candidate candidate_tree parents current_head align_rc=0
+  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$INTENT_REF" ] || return 3
   patch_abs="$(intent_patch_file)" || return 1
   expected_tree="$(intent_expected_tree "$patch_abs" 2>/dev/null || true)"
-  actual_tree="$(git -C "$REPO" rev-parse 'HEAD^{tree}' 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$expected_tree" ] && [ "$expected_tree" = "$actual_tree" ] &&
-    intent_worktree_matches_head; then
+  [ -n "$expected_tree" ] || return 1
+  candidate="$(git -C "$REPO" rev-list --first-parent "$INTENT_REF" 2>/dev/null |
+    while IFS= read -r commit; do
+      parents="$(git -C "$REPO" rev-list --parents -n 1 "$commit" 2>/dev/null | tr -d '\r')"
+      [ "$parents" = "$commit $INTENT_BASE" ] || continue
+      candidate_tree="$(git -C "$REPO" rev-parse "$commit^{tree}" 2>/dev/null | tr -d '\r')"
+      [ "$candidate_tree" = "$expected_tree" ] || continue
+      printf '%s\n' "$commit"
+      break
+    done)"
+  current_head="$(git -C "$REPO" rev-parse "$INTENT_REF" 2>/dev/null | tr -d '\r')"
+  if [ -n "$candidate" ] && intent_worktree_matches_head; then
+    if [ "$current_head" != "$candidate" ]; then
+      [ -z "$(git_status_porcelain)" ] && return 0
+      return 1
+    fi
     intent_align_index "$expected_tree" || align_rc=$?
     [ "$align_rc" -eq 0 ] || return 2
-    [ -z "$(git -C "$REPO" status --porcelain)" ] && return 0
+    [ -z "$(git_status_porcelain)" ] && return 0
   fi
   return 1
 }
@@ -1509,7 +1744,7 @@ reconcile_commit_intent() {
           return 0
         }
         old_intent="$INTENT_ID"
-        intent_prepare "$INTENT_TASK" "$TASK_RECEIPT_PATCH" "$INTENT_BASE" repair "$old_intent"
+        intent_prepare "$INTENT_TASK" "$TASK_RECEIPT_PATCH" "$INTENT_BASE" "$INTENT_REF" repair "$old_intent"
         patch_abs="$(intent_patch_file)" || park "unsafe-patch-path" "inspect the repaired intent"
         ;;
       review:0)
@@ -1558,8 +1793,11 @@ reconcile_commit_intent() {
           ;;
       esac
     fi
+    if [ "$present_rc" -eq 3 ]; then
+      park "intent-ref-moved" "the checked-out branch differs from the frozen commit intent"
+    fi
     if [ "$TASK_RECEIPT_STATE" = review ] &&
-      [ -z "$(git -C "$REPO" status --porcelain)" ] &&
+      [ -z "$(git_status_porcelain)" ] &&
       git -C "$REPO" apply --check --binary "$patch_abs" >/dev/null 2>&1; then
       abandon_invalid_intent "frozen-base-receipt-mismatch"
       return 0
@@ -1574,7 +1812,7 @@ reconcile_commit_intent() {
     return 0
   fi
 
-  if [ -z "$(git -C "$REPO" status --porcelain)" ] &&
+  if [ -z "$(git_status_porcelain)" ] &&
     git -C "$REPO" apply --check --binary "$patch_abs" >/dev/null 2>&1; then
     [ "$TASK_RECEIPT_STATE" = review ] ||
       park "intent-task-moved" "the pending intent task is $TASK_RECEIPT_STATE, not review"
@@ -1592,11 +1830,14 @@ reconcile_commit_intent() {
 # Reconcile before acceptance and before the ordinary clean-tree refusal. A
 # crash after landing is expected to be dirty; treating it as foreign work is
 # precisely the liveness bug this journal closes.
+guard_git_authority
+guard_expected_ref
 reconcile_commit_intent
+guard_expected_ref
 
 # A dirty tree now means another session's live work, not an OMS-owned intent.
 # Include untracked files: a new-file-only landing was previously invisible.
-dirty="$(git -C "$REPO" status --porcelain)"
+dirty="$(git_status_porcelain)"
 [ -z "$dirty" ] || fail "tree is dirty; commit or stash first, or drive from a dedicated worktree"
 
 prev_tree=""
@@ -1604,6 +1845,8 @@ prev_accept_out=""
 
 while :; do
   CYCLE=$((CYCLE + 1))
+  guard_git_authority
+  guard_expected_ref
   # Judge against the start-of-run contract only: a mid-run edit to the
   # acceptance command is a moved goalpost, not a pass. Checked in the main
   # shell so park() actually terminates the run.
@@ -1613,6 +1856,7 @@ while :; do
   accept_rc=0
   accept_out="$(OMS_GOAL_RUN_ID="$RUN_ID" OMS_GOAL_CYCLE="$CYCLE" \
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept 2>&1)" || accept_rc=$?
+  guard_expected_ref
   printf '%s\n' "$accept_out" | tail -n 3
   if [ "$accept_rc" -eq 0 ]; then
     if ! terminal_row "done" acceptance-pass; then
@@ -1627,8 +1871,26 @@ while :; do
     fi
     exit 0
   fi
-  [ "$accept_rc" -eq 3 ] ||
+  if [ "$accept_rc" -ne 3 ]; then
+    accept_reason="$(printf '%s\n' "$accept_out" | python3 -c '
+import re, sys
+allowed = {
+    "acceptance-command-changed", "acceptance-files-changed",
+    "acceptance-mutated-repository", "acceptance-supervision-failed",
+    "acceptance-timeout", "acceptance-output-limit",
+}
+found = ""
+for line in sys.stdin:
+    match = re.search(r"(?:^|\s)reason=([a-z0-9-]+)(?=$|\s)", line)
+    if match and match.group(1) in allowed:
+        found = match.group(1)
+print(found)
+' | tr -d '\r')"
+    if [ -n "$accept_reason" ]; then
+      park "$accept_reason" "inspect the acceptance receipt and restore the frozen plan, files, and repository state before retrying"
+    fi
     park "acceptance-command-error" "the acceptance command itself failed to run; fix the spec (agent-plan init --accept)"
+  fi
 
   # Stuck: nothing changed since the last failing cycle — more cycles would
   # replay the same failure, not fix it.
@@ -1644,6 +1906,9 @@ while :; do
   fi
 
   head_before="$(git -C "$REPO" rev-parse HEAD)"
+  head_ref_before="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')"
+  [ -n "$head_ref_before" ] ||
+    park "detached-head" "check out the reviewed work branch before goal-drive can commit"
   # First obtain a reviewed patch without mutating the main tree. The durable
   # intent below is the handoff between delegation authority and landing/
   # commit authority; plan-run no longer gets to cross both in one opaque
@@ -1670,8 +1935,16 @@ while :; do
 
   if [ "$provider_called" = 1 ]; then
     run_args=(--repo "$REPO" --to "$PROVIDER" --next)
+    [ "$RETRY_KNOWN" -eq 0 ] || run_args+=(--retry-known)
+    [ -z "$MODEL" ] || run_args+=(--model "$MODEL")
+    [ -z "$FALLBACK_MODEL" ] || run_args+=(--fallback-model "$FALLBACK_MODEL")
+    [ "$REASONING_EFFORT" = auto ] || run_args+=(--reasoning-effort "$REASONING_EFFORT")
     run_rc=0
-    run_out="$("$ROOT/scripts/plan-run.sh" "${run_args[@]}" 2>&1)" || run_rc=$?
+    goal_phase_run env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" bash \
+      "$ROOT/scripts/plan-run.sh" "${run_args[@]}" || run_rc=$?
+    run_out="$GOAL_PHASE_OUT"
+    guard_git_authority
+    guard_expected_ref
     printf '%s\n' "$run_out" | tail -n 6
     if [ "$run_rc" -ne 0 ]; then
       if printf '%s\n' "$run_out" | grep -q 'no actionable task'; then
@@ -1684,8 +1957,12 @@ while :; do
     patch_file="$(printf '%s\n' "$run_out" | sed -n 's/.* patch=\([^ ]*\).*/\1/p' | tail -n 1)"
   fi
 
+  guard_git_authority
+  guard_expected_ref
   [ "$(git -C "$REPO" rev-parse HEAD)" = "$head_before" ] ||
     park "head-moved" "another writer advanced HEAD mid-cycle; inspect git log, then re-run on a quiet tree"
+  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$head_ref_before" ] ||
+    park "intent-ref-moved" "the checked-out branch changed mid-cycle; return to the reviewed branch"
   [ -n "$task_id" ] || park "missing-plan-task" "plan-run returned no task id"
   if [ -z "$patch_file" ] || [ ! -f "$patch_file" ]; then
     park "no-admitted-patch" "plan-run returned no reviewed patch"
@@ -1695,7 +1972,8 @@ while :; do
     exit 75
   fi
 
-  intent_prepare "$task_id" "$patch_file" "$head_before" ""
+  intent_prepare "$task_id" "$patch_file" "$head_before" "$head_ref_before" ""
+  guard_expected_ref
   patch_abs="$(intent_patch_file)" || park "unsafe-patch-path" "inspect the commit intent"
   verify="$TASK_RECEIPT_VERIFY"
   land_log="$(agent_memory_mktemp)" || park "internal" "could not allocate landing output"
@@ -1717,7 +1995,7 @@ while :; do
     [ "$TASK_RECEIPT_STATE" = "done" ] ||
       park "landing-recovery-incomplete" "the applied patch is exact but its task receipt is $TASK_RECEIPT_STATE; keep the outer intent and recover it"
     land_rc=0
-  elif [ "$land_rc" -ne 0 ] && [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+  elif [ "$land_rc" -ne 0 ] && [ -n "$(git_status_porcelain)" ]; then
     printf '%s\n' "$(tail -n 8 "$land_log")" >&2
     rm -f "$land_log"
     park "landing-tree-ambiguous" "landing failed with a dirty non-exact tree; the outer intent remains open for manual recovery"
@@ -1730,9 +2008,16 @@ while :; do
     intent_write repairing "landing-repair-started"
     if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" repair --id "$task_id" \
       --lease-id "$repair_lease" --artifact "$land_log" >/dev/null 2>&1; then
-      repair_out="$("$ROOT/scripts/peer-delegate.sh" --repo "$REPO" --to "$PROVIDER" \
-        --plan-task "$task_id" --repair 0 --review-artifact "$land_log" \
-        --terminalize-resumed-repair 2>&1)" || repair_rc=$?
+      repair_args=(--repo "$REPO" --to "$PROVIDER" --plan-task "$task_id" \
+        --repair 0 --review-artifact "$land_log" --terminalize-resumed-repair)
+      [ -z "$MODEL" ] || repair_args+=(--model "$MODEL")
+      [ -z "$FALLBACK_MODEL" ] || repair_args+=(--fallback-model "$FALLBACK_MODEL")
+      [ "$REASONING_EFFORT" = auto ] || repair_args+=(--reasoning-effort "$REASONING_EFFORT")
+      goal_phase_run env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" bash \
+        "$ROOT/scripts/peer-delegate.sh" "${repair_args[@]}" || repair_rc=$?
+      repair_out="$GOAL_PHASE_OUT"
+      guard_git_authority
+      guard_expected_ref
       repair_rc="${repair_rc:-0}"
       [ "$repair_rc" -eq 0 ] || repair_worker_failed=1
       printf '%s\n' "$repair_out" | tail -n 6
@@ -1750,7 +2035,8 @@ while :; do
           exit 75
         fi
         old_intent="$INTENT_ID"
-        intent_prepare "$task_id" "$repaired_patch" "$head_before" repair "$old_intent"
+        intent_prepare "$task_id" "$repaired_patch" "$head_before" "$head_ref_before" repair "$old_intent"
+        guard_expected_ref
         patch_abs="$(intent_patch_file)" || park "unsafe-patch-path" "inspect the repaired intent"
         verify="$TASK_RECEIPT_VERIFY"
         : > "$land_log"
@@ -1776,7 +2062,7 @@ while :; do
     [ "$TASK_RECEIPT_STATE" = "done" ] ||
       park "landing-recovery-incomplete" "the repaired patch is exact but its task receipt is $TASK_RECEIPT_STATE; keep the outer intent and recover it"
     land_rc=0
-  elif [ "$land_rc" -ne 0 ] && [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+  elif [ "$land_rc" -ne 0 ] && [ -n "$(git_status_porcelain)" ]; then
     printf '%s\n' "$(tail -n 8 "$land_log")" >&2
     rm -f "$land_log"
     park "landing-tree-ambiguous" "repaired landing failed with a dirty non-exact tree; the outer intent remains open"
@@ -1816,6 +2102,8 @@ while :; do
     park "task-failed" "landing failed; $landing_next"
   fi
   rm -f "$land_log"
+  guard_git_authority
+  guard_expected_ref
   intent_write landed "patch-land-complete"
   if [ "${OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND:-0}" = 1 ]; then
     echo "goal-drive: injected stop after landing; rerun to reconcile $INTENT_ID" >&2

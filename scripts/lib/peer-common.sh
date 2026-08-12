@@ -191,8 +191,13 @@ ma_agy_read_dir() {
   # signal (Ctrl-C mid-call) is still reclaimable by cleanup.sh / doctor, the
   # same residue path delegate and patch-admit use.
   base="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-agy-read.XXXXXX")" || return 1
-  if [ -n "$repo" ] && git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
-     git -C "$repo" worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
+  if [ -n "$repo" ] &&
+     oms_git_assert_safe_execution_config "$repo" diff-read >/dev/null 2>&1 &&
+     git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
+     GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+       GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+       -c core.fsmonitor=false -C "$repo" \
+       worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
     oms_harness_mark_tmpdir "$base" "$repo" "$base/tree" 2>/dev/null || true
     printf '%s/tree\n' "$base"
   else
@@ -890,7 +895,12 @@ EOF
 
 ma_safe_status() {
   local repo="$1"
-  git -C "$repo" status --short -- "${MA_SAFE_PATHS[@]}"
+  oms_git_assert_safe_execution_config "$repo" diff-read || return 1
+  oms_git_assert_plain_index "$repo" || return 1
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    git -c core.fsmonitor=false -C "$repo" \
+    status --short -- "${MA_SAFE_PATHS[@]}"
 }
 
 ma_prompt_diff_bytes() {
@@ -977,7 +987,13 @@ ma_safe_diff() {
   base="$(ma_git_diff_base "$repo")"
   tmp="$(agent_memory_mktemp)" || return 1
 
-  if ! git -C "$repo" diff "$base" -- "${MA_SAFE_PATHS[@]}" > "$tmp"; then
+  if ! oms_git_assert_safe_execution_config "$repo" diff-read ||
+    ! oms_git_assert_plain_index "$repo" ||
+    ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+      GIT_CONFIG_NOSYSTEM=1 \
+      git -c core.fsmonitor=false -c diff.external= -C "$repo" \
+      diff --no-ext-diff --no-textconv \
+      "$base" -- "${MA_SAFE_PATHS[@]}" > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1402,16 +1418,18 @@ ma_normalize_provider_list() {
 # porcelain status while changing its bytes.
 ma_worktree_fingerprint() {
   local workdir="$1"
-  python3 - "$workdir" <<'PY'
+  local tracked=""
+
+  tracked="$(oms_git_tracked_state_fingerprint "$workdir")" || return 1
+  python3 - "$workdir" "$tracked" <<'PY'
 import hashlib, os, subprocess, sys
 
 repo = sys.argv[1]
 h = hashlib.sha256()
-h.update(subprocess.check_output([
-    "git", "-C", repo, "diff", "--binary", "--no-ext-diff", "HEAD", "--"
-]))
+h.update(sys.argv[2].encode("ascii"))
 raw = subprocess.check_output([
-    "git", "-C", repo, "ls-files", "--others", "-z"
+    "git", "-c", "core.fsmonitor=false", "-C", repo,
+    "ls-files", "--others", "-z"
 ])
 for rel in sorted(p for p in raw.split(b"\0") if p):
     path = os.path.join(os.fsencode(repo), rel)
@@ -1430,6 +1448,29 @@ for rel in sorted(p for p in raw.split(b"\0") if p):
                 h.update(chunk)
 print(h.hexdigest())
 PY
+}
+
+# A write caller may install a named post-attempt guard function. It runs immediately
+# after every provider child returns, before routed fallback code fingerprints
+# the worktree or invokes another model. Nonzero is an authority violation,
+# not a provider failure, and therefore never retries.
+ma_write_post_attempt_guard() {
+  local access="$1"
+  local fn="${OMS_WRITE_POST_ATTEMPT_GUARD_FN:-}"
+
+  [ "$access" = write ] || return 0
+  [ -n "$fn" ] || return 0
+  case "$fn" in
+    [A-Za-z_]*[!A-Za-z0-9_]*|[!A-Za-z_]*|"")
+      echo "error: invalid write post-attempt guard function" >&2
+      return 2
+      ;;
+  esac
+  declare -F "$fn" >/dev/null 2>&1 || {
+    echo "error: write post-attempt guard function is unavailable: $fn" >&2
+    return 2
+  }
+  "$fn"
 }
 
 # Run one provider with a resolved model and at most one capacity-only fallback.
@@ -1476,6 +1517,11 @@ ma_run_routed_provider_inner() {
   status=0
   ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
     "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
+  if ! ma_write_post_attempt_guard "$access"; then
+    OMS_WORKER_AUTHORITY_VIOLATION=1
+    export OMS_WORKER_AUTHORITY_VIOLATION
+    status=125
+  fi
   cat "$attempt_file" >> "$artifact"
 
   # An authority breach is not a provider/model failure. Never route the same
@@ -1518,10 +1564,20 @@ ma_run_routed_provider_inner() {
         status=0
         ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
           "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
+        if ! ma_write_post_attempt_guard "$access"; then
+          OMS_WORKER_AUTHORITY_VIOLATION=1
+          export OMS_WORKER_AUTHORITY_VIOLATION
+          status=125
+        fi
         cat "$attempt_file" >> "$artifact"
+        [ "$OMS_WORKER_AUTHORITY_VIOLATION" != 1 ] || break
       done <<EOF
 $OMS_MODEL_DISTINCT_CHAIN
 EOF
+    fi
+    if [ "$OMS_WORKER_AUTHORITY_VIOLATION" = 1 ]; then
+      rm -f "$attempt_file"
+      return "$status"
     fi
     if [ "$status" -ne 0 ] && oms_model_is_model_safeguard_output "$attempt_file"; then
       echo "note: model safeguard stopped the selected route; no eligible model remains" >&2
@@ -1548,7 +1604,16 @@ EOF
       status=0
       ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
         "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
+      if ! ma_write_post_attempt_guard "$access"; then
+        OMS_WORKER_AUTHORITY_VIOLATION=1
+        export OMS_WORKER_AUTHORITY_VIOLATION
+        status=125
+      fi
       cat "$attempt_file" >> "$artifact"
+      if [ "$OMS_WORKER_AUTHORITY_VIOLATION" = 1 ]; then
+        rm -f "$attempt_file"
+        return "$status"
+      fi
     fi
   fi
 
@@ -1589,7 +1654,16 @@ EOF
       status=0
       ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
         "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$origin" "$state_repo" "$call_id" || status=$?
+      if ! ma_write_post_attempt_guard "$access"; then
+        OMS_WORKER_AUTHORITY_VIOLATION=1
+        export OMS_WORKER_AUTHORITY_VIOLATION
+        status=125
+      fi
       cat "$attempt_file" >> "$artifact"
+      if [ "$OMS_WORKER_AUTHORITY_VIOLATION" = 1 ]; then
+        rm -f "$attempt_file"
+        return "$status"
+      fi
     fi
   fi
 

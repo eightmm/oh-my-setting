@@ -245,8 +245,9 @@ directory symlink; a changed absolute lookup parks before consumption.
 `oms autopilot` composes those boundaries. It proposes an initial plan for
 parent review, atomically applies only that exact proposal, drives the approved
 tasks, and may propose one `r1-` remainder tranche of at most two tasks. The
-mechanical acceptance command remains the hard gate; cross-family semantic
-review defaults to advisory shadow mode and can be made a gate explicitly. Its
+mechanical acceptance command remains the hard gate. Custom acceptance commands
+bind their declared `Required check files` and reject verifier mutation; Draft
+PR publication defaults cross-family semantic review to a blocking gate. Its
 base is frozen to a commit before the drive, so a moved branch name cannot make
 the whole-change review empty. Each drive ends with one unique canonical result
 that binds its internal receipt, status, and reason; the durable terminal row
@@ -421,12 +422,13 @@ declared mechanical gate.
   same-account writers, and use OS isolation when that threat is in scope.
 - Draft publication pushes with `--no-verify --no-signed`, so repository-local
   pre-push hooks and worker-writable signing configuration never execute under
-  the publisher's credentials. The publisher scans all new history objects
-  before intent creation and again after its verifier, disables implicit tag
-  and submodule pushes, and binds the `gh` viewer. Residue: repository-local
-  transport configuration (for example `core.sshCommand`) still shapes the
-  push at same-UID tier, and Git transport credentials may identify a
-  different account.
+  the publisher's credentials. It refuses repository-local executable
+  transport, filter/diff/fsmonitor, proxy, credential, include, and URL-rewrite
+  keys plus unsafe command-scope Git configuration before any remote operation, scans all new
+  history objects, disables implicit tag/submodule
+  pushes, and binds the `gh` viewer. Residue: a trusted global Git credential
+  helper can still identify a different account; GitHub identity checks cover
+  `gh`, not every possible transport credential source.
 - GitHub creates pull requests from branch names, not caller-supplied expected
   object IDs. The publisher checks both refs immediately before and after the
   request and parks on drift, but another authorized GitHub writer can still

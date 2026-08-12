@@ -12,6 +12,44 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
 
+# Cancellation is an authority boundary too: a targeted TERM/HUP/INT to the
+# publisher must not return while a verifier, Git transport, push, or gh child
+# keeps running with the parent's credentials. The small outer shell waits on
+# run-bounded in the background so Bash handles traps immediately; the Python
+# supervisor owns a fresh child session and terminates/reaps the whole group.
+if [ "${OMS_DRAFT_PROCESS_SUPERVISED:-0}" != 1 ]; then
+  DRAFT_SUPERVISOR_PID=""
+  draft_supervisor_signal() {  # SIGNAL EXIT
+    local signal_name="$1" exit_code="$2" pid="${DRAFT_SUPERVISOR_PID:-}"
+    trap - HUP INT TERM
+    if [ -n "$pid" ]; then
+      kill -"$signal_name" "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+    exit "$exit_code"
+  }
+  trap 'draft_supervisor_signal HUP 129' HUP
+  trap 'draft_supervisor_signal INT 130' INT
+  trap 'draft_supervisor_signal TERM 143' TERM
+  # Use the cross-platform supervisor shared with autopilot. Launch through
+  # bash explicitly: native Windows Python cannot CreateProcess a shebang-only
+  # .sh path, while Git Bash itself is the documented Windows runtime.
+  OMS_DRAFT_PROCESS_SUPERVISED=1 python3 \
+    "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
+    --wall "${OMS_DRAFT_TOTAL_TIMEOUT_S:-86400}" \
+    --kill-after "${OMS_DRAFT_CANCEL_GRACE_S:-2}" --label draft-pr -- \
+    bash "$ROOT/scripts/draft-pr.sh" "$@" &
+  DRAFT_SUPERVISOR_PID=$!
+  if wait "$DRAFT_SUPERVISOR_PID"; then
+    draft_supervisor_rc=0
+  else
+    draft_supervisor_rc=$?
+  fi
+  DRAFT_SUPERVISOR_PID=""
+  trap - HUP INT TERM
+  exit "$draft_supervisor_rc"
+fi
+
 GIT="${OMS_GIT_BIN:-git}"
 GH="${OMS_GH_BIN:-gh}"
 # Replacement refs can make inspection read one commit while push transfers
@@ -270,7 +308,11 @@ PY
 
 assert_clean() {
   local status_out status_rc=0
-  assert_plain_index
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "unsafe executable Git config; remove it before publication"
+    assert_plain_index
+    oms_git_assert_plain_index "$REPO" ||
+        park "git-index-unreadable" "repair the Git index before publication"
   status_out="$("$GIT" -C "$REPO" -c core.fsmonitor=false \
     status --porcelain --untracked-files=all)" || status_rc=$?
   [ "$status_rc" -eq 0 ] || park "git-status-failed" "repair the repository before publication"
@@ -292,6 +334,7 @@ remote_ref_sha() {  # URL REF -> absent | SHA
   local remote_url="$1"
   local ref="$2"
   local raw count sha found_ref
+  assert_safe_local_transport_config
   raw="$(draft_run_remote "$GIT" -C "$REPO" ls-remote --heads "$remote_url" \
     "refs/heads/$ref" 2>/dev/null)" ||
     park "remote-unreachable" "check the remote and network"
@@ -310,8 +353,116 @@ remote_ref_sha() {  # URL REF -> absent | SHA
   printf '%s\n' "$sha"
 }
 
+assert_safe_local_transport_config() {
+  local keys_file unsafe_key unsafe_command_key worktree_enabled worktree_rc
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "unsafe executable Git config; remove it before publication"
+  unsafe_command_key="$(python3 - <<'PY'
+import os
+
+raw_count = os.environ.get("GIT_CONFIG_COUNT", "0")
+if not raw_count.isdigit() or (len(raw_count) > 1 and raw_count.startswith("0")):
+    print("invalid GIT_CONFIG_COUNT")
+    raise SystemExit(0)
+count = int(raw_count)
+if count > 64:
+    print("oversized GIT_CONFIG_COUNT")
+    raise SystemExit(0)
+safe = {("core.hookspath", "/dev/null")}
+for index in range(count):
+    key_name = "GIT_CONFIG_KEY_%d" % index
+    value_name = "GIT_CONFIG_VALUE_%d" % index
+    if key_name not in os.environ or value_name not in os.environ:
+        print("incomplete command-scope config")
+        break
+    key = os.environ[key_name]
+    value = os.environ[value_name]
+    if (key.lower(), value) not in safe:
+        print(key or "empty-key")
+        break
+else:
+    if os.environ.get("GIT_CONFIG_PARAMETERS"):
+        print("GIT_CONFIG_PARAMETERS")
+PY
+)" || fail "cannot inspect command-scope Git config"
+  unsafe_command_key="${unsafe_command_key//$'\r'/}"
+  [ -z "$unsafe_command_key" ] ||
+    fail "unsafe command-scope Git config: $unsafe_command_key"
+  keys_file="$(agent_memory_mktemp)" || fail "cannot allocate Git config scan"
+  if ! "$GIT" -C "$REPO" config --local --null --name-only --list > "$keys_file"; then
+    rm -f "$keys_file"
+    fail "cannot inspect repository-local Git config"
+  fi
+  worktree_rc=0
+  worktree_enabled="$("$GIT" -C "$REPO" config --local --bool --get \
+    extensions.worktreeConfig 2>/dev/null)" || worktree_rc=$?
+  worktree_enabled="${worktree_enabled//$'\r'/}"
+  case "$worktree_rc:$worktree_enabled" in
+    0:true)
+      if ! "$GIT" -C "$REPO" config --worktree --null --name-only --list >> "$keys_file"; then
+        rm -f "$keys_file"
+        fail "cannot inspect worktree-local Git config"
+      fi
+      ;;
+    0:false|1:) ;;
+    *)
+      rm -f "$keys_file"
+      fail "cannot validate extensions.worktreeConfig"
+      ;;
+  esac
+  unsafe_key="$(python3 - "$keys_file" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    keys = handle.read().split(b"\0")
+
+exact = {
+    "core.alternaterefscommand",
+    "core.askpass",
+    "core.gitproxy",
+    "core.sshcommand",
+    "ssh.variant",
+}
+remote_command = re.compile(r"^remote\.[^.]+\.(?:proxy|receivepack|uploadpack|vcs)$")
+for raw in keys:
+    if not raw:
+        continue
+    try:
+        key = raw.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        print("non-UTF-8-key")
+        break
+    folded = key.lower()
+    if (
+        folded in exact
+        or folded.startswith("credential.")
+        or folded.startswith("http.")
+        or folded.startswith("include.")
+        or folded.startswith("includeif.")
+        or folded.startswith("protocol.")
+        or remote_command.match(folded)
+        or (
+            folded.startswith("url.")
+            and folded.endswith((".insteadof", ".pushinsteadof"))
+        )
+    ):
+        print(key)
+        break
+PY
+)" || {
+    rm -f "$keys_file"
+    fail "cannot validate repository-local Git config"
+  }
+  rm -f "$keys_file"
+  unsafe_key="${unsafe_key//$'\r'/}"
+  [ -z "$unsafe_key" ] ||
+    fail "unsafe local Git transport config: $unsafe_key"
+}
+
 strict_remote() {
   local fetch_urls push_urls fetch_count push_count fetch_slug push_slug fetch_fold push_fold
+  assert_safe_local_transport_config
   fetch_urls="$("$GIT" -C "$REPO" remote get-url --all "$REMOTE" 2>/dev/null)" ||
     fail "remote $REMOTE does not exist"
   push_urls="$("$GIT" -C "$REPO" remote get-url --push --all "$REMOTE" 2>/dev/null)" ||
@@ -1063,6 +1214,10 @@ publish_locked() {
       park "published-branch-missing" "an armed intent never recreates a deleted or uncertain branch"
     [ "$phase" = prepared ] ||
       park "published-branch-missing" "later intent phases never recreate a deleted branch"
+    # Recheck immediately before arming the irreversible remote effect. The
+    # repository is worker-writable, and local transport keys can execute a
+    # credential helper/proxy/SSH command even when hooks are suppressed.
+    assert_safe_local_transport_config
     push_out="$(agent_memory_mktemp)" || fail "cannot allocate push diagnostics"
     # Persist uncertainty before the remote effect. If the process dies after
     # this point, an absent branch is never recreated: deletion remains a

@@ -36,6 +36,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `PROVIDER:model=NAME` targets.
 
 ### Changed
+- Autopilot hardening now binds the full local authority chain: provider routes
+  and timeouts live in a durable resumable run receipt; workers cannot invoke
+  the commit driver; commit recovery compare-and-sets the reviewed symbolic
+  branch; progress writes reject symlinks; custom acceptance files are hashed,
+  bounded, and protected by the base-owned admission floor; and whole-branch
+  scope is rechecked after implementation, review, and publication preparation.
+  Draft PRs use semantic review as a gate by default, blocking reviews require
+  a complete native diff, and worker-writable executable Git settings and
+  hidden index flags are refused before parent or publisher authority is used.
+  Cancellation terminates and reaps each autonomous phase's process group.
 - Autopilot recovery is now bound to one unique final drive result, its durable
   receipt row, and the selected work branch. `propose` requires the base, so
   its paste-ready, shell-quoted continuation preserves every effective option;

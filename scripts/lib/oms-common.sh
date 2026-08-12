@@ -69,6 +69,401 @@ oms_sha256_file() {
   oms_sha256_stream < "$1"
 }
 
+# Git is an execution boundary, not only a content reader. Repository and
+# worktree config can make seemingly read-only status/diff commands execute a
+# worker-planted program (fsmonitor, external diff/textconv, filters, includes).
+# Inspect those files directly: using `git config` to decide whether config is
+# safe would already have followed include/includeIf directives.
+#
+# Command-scope config is parent-owned. The harness appends only an exact
+# hooksPath=/dev/null guard; duplicates are harmless and everything else is
+# rejected so an inherited GIT_CONFIG_* value cannot widen execution.
+oms_git_assert_safe_execution_config() {  # REPO [diff-read]
+  local root="$1"
+  local mode="${2:-strict}"
+  local command_problem=""
+  local paths=""
+  local common_dir=""
+  local worktree_dir=""
+
+  command_problem="$(python3 - <<'PY'
+import os
+
+raw = os.environ.get("GIT_CONFIG_COUNT", "0")
+if (not raw.isdigit() or (len(raw) > 1 and raw.startswith("0"))):
+    print("invalid GIT_CONFIG_COUNT")
+    raise SystemExit(0)
+count = int(raw)
+if count > 64:
+    print("oversized GIT_CONFIG_COUNT")
+    raise SystemExit(0)
+for index in range(count):
+    key_name = "GIT_CONFIG_KEY_%d" % index
+    value_name = "GIT_CONFIG_VALUE_%d" % index
+    if key_name not in os.environ or value_name not in os.environ:
+        print("incomplete command-scope config")
+        break
+    if (os.environ[key_name].lower(), os.environ[value_name]) != (
+            "core.hookspath", "/dev/null"):
+        print(os.environ[key_name] or "empty command-scope key")
+        break
+else:
+    if os.environ.get("GIT_CONFIG_PARAMETERS"):
+        print("GIT_CONFIG_PARAMETERS")
+PY
+  )" || {
+    echo "cannot inspect command-scope Git config" >&2
+    return 2
+  }
+  command_problem="$(printf '%s' "$command_problem" | tr -d '\r')"
+  if [ -n "$command_problem" ]; then
+    echo "unsafe command-scope Git config: $command_problem" >&2
+    return 2
+  fi
+
+  # Resolve only Git's already-established metadata paths. At this point no
+  # repository config has been parsed by this function, and rev-parse does not
+  # load diff/filter/fsmonitor drivers. Canonical physical parents collapse the
+  # alternative path spellings seen under Windows Git Bash; CR comes from
+  # native Windows Python/Git and must not become part of the pathname.
+  common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
+  worktree_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
+  common_dir="$(printf '%s' "$common_dir" | tr -d '\r')"
+  worktree_dir="$(printf '%s' "$worktree_dir" | tr -d '\r')"
+  if [ -z "$common_dir" ] || [ -z "$worktree_dir" ]; then
+    echo "cannot inspect repository Git config paths" >&2
+    return 2
+  fi
+  case "$common_dir" in /*|[A-Za-z]:/*) ;; *) common_dir="$root/$common_dir" ;; esac
+  case "$worktree_dir" in /*|[A-Za-z]:/*) ;; *) worktree_dir="$root/$worktree_dir" ;; esac
+  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
+    echo "cannot inspect repository Git config path" >&2
+    return 2
+  }
+  worktree_dir="$(cd "$worktree_dir" 2>/dev/null && pwd -P)" || {
+    echo "cannot inspect worktree Git config path" >&2
+    return 2
+  }
+  paths="$common_dir/config
+$worktree_dir/config.worktree"
+
+  OMS_GIT_CONFIG_PATHS="$paths" OMS_GIT_CONFIG_MODE="$mode" python3 - <<'PY'
+import configparser
+import os
+import re
+import stat
+import sys
+
+paths = [value for value in os.environ["OMS_GIT_CONFIG_PATHS"].splitlines()
+         if value]
+mode = os.environ.get("OMS_GIT_CONFIG_MODE", "strict")
+if mode not in ("strict", "diff-read"):
+    print("cannot inspect repository Git config: unknown inspection mode",
+          file=sys.stderr)
+    raise SystemExit(2)
+
+def unsafe(section, option):
+    section = section.lower()
+    option = option.lower()
+    def family(name):
+        # Git accepts modern quoted subsections separated by spaces OR tabs,
+        # plus the deprecated dotted form. Match the grammar boundary rather
+        # than one pretty-printed spelling of the section header.
+        return (section == name or section.startswith(name + ".") or
+                re.match(r"^" + re.escape(name) + r"[ \t]+\"", section))
+    if family("include") or family("includeif"):
+        return True
+    if section == "core" and option == "fsmonitor":
+        return True
+    if mode != "diff-read" and section == "diff" and option == "external":
+        return True
+    if family("filter") and option in (
+            "clean", "smudge", "process"):
+        return True
+    # A named diff driver can execute either a command or textconv program.
+    if mode != "diff-read" and family("diff") and option in (
+            "command", "external", "textconv"):
+        return True
+    return False
+
+for path in paths:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        # config.worktree is optional; the common config is not.
+        if path.endswith("config.worktree"):
+            continue
+        print("cannot inspect repository Git config: missing config", file=sys.stderr)
+        raise SystemExit(2)
+    except OSError:
+        print("cannot inspect repository Git config", file=sys.stderr)
+        raise SystemExit(2)
+    if not stat.S_ISREG(info.st_mode):
+        print("cannot inspect repository Git config: non-regular config", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        if info.st_size > 1024 * 1024:
+            raise ValueError("config exceeds 1 MiB")
+        raw = open(path, "rb").read()
+        if b"\0" in raw:
+            raise ValueError("NUL in config")
+        text = raw.decode("utf-8-sig", "strict")
+    except (OSError, UnicodeError, ValueError) as exc:
+        print("cannot inspect repository Git config: %s" % exc, file=sys.stderr)
+        raise SystemExit(2)
+
+    # Parse the syntax ourselves without interpolation or includes. Git permits
+    # bare booleans; ConfigParser accepts those with allow_no_value.
+    parser = configparser.RawConfigParser(
+        interpolation=None, strict=False, allow_no_value=True,
+        delimiters=("=",), comment_prefixes=("#", ";"),
+        inline_comment_prefixes=None)
+    parser.optionxform = str
+    try:
+        parser.read_string(text)
+    except configparser.Error as exc:
+        print("cannot inspect repository Git config: malformed config (%s)" % exc,
+              file=sys.stderr)
+        raise SystemExit(2)
+    for section in parser.sections():
+        for option, unused in parser.items(section, raw=True):
+            if unsafe(section, option):
+                key = "%s.%s" % (section, option)
+                print("unsafe Git execution config: %s" % key, file=sys.stderr)
+                raise SystemExit(2)
+raise SystemExit(0)
+PY
+}
+
+# Refuse index hints that deliberately make tracked work invisible to ordinary
+# status/diff. The caller checks execution config first; fsmonitor is disabled
+# here as defense in depth before reading the index.
+oms_git_assert_plain_index() {  # REPO
+  local root="$1"
+  local listing=""
+
+  listing="$(agent_memory_mktemp 2>/dev/null || mktemp "${TMPDIR:-/tmp}/oms-index-flags.XXXXXX")" || {
+    echo "cannot inspect Git index flags" >&2
+    return 2
+  }
+  if ! git -c core.fsmonitor=false -C "$root" ls-files -v -z > "$listing"; then
+    rm -f "$listing"
+    echo "cannot inspect Git index flags" >&2
+    return 2
+  fi
+  if ! python3 - "$listing" <<'PY'
+import sys
+raw = open(sys.argv[1], "rb").read()
+for record in raw.split(b"\0"):
+    if not record:
+        continue
+    tag = record[:1]
+    if tag == b"S" or b"a" <= tag <= b"z":
+        name = record[2:] if len(record) > 2 else b"<unknown>"
+        print("hidden Git index flag: %s" %
+              name.decode("utf-8", "backslashreplace"), file=sys.stderr)
+        raise SystemExit(2)
+PY
+  then
+    rm -f "$listing"
+    return 2
+  fi
+  rm -f "$listing"
+  return 0
+}
+
+# Freeze the raw config files and index visibility bits that can change what a
+# later Git capture sees or executes. This intentionally does not invoke Git:
+# it is the first post-provider check, before status/diff/ls-files can consume
+# worker-controlled config. OUT lives in the private delegated-worktree parent.
+oms_git_execution_state_snapshot() {  # REPO OUT [config-only]
+  local root="$1"
+  local out="$2"
+  local mode="${3:-full}"
+  local common_dir=""
+  local worktree_dir=""
+  local index_path=""
+  local paths=""
+  local tmp="$out.tmp.$$"
+
+  common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
+  worktree_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
+  index_path="$(git -C "$root" rev-parse --git-path index 2>/dev/null || true)"
+  common_dir="$(printf '%s' "$common_dir" | tr -d '\r')"
+  worktree_dir="$(printf '%s' "$worktree_dir" | tr -d '\r')"
+  index_path="$(printf '%s' "$index_path" | tr -d '\r')"
+  [ -n "$common_dir" ] && [ -n "$worktree_dir" ] && [ -n "$index_path" ] || return 2
+  case "$common_dir" in /*|[A-Za-z]:/*) ;; *) common_dir="$root/$common_dir" ;; esac
+  case "$worktree_dir" in /*|[A-Za-z]:/*) ;; *) worktree_dir="$root/$worktree_dir" ;; esac
+  case "$index_path" in /*|[A-Za-z]:/*) ;; *) index_path="$root/$index_path" ;; esac
+  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || return 2
+  worktree_dir="$(cd "$worktree_dir" 2>/dev/null && pwd -P)" || return 2
+  paths="$common_dir/config
+$worktree_dir/config.worktree"
+  [ "$mode" = config-only ] || paths="$paths
+$index_path"
+
+  OMS_GIT_EXEC_PATHS="$paths" python3 - <<'PY' > "$tmp" || {
+import base64
+import hashlib
+import os
+import stat
+import sys
+
+for path in os.environ["OMS_GIT_EXEC_PATHS"].splitlines():
+    if not path:
+        continue
+    key = base64.b64encode(os.fsencode(path)).decode("ascii")
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        print("%s\tabsent" % key)
+        continue
+    except OSError:
+        print("%s\tunreadable" % key)
+        raise SystemExit(2)
+    if not stat.S_ISREG(info.st_mode):
+        print("%s\tnon-regular:%o" % (key, info.st_mode))
+        continue
+    if info.st_size > 64 * 1024 * 1024:
+        print("%s\toversized:%d" % (key, info.st_size))
+        raise SystemExit(2)
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    print("%s\tregular:%o:%d:%s" % (
+        key, stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest()))
+PY
+    rm -f "$tmp"
+    return 2
+  }
+  mv "$tmp" "$out"
+}
+
+# Compare with the same no-Git raw walk and bind the private snapshot bytes to
+# the hash held by the parent shell. A worker that finds and edits SNAPSHOT
+# cannot manufacture a new trusted baseline.
+oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
+  local root="$1"
+  local snapshot="$2"
+  local expected_sha="$3"
+  local actual_sha=""
+
+  # Root is part of the public signature for callers and documents which
+  # repository the receipt belongs to. The trusted snapshot contains the
+  # already-resolved physical paths, so the post-worker path never asks Git to
+  # resolve them again.
+  [ -n "$root" ] || return 2
+
+  actual_sha="$(oms_sha256_file "$snapshot" 2>/dev/null || true)"
+  if [ -z "$actual_sha" ] || [ "$actual_sha" != "$expected_sha" ]; then
+    echo "Git execution-state snapshot changed or became unreadable" >&2
+    return 2
+  fi
+  if ! python3 - "$snapshot" <<'PY'
+import base64
+import hashlib
+import os
+import stat
+import sys
+
+def signature(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    if not stat.S_ISREG(info.st_mode):
+        return "non-regular:%o" % info.st_mode
+    if info.st_size > 64 * 1024 * 1024:
+        return "oversized:%d" % info.st_size
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return "unreadable"
+    return "regular:%o:%d:%s" % (
+        stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest())
+
+try:
+    rows = open(sys.argv[1], "rb").read().splitlines()
+except OSError:
+    raise SystemExit(2)
+for row in rows:
+    try:
+        encoded, expected = row.split(b"\t", 1)
+        path = os.fsdecode(base64.b64decode(encoded, validate=True))
+        expected = expected.decode("ascii", "strict")
+    except (ValueError, UnicodeError):
+        raise SystemExit(2)
+    if not os.path.isabs(path) or signature(path) != expected:
+        raise SystemExit(2)
+PY
+  then
+    echo "Git execution config or hidden index state changed" >&2
+    return 2
+  fi
+  return 0
+}
+
+# Content fingerprint of the index and tracked worktree bytes without invoking
+# diff machinery. Git diff may run clean filters even with --no-ext-diff and
+# --no-textconv; ls-files plus direct byte reads has no filter/attribute command
+# path and is safe for refusal/recovery bookkeeping.
+oms_git_tracked_state_fingerprint() {  # REPO
+  local root="$1"
+
+  python3 - "$root" <<'PY'
+import hashlib
+import os
+import stat
+import subprocess
+import sys
+
+root = sys.argv[1]
+root_b = os.fsencode(root)
+base = ["git", "-c", "core.fsmonitor=false", "-C", root]
+try:
+    index = subprocess.check_output(base + ["ls-files", "--stage", "-z"],
+                                    stderr=subprocess.DEVNULL)
+    tracked = subprocess.check_output(base + ["ls-files", "-z"],
+                                      stderr=subprocess.DEVNULL)
+except (OSError, subprocess.CalledProcessError):
+    raise SystemExit(2)
+
+h = hashlib.sha256()
+h.update(b"index\0" + index)
+for rel in sorted(value for value in tracked.split(b"\0") if value):
+    h.update(b"\0path\0" + hashlib.sha256(rel).digest())
+    path = os.path.join(root_b, rel)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        h.update(b"missing\0")
+        continue
+    h.update(("mode:%o\0" % info.st_mode).encode())
+    if stat.S_ISLNK(info.st_mode):
+        h.update(b"link\0" + os.fsencode(os.readlink(path)))
+    elif stat.S_ISREG(info.st_mode):
+        h.update(b"file\0")
+        try:
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    h.update(chunk)
+        except OSError:
+            h.update(b"unreadable\0")
+    else:
+        h.update(("other:%d:%d\0" % (info.st_size,
+                  getattr(info, "st_mtime_ns",
+                          int(info.st_mtime * 1_000_000_000)))).encode())
+print(h.hexdigest())
+PY
+}
+
 # Hash only git metadata and tracked diff bytes. The ledger never stores diff
 # content, file paths, host paths, or secrets.
 oms_git_state_fingerprint() {
@@ -79,16 +474,15 @@ oms_git_state_fingerprint() {
     printf 'non-git\n'
     return 0
   fi
-  head="$(git -C "$root" rev-parse HEAD 2>/dev/null || printf 'unborn')"
-  diff_hash="$({
-    git -C "$root" diff --binary HEAD -- 2>/dev/null || true
-    git -C "$root" diff --cached --binary -- 2>/dev/null || true
-  } | oms_sha256_stream)"
+  head="$(git -c core.fsmonitor=false -C "$root" rev-parse HEAD 2>/dev/null || printf 'unborn')"
+  diff_hash="$(oms_git_tracked_state_fingerprint "$root" 2>/dev/null ||
+    printf 'unreadable')"
   untracked_hash="$(python3 - "$root" <<'PY'
 import hashlib, os, subprocess, sys
 root = sys.argv[1]
 paths = subprocess.check_output(
-    ["git", "-C", root, "ls-files", "-z", "--others", "--exclude-standard"])
+    ["git", "-c", "core.fsmonitor=false", "-C", root,
+     "ls-files", "-z", "--others", "--exclude-standard"])
 h = hashlib.sha256()
 for raw in sorted(x for x in paths.split(b"\0") if x):
     path = os.path.join(root, os.fsdecode(raw))
@@ -967,15 +1361,11 @@ oms_worker_surface_capture_one() {
       ;;
     tracked)
       # Status categories are not content: a file already marked ` M` stays
-      # ` M` however much a worker rewrites it, so an in-flight edit of the
-      # user's own uncommitted work would pass unnoticed. Hash the diff bytes.
-      git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | LC_ALL=C sort
-      printf 'worktree-diff %s\n' "$({
-        git -C "$repo" diff --binary HEAD -- 2>/dev/null || true
-      } | oms_sha256_stream)"
-      printf 'index-diff %s\n' "$({
-        git -C "$repo" diff --cached --binary -- 2>/dev/null || true
-      } | oms_sha256_stream)"
+      # ` M` however much a worker rewrites it. More importantly, status can
+      # consult attributes and an inherited global clean filter. Hash raw
+      # index/tracked bytes only; this also avoids the filter execution path.
+      printf 'tracked-state %s\n' \
+        "$(oms_git_tracked_state_fingerprint "$repo" 2>/dev/null || printf unreadable)"
       ;;
     files)
       # Untracked AND ignored content, by stat rather than by reading bytes.
@@ -1002,7 +1392,8 @@ except ValueError:
 def listing(args):
     try:
         raw = subprocess.check_output(
-            ["git", "-C", root, "ls-files", "-z"] + args,
+            ["git", "-c", "core.fsmonitor=false", "-C", root,
+             "ls-files", "-z"] + args,
             stderr=subprocess.DEVNULL)
     except Exception:
         return []

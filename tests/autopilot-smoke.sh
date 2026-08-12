@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-autopilot.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+trap '[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMP"' EXIT HUP INT TERM
 
 fail() {
   echo "FAIL: $*" >&2
@@ -52,6 +52,7 @@ make_repo() {
 ## Verification
 
 - Required checks: true
+- Required check files: PROJECT.md
 EOF
   git -C "$repo" add .gitignore PROJECT.md src/app.txt
   git -C "$repo" commit -qm base
@@ -78,6 +79,7 @@ write_proposal() {
   "base_sha": "$base_sha",
   "id_prefix": "",
   "allowed_envelope": ["tests/", "src/"],
+  "acceptance_files": ["PROJECT.md"],
   "tasks": [
     {"id":"t1","title":"feat: core","allowed":["src/"],"verify":"true","depends":[]},
     {"id":"t2","title":"test: core","allowed":["$second_allowed"],"verify":"true","depends":["t1"]}
@@ -100,7 +102,7 @@ test_atomic_proposal_apply() {
     --expected-proposal-sha256 "$proposal_sha" \
     --expected-plan-sha256 absent \
     --goal "finish the bounded feature" --accept true \
-    --allowed-envelope 'src/,tests/' --max-tasks 4 >/dev/null ||
+    --allowed-envelope 'src/,tests/' --accept-files PROJECT.md --max-tasks 4 >/dev/null ||
     fail "a reviewed proposal should apply atomically"
 
   python3 - "$repo/.oms/plan/tasks.json" <<'PY' || fail "proposal tasks missing"
@@ -123,7 +125,7 @@ PY
     --expected-proposal-sha256 "$proposal_sha" \
     --expected-plan-sha256 absent \
     --goal "finish the bounded feature" --accept true \
-    --allowed-envelope 'src/,tests/' --max-tasks 4 > "$repo/replay.out" ||
+    --allowed-envelope 'src/,tests/' --accept-files PROJECT.md --max-tasks 4 > "$repo/replay.out" ||
     fail "exact proposal replay should converge"
   grep -Fq 'already applied' "$repo/replay.out" ||
     fail "proposal replay did not report convergence"
@@ -153,7 +155,7 @@ PY
     --proposal "$proposal" \
     --expected-proposal-sha256 "$proposal_sha" \
     --expected-plan-sha256 "$before" \
-    --allowed-envelope 'src/,tests/' --max-tasks 4 >/dev/null 2>&1; then
+    --allowed-envelope 'src/,tests/' --accept-files PROJECT.md --max-tasks 4 >/dev/null 2>&1; then
     fail "scope-widening proposal should be rejected"
   fi
   after="$(sha256_file "$repo/.oms/plan/tasks.json")"
@@ -167,7 +169,7 @@ EOF
     --proposal "$proposal" \
     --expected-proposal-sha256 "$proposal_sha" \
     --expected-plan-sha256 0000000000000000000000000000000000000000000000000000000000000000 \
-    --allowed-envelope 'src/,tests/' --max-tasks 4 >/dev/null 2>&1; then
+    --allowed-envelope 'src/,tests/' --accept-files PROJECT.md --max-tasks 4 >/dev/null 2>&1; then
     fail "stale plan CAS should be rejected"
   fi
   [ "$before" = "$(sha256_file "$repo/.oms/plan/tasks.json")" ] ||
@@ -185,7 +187,7 @@ EOF
   if "$ROOT/scripts/agent-plan.sh" --repo "$stale_repo" apply-proposal \
     --proposal "$stale_proposal" --expected-proposal-sha256 "$stale_sha" \
     --expected-plan-sha256 absent --goal g --accept true \
-    --allowed-envelope 'src,tests' --max-tasks 4 >/dev/null 2>&1; then
+    --allowed-envelope 'src,tests' --accept-files PROJECT.md --max-tasks 4 >/dev/null 2>&1; then
     fail "a proposal bound to an older PROJECT.md should not apply"
   fi
   [ ! -f "$stale_repo/.oms/plan/tasks.json" ] ||
@@ -203,7 +205,7 @@ EOF
   if "$ROOT/scripts/agent-plan.sh" --repo "$head_repo" apply-proposal \
     --proposal "$head_proposal" --expected-proposal-sha256 "$head_sha" \
     --expected-plan-sha256 absent --goal g --accept true \
-    --allowed-envelope 'src,tests' --max-tasks 4 >/dev/null 2>&1; then
+    --allowed-envelope 'src,tests' --accept-files PROJECT.md --max-tasks 4 >/dev/null 2>&1; then
     fail "a proposal bound to an older clean HEAD should not apply"
   fi
   [ ! -f "$head_repo/.oms/plan/tasks.json" ] || fail "stale HEAD proposal changed the plan"
@@ -221,7 +223,7 @@ EOF
   if "$ROOT/scripts/agent-plan.sh" --repo "$draft_repo" apply-proposal \
       --proposal "$draft_proposal" --expected-proposal-sha256 "$draft_sha" \
       --expected-plan-sha256 absent --goal g --accept true \
-      --allowed-envelope 'src,tests' >/dev/null 2>&1; then
+      --allowed-envelope 'src,tests' --accept-files PROJECT.md >/dev/null 2>&1; then
     fail "a current but unconfirmed PROJECT.md should not authorize plan topology"
   fi
   [ ! -f "$draft_repo/.oms/plan/tasks.json" ] || fail "draft proposal changed plan state"
@@ -244,7 +246,7 @@ PY
   if "$ROOT/scripts/agent-plan.sh" --repo "$control_repo" apply-proposal \
     --proposal "$control_proposal" --expected-proposal-sha256 "$control_sha" \
     --expected-plan-sha256 absent --goal g --accept true \
-    --allowed-envelope 'src,tests' --max-tasks 4 >/dev/null 2>&1; then
+    --allowed-envelope 'src,tests' --accept-files PROJECT.md --max-tasks 4 >/dev/null 2>&1; then
     fail "task delimiter injection should be rejected"
   fi
   [ ! -f "$control_repo/.oms/plan/tasks.json" ] ||
@@ -279,7 +281,7 @@ PY
   if "$ROOT/scripts/agent-plan.sh" --repo "$control_repo" apply-proposal \
       --proposal "$control_proposal" --expected-proposal-sha256 "$control_sha" \
       --expected-plan-sha256 absent --goal g --accept true \
-      --allowed-envelope 'src,tests' >/dev/null 2>&1; then
+      --allowed-envelope 'src,tests' --accept-files PROJECT.md >/dev/null 2>&1; then
     fail "proposal accepted a terminal-control review spoof"
   fi
 
@@ -295,7 +297,7 @@ PY
   if OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-plan.sh" --repo "$child_repo" apply-proposal \
       --proposal "$child_proposal" --expected-proposal-sha256 "$child_sha" \
       --expected-plan-sha256 absent --goal g --accept true \
-      --allowed-envelope 'src,tests' >/dev/null 2>&1; then
+      --allowed-envelope 'src,tests' --accept-files PROJECT.md >/dev/null 2>&1; then
     fail "a harness child applied plan topology directly"
   fi
   if OMS_HARNESS_CHILD=1 "$ROOT/scripts/plan-from-spec.sh" --repo "$child_repo" \
@@ -354,7 +356,7 @@ PY
   if "$ROOT/scripts/agent-plan.sh" --repo "$legacy_repo" apply-proposal \
       --proposal "$legacy_proposal" --expected-proposal-sha256 "$legacy_proposal_sha" \
       --expected-plan-sha256 "$legacy_plan_sha" --goal g --accept true \
-      --allowed-envelope 'src,tests' >/dev/null 2>&1; then
+      --allowed-envelope 'src,tests' --accept-files PROJECT.md >/dev/null 2>&1; then
     fail "legacy adoption admitted a task absent from the reviewed proposal"
   fi
 
@@ -381,7 +383,11 @@ write_done_plan() {
   local repo="$1"
   local accept="$2"
   local include_replan="${3:-0}"
+  local preserve_receipt="${4:-0}"
   mkdir -p "$repo/.oms/plan"
+  # Each fixture call models a fresh outer operator invocation. Individual
+  # receipt-resume behavior is covered explicitly below.
+  [ "$preserve_receipt" = 1 ] || rm -f "$repo/.oms/plan/autopilot-run.json"
   OMS_T_ACCEPT="$accept" OMS_T_REPLAN="$include_replan" python3 - "$repo/.oms/plan/tasks.json" <<'PY'
 import datetime, json, os, sys
 now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -409,6 +415,10 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
             "schema": 1,
             "spec_sha256": hashlib.sha256(spec).hexdigest(),
             "allowed_envelope": ["src", "tests"],
+            "acceptance_files": ["PROJECT.md"],
+            "acceptance_manifest": [
+                {"path": "PROJECT.md", "sha256": hashlib.sha256(spec).hexdigest()}
+            ],
         },
         "tasks": tasks,
     }, handle)
@@ -419,22 +429,53 @@ write_orchestration_stubs() {
   local bin="$1"
   mkdir -p "$bin"
 
-  cat > "$bin/goal-drive" <<'EOF'
+cat > "$bin/goal-drive" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_CALLS/goal-drive"
+printf 'strict=%s off=%s timeout=%s\n' \
+  "${OMS_WORKER_GUARD_STRICT:-}" "${OMS_WORKER_GUARD_OFF:-}" \
+  "${OMS_PEER_TIMEOUT:-}" >> "$OMS_T_CALLS/goal-drive-env"
 run_id=""
+expected_ref=""
 receipt="1111111111111111111111111111111111111111111111111111111111111111"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --run-id) run_id="$2"; shift 2 ;;
+    --expected-ref) expected_ref="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 [ -n "$run_id" ] || exit 2
+if [ -n "${OMS_T_GOAL_EXPECT_REF:-}" ]; then
+  printf '%s\n' "$(git -C "$OMS_T_REPO" symbolic-ref -q HEAD)" \
+    > "$OMS_T_CALLS/goal-drive-observed-ref"
+  [ -z "${OMS_T_GOAL_SWITCH_REF:-}" ] ||
+    git -C "$OMS_T_REPO" symbolic-ref HEAD "$OMS_T_GOAL_SWITCH_REF"
+  printf '%s\n' "$expected_ref" > "$OMS_T_CALLS/goal-drive-expected-ref"
+fi
 if [ "${OMS_T_GOAL_COMMIT:-0}" = 1 ]; then
   printf 'implemented by goal-drive\n' >> "$OMS_T_REPO/src/app.txt"
   git -C "$OMS_T_REPO" add src/app.txt
   git -C "$OMS_T_REPO" commit -qm 'feat: implement planned work'
+fi
+if [ "${OMS_T_GOAL_COMMIT_OUTSIDE:-0}" = 1 ]; then
+  printf 'outside reviewed scope\n' > "$OMS_T_REPO/outside.txt"
+  git -C "$OMS_T_REPO" add outside.txt
+  git -C "$OMS_T_REPO" commit -qm 'chore: drive outside reviewed scope'
+fi
+if [ "${OMS_T_GOAL_ASSUME_UNCHANGED:-0}" = 1 ]; then
+  git -C "$OMS_T_REPO" update-index --assume-unchanged src/app.txt
+  printf 'hidden drive mutation\n' >> "$OMS_T_REPO/src/app.txt"
+fi
+if [ "${OMS_T_GOAL_INSTALL_FILTER:-0}" = 1 ]; then
+  marker="$OMS_T_REPO/calls/filter-fired"
+  git -C "$OMS_T_REPO" config filter.owned.process \
+    "sh -c ': > \"$marker\"; exit 1'"
+fi
+if [ "${OMS_T_GOAL_INSTALL_DIFF:-0}" = 1 ]; then
+  marker="$OMS_T_REPO/calls/diff-fired"
+  git -C "$OMS_T_REPO" config diff.external \
+    "sh -c ': > \"$marker\"; exit 1'"
 fi
 terminal_row() {
   mkdir -p "$OMS_T_REPO/.oms/plan"
@@ -447,7 +488,29 @@ terminal_result() {
     "$run_id" "$receipt" "$1"
 }
 case "${OMS_T_GOAL_RESULT:-success}" in
-  success) echo 'goal-drive: done run=test cycles=1 (acceptance passed)'; exit 0 ;;
+  success)
+    terminal_row acceptance-pass
+    python3 - "$OMS_T_REPO/.oms/plan/progress.jsonl" <<'PY'
+import json, sys
+path = sys.argv[1]
+rows = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        row = json.loads(line)
+        if row.get("reason") == "acceptance-pass":
+            row["status"] = "done"
+        rows.append(row)
+with open(path, "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+PY
+    echo 'goal-drive: done run=test cycles=1 (acceptance passed)'
+    printf 'goal-drive: terminal-v1 run=%s receipt=%s status=done reason=acceptance-pass\n' \
+      "$run_id" "$receipt"
+    exit 0 ;;
+  success-no-terminal)
+    echo 'goal-drive: done run=test cycles=1 (acceptance passed)'
+    exit 0 ;;
   exhausted)
     terminal_row tasks-exhausted
     echo 'goal-drive: parked run=test cycle=1 reason=tasks-exhausted'
@@ -486,6 +549,28 @@ case "${OMS_T_GOAL_RESULT:-success}" in
     terminal_result tasks-exhausted
     echo 'background child output after the terminal result'
     exit 3 ;;
+  signal-wait)
+    : > "$OMS_T_CALLS/goal-drive-started"
+    trap '' TERM HUP INT
+    if command -v setsid >/dev/null 2>&1; then
+      setsid bash -c 'trap "" TERM HUP INT; sleep 3; : > "$1"' \
+        phase "$OMS_T_CALLS/goal-drive-leaked" &
+    else
+      (trap '' TERM HUP INT; sleep 3; : > "$OMS_T_CALLS/goal-drive-leaked") &
+    fi
+    wait ;;
+  escape-and-exit)
+    : > "$OMS_T_CALLS/goal-drive-started"
+    if command -v setsid >/dev/null 2>&1; then
+      setsid bash -c 'trap "" TERM HUP INT; printf "%s\n" "$$" > "$1"; sleep 3; : > "$2"' \
+        phase "$OMS_T_CALLS/goal-drive-escaped-pid" \
+        "$OMS_T_CALLS/goal-drive-leaked" &
+    else
+      (trap '' TERM HUP INT; printf '%s\n' "$BASHPID" \
+        > "$OMS_T_CALLS/goal-drive-escaped-pid"; sleep 3; \
+        : > "$OMS_T_CALLS/goal-drive-leaked") &
+    fi
+    exit 9 ;;
   *) echo 'goal-drive: parked run=test cycle=1 reason=task-failed'; exit 3 ;;
 esac
 EOF
@@ -508,11 +593,26 @@ EOF
 cat > "$bin/peer-review" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_CALLS/peer-review"
+printf 'timeout=%s\n' "${OMS_PEER_TIMEOUT:-}" >> "$OMS_T_CALLS/peer-review-env"
 [ "${OMS_T_REVIEW_BREAK_ACCEPT:-0}" != 1 ] || : > "$OMS_T_CALLS/fail-accept"
 if [ "${OMS_T_REVIEW_COMMIT:-0}" = 1 ]; then
   printf 'reviewer mutation\n' >> "$OMS_T_REPO/src/app.txt"
   git -C "$OMS_T_REPO" add src/app.txt
   git -C "$OMS_T_REPO" commit -qm 'chore: reviewer mutation'
+fi
+if [ "${OMS_T_REVIEW_COMMIT_OUTSIDE:-0}" = 1 ]; then
+  printf 'reviewer outside mutation\n' > "$OMS_T_REPO/outside.txt"
+  git -C "$OMS_T_REPO" add outside.txt
+  git -C "$OMS_T_REPO" commit -qm 'chore: reviewer outside mutation'
+fi
+if [ "${OMS_T_REVIEW_SKIP_WORKTREE:-0}" = 1 ]; then
+  git -C "$OMS_T_REPO" update-index --skip-worktree src/app.txt
+  printf 'hidden reviewer mutation\n' >> "$OMS_T_REPO/src/app.txt"
+fi
+if [ "${OMS_T_REVIEW_INSTALL_FSMONITOR:-0}" = 1 ]; then
+  marker="$OMS_T_REPO/calls/fsmonitor-fired"
+  git -C "$OMS_T_REPO" config core.fsmonitor \
+    "sh -c ': > \"$marker\"; exit 1'"
 fi
 if [ -n "${OMS_T_REVIEW_SWITCH_BRANCH:-}" ]; then
   git -C "$OMS_T_REPO" switch -qc "$OMS_T_REVIEW_SWITCH_BRANCH"
@@ -520,14 +620,21 @@ fi
 exit "${OMS_T_REVIEW_RC:-0}"
 EOF
 
-  cat > "$bin/draft-pr" <<'EOF'
+cat > "$bin/draft-pr" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_CALLS/draft-pr"
+printf 'phase=%s wall=%s\n' "${1:-}" "${OMS_AUTOPILOT_PHASE_WALL:-}" \
+  >> "$OMS_T_CALLS/draft-pr-env"
 case "${1:-}" in
   prepare)
     intent="$OMS_T_REPO/.oms/publish/fake.json"
     mkdir -p "$(dirname "$intent")"
     printf '{}\n' > "$intent"
+    if [ "${OMS_T_PREPARE_COMMIT_OUTSIDE:-0}" = 1 ]; then
+      printf 'prepare outside mutation\n' > "$OMS_T_REPO/outside.txt"
+      git -C "$OMS_T_REPO" add outside.txt
+      git -C "$OMS_T_REPO" commit -qm 'chore: prepare outside mutation'
+    fi
     echo "intent: $intent"
     ;;
   publish) echo 'draft-pr: published https://example.invalid/pr/1' ;;
@@ -654,6 +761,17 @@ test_autopilot_orchestration() {
   [ ! -s "$repo/calls/plan-from-spec" ] ||
     fail "a stale tasks-exhausted row reached the planner"
 
+  # Exit zero is not completion authority by itself. The outer orchestrator
+  # requires goal-drive's unique terminal-v1 line and matching durable row.
+  write_done_plan "$repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success-no-terminal run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$repo/no-success-terminal.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "success without a durable terminal receipt should park, got $rc"
+  grep -Fq 'reason=goal-drive-result-invalid' "$repo/no-success-terminal.out" ||
+    fail "missing successful drive receipt parked for the wrong reason"
+
   # status survives a vanished or dangling proposal file.
   ln -s missing-target "$repo/.oms/plan/proposal-dangling.json"
   run_autopilot "$repo" status > "$repo/status.out" 2>&1 ||
@@ -699,10 +817,16 @@ test_autopilot_orchestration() {
   rc=0
   OMS_T_PLAN_RC=3 run_autopilot "$planner_repo" propose --planner claude \
     --allowed 'src,tests' --base main > "$planner_repo/planner.out" 2>&1 || rc=$?
-  [ "$rc" = 3 ] || fail "planner failure should propagate, got $rc"
+  [ "$rc" = 3 ] || fail "planner failure should propagate, got $rc: $(tail -5 "$planner_repo/planner.out")"
   if grep -Fq 'awaits parent review' "$planner_repo/planner.out"; then
     fail "planner failure was misreported as a proposal"
   fi
+  run_autopilot "$planner_repo" status > "$planner_repo/planner-status.out" 2>&1 ||
+    fail "planner interruption receipt should remain inspectable"
+  grep -Fq 'outer run: stage=proposing' "$planner_repo/planner-status.out" ||
+    fail "planner interruption did not retain its pre-call proposing receipt"
+  grep -Eq '^  oms .* propose$' "$planner_repo/planner-status.out" ||
+    fail "planner interruption status did not print an exact propose continuation"
 
   # A proposal continuation is executable, not a template with an unresolved
   # branch token. Collect the base before the planner is allowed to run.
@@ -718,6 +842,19 @@ test_autopilot_orchestration() {
   [ ! -s "$missing_base_repo/calls/plan-from-spec" ] ||
     fail "a proposal without its continuation base reached the planner"
 
+  # A completed plan whose acceptance already passes needs no remainder.
+  local accepted_repo="$TMP/already-accepted"
+  make_repo "$accepted_repo"
+  mkdir -p "$accepted_repo/calls"
+  write_done_plan "$accepted_repo" true
+  run_autopilot "$accepted_repo" propose --allowed 'src,tests' --base main \
+    > "$accepted_repo/accepted.out" 2>&1 ||
+    fail "already accepted plan should finish without another proposal: $(tail -8 "$accepted_repo/accepted.out")"
+  [ ! -s "$accepted_repo/calls/plan-from-spec" ] ||
+    fail "already accepted plan called the remainder planner"
+  grep -Fq 'acceptance already passes' "$accepted_repo/accepted.out" ||
+    fail "already accepted plan did not explain why no remainder was created"
+
   # The exit-4 receipt is executable argv, not prose. It must survive a repo
   # path with spaces and retain every effective option that shapes the resumed
   # run, including the proposal caps used by the atomic apply.
@@ -732,6 +869,13 @@ test_autopilot_orchestration() {
     --planner antigravity --worker claude --reviewer codex \
     --remote upstream --allowed 'src,tests' --base main \
     --max-cycles 7 --initial-tasks 9 --replan-tasks 1 --auto-repair \
+    --retry-known --provider-timeout 17m \
+    --planner-model planner-model-x --planner-fallback-model planner-fallback-x \
+    --planner-reasoning-effort low \
+    --worker-model worker-model-x --worker-fallback-model worker-fallback-x \
+    --worker-reasoning-effort high \
+    --reviewer-model reviewer-model-x --reviewer-fallback-model reviewer-fallback-x \
+    --reviewer-reasoning-effort medium \
     --review-mode gate --draft-pr > "$continuation_repo/propose.out" 2>&1 || rc=$?
   [ "$rc" = 4 ] || fail "continuation fixture should stop for review, got $rc"
   continuation_proposal="$continuation_repo/.oms/plan/proposal-r1.json"
@@ -768,9 +912,304 @@ assert value("--max-cycles") == "7", args
 assert value("--initial-tasks") == "9", args
 assert value("--replan-tasks") == "1", args
 assert value("--review-mode") == "gate", args
+assert value("--provider-timeout") == "17m", args
+assert value("--planner-model") == "planner-model-x", args
+assert value("--planner-fallback-model") == "planner-fallback-x", args
+assert value("--planner-reasoning-effort") == "low", args
+assert value("--worker-model") == "worker-model-x", args
+assert value("--worker-fallback-model") == "worker-fallback-x", args
+assert value("--worker-reasoning-effort") == "high", args
+assert value("--reviewer-model") == "reviewer-model-x", args
+assert value("--reviewer-fallback-model") == "reviewer-fallback-x", args
+assert value("--reviewer-reasoning-effort") == "medium", args
 assert args.count("--auto-repair") == 1, args
+assert args.count("--retry-known") == 1, args
 assert args.count("--draft-pr") == 1, args
 PY
+
+  # Status validates the outer receipt, its proposal bytes, frozen base, and
+  # option-derived continuation before presenting executable recovery argv.
+  run_autopilot "$continuation_repo" status > "$continuation_repo/status.out" 2>&1 ||
+    fail "valid outer receipt should be visible in status"
+  grep -Fq 'outer run: stage=proposal-review' "$continuation_repo/status.out" ||
+    fail "status omitted the outer proposal-review stage"
+  grep -Fq -- '--provider-timeout 17m' "$continuation_repo/status.out" ||
+    fail "status did not reconstruct the bound outer continuation"
+  rc=0
+  run_autopilot "$continuation_repo" propose \
+    --planner antigravity --worker claude --reviewer codex \
+    --remote upstream --allowed 'src,tests' --base main --max-cycles 6 \
+    --review-mode gate --draft-pr > "$continuation_repo/contract-drift.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an in-progress outer contract rewrite should fail, got $rc"
+  grep -Fq 'immutable contract changed' "$continuation_repo/contract-drift.out" ||
+    fail "outer contract drift was rejected for the wrong reason"
+  run_autopilot "$continuation_repo" status > "$continuation_repo/status-after-drift.out" 2>&1 ||
+    fail "failed contract drift corrupted the outer receipt"
+  grep -Fq -- '--provider-timeout 17m' "$continuation_repo/status-after-drift.out" ||
+    fail "failed contract drift replaced the safe continuation"
+  local receipt_path="$continuation_repo/.oms/plan/autopilot-run.json"
+  local receipt_copy="$continuation_repo/.oms/plan/autopilot-run-copy.json"
+  cp "$receipt_path" "$receipt_copy"
+  rm -f "$receipt_path"
+  ln -s "$(basename "$receipt_copy")" "$receipt_path"
+  run_autopilot "$continuation_repo" status > "$continuation_repo/status-symlink.out" 2>&1 ||
+    fail "status should diagnose an unsafe receipt without crashing"
+  grep -Fq 'outer run: invalid receipt' "$continuation_repo/status-symlink.out" ||
+    fail "status trusted a symlink outer receipt"
+  if grep -Fq 'outer continuation:' "$continuation_repo/status-symlink.out"; then
+    fail "invalid outer receipt exposed a continuation"
+  fi
+
+  # Routing controls are bounded and validated before reaching any provider.
+  local invalid_option_repo="$TMP/invalid-autopilot-options"
+  make_repo "$invalid_option_repo"
+  mkdir -p "$invalid_option_repo/calls"
+  for invalid_args in \
+    '--provider-timeout 0' \
+    '--provider-timeout forever' \
+    '--worker-reasoning-effort impossible'; do
+    rc=0
+    # The values above contain no shell metacharacters; word splitting here is
+    # deliberate so each fixture exercises the public two-argument option.
+    # shellcheck disable=SC2086
+    run_autopilot "$invalid_option_repo" propose --allowed 'src,tests' --base main \
+      $invalid_args > "$invalid_option_repo/invalid.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid option '$invalid_args' should exit 2, got $rc"
+  done
+  [ ! -s "$invalid_option_repo/calls/plan-from-spec" ] ||
+    fail "invalid routing controls reached the planner"
+  rc=0
+  OMS_T_PLAN_RC=3 run_autopilot "$invalid_option_repo" propose \
+    --allowed 'src,tests' --base main --max-cycles 10 \
+    --worker-timeout 24h > "$invalid_option_repo/max-timeout.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] ||
+    fail "documented max worker timeout/cycle composition should launch, got $rc"
+  local max_worker_repo="$TMP/max-worker-phase-wall"
+  make_repo "$max_worker_repo"
+  mkdir -p "$max_worker_repo/calls"
+  write_done_plan "$max_worker_repo" true
+  OMS_T_GOAL_RESULT=success run_autopilot "$max_worker_repo" run \
+    --worker codex --base main --max-cycles 10 --worker-timeout 24h \
+    --auto-repair --review-mode off > "$max_worker_repo/max.out" 2>&1 ||
+    fail "max cycles/timeout/repair composition should fit the outer supervisor"
+  grep -Fq 'autopilot: done' "$max_worker_repo/max.out" ||
+    fail "max worker phase composition did not reach completion"
+
+  local unsafe_start_repo="$TMP/unsafe-git-at-start"
+  make_repo "$unsafe_start_repo"
+  mkdir -p "$unsafe_start_repo/calls"
+  git -C "$unsafe_start_repo" config diff.external \
+    "sh -c ': > \"$unsafe_start_repo/calls/start-diff-fired\"; exit 1'"
+  rc=0
+  run_autopilot "$unsafe_start_repo" status \
+    > "$unsafe_start_repo/unsafe.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "status should reject executable local Git config, got $rc"
+  [ ! -e "$unsafe_start_repo/calls/start-diff-fired" ] ||
+    fail "status executed a configured external diff while rejecting it"
+
+  # Git can deliberately hide tracked working-tree changes from status/diff.
+  # Neither skip-worktree (S) nor assume-unchanged (lowercase -v tag) is a
+  # valid autonomous-run surface, even when the ordinary clean-tree check is
+  # fooled by it.
+  local hidden_mode hidden_repo
+  for hidden_mode in assume-unchanged skip-worktree; do
+    hidden_repo="$TMP/hidden-index-$hidden_mode"
+    make_repo "$hidden_repo"
+    mkdir -p "$hidden_repo/calls"
+    write_done_plan "$hidden_repo" true
+    if [ "$hidden_mode" = assume-unchanged ]; then
+      git -C "$hidden_repo" update-index --assume-unchanged src/app.txt
+    else
+      git -C "$hidden_repo" update-index --skip-worktree src/app.txt
+    fi
+    printf 'hidden before autopilot\n' >> "$hidden_repo/src/app.txt"
+    [ -z "$(git -C "$hidden_repo" status --porcelain)" ] ||
+      fail "$hidden_mode fixture was not hidden from ordinary status"
+    rc=0
+    OMS_T_GOAL_RESULT=success run_autopilot "$hidden_repo" run --worker codex \
+      --reviewer claude --base main --review-mode gate \
+      > "$hidden_repo/hidden.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "$hidden_mode should fail before drive, got $rc"
+    grep -Fq 'skip-worktree/assume-unchanged flags are forbidden' \
+      "$hidden_repo/hidden.out" || fail "$hidden_mode was rejected for the wrong reason"
+    [ ! -s "$hidden_repo/calls/goal-drive" ] ||
+      fail "$hidden_mode reached goal-drive"
+  done
+
+  # Unattended implementation forces the strict surface guard even when a
+  # caller inherited opt-out values, and every role receives its effective
+  # routing/timeout settings.
+  local routing_repo="$TMP/routing-controls"
+  make_repo "$routing_repo"
+  mkdir -p "$routing_repo/calls"
+  write_done_plan "$routing_repo" true
+  OMS_WORKER_GUARD_STRICT=0 OMS_WORKER_GUARD_OFF=1 OMS_T_GOAL_RESULT=success \
+    run_autopilot "$routing_repo" run --worker codex --reviewer claude \
+      --allowed 'src,tests' --base main --provider-timeout 23s --retry-known \
+      --worker-model worker-model-y --worker-reasoning-effort high \
+      --reviewer-model reviewer-model-y --reviewer-reasoning-effort low \
+      --review-mode gate > "$routing_repo/routing.out" 2>&1 ||
+    fail "valid routing controls should reach the bounded children"
+  grep -Fq 'strict=1 off=0 timeout=23s' "$routing_repo/calls/goal-drive-env" ||
+    fail "goal-drive did not receive the forced strict guard and timeout"
+  grep -Fq -- '--retry-known' "$routing_repo/calls/goal-drive" ||
+    fail "goal-drive did not receive retry-known"
+  grep -Fq -- '--model worker-model-y' "$routing_repo/calls/goal-drive" ||
+    fail "goal-drive did not receive the worker model"
+  grep -Fq -- '--reasoning-effort high' "$routing_repo/calls/goal-drive" ||
+    fail "goal-drive did not receive the worker reasoning effort"
+  grep -Fq -- '--model reviewer-model-y' "$routing_repo/calls/peer-review" ||
+    fail "peer-review did not receive the reviewer model"
+  grep -Fq -- '--reasoning-effort low' "$routing_repo/calls/peer-review" ||
+    fail "peer-review did not receive the reviewer reasoning effort"
+  grep -Fq 'timeout=23s' "$routing_repo/calls/peer-review-env" ||
+    fail "peer-review did not receive the provider timeout"
+
+  # A process may stop immediately after persisting a downstream stage. The
+  # exact status continuation safely replays through approved/driving instead
+  # of becoming an unusable receipt at reviewing or publishing.
+  local interrupted_stage
+  for interrupted_stage in reviewing publishing; do
+    python3 - "$routing_repo/.oms/plan/autopilot-run.json" "$interrupted_stage" <<'PY'
+import json, sys
+path, stage = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    row = json.load(handle)
+row["stage"] = stage
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+    OMS_T_GOAL_RESULT=success run_autopilot "$routing_repo" run \
+      --worker codex --reviewer claude --allowed 'src,tests' --base main \
+      --provider-timeout 23s --retry-known \
+      --worker-model worker-model-y --worker-reasoning-effort high \
+      --reviewer-model reviewer-model-y --reviewer-reasoning-effort low \
+      --review-mode gate > "$routing_repo/resume-$interrupted_stage.out" 2>&1 ||
+      fail "$interrupted_stage outer receipt could not replay its exact continuation"
+    grep -Fq 'autopilot: done' "$routing_repo/resume-$interrupted_stage.out" ||
+      fail "$interrupted_stage replay did not reach a new done receipt"
+  done
+
+  # Recheck the hidden-index surface after every provider boundary. A child
+  # cannot earn completion by hiding a tracked mutation after startup.
+  local hidden_drive_repo="$TMP/hidden-index-after-drive"
+  make_repo "$hidden_drive_repo"
+  mkdir -p "$hidden_drive_repo/calls"
+  write_done_plan "$hidden_drive_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_GOAL_ASSUME_UNCHANGED=1 \
+    run_autopilot "$hidden_drive_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate > "$hidden_drive_repo/hidden.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "post-drive assume-unchanged should park, got $rc"
+  grep -Fq 'reason=hidden-index-flags-after-drive' "$hidden_drive_repo/hidden.out" ||
+    fail "post-drive assume-unchanged parked for the wrong reason"
+  [ ! -s "$hidden_drive_repo/calls/peer-review" ] ||
+    fail "hidden post-drive mutation reached semantic review"
+
+  local unsafe_git_repo="$TMP/unsafe-git-after-drive"
+  make_repo "$unsafe_git_repo"
+  mkdir -p "$unsafe_git_repo/calls"
+  write_done_plan "$unsafe_git_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_GOAL_INSTALL_FILTER=1 \
+    run_autopilot "$unsafe_git_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate > "$unsafe_git_repo/unsafe.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "post-drive executable filter config should park, got $rc"
+  grep -Fq 'reason=unsafe-git-execution-config' "$unsafe_git_repo/unsafe.out" ||
+    fail "post-drive executable filter config parked for the wrong reason"
+  [ ! -e "$unsafe_git_repo/calls/filter-fired" ] ||
+    fail "post-drive executable filter config was invoked"
+  [ ! -s "$unsafe_git_repo/calls/peer-review" ] ||
+    fail "post-drive executable filter config reached semantic review"
+
+  local hidden_review_repo="$TMP/hidden-index-after-review"
+  make_repo "$hidden_review_repo"
+  mkdir -p "$hidden_review_repo/calls"
+  write_done_plan "$hidden_review_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_REVIEW_SKIP_WORKTREE=1 \
+    run_autopilot "$hidden_review_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate > "$hidden_review_repo/hidden.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "post-review skip-worktree should park, got $rc"
+  grep -Fq 'reason=hidden-index-flags-after-review' "$hidden_review_repo/hidden.out" ||
+    fail "post-review skip-worktree parked for the wrong reason"
+
+  local unsafe_review_repo="$TMP/unsafe-git-after-review"
+  make_repo "$unsafe_review_repo"
+  mkdir -p "$unsafe_review_repo/calls"
+  write_done_plan "$unsafe_review_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_REVIEW_INSTALL_FSMONITOR=1 \
+    run_autopilot "$unsafe_review_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate > "$unsafe_review_repo/unsafe.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "post-review fsmonitor config should park, got $rc"
+  grep -Fq 'reason=unsafe-git-execution-config' "$unsafe_review_repo/unsafe.out" ||
+    fail "post-review fsmonitor config parked for the wrong reason"
+  [ ! -e "$unsafe_review_repo/calls/fsmonitor-fired" ] ||
+    fail "post-review fsmonitor config was invoked"
+
+  # A completed receipt is durable history, not a permanent repo lock. After
+  # the operator returns to the base and installs a new confirmed spec, a new
+  # proposal archives the done receipt by digest and starts a fresh binding.
+  local done_receipt_sha
+  local done_receipt_stage
+  if ! python3 - "$routing_repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    assert json.load(handle)["stage"] == "done"
+PY
+  then
+    fail "same-spec remainder fixture did not begin from a done outer receipt"
+  fi
+  done_receipt_sha="$(sha256_file "$routing_repo/.oms/plan/autopilot-run.json")"
+  done_receipt_stage="$(python3 - "$routing_repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["stage"])
+PY
+)"
+  printf 'before=%s stage=%s\n' "$done_receipt_sha" "$done_receipt_stage" \
+    > "$routing_repo/same-spec-debug.out"
+  write_done_plan "$routing_repo" false 0 1
+  rc=0
+  run_autopilot "$routing_repo" propose --allowed 'src,tests' --base main \
+    --worker codex --reviewer claude --provider-timeout 23s --retry-known \
+    --worker-model worker-model-y --worker-reasoning-effort high \
+    --reviewer-model reviewer-model-y --reviewer-reasoning-effort low \
+    --review-mode gate > "$routing_repo/same-spec-replan.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] ||
+    fail "same-spec acceptance regression should archive done and propose r1, got $rc"
+  ls "$routing_repo/.oms/plan"/autopilot-run* 2>/dev/null | sed 's#.*/##' \
+    >> "$routing_repo/same-spec-debug.out"
+  [ -f "$routing_repo/.oms/plan/autopilot-run.$done_receipt_sha.json" ] ||
+    fail "same-spec remainder did not archive its completed outer receipt: $(ls "$routing_repo/.oms/plan"/autopilot-run* 2>/dev/null | sed 's#.*/##' | tr '\n' ' ')"
+  rm -f "$routing_repo/.oms/plan/autopilot-run.json" \
+    "$routing_repo/.oms/plan/proposal-r1.json"
+  write_done_plan "$routing_repo" true
+  OMS_T_GOAL_RESULT=success run_autopilot "$routing_repo" run \
+    --worker codex --reviewer claude --allowed 'src,tests' --base main \
+    --provider-timeout 23s --retry-known \
+    --worker-model worker-model-y --worker-reasoning-effort high \
+    --reviewer-model reviewer-model-y --reviewer-reasoning-effort low \
+    --review-mode gate > "$routing_repo/restore-done.out" 2>&1 ||
+    fail "same-spec archive fixture could not restore a completed outer run"
+  done_receipt_sha="$(sha256_file "$routing_repo/.oms/plan/autopilot-run.json")"
+  git -C "$routing_repo" switch -q main
+  printf '\n- Goal: next bounded feature\n' >> "$routing_repo/PROJECT.md"
+  git -C "$routing_repo" add PROJECT.md
+  git -C "$routing_repo" commit -qm 'docs: confirm the next project goal'
+  rm -f "$routing_repo/.oms/plan/tasks.json" \
+    "$routing_repo/.oms/plan/progress.jsonl"
+  rc=0
+  run_autopilot "$routing_repo" propose --allowed 'src,tests' --base main \
+    > "$routing_repo/next-propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "new spec after a done run should reach proposal review, got $rc"
+  [ -f "$routing_repo/.oms/plan/autopilot-run.$done_receipt_sha.json" ] ||
+    fail "done outer receipt was not archived by digest"
+  run_autopilot "$routing_repo" status > "$routing_repo/next-status.out" 2>&1 ||
+    fail "new outer proposal receipt should validate"
+  grep -Fq 'outer run: stage=proposal-review' "$routing_repo/next-status.out" ||
+    fail "new confirmed spec did not start a fresh outer run"
 
   local crlf_repo="$TMP/crlf-draft"
   make_repo "$crlf_repo"
@@ -788,15 +1227,28 @@ PY
   [ "$rc" = 2 ] || fail "CRLF draft spec should be refused, got $rc"
   [ ! -f "$crlf_repo/calls/plan-from-spec" ] || fail "CRLF draft reached the planner"
 
-  # Semantic review is shadow by default: its failure is visible but cannot
-  # block a mechanically accepted draft PR. Gate mode is the opt-in strict path.
+  # Draft publication is strict by default. Shadow remains an explicit local
+  # operator choice, but is never silently selected merely because no review
+  # mode flag was written.
   write_done_plan "$repo" true
   : > "$repo/calls/peer-review"
   : > "$repo/calls/draft-pr"
+  rc=0
   OMS_T_GOAL_RESULT=success OMS_T_REVIEW_RC=1 run_autopilot "$repo" run \
     --planner claude --worker codex --reviewer claude --allowed 'src/,tests/' \
-    --base main --draft-pr > "$repo/shadow.out" 2>&1 ||
-    fail "shadow semantic finding should not block a draft PR"
+    --base main --draft-pr > "$repo/default-gate.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "Draft PR should default to semantic gate, got $rc"
+  [ ! -s "$repo/calls/draft-pr" ] || fail "default semantic gate reached Draft PR"
+
+  write_done_plan "$repo" true
+  : > "$repo/calls/peer-review"
+  : > "$repo/calls/draft-pr"
+  : > "$repo/calls/draft-pr-env"
+  OMS_T_GOAL_RESULT=success OMS_T_REVIEW_RC=1 run_autopilot "$repo" run \
+    --planner claude --worker codex --reviewer claude --allowed 'src/,tests/' \
+    --base main --provider-timeout 1s --draft-pr --review-mode shadow \
+    > "$repo/shadow.out" 2>&1 ||
+    fail "explicit shadow semantic finding should remain advisory"
   grep -Fq 'semantic review: advisory fail' "$repo/shadow.out" ||
     fail "shadow review failure was hidden"
   grep -Fq 'prepare --repo' "$repo/calls/draft-pr" ||
@@ -806,6 +1258,10 @@ PY
   grep -Fq -- '--review-evidence mode=shadow outcome=advisory-fail reviewer=claude' \
     "$repo/calls/draft-pr" ||
     fail "the advisory review outcome was not disclosed to prepare"
+  grep -Fq 'phase=prepare wall=86400' "$repo/calls/draft-pr-env" ||
+    fail "tiny provider timeout prematurely narrowed the draft prepare ceiling"
+  grep -Fq 'phase=publish wall=86400' "$repo/calls/draft-pr-env" ||
+    fail "tiny provider timeout prematurely narrowed the draft publish ceiling"
 
   : > "$repo/calls/draft-pr"
   rc=0
@@ -817,6 +1273,7 @@ PY
 
   # Off mode is an operator choice that is disclosed, not hidden: no reviewer
   # call happens and the publication intent carries the skip verbatim.
+  write_done_plan "$repo" true
   : > "$repo/calls/draft-pr"
   : > "$repo/calls/peer-review"
   OMS_T_GOAL_RESULT=success run_autopilot "$repo" run \
@@ -873,6 +1330,68 @@ PY
   [ ! -s "$sibling_repo/calls/draft-pr" ] ||
     fail "a reviewer-selected sibling branch reached Draft PR publication"
 
+  # Whole-branch scope is not a one-time preflight. It is rechecked after the
+  # drive, after semantic review, and after Draft PR intent preparation before
+  # any publication can happen.
+  local drive_scope_repo="$TMP/drive-final-scope"
+  make_repo "$drive_scope_repo"
+  mkdir -p "$drive_scope_repo/calls"
+  write_done_plan "$drive_scope_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_GOAL_COMMIT_OUTSIDE=1 \
+    run_autopilot "$drive_scope_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate > "$drive_scope_repo/scope.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "out-of-scope drive result should park, got $rc: $(tail -8 "$drive_scope_repo/scope.out")"
+  grep -Fq 'reason=work-branch-outside-scope-after-drive' "$drive_scope_repo/scope.out" ||
+    fail "post-drive scope failure was not identified"
+  [ ! -s "$drive_scope_repo/calls/peer-review" ] ||
+    fail "out-of-scope drive result reached semantic review"
+
+  local exhausted_scope_repo="$TMP/exhausted-final-scope"
+  make_repo "$exhausted_scope_repo"
+  mkdir -p "$exhausted_scope_repo/calls"
+  write_done_plan "$exhausted_scope_repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=exhausted OMS_T_GOAL_COMMIT_OUTSIDE=1 \
+    run_autopilot "$exhausted_scope_repo" run --worker codex --reviewer claude \
+      --allowed 'src,tests' --base main --review-mode gate \
+      > "$exhausted_scope_repo/scope.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "out-of-scope exhausted drive should park, got $rc"
+  grep -Fq 'reason=work-branch-outside-scope-after-drive' \
+    "$exhausted_scope_repo/scope.out" ||
+    fail "exhausted post-drive scope failure was not identified"
+  [ ! -s "$exhausted_scope_repo/calls/plan-from-spec" ] ||
+    fail "out-of-scope exhausted drive reached the remainder planner"
+
+  local review_scope_repo="$TMP/review-final-scope"
+  make_repo "$review_scope_repo"
+  mkdir -p "$review_scope_repo/calls"
+  write_done_plan "$review_scope_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_REVIEW_COMMIT_OUTSIDE=1 \
+    run_autopilot "$review_scope_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate --draft-pr > "$review_scope_repo/scope.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "out-of-scope reviewer result should park, got $rc"
+  grep -Fq 'reason=work-branch-outside-scope-after-review' "$review_scope_repo/scope.out" ||
+    fail "post-review scope failure was not identified"
+  [ ! -s "$review_scope_repo/calls/draft-pr" ] ||
+    fail "out-of-scope reviewer result reached Draft PR"
+
+  local prepare_scope_repo="$TMP/prepare-final-scope"
+  make_repo "$prepare_scope_repo"
+  mkdir -p "$prepare_scope_repo/calls"
+  write_done_plan "$prepare_scope_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_REVIEW_RC=0 OMS_T_PREPARE_COMMIT_OUTSIDE=1 \
+    run_autopilot "$prepare_scope_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate --draft-pr > "$prepare_scope_repo/scope.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "out-of-scope publish preparation should park, got $rc"
+  grep -Fq 'reason=work-branch-outside-scope-before-publication' "$prepare_scope_repo/scope.out" ||
+    fail "pre-publication scope failure was not identified"
+  if grep -Eq '^publish ' "$prepare_scope_repo/calls/draft-pr"; then
+    fail "out-of-scope prepared tree reached Draft PR publish"
+  fi
+
   # A local run that starts on its base branch moves to the deterministic work
   # branch before goal-drive. The named base stays stable across interruptions,
   # and the reviewer receives its frozen object id rather than a mutable name.
@@ -892,6 +1411,25 @@ PY
     fail "autopilot advanced the named base branch"
   [ "$(git -C "$base_review_repo" branch --show-current)" != main ] ||
     fail "local autopilot did not move work off the base branch"
+
+  # The wrapper disables repository hooks before its own top-level checkout;
+  # a reviewed run cannot execute mutable post-checkout code from the repo.
+  local hook_repo="$TMP/top-level-hooks"
+  make_repo "$hook_repo"
+  mkdir -p "$hook_repo/calls"
+  write_done_plan "$hook_repo" true
+  git -C "$hook_repo" checkout -q main
+  cat > "$hook_repo/.git/hooks/post-checkout" <<'EOF'
+#!/usr/bin/env bash
+: > "$OMS_T_REPO/calls/post-checkout-fired"
+EOF
+  chmod +x "$hook_repo/.git/hooks/post-checkout"
+  rm -f "$hook_repo/calls/post-checkout-fired"
+  OMS_T_GOAL_RESULT=success run_autopilot "$hook_repo" run --worker codex \
+    --reviewer claude --base main --review-mode gate > "$hook_repo/hook.out" 2>&1 ||
+    fail "hook-suppressed top-level checkout should complete"
+  [ ! -e "$hook_repo/calls/post-checkout-fired" ] ||
+    fail "autopilot top-level checkout executed a repository hook"
 
   # Starting the publish path on the base branch creates a deterministic
   # local feature branch before the first implementation cycle.
@@ -957,6 +1495,7 @@ PY
     fail "foreign branch park reason missing"
   [ ! -f "$foreign_repo/calls/goal-drive" ] || fail "a foreign branch reached goal-drive"
   foreign_target="oms/autopilot-$(sha256_file "$foreign_repo/PROJECT.md" | cut -c1-12)"
+  rm -f "$foreign_repo/.oms/plan/autopilot-run.json"
   git -C "$foreign_repo" switch -q main
   git -C "$foreign_repo" switch -qc "$foreign_target-vendor"
   rc=0
@@ -968,6 +1507,7 @@ PY
 
   git -C "$foreign_repo" switch -q main
   git -C "$foreign_repo" switch -qc "$foreign_target-r3"
+  rm -f "$foreign_repo/.oms/plan/autopilot-run.json"
   printf 'outside reviewed scope\n' > "$foreign_repo/outside.txt"
   git -C "$foreign_repo" add outside.txt
   git -C "$foreign_repo" commit -qm 'test: add foreign recovery history'
@@ -1001,6 +1541,7 @@ PY
     git -C "$foreign_repo" commit-tree "$normal_tree" -p "$invalid_base")"
   git -C "$foreign_repo" branch "$foreign_target-r4" "$valid_head"
   git -C "$foreign_repo" switch -q "$foreign_target-r4"
+  rm -f "$foreign_repo/.oms/plan/autopilot-run.json"
   git -C "$foreign_repo" update-ref refs/heads/main "$invalid_base" "$original_main"
   : > "$foreign_repo/calls/goal-drive"
   rc=0
@@ -1017,6 +1558,7 @@ PY
 
   git -C "$foreign_repo" switch -q main
   git -C "$foreign_repo" switch -qc "$foreign_target-r2"
+  rm -f "$foreign_repo/.oms/plan/autopilot-run.json"
   OMS_T_GOAL_RESULT=success run_autopilot "$foreign_repo" run --worker codex \
     --base main > "$foreign_repo/recovery.out" 2>&1 ||
     fail "an in-scope -rN recovery branch of the same contract should resume"
@@ -1106,7 +1648,7 @@ PY
   bad_plan="$(sha256_file "$contract_repo/.oms/plan/tasks.json")"
   bad_base="$(git -C "$contract_repo" rev-parse HEAD)"
   cat > "$bad_prefix" <<JSON
-{"schema":1,"kind":"agent-plan-proposal","spec_sha256":"$bad_spec","plan_sha256":"$bad_plan","base_sha":"$bad_base","id_prefix":"r1-","allowed_envelope":["src","tests"],"tasks":[{"id":"ordinary","title":"fix: bad prefix","allowed":["src"],"verify":"true","depends":[]}]}
+{"schema":1,"kind":"agent-plan-proposal","spec_sha256":"$bad_spec","plan_sha256":"$bad_plan","base_sha":"$bad_base","id_prefix":"r1-","allowed_envelope":["src","tests"],"acceptance_files":["PROJECT.md"],"tasks":[{"id":"ordinary","title":"fix: bad prefix","allowed":["src"],"verify":"true","depends":[]}]}
 JSON
   rc=0
   "$ROOT/scripts/plan-from-spec.sh" --repo "$contract_repo" --apply "$bad_prefix" \
@@ -1119,6 +1661,78 @@ JSON
   OMS_HARNESS_CHILD=1 run_autopilot "$repo" run --worker codex \
     --allowed 'src/' --base main >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "a harness child must not drive the parent workflow"
+
+  # Targeted cancellation owns the complete active provider session. Even a
+  # direct child and background descendant that ignore TERM cannot write after
+  # the autopilot parent has returned from its bounded TERM→KILL→reap cleanup.
+  local signal_repo="$TMP/phase-signal-supervision"
+  make_repo "$signal_repo"
+  mkdir -p "$signal_repo/calls"
+  write_done_plan "$signal_repo" true
+  OMS_T_REPO="$signal_repo" OMS_T_CALLS="$signal_repo/calls" \
+    OMS_T_GOAL_RESULT=signal-wait \
+    OMS_AUTOPILOT_GOAL_DRIVE="$TMP/bin/goal-drive" \
+    OMS_AUTOPILOT_PLAN_FROM_SPEC="$TMP/bin/plan-from-spec" \
+    OMS_AUTOPILOT_PEER_REVIEW="$TMP/bin/peer-review" \
+    OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
+    "$ROOT/scripts/autopilot.sh" --repo "$signal_repo" run --worker codex \
+      --reviewer claude --base main --review-mode gate \
+      > "$signal_repo/signal.out" 2>&1 &
+  local autopilot_pid=$! signal_tries=0 signal_rc=0
+  while [ ! -e "$signal_repo/calls/goal-drive-started" ] && \
+      [ "$signal_tries" -lt 200 ]; do
+    sleep 0.02
+    signal_tries=$((signal_tries + 1))
+  done
+  [ -e "$signal_repo/calls/goal-drive-started" ] ||
+    fail "signal supervision fixture never reached goal-drive"
+  kill -TERM "$autopilot_pid"
+  wait "$autopilot_pid" || signal_rc=$?
+  [ "$signal_rc" = 143 ] ||
+    fail "TERM should return 143 after phase cleanup, got $signal_rc"
+  sleep 3.2
+  [ ! -e "$signal_repo/calls/goal-drive-leaked" ] ||
+    fail "goal-drive descendant survived targeted autopilot TERM"
+
+  # A provider shell can also daemonize a setsid child and exit before the
+  # next ordinary group check. The supervisor adopts/retains that descendant,
+  # drains it before returning, and never lets its delayed write escape.
+  local escape_repo="$TMP/phase-escape-supervision"
+  make_repo "$escape_repo"
+  mkdir -p "$escape_repo/calls"
+  write_done_plan "$escape_repo" true
+  rc=0
+  OMS_T_GOAL_RESULT=escape-and-exit run_autopilot "$escape_repo" run \
+    --worker codex --reviewer claude --base main --review-mode gate \
+    > "$escape_repo/escape.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "escaped provider child should park, got $rc"
+  [ -s "$escape_repo/calls/goal-drive-escaped-pid" ] ||
+    fail "setsid escape fixture never started"
+  local escaped_pid
+  escaped_pid="$(tr -d '\r\n' < "$escape_repo/calls/goal-drive-escaped-pid")"
+  if kill -0 "$escaped_pid" 2>/dev/null; then
+    fail "setsid provider descendant remained after autopilot returned"
+  fi
+  sleep 3.2
+  [ ! -e "$escape_repo/calls/goal-drive-leaked" ] ||
+    fail "setsid provider descendant wrote after autopilot returned"
+
+  # The outer parent passes its exact deterministic ref to goal-drive rather
+  # than authorizing whichever same-SHA branch happens to be checked out when
+  # the inner process starts.
+  local expected_ref_repo="$TMP/expected-ref-binding"
+  make_repo "$expected_ref_repo"
+  mkdir -p "$expected_ref_repo/calls"
+  write_done_plan "$expected_ref_repo" true
+  OMS_T_GOAL_RESULT=success OMS_T_GOAL_EXPECT_REF=1 \
+    run_autopilot "$expected_ref_repo" run --worker codex --reviewer claude \
+      --base main --review-mode gate > "$expected_ref_repo/ref.out" 2>&1 ||
+    fail "outer expected-ref binding fixture should complete"
+  local observed_ref expected_ref_arg
+  observed_ref="$(tr -d '\r\n' < "$expected_ref_repo/calls/goal-drive-observed-ref")"
+  expected_ref_arg="$(tr -d '\r\n' < "$expected_ref_repo/calls/goal-drive-expected-ref")"
+  [ "$expected_ref_arg" = "$observed_ref" ] ||
+    fail "autopilot did not bind goal-drive to its exact work ref"
 }
 
 test_atomic_proposal_apply

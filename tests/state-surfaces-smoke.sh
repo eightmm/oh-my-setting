@@ -873,6 +873,20 @@ test_router_state_hint_surfaces_parked_goal() {
   printf '%s' "$out" | grep -Fq "goal parked (tasks-exhausted)" ||
     fail "a parked goal run should surface in the daily hint: $out"
 
+  # When an outer autopilot receipt exists, the hook must not tell the next
+  # parent to bypass that contract and invoke goal-drive directly.
+  printf '%s\n' \
+    '{"schema":1,"kind":"autopilot-run","stage":"parked"}' \
+    > "$repo/.oms/plan/autopilot-run.json"
+  rm -f "$repo/.oms/hooks/state-hint."*
+  out="$(printf '%s' "$payload" |
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'oms autopilot --repo . status' ||
+    fail "a parked outer run should prefer autopilot recovery: $out"
+  if printf '%s' "$out" | grep -Fq 'resume with `oms goal-drive`'; then
+    fail "outer autopilot park was downgraded to a bare goal-drive resume"
+  fi
+
   # A goal that finished (terminal done) stays quiet.
   printf '%s\n' \
     '{"schema": 1, "kind": "terminal", "status": "done", "reason": "acceptance-pass", "cycle": 2}' \
@@ -1339,6 +1353,7 @@ test_agy_surfaces_are_certified_before_hooks_ship
 test_agy_surfaces_stay_mcp_only_when_hooks_never_fire
 test_update_probe_flag_reaches_the_probe
 test_router_state_hint_on_unresolved_failures
+test_router_state_hint_surfaces_parked_goal
 test_router_state_hint_skips_unadopted_repo
 test_router_state_hint_offers_forge_for_resolved_repeats
 test_router_hints_on_recurring_uncovered_usage

@@ -61,6 +61,7 @@ EXPECTED_PROPOSAL_SHA256=""
 EXPECTED_PLAN_SHA256=""
 ALLOWED_ENVELOPE=""
 MAX_TASKS=""
+ACCEPT_FILES=""
 
 usage() {
   cat <<'EOF'
@@ -73,6 +74,7 @@ Commands:
   apply-proposal --proposal FILE --expected-proposal-sha256 SHA256
          --expected-plan-sha256 absent|SHA256
          [--goal TEXT --accept CMD] --allowed-envelope "p1,p2"
+         [--accept-files "path1,path2"]
          [--max-tasks N]
                                      Atomically create/append every task in a
                                      reviewed proposal. The plan CAS, proposal
@@ -198,6 +200,7 @@ while [ "$#" -gt 0 ]; do
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --accept) [ "$#" -ge 2 ] || fail "--accept requires command"; ACCEPT="$2"; shift 2 ;;
+    --accept-files) [ "$#" -ge 2 ] || fail "--accept-files requires a value"; ACCEPT_FILES="$2"; shift 2 ;;
     --proposal) [ "$#" -ge 2 ] || fail "--proposal requires a file"; PROPOSAL="$2"; shift 2 ;;
     --expected-proposal-sha256)
       [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a value"
@@ -316,7 +319,8 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON" OMS_CLAIM_TTL="$CLAIM_TTL" \
   OMS_EXPECTED_PROPOSAL_SHA256="$EXPECTED_PROPOSAL_SHA256" \
   OMS_EXPECTED_PLAN_SHA256="$EXPECTED_PLAN_SHA256" \
-  OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}"
+  OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}" \
+  OMS_ACCEPT_FILES="$ACCEPT_FILES"
 
 plan_run() {
 python3 - "$PROPOSAL" <<'PY'
@@ -536,7 +540,7 @@ if act == "apply-proposal":
         die("proposal kind is not agent-plan-proposal")
     top_keys = {
         "schema", "kind", "spec_sha256", "plan_sha256", "base_sha",
-        "id_prefix", "allowed_envelope", "tasks",
+        "id_prefix", "allowed_envelope", "acceptance_files", "tasks",
     }
     if set(proposal) != top_keys:
         die("proposal fields do not match the exact reviewed schema")
@@ -546,6 +550,7 @@ if act == "apply-proposal":
     proposal_base = proposal.get("base_sha")
     proposal_prefix = proposal.get("id_prefix")
     proposal_envelope = proposal.get("allowed_envelope")
+    proposal_acceptance_files = proposal.get("acceptance_files")
     if (not isinstance(proposal_spec, str) or len(proposal_spec) != 64 or
             any(ch not in "0123456789abcdef" for ch in proposal_spec)):
         die("proposal spec_sha256 is invalid")
@@ -563,6 +568,45 @@ if act == "apply-proposal":
     )) or ["."]
     if reviewed_envelope != sorted(set(envelope)):
         die("proposal allowed envelope does not match the apply boundary")
+
+    if (not isinstance(proposal_acceptance_files, list) or
+            any(not isinstance(item, str) for item in proposal_acceptance_files)):
+        die("proposal acceptance_files must be a list")
+    if len(proposal_acceptance_files) > 64:
+        die("proposal acceptance_files must contain at most 64 paths")
+    if any(len(item.encode("utf-8")) > 240 for item in proposal_acceptance_files):
+        die("proposal acceptance file paths must be at most 240 UTF-8 bytes")
+    reviewed_acceptance_files = sorted(set(
+        clean_rel(item, "proposal acceptance file")
+        for item in proposal_acceptance_files
+    ))
+    supplied_acceptance_files = sorted(set(
+        clean_rel(item, "--accept-files")
+        for item in env("OMS_ACCEPT_FILES").split(",") if item.strip()
+    ))
+    if proposal_acceptance_files != reviewed_acceptance_files:
+        die("proposal acceptance_files must be sorted and unique")
+    if supplied_acceptance_files != reviewed_acceptance_files:
+        die("proposal acceptance_files do not match --accept-files")
+
+    repo_root = os.path.realpath(env("OMS_REPO"))
+    acceptance_manifest = []
+    for item in reviewed_acceptance_files:
+        if item == ".":
+            die("acceptance file must name a regular file, not the repository root")
+        filename = os.path.join(repo_root, *item.split("/"))
+        if os.path.realpath(filename) != filename:
+            die("acceptance file %s must not cross a symlink boundary" % item)
+        try:
+            info = os.lstat(filename)
+        except OSError as exc:
+            die("cannot inspect acceptance file %s: %s" % (item, exc))
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            die("acceptance file %s must be a regular non-symlink file" % item)
+        value = hashlib.sha256(read_regular_bytes(
+            filename, "acceptance file %s" % item, 8 * 1024 * 1024
+        )).hexdigest()
+        acceptance_manifest.append({"path": item, "sha256": value})
 
     spec_path = os.path.join(env("OMS_REPO"), "PROJECT.md")
     spec_bytes = read_regular_bytes(spec_path, "PROJECT.md", 1024 * 1024)
@@ -641,7 +685,9 @@ if act == "apply-proposal":
     if contract is not None:
         if (not isinstance(contract, dict) or contract.get("schema") != 1 or
                 contract.get("spec_sha256") != proposal_spec or
-                contract.get("allowed_envelope") != reviewed_envelope):
+                contract.get("allowed_envelope") != reviewed_envelope or
+                contract.get("acceptance_files", []) != reviewed_acceptance_files or
+                contract.get("acceptance_manifest", []) != acceptance_manifest):
             die("existing plan project contract does not match the reviewed proposal")
 
     immutable = ("id", "title", "depends", "allowed_paths", "forbidden_paths", "verify", "role")
@@ -696,6 +742,8 @@ if act == "apply-proposal":
                 "schema": 1,
                 "spec_sha256": proposal_spec,
                 "allowed_envelope": reviewed_envelope,
+                "acceptance_files": reviewed_acceptance_files,
+                "acceptance_manifest": acceptance_manifest,
             },
             "tasks": {},
         }
@@ -718,6 +766,8 @@ if act == "apply-proposal":
             "schema": 1,
             "spec_sha256": proposal_spec,
             "allowed_envelope": reviewed_envelope,
+            "acceptance_files": reviewed_acceptance_files,
+            "acceptance_manifest": acceptance_manifest,
         }
         if prepared and all(item["id"] in tasks for item in prepared):
             save(d)
@@ -944,6 +994,10 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         # Computed on a copy: the stored task keeps exactly the fields its
         # writers put there, and a later save() cannot persist a read's view.
         view = dict(t)
+        if isinstance(d.get("project_contract"), dict):
+            # Contract metadata is a read-only view for admission consumers. It
+            # is deliberately not copied into each stored task.
+            view["project_contract"] = d["project_contract"]
         view["claim_expired"] = claim_expired(t)
         if t.get("state") in ("claimed", "running", "review"):
             age = claim_age(t)
@@ -1106,9 +1160,35 @@ die("unhandled action: %s" % act)
 PY
 }
 
-# Keep the plan dir out of git like the rest of .oms state.
-mkdir -p "$(dirname "$PLAN_FILE")"
-agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
+# Keep the plan dir out of git like the rest of .oms state. Acceptance is
+# read-only until its final receipt, so validate its existing authority files
+# before any mkdir/ignore helper could follow a planted state-directory link.
+if [ "$ACTION" = accept ]; then
+  python3 - "$REPO" "$PLAN_FILE" <<'PY' ||
+import os, stat, sys
+repo = os.path.realpath(sys.argv[1])
+target = os.path.abspath(sys.argv[2])
+parent = os.path.dirname(target)
+expected = os.path.join(repo, ".oms", "plan")
+try:
+    parent_info = os.lstat(parent)
+    target_info = os.lstat(target)
+except OSError as exc:
+    print("error: cannot inspect acceptance plan authority: %s" % exc, file=sys.stderr)
+    raise SystemExit(2)
+if (parent != expected or os.path.realpath(parent) != expected or
+        stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode)):
+    print("error: acceptance plan parent must be the real repo-local .oms/plan directory", file=sys.stderr)
+    raise SystemExit(2)
+if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISREG(target_info.st_mode):
+    print("error: acceptance plan must be a regular non-symlink file", file=sys.stderr)
+    raise SystemExit(2)
+PY
+    fail "acceptance requires a safe repo-local plan file"
+else
+  mkdir -p "$(dirname "$PLAN_FILE")"
+  agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
+fi
 
 # `accept` runs OUTSIDE the plan lock: the acceptance command is an arbitrary
 # project check (often the full gate) and must not hold the task-graph lock
@@ -1117,6 +1197,9 @@ agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
 # goal actually met", which no per-task verify can give.
 if [ "$ACTION" = "accept" ]; then
   [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; run: agent-plan init --goal ... --accept CMD"
+  progress="$(dirname "$PLAN_FILE")/progress.jsonl"
+  python3 "$ROOT/scripts/lib/durable-jsonl.py" check "$progress" ||
+    fail "progress.jsonl must be a repo-local regular non-symlink file"
   accept_cmd="$(python3 -c '
 import json, sys
 try:
@@ -1127,18 +1210,274 @@ print(d.get("accept", "") or "")
 ' "$PLAN_FILE")"
   [ -n "$accept_cmd" ] ||
     fail "plan has no acceptance command; set one with: agent-plan init --goal ... --accept CMD"
-  progress="$(dirname "$PLAN_FILE")/progress.jsonl"
+
+  # Contract-bound acceptance names every verifier/input file whose bytes were
+  # reviewed. Re-open each leaf without following symlinks and compare it with
+  # the stored digest before and after execution. Legacy manual plans have no
+  # project_contract and therefore use the empty manifest, but still receive
+  # the repository and plan mutation fences below.
+  acceptance_manifest() {
+    python3 - "$REPO" "$PLAN_FILE" <<'PY' | tr -d '\r'
+import hashlib, json, os, stat, sys
+
+repo = os.path.realpath(sys.argv[1])
+with open(sys.argv[2], encoding="utf-8") as handle:
+    plan = json.load(handle)
+contract = plan.get("project_contract")
+if contract is None:
+    print("legacy")
+    raise SystemExit(0)
+if not isinstance(contract, dict) or contract.get("schema") != 1:
+    raise SystemExit(2)
+files = contract.get("acceptance_files", [])
+manifest = contract.get("acceptance_manifest", [])
+if (not isinstance(files, list) or not isinstance(manifest, list) or
+        len(files) > 64 or len(files) != len(manifest)):
+    raise SystemExit(2)
+current = []
+for index, rel in enumerate(files):
+    if (not isinstance(rel, str) or not rel or len(rel.encode("utf-8")) > 240 or
+            rel.startswith("/") or "\\" in rel or
+            any(part in ("", ".", "..") for part in rel.split("/"))):
+        raise SystemExit(2)
+    expected = manifest[index]
+    if (not isinstance(expected, dict) or expected.get("path") != rel or
+            not isinstance(expected.get("sha256"), str)):
+        raise SystemExit(2)
+    target = os.path.join(repo, *rel.split("/"))
+    if os.path.realpath(target) != target:
+        raise SystemExit(3)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(target, flags)
+    except OSError:
+        raise SystemExit(3)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(3)
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, 8 * 1024 * 1024 + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 8 * 1024 * 1024:
+                raise SystemExit(3)
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    value = digest.hexdigest()
+    if value != expected.get("sha256"):
+        raise SystemExit(3)
+    current.append({"path": rel, "sha256": value})
+if files != sorted(set(files)):
+    raise SystemExit(2)
+print(hashlib.sha256(json.dumps(
+    current, sort_keys=True, separators=(",", ":")
+).encode()).hexdigest())
+PY
+  }
+
+  # Exact repository state, including symbolic ref, HEAD, index entries,
+  # tracked working bytes, and every untracked leaf. The 64 MiB ceiling keeps
+  # an already-pathological dirty checkout from turning this fence into an
+  # unbounded read; goal-drive normally supplies a clean dedicated worktree.
+  acceptance_repo_snapshot() {
+    python3 - "$REPO" <<'PY' | tr -d '\r'
+import hashlib, os, stat, subprocess, sys
+
+repo = os.path.realpath(sys.argv[1])
+limit = 64 * 1024 * 1024
+total = 0
+digest = hashlib.sha256()
+git_env = os.environ.copy()
+git_env["GIT_CONFIG_GLOBAL"] = os.devnull
+git_env["GIT_CONFIG_SYSTEM"] = os.devnull
+
+def command(argv):
+    value = subprocess.check_output(
+        argv, stderr=subprocess.DEVNULL, env=git_env)
+    global total
+    total += len(value)
+    if total > limit:
+        raise SystemExit(2)
+    digest.update(value)
+    digest.update(b"\0")
+    return value
+
+command(["git", "-C", repo, "symbolic-ref", "-q", "HEAD"])
+command(["git", "-C", repo, "rev-parse", "HEAD"])
+command(["git", "-C", repo, "ls-files", "--stage", "-z"])
+command(["git", "-c", "core.fsmonitor=false", "-c", "diff.external=",
+         "-C", repo, "diff", "--no-ext-diff", "--no-textconv",
+         "--binary", "HEAD", "--"])
+untracked = command(["git", "-C", repo, "ls-files", "--others", "--exclude-standard", "-z"])
+for raw in sorted(value for value in untracked.split(b"\0") if value):
+    rel = os.fsdecode(raw)
+    target = os.path.join(repo, rel)
+    if os.path.commonpath((repo, os.path.realpath(target))) != repo:
+        raise SystemExit(2)
+    info = os.lstat(target)
+    digest.update(raw + b"\0" + str(stat.S_IFMT(info.st_mode)).encode() + b"\0")
+    if stat.S_ISLNK(info.st_mode):
+        value = os.fsencode(os.readlink(target))
+        total += len(value)
+        digest.update(value)
+    elif stat.S_ISREG(info.st_mode):
+        with open(target, "rb") as handle:
+            while True:
+                chunk = handle.read(min(1024 * 1024, limit + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise SystemExit(2)
+                digest.update(chunk)
+    else:
+        raise SystemExit(2)
+print(digest.hexdigest())
+PY
+  }
+
+  acceptance_integrity_error() {  # REASON MESSAGE [BASE]
+    local reason="$1" message="$2" base="${3:-unborn}"
+    echo "plan-accept: error (exit 2, 0s) base=$base reason=$reason"
+    echo "error: $message" >&2
+    exit 2
+  }
+
+  command -v oms_git_assert_safe_execution_config >/dev/null 2>&1 ||
+    fail "installed Git execution guard is unavailable"
+  command -v oms_git_assert_plain_index >/dev/null 2>&1 ||
+    fail "installed Git index guard is unavailable"
+  oms_git_assert_safe_execution_config "$REPO" ||
+    acceptance_integrity_error acceptance-mutated-repository \
+      "unsafe executable Git config is active" unsafe
+  oms_git_assert_plain_index "$REPO" ||
+    acceptance_integrity_error acceptance-mutated-repository \
+      "hidden Git index flags are active"
+  manifest_before="$(acceptance_manifest)" ||
+    acceptance_integrity_error acceptance-files-changed \
+      "acceptance files changed or their stored manifest is invalid"
+  repo_before="$(acceptance_repo_snapshot)" ||
+    acceptance_integrity_error acceptance-supervision-failed \
+      "cannot freeze repository state before acceptance"
+  plan_before="$(oms_sha256_file "$PLAN_FILE")" ||
+    acceptance_integrity_error acceptance-supervision-failed \
+      "cannot freeze the plan before acceptance"
+
+  timeout_value="${OMS_PLAN_ACCEPT_TIMEOUT:-10m}"
+  timeout_seconds="$(python3 - "$timeout_value" <<'PY' | tr -d '\r'
+import re, sys
+match = re.fullmatch(r"([1-9][0-9]*)([smh]?)", sys.argv[1])
+if not match:
+    raise SystemExit(2)
+seconds = int(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+if seconds > 24 * 60 * 60:
+    raise SystemExit(2)
+print(seconds)
+PY
+)" || fail "OMS_PLAN_ACCEPT_TIMEOUT must be a positive duration up to 24h"
   out_tmp="$(mktemp)" || fail "mktemp failed"
+  meta_tmp="$(mktemp)" || { rm -f "$out_tmp"; fail "mktemp failed"; }
   start_s="$(date +%s)"
+  accept_supervisor_pid=""
+  acceptance_forward_signal() {  # SIGNAL EXIT_CODE
+    local signal_name="$1" exit_code="$2"
+    trap - HUP INT TERM
+    if [ -n "$accept_supervisor_pid" ]; then
+      kill -s "$signal_name" "$accept_supervisor_pid" 2>/dev/null || true
+      wait "$accept_supervisor_pid" 2>/dev/null || true
+    fi
+    rm -f "$out_tmp" "$meta_tmp"
+    exit "$exit_code"
+  }
+  trap 'acceptance_forward_signal HUP 129' HUP
+  trap 'acceptance_forward_signal INT 130' INT
+  trap 'acceptance_forward_signal TERM 143' TERM
   set +e
-  ( cd "$REPO" && bash -c "$accept_cmd" ) > "$out_tmp" 2>&1
-  accept_exit=$?
+  # Use the same whole-tree supervisor as provider phases. In addition to the
+  # original group, it retains nested process groups/sessions, periodically
+  # refreshes descendants, and adopts daemonized Linux grandchildren. The
+  # capture options preserve acceptance's exact 1 MiB output and typed receipt.
+  python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
+    --wall "$timeout_seconds" --kill-after 1 --label acceptance \
+    --cwd "$REPO" --output "$out_tmp" --output-limit 1048576 \
+    --metadata "$meta_tmp" -- bash -c "$accept_cmd" &
+  accept_supervisor_pid=$!
+  wait "$accept_supervisor_pid"
+  runner_exit=$?
+  accept_supervisor_pid=""
+  trap - HUP INT TERM
   set -e
+  meta="$(python3 - "$meta_tmp" <<'PY' | tr -d '\r'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit(2)
+expected = {"exit", "timed_out", "output_limited", "launch_error", "supervision_error"}
+if set(value) != expected:
+    raise SystemExit(2)
+exit_code = value.get("exit")
+flags = [value.get(name) for name in (
+    "timed_out", "output_limited", "launch_error", "supervision_error"
+)]
+if (not isinstance(exit_code, int) or isinstance(exit_code, bool) or
+        not 0 <= exit_code <= 255 or any(not isinstance(item, bool) for item in flags)):
+    raise SystemExit(2)
+print("%s\t%s\t%s\t%s\t%s" % (
+    exit_code, *(int(item) for item in flags)
+))
+PY
+)" || { rm -f "$out_tmp" "$meta_tmp"; fail "acceptance supervisor did not return a receipt"; }
+  accept_exit="$(printf '%s' "$meta" | cut -f1)"
+  accept_timed_out="$(printf '%s' "$meta" | cut -f2)"
+  accept_output_limited="$(printf '%s' "$meta" | cut -f3)"
+  accept_launch_error="$(printf '%s' "$meta" | cut -f4)"
+  accept_supervision_error="$(printf '%s' "$meta" | cut -f5)"
+  rm -f "$meta_tmp"
   duration=$(( $(date +%s) - start_s ))
-  base_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unborn)"
+  post_git_safe=1
+  oms_git_assert_safe_execution_config "$REPO" >/dev/null 2>&1 || post_git_safe=0
+  oms_git_assert_plain_index "$REPO" >/dev/null 2>&1 || post_git_safe=0
+  if [ "$post_git_safe" = 1 ]; then
+    base_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unborn)"
+  else
+    base_sha=unsafe
+  fi
   out_digest="$(oms_sha256_stream < "$out_tmp" 2>/dev/null || echo unhashed)"
   verdict=pass
   [ "$accept_exit" -eq 0 ] || verdict=fail
+  integrity_reason=""
+  plan_after="$(oms_sha256_file "$PLAN_FILE" 2>/dev/null || true)"
+  manifest_after="$(acceptance_manifest 2>/dev/null || true)"
+  if [ "$post_git_safe" = 1 ]; then
+    repo_after="$(acceptance_repo_snapshot 2>/dev/null || true)"
+  else
+    repo_after=""
+  fi
+  # Integrity outranks the command's own result: a failing check that mutates
+  # inputs or repository state is not an ordinary acceptance failure.
+  if [ "$post_git_safe" != 1 ]; then
+    integrity_reason=acceptance-mutated-repository
+  elif [ -z "$plan_after" ] || [ "$plan_after" != "$plan_before" ]; then
+    integrity_reason=acceptance-command-changed
+  elif [ -z "$manifest_after" ] || [ "$manifest_after" != "$manifest_before" ]; then
+    integrity_reason=acceptance-files-changed
+  elif [ -z "$repo_after" ] || [ "$repo_after" != "$repo_before" ]; then
+    integrity_reason=acceptance-mutated-repository
+  elif [ "$runner_exit" -ne "$accept_exit" ] || \
+      [ "$accept_launch_error" = 1 ] || [ "$accept_supervision_error" = 1 ]; then
+    integrity_reason=acceptance-supervision-failed
+  elif [ "$accept_timed_out" = 1 ]; then
+    integrity_reason=acceptance-timeout
+  elif [ "$accept_output_limited" = 1 ]; then
+    integrity_reason=acceptance-output-limit
+  fi
+  [ -z "$integrity_reason" ] || verdict=error
   accept_digest="$(printf '%s' "$accept_cmd" | oms_sha256_stream 2>/dev/null || echo unhashed)"
   # run_id/cycle are set by goal-drive so one run's rows correlate; manual
   # invocations leave them empty. The row is the goal-run protocol record:
@@ -1146,7 +1485,8 @@ print(d.get("accept", "") or "")
   OMS_PA_TS="$ts" OMS_PA_SHA="$base_sha" OMS_PA_VERDICT="$verdict" \
     OMS_PA_EXIT="$accept_exit" OMS_PA_DIGEST="$out_digest" OMS_PA_DUR="$duration" \
     OMS_PA_ACCEPT="$accept_digest" OMS_PA_RUN="${OMS_GOAL_RUN_ID:-}" \
-    OMS_PA_CYCLE="${OMS_GOAL_CYCLE:-}" \
+    OMS_PA_CYCLE="${OMS_GOAL_CYCLE:-}" OMS_PA_REASON="$integrity_reason" \
+    OMS_PA_TIMEOUT="$accept_timed_out" OMS_PA_LIMITED="$accept_output_limited" \
     python3 -c '
 import json, os
 row = {
@@ -1156,17 +1496,24 @@ row = {
     "accept_sha256": os.environ["OMS_PA_ACCEPT"][:16],
     "output_sha256": os.environ["OMS_PA_DIGEST"][:16],
     "duration_s": int(os.environ["OMS_PA_DUR"]),
+    "reason": os.environ.get("OMS_PA_REASON", ""),
+    "timed_out": os.environ.get("OMS_PA_TIMEOUT") == "1",
+    "output_limited": os.environ.get("OMS_PA_LIMITED") == "1",
 }
 if os.environ.get("OMS_PA_RUN"): row["run_id"] = os.environ["OMS_PA_RUN"]
 if os.environ.get("OMS_PA_CYCLE"): row["cycle"] = int(os.environ["OMS_PA_CYCLE"])
 print(json.dumps(row, ensure_ascii=False))
-' >> "$progress"
-  echo "plan-accept: $verdict (exit $accept_exit, ${duration}s) base=$base_sha"
-  if [ "$verdict" = "fail" ]; then
+' | python3 "$ROOT/scripts/lib/durable-jsonl.py" append "$progress" || {
+    rm -f "$out_tmp"
+    fail "cannot durably append the acceptance receipt to progress.jsonl"
+  }
+  echo "plan-accept: $verdict (exit $accept_exit, ${duration}s) base=$base_sha${integrity_reason:+ reason=$integrity_reason}"
+  if [ "$verdict" != "pass" ]; then
     echo "--- acceptance output (last 20 lines) ---" >&2
     tail -n 20 "$out_tmp" >&2
     rm -f "$out_tmp"
-    exit 3
+    [ "$verdict" = fail ] && exit 3
+    exit 2
   fi
   rm -f "$out_tmp"
   exit 0

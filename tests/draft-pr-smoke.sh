@@ -96,6 +96,13 @@ if [ -n "\$repo_path" ] && "$REAL_GIT" -C "\$repo_path" config --bool oms.test.s
 fi
 case "\$*" in
   *' push '*)
+    if [ -n "\$repo_path" ] && "$REAL_GIT" -C "\$repo_path" config --bool oms.test.pushDelay 2>/dev/null | grep -qx true; then
+      : > "\$repo_path/.git/push-delay-started"
+      trap '' TERM HUP INT
+      sleep "\${OMS_T_PUSH_DELAY:-3}"
+      trap - TERM HUP INT
+      : > "\$repo_path/.git/push-delay-completed"
+    fi
     if [ -n "\$repo_path" ] && "$REAL_GIT" -C "\$repo_path" config --bool oms.test.commitBeforePush 2>/dev/null | grep -qx true; then
       "$REAL_GIT" -C "\$repo_path" config --unset oms.test.commitBeforePush
       "$REAL_GIT" -C "\$repo_path" commit -q --allow-empty -m 'chore: concurrent local commit'
@@ -1073,6 +1080,123 @@ PY
   [ "$rc" = 3 ] || fail "changed GitHub viewer should park, got $rc"
   if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture; then
     fail "viewer mismatch still created the source branch"
+  fi
+
+  # The repository is worker-writable, while publication uses the parent's
+  # GitHub authority. Transport-affecting local config must be rejected before
+  # any remote operation: core.sshCommand and credential helpers are executable
+  # command surfaces even when hooks and signing are disabled at push time.
+  repo="$TMP/hostile-transport-config"
+  bare="$TMP/hostile-transport-config.git"
+  make_repo "$repo" "$bare"
+  : > "$repo/git.log"; : > "$repo/gh.log"
+  cat > "$repo/.git/hostile-ssh" <<'EOF'
+#!/usr/bin/env bash
+: > .git/hostile-transport-fired
+exit 91
+EOF
+  chmod +x "$repo/.git/hostile-ssh"
+  "$REAL_GIT" -C "$repo" config --local core.sshCommand .git/hostile-ssh
+  "$REAL_GIT" -C "$repo" config --local credential.helper '!printf fired > .git/hostile-credential-fired'
+  rc=0
+  run_draft_pr "$repo" prepare --remote origin --base main --verify true \
+    > "$repo/hostile-transport.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "hostile local transport config should be rejected, got $rc"
+  grep -Fq 'unsafe local Git transport config' "$repo/hostile-transport.out" ||
+    fail "hostile local transport refusal was not explained"
+  [ ! -e "$repo/.git/hostile-transport-fired" ] ||
+    fail "repository core.sshCommand executed with publisher authority"
+  [ ! -e "$repo/.git/hostile-credential-fired" ] ||
+    fail "repository credential helper executed with publisher authority"
+
+  # With extensions.worktreeConfig enabled, transport commands can also live
+  # in config.worktree. It is just as worker-writable and must not bypass the
+  # repository-local transport scan.
+  repo="$TMP/hostile-worktree-transport-config"
+  bare="$TMP/hostile-worktree-transport-config.git"
+  make_repo "$repo" "$bare"
+  : > "$repo/git.log"; : > "$repo/gh.log"
+  "$REAL_GIT" -C "$repo" config --local extensions.worktreeConfig true
+  "$REAL_GIT" -C "$repo" config --worktree core.sshCommand .git/hostile-worktree-ssh
+  rc=0
+  run_draft_pr "$repo" prepare --remote origin --base main --verify true \
+    > "$repo/hostile-worktree-transport.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "hostile worktree transport config should be rejected, got $rc"
+  grep -Fq 'unsafe local Git transport config' "$repo/hostile-worktree-transport.out" ||
+    fail "hostile worktree transport refusal was not explained"
+
+  repo="$TMP/hostile-fsmonitor-config"
+  bare="$TMP/hostile-fsmonitor-config.git"
+  make_repo "$repo" "$bare"
+  : > "$repo/git.log"; : > "$repo/gh.log"
+  cat > "$repo/.git/hostile-fsmonitor" <<EOF
+#!/usr/bin/env bash
+: > "$repo/.git/hostile-fsmonitor-fired"
+exit 0
+EOF
+  chmod +x "$repo/.git/hostile-fsmonitor"
+  "$REAL_GIT" -C "$repo" config --local core.fsmonitor "$repo/.git/hostile-fsmonitor"
+  rc=0
+  run_draft_pr "$repo" prepare --remote origin --base main --verify true \
+    > "$repo/hostile-fsmonitor.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "hostile fsmonitor config should fail before status, got $rc"
+  [ ! -e "$repo/.git/hostile-fsmonitor-fired" ] ||
+    fail "repository fsmonitor executed with publisher authority"
+
+  repo="$TMP/hostile-command-config"
+  bare="$TMP/hostile-command-config.git"
+  make_repo "$repo" "$bare"
+  : > "$repo/git.log"; : > "$repo/gh.log"
+  rc=0
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.sshCommand \
+    GIT_CONFIG_VALUE_0="$repo/.git/hostile-command" \
+    run_draft_pr "$repo" prepare --remote origin --base main --verify true \
+    > "$repo/hostile-command.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "hostile command-scope Git config should be rejected, got $rc"
+  grep -Fq 'unsafe command-scope Git config' "$repo/hostile-command.out" ||
+    fail "command-scope Git config refusal was not explained"
+
+  # UI/task cancellation targets the publisher PID. It must synchronously
+  # terminate the whole push group, including a descendant that ignores TERM,
+  # before returning 143; no delayed remote effect may survive cancellation.
+  repo="$TMP/push-cancel"
+  bare="$TMP/push-cancel.git"
+  make_repo "$repo" "$bare"
+  : > "$repo/git.log"; : > "$repo/gh.log"
+  run_draft_pr "$repo" prepare --remote origin --base main --verify true \
+    > "$repo/cancel-prepare.out" || fail "push-cancel fixture prepare failed"
+  intent="$(sed -n 's/^intent: //p' "$repo/cancel-prepare.out" | tail -n 1)"
+  "$REAL_GIT" -C "$repo" config --local oms.test.pushDelay true
+  (
+    export OMS_GIT_BIN="$TMP/bin/git" OMS_GH_BIN="$TMP/bin/gh"
+    export OMS_T_GIT_LOG="$repo/git.log" OMS_T_GH_LOG="$repo/gh.log"
+    export OMS_T_BARE="$bare" OMS_T_PR_MARKER="$repo/pr-created"
+    export OMS_T_BRANCH="codex/draft-fixture"
+    OMS_T_BASE="$($REAL_GIT -C "$repo" rev-parse main)"
+    OMS_T_HEAD="$($REAL_GIT -C "$repo" rev-parse HEAD)"
+    export OMS_T_BASE OMS_T_HEAD
+    export OMS_DRAFT_CANCEL_GRACE_S=0.2 OMS_T_PUSH_DELAY=3
+    exec "$ROOT/scripts/draft-pr.sh" --repo "$repo" publish --intent "$intent"
+  ) > "$repo/cancel-publish.out" 2>&1 &
+  local cancel_pid=$! cancel_seen=0 cancel_try=0
+  while [ "$cancel_try" -lt 100 ]; do
+    if [ -e "$repo/.git/push-delay-started" ]; then
+      cancel_seen=1
+      break
+    fi
+    sleep 0.05
+    cancel_try=$((cancel_try + 1))
+  done
+  [ "$cancel_seen" = 1 ] || fail "push-cancel fixture never reached the push"
+  kill -TERM "$cancel_pid"
+  rc=0
+  wait "$cancel_pid" || rc=$?
+  [ "$rc" = 143 ] || fail "targeted publisher TERM should exit 143, got $rc"
+  sleep 1
+  [ ! -e "$repo/.git/push-delay-completed" ] ||
+    fail "cancelled push descendant survived and completed"
+  if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture; then
+    fail "cancelled publisher still created the source branch"
   fi
 
   # A worker-planted local pre-push hook must never execute with the

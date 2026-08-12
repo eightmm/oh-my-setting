@@ -89,6 +89,8 @@ row = {
     "task_id": task_id,
     "base_sha": subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(),
+    "head_ref": subprocess.check_output(
+        ["git", "-C", str(repo), "symbolic-ref", "HEAD"], text=True).strip(),
     "patch": str(patch.relative_to(repo)).replace("\\", "/"),
     "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
     "paths": paths,
@@ -121,6 +123,51 @@ echo worker-ok
 EOF
 chmod +x "$bin/codex"
 
+# A delegated harness child has patch authority only. Calling the goal driver
+# would otherwise turn that patch authority into commit authority, so every
+# real drive (including one whose acceptance already passes) must refuse before
+# it appends progress or invokes a provider.
+child_repo="$TMP/harness-child"
+make_case "$child_repo" tracked
+child_before="$(git -C "$child_repo" rev-parse HEAD)"
+child_calls="$TMP/harness-child-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$child_calls" OMS_HARNESS_CHILD=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$child_repo" --to codex --max-cycles 1 \
+  > "$TMP/harness-child.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "harness child goal-drive should refuse with 2, got $rc"
+grep -Fq 'parent-only' "$TMP/harness-child.out" ||
+  fail "harness child refusal was not actionable"
+[ "$(git -C "$child_repo" rev-parse HEAD)" = "$child_before" ] ||
+  fail "harness child goal-drive advanced HEAD"
+[ ! -s "$child_calls" ] || fail "harness child goal-drive called a provider"
+[ ! -e "$child_repo/.oms/plan/progress.jsonl" ] ||
+  fail "harness child goal-drive appended progress before refusing"
+
+# Parent orchestration can freeze a branch ref even when a sibling branch has
+# the same commit. A same-SHA symbolic-HEAD swap must park before acceptance or
+# provider delegation and must not advance either ref.
+expected_ref_repo="$TMP/expected-ref-start"
+make_case "$expected_ref_repo" tracked
+expected_ref_base="$(git -C "$expected_ref_repo" rev-parse HEAD)"
+git -C "$expected_ref_repo" branch sibling "$expected_ref_base"
+git -C "$expected_ref_repo" symbolic-ref HEAD refs/heads/sibling
+expected_ref_calls="$TMP/expected-ref-start-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$expected_ref_calls" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$expected_ref_repo" --to codex --max-cycles 1 \
+  --expected-ref refs/heads/main > "$TMP/expected-ref-start.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "same-SHA expected-ref mismatch should park, got $rc"
+grep -Fq 'reason=expected-ref-moved' "$TMP/expected-ref-start.out" ||
+  fail "same-SHA expected-ref mismatch used the wrong park reason"
+[ ! -s "$expected_ref_calls" ] ||
+  fail "same-SHA expected-ref mismatch reached the provider"
+[ "$(git -C "$expected_ref_repo" rev-parse refs/heads/main)" = "$expected_ref_base" ] &&
+  [ "$(git -C "$expected_ref_repo" rev-parse refs/heads/sibling)" = "$expected_ref_base" ] ||
+  fail "same-SHA expected-ref mismatch advanced a branch"
+
 for mode in new tracked; do
   repo="$TMP/$mode"
   make_case "$repo" "$mode"
@@ -130,7 +177,7 @@ for mode in new tracked; do
     OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND=1 \
     "$ROOT/scripts/goal-drive.sh" --repo "$repo" --to codex --max-cycles 2 \
     > "$TMP/$mode-stop.out" 2>&1 || rc=$?
-  [ "$rc" = 75 ] || fail "$mode crash fixture should stop after landing with 75, got $rc"
+  [ "$rc" = 75 ] || fail "$mode crash fixture should stop after landing with 75, got $rc: $(tail -12 "$TMP/$mode-stop.out")"
   [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] ||
     fail "$mode stop committed before the injected crash"
   [ -n "$(git -C "$repo" status --porcelain)" ] ||
@@ -338,6 +385,116 @@ grep -Fxq autonomous-tracked "$post_ref_repo/tracked.txt" ||
   fail "post-ref staged-only collision changed the exact candidate worktree"
 [ "$(wc -l < "$post_ref_calls" | tr -d ' ')" = 1 ] ||
   fail "post-ref staged-only collision called the provider again"
+
+# Commit authority is a full symbolic ref, not whichever branch happens to be
+# checked out later. A sibling branch at the same base SHA must not inherit an
+# intent prepared on main.
+ref_swap_repo="$TMP/same-sha-ref-swap"
+make_case "$ref_swap_repo" tracked
+ref_swap_base="$(git -C "$ref_swap_repo" rev-parse HEAD)"
+ref_swap_calls="$TMP/same-sha-ref-swap-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$ref_swap_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$ref_swap_repo" --to codex --max-cycles 2 \
+  > "$TMP/same-sha-ref-swap-stop.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "same-SHA ref-swap fixture did not stop after landing"
+git -C "$ref_swap_repo" branch sibling "$ref_swap_base"
+git -C "$ref_swap_repo" symbolic-ref HEAD refs/heads/sibling
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$ref_swap_calls" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$ref_swap_repo" --to codex --max-cycles 2 \
+  > "$TMP/same-sha-ref-swap-resume.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "same-SHA sibling ref swap should park, got $rc"
+grep -Fq 'reason=intent-ref-moved' "$TMP/same-sha-ref-swap-resume.out" ||
+  fail "same-SHA sibling ref swap used the wrong park reason"
+[ "$(git -C "$ref_swap_repo" rev-parse refs/heads/main)" = "$ref_swap_base" ] ||
+  fail "ref swap advanced the frozen main ref"
+[ "$(git -C "$ref_swap_repo" rev-parse refs/heads/sibling)" = "$ref_swap_base" ] ||
+  fail "ref swap advanced the sibling ref"
+[ "$(wc -l < "$ref_swap_calls" | tr -d ' ')" = 1 ] ||
+  fail "ref-swap recovery called the provider again"
+
+# Historical intent rows did not freeze a full symbolic ref. Even when another
+# branch happens to point at the same SHA, that coincidence cannot transfer
+# commit authority: require explicit operator reconciliation and make no
+# provider/ref change.
+legacy_repo="$TMP/legacy-intent-no-ref"
+make_case "$legacy_repo" tracked
+legacy_base="$(git -C "$legacy_repo" rev-parse HEAD)"
+legacy_calls="$TMP/legacy-intent-no-ref-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$legacy_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_LAND=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$legacy_repo" --to codex --max-cycles 2 \
+  > "$TMP/legacy-intent-no-ref-stop.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "legacy intent fixture did not stop after landing"
+python3 - "$legacy_repo/.oms/plan/progress.jsonl" <<'PY'
+import json, os, pathlib, sys, tempfile
+
+path = pathlib.Path(sys.argv[1])
+rows = []
+legacy_id = ""
+for line in path.read_text(encoding="utf-8").splitlines():
+    row = json.loads(line)
+    if row.get("kind") == "commit-intent" and row.get("phase") in {
+            "prepared", "repairing", "landed"}:
+        row.pop("head_ref", None)
+        legacy_id = row.get("intent_id", legacy_id)
+    rows.append(row)
+# An untrusted minimal terminal append must not suppress the open legacy fence.
+rows.append({"kind": "commit-intent", "intent_id": legacy_id,
+             "phase": "abandoned"})
+fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix="legacy-progress-")
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+os.replace(temporary, path)
+PY
+git -C "$legacy_repo" branch sibling "$legacy_base"
+git -C "$legacy_repo" symbolic-ref HEAD refs/heads/sibling
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$legacy_calls" "$ROOT/scripts/goal-drive.sh" --repo "$legacy_repo" \
+  --to codex --max-cycles 2 > "$TMP/legacy-intent-no-ref.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "legacy intent without head_ref should park, got $rc"
+grep -Fq 'reason=legacy-intent-missing-head-ref' "$TMP/legacy-intent-no-ref.out" ||
+  fail "legacy intent without head_ref did not report explicit reconciliation"
+[ "$(git -C "$legacy_repo" rev-parse refs/heads/main)" = "$legacy_base" ] &&
+  [ "$(git -C "$legacy_repo" rev-parse refs/heads/sibling)" = "$legacy_base" ] ||
+  fail "legacy intent without head_ref advanced a same-SHA branch"
+[ "$(wc -l < "$legacy_calls" | tr -d ' ')" = 1 ] ||
+  fail "legacy intent without head_ref called the provider again"
+
+# A crash after the explicit ref CAS but before the terminal journal may be
+# followed by a legitimate commit on that same branch. Recovery must locate
+# the exact autonomous commit in first-parent ancestry, close its intent, and
+# leave the descendant as HEAD without another provider call.
+desc_repo="$TMP/post-ref-descendant"
+make_case "$desc_repo" tracked
+desc_calls="$TMP/post-ref-descendant-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$desc_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REF=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$desc_repo" --to codex --max-cycles 2 \
+  > "$TMP/post-ref-descendant-stop.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "post-ref descendant fixture did not stop after ref CAS"
+git -C "$desc_repo" add -A
+printf 'legitimate descendant\n' > "$desc_repo/descendant.txt"
+git -C "$desc_repo" add descendant.txt
+git -C "$desc_repo" commit -qm 'test: advance same frozen ref'
+descendant_head="$(git -C "$desc_repo" rev-parse HEAD)"
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$desc_calls" "$ROOT/scripts/goal-drive.sh" --repo "$desc_repo" \
+  --to codex --max-cycles 2 > "$TMP/post-ref-descendant-resume.out" 2>&1 ||
+  fail "same-ref descendant recovery failed: $(tail -8 "$TMP/post-ref-descendant-resume.out")"
+[ "$(git -C "$desc_repo" rev-parse HEAD)" = "$descendant_head" ] ||
+  fail "same-ref descendant recovery moved HEAD"
+[ "$(wc -l < "$desc_calls" | tr -d ' ')" = 1 ] ||
+  fail "same-ref descendant recovery called the provider again"
+grep -Fq 'recovered commit intent' "$TMP/post-ref-descendant-resume.out" ||
+  fail "same-ref descendant recovery did not close the exact intent"
 
 # A second crash window exists after the one-shot repair publishes a new
 # review but before goal-drive freezes its replacement intent. Journal the
@@ -795,6 +952,531 @@ if grep -Fq 'goal-drive: done' "$TMP/terminal-write-failure.out"; then
   fail "terminal append failure was reported as a successful drive"
 fi
 
+# progress.jsonl is evidence inside repo-local .oms. Neither the driver nor a
+# direct acceptance run may follow a planted symlink into an external file.
+for progress_writer in goal accept; do
+  progress_repo="$TMP/progress-link-$progress_writer"
+  make_case "$progress_repo" tracked
+  progress_outside="$TMP/progress-link-$progress_writer.external"
+  printf 'external progress sentinel\n' > "$progress_outside"
+  progress_expected="$TMP/progress-link-$progress_writer.expected"
+  cp "$progress_outside" "$progress_expected"
+  if ln -s "$progress_outside" "$progress_repo/.oms/plan/progress.jsonl" 2>/dev/null; then
+    rc=0
+    case "$progress_writer" in
+      goal)
+        HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+          CALL_LOG="$TMP/progress-link-goal-calls" \
+          "$ROOT/scripts/goal-drive.sh" --repo "$progress_repo" --to codex \
+          --max-cycles 1 > "$TMP/progress-link-goal.out" 2>&1 || rc=$?
+        ;;
+      accept)
+        "$ROOT/scripts/agent-plan.sh" --repo "$progress_repo" accept \
+          > "$TMP/progress-link-accept.out" 2>&1 || rc=$?
+        ;;
+    esac
+    [ "$rc" = 2 ] || fail "$progress_writer progress symlink should refuse with 2, got $rc"
+    grep -Fq 'progress.jsonl' "$TMP/progress-link-$progress_writer.out" ||
+      fail "$progress_writer progress symlink refusal was not actionable"
+    cmp -s "$progress_expected" "$progress_outside" ||
+      fail "$progress_writer followed progress.jsonl outside the repository"
+  else
+    echo "goal-drive-recovery-smoke: skip $progress_writer progress symlink fixture (symlinks unavailable)" >&2
+  fi
+done
+
+# Git index hints can hide changed tracked bytes from status/diff. A goal that
+# already appears to pass must still refuse before acceptance when either
+# assume-unchanged (lowercase `ls-files -v`) or skip-worktree (`S`) is present.
+for hidden_index_mode in assume skip; do
+  hidden_repo="$TMP/hidden-index-$hidden_index_mode"
+  make_case "$hidden_repo" tracked
+  hidden_before="$(git -C "$hidden_repo" rev-parse HEAD)"
+  case "$hidden_index_mode" in
+    assume) git -C "$hidden_repo" update-index --assume-unchanged tracked.txt ;;
+    skip) git -C "$hidden_repo" update-index --skip-worktree tracked.txt ;;
+  esac
+  printf 'autonomous-tracked\n' > "$hidden_repo/tracked.txt"
+  [ -z "$(git -C "$hidden_repo" status --porcelain)" ] ||
+    fail "$hidden_index_mode fixture was not hidden from ordinary status"
+  rc=0
+  hidden_calls="$TMP/hidden-index-$hidden_index_mode-calls"
+  HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+    CALL_LOG="$hidden_calls" "$ROOT/scripts/goal-drive.sh" --repo "$hidden_repo" \
+    --to codex --max-cycles 1 > "$TMP/hidden-index-$hidden_index_mode.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "$hidden_index_mode hidden index should park, got $rc"
+  grep -Fq 'reason=hidden-index-flags' "$TMP/hidden-index-$hidden_index_mode.out" ||
+    fail "$hidden_index_mode hidden index used the wrong park reason"
+  [ "$(git -C "$hidden_repo" rev-parse HEAD)" = "$hidden_before" ] ||
+    fail "$hidden_index_mode hidden index advanced HEAD"
+  [ ! -s "$hidden_calls" ] ||
+    fail "$hidden_index_mode hidden index called a provider"
+done
+
+# Executable Git config is data until a porcelain/diff/filter operation
+# consumes it. Goal-drive and direct acceptance inspect raw local, worktree,
+# and command-scope keys first; hostile commands must never reach their marker.
+git_exec_marker_script="$TMP/git-exec-marker.sh"
+git_exec_marker="$TMP/git-exec-marker.ran"
+cat > "$git_exec_marker_script" <<EOF
+#!/usr/bin/env bash
+: > "$git_exec_marker"
+exit 0
+EOF
+chmod +x "$git_exec_marker_script"
+
+for git_exec_scope in local worktree command; do
+  git_exec_goal_repo="$TMP/git-exec-goal-$git_exec_scope"
+  make_case "$git_exec_goal_repo" tracked
+  case "$git_exec_scope" in
+    local)
+      git -C "$git_exec_goal_repo" config --local core.fsmonitor \
+        "$git_exec_marker_script"
+      git_exec_env=()
+      ;;
+    worktree)
+      git -C "$git_exec_goal_repo" config --local extensions.worktreeConfig true
+      git -C "$git_exec_goal_repo" config --worktree diff.external \
+        "$git_exec_marker_script"
+      git_exec_env=()
+      ;;
+    command)
+      git_exec_env=(env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.hostile.clean
+        "GIT_CONFIG_VALUE_0=$git_exec_marker_script")
+      ;;
+  esac
+  rc=0
+  HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+    CALL_LOG="$TMP/git-exec-goal-$git_exec_scope-calls" \
+    "${git_exec_env[@]}" "$ROOT/scripts/goal-drive.sh" \
+    --repo "$git_exec_goal_repo" --to codex --max-cycles 1 \
+    > "$TMP/git-exec-goal-$git_exec_scope.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] ||
+    fail "goal-drive executable $git_exec_scope Git config should park, got $rc"
+  grep -Fq 'reason=unsafe-git-execution-config' \
+    "$TMP/git-exec-goal-$git_exec_scope.out" ||
+    fail "goal-drive executable $git_exec_scope Git config used the wrong reason"
+  [ ! -e "$git_exec_marker" ] ||
+    fail "goal-drive executed hostile $git_exec_scope Git config"
+  [ ! -s "$TMP/git-exec-goal-$git_exec_scope-calls" ] ||
+    fail "goal-drive delegated under hostile $git_exec_scope Git config"
+done
+
+# Recheck immediately when plan-run returns, including a failed worker phase.
+# A delegated phase can still return after touching the primary repo; a planted
+# fsmonitor must be caught before goal-drive evaluates its output or asks Git
+# for repository status. The delegate stub bypasses the lower worker restorer
+# so this specifically exercises goal-drive's own return boundary.
+git_exec_return_repo="$TMP/git-exec-goal-plan-return"
+make_case "$git_exec_return_repo" tracked
+git_exec_return_delegate="$TMP/git-exec-goal-plan-return-delegate"
+cat > "$git_exec_return_delegate" <<'EOF'
+#!/usr/bin/env bash
+repo=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'delegate\n' >> "$CALL_LOG"
+git -C "$repo" config --local core.fsmonitor "$OMS_EXEC_MARKER_SCRIPT"
+exit 9
+EOF
+chmod +x "$git_exec_return_delegate"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$TMP/git-exec-goal-plan-return-calls" \
+  OMS_PLAN_RUN_DELEGATE="$git_exec_return_delegate" \
+  OMS_EXEC_MARKER_SCRIPT="$git_exec_marker_script" \
+  "$ROOT/scripts/goal-drive.sh" --repo "$git_exec_return_repo" --to codex \
+  --max-cycles 1 > "$TMP/git-exec-goal-plan-return.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "plan-run-return executable Git config should park, got $rc"
+grep -Fq 'reason=unsafe-git-execution-config' \
+  "$TMP/git-exec-goal-plan-return.out" ||
+  fail "plan-run-return executable Git config used the wrong reason"
+[ ! -e "$git_exec_marker" ] ||
+  fail "goal-drive executed fsmonitor planted during plan-run"
+[ "$(wc -l < "$TMP/git-exec-goal-plan-return-calls" | tr -d ' ')" = 1 ] ||
+  fail "plan-run-return config fixture made duplicate provider calls"
+git -C "$git_exec_return_repo" config --unset-all core.fsmonitor
+
+git_exec_accept_repo="$TMP/git-exec-accept-worktree"
+make_case "$git_exec_accept_repo" tracked
+git -C "$git_exec_accept_repo" config --local extensions.worktreeConfig true
+git -C "$git_exec_accept_repo" config --worktree diff.external "$git_exec_marker_script"
+rc=0
+"$ROOT/scripts/agent-plan.sh" --repo "$git_exec_accept_repo" accept \
+  > "$TMP/git-exec-accept-worktree.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "acceptance executable worktree Git config should error, got $rc"
+grep -Fq 'reason=acceptance-mutated-repository' \
+  "$TMP/git-exec-accept-worktree.out" ||
+  fail "acceptance worktree Git config used the wrong reason"
+[ ! -e "$git_exec_marker" ] || fail "acceptance executed hostile diff.external"
+git -C "$git_exec_accept_repo" config --worktree --unset-all diff.external
+
+git_exec_command_repo="$TMP/git-exec-accept-command"
+make_case "$git_exec_command_repo" tracked
+rc=0
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.hostile.clean \
+  GIT_CONFIG_VALUE_0="$git_exec_marker_script" \
+  "$ROOT/scripts/agent-plan.sh" --repo "$git_exec_command_repo" accept \
+  > "$TMP/git-exec-accept-command.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "acceptance executable command-scope Git config should error, got $rc"
+grep -Fq 'reason=acceptance-mutated-repository' \
+  "$TMP/git-exec-accept-command.out" ||
+  fail "acceptance command-scope Git config used the wrong reason"
+[ ! -e "$git_exec_marker" ] || fail "acceptance executed hostile command-scope filter"
+
+# Repository guards cannot authorize mutable user/system Git programs. Exact
+# acceptance snapshots explicitly suppress those scopes, so even a reviewed
+# attribute naming a global clean filter cannot execute it during diff reads.
+git_exec_global_repo="$TMP/git-exec-accept-global"
+make_case "$git_exec_global_repo" tracked
+printf 'tracked.txt filter=hostile\n' > "$git_exec_global_repo/.gitattributes"
+git -C "$git_exec_global_repo" add .gitattributes
+git -C "$git_exec_global_repo" commit -qm 'test: add named filter attribute'
+git_exec_global_config="$TMP/git-exec-global.config"
+git config -f "$git_exec_global_config" filter.hostile.clean "$git_exec_marker_script"
+rm -f "$git_exec_marker"
+rc=0
+GIT_CONFIG_GLOBAL="$git_exec_global_config" GIT_CONFIG_SYSTEM=/dev/null \
+  "$ROOT/scripts/agent-plan.sh" --repo "$git_exec_global_repo" accept \
+  > "$TMP/git-exec-accept-global.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "ordinary acceptance failure under global filter should remain 3, got $rc"
+[ ! -e "$git_exec_marker" ] || fail "acceptance snapshot executed a global clean filter"
+grep -Fq 'GIT_CONFIG_GLOBAL=/dev/null' "$ROOT/scripts/goal-drive.sh" ||
+  fail "goal-drive exact diff reader does not suppress global Git programs"
+
+# Recheck config and index after the acceptance child and before *any* Git
+# snapshot. The child may plant executable config or hide a changed tracked
+# file; both must become integrity errors without executing the planted hook.
+git_exec_post_repo="$TMP/git-exec-accept-post"
+make_case "$git_exec_post_repo" tracked
+"$ROOT/scripts/agent-plan.sh" --repo "$git_exec_post_repo" init --goal post-config \
+  --accept 'git config --local filter.hostile.clean "$OMS_EXEC_MARKER_SCRIPT"' \
+  >/dev/null
+rc=0
+OMS_EXEC_MARKER_SCRIPT="$git_exec_marker_script" \
+  "$ROOT/scripts/agent-plan.sh" --repo "$git_exec_post_repo" accept \
+  > "$TMP/git-exec-accept-post.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "acceptance child-planted Git config should error, got $rc"
+grep -Fq 'reason=acceptance-mutated-repository' "$TMP/git-exec-accept-post.out" ||
+  fail "child-planted Git config used the wrong reason"
+[ ! -e "$git_exec_marker" ] || fail "post-acceptance snapshot executed hostile filter"
+git -C "$git_exec_post_repo" config --unset-all filter.hostile.clean
+
+hidden_post_repo="$TMP/hidden-index-accept-post"
+make_case "$hidden_post_repo" tracked
+"$ROOT/scripts/agent-plan.sh" --repo "$hidden_post_repo" init --goal post-hidden \
+  --accept 'git update-index --skip-worktree tracked.txt; printf "hidden acceptance bytes\n" > tracked.txt' \
+  >/dev/null
+rc=0
+"$ROOT/scripts/agent-plan.sh" --repo "$hidden_post_repo" accept \
+  > "$TMP/hidden-index-accept-post.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "acceptance child-hidden mutation should error, got $rc"
+grep -Fq 'reason=acceptance-mutated-repository' \
+  "$TMP/hidden-index-accept-post.out" ||
+  fail "acceptance child-hidden mutation used the wrong reason"
+git -C "$hidden_post_repo" update-index --no-skip-worktree tracked.txt
+git -C "$hidden_post_repo" restore tracked.txt
+
+# Acceptance is an evaluator, not a writer. Timeout, unbounded output, and any
+# repository or verifier mutation are integrity errors (exit 2), even when the
+# command itself also exits nonzero.
+accept_mutate_repo="$TMP/accept-mutate"
+make_case "$accept_mutate_repo" tracked
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_mutate_repo" init --goal mutate \
+  --accept 'printf "foreign acceptance bytes\n" >> tracked.txt; false' >/dev/null
+rc=0
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_mutate_repo" accept \
+  > "$TMP/accept-mutate.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "mutating acceptance should be an integrity error, got $rc"
+grep -Fq 'reason=acceptance-mutated-repository' "$TMP/accept-mutate.out" ||
+  fail "mutating acceptance did not outrank its command failure"
+git -C "$accept_mutate_repo" restore tracked.txt
+
+accept_timeout_repo="$TMP/accept-timeout"
+make_case "$accept_timeout_repo" tracked
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_timeout_repo" init --goal timeout \
+  --accept 'sleep 5' >/dev/null
+rc=0
+OMS_PLAN_ACCEPT_TIMEOUT=1s "$ROOT/scripts/agent-plan.sh" \
+  --repo "$accept_timeout_repo" accept > "$TMP/accept-timeout.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "timed-out acceptance should fail closed, got $rc"
+grep -Fq 'reason=acceptance-timeout' "$TMP/accept-timeout.out" ||
+  fail "timed-out acceptance did not report its integrity reason"
+
+# Acceptance cleanup owns nested process groups/sessions too. A verifier may
+# daemonize a setsid child before its shell reaches the timeout; neither that
+# PID nor a delayed write may survive the typed timeout receipt.
+if command -v setsid >/dev/null 2>&1; then
+  accept_escape_repo="$TMP/accept-setsid-timeout"
+  make_case "$accept_escape_repo" tracked
+  accept_escape_pid="$TMP/accept-setsid-timeout.pid"
+  accept_escape_marker="$TMP/accept-setsid-timeout.leaked"
+  "$ROOT/scripts/agent-plan.sh" --repo "$accept_escape_repo" init \
+    --goal setsid-timeout \
+    --accept 'setsid bash -c '\''trap "" TERM HUP INT; printf "%s\n" "$$" > "$1"; sleep 3; : > "$2"'\'' child "$OMS_ESCAPE_PID" "$OMS_ESCAPE_MARKER" & wait' \
+    >/dev/null
+  rc=0
+  OMS_ESCAPE_PID="$accept_escape_pid" OMS_ESCAPE_MARKER="$accept_escape_marker" \
+    OMS_PLAN_ACCEPT_TIMEOUT=1s "$ROOT/scripts/agent-plan.sh" \
+    --repo "$accept_escape_repo" accept > "$TMP/accept-setsid-timeout.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "setsid acceptance timeout should fail closed, got $rc"
+  grep -Fq 'reason=acceptance-timeout' "$TMP/accept-setsid-timeout.out" ||
+    fail "setsid acceptance timeout lost its typed reason"
+  [ -s "$accept_escape_pid" ] || fail "setsid acceptance child did not start"
+  accept_escape_child="$(tr -d '\r\n' < "$accept_escape_pid")"
+  ! kill -0 "$accept_escape_child" 2>/dev/null ||
+    fail "setsid acceptance child survived timeout"
+  sleep 3.2
+  [ ! -e "$accept_escape_marker" ] ||
+    fail "setsid acceptance child wrote after timeout"
+fi
+
+# The autonomous driver must preserve a bounded acceptance supervisor's safe
+# reason rather than collapsing every exit 2 into an ambiguous command error.
+goal_accept_timeout_repo="$TMP/goal-accept-timeout"
+make_case "$goal_accept_timeout_repo" tracked
+"$ROOT/scripts/agent-plan.sh" --repo "$goal_accept_timeout_repo" init \
+  --goal goal-timeout --accept 'sleep 5' >/dev/null
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$TMP/goal-accept-timeout-calls" OMS_PLAN_ACCEPT_TIMEOUT=1s \
+  "$ROOT/scripts/goal-drive.sh" --repo "$goal_accept_timeout_repo" --to codex \
+  --max-cycles 1 > "$TMP/goal-accept-timeout.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "goal-drive timed-out acceptance should park, got $rc"
+grep -Fq 'reason=acceptance-timeout' "$TMP/goal-accept-timeout.out" ||
+  fail "goal-drive collapsed the exact acceptance timeout reason"
+[ ! -s "$TMP/goal-accept-timeout-calls" ] ||
+  fail "goal-drive called a provider after an acceptance integrity error"
+
+accept_output_repo="$TMP/accept-output-limit"
+make_case "$accept_output_repo" tracked
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_output_repo" init --goal output-limit \
+  --accept "python3 -c 'import sys; sys.stdout.write(\"x\" * 1100000)'" >/dev/null
+rc=0
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_output_repo" accept \
+  > "$TMP/accept-output-limit.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "over-limit acceptance output should fail closed, got $rc"
+grep -Fq 'reason=acceptance-output-limit' "$TMP/accept-output-limit.out" ||
+  fail "over-limit acceptance did not report its integrity reason"
+
+# agent-plan is the process-group owner even though the verifier runs in a new
+# session. HUP/INT/TERM to the shell must be forwarded through the Python
+# supervisor and reap the stubborn acceptance child rather than orphaning it.
+for accept_signal in HUP INT TERM; do
+  accept_signal_repo="$TMP/accept-signal-$accept_signal"
+  make_case "$accept_signal_repo" tracked
+  "$ROOT/scripts/agent-plan.sh" --repo "$accept_signal_repo" init \
+    --goal "signal $accept_signal" \
+    --accept 'printf "%s\n" "$$" > "$OMS_SIGNAL_PID_FILE"; trap "" HUP INT TERM; sleep 30' \
+    >/dev/null
+  accept_pid_file="$TMP/accept-signal-$accept_signal.pid"
+  # A non-interactive shell marks SIGINT ignored for jobs it backgrounds.
+  # Reset dispositions before exec so this exercises the same signal boundary
+  # as a foreground CLI invocation.
+  OMS_SIGNAL_PID_FILE="$accept_pid_file" OMS_PLAN_ACCEPT_TIMEOUT=30s \
+    python3 - "$ROOT/scripts/agent-plan.sh" "$accept_signal_repo" \
+    > "$TMP/accept-signal-$accept_signal.out" 2>&1 <<'PY' &
+import os, signal, sys
+for name in ("SIGHUP", "SIGINT", "SIGTERM"):
+    signal.signal(getattr(signal, name), signal.SIG_DFL)
+os.execv(sys.argv[1], [sys.argv[1], "--repo", sys.argv[2], "accept"])
+PY
+  accept_wrapper_pid=$!
+  accept_wait=0
+  while [ ! -s "$accept_pid_file" ] && [ "$accept_wait" -lt 200 ]; do
+    sleep 0.02
+    accept_wait=$((accept_wait + 1))
+  done
+  [ -s "$accept_pid_file" ] || {
+    kill -TERM "$accept_wrapper_pid" 2>/dev/null || true
+    wait "$accept_wrapper_pid" 2>/dev/null || true
+    fail "$accept_signal acceptance child did not start"
+  }
+  accept_child_pid="$(tr -d '\r\n' < "$accept_pid_file")"
+  case "$accept_child_pid" in
+    ''|*[!0-9]*) fail "$accept_signal acceptance child wrote an invalid pid" ;;
+  esac
+  kill -s "$accept_signal" "$accept_wrapper_pid"
+  rc=0
+  wait "$accept_wrapper_pid" || rc=$?
+  case "$accept_signal:$rc" in
+    HUP:129|INT:130|TERM:143) ;;
+    *) fail "$accept_signal acceptance wrapper returned unexpected status $rc" ;;
+  esac
+  accept_wait=0
+  while kill -0 "$accept_child_pid" 2>/dev/null && [ "$accept_wait" -lt 200 ]; do
+    sleep 0.02
+    accept_wait=$((accept_wait + 1))
+  done
+  ! kill -0 "$accept_child_pid" 2>/dev/null ||
+    fail "$accept_signal left acceptance child $accept_child_pid running"
+done
+
+# A reviewed acceptance manifest freezes its executable inputs. Changing one
+# after apply must fail before the command runs and before a receipt claims an
+# ordinary test failure.
+accept_manifest_repo="$TMP/accept-manifest"
+mkdir -p "$accept_manifest_repo"
+git -C "$accept_manifest_repo" init -q -b main
+git -C "$accept_manifest_repo" config user.email test@example.com
+git -C "$accept_manifest_repo" config user.name Test
+printf '# PROJECT.md\n\n## Status\n\n- State: confirmed\n' > "$accept_manifest_repo/PROJECT.md"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$accept_manifest_repo/check.sh"
+chmod +x "$accept_manifest_repo/check.sh"
+git -C "$accept_manifest_repo" add PROJECT.md check.sh
+git -C "$accept_manifest_repo" commit -qm base
+accept_spec_sha="$(python3 - "$accept_manifest_repo/PROJECT.md" <<'PY' | tr -d '\r'
+import hashlib, pathlib, sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+accept_base="$(git -C "$accept_manifest_repo" rev-parse HEAD)"
+accept_proposal="$TMP/accept-manifest-proposal.json"
+python3 - "$accept_proposal" "$accept_spec_sha" "$accept_base" <<'PY'
+import json, pathlib, sys
+path, spec, base = sys.argv[1:]
+pathlib.Path(path).write_text(json.dumps({
+    "schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec,
+    "plan_sha256": "absent", "base_sha": base, "id_prefix": "",
+    "allowed_envelope": ["."], "acceptance_files": ["check.sh"],
+    "tasks": [{"id": "manifest", "title": "test: manifest",
+               "allowed": ["check.sh"], "verify": "bash check.sh", "depends": []}],
+}, sort_keys=True), encoding="utf-8")
+PY
+accept_proposal_sha="$(python3 - "$accept_proposal" <<'PY' | tr -d '\r'
+import hashlib, pathlib, sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_manifest_repo" apply-proposal \
+  --proposal "$accept_proposal" --expected-proposal-sha256 "$accept_proposal_sha" \
+  --expected-plan-sha256 absent --goal manifest --accept 'bash check.sh' \
+  --allowed-envelope . --accept-files check.sh >/dev/null
+printf '#!/usr/bin/env bash\necho changed\nexit 0\n' > "$accept_manifest_repo/check.sh"
+rc=0
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_manifest_repo" accept \
+  > "$TMP/accept-manifest.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "changed acceptance file should fail closed, got $rc"
+grep -Fq 'acceptance files changed' "$TMP/accept-manifest.out" ||
+  fail "changed acceptance file refusal was not actionable"
+
+# Goal-drive owns routing continuity for the bounded loop. Every explicit
+# model/fallback/reasoning choice and retry override must reach plan-run.
+route_repo="$TMP/goal-routing"
+make_case "$route_repo" tracked
+route_bin="$TMP/goal-routing-bin"
+mkdir -p "$route_bin"
+cat > "$route_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' "${OMS_TASK_ID:-missing}" >> "$CALL_LOG"
+printf '%s\n' "$@" > "$ROUTE_ARGV"
+printf '%s\n' "${OMS_PEER_TIMEOUT:-}" > "$ROUTE_TIMEOUT"
+printf 'autonomous-tracked\n' > tracked.txt
+echo worker-ok
+EOF
+chmod +x "$route_bin/codex"
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$route_bin:/usr/bin:/bin" \
+  CALL_LOG="$TMP/goal-routing-calls" ROUTE_ARGV="$TMP/goal-routing-argv" \
+  ROUTE_TIMEOUT="$TMP/goal-routing-timeout" \
+  "$ROOT/scripts/goal-drive.sh" --repo "$route_repo" --to codex --max-cycles 2 \
+  --retry-known --model gpt-route-primary --fallback-model gpt-route-fallback \
+  --reasoning-effort high --provider-timeout 23s > "$TMP/goal-routing.out" 2>&1 ||
+  fail "goal-drive routing arguments were not accepted: $(tail -8 "$TMP/goal-routing.out")"
+grep -Fxq gpt-route-primary "$TMP/goal-routing-argv" ||
+  fail "goal-drive did not forward --model"
+grep -Fq 'model_reasoning_effort="high"' "$TMP/goal-routing-argv" ||
+  fail "goal-drive did not forward --reasoning-effort"
+grep -Fxq 23s "$TMP/goal-routing-timeout" ||
+  fail "goal-drive did not forward --provider-timeout"
+
+# Synchronous provider phases must not outlive a targeted TERM of goal-drive.
+# Exercise both the ordinary plan-run phase and the optional repair phase with
+# a stubborn provider that ignores TERM; the phase supervisor must escalate
+# and reap it before the wrapper exits.
+for goal_phase in plan-run repair; do
+  phase_repo="$TMP/phase-signal-$goal_phase"
+  make_case "$phase_repo" tracked
+  phase_bin="$TMP/phase-signal-$goal_phase-bin"
+  phase_calls="$TMP/phase-signal-$goal_phase-calls"
+  phase_marker="$TMP/phase-signal-$goal_phase.pid"
+  phase_survivor_marker="$TMP/phase-signal-$goal_phase.survived"
+  mkdir -p "$phase_bin"
+  cat > "$phase_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+count=0
+[ ! -f "$CALL_LOG" ] || count="$(wc -l < "$CALL_LOG" | tr -d ' ')"
+printf '%s\n' "${OMS_TASK_ID:-missing}" >> "$CALL_LOG"
+if [ "$OMS_PHASE_KIND" = repair ] && [ "$count" -eq 0 ]; then
+  printf 'autonomous-tracked\n' > tracked.txt
+  echo worker-ok
+  exit 0
+fi
+printf '%s\n' "$$" > "$OMS_PHASE_PID_FILE"
+trap '' HUP INT TERM
+sleep 3
+: > "$OMS_PHASE_SURVIVOR_MARKER"
+sleep 30
+EOF
+  chmod +x "$phase_bin/codex"
+  phase_auto_repair=()
+  phase_approval=0
+  if [ "$goal_phase" = repair ]; then
+    phase_auto_repair=(--auto-repair)
+    phase_approval=1
+  fi
+  HOME="$home" NVM_DIR="$home/.nvm" PATH="$phase_bin:/usr/bin:/bin" \
+    CALL_LOG="$phase_calls" OMS_PHASE_KIND="$goal_phase" \
+    OMS_PHASE_PID_FILE="$phase_marker" OMS_REQUIRE_LANDING_APPROVAL="$phase_approval" \
+    OMS_PHASE_SURVIVOR_MARKER="$phase_survivor_marker" \
+    python3 - "$ROOT/scripts/goal-drive.sh" "$phase_repo" \
+      "${phase_auto_repair[@]}" > "$TMP/phase-signal-$goal_phase.out" 2>&1 <<'PY' &
+import os, signal, sys
+for name in ("SIGHUP", "SIGINT", "SIGTERM"):
+    signal.signal(getattr(signal, name), signal.SIG_DFL)
+argv = [sys.argv[1], "--repo", sys.argv[2], "--to", "codex", "--max-cycles", "2"]
+argv.extend(sys.argv[3:])
+os.execv(sys.argv[1], argv)
+PY
+  phase_wrapper_pid=$!
+  phase_wait=0
+  while [ ! -s "$phase_marker" ] && [ "$phase_wait" -lt 400 ]; do
+    sleep 0.02
+    phase_wait=$((phase_wait + 1))
+  done
+  [ -s "$phase_marker" ] || {
+    kill -TERM "$phase_wrapper_pid" 2>/dev/null || true
+    wait "$phase_wrapper_pid" 2>/dev/null || true
+    fail "$goal_phase provider phase did not reach its marker"
+  }
+  phase_child_pid="$(tr -d '\r\n' < "$phase_marker")"
+  case "$phase_child_pid" in
+    ''|*[!0-9]*) fail "$goal_phase provider wrote an invalid pid" ;;
+  esac
+  kill -TERM "$phase_wrapper_pid"
+  rc=0
+  wait "$phase_wrapper_pid" || rc=$?
+  [ "$rc" = 143 ] || fail "$goal_phase TERM returned unexpected status $rc"
+  phase_wait=0
+  while kill -0 "$phase_child_pid" 2>/dev/null && [ "$phase_wait" -lt 200 ]; do
+    sleep 0.02
+    phase_wait=$((phase_wait + 1))
+  done
+  ! kill -0 "$phase_child_pid" 2>/dev/null ||
+    fail "$goal_phase TERM orphaned provider $phase_child_pid"
+  # The supervisor permits a one-second graceful TERM window. Check a marker
+  # scheduled well beyond that window so this proves escalation containment,
+  # not an impossible zero-side-effect guarantee during grace.
+  sleep 2.3
+  [ ! -e "$phase_survivor_marker" ] ||
+    fail "$goal_phase TERM allowed a delayed provider side effect"
+done
+
 # Freezing reviewed bytes is a private repository write. A planted
 # commit-patches symlink must park before chmod or file creation can mutate its
 # external directory target. Windows Git Bash can lack symlink privilege, so
@@ -1029,12 +1711,37 @@ printf '%s\n' "$rename_status" | grep -Eq '^R[0-9]+[[:space:]]+old\.txt[[:space:
   fail "rename intent commit did not preserve old/new rename lineage"
 [ -z "$(git -C "$rename_repo" status --porcelain)" ] ||
   fail "rename intent left the repository dirty"
-python3 - "$rename_repo/.oms/plan/progress.jsonl" <<'PY' || fail "caller-supplied run id did not bind the terminal receipt"
-import json, sys
+python3 - "$rename_repo/.oms/plan/progress.jsonl" "$TMP/rename-intent.out" <<'PY' || fail "caller-supplied run id did not bind one stable terminal receipt"
+import json, re, sys
 
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
-terminal = [row for row in rows if row.get("kind") == "terminal"]
-assert terminal and terminal[-1].get("run_id") == "exact-run-receipt", terminal
+terminal = [row for row in rows if row.get("kind") == "terminal"
+            and row.get("run_id") == "exact-run-receipt"]
+assert len(terminal) == 1, terminal
+row = terminal[0]
+assert row.get("status") == "done" and row.get("reason") == "acceptance-pass", row
+assert re.fullmatch(r"[0-9a-f]{64}", row.get("receipt", "")), row
+lines = [line for line in open(sys.argv[2], encoding="utf-8").read().splitlines()
+         if line.startswith("goal-drive: terminal-v1 ")]
+expected = ("goal-drive: terminal-v1 run=exact-run-receipt receipt=%s "
+            "status=done reason=acceptance-pass") % row["receipt"]
+assert lines == [expected], lines
 PY
+
+# Native Windows Python cannot execute a shebang-only Bash script directly.
+# Provider phases must preserve an explicit Bash hop while still using the
+# cross-platform supervisor's CREATE_NEW_PROCESS_GROUP/taskkill branch.
+if ! python3 - "$ROOT/scripts/goal-drive.sh" \
+  "$ROOT/scripts/lib/autopilot-receipt.py" <<'PY'
+import pathlib, sys
+goal = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+helper = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+assert 'goal_phase_run env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" bash' in goal
+assert 'CREATE_NEW_PROCESS_GROUP' in helper
+assert '["taskkill", "/PID", str(process.pid), "/T", "/F"]' in helper
+PY
+then
+  fail "goal provider supervisor lost its Windows Git Bash execution contract"
+fi
 
 echo "goal-drive-recovery-smoke: ok"
