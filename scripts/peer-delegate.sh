@@ -166,7 +166,7 @@ It is detection, not a sandbox: it cannot prevent a write, and it cannot see a
 write that is undone before the worker exits, anything the worker reads
 (inherited tokens, ssh agents), or anything it does outside the repository
 (HOME, /tmp, a surviving background process). Those need process isolation.
-  OMS_PEER_TIMEOUT=5m        Worker wall-clock timeout.
+  OMS_PEER_TIMEOUT           Worker wall-clock timeout (default: 30m).
 EOF
 }
 

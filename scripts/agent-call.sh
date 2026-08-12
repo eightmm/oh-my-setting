@@ -57,7 +57,7 @@ Options:
 
 Environment:
   OH_MY_SETTING_CALL_DRY_RUN=1    Same as --dry-run.
-  OMS_PEER_TIMEOUT=5m      Provider wall-clock timeout.
+  OMS_PEER_TIMEOUT         Provider wall-clock timeout (default: 20m).
 EOF
 }
 

@@ -31,12 +31,13 @@ FINGERPRINT=""
 HOW=""
 UNRESOLVED_ONLY=0
 AS_JSON=0
+IGNORE_STATE=0
 ACTION=""
 
 usage() {
   cat <<'EOF'
 Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT] [--next TEXT]
-       fail-ledger.sh [--repo PATH] check  --cmd CMD
+       fail-ledger.sh [--repo PATH] check  --cmd CMD [--ignore-state]
        fail-ledger.sh [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]
        fail-ledger.sh [--repo PATH] list   [--unresolved] [--json]
 
@@ -54,6 +55,10 @@ record   Append a failure for CMD (exit N), optionally with a recommended next
          thing is what happens when nothing says so.
 check    Exit 3 (and print prior context) if CMD's fingerprint is a known
          UNRESOLVED failure; exit 0 otherwise. Gate a retry with this.
+         --ignore-state keeps the schema-2 git-state clearing out of the
+         verdict, for failures that no repo change can plausibly fix (a
+         provider CLI that hangs does not recover because the repo gained a
+         commit).
 resolve  Mark a fingerprint fixed so it stops warning; --how records how it
          was fixed.
 list     One line per fingerprint (count, last exit, resolved); --unresolved
@@ -173,6 +178,7 @@ while [ "$#" -gt 0 ]; do
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --unresolved) UNRESOLVED_ONLY=1; shift ;;
     --json) AS_JSON=1; shift ;;
+    --ignore-state) IGNORE_STATE=1; shift ;;
     record|check|resolve|list) ACTION="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -181,6 +187,7 @@ done
 
 ACTION="${ACTION:-list}"
 [ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--json is only supported by list"
+[ "$IGNORE_STATE" -eq 0 ] || [ "$ACTION" = "check" ] || fail "--ignore-state is only supported by check"
 case "$KIND" in
   cmd|hook|verify|plan-run|delegate|patch-land) ;;
   *) fail "--kind must be one of: cmd, hook, verify, plan-run, delegate, patch-land" ;;
@@ -247,10 +254,12 @@ PY
     [ -n "$CMD" ] || fail "check requires --cmd"
     [ -f "$LEDGER" ] || exit 0
     fp="$(fingerprint_of "$CMD")"
-    OMS_FP="$fp" OMS_STATE_FP="$(state_fingerprint)" python3 - "$LEDGER" <<'PY'
+    OMS_FP="$fp" OMS_STATE_FP="$(state_fingerprint)" OMS_IGNORE_STATE="$IGNORE_STATE" \
+      python3 - "$LEDGER" <<'PY'
 import calendar, json, os, sys, time
 fp = os.environ["OMS_FP"]
 current_state = os.environ["OMS_STATE_FP"]
+ignore_state = os.environ.get("OMS_IGNORE_STATE") == "1"
 ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 now = time.time()
 
@@ -290,7 +299,7 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         last = r
 if fails > 0 and last is not None:
     recorded_state = last.get("state_fingerprint")
-    if recorded_state and recorded_state != current_state:
+    if not ignore_state and recorded_state and recorded_state != current_state:
         sys.stderr.write("fail-ledger: %s failed before, but git state changed; retry allowed\n" % fp)
         sys.exit(0)
     sys.stderr.write("fail-ledger: %s already failed %dx (last exit %s): %s\n" % (

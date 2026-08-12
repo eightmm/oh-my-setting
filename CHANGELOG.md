@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Peer seat calls now consume the durable failure memory at the moment it can
+  change a decision: a call on a seat with unresolved no-answer history warns
+  on stderr and stamps a `seat-health:` line into the artifact before spending
+  its wall clock, and a seat that answers again resolves its own rows so the
+  warning cannot become permanent noise. `fail-ledger check` gained
+  `--ignore-state` for failures no repo change can plausibly fix. The peer
+  wall-clock default is now verb-scoped — ask 10m, call/review 20m, delegate
+  30m (agy's `--print-timeout` default tracks the same verb value) — because
+  the single 5m default repeatedly killed healthy long-reasoning seats;
+  `OMS_PEER_TIMEOUT` remains the explicit override everywhere.
 - A bounded coding autopilot now carries a confirmed `PROJECT.md` through an
   explicitly reviewed, atomically applied plan, one capped remainder proposal,
   existing landing/acceptance gates, and cross-family semantic review. Its
