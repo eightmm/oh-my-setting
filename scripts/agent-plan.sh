@@ -323,14 +323,15 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_ACCEPT_FILES="$ACCEPT_FILES"
 
 plan_run() {
-python3 - "$PROPOSAL" <<'PY'
-import datetime, hashlib, json, os, re, secrets, stat, subprocess, sys, tempfile, unicodedata
+python3 - "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" <<'PY'
+import datetime, hashlib, json, os, re, runpy, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
 path = os.environ["OMS_PLAN_FILE"]
 act = os.environ["OMS_ACTION"]
 ts = os.environ["OMS_TS"]
 proposal_path = sys.argv[1]
+landing_receipt_digest = runpy.run_path(sys.argv[2])["digest"]
 def env(k): return os.environ.get(k, "")
 
 STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
@@ -964,13 +965,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         expected_receipt = env("OMS_EXPECTED_LANDING_RECEIPT_SHA256")
         if not re.fullmatch(r"[0-9a-f]{64}", expected_receipt):
             die("--expected-landing-receipt-sha256 must be a lowercase SHA-256")
-        landing_receipt = dict(t)
-        for name in ("state", "updated", "claim_expired", "claim_age_s"):
-            landing_receipt.pop(name, None)
-        actual_receipt = hashlib.sha256(json.dumps(
-            landing_receipt, sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False).encode()).hexdigest()
-        if actual_receipt != expected_receipt:
+        if landing_receipt_digest(t) != expected_receipt:
             die("task %s landing receipt changed; stale finish rejected" % i)
         t.update(state="done", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""))

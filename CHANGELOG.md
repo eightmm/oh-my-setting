@@ -236,6 +236,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- A plan bound to a confirmed `PROJECT.md` can be landed again. `patch-land`
+  froze the reviewed receipt by hashing the `agent-plan show` view, which mixes
+  in the plan-level `project_contract`, while `agent-plan finish` hashed the
+  stored task, which never carries it: the two digests could not match, so
+  every spec-bound landing applied its patch and then failed its own
+  compare-and-set, leaving the task in `landing`, the drive parked, and
+  `--recover` repeating the identical rejection. Both sides now compute the
+  digest through one projection (`scripts/lib/plan-receipt.py`) that excludes
+  exactly the transition and read-view fields, and a contract-bound landing is
+  driven end to end in the gate. Plans without a project contract keep their
+  previous digests, so landings already in flight still converge.
 - The Draft-PR publisher now queries and creates pull requests with the
   unqualified `--head BRANCH` form: the previous owner-qualified syntax is
   rejected by `gh pr list` outright and by `gh pr create` for organization

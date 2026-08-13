@@ -1528,4 +1528,97 @@ assert events == ["intent", "abandoned"], events
 PY
   fail "plan fence failure was not bracketed by a durable intent and terminal receipt"
 
+# A plan applied from a reviewed proposal carries a plan-level project_contract,
+# which `agent-plan show` mixes into the read view landing hashes, while finish
+# hashes the stored task. Two projections of one receipt is a deadlock, not a
+# check: the patch lands and then cannot be finished, the task is stuck in
+# `landing`, and `--recover` repeats the same rejection forever. Every
+# spec-bound (autopilot) landing goes through here, so this drives the real
+# binaries end to end rather than asserting a digest by hand.
+contract_repo="$TMP/contract-bound-landing-repo"
+contract_patch="$TMP/contract-bound-landing.patch"
+contract_artifact="$TMP/contract-bound-landing.md"
+mkdir -p "$contract_repo"
+git -C "$contract_repo" init -q
+git -C "$contract_repo" config user.email test@example.com
+git -C "$contract_repo" config user.name test
+printf 'base\n' > "$contract_repo/file.txt"
+git -C "$contract_repo" add file.txt
+git -C "$contract_repo" commit -qm base
+printf 'contract reviewed\n' > "$contract_repo/file.txt"
+git -C "$contract_repo" diff --binary > "$contract_patch"
+git -C "$contract_repo" restore file.txt
+printf 'reviewed\n' > "$contract_artifact"
+
+"$PLAN" --repo "$contract_repo" init --goal test >/dev/null
+"$PLAN" --repo "$contract_repo" add --id t1 --title contract-bound \
+  --allowed file.txt --verify true >/dev/null
+"$PLAN" --repo "$contract_repo" add --id t2 --title contract-drift \
+  --allowed file.txt --verify true >/dev/null
+# The contract is written the way apply-proposal writes it; this suite fences
+# the landing receipt, not the proposal path that mints the contract.
+python3 - "$contract_repo/.oms/plan/tasks.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+plan = json.loads(path.read_text(encoding="utf-8"))
+plan["project_contract"] = {
+    "schema": 1,
+    "spec_sha256": "0" * 64,
+    "allowed_envelope": ["file.txt"],
+    "acceptance_files": [],
+    "acceptance_manifest": [],
+}
+path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+PY
+"$PLAN" --repo "$contract_repo" show --id t1 |
+  python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin).get("project_contract"), dict)' ||
+  fail "the contract fixture is not visible in the task read view"
+
+"$PLAN" --repo "$contract_repo" claim --id t1 --provider codex >/dev/null
+"$PLAN" --repo "$contract_repo" review --id t1 \
+  --artifact "$contract_artifact" --patch "$contract_patch" >/dev/null
+"$LAND" --repo "$contract_repo" --plan-task t1 --verify true >/dev/null ||
+  fail "a contract-bound plan review did not land"
+grep -Fxq 'contract reviewed' "$contract_repo/file.txt" ||
+  fail "contract-bound landing applied the wrong patch"
+"$PLAN" --repo "$contract_repo" show --id t1 |
+  python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["state"]=="done",d' ||
+  fail "a contract-bound landing applied its patch but could not finish the task"
+python3 - "$contract_repo/.oms/landings.jsonl" <<'PY' ||
+import json, sys
+events = [json.loads(line)["event"] for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert events == ["intent", "complete"], events
+PY
+  fail "contract-bound landing did not close its durable receipt"
+"$LAND" --repo "$contract_repo" --recover > "$TMP/contract-recover.out" 2>&1 ||
+  fail "recovery over a settled contract-bound landing failed"
+grep -Fq "0 recovered, 0 abandoned, 0 need manual recovery" "$TMP/contract-recover.out" ||
+  fail "a settled contract-bound landing still looked unrecovered: $(cat "$TMP/contract-recover.out")"
+
+# One projection must not mean a weaker fence: a landing task whose stored
+# record moved after its receipt was taken still cannot be finished.
+contract_drift_lease="$("$PLAN" --repo "$contract_repo" claim --id t2 \
+  --provider codex >/dev/null; "$PLAN" --repo "$contract_repo" show --id t2 |
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])' | tr -d '\r')"
+"$PLAN" --repo "$contract_repo" review --id t2 \
+  --lease-id "$contract_drift_lease" --artifact "$contract_artifact" \
+  --patch "$contract_patch" >/dev/null
+"$PLAN" --repo "$contract_repo" land --id t2 --lease-id "$contract_drift_lease" \
+  --expected-review-patch "$contract_patch" \
+  --expected-review-patch-sha256 "$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$contract_patch")" \
+  --expected-review-verify true \
+  --expected-review-lease-id "$contract_drift_lease" \
+  --expected-review-executor-id "" \
+  --expected-review-executor-soul-sha256 "" >/dev/null ||
+  fail "a contract-bound review could not be fenced into landing"
+if "$PLAN" --repo "$contract_repo" finish --id t2 \
+  --lease-id "$contract_drift_lease" --patch "$contract_patch" \
+  --expected-landing-receipt-sha256 "$(printf '0%.0s' $(seq 64))" \
+  >/dev/null 2>&1; then
+  fail "a stale landing receipt finished a contract-bound task"
+fi
+"$PLAN" --repo "$contract_repo" show --id t2 |
+  python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["state"]=="landing",d' ||
+  fail "the rejected stale finish still moved the contract-bound task"
+
 echo "patch-land-approval: ok"

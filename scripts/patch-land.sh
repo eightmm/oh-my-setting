@@ -382,16 +382,13 @@ plan_receipt_values() {  # plan_receipt_values TASK
   local task_json
   task_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$1" 2>/dev/null)" || return 1
   printf '%s' "$task_json" | python3 -c '
-import hashlib,json,sys
+import json,runpy,sys
 d=json.load(sys.stdin)
 state=d.get("state", "")
 lease=d.get("lease_id", "")
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
-    d.pop(name, None)
-digest=hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
+digest=runpy.run_path(sys.argv[1])["digest"](d)
 print(state + "\t" + lease + "\t" + digest)
-' | tr -d '\r'
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r'
 }
 
 plan_complete_receipt_converged() {
@@ -854,13 +851,10 @@ print(value)
 ' | tr -d '\r')" || fail "cannot read reviewed patch for plan task $PLAN_TASK"
   PLAN_REVIEW_PATCH_STORED="$PLAN_REVIEW_PATCH"
   PLAN_REVIEW_RECEIPT_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
-import hashlib,json,sys
-d=json.load(sys.stdin)
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
-    d.pop(name, None)
-print(hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
-' | tr -d '\r')" || fail "cannot hash review receipt for plan task $PLAN_TASK"
+import json,runpy,sys
+print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')" ||
+    fail "cannot hash review receipt for plan task $PLAN_TASK"
   PLAN_REVIEW_EXECUTOR_ID="$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json,re,sys
 value=json.load(sys.stdin).get("executor_id", "")
@@ -1062,14 +1056,11 @@ if [ -n "$PLAN_TASK" ]; then
   [ "$PATCH_SHA" = "$PLAN_REVIEW_PATCH_SHA" ] ||
     fail "frozen patch bytes no longer match plan task $PLAN_TASK review"
   PLAN_DONE_RECEIPT_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
-import hashlib,json,sys
+import json,runpy,sys
 d=json.load(sys.stdin)
-d["patch"]=sys.argv[1]
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
-    d.pop(name, None)
-print(hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
-' "$FROZEN_PATCH" | tr -d '\r')" ||
+d["patch"]=sys.argv[2]
+print(runpy.run_path(sys.argv[1])["digest"](d))
+' "$ROOT/scripts/lib/plan-receipt.py" "$FROZEN_PATCH" | tr -d '\r')" ||
     fail "cannot hash expected done receipt for plan task $PLAN_TASK"
 fi
 LANDING_BASE="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')"
