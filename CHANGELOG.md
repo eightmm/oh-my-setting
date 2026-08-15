@@ -7,6 +7,39 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Three structural refusals that autopilot campaigns previously paid a full
+  worker run to discover, each reviewed by a peer before landing.
+  `goal-drive` no longer reports `done` on a cycle-1 acceptance pass that
+  proves nothing: a pass is redeemed by a recorded failure of the same
+  acceptance digest at an ancestor commit (work landed and turned it around)
+  or by a plan with nothing left to do, and otherwise parks as
+  `acceptance-vacuous` with the repair. The plan read fails closed — a plan
+  this cannot parse is not evidence that a goal was met. `autopilot` now
+  carries the driver's own terminal reason into its park row
+  (`goal-drive-<reason>`) instead of flattening every drive park into one
+  generic reason, but only when the terminal receipt validates: a tampered
+  ledger still parks generically.
+  `plan-run` refuses, before the provider is called, a task whose verify
+  command names a file inside the task's own scope that is absent from the
+  base commit — admission restores the verification surface from base and
+  re-runs that command, so such a task can never be admitted. The detector
+  speaks only about high-confidence verifier inputs: output operands,
+  redirections, options, assignments, URLs, globs, `./...`-style package
+  selectors, bare runner names, and any command that moves the working
+  directory are left alone.
+  `plan-from-spec` now sends PROJECT.md's `Interface and Data` and `Decisions`
+  sections to the planner, so a constraint recorded in the contract no longer
+  has to be smuggled into Verification to have any effect. Over a 4 KiB
+  per-section budget the run refuses before the provider call and names the
+  section to compact, rather than truncating — a cut would keep the early
+  decisions and silently drop the later ones that revised them.
+- Every MCP tool now carries the standard annotations a client reads to decide
+  what it may call without asking: the eleven readers advertise
+  `readOnlyHint`/`idempotentHint` with no open world, and `oms_peer_start`
+  advertises the opposite on both — two calls start two runs, and it reaches a
+  provider outside this machine. Nothing here destroys state, so
+  `destructiveHint` is false throughout. The hints are advice to the client;
+  the server's own validation and refusals remain the enforcement.
 - MCP peer consultations are now addressable from disk instead of from the one
   conversation that started them. `oms_peer_operations` lists a repository's
   runs newest first with status, kind, targets, question, and thread, so a
@@ -248,6 +281,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and non-hook ledger kinds are untouched.
 
 ### Fixed
+- The gate's `.oms` purity check no longer fails on the live session that runs
+  it. Its inventory moved to `scripts/lib/oms-state-inventory.py` and now
+  excludes top-level `ci.jsonl` alongside `hooks/` and `work-journal/`: the CI
+  watcher records a run for a push whenever one lands, and a 25-minute gate is
+  a wide window for that to read as a suite writing into the checkout. The
+  exclusion is anchored at the top level, `failures.jsonl` and every plan file
+  stay covered, and the failure message no longer asserts a forgotten `--repo`
+  as the only explanation — it names the live session as a possible writer, so
+  the next diagnosis starts from the entry's timestamp.
 - A plan bound to a confirmed `PROJECT.md` can be landed again. `patch-land`
   froze the reviewed receipt by hashing the `agent-plan show` view, which mixes
   in the plan-level `project_contract`, while `agent-plan finish` hashed the

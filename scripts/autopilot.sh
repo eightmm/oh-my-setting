@@ -1164,7 +1164,13 @@ if [ "$drive_rc" -ne 0 ]; then
     propose_tasks r1- "$REPLAN_TASKS" || exit $?
   fi
   rm -f "$drive_out"
-  park "goal-drive-failed" "inspect the drive output and failure ledger"
+  # Keep the driver's own terminal reason: flattening every park into one
+  # generic reason hides exactly the diagnosis the ledger row exists to carry
+  # (a vacuous acceptance and a dead provider read identically otherwise).
+  case "$drive_reason" in
+    "" | *[!a-z0-9-]*) park "goal-drive-failed" "inspect the drive output and failure ledger" ;;
+    *) park "goal-drive-$drive_reason" "inspect the drive output and failure ledger" ;;
+  esac
 fi
 [ "$drive_status" = "done" ] && [ "$drive_reason" = acceptance-pass ] || {
   rm -f "$drive_out"

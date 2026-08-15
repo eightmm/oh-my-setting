@@ -700,4 +700,109 @@ bash "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list |
   grep -Fq 'fixed: acceptance passed in gd-' ||
   fail "park resolution should record how it was fixed"
 
+# An acceptance command that already passes on the base tree cannot tell the
+# goal state from the start state. Reporting done there is a run that did
+# nothing — the shape that sent a whole autopilot campaign into semantic
+# review with an empty diff. Its own repository: this must not depend on the
+# plan history above.
+vacuous="$TMP/vacuous"
+mkdir -p "$vacuous"
+git -C "$vacuous" init -q
+git -C "$vacuous" config user.email test@example.com
+git -C "$vacuous" config user.name Test
+printf 'base\n' > "$vacuous/README.md"
+git -C "$vacuous" add README.md
+git -C "$vacuous" commit -qm base
+"$PLAN" --repo "$vacuous" init --goal "already satisfied" --accept 'true' >/dev/null
+"$PLAN" --repo "$vacuous" add --id v1 --title "feat: work that never runs" \
+  --allowed goal.txt --verify 'test -f goal.txt' >/dev/null
+head_vacuous="$(git -C "$vacuous" rev-parse HEAD)"
+rc=0
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$vacuous" --to codex >"$TMP/gd-vacuous.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "a vacuous acceptance should park with exit 3, got $rc"
+grep -Fq 'reason=acceptance-vacuous' "$TMP/gd-vacuous.out" ||
+  fail "vacuous park reason missing: $(tail -5 "$TMP/gd-vacuous.out")"
+if grep -Fq 'goal-drive: done' "$TMP/gd-vacuous.out"; then
+  fail "a run that executed no task must not report done"
+fi
+grep -Fq '"reason": "acceptance-vacuous"' "$vacuous/.oms/plan/progress.jsonl" ||
+  fail "vacuous park row missing from progress.jsonl"
+[ "$(git -C "$vacuous" rev-parse HEAD)" = "$head_vacuous" ] ||
+  fail "a parked vacuous run must not commit"
+"$PLAN" --repo "$vacuous" show --id v1 | grep -Fq '"state": "ready"' ||
+  fail "the pending task must stay ready after the park"
+
+# The same passing acceptance over a plan that actually finished its work is
+# the legitimate done: the guard must not turn a completed plan into a park.
+"$PLAN" --repo "$vacuous" init --goal "already satisfied" --accept 'true' >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$vacuous" --to codex >"$TMP/gd-empty-plan.out" 2>&1 ||
+  fail "a plan with no pending task should report done: $(tail -5 "$TMP/gd-empty-plan.out")"
+grep -Fq 'goal-drive: done' "$TMP/gd-empty-plan.out" ||
+  fail "done line missing for a plan with nothing left to do"
+
+# The discriminator is evidence, not task bookkeeping: an acceptance that
+# recorded a failure at an ancestor commit and passes now describes work that
+# landed, even with tasks still pending. A "no task is done yet" rule would
+# park this, which is why it is not the rule.
+"$PLAN" --repo "$vacuous" init --goal "the marker exists" \
+  --accept 'test -f marker.txt' >/dev/null
+"$PLAN" --repo "$vacuous" add --id e1 --title "feat: unrelated leftover" \
+  --allowed leftover.txt --verify 'bash tests/run.sh' >/dev/null
+"$PLAN" --repo "$vacuous" accept >/dev/null 2>&1 &&
+  fail "the acceptance fixture must fail before the marker exists"
+grep -Fq '"status": "fail"' "$vacuous/.oms/plan/progress.jsonl" ||
+  fail "the failing acceptance receipt was not recorded"
+printf 'here\n' > "$vacuous/marker.txt"
+git -C "$vacuous" add marker.txt
+git -C "$vacuous" commit -qm 'feat: the marker lands'
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
+  --repo "$vacuous" --to codex >"$TMP/gd-evidence.out" 2>&1 ||
+  fail "a turned-around acceptance should report done: $(tail -5 "$TMP/gd-evidence.out")"
+grep -Fq 'goal-drive: done' "$TMP/gd-evidence.out" ||
+  fail "prior failing evidence at an ancestor must redeem a cycle-1 pass"
+
+# Admission re-runs the verify command against a worktree whose verification
+# surface was restored from base. A verify naming a file only this task creates
+# is therefore unadmittable by construction — a verdict that used to cost a
+# full worker run. The precondition is checked before the provider is called.
+mkdir -p "$vacuous/tests"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$vacuous/tests/run.sh"
+chmod +x "$vacuous/tests/run.sh"
+git -C "$vacuous" add tests/run.sh
+git -C "$vacuous" commit -qm 'test: a suite that exists at base'
+"$PLAN" --repo "$vacuous" init --goal "verify precondition" --accept 'false' >/dev/null
+"$PLAN" --repo "$vacuous" add --id p1 --title "test: brings its own verifier" \
+  --allowed tests/ --verify 'bash tests/new-suite.sh' >/dev/null
+: > "$TMP/verify-calls"
+rc=0
+# A real claim, not a dry run: the refusal has to happen on the path that
+# would otherwise spend the provider call, and it has to give the claim back.
+CALL_LOG="$TMP/verify-calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$ROOT/scripts/plan-run.sh" --repo "$vacuous" --to codex --next \
+  >"$TMP/pr-verify.out" 2>&1 || rc=$?
+[ "$rc" != 0 ] || fail "a verify naming a file absent at base must refuse"
+grep -Fq 'does not exist at the base commit' "$TMP/pr-verify.out" ||
+  fail "refusal must name the precondition: $(tail -3 "$TMP/pr-verify.out")"
+[ ! -s "$TMP/verify-calls" ] || fail "the provider was called despite the refusal"
+"$PLAN" --repo "$vacuous" show --id p1 | grep -Fq '"state": "ready"' ||
+  fail "the refused task must be left claimable, not stuck claimed"
+
+# The detector only speaks about high-confidence verifier inputs inside the
+# task's own scope. These three shapes are exactly the false positives a
+# slash-token rule would refuse, and every one of them must run.
+verify_control() {  # ID TITLE ALLOWED VERIFY
+  "$PLAN" --repo "$vacuous" init --goal "verify precondition" --accept 'false' >/dev/null
+  "$PLAN" --repo "$vacuous" add --id "$1" --title "$2" --allowed "$3" --verify "$4" >/dev/null
+  HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/plan-run.sh" \
+    --repo "$vacuous" --to codex --next --dry-run >"$TMP/pr-control.out" 2>&1 ||
+    fail "verify control '$4' must not be refused: $(tail -3 "$TMP/pr-control.out")"
+  grep -Fq 'dry-run' "$TMP/pr-control.out" ||
+    fail "verify control '$4' did not reach the dry-run boundary"
+}
+verify_control p2 "test: uses the committed suite" tests/ 'bash tests/run.sh'
+verify_control p3 "test: package-wide runner" . 'go test ./...'
+verify_control p4 "test: writes a report" tests/ 'bash tests/run.sh -o tests/report.xml'
+
 echo "autonomy-plan-run-smoke: ok"

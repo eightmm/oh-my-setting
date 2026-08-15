@@ -490,8 +490,9 @@ test_gate_fingerprints_full_oms_state() {
   local gate="$TMP/check-state-gate"
   local base head mutation out status
 
-  mkdir -p "$gate/scripts" "$gate/tests"
+  mkdir -p "$gate/scripts/lib" "$gate/tests"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
+  cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-python.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-bash32.sh"
   cat > "$gate/fake-shellcheck" <<'EOF'
@@ -518,6 +519,8 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
   failed-content) printf 'after\n' > "$root/.oms/state"; exit 29 ;;
   hooks) mkdir -p "$root/.oms/hooks"; printf 'ambient\n' >> "$root/.oms/hooks/events.jsonl" ;;
   journal) mkdir -p "$root/.oms/work-journal"; printf 'ambient\n' >> "$root/.oms/work-journal/index.json" ;;
+  ci) printf 'ambient\n' >> "$root/.oms/ci.jsonl" ;;
+  nested-ci) mkdir -p "$root/.oms/plan"; printf 'leak\n' >> "$root/.oms/plan/ci.jsonl" ;;
 esac
 EOF
   done
@@ -534,7 +537,7 @@ EOF
   git -C "$gate" commit -qm head
   head="$(git -C "$gate" rev-parse HEAD)"
 
-  for mutation in content symlink directory mode lint failed-content; do
+  for mutation in content symlink directory mode lint failed-content nested-ci; do
     rm -rf "$gate/.oms"
     mkdir -p "$gate/.oms"
     printf 'before\n' > "$gate/.oms/state"
@@ -547,9 +550,11 @@ EOF
       fail "check gate did not explain .oms $mutation mutation: $out"
   done
 
-  # These two trees belong to the live session and Work Journal, not to the
-  # suite under test. Their ambient writes must not make a clean gate flaky.
-  for mutation in hooks journal; do
+  # These belong to the live session and Work Journal, not to the suite under
+  # test: two trees it writes every turn, plus the CI row it records whenever a
+  # push lands. Their ambient writes must not make a clean gate flaky, while
+  # the same file name one level down stays a leak (see nested-ci above).
+  for mutation in hooks journal ci; do
     rm -rf "$gate/.oms"
     mkdir -p "$gate/.oms"
     printf 'before\n' > "$gate/.oms/state"

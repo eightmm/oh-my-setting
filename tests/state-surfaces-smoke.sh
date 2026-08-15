@@ -59,10 +59,27 @@ init = by_id[1]["result"]
 assert init["protocolVersion"] == "2025-06-18", init
 assert init["serverInfo"]["name"] == "oh-my-setting", init
 assert by_id[6]["result"]["protocolVersion"] == "2025-03-26", by_id[6]
-tools = {t["name"] for t in by_id[2]["result"]["tools"]}
+listed = {t["name"]: t for t in by_id[2]["result"]["tools"]}
+tools = set(listed)
 assert {"oms_inbox", "oms_task_state", "oms_fail_ledger", "oms_handoffs",
         "oms_handoff_show", "oms_journal", "oms_repo_state",
         "oms_agent_operations", "oms_approvals"} <= tools, tools
+# Every tool tells a client what it costs to call. A reader that advertised
+# itself as a write would be approved by hand forever; a consultation that
+# advertised itself as a read would spend a peer's wall clock unattended.
+for name, tool in listed.items():
+    hints = tool.get("annotations")
+    assert hints, (name, tool)
+    assert set(hints) == {"readOnlyHint", "destructiveHint", "idempotentHint",
+                          "openWorldHint"}, (name, hints)
+    assert hints["destructiveHint"] is False, (name, hints)
+    if name == "oms_peer_start":
+        assert hints["readOnlyHint"] is False, hints
+        assert hints["idempotentHint"] is False, hints  # two calls, two runs
+        assert hints["openWorldHint"] is True, hints    # it reaches a provider
+    else:
+        assert hints["readOnlyHint"] is True, (name, hints)
+        assert hints["openWorldHint"] is False, (name, hints)
 task = by_id[3]["result"]
 assert not task["isError"], task
 assert json.loads(task["content"][0]["text"])["schema"] == 1, task
@@ -464,6 +481,39 @@ empty = json.loads(by_id[3]["result"]["content"][0]["text"])
 assert empty["operations"] == [] and empty["total"] == 0, empty
 assert not os.path.exists(os.path.join(os.environ["OMS_T_EMPTY"], ".oms", "artifacts")), empty
 PY
+}
+
+# The gate's .oms purity inventory. What the live session writes on its own
+# schedule must stay out of it — a CI row recorded for a push mid-gate read as
+# a suite defect and cost a full re-run — while everything a forgotten --repo
+# would touch stays covered.
+test_oms_state_inventory_excludes_only_session_owned_entries() {
+  local state="$TMP/inventory/.oms"
+  local out="$TMP/inventory-out"
+
+  mkdir -p "$state/hooks" "$state/work-journal" "$state/plan"
+  printf 'row\n' > "$state/hooks/turn.jsonl"
+  printf 'row\n' > "$state/work-journal/today.jsonl"
+  printf 'row\n' > "$state/ci.jsonl"
+  printf 'row\n' > "$state/failures.jsonl"
+  printf 'row\n' > "$state/plan/tasks.json"
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out" ||
+    fail "the inventory should read a plain .oms directory"
+
+  grep -q '"failures.jsonl"' "$out" ||
+    fail "failures.jsonl must stay covered: a forgotten --repo writes it"
+  grep -q '"plan/tasks.json"' "$out" || fail "plan state must stay covered"
+  for ambient in ci.jsonl hooks work-journal; do
+    if grep -q "\"$ambient" "$out"; then
+      fail "$ambient is written by the live session and must not be inventoried"
+    fi
+  done
+
+  # A nested path that merely repeats an ambient name is not ambient.
+  printf 'row\n' > "$state/plan/ci.jsonl"
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out"
+  grep -q '"plan/ci.jsonl"' "$out" ||
+    fail "the exclusion must be anchored at the top level, not by name anywhere"
 }
 
 # --- claude/codex registration ---------------------------------------------
@@ -1469,6 +1519,7 @@ test_mcp_server_bounds_requests_before_effects
 test_mcp_peer_actions_start_detached_and_poll
 test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt
 test_mcp_peer_operations_report_dead_and_legacy_runs
+test_oms_state_inventory_excludes_only_session_owned_entries
 test_install_mcp_registers_and_is_idempotent
 test_install_agy_plugin_bakes_absolute_paths
 test_agy_surfaces_are_certified_before_hooks_ship

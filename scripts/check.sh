@@ -188,64 +188,11 @@ if [ "$RUN_LINT" = 1 ] && ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
 fi
 
 # No suite may write into this checkout's own .oms state. A test that forgets
-# --repo defaults to the working directory. hooks/ and work-journal/ are
-# excluded because the live session writes them independently of the gate.
-# The inventory covers contents, child-entry modes, symlinks, and empty dirs.
+# --repo defaults to the working directory. The inventory and its ambient
+# exclusions live in the library so they can be tested directly.
 oms_state_fingerprint() {
   [ -d "$ROOT/.oms" ] || return 0
-  python3 - "$ROOT/.oms" <<'PY' | tr -d '\r'
-import hashlib
-import json
-import os
-import stat
-import sys
-
-root = os.path.realpath(sys.argv[1])
-ambient = {"hooks", "work-journal"}
-entries = []
-
-for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
-    if base == root:
-        dirs[:] = [name for name in dirs if name not in ambient]
-
-    traversable = []
-    for name in sorted(dirs):
-        path = os.path.join(base, name)
-        rel = os.path.relpath(path, root).replace(os.sep, "/")
-        try:
-            info = os.lstat(path)
-            mode = stat.S_IMODE(info.st_mode)
-            if stat.S_ISLNK(info.st_mode):
-                entries.append((rel, "link", mode, os.readlink(path)))
-            else:
-                entries.append((rel, "dir", mode, ""))
-                traversable.append(name)
-        except OSError as exc:
-            entries.append((rel, "error", 0, exc.__class__.__name__))
-    dirs[:] = traversable
-
-    for name in sorted(files):
-        path = os.path.join(base, name)
-        rel = os.path.relpath(path, root).replace(os.sep, "/")
-        try:
-            info = os.lstat(path)
-            mode = stat.S_IMODE(info.st_mode)
-            if stat.S_ISLNK(info.st_mode):
-                entries.append((rel, "link", mode, os.readlink(path)))
-            elif stat.S_ISREG(info.st_mode):
-                digest = hashlib.sha256()
-                with open(path, "rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                entries.append((rel, "file", mode, digest.hexdigest()))
-            else:
-                entries.append((rel, "other", mode, ""))
-        except OSError as exc:
-            entries.append((rel, "error", 0, exc.__class__.__name__))
-
-for entry in sorted(entries):
-    print(json.dumps(entry, ensure_ascii=True, separators=(",", ":")))
-PY
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$ROOT/.oms" | tr -d '\r'
 }
 
 STATE_BEFORE="$CHECK_RUNTIME/oms-state.before"
@@ -261,8 +208,10 @@ verify_oms_state() {
   fi
   if ! cmp -s "$STATE_BEFORE" "$STATE_AFTER"; then
     echo "check: a suite wrote into this checkout's .oms state" >&2
-    echo "a test that omits --repo defaults to the working directory; give it a" >&2
-    echo "temporary repo instead. First changed inventory entries:" >&2
+    echo "usually a test that omits --repo and defaults to the working directory;" >&2
+    echo "give it a temporary repo instead. A live agent session driving this same" >&2
+    echo "checkout can also be the writer — check the entry's own timestamp before" >&2
+    echo "hunting a test. First changed inventory entries:" >&2
     diff -u "$STATE_BEFORE" "$STATE_AFTER" | sed -n '1,40p' >&2 || true
     return 1
   fi

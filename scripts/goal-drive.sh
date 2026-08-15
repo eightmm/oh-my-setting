@@ -171,6 +171,68 @@ print(d.get("accept", "") or "")
 ' "$PLAN_FILE" | tr -d '\r'
 }
 
+plan_has_unfinished_work() {  # prints 1 when any task is not done
+  # Fails closed: a plan this cannot read is not evidence that the goal is met.
+  python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    tasks = list((d.get("tasks") or {}).values())
+except Exception:
+    print("1")
+    sys.exit(0)
+print("1" if any(t.get("state") != "done" for t in tasks) else "")
+' "$PLAN_FILE" | tr -d '\r'
+}
+
+acceptance_ever_failed() {  # prints 1 when this contract failed at an ancestor
+  # The one thing that makes a pass meaningful: the same acceptance command,
+  # by digest, recorded a failure at a commit this HEAD descends from. Work
+  # landed in between and turned it around. Without such a receipt the command
+  # has never demonstrated it can fail at all, and passing proves nothing.
+  local candidates row_sha
+  candidates="$(OMS_GD_ACCEPT16="${ACCEPT_SNAPSHOT:0:16}" python3 -c '
+import json, os, sys
+want = os.environ["OMS_GD_ACCEPT16"]
+seen = []
+try:
+    handle = open(sys.argv[1], encoding="utf-8")
+except OSError:
+    sys.exit(0)
+with handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("kind") != "acceptance":
+            continue
+        if row.get("status") != "fail" or row.get("accept_sha256") != want:
+            continue
+        sha = row.get("base_sha")
+        if isinstance(sha, str) and sha and sha not in seen:
+            seen.append(sha)
+print("\n".join(seen[-20:]))
+' "$PROGRESS" | tr -d '\r')"
+  [ -n "$candidates" ] || { printf ''; return 0; }
+  local head
+  head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | tr -d '\r')"
+  while IFS= read -r row_sha; do
+    [ -n "$row_sha" ] || continue
+    [ "$row_sha" != "$head" ] || continue
+    if git -C "$REPO" merge-base --is-ancestor "$row_sha" "$head" 2>/dev/null; then
+      printf '1'
+      return 0
+    fi
+  done <<EOF
+$candidates
+EOF
+  printf ''
+}
+
 ACCEPT_CMD="$(read_accept_cmd)"
 [ -n "$ACCEPT_CMD" ] ||
   fail "plan has no acceptance command; set one: agent-plan init --goal ... --accept CMD"
@@ -1859,6 +1921,17 @@ while :; do
   guard_expected_ref
   printf '%s\n' "$accept_out" | tail -n 3
   if [ "$accept_rc" -eq 0 ]; then
+    # An acceptance command that already passes before this run did anything
+    # cannot tell the goal state from the start state. Reporting done here is a
+    # run that accomplished nothing while every caller downstream — a semantic
+    # review of an empty diff, a parent reading the terminal row — takes it for
+    # success. Two things redeem a cycle-1 pass: a recorded failure of this same
+    # contract at an ancestor commit (work landed and turned it around), or a
+    # plan with nothing left to do. Neither one, and the contract is broken.
+    if [ "$CYCLE" -eq 1 ] && [ -z "$(acceptance_ever_failed)" ] &&
+      [ "$(plan_has_unfinished_work)" = 1 ]; then
+      park "acceptance-vacuous" "acceptance passes on the base tree while every task is still pending; tighten it (agent-plan init --accept) so it fails until the goal is actually met"
+    fi
     if ! terminal_row "done" acceptance-pass; then
       echo "error: cannot durably append the goal-drive terminal row" >&2
       exit 2

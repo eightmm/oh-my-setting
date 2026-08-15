@@ -94,6 +94,25 @@ REPO_PROPERTY = {
     }
 }
 
+# Tool annotations are hints a client uses to decide what to auto-approve;
+# they are not enforcement, and this server's own refusals stay authoritative.
+# Every reader here runs one fixed read-only subcommand against local state.
+READ_ONLY = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+# Starting a consultation spends another agent's wall clock and money and
+# writes artifacts, and calling it twice starts two runs. It reaches outside
+# this machine's state through the provider CLI, but it destroys nothing.
+START_PEER = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
 TOOLS = [
     {
         "name": "oms_inbox",
@@ -103,6 +122,7 @@ TOOLS = [
         ),
         "argv": ["bash", "scripts/inbox.sh", "--json"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_repo_state",
@@ -112,6 +132,7 @@ TOOLS = [
         ),
         "argv": ["bash", "scripts/repo-state.sh", "--json"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_agent_operations",
@@ -121,6 +142,7 @@ TOOLS = [
         ),
         "argv": ["bash", "scripts/agent-events.sh", "list", "--json"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_approvals",
@@ -130,6 +152,7 @@ TOOLS = [
         ),
         "argv": ["bash", "scripts/approval-inbox.sh", "list", "--pending", "--json"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_task_state",
@@ -139,6 +162,7 @@ TOOLS = [
         ),
         "argv": ["bash", "scripts/agent-task.sh", "status", "--json"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_fail_ledger",
@@ -148,6 +172,7 @@ TOOLS = [
         ),
         "argv": ["bash", "scripts/fail-ledger.sh", "list", "--json"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_handoffs",
@@ -157,6 +182,7 @@ TOOLS = [
         ),
         "argv": ["bash", "scripts/session-handoff.sh", "list", "--json"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_handoff_show",
@@ -171,6 +197,7 @@ TOOLS = [
         },
         "required": ["file"],
         "positional": "file",
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_journal",
@@ -187,6 +214,7 @@ TOOLS = [
                 "description": "Which journal view to return (default today).",
             },
         },
+        "annotations": READ_ONLY,
     },
     # Action tools: no argv, dispatched through ACTIONS below.
     {
@@ -245,6 +273,7 @@ TOOLS = [
             },
         },
         "required": ["kind", "prompt"],
+        "annotations": START_PEER,
     },
     {
         "name": "oms_peer_result",
@@ -265,6 +294,7 @@ TOOLS = [
             },
         },
         "required": ["operation"],
+        "annotations": READ_ONLY,
     },
     {
         "name": "oms_peer_operations",
@@ -276,6 +306,7 @@ TOOLS = [
             " elsewhere and reads its answer with oms_peer_result."
         ),
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
     },
 ]
 
@@ -283,17 +314,19 @@ TOOLS = [
 def tool_definitions() -> list[dict]:
     defs = []
     for tool in TOOLS:
-        defs.append(
-            {
-                "name": tool["name"],
-                "description": tool["description"],
-                "inputSchema": {
-                    "type": "object",
-                    "properties": tool["properties"],
-                    "required": tool.get("required", []),
-                },
-            }
-        )
+        definition = {
+            "name": tool["name"],
+            "description": tool["description"],
+            "inputSchema": {
+                "type": "object",
+                "properties": tool["properties"],
+                "required": tool.get("required", []),
+            },
+        }
+        annotations = tool.get("annotations")
+        if annotations:
+            definition["annotations"] = dict(annotations)
+        defs.append(definition)
     return defs
 
 

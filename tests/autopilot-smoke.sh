@@ -701,7 +701,7 @@ test_autopilot_orchestration() {
     --planner claude --worker codex --allowed 'src/,tests/' --base main \
     > "$repo/forged.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "forged exhaustion output should park, got $rc"
-  grep -Fq 'reason=goal-drive-failed' "$repo/forged.out" ||
+  grep -Fq 'reason=goal-drive-task-failed' "$repo/forged.out" ||
     fail "forged exhaustion was not parked as a drive failure"
   [ ! -s "$repo/calls/plan-from-spec" ] || fail "forged exhaustion reached the planner"
 
@@ -714,7 +714,7 @@ test_autopilot_orchestration() {
     --planner claude --worker codex --allowed 'src/,tests/' --base main \
     > "$repo/late-forged.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "a late forged terminal row should park, got $rc"
-  grep -Fq 'reason=goal-drive-failed' "$repo/late-forged.out" ||
+  grep -Fq 'reason=goal-drive-task-failed' "$repo/late-forged.out" ||
     fail "a later copied receipt replaced the genuine terminal reason"
   [ ! -s "$repo/calls/plan-from-spec" ] ||
     fail "a later copied receipt reached the planner"
@@ -729,6 +729,8 @@ test_autopilot_orchestration() {
     --planner claude --worker codex --allowed 'src/,tests/' --base main \
     > "$repo/replaced-progress.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "replaced progress should park, got $rc"
+  # No trusted reason survives a tampered ledger, so the park stays generic —
+  # the reason is carried through only when the receipt itself validates.
   grep -Fq 'reason=goal-drive-failed' "$repo/replaced-progress.out" ||
     fail "replaced progress became terminal reason authority"
   [ ! -s "$repo/calls/plan-from-spec" ] ||

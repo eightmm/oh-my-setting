@@ -4677,6 +4677,64 @@ EOF
   assert_file_contains "$project/bad-out" "could not extract a proposal"
 }
 
+# The contract's implementation-shaping sections used to stop at plan-from-spec:
+# a constraint recorded under Decisions never reached the planner, so it had to
+# be smuggled into Verification to have any effect.
+test_plan_from_spec_prompt_carries_contract_decisions() {
+  local project="$TMP/plan-from-spec-decisions"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local capture="$project/prompt.txt"
+  local n
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"
+  chmod +x "$project/tests/run.sh"
+  {
+    printf '%s\n' '# PROJECT.md' '' '## Status' '' '- State: confirmed' ''
+    printf '%s\n' '## Project' '' '- Goal: ship the greeting' '- Scope: src/' \
+      '- Non-goals: release' ''
+    printf '%s\n' '## Interface and Data' '' '- CLI: greet NAME prints a greeting' ''
+    printf '%s\n' '## Commands' '' '- Test: bash tests/run.sh' ''
+    printf '%s\n' '## Verification' '' '- Required checks: bash tests/run.sh' ''
+    printf '%s\n' '## Decisions' '' '- No third-party dependency may enter src/'
+  } > "$project/PROJECT.md"
+  # The stub writes beside its own directory rather than through the
+  # environment, so the capture does not depend on what the call passes down.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > "$(dirname "$0")/../prompt.txt"
+printf '{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]}]}\n'
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex \
+    > "$project/out" 2>&1 || fail "decomposition should propose: $(cat "$project/out")"
+
+  assert_file_contains "$capture" "No third-party dependency may enter src/"
+  assert_file_contains "$capture" "CLI: greet NAME prints a greeting"
+
+  # Over budget, the run refuses instead of truncating: a cut keeps the early
+  # decisions and drops the later ones that revised them. One enormous line
+  # must hit the same wall as a thousand short ones.
+  rm -f "$capture"
+  python3 - "$project/PROJECT.md" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write("- " + ("decision " * 900) + "\n")
+PY
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex \
+    > "$project/over" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "an over-budget contract section must refuse"
+  assert_file_contains "$project/over" "over the 4096-byte planner budget"
+  [ ! -f "$capture" ] || fail "the planner was called despite the refusal"
+}
+
 test_plan_from_spec_normalizes_acceptance_and_binds_check_files() {
   local project="$TMP/plan-from-spec-acceptance"
   local bin_dir="$project/bin"

@@ -290,6 +290,22 @@ spec_section() {  # HEADER -> section body
   awk -v h="## $1" '{ sub(/\r$/, "", $0) } $0 == h {f=1; next} /^## / {f=0} f' "$SPEC"
 }
 
+# Decisions and Interface accumulate across a project's life, and the planner
+# call has a prompt budget. Truncating them is worse than refusing: a cut keeps
+# the early decisions and silently drops the later ones, which are the ones
+# that revised them. So the section goes in whole or the run stops here, before
+# any provider call, and says which section to compact.
+SPEC_SECTION_BYTES=4096
+assert_section_budget() {  # HEADER — refuse in the main shell, before the call
+  # Called here and not from inside the prompt substitution on purpose: a fail
+  # inside $( ) would exit that subshell and let the run continue with the
+  # section silently missing — the failure mode this guard exists to prevent.
+  local size
+  size="$(spec_section "$1" | wc -c | tr -d ' \r')"
+  [ "${size:-0}" -le "$SPEC_SECTION_BYTES" ] ||
+    fail "PROJECT.md section '$1' is ${size} bytes, over the ${SPEC_SECTION_BYTES}-byte planner budget; compact it (keep the decisions that still bind) — truncating would drop exactly the later decisions that revised the earlier ones"
+}
+
 # Extract one executable acceptance line and the files whose reviewed bytes
 # define it. A complete single-backtick Markdown wrapper is presentation, not
 # shell syntax; every other backtick shape is rejected so command substitution
@@ -527,6 +543,9 @@ acceptance_meta="${acceptance_meta//$'\r'/}"
 accept="$(printf '%s\n' "$acceptance_meta" | sed -n 1p)"
 accept_files="$(printf '%s\n' "$acceptance_meta" | sed -n 2p)"
 
+assert_section_budget 'Interface and Data'
+assert_section_budget Decisions
+
 spec_sha="$(oms_sha256_file "$SPEC")" || fail "cannot hash PROJECT.md"
 if [ -f "$PLAN_FILE" ]; then
   plan_sha="$(oms_sha256_file "$PLAN_FILE")" || fail "cannot hash current plan"
@@ -579,6 +598,10 @@ Commands:
 $(spec_section Commands)
 Verification:
 $(spec_section Verification)
+Interface and Data:
+$(spec_section 'Interface and Data')
+Decisions:
+$(spec_section Decisions)
 Existing plan (id | state | title | scope):
 $plan_context
 --- end contract ---"

@@ -349,6 +349,14 @@ review_lease_id="$(printf '%s' "$task_values" | cut -f11)"
 repair_artifact="$(printf '%s' "$task_values" | cut -f12)"
 [ -n "$ALLOWED" ] || fail "task $TASK_ID must declare non-empty allowed_paths"
 [ -n "$VERIFY" ] || fail "task $TASK_ID must declare a mechanical verify command"
+# Admission runs the same verify command a second time against a worktree where
+# the verification surface has been restored from the base. A verify that names
+# a file only this task creates therefore cannot be admitted at all: the floor
+# deletes the very command it then runs. That verdict costs a full worker run to
+# reach, and the precondition is knowable here, before the provider is called.
+verify_missing="$(python3 "$ROOT/scripts/lib/verify-base-precondition.py" "$REPO" "$VERIFY" "$ALLOWED" | tr -d '\r')"
+[ -z "$verify_missing" ] ||
+  fail "task $TASK_ID verify names $verify_missing, which does not exist at the base commit; admission restores the verification surface from base, so this task can never be admitted — name a check that exists at base (a committed suite arm) instead"
 if [ "$state" = claimed ] && [ "$repair_count" = 1 ] &&
   [ -n "$LEASE_ID" ] && [ "$review_lease_id" = "$LEASE_ID" ]; then
   RESUME_REPAIR=1
