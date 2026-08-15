@@ -373,6 +373,10 @@ chooses a connector or tracked summary.
 - MCP: shared state reads plus background peer actions that can incur provider
   cost and write `.oms` artifacts. Stdio records and prompts are byte-bounded;
   oversized input is rejected before provider argv or prompt files are built.
+  Runs are addressable from disk rather than from the conversation that started
+  them: `oms_peer_operations` lists them newest first, a run whose process died
+  without an exit reads as `stalled` instead of polling as running forever, and
+  a finished result names the thread to continue from.
 
 Integration removal failures propagate to `oms uninstall`; successful-looking
 messages are emitted only after the corresponding CLI confirms removal.

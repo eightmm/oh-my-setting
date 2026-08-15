@@ -205,6 +205,9 @@ EOF
     printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"q","providers":"--sandbox"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"../../../etc"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"is the gate open","providers":"codex"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"advise","prompt":"q","new_thread":true}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"q","thread":"--print-timeout"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"oms_peer_operations","arguments":{"repo":"%s"}}}\n' "$repo"
   } | peer_rpc "$out"
 
   OMS_T_OUT="$out" OMS_T_REPO="$repo" python3 - <<'PY' || fail "peer action tools did not match the contract"
@@ -224,10 +227,14 @@ start = tools["oms_peer_start"]["inputSchema"]
 assert set(start["required"]) == {"kind", "prompt"}, start
 assert sorted(start["properties"]["kind"]["enum"]) == ["advise", "ask", "consult"], start
 assert "providers" in start["properties"], start
+assert "thread" in start["properties"], start
+assert start["properties"]["new_thread"]["type"] == "boolean", start
 result = tools["oms_peer_result"]["inputSchema"]
 assert result["required"] == ["operation"], result
 # The description has to teach the pattern, or a model blocks on a 25-minute run.
 assert "oms_peer_result" in tools["oms_peer_start"]["description"], tools
+listing = tools["oms_peer_operations"]["inputSchema"]
+assert listing["required"] == [], listing
 
 empty = by_id[2]["result"]
 assert empty["isError"], empty
@@ -249,6 +256,29 @@ assert payload["artifact_dir"].endswith("/.oms/artifacts/consult"), payload
 assert payload["operation"] in payload["run_dir"], payload
 assert os.path.isdir(payload["run_dir"]), payload
 assert os.path.isfile(payload["log"]), payload
+assert payload["targets"] == ["codex"], payload
+
+# Thread control is offered only where the verb has it, and a thread id
+# becomes argv: neither may reach the verb unchecked.
+fresh_advise = by_id[6]["result"]
+assert fresh_advise["isError"], fresh_advise
+assert "new_thread applies to kind='consult'" in fresh_advise["content"][0]["text"], fresh_advise
+flag_thread = by_id[7]["result"]
+assert flag_thread["isError"], flag_thread
+assert "thread must be an id" in flag_thread["content"][0]["text"], flag_thread
+assert len(os.listdir(os.path.dirname(payload["run_dir"]))) == 1, "a rejected start left a run directory"
+
+# The id lives on disk, not in the conversation that started it.
+listed = by_id[8]["result"]
+assert not listed["isError"], listed
+rows = json.loads(listed["content"][0]["text"])
+assert rows["total"] == 1 and rows["shown"] == 1, rows
+row = rows["operations"][0]
+assert row["operation"] == payload["operation"], row
+assert row["status"] == "running", row
+assert row["kind"] == "consult", row
+assert row["targets"] == ["codex"], row
+assert row["title"] == "is the gate open", row
 PY
 
   operation="$(
@@ -294,6 +324,22 @@ assert payload["artifacts"], payload
 for path in payload["artifacts"]:
     assert "/.oms/artifacts/consult/" in path, payload
     assert os.path.isfile(path), payload
+# The follow-up address: without it a second question starts from nothing.
+assert payload["thread"], payload
+PY
+
+  printf '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"oms_peer_operations","arguments":{"repo":"%s"}}}\n' \
+    "$repo" | peer_rpc "$out"
+  OMS_T_OUT="$out" python3 - <<'PY' || fail "the finished run was not listed as done"
+import json, os
+
+rows = json.loads(
+    json.loads(open(os.environ["OMS_T_OUT"], encoding="utf-8").read())
+    ["result"]["content"][0]["text"]
+)
+row = rows["operations"][0]
+assert row["status"] == "done" and row["exit"] == 0, row
+assert row["thread"], row
 PY
 }
 
@@ -345,6 +391,78 @@ payload = json.loads(
 assert payload["status"] == "done", payload
 assert payload["exit"] == 0, payload
 assert payload["answer"] == "REAL-ANSWER: the advisor spoke", payload
+PY
+}
+
+# A run whose process died without writing an exit used to poll as "running"
+# forever, and the only honest answer — nothing is coming — was invisible.
+# Runs started before the pid file exists must still list.
+test_mcp_peer_operations_report_dead_and_legacy_runs() {
+  local repo="$TMP/peer-liveness"
+  local dead_run="$repo/.oms/artifacts/mcp/consult-20200101T000000Z-deadbeef"
+  local old_run="$repo/.oms/artifacts/mcp/ask-20190101T000000Z-0badc0de"
+  local empty="$TMP/peer-no-runs"
+  local out="$TMP/peer-liveness-out"
+  local dead
+
+  make_repo "$repo"
+  make_repo "$empty"
+  mkdir -p "$dead_run" "$old_run" "$TMP/peer-home" "$TMP/peer-bin"
+
+  # A pid that is certainly not a live run: started, reaped, then recorded.
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  printf '%s\n' "$dead" > "$dead_run/pid"
+  printf 'consult: the peer was launched\n' > "$dead_run/run.log"
+  printf '{"operation":"consult-20200101T000000Z-deadbeef","kind":"consult","targets":["claude"],"started_at":"2020-01-01T00:00:00Z","title":"did the run survive"}\n' \
+    > "$dead_run/meta.json"
+  # The legacy shape: no meta.json, no pid, just the exit the run recorded.
+  printf '0\n' > "$old_run/status"
+
+  {
+    printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oms_peer_operations","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"consult-20200101T000000Z-deadbeef"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oms_peer_operations","arguments":{"repo":"%s"}}}\n' "$empty"
+  } | peer_rpc "$out"
+
+  OMS_T_OUT="$out" OMS_T_EMPTY="$empty" python3 - <<'PY' || fail "peer run liveness did not match the contract"
+import json, os
+
+by_id = {}
+with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
+    for line in fh:
+        msg = json.loads(line)
+        by_id[msg.get("id")] = msg
+
+rows = json.loads(by_id[1]["result"]["content"][0]["text"])
+assert rows["total"] == 2 and rows["shown"] == 2, rows
+# Newest first by the timestamp in the id, not by the kind that prefixes it.
+dead, legacy = rows["operations"]
+assert dead["operation"].startswith("consult-2020"), rows
+assert legacy["operation"].startswith("ask-2019"), rows
+assert dead["targets"] == ["claude"], dead
+assert dead["title"] == "did the run survive", dead
+# The id carries kind and start time, so a run with no meta.json still reads.
+assert legacy["kind"] == "ask", legacy
+assert legacy["started_at"] == "2019-01-01T00:00:00Z", legacy
+assert legacy["status"] == "done" and legacy["exit"] == 0, legacy
+
+if os.name == "posix":  # elsewhere os.kill would terminate the pid, not test it
+    assert dead["status"] == "stalled", dead
+    stalled = by_id[2]["result"]
+    assert stalled["isError"], stalled
+    payload = json.loads(stalled["content"][0]["text"])
+    assert payload["status"] == "stalled", payload
+    assert "no answer is coming" in payload["next"], payload
+    assert "the peer was launched" in payload["log_tail"], payload
+else:
+    assert dead["status"] == "running", dead
+
+# A repository that never consulted anyone lists nothing and gains nothing.
+empty = json.loads(by_id[3]["result"]["content"][0]["text"])
+assert empty["operations"] == [] and empty["total"] == 0, empty
+assert not os.path.exists(os.path.join(os.environ["OMS_T_EMPTY"], ".oms", "artifacts")), empty
 PY
 }
 
@@ -1350,6 +1468,7 @@ test_mcp_server_protocol
 test_mcp_server_bounds_requests_before_effects
 test_mcp_peer_actions_start_detached_and_poll
 test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt
+test_mcp_peer_operations_report_dead_and_legacy_runs
 test_install_mcp_registers_and_is_idempotent
 test_install_agy_plugin_bakes_absolute_paths
 test_agy_surfaces_are_certified_before_hooks_ship

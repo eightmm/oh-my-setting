@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- MCP peer consultations are now addressable from disk instead of from the one
+  conversation that started them. `oms_peer_operations` lists a repository's
+  runs newest first with status, kind, targets, question, and thread, so a
+  later session — or a different client entirely — finds a run whose operation
+  id it never saw. A run records the pid of its detached shell, and a run whose
+  process is gone with no exit recorded now reads as `stalled` on POSIX rather
+  than polling as `running` forever; absence of evidence still reads as running,
+  because reporting a slow peer dead costs another provider call. `oms_peer_start`
+  gained `thread` and `new_thread` (consult only), and a finished result names
+  the thread to continue from, so a follow-up from another surface keeps its
+  context. Runs started before this change still list: the operation id has
+  always carried both kind and start time.
 - A non-pass acceptance verdict now persists its output body under
   `.oms/plan/acceptance/<output-digest>.log` (newest 20 kept), written with the
   same no-follow temp-then-rename discipline as the progress ledger, machine-path

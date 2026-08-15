@@ -15,7 +15,9 @@ read-only pass, and no tool here edits, stages, or commits anything.
 Consultations run for minutes, far longer than one tool call may block, so
 they are started detached and polled with oms_peer_result. The server keeps
 no run state of its own; a poll reads only the filesystem, so any client
-process can poll a run another one started.
+process can poll a run another one started — and oms_peer_operations lists
+what is on disk, so an id that lived only in a closed conversation is not
+how an answer becomes unreachable.
 
 Transport: stdio, newline-delimited JSON-RPC 2.0 (the MCP stdio framing).
 Stdlib only — this runs wherever the harness runs.
@@ -55,15 +57,23 @@ RUN_ROOT = Path(".oms/artifacts/mcp")
 OPERATION_RE = re.compile(r"[a-z]+-[0-9TZ]+-[0-9a-f]+\Z")
 LOG_TAIL_LINES = 20
 LOG_TAIL_LIMIT = 4_000
+OPERATIONS_LIMIT = 20
+TITLE_LIMIT = 160
+# A thread id reaches the verb as argv, so only the shape agent-thread.sh mints
+# gets through, and never one that could read as a flag of its own.
+THREAD_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}\Z")
 # The consultation outlives this server: the inner shell is backgrounded so the
 # launcher exits at once and the run is reparented to init, and the run's own
 # exit code lands in a status file only after the verb returns. That file is the
 # completion signal — a verb can fail (no peer CLI installed, bad target) before
 # any artifact exists, and waiting on artifacts alone would poll forever.
+# The pid of that inner shell is recorded the same way, because a status file
+# that never appears is ambiguous: still working, or died without writing one.
 LAUNCH_WRAPPER = (
-    'status="$1"; shift; '
+    'status="$1"; pid="$2"; shift 2; '
     '{ rc=0; "$@" || rc=$?; printf "%s\\n" "$rc" > "$status.part" && '
-    'mv "$status.part" "$status"; } &'
+    'mv "$status.part" "$status"; } & '
+    'printf "%s\\n" "$!" > "$pid.part" && mv "$pid.part" "$pid"'
 )
 
 
@@ -217,6 +227,22 @@ TOOLS = [
                     " advise takes one target."
                 ),
             },
+            "thread": {
+                "type": "string",
+                "description": (
+                    "Continue this conversation: the thread id a finished"
+                    " oms_peer_result reported. Default: the repository's"
+                    " current thread, so follow-ups keep their context."
+                ),
+            },
+            "new_thread": {
+                "type": "boolean",
+                "description": (
+                    "Start a fresh conversation instead of continuing the"
+                    " current one — a new topic, not a follow-up."
+                    " kind='consult' only."
+                ),
+            },
         },
         "required": ["kind", "prompt"],
     },
@@ -226,7 +252,9 @@ TOOLS = [
             "Read a consultation started by oms_peer_start. While the peer is"
             " still working this returns status='running' with the tail of its"
             " log; when it finishes, status='done' with the answer, the exit"
-            " code, and the artifact paths. Polling is cheap and never blocks,"
+            " code, the artifact paths, and the thread id to continue from."
+            " status='stalled' means the run's process is gone without an"
+            " exit: no answer is coming. Polling is cheap and never blocks,"
             " but the run takes minutes — do other work between polls."
         ),
         "properties": {
@@ -237,6 +265,17 @@ TOOLS = [
             },
         },
         "required": ["operation"],
+    },
+    {
+        "name": "oms_peer_operations",
+        "description": (
+            "Consultations this repository has started, newest first, with"
+            " status, kind, targets, question, and thread. The operation id"
+            " lives on disk, not in one conversation: this is how a later"
+            " session — or another client entirely — finds a run started"
+            " elsewhere and reads its answer with oms_peer_result."
+        ),
+        "properties": REPO_PROPERTY,
     },
 ]
 
@@ -364,8 +403,12 @@ def peer_targets(raw: str) -> tuple[list[str], str]:
     return targets, ""
 
 
-def peer_command(kind, script, repo, prompt, prompt_file, targets):
+def peer_command(kind, script, repo, prompt, prompt_file, targets, thread, new_thread):
     argv = ["bash", str(ROOT / script), "--repo", str(repo)]
+    if thread:
+        argv += ["--thread", thread]
+    if new_thread:
+        argv.append("--new-thread")
     if kind == "ask":
         # peer-ask takes the question inline and one comma list of providers.
         argv += ["--prompt", prompt]
@@ -412,6 +455,33 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     targets, err = peer_targets(raw_targets)
     if err:
         return err, True
+    thread, err = text_argument(arguments, "thread", 128)
+    if err:
+        return err, True
+    if thread and not THREAD_RE.match(thread):
+        return (
+            "error: thread must be an id a previous run reported (letters,"
+            " digits, dot, underscore, dash): %r" % thread
+        ), True
+    raw_new_thread = arguments.get("new_thread")
+    if raw_new_thread is None:
+        new_thread = False
+    elif isinstance(raw_new_thread, bool):
+        new_thread = raw_new_thread
+    else:
+        return "error: new_thread must be a boolean", True
+    # advise and ask take a thread but cannot mint one, and naming a thread
+    # while asking for a fresh one is two different conversations at once.
+    if new_thread and kind != "consult":
+        return (
+            "error: new_thread applies to kind='consult'; advise and ask join"
+            " the thread they are given or the current one"
+        ), True
+    if new_thread and thread:
+        return (
+            "error: thread and new_thread are exclusive: continue that thread"
+            " or start a fresh one"
+        ), True
 
     operation = "%s-%s-%s" % (
         kind,
@@ -421,17 +491,35 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     run_dir = repo / RUN_ROOT / operation
     log = run_dir / "run.log"
     status = run_dir / "status"
+    pid_file = run_dir / "pid"
     prompt_file = run_dir / "prompt.txt"
-    argv, err = peer_command(kind, spec["script"], repo, prompt, prompt_file, targets)
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    argv, err = peer_command(
+        kind, spec["script"], repo, prompt, prompt_file, targets, thread, new_thread
+    )
     if err:
         return err, True
+    meta = {
+        "operation": operation,
+        "kind": kind,
+        "targets": targets,
+        "started_at": started_at,
+        # One line of the question, so a later listing says what was asked
+        # without reading the prompt file of every run.
+        "title": " ".join(prompt.split())[:TITLE_LIMIT],
+    }
+    if thread:
+        meta["thread"] = thread
     try:
         ensure_oms_ignore(repo)
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_file.write_text(prompt + "\n", encoding="utf-8")
+        (run_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
         with open(log, "wb") as log_handle, open(os.devnull, "rb") as devnull:
             launcher = subprocess.Popen(
-                ["bash", "-c", LAUNCH_WRAPPER, operation, str(status), *argv],
+                ["bash", "-c", LAUNCH_WRAPPER, operation, str(status), str(pid_file), *argv],
                 cwd=str(repo),
                 stdin=devnull,
                 stdout=log_handle,
@@ -449,7 +537,8 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
             "operation": operation,
             "kind": kind,
             "started": True,
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "started_at": started_at,
+            "targets": targets,
             "artifact_dir": str(repo / ".oms" / "artifacts" / spec["artifacts"]),
             "run_dir": str(run_dir),
             "log": str(log),
@@ -525,6 +614,150 @@ def artifact_answer(path: str) -> tuple[str, str]:
     return "\n".join(head[start + 1:]).strip(), exit_code
 
 
+def run_meta(run_dir: Path) -> dict:
+    """Start facts recorded for a run, or {} for runs that predate the file."""
+    try:
+        data = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def operation_start(operation: str) -> tuple[str, str]:
+    """Kind and start time carried by the id itself: kind-YYYYmmddTHHMMSSZ-hex.
+
+    A run directory older than meta.json still lists, because the id the
+    server minted has always spelled both of these out.
+    """
+    parts = operation.split("-")
+    kind = parts[0]
+    stamp = parts[1] if len(parts) > 2 else ""
+    if len(stamp) == 16 and stamp[8] == "T":
+        return kind, "%s-%s-%sT%s:%s:%sZ" % (
+            stamp[0:4], stamp[4:6], stamp[6:8], stamp[9:11], stamp[11:13], stamp[13:15]
+        )
+    return kind, ""
+
+
+def run_alive(run_dir: Path) -> bool:
+    """False only on positive evidence that the run's process is gone.
+
+    Absence of evidence keeps a run 'running': a slow peer must never be
+    reported dead, because the caller's answer to that is to spend another
+    25-minute provider call. Only POSIX gets the probe — on Windows os.kill
+    terminates the target instead of testing it — and a recycled pid reads
+    as alive, which is exactly the behavior this had before the pid file.
+    """
+    if os.name != "posix":
+        return True
+    try:
+        pid = int((run_dir / "pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return True
+    if pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # alive but not ours to signal
+    return True
+
+
+def run_status(run_dir: Path) -> tuple[str, int | None]:
+    """running, done with its exit code, or stalled — died writing no exit."""
+    status = run_dir / "status"
+    if status.is_file():
+        try:
+            return "done", int(status.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return "done", 1
+    if not run_alive(run_dir):
+        return "stalled", None
+    return "running", None
+
+
+def run_age(run_dir: Path) -> int | None:
+    for candidate in (run_dir / "prompt.txt", run_dir):
+        try:
+            return int(time.time() - candidate.stat().st_mtime)
+        except OSError:
+            continue
+    return None
+
+
+def log_thread(log: Path) -> str:
+    """The thread id consult prints when it finishes; empty while it runs."""
+    thread = ""
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        match = re.match(r"thread: (\S+)\Z", line)
+        if match:
+            thread = match.group(1)
+    return thread
+
+
+def peer_operations(arguments: dict) -> tuple[str, bool]:
+    repo, err = resolve_repo(arguments)
+    if err:
+        return err, True
+    # A pure reader: a repository that has never consulted anyone has no run
+    # root, and listing must not be the thing that creates one.
+    entries = []
+    try:
+        for child in (repo / RUN_ROOT).iterdir():
+            if child.is_dir() and OPERATION_RE.match(child.name):
+                entries.append(child)
+    except OSError:
+        entries = []
+    entries.sort(key=lambda path: (path.name.split("-")[1], path.name), reverse=True)
+
+    rows = []
+    for run_dir in entries[:OPERATIONS_LIMIT]:
+        meta = run_meta(run_dir)
+        kind, started = operation_start(run_dir.name)
+        status, code = run_status(run_dir)
+        row = {
+            "operation": run_dir.name,
+            "kind": meta.get("kind") or kind,
+            "status": status,
+            "started_at": meta.get("started_at") or started,
+        }
+        age = run_age(run_dir)
+        if age is not None:
+            row["age_seconds"] = age
+        if code is not None:
+            row["exit"] = code
+        targets = meta.get("targets")
+        if isinstance(targets, list) and targets:
+            row["targets"] = [t for t in targets if isinstance(t, str)][:8]
+        title = meta.get("title")
+        if isinstance(title, str) and title:
+            row["title"] = title[:TITLE_LIMIT]
+        thread = log_thread(run_dir / "run.log") or meta.get("thread")
+        if isinstance(thread, str) and thread:
+            row["thread"] = thread
+        rows.append(row)
+
+    payload = {
+        "operations": rows,
+        "shown": len(rows),
+        "total": len(entries),
+        "next": (
+            "Read one with oms_peer_result operation=ID. status='stalled' means"
+            " the run's process is gone with no exit recorded: that answer is"
+            " never arriving, so start a new consultation instead of polling."
+        ),
+    }
+    if len(entries) > len(rows):
+        payload["truncated"] = True
+    return json.dumps(payload, ensure_ascii=False, indent=2), False
+
+
 def peer_result(arguments: dict) -> tuple[str, bool]:
     repo, err = resolve_repo(arguments)
     if err:
@@ -547,8 +780,8 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     except OSError:
         pass
 
-    status = run_dir / "status"
-    if not status.is_file():
+    status, code = run_status(run_dir)
+    if status == "running":
         payload["status"] = "running"
         payload["log_tail"] = log_tail(log)
         payload["next"] = (
@@ -556,11 +789,16 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
             " a consultation can take many minutes."
         )
         return json.dumps(payload, ensure_ascii=False, indent=2), False
+    if status == "stalled":
+        payload["status"] = "stalled"
+        payload["log_tail"] = log_tail(log)
+        payload["next"] = (
+            "The run's process is gone and it recorded no exit, so no answer"
+            " is coming. The log tail says how far it got; start a new"
+            " consultation if the question still needs one."
+        )
+        return json.dumps(payload, ensure_ascii=False, indent=2), True
 
-    try:
-        code = int(status.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        code = 1
     artifacts = artifact_paths(log)
     sections = []
     for path in artifacts:
@@ -581,12 +819,21 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     payload["exit"] = code
     payload["artifacts"] = artifacts
     payload["answer"] = answer
+    thread = log_thread(log)
+    if thread:
+        # The follow-up address: pass it back as oms_peer_start thread=ID and
+        # the next question starts from what this peer already said.
+        payload["thread"] = thread
     if code != 0 or not answer:
         payload["log_tail"] = log_tail(log)
     return json.dumps(payload, ensure_ascii=False, indent=2), code != 0
 
 
-ACTIONS = {"oms_peer_start": start_peer, "oms_peer_result": peer_result}
+ACTIONS = {
+    "oms_peer_start": start_peer,
+    "oms_peer_result": peer_result,
+    "oms_peer_operations": peer_operations,
+}
 
 
 def response(msg_id, result=None, error=None) -> dict:
