@@ -17,7 +17,7 @@ from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atom
 from oms_runtime.execution import check as check_backend
 from oms_runtime.execution import run as run_backend
 
-from tests.runtime_test_base import RuntimeFixtureBase
+from runtime_test_base import RuntimeFixtureBase
 
 class RuntimeFixture(RuntimeFixtureBase):
 
