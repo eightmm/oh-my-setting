@@ -1,9 +1,10 @@
 ---
 name: oms-agent-harness
 description: >
-  Shared state/plans/recovery, multi-agent coordination, peer consultation and
-  review, model routing, roles/executors, isolated delegation, patch landing,
-  bounded coding autopilot, Draft PRs, artifacts, and cross-provider handoff.
+  Shared state/plans/recovery, typed runtime projections, multi-agent
+  coordination, peer consultation and review, model routing, isolated
+  delegation, patch landing, bounded coding autopilot, Draft PRs, artifacts,
+  experiments, and cross-provider handoff.
 ---
 
 # Agent Harness
@@ -27,11 +28,20 @@ tag, and release need their own authority.
 If `PROJECT.md` is missing, draft, or materially drifted, route internally
 through `oms-spec-interview` and ask the user only for unresolved material gaps.
 
+The typed runtime is a projection and execution adapter over the existing
+hardened plane. It never replaces `peer-delegate -> patch-admit -> patch-land`,
+plan leases, executor souls, approvals, commit intents, or publication intents.
+Do not treat a runtime snapshot, capsule, backend receipt, context bundle, or
+evidence view as mutation authority.
+
 ## Route by intent
 
 | Need | Agent action | Authority |
 |---|---|---|
-| orient or resume unclear state | `oms inbox --repo .`; use `oms state --repo .` for detail (`oms init` only when fresh) | read |
+| orient or resume unclear state | `oms inbox --repo .`; use `oms runtime envelope show` for the effective contract and evidence | read |
+| see the next permitted action | `oms runtime next` | read |
+| inspect criterion-level completion | `oms runtime evidence show`; bind only existing fresh receipts | read, append |
+| compile bounded delegated context | `oms runtime context --phase implementation|review --target PATH` | read, local artifact |
 | recall or record knowledge | `oms agent-memory recall`, `append`, or `pin` | read, append |
 | preserve a repeating lesson | `oms skill-forge add --name NAME` | append |
 | get an outside view | `oms consult`; use `oms peer-ask` for several peers | read |
@@ -41,13 +51,18 @@ through `oms-spec-interview` and ask the user only for unresolved material gaps.
 | implement an authorized goal | parent reviews `oms autopilot … propose`, then runs its digest-bound continuation | repo |
 | publish its authorized Draft PR | add `--draft-pr` to that parent-owned flow | create-only remote |
 | judge a diff | `oms peer-review --gate` | read |
-| inspect route/outcome/cost telemetry | `oms artifact-index telemetry` | read |
+| inspect route/outcome/cost telemetry | `oms artifact-index telemetry`; use `oms runtime benchmark` for content-free effectiveness views | read, append |
 | preserve local state | `oms checkpoint create`; restore is dry-run unless `--apply` | repo write |
+| move safe continuity across machines | `oms runtime capsule export|verify|import`; never copy raw `.oms` | local artifact, append |
+| select the minimum installed capability | `oms runtime profile check|install-plan|install` | host tool install |
+| run a bounded local/container/remote command | `oms runtime backend check|run` | execution only, never landing |
+| run a comparable research study | `oms runtime experiment register|run|invariants|summarize` | execution, append |
 | admit and land reviewed bytes | `oms patch-admit`, then `oms patch-land` | repo write |
 | run one provider boundary | `oms agent-run --mode read\|write` | read or worktree write |
 | pin persona, model, or effort | `oms agent-role`, `oms agent-executor`, `oms models` | — |
 
-`oms list` catalogs tools; each answers `oms <tool> --help`.
+`oms list --frontdoor` shows the compact agent-facing catalog; `oms list --all`
+keeps every compatibility primitive visible. Each answers `oms <tool> --help`.
 
 ## Lines that do not move
 
@@ -58,9 +73,14 @@ through `oms-spec-interview` and ask the user only for unresolved material gaps.
 - Advisors serve irreversible/high-risk decisions, repeats, release go/no-go —
   not routine completion.
 - `plan-run` stops in review unless landing was explicitly authorized.
+- `trusted-local` is process supervision, not a sandbox. Capability receipts
+  must separate declared, enforced, and unknown properties.
+- A portable capsule is advisory only and carries no lease, approval, command,
+  credential, absolute path, raw transcript, or publication right.
 
 ## References
 
+- Runtime projection, evidence, context, profiles, capsules, and backends: [runtime-core.md](references/runtime-core.md)
 - Prompt hooks, memory, tasks, skills: [state-memory.md](references/state-memory.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
 - Autonomous stopping: [autonomy-loop.md](references/autonomy-loop.md)
@@ -71,5 +91,6 @@ through `oms-spec-interview` and ask the user only for unresolved material gaps.
 - Models/quorum: [model-routing.md](references/model-routing.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
 
-Internally retain provider, artifact/patch, and landing evidence. Report only
-useful conclusions, changed behavior, verification, and skipped checks.
+Internally retain provider, artifact/patch, landing, execution, criterion, and
+context evidence. Report only useful conclusions, changed behavior,
+verification, and skipped checks.

@@ -1,0 +1,158 @@
+diff --git a/scripts/repo-state.sh b/scripts/repo-state.sh
+--- a/scripts/repo-state.sh
++++ b/scripts/repo-state.sh
+@@ -82,6 +82,12 @@
+   > "$RS_TMP/approvals.json" 2>/dev/null || {
+     APPROVAL_HEALTHY=0
+     printf '[]\n' > "$RS_TMP/approvals.json"
++  }
++RUNTIME_HEALTHY=1
++"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show \
++  > "$RS_TMP/runtime.json" 2> "$RS_TMP/runtime.err" || {
++    RUNTIME_HEALTHY=0
++    printf '{}\n' > "$RS_TMP/runtime.json"
+   }
+ 
+ OMS_RS_AUTOUPDATE="$AUTOUPDATE_ATTENTION" \
+@@ -92,4 +98,6 @@
+ OMS_RS_LIFECYCLE_HEALTHY="$LIFECYCLE_HEALTHY" \
+ OMS_RS_APPROVAL_FILE="$RS_TMP/approvals.json" \
+ OMS_RS_APPROVAL_HEALTHY="$APPROVAL_HEALTHY" \
++OMS_RS_RUNTIME_FILE="$RS_TMP/runtime.json" \
++OMS_RS_RUNTIME_HEALTHY="$RUNTIME_HEALTHY" \
+ OMS_RS_PLAN_TTL="${OMS_PLAN_CLAIM_TTL:-3600}" \
+@@ -160,4 +168,19 @@
+         return fallback
+ 
+ 
++runtime_raw = load_json_file(os.environ["OMS_RS_RUNTIME_FILE"], {})
++runtime_healthy = os.environ["OMS_RS_RUNTIME_HEALTHY"] == "1" and runtime_raw.get("schema") == 2
++runtime = {
++    "healthy": runtime_healthy,
++    "schema": runtime_raw.get("schema") if runtime_healthy else None,
++    "state_digest": runtime_raw.get("state_digest") if runtime_healthy else None,
++    "objective": runtime_raw.get("objective", {}) if runtime_healthy else {},
++    "scope": runtime_raw.get("scope", {}) if runtime_healthy else {},
++    "criteria": runtime_raw.get("criteria", []) if runtime_healthy else [],
++    "evidence": runtime_raw.get("evidence", {}) if runtime_healthy else {},
++    "next_actions": runtime_raw.get("next_actions", []) if runtime_healthy else [],
++    "warnings": runtime_raw.get("warnings", []) if runtime_healthy else [],
++}
++state["runtime"] = runtime
++
+ attempts = load_json_file(os.environ["OMS_RS_LIFECYCLE_FILE"], [])
+@@ -780,4 +803,21 @@
+     else:
+         line("\n## Active task: none")
+ 
++    runtime = state.get("runtime", {})
++    line("\n## Runtime contract")
++    if not runtime.get("healthy"):
++        line("  unavailable or invalid (run: oms runtime doctor --strict)")
++    else:
++        evidence = runtime.get("evidence", {})
++        counts = evidence.get("counts", {})
++        line("  evidence coverage: %.1f%%  complete=%s" % (
++            100.0 * float(evidence.get("coverage", 0.0) or 0.0),
++            "yes" if evidence.get("complete") else "no"))
++        if counts:
++            line("  criteria: %s" % ", ".join(
++                "%s=%s" % (key, value) for key, value in sorted(counts.items())))
++        next_actions = runtime.get("next_actions", [])
++        if next_actions:
++            line("  next: %s" % next_actions[0].get("command", next_actions[0].get("id", "-")))
++
+     p = state["plan"]
+diff --git a/scripts/inbox.sh b/scripts/inbox.sh
+--- a/scripts/inbox.sh
++++ b/scripts/inbox.sh
+@@ -150,4 +150,23 @@
+     add(16, "P1", "pending-approval", "%d approval action(s) need a decision or completion" % pending_approvals,
+         "oms approval-inbox --repo . list --pending", pending_approvals)
+ 
++runtime = state.get("runtime", {})
++if not runtime.get("healthy", False):
++    add(7, "P1", "runtime-core-unavailable", "typed task/evidence projection is unavailable",
++        "oms runtime doctor --strict")
++else:
++    evidence_counts = runtime.get("evidence", {}).get("counts", {})
++    failed = int(evidence_counts.get("failed", 0) or 0)
++    stale_evidence = int(evidence_counts.get("stale", 0) or 0)
++    missing_evidence = int(evidence_counts.get("missing", 0) or 0)
++    if failed:
++        add(17, "P1", "runtime-evidence-failed", "%d acceptance criterion/criteria have failing evidence" % failed,
++            "oms runtime evidence show", failed)
++    if stale_evidence:
++        add(18, "P2", "runtime-evidence-stale", "%d acceptance criterion/criteria have stale evidence" % stale_evidence,
++            "oms runtime evidence show", stale_evidence)
++    if missing_evidence:
++        add(19, "P3", "runtime-evidence-missing", "%d acceptance criterion/criteria lack current evidence" % missing_evidence,
++            "oms runtime evidence show", missing_evidence)
++
+ ci = state.get("ci", {})
+@@ -245,7 +264,12 @@
+ actions = [entry for entry in os.environ.get("OMS_INBOX_SAFE", "").split(",") if entry]
++recommended = [
++    {key: action.get(key) for key in ("id", "priority", "authority", "reason", "command")}
++    for action in state.get("runtime", {}).get("next_actions", [])[:3]
++]
+ report = {
+     "schema": 1,
+     "actionable": len(items),
+     "safe_actions": actions,
+     "items": items,
++    "recommended_actions": recommended,
+ }
+@@ -260,3 +284,7 @@
++    if recommended:
++        print("runtime recommendations:")
++        for action in recommended:
++            print("  %s: %s" % (action.get("id", "action"), action.get("command", "-")))
+     if actions:
+         print("safe actions: %s" % ", ".join(actions))
+ PY
+diff --git a/scripts/state-verify.sh b/scripts/state-verify.sh
+--- a/scripts/state-verify.sh
++++ b/scripts/state-verify.sh
+@@ -95,10 +95,15 @@
+ "$ROOT/scripts/journal.sh" status --repo "$REPO" --json \
+   > "$TMP/journal.json" 2>/dev/null || JOURNAL_STATUS_EXIT=$?
+ [ "$JOURNAL_STATUS_EXIT" = 0 ] || printf '{}' > "$TMP/journal.json"
++RUNTIME_EXIT=0
++"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show \
++  > "$TMP/runtime.json" 2> "$TMP/runtime.err" || RUNTIME_EXIT=$?
++[ "$RUNTIME_EXIT" = 0 ] || printf '{}' > "$TMP/runtime.json"
+ 
+ OMS_SV_REPO="$REPO" OMS_SV_TMP="$TMP" OMS_SV_JSON="$AS_JSON" \
+ OMS_SV_RUN_EXIT="$RUN_VALIDATE_EXIT" OMS_SV_ARTIFACT_EXIT="$ARTIFACT_EXIT" \
+ OMS_SV_LIFECYCLE_EXIT="$LIFECYCLE_EXIT" OMS_SV_APPROVAL_EXIT="$APPROVAL_EXIT" \
+ OMS_SV_TASK_STATUS_EXIT="$TASK_STATUS_EXIT" \
+ OMS_SV_JOURNAL_STATUS_EXIT="$JOURNAL_STATUS_EXIT" \
++OMS_SV_RUNTIME_EXIT="$RUNTIME_EXIT" \
+ python3 <<'PY'
+@@ -182,5 +187,20 @@
+     finding("fail", "journal", "journal status failed (exit %d); journal checks were skipped"
+             % journal_status_exit,
+             "oms journal status --repo %s --json" % repo)
++runtime_exit = int(os.environ["OMS_SV_RUNTIME_EXIT"])
++runtime = load_json("runtime.json")
++if runtime_exit != 0 or runtime.get("schema") != 2:
++    finding("fail", "runtime-core", "typed task/evidence projection failed (exit %d)" % runtime_exit,
++            "oms runtime --repo %s doctor --strict" % repo)
++else:
++    counts = runtime.get("evidence", {}).get("counts", {})
++    stale_count = int(counts.get("stale", 0) or 0)
++    if stale_count:
++        finding("warn", "runtime-core", "%d acceptance criterion/criteria have stale evidence" % stale_count,
++                "oms runtime --repo %s evidence show" % repo)
++    task_verification = runtime.get("task", {}).get("verification")
++    if task_verification == "stale":
++        finding("warn", "runtime-core", "active task verification is stale against the current tree",
++                "oms agent-task --repo %s verify" % repo)
+ 
+ # --- task packet: contradictions the status command tolerates ---
+@@ -285,3 +305,4 @@
+             "lifecycle_exit": lifecycle_exit,
+             "approval_exit": approval_exit,
++            "runtime_core_exit": runtime_exit,
+         },

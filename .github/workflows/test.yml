@@ -35,7 +35,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: focused suites
-        run: bash scripts/check.sh --focused-only
+        run: |
+          bash scripts/check.sh --focused-only
+          bash tests/runtime-core-smoke.sh
+          bash tests/install-profile-smoke.sh
 
   # scripts-smoke is the dominant wall-clock cost. Native matrix children get
   # separate runners instead of four process trees racing on one VM. The
@@ -54,6 +57,25 @@ jobs:
         env:
           OMS_SMOKE_TIMINGS: "1"
         run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
+
+  # The PR is a compatibility-preserving overlay rather than a rewrite of the
+  # hardened state/landing files. Apply it to its exact reviewed base in a
+  # detached worktree, then run the integrated projection and focused gates.
+  overlay_integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: apply overlay to reviewed base
+        env:
+          OMS_RUNTIME_BASE: fa1e9e2cf66ee8b9a5adb642a5ef766c1381db9b
+        run: |
+          target="$RUNNER_TEMP/oms-runtime-integrated"
+          git worktree add --detach "$target" "$OMS_RUNTIME_BASE"
+          python3 integration/apply-to-oms.py "$target" \
+            --no-branch --no-commit --full-check \
+            --report "$RUNNER_TEMP/oms-runtime-apply-report.json"
 
   # Exercise the same install -> update -> uninstall contract on every
   # supported host, and in both ownership modes. Windows selects copy mode on
@@ -111,6 +133,8 @@ jobs:
       - name: Python 3.9 compatibility
         run: |
           bash scripts/check-python.sh
+          bash tests/runtime-core-smoke.sh
+          bash tests/install-profile-smoke.sh
           bash tests/codex-hud-config-smoke.sh
 
   # Branch protection targets only this fixed name. Matrix child check names
@@ -118,13 +142,14 @@ jobs:
   # cancelled, or skipped dependency.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, install_e2e, portability_macos, python39]
+    needs: [lint, focused, overlay_integration, smoke_shard, install_e2e, portability_macos, python39]
     runs-on: ubuntu-latest
     steps:
       - name: require every verification job
         env:
           LINT_RESULT: ${{ needs.lint.result }}
           FOCUSED_RESULT: ${{ needs.focused.result }}
+          OVERLAY_INTEGRATION_RESULT: ${{ needs.overlay_integration.result }}
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           PORTABILITY_MACOS_RESULT: ${{ needs.portability_macos.result }}
@@ -134,6 +159,7 @@ jobs:
           for result in \
             "$LINT_RESULT" \
             "$FOCUSED_RESULT" \
+            "$OVERLAY_INTEGRATION_RESULT" \
             "$SMOKE_SHARD_RESULT" \
             "$INSTALL_E2E_RESULT" \
             "$PORTABILITY_MACOS_RESULT" \

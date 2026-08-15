@@ -1,0 +1,99 @@
+# Runtime Core and Minimal Execution
+
+Use the runtime core as a typed read/projection layer over existing OMS state.
+It does not replace the hardened delegation, admission, landing, approval, or
+publication boundaries.
+
+## Orient with one projection
+
+```bash
+oms runtime envelope show
+oms runtime next
+oms runtime evidence show
+```
+
+The TaskEnvelope reconciles `PROJECT.md`, the active task, plan, executor,
+failures, and evidence. Treat it as a derived view. Never edit its snapshot to
+change authority.
+
+## Compile context only at a boundary that benefits from it
+
+```bash
+oms runtime context --target PATH --require TEST --max-bytes 65536
+```
+
+Use this before delegated implementation or review when reproducibility and
+bounded prompt size matter. A nonzero context-debt result means retrieve the
+missing required source before patching. Do not force it onto every interactive
+parent turn.
+
+## Complete by evidence coverage
+
+Use stable criterion IDs in project/task acceptance lists. Bind only an existing
+artifact or fresh task-verification receipt:
+
+```bash
+oms runtime evidence bind \
+  --criterion CRITERION_ID \
+  --ref EVIDENCE_ID \
+  --status verified \
+  --depends path/to/source \
+  --depends path/to/test
+```
+
+A changed dependency makes the binding stale. Provider confidence is not a
+completion signal.
+
+## Choose the minimum capability profile
+
+```bash
+oms runtime profile check core
+oms runtime profile install-plan core research --primary-provider codex
+oms runtime profile install core research --primary-provider codex
+```
+
+Notion, GitHub, research tools, HPC commands, container isolation, and
+remote execution are optional profiles. `council` inherits `core` and adds a
+second distinct provider seat. The selective installer reuses the existing
+locked download and transaction functions; it does not create another
+supply-chain path. Do not widen the installation because a capability exists;
+select it only when the current project needs it.
+
+## Choose an honest execution boundary
+
+- `trusted-local`: supervised host process; not a sandbox.
+- `isolated`: read-only repo plus one writable worktree, no network by default,
+  no host credentials, dropped capabilities, resource limits.
+- `remote`: external adapter; record its claims as attestations, not local facts.
+
+Use the existing `peer-delegate -> patch-admit -> patch-land` flow for code
+mutation. A runtime backend receipt is execution evidence, not landing
+authority.
+
+## Move between machines with a capsule, never raw `.oms`
+
+```bash
+oms runtime capsule export
+oms runtime capsule import capsule.json
+```
+
+The capsule is advisory and sanitized. It never carries a lease, approval,
+command, raw transcript/log, machine path, credential, or publication right.
+
+## Research work
+
+Use ExperimentContract v2 when a run tests a claim. Pre-register seeds, primary
+and no-regression metrics, controlled variables, and invariant commands. A
+pre-existing metrics file is rejected by default to prevent stale-result reuse.
+Incomplete seeds or invariant evidence remain inconclusive.
+
+## Failure routing
+
+Classify once, then follow the canonical recovery. In particular:
+
+- capacity may use one explicit fallback;
+- policy/auth failures do not route around the provider;
+- context-insufficient may expand context;
+- verifier mutation and scope violation reject the patch;
+- unknown remote side effects are never replayed;
+- exhausted budgets preserve partial evidence and stop.

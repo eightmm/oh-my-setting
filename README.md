@@ -18,21 +18,34 @@ showing you what the agent will run.
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-This installs or verifies the harness and every required core CLI — Claude
-Code, Codex, Antigravity, Node, uv, GitHub CLI, and Notion CLI. Nothing needs
-root; tool installation is required so setup cannot leave a partial council.
-In an interactive terminal the installer delegates browser login to `gh auth login` and
-`ntn login` and discovers the Work Journal's Notion target; a non-interactive
-install prints the follow-up commands and continues. Claude Code gets compact
-main and subagent HUDs (model/effort, context, rate-limit countdowns, cost, Git
-state); Codex gets the equivalent native footer when it has no user footer.
-Required tool versions, platform URLs, and integrity values are pinned in
-`tools.lock.json`, and new downloads are verified before use. Existing external
-CLIs at the exact version are reused and labeled as version-only by doctor. Install, update,
+The default installer selects the `core` capability: the harness, Bash, Git,
+Python, and one coding-agent provider. It does not make GitHub CLI, Notion CLI,
+all three providers, research tooling, or cluster tools mandatory. Use the
+`full` compatibility profile only on machines that should carry the historical
+all-provider/GitHub/Notion/research footprint. Nothing needs root; managed tool
+versions, platform URLs, and integrity values are pinned in `tools.lock.json`,
+and new downloads are verified before use. Existing external CLIs at the exact
+version are reused and labeled as version-only by doctor. Install, update,
 repair, and uninstall share one user-wide lifecycle lock.
-The daily updater applies clean fast-forwards by default and skips dirty or
-diverged checkouts. Uninstall restores managed configuration but leaves the
-external CLIs and the user-local PATH entry in place.
+
+Capability profiles are `core`, `council`, `github`, `notion`, `research`,
+`hpc`, `container`, `remote`, and `full`. The selective installer reuses the
+existing locked download transactions, records the exact requested profile in a
+private receipt, and reapplies only that tool set during updates. Existing
+installs without a capability receipt retain the legacy full-tool update path
+until an agent explicitly migrates them. See
+[docs/OMS-RUNTIME.md](docs/OMS-RUNTIME.md).
+
+When GitHub or Notion capabilities are selected, an interactive installer can
+delegate browser login to `gh auth login` and `ntn login` and discover the Work
+Journal's Notion target; a non-interactive install records the missing
+capability instead of weakening the core runtime.
+Claude Code gets compact main and subagent HUDs (model/effort, context,
+rate-limit countdowns, cost, Git state); Codex gets the equivalent native footer
+when it has no user footer. The daily updater applies clean fast-forwards by
+default and skips dirty or diverged checkouts. Uninstall restores managed
+configuration but leaves the external CLIs and the user-local PATH entry in
+place.
 
 The install manages the three global agent rule files — `~/.claude/CLAUDE.md`,
 `~/.codex/AGENTS.md`, and `~/.gemini/AGENTS.md`. A pre-existing file is moved
@@ -69,6 +82,28 @@ Once `PROJECT.md` is confirmed, you can ask the agent to carry it through a
 reviewed task proposal, bounded implementation, acceptance checks, and a Draft
 PR. Generated work never approves itself, and merge/release stay separate.
 
+## Typed Runtime Core
+
+`oms runtime` is a standard-library-only semantic layer over the existing
+hardened execution plane. It reconciles the distributed task state into an
+effective TaskEnvelope, projects criterion-level evidence coverage, compiles
+bounded context manifests, selects optional capability profiles, exports
+sanitized cross-machine capsules, runs honest local/container/remote backends,
+and evaluates comparable research experiments.
+
+It deliberately does **not** replace the established mutation path:
+
+```text
+peer-delegate -> patch-admit -> patch-land
+```
+
+Plan leases, executor souls, one-use approvals, commit intents, and Draft PR
+intents remain authoritative. Runtime snapshots, capsules, context bundles, and
+backend receipts are evidence or advisory state, never write authority.
+
+The compact catalog is `oms list --frontdoor`; every compatibility primitive is
+still available through `oms list --all`.
+
 ## What You Can Say
 
 ```text
@@ -78,6 +113,11 @@ Run a peer review of the current diff.
 Ask all three models with one debate round: vector DB or pgvector?
 Delegate this to codex: add input validation to scripts/train.py.
 Take this confirmed PROJECT.md through implementation to a Draft PR.
+Show the effective task contract and which completion criteria lack evidence.
+Compile the smallest review context for this patch.
+Prepare only the core and research capability profiles on this machine.
+Export a sanitized continuity capsule for the other workstation.
+Run this experiment with fixed seeds and reject it if invariants regress.
 Ask another agent about this split policy, and keep the thread.
 Check this dataset's group split for leakage before I train.
 Frame this as a hypothesis-driven experiment before I launch the run.
@@ -87,10 +127,15 @@ Update oh-my-setting and re-run its doctor.
 
 ## What's Inside
 
-Your agent picks these up on its own when a task calls for them. One front
-door per capability; the full catalog is `oms list`, documented in
-[docs/COMPONENTS.md](docs/COMPONENTS.md).
+Your agent picks these up on its own when a task calls for them. The compact
+agent surface is `oms list --frontdoor`; the complete compatibility catalog is
+`oms list --all`, documented in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 
+- **Typed semantic runtime** — effective TaskEnvelope projection,
+  criterion-linked EvidenceCoverage, context manifests, canonical failure
+  recovery, optional capability profiles, portable capsules, execution
+  receipts, comparable ExperimentContract v2 studies, and content-free harness
+  effectiveness telemetry
 - **Project setup** — start router, spec interview, `general`/`ml`/`slurm`
   templates, a doctor that validates the three managed rule/config surfaces,
   agent files hidden from git locally
@@ -111,16 +156,18 @@ door per capability; the full catalog is `oms list`, documented in
   hypothesis runs, dataset leakage manifests, Slurm reconcile and GPU queue
 - **Providers and models** — cached capability probing, provider defaults or
   exact model/effort selection, opt-in one-shot capacity fallback,
-  family-diversity diagnostics, and content-free native
-  activity/token telemetry when providers expose it
+  family-diversity diagnostics, and content-free native activity/token
+  telemetry when providers expose it
 - **Operations and execution boundaries** — durable attempt events with
   child-attempt resume, a bounded supervisor, one-use approvals,
-  `trusted-local`/`isolated`/`remote` preflight, optional Herdr control and
-  VS Code/Stably Orca/Codex launchers, a read-only cockpit, local OTLP JSONL,
-  advisory semantic evaluation, and an agent-managed bounded coding loop whose
-  only built-in remote-write path creates a branch plus Draft PR
-- **Maintenance** — transactional update with rollback, doctor, one full
-  verification gate plus a protected-branch quick pre-push mode
+  `trusted-local`/`isolated`/`remote` preflight and executable backends,
+  optional Herdr control and VS Code/Stably Orca/Codex launchers, a read-only
+  cockpit, local OTLP JSONL, advisory semantic evaluation, and an agent-managed
+  bounded coding loop whose only built-in remote-write path creates a branch
+  plus Draft PR
+- **Maintenance** — transactional update with rollback, explicit stable/edge
+  channel projection, doctor, one full verification gate plus a protected-branch
+  quick pre-push mode
 
 Skills load in three layers: general-purpose skills everywhere,
 machine-conditional skills only where their command exists (`oms-slurm`,
@@ -132,11 +179,10 @@ shared skill roots; forged project skills keep their plain names.
 
 - Local-first: use local files and CLIs by default. Connectors are allowed when explicitly requested or local sources cannot answer reliably.
 - Never commit tokens, private data, or cluster/machine details — per-project
-  agent files stay out of git by design, so re-apply the template on a fresh
-  clone.
-- Scripts live in `~/.oh-my-setting/scripts/`, reachable as `oms <tool>`
-  (`oms list` prints the catalog). Documented for transparency and recovery,
-  not for manual use.
+  agent files stay out of git by design. Portable runtime capsules are sanitized
+  and advisory; raw `.oms` state is intentionally not synchronized.
+- Scripts live in `~/.oh-my-setting/scripts/`, reachable as `oms <tool>`.
+  Documented for transparency and recovery, not for manual use.
 
 ## Star
 

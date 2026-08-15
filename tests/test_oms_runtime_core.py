@@ -1,0 +1,260 @@
+from __future__ import annotations
+import json
+import os
+import stat
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+from oms_runtime import capsule, context, evidence, experiment, failures, profiles, release
+from oms_runtime.benchmark import record_outcome as record_benchmark_outcome
+from oms_runtime.benchmark import snapshot as benchmark_snapshot
+from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atomic_write_json, canonical_json, git_head, parse_path_list, read_json, read_jsonl, sensitive_text, sha256_bytes, sha256_file, sha256_text
+from oms_runtime.execution import check as check_backend
+from oms_runtime.execution import run as run_backend
+
+from tests.runtime_test_base import RuntimeFixtureBase
+
+class RuntimeFixture(RuntimeFixtureBase):
+
+    def test_envelope_and_coverage_are_conservative(self) -> None:
+        row = evidence.build_envelope(self.repo)
+        statuses = {item['id']: item['status'] for item in row['criteria']}
+        self.assertEqual(statuses['project-api'], 'verified')
+        self.assertEqual(statuses['project-safe'], 'missing')
+        self.assertEqual(statuses['task-tests'], 'verified')
+        plan_id = next((item['id'] for item in row['criteria'] if item['source'] == 'plan'))
+        self.assertEqual(statuses[plan_id], 'missing')
+        self.assertEqual(row['scope']['forbidden'], ['secrets/'])
+        self.assertEqual(row['next_actions'][0]['id'], 'execute_ready_task')
+
+    def test_explicit_binding_and_dependency_staleness(self) -> None:
+        dependency = self.repo / 'scripts' / 'sample.py'
+        bound = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified', dependencies=['scripts/sample.py'])
+        self.assertEqual(bound['criterion_id'], 'project-safe')
+        statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+        self.assertEqual(statuses['project-safe'], 'verified')
+        unrelated = self.repo / 'unrelated.txt'
+        unrelated.write_text('unrelated change\n', encoding='utf-8')
+        subprocess.run(['git', '-C', str(self.repo), 'add', 'unrelated.txt'], check=True)
+        subprocess.run(['git', '-C', str(self.repo), 'commit', '-qm', 'unrelated'], check=True)
+        statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+        self.assertEqual(statuses['project-safe'], 'verified')
+        dependency.write_text(dependency.read_text(encoding='utf-8') + '\n# changed\n', encoding='utf-8')
+        statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+        self.assertEqual(statuses['project-safe'], 'stale')
+
+    def test_context_manifest_selects_target_imports_tests_and_reports_debt(self) -> None:
+        manifest = context.plan_context(self.repo, target='scripts/sample.py', required=['scripts/helper.py', 'missing-required.py'], max_bytes=32768)
+        selected = {item['path'] for item in manifest['selected']}
+        self.assertIn('scripts/sample.py', selected)
+        self.assertIn('scripts/helper.py', selected)
+        self.assertIn('tests/test_sample.py', selected)
+        self.assertFalse(manifest['sufficient'])
+        self.assertIn('missing-required.py', manifest['missing_required'])
+        self.assertTrue((self.repo / manifest['manifest_path']).is_file())
+        self.assertTrue((self.repo / manifest['bundle_path']).is_file())
+
+    def test_path_lists_reject_parent_traversal_and_jsonl_fails_closed_on_truncation(self) -> None:
+        self.assertEqual(parse_path_list(['./src', '../outside', 'tests/../secret', 'safe/**']), ['safe/**', 'src'])
+        ledger = self.repo / '.oms' / 'runtime' / 'stream.jsonl'
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(''.join(('{"i":%d}\n' % i for i in range(100))), encoding='utf-8')
+        with self.assertRaises(CoreError):
+            read_jsonl(ledger, limit_rows=3)
+        rows = read_jsonl(ledger, limit_rows=100)
+        self.assertEqual([row['i'] for row in rows[-3:]], [97, 98, 99])
+        self.assertTrue(sensitive_text('machine file: /mnt/private/checkpoint.bin'))
+        self.assertFalse(sensitive_text('public docs: https://example.com/path/to/page'))
+
+    def test_context_discovers_relative_import_and_truncated_required_is_debt(self) -> None:
+        package = self.repo / 'pkg'
+        package.mkdir()
+        (package / '__init__.py').write_text('', encoding='utf-8')
+        (package / 'helper.py').write_text('VALUE = 1\n', encoding='utf-8')
+        (package / 'target.py').write_text('from .helper import VALUE\n', encoding='utf-8')
+        large = self.repo / 'required-large.txt'
+        large.write_text('x' * 20000, encoding='utf-8')
+        manifest = context.plan_context(self.repo, target='pkg/target.py', required=['required-large.txt'], max_bytes=8192)
+        selected = {item['path'] for item in manifest['selected']}
+        self.assertIn('pkg/helper.py', selected)
+        self.assertIn('required-large.txt', manifest['truncated_required'])
+        self.assertFalse(manifest['sufficient'])
+
+    def test_capsule_digest_and_import_do_not_transfer_authority(self) -> None:
+        output = self.repo / 'capsule.json'
+        exported = capsule.export(self.repo, output)
+        self.assertFalse(exported['authority_transfer'])
+        verified = capsule.verify(output)
+        self.assertTrue(verified['valid'])
+        imported = capsule.import_capsule(self.repo, output)
+        self.assertFalse(imported['authority_transfer'])
+        task_before = sha256_file(self.repo / '.oms' / 'task' / 'current.md')
+        raw = read_json(output)
+        raw['payload']['contract']['complete'] = True
+        atomic_write_json(output, raw)
+        with self.assertRaises(CoreError):
+            capsule.verify(output)
+        self.assertEqual(task_before, sha256_file(self.repo / '.oms' / 'task' / 'current.md'))
+
+    def test_profiles_are_optional_and_install_plan_is_minimal(self) -> None:
+        fake_bin = Path(self.tmp.name) / 'bin'
+        fake_bin.mkdir()
+        for name in ('codex', 'gh'):
+            path = fake_bin / name
+            path.write_text('#!/usr/bin/env sh\nexit 0\n', encoding='utf-8')
+            path.chmod(493)
+        old_path = os.environ.get('PATH', '')
+        os.environ['PATH'] = str(fake_bin) + os.pathsep + old_path
+        try:
+            self.assertTrue(profiles.check(['core'])['ready'])
+            self.assertFalse(profiles.check(['notion'])['ready'])
+            plan = profiles.install_plan(['core', 'github'], 'codex')
+            self.assertEqual(plan['managed_tools'], ['node', 'codex', 'gh'])
+            council = profiles.install_plan(['core', 'council'], 'codex')
+            self.assertEqual(len([name for name in council['managed_tools'] if name in ('codex', 'claude', 'agy')]), 2)
+            full = profiles.install_plan(['full'], 'codex')
+            self.assertTrue({'codex', 'claude', 'agy'}.issubset(set(full['managed_tools'])))
+            applied = profiles.apply(self.repo, ['core', 'github'])
+            self.assertTrue(applied['check']['ready'])
+        finally:
+            os.environ['PATH'] = old_path
+
+    def test_trusted_local_receipt_is_honest_and_timeout_is_bounded(self) -> None:
+        receipt, rc = run_backend('trusted-local', self.repo, [sys.executable, '-c', "print('runtime-ok')"], timeout_seconds=10)
+        self.assertEqual(rc, 0)
+        self.assertFalse(receipt['enforced_capabilities']['filesystem'])
+        self.assertFalse(receipt['enforced_capabilities']['network'])
+        self.assertTrue((self.repo / receipt['receipt']).is_file())
+        timed, rc = run_backend('trusted-local', self.repo, [sys.executable, '-c', 'import time; time.sleep(5)'], timeout_seconds=1)
+        self.assertEqual(rc, 124)
+        self.assertTrue(timed['timed_out'])
+
+    def test_experiment_digest_is_stable_and_runs_are_summarized(self) -> None:
+        contract = self._experiment()
+        registered = experiment.register(self.repo, contract, 'exp1')
+        loaded = experiment.load_contract(self.repo, 'exp1')
+        self.assertEqual(registered['contract_digest'], loaded['contract_digest'])
+        for arm, value, memory in (('baseline', 1.0, 10.0), ('treatment', 1.2, 10.3)):
+            metrics = self.repo / ('metrics-%s.json' % arm)
+            command = [sys.executable, '-c', "import json; json.dump({'score': %s, 'memory': %s}, open(%r,'w'))" % (value, memory, metrics.name)]
+            row, rc = experiment.record_run(self.repo, 'exp1', arm, 0, metrics, command, timeout_seconds=10)
+            self.assertEqual(rc, 0)
+            self.assertEqual(row['metric_value'], value)
+        summary = experiment.summarize(self.repo, 'exp1')
+        self.assertTrue(summary['complete'])
+        self.assertEqual(summary['verdict'], 'supported')
+        self.assertAlmostEqual(summary['improvement'], 0.2)
+        self.assertTrue(summary['no_regression']['memory']['passed'])
+
+    def test_release_failure_taxonomy_and_benchmark(self) -> None:
+        stable = release.resolve(self.repo, 'stable')
+        self.assertTrue(stable['ready'])
+        self.assertEqual(failures.classify('verification failed')['code'], 'verifier_failed')
+        row = benchmark_snapshot(self.repo)
+        self.assertIn('useful_work_efficiency', row)
+        self.assertIn('human_corrections', row['unknown_metrics'])
+
+    def test_atomic_writer_rejects_symlink_and_preserves_parent_mode(self) -> None:
+        parent = self.repo / 'tracked-config'
+        parent.mkdir()
+        parent.chmod(493)
+        outside = Path(self.tmp.name) / 'outside.json'
+        outside.write_text('unchanged\n', encoding='utf-8')
+        target = parent / 'state.json'
+        target.symlink_to(outside)
+        before_mode = stat.S_IMODE(parent.stat().st_mode)
+        with self.assertRaises(CoreError):
+            atomic_write_json(target, {'unsafe': True})
+        self.assertEqual(outside.read_text(encoding='utf-8'), 'unchanged\n')
+        self.assertEqual(stat.S_IMODE(parent.stat().st_mode), before_mode)
+
+    def test_capsule_rejects_secret_and_machine_path_even_with_valid_digest(self) -> None:
+        row = capsule.build(self.repo)
+        row['payload']['continuity']['note'] = 'api_key=super-secret-material'
+        row['digest'] = sha256_bytes(canonical_json(row['payload']))
+        row['capsule_id'] = 'capsule-' + row['digest'][:32]
+        path = self.repo / 'bad-secret-capsule.json'
+        atomic_write_json(path, row)
+        with self.assertRaises(CoreError):
+            capsule.verify(path)
+        row = capsule.build(self.repo)
+        row['payload']['continuity']['note'] = '/mnt/private/project'
+        row['digest'] = sha256_bytes(canonical_json(row['payload']))
+        row['capsule_id'] = 'capsule-' + row['digest'][:32]
+        atomic_write_json(path, row)
+        with self.assertRaises(CoreError):
+            capsule.verify(path)
+
+    def test_context_omits_sensitive_source_and_unknown_evidence_ref_is_rejected(self) -> None:
+        secret = self.repo / 'secret-note.txt'
+        secret.write_text('access_token=ghp_abcdefghijklmnopqrst\n', encoding='utf-8')
+        manifest = context.plan_context(self.repo, explicit=[('secret-note.txt', 'should be scrubbed')], max_bytes=32768)
+        omitted = {item['path']: item['reason'] for item in manifest['omitted']}
+        self.assertEqual(omitted['secret-note.txt'], 'sensitive-looking content')
+        with self.assertRaises(CoreError):
+            evidence.bind(self.repo, 'project-safe', 'evt-does-not-exist', 'verified')
+
+    def test_council_profile_requires_two_providers(self) -> None:
+        fake_bin = Path(self.tmp.name) / 'council-bin'
+        fake_bin.mkdir()
+        old_path = os.environ.get('PATH', '')
+        os.environ['PATH'] = str(fake_bin)
+        try:
+            for required in ('bash', 'git', 'python3'):
+                command = fake_bin / required
+                command.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+                command.chmod(493)
+            one = fake_bin / 'codex'
+            one.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            one.chmod(493)
+            self.assertFalse(profiles.check(['council'])['ready'])
+            two = fake_bin / 'claude'
+            two.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            two.chmod(493)
+            self.assertTrue(profiles.check(['council'])['ready'])
+        finally:
+            os.environ['PATH'] = old_path
+
+    def test_backend_readiness_and_absolute_local_command(self) -> None:
+        self.assertFalse(check_backend('isolated', image='missing-image')['ready'])
+        self.assertFalse(check_backend('remote', adapter='missing-adapter')['ready'])
+        script = Path(self.tmp.name) / 'absolute-script.py'
+        script.write_text("print('absolute-ok')\n", encoding='utf-8')
+        receipt, rc = run_backend('trusted-local', self.repo, [sys.executable, str(script)], timeout_seconds=10)
+        self.assertEqual(rc, 0)
+        self.assertFalse(receipt['resource_limits']['enforced'])
+
+    def test_remote_adapter_protocol_records_attestation_without_claiming_enforcement(self) -> None:
+        adapter = Path(self.tmp.name) / 'adapter.py'
+        adapter.write_text("#!/usr/bin/env python3\nimport json,sys\nrequest=json.load(sys.stdin)\nassert request['schema']==1 and request['command']==['echo','remote']\nprint(json.dumps({'schema': 1, 'operation_id': request['operation_id'], 'accepted': True, 'exit': 0, 'attestation': {'transport_authenticated': True, 'filesystem_isolated': True, 'cleanup_confirmed': True}}))\n", encoding='utf-8')
+        adapter.chmod(493)
+        receipt, rc = run_backend('remote', self.repo, ['echo', 'remote'], adapter=str(adapter), timeout_seconds=10)
+        self.assertEqual(rc, 0)
+        self.assertTrue(receipt['adapter_attestation']['transport_authenticated'])
+        self.assertEqual(receipt['unknown_capabilities'][0], 'remote authentication')
+        self.assertTrue(receipt['resource_limits']['attested_only'])
+        self.assertTrue(receipt['adapter_attestation_valid'])
+
+    def test_release_promotion_requires_manifest_cas(self) -> None:
+        before = release.resolve(self.repo, 'stable')['manifest_digest']
+        with self.assertRaises(CoreError) as raised:
+            release.promote(self.repo, git_head(self.repo), '1.0.1', expected_manifest_digest='0' * 64)
+        self.assertEqual(raised.exception.exit_code, 75)
+        promoted = release.promote(self.repo, git_head(self.repo), '1.0.1', expected_manifest_digest=before)
+        self.assertTrue(promoted['promoted'])
+        self.assertNotEqual(promoted['new_manifest_digest'], before)
+
+    def test_experiment_refuses_stale_metrics_and_enforces_no_regression(self) -> None:
+        experiment.register(self.repo, self._experiment(), 'exp-stale')
+        metrics = self.repo / 'stale-metrics.json'
+        metrics.write_text(json.dumps({'score': 9.0, 'memory': 1.0}), encoding='utf-8')
+        with self.assertRaises(CoreError):
+            experiment.record_run(self.repo, 'exp-stale', 'baseline', 0, metrics, [sys.executable, '-c', "print('does not write metrics')"], timeout_seconds=10)
+        evaluated = experiment.evaluate(self._experiment(), {'baseline': {'score': [1.0], 'memory': [10.0]}, 'treatment': {'score': [1.2], 'memory': [11.0]}})
+        self.assertEqual(evaluated['verdict'], 'not_supported')
+        self.assertFalse(evaluated['no_regression']['memory']['passed'])

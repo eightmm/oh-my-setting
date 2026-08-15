@@ -1,0 +1,60 @@
+{
+  "schema": 2,
+  "question": "Does the soft neighbour-count channel improve validation MAE?",
+  "hypothesis": "The added local-count signal improves local geometric discrimination without breaking equivariance.",
+  "prediction": "Mean validation MAE improves by at least 0.02 while memory and equivariance stay within their bounds.",
+  "baseline": {
+    "run_id": "baseline-current-main",
+    "config_digest": "replace-with-real-digest"
+  },
+  "treatment": {
+    "independent_change": "enable soft neighbour-count channel",
+    "config_digest": "replace-with-real-digest"
+  },
+  "controlled_variables": {
+    "code_base": "replace-with-commit",
+    "dataset_split": "fixed-split-v1",
+    "training_steps": 10000,
+    "parameter_count_tolerance": 0.01
+  },
+  "seeds": [0, 1, 2, 3, 4],
+  "metrics": {
+    "primary": {
+      "name": "validation_mae",
+      "direction": "minimize"
+    },
+    "secondary": [
+      {
+        "name": "peak_memory_mb",
+        "direction": "minimize"
+      },
+      {
+        "name": "equivariance_error",
+        "direction": "minimize"
+      }
+    ]
+  },
+  "success": {
+    "min_improvement": 0.02,
+    "no_regression": {
+      "peak_memory_mb": {
+        "direction": "minimize",
+        "max_regression": 512.0
+      },
+      "equivariance_error": {
+        "direction": "minimize",
+        "max_regression": 1e-5
+      }
+    }
+  },
+  "invariant_pack": [
+    {
+      "name": "rotation-equivariance",
+      "command": ["python3", "tests/numerical/test_rotation.py"]
+    },
+    {
+      "name": "no-explicit-nxn-pair",
+      "command": ["python3", "tests/static/test_no_pair_tensor.py"]
+    }
+  ]
+}
