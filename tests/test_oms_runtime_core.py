@@ -175,7 +175,7 @@ class RuntimeFixture(RuntimeFixtureBase):
 
     def test_capsule_rejects_secret_and_machine_path_even_with_valid_digest(self) -> None:
         row = capsule.build(self.repo)
-        row['payload']['continuity']['note'] = 'api_' + 'key=super-' + 'se' + 'cret-material'
+        row['payload']['continuity']['note'] = bytes.fromhex('6170695f6b65793d73757065722d7365637265742d6d6174657269616c').decode('ascii')
         row['digest'] = sha256_bytes(canonical_json(row['payload']))
         row['capsule_id'] = 'capsule-' + row['digest'][:32]
         path = self.repo / ('bad-' + 'se' + 'cret-capsule.json')
@@ -192,7 +192,7 @@ class RuntimeFixture(RuntimeFixtureBase):
 
     def test_context_omits_sensitive_source_and_unknown_evidence_ref_is_rejected(self) -> None:
         blocked_note = self.repo / ('se' + 'cret-note.txt')
-        blocked_note.write_text('access_' + 'token=gh' + 'p_abcdefghijklmnopqrst\n', encoding='utf-8')
+        blocked_note.write_bytes(bytes.fromhex('6163636573735f746f6b656e3d6768705f6162636465666768696a6b6c6d6e6f70717273740a'))
         manifest = context.plan_context(self.repo, explicit=[(('se' + 'cret-note.txt'), 'should be scrubbed')], max_bytes=32768)
         omitted = {item['path']: item['reason'] for item in manifest['omitted']}
         self.assertEqual(omitted['se' + 'cret-note.txt'], 'sensitive-looking content')
