@@ -242,6 +242,17 @@ unknown capabilities
 A policy that is not actually enforced is never reported as a security
 property.
 
+## Migrating an existing install to capability profiles
+
+No migration is forced. An install with no capability receipt keeps the
+legacy full-tool update path unchanged. Opting in is one explicit apply —
+`oms install-profile --apply --profile core --profile github` (choose your
+own set) — which writes the private receipt; from then on `oms update`
+refreshes exactly that selection. Rolling back is deleting the receipt
+(`~/.config/oh-my-setting/capabilities.json`), which restores legacy
+full-tool behavior on the next update. Uninstall removes the receipt with
+the install it belongs to.
+
 ## Portable continuity capsule
 
 ```bash
