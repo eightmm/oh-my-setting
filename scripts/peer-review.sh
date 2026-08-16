@@ -30,6 +30,7 @@ INCLUDE_ML_CONTEXT=0
 DEBATE=0
 EXPORT_ONLY=0
 GATE=0
+COVERS=""
 VERIFY_CMD=""
 NO_VERIFY=0
 MODEL=""
@@ -100,6 +101,12 @@ Options:
                        Default when --gate is set and scripts/check.sh is
                        executable: "bash scripts/check.sh fast" (ml-smoke
                        with --ml when available).
+  --covers ID          Gate mode: acceptance criterion the gate verify run
+                       proves (repeatable). Ids are validated against the
+                       runtime envelope up front and ride the mechanical
+                       verify receipt exit-judged; reviewer prose never
+                       contributes verified coverage, so --covers requires
+                       a gate verify command.
   --no-verify          Gate mode: skip the default scripts/check.sh backstop.
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
@@ -508,6 +515,11 @@ while [ "$#" -gt 0 ]; do
       GATE=1
       shift
       ;;
+    --covers)
+      [ "$#" -ge 2 ] || fail "--covers requires a criterion id"
+      COVERS="$COVERS $2"
+      shift 2
+      ;;
     --verify)
       [ "$#" -ge 2 ] || fail "--verify requires command"
       VERIFY_CMD="$2"
@@ -604,6 +616,17 @@ if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "
     VERIFY_CMD="bash scripts/check.sh"
   fi
   echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
+fi
+
+# Explicit coverage may only ride the mechanical verify receipt: reviewer
+# prose is advisory and never projects a criterion to verified. Both the
+# id set and the presence of a verify command are checked before any
+# reviewer is called or any artifact is written.
+if [ -n "$COVERS" ]; then
+  [ "$GATE" -eq 1 ] || fail "--covers requires --gate"
+  [ -n "$VERIFY_CMD" ] ||
+    fail "--covers requires a gate verify command (pass --verify or drop --no-verify)"
+  ma_validate_covers_ids "$REPO" "$COVERS" || exit 2
 fi
 
 load_user_tool_paths
@@ -888,17 +911,32 @@ if [ "$GATE" -eq 1 ]; then
       # coverage claim is derivable here with no side channel: if the plan's
       # acceptance command is this command, the row links; if not, the covers
       # id simply matches no criterion and stays inert.
-      gate_verify_covers="$(OMS_PR_VERIFY_CMD="$VERIFY_CMD" OMS_PR_VERIFY_EXIT="$gate_verify_exit" python3 -c '
+      gate_verify_covers="$(OMS_PR_VERIFY_CMD="$VERIFY_CMD" OMS_PR_VERIFY_EXIT="$gate_verify_exit" \
+        OMS_PR_COVERS_IDS="$COVERS" python3 -c '
 import hashlib, json, os
 command = os.environ.get("OMS_PR_VERIFY_CMD", "")
 digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
 status = "verified" if os.environ.get("OMS_PR_VERIFY_EXIT") == "0" else "failed"
+covers = ["criterion-plan-acceptance-" + digest[:10]]
+for cid in os.environ.get("OMS_PR_COVERS_IDS", "").split():
+    if cid and cid not in covers:
+        covers.append(cid)
 print(json.dumps({
-    "covers": ["criterion-plan-acceptance-" + digest[:10]],
+    "covers": covers,
     "status": status,
 }))' 2>/dev/null || true)"
-      OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
-        "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" || true
+      if [ -n "$COVERS" ]; then
+        # Explicitly claimed coverage fails closed: a verify receipt that
+        # dropped its covers would read as unbound evidence forever.
+        [ -n "$gate_verify_covers" ] ||
+          fail "could not compose the criterion coverage payload"
+        OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
+          "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" ||
+          fail "criterion coverage was not recorded; failing closed"
+      else
+        OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
+          "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" || true
+      fi
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass"
       else

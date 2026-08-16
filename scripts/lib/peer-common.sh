@@ -674,6 +674,49 @@ else:
 PY
 }
 
+# Validate explicit criterion-coverage ids against the repo's own runtime
+# projection before any side effect. Unknown ids are a usage error at the
+# front door, and a projection that cannot be built fails closed: an
+# unverifiable coverage claim must not ride into the index looking bound.
+ma_validate_covers_ids() {
+  local repo="$1" ids="$2"
+  command -v python3 >/dev/null 2>&1 || {
+    echo "error: --covers needs python3 to validate criterion ids" >&2
+    return 2
+  }
+  OMS_COVERS_REPO="$repo" OMS_COVERS_IDS="$ids" \
+  OMS_COVERS_LIB="$(ma_scripts_dir)/lib" python3 -c '
+import os, re, sys
+sys.path.insert(0, os.environ["OMS_COVERS_LIB"])
+from pathlib import Path
+ids = [item for item in os.environ.get("OMS_COVERS_IDS", "").split() if item]
+if not ids:
+    sys.stderr.write("error: --covers received no criterion ids\n")
+    sys.exit(2)
+if len(ids) > 15:
+    sys.stderr.write("error: --covers accepts at most 15 criterion ids\n")
+    sys.exit(2)
+for cid in ids:
+    if not re.match(r"^[A-Za-z0-9._:-]{1,160}$", cid):
+        sys.stderr.write("error: covers id has an invalid shape: %s\n" % cid[:80])
+        sys.exit(2)
+try:
+    from oms_runtime.projection import build_base_envelope
+    criteria = build_base_envelope(Path(os.environ["OMS_COVERS_REPO"])).get("criteria", [])
+except Exception as exc:
+    sys.stderr.write(
+        "error: covers validation needs the runtime projection and it failed: %s\n" % exc)
+    sys.exit(3)
+valid = {str(item.get("id")) for item in criteria}
+unknown = [cid for cid in ids if cid not in valid]
+if unknown:
+    sys.stderr.write(
+        "error: unknown criterion id(s): %s (%d criteria in the current envelope)\n"
+        % (" ".join(unknown), len(valid)))
+    sys.exit(2)
+'
+}
+
 ma_append_artifact_index() {
   local repo="$1"
   local kind="$2"

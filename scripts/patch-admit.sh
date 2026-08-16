@@ -33,6 +33,7 @@ ALLOW_RESTRUCTURE=0
 KEEP_WORKTREE=0
 REPORT=""
 PLAN_TASK=""
+COVERS=""
 EXECUTOR_ID=""
 SCOPE_ALLOWED=""
 SCOPE_FORBIDDEN=""
@@ -60,6 +61,10 @@ Options:
   --ml           Prefer the ml-smoke verification mode when auto-detecting.
   --report FILE  Write the admission report here (default: .oms/artifacts/admit/).
   --plan-task ID  Enforce this agent-plan task's allowed/forbidden paths.
+  --covers ID    Acceptance criterion this admission proves (repeatable).
+                 Ids are validated against the runtime envelope before any
+                 work; the receipt records them exit-judged — verified on
+                 ADMIT, failed on REJECT — bound to the patch digest.
   --executor ID   Enforce a frozen executor's scope and soul hash.
   --keep-worktree  Keep the worktree for inspection.
   --allow-verifier-change  Permit a patch that modifies the verify command's
@@ -122,6 +127,7 @@ while [ "$#" -gt 0 ]; do
     --ml) ML=1; shift ;;
     --report) [ "$#" -ge 2 ] || fail "--report requires a path"; REPORT="$2"; shift 2 ;;
     --plan-task) [ "$#" -ge 2 ] || fail "--plan-task requires id"; PLAN_TASK="$2"; shift 2 ;;
+    --covers) [ "$#" -ge 2 ] || fail "--covers requires a criterion id"; COVERS="$COVERS $2"; shift 2 ;;
     --executor) [ "$#" -ge 2 ] || fail "--executor requires id"; EXECUTOR_ID="$2"; shift 2 ;;
     --keep-worktree) KEEP_WORKTREE=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
@@ -141,6 +147,9 @@ oms_git_assert_safe_execution_config "$REPO" ||
   fail "unsafe executable Git config; remove it before patch admission"
 oms_git_assert_plain_index "$REPO" ||
   fail "Git index has hidden or unreadable entries; clear them before patch admission"
+if [ -n "$COVERS" ]; then
+  ma_validate_covers_ids "$REPO" "$COVERS" || exit 2
+fi
 
 if [ -n "$PLAN_TASK" ]; then
   case "$PLAN_TASK" in *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;; esac
@@ -619,6 +628,7 @@ mkdir -p "$(dirname "$REPORT")"
   printf -- '- patch: %s\n' "$PATCH"
   printf -- '- patch_sha: %s\n' "$patch_sha"
   printf -- '- base: %s\n' "$base_sha"
+  [ -z "$COVERS" ] || printf -- '- covers:%s\n' "$COVERS"
   printf -- '- checked: %s\n\n' "$ts"
   printf '## Ladder\n\n'
   printf '%s' "$ladder" | while IFS=$'\t' read -r gate status detail; do
@@ -643,7 +653,26 @@ mkdir -p "$(dirname "$REPORT")"
 # --files` (which removes unreferenced files under .oms/artifacts/).
 admit_exit=1
 [ "$verdict" = "ADMIT" ] && admit_exit=0
-ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" || true
+if [ -n "$COVERS" ]; then
+  # Explicit coverage is exit-judged by the admission itself and bound to the
+  # patch digest; a receipt that failed to record its covers would read as
+  # unbound evidence forever, so this path fails closed instead of shrugging.
+  admit_covers="$(OMS_PA_COVERS_IDS="$COVERS" OMS_PA_EXIT="$admit_exit" \
+    OMS_PA_SCOPE="$patch_sha" python3 -c '
+import json, os, re
+ids = [item for item in os.environ.get("OMS_PA_COVERS_IDS", "").split() if item]
+payload = {"covers": ids,
+           "status": "verified" if os.environ.get("OMS_PA_EXIT") == "0" else "failed"}
+scope = os.environ.get("OMS_PA_SCOPE", "")
+if re.match(r"^[0-9a-f]{16,64}$", scope):
+    payload["scope_digest"] = scope
+print(json.dumps(payload))')" || fail "could not compose the criterion coverage payload"
+  OMS_INDEX_COVERS_JSON="$admit_covers" \
+    ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
+    fail "criterion coverage was not recorded; failing closed"
+else
+  ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" || true
+fi
 if [ "$verdict" = "ADMIT" ]; then
   work_journal_observe "$REPO" patch-admit "$REPORT" \
     --source-id "admit:$patch_sha:$base_sha:$verdict" \

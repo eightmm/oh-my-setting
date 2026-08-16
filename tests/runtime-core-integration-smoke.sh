@@ -124,3 +124,71 @@ assert statuses["integration-projection"] == "verified", statuses
 PY
 
 echo 'runtime-core-integration-smoke: covers chain ok'
+
+# Front door: patch-admit --covers. An unknown id is a usage error before any
+# admission side effect; a valid id rides the admission receipt exit-judged
+# (verified on ADMIT, failed on REJECT) and the projection links it with no
+# manual binding.
+capture_patch() {  # capture_patch MESSAGE OUT
+  git -C "$REPO" add -A ':!.oms'
+  git -C "$REPO" -c user.email=test@example.com -c user.name='OMS Runtime Test' \
+    commit -qm "$1"
+  git -C "$REPO" diff HEAD~1 HEAD > "$2"
+  git -C "$REPO" reset -q --hard HEAD~1
+}
+printf '\nadmitted line\n' >> "$REPO/PROJECT.md"
+capture_patch admit-fixture "$TMP/admit.patch"
+
+rc=0
+"$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
+  --verify true --covers no-such-criterion >/dev/null 2>"$TMP/admit-err" || rc=$?
+[ "$rc" = 2 ] || {
+  echo "unknown covers id must exit 2, got $rc" >&2
+  exit 1
+}
+grep -q "unknown criterion id" "$TMP/admit-err" || {
+  echo "unknown covers id must be named in the error" >&2
+  exit 1
+}
+[ ! -d "$REPO/.oms/artifacts/admit" ] || {
+  echo "a rejected covers id must not leave admission artifacts" >&2
+  exit 1
+}
+
+"$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
+  --verify true --covers integration-evidence > "$TMP/admit-verdict" 2>/dev/null
+grep -qx ADMIT "$TMP/admit-verdict" || {
+  echo "covers admission should ADMIT: $(cat "$TMP/admit-verdict")" >&2
+  exit 1
+}
+
+rc=0
+"$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
+  --verify false --covers integration-task-gate >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] || {
+  echo "a failing verify must REJECT" >&2
+  exit 1
+}
+
+python3 - "$REPO/.oms/artifacts/index.jsonl" <<'PY'
+import json, re, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+admits = [row for row in rows if row.get("kind") == "patch-admit"]
+admitted = [row for row in admits if row.get("covers") == ["integration-evidence"]]
+assert len(admitted) == 1, admits
+assert admitted[0]["status"] == "verified", admitted[0]
+assert re.match(r"^[0-9a-f]{16}$", admitted[0].get("scope_digest", "")), admitted[0]
+rejected = [row for row in admits if row.get("covers") == ["integration-task-gate"]]
+assert len(rejected) == 1, admits
+assert rejected[0]["status"] == "failed", rejected[0]
+PY
+"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show > "$TMP/envelope3.json"
+python3 - "$TMP/envelope3.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+statuses = {item["id"]: item["status"] for item in row["criteria"]}
+assert statuses["integration-evidence"] == "verified", statuses
+assert statuses["integration-task-gate"] == "failed", statuses
+PY
+
+echo 'runtime-core-integration-smoke: patch-admit covers ok'

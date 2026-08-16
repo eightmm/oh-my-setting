@@ -2306,6 +2306,86 @@ PY
     fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
 }
 
+test_peer_review_gate_covers_rides_the_mechanical_verify_receipt() {
+  local project="$TMP/review-gate-covers"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  cat > "$project/PROJECT.md" <<'PROJECT'
+# Covers fixture
+
+## Acceptance Criteria
+
+- [id:gate-covers-crit] The gate verify command passes on this tree.
+PROJECT
+  git -C "$project" add PROJECT.md
+  git -C "$project" \
+    -c user.email=test@example.com -c user.name='Test User' \
+    commit -qm criteria
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  write_fake_review_gate_provider "$bin_dir" antigravity pass
+
+  # Misuse fails before any reviewer or artifact side effect: covers without
+  # the gate, covers without a verify command, and an id the envelope does
+  # not know.
+  if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$project/artifacts-misuse" \
+    --providers claude,antigravity --no-diff \
+    --covers gate-covers-crit --prompt "covers without gate" >/dev/null 2>&1; then
+    fail "--covers without --gate must be rejected"
+  fi
+  if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$project/artifacts-misuse" \
+    --providers claude,antigravity --no-diff --gate --no-verify \
+    --covers gate-covers-crit --prompt "covers without verify" >/dev/null 2>&1; then
+    fail "--covers without a gate verify command must be rejected"
+  fi
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$project/artifacts-misuse" \
+    --providers claude,antigravity --no-diff --gate --verify true \
+    --covers no-such-criterion --prompt "unknown covers id" \
+    >/dev/null 2>"$project/err-unknown" && rc=0 || rc=$?
+  [ "$rc" != "0" ] || fail "an unknown covers id must be rejected"
+  assert_file_contains "$project/err-unknown" "unknown criterion id"
+  [ ! -d "$project/artifacts-misuse" ] ||
+    fail "rejected covers must not leave review artifacts behind"
+
+  # Happy path: the explicit id rides the mechanical verify receipt beside
+  # the derived plan-acceptance cover, exit-judged; reviewer prose rows carry
+  # no covers at all.
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$project/artifacts" \
+    --providers claude,antigravity --no-diff --gate --verify true \
+    --covers gate-covers-crit --prompt "covers happy path" >"$project/out" ||
+    fail "gate with covers should pass: $(cat "$project/out")"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' ||
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+verify = [r for r in rows if r.get("kind") == "review-verify"]
+assert verify, "no review-verify row"
+covers = verify[-1].get("covers", [])
+assert "gate-covers-crit" in covers, covers
+assert any(c.startswith("criterion-plan-acceptance-") for c in covers), covers
+assert verify[-1].get("status") == "verified", verify[-1]
+for row in rows:
+    if row.get("kind") in ("review-outcome", "ask", "review"):
+        assert "covers" not in row, row
+PY
+    fail "verify receipt covers are wrong: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
+  "$ROOT/scripts/runtime-core.sh" --repo "$project" envelope show > "$project/envelope.json" ||
+    fail "envelope show failed"
+  python3 - "$project/envelope.json" <<'PY' ||
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+statuses = {item["id"]: item["status"] for item in row["criteria"]}
+assert statuses.get("gate-covers-crit") == "verified", statuses
+PY
+    fail "explicit covers did not project the criterion to verified"
+}
+
 test_peer_review_gate_binds_complete_diff_and_refuses_truncation() {
   local project="$TMP/review-gate-complete-diff"
   local artifact_dir="$project/artifacts"
