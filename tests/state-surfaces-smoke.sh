@@ -116,12 +116,16 @@ assert release_body["stable"]["auto_apply"] is False, release_body
 # never this environment's readiness.
 assert release_body["stable"]["channel"] == "stable", release_body
 assert "resolved_commit" in release_body["stable"], release_body
+# isError mirrors the runtime command's own exit: profile current is
+# nonzero wherever no provider CLI is installed (CI runners), and that
+# structured refusal passing through unchanged IS the contract. Assert the
+# body's shape in both worlds, never this environment's readiness.
 profile = by_id[12]["result"]
-assert not profile["isError"], profile
 profile_body = json.loads(profile["content"][0]["text"])
 assert profile_body["schema"] == 1, profile_body
 assert "configured" in profile_body, profile_body
 assert profile_body["check"]["required"].get("git") is True, profile_body
+assert profile["isError"] == (not profile_body["check"]["ready"]), profile
 failures = by_id[13]["result"]
 assert not failures["isError"], failures
 failure_body = json.loads(failures["content"][0]["text"])
