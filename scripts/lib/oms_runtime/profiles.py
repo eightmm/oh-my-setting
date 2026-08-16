@@ -52,7 +52,8 @@ def _command_present(name: str) -> bool:
     ~/.local/bin. Git Bash resolves them fine; Windows-native Python's
     shutil.which never will (PATHEXT), so a healthy Windows install judged
     its own provider absent. The managed location is part of the product
-    contract, and HOME arrives in MSYS form (/c/Users/...) when bash spawned
+    contract, and HOME arrives in MSYS form (slash, drive letter, slash
+    prefix) when bash spawned
     this interpreter, so both spellings are honored.
     """
     if shutil.which(name):
