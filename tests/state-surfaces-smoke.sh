@@ -42,6 +42,9 @@ test_mcp_server_protocol() {
     printf '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"oms_repo_state","arguments":{"repo":"%s"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"oms_agent_operations","arguments":{"repo":"%s"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"oms_approvals","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"oms_runtime_release","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"oms_runtime_profile","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"oms_runtime_failures","arguments":{"repo":"%s"}}}\n' "$repo"
   } | python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "MCP protocol exchange did not match the contract"
@@ -63,7 +66,8 @@ listed = {t["name"]: t for t in by_id[2]["result"]["tools"]}
 tools = set(listed)
 assert {"oms_inbox", "oms_task_state", "oms_fail_ledger", "oms_handoffs",
         "oms_handoff_show", "oms_journal", "oms_repo_state",
-        "oms_agent_operations", "oms_approvals"} <= tools, tools
+        "oms_agent_operations", "oms_approvals", "oms_runtime_release",
+        "oms_runtime_profile", "oms_runtime_failures"} <= tools, tools
 # Every tool tells a client what it costs to call. A reader that advertised
 # itself as a write would be approved by hand forever; a consultation that
 # advertised itself as a read would spend a peer's wall clock unattended.
@@ -99,6 +103,27 @@ assert json.loads(operations["content"][0]["text"]) == [], operations
 approvals = by_id[10]["result"]
 assert not approvals["isError"], approvals
 assert json.loads(approvals["content"][0]["text"]) == [], approvals
+# The typed runtime readers return the runtime command's own JSON unchanged:
+# the same schemas the shell front door prints, no reconstruction, and no
+# mutation surface (release status names the apply command, never runs it).
+release = by_id[11]["result"]
+assert not release["isError"], release
+release_body = json.loads(release["content"][0]["text"])
+assert release_body["schema"] == 1, release_body
+assert release_body["stable"]["auto_apply"] is False, release_body
+assert release_body["stable"]["resolved_commit"], release_body
+profile = by_id[12]["result"]
+assert not profile["isError"], profile
+profile_body = json.loads(profile["content"][0]["text"])
+assert profile_body["schema"] == 1, profile_body
+assert "configured" in profile_body, profile_body
+assert profile_body["check"]["required"].get("git") is True, profile_body
+failures = by_id[13]["result"]
+assert not failures["isError"], failures
+failure_body = json.loads(failures["content"][0]["text"])
+assert "provider_timeout" in failure_body, sorted(failure_body)
+assert failure_body["provider_timeout"]["recovery"], failure_body
+assert len(failure_body) >= 15, sorted(failure_body)
 PY
 }
 

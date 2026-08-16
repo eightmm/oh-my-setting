@@ -216,6 +216,42 @@ TOOLS = [
         },
         "annotations": READ_ONLY,
     },
+    # Typed runtime readers: fixed argv onto the runtime front door, structured
+    # failures passed through unchanged, and no mutation, promotion, apply, or
+    # landing surface — runtime state is projection or evidence only.
+    {
+        "name": "oms_runtime_release",
+        "description": (
+            "Advisory update-channel projection from the checkout's own"
+            " manifest: stable and edge by exact commit, readiness, and the"
+            " apply command. Read-only; nothing here applies an update."
+        ),
+        "argv": ["bash", "scripts/runtime-core.sh", "release", "status"],
+        "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_runtime_profile",
+        "description": (
+            "Current capability-profile selection and readiness: requested"
+            " profiles, required and missing commands, and whether the"
+            " selection is configured by a receipt."
+        ),
+        "argv": ["bash", "scripts/runtime-core.sh", "profile", "current"],
+        "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_runtime_failures",
+        "description": (
+            "Canonical failure taxonomy: every failure code with its recovery"
+            " action, retryability, and escalation flags, as fail-ledger rows"
+            " and typed refusals use them."
+        ),
+        "argv": ["bash", "scripts/runtime-core.sh", "failure", "catalog"],
+        "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
+    },
     # Action tools: no argv, dispatched through ACTIONS below.
     {
         "name": "oms_peer_start",
