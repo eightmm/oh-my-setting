@@ -131,6 +131,23 @@ def _criteria(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping
             seen.add(key); result.append({'id': criterion_id, 'text': bounded_line(text, 500), 'source': source, 'weight': weight})
     if plan.get('acceptance_present'):
         digest = str(plan.get('acceptance_digest', '')); result.append({'id': 'criterion-plan-acceptance-' + digest[:10], 'text': 'The plan-level acceptance command passes on the final tree.', 'source': 'plan', 'weight': 3, 'command_digest': digest})
+    # Every plan task is a criterion of its own: an explicit [id:...] in the
+    # title wins, otherwise the task id names it deterministically. Admission
+    # receipts for the task are the evidence (see evidence.build_coverage) —
+    # admission re-ran the task's verify against an isolated tree, which is a
+    # stronger claim than the task row's own state field.
+    for row in plan.get('tasks', []):
+        task_id = str(row.get('id', ''))
+        if not task_id:
+            continue
+        title = str(row.get('title', ''))
+        explicit = re.search(r"\[(?:id|criterion):\s*([A-Za-z0-9._:-]{1,80})\]", title, re.I)
+        criterion_id = explicit.group(1) if explicit else 'plan-task-' + task_id
+        key = (criterion_id, task_id.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({'id': criterion_id, 'text': bounded_line(strip_criterion_marker(title) or ('Plan task %s is admitted.' % task_id), 500), 'source': 'plan-task', 'weight': 1, 'plan_task_id': task_id})
     return result
 
 def _objective(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[str, Any]) -> Dict[str, str]:

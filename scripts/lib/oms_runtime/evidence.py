@@ -192,6 +192,24 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                 refs = [criterion_id for criterion_id, digest in plan_criteria.items() if digest.startswith(observed)]
                 if refs:
                     support = "plan-acceptance-receipt"
+        if not refs and str(row.get("kind", "")).lower() == "patch-admit":
+            # An admission receipt is the evidence for the plan task it
+            # admitted: admission re-ran the task's verify in an isolated
+            # tree. The link is the row's own task lineage — retroactive over
+            # historical rows, no schema change. Rows whose task matches no
+            # current plan task stay inert.
+            admitted_task = str(row.get("task_id", ""))
+            if admitted_task:
+                refs = [str(item.get("id")) for item in criteria
+                        if item.get("source") == "plan-task"
+                        and str(item.get("plan_task_id")) == admitted_task]
+                if refs:
+                    support = "patch-admission-receipt"
+                    # Admission rows speak through their exit code, not a
+                    # status field: ADMIT recorded 0, REJECT recorded nonzero.
+                    exit_code = row.get("exit")
+                    judged = "verified" if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0 else "failed"
+                    row = dict(row, status=judged)
         item = _evidence_item(row, repo, support=support)
         if refs:
             for ref in refs:

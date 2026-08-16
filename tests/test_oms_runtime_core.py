@@ -134,6 +134,36 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(_completion_state({'present': True, 'status': 'active'}, incomplete), 'active')
         self.assertEqual(_completion_state({'present': False, 'status': ''}, incomplete), 'none')
 
+    def test_plan_tasks_are_criteria_and_admission_is_their_evidence(self) -> None:
+        # Every plan task projects as a criterion; the admission receipt that
+        # carries its task lineage is the automatic evidence — verified on
+        # ADMIT (exit 0), failed on REJECT, and a receipt naming no current
+        # plan task stays inert instead of guessing.
+        row = evidence.build_envelope(self.repo)
+        statuses = {item['id']: item['status'] for item in row['criteria']}
+        self.assertEqual(statuses['plan-task-t1'], 'missing')
+        append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
+            'schema': 1, 'event_id': 'evt-admit-t1', 'kind': 'patch-admit',
+            'exit': 0, 'task_id': 't1',
+        })
+        append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
+            'schema': 1, 'event_id': 'evt-admit-ghost', 'kind': 'patch-admit',
+            'exit': 0, 'task_id': 'no-such-task',
+        })
+        linked = evidence.build_envelope(self.repo)
+        by_id = {item['id']: item for item in linked['criteria']}
+        self.assertEqual(by_id['plan-task-t1']['status'], 'verified')
+        supports = [e.get('support') for e in by_id['plan-task-t1']['evidence']]
+        self.assertIn('patch-admission-receipt', supports)
+        self.assertNotIn('plan-task-no-such-task', by_id)
+        append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
+            'schema': 1, 'event_id': 'evt-admit-t1-reject', 'kind': 'patch-admit',
+            'exit': 3, 'task_id': 't1',
+        })
+        rejected = evidence.build_envelope(self.repo)
+        by_id = {item['id']: item for item in rejected['criteria']}
+        self.assertEqual(by_id['plan-task-t1']['status'], 'failed')
+
     def test_concurrent_appends_lose_nothing(self) -> None:
         lock_root = Path(self.tmp.name) / 'append-locks'
         target = self.repo / '.oms' / 'append-probe.jsonl'
