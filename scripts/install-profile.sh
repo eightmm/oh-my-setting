@@ -191,6 +191,15 @@ if [ "${#SELECTED_TOOLS[@]}" -gt 0 ]; then
   done
 fi
 
+# The tools this apply just installed live under ~/.local/bin, which future
+# shells get from the persisted rc line but the CURRENT process does not have
+# yet on hosts whose default PATH omits it (Windows Git Bash). Verifying with
+# the old PATH judged a successful install unavailable.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
 check_rc=0
 check_result="$(check_json)" || check_rc=$?
 if [ "$check_rc" -ne 0 ] && [ "$ALLOW_MISSING" -ne 1 ]; then
