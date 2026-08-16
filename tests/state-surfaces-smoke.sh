@@ -111,7 +111,11 @@ assert not release["isError"], release
 release_body = json.loads(release["content"][0]["text"])
 assert release_body["schema"] == 1, release_body
 assert release_body["stable"]["auto_apply"] is False, release_body
-assert release_body["stable"]["resolved_commit"], release_body
+# Passthrough only: whether the pinned stable SHA resolves depends on the
+# clone (a shallow CI checkout lacks it), so assert the projection's shape,
+# never this environment's readiness.
+assert release_body["stable"]["channel"] == "stable", release_body
+assert "resolved_commit" in release_body["stable"], release_body
 profile = by_id[12]["result"]
 assert not profile["isError"], profile
 profile_body = json.loads(profile["content"][0]["text"])
