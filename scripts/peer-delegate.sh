@@ -16,6 +16,8 @@ MA_KIND="delegate"
 REPO="$PWD"
 TO=""
 PROMPT=""
+CONTEXT_MANIFEST=0
+CONTEXT_MANIFEST_DIGEST=""
 BRIEF_FILE=""
 REVIEW_ARTIFACT=""
 ROLE=""
@@ -124,6 +126,9 @@ Options:
                        that exact plan lease instead of releasing it to ready.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
+  --context-manifest   Compile a bounded context manifest for the delegated
+                       scope first and record its digest on the delegation row
+                       (advisory; lets two providers run the identical bundle).
   --dry-run            Write prompt and empty patch without calling the CLI.
   -h, --help           Show this help.
 
@@ -312,6 +317,14 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--print-timeout requires duration"
       OMS_PEER_PRINT_TIMEOUT="$2"
       shift 2
+      ;;
+    --context-manifest)
+      # Opt-in: compile a bounded context manifest for the delegated targets
+      # before the call and record its digest on the delegation row, so two
+      # providers can be compared on the identical bundle. Never default-on:
+      # the parent's interactive turn is not a delegated boundary.
+      CONTEXT_MANIFEST=1
+      shift
       ;;
     --dry-run)
       DRY_RUN=1
@@ -780,6 +793,36 @@ export OMS_OPERATION_ID="${OMS_OPERATION_ID:-delegate-$timestamp}"
 export OMS_DELEGATION_ID="${OMS_DELEGATION_ID:-$timestamp}"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
 patch_file="$ARTIFACT_DIR/$TO-$slug-$timestamp.patch"
+
+if [ "$CONTEXT_MANIFEST" -eq 1 ]; then
+  # The manifest is advisory continuity for the delegated call: targets are the
+  # task scope's allowed paths, the bundle passes the same sensitive-content
+  # policy as every outbound prompt, and only the digest becomes durable state.
+  context_manifest_file="$ARTIFACT_DIR/_context-$slug-$timestamp.json"
+  context_args=(--repo "$REPO" context --manifest "$context_manifest_file")
+  first_allowed=""
+  if [ -n "$PLAN_TASK_ID" ]; then
+    first_allowed="$("$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" show \
+      --id "$PLAN_TASK_ID" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    row = json.load(sys.stdin)
+except ValueError:
+    row = {}
+paths = row.get("allowed_paths") or []
+print(paths[0] if paths else "")
+' | tr -d '\r')"
+  fi
+  [ -z "$first_allowed" ] || context_args+=(--target "$first_allowed")
+  if "$ROOT/scripts/runtime-core.sh" "${context_args[@]}" >/dev/null 2>&1 &&
+    [ -f "$context_manifest_file" ]; then
+    CONTEXT_MANIFEST_DIGEST="$(oms_sha256_file "$context_manifest_file" 2>/dev/null || true)"
+    CONTEXT_MANIFEST_DIGEST="${CONTEXT_MANIFEST_DIGEST//$'\r'/}"
+  else
+    echo "warning: context manifest compilation failed; delegating without one" >&2
+  fi
+  export OMS_INDEX_CONTEXT_MANIFEST_DIGEST="$CONTEXT_MANIFEST_DIGEST"
+fi
 
 if ! ma_validate_outbound_prompt "$prompt_file"; then
   {

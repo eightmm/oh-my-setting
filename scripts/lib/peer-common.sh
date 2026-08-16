@@ -838,6 +838,58 @@ if fallback_reasoning_effort in valid_efforts:
 # this variable, and it composed the payload itself one step earlier, so a
 # malformed value here is a caller bug and fails the append rather than
 # publishing a row that looks authoritative while missing its seats.
+# Criterion coverage rides the same row: a producer that just proved
+# something says which acceptance criteria it proves, so the runtime evidence
+# projection links it without manual binding. Malformed coverage fails the
+# append — a row that silently dropped its covers would read as unbound
+# evidence forever.
+manifest_digest = os.environ.get("OMS_INDEX_CONTEXT_MANIFEST_DIGEST", "")
+if manifest_digest:
+    if not re.match(r"^[0-9a-f]{16,64}$", manifest_digest):
+        sys.stderr.write("error: context manifest digest must be a hex digest\n")
+        sys.exit(3)
+    row["context_manifest_digest"] = manifest_digest
+covers_payload = os.environ.get("OMS_INDEX_COVERS_JSON", "")
+if covers_payload:
+    if len(covers_payload) > 8192:
+        sys.stderr.write("error: criterion coverage payload exceeds 8KiB\n")
+        sys.exit(3)
+    try:
+        covers_obj = json.loads(covers_payload)
+    except ValueError:
+        sys.stderr.write("error: criterion coverage payload is not JSON\n")
+        sys.exit(3)
+    if not isinstance(covers_obj, dict):
+        sys.stderr.write("error: criterion coverage payload must be an object\n")
+        sys.exit(3)
+    covers_ids = covers_obj.get("covers", [])
+    if (not isinstance(covers_ids, list) or len(covers_ids) > 16 or
+            not all(isinstance(item, str) and safe_id(item) for item in covers_ids)):
+        sys.stderr.write("error: covers must be a bounded list of criterion ids\n")
+        sys.exit(3)
+    if covers_ids:
+        row["covers"] = covers_ids
+    covers_status = covers_obj.get("status", "")
+    if covers_status:
+        if covers_status not in ("verified", "failed", "inconclusive", "skipped_with_reason"):
+            sys.stderr.write("error: coverage status is not a known outcome\n")
+            sys.exit(3)
+        row["status"] = covers_status
+    covers_scope = covers_obj.get("scope_digest", "")
+    if covers_scope:
+        if not re.match(r"^[0-9a-f]{16,64}$", str(covers_scope)):
+            sys.stderr.write("error: scope_digest must be a hex digest\n")
+            sys.exit(3)
+        row["scope_digest"] = covers_scope
+    covers_deps = covers_obj.get("dependency_digests", {})
+    if covers_deps:
+        if (not isinstance(covers_deps, dict) or len(covers_deps) > 64 or
+                not all(isinstance(k, str) and 0 < len(k) <= 300 and not k.startswith("/") and
+                        ".." not in k.split("/") and
+                        re.match(r"^[0-9a-f]{16,64}$", str(v)) for k, v in covers_deps.items())):
+            sys.stderr.write("error: dependency_digests must map bounded repo-relative paths to hex digests\n")
+            sys.exit(3)
+        row["dependency_digests"] = {str(k): str(v) for k, v in covers_deps.items()}
 review_payload = os.environ.get("OMS_INDEX_REVIEW_OUTCOME_JSON", "")
 if review_payload:
     if len(review_payload) > 16384:

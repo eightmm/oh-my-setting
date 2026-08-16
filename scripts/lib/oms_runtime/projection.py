@@ -170,8 +170,29 @@ def build_base_envelope(repo: Path) -> Dict[str, Any]:
     if failures: warnings.append('%d unresolved failure record(s) require attention.' % len(failures))
     return {'schema': ENVELOPE_SCHEMA, 'generated_at': utc_now(), 'repo': {'head': head or None, 'branch': git_branch(repo) or None}, 'state_digest': state_digest, 'sources': sources, 'objective': _objective(project, task, plan), 'scope': scope, 'criteria': criteria, 'budget': task.get('budget', {}), 'task': {key: value for key, value in task.items() if key not in ('criteria', 'source', 'constraints')}, 'plan': {key: value for key, value in plan.items() if key != 'source'}, 'executor': {key: value for key, value in executor.items() if key != 'source'}, 'authority': {'repo_write': 'external_parent_decision', 'remote_create': 'external_parent_decision', 'authority_transferable_by_capsule': False}, 'failures': failures, 'warnings': warnings}
 
+def _completion_state(task: Mapping[str, Any], evidence: Mapping[str, Any]) -> str:
+    """Derived completion judgment: evidence decides, never a model's confidence.
+
+    completed_verified only when every declared criterion carries current
+    verified evidence; a closed task with anything less is completed with
+    unverified items, which is a different promise to the caller.
+    """
+    status = str(task.get('status', '') or '').lower()
+    if status in ('blocked', 'failed', 'cancelled'):
+        return status
+    counts = evidence.get('counts', {}) if isinstance(evidence.get('counts'), Mapping) else {}
+    failing = int(counts.get('failed', 0) or 0)
+    if status in ('closed', 'done', 'verified', 'completed'):
+        if failing:
+            return 'failed'
+        return 'completed_verified' if evidence.get('complete') else 'completed_with_unverified_items'
+    return 'active' if task.get('present') else 'none'
+
+
 def finalize_envelope(base: Dict[str, Any], evidence: Mapping[str, Any]) -> Dict[str, Any]:
     base = dict(base); base['criteria'] = evidence.get('criteria', []); base['evidence'] = {key: value for key, value in evidence.items() if key != 'criteria'}
+    if isinstance(base.get('task'), dict):
+        base['task'] = dict(base['task'], completion=_completion_state(base['task'], evidence))
     base['next_actions'] = _actions({'present': any(source.get('path') == 'PROJECT.md' for source in base.get('sources', []))}, base.get('task', {}), base.get('plan', {}), evidence, base.get('failures', []))
     base['state_digest'] = sha256_bytes(canonical_json({'contract': base['state_digest'], 'evidence': base['evidence']}))
     return base

@@ -101,6 +101,62 @@ class RuntimeFixture(RuntimeFixtureBase):
             capsule.verify(output)
         self.assertEqual(task_before, sha256_file(self.repo / '.oms' / 'task' / 'current.md'))
 
+    def test_producer_covers_and_completion_state_are_evidence_driven(self) -> None:
+        # A review-verify row whose covers digest matches the plan acceptance
+        # command links automatically; a mismatched digest stays inert.
+        import hashlib
+        accept_digest = hashlib.sha256('python3 -m unittest'.encode('utf-8')).hexdigest()
+        append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
+            'schema': 1, 'event_id': 'evt-gate', 'kind': 'review-verify',
+            'exit': 0, 'status': 'verified',
+            'covers': ['criterion-plan-acceptance-' + accept_digest[:10]],
+        })
+        row = evidence.build_envelope(self.repo)
+        statuses = {item['id']: item['status'] for item in row['criteria']}
+        plan_id = 'criterion-plan-acceptance-' + accept_digest[:10]
+        self.assertEqual(statuses[plan_id], 'verified')
+        # patch_sha256 is an accepted scope digest spelling: an existing
+        # patch-admit row proves scope without being rewritten to a new field.
+        supports = {item['id']: [e.get('support') for e in item.get('evidence', [])] for item in row['criteria']}
+        self.assertIn('explicit-artifact', supports[plan_id])
+        # Completion is derived from evidence, never from model confidence:
+        # the fixture task is marked verified while project-safe still lacks
+        # evidence, so the completion judgment keeps its unverified qualifier.
+        self.assertEqual(row['task']['completion'], 'completed_with_unverified_items')
+        from oms_runtime.projection import _completion_state
+        complete = {'complete': True, 'counts': {'verified': 3}}
+        incomplete = {'complete': False, 'counts': {'verified': 1, 'missing': 2}}
+        failing = {'complete': False, 'counts': {'failed': 1}}
+        self.assertEqual(_completion_state({'present': True, 'status': 'closed'}, complete), 'completed_verified')
+        self.assertEqual(_completion_state({'present': True, 'status': 'closed'}, failing), 'failed')
+        self.assertEqual(_completion_state({'present': True, 'status': 'blocked'}, complete), 'blocked')
+        self.assertEqual(_completion_state({'present': True, 'status': 'cancelled'}, complete), 'cancelled')
+        self.assertEqual(_completion_state({'present': True, 'status': 'active'}, incomplete), 'active')
+        self.assertEqual(_completion_state({'present': False, 'status': ''}, incomplete), 'none')
+
+    def test_concurrent_appends_lose_nothing(self) -> None:
+        lock_root = Path(self.tmp.name) / 'append-locks'
+        target = self.repo / '.oms' / 'append-probe.jsonl'
+        writer_script = (
+            'import sys\n'
+            'sys.path.insert(0, %r)\n'
+            'from pathlib import Path\n'
+            'from oms_runtime.common import append_jsonl\n'
+            'for i in range(10):\n'
+            '    append_jsonl(Path(%r), {"w": int(sys.argv[1]), "i": i})\n'
+        ) % (str(ROOT / 'scripts' / 'lib'), str(target))
+        env = dict(os.environ)
+        env['OMS_LOCK_DIR'] = str(lock_root)
+        writers = [
+            subprocess.Popen([sys.executable, '-c', writer_script, str(index)], env=env)
+            for index in range(4)
+        ]
+        for writer in writers:
+            self.assertEqual(writer.wait(timeout=120), 0)
+        rows = read_jsonl(target)
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(len({(row['w'], row['i']) for row in rows}), 40)
+
     @unittest.skipUnless(os.name == 'posix', 'holder liveness probing is POSIX-only')
     def test_state_lock_never_displaces_a_live_holder_and_reclaims_dead_ones(self) -> None:
         from oms_runtime.common import file_lock, sha256_text

@@ -151,7 +151,7 @@ def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str) -> Dict[
     stale = _stale(row, repo)
     if stale:
         status = "stale"
-    return {"evidence_ref": evidence_ref(row) or bounded_line(row.get("binding_id", ""), 160), "binding_id": bounded_line(row.get("binding_id", ""), 160), "kind": bounded_line(row.get("kind", row.get("evidence_type", "artifact")), 80), "provider": bounded_line(row.get("provider", ""), 80), "status": status, "stale": stale, "ts": bounded_line(row.get("ts", row.get("created_at", "")), 40), "scope_digest": bounded_line(row.get("scope_digest", row.get("reviewed_diff_sha256", "")), 80), "support": support, "source": bounded_line(row.get("_source", ""), 200), "_ordinal": int(row.get("_ordinal", 0)) if isinstance(row.get("_ordinal", 0), int) else 0}
+    return {"evidence_ref": evidence_ref(row) or bounded_line(row.get("binding_id", ""), 160), "binding_id": bounded_line(row.get("binding_id", ""), 160), "kind": bounded_line(row.get("kind", row.get("evidence_type", "artifact")), 80), "provider": bounded_line(row.get("provider", ""), 80), "status": status, "stale": stale, "ts": bounded_line(row.get("ts", row.get("created_at", "")), 40), "scope_digest": bounded_line(row.get("scope_digest", row.get("reviewed_diff_sha256", row.get("patch_sha256", ""))), 80), "support": support, "source": bounded_line(row.get("_source", ""), 200), "_ordinal": int(row.get("_ordinal", 0)) if isinstance(row.get("_ordinal", 0), int) else 0}
 
 
 def _item_sort_key(item: Mapping[str, Any]) -> tuple:

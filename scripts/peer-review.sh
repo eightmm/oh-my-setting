@@ -883,7 +883,22 @@ if [ "$GATE" -eq 1 ]; then
   if [ "$gate_verify_ran" -eq 1 ]; then
       gate_verify_artifact="$ARTIFACT_DIR/_verify-$slug-$timestamp.md"
       cp "$gate_verify_temp" "$gate_verify_artifact"
-      ma_append_artifact_index "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" || true
+      # The verify run just proved (or refuted) the exact command it ran. The
+      # plan-acceptance criterion is named by that command's own digest, so the
+      # coverage claim is derivable here with no side channel: if the plan's
+      # acceptance command is this command, the row links; if not, the covers
+      # id simply matches no criterion and stays inert.
+      gate_verify_covers="$(OMS_PR_VERIFY_CMD="$VERIFY_CMD" OMS_PR_VERIFY_EXIT="$gate_verify_exit" python3 -c '
+import hashlib, json, os
+command = os.environ.get("OMS_PR_VERIFY_CMD", "")
+digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+status = "verified" if os.environ.get("OMS_PR_VERIFY_EXIT") == "0" else "failed"
+print(json.dumps({
+    "covers": ["criterion-plan-acceptance-" + digest[:10]],
+    "status": status,
+}))' 2>/dev/null || true)"
+      OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
+        "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" || true
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass"
       else
