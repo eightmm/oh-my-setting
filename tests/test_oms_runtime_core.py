@@ -101,6 +101,72 @@ class RuntimeFixture(RuntimeFixtureBase):
             capsule.verify(output)
         self.assertEqual(task_before, sha256_file(self.repo / '.oms' / 'task' / 'current.md'))
 
+    @unittest.skipUnless(os.name == 'posix', 'holder liveness probing is POSIX-only')
+    def test_state_lock_never_displaces_a_live_holder_and_reclaims_dead_ones(self) -> None:
+        from oms_runtime.common import file_lock, sha256_text
+        lock_root = Path(self.tmp.name) / 'locks'
+        target = self.repo / '.oms' / 'lock-probe.jsonl'
+        env = dict(os.environ)
+        env['OMS_LOCK_DIR'] = str(lock_root)
+        hold_script = (
+            'import sys\n'
+            'sys.path.insert(0, %r)\n'
+            'from pathlib import Path\n'
+            'from oms_runtime.common import file_lock\n'
+            'with file_lock(Path(%r), timeout_seconds=30):\n'
+            '    print("held", flush=True)\n'
+            '    sys.stdin.readline()\n'
+            'print("released", flush=True)\n'
+        ) % (str(ROOT / 'scripts' / 'lib'), str(target))
+        contend_script = (
+            'import sys\n'
+            'sys.path.insert(0, %r)\n'
+            'from pathlib import Path\n'
+            'from oms_runtime.common import CoreError, file_lock\n'
+            'try:\n'
+            '    with file_lock(Path(%r), timeout_seconds=2):\n'
+            '        print("acquired", flush=True)\n'
+            'except CoreError as exc:\n'
+            '    sys.exit(exc.exit_code)\n'
+        ) % (str(ROOT / 'scripts' / 'lib'), str(target))
+
+        holder = subprocess.Popen(
+            [sys.executable, '-c', hold_script], env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), 'held')
+            # A live holder is authoritative no matter how impatient the
+            # contender: the short timeout must expire, never displace.
+            contender = subprocess.run(
+                [sys.executable, '-c', contend_script], env=env,
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(contender.returncode, 75, contender.stderr)
+            self.assertNotIn('acquired', contender.stdout)
+        finally:
+            holder.stdin.write('\n')
+            holder.stdin.close()
+            holder.wait(timeout=30)
+        after = subprocess.run(
+            [sys.executable, '-c', contend_script], env=env,
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(after.returncode, 0, after.stderr)
+
+        # A crashed holder leaves a dead PID; the protocol reclaims it instead
+        # of waiting forever, and never by age alone.
+        lock_dir = lock_root / ('runtime-%s.lock' % sha256_text(str(target.resolve(strict=False)))[:32])
+        lock_dir.mkdir(parents=True)
+        reaped = subprocess.Popen(['sh', '-c', 'exit 0'])
+        reaped.wait()
+        (lock_dir / 'owner').write_text('%d.0.0\n' % reaped.pid, encoding='utf-8')
+        (lock_dir / 'pid').write_text('%d\n' % reaped.pid, encoding='utf-8')
+        (lock_dir / 'started').write_text('1\n', encoding='utf-8')
+        os.environ['OMS_LOCK_DIR'] = str(lock_root)
+        try:
+            with file_lock(target, timeout_seconds=10):
+                pass
+        finally:
+            os.environ.pop('OMS_LOCK_DIR', None)
+
     def test_profiles_are_optional_and_install_plan_is_minimal(self) -> None:
         fake_bin = Path(self.tmp.name) / 'bin'
         fake_bin.mkdir()

@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -144,11 +143,14 @@ def _ensure_state_directory_chain(path: Path) -> None:
     for end in range(index + 2, len(parts) + 1):
         candidates.append(current.joinpath(*parts[index + 1 : end]))
     for candidate in candidates:
-        if candidate.exists() or candidate.is_symlink():
-            if candidate.is_symlink() or not candidate.is_dir():
-                raise CoreError("repository state directory must be a real directory: %s" % candidate)
-        else:
-            candidate.mkdir(mode=0o700)
+        if not (candidate.exists() or candidate.is_symlink()):
+            try:
+                candidate.mkdir(mode=0o700)
+                continue
+            except FileExistsError:
+                pass  # a concurrent writer created it first; verify it below
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise CoreError("repository state directory must be a real directory: %s" % candidate)
 
 
 def ensure_private_dir(path: Path) -> Path:
@@ -192,32 +194,84 @@ def atomic_write_json(path: Path, value: Any, *, mode: int = 0o600) -> Path:
     return atomic_write_bytes(path, pretty_json(value), mode=mode)
 
 
+# The lock protocol has exactly one implementation: scripts/lib/file-lock.sh —
+# owner generation, PID plus process-start token, live-holder authority
+# regardless of age, and bakery-elected stale reclaim. A second Python lock
+# here started weaker (it judged staleness by mtime alone, so a slow live
+# holder could be displaced and the departing owner's release could then
+# delete the next acquirer's lock) and would only ever drift from the audited
+# one. Python therefore holds the lock through a bash holder process: the
+# holder's own PID is the recorded identity, so it is alive exactly as long
+# as this process holds the lock, its EXIT trap releases on our crash via
+# stdin EOF, and a SIGKILLed holder leaves a dead PID the protocol reclaims.
+_LOCK_HOLDER_SCRIPT = """
+set -eu
+. "$OMS_RUNTIME_LOCK_LIB"
+oms_file_lock_set_current_identity || exit 75
+owner_id="$OMS_FILE_LOCK_CURRENT_PID.$(date +%s).${RANDOM:-0}"
+oms_file_lock_mkdir_acquire "$OMS_RUNTIME_LOCK_TARGET" "$OMS_RUNTIME_LOCK_DIR" \
+  "$OMS_RUNTIME_LOCK_TIMEOUT" "$owner_id" || exit 75
+release() { oms_file_lock_mkdir_release "$OMS_RUNTIME_LOCK_DIR" "$owner_id"; }
+trap release EXIT
+trap 'trap - EXIT; release; exit 129' HUP
+trap 'trap - EXIT; release; exit 130' INT
+trap 'trap - EXIT; release; exit 143' TERM
+printf 'locked\\n'
+read -r _ || true
+"""
+
+
 @contextlib.contextmanager
 def file_lock(target: Path, timeout_seconds: float = 15.0) -> Iterator[None]:
     root = ensure_private_dir(Path(os.environ.get("OMS_LOCK_DIR", Path.home() / ".cache" / "oh-my-setting" / "locks")).expanduser())
     lock = root / ("runtime-%s.lock" % sha256_text(str(target.resolve(strict=False)))[:32])
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        try:
-            lock.mkdir(mode=0o700)
-            break
-        except FileExistsError:
-            try:
-                stale = time.time() - lock.stat().st_mtime > max(30.0, timeout_seconds * 2)
-            except OSError:
-                stale = False
-            if stale:
-                with contextlib.suppress(OSError):
-                    shutil.rmtree(str(lock))
-                continue
-            if time.monotonic() >= deadline:
-                raise CoreError("timed out waiting for state lock: %s" % target, exit_code=75)
-            time.sleep(0.05)
+    lock_lib = install_root() / "scripts" / "lib" / "file-lock.sh"
+    if not lock_lib.is_file():
+        raise CoreError("state lock library is missing: %s" % lock_lib)
+    timeout = max(1, int(timeout_seconds))
+    environment = dict(os.environ)
+    environment.update({
+        "OMS_RUNTIME_LOCK_LIB": str(lock_lib),
+        "OMS_RUNTIME_LOCK_TARGET": str(target),
+        "OMS_RUNTIME_LOCK_DIR": str(lock),
+        "OMS_RUNTIME_LOCK_TIMEOUT": str(timeout),
+    })
     try:
-        yield
+        holder = subprocess.Popen(
+            ["bash", "-c", _LOCK_HOLDER_SCRIPT],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+        )
+    except OSError as exc:
+        raise CoreError("cannot start the state lock holder (bash required): %s" % exc)
+    try:
+        assert holder.stdout is not None and holder.stdin is not None
+        deadline = time.monotonic() + timeout + 10.0
+        acquired = b""
+        while time.monotonic() < deadline:
+            if holder.poll() is not None:
+                break
+            acquired = holder.stdout.readline()
+            break
+        if acquired.strip() != b"locked":
+            with contextlib.suppress(OSError):
+                holder.stdin.close()
+            holder.wait(timeout=10)
+            raise CoreError("timed out waiting for state lock: %s" % target, exit_code=75)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                holder.stdin.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                holder.wait(timeout=10)
     finally:
-        with contextlib.suppress(OSError):
-            lock.rmdir()
+        if holder.poll() is None:
+            holder.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                holder.wait(timeout=5)
 
 
 def append_jsonl(path: Path, row: Mapping[str, Any]) -> None:
