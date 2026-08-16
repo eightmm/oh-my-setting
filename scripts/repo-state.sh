@@ -90,6 +90,12 @@ APPROVAL_HEALTHY=1
     APPROVAL_HEALTHY=0
     printf '[]\n' > "$RS_TMP/approvals.json"
   }
+RUNTIME_HEALTHY=1
+"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show \
+  > "$RS_TMP/runtime.json" 2>/dev/null || {
+    RUNTIME_HEALTHY=0
+    printf '{}\n' > "$RS_TMP/runtime.json"
+  }
 
 OMS_RS_AUTOUPDATE="$AUTOUPDATE_ATTENTION" \
 OMS_RS_REPO="$REPO" \
@@ -99,6 +105,8 @@ OMS_RS_LIFECYCLE_FILE="$RS_TMP/lifecycle.json" \
 OMS_RS_LIFECYCLE_HEALTHY="$LIFECYCLE_HEALTHY" \
 OMS_RS_APPROVAL_FILE="$RS_TMP/approvals.json" \
 OMS_RS_APPROVAL_HEALTHY="$APPROVAL_HEALTHY" \
+OMS_RS_RUNTIME_FILE="$RS_TMP/runtime.json" \
+OMS_RS_RUNTIME_HEALTHY="$RUNTIME_HEALTHY" \
 OMS_RS_PLAN_TTL="${OMS_PLAN_CLAIM_TTL:-3600}" \
 OMS_RS_HOOK_FAIL_TTL="${OMS_HOOK_FAIL_TTL:-86400}" \
 OMS_RS_REVIEW_TTL="${OMS_PLAN_REVIEW_TTL:-86400}" \
@@ -228,6 +236,24 @@ state["approvals"] = {
     "effective_expired": effective_expired,
     "by_state": approval_by_state,
     "latest_pending": pending_approvals[-5:],
+}
+
+# Typed runtime projection: read-only evidence over the same shared state. An
+# unhealthy or schema-mismatched projection is reported, never guessed at.
+runtime_raw = load_json_file(os.environ["OMS_RS_RUNTIME_FILE"], {})
+runtime_healthy = (
+    os.environ["OMS_RS_RUNTIME_HEALTHY"] == "1" and runtime_raw.get("schema") == 2
+)
+state["runtime"] = {
+    "healthy": runtime_healthy,
+    "schema": runtime_raw.get("schema") if runtime_healthy else None,
+    "state_digest": runtime_raw.get("state_digest") if runtime_healthy else None,
+    "objective": runtime_raw.get("objective", {}) if runtime_healthy else {},
+    "scope": runtime_raw.get("scope", {}) if runtime_healthy else {},
+    "criteria": runtime_raw.get("criteria", []) if runtime_healthy else [],
+    "evidence": runtime_raw.get("evidence", {}) if runtime_healthy else {},
+    "next_actions": runtime_raw.get("next_actions", []) if runtime_healthy else [],
+    "warnings": runtime_raw.get("warnings", []) if runtime_healthy else [],
 }
 
 # --- Active task packet: Goal + Next Step -----------------------------------
@@ -780,6 +806,23 @@ else:
             line("  next: %s" % t["next"])
     else:
         line("\n## Active task: none")
+
+    runtime = state.get("runtime", {})
+    line("\n## Runtime contract")
+    if not runtime.get("healthy"):
+        line("  unavailable or invalid (run: oms runtime doctor --strict)")
+    else:
+        evidence = runtime.get("evidence", {})
+        counts = evidence.get("counts", {})
+        line("  evidence coverage: %.1f%%  complete=%s" % (
+            100.0 * float(evidence.get("coverage", 0.0) or 0.0),
+            "yes" if evidence.get("complete") else "no"))
+        if counts:
+            line("  criteria: %s" % ", ".join(
+                "%s=%s" % (key, value) for key, value in sorted(counts.items())))
+        next_actions = runtime.get("next_actions", [])
+        if next_actions:
+            line("  next: %s" % next_actions[0].get("command", next_actions[0].get("id", "-")))
 
     p = state["plan"]
     if p["present"]:

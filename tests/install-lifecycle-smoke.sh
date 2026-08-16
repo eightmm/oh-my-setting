@@ -668,10 +668,35 @@ chmod +x "$tools_bin/npm"
   XDG_CONFIG_HOME="$tools_home/.config" XDG_CACHE_HOME="$tools_home/.cache" \
   PATH="$tools_bin:$PATH" bash "$upstream/install.sh") > "$TMP/tools-install.txt" 2>&1 ||
   { cat "$TMP/tools-install.txt" >&2; fail "the default install must succeed"; }
-grep -Fq 'tools: ok' "$TMP/tools-install.txt" ||
-  fail "the default install did not run install-tools"
+grep -Fq 'install-profile: ok (core)' "$TMP/tools-install.txt" ||
+  fail "the default install did not apply the core capability profile"
+[ -f "$tools_home/.config/oh-my-setting/capabilities.json" ] ||
+  fail "the default install did not record a capability receipt"
+python3 - "$tools_home/.config/oh-my-setting/capabilities.json" <<'PY_RECEIPT'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["schema"] == 1, row
+assert row["requested"] == ["core"], row
+assert row["primary_provider"] in ("codex", "claude", "agy"), row
+PY_RECEIPT
 grep -Fq 'doctor: ok' "$TMP/tools-install.txt" ||
   fail "the default install did not end on a passing doctor"
+# Capability semantics survive install: the runtime front door answers from
+# the fresh checkout in every ownership mode, so nested scripts/lib packages
+# provably arrived (spec: post-install verification).
+tools_dest="$tools_home/.oh-my-setting"
+(cd "$tools_home" && HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
+  "$tools_dest/scripts/oms" runtime envelope show > "$TMP/tools-runtime.json" 2>"$TMP/tools-runtime.err") ||
+  fail "oms runtime must answer right after a default install: $(cat "$TMP/tools-runtime.err")"
+python3 - "$TMP/tools-runtime.json" <<'PY_RUNTIME'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row.get("schema") == 2, row
+PY_RUNTIME
+(cd "$tools_home" && HOME="$tools_home" "$tools_dest/scripts/oms" list --frontdoor > "$TMP/tools-frontdoor.txt") ||
+  fail "oms list --frontdoor must answer after a default install"
+grep -Fq runtime-core "$TMP/tools-frontdoor.txt" ||
+  fail "the front-door catalog must include the runtime after install"
 # Without the opt-in flag a default install must not widen Antigravity's
 # authority — it reports the denial and names the flag instead.
 grep -Fq 'rerun with --peer-permissions' "$TMP/tools-install.txt" ||

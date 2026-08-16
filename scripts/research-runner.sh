@@ -26,7 +26,7 @@ Gate an ML/research experiment with a compact pre-registration, then launch it
 through run-ledger.sh so the command, commit, exit code, and metrics are kept in
 one ledger row. This is intentionally a thin wrapper, not a tuner or scheduler.
 
-Required options:
+Required options (or --contract, which derives all seven):
   --question TEXT     Specific question this run answers.
   --hypothesis TEXT   Falsifiable claim under test.
   --prediction TEXT   Expected direction/magnitude before seeing results.
@@ -36,6 +36,10 @@ Required options:
   --change TEXT       Single intended independent variable/change.
 
 Options:
+  --contract PATH     ExperimentContract v2 JSON: the pre-registration fields
+                      are derived from the validated contract and the contract
+                      digest is recorded with the run, so the typed contract
+                      and this front door are one system, not two.
   --metrics PATH      Metrics JSON emitted by the command; passed to run-ledger.
   --file PATH         Ledger path. Default: docs/EXPERIMENTS.jsonl.
   --no-gate           Skip run-ledger's scripts/check.sh pre-flight gate.
@@ -61,6 +65,11 @@ need_text() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --contract)
+      [ "$#" -ge 2 ] || fail "--contract requires a path"
+      CONTRACT_PATH="$2"
+      shift 2
+      ;;
     --question)
       [ "$#" -ge 2 ] || fail "--question requires text"
       QUESTION="$2"
@@ -133,6 +142,54 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -n "${CONTRACT_PATH:-}" ]; then
+  # The typed contract is the pre-registration: validate it through the same
+  # code the runtime uses, then derive the seven registration fields. A
+  # contract that does not validate refuses the launch.
+  contract_fields="$(OMS_RR_CONTRACT="$CONTRACT_PATH" OMS_RR_LIB="$ROOT/scripts/lib" python3 - <<'PY_CONTRACT'
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["OMS_RR_LIB"])
+from oms_runtime.common import CoreError, read_json
+from oms_runtime.experiment_contract import validate
+
+try:
+    raw = read_json(Path(os.environ["OMS_RR_CONTRACT"]))
+    contract = validate(raw)
+except CoreError as exc:
+    sys.stderr.write("invalid experiment contract: %s\n" % exc)
+    raise SystemExit(2)
+success = contract.get("success", {})
+success_text = "min_improvement=%s" % success.get("min_improvement", 0.0)
+regressions = sorted(success.get("no_regression", {}))
+if regressions:
+    success_text += "; no_regression=" + ",".join(regressions)
+fields = [
+    contract["question"],
+    contract["hypothesis"],
+    contract["prediction"],
+    json.dumps(contract["baseline"], sort_keys=True)[:300],
+    "%s (%s)" % (contract["primary_metric"], contract["metrics"]["primary"]["direction"]),
+    success_text,
+    contract["treatment"]["independent_change"],
+    contract["contract_digest"],
+]
+for value in fields:
+    print(" ".join(str(value).split()))
+PY_CONTRACT
+)" || fail "contract validation failed: $CONTRACT_PATH"
+  QUESTION="${QUESTION:-$(printf '%s\n' "$contract_fields" | sed -n 1p)}"
+  HYPOTHESIS="${HYPOTHESIS:-$(printf '%s\n' "$contract_fields" | sed -n 2p)}"
+  PREDICTION="${PREDICTION:-$(printf '%s\n' "$contract_fields" | sed -n 3p)}"
+  BASELINE="${BASELINE:-$(printf '%s\n' "$contract_fields" | sed -n 4p)}"
+  METRIC="${METRIC:-$(printf '%s\n' "$contract_fields" | sed -n 5p)}"
+  SUCCESS="${SUCCESS:-$(printf '%s\n' "$contract_fields" | sed -n 6p)}"
+  CHANGE="${CHANGE:-$(printf '%s\n' "$contract_fields" | sed -n 7p)}"
+  CONTRACT_DIGEST="$(printf '%s\n' "$contract_fields" | sed -n 8p)"
+fi
 need_text "--question" "$QUESTION"
 need_text "--hypothesis" "$HYPOTHESIS"
 need_text "--prediction" "$PREDICTION"
@@ -172,6 +229,7 @@ if agent_memory_file_has_sensitive_content "$note_file"; then
 fi
 
 OMS_RR_QUESTION="$QUESTION" OMS_RR_HYPOTHESIS="$HYPOTHESIS" \
+  OMS_RR_CONTRACT_DIGEST="${CONTRACT_DIGEST:-}" \
   OMS_RR_PREDICTION="$PREDICTION" OMS_RR_BASELINE="$BASELINE" \
   OMS_RR_METRIC="$METRIC" OMS_RR_SUCCESS="$SUCCESS" OMS_RR_CHANGE="$CHANGE" \
   python3 - "$research_json_file" <<'PY'
@@ -188,6 +246,8 @@ fields = {
     "success": os.environ["OMS_RR_SUCCESS"],
     "change": os.environ["OMS_RR_CHANGE"],
 }
+if os.environ.get("OMS_RR_CONTRACT_DIGEST"):
+    fields["contract_digest"] = os.environ["OMS_RR_CONTRACT_DIGEST"]
 with open(sys.argv[1], "w", encoding="utf-8", newline="\n") as handle:
     json.dump(fields, handle, ensure_ascii=False)
 PY

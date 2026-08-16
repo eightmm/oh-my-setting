@@ -96,12 +96,17 @@ JOURNAL_STATUS_EXIT=0
 "$ROOT/scripts/journal.sh" status --repo "$REPO" --json \
   > "$TMP/journal.json" 2>/dev/null || JOURNAL_STATUS_EXIT=$?
 [ "$JOURNAL_STATUS_EXIT" = 0 ] || printf '{}' > "$TMP/journal.json"
+RUNTIME_EXIT=0
+"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show \
+  > "$TMP/runtime.json" 2>/dev/null || RUNTIME_EXIT=$?
+[ "$RUNTIME_EXIT" = 0 ] || printf '{}' > "$TMP/runtime.json"
 
 OMS_SV_REPO="$REPO" OMS_SV_TMP="$TMP" OMS_SV_JSON="$AS_JSON" \
 OMS_SV_RUN_EXIT="$RUN_VALIDATE_EXIT" OMS_SV_ARTIFACT_EXIT="$ARTIFACT_EXIT" \
 OMS_SV_LIFECYCLE_EXIT="$LIFECYCLE_EXIT" OMS_SV_APPROVAL_EXIT="$APPROVAL_EXIT" \
 OMS_SV_TASK_STATUS_EXIT="$TASK_STATUS_EXIT" \
 OMS_SV_JOURNAL_STATUS_EXIT="$JOURNAL_STATUS_EXIT" \
+OMS_SV_RUNTIME_EXIT="$RUNTIME_EXIT" \
 python3 <<'PY'
 import glob
 import json
@@ -188,6 +193,21 @@ if journal_status_exit != 0:
     finding("fail", "journal", "journal status failed (exit %d); journal checks were skipped"
             % journal_status_exit,
             "oms journal status --repo %s --json" % repo)
+runtime_exit = int(os.environ["OMS_SV_RUNTIME_EXIT"])
+runtime = load_json("runtime.json")
+if runtime_exit != 0 or runtime.get("schema") != 2:
+    finding("fail", "runtime-core", "typed task/evidence projection failed (exit %d)" % runtime_exit,
+            "oms runtime --repo %s doctor --strict" % repo)
+else:
+    counts = runtime.get("evidence", {}).get("counts", {})
+    stale_count = int(counts.get("stale", 0) or 0)
+    if stale_count:
+        finding("warn", "runtime-core", "%d acceptance criterion/criteria have stale evidence" % stale_count,
+                "oms runtime --repo %s evidence show" % repo)
+    task_verification = runtime.get("task", {}).get("verification")
+    if task_verification == "stale":
+        finding("warn", "runtime-core", "active task verification is stale against the current tree",
+                "oms agent-task --repo %s verify" % repo)
 
 # --- task packet: contradictions the status command tolerates ---
 task = load_json("task.json")
@@ -285,6 +305,7 @@ if as_json:
             "artifact_index_exit": artifact_exit,
             "lifecycle_exit": lifecycle_exit,
             "approval_exit": approval_exit,
+            "runtime_core_exit": runtime_exit,
         },
     }, indent=2, sort_keys=True))
 else:

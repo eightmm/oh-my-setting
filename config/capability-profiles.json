@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "profiles": {
+    "core": {
+      "description": "Local state, typed projections and one coding-agent backend.",
+      "required": ["bash", "git", "python3"],
+      "any_of": [["codex", "claude", "agy"]],
+      "min_present": {},
+      "optional": [],
+      "managed_tools": ["primary-provider"]
+    },
+    "council": {
+      "description": "Cross-provider consultation, review and delegation.",
+      "required": [],
+      "any_of": [],
+      "min_present": {"commands": ["codex", "claude", "agy"], "count": 2},
+      "optional": [],
+      "managed_tools": ["secondary-provider"],
+      "inherits": ["core"]
+    },
+    "github": {
+      "description": "GitHub status, branch publication and Draft PR integration.",
+      "required": ["gh"],
+      "any_of": [],
+      "min_present": {},
+      "optional": [],
+      "managed_tools": ["gh"]
+    },
+    "notion": {
+      "description": "Optional Work Journal mirror to Notion.",
+      "required": ["ntn"],
+      "any_of": [],
+      "min_present": {},
+      "optional": [],
+      "managed_tools": ["ntn"]
+    },
+    "research": {
+      "description": "Reproducible ML/research runs and locked Python environments.",
+      "required": ["uv"],
+      "any_of": [],
+      "min_present": {},
+      "optional": ["nvidia-smi"],
+      "managed_tools": ["uv"]
+    },
+    "hpc": {
+      "description": "Slurm reconciliation and cluster job control.",
+      "required": ["sbatch", "squeue", "sacct"],
+      "any_of": [],
+      "min_present": {},
+      "optional": ["sinfo", "scontrol", "nvidia-smi"],
+      "managed_tools": []
+    },
+    "container": {
+      "description": "Container-isolated runtime backend.",
+      "required": [],
+      "any_of": [["docker", "podman"]],
+      "min_present": {},
+      "optional": [],
+      "managed_tools": []
+    },
+    "remote": {
+      "description": "External remote execution adapter.",
+      "required": [],
+      "any_of": [],
+      "min_present": {},
+      "optional": [],
+      "managed_tools": [],
+      "environment": ["OMS_REMOTE_ADAPTER"]
+    },
+    "full": {
+      "description": "Compatibility profile with all provider, GitHub, Notion and research adapters.",
+      "inherits": ["core", "council", "github", "notion", "research"],
+      "required": [],
+      "any_of": [],
+      "min_present": {},
+      "optional": [],
+      "managed_tools": ["all-providers"]
+    }
+  }
+}

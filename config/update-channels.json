@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "channels": {
+    "stable": {
+      "version": "0.4.0",
+      "ref": "fa1e9e2cf66ee8b9a5adb642a5ef766c1381db9b",
+      "auto_apply": false,
+      "policy": "pinned reviewed commit; promotion requires an exact manifest change"
+    },
+    "edge": {
+      "version": "edge",
+      "ref": "main",
+      "auto_apply": false,
+      "policy": "clean fast-forward development channel"
+    }
+  }
+}

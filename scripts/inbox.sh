@@ -152,6 +152,25 @@ if pending_approvals:
     add(16, "P1", "pending-approval", "%d approval action(s) need a decision or completion" % pending_approvals,
         "oms approval-inbox --repo . list --pending", pending_approvals)
 
+runtime = state.get("runtime", {})
+if not runtime.get("healthy", False):
+    add(7, "P1", "runtime-core-unavailable", "typed task/evidence projection is unavailable",
+        "oms runtime doctor --strict")
+else:
+    evidence_counts = runtime.get("evidence", {}).get("counts", {})
+    failed = int(evidence_counts.get("failed", 0) or 0)
+    stale_evidence = int(evidence_counts.get("stale", 0) or 0)
+    missing_evidence = int(evidence_counts.get("missing", 0) or 0)
+    if failed:
+        add(17, "P1", "runtime-evidence-failed", "%d acceptance criterion/criteria have failing evidence" % failed,
+            "oms runtime evidence show", failed)
+    if stale_evidence:
+        add(18, "P2", "runtime-evidence-stale", "%d acceptance criterion/criteria have stale evidence" % stale_evidence,
+            "oms runtime evidence show", stale_evidence)
+    if missing_evidence:
+        add(19, "P3", "runtime-evidence-missing", "%d acceptance criterion/criteria lack current evidence" % missing_evidence,
+            "oms runtime evidence show", missing_evidence)
+
 ci = state.get("ci", {})
 ci_state = ci.get("state")
 if ci_state == "current" and ci.get("conclusion") in (
@@ -243,11 +262,16 @@ items.sort(key=lambda item: (item["order"], item["code"]))
 for item in items:
     item.pop("order", None)
 actions = [entry for entry in os.environ.get("OMS_INBOX_SAFE", "").split(",") if entry]
+recommended = [
+    {key: action.get(key) for key in ("id", "priority", "authority", "reason", "command")}
+    for action in state.get("runtime", {}).get("next_actions", [])[:3]
+]
 report = {
     "schema": 1,
     "actionable": len(items),
     "safe_actions": actions,
     "items": items,
+    "recommended_actions": recommended,
 }
 if os.environ.get("OMS_INBOX_JSON") == "1":
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
@@ -256,6 +280,10 @@ else:
     for item in items:
         print("%s %s: %s" % (item["priority"], item["code"], item["summary"]))
         print("  next: %s" % item["command"])
+    if recommended:
+        print("runtime recommendations:")
+        for action in recommended:
+            print("  %s: %s" % (action.get("id", "action"), action.get("command", "-")))
     if actions:
         print("safe actions: %s" % ", ".join(actions))
 PY

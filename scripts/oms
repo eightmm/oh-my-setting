@@ -7,7 +7,6 @@ set -euo pipefail
 # symlink installs resolve the checkout from that link, while copy installs
 # recover the canonical checkout from the install receipt.
 
-# macOS readlink has no -f; walk the link chain by hand (bash 3.2 safe).
 resolve_self() {
   local src="$1"
   local dir
@@ -25,11 +24,6 @@ resolve_self() {
 
 SCRIPTS_DIR="$(cd "$(dirname "$(resolve_self "${BASH_SOURCE[0]}")")" && pwd)"
 if [ ! -f "$SCRIPTS_DIR/agent-task.sh" ]; then
-  # A copy install put a real file here, not a link back to the checkout, so
-  # the receipt is the only record of where the scripts live. The same schema-2
-  # shape the rest of the harness validates is required here: an unreadable or
-  # pre-v0.4 receipt must not silently redirect the dispatcher at some other
-  # tree that happens to be named in it.
   receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
   source_root=""
   if command -v python3 >/dev/null 2>&1; then
@@ -49,8 +43,6 @@ except (OSError, ValueError):
 PY
 )"
   fi
-  # Windows Python writes CRLF and this value is about to be used as a path, so
-  # the carriage return would turn a correct checkout into a missing one.
   source_root="${source_root//$'\r'/}"
   if [ -n "$source_root" ] && command -v cygpath >/dev/null 2>&1; then
     source_root="$(cygpath -u "$source_root")"
@@ -58,9 +50,6 @@ PY
   if [ -n "$source_root" ] && [ -f "$source_root/scripts/agent-task.sh" ]; then
     SCRIPTS_DIR="$source_root/scripts"
   else
-    # Failing here names the broken contract. Falling through would report a
-    # missing file for whichever subcommand was asked for, which sends the
-    # reader after the wrong thing entirely.
     echo "error: oms cannot locate its checkout from $SCRIPTS_DIR" >&2
     echo "error: no harness scripts there and no usable install receipt at $receipt" >&2
     echo "error: reinstall, or run scripts/oms from the checkout directly" >&2
@@ -69,28 +58,21 @@ PY
 fi
 
 usage() {
-  cat <<'EOF'
+  cat <<'EOF_USAGE'
 Usage: oms <tool> [args...]
-       oms list
+       oms list [--frontdoor|--all]
        oms help
 
-Dispatch to an oh-my-setting harness tool by name: `oms run-ledger --help`
-runs run-ledger.sh from the install this dispatcher belongs to. `list`
-prints public tools with one-line descriptions; docs/COMPONENTS.md in the
-install describes each subsystem.
+Dispatch to an oh-my-setting harness tool by name. `list` prints every
+compatibility primitive; `list --frontdoor` prints the small stable
+agent-facing catalog. Docs/COMPONENTS.md describes the existing subsystems and
+docs/OMS-RUNTIME.md explains the typed runtime projection.
 
-These tools are the agent's hands, not a human command set: every one of them
-is meant to be run by Codex, Claude Code, or Antigravity in the middle of a
-task. If you are a person reading this, say what you want to your coding
-agent instead — it has the harness, the project state, and these tools.
-EOF
+These tools are the agent's hands, not a human command set. If you are a person
+reading this, say what you want to your coding agent instead.
+EOF_USAGE
 }
 
-# One-line purpose of a tool: the first sentence of its header comment block
-# (before any code line), else of the description under its usage() Usage:
-# block. Blank when a script has neither. The block is joined before the
-# sentence cut so a description never ends mid-line; "e.g."/"i.e." do not
-# terminate the sentence.
 describe() {
   local desc
 
@@ -137,10 +119,6 @@ describe() {
   printf '%s\n' "$desc"
 }
 
-# Public tools are the supported `oms` surface: listed by `oms list` and
-# dispatchable by name. One name per line, sorted, so a diff shows exactly
-# what entered or left the catalog; tests/scripts-smoke.sh reconciles both
-# lists against scripts/*.sh so a rename cannot leave a ghost entry.
 OMS_PUBLIC_TOOLS="
 advise
 agent-call
@@ -173,6 +151,7 @@ gc
 goal-drive
 herdr-adapter
 inbox
+install-profile
 job-digest
 journal
 model-doctor
@@ -197,6 +176,7 @@ repo-state
 research-runner
 run-ledger
 run-reconcile
+runtime-core
 semantic-eval
 session-handoff
 skill-doctor
@@ -210,9 +190,18 @@ uninstall
 update
 "
 
+OMS_FRONTDOOR_TOOLS="
+doctor
+inbox
+journal
+patch-admit
+peer-delegate
+peer-review
+research-runner
+runtime-core
+update
+"
 
-# Newline-delimited membership; tool names come from the validated command
-# line or from scripts/*.sh basenames, so they never carry a newline.
 tool_in_list() {
   case "$2" in
     *"
@@ -226,15 +215,15 @@ is_public_tool() {
   tool_in_list "$1" "$OMS_PUBLIC_TOOLS"
 }
 
-
 cmd_list() {
+  local selected="$1"
   local f
   local name
 
   for f in "$SCRIPTS_DIR"/*.sh; do
     [ -f "$f" ] || continue
     name="$(basename "$f" .sh)"
-    is_public_tool "$name" || continue
+    tool_in_list "$name" "$selected" || continue
     printf '%-26s %s\n' "$name" "$(describe "$f")"
   done
 }
@@ -247,11 +236,15 @@ case "${1:-}" in
   help)
     usage
     echo
-    cmd_list
+    cmd_list "$OMS_PUBLIC_TOOLS"
     exit 0
     ;;
   list)
-    cmd_list
+    case "${2:-}" in
+      ""|--all) cmd_list "$OMS_PUBLIC_TOOLS" ;;
+      --frontdoor) cmd_list "$OMS_FRONTDOOR_TOOLS" ;;
+      *) echo "error: oms list accepts --frontdoor or --all" >&2; exit 2 ;;
+    esac
     exit 0
     ;;
 esac
@@ -265,24 +258,22 @@ case "$TOOL" in
     ;;
 esac
 TOOL="${TOOL%.sh}"
-# Short aliases for the most-typed tools.
-[ "$TOOL" = "run" ] && TOOL="oms-run"      # oms run new|current|show|timeline ...
-[ "$TOOL" = "state" ] && TOOL="repo-state" # oms state
-[ "$TOOL" = "init" ] && TOOL="oms-init"    # oms init
-[ "$TOOL" = "thread" ] && TOOL="agent-thread"    # oms thread list|show|new
+[ "$TOOL" = "run" ] && TOOL="oms-run"
+[ "$TOOL" = "state" ] && TOOL="repo-state"
+[ "$TOOL" = "init" ] && TOOL="oms-init"
+[ "$TOOL" = "thread" ] && TOOL="agent-thread"
+[ "$TOOL" = "runtime" ] && TOOL="runtime-core"
 if ! is_public_tool "$TOOL"; then
-  echo "error: unknown tool: $TOOL (run: oms list)" >&2
+  echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
 fi
 TARGET="$SCRIPTS_DIR/$TOOL.sh"
 if [ ! -f "$TARGET" ]; then
-  echo "error: unknown tool: $TOOL (run: oms list)" >&2
+  echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
 fi
 RC=0
 bash "$TARGET" "$@" || RC=$?
-# Exit 2 is the harness misuse convention, so every tool gets one uniform
-# recovery hint here instead of per-script wording.
 if [ "$RC" -eq 2 ]; then
   echo "hint: run \`oms $TOOL --help\` for usage" >&2
 fi

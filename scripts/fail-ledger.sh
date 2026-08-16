@@ -27,6 +27,7 @@ EXIT_CODE=""
 KIND="cmd"
 SUMMARY=""
 NEXT=""
+FAILURE_CODE=""
 FINGERPRINT=""
 HOW=""
 UNRESOLVED_ONLY=0
@@ -173,6 +174,7 @@ while [ "$#" -gt 0 ]; do
     --kind) [ "$#" -ge 2 ] || fail "--kind requires text"; KIND="$2"; shift 2 ;;
     --summary) [ "$#" -ge 2 ] || fail "--summary requires text"; SUMMARY="$2"; shift 2 ;;
     --next) [ "$#" -ge 2 ] || fail "--next requires text"; NEXT="$2"; shift 2 ;;
+    --failure-code) [ "$#" -ge 2 ] || fail "--failure-code requires a value"; FAILURE_CODE="$2"; shift 2 ;;
     --fingerprint) [ "$#" -ge 2 ] || fail "--fingerprint requires a value"; FINGERPRINT="$2"; shift 2 ;;
     --how) [ "$#" -ge 2 ] || fail "--how requires text"; HOW="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
@@ -230,8 +232,9 @@ case "$ACTION" in
     OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
       OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" OMS_NEXT="$NEXT" \
       OMS_STATE_FP="$(state_fingerprint)" \
+      OMS_RUNTIME_LIB="$ROOT/scripts/lib" OMS_FAILURE_CODE="${FAILURE_CODE:-}" \
       python3 - > "$row_tmp" <<'PY'
-import json, os
+import json, os, sys
 row = {"schema": int(os.environ["OMS_SCHEMA"]), "event": "fail",
        "ts": os.environ["OMS_TS"], "agent": os.environ["OMS_AGENT_L"],
        "fingerprint": os.environ["OMS_FP"], "kind": os.environ["OMS_KIND"],
@@ -241,6 +244,22 @@ if os.environ.get("OMS_SUMMARY"):
     row["summary"] = os.environ["OMS_SUMMARY"]
 if os.environ.get("OMS_NEXT"):
     row["next"] = os.environ["OMS_NEXT"]
+# Canonical taxonomy rides beside the free-form reason: every producer that
+# records a failure funnels through here, so one annotation point covers the
+# provider, supervisor, delegation, admission, plan-run, and goal-drive paths.
+# Classification is enrichment — a ledger that cannot classify still records.
+try:
+    sys.path.insert(0, os.environ["OMS_RUNTIME_LIB"])
+    from oms_runtime.failures import classify
+    judged = classify(
+        "%s %s" % (os.environ["OMS_CMD"], os.environ.get("OMS_SUMMARY", "")),
+        exit_code=int(os.environ["OMS_EXIT"]),
+        explicit=os.environ.get("OMS_FAILURE_CODE", ""),
+    )
+    row["failure_code"] = judged["code"]
+    row["recovery"] = judged["recovery"]
+except Exception:
+    pass
 print(json.dumps(row, ensure_ascii=False, allow_nan=False))
 PY
     oms_with_file_lock "$LEDGER" ledger_append "$LEDGER" "$row_tmp"

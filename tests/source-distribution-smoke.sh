@@ -78,12 +78,68 @@ grep -Fq 'codex-hud-config-smoke.sh' "$workflow" ||
 # cancelled or skipped.
 grep -Fq 'gate:' "$workflow" || fail "workflow must expose one stable gate job"
 grep -Fq 'if: always()' "$workflow" || fail "gate must evaluate failed and cancelled needs"
-grep -Fq 'needs: [lint, focused, smoke_shard, install_e2e, portability_macos, python39]' "$workflow" ||
-  fail "gate must depend on every cross-platform verification job"
-for result in lint focused smoke_shard install_e2e portability_macos python39; do
-  grep -Fq "needs.$result.result" "$workflow" ||
-    fail "gate does not inspect $result result"
-done
+# The requirement is semantic, not textual: every job the workflow defines is a
+# verification job, so the gate must depend on all of them and read each one's
+# result. Matching one rendered `needs:` line instead made the contract hostage
+# to YAML formatting and to the job list of the day — adding a job passed the
+# test while leaving the gate blind to it.
+python3 - "$workflow" <<'PY' || fail "gate must depend on every verification job and inspect each result"
+import pathlib
+import re
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+try:
+    start = next(i for i, line in enumerate(lines) if line.rstrip() == "jobs:")
+except StopIteration:
+    raise SystemExit("workflow defines no jobs block")
+
+jobs = []
+gate_body = []
+current = None
+for line in lines[start + 1:]:
+    if line.strip() and not line.startswith(" "):
+        break
+    header = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+    if header:
+        current = header.group(1)
+        jobs.append(current)
+        continue
+    if current == "gate":
+        gate_body.append(line)
+
+if "gate" not in jobs:
+    raise SystemExit("workflow has no gate job")
+required = set(jobs) - {"gate"}
+if not required:
+    raise SystemExit("workflow defines no verification jobs to gate on")
+
+needs = set()
+for index, line in enumerate(gate_body):
+    inline = re.match(r"^\s{4}needs:\s*\[(.*)\]\s*$", line)
+    if inline:
+        needs = {name.strip() for name in inline.group(1).split(",") if name.strip()}
+        break
+    if re.match(r"^\s{4}needs:\s*$", line):
+        for entry in gate_body[index + 1:]:
+            item = re.match(r"^\s{6}-\s*([A-Za-z0-9_-]+)\s*$", entry)
+            if not item:
+                break
+            needs.add(item.group(1))
+        break
+
+missing = sorted(required - needs)
+if missing:
+    raise SystemExit("gate does not depend on: %s" % ", ".join(missing))
+unknown = sorted(needs - required)
+if unknown:
+    raise SystemExit("gate depends on jobs the workflow does not define: %s" % ", ".join(unknown))
+
+body = "\n".join(gate_body)
+unread = sorted(name for name in required if "needs.%s.result" % name not in body)
+if unread:
+    raise SystemExit("gate does not inspect the result of: %s" % ", ".join(unread))
+PY
 
 for mode in --focused-only --scripts-smoke-only --quick; do
   grep -Fq -- "$mode" "$ROOT/scripts/check.sh" ||
@@ -118,6 +174,9 @@ expected = {
     "execution-profile": "execution-profile-smoke.sh",
     "herdr-adapter": "herdr-adapter-smoke.sh",
     "operator-tools": "operator-tools-smoke.sh",
+    "runtime-core": "runtime-core-smoke.sh",
+    "runtime-core-integration": "runtime-core-integration-smoke.sh",
+    "install-profile": "install-profile-smoke.sh",
 }
 for stage, suite in expected.items():
     invocation = "stage %s bash tests/%s" % (stage, suite)
@@ -137,15 +196,33 @@ if grep -Fq 'OH_MY_SETTING_UPGRADE_GH' "$ROOT/scripts/install-tools.sh"; then
   fail "test-only gh upgrade controls must not be part of the product interface"
 fi
 
-# A working council is the installed product, so the initial installer has no
-# partial-install mode that silently omits provider and service CLIs. Update's
-# separate --no-tools flag remains valid: it means "do not refresh binaries on
-# every daily source update", not "install an incomplete harness".
+# The installed product is capability-scoped: a fresh install provides the
+# core runtime plus exactly one coding-agent provider and records a private
+# capability receipt; --full remains the explicit compatibility footprint.
+# The old all-tools contract had no partial mode; the new one has no silent
+# one — a missing capability is reported unavailable, never faked as success,
+# and there is still no escape hatch that skips tool installation entirely.
 if grep -Fq -- '--no-tools' "$ROOT/install.sh"; then
   fail "initial install must not expose a no-tools escape hatch"
 fi
+grep -Fq 'CAPABILITY_PROFILES="${OH_MY_SETTING_CAPABILITY_PROFILES:-core}"' "$ROOT/install.sh" ||
+  fail "fresh install must default to the core capability profile"
+grep -Fq '"$DEST/scripts/install-profile.sh"' "$ROOT/install.sh" ||
+  fail "capability installs must go through the selective installer"
 grep -Fq '"$DEST/scripts/install-tools.sh"' "$ROOT/install.sh" ||
-  fail "initial install must always invoke install-tools"
+  fail "--full must keep the legacy all-tools path reachable"
+grep -Fq 'CONNECT_SERVICES=0' "$ROOT/install.sh" ||
+  fail "a non-full install must not run unselected service logins"
+# Updating never silently shrinks an existing install: no capability receipt
+# means the legacy full-tool refresh; a receipt updates only what was chosen.
+grep -Fq -- '--reapply --upgrade' "$ROOT/scripts/update.sh" ||
+  fail "update must reapply the recorded capability selection"
+grep -Fq 'install-tools.sh" --upgrade' "$ROOT/scripts/update.sh" ||
+  fail "receipt-less installs must keep the legacy full-tool update"
+# The selective installer itself must enforce the capability semantics the
+# runtime promises: one provider for core, Notion optional, council plural.
+grep -Fq 'selected capabilities remain unavailable' "$ROOT/scripts/install-profile.sh" ||
+  fail "a failed capability check must fail the apply, not masquerade as success"
 if grep -Fq -- '--no-tools' "$ROOT/README.md" || grep -Fq -- '--no-tools' "$ROOT/README.ko.md"; then
   fail "README still documents a partial initial install"
 fi
