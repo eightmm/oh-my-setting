@@ -17,7 +17,7 @@ for path in \
   [ ! -e "$ROOT/$path" ] || fail "obsolete GitHub Release surface remains: $path"
 done
 
-for file in README.md README.ko.md docs/COMPONENTS.md docs/MIGRATION-0.4.md \
+for file in README.md README.ko.md docs/COMPONENTS.md docs/MIGRATION-0.4.md docs/MIGRATION-0.5.md \
     .github/workflows/test.yml scripts/check.sh; do
   if grep -Eiq 'docs/RELEASE|releases/(latest|download)|release-contract-smoke|gen-checksums|tag-driven release|tag 기반 릴리스' "$ROOT/$file"; then
     fail "obsolete Release reference remains: $file"

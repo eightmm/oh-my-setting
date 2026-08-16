@@ -165,10 +165,10 @@ else:
         add(17, "P1", "runtime-evidence-failed", "%d acceptance criterion/criteria have failing evidence" % failed,
             "oms runtime evidence show", failed)
     if stale_evidence:
-        add(18, "P2", "runtime-evidence-stale", "%d acceptance criterion/criteria have stale evidence" % stale_evidence,
+        add(75, "P2", "runtime-evidence-stale", "%d acceptance criterion/criteria have stale evidence" % stale_evidence,
             "oms runtime evidence show", stale_evidence)
     if missing_evidence:
-        add(19, "P3", "runtime-evidence-missing", "%d acceptance criterion/criteria lack current evidence" % missing_evidence,
+        add(85, "P3", "runtime-evidence-missing", "%d acceptance criterion/criteria lack current evidence" % missing_evidence,
             "oms runtime evidence show", missing_evidence)
 
 ci = state.get("ci", {})

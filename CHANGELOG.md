@@ -4,9 +4,28 @@ All notable changes to this project are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 `VERSION` file.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-16
 
 ### Added
+- The canonical failure taxonomy is consumed, not just recorded: `fail-ledger
+  check` surfaces the stored `failure_code` and `recovery` in every refusal
+  built on it (plan-run inherits the policy line with no changes of its own),
+  and goal-drive's park records the codes it knows with certainty instead of
+  leaving the classifier to guess from prose.
+- The capability receipt names every absence doctor and the peer verbs
+  report: selected capability missing = named defect, the chosen core
+  provider is never a mere council seat, unselected capability = "not
+  installed" with the exact add command. Presence always beats the receipt,
+  and a receipt-less home keeps the legacy wording byte for byte.
+- Every plan task projects as a criterion (`[id:]` in the title wins,
+  `plan-task-<id>` otherwise) and the patch-admit receipt carrying its task
+  lineage links automatically as evidence — verified on ADMIT, failed on
+  REJECT, retroactive over historical rows, inert when no current plan task
+  matches.
+- Writer protocol parity: `atomic_write_bytes` persists renames in their
+  directory on POSIX (the one durability gap against the root durable-jsonl
+  writer), and a conformance test drives both writer stacks over the same
+  adversarial shapes so parity is a checked contract.
 - Three structural refusals that autopilot campaigns previously paid a full
   worker run to discover, each reviewed by a peer before landing.
   `goal-drive` no longer reports `done` on a cycle-1 acceptance pass that

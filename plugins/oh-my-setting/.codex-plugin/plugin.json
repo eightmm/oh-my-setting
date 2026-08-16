@@ -1,6 +1,6 @@
 {
   "name": "oh-my-setting",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Shared coding-agent routing, handoff, guard, and content-free telemetry hooks for Codex.",
   "author": {
     "name": "oh-my-setting"

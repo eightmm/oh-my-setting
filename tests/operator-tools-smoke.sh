@@ -263,6 +263,10 @@ assert isinstance(row["approval"]["items"], list), row
 assert row["telemetry"]["operations"]["eligible"] == 3, row
 assert row["telemetry"]["usage"]["provider_reported_tokens"]["total"] == 120, row
 assert row["inbox"]["items"][0]["priority"] == "P1", row
+# Plan tasks now project as criteria, so a plan fixture with no evidence
+# carries an advisory runtime item — present, and never ahead of a P1.
+codes = [item["code"] for item in row["inbox"]["items"]]
+assert "runtime-evidence-missing" in codes, row
 PY
 text="$(bash "$ROOT/scripts/ops-cockpit.sh" --repo "$repo")"
 printf '%s\n' "$text" | grep -Fq 'ops cockpit:' || fail "cockpit text header missing"
