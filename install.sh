@@ -10,10 +10,16 @@ GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 # Default auto: skills that plan GPU/Slurm/tsp work read local/machine.md, so
 # every install writes the local-only snapshot unless explicitly opted out.
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
-# The provider CLIs, gh, and ntn are the executable half of the harness. An
-# initial install without them is an incomplete product, so setup fails rather
-# than recording a partial profile.
+# Tool installation is capability-scoped: a fresh install provides the core
+# runtime (Bash, Git, Python, one coding-agent provider) and records a private
+# capability receipt; optional capabilities (council, github, notion, research,
+# hpc, container, remote) install only when selected, and --full remains the
+# explicit compatibility path with the historical all-tools footprint. Missing
+# optional capabilities report as unavailable — never as success.
 INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
+CAPABILITY_PROFILES="${OH_MY_SETTING_CAPABILITY_PROFILES:-core}"
+PRIMARY_PROVIDER="${OH_MY_SETTING_PRIMARY_PROVIDER:-auto}"
+TOOLS_FULL=0
 CONNECT_SERVICES="${OH_MY_SETTING_CONNECT_SERVICES:-auto}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
 # The apply-mode update trigger is a default, not an opt-in: a harness that
@@ -33,12 +39,22 @@ OMS_INSTALL_LIFECYCLE_PROTOCOL=1
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--full] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
+Usage: install.sh [--ref REF] [--profile NAME]... [--primary-provider NAME] [--full] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
 
 Options:
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
-  --full              Install provider tools, machine snapshot, and update timer.
-  --tools             Install Node, uv, provider CLIs, gh, and ntn (already the default).
+  --profile NAME      Add a capability profile to the default core install:
+                      council, github, notion, research, hpc, container,
+                      remote, or full. Repeatable. Fresh default: core (Bash,
+                      Git, Python, one coding-agent provider, no service
+                      logins); everything else reports as unavailable until
+                      selected.
+  --primary-provider NAME  codex, claude, or agy for the core provider
+                      (default auto: reuse an installed one, else codex).
+  --full              Explicit compatibility install: the historical all-tools
+                      council footprint, machine snapshot, and update timer.
+  --tools             Install the full council toolset (Node, uv, provider
+                      CLIs, gh, ntn) without the rest of --full.
   --connect-services  Require interactive gh and Notion login plus journal linking.
   --no-connect-services
                       Skip account login and automatic journal discovery.
@@ -94,6 +110,7 @@ while [ "$#" -gt 0 ]; do
     --full)
       PROFILE=full
       INSTALL_TOOLS=1
+      TOOLS_FULL=1
       GENERATE_MACHINE=auto
       GENERATE_SLURM=auto
       AUTO_UPDATE=1
@@ -101,6 +118,21 @@ while [ "$#" -gt 0 ]; do
     --tools)
       [ "$PROFILE" = "full" ] || PROFILE=custom
       INSTALL_TOOLS=1
+      TOOLS_FULL=1
+      ;;
+    --profile)
+      [ "$#" -ge 2 ] || { echo "error: --profile requires a value" >&2; exit 2; }
+      [ "$PROFILE" = "full" ] || PROFILE=custom
+      case ",$CAPABILITY_PROFILES," in
+        *",$2,"*) ;;
+        *) CAPABILITY_PROFILES="$CAPABILITY_PROFILES,$2" ;;
+      esac
+      shift
+      ;;
+    --primary-provider)
+      [ "$#" -ge 2 ] || { echo "error: --primary-provider requires a value" >&2; exit 2; }
+      PRIMARY_PROVIDER="$2"
+      shift
       ;;
     --connect-services)
       [ "$PROFILE" = "full" ] || PROFILE=custom
@@ -175,6 +207,28 @@ case "$PEER_PERMISSIONS" in
   0|1) ;;
   *) echo "error: OH_MY_SETTING_PEER_PERMISSIONS must be 0 or 1" >&2; exit 2 ;;
 esac
+IFS=',' read -r -a _capability_list <<EOF_CAPS
+$CAPABILITY_PROFILES
+EOF_CAPS
+for _capability in "${_capability_list[@]}"; do
+  case "$_capability" in
+    core|council|github|notion|research|hpc|container|remote|full) ;;
+    *)
+      echo "error: unknown capability profile: $_capability" >&2
+      exit 2
+      ;;
+  esac
+done
+case "$PRIMARY_PROVIDER" in
+  auto|codex|claude|agy) ;;
+  *) echo "error: --primary-provider must be auto, codex, claude, or agy" >&2; exit 2 ;;
+esac
+# Default service connection is none: the installer never runs a service login
+# the user did not select. --full keeps the historical auto behaviour, and an
+# explicit --connect-services remains an explicit choice.
+if [ "$TOOLS_FULL" -eq 0 ] && [ "$CONNECT_SERVICES" = auto ]; then
+  CONNECT_SERVICES=0
+fi
 case "$CONNECT_SERVICES" in
   1) CONNECT_SERVICES=required ;;
   auto|required|0) ;;
@@ -868,8 +922,20 @@ trap install_lifecycle_exit EXIT
 . "$DEST/scripts/lib/platform.sh"
 ensure_python3
 
-"$DEST/scripts/install-tools.sh"
-export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
+if [ "$TOOLS_FULL" -eq 1 ]; then
+  # Explicit compatibility: the historical all-tools council footprint.
+  "$DEST/scripts/install-tools.sh"
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
+else
+  install_profile_args=(--apply --primary-provider "$PRIMARY_PROVIDER")
+  for _capability in "${_capability_list[@]}"; do
+    install_profile_args+=(--profile "$_capability")
+  done
+  "$DEST/scripts/install-profile.sh" "${install_profile_args[@]}"
+  # A core install treats absent optional CLIs as unavailable capabilities,
+  # not as a broken install; the capability receipt records what was chosen.
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
+fi
 load_user_tool_paths
 
 case "$CODEX_PLUGIN" in

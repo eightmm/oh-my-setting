@@ -526,7 +526,15 @@ fi
 TRANSACTION_ACTIVE=0
 
 if [ "$SKIP_TOOLS" != "1" ]; then
-  "$ROOT/scripts/install-tools.sh" --upgrade
+  # An install that chose its capabilities updates exactly that choice; an
+  # install from before the capability receipt keeps the legacy full-tool
+  # refresh, so updating never silently shrinks what someone already has.
+  capability_receipt="${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
+  if [ -f "$capability_receipt" ] && [ ! -L "$capability_receipt" ]; then
+    "$ROOT/scripts/install-profile.sh" --reapply --upgrade
+  else
+    "$ROOT/scripts/install-tools.sh" --upgrade
+  fi
 fi
 if [ "$AUTO_UPDATE" = "1" ]; then
   "$ROOT/scripts/install-autoupdate.sh"

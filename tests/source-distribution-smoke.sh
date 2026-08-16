@@ -196,15 +196,33 @@ if grep -Fq 'OH_MY_SETTING_UPGRADE_GH' "$ROOT/scripts/install-tools.sh"; then
   fail "test-only gh upgrade controls must not be part of the product interface"
 fi
 
-# A working council is the installed product, so the initial installer has no
-# partial-install mode that silently omits provider and service CLIs. Update's
-# separate --no-tools flag remains valid: it means "do not refresh binaries on
-# every daily source update", not "install an incomplete harness".
+# The installed product is capability-scoped: a fresh install provides the
+# core runtime plus exactly one coding-agent provider and records a private
+# capability receipt; --full remains the explicit compatibility footprint.
+# The old all-tools contract had no partial mode; the new one has no silent
+# one — a missing capability is reported unavailable, never faked as success,
+# and there is still no escape hatch that skips tool installation entirely.
 if grep -Fq -- '--no-tools' "$ROOT/install.sh"; then
   fail "initial install must not expose a no-tools escape hatch"
 fi
+grep -Fq 'CAPABILITY_PROFILES="${OH_MY_SETTING_CAPABILITY_PROFILES:-core}"' "$ROOT/install.sh" ||
+  fail "fresh install must default to the core capability profile"
+grep -Fq '"$DEST/scripts/install-profile.sh"' "$ROOT/install.sh" ||
+  fail "capability installs must go through the selective installer"
 grep -Fq '"$DEST/scripts/install-tools.sh"' "$ROOT/install.sh" ||
-  fail "initial install must always invoke install-tools"
+  fail "--full must keep the legacy all-tools path reachable"
+grep -Fq 'CONNECT_SERVICES=0' "$ROOT/install.sh" ||
+  fail "a non-full install must not run unselected service logins"
+# Updating never silently shrinks an existing install: no capability receipt
+# means the legacy full-tool refresh; a receipt updates only what was chosen.
+grep -Fq -- '--reapply --upgrade' "$ROOT/scripts/update.sh" ||
+  fail "update must reapply the recorded capability selection"
+grep -Fq 'install-tools.sh" --upgrade' "$ROOT/scripts/update.sh" ||
+  fail "receipt-less installs must keep the legacy full-tool update"
+# The selective installer itself must enforce the capability semantics the
+# runtime promises: one provider for core, Notion optional, council plural.
+grep -Fq 'selected capabilities remain unavailable' "$ROOT/scripts/install-profile.sh" ||
+  fail "a failed capability check must fail the apply, not masquerade as success"
 if grep -Fq -- '--no-tools' "$ROOT/README.md" || grep -Fq -- '--no-tools' "$ROOT/README.ko.md"; then
   fail "README still documents a partial initial install"
 fi

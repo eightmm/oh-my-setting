@@ -125,6 +125,18 @@ unlink_all() {
     rm -f "$receipt"
     echo "removed install receipt $receipt"
   fi
+  # The capability receipt lives beside the install receipt and belongs to the
+  # same install: leaving it behind would steer the next install's updater at
+  # a selection this checkout no longer owns.
+  capability_receipt="${OMS_CAPABILITY_RECEIPT:-$(dirname "$receipt")/capabilities.json}"
+  if [ -f "$capability_receipt" ] && [ ! -L "$capability_receipt" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would remove capability receipt $capability_receipt"
+    else
+      rm -f "$capability_receipt"
+      echo "removed capability receipt $capability_receipt"
+    fi
+  fi
   if oms_install_python_shim_owned "$python_shim"; then
     if [ "$DRY_RUN" = "1" ]; then
       echo "would remove managed Python shim $python_shim"
