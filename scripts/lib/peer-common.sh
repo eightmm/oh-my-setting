@@ -2111,7 +2111,27 @@ run_provider() {
     printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
     printf '\n\n## Exit\n\n127\n' >> "$artifact"
     ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 127 "$artifact" "" "$prompt_file" || true
-    echo "skipped: $provider missing ($binary) -> $artifact"
+    # A capability receipt turns the generic absence into its actual name: on
+    # a core install the missing seat is an uninstalled council capability,
+    # not a defect. Behavior is identical either way — only the message says
+    # what to do about it. No receipt, no change.
+    capability_receipt="${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
+    if [ -f "$capability_receipt" ] && [ ! -L "$capability_receipt" ] &&
+      ! python3 - "$capability_receipt" 2>/dev/null <<'PY_SEAT'
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+    requested = row.get("requested") if row.get("schema") == 1 else None
+    values = set(requested) if isinstance(requested, list) else set()
+except (OSError, ValueError):
+    raise SystemExit(0)
+raise SystemExit(0 if values & {"council", "full"} else 1)
+PY_SEAT
+    then
+      echo "skipped: $provider missing ($binary) — council capability not installed (oms install-profile --apply --profile council) -> $artifact"
+    else
+      echo "skipped: $provider missing ($binary) -> $artifact"
+    fi
     return 127
   fi
 

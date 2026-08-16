@@ -364,6 +364,68 @@ test_clean_home_reports_no_displaced_config() {
 # enforces: adding a surface and forgetting the bump leaves every stale install
 # certifying itself. This hashes the list and requires both literals to move
 # together.
+# A capability receipt names each absence: a selected capability's missing
+# tool is a defect, an unselected one is simply not installed (with the add
+# command), the chosen core provider is never a mere council seat, and a
+# receipt-less home keeps the exact legacy wording.
+run_capability_doctor() {  # HOME -> stdout
+  env -u NVM_DIR HOME="$1" \
+    XDG_CONFIG_HOME="$1/.config" \
+    OMS_CLAUDE_SETTINGS="$1/.claude/settings.json" \
+    OMS_INSTALL_RECEIPT="$1/.config/oh-my-setting/install.json" \
+    OMS_CAPABILITY_RECEIPT="$1/.config/oh-my-setting/capabilities.json" \
+    OMS_DOCTOR_PROJECT_DIR="$1/repo" \
+    OH_MY_SETTING_MODEL_DOCTOR=0 \
+    OH_MY_SETTING_CODEX_PLUGIN=0 \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    PATH="/usr/bin:/bin" \
+    bash "$ROOT/scripts/doctor.sh" 2>&1 || true
+}
+
+test_capability_receipt_names_tool_absences() {
+  local home="$TMP/capability"
+  local out
+
+  make_fixture "$home" rows 1
+  cat > "$home/.config/oh-my-setting/capabilities.json" <<'EOF_CAP'
+{"schema":1,"requested":["core","research"],"primary_provider":"codex"}
+EOF_CAP
+  out="$(run_capability_doctor "$home")"
+
+  case "$out" in
+    *"missing: command uv (selected capability research)"*) ;;
+    *) printf '%s\n' "$out"; fail "a selected capability's absent tool must be a named defect" ;;
+  esac
+  case "$out" in
+    *"missing: command codex (selected core provider)"*) ;;
+    *) printf '%s\n' "$out"; fail "the chosen core provider's absence must be a defect, not a council note" ;;
+  esac
+  case "$out" in
+    *"capability notion not installed: command ntn (add it: oms install-profile --apply --profile notion)"*) ;;
+    *) printf '%s\n' "$out"; fail "an unselected capability must be reported as not installed, with the add command" ;;
+  esac
+  case "$out" in
+    *"capability council not installed: command claude"*) ;;
+    *) printf '%s\n' "$out"; fail "a non-primary provider seat must read as the uninstalled council" ;;
+  esac
+}
+
+test_receiptless_home_keeps_legacy_wording() {
+  local home="$TMP/receiptless"
+  local out
+
+  make_fixture "$home" rows 1
+  out="$(run_capability_doctor "$home")"
+
+  case "$out" in
+    *"optional missing: command ntn"*) ;;
+    *) printf '%s\n' "$out"; fail "a receipt-less home must keep the legacy optional-missing wording" ;;
+  esac
+  case "$out" in
+    *"capability "*) printf '%s\n' "$out"; fail "no capability wording may appear without a receipt" ;;
+  esac
+}
+
 test_expected_surface_list_is_bump_gated() {
   local computed
   local source_schema
@@ -416,5 +478,7 @@ test_install_stamps_hooks_schema_into_the_receipt
 test_displaced_user_config_is_reported
 test_clean_home_reports_no_displaced_config
 test_expected_surface_list_is_bump_gated
+test_capability_receipt_names_tool_absences
+test_receiptless_home_keeps_legacy_wording
 
 echo "doctor-surfaces-smoke: ok"

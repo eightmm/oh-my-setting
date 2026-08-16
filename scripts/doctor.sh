@@ -526,15 +526,86 @@ load_user_tool_paths() {
   fi
 }
 
+# Which capability owns a managed tool, for receipt-aware absence messages.
+# Providers map to council: core needs only one of them, and a core install
+# reports the absent seats as an uninstalled council rather than a defect.
+capability_of_tool() {
+  case "$1" in
+    gh) echo github ;;
+    ntn) echo notion ;;
+    uv|uvx) echo research ;;
+    claude|codex|agy) echo council ;;
+    *) echo "" ;;
+  esac
+}
+
+CAPABILITY_RECEIPT_PATH="${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
+CAPABILITY_SELECTED=""
+CAPABILITY_PRIMARY=""
+if [ -f "$CAPABILITY_RECEIPT_PATH" ] && [ ! -L "$CAPABILITY_RECEIPT_PATH" ]; then
+  CAPABILITY_SELECTED="$(python3 - "$CAPABILITY_RECEIPT_PATH" 2>/dev/null <<'PY_RECEIPT'
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+    requested = row.get("requested")
+    if row.get("schema") == 1 and isinstance(requested, list):
+        print(",".join(str(item) for item in requested if isinstance(item, str)))
+        primary = row.get("primary_provider")
+        print(primary if isinstance(primary, str) else "")
+except (OSError, ValueError):
+    pass
+PY_RECEIPT
+)"
+  CAPABILITY_PRIMARY="$(printf '%s\n' "$CAPABILITY_SELECTED" | sed -n 2p)"
+  CAPABILITY_SELECTED="$(printf '%s\n' "$CAPABILITY_SELECTED" | sed -n 1p)"
+  CAPABILITY_SELECTED="${CAPABILITY_SELECTED//$'\r'/}"
+  CAPABILITY_PRIMARY="${CAPABILITY_PRIMARY//$'\r'/}"
+fi
+
+capability_selected() {
+  case ",$CAPABILITY_SELECTED," in
+    *",$1,"*|*",full,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 check_cmd() {
+  local capability
   if command -v "$1" >/dev/null 2>&1; then
+    # Presence beats the receipt: an installed CLI is usable whether or not
+    # its capability was selected.
     echo "ok: command $1"
-  elif [ "$REQUIRE_TOOLS" = "1" ]; then
+    return 0
+  fi
+  if [ "$REQUIRE_TOOLS" = "1" ]; then
     echo "missing: command $1"
     FAILED=1
-  else
-    echo "optional missing: command $1"
+    return 0
   fi
+  # With a capability receipt the absence has a name: a tool of a SELECTED
+  # capability is genuinely broken, while an unselected capability is simply
+  # not installed — say which, and how to add it. Without a receipt the
+  # behavior stays exactly what it always was.
+  if [ -n "$CAPABILITY_SELECTED" ]; then
+    # The chosen core provider is not an optional council seat: its absence
+    # is a broken selected capability even when council was never requested.
+    if [ -n "$CAPABILITY_PRIMARY" ] && [ "$1" = "$CAPABILITY_PRIMARY" ]; then
+      echo "missing: command $1 (selected core provider)"
+      FAILED=1
+      return 0
+    fi
+    capability="$(capability_of_tool "$1")"
+    if [ -n "$capability" ]; then
+      if capability_selected "$capability"; then
+        echo "missing: command $1 (selected capability $capability)"
+        FAILED=1
+      else
+        echo "capability $capability not installed: command $1 (add it: oms install-profile --apply --profile $capability)"
+      fi
+      return 0
+    fi
+  fi
+  echo "optional missing: command $1"
 }
 
 check_optional_cmd() {
