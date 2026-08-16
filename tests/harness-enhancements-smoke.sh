@@ -519,7 +519,7 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
   failed-content) printf 'after\n' > "$root/.oms/state"; exit 29 ;;
   hooks) mkdir -p "$root/.oms/hooks"; printf 'ambient\n' >> "$root/.oms/hooks/events.jsonl" ;;
   journal) mkdir -p "$root/.oms/work-journal"; printf 'ambient\n' >> "$root/.oms/work-journal/index.json" ;;
-  ci) printf 'ambient\n' >> "$root/.oms/ci.jsonl" ;;
+  ci) printf 'ambient\n' >> "$root/.oms/ci.jsonl"; printf '*\n' > "$root/.oms/.gitignore" ;;
   nested-ci) mkdir -p "$root/.oms/plan"; printf 'leak\n' >> "$root/.oms/plan/ci.jsonl" ;;
 esac
 EOF

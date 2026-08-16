@@ -8,8 +8,45 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import RUNTIME_SCHEMA
 from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, read_json, read_jsonl, sha256_bytes, sha256_file, utc_now
+from .common import install_root, run_output
 from .execution import run as run_execution
 from .experiment_contract import load_contract, run_index, validate
+import json as _json
+import subprocess as _subprocess
+
+
+def _run_through_ledger(repo, run_id, command, metrics_path, experiment_id, arm, seed, timeout_seconds):
+    ledger_script = install_root() / 'scripts' / 'run-ledger.sh'
+    if not ledger_script.is_file():
+        raise CoreError('run-ledger.sh is required for trusted-local experiment runs')
+    ledger_file = repo / 'docs' / 'EXPERIMENTS.jsonl'
+    argv = ['bash', str(ledger_script), '--file', str(ledger_file),
+            '--note', 'experiment=%s arm=%s seed=%d contract-run' % (experiment_id, arm, seed)]
+    if metrics_path.exists():
+        argv += ['--metrics', str(metrics_path)]
+    argv += ['--'] + [str(part) for part in command]
+    environment = dict(__import__('os').environ)
+    environment['OMS_OPERATION_ID'] = run_id
+    try:
+        proc = _subprocess.run(argv, cwd=str(repo), env=environment,
+                               stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL,
+                               timeout=timeout_seconds)
+        rc = proc.returncode
+    except (_subprocess.TimeoutExpired, OSError) as exc:
+        raise CoreError('run-ledger execution failed: %s' % exc)
+    ledger_id = ''
+    try:
+        for line in ledger_file.read_text(encoding='utf-8').splitlines():
+            if not line.strip():
+                continue
+            row = _json.loads(line)
+            if row.get('operation_id') == run_id:
+                ledger_id = str(row.get('id', ''))
+    except (OSError, ValueError):
+        ledger_id = ''
+    if not ledger_id:
+        raise CoreError('the run ledger did not record this run; refusing an unrecorded experiment result')
+    return ({'receipt': None, 'operation_id': run_id, 'ledger_id': ledger_id}, rc)
 
 def _metric_value(metrics: Mapping[str, Any], name: str) -> float:
     value = metrics.get(name)
@@ -46,7 +83,19 @@ def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path
     if before is not None and (not allow_existing_metrics):
         raise CoreError('metrics file already exists; refuse stale reuse unless --allow-existing-metrics is explicit')
     run_id = 'experiment-run-' + uuid.uuid4().hex
-    receipt, rc = run_execution(profile, repo, command, timeout_seconds=timeout_seconds, image=image, adapter=adapter, worktree=worktree, log_path=repo / '.oms' / 'experiments' / 'logs' / (run_id + '.log'))
+    ledger_id = ''
+    if profile == 'trusted-local':
+        # One run, one authority: the existing run ledger executes the command
+        # and owns the record (command, commit, duration, exit); the runtime
+        # row below is a projection linked by the shared operation id, never a
+        # second ledger with its own identity for the same run.
+        receipt, rc = _run_through_ledger(repo, run_id, command, metrics_path, experiment_id, arm, seed, timeout_seconds)
+        ledger_id = receipt.get('ledger_id', '')
+    else:
+        # Backend-isolated profiles execute through the runtime backend so the
+        # isolation receipt is real; the ledger linkage is honestly absent and
+        # recorded as such rather than fabricated.
+        receipt, rc = run_execution(profile, repo, command, timeout_seconds=timeout_seconds, image=image, adapter=adapter, worktree=worktree, log_path=repo / '.oms' / 'experiments' / 'logs' / (run_id + '.log'))
     after = _metrics_snapshot(metrics_path)
     stale_metrics = before is not None and after is not None and (before.get('sha256') == after.get('sha256')) and (before.get('size') == after.get('size'))
     metrics = None if stale_metrics else read_json(metrics_path, default=None)
@@ -70,7 +119,7 @@ def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path
         metric_error = 'metrics file is missing or invalid'
     metrics_valid = rc == 0 and (not stale_metrics) and (metric_value is not None) and (not missing_required_metrics)
     effective_exit = rc if rc != 0 else 0 if metrics_valid else 3
-    row = {'schema': 1, 'run_id': run_id, 'created_at': utc_now(), 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'arm': arm, 'seed': seed, 'execution_receipt': receipt.get('receipt'), 'execution_operation_id': receipt.get('operation_id'), 'exit': effective_exit, 'command_exit': rc, 'metric': contract['primary_metric'], 'metric_value': metric_value, 'metrics': numeric, 'metrics_digest': after.get('sha256') if after and (not stale_metrics) else None, 'metric_error': metric_error, 'missing_required_metrics': missing_required_metrics, 'metrics_valid': metrics_valid, 'stale_metrics': stale_metrics}
+    row = {'schema': 1, 'run_id': run_id, 'created_at': utc_now(), 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'arm': arm, 'seed': seed, 'execution_receipt': receipt.get('receipt'), 'execution_operation_id': receipt.get('operation_id'), 'ledger_id': ledger_id or None, 'exit': effective_exit, 'command_exit': rc, 'metric': contract['primary_metric'], 'metric_value': metric_value, 'metrics': numeric, 'metrics_digest': after.get('sha256') if after and (not stale_metrics) else None, 'metric_error': metric_error, 'missing_required_metrics': missing_required_metrics, 'metrics_valid': metrics_valid, 'stale_metrics': stale_metrics}
     append_jsonl(run_index(repo), row)
     return (row, effective_exit)
 

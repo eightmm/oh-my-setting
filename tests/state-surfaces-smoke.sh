@@ -495,6 +495,7 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
   printf 'row\n' > "$state/hooks/turn.jsonl"
   printf 'row\n' > "$state/work-journal/today.jsonl"
   printf 'row\n' > "$state/ci.jsonl"
+  printf '*\n' > "$state/.gitignore"
   printf 'row\n' > "$state/failures.jsonl"
   printf 'row\n' > "$state/plan/tasks.json"
   python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out" ||
@@ -503,7 +504,7 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
   grep -q '"failures.jsonl"' "$out" ||
     fail "failures.jsonl must stay covered: a forgotten --repo writes it"
   grep -q '"plan/tasks.json"' "$out" || fail "plan state must stay covered"
-  for ambient in ci.jsonl hooks work-journal; do
+  for ambient in ci.jsonl .gitignore hooks work-journal; do
     if grep -q "\"$ambient" "$out"; then
       fail "$ambient is written by the live session and must not be inventoried"
     fi
@@ -511,9 +512,12 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
 
   # A nested path that merely repeats an ambient name is not ambient.
   printf 'row\n' > "$state/plan/ci.jsonl"
+  printf '*\n' > "$state/plan/.gitignore"
   python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out"
   grep -q '"plan/ci.jsonl"' "$out" ||
     fail "the exclusion must be anchored at the top level, not by name anywhere"
+  grep -q '"plan/.gitignore"' "$out" ||
+    fail "a nested .gitignore is state, not the top-level ownership marker"
 }
 
 # --- claude/codex registration ---------------------------------------------

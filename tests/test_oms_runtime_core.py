@@ -277,6 +277,17 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(summary['verdict'], 'supported')
         self.assertAlmostEqual(summary['improvement'], 0.2)
         self.assertTrue(summary['no_regression']['memory']['passed'])
+        # One run, one authority: every trusted-local run landed in the
+        # existing run ledger, and the runtime row is a projection linked by
+        # the ledger row's own id — the same run never lives under two names.
+        ledger_rows = [json.loads(line) for line in
+                       (self.repo / 'docs' / 'EXPERIMENTS.jsonl').read_text(encoding='utf-8').splitlines()
+                       if line.strip()]
+        runtime_rows = read_jsonl(self.repo / '.oms' / 'experiments' / 'runs.jsonl')
+        self.assertEqual(len(ledger_rows), len(runtime_rows))
+        ledger_by_op = {row['operation_id']: row['id'] for row in ledger_rows}
+        for row in runtime_rows:
+            self.assertEqual(row['ledger_id'], ledger_by_op[row['run_id']])
 
     def test_release_failure_taxonomy_and_benchmark(self) -> None:
         stable = release.resolve(self.repo, 'stable')

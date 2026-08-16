@@ -25,7 +25,12 @@ import stat
 import sys
 
 AMBIENT_DIRS = {"hooks", "work-journal"}
-AMBIENT_FILES = {"ci.jsonl"}
+# .gitignore is the constant ownership marker ("*") every harness tool drops
+# when it first touches a repository's .oms; the ambient CI watcher creates it
+# together with ci.jsonl, so excluding one without the other still failed a
+# green gate. A suite that wrote only this marker left no state behind, and
+# any real leak brings its own entries.
+AMBIENT_FILES = {"ci.jsonl", ".gitignore"}
 
 
 def inventory(root: str) -> list[tuple]:

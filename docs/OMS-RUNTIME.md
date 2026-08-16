@@ -264,6 +264,14 @@ logs, patches, credentials, environment variables, machine paths, or remote
 publication authority. Import is advisory and cannot modify task, plan,
 approval, or Git state.
 
+The capsule and `session-handoff` split one responsibility two ways:
+`session-handoff` preserves **provider session continuity** — what one CLI's
+session was doing, for the next session of that CLI on the same machine. The
+capsule preserves **machine-independent project continuity** — sanitized
+objective/criteria/evidence state that survives moving to another machine
+entirely. An imported capsule is a reference candidate for the next session,
+used only after the current Git state and local evidence are re-verified.
+
 ## Failure taxonomy
 
 ```bash

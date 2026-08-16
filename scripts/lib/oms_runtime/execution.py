@@ -187,7 +187,13 @@ def run(profile: str, repo: Path, command: Sequence[str], *, timeout_seconds: in
         effective = list(command)
         popen_cwd: Optional[str] = str(cwd)
     elif profile == 'isolated':
-        effective = _container_command(_container_engine(), image, repo, worktree, command, allow_network, memory_mb=memory_mb, cpus=float(cpus), pids_limit=pids_limit, tmpfs_mb=tmpfs_mb)
+        engine = _container_engine()
+        if not engine or not image:
+            # Never fall back to trusted-local silently: an unavailable
+            # backend is an unavailable capability, reported as such.
+            raise CoreError('container capability unavailable: %s' % (
+                'no docker or podman on PATH' if not engine else 'no container image selected'))
+        effective = _container_command(engine, image, repo, worktree, command, allow_network, memory_mb=memory_mb, cpus=float(cpus), pids_limit=pids_limit, tmpfs_mb=tmpfs_mb)
         popen_cwd = None
         env = _container_cli_env()
     else:
