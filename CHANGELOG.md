@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 `VERSION` file.
 
+## Unreleased
+
+### Added
+- Explicit exit-judged criterion coverage at both remaining producers:
+  `patch-admit --covers` rides the admission receipt (verified on ADMIT,
+  failed on REJECT, bound to the patch digest) and `peer-review --gate
+  --covers` rides the mechanical verify receipt beside the derived
+  plan-acceptance cover. Ids are validated against the runtime envelope
+  before any side effect, reviewer prose never contributes verified
+  coverage, and a receipt that cannot record its claimed covers fails the
+  command instead of publishing unbound evidence.
+- Read-only MCP parity for the typed runtime: `oms_runtime_release`,
+  `oms_runtime_profile`, and `oms_runtime_failures` map to fixed runtime
+  argv, pass structured failures through unchanged, and expose no mutation,
+  promotion, or landing surface.
+
+### Fixed
+- Debate rounds encode pairs, prompt files, and round artifacts with the
+  colon-free seat label instead of the raw model-pinned target. The raw
+  form split the "name:artifact" pair at the wrong colon, mangling the
+  peer's artifact path into an absolute-path reference the outbound
+  scrubber rightly blocked (a live round lost its rebuttal to this), and a
+  colon is not a legal NTFS file-name byte on the supported Windows target.
+
 ## [0.5.0] - 2026-08-16
 
 ### Added
