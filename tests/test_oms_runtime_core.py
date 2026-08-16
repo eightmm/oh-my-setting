@@ -164,6 +164,39 @@ class RuntimeFixture(RuntimeFixtureBase):
         by_id = {item['id']: item for item in rejected['criteria']}
         self.assertEqual(by_id['plan-task-t1']['status'], 'failed')
 
+    def test_projection_subprocess_cost_does_not_scale_with_evidence_rows(self) -> None:
+        # The staleness judgment once ran `git rev-parse` per evidence row —
+        # ~4.5s of a ~5s build on a thousand-row index. Every row is now
+        # judged against the base envelope's single head snapshot, so the
+        # subprocess count must be a constant of the build, not of the index.
+        from oms_runtime import common
+        index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+
+        def spawns_after_adding(count: int, tag: str) -> int:
+            for i in range(count):
+                append_jsonl(index, {
+                    'schema': 1, 'event_id': 'evt-scale-%s-%d' % (tag, i),
+                    'kind': 'review-verify', 'exit': 0, 'status': 'verified',
+                    'verified_head': 'deadbeefdeadbeef',
+                })
+            calls = []
+            original = common.run_output
+
+            def counting(command, **kwargs):
+                calls.append(list(command))
+                return original(command, **kwargs)
+
+            common.run_output = counting
+            try:
+                evidence.build_envelope(self.repo)
+            finally:
+                common.run_output = original
+            return len(calls)
+
+        small = spawns_after_adding(5, 'small')
+        large = spawns_after_adding(60, 'large')
+        self.assertEqual(small, large)
+
     def test_writer_protocol_parity_with_the_root_durable_writer(self) -> None:
         # Two writer stacks, one protocol: the runtime writer and the root
         # durable-jsonl writer must refuse the same adversarial shapes. This
