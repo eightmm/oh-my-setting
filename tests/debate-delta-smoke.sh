@@ -182,6 +182,36 @@ ma_run_debate_rounds
   fail "a moving seat must keep the debate running (stable=$debate_stable_round)"
 [ -f "$ARTIFACT_DIR/codex-stable-$timestamp-r4.md" ] || fail "budgeted rounds must all run"
 
+# --- a model-pinned seat stays quotable and its files stay portable ----------
+# The raw target (provider:model=NAME) once entered the "name:artifact" pair
+# and the round file names: the pair split at the wrong colon, mangling the
+# peer's artifact path into an absolute-path leak the outbound scrubber
+# blocked, and the colon is not a legal NTFS file-name byte. The seat label
+# is the only form that may cross into encodings and names.
+rm -f "$ARTIFACT_DIR"/*-r2.md "$ARTIFACT_DIR"/*-r3.md "$ARTIFACT_DIR"/*-r4.md
+DEBATE=1
+provider_names=(codex "claude:model=sonnet-x")
+alive=(1 1)
+last_arts=("$self" "$other")
+dropped=0
+dropped_names=()
+run_provider() { write_echoing_artifact "$3" PINNED none; }
+ma_run_debate_rounds
+[ -f "$ARTIFACT_DIR/claude-sonnet-x-stable-$timestamp-r2.md" ] ||
+  fail "the pinned seat's round artifact must use its colon-free label"
+for f in "$ARTIFACT_DIR"/*; do
+  case "$(basename "$f")" in
+    *:*) fail "no artifact file name may carry a colon (NTFS-illegal): $f" ;;
+  esac
+done
+pinned_prompt="$debate_dir/prompt-r2-codex"
+[ -f "$pinned_prompt" ] || fail "codex round-2 prompt missing"
+assert_contains "$pinned_prompt" "OTHER revised body line one"
+assert_contains "$pinned_prompt" "full answer on disk: .oms/artifacts/ask/"
+assert_lacks "$pinned_prompt" "model=sonnet-x:"
+[ -f "$debate_dir/prompt-r2-claude-sonnet-x" ] ||
+  fail "the pinned seat's prompt file must use its colon-free label"
+
 # --- a debate-dropped seat still counts toward answered families -------------
 # Its last good answer rides the synthesis, so a two-family debate that lost
 # one seat in the final round must not report "1 family: replication".

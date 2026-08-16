@@ -2474,7 +2474,7 @@ write_debate_prompt() {
 # Debate rounds 2..DEBATE+1. Mutates alive and last_arts; sets
 # debate_stable_round when the debate stopped early.
 ma_run_debate_rounds() {
-  local round i j k p others debate_prompt artifact quality
+  local round i j k p p_label peer_label others debate_prompt artifact quality
   local r_pids r_idx r_arts active settled checked
 
   debate_stable_round=""
@@ -2493,15 +2493,24 @@ ma_run_debate_rounds() {
     r_arts=()
     for i in "${active[@]}"; do
       p="${provider_names[i]}"
+      # Names entering pair encodings and file names must be the colon-free
+      # seat label, never the raw target: a model-pinned target
+      # (provider:model=NAME) split "name:artifact" at the wrong colon, which
+      # mangled the peer's artifact path into an absolute-path leak the
+      # outbound scrubber then blocked — and a colon is not a legal NTFS
+      # file-name byte on the supported Windows target.
+      p_label="$(ma_target_label "$p" "$(ma_target_model "$p")")"
       others=()
       for j in "${active[@]}"; do
-        [ "$j" != "$i" ] && others+=("${provider_names[j]}:${last_arts[j]}")
+        [ "$j" = "$i" ] && continue
+        peer_label="$(ma_target_label "${provider_names[j]}" "$(ma_target_model "${provider_names[j]}")")"
+        others+=("$peer_label:${last_arts[j]}")
       done
       # debate_dir is initialized by the owning ask/review operation.
       # shellcheck disable=SC2154
-      debate_prompt="$debate_dir/prompt-r$round-$p"
+      debate_prompt="$debate_dir/prompt-r$round-$p_label"
       write_debate_prompt "$debate_prompt" "$p" "$round" "${last_arts[i]}" "${others[@]}"
-      artifact="$ARTIFACT_DIR/$p-$slug-$timestamp-r$round.md"
+      artifact="$ARTIFACT_DIR/$p_label-$slug-$timestamp-r$round.md"
       run_provider "$p" "$debate_prompt" "$artifact" &
       r_pids+=("$!")
       r_idx+=("$i")
