@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -44,6 +45,26 @@ def _load_profile_defs() -> Dict[str, Dict[str, Any]]:
 PROFILE_DEFS = _load_profile_defs()
 
 
+def _command_present(name: str) -> bool:
+    """PATH resolution first, then the harness's managed shim directory.
+
+    The installer writes provider shims as extensionless bash scripts under
+    ~/.local/bin. Git Bash resolves them fine; Windows-native Python's
+    shutil.which never will (PATHEXT), so a healthy Windows install judged
+    its own provider absent. The managed location is part of the product
+    contract, and HOME arrives in MSYS form (/c/Users/...) when bash spawned
+    this interpreter, so both spellings are honored.
+    """
+    if shutil.which(name):
+        return True
+    home = os.environ.get("HOME", "")
+    if re.match(r"^/[A-Za-z]/", home):
+        home = home[1].upper() + ":" + home[2:]
+    if not home:
+        return False
+    return os.path.isfile(os.path.join(home, ".local", "bin", name))
+
+
 def _expand(names: Sequence[str]) -> List[str]:
     result: List[str] = []
 
@@ -77,17 +98,17 @@ def check(names: Sequence[str]) -> Dict[str, Any]:
             min_groups.append(dict(spec["min_present"], profile=name))
     required = sorted(set(required))
     optional = sorted(set(optional) - set(required))
-    required_status = {name: shutil.which(name) is not None for name in required}
-    optional_status = {name: shutil.which(name) is not None for name in optional}
+    required_status = {name: _command_present(name) for name in required}
+    optional_status = {name: _command_present(name) for name in optional}
     any_status: List[Dict[str, Any]] = []
     for group in any_groups:
-        present = [name for name in group if shutil.which(name)]
+        present = [name for name in group if _command_present(name)]
         any_status.append({"commands": group, "present": present, "satisfied": bool(present)})
     minimum_status: List[Dict[str, Any]] = []
     for group in min_groups:
         commands = [str(value) for value in group.get("commands", [])]
         count = int(group.get("count", 1))
-        present = [name for name in commands if shutil.which(name)]
+        present = [name for name in commands if _command_present(name)]
         minimum_status.append({"profile": group.get("profile"), "commands": commands, "required_count": count, "present": present, "satisfied": len(present) >= count})
     env_status = {name: bool(os.environ.get(name)) for name in sorted(set(environment))}
     missing = [name for name, present in required_status.items() if not present]
@@ -145,7 +166,7 @@ def install_plan(names: Sequence[str], primary_provider: str = "codex") -> Dict[
                 selected = [primary_provider]
             elif tool == "secondary-provider":
                 candidates = [value for value in provider_order if value != primary_provider]
-                present = [value for value in candidates if shutil.which(value)]
+                present = [value for value in candidates if _command_present(value)]
                 selected = [present[0] if present else secondary_provider]
             elif tool == "all-providers":
                 selected = provider_order

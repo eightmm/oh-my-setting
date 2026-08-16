@@ -223,6 +223,30 @@ class RuntimeFixture(RuntimeFixtureBase):
         finally:
             os.environ.pop('OMS_LOCK_DIR', None)
 
+    def test_managed_shim_location_counts_as_installed(self) -> None:
+        # Windows-native Python cannot which() an extensionless bash shim, so
+        # a healthy install judged its own provider absent. The managed
+        # ~/.local/bin location is part of the product contract, in both HOME
+        # spellings (POSIX and the MSYS drive form bash hands to Python).
+        fenced_home = Path(self.tmp.name) / 'shim-home'
+        (fenced_home / '.local' / 'bin').mkdir(parents=True)
+        shim = fenced_home / '.local' / 'bin' / 'codex'
+        shim.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+        empty_bin = Path(self.tmp.name) / 'empty-bin'
+        empty_bin.mkdir()
+        for name in ('bash', 'git', 'python3'):
+            tool = empty_bin / name
+            tool.write_text('#!/usr/bin/env sh\nexit 0\n', encoding='utf-8')
+            tool.chmod(493)
+        old_path, old_home = os.environ.get('PATH', ''), os.environ.get('HOME', '')
+        os.environ['PATH'] = str(empty_bin)
+        os.environ['HOME'] = str(fenced_home)
+        try:
+            self.assertTrue(profiles.check(['core'])['ready'])
+        finally:
+            os.environ['PATH'] = old_path
+            os.environ['HOME'] = old_home
+
     def test_profiles_are_optional_and_install_plan_is_minimal(self) -> None:
         fake_bin = Path(self.tmp.name) / 'bin'
         fake_bin.mkdir()
@@ -236,7 +260,11 @@ class RuntimeFixture(RuntimeFixtureBase):
             path.write_text('#!/usr/bin/env sh\nexit 0\n', encoding='utf-8')
             path.chmod(493)
         old_path = os.environ.get('PATH', '')
+        old_home = os.environ.get('HOME', '')
         os.environ['PATH'] = str(fake_bin)
+        # HOME too: presence checks also honor the managed ~/.local/bin shim
+        # directory, and a developer machine keeps real shims there.
+        os.environ['HOME'] = str(Path(self.tmp.name) / 'fenced-home')
         try:
             self.assertTrue(profiles.check(['core'])['ready'])
             self.assertFalse(profiles.check(['notion'])['ready'])
@@ -250,6 +278,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             self.assertTrue(applied['check']['ready'])
         finally:
             os.environ['PATH'] = old_path
+            os.environ['HOME'] = old_home
 
     def test_trusted_local_receipt_is_honest_and_timeout_is_bounded(self) -> None:
         receipt, rc = run_backend('trusted-local', self.repo, [sys.executable, '-c', "print('runtime-ok')"], timeout_seconds=10)
@@ -341,7 +370,9 @@ class RuntimeFixture(RuntimeFixtureBase):
         fake_bin = Path(self.tmp.name) / 'council-bin'
         fake_bin.mkdir()
         old_path = os.environ.get('PATH', '')
+        old_home = os.environ.get('HOME', '')
         os.environ['PATH'] = str(fake_bin)
+        os.environ['HOME'] = str(Path(self.tmp.name) / 'council-home')
         try:
             for required in ('bash', 'git', 'python3'):
                 command = fake_bin / required
@@ -357,6 +388,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             self.assertTrue(profiles.check(['council'])['ready'])
         finally:
             os.environ['PATH'] = old_path
+            os.environ['HOME'] = old_home
 
     def test_backend_readiness_and_absolute_local_command(self) -> None:
         self.assertFalse(check_backend('isolated', image='missing-image')['ready'])
