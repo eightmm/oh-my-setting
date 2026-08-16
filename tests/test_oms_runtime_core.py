@@ -164,6 +164,52 @@ class RuntimeFixture(RuntimeFixtureBase):
         by_id = {item['id']: item for item in rejected['criteria']}
         self.assertEqual(by_id['plan-task-t1']['status'], 'failed')
 
+    def test_writer_protocol_parity_with_the_root_durable_writer(self) -> None:
+        # Two writer stacks, one protocol: the runtime writer and the root
+        # durable-jsonl writer must refuse the same adversarial shapes. This
+        # is the conformance contract that keeps parity from silently
+        # drifting; the implementations stay separate on purpose (one is a
+        # bash-invoked script, one an imported library).
+        import importlib.util
+        loader_spec = importlib.util.spec_from_file_location(
+            'durable_jsonl_root', str(ROOT / 'scripts' / 'lib' / 'durable-jsonl.py'))
+        root_writer = importlib.util.module_from_spec(loader_spec)
+        loader_spec.loader.exec_module(root_writer)
+
+        arena = Path(self.tmp.name) / 'writer-parity'
+        arena.mkdir()
+        real_dir = arena / 'real'
+        real_dir.mkdir()
+        (real_dir / 'seed.jsonl').write_text('{"i":0}\n', encoding='utf-8')
+
+        # Symlinked target: both refuse to write through it.
+        (arena / 'link-target.jsonl').symlink_to(real_dir / 'seed.jsonl')
+        with self.assertRaises(CoreError):
+            atomic_write_bytes(arena / 'link-target.jsonl', b'{}\n')
+        with self.assertRaises(SystemExit):
+            root_writer.append(str(arena / 'link-target.jsonl'), b'{"i":1}\n')
+
+        # Symlinked parent: both refuse to cross it.
+        (arena / 'link-dir').symlink_to(real_dir)
+        with self.assertRaises(CoreError):
+            atomic_write_bytes(arena / 'link-dir' / 'row.jsonl', b'{}\n')
+        with self.assertRaises(SystemExit):
+            root_writer.append(str(arena / 'link-dir' / 'row.jsonl'), b'{"i":1}\n')
+
+        # Torn state fails closed on the runtime side (append refuses to build
+        # on a partial final row), and both writers refuse a malformed input
+        # row — no newline, embedded NUL — before anything touches disk.
+        torn = real_dir / 'torn.jsonl'
+        torn.write_bytes(b'{"i":0}\n{"i":1}')
+        with self.assertRaises(CoreError):
+            append_jsonl(torn, {'i': 2})
+        clean = real_dir / 'clean.jsonl'
+        clean.write_text('{"i":0}\n', encoding='utf-8')
+        with self.assertRaises(SystemExit):
+            root_writer.append(str(clean), b'{"i":1}')  # no trailing newline
+        with self.assertRaises(SystemExit):
+            root_writer.append(str(clean), b'{"i":1}\x00\n')
+
     def test_concurrent_appends_lose_nothing(self) -> None:
         lock_root = Path(self.tmp.name) / 'append-locks'
         target = self.repo / '.oms' / 'append-probe.jsonl'

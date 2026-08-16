@@ -183,6 +183,17 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(str(temp), str(target))
+        # Rename durability matches the root durable writer: the rename lives
+        # in the directory, so persist the directory too where the host allows
+        # it (Windows cannot open a directory for fsync; content fsync above
+        # already ran everywhere).
+        if os.name == "posix":
+            with contextlib.suppress(OSError):
+                directory = os.open(str(resolved), os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
     except Exception:
         with contextlib.suppress(OSError):
             temp.unlink()
