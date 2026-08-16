@@ -325,6 +325,13 @@ if fails > 0 and last is not None:
         fp, fails, last.get("exit"), (last.get("summary") or last.get("cmd", ""))[:160]))
     if last.get("next"):
         sys.stderr.write("fail-ledger: next: %s\n" % last["next"])
+    # The canonical taxonomy is why the row exists: surface the recovery the
+    # code binds so every refusal built on this check carries the policy, not
+    # just the history. Older rows predate the fields and stay readable.
+    if last.get("failure_code"):
+        sys.stderr.write("fail-ledger: code: %s\n" % last["failure_code"])
+    if last.get("recovery"):
+        sys.stderr.write("fail-ledger: recovery: %s\n" % last["recovery"])
     threshold = os.environ.get("OMS_ADVISE_AFTER_FAILURES", "2")
     threshold = int(threshold) if threshold.isdigit() else 2
     if threshold > 0 and fails >= threshold:

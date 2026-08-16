@@ -728,6 +728,14 @@ if grep -Fq 'goal-drive: done' "$TMP/gd-vacuous.out"; then
 fi
 grep -Fq '"reason": "acceptance-vacuous"' "$vacuous/.oms/plan/progress.jsonl" ||
   fail "vacuous park row missing from progress.jsonl"
+# The park judgment carries its canonical code: a vacuous acceptance is a
+# broken contract, and the ledger row says so without classifier guesswork.
+tail -1 "$vacuous/.oms/failures.jsonl" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row.get("failure_code") == "contract_invalid", row
+assert row.get("recovery") == "repair_contract", row
+' || fail "vacuous park must record contract_invalid/repair_contract"
 [ "$(git -C "$vacuous" rev-parse HEAD)" = "$head_vacuous" ] ||
   fail "a parked vacuous run must not commit"
 "$PLAN" --repo "$vacuous" show --id v1 | grep -Fq '"state": "ready"' ||

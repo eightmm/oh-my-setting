@@ -318,9 +318,19 @@ park() {  # REASON NEXT
   # never reach the advise threshold. The contract — this reason against this
   # acceptance command — is what repeats across runs, so that is the cmd;
   # lineage belongs in the summary.
+  # The park reason is already a judgment; where it maps onto the canonical
+  # taxonomy with certainty, say so explicitly instead of letting the
+  # classifier guess from prose. Unmapped reasons classify from the summary.
+  local park_code=""
+  case "$1" in
+    acceptance-*) park_code=contract_invalid ;;
+    tasks-exhausted|cycles-exhausted|replan-budget-used) park_code=budget_exhausted ;;
+    stuck) park_code=verifier_failed ;;
+  esac
   recorded="$("$ROOT/scripts/fail-ledger.sh" record --repo "$REPO" --kind plan-run \
     --cmd "goal-drive park reason=$1 accept=$ACCEPT_SNAPSHOT" --exit 3 \
-    --summary "parked: $1 ($RUN_ID)" --next "$2" 2>&1 >/dev/null || true)"
+    --summary "parked: $1 ($RUN_ID)" --next "$2" \
+    ${park_code:+--failure-code "$park_code"} 2>&1 >/dev/null || true)"
   echo "goal-drive: parked run=$RUN_ID cycle=$CYCLE reason=$1"
   echo "goal-drive: parent-agent next: $2"
   # record names `oms advise` once the same park repeats, and this used to
