@@ -104,12 +104,17 @@ class RuntimeFixture(RuntimeFixtureBase):
     def test_profiles_are_optional_and_install_plan_is_minimal(self) -> None:
         fake_bin = Path(self.tmp.name) / 'bin'
         fake_bin.mkdir()
-        for name in ('codex', 'gh'):
+        # The PATH is replaced, not prepended: presence checks go through
+        # shutil.which, and a developer machine with a real ntn (or any other
+        # optional tool) on PATH must not turn the "notion is not ready"
+        # assertion into an environment lottery. Everything core needs is
+        # faked explicitly instead.
+        for name in ('bash', 'git', 'python3', 'codex', 'gh'):
             path = fake_bin / name
             path.write_text('#!/usr/bin/env sh\nexit 0\n', encoding='utf-8')
             path.chmod(493)
         old_path = os.environ.get('PATH', '')
-        os.environ['PATH'] = str(fake_bin) + os.pathsep + old_path
+        os.environ['PATH'] = str(fake_bin)
         try:
             self.assertTrue(profiles.check(['core'])['ready'])
             self.assertFalse(profiles.check(['notion'])['ready'])
