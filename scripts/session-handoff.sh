@@ -436,8 +436,12 @@ append_resume_contract() {
   # incomplete round is not a disagreement) whose event no
   # artifact-resolution receipt has retired; a later non-split gate must not
   # bury a split nobody acknowledged, and a resolved one must stop nagging.
-  local review_json=""
-  review_json="$(python3 - "$repo" <<'PY' 2>/dev/null || true
+  # A failed probe must stay distinguishable from "no dissent": absence of
+  # the section is read downstream as consensus, which is exactly the burial
+  # this function exists to prevent. Probe failures print a sentinel and the
+  # digest says UNAVAILABLE instead of saying nothing.
+  local review_json="" dissent_probe_failed=0
+  review_json="$(python3 - "$repo" <<'PY' 2>/dev/null || printf '__OMS_DISSENT_PROBE_FAILED__'
 import json, os, sys
 
 index = os.path.join(sys.argv[1], ".oms", "artifacts", "index.jsonl")
@@ -482,15 +486,22 @@ if best is not None:
     print(json.dumps(best, ensure_ascii=False, separators=(",", ":")))
 PY
 )"
-  if [ -z "$review_json" ] && [ -d "$repo/.oms/artifacts/review" ]; then
+  case "$review_json" in
+    *__OMS_DISSENT_PROBE_FAILED__*) dissent_probe_failed=1; review_json="" ;;
+  esac
+  if [ -z "$review_json" ] && [ "$dissent_probe_failed" -eq 0 ] &&
+    [ -d "$repo/.oms/artifacts/review" ]; then
     # Artifacts that predate the typed outcome row are stored user state;
     # parse them through the one parser peer-review owns, still consuming
     # JSON rather than grepping rendered lines.
     review_json="$("$ROOT/scripts/peer-review.sh" verdicts --json \
-      "$repo/.oms/artifacts/review" 2>/dev/null || true)"
+      "$repo/.oms/artifacts/review" 2>/dev/null || printf '__OMS_DISSENT_PROBE_FAILED__')"
+    case "$review_json" in
+      *__OMS_DISSENT_PROBE_FAILED__*) dissent_probe_failed=1; review_json="" ;;
+    esac
   fi
   [ -z "$review_json" ] ||
-    dissent_seats="$(OMS_HANDOFF_VERDICTS_JSON="$review_json" python3 - <<'PY' 2>/dev/null || true
+    dissent_seats="$(OMS_HANDOFF_VERDICTS_JSON="$review_json" python3 - <<'PY' 2>/dev/null || printf '__OMS_DISSENT_PROBE_FAILED__'
 import json, os
 
 try:
@@ -523,14 +534,22 @@ PY
       printf 'Run before building on this handoff:\n\n'
       printf '```bash\n%s\n```\n' "$verify_cmd"
     fi
+    case "$dissent_seats" in
+      *__OMS_DISSENT_PROBE_FAILED__*) dissent_probe_failed=1; dissent_seats="" ;;
+    esac
     if [ -n "$dissent_seats" ]; then
       printf '\n## Open dissents\n\n'
       printf 'The last review round ended split. Acknowledge each verdict —\n'
       printf 'agree, override with reasons, or escalate — before landing\n'
       printf 'related work; do not silently re-derive consensus.\n\n'
       printf '%s\n' "$dissent_seats"
+    elif [ "$dissent_probe_failed" -eq 1 ]; then
+      printf '\n## Open dissents\n\n'
+      printf 'UNAVAILABLE: the dissent projection failed while capturing this\n'
+      printf 'handoff. Do not read absence as consensus; inspect with:\n'
+      printf '`oms peer-review verdicts --json .oms/artifacts/review`\n'
     fi
-  } >> "$out"
+  } >> "$out" || echo "warning: resume contract/dissent section could not be appended to $out" >&2
 }
 
 cmd_capture() {

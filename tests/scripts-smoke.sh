@@ -2384,6 +2384,19 @@ statuses = {item["id"]: item["status"] for item in row["criteria"]}
 assert statuses.get("gate-covers-crit") == "verified", statuses
 PY
     fail "explicit covers did not project the criterion to verified"
+
+  # The derived plan-acceptance cover is equally load-bearing: a gate whose
+  # verify receipt cannot be recorded fails closed even without --covers.
+  local rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_ARTIFACT_INDEX=/proc/version/cannot/index.jsonl \
+    "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$project/artifacts-closed" \
+    --providers claude,antigravity --no-diff --gate --verify true \
+    --prompt "derived cover fail closed" >/dev/null 2>"$project/err-closed" && rc=0 || rc=$?
+  [ "$rc" != 0 ] || fail "a gate with an unwritable index must fail closed"
+  grep -q "failing closed\|cannot create" "$project/err-closed" ||
+    fail "the fail-closed refusal must be named: $(tail -2 "$project/err-closed")"
 }
 
 test_peer_review_gate_binds_complete_diff_and_refuses_truncation() {

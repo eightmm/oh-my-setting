@@ -1653,10 +1653,16 @@ if [ -n "$worker_guard_dir" ]; then
       echo "error: worktree kept at $worktree" >&2
     fi
     echo "error: nothing from this run should be landed" >&2
+    # The breach is loud now (this run exits 1), but a later patch-land or
+    # inbox read only knows what these two rows remember. If either write
+    # fails, say so instead of letting the breach become invisible one
+    # command later.
     (cd "$REPO" && "$(ma_scripts_dir)/fail-ledger.sh" record --kind delegate \
       --cmd "peer-delegate --to $TO worker-authority" --exit 1 \
-      --summary "worker changed protected state: $worker_guard_changed") >/dev/null 2>&1 || true
-    ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+      --summary "worker changed protected state: $worker_guard_changed") >/dev/null 2>&1 ||
+      echo "warning: worker-authority breach was NOT recorded in the fail ledger; later commands will not remember it" >&2
+    ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
+      echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
       --id "$EXECUTOR_ID" --reason "worker changed protected state" >/dev/null 2>&1 || true
     executor_finalized=1

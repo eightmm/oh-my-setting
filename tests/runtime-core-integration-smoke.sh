@@ -192,3 +192,32 @@ assert statuses["integration-task-gate"] == "failed", statuses
 PY
 
 echo 'runtime-core-integration-smoke: patch-admit covers ok'
+
+# A task-linked admission receipt fails closed when its index write fails:
+# the projection trusts the latest row per criterion, so a dropped REJECT
+# would let a stale ADMIT keep reading as current verification. Without
+# task lineage the row binds nothing and stays best-effort.
+rc=0
+OMS_TASK_ID=t1 OMS_ARTIFACT_INDEX=/proc/version/cannot/index.jsonl \
+  "$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
+  --verify true >/dev/null 2>"$TMP/admit-closed-err" || rc=$?
+[ "$rc" != 0 ] || {
+  echo "a task-linked admission with an unwritable index must fail closed" >&2
+  exit 1
+}
+grep -q "failing closed" "$TMP/admit-closed-err" || {
+  echo "the fail-closed refusal must be named: $(cat "$TMP/admit-closed-err")" >&2
+  exit 1
+}
+OMS_ARTIFACT_INDEX=/proc/version/cannot/index.jsonl \
+  "$ROOT/scripts/patch-admit.sh" --repo "$REPO" --patch "$TMP/admit.patch" \
+  --verify true > "$TMP/admit-besteffort" 2>/dev/null || {
+  echo "an unlinked admission keeps best-effort indexing (must not fail)" >&2
+  exit 1
+}
+grep -qx ADMIT "$TMP/admit-besteffort" || {
+  echo "best-effort admission should still ADMIT" >&2
+  exit 1
+}
+
+echo 'runtime-core-integration-smoke: admission fail-closed ok'

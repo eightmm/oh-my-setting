@@ -732,15 +732,28 @@ ma_append_artifact_index() {
   local prompt_hash=""
   local task_goal=""
 
+  # A repo-less call is a caller that opted out of indexing — a designed
+  # no-op. Every other early exit is a real failure to record and must say
+  # so: fail-closed callers trust this function's status, and "success
+  # without writing" is how a receipt vanishes while its guard stays green.
   [ -n "$repo" ] || return 0
-  repo="$(cd "$repo" && pwd)" || return 0
+  repo="$(cd "$repo" && pwd)" || {
+    echo "error: artifact index append: cannot resolve repo path" >&2
+    return 1
+  }
   agent_memory_ensure_oms_ignore "$repo"
   index="${OMS_ARTIFACT_INDEX:-$repo/.oms/artifacts/index.jsonl}"
   local telemetry_helper
   telemetry_helper="$(ma_scripts_dir)/lib/artifact-telemetry.py"
   retention_helper="$(ma_scripts_dir)/lib/artifact-index-retention.py"
-  mkdir -p "$(dirname "$index")"
-  command -v python3 >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$index")" || {
+    echo "error: artifact index append: cannot create $(dirname "$index")" >&2
+    return 1
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    echo "error: artifact index append needs python3; row not recorded" >&2
+    return 1
+  }
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     prompt_hash="$(ma_sha256_file "$prompt_file" || true)"

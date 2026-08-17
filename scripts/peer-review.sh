@@ -911,6 +911,10 @@ if [ "$GATE" -eq 1 ]; then
       # coverage claim is derivable here with no side channel: if the plan's
       # acceptance command is this command, the row links; if not, the covers
       # id simply matches no criterion and stays inert.
+      # The derived plan-acceptance cover is as load-bearing as an explicit
+      # one: the projection trusts the latest fresh row, so a failed verify
+      # receipt that silently vanished would leave an older pass speaking
+      # for the acceptance command. Compose and append both fail closed.
       gate_verify_covers="$(OMS_PR_VERIFY_CMD="$VERIFY_CMD" OMS_PR_VERIFY_EXIT="$gate_verify_exit" \
         OMS_PR_COVERS_IDS="$COVERS" python3 -c '
 import hashlib, json, os
@@ -924,19 +928,10 @@ for cid in os.environ.get("OMS_PR_COVERS_IDS", "").split():
 print(json.dumps({
     "covers": covers,
     "status": status,
-}))' 2>/dev/null || true)"
-      if [ -n "$COVERS" ]; then
-        # Explicitly claimed coverage fails closed: a verify receipt that
-        # dropped its covers would read as unbound evidence forever.
-        [ -n "$gate_verify_covers" ] ||
-          fail "could not compose the criterion coverage payload"
-        OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
-          "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" ||
-          fail "criterion coverage was not recorded; failing closed"
-      else
-        OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
-          "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" || true
-      fi
+}))')" || fail "could not compose the gate verify coverage payload"
+      OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
+        "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" ||
+        fail "gate verify receipt was not recorded; failing closed"
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass"
       else

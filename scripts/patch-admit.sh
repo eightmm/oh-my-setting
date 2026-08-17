@@ -670,6 +670,14 @@ print(json.dumps(payload))')" || fail "could not compose the criterion coverage 
   OMS_INDEX_COVERS_JSON="$admit_covers" \
     ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
     fail "criterion coverage was not recorded; failing closed"
+elif [ -n "${OMS_TASK_ID:-}" ]; then
+  # A task-linked admission receipt is trusted evidence even without explicit
+  # covers: the projection links it by task lineage and judges it by exit.
+  # One that cannot be recorded must not vanish while an older row keeps
+  # speaking for the task — a dropped REJECT would let a stale ADMIT read as
+  # current verification.
+  ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
+    fail "task-linked admission receipt was not indexed; failing closed"
 else
   ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" || true
 fi
