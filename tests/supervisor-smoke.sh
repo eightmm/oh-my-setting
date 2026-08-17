@@ -790,7 +790,8 @@ descendant_attempt="$(submit --max-wall-seconds 1 -- bash -c \
 "$SUP" --repo "$REPO" dispatch --max-running 1 --max-jobs 1 >/dev/null
 "$SUP" --repo "$REPO" wait --attempt "$descendant_attempt" --timeout 10 >/dev/null ||
   fail "descendant cleanup fixture did not finish"
-sleep 3
+# Outwait the fixture's 2s delayed write with a real margin.
+sleep 4
 [ ! -e "$descendant_marker" ] || fail "background descendant escaped supervision"
 
 # If the runner itself disappears, reconcile owns cleanup of the recorded

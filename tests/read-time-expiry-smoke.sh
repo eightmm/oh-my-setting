@@ -219,9 +219,23 @@ seed_retired_row "$lock_repo" 'oms-test-lock-resolved' "$FORTY_DAYS"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
 export OMS_LOCK_DIR="$TMP/locks"
-OMS_LOCK_FORCE_MKDIR=1 oms_with_file_lock "$lock_repo/.oms/failures.jsonl" sleep 3 &
+# Barrier, not a fixed sleep: the holder proves acquisition by touching a
+# marker from inside the locked command, and gc only runs after the marker
+# exists. A loaded runner that delays the fork can no longer let gc race in
+# before the lock is held (update-v04-smoke uses the same pattern).
+rm -f "$TMP/lock-ready"
+OMS_LOCK_FORCE_MKDIR=1 oms_with_file_lock "$lock_repo/.oms/failures.jsonl" \
+  bash -c ": > '$TMP/lock-ready'; sleep 3" &
 lock_holder=$!
-sleep 0.3
+i=0
+while [ ! -f "$TMP/lock-ready" ] && [ "$i" -lt 100 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -f "$TMP/lock-ready" ] || {
+  kill "$lock_holder" 2>/dev/null || true
+  fail "lock holder did not start"
+}
 lock_out="$(OMS_LOCK_FORCE_MKDIR=1 "$GC_SH" --repo "$lock_repo" --days 30 --apply)"
 wait "$lock_holder"
 printf '%s\n' "$lock_out" | grep -Fq 'failures: skipped' ||

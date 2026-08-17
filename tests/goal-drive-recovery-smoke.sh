@@ -1230,7 +1230,9 @@ if command -v setsid >/dev/null 2>&1; then
   accept_escape_child="$(tr -d '\r\n' < "$accept_escape_pid")"
   ! kill -0 "$accept_escape_child" 2>/dev/null ||
     fail "setsid acceptance child survived timeout"
-  sleep 3.2
+  # Outwait the fixture's 3s delayed write with a real margin (thin
+  # windows read a real leak as green on a slow runner).
+  sleep 4.5
   [ ! -e "$accept_escape_marker" ] ||
     fail "setsid acceptance child wrote after timeout"
 fi

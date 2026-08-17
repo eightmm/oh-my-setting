@@ -23,7 +23,11 @@ class RuntimeFixtureBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='oms-runtime-test.')
         self.repo = Path(self.tmp.name) / 'repo'
         self.repo.mkdir()
-        subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
+        # -b main so the fixture is branch-deterministic wherever it runs:
+        # the ambient init.defaultBranch differs between machines (unset on
+        # CI -> master, main on typical dev boxes), and a ref hardcoded
+        # below must resolve on both.
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True)
         subprocess.run(['git', '-C', str(self.repo), 'config', 'user.email', 'test@example.com'], check=True)
         subprocess.run(['git', '-C', str(self.repo), 'config', 'user.name', 'OMS Test'], check=True)
         (self.repo / 'scripts').mkdir()
@@ -49,7 +53,7 @@ class RuntimeFixtureBase(unittest.TestCase):
         subprocess.run(['git', '-C', str(self.repo), 'commit', '-qm', 'fixture'], check=True)
         config_dir = self.repo / 'config'
         config_dir.mkdir(exist_ok=True)
-        atomic_write_json(config_dir / 'update-channels.json', {'schema': 1, 'channels': {'stable': {'version': '1.0.0', 'ref': git_head(self.repo), 'auto_apply': False, 'policy': 'pinned'}, 'edge': {'version': 'edge', 'ref': 'master', 'auto_apply': False, 'policy': 'fast-forward'}}}, mode=420)
+        atomic_write_json(config_dir / 'update-channels.json', {'schema': 1, 'channels': {'stable': {'version': '1.0.0', 'ref': git_head(self.repo), 'auto_apply': False, 'policy': 'pinned'}, 'edge': {'version': 'edge', 'ref': 'main', 'auto_apply': False, 'policy': 'fast-forward'}}}, mode=420)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()

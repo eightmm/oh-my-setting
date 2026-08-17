@@ -1699,7 +1699,9 @@ JSON
   wait "$autopilot_pid" || signal_rc=$?
   [ "$signal_rc" = 143 ] ||
     fail "TERM should return 143 after phase cleanup, got $signal_rc"
-  sleep 3.2
+  # Outwait the fixture's 3s delayed write with a real margin: a thin
+  # 200ms window turns a genuine leak into a green on a slow runner.
+  sleep 4.5
   [ ! -e "$signal_repo/calls/goal-drive-leaked" ] ||
     fail "goal-drive descendant survived targeted autopilot TERM"
 
@@ -1722,7 +1724,7 @@ JSON
   if kill -0 "$escaped_pid" 2>/dev/null; then
     fail "setsid provider descendant remained after autopilot returned"
   fi
-  sleep 3.2
+  sleep 4.5
   [ ! -e "$escape_repo/calls/goal-drive-leaked" ] ||
     fail "setsid provider descendant wrote after autopilot returned"
 

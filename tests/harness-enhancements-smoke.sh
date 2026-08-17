@@ -434,13 +434,26 @@ EOF
   kill -TERM "$leader"
   wait "$leader" || status=$?
   [ "$status" -eq 143 ] || fail "TERM should propagate as 143, got $status"
-  sleep 0.2
-  while IFS= read -r child; do
-    if kill -0 "$child" 2>/dev/null; then
-      kill -KILL "$child" 2>/dev/null || true
-      fail "parallel smoke child survived parent TERM: $child"
-    fi
-  done < "$signal_tmp/pids"
+  # Children may linger briefly as unreaped zombies after the leader's TERM;
+  # poll for their disappearance instead of judging a fixed 200ms snapshot,
+  # so reap latency on a loaded runner is not reported as a survivor. The
+  # startup wait above already uses this shape.
+  lingering=""
+  for _ in $(seq 1 100); do
+    lingering=""
+    while IFS= read -r child; do
+      if kill -0 "$child" 2>/dev/null; then
+        lingering="$child"
+        break
+      fi
+    done < "$signal_tmp/pids"
+    [ -n "$lingering" ] || break
+    sleep 0.05
+  done
+  if [ -n "$lingering" ]; then
+    kill -KILL "$lingering" 2>/dev/null || true
+    fail "parallel smoke child survived parent TERM: $lingering"
+  fi
   [ -z "$(find "$signal_tmp" -maxdepth 1 -type d -name 'oms-smoke-shards.*' -print -quit)" ] ||
     fail "parallel smoke log directory survived parent TERM"
 }

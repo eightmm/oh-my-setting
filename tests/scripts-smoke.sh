@@ -12871,7 +12871,11 @@ test_smoke_suite_does_not_mutate_source_oms() {
   # after the fact, and a watcher could only catch a recurrence live.
   printf '%s\n' "$SOURCE_OMS_FINGERPRINT" > "$TMP/oms-before.txt"
   printf '%s\n' "$after" > "$TMP/oms-after.txt"
-  diff "$TMP/oms-before.txt" "$TMP/oms-after.txt" | grep -E '^[<>]' | head -20 >&2
+  # The fingerprints differ here, so this diff exits 1 by definition (and
+  # SIGPIPEs past 20 lines); without the guard, errexit killed the suite
+  # before the labelled fail below could state what happened — the guard
+  # destroyed the evidence it had just printed.
+  diff "$TMP/oms-before.txt" "$TMP/oms-after.txt" | grep -E '^[<>]' | head -20 >&2 || true
   fail "smoke suite mutated the source checkout .oms state (paths above)"
 }
 

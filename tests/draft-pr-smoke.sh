@@ -1192,7 +1192,10 @@ EOF
   rc=0
   wait "$cancel_pid" || rc=$?
   [ "$rc" = 143 ] || fail "targeted publisher TERM should exit 143, got $rc"
-  sleep 1
+  # The fixture's delayed push lands at OMS_T_PUSH_DELAY=3s; a 1s window
+  # closed before the escaped write could ever land, making this assert
+  # vacuous on every machine. Outwait the deadline with margin.
+  sleep 4
   [ ! -e "$repo/.git/push-delay-completed" ] ||
     fail "cancelled push descendant survived and completed"
   if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture; then
