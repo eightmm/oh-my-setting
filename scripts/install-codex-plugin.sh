@@ -79,13 +79,26 @@ case "$PLUGIN_VERSION" in
 esac
 PLUGIN_CACHE="$CODEX_HOME_DIR/plugins/cache/$MARKETPLACE_NAME/$PLUGIN_NAME/$PLUGIN_VERSION"
 
+# The codex CLI runs unattended here — auto-update's cron chain reaches this
+# installer — so a call must never wait on a prompt (stdin closed) or run
+# unbounded (timeout where coreutils provides one; the agy plugin installer
+# set this pattern). Exit 124 lands in the same failure branches as any other
+# nonzero status.
+provider_cmd() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${OMS_PROVIDER_CMD_TIMEOUT:-120}" "$@" </dev/null
+  else
+    "$@" </dev/null
+  fi
+}
+
 run_cmd() {
   if [ "$DRY_RUN" = "1" ]; then
     printf 'would run:'
     printf ' %q' "$@"
     printf '\n'
   else
-    "$@"
+    provider_cmd "$@"
   fi
 }
 
@@ -99,14 +112,14 @@ configure_hud() {
 }
 
 marketplace_root() {
-  codex plugin marketplace list 2>/dev/null |
+  provider_cmd codex plugin marketplace list 2>/dev/null |
     awk -v name="$MARKETPLACE_NAME" '$1 == name { print $2; exit }'
 }
 
 codex_marketplace_state() {
   local out
 
-  out="$(codex plugin marketplace list 2>/dev/null)" || return 2
+  out="$(provider_cmd codex plugin marketplace list 2>/dev/null)" || return 2
   printf '%s\n' "$out" |
     awk -v name="$MARKETPLACE_NAME" '$1 == name { found=1 } END { exit(found ? 0 : 1) }'
 }
@@ -114,7 +127,7 @@ codex_marketplace_state() {
 codex_plugin_state() {
   local out
 
-  out="$(codex plugin list --json 2>/dev/null)" || return 2
+  out="$(provider_cmd codex plugin list --json 2>/dev/null)" || return 2
   printf '%s\n' "$out" |
     python3 -c '
 import json, sys
@@ -134,7 +147,7 @@ sys.exit(0 if any(
 }
 
 installed_plugin_root() {
-  codex plugin list --json 2>/dev/null |
+  provider_cmd codex plugin list --json 2>/dev/null |
     python3 -c '
 import json, sys
 target = sys.argv[1]
@@ -209,7 +222,7 @@ install_plugin() {
 
   local out
   local plugin_root
-  out="$(codex plugin add "$PLUGIN_NAME@$MARKETPLACE_NAME" 2>&1)" || {
+  out="$(provider_cmd codex plugin add "$PLUGIN_NAME@$MARKETPLACE_NAME" 2>&1)" || {
     printf '%s\n' "$out" >&2
     return 1
   }

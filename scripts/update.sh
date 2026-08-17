@@ -154,7 +154,7 @@ legacy_claude_hooks() {
 
 legacy_codex_plugin() {
   if command -v codex >/dev/null 2>&1 &&
-     codex plugin list --json 2>/dev/null |
+     codex plugin list --json </dev/null 2>/dev/null |
        python3 -c 'import json,sys; d=json.load(sys.stdin); target="oh-my-setting@oh-my-setting-local"; sys.exit(0 if any(p.get("pluginId")==target and p.get("installed") for p in d.get("installed", [])) else 1)' 2>/dev/null; then
     printf 1
   else

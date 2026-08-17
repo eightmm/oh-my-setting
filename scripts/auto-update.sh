@@ -10,6 +10,12 @@ case "${1:-}" in
   remove) shift; exec "$ROOT/scripts/uninstall-autoupdate.sh" "$@" ;;
 esac
 
+# This script's check/apply modes run unattended (cron, systemd timer). Git's
+# credential and host-key questions read /dev/tty, so an interactive fallback
+# is never answerable here: fail fast into the existing failure branches
+# instead of waiting on a prompt no one will see.
+export GIT_TERMINAL_PROMPT=0
+
 MODE="${1:-check}"
 STATE_FILE="${OH_MY_SETTING_AUTO_UPDATE_STATE:-$ROOT/local/auto-update.status}"
 LOG_FILE="${OH_MY_SETTING_AUTO_UPDATE_LOG:-$ROOT/local/auto-update.log}"

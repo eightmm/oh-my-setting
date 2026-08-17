@@ -45,11 +45,24 @@ if [ "$REMOVE" != "1" ]; then
   [ -f "$SERVER" ] || fail "oms-mcp-server.py not found under $ROOT"
 fi
 
+# Provider management CLIs run unattended here — update.sh reaches this from
+# auto-update's cron chain — so a call must never wait on a prompt (stdin
+# closed) or run unbounded (timeout where coreutils provides one; the agy
+# plugin installer set this pattern). A timeout's exit 124 lands in the same
+# failure branches as any other nonzero status.
+provider_cmd() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${OMS_PROVIDER_CMD_TIMEOUT:-120}" "$@" </dev/null
+  else
+    "$@" </dev/null
+  fi
+}
+
 mcp_registration_state() {  # CLI
   local cli="$1"
   local out
 
-  if out="$("$cli" mcp get "$NAME" 2>&1)"; then
+  if out="$(provider_cmd "$cli" mcp get "$NAME" 2>&1)"; then
     return 0
   fi
   case "$out" in
@@ -73,7 +86,7 @@ register_claude() {
     mcp_registration_state claude || state=$?
     case "$state" in
       0)
-        if claude mcp remove -s user "$NAME" >/dev/null 2>&1; then
+        if provider_cmd claude mcp remove -s user "$NAME" >/dev/null 2>&1; then
           echo "mcp: claude registration removed"
           return 0
         fi
@@ -91,13 +104,13 @@ register_claude() {
     esac
   fi
   local current
-  if current="$(claude mcp get "$NAME" 2>/dev/null)" &&
+  if current="$(provider_cmd claude mcp get "$NAME" 2>/dev/null)" &&
      printf '%s' "$current" | grep -Fq "$SERVER"; then
     echo "mcp: claude already registered"
     return 0
   fi
-  claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
-  if claude mcp add -s user "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
+  provider_cmd claude mcp remove -s user "$NAME" >/dev/null 2>&1 || true
+  if provider_cmd claude mcp add -s user "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
     echo "mcp: claude registered ($NAME)"
   else
     echo "warn: could not register the MCP server with claude" >&2
@@ -118,7 +131,7 @@ register_codex() {
     mcp_registration_state codex || state=$?
     case "$state" in
       0)
-        if codex mcp remove "$NAME" >/dev/null 2>&1; then
+        if provider_cmd codex mcp remove "$NAME" >/dev/null 2>&1; then
           echo "mcp: codex registration removed"
           return 0
         fi
@@ -136,13 +149,13 @@ register_codex() {
     esac
   fi
   local current
-  if current="$(codex mcp get "$NAME" 2>/dev/null)" &&
+  if current="$(provider_cmd codex mcp get "$NAME" 2>/dev/null)" &&
      printf '%s' "$current" | grep -Fq "$SERVER"; then
     echo "mcp: codex already registered"
     return 0
   fi
-  codex mcp remove "$NAME" >/dev/null 2>&1 || true
-  if codex mcp add "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
+  provider_cmd codex mcp remove "$NAME" >/dev/null 2>&1 || true
+  if provider_cmd codex mcp add "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
     echo "mcp: codex registered ($NAME)"
   else
     echo "warn: could not register the MCP server with codex" >&2
