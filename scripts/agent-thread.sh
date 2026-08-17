@@ -401,6 +401,13 @@ for row in reversed(rows[-limit:]):
     size = len(block.encode("utf-8"))
     if kept and used + size > budget:
         break
+    if not kept and size > budget:
+        # The newest turn always speaks, but never past the whole budget: a
+        # single oversized row (another writer, a raised write cap) must not
+        # ride into every later prompt uncut.
+        block = block.encode("utf-8")[:budget].decode("utf-8", "ignore")
+        block += "\n[newest turn truncated to the thread context budget]\n"
+        size = len(block.encode("utf-8"))
     kept.append(block)
     used += size
 omitted = len(rows) - len(kept)

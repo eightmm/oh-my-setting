@@ -26,39 +26,28 @@ exists_ml_entry() {
 has_python_ml_import() {
   local pattern='(^|[[:space:];])(from|import)[[:space:]]+(torch|tensorflow|jax|sklearn|pytorch_lightning|lightning)([.[:space:],]|$)'
 
-  if command -v rg >/dev/null 2>&1; then
-    (cd "$DIR" && rg -q "$pattern" . -g '*.py' \
-      -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
-      -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null)
-  else
-    find "$DIR" -maxdepth 3 \( \
-      -name ".git" -o -name ".venv" -o -name "node_modules" -o \
-      -name "__pycache__" -o -name "tmp" -o -name "backups" \
-    \) -prune -o -type f -name '*.py' \
-      -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
-  fi
+  # One implementation: the rg fast path disagreed with this one on depth,
+  # hidden files, and gitignore, so style detection depended on whether rg
+  # was on PATH (codex vendors one). CI runs find-only; find is the contract.
+  find "$DIR" -maxdepth 3 \( \
+    -name ".git" -o -name ".venv" -o -name "node_modules" -o \
+    -name "__pycache__" -o -name "tmp" -o -name "backups" \
+  \) -prune -o -type f -name '*.py' \
+    -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
 }
 
 has_ml_dependency() {
   local pattern="(^|[\"'[:space:]-])(torch|tensorflow|jax|scikit-learn|pytorch-lightning|lightning)(\\[[^]]+\\])?([\"'[:space:]]*([<>=~!:]|$)|[\"'])"
 
-  if command -v rg >/dev/null 2>&1; then
-    (cd "$DIR" && rg -q "$pattern" . \
-      -g 'requirements*.txt' -g 'pyproject.toml' -g 'setup.cfg' -g 'setup.py' \
-      -g 'environment*.yaml' -g 'environment*.yml' -g 'Pipfile' \
-      -g 'poetry.lock' -g 'uv.lock' \
-      -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
-      -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null)
-  else
-    find "$DIR" -maxdepth 3 \( \
-      -name ".git" -o -name ".venv" -o -name "node_modules" -o \
-      -name "__pycache__" -o -name "tmp" -o -name "backups" \
-    \) -prune -o -type f \( \
-      -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'setup.cfg' -o \
-      -name 'setup.py' -o -name 'environment*.yaml' -o -name 'environment*.yml' -o \
-      -name 'Pipfile' -o -name 'poetry.lock' -o -name 'uv.lock' \
-    \) -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
-  fi
+  # Same single-implementation rule as has_python_ml_import above.
+  find "$DIR" -maxdepth 3 \( \
+    -name ".git" -o -name ".venv" -o -name "node_modules" -o \
+    -name "__pycache__" -o -name "tmp" -o -name "backups" \
+  \) -prune -o -type f \( \
+    -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'setup.cfg' -o \
+    -name 'setup.py' -o -name 'environment*.yaml' -o -name 'environment*.yml' -o \
+    -name 'Pipfile' -o -name 'poetry.lock' -o -name 'uv.lock' \
+  \) -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep -q .
 }
 
 style="general"

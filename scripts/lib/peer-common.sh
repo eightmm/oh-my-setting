@@ -1080,12 +1080,19 @@ ma_emit_bounded_prompt_file() {
   local label="$3"
   local setting="$4"
   local keep="${5:-head}"
+  # A caller that pre-trimmed its input passes the ORIGINAL size here, so the
+  # omission marker states the true loss instead of the loss since the trim.
+  local total_override="${6:-}"
   local bytes
   local omitted
   local slice
   local slice_bytes
 
   bytes="$(LC_ALL=C wc -c < "$file" | tr -d ' ')"
+  case "$total_override" in
+    ''|*[!0-9]*) ;;
+    *) [ "$total_override" -le "$bytes" ] || bytes="$total_override" ;;
+  esac
   if [ "$bytes" -le "$budget" ]; then
     cat "$file"
     return 0
@@ -1402,10 +1409,25 @@ ma_sanitize_quoted_output() {
   local budget
   local line
   local redacted=0
+  local original_bytes
+  local trimmed
 
   tmp="$(agent_memory_mktemp)" || return 1
   sanitized="$(agent_memory_mktemp)" || { rm -f "$tmp"; return 1; }
   ma_mask_quoted_paths > "$tmp"
+  # The redaction loop below forks a grep per line; over an unbounded
+  # artifact that is minutes of work for bytes the final tail-keep budget
+  # will drop anyway. Trim to the budget plus a margin first — tail-keep to
+  # match the final cut, first partial line dropped like the emitter does —
+  # and pass the original size through so the marker states the true loss.
+  original_bytes="$(LC_ALL=C wc -c < "$tmp" | tr -d ' ')"
+  budget="$(ma_prompt_quote_bytes)"
+  if [ "$original_bytes" -gt $((budget + 4096)) ]; then
+    trimmed="$(agent_memory_mktemp)" || { rm -f "$tmp" "$sanitized"; return 1; }
+    tail -c $((budget + 4096)) "$tmp" | sed 1d > "$trimmed"
+    [ -s "$trimmed" ] || tail -c $((budget + 4096)) "$tmp" > "$trimmed"
+    mv -f "$trimmed" "$tmp"
+  fi
   {
     while IFS= read -r line; do
       if printf '%s\n' "$line" | grep -Eiq "$(agent_memory_sensitive_re)"; then
@@ -1419,8 +1441,8 @@ ma_sanitize_quoted_output() {
       fi
     done < "$tmp"
   } > "$sanitized"
-  budget="$(ma_prompt_quote_bytes)"
-  ma_emit_bounded_prompt_file "$sanitized" "$budget" "provider output" "OMS_PROMPT_QUOTE_BYTES" tail
+  ma_emit_bounded_prompt_file "$sanitized" "$budget" "provider output" \
+    "OMS_PROMPT_QUOTE_BYTES" tail "$original_bytes"
   rm -f "$tmp" "$sanitized"
 }
 
@@ -1476,6 +1498,89 @@ os.replace(tmp, path)
 PY
 }
 
+# Parse codex's --json JSONL event stream back to plain text, keeping what
+# plain text cannot carry: whether the turn actually closed. item.completed
+# agent_message events are the answer; turn.completed carries authoritative
+# token usage; and a stream with events but no turn.completed was cut
+# mid-answer — codex's stop-reason equivalent. A file with no known event
+# types passes through untouched (test stubs, older CLIs, other providers).
+ma_codex_jsonl_to_text() {
+  local file="$1"
+  [ -s "$file" ] || return 0
+  python3 - "$file" <<'PY' 2>/dev/null || true
+import json, os, sys
+
+path = sys.argv[1]
+try:
+    raw = open(path, encoding="utf-8", errors="replace").read()
+except OSError:
+    raise SystemExit(0)
+
+KNOWN = {
+    "thread.started", "turn.started", "item.started", "item.updated",
+    "item.completed", "turn.completed", "turn.failed", "error",
+}
+events = []
+others = []
+for line in raw.splitlines():
+    candidate = line.strip()
+    doc = None
+    if candidate.startswith("{") and '"type"' in candidate:
+        try:
+            doc = json.loads(candidate)
+        except ValueError:
+            doc = None
+    if isinstance(doc, dict) and doc.get("type") in KNOWN:
+        events.append(doc)
+        continue
+    others.append(line)
+if not events:
+    raise SystemExit(0)
+
+texts = []
+errors = []
+completed = False
+tokens = 0
+for doc in events:
+    kind = doc.get("type")
+    if kind == "item.completed":
+        item = doc.get("item") or {}
+        if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            texts.append(item["text"])
+    elif kind == "turn.completed":
+        completed = True
+        usage = doc.get("usage") or {}
+        for key in ("input_tokens", "output_tokens"):
+            try:
+                tokens += int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+    elif kind in ("turn.failed", "error"):
+        errors.append(json.dumps(doc.get("error") or doc.get("message") or doc, ensure_ascii=False))
+
+if errors:
+    stop = "stop-reason: provider=codex reason=turn_failed subtype=error is_error=1"
+elif completed:
+    stop = "stop-reason: provider=codex reason=turn_completed subtype=success is_error=0"
+else:
+    stop = "stop-reason: provider=codex reason=stream_truncated subtype=incomplete is_error=0"
+
+out = [stop]
+out.extend(others)
+out.extend(texts)
+out.extend(errors)
+if tokens:
+    # The observability footer plain-mode codex used to print; the usage
+    # parser reads this exact shape and treats it as non-authoritative.
+    out.append("tokens used")
+    out.append(str(tokens))
+tmp = path + ".envelope"
+with open(tmp, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(out) + "\n")
+os.replace(tmp, path)
+PY
+}
+
 ma_provider_attempt() {
   local provider="$1"
   local access="$2"
@@ -1506,6 +1611,10 @@ ma_provider_attempt() {
       # whole config ("reasoning_effort must not be empty") and killed every
       # no-effort council seat while the dry-run smokes stayed green.
       [ -z "$effort" ] || cmd+=(-c "model_reasoning_effort=\"$effort\"")
+      # JSONL events are the only codex transport that says whether the turn
+      # actually closed; parsed back to plain text right after the run
+      # (ma_codex_jsonl_to_text), parse-or-passthrough like the claude branch.
+      cmd+=(--json)
       if [ "$access" = write ]; then
         cmd+=(--sandbox workspace-write -)
       else
@@ -1525,6 +1634,11 @@ ma_provider_attempt() {
       # workers keep MCP: a project may legitimately register servers its
       # tasks depend on.
       [ "$access" = write ] || cmd+=(--strict-mcp-config)
+      # Four tools is the whole belt a judging seat needs (read the code,
+      # search it, run read-only commands) — past four or five, tool
+      # selection degrades and none of the write/spawn tools belong in a
+      # reviewer's hands anyway. Write workers keep the default set.
+      [ "$access" = write ] || cmd+=(--tools "Read,Grep,Glob,Bash")
       # JSON is the only transport that carries WHY the model stopped. The
       # envelope is parsed back to plain text right after the run
       # (ma_claude_envelope_to_text), so every downstream reader keeps its
@@ -1613,6 +1727,7 @@ ma_provider_attempt() {
 
   if wait "$pid"; then status=0; else status=$?; fi
   [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
+  [ "$provider" != codex ] || ma_codex_jsonl_to_text "$output_file"
   if [ -n "$authority_before" ]; then
     if ! ma_authority_state_snapshot "$state_repo" "$authority_after"; then
       authority_diff="owner authority state became unreadable"
@@ -2025,6 +2140,12 @@ try:
         text = handle.read()
 except OSError:
     text = ""
+# Count only after the first Output heading: the Prompt section above it can
+# quote another seat's footer (thread replays, debate rounds), and a quoted
+# footer is someone else's bill.
+marker = re.search(r"(?m)^## Output$", text)
+if marker:
+    text = text[marker.end():]
 found = re.findall(r"(?im)^tokens used[ \t]*\r?\n[ \t]*([0-9][0-9,]*)[ \t]*$", text)
 if found:
     # The artifact contains every bounded retry, so the informational metric

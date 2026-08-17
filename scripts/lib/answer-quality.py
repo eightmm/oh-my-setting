@@ -49,7 +49,7 @@ def main(path: str) -> None:
         if match.group("is_error") == "1":
             print("blocked")
             return
-        if match.group("reason") == "max_tokens":
+        if match.group("reason") in ("max_tokens", "stream_truncated"):
             print("truncated")
             return
         break

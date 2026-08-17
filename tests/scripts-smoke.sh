@@ -1679,6 +1679,26 @@ test_detect_configs_only_is_general() {
   [ "$style" = "general" ] || fail "expected general for configs-only project, got $style"
 }
 
+test_detect_depth_contract_is_tool_independent() {
+  local project="$TMP/detect-depth"
+  local style
+
+  # find -maxdepth 3 is THE detection contract, on every machine. The old rg
+  # fast path searched unbounded depth, so the same repository detected a
+  # different style depending on whether rg was on PATH (codex vendors one).
+  # This pins the find semantics: a machine with rg must agree with CI.
+  mkdir -p "$project/x/y" "$project/a/b/c/d"
+  printf 'import torch\n' > "$project/x/y/model.py"
+  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
+  [ "$style" = "ml" ] || fail "a depth-3 ML import must detect ml, got $style"
+
+  rm -rf "$project/x"
+  printf 'import torch\n' > "$project/a/b/c/d/model.py"
+  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
+  [ "$style" = "general" ] ||
+    fail "a depth-4-only signal is outside the detection contract on every machine, got $style"
+}
+
 test_detect_ml_filename_is_ml() {
   local project="$TMP/detect-ml-filename"
   mkdir -p "$project"
@@ -6042,6 +6062,62 @@ EOF
   # A read seat judges text and gets no MCP tool surface.
   grep -Fxq -- '--strict-mcp-config' "$home_dir/claude-argv" ||
     fail "a read seat must not inherit the user-scope MCP servers: $(cat "$home_dir/claude-argv")"
+  # Four tools is the whole belt a judging seat carries.
+  grep -Fxq -- 'Read,Grep,Glob,Bash' "$home_dir/claude-argv" ||
+    fail "a read seat must carry the bounded tool belt: $(cat "$home_dir/claude-argv")"
+}
+
+test_codex_jsonl_carries_stop_reason() {
+  local project="$TMP/codex-jsonl"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+  local artifact quality
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # A complete turn: answer item plus a closing turn.completed with usage.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"t1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"JSONL answer body: pong."}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+EOF
+  chmod +x "$bin_dir/codex"
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to codex \
+    --prompt "Jsonl probe" >/dev/null
+  assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' \
+    'stop-reason: provider=codex reason=turn_completed subtype=success is_error=0'
+  assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'JSONL answer body: pong.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'tokens used'
+  if grep -R -Fq '"type":"item.completed"' "$artifact_dir"/codex-jsonl-probe-*.md; then
+    fail "the JSONL events must be parsed away, not quoted as the answer"
+  fi
+
+  # A stream cut before turn.completed is codex's max_tokens: events arrived,
+  # the turn never closed, and the answer only looks finished.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"t2"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"A finished-looking sentence the stream cut right after."}}'
+EOF
+  chmod +x "$bin_dir/codex"
+  rm -rf "$artifact_dir"
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to codex \
+    --prompt "Cut probe" >/dev/null
+  artifact="$(find "$artifact_dir" -type f -name 'codex-cut-probe-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "missing cut-probe artifact"
+  grep -Fq 'reason=stream_truncated' "$artifact" ||
+    fail "a cut stream must record its stop reason: $(cat "$artifact")"
+  quality="$(python3 "$ROOT/scripts/lib/answer-quality.py" "$artifact")"
+  [ "$quality" = "truncated" ] ||
+    fail "a cut stream must classify as truncated (got $quality)"
 }
 
 test_agent_call_context_is_opt_in() {

@@ -759,7 +759,21 @@ agent_memory_emit_full_section() {
   fi
 
   printf '### %s\n' "$label"
-  tail -n "$lines" "$file"
+  # Line-bounded is not size-bounded: one pasted wall of text is one line.
+  # Capture, then byte-cap from the file so the consumer's early exit has no
+  # writer to kill.
+  local buf_file total
+  buf_file="$(agent_memory_mktemp)" || return 1
+  tail -n "$lines" "$file" > "$buf_file"
+  total="$(LC_ALL=C wc -c < "$buf_file" | tr -d ' ')"
+  if [ "$total" -gt "${OMS_AGENT_MEMORY_FULL_BYTES:-16384}" ]; then
+    agent_memory_truncate_bytes "${OMS_AGENT_MEMORY_FULL_BYTES:-16384}" < "$buf_file"
+    printf '\n[shared memory truncated: %s of %s bytes shown; OMS_AGENT_MEMORY_FULL_BYTES]\n' \
+      "${OMS_AGENT_MEMORY_FULL_BYTES:-16384}" "$total"
+  else
+    cat "$buf_file"
+  fi
+  rm -f "$buf_file"
   printf '\n'
 }
 

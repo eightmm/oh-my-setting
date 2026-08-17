@@ -735,8 +735,14 @@ print(json.dumps({"schema": 1, "handoffs": rows}, ensure_ascii=False))
 cmd_show() {
   [ "$#" -eq 1 ] || fail "show requires exactly one file"
   local f="$1"
-  [ -f "$f" ] ||
-    f="$(oms_repo_root "${OMS_STATE_REPO:-$PWD}")/.oms/handoffs/$1"
+  # A bare name resolves only inside the handoff store: show is the resume
+  # hint's front door, and trying the caller's cwd first turned
+  # "show README.md" into an arbitrary repo file wearing a handoff's name.
+  # An explicit path still works — it carries a slash.
+  case "$f" in
+    */*) ;;
+    *) f="$(oms_repo_root "${OMS_STATE_REPO:-$PWD}")/.oms/handoffs/$1" ;;
+  esac
   [ -f "$f" ] || fail "no such handoff: $1"
   cat "$f"
 }

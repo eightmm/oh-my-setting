@@ -86,22 +86,16 @@ has_slurm_project() {
     return 0
   fi
 
-  if command -v rg >/dev/null 2>&1; then
-    # Search from inside the project so exclude globs match project-relative
-    # paths, not absolute path segments (e.g. a project located under /tmp).
-    (cd "$PROJECT_DIR" && rg -q "#SBATCH" . \
-      -g '*.sh' -g '*.sbatch' \
-      -g '!scripts/apply-project-template.sh' \
-      -g '!**/.git/**' -g '!**/.venv/**' -g '!**/node_modules/**' \
-      -g '!**/__pycache__/**' -g '!**/tmp/**' -g '!**/backups/**' 2>/dev/null)
-  else
-    find "$PROJECT_DIR" -maxdepth 3 \( \
-      -name ".git" -o -name ".venv" -o -name "node_modules" -o \
-      -name "__pycache__" -o -name "tmp" -o -name "backups" \
-    \) -prune -o -type f \( -name '*.sh' -o -name '*.sbatch' \) \
-      ! -path "$PROJECT_DIR/scripts/apply-project-template.sh" \
-      -exec grep -q "#SBATCH" {} \; -print -quit 2>/dev/null | grep -q .
-  fi
+  # One implementation, not an rg fast path with a find fallback: the two
+  # branches disagreed on depth, hidden files, and gitignore, so the same
+  # repository detected a different style depending on whether rg was on
+  # PATH (codex vendors one). CI runs find-only; find is the contract.
+  find "$PROJECT_DIR" -maxdepth 3 \( \
+    -name ".git" -o -name ".venv" -o -name "node_modules" -o \
+    -name "__pycache__" -o -name "tmp" -o -name "backups" \
+  \) -prune -o -type f \( -name '*.sh' -o -name '*.sbatch' \) \
+    ! -path "$PROJECT_DIR/scripts/apply-project-template.sh" \
+    -exec grep -q "#SBATCH" {} \; -print -quit 2>/dev/null | grep -q .
 }
 
 if [ "$BASE_STYLE" = "auto" ]; then

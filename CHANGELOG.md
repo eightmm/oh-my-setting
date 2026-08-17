@@ -7,6 +7,36 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- The codex transport now says whether the turn actually closed: exec calls
+  ride `--json`, and the JSONL events are parsed back to plain text plus a
+  `stop-reason:` line (parse-or-passthrough like the claude branch).
+  item.completed agent_message events are the answer, turn.completed carries
+  authoritative token usage (replayed as the observability footer the usage
+  parser already reads), and a stream with events but no turn.completed is
+  codex's max_tokens — recorded as `stream_truncated`, classified truncated,
+  and voided at the review gate. The token parser also counts only after the
+  first Output heading, so a quoted footer in a replayed prompt is no longer
+  someone else's bill.
+- Read-access claude seats carry a four-tool belt (`--tools
+  Read,Grep,Glob,Bash`): a judging seat reads and searches, and none of the
+  write or spawn tools belong in a reviewer's hands — past four or five
+  tools, selection degrades (the exam's own line).
+- Style detection has one implementation: the rg fast path disagreed with
+  the find fallback on depth, hidden files, and gitignore, so the same
+  repository detected a different style depending on whether rg was on PATH
+  (codex vendors one; measured live — a depth-4 `import torch` read `ml`
+  with rg and `general` without). find -maxdepth 3 is now the contract on
+  every machine, pinned by a depth-boundary regression.
+
+### Fixed
+- Bounded ingress at four more mouths: the quote sanitizer trims to the
+  budget before its per-line redaction (minutes of forks over bytes the
+  final cut dropped anyway; the omission marker still states the true
+  loss), the newest thread turn is truncated to the context budget instead
+  of riding uncut, MODE=full shared memory is byte-capped after its line
+  tail, and a bare handoff name resolves only inside the handoff store —
+  resolving against the caller's cwd first turned "show README.md" into an
+  arbitrary repo file wearing a handoff's name.
 - The claude transport carries why the model stopped: print-mode calls ask
   for the JSON envelope and parse it back to plain text plus one
   `stop-reason:` line (parse-or-passthrough — stubs and other providers are

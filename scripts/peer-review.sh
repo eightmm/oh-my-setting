@@ -240,7 +240,7 @@ review_verdicts() {
     # a replayed thread turn can quote a marker line into the prompt, and a
     # quoted marker is not the transport's verdict.
     died_stop="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0}
-      o && /^stop-reason: .*(reason=max_tokens|is_error=1)/{print substr($0, 14, 67); exit}' "$f")"
+      o && /^stop-reason: .*(reason=max_tokens|reason=stream_truncated|is_error=1)/{print substr($0, 14, 67); exit}' "$f")"
     if [ -n "$verdict" ] && [ -n "$died_stop" ]; then
       verdict=""
     fi
