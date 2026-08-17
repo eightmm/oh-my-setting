@@ -20,7 +20,44 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   argv, pass structured failures through unchanged, and expose no mutation,
   promotion, or landing surface.
 
+### Changed
+- Consult forms its second opinion before reading the first: shared memory
+  (prior conclusions — closed tasks, distilled decisions) is opt-in via
+  `--memory`, matching peer-ask/peer-review/agent-call; the task packet
+  still rides by default. The advisor session digest likewise drops the
+  caller's own concluding summary — goal, turns, and files touched are
+  evidence, the author's rationale is anchoring.
+- `oms_agent_operations` projects the most recent 40 attempts instead of
+  the whole append-only lifecycle ledger; unbounded, the projection was
+  4KB from the 60k output cap, past which the character cut returns
+  unparseable JSON at full token cost.
+
 ### Fixed
+- Rules land at their tier: the ML project template no longer ships
+  cluster-only guidance (`snapshot --cluster`, `run-reconcile`) that the
+  conditional Slurm overlay exists to withhold, and the generated loader
+  abbreviates `$HOME` again — bash tilde-expanded the unquoted
+  replacement, so every loader carried an absolute machine path that
+  resolves nowhere else.
+- A dead council seat is honest in every surface: the synthesis names the
+  seat and withholds its partial stdout instead of pasting it as one more
+  opinion, the review gate voids a GATE line whose transcript records a
+  nonzero exit (a verdict printed before the death judged nothing), and
+  advisor advice entering a repair prompt takes the answer-quality gate
+  plus the same sanitize-and-bound pass as every other quoted output. A
+  consult that produced no usable answer exits nonzero, and its failover
+  judges the exact artifact its call reported, not the newest file an
+  overlapping detached run may still be writing.
+- Unattended paths cannot wait on prompts: auto-update's cron fetch/pull
+  run under `GIT_TERMINAL_PROMPT=0`, and the claude/codex MCP and plugin
+  installers close stdin and wall-clock-bound every provider-management
+  call, so a trust or credential question fails fast instead of holding
+  the daily slot.
+- Session ingress is bounded at the remaining unbounded mouths: a failing
+  check.sh stage prints a bounded tail and keeps the full log on disk for
+  job-digest, git status in peer prompts is line-capped with an omission
+  marker beside the already-capped diff, and run-capsule refuses an
+  oversized metrics file with run-ledger's exact contract.
 - Debate rounds encode pairs, prompt files, and round artifacts with the
   colon-free seat label instead of the raw model-pinned target. The raw
   form split the "name:artifact" pair at the wrong colon, mangling the
