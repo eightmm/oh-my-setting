@@ -494,11 +494,12 @@ PY
     # Artifacts that predate the typed outcome row are stored user state;
     # parse them through the one parser peer-review owns, still consuming
     # JSON rather than grepping rendered lines.
+    # The verdicts exit code carries the gate verdict itself — a genuine
+    # split exits 1 WITH valid JSON on stdout — so nonzero is not a probe
+    # failure here and must not become an UNAVAILABLE section. Captured
+    # stdout is the only signal this legacy path offers.
     review_json="$("$ROOT/scripts/peer-review.sh" verdicts --json \
-      "$repo/.oms/artifacts/review" 2>/dev/null || printf '__OMS_DISSENT_PROBE_FAILED__')"
-    case "$review_json" in
-      *__OMS_DISSENT_PROBE_FAILED__*) dissent_probe_failed=1; review_json="" ;;
-    esac
+      "$repo/.oms/artifacts/review" 2>/dev/null || true)"
   fi
   [ -z "$review_json" ] ||
     dissent_seats="$(OMS_HANDOFF_VERDICTS_JSON="$review_json" python3 - <<'PY' 2>/dev/null || printf '__OMS_DISSENT_PROBE_FAILED__'
