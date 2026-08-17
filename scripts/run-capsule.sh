@@ -302,8 +302,17 @@ cmd_run() {
     echo "capsule: warning: output.log contains sensitive-looking content (local under .oms)" >&2
   fi
 
-  local metrics_json=""
-  [ -n "$METRICS_FILE" ] && [ -f "$METRICS_FILE" ] && metrics_json="$(cat "$METRICS_FILE")"
+  # Same input, same contract as run-ledger's metrics guard: an oversized
+  # metrics file is recorded as absent, not embedded whole into the capsule
+  # that `show` later returns to a session.
+  local metrics_json="" metrics_max_bytes="${OMS_METRICS_MAX_BYTES:-65536}"
+  if [ -n "$METRICS_FILE" ] && [ -f "$METRICS_FILE" ]; then
+    if [ "$(wc -c < "$METRICS_FILE" | tr -d ' ')" -gt "$metrics_max_bytes" ]; then
+      echo "capsule: metrics file exceeds ${metrics_max_bytes}B; capsule recorded without metrics" >&2
+    else
+      metrics_json="$(cat "$METRICS_FILE")"
+    fi
+  fi
 
   OMS_GIT="$git_json" OMS_ENV="$env_json" OMS_CFG="$cfg_json" OMS_OUT="$out_json" \
   OMS_METRICS="$metrics_json" OMS_SEEDS="$(printf '%s\n' "${SEEDS[@]:-}")" \

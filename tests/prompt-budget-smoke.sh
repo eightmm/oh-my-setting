@@ -154,6 +154,35 @@ test_debate_and_synthesis_use_quote_budget() {
     fail "synthesis should cap each quoted provider output"
 }
 
+test_status_budget_caps_lines() {
+  local repo="$TMP/status-repo"
+  local out i
+
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config user.name t
+  git -C "$repo" config user.email t@example.com
+  for i in $(seq 1 25); do printf 'x\n' > "$repo/f$i.txt"; done
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm init
+  for i in $(seq 1 25); do printf 'y\n' >> "$repo/f$i.txt"; done
+
+  # The status rides prompts beside a hard-capped diff; a mass reformat must
+  # not put an unbounded file list where the diff itself is bounded.
+  MA_SAFE_PATHS=(".")
+  out="$(OMS_PROMPT_STATUS_LINES=10 ma_safe_status "$repo")"
+  [ "$(printf '%s\n' "$out" | grep -c '^ M ')" -eq 10 ] ||
+    fail "status should keep exactly the budgeted lines: $out"
+  printf '%s\n' "$out" | grep -Fq '[status truncated: 10 of 25 lines shown' ||
+    fail "status truncation must be marked: $out"
+  out="$(ma_safe_status "$repo")"
+  [ "$(printf '%s\n' "$out" | grep -c '^ M ')" -eq 25 ] ||
+    fail "a status inside the budget must pass through whole: $out"
+  if printf '%s\n' "$out" | grep -Fq '[status truncated'; then
+    fail "an untruncated status must not carry a marker: $out"
+  fi
+}
+
 small_prompt="$TMP/operator-prompt"
 printf 'Operator question\n' > "$small_prompt"
 
@@ -161,5 +190,6 @@ test_budget_defaults_and_invalid_fallback
 test_diff_budget_and_small_passthrough
 test_quoted_output_budget_and_small_passthrough
 test_debate_and_synthesis_use_quote_budget
+test_status_budget_caps_lines
 
 echo 'prompt-budget-smoke: ok'

@@ -1472,8 +1472,15 @@ advise_after_repeated_failure() {
   advice=""
   if [ "$rc" -eq 0 ]; then
     advice_artifact="$(printf '%s' "$advice_out" | sed -n 's/^artifact: //p' | sed -n '1p')"
-    [ -z "$advice_artifact" ] || [ ! -f "$advice_artifact" ] ||
-      advice="$(extract_output "$advice_artifact")"
+    # Advisor output is provider output: it must really be an answer (a
+    # banner-only or refusal artifact steering a repair attempt is worse than
+    # no advisor), and it rides into the repair prompt, so it takes the same
+    # sanitize-and-bound pass as every other quoted answer. Anything short of
+    # that falls into the advisor-unavailable branch.
+    if [ -n "$advice_artifact" ] && [ -f "$advice_artifact" ] &&
+       [ "$(ma_answer_quality "$advice_artifact")" = "ok" ]; then
+      advice="$(extract_output "$advice_artifact" | ma_sanitize_quoted_output 2>/dev/null || true)"
+    fi
   fi
   if [ "$rc" -ne 0 ] || [ -z "$advice" ]; then
     echo "note: advisor unavailable after repeated failure; repairing without it" >&2

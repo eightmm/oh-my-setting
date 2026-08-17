@@ -137,10 +137,15 @@ TOOLS = [
     {
         "name": "oms_agent_operations",
         "description": (
-            "Durable lifecycle projection for all supervised and direct agent"
-            " attempts, including state, usage, lineage, and budgets."
+            "Durable lifecycle projection of recent supervised and direct"
+            " agent attempts (most recent 40), including state, usage,"
+            " lineage, and budgets."
         ),
-        "argv": ["bash", "scripts/agent-events.sh", "list", "--json"],
+        # The lifecycle ledger is append-only and never pruned; unbounded, the
+        # projection outgrows OUTPUT_LIMIT and the character cut below turns
+        # every call into unparseable JSON. Recent attempts are the question
+        # this tool answers.
+        "argv": ["bash", "scripts/agent-events.sh", "list", "--json", "--limit", "40"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },

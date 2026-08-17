@@ -1018,12 +1018,26 @@ EOF
 
 ma_safe_status() {
   local repo="$1"
+  local out total limit
   oms_git_assert_safe_execution_config "$repo" diff-read || return 1
   oms_git_assert_plain_index "$repo" || return 1
-  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+  out="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 \
     git -c core.fsmonitor=false -C "$repo" \
-    status --short -- "${MA_SAFE_PATHS[@]}"
+    status --short -- "${MA_SAFE_PATHS[@]}")" || return 1
+  [ -n "$out" ] || return 0
+  # The status rides into prompts next to a hard-capped diff; a mass reformat
+  # or lockfile churn would otherwise put megabytes of file names where the
+  # diff itself is bounded. awk (not head) so the writer is drained: SIGPIPE
+  # under pipefail was this repo's recurring failure shape.
+  limit="${OMS_PROMPT_STATUS_LINES:-200}"
+  case "$limit" in ''|0|*[!0-9]*) limit=200 ;; esac
+  total="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+  printf '%s\n' "$out" | awk -v n="$limit" 'NR <= n'
+  if [ "$total" -gt "$limit" ]; then
+    printf '[status truncated: %s of %s lines shown; OMS_PROMPT_STATUS_LINES=%s]\n' \
+      "$limit" "$total" "$limit"
+  fi
 }
 
 ma_prompt_diff_bytes() {
@@ -2603,6 +2617,15 @@ ma_write_synthesis() {
       printf '## %s\n\n' "${provider_names[i]}"
       # This loop walks every seat, alive or not, so a dropped seat's body would
       # still be read here as one more opinion. Name it instead of pasting it.
+      # A seat that died in round 1 (timeout, kill, provider error) left
+      # whatever stdout survived — a truncation that reads as a short opinion.
+      # The thread of record already names such seats (thread_append_nonanswer);
+      # the synthesis must be as honest.
+      if [ "${seat_exit[i]:-0}" != 0 ]; then
+        printf '_no answer: provider exited %s; partial output withheld (see %s)_\n\n' \
+          "${seat_exit[i]}" "$(basename "${artifacts[i]}")"
+        continue
+      fi
       if [ -n "${seat_quality[i]:-}" ]; then
         printf '_non-answer (%s): %s_\n\n' "${seat_quality[i]}" \
           "$(printf '%s\n' "${seat_reason[i]:-no usable output}" | ma_sanitize_quoted_output)"

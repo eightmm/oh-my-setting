@@ -151,7 +151,7 @@ review_verdicts() {
   local vrecords="" providers
   # One extraction pass feeds prose, JSON, and the typed outcome row alike:
   # a second parser is where verdict drift starts.
-  local seat_rows="" seat_round
+  local seat_rows="" seat_round exit_val died_exit
 
   [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
   if [ -n "$forced_run_id" ]; then
@@ -220,6 +220,20 @@ review_verdicts() {
     # ("...exactly one line: GATE: pass or GATE: fail.") must not match.
     verdict="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
       grep -E '^[*[:space:]]*GATE: (pass|fail)[*[:space:]]*$' | tail -n 1 | grep -oE 'pass|fail')" || verdict=""
+    # The recorded exit is part of the verdict: a seat that died nonzero
+    # (timeout, kill, provider error) left a partial transcript, and a GATE
+    # line inside it — printed before the death — is not a judgment of the
+    # whole diff. Blank it so the no-verdict branch fails the gate closed.
+    # Exits that never ran the model (blocked, missing CLI) have no GATE line
+    # and keep their own diagnosis below. The last exit section is the
+    # harness-written one.
+    died_exit=""
+    exit_val="$(awk '/^## Exit$/{e=1; v=""; next} e && NF {v=$0; e=0} END{print v}' "$f" |
+      tr -d '[:space:]')"
+    if [ -n "$verdict" ] && [ -n "$exit_val" ] && [ "$exit_val" != "0" ]; then
+      died_exit="$exit_val"
+      verdict=""
+    fi
     # Stated confidence is advisory display for tiebreaks, never a gate
     # input: a confident wrong verdict must not outvote the mechanical check.
     confidence="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
@@ -262,6 +276,9 @@ review_verdicts() {
           reason="$(ma_answer_block_reason "$f")"
         if [ -n "$reason" ]; then
           [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (blocked: $reason)"
+        elif [ -n "$died_exit" ]; then
+          [ "$json_stdout" = 1 ] ||
+            echo "$provider: no-verdict (provider exited $died_exit; a GATE line in a partial transcript is not a verdict — re-run the review)"
         else
           [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (complete but no GATE line)"
         fi

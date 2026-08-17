@@ -43,6 +43,7 @@ write_stubs() {  # write_stubs BIN_DIR
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > /dev/null
+echo "PARTIAL-OPINION: a line the wall clock cut off mid-answer"
 exec sleep 30
 EOF
   # Two seats that answer, so the run stays a quorum and the dead seat is a
@@ -137,7 +138,18 @@ PY
   printf '%s' "$list" | grep -Fq 'count=1' || fail "first failure should count once: $list"
   printf '%s' "$list" | grep -Fq 'OPEN' || fail "an unresolved seat failure should be open: $list"
 
-  # 5. A provider that hangs every time has to accumulate onto one fingerprint,
+  # 5. Synthesis: the dead seat is named, and its partial stdout is withheld —
+  #    a truncation pasted under a provider heading reads as a short opinion.
+  local synth
+  synth="$(ls "$project/artifacts/"_synthesis-*.md 2>/dev/null | head -1)"
+  [ -n "$synth" ] || fail "no synthesis artifact was written"
+  grep -Fq 'no answer: provider exited 124' "$synth" ||
+    fail "the synthesis must name the dead seat: $(cat "$synth")"
+  if grep -Fq 'PARTIAL-OPINION' "$synth"; then
+    fail "the dead seat's partial output must not ride the synthesis"
+  fi
+
+  # 6. A provider that hangs every time has to accumulate onto one fingerprint,
   #    or the advise threshold never sees a chronically dead seat.
   rc="$(run_council "$project" "$bin_dir" seatfail2 "$project/out2" "$project/err2")"
   [ "$rc" = "0" ] || fail "the second run should also reach quorum, got exit $rc"

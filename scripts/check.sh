@@ -233,10 +233,28 @@ stage() {  # stage NAME COMMAND...
   started="$(date +%s)"
   "$@" > "$log" 2>&1 || rc=$?
   elapsed=$(( $(date +%s) - started ))
-  if [ "$rc" -ne 0 ] || [ "${OMS_VERBOSE:-0}" = "1" ]; then
+  if [ "${OMS_VERBOSE:-0}" = "1" ]; then
     cat "$log"
+    rm -f "$log"
+  elif [ "$rc" -ne 0 ]; then
+    # Failure output is read by an agent between edits: bounded tail in the
+    # session (the assertion that failed prints last), full log kept on disk
+    # for oms job-digest. Unbounded, one failing smoke can dump hundreds of
+    # kilobytes into the calling context.
+    local log_cap log_bytes
+    log_cap="${OMS_CHECK_LOG_BYTES:-65536}"
+    case "$log_cap" in ''|0|*[!0-9]*) log_cap=65536 ;; esac
+    log_bytes="$(wc -c < "$log" | tr -d ' ')"
+    if [ "$log_bytes" -gt "$log_cap" ]; then
+      echo "[check: output is ${log_bytes}B; showing the last ${log_cap}B — full log: $log]"
+      tail -c "$log_cap" "$log"
+    else
+      cat "$log"
+      rm -f "$log"
+    fi
+  else
+    rm -f "$log"
   fi
-  rm -f "$log"
   if [ "$rc" -ne 0 ]; then
     echo "check: $name FAILED (${elapsed}s)" >&2
     exit "$rc"

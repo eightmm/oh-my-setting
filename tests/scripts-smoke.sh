@@ -873,6 +873,16 @@ test_review_verdicts_subcommand() {
     fail "empty dir should exit nonzero"
   fi
 
+  # A seat that died after printing a GATE line: the recorded nonzero exit
+  # voids the verdict — a partial transcript's pass must not open the gate.
+  mkdir -p "$dir/died"
+  printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n124\n' \
+    > "$dir/died/codex-x-$run.md"
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/died")" && rc=0 || rc=$?
+  [ "$rc" = "2" ] || fail "a dead seat's GATE line must not gate (want exit 2, got $rc)"
+  printf '%s' "$out" | grep -Fq 'codex: no-verdict (provider exited 124' ||
+    fail "dead seat must be named with its exit: $out"
+
   # Debate runs: judge each provider's FINAL round, not round 1; a slug that
   # contains "-r9" must not be parsed as a round suffix.
   mkdir -p "$dir/debate"
@@ -5834,6 +5844,34 @@ test_agent_run_records_task_outcome() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"patch": "artifacts/codex-implement-helper-'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"task_goal": "Record delegated artifact"'
+}
+
+test_consult_memory_is_opt_in() {
+  local project="$TMP/consult-memory-opt-in"
+  local home_dir="$project/home"
+  local bin_dir="$project/bin"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir" "$bin_dir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$bin_dir/codex"
+  chmod +x "$bin_dir/codex"
+  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
+
+  # Shared memory holds prior conclusions; a consulted peer reads them only on
+  # request, so the second opinion is not anchored on the first.
+  HOME="$home_dir" PATH="$bin_dir:$PATH" OMS_AGENT=claude "$ROOT/scripts/consult.sh" \
+    --repo "$project" --to codex --dry-run --quiet \
+    --prompt "Assess this plan" >/dev/null
+  if grep -R -Fq 'Prefer narrow verification commands.' "$project/.oms/artifacts/consult"; then
+    fail "consult should omit shared memory by default"
+  fi
+
+  HOME="$home_dir" PATH="$bin_dir:$PATH" OMS_AGENT=claude "$ROOT/scripts/consult.sh" \
+    --repo "$project" --to codex --memory --dry-run --quiet \
+    --prompt "Assess this plan" >/dev/null
+  grep -R -Fq 'Prefer narrow verification commands.' "$project/.oms/artifacts/consult" ||
+    fail "consult --memory should attach shared memory"
 }
 
 test_agent_call_context_is_opt_in() {
