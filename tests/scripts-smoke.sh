@@ -537,6 +537,32 @@ test_apply_loader_allows_clear_bounded_changes() {
   fi
 }
 
+test_apply_loader_abbreviates_home() {
+  local project="$TMP/loader-home"
+  local fake_home
+
+  # The loader pointer abbreviates $HOME to ~: an absolute home path is a
+  # machine detail and resolves nowhere else. HOME is the checkout's parent
+  # here so the abbreviation has a prefix to strike.
+  fake_home="$(cd "$ROOT/.." && pwd)"
+  HOME="$fake_home" "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  assert_file_contains "$project/AGENTS.md" "~/$(basename "$ROOT")/templates/project-general-AGENTS.md"
+  if grep -Fq "$fake_home" "$project/AGENTS.md"; then
+    fail "generated loader leaks the absolute home path"
+  fi
+}
+
+test_ml_template_keeps_cluster_guidance_in_slurm_overlay() {
+  # The ML template applies on workstations too; cluster-only commands ride
+  # the conditional Slurm overlay so they never follow into machines that
+  # cannot run them.
+  if grep -Eq 'snapshot --cluster|run-reconcile' "$ROOT/templates/project-ml-AGENTS.md"; then
+    fail "ML template carries cluster-only guidance; it belongs in the slurm overlay"
+  fi
+  grep -Eq 'snapshot --cluster' "$ROOT/templates/project-slurm-AGENTS.md" ||
+    fail "slurm overlay lost its cluster snapshot guidance"
+}
+
 test_generated_project_contracts_stay_compact() {
   local general="$TMP/project-budget-general"
   local ml="$TMP/project-budget-ml"

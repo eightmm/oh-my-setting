@@ -162,7 +162,10 @@ loader_content() {
   local style="$1"
   local template="$2"
   local display_template="$template"
-  display_template="${display_template/#$HOME/~}"
+  # The tilde must be escaped: bash tilde-expands an unquoted ~ in the
+  # replacement, silently writing the absolute home path into the generated
+  # loader — a machine detail, and a pointer that resolves nowhere else.
+  display_template="${display_template/#$HOME/\~}"
 
   printf '# oh-my-setting Loader\n\n'
   printf 'Read `PROJECT.md`, then follow `%s` for shared `%s` rules.\n' "$display_template" "$style"
