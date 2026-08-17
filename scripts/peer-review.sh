@@ -236,11 +236,12 @@ review_verdicts() {
     fi
     # A recorded stop reason outranks the text: a seat cut off at max_tokens
     # exits 0 with finished-looking sentences, and a GATE line above the cut
-    # judged only what survived it.
-    died_stop=""
-    if [ -n "$verdict" ] &&
-       grep -Eq '^stop-reason: .*(reason=max_tokens|is_error=1)' "$f"; then
-      died_stop="$(grep -E '^stop-reason: ' "$f" | head -1 | cut -c14-80)"
+    # judged only what survived it. Same Output window as the GATE parse —
+    # a replayed thread turn can quote a marker line into the prompt, and a
+    # quoted marker is not the transport's verdict.
+    died_stop="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0}
+      o && /^stop-reason: .*(reason=max_tokens|is_error=1)/{print substr($0, 14, 67); exit}' "$f")"
+    if [ -n "$verdict" ] && [ -n "$died_stop" ]; then
       verdict=""
     fi
     # Stated confidence is advisory display for tiebreaks, never a gate

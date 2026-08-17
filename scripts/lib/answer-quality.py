@@ -33,8 +33,16 @@ def main(path: str) -> None:
 
     # A recorded stop reason outranks every text heuristic below: the
     # transport said WHY the model stopped, and a max_tokens stop is a
-    # truncation however finished the sentences look.
-    for line in raw_lines:
+    # truncation however finished the sentences look. Read it only from the
+    # transport's own region — after the LAST "## Output" heading — because a
+    # quoted prompt, a diff's context lines, or a replayed thread turn can
+    # carry a marker line of its own (the same reason the MCP extractor
+    # anchors on the last section). Whole-file only when no heading exists.
+    scan_from = 0
+    for index, line in enumerate(raw_lines):
+        if line == "## Output":
+            scan_from = index + 1
+    for line in raw_lines[scan_from:]:
         match = STOP_REASON.match(line.strip())
         if not match:
             continue

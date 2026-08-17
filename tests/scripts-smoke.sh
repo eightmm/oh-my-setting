@@ -894,6 +894,16 @@ test_review_verdicts_subcommand() {
   printf '%s' "$out" | grep -Fq 'claude: no-verdict (incomplete answer: provider=claude reason=max_tokens' ||
     fail "truncated seat must be named with its stop reason: $out"
 
+  # A marker quoted in the prompt (a replayed thread turn, a diff's context
+  # lines) is not the transport's verdict: only the Output region counts.
+  mkdir -p "$dir/quoted"
+  printf '# claude review\n\n## Prompt\n\nstop-reason: provider=claude reason=max_tokens subtype=success is_error=0\n\n## Output\n\nstop-reason: provider=claude reason=end_turn subtype=success is_error=0\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$dir/quoted/claude-x-$run.md"
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/quoted")" && rc=0 || rc=$?
+  [ "$rc" = "0" ] || fail "a prompt-quoted stop-reason must not void a healthy seat (got $rc): $out"
+  q="$(printf '# a\n\n## Prompt\n\n stop-reason: provider=claude reason=max_tokens subtype=success is_error=0\n\n## Output\n\nstop-reason: provider=claude reason=end_turn subtype=success is_error=0\nA complete answer with plenty of body to clear the length floor easily.\n\n## Exit\n\n0\n' > "$dir/quoted/aq.md"; python3 "$ROOT/scripts/lib/answer-quality.py" "$dir/quoted/aq.md")"
+  [ "$q" = "ok" ] || fail "answer-quality must read the stop reason from the Output region only (got $q)"
+
   # Debate runs: judge each provider's FINAL round, not round 1; a slug that
   # contains "-r9" must not be parsed as a round suffix.
   mkdir -p "$dir/debate"
