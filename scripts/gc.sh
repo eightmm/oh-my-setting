@@ -616,6 +616,24 @@ PY
   esac
 fi
 
+# 4.2) Lifecycle events of long-terminal attempts. Delegated to agent-events,
+#      which owns the stream's schema and lock: whole attempt streams only,
+#      survivors must still project, and an invalid stream refuses to
+#      compact. Without this the append-only ledger grows forever and the
+#      projection every MCP reader consumes outgrows any output budget.
+if [ -f "$OMS/lifecycle/events.jsonl" ]; then
+  lifecycle_gc_args=(--repo "$STATE_ROOT" compact --days "$DAYS")
+  [ "$DRY_RUN" = 1 ] || lifecycle_gc_args+=(--apply)
+  if lifecycle_gc_out="$("$ROOT/scripts/agent-events.sh" "${lifecycle_gc_args[@]}" 2>&1)"; then
+    printf -- '- %s\n' "$lifecycle_gc_out"
+    case "$lifecycle_gc_out" in
+      *'dropped '*) removed=$((removed + 1)) ;;
+    esac
+  else
+    echo "- lifecycle: compaction skipped ($lifecycle_gc_out)"
+  fi
+fi
+
 # 4.4) Usage rows: the content-free family counter the fail-ledger hook
 #      appends on matched Bash calls. The reader (skill-router's usage hint)
 #      drops rows past OMS_USAGE_TTL at read time — this compaction uses the

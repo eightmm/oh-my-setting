@@ -197,7 +197,7 @@ oms_model_is_model_safeguard_output() {
 oms_model_is_policy_decline_output() {
   local file="$1"
   local prompt="${2:-}"
-  local pattern='violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal'
+  local pattern='violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal|stop-reason: .*reason=refusal'
   if [ ! -f "$prompt" ]; then
     grep -Eiq "$pattern" "$file"
     return $?
@@ -210,7 +210,7 @@ oms_model_is_policy_decline_output() {
     FNR == NR { prompt[$0]++; next }
     {
       lower = tolower($0)
-      if (lower ~ /violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal/) {
+      if (lower ~ /violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal|stop-reason: .*reason=refusal/) {
         if (prompt[$0] > 0) prompt[$0]--
         else declined = 1
       }

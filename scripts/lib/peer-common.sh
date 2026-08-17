@@ -1424,6 +1424,58 @@ ma_sanitize_quoted_output() {
   rm -f "$tmp" "$sanitized"
 }
 
+# Parse claude's print-mode JSON envelope back to plain text, keeping the one
+# fact plain text cannot carry: why the model stopped. A max_tokens stop reads
+# as a complete answer and is not one — the response arrives, the sentences
+# look finished, and the tail is gone. The stop-reason line lands at the top
+# of the Output section where answer-quality and the review gate read it.
+# A file that does not contain the envelope is left untouched (test stubs,
+# older CLIs, other providers), so this is parse-or-passthrough, never a
+# format requirement.
+ma_claude_envelope_to_text() {
+  local file="$1"
+  [ -s "$file" ] || return 0
+  python3 - "$file" <<'PY' 2>/dev/null || true
+import json, sys
+
+path = sys.argv[1]
+try:
+    raw = open(path, encoding="utf-8", errors="replace").read()
+except OSError:
+    raise SystemExit(0)
+
+envelope = None
+others = []
+for line in raw.splitlines():
+    candidate = line.strip()
+    if envelope is None and candidate.startswith("{") and '"type"' in candidate:
+        try:
+            doc = json.loads(candidate)
+        except ValueError:
+            doc = None
+        if isinstance(doc, dict) and doc.get("type") == "result" and "result" in doc:
+            envelope = doc
+            continue
+    others.append(line)
+if envelope is None:
+    raise SystemExit(0)
+
+reason = envelope.get("stop_reason") or envelope.get("terminal_reason") or "unknown"
+subtype = envelope.get("subtype") or "unknown"
+is_error = 1 if envelope.get("is_error") else 0
+out = ["stop-reason: provider=claude reason=%s subtype=%s is_error=%d" % (reason, subtype, is_error)]
+out.extend(others)
+result = envelope.get("result")
+if isinstance(result, str) and result:
+    out.append(result)
+tmp = path + ".envelope"
+with open(tmp, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(out) + "\n")
+import os
+os.replace(tmp, path)
+PY
+}
+
 ma_provider_attempt() {
   local provider="$1"
   local access="$2"
@@ -1467,7 +1519,17 @@ ma_provider_attempt() {
       [ "$model" = provider-default ] || cmd+=(--model "$model")
       # Same empty-effort contract as the codex branch above.
       [ -z "$effort" ] || cmd+=(--effort "$effort")
-      cmd+=(--permission-mode "$permission" -p)
+      # Read seats judge text: they need no MCP tool surface, and the
+      # user-scope oms server would otherwise ride into every spawned seat
+      # (children receive context, never the owner's capabilities). Write
+      # workers keep MCP: a project may legitimately register servers its
+      # tasks depend on.
+      [ "$access" = write ] || cmd+=(--strict-mcp-config)
+      # JSON is the only transport that carries WHY the model stopped. The
+      # envelope is parsed back to plain text right after the run
+      # (ma_claude_envelope_to_text), so every downstream reader keeps its
+      # shape; anything that is not the envelope passes through untouched.
+      cmd+=(--permission-mode "$permission" --output-format json -p)
       ;;
     antigravity|agy)
       # --print TAKES the prompt as its value here (--prompt is its alias), so
@@ -1550,6 +1612,7 @@ ma_provider_attempt() {
   local pid="$!"
 
   if wait "$pid"; then status=0; else status=$?; fi
+  [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
   if [ -n "$authority_before" ]; then
     if ! ma_authority_state_snapshot "$state_repo" "$authority_after"; then
       authority_diff="owner authority state became unreadable"

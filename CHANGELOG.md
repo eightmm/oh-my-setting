@@ -7,6 +7,33 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- The claude transport carries why the model stopped: print-mode calls ask
+  for the JSON envelope and parse it back to plain text plus one
+  `stop-reason:` line (parse-or-passthrough — stubs and other providers are
+  untouched). Consumers act on it: answer-quality classifies a max_tokens
+  stop as `truncated` however finished the sentences look, the review gate
+  voids a GATE line whose transcript records a truncation or error stop,
+  and the refusal detector reads the recorded reason. Read-access claude
+  seats also run `--strict-mcp-config`: a council seat judges text and does
+  not inherit the user-scope MCP tool surface (write workers keep MCP — a
+  project may register servers its tasks depend on). codex (`--json` is
+  JSONL events) and agy (no JSON surface; its self-timeout already exits
+  nonzero, verified) keep the plain transport for now.
+- `peer-delegate --read-only` runs a reviewer or auditor role with the
+  authority its mandate describes; authority still comes from the caller,
+  never role prose, and `--apply` is rejected as contradictory.
+- `agent-events compact` (wired into gc) drops the full event streams of
+  long-terminal attempts — whole streams only, survivors must re-project,
+  an invalid stream refuses to compact. The append-only lifecycle ledger
+  was pruned by nothing and its projection outgrows any output budget.
+- `fail-ledger list --limit` keeps the most recently active fingerprints
+  and states the omission; the MCP projection uses it. `tsp-queue logs`
+  defaults to a bounded tail naming the full log (`--full` for everything).
+- project-doctor checks tier-3 loaders below the root: a subdirectory
+  CLAUDE.md whose AGENTS.md sibling lacks the managed block is the
+  one-CLI-follows-different-rules divergence, now named with the exact
+  re-run command; sub-tier staleness is checked against the current
+  templates.
 - Explicit exit-judged criterion coverage at both remaining producers:
   `patch-admit --covers` rides the admission receipt (verified on ADMIT,
   failed on REJECT, bound to the patch digest) and `peer-review --gate
@@ -21,6 +48,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   promotion, or landing surface.
 
 ### Changed
+- Every bounded quote names its cut, and admitted answers are judged:
+  peer-delegate's five unmarked head/tail reads carry truncation markers,
+  the synthesis embeds the operator prompt head-kept at the quote budget
+  instead of re-billing the whole diff, import-agent-result refuses an
+  empty paste and names a non-answer at the door, an answer thread turn
+  derives its quality when the caller supplied none, oms_peer_result gives
+  each seat an equal budget slice and labels a nonzero seat's text as the
+  partial it is, attempt-runner says at completion when its capture dropped
+  the tail, and the antigravity transport refuses a prompt past its
+  ~128KiB argv wall by name.
 - Consult forms its second opinion before reading the first: shared memory
   (prior conclusions — closed tasks, distilled decisions) is opt-in via
   `--memory`, matching peer-ask/peer-review/agent-call; the task packet

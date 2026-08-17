@@ -151,7 +151,7 @@ review_verdicts() {
   local vrecords="" providers
   # One extraction pass feeds prose, JSON, and the typed outcome row alike:
   # a second parser is where verdict drift starts.
-  local seat_rows="" seat_round exit_val died_exit
+  local seat_rows="" seat_round exit_val died_exit died_stop
 
   [ -d "$vdir" ] || { echo "error: no artifact dir: $vdir" >&2; exit 2; }
   if [ -n "$forced_run_id" ]; then
@@ -234,6 +234,15 @@ review_verdicts() {
       died_exit="$exit_val"
       verdict=""
     fi
+    # A recorded stop reason outranks the text: a seat cut off at max_tokens
+    # exits 0 with finished-looking sentences, and a GATE line above the cut
+    # judged only what survived it.
+    died_stop=""
+    if [ -n "$verdict" ] &&
+       grep -Eq '^stop-reason: .*(reason=max_tokens|is_error=1)' "$f"; then
+      died_stop="$(grep -E '^stop-reason: ' "$f" | head -1 | cut -c14-80)"
+      verdict=""
+    fi
     # Stated confidence is advisory display for tiebreaks, never a gate
     # input: a confident wrong verdict must not outvote the mechanical check.
     confidence="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
@@ -276,9 +285,9 @@ review_verdicts() {
           reason="$(ma_answer_block_reason "$f")"
         if [ -n "$reason" ]; then
           [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (blocked: $reason)"
-        elif [ -n "$died_exit" ]; then
+        elif [ -n "$died_exit" ] || [ -n "$died_stop" ]; then
           [ "$json_stdout" = 1 ] ||
-            echo "$provider: no-verdict (provider exited $died_exit; a GATE line in a partial transcript is not a verdict — re-run the review)"
+            echo "$provider: no-verdict (${died_exit:+provider exited $died_exit}${died_stop:+incomplete answer: $died_stop}; a GATE line in a partial transcript is not a verdict — re-run the review)"
         else
           [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (complete but no GATE line)"
         fi

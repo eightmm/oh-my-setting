@@ -21,13 +21,38 @@ REFUSAL = re.compile(
 )
 
 
+STOP_REASON = re.compile(
+    r"^stop-reason: provider=\S+ reason=(?P<reason>\S+) subtype=(?P<subtype>\S+)"
+    r" is_error=(?P<is_error>[01])$"
+)
+
+
 def main(path: str) -> None:
     with open(path, encoding="utf-8", errors="replace") as handle:
-        lines = [
-            line.rstrip().strip()
-            for line in handle
-            if line.strip() and not NOISE.match(line.rstrip())
-        ]
+        raw_lines = [line.rstrip() for line in handle]
+
+    # A recorded stop reason outranks every text heuristic below: the
+    # transport said WHY the model stopped, and a max_tokens stop is a
+    # truncation however finished the sentences look.
+    for line in raw_lines:
+        match = STOP_REASON.match(line.strip())
+        if not match:
+            continue
+        if match.group("is_error") == "1":
+            print("blocked")
+            return
+        if match.group("reason") == "max_tokens":
+            print("truncated")
+            return
+        break
+
+    lines = [
+        line.strip()
+        for line in raw_lines
+        if line.strip()
+        and not NOISE.match(line)
+        and not STOP_REASON.match(line.strip())
+    ]
 
     if not lines:
         print("empty")

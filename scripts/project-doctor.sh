@@ -156,6 +156,49 @@ if [ "$styles_found" -eq 0 ]; then
   fail "no oh-my-setting managed blocks found; run: apply-project-template.sh auto $PROJECT_DIR"
 fi
 
+# Tier-3 loaders below the root carry the same parity and staleness contract:
+# apply-project-template writes any path it is given, and a subdirectory
+# CLAUDE.md with no AGENTS.md sibling quietly gives one CLI rules the other
+# two never see — the divergence this project exists to prevent. Only files
+# carrying a managed block count; a project's own hand-written notes do not.
+sub_dirs=""
+while IFS= read -r sub_file; do
+  [ -n "$sub_file" ] || continue
+  grep -Fq '<!-- oh-my-setting:' "$sub_file" 2>/dev/null || continue
+  sub_dir="$(dirname "$sub_file")"
+  case "$sub_dirs" in
+    *"|$sub_dir|"*) continue ;;
+  esac
+  sub_dirs="$sub_dirs|$sub_dir|"
+  sub_rel="${sub_dir#"$PROJECT_DIR"/}"
+  for style in general ml slurm; do
+    style_present=0
+    for name in AGENTS.md CLAUDE.md GEMINI.md; do
+      has_block "$sub_dir/$name" "$style" && { style_present=1; break; }
+    done
+    [ "$style_present" -eq 1 ] || continue
+    for name in AGENTS.md CLAUDE.md; do
+      if ! has_block "$sub_dir/$name" "$style"; then
+        fail "$sub_rel: $style block missing in $name; re-run: apply-project-template.sh $style $PROJECT_DIR $sub_rel/AGENTS.md $sub_rel/CLAUDE.md"
+      fi
+    done
+    if has_block "$sub_dir/AGENTS.md" "$style"; then
+      if diff -q \
+        <(extract_block "$sub_dir/AGENTS.md" "$style") \
+        <(reference_block "$style") >/dev/null; then
+        ok "$sub_rel: $style block matches current template"
+      else
+        fail "$sub_rel: $style block is stale; re-run: apply-project-template.sh $style $PROJECT_DIR $sub_rel/AGENTS.md $sub_rel/CLAUDE.md"
+      fi
+    fi
+  done
+done <<EOF
+$(find "$PROJECT_DIR" -mindepth 2 -maxdepth 6 \
+    \( -name .git -o -name node_modules -o -name .oms -o -name .venv \
+       -o -name __pycache__ -o -name .cache \) -prune -o \
+    -type f \( -name AGENTS.md -o -name CLAUDE.md -o -name GEMINI.md \) -print 2>/dev/null | head -200)
+EOF
+
 if [ -f "$PROJECT_DIR/PROJECT.md" ]; then
   pm_field() {
     awk -v prefix="- $1:" '

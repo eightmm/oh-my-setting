@@ -884,6 +884,16 @@ test_review_verdicts_subcommand() {
   printf '%s' "$out" | grep -Fq 'codex: no-verdict (provider exited 124' ||
     fail "dead seat must be named with its exit: $out"
 
+  # A max_tokens stop exits 0 with finished-looking sentences; the recorded
+  # stop reason voids the GATE line the same way a dead exit does.
+  mkdir -p "$dir/maxtok"
+  printf '# claude review\n\n## Output\n\nstop-reason: provider=claude reason=max_tokens subtype=success is_error=0\nFindings: fine\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$dir/maxtok/claude-x-$run.md"
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/maxtok")" && rc=0 || rc=$?
+  [ "$rc" = "2" ] || fail "a max_tokens seat's GATE line must not gate (want exit 2, got $rc)"
+  printf '%s' "$out" | grep -Fq 'claude: no-verdict (incomplete answer: provider=claude reason=max_tokens' ||
+    fail "truncated seat must be named with its stop reason: $out"
+
   # Debate runs: judge each provider's FINAL round, not round 1; a slug that
   # contains "-r9" must not be parsed as a round suffix.
   mkdir -p "$dir/debate"
@@ -1581,6 +1591,29 @@ test_project_doctor_ok_after_apply() {
     fail "project-doctor should confirm identical ml blocks"
   printf '%s' "$out" | grep -Fq 'matches current template' ||
     fail "project-doctor should confirm template freshness"
+}
+
+test_project_doctor_checks_subdirectory_loaders() {
+  local project="$TMP/doctor-sub-tier"
+  local out
+  mkdir -p "$project"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  # A tier-3 loader for one CLI only: Claude follows rules in sub/ that
+  # Codex and Antigravity never see — the divergence the doctor exists to
+  # catch, previously invisible below the root.
+  "$ROOT/scripts/apply-project-template.sh" general "$project" sub/CLAUDE.md >/dev/null
+  if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
+    fail "a one-CLI subdirectory loader must fail the doctor: $out"
+  fi
+  printf '%s' "$out" | grep -Fq 'sub: general block missing in AGENTS.md' ||
+    fail "the doctor must name the missing sibling: $out"
+
+  "$ROOT/scripts/apply-project-template.sh" general "$project" sub/AGENTS.md sub/CLAUDE.md >/dev/null
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "a paired subdirectory loader should pass: $out"
+  printf '%s' "$out" | grep -Fq 'sub: general block matches current template' ||
+    fail "the doctor should confirm sub-tier freshness: $out"
 }
 
 test_project_doctor_detects_drift() {
@@ -5960,6 +5993,45 @@ test_consult_memory_is_opt_in() {
     --prompt "Assess this plan" >/dev/null
   grep -R -Fq 'Prefer narrow verification commands.' "$project/.oms/artifacts/consult" ||
     fail "consult --memory should attach shared memory"
+}
+
+test_claude_envelope_carries_stop_reason() {
+  local project="$TMP/claude-envelope"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local artifact_dir="$project/artifacts"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  # The stub answers in claude's print-mode JSON envelope and records its
+  # argv, so the test pins both halves of the transport: the flags we send
+  # and the parse of what comes back.
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$HOME/claude-argv"
+cat > /dev/null
+printf '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Envelope answer body: pong."}\n'
+EOF
+  chmod +x "$bin_dir/claude"
+
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt "Envelope probe" >/dev/null
+
+  # The envelope is parsed back to text: the answer reads as prose, and the
+  # one fact plain text cannot carry — why the model stopped — is kept.
+  assert_one_artifact_contains "$artifact_dir" 'claude-envelope-probe-*.md' \
+    'stop-reason: provider=claude reason=end_turn subtype=success is_error=0'
+  assert_one_artifact_contains "$artifact_dir" 'claude-envelope-probe-*.md' \
+    'Envelope answer body: pong.'
+  if grep -R -Fq '"type":"result"' "$artifact_dir"/claude-envelope-probe-*.md; then
+    fail "the JSON envelope must be parsed away, not quoted as the answer"
+  fi
+  grep -Fxq -- '--output-format' "$home_dir/claude-argv" ||
+    fail "claude must be asked for the JSON envelope: $(cat "$home_dir/claude-argv")"
+  # A read seat judges text and gets no MCP tool surface.
+  grep -Fxq -- '--strict-mcp-config' "$home_dir/claude-argv" ||
+    fail "a read seat must not inherit the user-scope MCP servers: $(cat "$home_dir/claude-argv")"
 }
 
 test_agent_call_context_is_opt_in() {

@@ -1177,6 +1177,91 @@ def event_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def event_compact(args: argparse.Namespace) -> int:
+    """Drop the full event streams of long-terminal attempts.
+
+    The stream is append-only and no writer prunes it, so the projection
+    every reader consumes grows without bound. Compaction removes whole
+    attempts only — an attempt's stream is valid from its first row or not
+    at all — and only attempts that are terminal and quiet past the cutoff.
+    Kept rows keep their original bytes, the survivors must still project
+    before the replace, and a stream that will not project refuses to
+    compact at all (fail closed).
+    """
+    repo = repo_root(args.repo)
+    path = event_path(repo)
+    if not path.exists():
+        print("lifecycle-compact: no events file")
+        return 0
+    days = int(args.days)
+    if days < 0:
+        raise OpsError("--days must be non-negative")
+    cutoff = (
+        (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days))
+        .replace(microsecond=0)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+    def load() -> Tuple[List[str], List[Dict[str, Any]]]:
+        raws: List[str] = []
+        rows: List[Dict[str, Any]] = []
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise OpsError("%s:%d is not valid JSON: %s" % (path, number, exc)) from exc
+                rows.append(row)
+                raws.append(line if line.endswith("\n") else line + "\n")
+        return raws, rows
+
+    def plan(raws: List[str], rows: List[Dict[str, Any]]):
+        attempts = project_attempts(rows)
+        drop = {
+            attempt_id
+            for attempt_id, item in attempts.items()
+            if item.get("terminal") and str(item.get("updated_at", "")) < cutoff
+        }
+        kept_raws = []
+        kept_rows = []
+        for raw, row in zip(raws, rows):
+            if row.get("attempt_id") in drop:
+                continue
+            kept_raws.append(raw)
+            kept_rows.append(row)
+        return drop, kept_raws, kept_rows
+
+    if not args.apply:
+        raws, rows = load()
+        drop, kept_raws, _ = plan(raws, rows)
+        print(
+            "lifecycle-compact: would drop %d event(s) across %d terminal attempt(s)"
+            " older than %dd (keeping %d)"
+            % (len(rows) - len(kept_raws), len(drop), days, len(kept_raws))
+        )
+        return 0
+
+    with file_lock(path):
+        raws, rows = load()
+        drop, kept_raws, kept_rows = plan(raws, rows)
+        if not drop:
+            print("lifecycle-compact: nothing to drop (%d events)" % len(rows))
+            return 0
+        project_attempts(kept_rows)
+        tmp = path.with_name(path.name + ".compact")
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.writelines(kept_raws)
+        os.replace(tmp, path)
+    print(
+        "lifecycle-compact: dropped %d event(s) across %d terminal attempt(s)"
+        " older than %dd (kept %d)"
+        % (len(rows) - len(kept_raws), len(drop), days, len(kept_raws))
+    )
+    return 0
+
+
 def approval_projection(rows: Sequence[Dict[str, Any]], repo: Path, *, validate: bool = True) -> Dict[str, Dict[str, Any]]:
     projected: Dict[str, Dict[str, Any]] = {}
     events = set()
@@ -1739,6 +1824,13 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
 
     validate = subparsers.add_parser("validate", help="validate the append-only stream")
     validate.set_defaults(func=event_validate)
+
+    compact = subparsers.add_parser(
+        "compact", help="drop long-terminal attempts' event streams (whole streams only)"
+    )
+    compact.add_argument("--days", type=int, default=14)
+    compact.add_argument("--apply", action="store_true")
+    compact.set_defaults(func=event_compact)
 
 
 def add_approval_parser(subparsers: argparse._SubParsersAction) -> None:
