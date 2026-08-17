@@ -546,6 +546,7 @@ test_apply_loader_abbreviates_home() {
   # here so the abbreviation has a prefix to strike.
   fake_home="$(cd "$ROOT/.." && pwd)"
   HOME="$fake_home" "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  # shellcheck disable=SC2088  # the literal ~ is the assertion: abbreviate, not expand
   assert_file_contains "$project/AGENTS.md" "~/$(basename "$ROOT")/templates/project-general-AGENTS.md"
   if grep -Fq "$fake_home" "$project/AGENTS.md"; then
     fail "generated loader leaks the absolute home path"
