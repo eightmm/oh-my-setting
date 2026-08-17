@@ -68,6 +68,11 @@ ctx="$(grep -n '## Decision context' "$artifact" | head -1 | cut -d: -f1)"
 hist="$(grep -n '## Caller session history' "$artifact" | head -1 | cut -d: -f1)"
 [ -n "$ctx" ] && [ -n "$hist" ] && [ "$hist" -gt "$ctx" ] ||
   fail "session digest must ride after the decision context (ctx=$ctx hist=$hist)"
+# The digest carries goal/turns/files as evidence. The caller's own concluding
+# reasoning stays out: an advisor shown the author's rationale converges on it.
+if grep -q '## Last assistant summary' "$artifact"; then
+  fail "advisor prompt must not carry the caller's own assistant summary"
+fi
 
 # 2. Two live sessions in one worktree: the newest-session default drifts to
 #    the other session; --session-id pins the caller's own.

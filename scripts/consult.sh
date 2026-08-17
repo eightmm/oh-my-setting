@@ -43,9 +43,10 @@ Usage: consult.sh (--prompt TEXT | --prompt-file PATH) [options]
        consult.sh "question text" [options]
 
 Ask another agent mid-task and keep the exchange. Picks a peer that is not the
-caller, attaches the active task, shared memory, and the current conversation
-thread, records question and answer, and prints the answer. Read-only: for a
-write task use peer-delegate.sh.
+caller, attaches the active task and the current conversation thread, records
+question and answer, and prints the answer. Shared memory (prior conclusions)
+is opt-in via --memory so the second opinion is formed independently.
+Read-only: for a write task use peer-delegate.sh.
 
 Options:
   --prompt TEXT        The question. A bare argument works too.
@@ -64,7 +65,8 @@ Options:
                        first use so a series of consults stays one conversation.
   --new-thread         Start a fresh thread even if one is current.
   --topic TEXT         Topic for a newly created thread.
-  --no-memory          Do not attach shared memory.
+  --memory             Attach shared harness memory (prior conclusions).
+  --no-memory          Disable --memory (compatibility).
   --no-task            Do not attach the active task packet.
   --ml-context         Attach the ML digest as well.
   --quiet              Print only the thread id and artifact paths.
@@ -86,7 +88,11 @@ latest_artifact_for() {
   ls -t "$REPO/.oms/artifacts/consult/$provider-"*.md 2>/dev/null | sed -n '1p'
 }
 
-INCLUDE_MEMORY=1
+# Shared memory holds prior conclusions (closed tasks, distilled decisions):
+# handing them to a consulted peer anchors the second opinion on the first
+# one. Opt-in via --memory, matching peer-ask/peer-review/agent-call. The task
+# packet stays on: it frames what is being worked on, not what was concluded.
+INCLUDE_MEMORY=0
 INCLUDE_TASK=1
 DRY_RUN=0
 
@@ -103,6 +109,7 @@ while [ "$#" -gt 0 ]; do
     --thread) [ "$#" -ge 2 ] || fail "--thread requires an id"; THREAD_ID="$2"; shift 2 ;;
     --new-thread) NEW_THREAD=1; shift ;;
     --topic) [ "$#" -ge 2 ] || fail "--topic requires text"; TOPIC="$2"; shift 2 ;;
+    --memory) INCLUDE_MEMORY=1; shift ;;
     --no-memory) INCLUDE_MEMORY=0; shift ;;
     --no-task) INCLUDE_TASK=0; shift ;;
     --ml-context) PASSTHROUGH+=(--ml-context); shift ;;
@@ -264,11 +271,18 @@ call_one() {
 # not the provider, so neither is retried. Read-only only — never for writes.
 consult_with_failover() {
   local first="$1"
-  local rc=0 quality next artifact
+  local rc=0 quality next artifact out
   shift
 
-  call_one "$first" || rc=$?
-  artifact="$(latest_artifact_for "$first")"
+  # Judge the exact artifact this call reported, never the newest file on
+  # disk: detached runs (the MCP server backgrounds consults) can overlap on
+  # one provider, and mtime would quality-score the other run's in-flight
+  # answer. The side file lives in artifact_dir_tmp, which the outer trap owns.
+  out="$artifact_dir_tmp/failover"
+  call_one "$first" ${out:+"$out"} || rc=$?
+  artifact=""
+  [ -z "$out" ] || artifact="$(sed -n 1p "$out" 2>/dev/null || true)"
+  [ -n "$artifact" ] && [ -f "$artifact" ] || artifact="$(latest_artifact_for "$first")"
   quality="ok"
   [ -z "$artifact" ] || quality="$(ma_answer_quality "$artifact")"
   if [ "$rc" -eq 0 ] && [ "$quality" = "ok" ]; then
@@ -305,8 +319,10 @@ consult_with_failover() {
   # must not duplicate it.
   export OMS_THREAD_QUESTION_RECORDED=1
   rc=0
-  call_one "$next" || rc=$?
-  artifact="$(latest_artifact_for "$next")"
+  : > "$out"
+  call_one "$next" "$out" || rc=$?
+  artifact="$(sed -n 1p "$out" 2>/dev/null || true)"
+  [ -n "$artifact" ] && [ -f "$artifact" ] || artifact="$(latest_artifact_for "$next")"
   if [ "$rc" -eq 0 ] && [ -n "$artifact" ]; then
     quality="$(ma_answer_quality "$artifact")"
     [ "$quality" = "ok" ] ||
@@ -367,6 +383,21 @@ trap 'rm -rf "$artifact_dir_tmp"' EXIT
 if [ "${#targets[@]}" -eq 1 ]; then
   if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
     call_one "${targets[0]}" "$artifact_dir_tmp/0" || status=$?
+    # A pinned target is not retried, but a non-answer is still not an answer:
+    # exiting 0 over a refusal or banner-only artifact tells the caller a
+    # consultation happened when none did.
+    if [ "$status" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+      art="$(sed -n 1p "$artifact_dir_tmp/0" 2>/dev/null || true)"
+      if [ -n "$art" ] && [ -f "$art" ]; then
+        q="$(ma_answer_quality "$art")"
+        if [ "$q" != "ok" ]; then
+          echo "consult: ${targets[0]} did not really answer ($q)" >&2
+          [ "$q" != blocked ] ||
+            echo "consult: ${targets[0]} said: $(ma_answer_block_reason "$art")" >&2
+          status=1
+        fi
+      fi
+    fi
   else
     # Auto-picked: fall back to one other peer if this one cannot answer.
     peer_list=()
@@ -431,6 +462,12 @@ $family
   echo "consult: ${usable}/${#targets[@]} target(s) answered, ${family_count} independent model family(ies)"
   if [ "$usable" -gt 1 ] && [ "$family_count" -lt 2 ]; then
     echo "consult: every answer came from one model family; treat agreement as one opinion, not corroboration" >&2
+  fi
+  # A panel where nothing answered is a failed consultation, whatever each
+  # seat's exit code claimed.
+  if [ "$DRY_RUN" -eq 0 ] && [ "$usable" -eq 0 ]; then
+    echo "consult: no target produced a usable answer" >&2
+    status=1
   fi
 fi
 

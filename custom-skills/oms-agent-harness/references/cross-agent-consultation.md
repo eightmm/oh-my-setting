@@ -11,9 +11,11 @@ oms consult --all "question"           # every installed peer, in parallel
 oms consult --to codex "question"      # pin the peer
 ```
 
-It picks a provider other than the caller, attaches the active task and shared
-memory, injects the running conversation, records question and answer, and
-prints the answer. Artifacts land under `.oms/artifacts/consult`.
+It picks a provider other than the caller, attaches the active task, injects
+the running conversation, records question and answer, and prints the answer.
+Shared memory holds prior conclusions, so it is opt-in (`--memory`): a second
+opinion anchored on the first one is not a second opinion. Artifacts land
+under `.oms/artifacts/consult`.
 
 For independent answers to the same conceptual or planning question, use the
 symmetric council instead of a diff review:
