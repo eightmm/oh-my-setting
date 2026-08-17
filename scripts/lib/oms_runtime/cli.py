@@ -62,10 +62,13 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             emit(value, args.pretty)
             return 0
         if args.command == 'evidence':
-            coverage = build_coverage(repo)
+            # Only the read actions need the full coverage projection; bind
+            # and revoke build their own state, and paying a whole-index
+            # pass just to discard it doubled their cost.
             if args.evidence_action == 'show':
-                value = coverage
+                value = build_coverage(repo)
             elif args.evidence_action == 'unbound':
+                coverage = build_coverage(repo)
                 value = {'schema': coverage['schema'], 'unbound_evidence': coverage['unbound_evidence']}
             elif args.evidence_action == 'bind':
                 value = bind_evidence(repo, args.criterion, args.ref, args.status, evidence_type=args.type, note=args.note, dependencies=args.depends)

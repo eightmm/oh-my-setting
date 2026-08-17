@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import re
 from pathlib import Path
@@ -41,13 +42,27 @@ def _safe_repo_file(repo: Path, raw: str, *, allow_external: bool = False) -> Pa
     return resolved
 
 
-def _discovery_text(path: Path) -> str:
+@functools.lru_cache(maxsize=4096)
+def _discovery_text_cached(resolved: str, mtime_ns: int, size: int) -> str:
     try:
-        if path.stat().st_size > MAX_DISCOVERY_FILE_BYTES:
-            return ""
-        return path.read_text(encoding="utf-8")
+        return Path(resolved).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return ""
+
+
+def _discovery_text(path: Path) -> str:
+    # Discovery walks overlapping roots (the repo root contains src/ and
+    # scripts/) and the test pass revisits files the symbol pass will read
+    # again, so the same bytes were read up to twice per plan. The memo key
+    # carries the stat signature: an edited file re-reads, an unchanged one
+    # never does.
+    try:
+        stat = path.stat()
+    except OSError:
+        return ""
+    if stat.st_size > MAX_DISCOVERY_FILE_BYTES:
+        return ""
+    return _discovery_text_cached(str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str, int]]:
@@ -217,7 +232,10 @@ def plan_context(repo: Path, *, target: str = "", explicit: Sequence[Tuple[str, 
         bundle_parts.append(part)
         remaining -= len(part)
         included_paths.add(label)
-        selected.append({"path": label, "reason": reason, "priority": priority, "bytes_before": len(data), "bytes_selected": len(selected_data), "omitted_bytes": omitted_bytes, "selection": selection, "sha256": sha256_file(path)})
+        # Hash the bytes already in hand: re-opening the file let a write
+        # between read and hash record a digest that disagrees with the
+        # bytes actually bundled.
+        selected.append({"path": label, "reason": reason, "priority": priority, "bytes_before": len(data), "bytes_selected": len(selected_data), "omitted_bytes": omitted_bytes, "selection": selection, "sha256": sha256_bytes(data)})
     truncated_required = sorted(item["path"] for item in selected if item["path"] in required_paths and int(item.get("omitted_bytes", 0)) > 0)
     missing_required = sorted(set(unresolved_required) | (required_paths - included_paths) | set(truncated_required))
     bundle = b"".join(bundle_parts)
