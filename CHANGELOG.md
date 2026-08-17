@@ -27,6 +27,34 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   peer's artifact path into an absolute-path reference the outbound
   scrubber rightly blocked (a live round lost its rebuttal to this), and a
   colon is not a legal NTFS file-name byte on the supported Windows target.
+- Evidence-trail writes fail closed or fail visibly, never silently: the
+  artifact-index appender no longer reports success without writing, a
+  task-linked admission receipt fails the admission when it cannot be
+  indexed (a dropped REJECT must not leave a stale ADMIT speaking for the
+  task), the gate verify receipt fails closed uniformly, a handoff whose
+  dissent projection fails says UNAVAILABLE instead of reading as
+  consensus, and an unrecorded worker-authority breach warns that later
+  commands will not remember it.
+- Bounded reads without SIGPIPE in job-digest, data-manifest, and
+  run-capsule: three pipelines died with exit 141 under pipefail exactly
+  when their input was large enough to matter (a growing training log, a
+  large split leak, a 1000+-file dirty tree).
+- Gate tests judge barriers and deadlines, not scheduler luck: the .oms
+  purity guard no longer destroys its own evidence, the gc-under-live-lock
+  case waits for a lock-ready marker, parallel-smoke teardown polls for
+  child exit, four absence windows outwait their fixture's delayed write
+  (one was vacuous on every machine), and the runtime fixture pins
+  `git init -b main`.
+
+### Performance
+- The evidence projection judges every row against one head snapshot
+  instead of one `git rev-parse` per row — envelope show 4.15s to 0.20s,
+  state 4.33s to 0.51s on a thousand-row index — and a commit landing
+  mid-build can no longer split one coverage across two heads.
+- `evidence bind`/`revoke` skip the full coverage projection they used to
+  build and discard; context discovery reads each unchanged file once
+  (stat-keyed memo) and the bundle manifest hashes the bytes it actually
+  bundled, closing a read-to-hash race.
 
 ## [0.5.0] - 2026-08-16
 
