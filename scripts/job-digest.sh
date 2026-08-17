@@ -177,7 +177,11 @@ if [ -n "$LOG_FILE" ]; then
   last_tb="$(grep -n 'Traceback (most recent call last)' "$LOG_FILE" | tail -n 1 | cut -d: -f1 || true)"
   if [ -n "$last_tb" ]; then
     printf '```\n'
-    sed -n "${last_tb},\$p" "$LOG_FILE" | head -40
+    # Bounded range instead of sed|head: a log that keeps growing past the
+    # traceback (retries, caught exceptions) left sed writing into a closed
+    # pipe once head exited — SIGPIPE 141 under pipefail killed the digest
+    # exactly on the logs big enough to need one.
+    sed -n "${last_tb},$((last_tb + 39))p" "$LOG_FILE"
     printf '```\n'
   else
     printf 'No Python traceback found.\n'

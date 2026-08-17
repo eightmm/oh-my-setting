@@ -447,7 +447,12 @@ EOF
         echo "LEAKAGE $la ∩ $lb: $overlap shared ID(s)"
         found=1
         if [ "$SHOW_EXAMPLES" = 1 ]; then
-          comm -12 "$a" "$b" | head -n 5 | sed 's/^/    /'
+          # Capture first, then head the file: comm piped into an
+          # early-exiting head took SIGPIPE under pipefail precisely when
+          # the leak was largest, killing the report right after its first
+          # LEAKAGE line with the remaining pairs unchecked.
+          comm -12 "$a" "$b" > "$tmpdir/leak-examples"
+          head -n 5 "$tmpdir/leak-examples" | sed 's/^/    /'
         fi
       else
         echo "ok      $la ∩ $lb: no overlap"

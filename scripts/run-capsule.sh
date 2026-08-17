@@ -184,7 +184,12 @@ capture_git_json() {
       else
         rm -f "$bundle/uncommitted.diff"
       fi
-      status_short="$(git status --porcelain --untracked-files=no | head -n 40)"
+      # Capture first, then truncate: piping git status into head let a
+      # 1000+-file dirty tree SIGPIPE git under pipefail and abort the
+      # capsule; a temp file keeps git's own exit status honest.
+      git status --porcelain --untracked-files=no > "$bundle/.git-status-full"
+      status_short="$(head -n 40 "$bundle/.git-status-full")"
+      rm -f "$bundle/.git-status-full"
     fi
   fi
   OMS_GIT_STATUS="$status_short" python3 - \
