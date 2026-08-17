@@ -152,6 +152,17 @@ test_debate_and_synthesis_use_quote_budget() {
   fi
   [ "$(grep -Fc '[TRUNCATED: provider output omitted ' "$synth")" -eq 2 ] ||
     fail "synthesis should cap each quoted provider output"
+
+  # The synthesis embeds the operator prompt head-kept at the quote budget:
+  # the question sits at the top, and the diff below it already rode every
+  # seat's round-1 call — embedding it whole billed the same bytes twice.
+  local big_prompt="$TMP/big-prompt"
+  local synth_big="$TMP/synth-big"
+  { printf 'Operator question first\n'; python3 -c "print('x' * 40000)"; } > "$big_prompt"
+  prompt_file="$big_prompt"
+  ma_write_synthesis "$synth_big"
+  assert_contains "$synth_big" 'Operator question first'
+  assert_contains "$synth_big" '[TRUNCATED: operator prompt omitted '
 }
 
 test_status_budget_caps_lines() {

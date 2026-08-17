@@ -98,6 +98,10 @@ esac
 [ "$PROVIDER" = "agy" ] && PROVIDER="antigravity"
 [ -n "$RESULT_FILE" ] || fail "--file is required"
 [ -f "$RESULT_FILE" ] || fail "result file not found: $RESULT_FILE"
+# An empty paste would become an artifact with a harness-written exit 0,
+# indistinguishable downstream from a clean answer. Refuse it here; a
+# deliberately failed run is imported with its real --exit instead.
+[ -s "$RESULT_FILE" ] || fail "result file is empty: $RESULT_FILE"
 if [ -n "$PROMPT_FILE" ]; then
   [ -f "$PROMPT_FILE" ] || fail "prompt file not found: $PROMPT_FILE"
 fi
@@ -141,4 +145,10 @@ artifact="$ARTIFACT_DIR/$PROVIDER-$slug-$timestamp.import.md"
 } > "$artifact"
 
 ma_append_artifact_index "$REPO" "$KIND-import" "$PROVIDER" "$EXIT_CODE" "$artifact" "" "$PROMPT_FILE" "" "$PROMPT_FILE" || true
+# Imports bypass every in-band completeness check, so judge the pasted answer
+# once at the door. A warning, not a refusal: the operator may knowingly
+# import a refusal or fragment, but it must not pass silently as an answer.
+quality="$(ma_answer_quality "$artifact" 2>/dev/null || printf 'blocked')"
+[ "$quality" = "ok" ] ||
+  echo "warning: imported result reads as a non-answer ($quality); downstream consumers see only its recorded exit ($EXIT_CODE)" >&2
 printf 'imported: %s -> %s\n' "$PROVIDER" "$artifact"

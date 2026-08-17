@@ -1126,6 +1126,34 @@ test_tsp_queue_missing_tsp_fallback_records_ledger() {
   assert_one_artifact_contains "$project/fallback" 'job.*.log' "fallback-ok"
 }
 
+test_tsp_queue_logs_bounded_tail() {
+  local project="$TMP/tsp-logs-bound"
+  local job_id out
+
+  make_committed_repo "$project"
+  job_id="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_ALLOW_FALLBACK=1 \
+    OMS_TSP_FALLBACK_DIR="$project/fallback" PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" enqueue -- bash -c 'seq 1 50' 2>/dev/null)"
+  [ -n "$job_id" ] || fail "fallback enqueue should print pid"
+  (cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$project/fallback" \
+    PATH="/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" wait "$job_id" >/dev/null 2>&1) || true
+
+  # The default read is a bounded tail that names the cut; --full keeps the
+  # whole-log behavior for the operator who asked for it.
+  out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$project/fallback" \
+    OMS_TSP_LOG_LINES=10 PATH="/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" logs "$job_id" 2>/dev/null)"
+  printf '%s\n' "$out" | grep -Fq '[showing last 10 of 50 lines' ||
+    fail "bounded logs must name the cut: $out"
+  printf '%s\n' "$out" | grep -Fxq '50' || fail "bounded logs keep the tail: $out"
+  if printf '%s\n' "$out" | grep -Fxq '1'; then
+    fail "bounded logs must drop the head: $out"
+  fi
+  out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$project/fallback" \
+    PATH="/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" logs --full "$job_id" 2>/dev/null)"
+  printf '%s\n' "$out" | grep -Fxq '1' || fail "--full must print the whole log: $out"
+}
+
 test_tsp_queue_secret_guard_blocks_enqueue() {
   local dir="$TMP/tsp-guard"
   local bin="$dir/bin"
@@ -1162,6 +1190,30 @@ test_tsp_queue_allows_machine_path_commands() {
     python "/ho""me/researcher/data/train.py" >/dev/null 2>"$dir/error" ||
     fail "a path-bearing command must enqueue: $(cat "$dir/error")"
   [ -s "$dir/tsp.log" ] || fail "command did not reach the queue"
+}
+
+test_fail_ledger_list_limit_names_omissions() {
+  local project="$TMP/ledger-limit"
+  local out i
+
+  make_committed_repo "$project"
+  for i in 1 2 3; do
+    "$ROOT/scripts/fail-ledger.sh" --repo "$project" record --kind cmd \
+      --cmd "cmd-$i" --exit 1 --summary "failure $i" >/dev/null 2>&1
+  done
+  # The projection rides into agent context; a limit trims the report, never
+  # the ledger, and the omission is stated.
+  out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list --limit 2)"
+  [ "$(printf '%s\n' "$out" | grep -c 'OPEN')" -eq 2 ] ||
+    fail "limit should keep 2 rows: $out"
+  printf '%s' "$out" | grep -Fq '1 older fingerprint(s) omitted' ||
+    fail "the omission must be named: $out"
+  "$ROOT/scripts/fail-ledger.sh" --repo "$project" list --json --limit 2 |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["failures"]) == 2 and d.get("omitted") == 1, d' ||
+    fail "json limit must report rows and omitted count"
+  out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list)"
+  [ "$(printf '%s\n' "$out" | grep -c 'OPEN')" -eq 3 ] ||
+    fail "no limit keeps every row: $out"
 }
 
 test_run_ledger_records_and_lists() {
@@ -2772,6 +2824,27 @@ test_import_warns_sensitive_result_but_succeeds() {
 }
 
 
+test_import_refuses_empty_and_names_nonanswers() {
+  local project="$TMP/import-empty"
+
+  make_committed_repo "$project"
+  : > "$project/empty.md"
+  # An empty paste would become a harness-written exit-0 artifact,
+  # indistinguishable downstream from a clean answer.
+  if "$ROOT/scripts/import-agent-result.sh" --repo "$project" --kind ask \
+      --provider codex --file "$project/empty.md" >/dev/null 2>"$project/err"; then
+    fail "an empty result must not import as a clean answer"
+  fi
+  assert_file_contains "$project/err" "result file is empty"
+
+  # A fragment imports (the operator may want the record) but is named at
+  # the door: imports bypass every in-band completeness check.
+  printf 'ok\n' > "$project/fragment.md"
+  "$ROOT/scripts/import-agent-result.sh" --repo "$project" --kind ask \
+    --provider codex --file "$project/fragment.md" >/dev/null 2>"$project/err2"
+  assert_file_contains "$project/err2" "reads as a non-answer"
+}
+
 test_import_index_links_source_prompt() {
   local project="$TMP/import-source-link"
   local artifact_dir="$project/artifacts"
@@ -3710,6 +3783,20 @@ test_delegate_dry_run() {
   [ -n "$patch" ] || fail "missing delegate patch artifact"
   [ ! -s "$patch" ] || fail "dry-run patch should be empty"
   [ -z "$(git -C "$project" status --porcelain file.txt)" ] || fail "delegate dry-run touched main tree"
+}
+
+test_delegate_read_only_rejects_apply() {
+  local project="$TMP/delegate-read-only"
+
+  make_committed_repo "$project"
+  # Authority comes from the caller, and the two flags contradict: a
+  # read-only worker produces a report, never a patch to apply.
+  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --to codex --repo "$project" --prompt "Audit the tree" \
+      --read-only --apply >/dev/null 2>"$project/err"; then
+    fail "--read-only with --apply must be rejected"
+  fi
+  assert_file_contains "$project/err" "--read-only produces no patch"
 }
 
 test_delegate_embeds_review_findings() {

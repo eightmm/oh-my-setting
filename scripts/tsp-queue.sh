@@ -32,8 +32,9 @@ Subcommands:
       Stop and remove every listed job (tsp -k/-r per id), then clear finished rows with tsp -C.
   wait [<id>]
       Wait for a job (or last enqueued job) and record a run-ledger row.
-  logs <id>
-      Print stdout/stderr captured by tsp.
+  logs [--full] <id>
+      Print the captured log's tail (OMS_TSP_LOG_LINES, default 200 lines);
+      --full prints the whole file, `oms job-digest` gives a structured read.
   -h, --help
       Show this help.
 
@@ -305,14 +306,36 @@ cmd_wait() {
 }
 
 cmd_logs() {
-  [ "$#" -eq 1 ] || fail "logs requires <id>"
+  local full=0 out_file lines total
+  if [ "${1:-}" = "--full" ]; then
+    full=1
+    shift
+  fi
+  [ "$#" -eq 1 ] || fail "logs requires [--full] <id>"
   if ! tsp_available; then
     warn_fallback
-    fallback_logs "$1"
+    fallback_logs "$1" "$full"
     return
   fi
   require_id "$1"
-  tsp -c "$1"
+  if [ "$full" -eq 1 ]; then
+    tsp -c "$1"
+    return
+  fi
+  # A training job's captured log runs to hundreds of megabytes; the reader
+  # here is usually a session between edits. Bounded tail by default, the
+  # whole file on request, `oms job-digest` for a structured read.
+  lines="${OMS_TSP_LOG_LINES:-200}"
+  case "$lines" in ''|0|*[!0-9]*) lines=200 ;; esac
+  out_file="$(tsp -o "$1" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ -n "$out_file" ] && [ -f "$out_file" ]; then
+    total="$(wc -l < "$out_file" | tr -d ' ')"
+    [ "$total" -le "$lines" ] ||
+      echo "[showing last $lines of $total lines; full: logs --full $1, structured: oms job-digest]"
+    tail -n "$lines" "$out_file"
+  else
+    tsp -c "$1" | tail -n "$lines"
+  fi
 }
 
 fallback_enqueue() {
@@ -434,14 +457,24 @@ fallback_wait() {
 
 fallback_logs() {
   local job_id="$1"
-  local f_log
+  local full="${2:-0}"
+  local f_log lines total
   require_id "$job_id"
   [ -f "$FALLBACK_DIR/$job_id.meta" ] || fail "no fallback job: $job_id"
   f_log=""
   # shellcheck disable=SC1090
   . "$FALLBACK_DIR/$job_id.meta"
   [ -f "$f_log" ] || fail "log file not found: $f_log"
-  cat "$f_log"
+  if [ "$full" -eq 1 ]; then
+    cat "$f_log"
+    return
+  fi
+  lines="${OMS_TSP_LOG_LINES:-200}"
+  case "$lines" in ''|0|*[!0-9]*) lines=200 ;; esac
+  total="$(wc -l < "$f_log" | tr -d ' ')"
+  [ "$total" -le "$lines" ] ||
+    echo "[showing last $lines of $total lines; full log: $f_log]"
+  tail -n "$lines" "$f_log"
 }
 
 case "${1:-}" in

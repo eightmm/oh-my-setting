@@ -32,6 +32,7 @@ FINGERPRINT=""
 HOW=""
 UNRESOLVED_ONLY=0
 AS_JSON=0
+LIMIT=0
 IGNORE_STATE=0
 ACTION=""
 
@@ -63,7 +64,9 @@ check    Exit 3 (and print prior context) if CMD's fingerprint is a known
 resolve  Mark a fingerprint fixed so it stops warning; --how records how it
          was fixed.
 list     One line per fingerprint (count, last exit, resolved); --unresolved
-         shows only still-failing ones, --json emits a schema-1 JSON object.
+         shows only still-failing ones, --json emits a schema-1 JSON object,
+         --limit N keeps the N most recently active fingerprints and says
+         how many older ones were omitted.
 
 kind=hook rows are filed automatically for every failed shell command, so
 nothing ever resolves them by hand. They retire on a read-time TTL instead:
@@ -180,6 +183,10 @@ while [ "$#" -gt 0 ]; do
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --unresolved) UNRESOLVED_ONLY=1; shift ;;
     --json) AS_JSON=1; shift ;;
+    --limit)
+      [ "$#" -ge 2 ] || fail "--limit requires a count"
+      case "$2" in ''|*[!0-9]*) fail "--limit must be a non-negative integer" ;; esac
+      LIMIT="$2"; shift 2 ;;
     --ignore-state) IGNORE_STATE=1; shift ;;
     record|check|resolve|list) ACTION="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -189,6 +196,7 @@ done
 
 ACTION="${ACTION:-list}"
 [ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--json is only supported by list"
+[ "$LIMIT" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--limit is only supported by list"
 [ "$IGNORE_STATE" -eq 0 ] || [ "$ACTION" = "check" ] || fail "--ignore-state is only supported by check"
 case "$KIND" in
   cmd|hook|verify|plan-run|delegate|patch-land) ;;
@@ -377,7 +385,7 @@ PY
       fi
       exit 0
     fi
-    OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" python3 - "$LEDGER" <<'PY'
+    OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" OMS_LIMIT="$LIMIT" python3 - "$LEDGER" <<'PY'
 import calendar, json, os, sys, time
 unresolved_only = os.environ.get("OMS_UNRESOLVED") == "1"
 as_json = os.environ.get("OMS_JSON") == "1"
@@ -455,8 +463,22 @@ for fp in order:
     if d.get("how"):
         row["how"] = d["how"]
     rows.append(row)
+# Most recently active fingerprints first when a limit is set: the projection
+# rides into agent context (MCP), and the whole aggregated history outgrows
+# any output budget. The omission is stated, never silent; retirement
+# semantics above are untouched — this trims the report, not the ledger.
+omitted = 0
+limit = int(os.environ.get("OMS_LIMIT") or 0)
+if limit and len(rows) > limit:
+    newest = sorted(rows, key=lambda r: r.get("ts") or "", reverse=True)[:limit]
+    keep = {id(r) for r in newest}
+    omitted = len(rows) - limit
+    rows = [r for r in rows if id(r) in keep]
 if as_json:
-    print(json.dumps({"schema": 1, "failures": rows}, ensure_ascii=False))
+    doc = {"schema": 1, "failures": rows}
+    if omitted:
+        doc["omitted"] = omitted
+    print(json.dumps(doc, ensure_ascii=False))
 else:
     for r in rows:
         if r["resolved"]:
@@ -476,6 +498,8 @@ else:
                   % (r["expired_count"], ttl))
         if r["resolved"] and r.get("how"):
             print("  fixed: %s" % r["how"])
+    if omitted:
+        print("(%d older fingerprint(s) omitted by --limit; run without it for all)" % omitted)
 PY
     ;;
   *)

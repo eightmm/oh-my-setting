@@ -1241,6 +1241,12 @@ ma_thread_append() {
   [ -n "$thread" ] || return 0
   [ -s "$text_file" ] || return 0
   ma_thread_ensure "$repo" "$thread" || return 0
+  # An answer turn's quality is derived when the caller did not supply one:
+  # thread context replays unmarked turns as if verified, so an unqualified
+  # answer would hide a non-answer from every later prompt.
+  if [ "$role" = answer ] && [ -z "$quality" ] && [ -n "$artifact" ] && [ -f "$artifact" ]; then
+    quality="$(ma_answer_quality "$artifact")"
+  fi
   args=(--repo "$repo" --id "$thread" append --role "$role" --text-file "$text_file")
   [ -z "$provider" ] || args+=(--provider "$provider")
   [ -z "$model" ] || args+=(--model "$model")
@@ -1488,6 +1494,13 @@ ma_provider_attempt() {
       # its default must track the verb default or a raised wall changes nothing
       # for this seat: agy would still stop at its own five minutes.
       cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-$(ma_peer_timeout_default)}")
+      # The prompt rides argv here (see above), and Linux caps a single argv
+      # element at MAX_ARG_STRLEN (128KiB). Refusing with the limit named
+      # beats dying as E2BIG mid-exec with the prompt already composed.
+      if [ "$(wc -c < "$prompt_file" | tr -d ' ')" -gt 120000 ]; then
+        echo "error: prompt is $(wc -c < "$prompt_file" | tr -d ' ')B; the antigravity transport carries it as one argv element (limit ~128KiB) — trim the quoted context or use another provider" > "$output_file"
+        return 2
+      fi
       cmd+=(--print "$(cat "$prompt_file")")
       ;;
     *) echo "error: unsupported provider: $provider" > "$output_file"; return 2 ;;
@@ -2611,7 +2624,12 @@ ma_write_synthesis() {
     fi
     printf '\n## Prompt\n\n'
     printf '```\n'
-    cat "$prompt_file"
+    # Head-keep at the quote budget: the operator's question sits at the top,
+    # and the diff below it already rode every seat's round-1 call — embedding
+    # it whole here billed the same 64KB twice per review and pushed a 5-seat
+    # synthesis prompt toward transport limits.
+    ma_emit_bounded_prompt_file "$prompt_file" "$(ma_prompt_quote_bytes)" \
+      "operator prompt" "OMS_PROMPT_QUOTE_BYTES" head
     printf '\n```\n\n'
     for i in "${!artifacts[@]}"; do
       printf '## %s\n\n' "${provider_names[i]}"

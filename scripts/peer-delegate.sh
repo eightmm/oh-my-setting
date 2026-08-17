@@ -46,6 +46,10 @@ plan_started=0
 plan_finalized=0
 plan_brief_file=""
 REPAIR=0
+# write is the delegation default; --read-only narrows it so a reviewer or
+# auditor role runs with the authority its mandate describes. Authority still
+# comes from the caller, never from role prose (roles are data).
+WORKER_ACCESS="write"
 MODEL=""
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
@@ -88,6 +92,10 @@ Options:
                        has executable scripts/check.sh, ML projects prefer
                        "bash scripts/check.sh ml-smoke" when available, else
                        "bash scripts/check.sh fast".
+  --read-only          Run the worker with read access (plan mode / read-only
+                       sandbox). An audit or review role produces a report,
+                       never a patch; the role's prose mandate gains the
+                       matching authority. Incompatible with --apply.
   --no-verify          Skip the default scripts/check.sh verification.
   --repair N           On worker or verify failure, re-run the same worker in
                        the same worktree up to N times (1-3), feeding back the
@@ -237,6 +245,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-verify)
       NO_VERIFY=1
+      shift
+      ;;
+    --read-only)
+      WORKER_ACCESS="read"
       shift
       ;;
     --repair)
@@ -460,6 +472,10 @@ if [ "$((DELEGATE_DEPTH + 1))" -gt "$DELEGATE_MAX_DEPTH" ]; then
   exit 2
 fi
 export OMS_HARNESS_DELEGATE_DEPTH="$((DELEGATE_DEPTH + 1))"
+
+if [ "$WORKER_ACCESS" = read ] && [ "$APPLY" = 1 ]; then
+  fail "--read-only produces no patch; --apply has nothing to apply"
+fi
 
 if [ -n "$EXECUTOR_ID" ]; then
   [ -z "$ROLE" ] || fail "--executor and --role are mutually exclusive"
@@ -741,6 +757,24 @@ trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
 
+# Quote a bounded slice and say so when the source was larger: an unmarked cut
+# reads as the whole document to the model consuming it (the repair worker was
+# told to finish work whose description ended mid-file).
+quote_head() {  # quote_head FILE BYTES LABEL
+  local file="$1" bytes="$2" label="$3" total
+  head -c "$bytes" "$file"
+  total="$(wc -c < "$file" | tr -d ' ')"
+  [ "$total" -le "$bytes" ] ||
+    printf '\n[%s truncated: first %s of %s bytes shown]\n' "$label" "$bytes" "$total"
+}
+quote_tail() {  # quote_tail FILE BYTES LABEL
+  local file="$1" bytes="$2" label="$3" total
+  total="$(wc -c < "$file" | tr -d ' ')"
+  [ "$total" -le "$bytes" ] ||
+    printf '[%s truncated: last %s of %s bytes shown]\n' "$label" "$bytes" "$total"
+  tail -c "$bytes" "$file"
+}
+
 {
   printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
   printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized. If blocked, report it without asking questions.\n\n'
@@ -764,7 +798,7 @@ trap 'cleanup_signal 143' TERM
     printf 'Untrusted reviewer claims from a prior peer review. Address each\n'
     printf 'must-fix item or state in your report why it is wrong; verify\n'
     printf 'every claim against the code before acting on it.\n\n'
-    head -c 8000 "$REVIEW_ARTIFACT"
+    quote_head "$REVIEW_ARTIFACT" 8000 "review findings"
     printf '\n\n'
   fi
   printf '## Brief\n\n'
@@ -1039,7 +1073,7 @@ run_worker() {
   [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
   OMS_LAST_ATTEMPT_ID=""
   OMS_LAST_ATTEMPT_OWNED=0
-  ma_run_routed_provider "$TO" write "$prompt" "$artifact" "$worktree" \
+  ma_run_routed_provider "$TO" "$WORKER_ACCESS" "$prompt" "$artifact" "$worktree" \
     peer-delegate "$REPO" "$timestamp" || worker_status=$?
   if [ "${OMS_WORKER_AUTHORITY_VIOLATION:-0}" = 1 ]; then
     local_authority_detail="$(awk '
@@ -1204,10 +1238,10 @@ write_repair_prompt() {
       printf '\n## Previous Worker Exit\n\n- exit %s (interrupted or timed out; finish the remaining work)\n' "$worker_status"
     fi
     printf '\n## Your Previous Patch (captured, not accepted yet)\n\n'
-    head -c 20000 "$patch_file"
+    quote_head "$patch_file" 20000 "previous patch"
     if [ -n "$VERIFY_CMD" ] && [ "$verify_status" -ne 0 ]; then
       printf '\n## Failing Verification\n\n- command: %s\n- exit: %s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status"
-      tail -c 4000 "$verify_out"
+      quote_tail "$verify_out" 4000 "verification output"
       printf '\n'
     fi
     printf '\nWhen done, report: changed files, what you verified, what you did not verify, and any blockers.\n'
@@ -1449,14 +1483,14 @@ advise_after_repeated_failure() {
   {
     printf 'A delegated worker has now failed twice on the same task.\n\n'
     printf '## Task\n\n'
-    head -c 2000 "$prompt_file"
+    quote_head "$prompt_file" 2000 "task prompt"
     printf '\n\n## What happened\n\n'
     printf -- '- worker exit: %s\n' "$worker_status"
     printf -- '- verify command: %s\n' "${VERIFY_CMD:-<none>}"
     printf -- '- verify exit: %s\n' "$verify_status"
     if [ -n "$VERIFY_CMD" ] && [ -s "$verify_out" ]; then
       printf '\nVerification output (tail):\n\n'
-      tail -c 1500 "$verify_out"
+      quote_tail "$verify_out" 1500 "verification output"
     fi
     printf '\n\n## Decision\n\n'
     printf 'The plan is to re-run the same worker with the failure fed back.\n'

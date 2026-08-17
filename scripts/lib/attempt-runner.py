@@ -1234,6 +1234,17 @@ def runner(repo: Path, attempt_id: str) -> int:
                     "process-identity-mismatch",
                 )
             return 78
+        if capture.truncated:
+            # The capture keeps the head and drops the tail — where a final
+            # report or verdict lands. Completion stands (the exit code is the
+            # contract), but the flag must be louder than a ledger field no
+            # reader consults: say it where the operator and logs will see it.
+            print(
+                "attempt %s: log truncated at %d bytes; the tail (where a final"
+                " report lands) was dropped — judge by recorded state, not the log"
+                % (attempt_id, capture.bytes_written),
+                file=sys.stderr,
+            )
         if exit_code != 0:
             transition(repo, attempt_id, "failed", "command_failed", "runner-command-failed")
             return int(exit_code)

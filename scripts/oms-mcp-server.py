@@ -174,8 +174,10 @@ TOOLS = [
         "description": (
             "Recorded command failures keyed by fingerprint, with resolved"
             " state — what already failed here, so it is not retried blind."
+            " The 30 most recently active fingerprints; the JSON says how"
+            " many older ones were omitted."
         ),
-        "argv": ["bash", "scripts/fail-ledger.sh", "list", "--json"],
+        "argv": ["bash", "scripts/fail-ledger.sh", "list", "--json", "--limit", "30"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
@@ -875,11 +877,19 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
 
     artifacts = artifact_paths(log)
     sections = []
+    # Each seat gets an equal slice of the budget: joining before cutting let
+    # the first artifact spend it all and silently dropped the later seats.
+    per_artifact = OUTPUT_LIMIT // max(1, len(artifacts))
     for path in artifacts:
         answer, artifact_exit = artifact_answer(path)
         if not answer:
             continue
-        if len(artifacts) > 1:
+        if len(answer) > per_artifact:
+            answer = answer[:per_artifact] + "\n[truncated]"
+        # The recorded exit is part of the answer's meaning: a nonzero seat's
+        # text is a partial, and dropping the label on single-artifact runs
+        # (the common case) hid exactly that.
+        if len(artifacts) > 1 or str(artifact_exit or "0") != "0":
             answer = "--- %s (exit %s) ---\n%s" % (
                 Path(path).name,
                 artifact_exit or "?",
@@ -900,6 +910,11 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
         payload["thread"] = thread
     if code != 0 or not answer:
         payload["log_tail"] = log_tail(log)
+    if not answer and code == 0:
+        payload["note"] = (
+            "the run exited 0 but no answer text could be extracted from its"
+            " artifacts; judge by the log tail, not by the clean exit"
+        )
     return json.dumps(payload, ensure_ascii=False, indent=2), code != 0
 
 
