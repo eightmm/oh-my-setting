@@ -62,7 +62,9 @@ to `<file>.backup.<timestamp>` (announced at install time and reported by
 The awkward cases — Windows copy mode, Antigravity's headless permissions,
 Notion data-source selection — live in
 [docs/COMPONENTS.md](docs/COMPONENTS.md) and
-[docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md).
+[docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md). Upgrading an existing install
+is one `oms update`; what each release changes underfoot is stated in its
+migration note, currently [docs/MIGRATION-0.6.md](docs/MIGRATION-0.6.md).
 
 ## Start
 
@@ -141,11 +143,17 @@ agent surface is `oms list --frontdoor`; the complete compatibility catalog is
   agent files hidden from git locally
 - **Asking other agents** — durable peer threads, three-model councils and
   review gates backstopped by the project's own checks, decision-point
-  advisors, outbound scrubbing
-- **Delegating writes** — isolated worktree delegation, an admission ladder,
-  one mutation boundary, hash-frozen executor souls and worker-authority
-  fingerprints with snapshot-backed authority repair on violation, and
-  primary authority receipts withheld from write children
+  advisors, outbound scrubbing. Judging seats are given less on purpose: a
+  four-tool read belt, no MCP surface, evidence without the author's
+  rationale — and a seat that died or was cut off is named in the
+  synthesis, never quoted as one more opinion
+- **Delegating writes** — isolated worktree delegation (`--read-only` for
+  audits that must not produce a patch), an admission ladder, one mutation
+  boundary, hash-frozen executor souls and worker-authority fingerprints
+  with snapshot-backed authority repair on violation, primary authority
+  receipts withheld from write children, and no recursive delegation — a
+  worker asking for another peer is refused server-side and told to report
+  the need instead
 - **Agent state and handoff** — Work Journal with daily summaries and an
   optional Notion mirror, a prioritized attention inbox, pre-compaction
   handoffs, source-validated shared memory, reversible tracked-state
@@ -156,8 +164,10 @@ agent surface is `oms list --frontdoor`; the complete compatibility catalog is
   hypothesis runs, dataset leakage manifests, Slurm reconcile and GPU queue
 - **Providers and models** — cached capability probing, provider defaults or
   exact model/effort selection, opt-in one-shot capacity fallback,
-  family-diversity diagnostics, and content-free native activity/token
-  telemetry when providers expose it
+  family-diversity diagnostics, content-free native activity/token
+  telemetry when providers expose it, and transports that carry the
+  provider's own stop reason — an answer cut off at a token limit fails
+  closed instead of reading as finished
 - **Operations and execution boundaries** — durable attempt events with
   child-attempt resume, a bounded supervisor, one-use approvals,
   `trusted-local`/`isolated`/`remote` preflight and executable backends,
@@ -166,8 +176,10 @@ agent surface is `oms list --frontdoor`; the complete compatibility catalog is
   bounded coding loop whose only built-in remote-write path creates a branch
   plus Draft PR
 - **Maintenance** — transactional update with rollback, explicit stable/edge
-  channel projection, doctor, one full verification gate plus a protected-branch
-  quick pre-push mode
+  channel projection, doctor, one full verification gate plus a
+  protected-branch quick pre-push mode; append-only state compacts under gc
+  and every agent-facing projection is bounded, with the omission stated
+  rather than silent
 
 Skills load in three layers: general-purpose skills everywhere,
 machine-conditional skills only where their command exists (`oms-slurm`,

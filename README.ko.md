@@ -56,7 +56,9 @@ fast-forward하며 dirty 또는 diverged checkout은 건너뛴다. uninstall은 
 
 예외 상황 — Windows 사본 모드, Antigravity headless 권한, Notion data source
 지정 — 은 [docs/COMPONENTS.md](docs/COMPONENTS.md)와
-[docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md)에 있다.
+[docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md)에 있다. 기존 설치의 업그레이드는
+`oms update` 한 번이고, 릴리스마다 무엇이 바뀌는지는 마이그레이션 노트 —
+현재 [docs/MIGRATION-0.6.md](docs/MIGRATION-0.6.md) — 에 명시된다.
 
 ## 시작
 
@@ -133,10 +135,14 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   로컬에서만 숨겨지는 agent 파일
 - **다른 에이전트에게 묻기** — 이어지는 peer thread, 세 모델 council과
   프로젝트 자체 검사가 뒤를 받치는 리뷰 게이트, 결정 시점 advisor, 발신 전
-  민감정보 scrub
-- **쓰기 위임** — 격리 worktree 위임, admission 사다리, 단일 변이 경계,
-  해시 동결 executor soul과 워커 권한 지문, 위반 시 스냅샷 기반 권한 복구,
-  primary 권한 환경변수 미전달
+  민감정보 scrub. 심사하는 자리는 일부러 덜 받는다: 읽기용 4개 툴, MCP 표면
+  없음, 작성자의 논리 없이 증거만 — 그리고 죽거나 잘린 시트는 합성에서
+  이름으로 표시될 뿐 하나의 의견처럼 인용되지 않는다
+- **쓰기 위임** — 격리 worktree 위임(patch를 만들면 안 되는 감사는
+  `--read-only`), admission 사다리, 단일 변이 경계, 해시 동결 executor soul과
+  워커 권한 지문, 위반 시 스냅샷 기반 권한 복구, primary 권한 환경변수
+  미전달, 그리고 재귀 위임 금지 — 워커가 다른 peer를 부르려 하면 서버 측에서
+  거부되고 필요를 답변으로 보고하라고 안내받는다
 - **Agent 상태와 핸드오프** — 일간 요약과 선택적 Notion mirror가 있는 Work
   Journal, 우선순위 attention inbox, compaction 직전 세션 핸드오프, 출처를
   재검증하는 공유 메모리, 되돌릴 수 있는 tracked-state checkpoint, 검증이
@@ -146,14 +152,18 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   manifest, Slurm reconcile과 GPU 큐
 - **Provider와 모델** — 캐시된 capability 프로브, provider 기본값 또는 정확한
   모델/effort 선택, 명시한 경우에만 한 번 쓰는 capacity fallback, family 다양성
-  진단, provider가 제공할 때만 기록하는 내용 비저장형 native telemetry
+  진단, provider가 제공할 때만 기록하는 내용 비저장형 native telemetry,
+  그리고 provider 자신의 정지 사유를 실어 나르는 전송 — 토큰 한계에서 잘린
+  답은 완성된 것처럼 읽히는 대신 fail-closed로 떨어진다
 - **운영과 실행 경계** — 영속 attempt 이벤트와 child-attempt 재개, 제한된
   supervisor, 한 번만 쓰는 승인, `trusted-local`/`isolated`/`remote` preflight와
   실제 실행 backend, 선택적 Herdr 제어와 VS Code·Stably Orca·Codex 열기,
   읽기 전용 cockpit, 로컬 OTLP JSONL, advisory semantic 평가, 기본 원격 쓰기
   경로가 새 브랜치와 Draft PR 생성뿐인 제한 코딩 루프
 - **유지보수** — 롤백 가능한 트랜잭션 업데이트, stable/edge channel projection,
-  doctor, 하나의 전체 검증 게이트와 보호 브랜치용 빠른 pre-push 모드
+  doctor, 하나의 전체 검증 게이트와 보호 브랜치용 빠른 pre-push 모드;
+  append-only 상태는 gc로 압축되고 agent에게 보이는 projection은 전부
+  경계가 있으며 생략은 침묵 대신 명시된다
 
 skill은 세 계층으로 붙는다: 어디서나 같은 범용 skill, 필요한 명령이 있는
 머신에만 링크되는 머신 조건 skill(`oms-slurm`, `oms-gpu-workstation`), 그리고
