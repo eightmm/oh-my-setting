@@ -159,6 +159,13 @@ def load_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
         raise ReceiptError("outer receipt is not valid UTF-8 JSON") from exc
     if not isinstance(row, dict):
         raise ReceiptError("outer receipt is not an object")
+    # Stored-state tolerance: receipts written before the field existed mean
+    # "never allowed". Normalizing here, before validation and before the
+    # immutable-view comparison, keeps every pre-field receipt loadable and
+    # equal to a fresh binding that omits the flag.
+    contract = row.get("contract")
+    if isinstance(contract, dict):
+        contract.setdefault("allow_verifier_change", False)
     validate_receipt(row)
     return row, payload
 
@@ -256,6 +263,7 @@ def validate_receipt(row: dict[str, Any]) -> None:
         "retry_known",
         "review_mode",
         "draft_pr",
+        "allow_verifier_change",
     }
     if not isinstance(contract, dict) or set(contract) != contract_keys:
         raise ReceiptError("run contract is invalid")
@@ -272,6 +280,7 @@ def validate_receipt(row: dict[str, Any]) -> None:
     boolean(contract.get("auto_repair"), "auto repair")
     boolean(contract.get("retry_known"), "retry known")
     boolean(contract.get("draft_pr"), "draft PR")
+    boolean(contract.get("allow_verifier_change"), "allow verifier change")
     if contract.get("review_mode") not in {"shadow", "gate", "off"}:
         raise ReceiptError("review mode is invalid")
     if not isinstance(proposal, dict) or set(proposal) != {"path", "sha256"}:
@@ -494,6 +503,8 @@ def option_args(row: dict[str, Any]) -> list[str]:
         args.append("--retry-known")
     if contract["draft_pr"]:
         args.append("--draft-pr")
+    if contract["allow_verifier_change"]:
+        args.append("--allow-verifier-change")
     args.append("propose" if row["stage"] == "proposing" else "run")
     if row["proposal"]["path"]:
         args.extend(
@@ -552,6 +563,7 @@ def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "retry_known": args.retry_known,
             "review_mode": args.review_mode,
             "draft_pr": args.draft_pr,
+            "allow_verifier_change": args.allow_verifier_change,
         },
         "proposal": {"path": args.proposal, "sha256": args.proposal_sha256},
         "branch": args.branch,
@@ -579,6 +591,7 @@ def add_binding_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--replan-tasks", type=int, required=True)
     parser.add_argument("--auto-repair", action="store_true")
     parser.add_argument("--retry-known", action="store_true")
+    parser.add_argument("--allow-verifier-change", action="store_true")
     parser.add_argument("--review-mode", required=True)
     parser.add_argument("--draft-pr", action="store_true")
     parser.add_argument("--proposal", default="")

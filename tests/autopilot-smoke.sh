@@ -874,6 +874,49 @@ test_autopilot_orchestration() {
   [ "$rc" = 4 ] ||
     fail "a fresh propose after abandon must bind the new contract, got $rc: $(tail -5 "$planner_repo/rebind.out")"
 
+  # Contract-level verifier-change consent (round 24): the flag binds into
+  # the receipt at intake, rides every continuation, reaches the drive, and
+  # is immutable mid-run — widening landing authority requires abandon plus
+  # a fresh contract, never a quiet flag on a later resume.
+  local avc_repo="$TMP/verifier-consent"
+  make_repo "$avc_repo"
+  mkdir -p "$avc_repo/calls"
+  write_done_plan "$avc_repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=exhausted run_autopilot "$avc_repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    --allow-verifier-change > "$avc_repo/avc.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "consented run should still propose its replan, got $rc: $(tail -5 "$avc_repo/avc.out")"
+  grep -Fq -- '--allow-verifier-change' "$avc_repo/calls/goal-drive" ||
+    fail "verifier-change consent did not reach the drive"
+  grep -Fq '"allow_verifier_change":true' "$avc_repo/.oms/plan/autopilot-run.json" ||
+    fail "verifier-change consent is not bound in the receipt contract"
+  grep -Fq -- '--allow-verifier-change' "$avc_repo/avc.out" ||
+    fail "the printed continuation dropped the verifier-change consent"
+  rc=0
+  OMS_T_GOAL_RESULT=exhausted run_autopilot "$avc_repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$avc_repo/avc-drop.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "dropping the consent mid-run must refuse, got $rc"
+  grep -Fq 'immutable contract changed' "$avc_repo/avc-drop.out" ||
+    fail "the consent drop refusal must name the immutable contract"
+  # A receipt written before the field existed still loads and means "never
+  # allowed" — stored user state gets tolerance, new writes always carry it.
+  python3 - "$avc_repo/.oms/plan/autopilot-run.json" <<'PY' || fail "could not rewrite the receipt as its pre-field shape"
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    row = json.load(handle)
+row["contract"].pop("allow_verifier_change")
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+  run_autopilot "$avc_repo" status > "$avc_repo/avc-legacy.out" 2>&1 ||
+    fail "a pre-field receipt must remain loadable: $(tail -3 "$avc_repo/avc-legacy.out")"
+  if grep -Fq -- '--allow-verifier-change' "$avc_repo/avc-legacy.out"; then
+    fail "a pre-field receipt must not invent verifier-change consent"
+  fi
+
   # A proposal continuation is executable, not a template with an unresolved
   # branch token. Collect the base before the planner is allowed to run.
   local missing_base_repo="$TMP/propose-missing-base"

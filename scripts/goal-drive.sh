@@ -29,6 +29,12 @@ MAX_CYCLES=3
 AUTO_REPAIR=0
 RUN_ID_OVERRIDE=""
 RETRY_KNOWN=0
+ALLOW_VERIFIER_CHANGE=0
+# Empty when not allowed; carries the literal flag when it is. Every landing
+# entrance (plan-run and the direct patch-land retries) expands it the same
+# way, so contract-level consent cannot cover one landing path and miss
+# another.
+AVC_FLAG=""
 MODEL=""
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
@@ -61,6 +67,9 @@ it parked; a later run whose acceptance passes resolves those park rows.
   --auto-repair   Run one same-lease repair delegation after a failed landing,
                   then retry landing once before parking.
   --retry-known   Forward the explicit unchanged-failure retry to plan-run.
+  --allow-verifier-change  Forward to plan-run and every landing retry: permit
+                  a patch that touches its own verifier (base floor still
+                  applies). Meant to arrive from the autopilot contract.
   --model MODEL   Exact worker model; disables implicit fallback.
   --fallback-model M  Explicit one-shot capacity fallback model.
   --reasoning-effort E  auto, low, medium, high, xhigh, max, or ultra.
@@ -87,6 +96,7 @@ while [ "$#" -gt 0 ]; do
       RUN_ID_OVERRIDE="$2"; shift 2 ;;
     --auto-repair) AUTO_REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
+    --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; AVC_FLAG="--allow-verifier-change"; shift ;;
     --model) [ "$#" -ge 2 ] || fail "--model requires a value"; MODEL="$2"; shift 2 ;;
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires a value"; FALLBACK_MODEL="$2"; shift 2 ;;
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires a value"; REASONING_EFFORT="$2"; shift 2 ;;
@@ -1889,6 +1899,7 @@ reconcile_commit_intent() {
     [ "$TASK_RECEIPT_STATE" = review ] ||
       park "intent-task-moved" "the pending intent task is $TASK_RECEIPT_STATE, not review"
     "$ROOT/scripts/patch-land.sh" --repo "$REPO" --patch "$patch_abs" \
+      ${AVC_FLAG:+"$AVC_FLAG"} \
       --plan-task "$INTENT_TASK" --verify "$TASK_RECEIPT_VERIFY" >/dev/null 2>&1 || land_rc=$?
     [ "$land_rc" -eq 0 ] || park "intent-reland-failed" "the frozen reviewed patch no longer admits; inspect its report"
     intent_write landed "reconciled-by-landing"
@@ -2019,6 +2030,7 @@ print(found)
   if [ "$provider_called" = 1 ]; then
     run_args=(--repo "$REPO" --to "$PROVIDER" --next)
     [ "$RETRY_KNOWN" -eq 0 ] || run_args+=(--retry-known)
+    [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || run_args+=(--allow-verifier-change)
     [ -z "$MODEL" ] || run_args+=(--model "$MODEL")
     [ -z "$FALLBACK_MODEL" ] || run_args+=(--fallback-model "$FALLBACK_MODEL")
     [ "$REASONING_EFFORT" = auto ] || run_args+=(--reasoning-effort "$REASONING_EFFORT")
@@ -2063,6 +2075,7 @@ print(found)
   land_rc=0
   repair_worker_failed=0
   "$ROOT/scripts/patch-land.sh" --repo "$REPO" --patch "$patch_abs" \
+    ${AVC_FLAG:+"$AVC_FLAG"} \
     --plan-task "$task_id" --verify "$verify" >"$land_log" 2>&1 || land_rc=$?
 
   if [ "$land_rc" -ne 0 ] &&
@@ -2125,6 +2138,7 @@ print(found)
         : > "$land_log"
         land_rc=0
         "$ROOT/scripts/patch-land.sh" --repo "$REPO" --patch "$patch_abs" \
+          ${AVC_FLAG:+"$AVC_FLAG"} \
           --plan-task "$task_id" --verify "$verify" >"$land_log" 2>&1 || land_rc=$?
       fi
     else

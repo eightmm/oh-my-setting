@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- `autopilot --allow-verifier-change` binds verifier-change consent into the
+  immutable run contract at propose time: the receipt records it, every
+  printed continuation carries it, goal-drive forwards it to plan-run and to
+  each direct landing retry, and dropping or adding it mid-run refuses as an
+  immutable-contract change — widening landing authority takes an abandon
+  plus a fresh contract. Receipts written before the field existed still
+  load and mean "never allowed". The attempt-capture byte cap now keeps the
+  log head and tail with an in-log marker counting the dropped middle bytes
+  (landed from the field campaign's Draft PR #8), and the completion-path
+  truncation warning says which of the two truncation causes happened —
+  cap (both ends kept) or undrained pipe (tail may be missing).
 - The single proposal-admission door rejects floor-incompatible verifies
   (`floor_incompatible_verifier`): a verify that READS the content of a file
   the task itself modifies — grep/sed/cat/redirect of an allowed path — can

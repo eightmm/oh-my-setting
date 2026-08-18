@@ -29,6 +29,7 @@ MAX_CYCLES=10
 INITIAL_TASKS=6
 REPLAN_TASKS=2
 AUTO_REPAIR=0
+ALLOW_VERIFIER_CHANGE=0
 REVIEW_MODE="shadow"
 REVIEW_MODE_EXPLICIT=0
 DRAFT_PR=0
@@ -100,6 +101,11 @@ Options:
   --replan-tasks N        Sole r1- proposal cap, 1..2 (default: 2).
   --auto-repair           Allow goal-drive's one same-lease landing repair.
   --retry-known           Explicitly retry a matching unresolved worker failure.
+  --allow-verifier-change Contract-level consent, bound at propose time: the
+                          drive forwards it to plan-run so a patch touching its
+                          own verifier can land (base floor still applies).
+                          Mid-run discovery cannot add it — abandon the run and
+                          propose a fresh contract carrying the flag.
   --provider-timeout DUR  Default per-provider wall clock (default: 5m; max 24h).
   --planner-timeout DUR   Planner override for --provider-timeout.
   --worker-timeout DUR    Worker override for --provider-timeout.
@@ -171,6 +177,7 @@ while [ "$#" -gt 0 ]; do
       REPLAN_TASKS="$2"; shift 2 ;;
     --auto-repair) AUTO_REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
+    --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --provider-timeout)
       [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
       PROVIDER_TIMEOUT="$2"; shift 2 ;;
@@ -513,6 +520,7 @@ outer_receipt_write_locked() {  # STAGE
     --branch "$receipt_branch" --updated "$now")
   [ "$AUTO_REPAIR" -eq 0 ] || receipt_args+=(--auto-repair)
   [ "$RETRY_KNOWN" -eq 0 ] || receipt_args+=(--retry-known)
+  [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || receipt_args+=(--allow-verifier-change)
   [ "$DRAFT_PR" -eq 0 ] || receipt_args+=(--draft-pr)
   python3 "$RECEIPT_HELPER" "${receipt_args[@]}"
 }
@@ -830,6 +838,7 @@ PY
     continuation+=(--reviewer-fallback-model "$REVIEWER_FALLBACK_MODEL")
   [ "$AUTO_REPAIR" -eq 0 ] || continuation+=(--auto-repair)
   [ "$RETRY_KNOWN" -eq 0 ] || continuation+=(--retry-known)
+  [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || continuation+=(--allow-verifier-change)
   [ "$DRAFT_PR" -eq 0 ] || continuation+=(--draft-pr)
   continuation+=(run --proposal "$proposal_path" \
     --expected-proposal-sha256 "$proposal_digest")
@@ -1075,6 +1084,7 @@ drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
 [ -z "$WORKER_FALLBACK_MODEL" ] || drive_args+=(--fallback-model "$WORKER_FALLBACK_MODEL")
 [ "$AUTO_REPAIR" -eq 0 ] || drive_args+=(--auto-repair)
 [ "$RETRY_KNOWN" -eq 0 ] || drive_args+=(--retry-known)
+[ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || drive_args+=(--allow-verifier-change)
 drive_out="$(autopilot_mktemp)" || fail "mktemp failed"
 drive_rc=0
 OMS_WORKER_GUARD_STRICT=1 OMS_WORKER_GUARD_OFF=0 \
