@@ -4,9 +4,18 @@ All notable changes to this project are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 `VERSION` file.
 
-## Unreleased
+## [0.6.0] - 2026-08-18
 
 ### Added
+- The claude transport carries why the model stopped: print-mode calls ask
+  for the JSON envelope and parse it back to plain text plus one
+  `stop-reason:` line (parse-or-passthrough — stubs and other providers are
+  untouched), read only from the transport's own region so a quoted marker
+  in a prompt or diff never classifies a healthy seat. Consumers act on it:
+  answer-quality classifies a max_tokens stop as `truncated` however
+  finished the sentences look, the review gate voids a GATE line whose
+  transcript records a truncation or error stop, and the refusal detector
+  reads the recorded reason.
 - The codex transport now says whether the turn actually closed: exec calls
   ride `--json`, and the JSONL events are parsed back to plain text plus a
   `stop-reason:` line (parse-or-passthrough like the claude branch).
@@ -18,9 +27,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   first Output heading, so a quoted footer in a replayed prompt is no longer
   someone else's bill.
 - Read-access claude seats carry a four-tool belt (`--tools
-  Read,Grep,Glob,Bash`): a judging seat reads and searches, and none of the
-  write or spawn tools belong in a reviewer's hands — past four or five
-  tools, selection degrades (the exam's own line).
+  Read,Grep,Glob,Bash`) and run `--strict-mcp-config`: a judging seat reads
+  and searches, none of the write or spawn tools belong in a reviewer's
+  hands — past four or five tools, selection degrades (the exam's own line)
+  — and it does not inherit the user-scope MCP tool surface. Write workers
+  keep MCP and the default tool set: a project may register servers its
+  tasks depend on. agy exposes no JSON or tool surface; its self-timeout
+  already exits nonzero (verified), so its truncations fail at the exit
+  layer.
 - Style detection has one implementation: the rg fast path disagreed with
   the find fallback on depth, hidden files, and gitignore, so the same
   repository detected a different style depending on whether rg was on PATH
@@ -44,18 +58,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   tail, and a bare handoff name resolves only inside the handoff store —
   resolving against the caller's cwd first turned "show README.md" into an
   arbitrary repo file wearing a handoff's name.
-- The claude transport carries why the model stopped: print-mode calls ask
-  for the JSON envelope and parse it back to plain text plus one
-  `stop-reason:` line (parse-or-passthrough — stubs and other providers are
-  untouched). Consumers act on it: answer-quality classifies a max_tokens
-  stop as `truncated` however finished the sentences look, the review gate
-  voids a GATE line whose transcript records a truncation or error stop,
-  and the refusal detector reads the recorded reason. Read-access claude
-  seats also run `--strict-mcp-config`: a council seat judges text and does
-  not inherit the user-scope MCP tool surface (write workers keep MCP — a
-  project may register servers its tasks depend on). codex (`--json` is
-  JSONL events) and agy (no JSON surface; its self-timeout already exits
-  nonzero, verified) keep the plain transport for now.
 - `peer-delegate --read-only` runs a reviewer or auditor role with the
   authority its mandate describes; authority still comes from the caller,
   never role prose, and `--apply` is rejected as contradictory.
@@ -84,29 +86,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   argv, pass structured failures through unchanged, and expose no mutation,
   promotion, or landing surface.
 
-### Changed
-- Every bounded quote names its cut, and admitted answers are judged:
-  peer-delegate's five unmarked head/tail reads carry truncation markers,
-  the synthesis embeds the operator prompt head-kept at the quote budget
-  instead of re-billing the whole diff, import-agent-result refuses an
-  empty paste and names a non-answer at the door, an answer thread turn
-  derives its quality when the caller supplied none, oms_peer_result gives
-  each seat an equal budget slice and labels a nonzero seat's text as the
-  partial it is, attempt-runner says at completion when its capture dropped
-  the tail, and the antigravity transport refuses a prompt past its
-  ~128KiB argv wall by name.
-- Consult forms its second opinion before reading the first: shared memory
-  (prior conclusions — closed tasks, distilled decisions) is opt-in via
-  `--memory`, matching peer-ask/peer-review/agent-call; the task packet
-  still rides by default. The advisor session digest likewise drops the
-  caller's own concluding summary — goal, turns, and files touched are
-  evidence, the author's rationale is anchoring.
-- `oms_agent_operations` projects the most recent 40 attempts instead of
-  the whole append-only lifecycle ledger; unbounded, the projection was
-  4KB from the 60k output cap, past which the character cut returns
-  unparseable JSON at full token cost.
-
-### Fixed
 - Rules land at their tier: the ML project template no longer ships
   cluster-only guidance (`snapshot --cluster`, `run-reconcile`) that the
   conditional Slurm overlay exists to withhold, and the generated loader
@@ -156,6 +135,28 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   child exit, four absence windows outwait their fixture's delayed write
   (one was vacuous on every machine), and the runtime fixture pins
   `git init -b main`.
+
+### Changed
+- Every bounded quote names its cut, and admitted answers are judged:
+  peer-delegate's five unmarked head/tail reads carry truncation markers,
+  the synthesis embeds the operator prompt head-kept at the quote budget
+  instead of re-billing the whole diff, import-agent-result refuses an
+  empty paste and names a non-answer at the door, an answer thread turn
+  derives its quality when the caller supplied none, oms_peer_result gives
+  each seat an equal budget slice and labels a nonzero seat's text as the
+  partial it is, attempt-runner says at completion when its capture dropped
+  the tail, and the antigravity transport refuses a prompt past its
+  ~128KiB argv wall by name.
+- Consult forms its second opinion before reading the first: shared memory
+  (prior conclusions — closed tasks, distilled decisions) is opt-in via
+  `--memory`, matching peer-ask/peer-review/agent-call; the task packet
+  still rides by default. The advisor session digest likewise drops the
+  caller's own concluding summary — goal, turns, and files touched are
+  evidence, the author's rationale is anchoring.
+- `oms_agent_operations` projects the most recent 40 attempts instead of
+  the whole append-only lifecycle ledger; unbounded, the projection was
+  4KB from the 60k output cap, past which the character cut returns
+  unparseable JSON at full token cost.
 
 ### Performance
 - The evidence projection judges every row against one head snapshot
