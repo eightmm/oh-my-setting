@@ -81,7 +81,16 @@ def promote(repo: Path, commit: str, version: str, *, expected_manifest_digest: 
         raise CoreError("stable version must be semantic-version shaped")
     resolved = run_output(["git", "-C", str(repo), "rev-parse", "--verify", commit + "^{commit}"])
     if not resolved or resolved != commit:
-        raise CoreError("stable commit is not available in this repository")
+        # Name the repo that was searched: `oms` resolves to the INSTALLED
+        # checkout, which has not fetched a release commit that only exists in
+        # the development checkout yet — the 0.6.0 promotion hit exactly this
+        # and the bare message read as a mystery instead of a wrong front door.
+        raise CoreError(
+            "stable commit %s is not available in %s; promote runs against the"
+            " checkout that owns the channel manifest — from the release"
+            " checkout use its own front door (bash scripts/oms runtime release"
+            " promote ...), or update this install first" % (commit[:12], repo)
+        )
     if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_digest):
         raise CoreError("stable promotion requires the exact reviewed manifest digest")
     tracked_dirty = run_output(["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=no"])

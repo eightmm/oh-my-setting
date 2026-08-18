@@ -6080,6 +6080,7 @@ test_codex_jsonl_carries_stop_reason() {
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > /dev/null
+echo "ERROR rmcp::transport::worker: TRANSPORT-NOISE before the answer" >&2
 printf '%s\n' '{"type":"thread.started","thread_id":"t1"}'
 printf '%s\n' '{"type":"turn.started"}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"JSONL answer body: pong."}}'
@@ -6095,6 +6096,11 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'tokens used'
   if grep -R -Fq '"type":"item.completed"' "$artifact_dir"/codex-jsonl-probe-*.md; then
     fail "the JSONL events must be parsed away, not quoted as the answer"
+  fi
+  # A cleanly closed turn drops merged stderr chatter: four lines of plugin
+  # MCP auth noise rode ahead of every live answer into the synthesis.
+  if grep -R -Fq 'TRANSPORT-NOISE' "$artifact_dir"/codex-jsonl-probe-*.md; then
+    fail "stderr chatter must not ride a successful answer"
   fi
 
   # A stream cut before turn.completed is codex's max_tokens: events arrived,

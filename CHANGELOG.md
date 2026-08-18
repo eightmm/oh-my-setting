@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 `VERSION` file.
 
+## Unreleased
+
+### Fixed
+- A cleanly closed turn drops merged stderr chatter from its answer: live
+  councils quoted four lines of plugin-MCP auth noise ahead of every codex
+  answer into the synthesis. A failed or cut turn keeps those lines — there
+  they are diagnostic evidence, not noise. Codex judging seats also run
+  with `tools.web_search=false`: the evidence is the prompt and the repo in
+  front of the seat (the config key was probe-verified).
+- The stable-promotion refusal names the repository it searched and the fix:
+  `oms` resolves to the installed checkout, which cannot know a release
+  commit that only exists in the development checkout yet — the 0.6.0
+  promotion hit exactly this and the bare message read as a mystery.
+- The CI lint job fails fast instead of hanging: apt stalled its install
+  step for an hour once (observed holding a release base hostage); both
+  steps now carry timeouts so a rerun of a five-minute failure replaces a
+  silent hour.
+
 ## [0.6.0] - 2026-08-18
 
 ### Added

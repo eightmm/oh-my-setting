@@ -1485,6 +1485,11 @@ if envelope is None:
 reason = envelope.get("stop_reason") or envelope.get("terminal_reason") or "unknown"
 subtype = envelope.get("subtype") or "unknown"
 is_error = 1 if envelope.get("is_error") else 0
+# Same rule as the codex transform: a clean end_turn's non-envelope lines are
+# merged stderr chatter, not answer; an errored or truncated stop keeps them
+# as evidence.
+if not is_error and reason == "end_turn":
+    others = []
 out = ["stop-reason: provider=claude reason=%s subtype=%s is_error=%d" % (reason, subtype, is_error)]
 out.extend(others)
 result = envelope.get("result")
@@ -1562,6 +1567,11 @@ if errors:
     stop = "stop-reason: provider=codex reason=turn_failed subtype=error is_error=1"
 elif completed:
     stop = "stop-reason: provider=codex reason=turn_completed subtype=success is_error=0"
+    # On a cleanly closed turn the answer is the answer: the non-event lines
+    # are merged stderr chatter (plugin MCP transports were four lines of
+    # auth noise ahead of every live answer), and quoting them forward buys
+    # no verdict. A failed or cut turn keeps them — there they are evidence.
+    others = []
 else:
     stop = "stop-reason: provider=codex reason=stream_truncated subtype=incomplete is_error=0"
 
@@ -1615,6 +1625,10 @@ ma_provider_attempt() {
       # actually closed; parsed back to plain text right after the run
       # (ma_codex_jsonl_to_text), parse-or-passthrough like the claude branch.
       cmd+=(--json)
+      # A judging seat's evidence is the prompt and the repo in front of it;
+      # web search widens the belt for no verdict value (same reasoning as
+      # the claude four-tool belt; config key accepted, probed 2026-08-18).
+      [ "$access" = write ] || cmd+=(-c "tools.web_search=false")
       if [ "$access" = write ]; then
         cmd+=(--sandbox workspace-write -)
       else

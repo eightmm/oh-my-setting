@@ -20,11 +20,17 @@ jobs:
   # result. Twenty seconds of runner time buys an independent red/green.
   lint:
     runs-on: ubuntu-latest
+    # apt has hung this job for an hour before timing anything out (observed
+    # 2026-08-18: "install shellcheck" stalled 60+ minutes and held a release
+    # base hostage until a manual cancel+rerun). Fail the step fast instead —
+    # a rerun of a 5-minute failure is cheap; a silent hour is not.
     steps:
       - uses: actions/checkout@v7
       - name: install shellcheck
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: lint
+        timeout-minutes: 15
         run: bash scripts/check.sh --lint-only
 
   # Focused suites share state and are intentionally serialized. Their stage
