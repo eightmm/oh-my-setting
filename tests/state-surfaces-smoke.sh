@@ -1551,7 +1551,36 @@ test_slurm_generator_has_one_front_door() {
   [ "$rc" = 2 ] || fail "the internal generator name must not dispatch, got $rc"
 }
 
+test_mcp_peer_start_refuses_harness_children() {
+  local repo="$TMP/mcp-child-repo"
+  local out="$TMP/mcp-child-out"
+
+  make_repo "$repo"
+  # A provider CLI this harness spawned carries OMS_HARNESS_CHILD, and the
+  # MCP server it starts inherits it: a worker asking for another peer is
+  # recursive delegation, which is the owner's decision. Server-side, so it
+  # holds for every provider whatever the CLI's own flags allow.
+  {
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"probe"}}}\n' "$repo"
+  } | OMS_HARNESS_CHILD=1 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
+  grep -Fq 'a delegated worker cannot start peer consultations' "$out" ||
+    fail "a harness child must be refused a peer start: $(cat "$out")"
+
+  # Without the marker the guard must not fire: an invalid kind reaching kind
+  # validation proves the request passed the guard.
+  {
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"nope","prompt":"probe"}}}\n' "$repo"
+  } | env -u OMS_HARNESS_CHILD python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
+  grep -Fq 'kind must be one of' "$out" ||
+    fail "an owner session must pass the child guard: $(cat "$out")"
+}
+
 test_mcp_server_protocol
+test_mcp_peer_start_refuses_harness_children
 test_mcp_server_bounds_requests_before_effects
 test_mcp_peer_actions_start_detached_and_poll
 test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt

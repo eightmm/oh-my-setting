@@ -504,6 +504,19 @@ def peer_command(kind, script, repo, prompt, prompt_file, targets, thread, new_t
 
 
 def start_peer(arguments: dict) -> tuple[str, bool]:
+    # A provider CLI spawned by this harness inherits OMS_HARNESS_CHILD (and
+    # this server inherits it from that CLI). Workers cannot widen authority
+    # or delegate recursively — that decision belongs to the owner — and no
+    # provider CLI offers a per-invocation switch to withhold this tool
+    # (codex loads plugin MCP servers unconditionally; probed 2026-08-18).
+    # Refusing here covers every provider at once, server-side.
+    if os.environ.get("OMS_HARNESS_CHILD") == "1":
+        return (
+            "error: a delegated worker cannot start peer consultations;"
+            " recursive delegation is the owner's decision — report the need"
+            " in your answer instead",
+            True,
+        )
     repo, err = resolve_repo(arguments)
     if err:
         return err, True

@@ -29,6 +29,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   every machine, pinned by a depth-boundary regression.
 
 ### Fixed
+- The MCP peer surface cannot be used to delegate recursively: oms_peer_start
+  refuses when the server was spawned under a harness child
+  (OMS_HARNESS_CHILD) — a worker asking for another peer is the owner's
+  decision, and the worker is told to report the need in its answer instead.
+  Server-side because no provider CLI offers a per-invocation switch to
+  withhold plugin-provided MCP servers (codex loads them unconditionally;
+  probed with mcp_servers/plugins overrides, none effective).
 - Bounded ingress at four more mouths: the quote sanitizer trims to the
   budget before its per-line redaction (minutes of forks over bytes the
   final cut dropped anyway; the omission marker still states the true
