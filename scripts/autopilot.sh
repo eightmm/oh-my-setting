@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 REPO="$PWD"
 ACTION=""
+ABANDON_REASON=""
 PROPOSAL=""
 PROPOSAL_SHA=""
 PLANNER="claude"
@@ -77,6 +78,12 @@ one optional remainder proposal, semantic review, and optionally a Draft PR.
                           exhaustion may emit the sole r1- proposal and exit 4.
                           Every other unsafe stop exits 3.
   status                  Show the current plan and latest drive terminal row.
+  abandon --reason TEXT   Retire the live outer receipt append-only: the exact
+                          bytes are preserved content-addressed, a typed
+                          abandon record names the predecessor digest and
+                          reason, and a fresh propose may bind a new contract.
+                          For receipts whose frozen contract cannot finish
+                          (e.g. a provider wall that kills every call).
 
 Options:
   --repo PATH             Repository (default: current directory).
@@ -208,7 +215,10 @@ while [ "$#" -gt 0 ]; do
       REVIEW_MODE="$2"; REVIEW_MODE_EXPLICIT=1; shift 2 ;;
     --draft-pr) DRAFT_PR=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    propose|run|status)
+    --reason)
+      [ "$#" -ge 2 ] || fail "--reason requires text"
+      ABANDON_REASON="$2"; shift 2 ;;
+    propose|run|status|abandon)
       [ -z "$ACTION" ] || fail "multiple actions: $ACTION, $1"
       ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
@@ -224,6 +234,22 @@ PLAN_FILE="$REPO/.oms/plan/tasks.json"
 PROGRESS_FILE="$REPO/.oms/plan/progress.jsonl"
 SPEC="$REPO/PROJECT.md"
 OUTER_RECEIPT="$REPO/.oms/plan/autopilot-run.json"
+
+# abandon touches only the receipt, deliberately before the spec/tree gates:
+# the receipt being unfinishable (a frozen contract whose own value killed
+# the run) is exactly when the operator needs this exit, and a dirty tree or
+# changed spec must not block retiring it.
+if [ "$ACTION" = abandon ]; then
+  [ -n "${ABANDON_REASON:-}" ] || fail "abandon requires --reason"
+  [ -f "$OUTER_RECEIPT" ] || fail "no live autopilot receipt to abandon"
+  expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || exit $?
+  record="$(python3 "$RECEIPT_HELPER" abandon "$OUTER_RECEIPT" --repo "$REPO" \
+    --expected "$expected" --reason "$ABANDON_REASON" \
+    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" || exit $?
+  echo "autopilot: receipt abandoned; the exact contract is preserved and the exit recorded at $record"
+  echo "autopilot: a fresh propose may now bind a new contract"
+  exit 0
+fi
 
 validate_duration() {  # VALUE LABEL
   local value="$1" label="$2" seconds

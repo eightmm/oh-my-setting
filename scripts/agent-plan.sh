@@ -401,6 +401,66 @@ def reject_controls(value, label):
     if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
         die("%s contains a control or format character" % label)
 
+FLOOR_READERS = {
+    "grep", "egrep", "fgrep", "rg", "sed", "awk", "cat", "head", "tail",
+    "diff", "cmp", "sort", "wc", "od", "strings", "cut", "tr", "uniq",
+}
+
+def floor_incompatible_reads(verify, allowed_paths):
+    """Content reads of task-modified files inside a verify command.
+
+    The admission gate's base floor re-runs the verify with the verifier
+    restored from HEAD, so a verify that READS the content of a file the
+    task modifies (grep/sed/cat/redirect of an allowed path) can never pass
+    it — the content it looks for only exists in the patch. EXECUTING the
+    restored file (bash/pytest of the suite) is the floor's whole point and
+    stays admissible. Unparseable structures admit: the runtime floor is
+    the backstop, and a false reject blocks planning while a false admit is
+    still caught at run time (three-family council consensus, 2026-08-18).
+    """
+    import shlex
+    try:
+        tokens = shlex.split(verify)
+    except ValueError:
+        return []
+    boundary = {"&&", "||", ";", "|", "&"}
+    commands = []
+    current = []
+    for token in tokens:
+        if token in boundary:
+            commands.append(current)
+            current = []
+        else:
+            current.append(token)
+    commands.append(current)
+    hits = []
+    allowed = set(allowed_paths)
+    for command in commands:
+        if not command:
+            continue
+        # bash -c 'inner': the inner string is where the field defect lived.
+        if command[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh") and "-c" in command[:3]:
+            marker = command.index("-c")
+            if marker + 1 < len(command):
+                hits.extend(floor_incompatible_reads(command[marker + 1], allowed_paths))
+            continue
+        words = list(command)
+        while words and "=" in words[0] and "/" not in words[0].split("=", 1)[0]:
+            words = words[1:]
+        if not words:
+            continue
+        head_word = words[0].rsplit("/", 1)[-1]
+        for index_w, word in enumerate(words):
+            if word == "<" and index_w + 1 < len(words) and words[index_w + 1] in allowed:
+                hits.append((words[index_w + 1], "stdin redirect"))
+            elif word.startswith("<") and len(word) > 1 and word[1:] in allowed:
+                hits.append((word[1:], "stdin redirect"))
+        if head_word in FLOOR_READERS:
+            for word in words[1:]:
+                if word in allowed:
+                    hits.append((word, head_word))
+    return hits
+
 def clean_rel(value, label):
     if not isinstance(value, str):
         die("%s must be a string" % label)
@@ -654,6 +714,13 @@ if act == "apply-proposal":
                            for item in allowed]
         if not all(inside_envelope(item) for item in cleaned_allowed):
             die("proposal task %s widens the allowed path envelope" % task_id)
+        floor_hits = floor_incompatible_reads(verify, cleaned_allowed)
+        if floor_hits:
+            die("floor_incompatible_verifier: proposal task %s verify reads %s"
+                " (via %s), a file the task itself modifies — the base floor"
+                " restores that file from HEAD, so this check can never pass;"
+                " verify by executing the restored file (run the suite), not"
+                " by reading its content" % (task_id, floor_hits[0][0], floor_hits[0][1]))
         forbidden = raw.get("forbidden") or []
         if not isinstance(forbidden, list):
             die("proposal task %s forbidden paths must be a list" % task_id)

@@ -835,6 +835,45 @@ test_autopilot_orchestration() {
   grep -Eq '^  oms .* propose$' "$planner_repo/planner-status.out" ||
     fail "planner interruption status did not print an exact propose continuation"
 
+  # The field scenario (2026-08-18): the frozen contract's own provider wall
+  # killed the planner, and no amendment path existed. A changed contract
+  # against the live receipt must still refuse — and abandon is the audited
+  # append-only exit that lets a fresh propose bind a new contract without a
+  # fresh clone.
+  rc=0
+  OMS_T_PLAN_RC=3 run_autopilot "$planner_repo" propose --planner claude \
+    --allowed 'src,tests' --base main --provider-timeout 10m \
+    > "$planner_repo/retry-changed.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a changed contract against a live receipt must refuse, got $rc"
+  grep -Fq 'immutable contract changed' "$planner_repo/retry-changed.out" ||
+    fail "the refusal must name the immutable contract: $(tail -3 "$planner_repo/retry-changed.out")"
+  run_autopilot "$planner_repo" abandon \
+    --reason "provider wall killed the planner; rebinding with a longer wall" \
+    > "$planner_repo/abandon.out" 2>&1 ||
+    fail "abandon failed: $(cat "$planner_repo/abandon.out")"
+  [ ! -f "$planner_repo/.oms/plan/autopilot-run.json" ] ||
+    fail "the live receipt must be retired by abandon"
+  ls "$planner_repo/.oms/plan/"autopilot-run.*.abandoned.json >/dev/null 2>&1 ||
+    fail "the abandon record is missing"
+  grep -Fq '"reason":"provider wall killed the planner' \
+    "$planner_repo/.oms/plan/"autopilot-run.*.abandoned.json ||
+    fail "the typed reason must ride the abandon record"
+  grep -Fq '"predecessor":' \
+    "$planner_repo/.oms/plan/"autopilot-run.*.abandoned.json ||
+    fail "the abandon record must name its predecessor digest"
+  archived_found=0
+  for archived in "$planner_repo/.oms/plan/"autopilot-run.*.json; do
+    case "$archived" in *.abandoned.json) continue ;; esac
+    [ -s "$archived" ] && archived_found=1
+  done
+  [ "$archived_found" = 1 ] ||
+    fail "the abandoned receipt's exact bytes must stay archived"
+  rc=0
+  run_autopilot "$planner_repo" propose --planner claude --allowed 'src,tests' \
+    --base main --provider-timeout 10m > "$planner_repo/rebind.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] ||
+    fail "a fresh propose after abandon must bind the new contract, got $rc: $(tail -5 "$planner_repo/rebind.out")"
+
   # A proposal continuation is executable, not a template with an unresolved
   # branch token. Collect the base before the planner is allowed to run.
   local missing_base_repo="$TMP/propose-missing-base"

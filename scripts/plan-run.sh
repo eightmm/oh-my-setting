@@ -21,6 +21,7 @@ USE_NEXT=0
 REPAIR=0
 LAND=0
 AUTO_REPAIR=0
+ALLOW_VERIFIER_CHANGE=0
 RETRY_KNOWN=0
 DRY_RUN=0
 EXECUTOR_ID=""
@@ -54,6 +55,8 @@ Options:
   --next          Atomically claim the next actionable task.
   --repair N      Bounded worker repair rounds, 0-3 (default: 0).
   --land          Land through patch-land after successful delegation.
+  --allow-verifier-change  Forward to patch-land/patch-admit: permit a patch
+                  whose task scope includes its own verifier file.
   --auto-repair   With --land: when landing fails, run exactly ONE fenced repair
                   delegation with the failed gate's own output embedded in
                   the worker brief, retry landing once, then park the task
@@ -87,6 +90,7 @@ while [ "$#" -gt 0 ]; do
     --next) USE_NEXT=1; shift ;;
     --repair) [ "$#" -ge 2 ] || fail "--repair requires N"; REPAIR="$2"; shift 2 ;;
     --land) LAND=1; shift ;;
+    --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --auto-repair) AUTO_REPAIR=1; [ "$REPAIR" -ge 1 ] || REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
     --executor) [ "$#" -ge 2 ] || fail "--executor requires ID"; EXECUTOR_ID="$2"; shift 2 ;;
@@ -313,7 +317,7 @@ print(1 if count == 1 and not isinstance(count,bool) and d.get("lease_id") and d
     elif [ "$POSSIBLE_REPAIR_RESUME" -eq 1 ]; then
       : # Exact repair marker is validated with the full receipt below.
     else
-      [ "$state" = ready ] || fail "task $TASK_ID is $state, not ready"
+      [ "$state" = ready ] || fail "task $TASK_ID is $state, not ready; the audited exits: oms agent-plan release --id $TASK_ID requeues it (review evidence kept) for a fresh drive, review+--land continues from the stored patch, and --auto-repair owns the in-drive repair loop"
     fi
   fi
   if [ "$CONTINUE_REVIEW" -eq 1 ]; then
@@ -509,6 +513,10 @@ fi
 KEEP_CLAIM=1
 if [ "$LAND" -eq 1 ]; then
   land_cmd=("$ROOT/scripts/patch-land.sh" --repo "$REPO" --plan-task "$TASK_ID" --verify "$VERIFY")
+  # A task whose scope legitimately includes its own regression file cannot
+  # land through this front door without the admission override; the flag is
+  # forwarded verbatim, never implied (the live campaign hit exactly this).
+  [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || land_cmd+=(--allow-verifier-change)
   [ -n "$EXECUTOR_ID" ] && land_cmd+=(--executor "$EXECUTOR_ID")
   land_log="$(agent_memory_mktemp)" || exit 1
   set +e

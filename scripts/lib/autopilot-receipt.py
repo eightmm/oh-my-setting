@@ -1196,6 +1196,12 @@ def main() -> int:
     archive.add_argument("path")
     archive.add_argument("--repo", required=True)
     archive.add_argument("--expected", required=True)
+    abandon = sub.add_parser("abandon")
+    abandon.add_argument("path")
+    abandon.add_argument("--repo", required=True)
+    abandon.add_argument("--expected", required=True)
+    abandon.add_argument("--reason", required=True)
+    abandon.add_argument("--updated", required=True)
     supervisor = sub.add_parser("supervise")
     supervisor.add_argument("--wall", type=float, required=True)
     supervisor.add_argument("--kill-after", type=float, default=1)
@@ -1216,6 +1222,54 @@ def main() -> int:
         if args.command == "metadata":
             row, payload = load_receipt(path)
             print("%s\t%s\t%s" % (row["stage"], row["spec_sha256"], digest(payload)))
+            return 0
+        if args.command == "abandon":
+            # The append-only exit for a receipt whose frozen contract turned
+            # out to be the problem (a too-short wall killed the first call
+            # and could not be amended — observed live, 2026-08-18). Mirrors
+            # archive-done's idiom: CAS, content-addressed preservation of
+            # the exact bytes, then a typed abandon record naming the
+            # predecessor digest and reason. The live path frees for a fresh
+            # propose with a new contract; nothing is mutated or lost.
+            validate_receipt_location(path, args.repo)
+            row, payload = load_receipt(path)
+            current = digest(payload)
+            if current != args.expected:
+                raise ReceiptError("outer receipt CAS changed")
+            if row["stage"] == "done":
+                raise ReceiptError("a done outer receipt is archived, not abandoned")
+            if not UPDATED.fullmatch(args.updated):
+                raise ReceiptError("abandon requires a valid --updated timestamp")
+            reason = args.reason.strip()
+            if not reason or len(reason) > 400:
+                raise ReceiptError("abandon requires a nonempty --reason (max 400 chars)")
+            archive_path = path.with_name("autopilot-run.%s.json" % current)
+            record_path = path.with_name("autopilot-run.%s.abandoned.json" % current)
+            if archive_path.exists() or archive_path.is_symlink():
+                archived = regular_bytes(archive_path, RECEIPT_LIMIT, "archived receipt")
+                if digest(archived) != current:
+                    raise ReceiptError("outer receipt archive path is occupied")
+            else:
+                # Copy before unlink: a crash between steps must never leave
+                # the abandoned contract without its only preserved copy.
+                atomic_write(archive_path, payload)
+            record = {
+                "schema": 1,
+                "kind": "autopilot-abandon",
+                "predecessor": current,
+                "stage_at_abandon": row["stage"],
+                "spec_sha256": row["spec_sha256"],
+                "branch": row.get("branch", ""),
+                "reason": reason,
+                "updated": args.updated,
+            }
+            atomic_write(
+                record_path,
+                (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
+            )
+            os.unlink(path)
+            fsync_directory(path.parent)
+            print(record_path)
             return 0
         if args.command == "archive-done":
             validate_receipt_location(path, args.repo)

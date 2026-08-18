@@ -7,6 +7,7 @@ import sys
 
 NOISE = re.compile(
     r"^\s*(model-route:|model-result:|tokens used|\[REDACTED|OpenAI Codex|"
+    r"\[untrusted |\[end untrusted |"
     r"workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|"
     r"reasoning summaries:|session id:|-{3,}$|user$|DRY RUN)"
 )

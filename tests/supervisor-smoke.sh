@@ -85,6 +85,11 @@ assert len(data) <= 4096, len(data)
 assert b"output truncated" in data, data[-100:]
 PY
 
+# Load-sensitive: with a 1-second wall, a heavily loaded machine can surface
+# the runner's exception path (blocked/supervisor_error) instead of a clean
+# timed_out — observed once under a live autopilot drive (2026-08-18 campaign,
+# parked cycle 1) while baseline and standalone runs stayed green. If this
+# fails inside a parallel drive, rerun it standalone before blaming the change.
 timeout_attempt="$(submit --max-wall-seconds 1 -- bash -c 'sleep 20 & wait')"
 "$SUP" --repo "$REPO" dispatch --max-running 1 --max-jobs 1 >/dev/null
 if "$SUP" --repo "$REPO" wait --attempt "$timeout_attempt" --timeout 10 >/dev/null 2>&1; then

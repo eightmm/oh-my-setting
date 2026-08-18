@@ -268,4 +268,57 @@ rc=0
 [ ! -e "$TMP/admit-fsmonitor-fired" ] ||
   fail "patch admission executed worker-planted fsmonitor"
 
+# --- Proposal admission rejects floor-incompatible verifies ------------------
+# The live 0.6.0 campaign parked on a planner-authored verify that greps a
+# file the task itself modifies: the base floor restores the verifier from
+# HEAD, so such a check can never pass. The generator of that dead state is
+# now refused at the single admission door (three-family council, 2026-08-18).
+floor_repo="$TMP/floor-admission"
+mkdir -p "$floor_repo/tests" "$floor_repo/docs"
+git -C "$floor_repo" init -q -b main
+git -C "$floor_repo" config user.email test@example.com
+git -C "$floor_repo" config user.name test
+printf '#!/usr/bin/env bash\necho ok\n' > "$floor_repo/tests/suite.sh"
+printf 'ok\n' > "$floor_repo/docs/other.md"
+printf '# probe\n\n- State: confirmed\n\n## Goal\n\nprobe\n' > "$floor_repo/PROJECT.md"
+git -C "$floor_repo" add -A
+git -C "$floor_repo" commit -qm fixtures
+
+floor_proposal() {  # floor_proposal VERIFY -> apply-proposal stderr tail
+  local verify="$1" spec base psha
+  spec="$(sha256sum "$floor_repo/PROJECT.md" | cut -d' ' -f1)"
+  base="$(git -C "$floor_repo" rev-parse HEAD)"
+  OMS_T_VERIFY="$verify" OMS_T_SPEC="$spec" OMS_T_BASE="$base" python3 - "$floor_repo/p.json" <<'PY'
+import json, os, sys
+doc = {"schema": 1, "kind": "agent-plan-proposal",
+       "spec_sha256": os.environ["OMS_T_SPEC"], "plan_sha256": "absent",
+       "base_sha": os.environ["OMS_T_BASE"], "id_prefix": "",
+       "allowed_envelope": ["tests/suite.sh"],
+       "acceptance_files": ["tests/suite.sh"],
+       "tasks": [{"id": "t1", "title": "probe", "allowed": ["tests/suite.sh"],
+                  "verify": os.environ["OMS_T_VERIFY"], "depends": []}]}
+open(sys.argv[1], "w").write(json.dumps(doc))
+PY
+  psha="$(sha256sum "$floor_repo/p.json" | cut -d' ' -f1)"
+  rm -rf "$floor_repo/.oms/plan"
+  "$ROOT/scripts/agent-plan.sh" --repo "$floor_repo" apply-proposal \
+    --proposal "$floor_repo/p.json" --expected-proposal-sha256 "$psha" \
+    --expected-plan-sha256 absent --allowed-envelope "tests/suite.sh" \
+    --accept-files "tests/suite.sh" --goal probe --accept "bash tests/suite.sh" \
+    2>&1 | tail -1 || true
+}
+
+out="$(floor_proposal "bash -c 'grep -q endswith tests/suite.sh && bash tests/suite.sh'")"
+printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+  fail "the field-defect verify shape must be rejected at admission: $out"
+out="$(floor_proposal "python3 - < tests/suite.sh")"
+printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+  fail "a redirect read of a modified file must be rejected: $out"
+out="$(floor_proposal "bash tests/suite.sh")"
+printf '%s' "$out" | grep -Fq 'proposal applied' ||
+  fail "executing the restored suite must stay admissible: $out"
+out="$(floor_proposal "grep -q ok docs/other.md && bash tests/suite.sh")"
+printf '%s' "$out" | grep -Fq 'proposal applied' ||
+  fail "reading an unmodified path must stay admissible: $out"
+
 echo "patch-admit-verifier-floor-smoke: ok"
