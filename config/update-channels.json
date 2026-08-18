@@ -9,9 +9,9 @@
     "stable": {
       "auto_apply": false,
       "policy": "pinned reviewed commit; promotion requires exact manifest digest",
-      "promoted_at": "2026-08-16T09:24:25Z",
-      "ref": "9112886fe24ec2bb132b2682f1ce2dfa5ed0f3c1",
-      "version": "0.5.0"
+      "promoted_at": "2026-08-18T03:58:43Z",
+      "ref": "b9328b6c59b56a4bd8da69a7a9f564be52781e36",
+      "version": "0.6.0"
     }
   },
   "schema": 1
