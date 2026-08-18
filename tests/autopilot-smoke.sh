@@ -917,6 +917,49 @@ PY
     fail "a pre-field receipt must not invent verifier-change consent"
   fi
 
+  # reenter (round 24, council unanimous implement-v1): the audited entrance
+  # mirroring abandon's exit. A fresh session resumes the live run from the
+  # receipt's own typed continuation; the typed reentry record lands before
+  # any work, refusals are records too, and stages that would let re-entry
+  # supply an approval refuse.
+  local reenter_repo="$TMP/reenter-v1"
+  make_repo "$reenter_repo"
+  mkdir -p "$reenter_repo/calls"
+  rc=0
+  OMS_T_PLAN_RC=3 run_autopilot "$reenter_repo" propose --planner claude \
+    --allowed 'src,tests' --base main > "$reenter_repo/re-seed.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "reenter seed should die at the planner, got $rc"
+  # Digest drift refuses through the same gate every resume passes — and the
+  # refusal is recorded before it is reported.
+  printf '\nreenter drift\n' >> "$reenter_repo/PROJECT.md"
+  rc=0
+  run_autopilot "$reenter_repo" reenter > "$reenter_repo/reenter-drift.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "digest drift must refuse re-entry"
+  grep -Fq 'digest gate:' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "the drift refusal must ride the reentry ledger"
+  git -C "$reenter_repo" checkout -q -- PROJECT.md
+  rc=0
+  run_autopilot "$reenter_repo" reenter --reason "fresh session picks up the dead planner" \
+    > "$reenter_repo/reenter.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] ||
+    fail "re-entering a proposing receipt should re-run propose to review, got $rc: $(tail -5 "$reenter_repo/reenter.out")"
+  grep -Fq 'awaits parent-agent review' "$reenter_repo/reenter.out" ||
+    fail "the re-entered propose did not reach the review boundary"
+  grep -Fq '"disposition":"resumed"' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "the reentry record is missing its resumed disposition"
+  grep -Fq '"stage_at_reentry":"proposing"' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "the reentry record must name the stage it re-entered"
+  grep -Fq '"predecessor":' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "the reentry record must name its predecessor digest"
+  # The receipt now awaits parent review: re-entry cannot supply the approval.
+  rc=0
+  run_autopilot "$reenter_repo" reenter > "$reenter_repo/reenter-review.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "re-entering a proposal-review receipt must refuse"
+  grep -Fq 'cannot supply the approval' "$reenter_repo/reenter-review.out" ||
+    fail "the review-stage refusal must say why: $(tail -3 "$reenter_repo/reenter-review.out")"
+  grep -Fq '"disposition":"refused"' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "a refused reentry must still leave a typed record"
+
   # A proposal continuation is executable, not a template with an unresolved
   # branch token. Collect the base before the planner is allowed to run.
   local missing_base_repo="$TMP/propose-missing-base"

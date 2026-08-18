@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 REPO="$PWD"
 ACTION=""
-ABANDON_REASON=""
+ACTION_REASON=""
 PROPOSAL=""
 PROPOSAL_SHA=""
 PLANNER="claude"
@@ -85,6 +85,16 @@ one optional remainder proposal, semantic review, and optionally a Draft PR.
                           reason, and a fresh propose may bind a new contract.
                           For receipts whose frozen contract cannot finish
                           (e.g. a provider wall that kills every call).
+  reenter [--reason TEXT] Re-enter the live run from a fresh session with no
+                          re-explanation: validate the receipt through the
+                          same digest gate every resume passes, append a
+                          typed reentry record (refusals are records too),
+                          and exec the receipt-derived continuation. Refuses
+                          proposal-review (re-entry cannot supply the parent
+                          approval), parked (an operator decision is open),
+                          done, and any digest drift — abandon plus a fresh
+                          contract is the recovery. No new authority: the
+                          resumed run keeps the original contract's terms.
 
 Options:
   --repo PATH             Repository (default: current directory).
@@ -224,8 +234,8 @@ while [ "$#" -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     --reason)
       [ "$#" -ge 2 ] || fail "--reason requires text"
-      ABANDON_REASON="$2"; shift 2 ;;
-    propose|run|status|abandon)
+      ACTION_REASON="$2"; shift 2 ;;
+    propose|run|status|abandon|reenter)
       [ -z "$ACTION" ] || fail "multiple actions: $ACTION, $1"
       ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
@@ -247,11 +257,11 @@ OUTER_RECEIPT="$REPO/.oms/plan/autopilot-run.json"
 # the run) is exactly when the operator needs this exit, and a dirty tree or
 # changed spec must not block retiring it.
 if [ "$ACTION" = abandon ]; then
-  [ -n "${ABANDON_REASON:-}" ] || fail "abandon requires --reason"
+  [ -n "${ACTION_REASON:-}" ] || fail "abandon requires --reason"
   [ -f "$OUTER_RECEIPT" ] || fail "no live autopilot receipt to abandon"
   expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || exit $?
   record="$(python3 "$RECEIPT_HELPER" abandon "$OUTER_RECEIPT" --repo "$REPO" \
-    --expected "$expected" --reason "$ABANDON_REASON" \
+    --expected "$expected" --reason "$ACTION_REASON" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" || exit $?
   echo "autopilot: receipt abandoned; the exact contract is preserved and the exit recorded at $record"
   echo "autopilot: a fresh propose may now bind a new contract"
@@ -441,6 +451,35 @@ chmod 700 "$AUTOPILOT_TMPDIR" 2>/dev/null || fail "cannot protect autopilot scra
 autopilot_mktemp() {
   mktemp "$AUTOPILOT_TMPDIR/item.XXXXXX"
 }
+
+# reenter is the audited entrance mirroring abandon's exit: a fresh session
+# re-enters the live run with zero re-explanation. The helper appends the
+# typed record first (refusals included), validates the digests through the
+# same gate every resume passes, and prints the receipt-derived continuation
+# — which is then exec'd, so execution derives from typed contract fields,
+# never from replayed prose. Runs after the child-authority guard: a harness
+# child cannot re-enter parent autopilot authority.
+if [ "$ACTION" = reenter ]; then
+  [ -f "$OUTER_RECEIPT" ] ||
+    fail "no live autopilot receipt to re-enter; propose starts a new run"
+  reenter_out="$(autopilot_mktemp)" || fail "mktemp failed"
+  oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter \
+    "$OUTER_RECEIPT" --repo "$REPO" --reason "${ACTION_REASON:-}" \
+    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$reenter_out" || exit $?
+  reenter_cont=()
+  while IFS= read -r reenter_line; do
+    reenter_line="${reenter_line//$'\r'/}"
+    [ -n "$reenter_line" ] || continue
+    reenter_cont+=("$reenter_line")
+  done < "$reenter_out"
+  [ "${#reenter_cont[@]}" -ge 3 ] || fail "reenter continuation is malformed"
+  [ "${reenter_cont[0]}" = oms ] && [ "${reenter_cont[1]}" = autopilot ] ||
+    fail "reenter continuation is malformed"
+  echo "autopilot: re-entering the live run (typed record appended to .oms/plan/autopilot-reentries.jsonl)"
+  trap - EXIT HUP INT TERM
+  autopilot_cleanup
+  exec bash "$0" "${reenter_cont[@]:2}"
+fi
 
 run_phase() {  # LABEL WALL_SECONDS COMMAND...
   local label="$1" wall="$2" phase_rc=0

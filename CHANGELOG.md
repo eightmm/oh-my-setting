@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- `autopilot reenter [--reason]` — the audited entrance mirroring abandon's
+  exit, landed after a three-family re-consult unanimously flipped the
+  round-23 defer (its named preconditions — audited exit, spotlighted
+  replay — had landed gate-green). A fresh session re-enters the live run
+  with zero re-explanation: the receipt validates through the same digest
+  gate every resume passes, a typed reentry record (predecessor digest,
+  stage, disposition) is appended before any work — refusals are records
+  too — and the receipt-derived continuation is exec'd, so execution comes
+  from typed contract fields, never replayed prose. Proposal-review
+  (re-entry cannot supply the parent approval), parked, done, and digest
+  drift refuse; no new authority is created. Autonomous activation-hook
+  triggering stayed out of v1 (one seat's dissent, recorded).
 - Replayed thread answers ride the untrusted-content spotlight: the thread
   context renderer wraps every answer turn — another model's bytes entering
   a new seat's prompt — in the same metadata-generated markers the synthesis

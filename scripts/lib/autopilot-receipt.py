@@ -1215,6 +1215,11 @@ def main() -> int:
     abandon.add_argument("--expected", required=True)
     abandon.add_argument("--reason", required=True)
     abandon.add_argument("--updated", required=True)
+    reenter = sub.add_parser("reenter")
+    reenter.add_argument("path")
+    reenter.add_argument("--repo", required=True)
+    reenter.add_argument("--reason", default="")
+    reenter.add_argument("--updated", required=True)
     supervisor = sub.add_parser("supervise")
     supervisor.add_argument("--wall", type=float, required=True)
     supervisor.add_argument("--kill-after", type=float, default=1)
@@ -1283,6 +1288,77 @@ def main() -> int:
             os.unlink(path)
             fsync_directory(path.parent)
             print(record_path)
+            return 0
+        if args.command == "reenter":
+            # The audited entrance mirroring abandon's exit (three-family
+            # council, unanimous implement-v1 once the round-23 defer's
+            # preconditions — audited exit, spotlighted replay — had landed).
+            # A fresh session re-enters the live run with zero re-explanation:
+            # execution derives solely from the receipt's typed fields (the
+            # exact continuation inspect prints), never from replayed prose.
+            # The typed record is appended BEFORE anything resumes, and a
+            # refusal is a record too. Stages that would let re-entry supply
+            # an approval (proposal-review) or override an operator decision
+            # (parked) refuse; digest drift refuses through the same
+            # validate_live gate every resume already passes.
+            validate_receipt_location(path, args.repo)
+            row, payload = load_receipt(path)
+            current = digest(payload)
+            if not UPDATED.fullmatch(args.updated):
+                raise ReceiptError("reenter requires a valid --updated timestamp")
+            reason = args.reason.strip()
+            if len(reason) > 400:
+                raise ReceiptError("reenter --reason is too long (max 400 chars)")
+            stage = row["stage"]
+            refusal = ""
+            if stage == "done":
+                refusal = "the run is complete; archive-done owns it"
+            elif stage == "proposal-review":
+                refusal = (
+                    "a proposal awaits parent review; re-entry cannot supply"
+                    " the approval — review it and run the printed continuation"
+                )
+            elif stage == "parked":
+                refusal = (
+                    "the run is parked for an operator decision; resolve the"
+                    " park reason or abandon"
+                )
+            else:
+                try:
+                    validate_live(row, args.repo)
+                except ReceiptError as exc:
+                    refusal = "digest gate: %s" % exc
+            record = {
+                "schema": 1,
+                "kind": "autopilot-reenter",
+                "predecessor": current,
+                "stage_at_reentry": stage,
+                "spec_sha256": row["spec_sha256"],
+                "branch": row.get("branch", ""),
+                "disposition": "refused" if refusal else "resumed",
+                "updated": args.updated,
+            }
+            if reason:
+                record["reason"] = reason
+            if refusal:
+                record["refusal"] = refusal
+            ledger = path.with_name("autopilot-reentries.jsonl")
+            line = (
+                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            ledger_fd = os.open(
+                str(ledger), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+            )
+            try:
+                os.write(ledger_fd, line)
+                os.fsync(ledger_fd)
+            finally:
+                os.close(ledger_fd)
+            fsync_directory(path.parent)
+            if refusal:
+                raise ReceiptError("reenter refused: %s" % refusal)
+            for value in option_args(row):
+                print(value)
             return 0
         if args.command == "archive-done":
             validate_receipt_location(path, args.repo)
