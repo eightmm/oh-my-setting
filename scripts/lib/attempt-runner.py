@@ -1279,16 +1279,28 @@ def runner(repo: Path, attempt_id: str) -> int:
                 )
             return 78
         if capture.truncated:
-            # The capture keeps the head and drops the tail — where a final
-            # report or verdict lands. Completion stands (the exit code is the
-            # contract), but the flag must be louder than a ledger field no
-            # reader consults: say it where the operator and logs will see it.
-            print(
-                "attempt %s: log truncated at %d bytes; the tail (where a final"
-                " report lands) was dropped — judge by recorded state, not the log"
-                % (attempt_id, capture.bytes_written),
-                file=sys.stderr,
-            )
+            # Completion stands (the exit code is the contract), but the flag
+            # must be louder than a ledger field no reader consults: say it
+            # where the operator and logs will see it. Two distinct causes:
+            # a byte-cap cut keeps head and tail (the marker carries the
+            # dropped count); an undrained pipe stops the capture early, so
+            # the tail — where a final report or verdict lands — may be gone.
+            if capture.total_bytes > capture.max_bytes and capture.error is None:
+                print(
+                    "attempt %s: log hit the %d-byte cap (%d bytes produced);"
+                    " head and tail are kept, the middle was dropped — the"
+                    " in-log marker carries the dropped byte count"
+                    % (attempt_id, capture.max_bytes, capture.total_bytes),
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "attempt %s: log capture stopped at %d bytes; the tail"
+                    " (where a final report lands) may be missing — judge by"
+                    " recorded state, not the log"
+                    % (attempt_id, capture.bytes_written),
+                    file=sys.stderr,
+                )
         if exit_code != 0:
             transition(repo, attempt_id, "failed", "command_failed", "runner-command-failed")
             return int(exit_code)
