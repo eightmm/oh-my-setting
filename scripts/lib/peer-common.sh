@@ -1603,6 +1603,8 @@ PY
 # The delimiters are mitigation completing the judging seat's tool-belt
 # boundary, never a boundary themselves — a model can still read straight
 # through them (three-family council consensus, 2026-08-18).
+# agent-thread.sh context mirrors this literal shape for replayed answer
+# turns; keep the two in sync (answer-quality.py knows the markers as noise).
 ma_untrusted_block() {  # ma_untrusted_block SOURCE KIND  (content on stdin)
   local source="$1"
   local kind="$2"

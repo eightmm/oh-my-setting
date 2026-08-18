@@ -7,6 +7,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- Replayed thread answers ride the untrusted-content spotlight: the thread
+  context renderer wraps every answer turn — another model's bytes entering
+  a new seat's prompt — in the same metadata-generated markers the synthesis
+  quotes carry, with the turn's own provider named. Question and note turns
+  stay bare. One renderer covers every consumer (peer-ask, peer-delegate,
+  agent-call/consult); debate fences are unchanged by design, and the
+  fail-closed phase (treating an untagged cross-seat quote as a defect)
+  waits for an observation window.
 - `autopilot --allow-verifier-change` binds verifier-change consent into the
   immutable run contract at propose time: the receipt records it, every
   printed continuation carries it, goal-drive forwards it to plan-run and to
