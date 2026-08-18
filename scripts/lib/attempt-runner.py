@@ -35,10 +35,16 @@ ae = load_events_module()
 DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024
 MIN_MAX_LOG_BYTES = 1024
 MAX_MAX_LOG_BYTES = 100 * 1024 * 1024
-LOG_TRUNCATION_MARKER = b"\n[oms: output truncated at log byte limit]\n"
 WINDOWS_CREATE_SUSPENDED = 0x00000004
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 ORPHAN_JOB_GRACE_SECONDS = 10
+
+
+def log_truncation_marker(dropped_bytes: int) -> bytes:
+    return (
+        "\n[oms: output truncated at log byte limit; %d bytes dropped]\n"
+        % dropped_bytes
+    ).encode("ascii")
 
 
 class _CtypesWindowsJobApi:
@@ -333,12 +339,16 @@ class BoundedLogCapture:
         self.path = path
         self.max_bytes = max_bytes
         self.bytes_written = 0
+        self.total_bytes = 0
         self.truncated = False
         self.error: Optional[BaseException] = None
         self.stream: Any = None
         self.thread: Optional[threading.Thread] = None
         self.stop_requested = threading.Event()
         self.detached = False
+        self.tail_limit = (max_bytes + 1) // 2
+        self.tail_chunks: "collections.deque[bytes]" = collections.deque()
+        self.tail_bytes = 0
 
     @staticmethod
     def _write_all(fd: int, data: bytes) -> None:
@@ -357,6 +367,40 @@ class BoundedLogCapture:
             daemon=True,
         )
         self.thread.start()
+
+    def _remember_tail(self, chunk: bytes) -> None:
+        self.tail_chunks.append(chunk)
+        self.tail_bytes += len(chunk)
+        excess = self.tail_bytes - self.tail_limit
+        while excess > 0:
+            first = self.tail_chunks[0]
+            if len(first) <= excess:
+                self.tail_chunks.popleft()
+                self.tail_bytes -= len(first)
+                excess -= len(first)
+            else:
+                self.tail_chunks[0] = first[excess:]
+                self.tail_bytes -= excess
+                excess = 0
+
+    def _truncated_layout(self) -> Tuple[int, bytes, bytes]:
+        tail = b"".join(self.tail_chunks)
+        # A truncated capture always ends with a newline, as the old
+        # marker-last layout guaranteed: attach() re-adds one to a final
+        # line that lacks it, and that single byte pushed the read past the
+        # byte cap the caller was promised.
+        terminal = b"" if tail.endswith(b"\n") else b"\n"
+        head_bytes = 0
+        while True:
+            dropped_bytes = self.total_bytes - head_bytes - len(tail)
+            marker = log_truncation_marker(dropped_bytes)
+            next_head_bytes = max(
+                0, self.max_bytes - len(tail) - len(terminal) - len(marker)
+            )
+            next_head_bytes = min(self.bytes_written, next_head_bytes)
+            if next_head_bytes == head_bytes:
+                return head_bytes, marker, tail + terminal
+            head_bytes = next_head_bytes
 
     def _run(self) -> None:
         fd = -1
@@ -390,6 +434,8 @@ class BoundedLogCapture:
                     chunk = self.stream.read(65536)
                 if not chunk:
                     break
+                self.total_bytes += len(chunk)
+                self._remember_tail(chunk)
                 if fd < 0 or self.error is not None:
                     continue
                 remaining = self.max_bytes - self.bytes_written
@@ -409,15 +455,13 @@ class BoundedLogCapture:
         finally:
             if fd >= 0:
                 try:
-                    if self.truncated and self.error is None:
-                        keep = max(0, self.max_bytes - len(LOG_TRUNCATION_MARKER))
-                        kept = min(self.bytes_written, keep)
+                    if self.total_bytes > self.max_bytes and self.error is None:
+                        kept, marker, tail = self._truncated_layout()
                         os.ftruncate(fd, kept)
                         os.lseek(fd, 0, os.SEEK_END)
-                        self._write_all(fd, LOG_TRUNCATION_MARKER[: self.max_bytes - kept])
-                        self.bytes_written = kept + min(
-                            len(LOG_TRUNCATION_MARKER), self.max_bytes - kept
-                        )
+                        self._write_all(fd, marker)
+                        self._write_all(fd, tail)
+                        self.bytes_written = kept + len(marker) + len(tail)
                     os.fsync(fd)
                 except BaseException as exc:
                     if self.error is None:

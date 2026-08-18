@@ -64,7 +64,7 @@ grep -Fq worker-ok "$TMP/log" || fail "attach did not return bounded worker outp
 # Worker output is drained without allowing a noisy or malicious command to
 # grow the private runtime store without bound.
 noisy_attempt="$(submit --max-wall-seconds 10 --max-log-bytes 4096 -- \
-  python3 -c 'import sys; sys.stdout.write("x" * 20000)')"
+  python3 -c 'import sys; sys.stdout.write("HEAD:" + "x" * 20000 + ":TAIL\n")')"
 "$SUP" --repo "$REPO" dispatch --max-running 1 --max-jobs 1 >/dev/null
 "$SUP" --repo "$REPO" wait --attempt "$noisy_attempt" --timeout 15 >/dev/null ||
   fail "log-capped supervised job did not finish"
@@ -79,10 +79,15 @@ assert row["max_log_bytes"] == 4096, row
 PY
 "$SUP" --repo "$REPO" attach --attempt "$noisy_attempt" --tail 5 > "$TMP/noisy.log"
 python3 - "$TMP/noisy.log" <<'PY' || fail "truncated log marker is missing or oversized"
-import pathlib, sys
+import pathlib, re, sys
 data = pathlib.Path(sys.argv[1]).read_bytes()
 assert len(data) <= 4096, len(data)
-assert b"output truncated" in data, data[-100:]
+assert data.startswith(b"HEAD:"), data[:100]
+assert data.endswith(b":TAIL\n"), data[-100:]
+markers = re.findall(rb"\n\[oms: output truncated at log byte limit; ([0-9]+) bytes dropped\]\n", data)
+assert len(markers) == 1, data
+marker_size = len(markers[0]) + len(b"\n[oms: output truncated at log byte limit;  bytes dropped]\n")
+assert int(markers[0]) == 20011 - (len(data) - marker_size), (markers, len(data))
 PY
 
 # Load-sensitive: with a 1-second wall, a heavily loaded machine can surface
