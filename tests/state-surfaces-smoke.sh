@@ -1134,9 +1134,9 @@ test_router_state_hint_offers_forge_for_resolved_repeats() {
     fail "a resolved repeated failure with no project skill should hint at the forge: $out"
 
   # Once any project skill exists, the forge hint stays quiet.
-  printf -- '---\nname: lesson\ndescription: %s\n---\n\nBody.\n' \
+  printf -- '---\nname: oms-lesson\ndescription: %s\n---\n\nBody.\n' \
     "A test lesson description long enough to pass the validation gate." |
-    ( cd "$repo" && bash "$ROOT/scripts/skill-forge.sh" add --name lesson >/dev/null )
+    ( cd "$repo" && bash "$ROOT/scripts/skill-forge.sh" add --name oms-lesson >/dev/null )
   rm -f "$repo/.oms/hooks/state-hint."*
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
@@ -1316,9 +1316,9 @@ test_skill_forge_stores_links_and_hides() {
   local out
 
   make_repo "$repo"
-  cat <<'EOF' | bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name build-quirks
+  cat <<'EOF' | bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name oms-build-quirks
 ---
-name: build-quirks
+name: oms-build-quirks
 description: How this repository actually builds and tests, including the nonstandard invocations discovered by inspection rather than guessed.
 ---
 
@@ -1326,49 +1326,49 @@ description: How this repository actually builds and tests, including the nonsta
 
 - Tests run with `make check-fast`, not pytest directly.
 EOF
-  [ -f "$repo/.oms/skills/build-quirks/SKILL.md" ] || fail "skill not stored"
-  [ -L "$repo/.agents/skills/build-quirks" ] || fail "not linked for codex/agy"
-  [ -L "$repo/.claude/skills/build-quirks" ] || fail "not linked for claude"
-  grep -Fq ".agents/skills/build-quirks" "$repo/.git/info/exclude" ||
+  [ -f "$repo/.oms/skills/oms-build-quirks/SKILL.md" ] || fail "skill not stored"
+  [ -L "$repo/.agents/skills/oms-build-quirks" ] || fail "not linked for codex/agy"
+  [ -L "$repo/.claude/skills/oms-build-quirks" ] || fail "not linked for claude"
+  grep -Fq ".agents/skills/oms-build-quirks" "$repo/.git/info/exclude" ||
     fail "codex/agy link not hidden from git"
-  grep -Fq ".claude/skills/build-quirks" "$repo/.git/info/exclude" ||
+  grep -Fq ".claude/skills/oms-build-quirks" "$repo/.git/info/exclude" ||
     fail "claude link not hidden from git"
 
   bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status | grep -Fq "1 project skill(s) valid" ||
     fail "status should count the valid skill"
 
-  cp "$repo/.oms/skills/build-quirks/SKILL.md" "$original"
-  if printf -- '---\nname: build-quirks\ndescription: short\n---\nbody\n' |
-    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name build-quirks \
+  cp "$repo/.oms/skills/oms-build-quirks/SKILL.md" "$original"
+  if printf -- '---\nname: oms-build-quirks\ndescription: short\n---\nbody\n' |
+    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name oms-build-quirks \
       >/dev/null 2>&1; then
     fail "add must refuse to overwrite an existing project skill"
   fi
-  cmp -s "$original" "$repo/.oms/skills/build-quirks/SKILL.md" ||
+  cmp -s "$original" "$repo/.oms/skills/oms-build-quirks/SKILL.md" ||
     fail "rejected replacement destroyed the existing project skill"
 
   # Invalidate the stored skill: the next link pass must withdraw the links
   # and status must fail loudly.
-  printf 'no frontmatter\n' > "$repo/.oms/skills/build-quirks/SKILL.md"
+  printf 'no frontmatter\n' > "$repo/.oms/skills/oms-build-quirks/SKILL.md"
   bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" link >/dev/null 2>&1
-  [ ! -e "$repo/.agents/skills/build-quirks" ] ||
+  [ ! -e "$repo/.agents/skills/oms-build-quirks" ] ||
     fail "invalid skill must be unlinked"
   if bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status >/dev/null 2>&1; then
     fail "status must be nonzero with an invalid skill"
   fi
 
-  bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" remove build-quirks >/dev/null
-  [ ! -d "$repo/.oms/skills/build-quirks" ] || fail "remove left the skill"
+  bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" remove oms-build-quirks >/dev/null
+  [ ! -d "$repo/.oms/skills/oms-build-quirks" ] || fail "remove left the skill"
 }
 
 test_skill_forge_status_flags_stale_skills() {
   local repo="$TMP/forge-stale"
-  local skill="$repo/.oms/skills/stale-lesson/SKILL.md"
+  local skill="$repo/.oms/skills/oms-stale-lesson/SKILL.md"
   local out
 
   make_repo "$repo"
-  cat <<'EOF' | bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name stale-lesson >/dev/null
+  cat <<'EOF' | bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name oms-stale-lesson >/dev/null
 ---
-name: stale-lesson
+name: oms-stale-lesson
 description: A durable project lesson that is long enough to meet the skill routing-quality validation requirement.
 ---
 
@@ -1399,19 +1399,31 @@ test_skill_forge_rejects_thin_and_sensitive() {
   local vector
 
   make_repo "$repo"
-  if printf -- '---\nname: bad\ndescription: short\n---\nbody\n' |
-    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name bad 2>/dev/null; then
+  if printf -- '---\nname: oms-bad\ndescription: short\n---\nbody\n' |
+    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name oms-bad 2>/dev/null; then
     fail "a thin description must be rejected"
   fi
-  [ ! -d "$repo/.oms/skills/bad" ] || fail "rejected skill must not be stored"
+  [ ! -d "$repo/.oms/skills/oms-bad" ] || fail "rejected skill must not be stored"
 
   # Assembled at runtime so this test file stays scrubber-clean.
   vector="AK""IAIOSFODNN7EXAMPLE"
-  if printf -- '---\nname: leaky\ndescription: a sufficiently long description that satisfies the routing-quality floor\n---\nkey: %s\n' "$vector" |
-    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name leaky 2>/dev/null; then
+  if printf -- '---\nname: oms-leaky\ndescription: a sufficiently long description that satisfies the routing-quality floor\n---\nkey: %s\n' "$vector" |
+    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name oms-leaky 2>/dev/null; then
     fail "secret-shaped content must be rejected"
   fi
-  [ ! -d "$repo/.oms/skills/leaky" ] || fail "sensitive skill must not be stored"
+  [ ! -d "$repo/.oms/skills/oms-leaky" ] || fail "sensitive skill must not be stored"
+
+  # Shared-surface provenance: a new project skill without the oms- prefix
+  # is refused at add with the corrected name, even when otherwise valid.
+  local prefix_out
+  if prefix_out="$(printf -- '---\nname: plain-lesson\ndescription: a sufficiently long description that satisfies the routing-quality floor\n---\n\nBody.\n' |
+    bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name plain-lesson 2>&1)"; then
+    fail "an unprefixed skill name must be rejected at add"
+  fi
+  printf '%s' "$prefix_out" | grep -Fq "oms-plain-lesson" ||
+    fail "prefix rejection should suggest the corrected name: $prefix_out"
+  [ ! -d "$repo/.oms/skills/plain-lesson" ] ||
+    fail "rejected unprefixed skill must not be stored"
 
   mkdir -p "$protected"
   printf 'must survive\n' > "$protected/SKILL.md"
@@ -1513,18 +1525,36 @@ test_ml_template_installs_project_skills() {
   git -C "$project" init -q 2>/dev/null || true
   bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||
     fail "ml template apply failed"
-  [ -f "$project/.oms/skills/ml-experiment/SKILL.md" ] ||
-    fail "ml-experiment project skill not installed"
-  [ -f "$project/.oms/skills/dataset-safety/SKILL.md" ] ||
-    fail "dataset-safety project skill not installed"
-  [ -L "$project/.agents/skills/ml-experiment" ] ||
-    fail "ml-experiment not linked for native discovery"
+  [ -f "$project/.oms/skills/oms-ml-experiment/SKILL.md" ] ||
+    fail "oms-ml-experiment project skill not installed"
+  [ -f "$project/.oms/skills/oms-dataset-safety/SKILL.md" ] ||
+    fail "oms-dataset-safety project skill not installed"
+  [ -L "$project/.agents/skills/oms-ml-experiment" ] ||
+    fail "oms-ml-experiment not linked for native discovery"
   bash "$ROOT/scripts/skill-forge.sh" --repo "$project" status |
     grep -Fq "2 project skill(s) valid" || fail "installed skills should validate"
 
   # Idempotent: a second apply must not fail on the existing skills.
   bash "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null 2>&1 ||
     fail "re-applying the ml template should be idempotent"
+
+  # A project that applied the template before the oms- rename keeps its
+  # stored skill under the legacy name; re-applying must not install a
+  # second copy of the same lesson beside it.
+  local legacy="$TMP/ml-skills-legacy"
+  mkdir -p "$legacy/.oms/skills/ml-experiment"
+  git -C "$legacy" init -q 2>/dev/null || true
+  cp "$ROOT/templates/project-skills/oms-ml-experiment/SKILL.md" \
+    "$legacy/.oms/skills/ml-experiment/SKILL.md"
+  sed -i.bak 's/^name: oms-ml-experiment$/name: ml-experiment/' \
+    "$legacy/.oms/skills/ml-experiment/SKILL.md" &&
+    rm -f "$legacy/.oms/skills/ml-experiment/SKILL.md.bak"
+  bash "$ROOT/scripts/apply-project-template.sh" ml "$legacy" >/dev/null 2>&1 ||
+    fail "ml template apply over a legacy-name skill failed"
+  [ ! -e "$legacy/.oms/skills/oms-ml-experiment" ] ||
+    fail "legacy ml-experiment must suppress the prefixed duplicate"
+  [ -f "$legacy/.oms/skills/oms-dataset-safety/SKILL.md" ] ||
+    fail "absent skills must still install beside a legacy one"
 
   # A general project gets none.
   local plain="$TMP/general-skills-proj"

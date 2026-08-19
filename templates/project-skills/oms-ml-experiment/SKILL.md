@@ -1,5 +1,5 @@
 ---
-name: ml-experiment
+name: oms-ml-experiment
 description: Run training and evaluation as registered experiments instead of ad-hoc launches: check the experiment board for duplicates, pre-register hypothesis runs, gate long runs through the run ledger, capture a reproducibility capsule, and record outcomes where the next session reads them.
 ---
 

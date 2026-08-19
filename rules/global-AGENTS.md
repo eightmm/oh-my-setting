@@ -68,7 +68,7 @@ contracts.
   decisions or authority.
 - Use `oms-agent-harness` for workflows; `oms list` catalogs tools; never edit
   `.oms/` manually; forge repeating fixes into project skills
-  (`oms skill-forge`).
+  (`oms skill-forge`, names carry the `oms-` prefix).
 - Peer CLIs: `claude`, `codex`, `agy`. Cross-model work
   uses `peer-ask`, `peer-review`, `peer-delegate`, `consult`, `advise` —
   never raw CLI calls.

@@ -20,7 +20,8 @@ usage() {
 Usage: skill-forge.sh [--repo PATH] <command> [args]
 
 Commands:
-  add --name NAME [--file F]  Store a project skill from F (or stdin): must
+  add --name NAME [--file F]  Store a project skill from F (or stdin): NAME
+                              carries the oms- prefix, and the content must
                               pass spec validation and the sensitive-content
                               scrubber; then linked and hidden from git.
   validate [NAME]             Validate one or all project skills.
@@ -283,6 +284,13 @@ cmd_add() {
   done
   [ -n "$name" ] || fail "add requires --name"
   valid_name "$name" || fail "skill names are lowercase kebab-case: $name"
+  # Forged skills load into shared namespaces (.claude/skills,
+  # .agents/skills) beside user-owned skills; the oms- prefix marks their
+  # provenance there. Add-time only: stored unprefixed skills stay valid.
+  case "$name" in
+    oms-*) : ;;
+    *) fail "harness-forged skills carry the oms- prefix: retry as oms-$name (the frontmatter name must match)" ;;
+  esac
   dir="$SKILLS_DIR/$name"
   if [ -e "$dir" ] || [ -L "$dir" ]; then
     fail "project skill already exists: $name"

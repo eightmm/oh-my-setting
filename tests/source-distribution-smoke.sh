@@ -288,4 +288,33 @@ if grep -Eq 'agent-consult|model tier below|deep planning/gates' "$ROOT/rules/gl
   fail "global agent rules still direct agents to removed commands or model tiers"
 fi
 
+# Shared-surface artifacts this repo ships carry the oms marker so their
+# provenance is visible next to user-owned files in the same namespace
+# (skills, output styles) and template installs stay collision-free.
+# Repo-internal files referenced by path (roles/, prompts/, config/) and
+# provider-mandated names are out of scope.
+for surface in custom-skills templates/project-skills; do
+  [ -d "$ROOT/$surface" ] || continue
+  for entry in "$ROOT/$surface"/*/; do
+    [ -d "$entry" ] || continue
+    case "$(basename "$entry")" in
+      oms-*) : ;;
+      *) fail "$surface entry lacks the oms- prefix: $(basename "$entry")" ;;
+    esac
+  done
+done
+for entry in "$ROOT/output-styles"/*.md; do
+  [ -f "$entry" ] || continue
+  case "$(basename "$entry")" in
+    oms-*) : ;;
+    *) fail "output style lacks the oms- prefix: $(basename "$entry")" ;;
+  esac
+done
+python3 - "$ROOT/skills.manifest.json" <<'PY' || fail "skills.manifest.json entries must keep the oms- prefix"
+import json, os, sys
+for row in json.load(open(sys.argv[1], encoding="utf-8"))["skills"]:
+    assert row["name"].startswith("oms-"), row["name"]
+    assert os.path.basename(row["source"]).startswith("oms-"), row["source"]
+PY
+
 echo "source-distribution-smoke: ok"

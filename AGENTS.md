@@ -9,6 +9,12 @@
   value read back from `python3` and resolve paths with `pwd -P` before
   comparing them: Windows Python emits CRLF, and one directory has more than
   one spelling.
+- Artifacts this repo publishes into shared namespaces carry the oms
+  marker: skills and output styles are `oms-*`, MCP tools `oms_*`, work
+  branches `oms/*`, and `skill-forge add` refuses new unprefixed project
+  skills. Stored skills under legacy names stay readable. Exempt:
+  provider-mandated names (plugin directory layouts) and repo-internal
+  files referenced by path (`roles/`, `prompts/`, `config/`).
 - Write a behavior regression before changing scripts or install contracts.
 - Keep install, update, repair, and uninstall ownership transitions reversible.
 - Run `bash scripts/check.sh` before commit or push. CI additionally verifies

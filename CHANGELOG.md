@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- The oms naming convention is now written policy and enforced. Artifacts
+  the harness publishes into shared namespaces carry the oms marker
+  (skills and output styles `oms-*`, MCP tools `oms_*`, work branches
+  `oms/*`): `skill-forge add` refuses a new unprefixed project skill with
+  the corrected name, the template project skills ship as
+  `oms-ml-experiment` and `oms-dataset-safety` (a project holding the
+  lesson under its legacy name keeps it — re-applying the template never
+  installs a prefixed duplicate beside it), and the distribution smoke
+  locks every shipped skill, output style, and manifest entry to the
+  prefix. Stored unprefixed skills stay readable everywhere; only the
+  add gate is strict.
 - Consent-aware acceptance-manifest refreeze: `agent-plan finish
   --refreeze-acceptance` (patch-land forwards it under operator
   verifier-change consent, and replays it from the durable landing intent

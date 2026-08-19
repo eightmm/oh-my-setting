@@ -166,7 +166,7 @@ if os.environ.get("OMS_SH_SKILLS") == "0":
     if lessons:
         print(
             "[oms] %d repeated failure(s) here were resolved but no project"
-            " skill records the lesson — `oms skill-forge add --name NAME`"
+            " skill records the lesson — `oms skill-forge add --name oms-NAME`"
             " turns it into standing context." % lessons
         )
         raise SystemExit(0)

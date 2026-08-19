@@ -652,7 +652,7 @@ print(sum(1 for e in state.values() if e["count"] >= 2 and e["resolved"]))
 PY
 )"
       if [ "${lesson_count:-0}" -gt 0 ] 2>/dev/null; then
-        echo "hint: $lesson_count repeated failure(s) were resolved in this repo; consider 'oms skill-forge add --name NAME' to make the lesson a project skill" >&2
+        echo "hint: $lesson_count repeated failure(s) were resolved in this repo; consider 'oms skill-forge add --name oms-NAME' to make the lesson a project skill" >&2
       fi
     fi
     # A project skill may declare the evidence it expects (a `verify:`

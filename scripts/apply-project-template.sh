@@ -419,12 +419,16 @@ if [ "$BASE_STYLE" = "ml" ]; then
   # only in ML repos, never in the global catalog. Installed through
   # skill-forge, which is also the validation and scrubbing gate.
   if [ "$DRY_RUN" = "1" ]; then
-    echo "would install ML project skills (ml-experiment, dataset-safety)"
+    echo "would install ML project skills (oms-ml-experiment, oms-dataset-safety)"
   else
-    for tskill in ml-experiment dataset-safety; do
+    for tskill in oms-ml-experiment oms-dataset-safety; do
       tskill_src="$ROOT/templates/project-skills/$tskill/SKILL.md"
       [ -f "$tskill_src" ] || continue
       [ ! -f "$PROJECT_DIR/.oms/skills/$tskill/SKILL.md" ] || continue
+      # A project that applied the template before the oms- rename holds
+      # the same lesson under the legacy name; installing the prefixed
+      # copy beside it would load the skill twice in every session.
+      [ ! -f "$PROJECT_DIR/.oms/skills/${tskill#oms-}/SKILL.md" ] || continue
       "$ROOT/scripts/skill-forge.sh" --repo "$PROJECT_DIR" add \
         --name "$tskill" --file "$tskill_src" >/dev/null ||
         echo "warn: could not install project skill $tskill"

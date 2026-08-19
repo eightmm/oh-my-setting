@@ -1,5 +1,5 @@
 ---
-name: dataset-safety
+name: oms-dataset-safety
 description: Register datasets and splits in a manifest and check group leakage and split drift before training: declared group keys (not row identity) decide train/eval separation, so the same protein, patient, or source never sits on both sides.
 ---
 

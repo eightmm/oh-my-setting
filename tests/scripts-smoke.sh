@@ -18239,7 +18239,7 @@ test_skill_forge_verify_contract_lifecycle() {
   # gate and carried through status, contracts, and the close reminder.
   cat > "$project/skill.md" <<'EOF'
 ---
-name: repo-build-check
+name: oms-repo-build-check
 description: Build and test discipline for this repository, including the canonical check command and its expected green output.
 metadata:
   verify: bash scripts/check.sh
@@ -18250,7 +18250,7 @@ metadata:
 Run the canonical gate before claiming done.
 EOF
   "$ROOT/scripts/skill-forge.sh" --repo "$project" add \
-    --name repo-build-check --file "$project/skill.md" >/dev/null 2>&1 ||
+    --name oms-repo-build-check --file "$project/skill.md" >/dev/null 2>&1 ||
     fail "adding a skill with a metadata.verify contract should succeed"
 
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status)"
@@ -18258,7 +18258,7 @@ EOF
     fail "status should surface the contract count: $out"
 
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
-  printf '%s\n' "$out" | grep -q "repo-build-check	bash scripts/check.sh" ||
+  printf '%s\n' "$out" | grep -q "oms-repo-build-check	bash scripts/check.sh" ||
     fail "contracts should list name<TAB>command: $out"
 
   # The close path reminds about the contract; it must never execute it.
@@ -18331,7 +18331,7 @@ test_skill_forge_add_enforces_portable_shape() {
   # field set is rejected with a pointer at the metadata: extension slot.
   cat > "$project/skill.md" <<'EOF'
 ---
-name: extra-field
+name: oms-extra-field
 description: A sufficiently long description that certainly passes the forty character routing floor.
 author: someone
 ---
@@ -18339,7 +18339,7 @@ author: someone
 body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
-    --name extra-field --file "$project/skill.md" 2>&1)" &&
+    --name oms-extra-field --file "$project/skill.md" 2>&1)" &&
     fail "an unknown top-level frontmatter field must be rejected at add: $out"
   printf '%s\n' "$out" | grep -q "non-portable frontmatter field 'author'" ||
     fail "unknown-field rejection not explained: $out"
@@ -18347,7 +18347,7 @@ EOF
   # A new top-level verify: is steered to metadata rather than stored.
   cat > "$project/skill.md" <<'EOF'
 ---
-name: new-legacy
+name: oms-new-legacy
 description: A sufficiently long description that certainly passes the forty character routing floor.
 verify: make test
 ---
@@ -18355,7 +18355,7 @@ verify: make test
 body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
-    --name new-legacy --file "$project/skill.md" 2>&1)" &&
+    --name oms-new-legacy --file "$project/skill.md" 2>&1)" &&
     fail "a new top-level verify must be rejected at add: $out"
   printf '%s\n' "$out" | grep -q 'verify belongs under the metadata: map' ||
     fail "top-level verify rejection should point at metadata: $out"
@@ -18363,21 +18363,21 @@ EOF
   # Spec name and description budgets hold at the gate.
   cat > "$project/skill.md" <<'EOF'
 ---
-name: bad--name
+name: oms-bad--name
 description: A sufficiently long description that certainly passes the forty character routing floor.
 ---
 
 body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
-    --name bad--name --file "$project/skill.md" 2>&1)" &&
+    --name oms-bad--name --file "$project/skill.md" 2>&1)" &&
     fail "consecutive hyphens must be rejected at add: $out"
   printf '%s\n' "$out" | grep -q 'no consecutive hyphens' ||
     fail "name-shape rejection not explained: $out"
-  python3 -c "print('---\nname: long-desc\ndescription: ' + 'x'*1100 + '\n---\n\nbody')" \
+  python3 -c "print('---\nname: oms-long-desc\ndescription: ' + 'x'*1100 + '\n---\n\nbody')" \
     > "$project/skill.md"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
-    --name long-desc --file "$project/skill.md" 2>&1)" &&
+    --name oms-long-desc --file "$project/skill.md" 2>&1)" &&
     fail "an over-budget description must be rejected at add: $out"
   printf '%s\n' "$out" | grep -q '1024-character budget' ||
     fail "description-budget rejection not explained: $out"
