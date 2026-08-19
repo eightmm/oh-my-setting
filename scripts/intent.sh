@@ -261,6 +261,9 @@ matching exactly this skeleton:
 - Success criteria: <one line: observable outcome>
 - Required checks: <ONE runnable shell command, on one line, that FAILS
   while the work is unfinished and passes when it is done>
+- Required check files: <the existing repo files that command reads —
+  REQUIRED for any custom command; omit the bullet entirely only when the
+  command is a conventional entrypoint such as bash tests/run.sh or pytest>
 
 ## Edge cases
 
@@ -378,6 +381,15 @@ if [ "$ACTION" = adopt ]; then
 
   meta="$(validate_intent_file "$INTENT_FILE")" || exit 3
   accept_cmd="$(printf '%s\n' "$meta" | sed -n 2p)"
+
+  # Downstream-contract preflight (field finding: a custom acceptance
+  # without its check files sailed through adopt and refused at the FIRST
+  # propose): the same parser plan-from-spec runs judges the candidate now.
+  if ! preflight_out="$("$ROOT/scripts/plan-from-spec.sh" --repo "$REPO" \
+      --validate-spec "$INTENT_FILE" 2>&1)"; then
+    printf '%s\n' "$preflight_out" >&2
+    fail "the candidate's acceptance contract would refuse at plan-from-spec; fix it before adopting (usually '- Required check files:' naming what the checks read)"
+  fi
 
   # The vacuity gate (a field defect class: hollow acceptance): an acceptance
   # that passes before any work exists cannot prove the work. Required checks

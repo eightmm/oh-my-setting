@@ -5082,11 +5082,22 @@ test_intent_adopt_gates_then_confirms() {
 
 - Success criteria: greeting prints
 - Required checks: true
+- Required check files: file.txt
 
 ## Notes
 
 - Risks: none
 EOF
+  # A custom acceptance without its check files refuses at adopt — the same
+  # parser plan-from-spec runs, so the refusal moves from first propose to
+  # the adopt gate (field finding).
+  sed '/- Required check files:/d' "$intent_dir/intent-vacuous.md" \
+    > "$intent_dir/intent-nofiles.md"
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-nofiles \
+    > "$project/nofiles-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a custom acceptance without check files must refuse adopt, got $rc"
+  assert_file_contains "$project/nofiles-out" "Required check files"
   rc=0
   "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-vacuous \
     > "$project/vacuous-out" 2>&1 || rc=$?
@@ -5126,7 +5137,9 @@ EOF
   # An acceptance that reads scope-file content adopts with the floor
   # warning: legitimate as acceptance, fatal if copied into a task verify.
   rm -f "$project/PROJECT.md"
-  sed 's|- Required checks: bash tests/greet.sh|- Required checks: grep -q greet src/app.py|' \
+  printf 'placeholder\n' > "$project/src/app.py"
+  sed -e 's|- Required checks: bash tests/greet.sh|- Required checks: grep -q greet src/app.py|' \
+    -e 's|- Required check files: file.txt|- Required check files: src/app.py|' \
     "$intent_dir/intent-good.md" > "$intent_dir/intent-reads.md"
   # Backticked scope entries are the shape live drafts actually produce.
   sed -i.bak 's|- Scope: src/|- Scope: `src/app.py`|' "$intent_dir/intent-reads.md" &&

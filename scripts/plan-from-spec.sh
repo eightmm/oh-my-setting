@@ -15,6 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$PWD"
 PROVIDER="codex"
 APPLY_FILE=""
+VALIDATE_SPEC=""
 MAX_TASKS=6
 ID_PREFIX=""
 ALLOWED_ENVELOPE=""
@@ -44,6 +45,9 @@ for review — nothing touches the task board until --apply.
                   autopilot replans use r1- so a second tranche is observable.
   --allowed PATHS Comma-separated immutable path envelope for every proposed
                   task. Stored in the proposal and rechecked during apply.
+  --validate-spec FILE  Preflight a spec candidate's acceptance contract
+                   (same parser as propose; state is not checked — a
+                   candidate is draft by design). Used by intent adopt.
   --model MODEL    Exact planner model forwarded to agent-call.
   --fallback-model MODEL
                   One-shot planner capacity fallback model.
@@ -94,6 +98,9 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
       PROVIDER_TIMEOUT="$2"; shift 2 ;;
     --apply) [ "$#" -ge 2 ] || fail "--apply requires a file"; APPLY_FILE="$2"; shift 2 ;;
+    --validate-spec)
+      [ "$#" -ge 2 ] || fail "--validate-spec requires a spec file"
+      VALIDATE_SPEC="$2"; shift 2 ;;
     --expected-proposal-sha256)
       [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a digest"
       EXPECTED_PROPOSAL_SHA="$2"; shift 2 ;;
@@ -525,6 +532,19 @@ PY
   else
     echo "plan-from-spec: $count task(s) applied; parent-agent next: oms goal-drive --repo $REPO"
   fi
+  exit 0
+fi
+
+# Acceptance-contract preflight for a spec candidate (intent adopt calls
+# this so a contract that would refuse at first propose refuses at adopt
+# instead — same parser, no drift). State is deliberately not checked: a
+# candidate is draft by design; adopting is what confirms it.
+if [ -n "$VALIDATE_SPEC" ]; then
+  [ -f "$VALIDATE_SPEC" ] || fail "no spec candidate at $VALIDATE_SPEC"
+  SPEC="$VALIDATE_SPEC"
+  acceptance_meta="$(acceptance_contract)" || exit 2
+  acceptance_meta="${acceptance_meta//$'\r'/}"
+  echo "validate-spec: acceptance ok ($(printf '%s\n' "$acceptance_meta" | sed -n 1p))"
   exit 0
 fi
 

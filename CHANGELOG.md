@@ -7,6 +7,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- `plan-from-spec --validate-spec FILE` preflights a spec candidate's
+  acceptance contract with the same parser propose runs (state deliberately
+  unchecked — a candidate is draft by design), and `intent adopt` now calls
+  it: a custom acceptance missing its `- Required check files:` refuses at
+  the adopt gate instead of surfacing at the first propose (field finding
+  from the verb's first live campaign). The draft skeleton asks for the
+  bullet whenever the checks are not a conventional entrypoint.
 - Run-level single-flight and dead-session lease recovery. Every drive
   start records its wrapper pid as a claim on the run lineage (spec digest
   plus branch — never the receipt digest, which moves on every stage
