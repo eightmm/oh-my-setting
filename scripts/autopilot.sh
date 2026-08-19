@@ -463,8 +463,11 @@ if [ "$ACTION" = reenter ]; then
   [ -f "$OUTER_RECEIPT" ] ||
     fail "no live autopilot receipt to re-enter; propose starts a new run"
   reenter_out="$(autopilot_mktemp)" || fail "mktemp failed"
+  # $$ survives the exec below, so the claim pid stays checkable for the
+  # whole resumed run: liveness is the claim's expiry.
   oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter \
     "$OUTER_RECEIPT" --repo "$REPO" --reason "${ACTION_REASON:-}" \
+    --pid "$$" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$reenter_out" || exit $?
   reenter_cont=()
   while IFS= read -r reenter_line; do

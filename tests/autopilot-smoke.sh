@@ -923,6 +923,7 @@ PY
   # any work, refusals are records too, and stages that would let re-entry
   # supply an approval refuse.
   local reenter_repo="$TMP/reenter-v1"
+  local reenter_digest dead_pid
   make_repo "$reenter_repo"
   mkdir -p "$reenter_repo/calls"
   rc=0
@@ -938,6 +939,35 @@ PY
   grep -Fq 'digest gate:' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
     fail "the drift refusal must ride the reentry ledger"
   git -C "$reenter_repo" checkout -q -- PROJECT.md
+  # At-most-once claim (debate finding): the same receipt state resumed by a
+  # LIVE session refuses a second entry; a crashed claimant's dead pid is
+  # the expiry — recovery proceeds and names the stale claim it superseded.
+  reenter_digest="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" digest \
+    "$reenter_repo/.oms/plan/autopilot-run.json")"
+  reenter_digest="${reenter_digest//$'\r'/}"
+  printf '{"kind":"autopilot-reenter","predecessor":"%s","disposition":"resumed","claim_pid":%d,"schema":1}\n' \
+    "$reenter_digest" "$$" >> "$reenter_repo/.oms/plan/autopilot-reentries.jsonl"
+  rc=0
+  run_autopilot "$reenter_repo" reenter > "$reenter_repo/reenter-claimed.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "a live claim on the same receipt state must refuse re-entry"
+  grep -Fq 'already resumed by a live session' "$reenter_repo/reenter-claimed.out" ||
+    fail "the live-claim refusal must name the holder: $(tail -3 "$reenter_repo/reenter-claimed.out")"
+  sh -c ':' & dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  python3 - "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" "$reenter_digest" "$dead_pid" <<'PY' || fail "could not rewrite the claim as stale"
+import json, sys
+path, predecessor, dead = sys.argv[1], sys.argv[2], int(sys.argv[3])
+rows = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        row = json.loads(line)
+        if row.get("predecessor") == predecessor and row.get("disposition") == "resumed":
+            row["claim_pid"] = dead
+        rows.append(row)
+with open(path, "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+PY
   rc=0
   run_autopilot "$reenter_repo" reenter --reason "fresh session picks up the dead planner" \
     > "$reenter_repo/reenter.out" 2>&1 || rc=$?
@@ -951,6 +981,8 @@ PY
     fail "the reentry record must name the stage it re-entered"
   grep -Fq '"predecessor":' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
     fail "the reentry record must name its predecessor digest"
+  grep -Fq '"superseded_stale_claim_pid":' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "superseding a dead claim must be recorded, not silent"
   # The receipt now awaits parent review: re-entry cannot supply the approval.
   rc=0
   run_autopilot "$reenter_repo" reenter > "$reenter_repo/reenter-review.out" 2>&1 || rc=$?

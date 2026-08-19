@@ -1220,6 +1220,7 @@ def main() -> int:
     reenter.add_argument("--repo", required=True)
     reenter.add_argument("--reason", default="")
     reenter.add_argument("--updated", required=True)
+    reenter.add_argument("--pid", type=int, default=0)
     supervisor = sub.add_parser("supervise")
     supervisor.add_argument("--wall", type=float, required=True)
     supervisor.add_argument("--kill-after", type=float, default=1)
@@ -1328,6 +1329,58 @@ def main() -> int:
                     validate_live(row, args.repo)
                 except ReceiptError as exc:
                     refusal = "digest gate: %s" % exc
+            # At-most-once claim (three-family debate finding, 2026-08-19):
+            # the wrapper's lock releases before exec, so without a claim two
+            # simultaneous sessions would each record "resumed" and both run
+            # — the receipt CAS only surfaces that much later, at the git
+            # state gate, after both provider bills. The predecessor digest
+            # IS the claim key: a prior "resumed" row for the same digest
+            # means this exact receipt state was already taken. Liveness via
+            # the recorded wrapper pid (exec preserves it) is the expiry —
+            # a crashed claimant's pid is gone, so recovery needs no wait
+            # and no override verb. Pid recycling is accepted for v1: the
+            # false positive is a refusal that says who to check, never a
+            # duplicate run.
+            superseded_pid = 0
+            if not refusal and getattr(args, "pid", 0):
+                prior_pid = 0
+                try:
+                    with open(
+                        path.with_name("autopilot-reentries.jsonl"),
+                        encoding="utf-8",
+                    ) as handle:
+                        for raw_line in handle:
+                            try:
+                                prior = json.loads(raw_line)
+                            except ValueError:
+                                continue
+                            if (
+                                isinstance(prior, dict)
+                                and prior.get("kind") == "autopilot-reenter"
+                                and prior.get("predecessor") == current
+                                and prior.get("disposition") == "resumed"
+                            ):
+                                prior_pid = int(prior.get("claim_pid") or 0)
+                except OSError:
+                    prior_pid = 0
+                if prior_pid > 0:
+                    alive = True
+                    try:
+                        os.kill(prior_pid, 0)
+                    except ProcessLookupError:
+                        alive = False
+                    except PermissionError:
+                        alive = True
+                    except OSError:
+                        alive = False
+                    if alive:
+                        refusal = (
+                            "this exact receipt state is already resumed by a"
+                            " live session (pid %d); a second re-entry would"
+                            " run the contract twice" % prior_pid
+                        )
+                    else:
+                        superseded_pid = prior_pid
             record = {
                 "schema": 1,
                 "kind": "autopilot-reenter",
@@ -1338,6 +1391,10 @@ def main() -> int:
                 "disposition": "refused" if refusal else "resumed",
                 "updated": args.updated,
             }
+            if getattr(args, "pid", 0):
+                record["claim_pid"] = args.pid
+            if superseded_pid:
+                record["superseded_stale_claim_pid"] = superseded_pid
             if reason:
                 record["reason"] = reason
             if refusal:
