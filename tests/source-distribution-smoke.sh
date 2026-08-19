@@ -19,7 +19,11 @@ done
 
 for file in README.md README.ko.md docs/COMPONENTS.md docs/MIGRATION-0.4.md docs/MIGRATION-0.5.md \
     .github/workflows/test.yml scripts/check.sh; do
-  if grep -Eiq 'docs/RELEASE|releases/(latest|download)|release-contract-smoke|gen-checksums|tag-driven release|tag 기반 릴리스' "$ROOT/$file"; then
+  # This guard exists for THIS repository's retired GitHub-Release surface;
+  # a third-party tool pinned from its own releases page (CI's shellcheck
+  # binary) is distribution hygiene, not a Release-surface regression, so
+  # the download pattern is scoped to this repo's slug.
+  if grep -Eiq 'docs/RELEASE|oh-my-setting/releases/(latest|download)|releases/latest|release-contract-smoke|gen-checksums|tag-driven release|tag 기반 릴리스' "$ROOT/$file"; then
     fail "obsolete Release reference remains: $file"
   fi
 done
