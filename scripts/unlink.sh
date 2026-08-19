@@ -108,6 +108,8 @@ unlink_all() {
   # Legacy cleanup: pi support was removed from defaults; still unlink old installs.
   unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
   unlink_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
+  unlink_and_restore "$HOME/.claude/output-styles/oms-korean.md" \
+    "$ROOT/output-styles/oms-korean.md"
   unlink_and_restore "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
   oms_ops_migrate_legacy_workflow_link "$DRY_RUN"
   unlink_and_restore "$HOME/.local/bin/oms" "$ROOT/scripts/oms"
