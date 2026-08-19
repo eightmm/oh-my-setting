@@ -4957,6 +4957,156 @@ EOF
   assert_file_contains "$project/bad-out" "could not extract a proposal"
 }
 
+test_intent_draft_writes_reviewed_candidate() {
+  local project="$TMP/intent-draft"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local candidate rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/src" "$project/tests"
+  # The stub echoes the prompt first — the skeleton inside the instructions
+  # must not be mistaken for the answer (the answer follows the echo).
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat
+printf '## Status\n\n- State: draft\n- Open decisions: none\n\n'
+printf '## Project\n\n- Goal: ship a greeting command\n- Scope: src/\n- Non-goals: packaging\n\n'
+printf '## Commands\n\n- Test: bash tests/run.sh\n\n'
+printf '## Verification\n\n- Success criteria: greeting prints\n- Required checks: bash tests/greet.sh\n\n'
+printf '## Edge cases\n\n- empty name input\n\n'
+printf '## Notes\n\n- Risks: none\n- Do not touch: docs/\n'
+EOF
+  chmod +x "$bin_dir/codex"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex \
+    --goal "인사 명령을 만들어줘" > "$project/draft-out" 2>&1 ||
+    fail "intent draft should succeed: $(tail -5 "$project/draft-out")"
+  assert_file_contains "$project/draft-out" "review it (editing is expected)"
+  candidate="$(find "$project/.oms/intents" -name 'intent-*.md' | head -n 1)"
+  [ -n "$candidate" ] || fail "intent candidate missing"
+  assert_file_contains "$candidate" "- State: draft"
+  assert_file_contains "$candidate" "- Drafted by: codex"
+  assert_file_contains "$candidate" "인사 명령을 만들어줘"
+  assert_file_contains "$candidate" "- Required checks: bash tests/greet.sh"
+  # The prompt echo's skeleton was not mistaken for the answer: exactly one
+  # Status section in the candidate (plus none from the echoed instructions).
+  [ "$(grep -c '^## Status$' "$candidate")" = 1 ] ||
+    fail "prompt echo leaked into the candidate: $candidate"
+  [ ! -e "$project/PROJECT.md" ] || fail "draft must never touch PROJECT.md"
+
+  # A structureless answer fails closed and keeps the artifact pointer.
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "no structure"\n' > "$bin_dir/codex"
+  chmod +x "$bin_dir/codex"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex \
+    --goal "another" > "$project/bad-out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "structureless draft should exit 3, got $rc"
+  assert_file_contains "$project/bad-out" "no '## Status' skeleton"
+}
+
+test_intent_adopt_gates_then_confirms() {
+  local project="$TMP/intent-adopt"
+  local intent_dir rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$project/src" "$project/tests"
+  intent_dir="$project/.oms/intents"
+  mkdir -p "$intent_dir"
+  cat > "$intent_dir/intent-vacuous.md" <<'EOF'
+## Status
+
+- State: draft
+- Open decisions: none
+
+## Project
+
+- Goal: ship a greeting command
+- Scope: src/
+- Non-goals: packaging
+
+## Commands
+
+- Test: true
+
+## Verification
+
+- Success criteria: greeting prints
+- Required checks: true
+
+## Notes
+
+- Risks: none
+EOF
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-vacuous \
+    > "$project/vacuous-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a pre-passing acceptance must refuse adopt, got $rc"
+  assert_file_contains "$project/vacuous-out" "cannot prove the work"
+  [ ! -e "$project/PROJECT.md" ] || fail "a refused adopt must not write PROJECT.md"
+
+  sed 's|- Required checks: true|- Required checks: bash tests/greet.sh|' \
+    "$intent_dir/intent-vacuous.md" > "$intent_dir/intent-good.md"
+  # A live autopilot receipt blocks adoption: a spec swap under a live run
+  # only bricks it into spec-changed park.
+  mkdir -p "$project/.oms/plan"
+  printf '{"stage":"driving"}\n' > "$project/.oms/plan/autopilot-run.json"
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-good \
+    > "$project/live-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a live receipt must refuse adopt, got $rc"
+  assert_file_contains "$project/live-out" "abandon"
+  rm -f "$project/.oms/plan/autopilot-run.json"
+
+  # Happy path: acceptance fails now (tests/greet.sh does not exist), adopt
+  # confirms, provenance and body land byte-preserved.
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-good \
+    > "$project/adopt-out" 2>&1 ||
+    fail "adopt should succeed: $(tail -5 "$project/adopt-out")"
+  assert_file_contains "$project/PROJECT.md" "- State: confirmed"
+  assert_file_contains "$project/PROJECT.md" "- Required checks: bash tests/greet.sh"
+  assert_file_contains "$project/adopt-out" "plan-from-spec"
+
+  # An existing PROJECT.md refuses: overwriting a contract is deliberate.
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-good \
+    > "$project/exists-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an existing PROJECT.md must refuse adopt, got $rc"
+  assert_file_contains "$project/exists-out" "already exists"
+
+  # An acceptance that reads scope-file content adopts with the floor
+  # warning: legitimate as acceptance, fatal if copied into a task verify.
+  rm -f "$project/PROJECT.md"
+  sed 's|- Required checks: bash tests/greet.sh|- Required checks: grep -q greet src/app.py|' \
+    "$intent_dir/intent-good.md" > "$intent_dir/intent-reads.md"
+  sed -i.bak 's|- Scope: src/|- Scope: src/app.py|' "$intent_dir/intent-reads.md" &&
+    rm -f "$intent_dir/intent-reads.md.bak"
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-reads \
+    > "$project/warn-out" 2>&1 ||
+    fail "a content-reading acceptance still adopts: $(tail -5 "$project/warn-out")"
+  assert_file_contains "$project/warn-out" "floor_incompatible_verifier"
+  assert_file_contains "$project/warn-out" "must NOT copy this shape into task verifies"
+}
+
+test_agent_plan_lint_verify_matches_admission_floor() {
+  local project="$TMP/lint-verify"
+  local rc=0
+
+  make_committed_repo "$project"
+  rc=0
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" lint-verify \
+    --verify 'grep -q done src/app.py' --allowed 'src/app.py' \
+    > "$project/bad-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a content read of an allowed path should exit 2, got $rc"
+  assert_file_contains "$project/bad-out" "floor_incompatible_verifier: src/app.py (grep)"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" lint-verify \
+    --verify 'bash tests/run.sh' --allowed 'src/app.py' \
+    > "$project/good-out" 2>&1 ||
+    fail "an executing verify should lint clean: $(cat "$project/good-out")"
+  assert_file_contains "$project/good-out" "lint-verify: ok"
+}
+
 # The contract's implementation-shaping sections used to stop at plan-from-spec:
 # a constraint recorded under Decisions never reached the planner, so it had to
 # be smuggled into Verification to have any effect.

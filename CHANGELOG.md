@@ -7,6 +7,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- `oms intent` — the delegation front door (research round: Anthropic's 2026
+  trends report names the delegation gap's blockers as persistent context,
+  testable outcomes, and explicit constraints — the exact fields PROJECT.md
+  already carries). `draft` asks a provider to expand one goal sentence into
+  a structured candidate spec under `.oms/intents/` with provenance, exact
+  consumed shape (Goal/Scope/Non-goals, Commands, single-line Required
+  checks), answer taken only from the transport's Output window; `adopt` is
+  the explicit approval act and sole PROJECT.md writer — it refuses under a
+  live autopilot receipt, refuses over an existing PROJECT.md, refuses an
+  acceptance that already passes (a pre-passing check cannot prove the
+  work), warns when the acceptance reads scope-file content, and writes
+  `State: confirmed` because adopting IS the confirmation. Generated specs
+  never confirm themselves.
+- `agent-plan lint-verify --verify CMD --allowed "p1,p2"` — the admission
+  floor's content-read check as a standalone front door. The floor logic
+  moved to `scripts/lib/verify-floor-lint.py` and the admission gate loads
+  that same module (the plan-receipt idiom), so the lint and the gate
+  cannot drift.
 - `autopilot reenter [--reason]` — the audited entrance mirroring abandon's
   exit, landed after a three-family re-consult unanimously flipped the
   round-23 defer (its named preconditions — audited exit, spotlighted
