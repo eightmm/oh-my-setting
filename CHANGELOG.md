@@ -7,6 +7,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- Shadow judgments: `oms autopilot shadow` runs the re-entry gate's exact
+  decision sequence read-only and appends one typed
+  would-resume/would-refuse row (stage, predecessor digest, the live or
+  dead claimant pid, observing session) to
+  `.oms/plan/autopilot-shadow.jsonl`. The session-start hook calls it
+  whenever a live receipt exists and surfaces the verdict in the resume
+  block. Nothing is claimed, nothing resumes, the receipt never moves —
+  this is the evidence the autonomy council asked for before any
+  autonomous re-entry trigger is considered, measured by the same
+  function the real verb runs rather than a second implementation of it.
+  The ledger is ambient to the check gate (a session starting mid-gate
+  must not read as a suite writing into the checkout), and reading the
+  rows carries one caveat: the hook fires at every session start, so a
+  would-resume with no re-entry after it is not by itself disagreement.
 - The oms naming convention is now written policy and enforced. Artifacts
   the harness publishes into shared namespaces carry the oms marker
   (skills and output styles `oms-*`, MCP tools `oms_*`, work branches

@@ -8,10 +8,11 @@ and empty directories.
 
 Ambient entries are excluded because the live agent session writes them on its
 own schedule, with no relation to the gate: hooks/ and work-journal/ on every
-turn, and ci.jsonl whenever the CI watcher records a run for a push — a green
-25-minute gate is a wide window for that to land and read as a suite defect.
-Everything else stays covered, including failures.jsonl, where a forgotten
---repo is exactly the bug worth catching.
+turn, ci.jsonl whenever the CI watcher records a run for a push, and the
+autopilot shadow-judgment ledger whenever any session starts in this checkout
+— a green 25-minute gate is a wide window for those to land and read as a
+suite defect. Everything else stays covered, including failures.jsonl, where
+a forgotten --repo is exactly the bug worth catching.
 
 Usage: oms-state-inventory.py OMS_DIR
 """
@@ -31,6 +32,11 @@ AMBIENT_DIRS = {"hooks", "work-journal"}
 # green gate. A suite that wrote only this marker left no state behind, and
 # any real leak brings its own entries.
 AMBIENT_FILES = {"ci.jsonl", ".gitignore"}
+# Path-precise ambient entries below the root: the session-start hook appends
+# a shadow-judgment row whenever a session opens this checkout mid-gate. Only
+# the ledger itself is ambient — every other plan/ entry (receipts, tasks,
+# claims) stays covered.
+AMBIENT_PATHS = {"plan/autopilot-shadow.jsonl"}
 
 
 def inventory(root: str) -> list[tuple]:
@@ -61,6 +67,8 @@ def inventory(root: str) -> list[tuple]:
                 continue
             path = os.path.join(base, name)
             rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if rel in AMBIENT_PATHS:
+                continue
             try:
                 info = os.lstat(path)
                 mode = stat.S_IMODE(info.st_mode)

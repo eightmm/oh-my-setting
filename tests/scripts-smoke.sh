@@ -12920,6 +12920,18 @@ PY
     fail "harness child rows must not be reported as a peer"
   fi
 
+  # A malformed autopilot receipt must never break session start: the
+  # shadow observation is best-effort and stays silent when the receipt
+  # refuses to load (the refusal is the receipt's problem, not the hook's).
+  mkdir -p "$repo/.oms/plan"
+  printf 'not json\n' > "$repo/.oms/plan/autopilot-run.json"
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
+    fail "resume hook must exit 0 with a malformed receipt"
+  if printf '%s\n' "$out" | grep -q 'autopilot:'; then
+    fail "a malformed receipt must not produce an autopilot line: $out"
+  fi
+  rm -f "$repo/.oms/plan/autopilot-run.json"
+
   # Outside an adopted repo, and when disabled: exit 0 with no output.
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$TMP" | "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0 outside an adopted repo"

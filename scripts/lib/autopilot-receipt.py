@@ -359,8 +359,7 @@ def validate_live(row: dict[str, Any], repo: str) -> None:
             raise ReceiptError("approved proposal digest changed")
 
 
-def append_reentry_ledger(path: Path, record: dict[str, Any]) -> None:
-    ledger = path.with_name("autopilot-reentries.jsonl")
+def append_jsonl_ledger(ledger: Path, record: dict[str, Any]) -> None:
     line = (
         json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
@@ -370,7 +369,11 @@ def append_reentry_ledger(path: Path, record: dict[str, Any]) -> None:
         os.fsync(ledger_fd)
     finally:
         os.close(ledger_fd)
-    fsync_directory(path.parent)
+    fsync_directory(ledger.parent)
+
+
+def append_reentry_ledger(path: Path, record: dict[str, Any]) -> None:
+    append_jsonl_ledger(path.with_name("autopilot-reentries.jsonl"), record)
 
 
 def lineage_claims(path: Path, spec_sha: str, branch: str) -> list[tuple[int, str]]:
@@ -421,6 +424,60 @@ def pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def reenter_judgment(
+    path: Path, row: dict[str, Any], repo: str, self_pid: int, scan_claims: bool
+) -> tuple[str, int, int]:
+    """The reenter gate's decision sequence, shared with shadow observation.
+
+    Stage refusals first (done/proposal-review/parked never resume), then the
+    validate_live digest gate every resume passes, then the lineage claim
+    scan: any living claimant — the original drive included — refuses, and
+    the latest dead claimant is the supersession candidate. Read-only by
+    contract; recording a claim or acting on the verdict belongs to the
+    caller. Shadow evidence is only worth collecting because this is the
+    same function the real verb runs — a reimplementation would measure
+    itself, not the gate (raise-after-evidence debate, 2026-08-19).
+    Returns (refusal, superseded_pid, live_pid).
+    """
+    stage = row["stage"]
+    refusal = ""
+    superseded_pid = 0
+    live_pid = 0
+    if stage == "done":
+        refusal = "the run is complete; archive-done owns it"
+    elif stage == "proposal-review":
+        refusal = (
+            "a proposal awaits parent review; re-entry cannot supply"
+            " the approval — review it and run the printed continuation"
+        )
+    elif stage == "parked":
+        refusal = (
+            "the run is parked for an operator decision; resolve the"
+            " park reason or abandon"
+        )
+    else:
+        try:
+            validate_live(row, repo)
+        except ReceiptError as exc:
+            refusal = "digest gate: %s" % exc
+    if not refusal and scan_claims:
+        for prior_pid, prior_kind in lineage_claims(
+            path, row["spec_sha256"], row.get("branch", "")
+        ):
+            if prior_pid == self_pid:
+                continue
+            if pid_alive(prior_pid):
+                refusal = (
+                    "this run is already held by a live session"
+                    " (pid %d, %s); a second entry would drive the"
+                    " contract twice" % (prior_pid, prior_kind)
+                )
+                live_pid = prior_pid
+                break
+            superseded_pid = prior_pid
+    return refusal, superseded_pid, live_pid
 
 
 def immutable_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -1296,6 +1353,11 @@ def main() -> int:
     reenter_note.add_argument("--requeued", required=True)
     reenter_note.add_argument("--dead-pid", type=int, required=True)
     reenter_note.add_argument("--updated", required=True)
+    shadow = sub.add_parser("shadow-judge")
+    shadow.add_argument("path")
+    shadow.add_argument("--repo", required=True)
+    shadow.add_argument("--updated", required=True)
+    shadow.add_argument("--session", default="")
     supervisor = sub.add_parser("supervise")
     supervisor.add_argument("--wall", type=float, required=True)
     supervisor.add_argument("--kill-after", type=float, default=1)
@@ -1385,25 +1447,6 @@ def main() -> int:
             reason = args.reason.strip()
             if len(reason) > 400:
                 raise ReceiptError("reenter --reason is too long (max 400 chars)")
-            stage = row["stage"]
-            refusal = ""
-            if stage == "done":
-                refusal = "the run is complete; archive-done owns it"
-            elif stage == "proposal-review":
-                refusal = (
-                    "a proposal awaits parent review; re-entry cannot supply"
-                    " the approval — review it and run the printed continuation"
-                )
-            elif stage == "parked":
-                refusal = (
-                    "the run is parked for an operator decision; resolve the"
-                    " park reason or abandon"
-                )
-            else:
-                try:
-                    validate_live(row, args.repo)
-                except ReceiptError as exc:
-                    refusal = "digest gate: %s" % exc
             # At-most-once claim (three-family debate finding, 2026-08-19):
             # the wrapper's lock releases before exec, so without a claim two
             # simultaneous sessions would each record "resumed" and both run
@@ -1416,31 +1459,20 @@ def main() -> int:
             # and no override verb. Pid recycling is accepted for v1: the
             # false positive is a refusal that says who to check, never a
             # duplicate run.
-            superseded_pid = 0
-            if not refusal and getattr(args, "pid", 0):
-                # Run-level single-flight over the whole lineage: any living
-                # claimant — the original drive included — refuses re-entry,
-                # receipt digest movement notwithstanding. The latest dead
-                # claimant is superseded, and that supersession is the proof
-                # of death the lease requeue downstream relies on.
-                for prior_pid, prior_kind in lineage_claims(
-                    path, row["spec_sha256"], row.get("branch", "")
-                ):
-                    if prior_pid == args.pid:
-                        continue
-                    if pid_alive(prior_pid):
-                        refusal = (
-                            "this run is already held by a live session"
-                            " (pid %d, %s); a second entry would drive the"
-                            " contract twice" % (prior_pid, prior_kind)
-                        )
-                        break
-                    superseded_pid = prior_pid
+            #
+            # The decision sequence itself lives in reenter_judgment, shared
+            # with shadow-judge. The pid-truthiness gate on the claim scan
+            # stays at this call site: a manual pid-less invocation keeps
+            # its historical no-claim, no-scan semantics.
+            self_pid = getattr(args, "pid", 0) or 0
+            refusal, superseded_pid, _live_pid = reenter_judgment(
+                path, row, args.repo, self_pid, bool(self_pid)
+            )
             record = {
                 "schema": 1,
                 "kind": "autopilot-reenter",
                 "predecessor": current,
-                "stage_at_reentry": stage,
+                "stage_at_reentry": row["stage"],
                 "spec_sha256": row["spec_sha256"],
                 "branch": row.get("branch", ""),
                 "disposition": "refused" if refusal else "resumed",
@@ -1505,6 +1537,57 @@ def main() -> int:
                     "updated": args.updated,
                 },
             )
+            return 0
+        if args.command == "shadow-judge":
+            # Evidence for the raise-after-evidence protocol (three-family
+            # debate, unanimous, 2026-08-19): before any autonomous re-entry
+            # trigger exists, record what the reenter gate WOULD decide at
+            # each session start — the same reenter_judgment sequence,
+            # observed, never acted on. No claim is written, nothing
+            # executes, the receipt is untouched. The ledger is ambient
+            # state (oms-state-inventory.py): the session-start hook writes
+            # it on the session's schedule, with no relation to any gate.
+            # Analysis caveat lives with the data: the hook fires on every
+            # session start, so a would-resume row with no later reenter is
+            # not by itself operator disagreement.
+            validate_receipt_location(path, args.repo)
+            row, payload = load_receipt(path)
+            if not UPDATED.fullmatch(args.updated):
+                raise ReceiptError("shadow-judge requires a valid --updated timestamp")
+            session = args.session.strip()
+            if len(session) > 128:
+                raise ReceiptError("shadow-judge --session is too long (max 128 chars)")
+            refusal, superseded_pid, live_pid = reenter_judgment(
+                path, row, args.repo, 0, True
+            )
+            record = {
+                "schema": 1,
+                "kind": "reenter-shadow-judgment",
+                "predecessor": digest(payload),
+                "stage": row["stage"],
+                "spec_sha256": row["spec_sha256"],
+                "branch": row.get("branch", ""),
+                "verdict": "would-refuse" if refusal else "would-resume",
+                "updated": args.updated,
+            }
+            if refusal:
+                record["refusal"] = refusal
+            if live_pid:
+                record["live_claim_pid"] = live_pid
+            if superseded_pid:
+                record["dead_claim_pid"] = superseded_pid
+            if session:
+                record["session_id"] = session
+            append_jsonl_ledger(path.with_name("autopilot-shadow.jsonl"), record)
+            if refusal:
+                print("would-refuse: %s" % refusal)
+            elif superseded_pid:
+                print(
+                    "would-resume (stage %s, dead claimant pid %d): oms autopilot reenter"
+                    % (row["stage"], superseded_pid)
+                )
+            else:
+                print("would-resume (stage %s): oms autopilot reenter" % row["stage"])
             return 0
         if args.command == "archive-done":
             validate_receipt_location(path, args.repo)

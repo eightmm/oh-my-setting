@@ -551,6 +551,18 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
     fail "the exclusion must be anchored at the top level, not by name anywhere"
   grep -q '"plan/.gitignore"' "$out" ||
     fail "a nested .gitignore is state, not the top-level ownership marker"
+
+  # The shadow-judgment ledger is the one path-precise ambient entry: any
+  # session starting in this checkout appends a row mid-gate. Only the
+  # ledger itself — a same-named file elsewhere stays covered.
+  printf 'row\n' > "$state/plan/autopilot-shadow.jsonl"
+  printf 'row\n' > "$state/autopilot-shadow.jsonl"
+  python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out"
+  if grep -q '"plan/autopilot-shadow.jsonl"' "$out"; then
+    fail "the shadow ledger is written at session start and must not be inventoried"
+  fi
+  grep -q '"autopilot-shadow.jsonl"' "$out" ||
+    fail "the ambient shadow entry is path-precise, not a name match"
 }
 
 # --- claude/codex registration ---------------------------------------------

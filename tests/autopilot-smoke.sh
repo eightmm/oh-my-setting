@@ -954,6 +954,25 @@ PY
   [ "$rc" != 0 ] || fail "a live drive claim on the lineage must refuse re-entry"
   grep -Fq 'already held by a live session' "$reenter_repo/reenter-claimed.out" ||
     fail "the live-claim refusal must name the holder: $(tail -3 "$reenter_repo/reenter-claimed.out")"
+  # shadow (raise-after-evidence protocol): the same decision sequence,
+  # observed, never acted on — and observation always scans claims, so a
+  # live holder is exactly what the evidence shows. One typed row per
+  # observation on its own ledger; receipt and claim ledger untouched.
+  local shadow_ledger="$reenter_repo/.oms/plan/autopilot-shadow.jsonl"
+  local shadow_receipt_before shadow_claims_before
+  shadow_receipt_before="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" digest \
+    "$reenter_repo/.oms/plan/autopilot-run.json")"
+  shadow_claims_before="$(wc -l < "$reenter_repo/.oms/plan/autopilot-reentries.jsonl")"
+  rc=0
+  run_autopilot "$reenter_repo" shadow --session smoke-live \
+    > "$reenter_repo/shadow-live.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "shadow must observe and exit 0, got $rc: $(tail -3 "$reenter_repo/shadow-live.out")"
+  grep -Fq 'would-refuse' "$reenter_repo/shadow-live.out" ||
+    fail "a live lineage claim must shadow as would-refuse: $(tail -3 "$reenter_repo/shadow-live.out")"
+  grep -Fq '"live_claim_pid":' "$shadow_ledger" ||
+    fail "the shadow row must name the live holder"
+  grep -Fq '"session_id":"smoke-live"' "$shadow_ledger" ||
+    fail "the shadow row must carry the observing session"
   sh -c ':' & dead_pid=$!
   wait "$dead_pid" 2>/dev/null || true
   python3 - "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" "$dead_pid" <<'PY' || fail "could not rewrite the claim as stale"
@@ -995,6 +1014,28 @@ json.dump({
     "tasks": {"t9": task},
 }, open(sys.argv[1], "w", encoding="utf-8"))
 PY
+  # Shadow over the dead-claimant state, BEFORE the real reenter: the
+  # verdict is would-resume naming the dead pid, and observation consumes
+  # nothing — the lease stays claimed, no claim row lands, the receipt
+  # digest holds — so the real reenter below still finds everything.
+  rc=0
+  run_autopilot "$reenter_repo" shadow --session smoke-dead \
+    > "$reenter_repo/shadow-dead.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "shadow over a dead claimant must exit 0, got $rc: $(tail -3 "$reenter_repo/shadow-dead.out")"
+  grep -Fq 'would-resume' "$reenter_repo/shadow-dead.out" ||
+    fail "a dead claimant must shadow as would-resume: $(tail -3 "$reenter_repo/shadow-dead.out")"
+  grep -Fq 'oms autopilot reenter' "$reenter_repo/shadow-dead.out" ||
+    fail "the would-resume line must name the verb to run"
+  grep -Fq '"dead_claim_pid":' "$shadow_ledger" ||
+    fail "the dead claimant is the evidence — the shadow row must name it"
+  [ "$shadow_claims_before" = "$(wc -l < "$reenter_repo/.oms/plan/autopilot-reentries.jsonl")" ] ||
+    fail "shadow observation must never write a claim"
+  [ "$shadow_receipt_before" = "$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" digest \
+      "$reenter_repo/.oms/plan/autopilot-run.json")" ] ||
+    fail "shadow observation must not move the receipt"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["t9"]["state"])' \
+      "$reenter_repo/.oms/plan/tasks.json")" = claimed ] ||
+    fail "shadow observation must not requeue the dead session's lease"
   rc=0
   run_autopilot "$reenter_repo" reenter --reason "fresh session picks up the dead planner" \
     > "$reenter_repo/reenter.out" 2>&1 || rc=$?
@@ -1037,6 +1078,14 @@ PY
     fail "the review-stage refusal must say why: $(tail -3 "$reenter_repo/reenter-review.out")"
   grep -Fq '"disposition":"refused"' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
     fail "a refused reentry must still leave a typed record"
+  # Shadow at the review boundary mirrors the same refusal as evidence.
+  rc=0
+  run_autopilot "$reenter_repo" shadow > "$reenter_repo/shadow-review.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "shadow at proposal-review must exit 0, got $rc: $(tail -3 "$reenter_repo/shadow-review.out")"
+  grep -Fq 'would-refuse: a proposal awaits parent review' "$reenter_repo/shadow-review.out" ||
+    fail "the review-stage shadow verdict must say why: $(tail -3 "$reenter_repo/shadow-review.out")"
+  grep -Fq '"verdict":"would-refuse"' "$shadow_ledger" ||
+    fail "the would-refuse verdict must ride the shadow ledger"
 
   # A proposal continuation is executable, not a template with an unresolved
   # branch token. Collect the base before the planner is allowed to run.
@@ -1051,6 +1100,15 @@ PY
     fail "missing proposal base was rejected for the wrong reason"
   [ ! -s "$missing_base_repo/calls/plan-from-spec" ] ||
     fail "a proposal without its continuation base reached the planner"
+  # No receipt, nothing to observe: shadow is a silent no-op that leaves
+  # no evidence ledger behind in a repo without a live run.
+  rc=0
+  run_autopilot "$missing_base_repo" shadow > "$missing_base_repo/shadow-none.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "shadow without a receipt must be a silent no-op, got $rc"
+  [ ! -s "$missing_base_repo/shadow-none.out" ] ||
+    fail "shadow without a receipt must print nothing: $(tail -3 "$missing_base_repo/shadow-none.out")"
+  [ ! -e "$missing_base_repo/.oms/plan/autopilot-shadow.jsonl" ] ||
+    fail "no receipt, no evidence ledger"
 
   # A completed plan whose acceptance already passes needs no remainder.
   local accepted_repo="$TMP/already-accepted"

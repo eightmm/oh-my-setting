@@ -17,6 +17,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$PWD"
 ACTION=""
 ACTION_REASON=""
+ACTION_SESSION=""
 PROPOSAL=""
 PROPOSAL_SHA=""
 PLANNER="claude"
@@ -64,6 +65,7 @@ usage() {
 Usage: autopilot.sh [options] propose
        autopilot.sh [options] run [--proposal FILE --expected-proposal-sha256 SHA]
        autopilot.sh [--repo PATH] status
+       autopilot.sh [--repo PATH] shadow [--session ID]
 
 Coordinate a confirmed PROJECT.md through a reviewed plan, bounded goal-drive,
 one optional remainder proposal, semantic review, and optionally a Draft PR.
@@ -99,6 +101,13 @@ one optional remainder proposal, semantic review, and optionally a Draft PR.
                           claimed/running leases that session still held
                           (review and later stay untouched), recorded as a
                           typed requeue row.
+  shadow [--session ID]   Observe, never act: run the exact reenter decision
+                          sequence read-only and append one typed
+                          would-resume/would-refuse row to the shadow
+                          evidence ledger (.oms/plan/autopilot-shadow.jsonl).
+                          Raise-after-evidence protocol input: no claim is
+                          written, nothing resumes, and without a live
+                          receipt the action is a silent no-op.
 
 Options:
   --repo PATH             Repository (default: current directory).
@@ -239,7 +248,10 @@ while [ "$#" -gt 0 ]; do
     --reason)
       [ "$#" -ge 2 ] || fail "--reason requires text"
       ACTION_REASON="$2"; shift 2 ;;
-    propose|run|status|abandon|reenter)
+    --session)
+      [ "$#" -ge 2 ] || fail "--session requires a value"
+      ACTION_SESSION="$2"; shift 2 ;;
+    propose|run|status|abandon|reenter|shadow)
       [ -z "$ACTION" ] || fail "multiple actions: $ACTION, $1"
       ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
@@ -269,6 +281,20 @@ if [ "$ACTION" = abandon ]; then
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" || exit $?
   echo "autopilot: receipt abandoned; the exact contract is preserved and the exit recorded at $record"
   echo "autopilot: a fresh propose may now bind a new contract"
+  exit 0
+fi
+
+if [ "$ACTION" = shadow ]; then
+  # Observation only, early like abandon: a session start must never be
+  # blocked by the spec/tree gates a real resume would face — the judgment
+  # itself reports those as would-refuse. No receipt, nothing to observe,
+  # and never any state or noise in a repo without a live run.
+  [ -f "$OUTER_RECEIPT" ] || exit 0
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "unsafe repository Git execution config"
+  python3 "$RECEIPT_HELPER" shadow-judge "$OUTER_RECEIPT" --repo "$REPO" \
+    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    ${ACTION_SESSION:+--session "$ACTION_SESSION"} || exit $?
   exit 0
 fi
 

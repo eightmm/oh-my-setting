@@ -5,7 +5,10 @@ set -uo pipefail
 # knowing what this repo was doing — active task packet (goal, next step,
 # verify), newest handoff digest, unresolved failures, and whether another
 # live session is using the same worktree. Everything here is read from .oms
-# state that was scrubbed at write time; nothing is captured or mutated.
+# state that was scrubbed at write time. The one write this hook makes is
+# the autopilot shadow-judgment row (append-only evidence ledger, ambient
+# to the check gate); receipts, claims, and every other surface stay
+# untouched.
 # Best-effort by contract: a hook that blocks session start costs more than a
 # missing resume line, so every failure path exits 0. OMS_RESUME_HOOK=0
 # disables; harness children stay silent (their parent already has context).
@@ -138,6 +141,25 @@ else:
 PY
 )" || fail_line=""
   [ -z "$fail_line" ] || append "$fail_line"
+fi
+
+# Autopilot shadow judgment: when a live outer receipt exists, record what
+# the reenter gate would decide right now — observe-only evidence for the
+# raise-after-evidence autonomy protocol — and surface the verdict. This is
+# the hook's one write (append-only shadow ledger, ambient to the check
+# gate); the receipt and the claim ledger stay untouched.
+if [ -f "$cwd/.oms/plan/autopilot-run.json" ]; then
+  sid="$(printf '%s' "$payload" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(data.get("session_id", "") or "")
+' 2>/dev/null)" || sid=""
+  shadow_line="$(bash "$ROOT/scripts/autopilot.sh" --repo "$cwd" shadow \
+    ${sid:+--session "$sid"} 2>/dev/null)" || shadow_line=""
+  [ -z "$shadow_line" ] || append "- autopilot: $shadow_line"
 fi
 
 # Auto-update attention: the session start is where a silently failing or
