@@ -678,6 +678,7 @@ if [ "$RECOVER" = 1 ]; then
     intent_base_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("base_sha",""))' | tr -d '\r')"
     intent_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("_receipt_sha",""))' | tr -d '\r')"
     intent_has_complete="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_complete") is True else 0)' | tr -d '\r')"
+    intent_verifier_consent="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("verifier_change_consent") == "true" else 0)' | tr -d '\r')"
     intent_has_abandoned="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_abandoned") is True else 0)' | tr -d '\r')"
     intent_approval="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval",""))')"
     intent_approval_version="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_version",""))')"
@@ -748,6 +749,9 @@ if [ "$RECOVER" = 1 ]; then
           finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$intent_task" --patch "$intent_patch")
           [ -n "$intent_lease" ] && finish_cmd+=(--lease-id "$intent_lease")
           finish_cmd+=(--expected-landing-receipt-sha256 "$intent_plan_receipt_sha")
+          # Consent replays from the durable intent, not operator argv: a
+          # --recover run carries the same refreeze the crashed run would.
+          [ "${intent_verifier_consent:-0}" = 0 ] || finish_cmd+=(--refreeze-acceptance)
           if "${finish_cmd[@]}" >/dev/null 2>&1; then
             if ! plan_complete_receipt_converged; then
               rec_ok=0
@@ -1207,7 +1211,12 @@ intent_receipt_sha="$(landing_receipt_hash)" ||
 # indistinguishable from nothing having happened, which is the exact failure
 # the transaction exists to prevent. Refuse rather than apply blind.
 FROZEN_PATCH_PERSIST=1
-if ! landing_append intent; then
+# Operator verifier-change consent rides the durable intent so a --recover
+# replay of the finish carries it too; the extra key stays outside the
+# canonical receipt hash, so pre-field intents remain hash-compatible.
+intent_consent_extra=""
+[ "$ALLOW_VERIFIER_CHANGE" = 0 ] || intent_consent_extra="verifier_change_consent=true"
+if ! landing_append intent ${intent_consent_extra:+"$intent_consent_extra"}; then
   FROZEN_PATCH_PERSIST=0
   fail "cannot record the landing intent in $LANDINGS; refusing to apply"
 fi
@@ -1300,6 +1309,7 @@ fi
 # --- Optional plan lifecycle ------------------------------------------------
 if [ -n "$PLAN_TASK" ]; then
   finish_cmd=("$ROOT/scripts/agent-plan.sh" --repo "$REPO" finish --id "$PLAN_TASK" --patch "$PATCH")
+  [ "$ALLOW_VERIFIER_CHANGE" = 0 ] || finish_cmd+=(--refreeze-acceptance)
   [ -n "$PLAN_LEASE_ID" ] && finish_cmd+=(--lease-id "$PLAN_LEASE_ID")
   finish_cmd+=(--expected-landing-receipt-sha256 "$PLAN_REVIEW_RECEIPT_SHA")
   if "${finish_cmd[@]}" >/dev/null 2>&1; then

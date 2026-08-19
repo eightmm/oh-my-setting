@@ -52,6 +52,7 @@ ACCEPT=""
 ROLE=""
 STATE_FILTER=""
 CLAIM=0
+REFREEZE_ACCEPTANCE=0
 INCLUDE_RUNNING=0
 INCLUDE_REVIEW=0
 LEASE_ID="${OMS_PLAN_LEASE_ID:-}"
@@ -98,6 +99,15 @@ Commands:
                                      until a new review replaces it. --artifact
                                      stores the failed gate output for recovery.
   land   --id ID --lease-id TOKEN    Fence the exact admitted review receipt.
+  finish --id ID --expected-landing-receipt-sha256 SHA [--refreeze-acceptance]
+                                     Complete a landing-fenced task. With
+                                     --refreeze-acceptance (patch-land
+                                     forwards operator verifier-change
+                                     consent), acceptance-manifest entries
+                                     the fenced patch itself modified are
+                                     recomputed from the landed tree; all
+                                     other entries keep their frozen hashes,
+                                     and each refreeze appends a typed row.
   lint-verify --verify CMD --allowed "p1,p2"
                                      Lint a verify/acceptance command against
                                      the admission floor: content reads of
@@ -224,6 +234,7 @@ while [ "$#" -gt 0 ]; do
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
     --lease-id) [ "$#" -ge 2 ] || fail "--lease-id requires value"; LEASE_ID="$2"; shift 2 ;;
     --claim) CLAIM=1; shift ;;
+    --refreeze-acceptance) REFREEZE_ACCEPTANCE=1; shift ;;
     --include-running) INCLUDE_RUNNING=1; shift ;;
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
@@ -315,6 +326,7 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_REPO="$REPO" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
+  OMS_REFREEZE_ACCEPTANCE="$REFREEZE_ACCEPTANCE" \
   OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_EXECUTOR_SOUL_SHA256="$EXECUTOR_SOUL_SHA256" \
   OMS_EXPECTED_REVIEW_PATCH="$EXPECTED_REVIEW_PATCH" \
   OMS_EXPECTED_REVIEW_PATCH_SHA256="$EXPECTED_REVIEW_PATCH_SHA256" \
@@ -998,6 +1010,76 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("--expected-landing-receipt-sha256 must be a lowercase SHA-256")
         if landing_receipt_digest(t) != expected_receipt:
             die("task %s landing receipt changed; stale finish rejected" % i)
+        if env("OMS_REFREEZE_ACCEPTANCE") == "1":
+            # Consent-aware manifest refreeze (field finding: a consented,
+            # admitted, floor-verified landing that touches acceptance-listed
+            # files parked at the next accept because the frozen manifest
+            # predates it). Only entries the FENCED patch itself modified are
+            # recomputed from the landed tree; every other entry keeps its
+            # frozen hash, so out-of-band edits — to other acceptance files,
+            # or to these files after this landing — still park. The patch's
+            # file list comes from the patch bytes the review fence pinned,
+            # never from caller argv. Recompute-from-tree is idempotent, so a
+            # --recover replay of this finish converges.
+            contract = d.get("project_contract")
+            patch_rel = env("OMS_PATCH") or t.get("patch", "")
+            repo_root = os.path.realpath(env("OMS_REPO") or os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(path)))))
+            if isinstance(contract, dict) and patch_rel:
+                patch_abs = os.path.join(repo_root, *patch_rel.split("/")) \
+                    if not os.path.isabs(patch_rel) else patch_rel
+                touched = set()
+                try:
+                    with open(patch_abs, encoding="utf-8", errors="replace") as ph:
+                        for line in ph:
+                            if line.startswith("+++ b/"):
+                                touched.add(line[6:].strip())
+                except OSError:
+                    touched = set()
+                files = contract.get("acceptance_files") or []
+                manifest = contract.get("acceptance_manifest") or []
+                refrozen = []
+                for index_m, rel in enumerate(files):
+                    if rel not in touched or index_m >= len(manifest):
+                        continue
+                    target = os.path.join(repo_root, *rel.split("/"))
+                    digest_new = hashlib.sha256()
+                    try:
+                        with open(target, "rb") as th:
+                            total = 0
+                            while True:
+                                chunk = th.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                total += len(chunk)
+                                if total > 8 * 1024 * 1024:
+                                    die("acceptance file %s exceeds the manifest size cap" % rel)
+                                digest_new.update(chunk)
+                    except OSError:
+                        die("cannot refreeze acceptance file %s" % rel)
+                    old_hash = manifest[index_m].get("sha256", "")
+                    new_hash = digest_new.hexdigest()
+                    if old_hash != new_hash:
+                        manifest[index_m] = {"path": rel, "sha256": new_hash}
+                        refrozen.append({"path": rel, "old": old_hash, "new": new_hash})
+                if refrozen:
+                    ledger_path = os.path.join(
+                        os.path.dirname(path), "manifest-refreeze.jsonl")
+                    row_out = {
+                        "schema": 1, "kind": "manifest-refreeze", "task": i,
+                        "landing_receipt_sha256": expected_receipt,
+                        "entries": refrozen, "ts": ts,
+                    }
+                    ledger_fd = os.open(
+                        ledger_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                    try:
+                        os.write(ledger_fd, (json.dumps(
+                            row_out, sort_keys=True,
+                            separators=(",", ":")) + "\n").encode("utf-8"))
+                        os.fsync(ledger_fd)
+                    finally:
+                        os.close(ledger_fd)
         t.update(state="done", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""))
     elif act == "block":

@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- Consent-aware acceptance-manifest refreeze: `agent-plan finish
+  --refreeze-acceptance` (patch-land forwards it under operator
+  verifier-change consent, and replays it from the durable landing intent
+  on `--recover`) recomputes exactly the manifest entries the fenced patch
+  itself modified, from the landed tree, inside the finish transaction.
+  Untouched entries keep their frozen hashes — an out-of-band edit to any
+  acceptance file, before or after the consented landing, still parks —
+  and every refreeze appends a typed row (old hash, new hash, task,
+  landing receipt). The field campaign's park class (a consented, admitted,
+  floor-verified landing that touches acceptance-listed files) becomes the
+  clean path; without consent, behavior is byte-identical to before.
 - `plan-from-spec --validate-spec FILE` preflights a spec candidate's
   acceptance contract with the same parser propose runs (state deliberately
   unchecked — a candidate is draft by design), and `intent adopt` now calls
