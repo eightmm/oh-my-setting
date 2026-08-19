@@ -16,6 +16,7 @@ standalone front door so a spec author can lint an acceptance or verify
 before a planner ever copies it.
 """
 
+import re
 import shlex
 import sys
 
@@ -30,7 +31,24 @@ def floor_incompatible_reads(verify, allowed_paths):
         tokens = shlex.split(verify)
     except ValueError:
         return []
-    boundary = {"&&", "||", ";", "|", "&"}
+    # Shell style writes "cmd path; next" with the separator attached to the
+    # path token, and an attached separator defeated the exact match (field
+    # finding, 2026-08-19: a planner-authored `grep ... smoke.sh; done`
+    # admitted). Split trailing/leading separator punctuation into their own
+    # boundary tokens before matching.
+    split_tokens = []
+    for token_value in tokens:
+        # A token with whitespace is a quoted argument (a bash -c script) —
+        # it must stay intact for the recursion below to see it whole.
+        if any(ch.isspace() for ch in token_value):
+            split_tokens.append(token_value)
+            continue
+        parts = re.split(r"([;|&]+)", token_value)
+        for part in parts:
+            if part:
+                split_tokens.append(part)
+    tokens = split_tokens
+    boundary = {"&&", "||", ";", "|", "&", ";;"}
     commands = []
     current = []
     for token in tokens:
@@ -53,6 +71,12 @@ def floor_incompatible_reads(verify, allowed_paths):
             continue
         words = list(command)
         while words and "=" in words[0] and "/" not in words[0].split("=", 1)[0]:
+            words = words[1:]
+        # Compound keywords put themselves ahead of the real command head
+        # (`do grep ...`, `if grep ...`) — same field finding as the attached
+        # separators: shell style, not evasion, but it shielded the reader.
+        compound = {"do", "then", "else", "elif", "if", "while", "until", "time", "!", "{"}
+        while words and words[0] in compound:
             words = words[1:]
         if not words:
             continue

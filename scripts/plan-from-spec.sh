@@ -585,6 +585,13 @@ repo-relative path prefixes the task may touch; verify is one runnable command
 that fails while the task is unfinished; depends names only earlier tasks in
 the list or an existing DONE task; $scope_rule; never repeat or modify an
 existing task; prefer few, landable, independently verifiable tasks.
+Verify floor rule: the admission gate re-runs each verify with the task's
+own modified files restored from HEAD, so a verify must EXECUTE a suite or
+tool (bash tests/x.sh, pytest, a linter) and must still pass under that
+restoration. Never write a verify that reads or asserts content that only
+exists in the task's patch (grep/sed/cat of an allowed path, inline asserts
+of new behavior) — those can never pass the floor; new-behavior proof
+belongs in the plan-level acceptance, which runs on the finished tree.
 Keep each task within roughly 180 changed lines by default so worker/review
 budgets can carry the full patch. If a genuinely indivisible task must exceed
 that budget, make the exception explicit in its title so parent review sees it.

@@ -5151,6 +5151,26 @@ test_agent_plan_lint_verify_matches_admission_floor() {
     > "$project/good-out" 2>&1 ||
     fail "an executing verify should lint clean: $(cat "$project/good-out")"
   assert_file_contains "$project/good-out" "lint-verify: ok"
+  # Field shapes (2026-08-19, planner-authored): a separator attached to the
+  # path token and a loop/conditional keyword ahead of the reader both
+  # shielded content reads from the exact match.
+  rc=0
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" lint-verify \
+    --verify 'bash -c "for r in a b; do grep -Fq -- \"$r\" src/app.py; done"' \
+    --allowed 'src/app.py' > "$project/adjacent-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an attached separator must not shield the read, got $rc"
+  assert_file_contains "$project/adjacent-out" "floor_incompatible_verifier: src/app.py (grep)"
+  rc=0
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" lint-verify \
+    --verify 'if grep -q ok src/app.py; then true; fi' \
+    --allowed 'src/app.py' > "$project/keyword-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a compound keyword must not shield the read, got $rc"
+  # A quoted bash -c script stays intact for the recursion: the executing
+  # form still lints clean even with separators inside the script.
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" lint-verify \
+    --verify 'bash -c "bash tests/run.sh; echo done"' --allowed 'src/app.py' \
+    > "$project/script-out" 2>&1 ||
+    fail "an executing script with separators should lint clean: $(cat "$project/script-out")"
 }
 
 # The contract's implementation-shaping sections used to stop at plan-from-spec:
