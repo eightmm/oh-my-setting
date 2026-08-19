@@ -28,7 +28,17 @@ jobs:
       - uses: actions/checkout@v7
       - name: install shellcheck
         timeout-minutes: 5
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        # Pinned release binary, digest-verified: three apt-mirror stalls in
+        # one day (2026-08-19) each cost a 5-minute timeout and a manual
+        # rerun. The GitHub release download shares no fate with the apt
+        # mirrors, and the pin keeps lint results reproducible.
+        run: |
+          curl -sSL -o /tmp/shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+          shellcheck --version
       - name: lint
         timeout-minutes: 15
         run: bash scripts/check.sh --lint-only
