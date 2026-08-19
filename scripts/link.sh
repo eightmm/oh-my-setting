@@ -180,6 +180,10 @@ link_all() {
   link_skills "$HOME/.codex/skills"
   link_skills "$HOME/.claude/skills"
   link_skills "$HOME/.gemini/antigravity/skills"
+  # Claude Code output styles shape the final human-visible reply only;
+  # codex/antigravity have no equivalent surface, and their human-read
+  # answers ride the harness answer-language block instead (peer-common).
+  link_target "$ROOT/output-styles/oms-korean.md" "$HOME/.claude/output-styles/oms-korean.md"
   link_target "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
   # The one-name dispatcher: `oms <tool>` from any agent CLI, no script paths.
   link_target "$ROOT/scripts/oms" "$HOME/.local/bin/oms"

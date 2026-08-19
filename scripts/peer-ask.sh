@@ -113,6 +113,7 @@ write_prompt() {
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Prefer concrete reasoning, tradeoffs, assumptions, and actionable recommendations.\n'
     printf 'If the question is underspecified, state the key assumptions and what would change the answer.\n\n'
+    ma_answer_language_block
     if [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
       printf 'This is a pre-registration design review. Attack the hypothesis and the\n'
       printf 'experiment design before compute is spent. Check each item:\n'

@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- Clear-Korean output, applied only where a human reads the result. Two
+  surfaces, one policy: `output-styles/oms-korean.md` installs as a Claude
+  Code output style (final replies only — thinking, tool calls, commit
+  messages, code comments, and English conversations are explicitly out of
+  scope), and `OMS_ANSWER_LANGUAGE=ko` rides a compact form of the same
+  directive into the human-read peer prompts (ask seats, consult/advise via
+  agent-call, review synthesis). Machine contracts never carry it: planner
+  JSON and intent skeletons are excluded at the choke point, gate verdict
+  seats are excluded entirely, and typed markers (VERDICT:, GATE:) stay
+  verbatim where the block does ride. Unset means unchanged defaults.
 - `oms intent` — the delegation front door (research round: Anthropic's 2026
   trends report names the delegation gap's blockers as persistent context,
   testable outcomes, and explicit constraints — the exact fields PROJECT.md

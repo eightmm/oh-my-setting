@@ -315,7 +315,8 @@ for pair in \
   "$HOME/.gemini/AGENTS.md:$dest/rules/global-AGENTS.md" \
   "$HOME/.codex/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
   "$HOME/.claude/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
-  "$HOME/.gemini/antigravity/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness"; do
+  "$HOME/.gemini/antigravity/skills/oms-agent-harness:$dest/custom-skills/oms-agent-harness" \
+  "$HOME/.claude/output-styles/oms-korean.md:$dest/output-styles/oms-korean.md"; do
   path="${pair%%:*}"
   source="${pair#*:}"
   oms_install_target_matches "$source" "$path" ||

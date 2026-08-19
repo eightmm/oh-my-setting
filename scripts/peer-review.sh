@@ -838,6 +838,7 @@ elif [ -n "$SYNTHESIZE" ]; then
   {
     printf 'You are the synthesis reviewer. Below are independent reviews of the same diff.\n'
     printf 'Merge them into one verdict. Accept only findings tied to file/line, diff, command, or doc evidence.\n'
+    ma_answer_language_block
     printf 'Return exactly these sections:\n'
     printf 'Consensus:\nMust-fix:\nOptional:\nDisagreement:\nVerification:\n\n'
     cat "$synth_file"

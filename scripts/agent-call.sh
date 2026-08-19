@@ -223,6 +223,9 @@ trap 'cleanup_signal 143' TERM
   printf 'You are %s, called by an agent harness for an independent read-only pass.\n' "$TO"
   printf 'Do not modify files. Do not run git commit or git push.\n'
   printf 'Use the shared memory only as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n\n'
+  # Human-read answers may carry the operator's language policy; machine
+  # contracts (--operation plan: planner JSON, intent skeletons) never do.
+  [ "$OPERATION" = plan ] || ma_answer_language_block
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" \
     "$(if [ -n "$PROMPT_FILE" ]; then head -c 300 "$PROMPT_FILE" 2>/dev/null; else printf '%s' "$PROMPT"; fi)"
   ma_write_thread_context "$REPO" "$THREAD_ID"

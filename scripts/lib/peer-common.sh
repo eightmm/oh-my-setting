@@ -1613,6 +1613,23 @@ ma_untrusted_block() {  # ma_untrusted_block SOURCE KIND  (content on stdin)
   printf '[end untrusted %s from %s]\n' "$kind" "$source"
 }
 
+# Human-read answers may carry the operator's language policy:
+# OMS_ANSWER_LANGUAGE=ko adds a compact clear-Korean directive — the
+# prompt-budget form of output-styles/oms-korean.md (keep the two aligned in
+# spirit, not bytes). Any other value emits nothing, deliberately fail-open:
+# a language preference must never sink a call. Machine-parsed surfaces
+# (planner JSON contracts, delegate workers, gate verdict seats) do not call
+# this; the closing clause keeps typed markers parseable where it does ride.
+ma_answer_language_block() {
+  case "${OMS_ANSWER_LANGUAGE:-}" in
+    ko)
+      printf '답변은 명확한 한국어로 작성하십시오. 필요한 조사를 생략하지 말고, 명사 나열 대신 서술어로 문장을 완결하며, 한 문장에는 하나의 명제만 담으십시오.\n'
+      printf '번역투("~에 대해" 남용, "~을 통해", "~함으로써", 이중 피동)를 피하고, 뜻이 같으면 더 자주 쓰이는 어휘를 고르고, 합쇼체로 종결을 통일하십시오.\n'
+      printf '코드, 명령어, 파일 경로, 기술 용어, 그리고 지시된 출력 형식 마커(예: VERDICT:, GATE:)는 원문 그대로 두십시오.\n\n'
+      ;;
+  esac
+}
+
 ma_provider_attempt() {
   local provider="$1"
   local access="$2"

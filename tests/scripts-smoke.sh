@@ -4850,6 +4850,46 @@ test_agent_call_outbound_scrubber_blocks_private_path() {
 }
 
 
+test_answer_language_block_rides_human_read_prompts() {
+  local project="$TMP/answer-language"
+  local artifact
+
+  mkdir -p "$project"
+  # ko: the compact clear-Korean directive rides the composed read prompt.
+  OMS_ANSWER_LANGUAGE=ko OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --artifact-dir "$project/a-ko" --to codex \
+    --prompt "explain the build layout" >/dev/null 2>&1 ||
+    fail "dry-run call with the language block should succeed"
+  artifact="$(find "$project/a-ko" -type f -name '*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "ko dry-run artifact missing"
+  grep -Fq '명확한 한국어' "$artifact" ||
+    fail "OMS_ANSWER_LANGUAGE=ko must ride the human-read prompt"
+
+  # Unset: nothing rides — a language preference never changes defaults.
+  OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --artifact-dir "$project/a-none" --to codex \
+    --prompt "explain the build layout" >/dev/null 2>&1 ||
+    fail "plain dry-run call should succeed"
+  artifact="$(find "$project/a-none" -type f -name '*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "plain dry-run artifact missing"
+  if grep -Fq '명확한 한국어' "$artifact"; then
+    fail "the language block must not ride without the operator's opt-in"
+  fi
+
+  # A machine contract (--operation plan) never carries it, even opted in:
+  # planner JSON and intent skeletons are parsed, not read.
+  OMS_ANSWER_LANGUAGE=ko OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --artifact-dir "$project/a-plan" --to codex \
+    --operation plan --prompt "return the tasks JSON" >/dev/null 2>&1 ||
+    fail "plan dry-run call should succeed"
+  artifact="$(find "$project/a-plan" -type f -name '*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "plan dry-run artifact missing"
+  if grep -Fq '명확한 한국어' "$artifact"; then
+    fail "a machine-contract prompt must not carry the language block"
+  fi
+}
+
+
 test_agent_call_missing_cli_writes_exit_and_index() {
   local project="$TMP/agent-call-missing-cli"
   local artifact_dir="$project/artifacts"
