@@ -191,9 +191,11 @@ for line in lines:
             scope = match.group(1)
             break
 # Every path-charset entry rides along; the linter matches verify words
-# against them EXACTLY, so prose entries simply never hit.
+# against them EXACTLY, so prose entries simply never hit. Backtick wrap is
+# presentation, not path (observed on the verb's first field draft: every
+# scope entry arrived backticked and the floor warning silently skipped).
 for entry in re.split(r"[ \t,]+", scope):
-    entry = entry.strip().rstrip("/")
+    entry = entry.strip().strip("`").rstrip("/")
     if entry and re.match(r"^[A-Za-z0-9._/-]+$", entry):
         print(entry)
 PY
@@ -314,6 +316,10 @@ text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 windows = text.split("\n## Output\n")
 if len(windows) > 1:
     text = windows[-1]
+# The artifact's Exit section follows the Output window (observed on the
+# verb's first field use: the exit heading and token footer rode into the
+# candidate); nothing at or after that heading is the answer.
+text = re.split(r"\n## Exit\b", text)[0]
 lines = [line for line in text.splitlines() if line.strip() not in ("```", "```markdown", "```md")]
 anchors = [index for index, line in enumerate(lines) if line.strip() == "## Status"]
 if not anchors:

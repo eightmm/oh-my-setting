@@ -5033,6 +5033,11 @@ EOF
   # Status section in the candidate (plus none from the echoed instructions).
   [ "$(grep -c '^## Status$' "$candidate")" = 1 ] ||
     fail "prompt echo leaked into the candidate: $candidate"
+  # Transport tail is not spec: the artifact's Exit section and token footer
+  # follow the answer (field finding, first live draft) and must not ride.
+  if grep -Eq '^## Exit$|^tokens used$|^model-result: ' "$candidate"; then
+    fail "artifact transport tail leaked into the candidate: $candidate"
+  fi
   [ ! -e "$project/PROJECT.md" ] || fail "draft must never touch PROJECT.md"
 
   # A structureless answer fails closed and keeps the artifact pointer.
@@ -5120,7 +5125,8 @@ EOF
   rm -f "$project/PROJECT.md"
   sed 's|- Required checks: bash tests/greet.sh|- Required checks: grep -q greet src/app.py|' \
     "$intent_dir/intent-good.md" > "$intent_dir/intent-reads.md"
-  sed -i.bak 's|- Scope: src/|- Scope: src/app.py|' "$intent_dir/intent-reads.md" &&
+  # Backticked scope entries are the shape live drafts actually produce.
+  sed -i.bak 's|- Scope: src/|- Scope: `src/app.py`|' "$intent_dir/intent-reads.md" &&
     rm -f "$intent_dir/intent-reads.md.bak"
   "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-reads \
     > "$project/warn-out" 2>&1 ||
