@@ -78,7 +78,7 @@ collect() {
   "$@" > "$BUNDLE/$name" 2>&1 || true
 }
 
-collect repo-state.txt "$ROOT/scripts/repo-state.sh" --repo "$REPO"
+collect repo-state.txt "$ROOT/scripts/state.sh" --repo "$REPO"
 collect state-verify.txt "$ROOT/scripts/state-verify.sh" --repo "$REPO"
 collect task-status.json "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json
 collect journal-status.json "$ROOT/scripts/journal.sh" status --repo "$REPO" --json

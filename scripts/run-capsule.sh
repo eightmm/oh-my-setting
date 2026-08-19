@@ -390,7 +390,7 @@ PY
 
   # Thin-spine join: link this capsule to the active run id when one is set.
   if oms_effective_run_id "$STATE_ROOT" >/dev/null 2>&1; then
-    "$ROOT/scripts/oms-run.sh" link --tool run-capsule --event capture \
+    "$ROOT/scripts/run.sh" link --tool run-capsule --event capture \
       --path "$bundle/capsule.json" --detail "exit $status" >/dev/null 2>&1 || true
   fi
 

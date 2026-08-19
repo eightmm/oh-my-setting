@@ -8,11 +8,11 @@ set -euo pipefail
 # the query layer, not a control layer: writers stay independent and
 # Unix-composable. There is deliberately no orchestrator/god-command here.
 #
-#   id=$(oms-run.sh new)          # mint a run id
+#   id=$(run.sh new)          # mint a run id
 #   export OMS_RUN_ID="$id"       # tools auto-link when this is set
-#   oms-run.sh link --tool X --event E --path P   # manual link (also used by tools)
-#   oms-run.sh show "$id"         # join everything keyed by the run id
-#   oms-run.sh ls                 # recent runs
+#   run.sh link --tool X --event E --path P   # manual link (also used by tools)
+#   run.sh show "$id"         # join everything keyed by the run id
+#   run.sh ls                 # recent runs
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
@@ -34,16 +34,16 @@ INDEX="${OMS_RUN_INDEX:-$STATE_ROOT/.oms/runs/spine.jsonl}"
 
 usage() {
   cat <<'EOF'
-Usage: oms-run.sh new [--note TEXT]
-       oms-run.sh current
-       oms-run.sh link --tool NAME --event NAME [--path PATH] [--run-id ID] [--detail TEXT] [--agent NAME]
-       oms-run.sh show <run_id>
-       oms-run.sh ls [N] [--open]
-       oms-run.sh close [run_id] [--note TEXT]
-       oms-run.sh diff <run_id_a> <run_id_b>
-       oms-run.sh timeline [--since ISO8601|--today] [--limit N] [--agent NAME] [--tool NAME] [--json]
-       oms-run.sh validate [--dir DIR]
-       oms-run.sh capsule [run-capsule args...]
+Usage: run.sh new [--note TEXT]
+       run.sh current
+       run.sh link --tool NAME --event NAME [--path PATH] [--run-id ID] [--detail TEXT] [--agent NAME]
+       run.sh show <run_id>
+       run.sh ls [N] [--open]
+       run.sh close [run_id] [--note TEXT]
+       run.sh diff <run_id_a> <run_id_b>
+       run.sh timeline [--since ISO8601|--today] [--limit N] [--agent NAME] [--tool NAME] [--json]
+       run.sh validate [--dir DIR]
+       run.sh capsule [run-capsule args...]
 
 The run spine: a canonical run_id and an append-only join index
 (.oms/runs/index.jsonl) over the independent run tools.
@@ -126,7 +126,7 @@ cmd_current() {
   [ "$#" -eq 0 ] || fail "current takes no arguments"
   local id
   if ! id="$(oms_effective_run_id "$STATE_ROOT")"; then
-    echo "no current run: no OMS_RUN_ID and no fresh .oms/runs/CURRENT (mint one with: oms-run.sh new)" >&2
+    echo "no current run: no OMS_RUN_ID and no fresh .oms/runs/CURRENT (mint one with: run.sh new)" >&2
     return 3
   fi
   printf '%s\n' "$id"

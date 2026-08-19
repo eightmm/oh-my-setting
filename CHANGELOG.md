@@ -6,6 +6,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## Unreleased
 
+### Changed
+- One spelling per verb. The dispatcher carried five aliases — `run`,
+  `state`, `init`, `thread`, `runtime` each redirected to a longer name —
+  which is the same second entrance this project refuses everywhere else,
+  and two of those long names (`oms-init`, `oms-run`) doubled the marker
+  the `oms` command already provides. The short spelling every caller
+  actually used is now the only one: `oms-init.sh`, `oms-run.sh`,
+  `repo-state.sh`, `agent-thread.sh`, and `runtime-core.sh` become
+  `init.sh`, `run.sh`, `state.sh`, `thread.sh`, and `runtime.sh`, the
+  aliases are gone rather than redirected, and the retired spellings are
+  refused like any unknown tool. The public tool list is unchanged at 69
+  entries. Typed data labels keep their names (`state-verify`'s
+  `runtime-core` finding family, `inbox`'s `runtime-core-unavailable`
+  key): they are consumer contracts, not command names.
+
 ### Added
 - Shadow judgments: `oms autopilot shadow` runs the re-entry gate's exact
   decision sequence read-only and appends one typed
@@ -1979,7 +1994,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   Generated `PROJECT.md` now leads its notes with gotchas — the non-obvious
   decisions an agent would otherwise get wrong — rather than restating what the
   repo already shows.
-- Cross-agent conversations (`agent-thread.sh`, `oms thread`) and one verb to
+- Cross-agent conversations (`thread.sh`, `oms thread`) and one verb to
   use them (`agent-consult.sh`, `oms consult`). Every cross-agent call used to
   be one-shot — the peer answered into an artifact and the next call started
   from nothing — so agents could not exchange context. A thread is an
@@ -2115,7 +2130,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `change-guard.sh` liveness: snapshots stamp a start time (optional
   `OMS_GUARD_PID`), `status` and `oms state` flag an abandoned guard STALE
   (`OMS_GUARD_TTL`), and the snapshot write is atomic.
-- `repo-state.sh --refresh-ci`: opt-in `ci-status record` before reading, so
+- `state.sh --refresh-ci`: opt-in `ci-status record` before reading, so
   the CI section reflects the latest run in one command.
 - CI `install-e2e` job: the real `install.sh` → `update.sh` → `uninstall.sh`
   lifecycle against a throwaway HOME — the installer path was previously only
@@ -2130,7 +2145,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   workers and flags dead-pid orphans (no daemon — the launcher is the writer).
 - `ci-status.sh record`: appends the latest CI conclusion to `.oms/ci.jsonl`
   (deduped by sha); `oms state` shows the latest conclusion for HEAD's branch.
-- `oms init` (`oms-init.sh`): seeds the `.oms/` skeleton + `.gitignore`
+- `oms init` (`init.sh`): seeds the `.oms/` skeleton + `.gitignore`
   (idempotent) and prints a next-actions checklist tailored to the detected
   project type — a first move for an agent landing in a fresh repo.
 - `oms gc` (`gc.sh`): `--dry-run` by default; reclaims aged transient state
@@ -2149,7 +2164,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   auto-injected when delegated via `--plan-task` — so the same reviewer /
   refactorer / test-writer role can drive any of the three providers.
 
-- `repo-state.sh` (`oms state`): one read-only dashboard over all shared `.oms`
+- `state.sh` (`oms state`): one read-only dashboard over all shared `.oms`
   state — active task goal/next, plan tasks by state with stale claims flagged,
   experiment board active/stale, current + open runs, latest artifact rows, and
   change-guard status; `--json` for machines. Answers "what is active, stale,
@@ -2165,8 +2180,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   invokes any harness script by name from any of the three agent CLIs
   (`run` aliases `oms-run`); `oms list` prints every tool with its one-line
   purpose. Linked/unlinked/doctored with the install.
-- `oms-run.sh new` writes a repo-scoped `.oms/runs/CURRENT` pointer and
-  `oms-run.sh current` resolves the effective run id; `link` and the
+- `run.sh new` writes a repo-scoped `.oms/runs/CURRENT` pointer and
+  `run.sh current` resolves the effective run id; `link` and the
   run-ledger/run-capsule/experiment-board auto-links fall back to a fresh
   CURRENT when `OMS_RUN_ID` is unset, so a second agent process joins the
   active run without env plumbing. Stale pointers expire
@@ -2205,10 +2220,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `project-doctor.sh`: flags an empty `## Commands`/`## Verification` once
   `PROJECT.md` is past draft.
 - `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, this changelog.
-- `oms-run.sh close [id]` + `ls --open`: mark a run terminal and list
+- `run.sh close [id]` + `ls --open`: mark a run terminal and list
   open-vs-closed runs; close also clears a `CURRENT` pointer naming the run so
   later tool events stop auto-joining a finished run.
-- `oms-run.sh timeline --agent NAME` / `--tool NAME`: filter the merged
+- `run.sh timeline --agent NAME` / `--tool NAME`: filter the merged
   cross-stream timeline by who or which tool (case-insensitive substring).
 - `experiment-board.sh list --stale` / `--owner NAME`: surface TTL-expired
   (reclaimable) claims and filter by claimer, instead of staleness only
@@ -2802,7 +2817,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `--plan-task` verify hydration no longer silently drops when run from a
   subdirectory; the hydrated-brief temp file no longer leaks on a hydration
   failure.
-- `oms-run.sh ls --open`: applied the open filter before taking the last N,
+- `run.sh ls --open`: applied the open filter before taking the last N,
   hiding older still-open runs — now filters first, then slices.
 - CI (`test.yml`): added a static bash-4ism gate (`declare -A`/`mapfile`/case-
   conversion) and put `scripts/oms` under shellcheck and macOS `bash -n`, since

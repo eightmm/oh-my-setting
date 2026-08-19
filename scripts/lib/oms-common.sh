@@ -25,7 +25,7 @@ oms_seed_local_agent_files() {
 }
 
 # Effective run id for auto-linking: explicit OMS_RUN_ID wins; otherwise the
-# repo's .oms/runs/CURRENT pointer (written by oms-run.sh new) when it is
+# repo's .oms/runs/CURRENT pointer (written by run.sh new) when it is
 # fresh. A stale pointer must not misjoin unrelated later work, so it expires
 # after OMS_RUN_CURRENT_TTL seconds (default 86400, same as board claims).
 # Prints nothing and returns nonzero when neither applies.

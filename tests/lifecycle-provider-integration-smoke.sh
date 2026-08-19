@@ -79,7 +79,7 @@ PY
 pending="$($ROOT/scripts/approval-inbox.sh --repo "$TMP/repo" request \
   --attempt "$outer" --action patch-land --object-id patch:pending \
   --summary 'Review pending patch')"
-"$ROOT/scripts/repo-state.sh" --repo "$TMP/repo" --json > "$TMP/state.json"
+"$ROOT/scripts/state.sh" --repo "$TMP/repo" --json > "$TMP/state.json"
 "$ROOT/scripts/inbox.sh" --repo "$TMP/repo" --json > "$TMP/inbox.json"
 python3 - "$TMP/state.json" "$TMP/inbox.json" "$pending" <<'PY' || fail "operation state is absent from shared views"
 import json, sys

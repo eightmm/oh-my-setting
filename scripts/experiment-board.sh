@@ -218,7 +218,7 @@ PY
   fi
   # Thin-spine join: link this lifecycle event to the active run id when set.
   if oms_effective_run_id "$STATE_ROOT" >/dev/null 2>&1; then
-    "$ROOT/scripts/oms-run.sh" link --tool experiment-board --event "$status" \
+    "$ROOT/scripts/run.sh" link --tool experiment-board --event "$status" \
       --detail "$ID" >/dev/null 2>&1 || true
   fi
   case "$status" in

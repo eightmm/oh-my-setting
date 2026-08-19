@@ -64,7 +64,7 @@ Options:
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).
   --thread ID          Record every answer in a cross-agent thread and give the
-                       providers the conversation so far (agent-thread.sh).
+                       providers the conversation so far (thread.sh).
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Debate rounds exchange answers only;

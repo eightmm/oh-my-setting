@@ -223,5 +223,5 @@ PY
 fi
 
 [ -n "$out" ] || exit 0
-printf '[oms resume] %s\n%s- more: oms repo-state\n' "$(basename "$cwd")" "$out"
+printf '[oms resume] %s\n%s- more: oms state\n' "$(basename "$cwd")" "$out"
 exit 0

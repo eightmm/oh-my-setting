@@ -2527,7 +2527,7 @@ for row in rows:
         assert "covers" not in row, row
 PY
     fail "verify receipt covers are wrong: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
-  "$ROOT/scripts/runtime-core.sh" --repo "$project" envelope show > "$project/envelope.json" ||
+  "$ROOT/scripts/runtime.sh" --repo "$project" envelope show > "$project/envelope.json" ||
     fail "envelope show failed"
   python3 - "$project/envelope.json" <<'PY' ||
 import json, sys
@@ -9694,7 +9694,7 @@ test_debate_prompt_sanitizes_sensitive_quoted_lines() {
 test_oms_run_spine_links_and_joins() {
   local d="$TMP/oms-run-spine"
   local index="$d/.oms/runs/spine.jsonl"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local id
 
   mkdir -p "$d"
@@ -9720,7 +9720,7 @@ test_oms_run_spine_links_and_joins() {
 test_oms_run_auto_link_from_capsule() {
   local d="$TMP/oms-run-autolink"
   local spine="$d/.oms/runs/spine.jsonl"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local id
 
   make_committed_repo "$d"
@@ -9734,14 +9734,14 @@ test_oms_run_auto_link_from_capsule() {
 }
 
 test_oms_run_unknown_subcommand_fails() {
-  if "$ROOT/scripts/oms-run.sh" bogus >/dev/null 2>&1; then
+  if "$ROOT/scripts/run.sh" bogus >/dev/null 2>&1; then
     fail "unknown subcommand should fail"
   fi
 }
 
 test_oms_run_validate_detects_malformed_jsonl() {
   local d="$TMP/oms-run-validate"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
 
   mkdir -p "$d/.oms/runs"
   printf '%s\n' '{"schema":1,"run_id":"r","tool":"t","event":"e"}' > "$d/.oms/runs/spine.jsonl"
@@ -9756,7 +9756,7 @@ test_oms_run_validate_detects_malformed_jsonl() {
 test_oms_run_diff_compares_capsules() {
   local d="$TMP/oms-run-diff"
   local spine="$d/.oms/runs/spine.jsonl"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local cap="$ROOT/scripts/run-capsule.sh"
   local a b out
 
@@ -9820,7 +9820,7 @@ EOF
 
 test_oms_run_timeline_merges_streams() {
   local d="$TMP/timeline"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local out
 
   mkdir -p "$d/.oms/runs" "$d/.oms/artifacts" "$d/docs"
@@ -10226,11 +10226,11 @@ test_run_state_anchors_to_git_root_from_subdir() {
   make_committed_repo "$project"
   mkdir -p "$project/sub"
 
-  id="$(cd "$project/sub" && env -u OMS_RUN_ID "$ROOT/scripts/oms-run.sh" new 2>/dev/null)"
+  id="$(cd "$project/sub" && env -u OMS_RUN_ID "$ROOT/scripts/run.sh" new 2>/dev/null)"
   [ -f "$project/.oms/runs/spine.jsonl" ] || fail "spine should land at the git root, not the subdir"
   [ -f "$project/.oms/.gitignore" ] || fail "first run-tool write should drop the .oms/.gitignore guard"
   assert_not_exists "$project/sub/.oms"
-  (cd "$project/sub" && "$ROOT/scripts/oms-run.sh" show "$id" >/dev/null 2>&1) ||
+  (cd "$project/sub" && "$ROOT/scripts/run.sh" show "$id" >/dev/null 2>&1) ||
     fail "show should resolve the same spine from a subdirectory"
 
   (cd "$project/sub" && "$ROOT/scripts/experiment-board.sh" claim --id e1 --hypothesis h >/dev/null 2>&1) ||
@@ -10317,14 +10317,14 @@ test_validate_separates_the_two_index_families() {
   printf '{"kind": "artifact-resolution", "operation_id": "o", "artifact_id": "a"}\n' \
     > "$project/.oms/artifacts/index.jsonl"
 
-  out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)" ||
+  out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" ||
     fail "both index families should validate: $out"
   printf '%s' "$out" | grep -Fq '0 with errors or invalid rows' ||
     fail "a run-capsule index must not be reported invalid: $out"
 
   # Each family still enforces its own required field.
   printf '{"ts": "2026-01-01T00:00:00Z"}\n' > "$project/.oms/runs/index.jsonl"
-  if out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)"; then
+  if out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)"; then
     fail "a runs index row without an id must be rejected: $out"
   fi
   printf '%s' "$out" | grep -Fq "missing required field 'id'" ||
@@ -10332,7 +10332,7 @@ test_validate_separates_the_two_index_families() {
 
   printf '{"id": "20260101T000000Z-1"}\n' > "$project/.oms/runs/index.jsonl"
   printf '{"operation_id": "o"}\n' > "$project/.oms/artifacts/index.jsonl"
-  if out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)"; then
+  if out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)"; then
     fail "an artifact index row without a kind must be rejected: $out"
   fi
   printf '%s' "$out" | grep -Fq "missing required field 'kind'" ||
@@ -10341,7 +10341,7 @@ test_validate_separates_the_two_index_families() {
 
 test_oms_run_link_records_calling_agent() {
   local d="$TMP/oms-run-agent"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local id
 
   mkdir -p "$d"
@@ -10376,7 +10376,7 @@ sys.exit(0 if d["tasks"]["t1"]["provider"] == "antigravity" else 1)
 
 test_oms_run_current_pointer_joins_and_expires() {
   local d="$TMP/oms-run-current"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local id
   local cur
 
@@ -10431,7 +10431,15 @@ test_oms_dispatcher_lists_and_dispatches() {
   done
   printf '%s' "$out" | grep -Eq '^snapshot ' || fail "oms list should include snapshot"
   "$bin/oms" run-ledger --help >/dev/null 2>&1 || fail "oms should dispatch run-ledger via its symlink"
-  (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run should alias oms-run"
+  (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run door broke"
+  # One spelling per verb: the dispatcher used to accept both a short alias
+  # and a long name for five tools, which is the same shim this project
+  # refuses everywhere else. The long spellings are gone, not redirected.
+  for retired in oms-run oms-init repo-state agent-thread runtime-core; do
+    if "$bin/oms" "$retired" --help >/dev/null 2>&1; then
+      fail "the retired second spelling must not dispatch: $retired"
+    fi
+  done
   # One entrance per capability: the consolidated front doors work, and the
   # retired direct names are refused outright — no compat dispatch.
   "$bin/oms" run capsule --help >/dev/null 2>&1 || fail "oms run capsule door broke"
@@ -10746,7 +10754,7 @@ PY
 
 test_oms_run_close_and_ls_open() {
   local d="$TMP/oms-run-close"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local id
 
   mkdir -p "$d"
@@ -10765,7 +10773,7 @@ test_oms_run_close_and_ls_open() {
 
 test_oms_run_timeline_filters() {
   local d="$TMP/oms-run-tl-filter"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local id
 
   mkdir -p "$d"
@@ -10917,17 +10925,17 @@ json.dump(d, open(p, "w"))
 PY
 
   local text
-  text="$(cd "$project" && "$ROOT/scripts/repo-state.sh")"
+  text="$(cd "$project" && "$ROOT/scripts/state.sh")"
   printf '%s' "$text" | grep -Fq "goal: ship it" || fail "repo-state should show the active task goal"
   printf '%s' "$text" | grep -Fq "actionable now: a1" || fail "repo-state should list actionable tasks"
   printf '%s' "$text" | grep -Fq "STALE claims: a2" || fail "repo-state should flag stale plan claims"
 
   # --json is valid and carries the same facts, and it is invocable via oms state.
-  ( cd "$project" && "$ROOT/scripts/repo-state.sh" --json ) |
+  ( cd "$project" && "$ROOT/scripts/state.sh" --json ) |
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["plan"]["stale"], "stale missing"; assert "a1" in d["plan"]["actionable"], "actionable missing"' ||
-    fail "repo-state --json should be valid and carry plan facts"
+    fail "state --json should be valid and carry plan facts"
   ( cd "$project" && "$ROOT/scripts/oms" state ) >/dev/null 2>&1 ||
-    fail "oms state alias should dispatch to repo-state"
+    fail "oms state should dispatch"
 }
 
 test_agent_memory_search() {
@@ -11008,7 +11016,7 @@ test_experiment_board_reclaim_transfers_owner() {
 test_oms_run_ls_open_filters_before_slice() {
   local d="$TMP/ls-open-window"
   local sp="$d/.oms/runs/spine.jsonl"
-  local SH="$ROOT/scripts/oms-run.sh"
+  local SH="$ROOT/scripts/run.sh"
   local i
 
   mkdir -p "$d/.oms/runs"
@@ -11551,7 +11559,7 @@ EOF
   # Dedupe: same sha+conclusion is not re-appended.
   ( cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
   [ "$(grep -c '' "$project/.oms/ci.jsonl")" -eq 1 ] || fail "identical CI result must not be re-appended"
-  ( cd "$project" && "$ROOT/scripts/repo-state.sh" ) | grep -Fq "## CI" || fail "oms state should surface CI"
+  ( cd "$project" && "$ROOT/scripts/state.sh" ) | grep -Fq "## CI" || fail "oms state should surface CI"
 }
 
 test_delegation_liveness_in_state() {
@@ -11564,7 +11572,7 @@ test_delegation_liveness_in_state() {
   printf '{"schema":1,"id":"d2","provider":"claude","role":"","pid":%s,"started_at":"2026-01-02T00:00:00Z","state":"running","worktree":"/y"}\n' "$$" \
     > "$project/.oms/delegations/d2.json"
   local out
-  out="$(cd "$project" && "$ROOT/scripts/repo-state.sh")"
+  out="$(cd "$project" && "$ROOT/scripts/state.sh")"
   printf '%s' "$out" | grep -Eq "d1.*ORPHAN" || fail "a dead-pid delegation must be flagged as ORPHAN"
   printf '%s' "$out" | grep -Eq "d2.*live" || fail "a live-pid delegation must show as live"
 }
@@ -11625,7 +11633,7 @@ test_oms_init_seeds_and_guides() {
   make_committed_repo "$project"
   printf 'import torch\n' > "$project/model.py"
   local out
-  out="$(cd "$project" && "$ROOT/scripts/oms-init.sh")"
+  out="$(cd "$project" && "$ROOT/scripts/init.sh")"
   [ -f "$project/.oms/.gitignore" ] || fail "init should create the .oms/.gitignore guard"
   [ -f "$project/.oms/memory/shared.md" ] || fail "init should seed shared memory"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
@@ -11639,7 +11647,7 @@ test_oms_init_seeds_and_guides() {
   # Idempotent and migratory: a Markdown-only project gets its derived index
   # back on the next init without changing the source.
   rm -f "$project/.oms/memory/memory.sqlite3"
-  ( cd "$project" && "$ROOT/scripts/oms-init.sh" >/dev/null 2>&1 ) || fail "init must be idempotent"
+  ( cd "$project" && "$ROOT/scripts/init.sh" >/dev/null 2>&1 ) || fail "init must be idempotent"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
     fail "init should migrate an existing Markdown-only memory"
 }
@@ -11649,7 +11657,7 @@ test_gc_closes_stale_open_run() {
 
   make_committed_repo "$project"
   local rid
-  rid="$(cd "$project" && "$ROOT/scripts/oms-run.sh" new)"
+  rid="$(cd "$project" && "$ROOT/scripts/run.sh" new)"
   # Backdate every spine event so the run reads as abandoned.
   python3 - "$project/.oms/runs/spine.jsonl" <<'PY'
 import json, sys
@@ -11661,10 +11669,10 @@ PY
   local out
   out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
   printf '%s' "$out" | grep -Fq "stale-run-close: $rid" || fail "dry-run should report the stale open run"
-  ( cd "$project" && "$ROOT/scripts/oms-run.sh" ls --open | grep -Fq "$rid" ) ||
+  ( cd "$project" && "$ROOT/scripts/run.sh" ls --open | grep -Fq "$rid" ) ||
     fail "dry-run must not close the run"
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
-  ( cd "$project" && "$ROOT/scripts/oms-run.sh" ls | grep -F "$rid" | grep -Fq "closed" ) ||
+  ( cd "$project" && "$ROOT/scripts/run.sh" ls | grep -F "$rid" | grep -Fq "closed" ) ||
     fail "gc --apply should append a close event for the stale run"
 }
 
@@ -11893,10 +11901,10 @@ json.dump(d, open(p, "w"))
 PY
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
   local out
-  out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo .' "$ROOT/scripts/repo-state.sh")"
+  out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo .' "$ROOT/scripts/state.sh")"
   printf '%s' "$out" | grep -Fq "STALE review" || fail "repo-state should flag the stale review"
   printf '%s' "$out" | grep -Fq "Change-guard: ACTIVE (STALE" || fail "repo-state should flag the stale guard"
-  ( cd "$project" && "$ROOT/scripts/repo-state.sh" --repo . --json ) |
+  ( cd "$project" && "$ROOT/scripts/state.sh" --repo . --json ) |
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["plan"]["stale_review"][0]["id"]=="t1"' ||
     fail "stale review should be in the JSON view"
 }
@@ -11952,7 +11960,7 @@ test_oms_run_new_leaves_no_pointer_residue() {
   local project="$TMP/run-pointer"
 
   make_committed_repo "$project"
-  ( cd "$project" && "$ROOT/scripts/oms-run.sh" new >/dev/null )
+  ( cd "$project" && "$ROOT/scripts/run.sh" new >/dev/null )
   [ -f "$project/.oms/runs/CURRENT" ] || fail "new should write the CURRENT pointer"
   # tmp+mv must not leave CURRENT.* temp files behind.
   find "$project/.oms/runs" -maxdepth 1 -name 'CURRENT.*' | grep -q . &&
@@ -11972,7 +11980,7 @@ printf '[{"status":"completed","conclusion":"failure","workflowName":"test","hea
 EOF
   chmod +x "$bin/gh"
   local out
-  out="$(cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/repo-state.sh" --repo . --refresh-ci)"
+  out="$(cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/state.sh" --repo . --refresh-ci)"
   printf '%s' "$out" | grep -Fq "failure" || fail "--refresh-ci should surface the recorded CI conclusion"
   assert_file_contains "$project/.oms/ci.jsonl" '"conclusion": "failure"'
 }
@@ -13445,12 +13453,12 @@ test_oms_run_validate_flags_schema_drift() {
   make_committed_repo "$project"
   mkdir -p "$project/.oms/runs"
   printf '{"schema":1,"run_id":"r","tool":"t","event":"new"}\n' > "$project/.oms/runs/spine.jsonl"
-  ( cd "$project" && "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 ) ||
     fail "a clean schema-1 spine should validate"
   # A row below the family's expected schema is drift (nonzero + DRIFT tag).
   printf '{"schema":0,"run_id":"r2","tool":"t","event":"new"}\n' >> "$project/.oms/runs/spine.jsonl"
   local out
-  out="$(cd "$project" && "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)" && \
+  out="$(cd "$project" && "$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" && \
     fail "schema drift must make validate exit nonzero"
   printf '%s' "$out" | grep -Fq "DRIFT" || fail "validate should tag the drifted family"
 }
@@ -13499,7 +13507,7 @@ test_repo_state_json_declares_schema() {
   local project="$TMP/repo-state-schema"
 
   make_committed_repo "$project"
-  ( cd "$project" && "$ROOT/scripts/repo-state.sh" --json ) | python3 -c '
+  ( cd "$project" && "$ROOT/scripts/state.sh" --json ) | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d.get("schema") == 1, "missing schema marker: %r" % d.get("schema")
@@ -13572,7 +13580,7 @@ test_oms_run_timeline_json() {
   mkdir -p "$project/.oms/runs"
   printf '{"schema":1,"run_id":"r1","tool":"t","event":"new","ts":"2026-07-23T00:00:00Z"}\n' \
     > "$project/.oms/runs/spine.jsonl"
-  out="$(cd "$project" && "$ROOT/scripts/oms-run.sh" timeline --json)" ||
+  out="$(cd "$project" && "$ROOT/scripts/run.sh" timeline --json)" ||
     fail "timeline --json should succeed"
   printf '%s' "$out" | python3 -c '
 import json, sys
@@ -13781,14 +13789,14 @@ test_oms_init_reports_missing_project_rules() {
   local out
 
   make_committed_repo "$project"
-  out="$("$ROOT/scripts/oms-init.sh" --repo "$project")" || fail "oms init should succeed"
+  out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
   printf '%s' "$out" | grep -Fq 'rules=missing' ||
     fail "oms init should report missing project rules: $out"
   printf '%s' "$out" | grep -Fq 'No project rules yet' ||
     fail "oms init should name applying a template as the next action: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
-  out="$("$ROOT/scripts/oms-init.sh" --repo "$project")"
+  out="$("$ROOT/scripts/init.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'rules=present' ||
     fail "oms init should see applied rules: $out"
   printf '%s' "$out" | grep -Fq 'spec=draft' ||
@@ -13798,7 +13806,7 @@ test_oms_init_reports_missing_project_rules() {
   local plain="$TMP/init-unmanaged"
   make_committed_repo "$plain"
   printf '# my own rules\n' > "$plain/AGENTS.md"
-  out="$("$ROOT/scripts/oms-init.sh" --repo "$plain")"
+  out="$("$ROOT/scripts/init.sh" --repo "$plain")"
   printf '%s' "$out" | grep -Fq 'rules=missing' ||
     fail "a file without a managed block is not applied rules: $out"
 }
@@ -13815,7 +13823,7 @@ test_oms_init_hides_agent_files_after_a_late_git_init() {
   git -C "$project" status --porcelain | grep -Fq 'AGENTS.md' ||
     fail "precondition: agent files should start exposed after a late git init"
 
-  out="$("$ROOT/scripts/oms-init.sh" --repo "$project")" || fail "oms init should succeed"
+  out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
   printf '%s' "$out" | grep -Fq 'hid the agent files from git' ||
     fail "oms init should report hiding the agent files: $out"
   out="$(git -C "$project" status --porcelain)"
@@ -13823,7 +13831,7 @@ test_oms_init_hides_agent_files_after_a_late_git_init() {
 
   "$ROOT/scripts/apply-project-template.sh" general "$optout" >/dev/null
   git -C "$optout" init -b main >/dev/null
-  "$ROOT/scripts/oms-init.sh" --repo "$optout" --no-private >/dev/null
+  "$ROOT/scripts/init.sh" --repo "$optout" --no-private >/dev/null
   git -C "$optout" status --porcelain | grep -Fq 'AGENTS.md' ||
     fail "--no-private must leave the agent files visible"
 }
@@ -13833,12 +13841,12 @@ test_repo_state_reports_the_project_harness() {
   local out
 
   make_committed_repo "$project"
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'Project harness: none' ||
     fail "a repo with no harness should say so: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'rules: general' ||
     fail "state should report the applied styles: $out"
   printf '%s' "$out" | grep -Fq 'spec: PROJECT.md draft' ||
@@ -13848,11 +13856,11 @@ test_repo_state_reports_the_project_harness() {
   fi
 
   "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'visible to git (run: oms project-private apply)' ||
     fail "state should surface exposed agent files: $out"
 
-  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+  "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
 h = json.load(sys.stdin)["harness"]
 assert h["rules"] == "present", h
@@ -13869,13 +13877,13 @@ test_repo_state_does_not_nag_about_hand_written_rules() {
 
   make_committed_repo "$project"
   printf '# hand-written rules\n' > "$project/AGENTS.md"
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'hand-written (no oh-my-setting block)' ||
     fail "state should report hand-written agent rules as such: $out"
   if printf '%s' "$out" | grep -Fq 'apply-project-template'; then
     fail "state must not push a template onto a repo with its own agent rules"
   fi
-  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+  "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
 h = json.load(sys.stdin)["harness"]
 assert h["rules"] == "unmanaged", h
@@ -13905,20 +13913,20 @@ test_agent_thread_records_a_cross_agent_conversation() {
   local id out marker_count
 
   make_committed_repo "$project"
-  id="$("$ROOT/scripts/agent-thread.sh" --repo "$project" new --topic "loader sharding")"
+  id="$("$ROOT/scripts/thread.sh" --repo "$project" new --topic "loader sharding")"
   [ -n "$id" ] || fail "new should print a thread id"
-  [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$id" ] ||
+  [ "$("$ROOT/scripts/thread.sh" --repo "$project" current)" = "$id" ] ||
     fail "a new thread should become current"
 
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" append --role question \
+  "$ROOT/scripts/thread.sh" --repo "$project" append --role question \
     --text "map-style or iterable?" >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" append --role answer \
+  "$ROOT/scripts/thread.sh" --repo "$project" append --role answer \
     --text "map-style; shard by file for streaming" --provider codex --model m1 >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" append --role answer \
+  "$ROOT/scripts/thread.sh" --repo "$project" append --role answer \
     --text "agree, but watch DDP worker duplication" --provider antigravity >/dev/null
 
   # The point of a thread: one context that carries every provider's answer.
-  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" context)"
+  out="$("$ROOT/scripts/thread.sh" --repo "$project" context)"
   printf '%s' "$out" | grep -Fq 'map-style; shard by file' ||
     fail "context should carry the first answer: $out"
   printf '%s' "$out" | grep -Fq 'watch DDP worker duplication' ||
@@ -13938,7 +13946,7 @@ test_agent_thread_records_a_cross_agent_conversation() {
   [ "$marker_count" = 2 ] ||
     fail "expected exactly the two answer turns spotlighted, got $marker_count: $out"
 
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+  "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d["schema"] == 1, d
@@ -13953,18 +13961,18 @@ test_agent_thread_refuses_sensitive_turns() {
   local project="$TMP/thread-sensitive"
 
   make_committed_repo "$project"
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id t1 >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id t1 >/dev/null
   # A turn is replayed into other providers' prompts, so it must be gated like
   # shared memory is.
-  if "$ROOT/scripts/agent-thread.sh" --repo "$project" --id t1 append --role note \
+  if "$ROOT/scripts/thread.sh" --repo "$project" --id t1 append --role note \
     --text "export api_ke""y=s""k-abcdefghijklmnopqr" >/dev/null 2>&1; then
     fail "a secret-looking turn must be refused"
   fi
-  if "$ROOT/scripts/agent-thread.sh" --repo "$project" --id t1 append --role note \
+  if "$ROOT/scripts/thread.sh" --repo "$project" --id t1 append --role note \
     --text "results live in /hom""e/someone/private/run" >/dev/null 2>&1; then
     fail "a private path must be refused"
   fi
-  if "$ROOT/scripts/agent-thread.sh" --repo "$project" show --id ../escape >/dev/null 2>&1; then
+  if "$ROOT/scripts/thread.sh" --repo "$project" show --id ../escape >/dev/null 2>&1; then
     fail "an id escaping the threads dir must be refused"
   fi
   [ "$(wc -l < "$project/.oms/threads/t1.jsonl" | tr -d ' ')" = "0" ] ||
@@ -13976,20 +13984,20 @@ test_agent_thread_truncates_and_bounds_context() {
   local i out
 
   make_committed_repo "$project"
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id big >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id big >/dev/null
   python3 -c 'print("y" * 9000)' > "$TMP/thread-big.txt"
-  OMS_THREAD_TURN_BYTES=200 "$ROOT/scripts/agent-thread.sh" --repo "$project" --id big \
+  OMS_THREAD_TURN_BYTES=200 "$ROOT/scripts/thread.sh" --repo "$project" --id big \
     append --role answer --text-file "$TMP/thread-big.txt" --provider codex >/dev/null
   grep -Fq 'truncated: see artifact' "$project/.oms/threads/big.jsonl" ||
     fail "an oversized turn should be truncated, not stored whole"
 
   i=0
   while [ "$i" -lt 6 ]; do
-    "$ROOT/scripts/agent-thread.sh" --repo "$project" --id big append --role note \
+    "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role note \
       --text "turn number $i" >/dev/null
     i=$((i + 1))
   done
-  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" --id big context --turns 2)"
+  out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --turns 2)"
   printf '%s' "$out" | grep -Fq 'turn number 5' ||
     fail "context should keep the newest turns: $out"
   if printf '%s' "$out" | grep -Fq 'turn number 0'; then
@@ -14021,7 +14029,7 @@ test_agent_call_threads_the_exchange() {
   grep -Fq 'first question' "$artifact" ||
     fail "the injected context should contain the earlier question"
 
-  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" --id work show)"
+  out="$("$ROOT/scripts/thread.sh" --repo "$project" --id work show)"
   printf '%s' "$out" | grep -Fq 'first question' ||
     fail "the question should be recorded: $out"
   printf '%s' "$out" | grep -Fq 'answer' ||
@@ -14044,9 +14052,9 @@ test_consult_asks_a_peer_and_keeps_the_thread() {
     fail "consult should succeed: $out"
   printf '%s' "$out" | grep -Fq 'thread: ' || fail "consult should report its thread: $out"
 
-  id="$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)"
+  id="$("$ROOT/scripts/thread.sh" --repo "$project" current)"
   [ -n "$id" ] || fail "consult should leave a current thread"
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+  "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
 import json, sys
 turns = json.load(sys.stdin)["turns"]
 roles = [t["role"] for t in turns]
@@ -14060,7 +14068,7 @@ assert answer.get("provider") != "claude", answer
   ( cd "$project" && PATH="$bin_dir:/usr/bin:/bin" \
     OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
     "$ROOT/scripts/consult.sh" --repo "$project" "and for the test split?" --quiet >/dev/null )
-  [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$id" ] ||
+  [ "$("$ROOT/scripts/thread.sh" --repo "$project" current)" = "$id" ] ||
     fail "a follow-up consult should stay in the same thread"
 }
 
@@ -14084,19 +14092,19 @@ test_repo_state_and_gc_cover_threads() {
   local out
 
   make_committed_repo "$project"
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id keep-open >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id keep-open append \
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id keep-open >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id keep-open append \
     --role answer --text "stay" --provider codex >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id done-thread >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id done-thread close \
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id done-thread >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id done-thread close \
     --summary "resolved" >/dev/null
 
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'Cross-agent threads' ||
     fail "state should surface open threads: $out"
   printf '%s' "$out" | grep -Fq 'keep-open' ||
     fail "state should name the open thread: $out"
-  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+  "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
 t = json.load(sys.stdin)["threads"]
 assert t["open"] == 1, t
@@ -14118,21 +14126,21 @@ test_thread_stale_triage_stays_advisory() {
   local out
 
   make_committed_repo "$project"
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id abandoned >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id abandoned >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id abandoned append \
     --role question --text "which sampler?" >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+  "$ROOT/scripts/thread.sh" --repo "$project" --id abandoned append \
     --role answer --text "top-p" --provider codex --quality ok >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+  "$ROOT/scripts/thread.sh" --repo "$project" --id abandoned append \
     --role question --text "and the temperature?" >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id abandoned append \
+  "$ROOT/scripts/thread.sh" --repo "$project" --id abandoned append \
     --role answer --text "0.7" --provider antigravity --quality thin >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id undatable >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id undatable append \
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id undatable >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id undatable append \
     --role note --text "no clock" >/dev/null
   # `new` leaves this one current, and a current thread is live by definition.
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id live >/dev/null
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" --id live append \
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id live >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id live append \
     --role note --text "still talking" >/dev/null
 
   # Age is read from the recorded turn timestamps, not from file mtimes, so the
@@ -14150,7 +14158,7 @@ for tid, ts in (("abandoned", "2001-01-01T00:00:00Z"), ("undatable", "whenever")
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 PY
 
-  out="$("$ROOT/scripts/agent-thread.sh" --repo "$project" list --stale)"
+  out="$("$ROOT/scripts/thread.sh" --repo "$project" list --stale)"
   printf '%s' "$out" | grep -Fq 'oms thread close --id abandoned' ||
     fail "--stale should print the exact close command per thread: $out"
   if printf '%s' "$out" | grep -Fq 'undatable'; then
@@ -14160,7 +14168,7 @@ PY
     fail "the current thread must never be reported stale: $out"
   fi
 
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" list --stale --json |
+  "$ROOT/scripts/thread.sh" --repo "$project" list --stale --json |
     python3 -c '
 import json, sys
 threads = json.load(sys.stdin)["threads"]
@@ -14168,7 +14176,7 @@ assert [t["id"] for t in threads] == ["abandoned"], threads
 assert threads[0]["staleness"] == "stale", threads
 ' || fail "list --stale --json should carry only the stale thread"
 
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" stats --json | python3 -c '
+  "$ROOT/scripts/thread.sh" --repo "$project" stats --json | python3 -c '
 import json, sys
 s = json.load(sys.stdin)["stats"]
 assert s["open"] == 3 and s["stale_open"] == 1, s
@@ -14178,7 +14186,7 @@ assert s["answers_rated"] == 2 and s["answers_ok"] == 1, s
 ' || fail "stats should report mechanical utility counts"
 
   # The attention surfaces key on the abandoned thread, not on all three.
-  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+  "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
 t = json.load(sys.stdin)["threads"]
 assert t["open"] == 3 and t["stale_open"] == 1, t
@@ -14195,7 +14203,7 @@ assert t["open"] == 3 and t["stale_open"] == 1, t
 
   # Triage is advisory. An open thread is the only record that the exchange
   # happened and there is no reopen path, so no view may close or delete one.
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" list --json | python3 -c '
+  "$ROOT/scripts/thread.sh" --repo "$project" list --json | python3 -c '
 import json, sys
 threads = json.load(sys.stdin)["threads"]
 assert len(threads) == 3, threads
@@ -14350,12 +14358,12 @@ test_repo_state_flags_ci_recorded_for_another_commit() {
   printf '{"schema":1,"ts":"2026-07-20T00:00:00Z","branch":"main","sha":"%s","status":"completed","conclusion":"success"}\n' \
     "$old" > "$project/.oms/ci.jsonl"
 
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'STALE' ||
     fail "CI recorded for another commit should be marked stale: $out"
   printf '%s' "$out" | grep -Fq 'oms state --refresh-ci' ||
     fail "state should name the refresh command: $out"
-  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+  "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
 ci = json.load(sys.stdin)["ci"]
 assert ci["fresh"] is False, ci
@@ -14364,11 +14372,11 @@ assert ci["current_sha"], ci
 
   printf '{"schema":1,"ts":"2026-07-21T00:00:00Z","branch":"main","sha":"%s","status":"completed","conclusion":"success"}\n' \
     "$head" >> "$project/.oms/ci.jsonl"
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   if printf '%s' "$out" | grep -Fq 'STALE'; then
     fail "CI recorded for HEAD must not be marked stale: $out"
   fi
-  "$ROOT/scripts/repo-state.sh" --repo "$project" --json | python3 -c '
+  "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
 assert json.load(sys.stdin)["ci"]["fresh"] is True
 ' || fail "CI for HEAD should be fresh"
@@ -14541,7 +14549,7 @@ EOF
   printf '%s' "$out" | grep -Fq 'did not really answer (thin); asking antigravity' ||
     fail "consult should report the fallback: $out"
 
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+  "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
 import json, sys
 turns = json.load(sys.stdin)["turns"]
 roles = [t["role"] for t in turns]
@@ -14578,7 +14586,7 @@ EOF
   if printf '%s' "$out" | grep -Fq 'asking antigravity'; then
     fail "an explicitly pinned peer must not be second-guessed: $out"
   fi
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+  "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
 import json, sys
 answers = [t for t in json.load(sys.stdin)["turns"] if t["role"] == "answer"]
 assert [a["provider"] for a in answers] == ["codex"], answers
@@ -14630,7 +14638,7 @@ PY
     "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
   git -C "$project" apply --binary "$patch"
 
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   printf '%s' "$out" | grep -Fq 'Interrupted landings (1)' ||
     fail "state should show the outstanding landing: $out"
 
@@ -14646,7 +14654,7 @@ PY
     fail "recovery must be idempotent: $out"
   [ "$(grep -c 'patch-land' "$project/.oms/artifacts/index.jsonl")" = "1" ] ||
     fail "recovery must not duplicate the lineage row"
-  out="$("$ROOT/scripts/repo-state.sh" --repo "$project")"
+  out="$("$ROOT/scripts/state.sh" --repo "$project")"
   if printf '%s' "$out" | grep -Fq 'Interrupted landings'; then
     fail "a recovered landing should no longer be outstanding: $out"
   fi
@@ -14698,7 +14706,7 @@ test_state_validator_rejects_parseable_but_invalid_state() {
     > "$project/.oms/plan/tasks.json"
 
   rc=0
-  out="$("$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" 2>&1)" || rc=$?
+  out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "invalid state should exit 1, got $rc"
   printf '%s' "$out" | grep -Fq "missing required field 'run_id'" ||
     fail "a spine row without run_id should be flagged: $out"
@@ -14728,7 +14736,7 @@ test_state_validator_accepts_healthy_state() {
     > "$project/.oms/plan/tasks.json"
 
   rc=0
-  "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 || rc=$?
+  "$ROOT/scripts/run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "healthy state must not be reported invalid (exit $rc)"
 }
 
@@ -14798,7 +14806,7 @@ EOF
   printf '%s' "$out" | grep -Fq '3/3 target(s) answered, 2 independent model family(ies)' ||
     fail "the panel should report answers and independent families: $out"
 
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" show --json | python3 -c '
+  "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
 import json, sys
 turns = json.load(sys.stdin)["turns"]
 answers = [t for t in turns if t["role"] == "answer"]
@@ -14916,7 +14924,7 @@ import json, sys
 events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
 assert events[-1] == "applied-pending-receipt", events
 PY
-  "$ROOT/scripts/repo-state.sh" --repo "$project" | grep -Fq 'Interrupted landings' ||
+  "$ROOT/scripts/state.sh" --repo "$project" | grep -Fq 'Interrupted landings' ||
     fail "a pending-receipt landing should stay visible in state"
 
   chmod 644 "$project/.oms/artifacts/index.jsonl"
@@ -17164,13 +17172,13 @@ test_thread_appends_are_serialized() {
   local i
 
   make_committed_repo "$project"
-  "$ROOT/scripts/agent-thread.sh" --repo "$project" new --id race >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" new --id race >/dev/null
 
   # A consult panel appends answers concurrently; read-max-then-append without
   # a lock hands two writers the same sequence number.
   i=0
   while [ "$i" -lt 12 ]; do
-    "$ROOT/scripts/agent-thread.sh" --repo "$project" --id race append \
+    "$ROOT/scripts/thread.sh" --repo "$project" --id race append \
       --role note --text "turn $i" >/dev/null 2>&1 &
     i=$((i + 1))
   done
@@ -17191,14 +17199,14 @@ test_thread_pointer_does_not_cross_tasks() {
 
   make_committed_repo "$project"
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "first task" >/dev/null )
-  first="$("$ROOT/scripts/agent-thread.sh" --repo "$project" new --topic "first" )"
-  [ "$("$ROOT/scripts/agent-thread.sh" --repo "$project" current)" = "$first" ] ||
+  first="$("$ROOT/scripts/thread.sh" --repo "$project" new --topic "first" )"
+  [ "$("$ROOT/scripts/thread.sh" --repo "$project" current)" = "$first" ] ||
     fail "the thread should be current for the task that opened it"
 
   # A different task must not inherit the previous task's conversation.
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" close --reason "moving on" >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "second task" >/dev/null )
-  if "$ROOT/scripts/agent-thread.sh" --repo "$project" current >/dev/null 2>&1; then
+  if "$ROOT/scripts/thread.sh" --repo "$project" current >/dev/null 2>&1; then
     fail "a new task must not inherit the previous task's thread"
   fi
 }

@@ -439,7 +439,7 @@ PY
     removed=$((removed + 1))
     if [ "$DRY_RUN" = 0 ]; then
       OMS_RUN_INDEX="$OMS/runs/spine.jsonl" \
-        "$ROOT/scripts/oms-run.sh" close --run-id "$rid" --note "gc: no event in ${DAYS}d" >/dev/null 2>&1 ||
+        "$ROOT/scripts/run.sh" close --run-id "$rid" --note "gc: no event in ${DAYS}d" >/dev/null 2>&1 ||
         echo "warning: gc: could not close run $rid" >&2
     fi
   done
@@ -463,7 +463,7 @@ EOF
 #    a dry run reports the close and the capsule sweep of the NEXT gc.
 open_ids=""
 if [ -f "$OMS/runs/spine.jsonl" ]; then
-  open_ids="$(OMS_RUN_INDEX="$OMS/runs/spine.jsonl" "$ROOT/scripts/oms-run.sh" ls --open 2>/dev/null | awk '{print $1}')"
+  open_ids="$(OMS_RUN_INDEX="$OMS/runs/spine.jsonl" "$ROOT/scripts/run.sh" ls --open 2>/dev/null | awk '{print $1}')"
 fi
 if [ -d "$OMS/runs" ]; then
   while IFS= read -r d; do

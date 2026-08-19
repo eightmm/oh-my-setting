@@ -1384,7 +1384,7 @@ PY
 )" || { echo "warn: run-state audit failed"; return 0; }
   bad="$(oms_strip_cr "$bad")"
   if [ "${bad:-0}" -gt 0 ]; then
-    echo "warn: $bad run-state JSONL file(s) have malformed lines (run oms-run.sh validate)"
+    echo "warn: $bad run-state JSONL file(s) have malformed lines (run run.sh validate)"
   else
     echo "ok: run-state JSONL"
   fi

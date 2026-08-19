@@ -52,7 +52,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-inbox.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 read_state() {
-  "$ROOT/scripts/repo-state.sh" --repo "$REPO" --json > "$tmp/state.json"
+  "$ROOT/scripts/state.sh" --repo "$REPO" --json > "$tmp/state.json"
 }
 
 read_state

@@ -23,8 +23,8 @@ Check the CLI.
 EOF
 git -C "$tmp" add PROJECT.md
 git -C "$tmp" commit -qm fixture
-"$ROOT/scripts/runtime-core.sh" --repo "$tmp" envelope show | python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["schema"]==2'
-"$ROOT/scripts/runtime-core.sh" --repo "$tmp" failure classify 'verification failed' | python3 -c 'import json,sys; assert json.load(sys.stdin)["code"]=="verifier_failed"'
-"$ROOT/scripts/runtime-core.sh" --repo "$tmp" backend run trusted-local --timeout-seconds 10 -- python3 -c 'print("ok")' | python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["exit"]==0'
+"$ROOT/scripts/runtime.sh" --repo "$tmp" envelope show | python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["schema"]==2'
+"$ROOT/scripts/runtime.sh" --repo "$tmp" failure classify 'verification failed' | python3 -c 'import json,sys; assert json.load(sys.stdin)["code"]=="verifier_failed"'
+"$ROOT/scripts/runtime.sh" --repo "$tmp" backend run trusted-local --timeout-seconds 10 -- python3 -c 'print("ok")' | python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["exit"]==0'
 
 echo "runtime-core-smoke: ok"

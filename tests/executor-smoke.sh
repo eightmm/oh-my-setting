@@ -175,7 +175,7 @@ EOF
   artifact="$(find "$repo/run-artifacts" -type f -name 'codex-*.md' | head -n 1)"
   contains "$artifact" 'EXECUTOR-RUN-MARKER'; contains "$artifact" 'executor_id: run1'
   "$ROOT/scripts/agent-executor.sh" show --repo "$repo" --id run1 | grep -Fq '"state": "frozen"' || fail "dry-run changed state"
-  "$ROOT/scripts/repo-state.sh" --repo "$repo" --json | python3 -c \
+  "$ROOT/scripts/state.sh" --repo "$repo" --json | python3 -c \
     'import json,sys;d=json.load(sys.stdin); assert any(x["id"]=="run1" and x["state"]=="frozen" for x in d["executors"])' ||
     fail "repo state should surface frozen executors"
   rc=0

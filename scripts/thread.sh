@@ -39,15 +39,15 @@ STALE=0
 
 usage() {
   cat <<'EOF'
-Usage: agent-thread.sh new     [--id ID] [--topic TEXT] [--repo PATH]
-       agent-thread.sh append  [--id ID] --role ROLE (--text TEXT | --text-file F)
+Usage: thread.sh new     [--id ID] [--topic TEXT] [--repo PATH]
+       thread.sh append  [--id ID] --role ROLE (--text TEXT | --text-file F)
                                [--provider P] [--model M] [--artifact PATH]
-       agent-thread.sh context [--id ID] [--max-bytes N] [--turns N]
-       agent-thread.sh show    [--id ID] [--json]
-       agent-thread.sh list    [--all] [--stale] [--json]
-       agent-thread.sh stats   [--json]
-       agent-thread.sh current
-       agent-thread.sh close   [--id ID] [--summary TEXT]
+       thread.sh context [--id ID] [--max-bytes N] [--turns N]
+       thread.sh show    [--id ID] [--json]
+       thread.sh list    [--all] [--stale] [--json]
+       thread.sh stats   [--json]
+       thread.sh current
+       thread.sh close   [--id ID] [--summary TEXT]
 
 A shared conversation any agent CLI can join. Turns live in
 .oms/threads/<id>.jsonl (append-only); `context` renders the recent turns for

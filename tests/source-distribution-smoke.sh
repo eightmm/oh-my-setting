@@ -272,7 +272,7 @@ for command in agent-call agent-run agent-executor peer-ask peer-review peer-del
   printf '%s' "$help" | grep -Fq 'ultra' || fail "$command help omits ultra effort"
 done
 
-if grep -Fq 'oms run-capsule' "$ROOT/scripts/oms-init.sh"; then
+if grep -Fq 'oms run-capsule' "$ROOT/scripts/init.sh"; then
   fail "oms init still recommends the removed run-capsule front door"
 fi
 if grep -Fq 'tier follows the work' "$ROOT/scripts/agent-run.sh"; then

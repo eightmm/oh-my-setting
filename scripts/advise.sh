@@ -44,7 +44,7 @@ Options:
   --prompt TEXT        Decision context to review.
   --prompt-file PATH   Decision context from a file.
   --thread ID          Record the advice in a cross-agent thread and give the
-                       advisor the conversation so far (agent-thread.sh).
+                       advisor the conversation so far (thread.sh).
   --session            Attach a mechanical digest of the calling agent's
                        current session (session-handoff.sh), so the advisor
                        reads the history behind the decision instead of only

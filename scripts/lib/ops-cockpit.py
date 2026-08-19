@@ -187,7 +187,7 @@ def count_priorities(items: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 def build_report(repo: str, limit: int) -> Dict[str, Any]:
-    state = read_surface("repo-state.sh", ["--repo", repo, "--json"])
+    state = read_surface("state.sh", ["--repo", repo, "--json"])
     inbox = read_surface("inbox.sh", ["--repo", repo, "--json"])
     telemetry = read_surface(
         "artifact-index.sh",

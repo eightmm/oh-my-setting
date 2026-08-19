@@ -49,7 +49,7 @@ printf '*\n' > "$REPO/.oms/.gitignore"
 git -C "$REPO" add PROJECT.md
 git -C "$REPO" commit -qm fixture
 
-"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show > "$TMP/envelope.json"
+"$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show > "$TMP/envelope.json"
 python3 - "$TMP/envelope.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -58,7 +58,7 @@ assert row["evidence"]["counts"].get("missing", 0) >= 1
 assert row["next_actions"]
 PY
 
-"$ROOT/scripts/repo-state.sh" --repo "$REPO" --json > "$TMP/state.json"
+"$ROOT/scripts/state.sh" --repo "$REPO" --json > "$TMP/state.json"
 python3 - "$TMP/state.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -115,7 +115,7 @@ assert tagged[0]["status"] == "verified"
 assert tagged[0]["scope_digest"] == "0123456789abcdef"
 assert tagged[0]["context_manifest_digest"] == "fedcba9876543210"
 PY
-"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show > "$TMP/envelope2.json"
+"$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show > "$TMP/envelope2.json"
 python3 - "$TMP/envelope2.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -182,7 +182,7 @@ rejected = [row for row in admits if row.get("covers") == ["integration-task-gat
 assert len(rejected) == 1, admits
 assert rejected[0]["status"] == "failed", rejected[0]
 PY
-"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show > "$TMP/envelope3.json"
+"$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show > "$TMP/envelope3.json"
 python3 - "$TMP/envelope3.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))

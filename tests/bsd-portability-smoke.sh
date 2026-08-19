@@ -85,14 +85,14 @@ test_run_tools_survive_a_bsd_userland() {
 
     export OMS_RUNS_DIR="$project/.oms/runs"
     export OMS_RUN_INDEX="$project/.oms/runs/spine.jsonl"
-    id="$("$ROOT/scripts/oms-run.sh" new)"
+    id="$("$ROOT/scripts/run.sh" new)"
     export OMS_RUN_ID="$id"
 
     printf 'fake\n' > ckpt.pt
     "$ROOT/scripts/run-capsule.sh" run --output ckpt.pt --no-ledger \
       -- bash -c 'echo trained' >/dev/null
     "$ROOT/scripts/run-capsule.sh" whence ckpt.pt >/dev/null
-    "$ROOT/scripts/oms-run.sh" show "$id" | grep -Fq run-capsule ||
+    "$ROOT/scripts/run.sh" show "$id" | grep -Fq run-capsule ||
       { echo "FAIL: run spine lost the capsule step" >&2; exit 1; }
 
     printf 'a\nb\nc\n' > train.txt
@@ -107,7 +107,7 @@ test_run_tools_survive_a_bsd_userland() {
 
     OMS_EXPERIMENT_BOARD="$project/.oms/experiments.jsonl" \
       "$ROOT/scripts/experiment-board.sh" claim --id e --hypothesis h >/dev/null
-    "$ROOT/scripts/oms-run.sh" validate --dir "$project/.oms" >/dev/null
+    "$ROOT/scripts/run.sh" validate --dir "$project/.oms" >/dev/null
   ) || fail "run-tools fixture failed"
 }
 

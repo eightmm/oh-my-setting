@@ -205,7 +205,7 @@ validate_target() {
   esac
 }
 
-THREAD_SH="$SCRIPT_DIR/agent-thread.sh"
+THREAD_SH="$SCRIPT_DIR/thread.sh"
 
 resolve_thread() {
   local id

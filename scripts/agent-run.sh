@@ -70,7 +70,7 @@ Options:
   --task               Attach the active task packet (write default).
   --ml-context         Attach the compact ML context digest.
   --thread ID          Join a cross-agent thread: prior turns are injected and
-                       the exchange is appended (agent-thread.sh).
+                       the exchange is appended (thread.sh).
   --operation NAME     Record the work phase in artifacts; it does not select
                        a model.
   --no-memory          Disable --memory (compatibility).

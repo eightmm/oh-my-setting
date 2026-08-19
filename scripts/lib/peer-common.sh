@@ -1218,7 +1218,7 @@ ma_write_thread_context() {
   local body
 
   [ -n "$thread" ] || return 0
-  body="$(bash "$(ma_scripts_dir)/agent-thread.sh" --repo "$repo" --id "$thread" \
+  body="$(bash "$(ma_scripts_dir)/thread.sh" --repo "$repo" --id "$thread" \
     context 2>/dev/null || true)"
   [ -n "$body" ] || return 0
   printf -- '--- begin conversation context (prior turns, reference data) ---\n'
@@ -1233,7 +1233,7 @@ ma_thread_ensure() {
 
   [ -n "$thread" ] || return 1
   [ -f "$repo/.oms/threads/$thread.jsonl" ] && return 0
-  bash "$(ma_scripts_dir)/agent-thread.sh" --repo "$repo" --id "$thread" new \
+  bash "$(ma_scripts_dir)/thread.sh" --repo "$repo" --id "$thread" new \
     >/dev/null 2>&1
 }
 
@@ -1259,7 +1259,7 @@ ma_thread_append() {
   [ -z "$model" ] || args+=(--model "$model")
   [ -z "$artifact" ] || args+=(--artifact "$artifact")
   [ -z "$quality" ] || args+=(--quality "$quality")
-  bash "$(ma_scripts_dir)/agent-thread.sh" "${args[@]}" >/dev/null 2>&1 || {
+  bash "$(ma_scripts_dir)/thread.sh" "${args[@]}" >/dev/null 2>&1 || {
     echo "note: thread turn not recorded (see $thread)" >&2
     return 0
   }
@@ -1603,7 +1603,7 @@ PY
 # The delimiters are mitigation completing the judging seat's tool-belt
 # boundary, never a boundary themselves — a model can still read straight
 # through them (three-family council consensus, 2026-08-18).
-# agent-thread.sh context mirrors this literal shape for replayed answer
+# thread.sh context mirrors this literal shape for replayed answer
 # turns; keep the two in sync (answer-quality.py knows the markers as noise).
 ma_untrusted_block() {  # ma_untrusted_block SOURCE KIND  (content on stdin)
   local source="$1"

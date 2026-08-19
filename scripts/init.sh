@@ -20,7 +20,7 @@ PRIVATE="${OH_MY_SETTING_PRIVATE_AGENT_FILES:-1}"
 
 usage() {
   cat <<'EOF'
-Usage: oms-init.sh [--repo PATH] [--no-private]
+Usage: init.sh [--repo PATH] [--no-private]
 
 Seed repo-local .oms/ state (idempotent, non-destructive), hide the
 agent-facing files from git, and print a next-actions checklist for an agent

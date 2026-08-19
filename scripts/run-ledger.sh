@@ -490,7 +490,7 @@ oms_with_file_lock "$LEDGER" run_ledger_append_row "$LEDGER" "$row_tmp"
 
 # Thin-spine join: link this ledger row to the active run id when set.
 if [ -n "$effective_run_id" ]; then
-  "$ROOT_LIB/../oms-run.sh" link --tool run-ledger --event append \
+  "$ROOT_LIB/../run.sh" link --tool run-ledger --event append \
     --path "$LEDGER" --detail "exit $status" >/dev/null 2>&1 || true
 fi
 

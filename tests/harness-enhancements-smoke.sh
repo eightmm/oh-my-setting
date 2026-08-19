@@ -176,7 +176,7 @@ PY
     fail "latest-run should not treat resolution events as outcomes"
   fi
 
-  "$ROOT/scripts/repo-state.sh" --repo "$repo" --json > "$TMP/state.json"
+  "$ROOT/scripts/state.sh" --repo "$repo" --json > "$TMP/state.json"
   python3 - "$TMP/state.json" <<'PY' || fail "repo-state JSON status counts are wrong"
 import json, sys
 state = json.load(open(sys.argv[1]))["artifacts"]
@@ -185,7 +185,7 @@ assert state["outcomes_total"] == 3
 assert state["counts"] == {"success": 1, "unresolved": 1, "resolved": 1}
 assert [row["status"] for row in state["latest"]] == ["success", "resolved", "unresolved"]
 PY
-  "$ROOT/scripts/repo-state.sh" --repo "$repo" > "$TMP/state.txt"
+  "$ROOT/scripts/state.sh" --repo "$repo" > "$TMP/state.txt"
   grep -Fq 'success=1 unresolved=1 resolved=1' "$TMP/state.txt" ||
     fail "repo-state text should show artifact status counts"
   grep -Fq 'status=resolved event=evt_fail_a' "$TMP/state.txt" ||
@@ -231,7 +231,7 @@ EOF
   if "$ROOT/scripts/artifact-index.sh" --repo "$malformed_repo" validate >/dev/null 2>&1; then
     fail "validate should reject malformed resolution contracts"
   fi
-  "$ROOT/scripts/repo-state.sh" --repo "$malformed_repo" --json > "$TMP/malformed-state.json"
+  "$ROOT/scripts/state.sh" --repo "$malformed_repo" --json > "$TMP/malformed-state.json"
   python3 - "$TMP/malformed-state.json" <<'PY' || fail "malformed resolution false-greened dashboard state"
 import json, sys
 state = json.load(open(sys.argv[1]))["artifacts"]
@@ -248,7 +248,7 @@ PY
   if "$ROOT/scripts/artifact-index.sh" --repo "$invalid_exit_repo" validate >/dev/null 2>&1; then
     fail "validate should reject a non-integer artifact exit"
   fi
-  "$ROOT/scripts/repo-state.sh" --repo "$invalid_exit_repo" --json > "$TMP/invalid-exit-state.json"
+  "$ROOT/scripts/state.sh" --repo "$invalid_exit_repo" --json > "$TMP/invalid-exit-state.json"
   python3 - "$TMP/invalid-exit-state.json" <<'PY' || fail "invalid exit false-greened dashboard state"
 import json, sys
 state = json.load(open(sys.argv[1]))["artifacts"]
@@ -342,19 +342,19 @@ EOF
     fail "provider append high-water retention should not leave dangling lineage"
 
   printf 'not-json\n' > "$index"
-  "$ROOT/scripts/repo-state.sh" --repo "$repo" --json > "$TMP/corrupt-state.json"
+  "$ROOT/scripts/state.sh" --repo "$repo" --json > "$TMP/corrupt-state.json"
   python3 - "$TMP/corrupt-state.json" <<'PY' || fail "repo-state hid artifact corruption"
 import json, sys
 state = json.load(open(sys.argv[1]))["artifacts"]
 assert state["invalid_rows"] == 1
 assert state["healthy"] is False
 PY
-  "$ROOT/scripts/repo-state.sh" --repo "$repo" > "$TMP/corrupt-state.txt"
+  "$ROOT/scripts/state.sh" --repo "$repo" > "$TMP/corrupt-state.txt"
   grep -Fq 'CORRUPT invalid_rows=1' "$TMP/corrupt-state.txt" ||
     fail "repo-state text should make artifact corruption visible"
 
   printf '%s\n' '{"schema":1,"kind":"call","exit":0}' > "$index"
-  "$ROOT/scripts/repo-state.sh" --repo "$repo" --json > "$TMP/invalid-contract-state.json"
+  "$ROOT/scripts/state.sh" --repo "$repo" --json > "$TMP/invalid-contract-state.json"
   python3 - "$TMP/invalid-contract-state.json" <<'PY' || fail "repo-state false-greened invalid schema-1 outcome"
 import json, sys
 state = json.load(open(sys.argv[1]))["artifacts"]

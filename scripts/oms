@@ -130,7 +130,6 @@ agent-role
 agent-run
 agent-supervisor
 agent-task
-agent-thread
 apply-project-template
 approval-inbox
 artifact-index
@@ -151,14 +150,13 @@ gc
 goal-drive
 herdr-adapter
 inbox
+init
 install-profile
 intent
 job-digest
 journal
 model-doctor
 models
-oms-init
-oms-run
 open-in
 ops-cockpit
 otel-export
@@ -173,19 +171,21 @@ project-doctor
 project-private
 provider-permissions
 remove-project-template
-repo-state
 research-runner
+run
 run-ledger
 run-reconcile
-runtime-core
+runtime
 semantic-eval
 session-handoff
 skill-doctor
 skill-forge
 snapshot
+state
 state-verify
 status
 support-bundle
+thread
 tsp-queue
 uninstall
 update
@@ -199,7 +199,7 @@ patch-admit
 peer-delegate
 peer-review
 research-runner
-runtime-core
+runtime
 update
 "
 
@@ -259,11 +259,6 @@ case "$TOOL" in
     ;;
 esac
 TOOL="${TOOL%.sh}"
-[ "$TOOL" = "run" ] && TOOL="oms-run"
-[ "$TOOL" = "state" ] && TOOL="repo-state"
-[ "$TOOL" = "init" ] && TOOL="oms-init"
-[ "$TOOL" = "thread" ] && TOOL="agent-thread"
-[ "$TOOL" = "runtime" ] && TOOL="runtime-core"
 if ! is_public_tool "$TOOL"; then
   echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2

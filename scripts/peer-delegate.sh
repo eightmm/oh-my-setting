@@ -117,7 +117,7 @@ Options:
   --no-task            Disable task context.
   --no-ml-context      Disable --ml-context (compatibility).
   --thread ID          Join a cross-agent thread: prior turns go into the
-                       worker brief and the outcome is appended (agent-thread.sh).
+                       worker brief and the outcome is appended (thread.sh).
   --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
                        artifact-index rows for lineage. [A-Za-z0-9._-]+.
   --plan-task ID       Couple this delegation to an agent-plan.sh task: on
@@ -848,7 +848,7 @@ print(paths[0] if paths else "")
 ' | tr -d '\r')"
   fi
   [ -z "$first_allowed" ] || context_args+=(--target "$first_allowed")
-  if "$ROOT/scripts/runtime-core.sh" "${context_args[@]}" >/dev/null 2>&1 &&
+  if "$ROOT/scripts/runtime.sh" "${context_args[@]}" >/dev/null 2>&1 &&
     [ -f "$context_manifest_file" ]; then
     CONTEXT_MANIFEST_DIGEST="$(oms_sha256_file "$context_manifest_file" 2>/dev/null || true)"
     CONTEXT_MANIFEST_DIGEST="${CONTEXT_MANIFEST_DIGEST//$'\r'/}"

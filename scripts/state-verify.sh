@@ -65,7 +65,7 @@ trap 'rm -rf "$TMP"' EXIT
 # Delegated engines. Their exit codes are data here, not verdicts: this
 # script re-reports their findings under one summary.
 RUN_VALIDATE_EXIT=0
-"$ROOT/scripts/oms-run.sh" validate --dir "$REPO/.oms" \
+"$ROOT/scripts/run.sh" validate --dir "$REPO/.oms" \
   > "$TMP/run-validate.out" 2>&1 || RUN_VALIDATE_EXIT=$?
 ARTIFACT_EXIT=0
 if [ -f "$REPO/.oms/artifacts/index.jsonl" ]; then
@@ -97,7 +97,7 @@ JOURNAL_STATUS_EXIT=0
   > "$TMP/journal.json" 2>/dev/null || JOURNAL_STATUS_EXIT=$?
 [ "$JOURNAL_STATUS_EXIT" = 0 ] || printf '{}' > "$TMP/journal.json"
 RUNTIME_EXIT=0
-"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show \
+"$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show \
   > "$TMP/runtime.json" 2>/dev/null || RUNTIME_EXIT=$?
 [ "$RUNTIME_EXIT" = 0 ] || printf '{}' > "$TMP/runtime.json"
 

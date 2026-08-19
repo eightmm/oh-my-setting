@@ -15,6 +15,10 @@
   skills. Stored skills under legacy names stay readable. Exempt:
   provider-mandated names (plugin directory layouts) and repo-internal
   files referenced by path (`roles/`, `prompts/`, `config/`).
+- The single PATH entry is `oms`, so its subcommands already sit inside
+  the marker: name them `oms <verb>`, never `oms oms-<verb>`. One spelling
+  per verb — the dispatcher holds no aliases, and the verb is the script
+  filename.
 - Write a behavior regression before changing scripts or install contracts.
 - Keep install, update, repair, and uninstall ownership transitions reversible.
 - Run `bash scripts/check.sh` before commit or push. CI additionally verifies

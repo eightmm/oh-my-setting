@@ -22,7 +22,7 @@ REFRESH_CI=0
 
 usage() {
   cat <<'EOF'
-Usage: repo-state.sh [--repo PATH] [--json]
+Usage: state.sh [--repo PATH] [--json]
 
 Print a read-only dashboard of the shared .oms state for a repo: the active
 task packet, plan tasks by state (stale claims flagged), the experiment board
@@ -91,7 +91,7 @@ APPROVAL_HEALTHY=1
     printf '[]\n' > "$RS_TMP/approvals.json"
   }
 RUNTIME_HEALTHY=1
-"$ROOT/scripts/runtime-core.sh" --repo "$REPO" envelope show \
+"$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show \
   > "$RS_TMP/runtime.json" 2>/dev/null || {
     RUNTIME_HEALTHY=0
     printf '{}\n' > "$RS_TMP/runtime.json"

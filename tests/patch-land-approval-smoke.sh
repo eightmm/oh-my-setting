@@ -931,7 +931,7 @@ if grep -Eq '"event": ?"(complete|abandoned)"' "$receipt_repo/.oms/landings.json
 fi
 grep -Fq '"event": "not-applied-pending-receipt"' "$receipt_repo/.oms/landings.jsonl" ||
   fail "failed approval receipt did not record its retryable state"
-"$ROOT/scripts/oms-run.sh" validate --dir "$receipt_repo/.oms" >/dev/null ||
+"$ROOT/scripts/run.sh" validate --dir "$receipt_repo/.oms" >/dev/null ||
   fail "state validator rejected a retryable not-applied landing receipt"
 
 # A crash can happen after the lineage append and before the terminal landing

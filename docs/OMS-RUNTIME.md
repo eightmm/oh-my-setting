@@ -50,7 +50,7 @@ The additive entrypoint is:
 oms runtime ...
 ```
 
-The underlying script is `scripts/runtime-core.sh`. Additional intent aliases
+The underlying script is `scripts/runtime.sh`. Additional intent aliases
 can compile to the same entrypoint without creating more state writers.
 
 ## Effective TaskEnvelope
@@ -378,7 +378,7 @@ not turn provider names into an unvalidated learned scheduler.
 ## Migration strategy
 
 1. Add the runtime core and keep every existing writer unchanged.
-2. Route `repo-state`, `inbox`, and `state-verify` through shadow projections and
+2. Route `state`, `inbox`, and `state-verify` through shadow projections and
    compare normalized output.
 3. Centralize common schema, hashing, atomic write, and failure vocabulary.
 4. Add criterion-linked evidence and context manifests to delegated calls.

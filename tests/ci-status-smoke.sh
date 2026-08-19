@@ -82,7 +82,7 @@ EOF
 }
 
 ci_json_state() {
-  bash "$ROOT/scripts/repo-state.sh" --repo "$1" --json |
+  bash "$ROOT/scripts/state.sh" --repo "$1" --json |
     python3 -c 'import json, sys; print(json.load(sys.stdin)["ci"]["state"])'
 }
 
@@ -187,7 +187,7 @@ test_run_for_a_prior_sha_is_history_not_a_current_result() {
 
   [ "$(ci_json_state "$repo")" = pending ] ||
     fail "a pushed HEAD with no run of its own is pending"
-  out="$(bash "$ROOT/scripts/repo-state.sh" --repo "$repo")"
+  out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
   printf '%s' "$out" | grep -Fq "unknown/pending" ||
     fail "state should report the missing run for HEAD: $out"
   printf '%s' "$out" | grep -Fq "history:" ||
@@ -218,7 +218,7 @@ test_unpushed_head_is_named_as_unpushed_everywhere() {
 
   # A repo that has CI says what to do before anything has been recorded.
   [ "$(ci_json_state "$repo")" = unpushed ] || fail "two local commits are unpushed"
-  out="$(bash "$ROOT/scripts/repo-state.sh" --repo "$repo")"
+  out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
   printf '%s' "$out" | grep -Fq "unpushed: 2 commit(s) ahead of origin/main" ||
     fail "state should count the unpushed commits: $out"
   printf '%s' "$out" | grep -Fq "push to get CI" ||
@@ -235,7 +235,7 @@ test_unpushed_head_is_named_as_unpushed_everywhere() {
   grep -Fq "\"sha\": \"$pushed\"" "$repo/.oms/ci.jsonl" ||
     fail "the run that did happen should still be recorded"
 
-  out="$(bash "$ROOT/scripts/repo-state.sh" --repo "$repo")"
+  out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
   printf '%s' "$out" | grep -Fq "unpushed: 2 commit(s)" ||
     fail "a recorded prior run must not displace the push state: $out"
   printf '%s' "$out" | grep -Fq "history:" || fail "the prior run is history: $out"
@@ -276,7 +276,7 @@ test_completed_run_for_head_is_the_current_result() {
     fail "HEAD's own run is the reported result: $out"
 
   [ "$(ci_json_state "$repo")" = current ] || fail "HEAD's run should read as current"
-  out="$(bash "$ROOT/scripts/repo-state.sh" --repo "$repo")"
+  out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
   printf '%s' "$out" | grep -Fq "completed success" || fail "state should show it: $out"
   if printf '%s' "$out" | grep -Eq "STALE|unpushed|pending"; then
     fail "a run for HEAD is neither stale, unpushed, nor pending: $out"
@@ -309,7 +309,7 @@ test_repo_without_upstream_keeps_the_recorded_vs_head_signal() {
 
   [ "$(ci_json_state "$repo")" = stale ] ||
     fail "without an upstream the recorded row is only known to be stale"
-  out="$(bash "$ROOT/scripts/repo-state.sh" --repo "$repo")"
+  out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
   printf '%s' "$out" | grep -Fq "STALE" ||
     fail "the pre-existing signal should survive: $out"
   printf '%s' "$out" | grep -Fq "oms state --refresh-ci" ||

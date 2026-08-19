@@ -59,7 +59,7 @@ LOG_TAIL_LINES = 20
 LOG_TAIL_LIMIT = 4_000
 OPERATIONS_LIMIT = 20
 TITLE_LIMIT = 160
-# A thread id reaches the verb as argv, so only the shape agent-thread.sh mints
+# A thread id reaches the verb as argv, so only the shape thread.sh mints
 # gets through, and never one that could read as a flag of its own.
 THREAD_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}\Z")
 # The consultation outlives this server: the inner shell is backgrounded so the
@@ -130,7 +130,7 @@ TOOLS = [
             "Complete read-only repository control-plane projection, including"
             " attempts, approvals, plans, runs, artifacts, CI, and recovery."
         ),
-        "argv": ["bash", "scripts/repo-state.sh", "--json"],
+        "argv": ["bash", "scripts/state.sh", "--json"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
@@ -233,7 +233,7 @@ TOOLS = [
             " manifest: stable and edge by exact commit, readiness, and the"
             " apply command. Read-only; nothing here applies an update."
         ),
-        "argv": ["bash", "scripts/runtime-core.sh", "release", "status"],
+        "argv": ["bash", "scripts/runtime.sh", "release", "status"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
@@ -244,7 +244,7 @@ TOOLS = [
             " profiles, required and missing commands, and whether the"
             " selection is configured by a receipt."
         ),
-        "argv": ["bash", "scripts/runtime-core.sh", "profile", "current"],
+        "argv": ["bash", "scripts/runtime.sh", "profile", "current"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
@@ -255,7 +255,7 @@ TOOLS = [
             " action, retryability, and escalation flags, as fail-ledger rows"
             " and typed refusals use them."
         ),
-        "argv": ["bash", "scripts/runtime-core.sh", "failure", "catalog"],
+        "argv": ["bash", "scripts/runtime.sh", "failure", "catalog"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
