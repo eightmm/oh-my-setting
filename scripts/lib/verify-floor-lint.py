@@ -25,6 +25,11 @@ FLOOR_READERS = {
     "diff", "cmp", "sort", "wc", "od", "strings", "cut", "tr", "uniq",
     "jq", "sha256sum", "md5sum", "shasum", "cksum", "comm", "join", "paste",
     "nl", "tac", "rev", "xxd", "hexdump", "base64",
+    # The reviewer's blocking finding: the nearest siblings inside the very
+    # families the sweep designated still admitted — one token away from a
+    # blocked command reproduces the dead-park state.
+    "sha1sum", "sha224sum", "sha384sum", "sha512sum", "b2sum", "sum",
+    "base32", "basenc",
 }
 
 

@@ -317,7 +317,8 @@ printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
 
 # Hash, text, and binary inspection siblings are content readers too. Keep
 # this static so the regression does not depend on any reader being installed.
-for reader in jq sha256sum md5sum shasum cksum comm join paste nl tac rev xxd hexdump base64; do
+for reader in jq sha256sum md5sum shasum cksum comm join paste nl tac rev xxd hexdump base64 \
+  sha1sum sha224sum sha384sum sha512sum b2sum sum base32 basenc; do
   out="$(floor_proposal "$reader tests/suite.sh")"
   printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
     fail "$reader reading a modified file must be rejected: $out"
