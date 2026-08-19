@@ -23,6 +23,8 @@ import sys
 FLOOR_READERS = {
     "grep", "egrep", "fgrep", "rg", "sed", "awk", "cat", "head", "tail",
     "diff", "cmp", "sort", "wc", "od", "strings", "cut", "tr", "uniq",
+    "jq", "sha256sum", "md5sum", "shasum", "cksum", "comm", "join", "paste",
+    "nl", "tac", "rev", "xxd", "hexdump", "base64",
 }
 
 

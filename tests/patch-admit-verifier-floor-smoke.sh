@@ -314,6 +314,24 @@ printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
 out="$(floor_proposal "python3 - < tests/suite.sh")"
 printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
   fail "a redirect read of a modified file must be rejected: $out"
+
+# Hash, text, and binary inspection siblings are content readers too. Keep
+# this static so the regression does not depend on any reader being installed.
+for reader in jq sha256sum md5sum shasum cksum comm join paste nl tac rev xxd hexdump base64; do
+  out="$(floor_proposal "$reader tests/suite.sh")"
+  printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+    fail "$reader reading a modified file must be rejected: $out"
+done
+out="$(floor_proposal "/usr/bin/jq tests/suite.sh")"
+printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+  fail "a path-qualified reader must be rejected: $out"
+out="$(floor_proposal "CHECK_MODE=strict sha256sum tests/suite.sh")"
+printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+  fail "a reader after an environment assignment must be rejected: $out"
+out="$(floor_proposal "bash -c 'base64 tests/suite.sh'")"
+printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+  fail "a reader inside bash -c must be rejected: $out"
+
 out="$(floor_proposal "bash tests/suite.sh")"
 printf '%s' "$out" | grep -Fq 'proposal applied' ||
   fail "executing the restored suite must stay admissible: $out"
