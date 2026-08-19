@@ -923,7 +923,7 @@ PY
   # any work, refusals are records too, and stages that would let re-entry
   # supply an approval refuse.
   local reenter_repo="$TMP/reenter-v1"
-  local reenter_digest dead_pid
+  local reenter_spec reenter_branch dead_pid
   make_repo "$reenter_repo"
   mkdir -p "$reenter_repo/calls"
   rc=0
@@ -939,37 +939,83 @@ PY
   grep -Fq 'digest gate:' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
     fail "the drift refusal must ride the reentry ledger"
   git -C "$reenter_repo" checkout -q -- PROJECT.md
-  # At-most-once claim (debate finding): the same receipt state resumed by a
-  # LIVE session refuses a second entry; a crashed claimant's dead pid is
-  # the expiry — recovery proceeds and names the stale claim it superseded.
-  reenter_digest="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" digest \
+  # Run-level single-flight (debate correction): claims key on the lineage
+  # (spec+branch), never the receipt digest — a live-but-slow ORIGINAL drive
+  # refuses re-entry even after its receipt moved. A dead claimant is
+  # superseded, and its leases requeue before the drive resumes.
+  reenter_spec="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["spec_sha256"])' \
     "$reenter_repo/.oms/plan/autopilot-run.json")"
-  reenter_digest="${reenter_digest//$'\r'/}"
-  printf '{"kind":"autopilot-reenter","predecessor":"%s","disposition":"resumed","claim_pid":%d,"schema":1}\n' \
-    "$reenter_digest" "$$" >> "$reenter_repo/.oms/plan/autopilot-reentries.jsonl"
+  reenter_branch="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r.get("branch",""))' \
+    "$reenter_repo/.oms/plan/autopilot-run.json")"
+  printf '{"kind":"autopilot-drive-claim","spec_sha256":"%s","branch":"%s","claim_pid":%d,"schema":1}\n' \
+    "$reenter_spec" "$reenter_branch" "$$" >> "$reenter_repo/.oms/plan/autopilot-reentries.jsonl"
   rc=0
   run_autopilot "$reenter_repo" reenter > "$reenter_repo/reenter-claimed.out" 2>&1 || rc=$?
-  [ "$rc" != 0 ] || fail "a live claim on the same receipt state must refuse re-entry"
-  grep -Fq 'already resumed by a live session' "$reenter_repo/reenter-claimed.out" ||
+  [ "$rc" != 0 ] || fail "a live drive claim on the lineage must refuse re-entry"
+  grep -Fq 'already held by a live session' "$reenter_repo/reenter-claimed.out" ||
     fail "the live-claim refusal must name the holder: $(tail -3 "$reenter_repo/reenter-claimed.out")"
   sh -c ':' & dead_pid=$!
   wait "$dead_pid" 2>/dev/null || true
-  python3 - "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" "$reenter_digest" "$dead_pid" <<'PY' || fail "could not rewrite the claim as stale"
+  python3 - "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" "$dead_pid" <<'PY' || fail "could not rewrite the claim as stale"
 import json, sys
-path, predecessor, dead = sys.argv[1], sys.argv[2], int(sys.argv[3])
+path, dead = sys.argv[1], int(sys.argv[2])
 rows = []
 with open(path, encoding="utf-8") as handle:
     for line in handle:
         row = json.loads(line)
-        if row.get("predecessor") == predecessor and row.get("disposition") == "resumed":
+        if row.get("kind") == "autopilot-drive-claim":
             row["claim_pid"] = dead
         rows.append(row)
 with open(path, "w", encoding="utf-8") as handle:
     for row in rows:
         handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 PY
+  # The dead session leaves a claimed lease behind — the field drill's park
+  # cause. A contracted plan fixture with one claimed task models it.
+  python3 - "$reenter_repo/.oms/plan/tasks.json" "$reenter_repo/PROJECT.md" <<'PY' || fail "could not plant the leased plan"
+import datetime, hashlib, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+spec = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
+task = {
+    "id": "t9", "title": "feat: interrupted work", "state": "claimed",
+    "depends": [], "allowed_paths": ["src/"], "forbidden_paths": [],
+    "verify": "true", "role": "", "provider": "codex", "ttl": "",
+    "artifact": "", "patch": "", "reason": "",
+    "executor_id": "", "executor_soul_sha256": "", "lease_epoch": 1,
+    "lease_id": "lease-dead", "review_lease_id": "", "repair_count": 0,
+    "repair_artifact": "", "created": now, "updated": now,
+}
+json.dump({
+    "schema": 3, "goal": "finish", "accept": "true",
+    "project_contract": {
+        "schema": 1, "spec_sha256": spec,
+        "allowed_envelope": ["src", "tests"],
+        "acceptance_files": [], "acceptance_manifest": [],
+    },
+    "tasks": {"t9": task},
+}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
   rc=0
   run_autopilot "$reenter_repo" reenter --reason "fresh session picks up the dead planner" \
+    > "$reenter_repo/reenter.out" 2>&1 || rc=$?
+  grep -Fq 'requeued task(s) t9 held by dead session' "$reenter_repo/reenter.out" ||
+    fail "the dead predecessor's lease was not requeued: $(tail -6 "$reenter_repo/reenter.out")"
+  grep -Fq '"kind":"autopilot-reenter-requeue"' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "the lease requeue must leave a typed record"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["t9"]["state"])' \
+      "$reenter_repo/.oms/plan/tasks.json")" = ready ] ||
+    fail "the requeued task must be ready again"
+  # The resumed propose then refuses honestly: the requeued work is
+  # actionable, so a remainder proposal is premature — run first.
+  [ "$rc" = 2 ] ||
+    fail "resume over an actionable plan should refuse the re-propose, got $rc: $(tail -5 "$reenter_repo/reenter.out")"
+  grep -Fq 'unfinished tasks' "$reenter_repo/reenter.out" ||
+    fail "the refusal must name the unfinished work: $(tail -3 "$reenter_repo/reenter.out")"
+  # Fixture reset: with the leased-plan scenario proven, clear it so the
+  # clean resume path below reaches the review boundary.
+  rm -f "$reenter_repo/.oms/plan/tasks.json"
+  rc=0
+  run_autopilot "$reenter_repo" reenter --reason "fresh session, plan cleared" \
     > "$reenter_repo/reenter.out" 2>&1 || rc=$?
   [ "$rc" = 4 ] ||
     fail "re-entering a proposing receipt should re-run propose to review, got $rc: $(tail -5 "$reenter_repo/reenter.out")"

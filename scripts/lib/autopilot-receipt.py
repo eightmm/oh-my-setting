@@ -359,6 +359,70 @@ def validate_live(row: dict[str, Any], repo: str) -> None:
             raise ReceiptError("approved proposal digest changed")
 
 
+def append_reentry_ledger(path: Path, record: dict[str, Any]) -> None:
+    ledger = path.with_name("autopilot-reentries.jsonl")
+    line = (
+        json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    ledger_fd = os.open(str(ledger), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(ledger_fd, line)
+        os.fsync(ledger_fd)
+    finally:
+        os.close(ledger_fd)
+    fsync_directory(path.parent)
+
+
+def lineage_claims(path: Path, spec_sha: str, branch: str) -> list[tuple[int, str]]:
+    """Claim rows for one run lineage, oldest first.
+
+    Keyed by (spec_sha256, branch), never the receipt digest: the drive
+    rewrites the receipt on every stage transition, so a digest-keyed scan
+    would go blind to a live-but-slow original session the moment its
+    receipt moved (debate correction, 2026-08-19).
+    """
+    rows: list[tuple[int, str]] = []
+    try:
+        with open(
+            path.with_name("autopilot-reentries.jsonl"), encoding="utf-8"
+        ) as handle:
+            for raw_line in handle:
+                try:
+                    row = json.loads(raw_line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get("spec_sha256") != spec_sha or row.get("branch") != branch:
+                    continue
+                kind = row.get("kind")
+                if kind == "autopilot-drive-claim" or (
+                    kind == "autopilot-reenter"
+                    and row.get("disposition") == "resumed"
+                ):
+                    try:
+                        pid = int(row.get("claim_pid") or 0)
+                    except (TypeError, ValueError):
+                        pid = 0
+                    if pid > 0:
+                        rows.append((pid, str(kind)))
+    except OSError:
+        pass
+    return rows
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def immutable_view(row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: row[key]
@@ -1221,6 +1285,17 @@ def main() -> int:
     reenter.add_argument("--reason", default="")
     reenter.add_argument("--updated", required=True)
     reenter.add_argument("--pid", type=int, default=0)
+    drive_claim = sub.add_parser("drive-claim")
+    drive_claim.add_argument("path")
+    drive_claim.add_argument("--repo", required=True)
+    drive_claim.add_argument("--pid", type=int, required=True)
+    drive_claim.add_argument("--updated", required=True)
+    reenter_note = sub.add_parser("reenter-note")
+    reenter_note.add_argument("path")
+    reenter_note.add_argument("--repo", required=True)
+    reenter_note.add_argument("--requeued", required=True)
+    reenter_note.add_argument("--dead-pid", type=int, required=True)
+    reenter_note.add_argument("--updated", required=True)
     supervisor = sub.add_parser("supervise")
     supervisor.add_argument("--wall", type=float, required=True)
     supervisor.add_argument("--kill-after", type=float, default=1)
@@ -1343,44 +1418,24 @@ def main() -> int:
             # duplicate run.
             superseded_pid = 0
             if not refusal and getattr(args, "pid", 0):
-                prior_pid = 0
-                try:
-                    with open(
-                        path.with_name("autopilot-reentries.jsonl"),
-                        encoding="utf-8",
-                    ) as handle:
-                        for raw_line in handle:
-                            try:
-                                prior = json.loads(raw_line)
-                            except ValueError:
-                                continue
-                            if (
-                                isinstance(prior, dict)
-                                and prior.get("kind") == "autopilot-reenter"
-                                and prior.get("predecessor") == current
-                                and prior.get("disposition") == "resumed"
-                            ):
-                                prior_pid = int(prior.get("claim_pid") or 0)
-                except OSError:
-                    prior_pid = 0
-                if prior_pid > 0:
-                    alive = True
-                    try:
-                        os.kill(prior_pid, 0)
-                    except ProcessLookupError:
-                        alive = False
-                    except PermissionError:
-                        alive = True
-                    except OSError:
-                        alive = False
-                    if alive:
+                # Run-level single-flight over the whole lineage: any living
+                # claimant — the original drive included — refuses re-entry,
+                # receipt digest movement notwithstanding. The latest dead
+                # claimant is superseded, and that supersession is the proof
+                # of death the lease requeue downstream relies on.
+                for prior_pid, prior_kind in lineage_claims(
+                    path, row["spec_sha256"], row.get("branch", "")
+                ):
+                    if prior_pid == args.pid:
+                        continue
+                    if pid_alive(prior_pid):
                         refusal = (
-                            "this exact receipt state is already resumed by a"
-                            " live session (pid %d); a second re-entry would"
-                            " run the contract twice" % prior_pid
+                            "this run is already held by a live session"
+                            " (pid %d, %s); a second entry would drive the"
+                            " contract twice" % (prior_pid, prior_kind)
                         )
-                    else:
-                        superseded_pid = prior_pid
+                        break
+                    superseded_pid = prior_pid
             record = {
                 "schema": 1,
                 "kind": "autopilot-reenter",
@@ -1399,23 +1454,57 @@ def main() -> int:
                 record["reason"] = reason
             if refusal:
                 record["refusal"] = refusal
-            ledger = path.with_name("autopilot-reentries.jsonl")
-            line = (
-                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-            ).encode("utf-8")
-            ledger_fd = os.open(
-                str(ledger), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
-            )
-            try:
-                os.write(ledger_fd, line)
-                os.fsync(ledger_fd)
-            finally:
-                os.close(ledger_fd)
-            fsync_directory(path.parent)
+            append_reentry_ledger(path, record)
             if refusal:
                 raise ReceiptError("reenter refused: %s" % refusal)
             for value in option_args(row):
                 print(value)
+            return 0
+        if args.command == "drive-claim":
+            # Every drive start records its wrapper pid on the lineage, so a
+            # later re-entry can tell a live-but-slow original session from a
+            # dead one. The wrapper is not exec'd on the run path, so the pid
+            # stays checkable for the whole drive; a reenter-exec'd run
+            # re-recording the same pid is a harmless duplicate.
+            validate_receipt_location(path, args.repo)
+            row, payload = load_receipt(path)
+            if not UPDATED.fullmatch(args.updated):
+                raise ReceiptError("drive-claim requires a valid --updated timestamp")
+            append_reentry_ledger(
+                path,
+                {
+                    "schema": 1,
+                    "kind": "autopilot-drive-claim",
+                    "predecessor": digest(payload),
+                    "spec_sha256": row["spec_sha256"],
+                    "branch": row.get("branch", ""),
+                    "claim_pid": args.pid,
+                    "updated": args.updated,
+                },
+            )
+            return 0
+        if args.command == "reenter-note":
+            # Recoveries are records too: the requeue of a dead predecessor's
+            # leases names the task ids and the pid whose death authorized it.
+            validate_receipt_location(path, args.repo)
+            row, payload = load_receipt(path)
+            if not UPDATED.fullmatch(args.updated):
+                raise ReceiptError("reenter-note requires a valid --updated timestamp")
+            requeued = [part for part in args.requeued.split(",") if part]
+            if not requeued or any(not REMOTE.fullmatch(part) for part in requeued):
+                raise ReceiptError("reenter-note requires safe requeued task ids")
+            append_reentry_ledger(
+                path,
+                {
+                    "schema": 1,
+                    "kind": "autopilot-reenter-requeue",
+                    "spec_sha256": row["spec_sha256"],
+                    "branch": row.get("branch", ""),
+                    "requeued": requeued,
+                    "dead_pid": args.dead_pid,
+                    "updated": args.updated,
+                },
+            )
             return 0
         if args.command == "archive-done":
             validate_receipt_location(path, args.repo)

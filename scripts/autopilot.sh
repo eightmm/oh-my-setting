@@ -95,6 +95,10 @@ one optional remainder proposal, semantic review, and optionally a Draft PR.
                           done, and any digest drift — abandon plus a fresh
                           contract is the recovery. No new authority: the
                           resumed run keeps the original contract's terms.
+                          Superseding a dead claimant also requeues the
+                          claimed/running leases that session still held
+                          (review and later stay untouched), recorded as a
+                          typed requeue row.
 
 Options:
   --repo PATH             Repository (default: current directory).
@@ -479,6 +483,39 @@ if [ "$ACTION" = reenter ]; then
   [ "${reenter_cont[0]}" = oms ] && [ "${reenter_cont[1]}" = autopilot ] ||
     fail "reenter continuation is malformed"
   echo "autopilot: re-entering the live run (typed record appended to .oms/plan/autopilot-reentries.jsonl)"
+  # Superseding a dead claimant is proof the previous session died; leases it
+  # still holds would otherwise park the resumed drive as tasks-exhausted
+  # (field drill, 2026-08-19). Requeue claimed/running only: review holds a
+  # frozen patch the landing path owns, and a receipt with no claim rows at
+  # all gets no requeue — the operator release path stays for those.
+  reenter_dead_pid="$(tail -n 1 "$REPO/.oms/plan/autopilot-reentries.jsonl" 2>/dev/null |
+    python3 -c 'import json,sys
+try:
+    print(int(json.loads(sys.stdin.read()).get("superseded_stale_claim_pid") or 0))
+except Exception:
+    print(0)')"
+  if [ "${reenter_dead_pid:-0}" -gt 0 ]; then
+    reenter_requeued=""
+    for reenter_state in claimed running; do
+      while IFS= read -r reenter_tid; do
+        [ -n "$reenter_tid" ] || continue
+        if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" release \
+            --id "$reenter_tid" >/dev/null 2>&1; then
+          reenter_requeued="${reenter_requeued:+$reenter_requeued,}$reenter_tid"
+        fi
+      done <<EOF_REENTER
+$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" list --state "$reenter_state" 2>/dev/null | awk '{print $1}')
+EOF_REENTER
+    done
+    if [ -n "$reenter_requeued" ]; then
+      oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter-note \
+        "$OUTER_RECEIPT" --repo "$REPO" --requeued "$reenter_requeued" \
+        --dead-pid "$reenter_dead_pid" \
+        --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
+        fail "could not record the lease requeue"
+      echo "autopilot: requeued task(s) $reenter_requeued held by dead session $reenter_dead_pid"
+    fi
+  fi
   trap - EXIT HUP INT TERM
   autopilot_cleanup
   exec bash "$0" "${reenter_cont[@]:2}"
@@ -1127,6 +1164,13 @@ drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
 [ "$AUTO_REPAIR" -eq 0 ] || drive_args+=(--auto-repair)
 [ "$RETRY_KNOWN" -eq 0 ] || drive_args+=(--retry-known)
 [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || drive_args+=(--allow-verifier-change)
+# Record this drive's wrapper pid on the run lineage before any provider
+# spends money: a later re-entry distinguishes a live-but-slow session from
+# a dead one by exactly this claim (run-level single-flight).
+oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" drive-claim \
+  "$OUTER_RECEIPT" --repo "$REPO" --pid "$$" \
+  --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
+  fail "could not record the drive claim"
 drive_out="$(autopilot_mktemp)" || fail "mktemp failed"
 drive_rc=0
 OMS_WORKER_GUARD_STRICT=1 OMS_WORKER_GUARD_OFF=0 \

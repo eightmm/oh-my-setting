@@ -7,6 +7,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Added
+- Run-level single-flight and dead-session lease recovery. Every drive
+  start records its wrapper pid as a claim on the run lineage (spec digest
+  plus branch — never the receipt digest, which moves on every stage
+  transition), so `reenter` now refuses while ANY claimant lives, the
+  original drive included. Superseding a dead claimant requeues the
+  claimed/running task leases that session still held — the field drill's
+  tasks-exhausted park class becomes a clean resume — recorded as a typed
+  requeue row naming the task ids and the dead pid. Review-stage and later
+  leases stay untouched (the landing path owns their recovery), and a
+  receipt with no claim rows gets no requeue: the operator release path
+  remains for pre-claim history.
 - Clear-Korean output, applied only where a human reads the result. Two
   surfaces, one policy: `output-styles/oms-korean.md` installs as a Claude
   Code output style (final replies only — thinking, tool calls, commit
