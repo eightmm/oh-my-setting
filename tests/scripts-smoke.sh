@@ -4866,7 +4866,10 @@ test_answer_language_block_rides_human_read_prompts() {
     fail "OMS_ANSWER_LANGUAGE=ko must ride the human-read prompt"
 
   # Unset: nothing rides — a language preference never changes defaults.
-  OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+  # Cleared explicitly: the operator running this suite may legitimately
+  # carry OMS_ANSWER_LANGUAGE in the session environment (that is the
+  # feature), and an inherited value is not this test's subject.
+  OMS_ANSWER_LANGUAGE='' OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
     --repo "$project" --artifact-dir "$project/a-none" --to codex \
     --prompt "explain the build layout" >/dev/null 2>&1 ||
     fail "plain dry-run call should succeed"
