@@ -5,7 +5,7 @@ set -euo pipefail
 # Shared state is the harness spine: a dangling pointer, a contradictory task
 # packet, or a stale derived view is inherited as false confidence by every
 # CLI that reads it, and until now each validator judged only its own family.
-# This composes the existing engines — oms-run validate (JSONL schemas, plan
+# This composes the existing engines — oms run validate (JSONL schemas, plan
 # references), artifact-index validate (artifact lineage), agent-task status,
 # journal status — and adds the cross-family checks none of them owns:
 # CURRENT pointers that name missing threads, active packets with a close
@@ -132,7 +132,7 @@ def load_json(name):
     except Exception:
         return {}
 
-# --- delegated: oms-run validate (JSONL schemas, enums, plan references) ---
+# --- delegated: oms run validate (JSONL schemas, enums, plan references) ---
 run_exit = int(os.environ["OMS_SV_RUN_EXIT"])
 if run_exit != 0:
     detail = ""
@@ -142,7 +142,7 @@ if run_exit != 0:
         detail = "; ".join(bad[:3])
     except OSError:
         pass
-    finding("fail", "jsonl", "oms-run validate found invalid rows or schema drift: %s" % detail,
+    finding("fail", "jsonl", "oms run validate found invalid rows or schema drift: %s" % detail,
             "oms run validate --dir %s/.oms" % repo)
 
 # --- delegated: artifact-index validate (errors fail, stale refs warn) ---

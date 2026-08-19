@@ -4,7 +4,7 @@ set -euo pipefail
 # Redaction-first diagnostic bundle for peer consultation and bug reports.
 # Harness state is intentionally rich and therefore unsafe to copy ad hoc:
 # task packets, ledgers, and journals carry paths, goals, and command lines.
-# This collects only bounded, derived summaries (repo-state, state-verify,
+# This collects only bounded, derived summaries (state, state-verify,
 # task/journal status, fail-ledger rows, artifact index counts — never
 # artifact contents, raw logs, diffs, datasets, or credentials), strips the
 # repo path, home directory, and hostname from every file, then runs the

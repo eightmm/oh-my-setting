@@ -217,9 +217,9 @@ resolve_id() {
 require_thread() {
   local id
   id="$(resolve_id)" ||
-    fail "no thread selected: pass --id, or start one with 'agent-thread new'"
+    fail "no thread selected: pass --id, or start one with 'oms thread new'"
   [ -f "$(thread_file "$id")" ] ||
-    fail "unknown thread: $id (agent-thread list)"
+    fail "unknown thread: $id (oms thread list)"
   printf '%s\n' "$id"
 }
 
@@ -309,7 +309,7 @@ cmd_new() {
   if [ -f "$(thread_file "$id")" ]; then
     write_current "$id"
     echo "$id"
-    echo "agent-thread: joined existing thread $id" >&2
+    echo "thread: joined existing thread $id" >&2
     return 0
   fi
   mkdir -p "$THREADS"
@@ -359,7 +359,7 @@ cmd_append() {
   fi
   append_row "$id" "$ROLE" "$tmp"
   rm -f "$tmp"
-  echo "agent-thread: appended $ROLE to $id" >&2
+  echo "thread: appended $ROLE to $id" >&2
 }
 
 cmd_context() {
@@ -683,7 +683,7 @@ cmd_close() {
   if [ "$(read_current || true)" = "$id" ]; then
     rm -f "$CURRENT"
   fi
-  echo "agent-thread: closed $id" >&2
+  echo "thread: closed $id" >&2
 }
 
 case "$ACTION" in

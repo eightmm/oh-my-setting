@@ -397,7 +397,7 @@ $(find "$OMS/handoffs" -maxdepth 1 -type f -name '*.md' -mtime +"$DAYS" 2>/dev/n
 EOF
 fi
 
-# 2.5) Stale open runs: nothing in the harness calls `oms-run close`
+# 2.5) Stale open runs: nothing in the harness calls `oms run close`
 #    automatically, so without this an abandoned run stays open forever and
 #    permanently protects its capsule from step 3. A run whose LAST spine
 #    event is older than --days is over; append a terminal close event.
@@ -723,7 +723,7 @@ fi
 
 # 4.5) Abandoned change-guards: a guard whose opt-in owner pid is dead, or
 #    whose snapshot is older than --days, is a corpse from a crashed session —
-#    without this it reads as "Change-guard: ACTIVE" in repo-state forever.
+#    without this it reads as "Change-guard: ACTIVE" in oms state forever.
 guard_file="$OMS/guards/change-guard.tsv"
 if [ -f "$guard_file" ]; then
   guard_pid="$(awk -F'\t' '$1=="pid"{print $2; exit}' "$guard_file")"

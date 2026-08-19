@@ -13496,8 +13496,8 @@ test_oms_dispatcher_hints_help_on_misuse() {
   printf '%s' "$err" | grep -Fq "oms agent-plan --help" ||
     fail "dispatcher should hint at --help on a usage error"
   # Success paths stay hint-free.
-  err="$( (cd "$d" && "$bin/oms" repo-state) 2>&1 >/dev/null )" ||
-    fail "repo-state should succeed"
+  err="$( (cd "$d" && "$bin/oms" state) 2>&1 >/dev/null )" ||
+    fail "state should succeed"
   if printf '%s' "$err" | grep -Fq "hint:"; then
     fail "dispatcher must not hint on success"
   fi

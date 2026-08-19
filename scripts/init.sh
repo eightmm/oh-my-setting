@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# First move for an agent landing in a repo with no .oms/ state. repo-state is
+# First move for an agent landing in a repo with no .oms/ state. oms state is
 # read-only and assumes state exists; every family has its own init but nothing
 # seeds them together or tells the agent what to do next. This creates the
 # .oms/ skeleton (idempotent, non-destructive), hides the agent-facing files

@@ -72,7 +72,7 @@ fi
 PRIVATE_JSON="$("$ROOT/scripts/project-private.sh" --repo "$REPO" status --json 2>/dev/null || true)"
 
 # The shared auto-update verdict rides the state so inbox stays a pure
-# derivation of repo-state while still surfacing a dying updater — the state
+# derivation of state while still surfacing a dying updater — the state
 # an agent resuming here most needs to distrust.
 AUTOUPDATE_ATTENTION="$("$ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
 
@@ -761,7 +761,7 @@ else:
     def line(s):
         print(s)
 
-    line("# repo-state: %s" % repo)
+    line("# state: %s" % repo)
 
     h = state["harness"]
     if h["rules"] == "missing" and h["spec"] == "missing" and h["private"] != "exposed":
