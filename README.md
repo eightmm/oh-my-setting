@@ -3,12 +3,12 @@
 One setup that gives Codex, Claude Code, and Antigravity the same rules,
 skills, and agent harness on every machine.
 
-**You never run any of it.** Install is the only command you type; from then on
-the harness is the agent's, not yours. Its tools (`oms ...`) are invoked by an
-agent mid-task, its state (`.oms/`) is written by agents, and its setup steps —
-updates, health checks, even the permissions another agent CLI needs — are
-things you ask your agent to do. If a document here shows a command, it is
-showing you what the agent will run.
+**You never run any of it.** After the host prerequisites below, install is the
+only command you type; from then on the harness is the agent's, not yours. Its
+tools (`oms ...`) are invoked by an agent mid-task, its state (`.oms/`) is
+written by agents, and its setup steps — updates, health checks, even the
+permissions another agent CLI needs — are things you ask your agent to do. If
+a document here shows a command, it is showing you what the agent will run.
 
 [한국어](README.ko.md)
 
@@ -18,15 +18,24 @@ showing you what the agent will run.
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
+On Windows, a fresh default Codex setup — or any profile selecting a
+Node-backed tool — first needs native **Node.js with npm**. Install the exact
+release named by the installer from the [official Node.js
+archive](https://nodejs.org/dist/), keep its PATH option enabled, and reopen Git
+Bash. The installer stops instead of accepting a different Node version. An
+Antigravity-only `core` profile does not need Node.
+
 The default installer selects the `core` capability: the harness, Bash, Git,
 Python, and one coding-agent provider. It does not make GitHub CLI, Notion CLI,
 all three providers, research tooling, or cluster tools mandatory. Use the
 `full` compatibility profile only on machines that should carry the historical
 all-provider/GitHub/Notion/research footprint. Nothing needs root; managed tool
-versions, platform URLs, and integrity values are pinned in `tools.lock.json`,
-and new downloads are verified before use. Existing external CLIs at the exact
-version are reused and labeled as version-only by doctor. Install, update,
-repair, and uninstall share one user-wide lifecycle lock.
+versions, platform URLs, and integrity values are pinned in `tools.lock.json`.
+Provider dependencies are selected with the provider: Codex and Claude include
+locked Node, while Antigravity does not. New downloads are verified before use.
+Existing external CLIs at the exact version are reused and labeled as
+version-only by doctor. Install, update, repair, and uninstall share one
+user-wide lifecycle lock.
 
 Capability profiles are `core`, `council`, `github`, `notion`, `research`,
 `hpc`, `container`, `remote`, and `full`. The selective installer reuses the
@@ -57,7 +66,7 @@ to `<file>.backup.<timestamp>` (announced at install time and reported by
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ (or uv) | symlinks |
 | macOS | stock Bash 3.2, Git, Python 3.9+ (or uv) | symlinks |
-| Windows Git Bash | Git, Python 3.9+, the exact locked native Node release | verified copies |
+| Windows Git Bash | Git, Python 3.9+; exact locked native Node when selected tools need it | verified copies |
 
 The awkward cases — Windows copy mode, Antigravity's headless permissions,
 Notion data-source selection — live in
@@ -185,7 +194,8 @@ Skills load in three layers: general-purpose skills everywhere,
 machine-conditional skills only where their command exists (`oms-slurm`,
 `oms-gpu-workstation`), and per-repo skills forged into `.oms/skills/`. Global
 skills are named `oms-*` so they cannot collide with your own skills in the
-shared skill roots; forged project skills keep their plain names.
+shared skill roots. Newly forged project skills are also `oms-*`; stored legacy
+names remain readable and are not renamed automatically.
 
 ## Notes
 

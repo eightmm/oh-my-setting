@@ -214,6 +214,70 @@ trap - EXIT HUP INT TERM
 EOF
 exercise_reclaim_gate standalone "$TMP/standalone-contender.sh"
 
+# A piped installer has no trustworthy source path. An empty BASH_SOURCE must
+# therefore select the inline lock implementation instead of treating the
+# current directory as the checkout and executing a hostile local helper.
+hostile_root="$TMP/hostile-cwd"
+hostile_marker="$TMP/hostile-helper-executed"
+pipe_acquired="$TMP/pipe-acquired"
+pipe_hold="$TMP/pipe-hold"
+pipe_log="$TMP/pipe-bootstrap.log"
+pipe_status=0
+mkdir -p "$hostile_root/scripts/lib"
+cat > "$hostile_root/scripts/lib/install-lifecycle-lock.sh" <<'EOF'
+: > "$OMS_TEST_HOSTILE_HELPER_MARKER"
+oms_install_lifecycle_lock_acquire() { return 0; }
+oms_install_lifecycle_lock_release() { return 0; }
+EOF
+: > "$pipe_hold"
+(
+  cd "$hostile_root"
+  OMS_TEST_HOSTILE_HELPER_MARKER="$hostile_marker" \
+    OMS_TEST_LOCK_ACQUIRED="$pipe_acquired" \
+    OMS_TEST_LOCK_HOLD="$pipe_hold" \
+    bash -s < "$TMP/standalone-contender.sh"
+) > "$pipe_log" 2>&1 || pipe_status=$?
+[ "$pipe_status" = 0 ] ||
+  fail "piped bootstrap failed (status $pipe_status): $(cat "$pipe_log")"
+[ -e "$pipe_acquired" ] ||
+  fail "piped bootstrap did not use the inline lifecycle implementation"
+[ ! -e "$hostile_marker" ] ||
+  fail "piped bootstrap executed a hostile current-directory helper"
+if grep -Fq 'BASH_SOURCE[0]: unbound variable' "$pipe_log"; then
+  fail "piped bootstrap emitted an empty-BASH_SOURCE diagnostic"
+fi
+[ ! -e "$OMS_INSTALL_LIFECYCLE_LOCK" ] ||
+  fail "piped bootstrap leaked its lifecycle lock"
+
+# A real file invocation does have a trustworthy source directory and must
+# continue using the helper shipped beside that installer.
+checkout_root="$TMP/checkout-invocation"
+checkout_marker="$TMP/checkout-helper-executed"
+checkout_acquired="$TMP/checkout-acquired"
+checkout_hold="$TMP/checkout-hold"
+checkout_log="$TMP/checkout-bootstrap.log"
+checkout_status=0
+mkdir -p "$checkout_root/scripts/lib"
+cp "$TMP/standalone-contender.sh" "$checkout_root/install.sh"
+cat > "$checkout_root/scripts/lib/install-lifecycle-lock.sh" <<'EOF'
+: > "$OMS_TEST_CHECKOUT_HELPER_MARKER"
+. "$OMS_TEST_LOCK_HELPER"
+EOF
+: > "$checkout_hold"
+OMS_TEST_CHECKOUT_HELPER_MARKER="$checkout_marker" \
+  OMS_TEST_LOCK_ACQUIRED="$checkout_acquired" \
+  OMS_TEST_LOCK_HOLD="$checkout_hold" \
+  bash "$checkout_root/install.sh" > "$checkout_log" 2>&1 ||
+  checkout_status=$?
+[ "$checkout_status" = 0 ] ||
+  fail "checkout bootstrap failed (status $checkout_status): $(cat "$checkout_log")"
+[ -e "$checkout_marker" ] ||
+  fail "file invocation did not use its checkout lifecycle helper"
+[ -e "$checkout_acquired" ] ||
+  fail "checkout lifecycle helper did not acquire the lock"
+[ ! -e "$OMS_INSTALL_LIFECYCLE_LOCK" ] ||
+  fail "checkout bootstrap leaked its lifecycle lock"
+
 # When the host exposes a start token, a live PID alone is not enough: it may
 # have been reused since a crashed owner wrote the lock. Model that state with
 # this process's live PID and a different recorded start token.

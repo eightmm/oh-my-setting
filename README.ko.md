@@ -3,11 +3,12 @@
 Codex, Claude Code, Antigravity가 어느 머신에서든 같은 규칙, 같은 skill, 같은
 agent 하네스를 쓰게 하는 설정 하나.
 
-**직접 실행할 일은 없다.** 설치 명령 하나만 직접 치고, 그 뒤로 하네스는
-사용자 것이 아니라 agent 것이다. 도구(`oms ...`)는 agent가 작업 중에 부르고,
-상태(`.oms/`)는 agent가 쓰고, 설정 작업 — 업데이트, 상태 점검, 다른 agent CLI에
-필요한 권한까지 — 도 agent에게 부탁하는 일이다. 이 문서에 명령이 보이면 그건
-agent가 실행할 것을 보여주는 것이다.
+**직접 실행할 일은 없다.** 아래 호스트 사전 조건을 준비한 뒤에는 설치 명령
+하나만 직접 치고, 그 뒤로 하네스는 사용자 것이 아니라 agent 것이다.
+도구(`oms ...`)는 agent가 작업 중에 부르고, 상태(`.oms/`)는 agent가 쓰고,
+설정 작업 — 업데이트, 상태 점검, 다른 agent CLI에 필요한 권한까지 — 도
+agent에게 부탁하는 일이다. 이 문서에 명령이 보이면 그건 agent가 실행할 것을
+보여주는 것이다.
 
 [English](README.md)
 
@@ -17,14 +18,22 @@ agent가 실행할 것을 보여주는 것이다.
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
+Windows에서 새 기본 Codex 설치 또는 Node 기반 도구를 선택한 profile은 먼저
+**npm을 포함한 네이티브 Node.js**가 필요하다. 설치기가 표시한 정확한 버전을
+[공식 Node.js archive](https://nodejs.org/dist/)에서 설치하고 PATH 옵션을 유지한
+뒤 Git Bash를 다시 연다. 설치기는 다른 Node 버전을 그대로 통과시키지 않는다.
+Antigravity만 쓰는 `core` profile에는 Node가 필요 없다.
+
 기본 설치는 `core` capability만 선택한다. 즉 하네스, Bash, Git, Python,
 그리고 coding-agent provider 하나만 필수다. GitHub CLI, Notion CLI, provider
 세 개 전부, 연구 도구, 클러스터 도구는 기본 필수 의존성이 아니다. 예전의
 all-provider/GitHub/Notion/research 구성이 필요한 머신에서만 `full` 호환
 profile을 사용한다. root 권한은 필요 없다. 관리 도구 버전·플랫폼 URL·무결성
-값은 `tools.lock.json`에 고정되고 새 다운로드는 사용 전에 검증된다. 이미 있는
-외부 CLI는 정확한 버전이면 재사용하고 doctor가 version-only로 표시한다.
-install/update/repair/uninstall은 사용자 단위 lifecycle lock 하나를 공유한다.
+값은 `tools.lock.json`에 고정된다. provider 의존성도 함께 선택되므로 Codex와
+Claude에는 locked Node가 포함되고 Antigravity에는 포함되지 않는다. 새 다운로드는
+사용 전에 검증된다. 이미 있는 외부 CLI는 정확한 버전이면 재사용하고 doctor가
+version-only로 표시한다. install/update/repair/uninstall은 사용자 단위 lifecycle
+lock 하나를 공유한다.
 
 capability profile은 `core`, `council`, `github`, `notion`, `research`, `hpc`,
 `container`, `remote`, `full`이다. 선택형 설치기는 기존 locked downloader와
@@ -52,7 +61,7 @@ fast-forward하며 dirty 또는 diverged checkout은 건너뛴다. uninstall은 
 |---|---|---|
 | Linux, WSL | Bash 3.2+, Git, Python 3.9+ (또는 uv) | symlink |
 | macOS | 기본 Bash 3.2, Git, Python 3.9+ (또는 uv) | symlink |
-| Windows Git Bash | Git, Python 3.9+, lock과 정확히 같은 네이티브 Node | 검증된 사본 |
+| Windows Git Bash | Git, Python 3.9+; 선택 도구가 요구할 때 lock과 정확히 같은 네이티브 Node | 검증된 사본 |
 
 예외 상황 — Windows 사본 모드, Antigravity headless 권한, Notion data source
 지정 — 은 [docs/COMPONENTS.md](docs/COMPONENTS.md)와
@@ -168,7 +177,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 skill은 세 계층으로 붙는다: 어디서나 같은 범용 skill, 필요한 명령이 있는
 머신에만 링크되는 머신 조건 skill(`oms-slurm`, `oms-gpu-workstation`), 그리고
 저장소의 `.oms/skills/`에 포지되는 프로젝트 skill. 전역 skill 이름은 `oms-`로
-시작하고, 포지된 프로젝트 skill은 접두사 없이 그대로 둔다.
+시작하며 새로 포지되는 프로젝트 skill도 `oms-*`를 쓴다. 저장된 legacy 이름은
+계속 읽을 수 있고 자동으로 바꾸지 않는다.
 
 ## 참고
 

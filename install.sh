@@ -265,8 +265,11 @@ export OH_MY_SETTING_NOTION_DATA_SOURCE_ID="$NOTION_DATA_SOURCE_ID"
 # has only this file before the first clone, so it carries the same mkdir-lock
 # protocol inline until the freshly selected checkout can adopt it.
 INSTALL_ENTRY_DIR=""
-INSTALL_ENTRY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" ||
-  INSTALL_ENTRY_DIR=""
+INSTALL_ENTRY_SOURCE="${BASH_SOURCE[0]:-}"
+if [ -n "$INSTALL_ENTRY_SOURCE" ]; then
+  INSTALL_ENTRY_DIR="$(cd "$(dirname "$INSTALL_ENTRY_SOURCE")" 2>/dev/null && pwd -P)" ||
+    INSTALL_ENTRY_DIR=""
+fi
 if [ -n "$INSTALL_ENTRY_DIR" ] &&
    [ -f "$INSTALL_ENTRY_DIR/scripts/lib/install-lifecycle-lock.sh" ]; then
   # shellcheck source=scripts/lib/install-lifecycle-lock.sh

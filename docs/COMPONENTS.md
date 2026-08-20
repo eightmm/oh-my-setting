@@ -27,15 +27,18 @@ commit, push, and release decisions. Peer agreement is evidence, not approval.
 
 ## Install and ownership
 
-The initial installer always installs or verifies the required core tools it
-coordinates: Node, uv, Codex, Claude Code, Antigravity, GitHub CLI, and Notion
-CLI. Setup fails rather than silently recording a profile with missing CLIs.
-Required versions, URLs, and integrity values live in `tools.lock.json`; direct
-platform payloads and npm wrapper/native packages are verified before use and
-npm installation runs offline with a fresh cache. Install,
-update, repair, and uninstall share one user-wide lifecycle lock. Lock
-ownership survives installer `exec` handoff but cannot be inherited or released
-by a child shell.
+The default installer selects the `core` capability: Bash, Git, Python, the
+harness, and one coding-agent provider. It installs or verifies only the locked
+tools required by the selected profile; optional capabilities add the council,
+GitHub, Notion, research, HPC, container, or remote surfaces. Setup fails rather
+than silently recording a selected profile with missing required CLIs. Required
+provider dependencies are part of that plan: Codex and Claude include Node,
+while Antigravity does not. Versions, URLs, and integrity values live in
+`tools.lock.json`; direct platform payloads and npm wrapper/native packages are
+verified before use and npm installation runs offline with a fresh cache.
+Install, update, repair, and uninstall share one user-wide lifecycle lock. Lock
+ownership survives installer `exec` handoff but cannot be inherited or
+released by a child shell.
 An already-installed external CLI at the exact version is reused as
 version-only evidence; doctor distinguishes it from a digest-owned install.
 Managed direct binaries and npm package/shim swaps carry recovery state, and
@@ -44,7 +47,8 @@ schema validity. PATH persistence follows Bash's existing login-file priority
 instead of creating a higher-priority profile.
 Optional provider registrations report a warning and remain visible to `oms
 doctor --contract`. Windows Git Bash requires the exact locked native Node
-release before setup; Linux and macOS can install it during setup.
+release before setup when the selected profile needs a Node-backed tool; Linux
+and macOS can install it during setup.
 
 Managed rules and skills use symlinks on Linux/macOS and verified copies on
 Windows Git Bash. Existing user files move to timestamped backups and return
