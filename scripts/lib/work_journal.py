@@ -2954,6 +2954,7 @@ def source_payload(
             repo, source_path, operation=operation, occurred_at=occurred_at or now
         )
     elif source_type in {
+        "autopilot",
         "handoff",
         "oms-run",
         "patch-admit",
@@ -2963,6 +2964,7 @@ def source_payload(
     }:
         sid = source_id or source_path.stem
         default_types = {
+            "autopilot": "phase_outcome",
             "handoff": "handoff",
             "session-handoff": "handoff",
             "oms-run": "phase_outcome",

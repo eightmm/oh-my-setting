@@ -1380,6 +1380,45 @@ PY
   grep -Fq 'autopilot: done' "$max_worker_repo/max.out" ||
     fail "max worker phase composition did not reach completion"
 
+  # A campaign is a day's largest unit of work, and it used to reach the Work
+  # Journal only as its commits. The terminal now records itself, and asks the
+  # parent for the judgment no record can derive. Both are fail-open.
+  local journal_repo="$TMP/journal-terminal"
+  make_repo "$journal_repo"
+  mkdir -p "$journal_repo/calls"
+  write_done_plan "$journal_repo" true
+  OMS_T_GOAL_RESULT=success run_autopilot "$journal_repo" run \
+    --worker codex --base main --review-mode off \
+    > "$journal_repo/journal.out" 2>&1 ||
+    fail "the journal terminal case should reach completion"
+  grep -Fq 'autopilot: done' "$journal_repo/journal.out" ||
+    fail "the journal terminal case did not reach completion"
+  grep -Fq 'Autopilot campaign landed' \
+    "$journal_repo/.oms/work-journal/events.jsonl" ||
+    fail "a landed campaign left no Work Journal event"
+  grep -Fq '"type":"autopilot"' \
+    "$journal_repo/.oms/work-journal/events.jsonl" ||
+    fail "the campaign event did not carry the autopilot source type"
+  grep -Fq 'oms agent-task update --decision' "$journal_repo/journal.out" ||
+    fail "a landed campaign did not ask the parent to record why"
+
+  # Disabling the journal keeps the campaign result and drops both additions.
+  local journal_off_repo="$TMP/journal-terminal-off"
+  make_repo "$journal_off_repo"
+  mkdir -p "$journal_off_repo/calls"
+  write_done_plan "$journal_off_repo" true
+  OMS_WORK_JOURNAL=0 OMS_T_GOAL_RESULT=success \
+    run_autopilot "$journal_off_repo" run \
+      --worker codex --base main --review-mode off \
+      > "$journal_off_repo/journal.out" 2>&1 ||
+    fail "a disabled journal should not change the campaign result"
+  grep -Fq 'autopilot: done' "$journal_off_repo/journal.out" ||
+    fail "a disabled journal changed the campaign terminal"
+  [ ! -e "$journal_off_repo/.oms/work-journal" ] ||
+    fail "a disabled journal still materialized campaign state"
+  ! grep -Fq 'oms agent-task update --decision' "$journal_off_repo/journal.out" ||
+    fail "a disabled journal still emitted the decision hint"
+
   local unsafe_start_repo="$TMP/unsafe-git-at-start"
   make_repo "$unsafe_start_repo"
   mkdir -p "$unsafe_start_repo/calls"

@@ -13,6 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/model-routing.sh
 . "$ROOT/scripts/lib/model-routing.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT/scripts/lib/work-journal.sh"
 
 REPO="$PWD"
 ACTION=""
@@ -1462,5 +1464,19 @@ fi
 
 outer_receipt_write "done" >/dev/null ||
   park "outer-receipt-write-failed" "inspect oms autopilot --repo . status"
+# A campaign is the largest unit of work in a day, and it was the only
+# lifecycle verb that observed nothing: a landed campaign reached the Work
+# Journal as its commits and CI rows alone. Record the terminal here, and then
+# ask the parent for the one thing no record can derive -- why it landed.
+# Both are fail-open; neither can change the acceptance result above.
+work_journal_observe "$REPO" autopilot "$OUTER_RECEIPT" \
+  --source-id "${drive_run_id:-$final_head}" \
+  --outcome "Autopilot campaign landed" --outcome-status "done" \
+  --verification-status "passed"
 echo "autopilot: done (acceptance passed)"
+if work_journal_enabled; then
+  echo "hint: record why this landed, so the Work Journal daily carries" \
+    "judgment and not only commits:" \
+    "'oms agent-task update --decision TEXT [--next TEXT]'" >&2
+fi
 exit 0
