@@ -50,6 +50,11 @@ if [ "$PURGE_DIRTY" = 1 ] && [ "$PURGE" != 1 ]; then
   exit 2
 fi
 
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || [ "$DRY_RUN" = 1 ] || {
+  echo "error: a harness child cannot mutate OMS host lifecycle authority" >&2
+  exit 2
+}
+
 confirm() {
   local prompt="$1"
   if [ "$ASSUME_YES" = "1" ]; then

@@ -42,6 +42,21 @@ The runtime core has no daemon and no independent authority database. Project
 state on disk remains the source of truth. The Python package uses Python 3.9+
 and only the standard library.
 
+A delegated process marked with `OMS_HARNESS_CHILD=1` can use the runtime's
+read/probe actions, including install planning, but mutation and execution fail
+closed with exit 2. In particular, backend execution, state/output writers,
+capability installation, release application, and the direct update lifecycle
+remain parent-only. The same boundary covers public auto-update wiring/apply,
+doctor repair, uninstall, provider-permission apply/remove, and cleanup apply;
+observation-only counterparts remain available: auto-update status/attention,
+explicit non-refresh doctor reports (`--tool-lock`, `--surfaces`, `--contract`,
+or `--no-model-doctor`), cached `models` output, provider-permission
+check/print, and uninstall/cleanup dry-runs. Model-doctor and `models --refresh`
+remain parent-owned because they rewrite routing capability state.
+This is a cooperative authority boundary carried by the harness environment,
+not an operating-system sandbox against a process that deliberately clears
+that marker.
+
 ## Stable entrypoint
 
 The additive entrypoint is:

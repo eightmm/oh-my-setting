@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="${OMS_STATE_REPO:-$PWD}"
 SCOPE="project"
 MEMORY_FILE=""
+MEMORY_FILE_EXPLICIT=0
 ACTION=""
 AGENT="$(oms_detect_agent)"
 # Separate from AGENT (which defaults to the detected agent): only set when
@@ -101,6 +102,7 @@ while [ "$#" -gt 0 ]; do
     --file)
       [ "$#" -ge 2 ] || { echo "error: --file requires path" >&2; exit 2; }
       MEMORY_FILE="$2"
+      MEMORY_FILE_EXPLICIT=1
       shift 2
       ;;
     --agent)
@@ -209,6 +211,21 @@ if [ "$AS_JSON" -eq 1 ]; then
   case "$ACTION" in
     search|recall|health) JSON_ARGS+=(--json) ;;
     *) echo "error: --json applies only to search, recall, or health" >&2; exit 2 ;;
+  esac
+fi
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] &&
+   { [ "$SCOPE" = global ] || [ "$MEMORY_FILE_EXPLICIT" -eq 1 ]; }; then
+  case "$ACTION" in
+    init|append|pin|compact|search|recall|rebuild)
+      echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
+      exit 2
+      ;;
+    context)
+      [ "$FULL" -eq 1 ] || {
+        echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
+        exit 2
+      }
+      ;;
   esac
 fi
 if [ -z "$MEMORY_FILE" ]; then

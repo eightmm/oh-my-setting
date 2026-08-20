@@ -111,6 +111,15 @@ through `oms artifact-index import`.
 Provider count is not independence. Two routes backed by the same model family
 remain one opinion for diversity reporting.
 
+A provider subprocess is a harness child, not a new owner. Child-marked
+processes may inspect saved review verdicts, but every peer-call and delegation
+front door refuses a recursive start. The child reports that another opinion or
+worker is needed and the parent decides whether to spend or fan out.
+Global or explicit-file memory source/derived-state changes, global role
+creation, journal configuration/sync, model-capability refresh, and host queue
+enqueue/cancel are parent-owned as well. Pure inspection and project-local
+counterparts remain available where applicable.
+
 ## Models and reasoning effort
 
 Routing is deliberately small:

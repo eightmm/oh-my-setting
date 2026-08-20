@@ -518,6 +518,62 @@ rc=$?
 set -e
 [ "$rc" = 2 ] || fail "work-journal became a public oms command"
 
+# A harness child may inspect the journal, but host-global configuration and
+# the remote-sync boundary stay with the parent. Every red path uses an
+# isolated config or repo and must fail before changing either one.
+child_expected="a harness child cannot mutate parent-owned host or global state; return the request to the parent agent"
+child_config="$TMP/child-configure.json"
+child_out="$TMP/child-configure.out"
+set +e
+OMS_HARNESS_CHILD=1 OMS_WORK_JOURNAL_CONFIG="$child_config" \
+  "$ROOT/scripts/journal.sh" configure --lang ko >"$child_out" 2>&1
+rc=$?
+set -e
+[ "$rc" = 2 ] || fail "child journal configure should exit 2 ($rc)"
+grep -Fq "$child_expected" "$child_out" ||
+  fail "child journal configure did not explain the parent boundary"
+[ ! -e "$child_config" ] || fail "child journal configure wrote global config"
+
+child_disconnect_config="$TMP/child-disconnect.json"
+child_disconnect_before="$TMP/child-disconnect.before"
+printf '%s\n' '{"schema_version":1,"managed_by":"oh-my-setting","notion":{}}' \
+  > "$child_disconnect_config"
+cp "$child_disconnect_config" "$child_disconnect_before"
+child_out="$TMP/child-disconnect.out"
+set +e
+OMS_HARNESS_CHILD=1 OMS_WORK_JOURNAL_CONFIG="$child_disconnect_config" \
+  "$ROOT/scripts/journal.sh" disconnect --managed >"$child_out" 2>&1
+rc=$?
+set -e
+[ "$rc" = 2 ] || fail "child journal disconnect should exit 2 ($rc)"
+grep -Fq "$child_expected" "$child_out" ||
+  fail "child journal disconnect did not explain the parent boundary"
+cmp -s "$child_disconnect_before" "$child_disconnect_config" ||
+  fail "child journal disconnect changed global config"
+
+child_sync_repo="$TMP/child-sync-repo"
+mkdir -p "$child_sync_repo"
+git -C "$child_sync_repo" init -q
+git -C "$child_sync_repo" config user.name "Test"
+git -C "$child_sync_repo" config user.email "test@example.com"
+printf 'seed\n' > "$child_sync_repo/seed.txt"
+git -C "$child_sync_repo" add seed.txt
+git -C "$child_sync_repo" commit -qm "seed"
+child_out="$TMP/child-sync.out"
+set +e
+OMS_HARNESS_CHILD=1 OMS_WORK_JOURNAL_CONFIG="$TMP/child-sync-config.json" \
+  "$ROOT/scripts/journal.sh" sync --repo "$child_sync_repo" --force \
+    >"$child_out" 2>&1
+rc=$?
+set -e
+[ "$rc" = 2 ] || fail "child journal sync should exit 2 ($rc)"
+grep -Fq "$child_expected" "$child_out" ||
+  fail "child journal sync did not explain the parent boundary"
+[ ! -e "$child_sync_repo/.oms" ] ||
+  fail "child journal sync materialized local state before refusing"
+OMS_HARNESS_CHILD=1 "$ROOT/scripts/journal.sh" show --repo "$repo" --today \
+  >/dev/null || fail "a harness child should retain journal read access"
+
 # One installer-side service connection flow owns both logins. It discovers
 # the existing Work Journal target after Notion authentication and persists no
 # credential in the harness config.

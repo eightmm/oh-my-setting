@@ -40,6 +40,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || [ "$DRY_RUN" -eq 1 ] || {
+  echo "error: a harness child cannot mutate OMS host lifecycle authority" >&2
+  exit 2
+}
+
 printf '# oh-my-setting cleanup\n\n'
 if [ "$DRY_RUN" -eq 1 ]; then
   printf 'mode: dry-run\n\n'

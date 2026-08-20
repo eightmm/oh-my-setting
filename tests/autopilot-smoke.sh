@@ -847,10 +847,125 @@ test_autopilot_orchestration() {
   [ "$rc" = 2 ] || fail "a changed contract against a live receipt must refuse, got $rc"
   grep -Fq 'immutable contract changed' "$planner_repo/retry-changed.out" ||
     fail "the refusal must name the immutable contract: $(tail -3 "$planner_repo/retry-changed.out")"
-  run_autopilot "$planner_repo" abandon \
+  # Abandon retires parent-owned authority. A delegated harness child may
+  # inspect with status/shadow, but it cannot free the receipt for a new run.
+  local child_receipt_before child_receipt_after
+  local child_archives_before child_archives_after
+  child_receipt_before="$(sha256_file "$planner_repo/.oms/plan/autopilot-run.json")"
+  child_archives_before="$(find "$planner_repo/.oms/plan" -type f \
+    -name 'autopilot-run.*.json' | wc -l | tr -d ' ')"
+  rc=0
+  OMS_HARNESS_CHILD=1 run_autopilot "$planner_repo" abandon \
+    --reason "a child must not retire parent authority" \
+    > "$planner_repo/child-abandon.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a harness child abandoned parent authority, got $rc"
+  child_receipt_after="$(sha256_file "$planner_repo/.oms/plan/autopilot-run.json")"
+  child_archives_after="$(find "$planner_repo/.oms/plan" -type f \
+    -name 'autopilot-run.*.json' | wc -l | tr -d ' ')"
+  [ "$child_receipt_after" = "$child_receipt_before" ] ||
+    fail "child abandon changed the live receipt"
+  [ "$child_archives_after" = "$child_archives_before" ] ||
+    fail "child abandon wrote an archive or abandon record"
+
+  # Stage writers already serialize on the receipt lock. Abandon must use the
+  # same lock around digest -> archive/record -> unlink, or it can delete a
+  # newer atomic replacement after its CAS check.
+  local abandon_lock_ready="$TMP/abandon-lock-ready"
+  local abandon_lock_mutate="$TMP/abandon-lock-mutate"
+  local abandon_lock_mutated="$TMP/abandon-lock-mutated"
+  local abandon_lock_release="$TMP/abandon-lock-release"
+  local abandon_lock_dir="$TMP/abandon-locks"
+  local abandon_holder_pid abandon_pid abandon_status=0 mutated_receipt_sha
+  cat > "$TMP/hold-autopilot-receipt-lock.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$OMS_TEST_FILE_LOCK_HELPER"
+hold_receipt_lock() {
+  : > "$OMS_TEST_LOCK_READY"
+  while [ ! -e "$OMS_TEST_LOCK_MUTATE" ]; do sleep 1; done
+  python3 - "$OMS_TEST_RECEIPT" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    row = json.load(handle)
+row["updated"] = "2099-01-01T00:00:00Z"
+payload = (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode()
+fd, temporary = tempfile.mkstemp(prefix=".autopilot-lock-test.", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+  : > "$OMS_TEST_LOCK_MUTATED"
+  while [ ! -e "$OMS_TEST_LOCK_RELEASE" ]; do sleep 1; done
+}
+oms_with_file_lock "$OMS_TEST_RECEIPT" hold_receipt_lock
+EOF
+  OMS_LOCK_DIR="$abandon_lock_dir" \
+    OMS_TEST_FILE_LOCK_HELPER="$ROOT/scripts/lib/file-lock.sh" \
+    OMS_TEST_RECEIPT="$planner_repo/.oms/plan/autopilot-run.json" \
+    OMS_TEST_LOCK_READY="$abandon_lock_ready" \
+    OMS_TEST_LOCK_MUTATE="$abandon_lock_mutate" \
+    OMS_TEST_LOCK_MUTATED="$abandon_lock_mutated" \
+    OMS_TEST_LOCK_RELEASE="$abandon_lock_release" \
+    bash "$TMP/hold-autopilot-receipt-lock.sh" &
+  abandon_holder_pid=$!
+  for _ in 1 2 3 4 5; do
+    [ -e "$abandon_lock_ready" ] && break
+    sleep 1
+  done
+  [ -e "$abandon_lock_ready" ] || {
+    kill "$abandon_holder_pid" 2>/dev/null || true
+    fail "receipt lock holder did not start"
+  }
+  OMS_LOCK_DIR="$abandon_lock_dir" run_autopilot "$planner_repo" abandon \
     --reason "provider wall killed the planner; rebinding with a longer wall" \
-    > "$planner_repo/abandon.out" 2>&1 ||
-    fail "abandon failed: $(cat "$planner_repo/abandon.out")"
+    > "$planner_repo/abandon.out" 2>&1 &
+  abandon_pid=$!
+  sleep 1
+  if ! kill -0 "$abandon_pid" 2>/dev/null; then
+    wait "$abandon_pid" || abandon_status=$?
+    : > "$abandon_lock_mutate"
+    : > "$abandon_lock_release"
+    wait "$abandon_holder_pid" 2>/dev/null || true
+    fail "abandon ignored the receipt lock (status $abandon_status)"
+  fi
+  if [ ! -f "$planner_repo/.oms/plan/autopilot-run.json" ]; then
+    : > "$abandon_lock_mutate"
+    : > "$abandon_lock_release"
+    wait "$abandon_holder_pid" 2>/dev/null || true
+    wait "$abandon_pid" 2>/dev/null || true
+    fail "abandon removed the live receipt while its lock was held"
+  fi
+  : > "$abandon_lock_mutate"
+  for _ in 1 2 3 4 5; do
+    [ -e "$abandon_lock_mutated" ] && break
+    sleep 1
+  done
+  [ -e "$abandon_lock_mutated" ] || {
+    : > "$abandon_lock_release"
+    wait "$abandon_holder_pid" 2>/dev/null || true
+    wait "$abandon_pid" 2>/dev/null || true
+    fail "locked stage-writer mutation did not complete"
+  }
+  mutated_receipt_sha="$(sha256_file "$planner_repo/.oms/plan/autopilot-run.json")"
+  mutated_receipt_sha="${mutated_receipt_sha//$'\r'/}"
+  : > "$abandon_lock_release"
+  wait "$abandon_holder_pid" || fail "receipt lock holder failed"
+  wait "$abandon_pid" || abandon_status=$?
+  [ "$abandon_status" = 0 ] ||
+    fail "abandon failed after the receipt lock released: $(cat "$planner_repo/abandon.out")"
+  [ -s "$planner_repo/.oms/plan/autopilot-run.$mutated_receipt_sha.json" ] ||
+    fail "abandon did not preserve the receipt version written under its lock"
   [ ! -f "$planner_repo/.oms/plan/autopilot-run.json" ] ||
     fail "the live receipt must be retired by abandon"
   ls "$planner_repo/.oms/plan/"autopilot-run.*.abandoned.json >/dev/null 2>&1 ||

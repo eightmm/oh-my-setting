@@ -8,6 +8,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PYTHON_ENTRY="$ROOT/scripts/lib/work_journal.py"
 
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  case "${1:-}" in
+    configure|disconnect|sync)
+      echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 case "${1:-}" in
   status|show|rebuild|sync|distill|identity)
     command_name="$1"

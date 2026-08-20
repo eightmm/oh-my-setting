@@ -93,6 +93,11 @@ done
   exit 2
 }
 
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || {
+  echo "error: a harness child cannot update or probe the OMS installation" >&2
+  exit 2
+}
+
 # Surface certification is an operator question about the installed Antigravity
 # binary, not a step of the update transaction: it spends one bounded provider
 # invocation, so it happens only when asked for by name and installs nothing.

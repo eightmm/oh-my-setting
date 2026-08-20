@@ -268,17 +268,36 @@ PROGRESS_FILE="$REPO/.oms/plan/progress.jsonl"
 SPEC="$REPO/PROJECT.md"
 OUTER_RECEIPT="$REPO/.oms/plan/autopilot-run.json"
 
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  case "$ACTION" in
+    status|shadow) ;;
+    *) fail "a harness child cannot mutate parent autopilot authority" ;;
+  esac
+fi
+
+outer_receipt_abandon_locked() {  # REASON
+  local reason="$1" expected
+
+  if [ ! -e "$OUTER_RECEIPT" ] && [ ! -L "$OUTER_RECEIPT" ]; then
+    fail "no live autopilot receipt to abandon"
+  fi
+  expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" ||
+    return $?
+  expected="${expected//$'\r'/}"
+  python3 "$RECEIPT_HELPER" abandon "$OUTER_RECEIPT" --repo "$REPO" \
+    --expected "$expected" --reason "$reason" \
+    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
 # abandon touches only the receipt, deliberately before the spec/tree gates:
 # the receipt being unfinishable (a frozen contract whose own value killed
 # the run) is exactly when the operator needs this exit, and a dirty tree or
 # changed spec must not block retiring it.
 if [ "$ACTION" = abandon ]; then
   [ -n "${ACTION_REASON:-}" ] || fail "abandon requires --reason"
-  [ -f "$OUTER_RECEIPT" ] || fail "no live autopilot receipt to abandon"
-  expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || exit $?
-  record="$(python3 "$RECEIPT_HELPER" abandon "$OUTER_RECEIPT" --repo "$REPO" \
-    --expected "$expected" --reason "$ACTION_REASON" \
-    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" || exit $?
+  record="$(oms_with_file_lock "$OUTER_RECEIPT" \
+    outer_receipt_abandon_locked "$ACTION_REASON")" || exit $?
+  record="${record//$'\r'/}"
   echo "autopilot: receipt abandoned; the exact contract is preserved and the exit recorded at $record"
   echo "autopilot: a fresh propose may now bind a new contract"
   exit 0
@@ -368,10 +387,6 @@ if [ -n "$PROPOSAL_SHA" ]; then
   esac
   [ "${#PROPOSAL_SHA}" -eq 64 ] ||
     fail "--expected-proposal-sha256 must be a lowercase SHA-256"
-fi
-
-if [ "$ACTION" != status ] && [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
-  fail "a harness child cannot start or resume parent autopilot authority"
 fi
 
 if [ "$ACTION" != status ]; then

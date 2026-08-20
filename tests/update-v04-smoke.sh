@@ -11,6 +11,36 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYST
 export GIT_AUTHOR_NAME=oms-test GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME=oms-test GIT_COMMITTER_EMAIL=test@example.com
 
+test_harness_child_cannot_mutate_install() {
+  local fixture="$TMP/child-update"
+  local output rc label
+  mkdir -p "$fixture/scripts/lib"
+  cp "$ROOT/scripts/update.sh" "$fixture/scripts/update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" "$fixture/scripts/lib/install-contract.sh"
+  cp "$ROOT/scripts/lib/install-lifecycle-lock.sh" \
+    "$fixture/scripts/lib/install-lifecycle-lock.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$fixture/scripts/lib/file-lock.sh"
+  chmod +x "$fixture/scripts/update.sh"
+
+  assert_child_update_refused() {
+    label="$1"
+    shift
+    output="$TMP/child-update-$label.out"
+    rc=0
+    OMS_HARNESS_CHILD=1 "$fixture/scripts/update.sh" "$@" \
+      >"$output" 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "child update $label returned $rc: $(cat "$output")"
+    grep -Fq 'a harness child cannot update or probe the OMS installation' "$output" ||
+      fail "child update $label refusal was not actionable: $(cat "$output")"
+  }
+
+  assert_child_update_refused default
+  assert_child_update_refused check --check
+  assert_child_update_refused rollback --rollback
+  assert_child_update_refused probe --probe-agy-surfaces
+  OMS_HARNESS_CHILD=1 "$fixture/scripts/update.sh" --help >/dev/null
+}
+
 test_schema1_receipt_migrates_to_profiled_schema2() {
   local home="$TMP/schema-home"
   local receipt="$home/.config/oh-my-setting/install.json"
@@ -772,6 +802,7 @@ PY
     fail "a multi-line failure must not corrupt the key=value state file"
 }
 
+test_harness_child_cannot_mutate_install
 test_schema1_receipt_migrates_to_profiled_schema2
 test_update_rolls_back_and_supports_explicit_rollback
 test_doctor_failure_restores_previous_plugin_payload

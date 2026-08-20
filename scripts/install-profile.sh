@@ -69,6 +69,10 @@ while [ "$#" -gt 0 ]; do
     *) fail "unknown argument: $1" ;;
   esac
 done
+
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || [ "$ACTION" != apply ] ||
+  fail "a harness child cannot install or apply capability profiles"
+
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 if [ "$REAPPLY" -eq 1 ]; then
   [ "${#PROFILES[@]}" -eq 0 ] || fail "--reapply cannot be combined with --profile"

@@ -374,7 +374,7 @@ PY
   local collision_repo="$TMP/helper-collision-repo"
   local collision_intent="$collision_repo/.oms/publish/collision.json"
   mkdir -p "$collision_repo/.oms/publish"
-  chmod 700 "$collision_repo/.oms/publish"
+  chmod 700 "$collision_repo/.oms" "$collision_repo/.oms/publish"
   printf 'first body\n' > "$TMP/collision-first.md"
   printf 'second body\n' > "$TMP/collision-second.md"
   python3 "$ROOT/scripts/lib/draft-pr-intent.py" create \

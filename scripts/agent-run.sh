@@ -376,6 +376,8 @@ if [ "$MODE" = "auto" ]; then
   resolved_mode="$(classify_mode "$(prompt_text)")"
 fi
 
+oms_require_peer_owner || exit $?
+
 echo "agent-run: mode=$MODE resolved=$resolved_mode to=$TO" >&2
 if [ "$EXPORT_ONLY" -eq 1 ] && [ "$resolved_mode" = "write" ]; then
   echo "error: delegate work cannot be exported; a worktree worker is required" >&2

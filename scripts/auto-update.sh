@@ -3,6 +3,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# A delegated worker may inspect the last updater state, but fetching,
+# applying, or wiring a future unmarked timer spends parent host authority.
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  case "${1:-check}" in
+    status|attention|-h|--help) ;;
+    check|apply|install|remove)
+      echo "error: a harness child cannot mutate OMS host lifecycle authority" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 # The trigger installers are part of this capability, not separate tools:
 # auto-update install|remove owns the user-level trigger lifecycle.
 case "${1:-}" in

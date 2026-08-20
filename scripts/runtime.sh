@@ -3,4 +3,5 @@ set -euo pipefail
 
 # Typed projections and optional execution services over the existing OMS plane.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONDONTWRITEBYTECODE=1
 exec python3 "$ROOT/scripts/lib/oms_core.py" "$@"

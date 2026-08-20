@@ -81,6 +81,11 @@ case "$ACTION" in
     ;;
 esac
 
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] &&
+   [ "$SCOPE" = global ] && [ "$ACTION" = init ]; then
+  fail "a harness child cannot mutate parent-owned host or global state; return the request to the parent agent"
+fi
+
 proj_dir="$(roles_dir_project "$REPO" 2>/dev/null || true)"
 glob_dir="$(roles_dir_global)"
 bundled_dir="$(roles_dir_bundled)"

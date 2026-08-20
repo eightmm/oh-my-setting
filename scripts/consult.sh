@@ -147,6 +147,8 @@ if [ "$EXPLICIT_MODEL_OPTION" -eq 1 ]; then
   esac
 fi
 
+oms_require_peer_owner || exit $?
+
 provider_cli_available() {
   case "$1" in
     codex) command -v codex >/dev/null 2>&1 ;;

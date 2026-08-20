@@ -430,6 +430,8 @@ elif [ -z "$PROMPT" ] && [ -z "$PLAN_TASK_ID" ]; then
   fail "--prompt, --brief-file, or --plan-task is required"
 fi
 
+oms_require_peer_owner || exit $?
+
 REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 # Normalize to the git worktree root so --plan-task hydration and every
@@ -467,8 +469,7 @@ case "$DELEGATE_MAX_DEPTH" in *[!0-9]*|"") DELEGATE_MAX_DEPTH=1 ;; esac
 if [ "$((DELEGATE_DEPTH + 1))" -gt "$DELEGATE_MAX_DEPTH" ]; then
   echo "error: delegation depth $((DELEGATE_DEPTH + 1)) exceeds OMS_DELEGATE_MAX_DEPTH=$DELEGATE_MAX_DEPTH" >&2
   echo "error: a delegated worker does not spawn its own workers. Do the work, or" >&2
-  echo "error: report what needs splitting and let the caller fan out. Read-only" >&2
-  echo "error: help is still available: oms consult." >&2
+  echo "error: report what needs splitting and let the parent fan out." >&2
   exit 2
 fi
 export OMS_HARNESS_DELEGATE_DEPTH="$((DELEGATE_DEPTH + 1))"

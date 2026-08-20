@@ -50,6 +50,14 @@ fail() {
   exit 2
 }
 
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  case "${1:-}" in
+    enqueue|cancel)
+      fail "a harness child cannot mutate parent-owned host or global state; return the request to the parent agent"
+      ;;
+  esac
+fi
+
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1

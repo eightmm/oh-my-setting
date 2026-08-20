@@ -159,6 +159,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  case "$MODE" in
+    apply|remove)
+      fail "a harness child cannot mutate OMS host lifecycle authority"
+      ;;
+  esac
+fi
+
 # WORKTREE_PARENT lands inside write_file(...). Normalize it as a POSIX path
 # even under Windows Python (Git Bash passes POSIX paths to Antigravity), and
 # reject every character that can terminate or widen the rule. NUL cannot be

@@ -624,6 +624,7 @@ if [ "$GATE" -eq 1 ]; then
 else
   export MA_MODEL_OPERATION=review
 fi
+oms_require_peer_owner || exit $?
 REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 if [ -n "$BASE_REF" ]; then

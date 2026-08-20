@@ -30,6 +30,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || {
+  echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
+  exit 2
+}
 PROVIDERS="$(oms_provider_normalize_list "$PROVIDERS")" || exit $?
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-model-doctor.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM

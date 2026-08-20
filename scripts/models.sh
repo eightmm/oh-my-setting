@@ -29,6 +29,11 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || [ "$REFRESH" -eq 0 ] || {
+  echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
+  exit 2
+}
+
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-models.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 rows="$tmp/rows.jsonl"

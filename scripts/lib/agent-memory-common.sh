@@ -51,6 +51,16 @@ oms_peer_caller() {
   printf '%s\n' "$caller"
 }
 
+# A provider process is delegated work, not a new harness owner. Let it report
+# that another opinion or worker is needed, but do not let it reset attempt
+# budgets, spend through a fresh peer call, or widen itself into write work.
+oms_require_peer_owner() {
+  [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && return 0
+  printf '%s\n' \
+    'error: a harness child cannot start peer calls or delegation; recursive delegation and provider spend belong to the parent - report the need in your answer instead' >&2
+  return 2
+}
+
 # Canonical provider namespace shared by the plan board, the router, and the
 # delegate. Accepts the aliases users type; prints the canonical name or fails,
 # so board/artifact records never fork into "agy" vs "antigravity".

@@ -187,6 +187,8 @@ elif [ -z "$PROMPT" ]; then
   fail "--prompt or --prompt-file is required"
 fi
 
+oms_require_peer_owner || exit $?
+
 REPO="$(cd "$REPO" && pwd)"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/call}"
 

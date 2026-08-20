@@ -19,6 +19,72 @@ from oms_runtime.execution import run as run_backend
 
 from runtime_test_base import RuntimeFixtureBase
 
+
+class ChildRuntimePolicyTest(unittest.TestCase):
+
+    def test_policy_classifies_every_runtime_action_fail_closed(self) -> None:
+        from oms_runtime.child_policy import child_action_is_read_only
+        from oms_runtime.cli_parser import build_parser
+
+        allowed = (
+            ['envelope', 'show'],
+            ['evidence', 'show'],
+            ['evidence', 'unbound'],
+            ['next'],
+            ['failure', 'classify', 'verification failed'],
+            ['failure', 'catalog'],
+            ['profile', 'list'],
+            ['profile', 'current'],
+            ['profile', 'show', 'core'],
+            ['profile', 'check', 'core'],
+            ['profile', 'install-plan', 'core'],
+            ['profile', 'install', 'core', '--dry-run'],
+            ['release', 'status'],
+            ['release', 'resolve', 'stable'],
+            ['capsule', 'verify', 'capsule.json'],
+            ['capsule', 'diff', 'left.json', 'right.json'],
+            ['backend', 'describe', 'trusted-local'],
+            ['backend', 'check', 'isolated'],
+            ['experiment', 'template'],
+            ['experiment', 'validate', '{}'],
+            ['experiment', 'compare', '{}', '{}'],
+            ['experiment', 'show', 'experiment-id'],
+            ['experiment', 'summarize', '--id', 'experiment-id'],
+            ['experiment', 'evaluate', '{}', '{}'],
+            ['benchmark', 'show'],
+            ['benchmark', 'compare', 'left.json', 'right.json'],
+            ['doctor'],
+            ['doctor', '--strict'],
+        )
+        denied = (
+            ['envelope', 'write'],
+            ['evidence', 'bind', '--criterion', 'criterion', '--ref', 'event', '--status', 'verified'],
+            ['evidence', 'revoke', '--binding', 'binding'],
+            ['context'],
+            ['profile', 'apply', 'core'],
+            ['profile', 'install', 'core'],
+            ['release', 'resolve', 'stable', '--fetch'],
+            ['release', 'apply', 'stable'],
+            ['release', 'promote', '--commit', 'a' * 40, '--version', '1.0.0', '--expected-manifest-digest', 'b' * 64],
+            ['capsule', 'export'],
+            ['capsule', 'import', 'capsule.json'],
+            ['backend', 'run', 'trusted-local', '--', 'true'],
+            ['experiment', 'template', '--output', 'experiment.json'],
+            ['experiment', 'register', '{}'],
+            ['experiment', 'run', '--id', 'experiment-id', '--arm', 'baseline', '--seed', '1', '--metrics', 'metrics.json', '--', 'true'],
+            ['experiment', 'invariants', '{}'],
+            ['benchmark', 'snapshot'],
+            ['benchmark', 'record', '--task-id', 'task', '--status', 'verified'],
+        )
+        parser = build_parser()
+        for argv in allowed:
+            with self.subTest(kind='allowed', argv=argv):
+                self.assertTrue(child_action_is_read_only(parser.parse_args(argv)))
+        for argv in denied:
+            with self.subTest(kind='denied', argv=argv):
+                self.assertFalse(child_action_is_read_only(parser.parse_args(argv)))
+
+
 class RuntimeFixture(RuntimeFixtureBase):
 
     def test_envelope_and_coverage_are_conservative(self) -> None:

@@ -94,6 +94,16 @@ if [ "$TOOL_LOCK_ONLY" = "1" ] && [ "$REPAIR" = "1" ]; then
   exit 2
 fi
 
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || [ "$REPAIR" != 1 ] || {
+  echo "error: a harness child cannot mutate OMS host lifecycle authority" >&2
+  exit 2
+}
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] && [ "$SURFACES" = 0 ] &&
+   [ "$TOOL_LOCK_ONLY" = 0 ] && [ "$MODEL_DOCTOR_MODE" != 0 ]; then
+  echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
+  exit 2
+fi
+
 RECEIPT="$(oms_install_receipt_path)"
 if [ "$REPAIR" = 1 ]; then
   # shellcheck source=scripts/lib/install-lifecycle-lock.sh

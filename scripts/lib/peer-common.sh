@@ -2155,6 +2155,8 @@ ma_run_routed_provider() {
   local -a start_args
   local -a usage_args
 
+  oms_require_peer_owner || return $?
+
   [ "$provider" != agy ] || provider=antigravity
   events="$(ma_scripts_dir)/agent-events.sh"
   if [ -n "$state_repo" ] && [ -x "$events" ]; then

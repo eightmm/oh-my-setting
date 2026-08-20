@@ -33,6 +33,43 @@ FLOOR_READERS = {
 }
 
 
+def floor_path_spelling(value):
+    """Normalize only Bash's unambiguous repo-relative ./ spelling."""
+    while value.startswith("./"):
+        value = value[2:]
+    return value
+
+
+def unwrap_strict_command_wrapper(words):
+    """Unwrap one deterministic command/env layer, leaving unknown forms alone."""
+    if not words:
+        return words
+    head = words[0]
+    if head == "command":
+        if len(words) < 2 or words[1] in ("-v", "-V"):
+            return words
+        index = 1
+        if words[index] in ("-p", "--"):
+            index += 1
+        if index >= len(words) or words[index].startswith("-"):
+            return words
+        return words[index:]
+    if head in ("env", "/bin/env", "/usr/bin/env"):
+        index = 1
+        if index < len(words) and words[index] == "--":
+            index += 1
+        elif index < len(words) and words[index].startswith("-"):
+            return words
+        while index < len(words) and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=.*", words[index]
+        ):
+            index += 1
+        if index >= len(words) or words[index].startswith("-"):
+            return words
+        return words[index:]
+    return words
+
+
 def floor_incompatible_reads(verify, allowed_paths):
     try:
         tokens = shlex.split(verify)
@@ -66,15 +103,9 @@ def floor_incompatible_reads(verify, allowed_paths):
             current.append(token)
     commands.append(current)
     hits = []
-    allowed = set(allowed_paths)
+    allowed = {floor_path_spelling(path) for path in allowed_paths}
     for command in commands:
         if not command:
-            continue
-        # bash -c 'inner': the inner string is where the field defect lived.
-        if command[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh") and "-c" in command[:3]:
-            marker = command.index("-c")
-            if marker + 1 < len(command):
-                hits.extend(floor_incompatible_reads(command[marker + 1], allowed_paths))
             continue
         words = list(command)
         while words and "=" in words[0] and "/" not in words[0].split("=", 1)[0]:
@@ -87,16 +118,32 @@ def floor_incompatible_reads(verify, allowed_paths):
             words = words[1:]
         if not words:
             continue
+        # `command` and `env` commonly wrap a verifier without changing which
+        # executable reads the file. Unwrap only the one-layer forms whose
+        # shell meaning is certain; option-rich or nested forms remain unknown
+        # and rely on the runtime floor instead of risking a false rejection.
+        words = unwrap_strict_command_wrapper(words)
+        # bash -c 'inner': the inner string is where the field defect lived.
+        if words[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh") and "-c" in words[:3]:
+            marker = words.index("-c")
+            if marker + 1 < len(words):
+                hits.extend(floor_incompatible_reads(words[marker + 1], allowed_paths))
+            continue
         head_word = words[0].rsplit("/", 1)[-1]
         for index_w, word in enumerate(words):
-            if word == "<" and index_w + 1 < len(words) and words[index_w + 1] in allowed:
-                hits.append((words[index_w + 1], "stdin redirect"))
-            elif word.startswith("<") and len(word) > 1 and word[1:] in allowed:
-                hits.append((word[1:], "stdin redirect"))
+            if word == "<" and index_w + 1 < len(words):
+                target = floor_path_spelling(words[index_w + 1])
+                if target in allowed:
+                    hits.append((target, "stdin redirect"))
+            elif word.startswith("<") and len(word) > 1:
+                target = floor_path_spelling(word[1:])
+                if target in allowed:
+                    hits.append((target, "stdin redirect"))
         if head_word in FLOOR_READERS:
             for word in words[1:]:
-                if word in allowed:
-                    hits.append((word, head_word))
+                target = floor_path_spelling(word)
+                if target in allowed:
+                    hits.append((target, head_word))
     return hits
 
 

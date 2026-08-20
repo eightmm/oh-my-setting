@@ -1126,6 +1126,189 @@ test_tsp_queue_wait_records_ledger() {
   assert_file_contains "$project/tsp.log" "-s 44"
 }
 
+test_harness_child_authority_guards_memory_roles_and_queue() {
+  local dir="$TMP/harness-child-authority"
+  local project="$dir/project"
+  local home_dir="$dir/home"
+  local expected="a harness child cannot mutate parent-owned host or global state; return the request to the parent agent"
+  local action action_dir explicit_file out rc
+  local bin="$dir/bin"
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+
+  # Project-default memory is delegated work state, so children may update it.
+  OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --repo "$project" append --agent codex --text "child project memory" >/dev/null ||
+    fail "a harness child should be allowed to update project-default memory"
+  assert_file_contains "$project/.oms/memory/shared.md" "child project memory"
+
+  # Every global memory mutator is parent-owned and must fail before creating
+  # even the isolated global store. Global observation remains available.
+  for action in init append pin compact rebuild search recall context; do
+    out="$dir/global-$action.out"
+    rc=0
+    case "$action" in
+      append|pin)
+        if OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+          --global "$action" --text blocked >"$out" 2>&1; then
+          fail "a harness child unexpectedly ran global memory $action"
+        else
+          rc=$?
+        fi
+        ;;
+      search|recall)
+        if OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+          --global "$action" --text blocked >"$out" 2>&1; then
+          fail "a harness child unexpectedly ran global memory $action"
+        else
+          rc=$?
+        fi
+        ;;
+      *)
+        if OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+          --global "$action" >"$out" 2>&1; then
+          fail "a harness child unexpectedly ran global memory $action"
+        else
+          rc=$?
+        fi
+        ;;
+    esac
+    [ "$rc" = 2 ] || fail "global memory $action should exit 2, got $rc"
+    assert_file_contains "$out" "$expected"
+  done
+  [ ! -e "$home_dir/.oh-my-setting" ] ||
+    fail "blocked global memory actions must not create the global store"
+  OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --global show >"$dir/global-show.out" ||
+    fail "a harness child should retain global memory read access"
+  assert_file_contains "$dir/global-show.out" "memory: empty"
+
+  # An explicit file is caller-selected authority even when it sits under the
+  # project fixture. Exercise every mutator against a fresh sentinel directory.
+  for action in init append pin compact rebuild search recall context; do
+    action_dir="$dir/explicit-$action"
+    explicit_file="$action_dir/shared.md"
+    out="$dir/explicit-$action.out"
+    mkdir -p "$action_dir"
+    printf 'sentinel\n' > "$explicit_file"
+    rc=0
+    case "$action" in
+      append|pin)
+        if OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+          --file "$explicit_file" "$action" --text blocked >"$out" 2>&1; then
+          fail "a harness child unexpectedly ran explicit-file memory $action"
+        else
+          rc=$?
+        fi
+        ;;
+      search|recall)
+        if OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+          --file "$explicit_file" "$action" --text blocked >"$out" 2>&1; then
+          fail "a harness child unexpectedly ran explicit-file memory $action"
+        else
+          rc=$?
+        fi
+        ;;
+      *)
+        if OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+          --file "$explicit_file" "$action" >"$out" 2>&1; then
+          fail "a harness child unexpectedly ran explicit-file memory $action"
+        else
+          rc=$?
+        fi
+        ;;
+    esac
+    [ "$rc" = 2 ] || fail "explicit-file memory $action should exit 2, got $rc"
+    assert_file_contains "$out" "$expected"
+    [ "$(find "$action_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ] ||
+      fail "blocked explicit-file memory $action created adjacent state"
+    [ "$(cat "$explicit_file")" = sentinel ] ||
+      fail "blocked explicit-file memory $action changed the sentinel"
+  done
+  action_dir="$dir/explicit-full-context"
+  explicit_file="$action_dir/shared.md"
+  mkdir -p "$action_dir"
+  printf 'sentinel\n' > "$explicit_file"
+  OMS_HARNESS_CHILD=1 HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
+    --file "$explicit_file" --full context >/dev/null ||
+    fail "a child should retain non-compacting explicit-memory context access"
+  [ "$(find "$action_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ] ||
+    fail "full explicit-memory context created adjacent derived state"
+
+  # Role reads and project initialization stay delegated; only global init is
+  # parent-owned. The custom role directory keeps the red path off real HOME.
+  out="$dir/global-role-init.out"
+  rc=0
+  if OMS_HARNESS_CHILD=1 OH_MY_SETTING_ROLES_DIR="$dir/global-roles" \
+    "$ROOT/scripts/agent-role.sh" --repo "$project" --global \
+      --name child-global init >"$out" 2>&1; then
+    fail "a harness child unexpectedly initialized a global role"
+  else
+    rc=$?
+  fi
+  [ "$rc" = 2 ] || fail "global role init should exit 2, got $rc"
+  assert_file_contains "$out" "$expected"
+  [ ! -e "$dir/global-roles" ] || fail "blocked global role init created its store"
+  [ "$(OMS_HARNESS_CHILD=1 OH_MY_SETTING_ROLES_DIR="$dir/global-roles" \
+    "$ROOT/scripts/agent-role.sh" --repo "$project" --global \
+      --name readable path)" = "$dir/global-roles/readable.md" ] ||
+    fail "a harness child should retain global role read access"
+  OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-role.sh" --repo "$project" \
+    --name child-project init >/dev/null ||
+    fail "a harness child should be allowed to initialize a project role"
+  [ -f "$project/.oms/roles/child-project.md" ] ||
+    fail "child project role was not created"
+
+  # Queue mutation is host authority. The fake tsp proves blocked operations
+  # never reach a process manager, while list/logs/wait remain observable.
+  write_fake_tsp "$bin"
+  for action in enqueue cancel; do
+    out="$dir/queue-$action.out"
+    rc=0
+    if [ "$action" = enqueue ]; then
+      if OMS_HARNESS_CHILD=1 TSP_STUB_LOG="$dir/blocked-tsp.log" \
+        OMS_TSP_STATE_DIR="$dir/blocked-state" PATH="$bin:/usr/bin:/bin" \
+        "$ROOT/scripts/tsp-queue.sh" enqueue -- bash -c true >"$out" 2>&1; then
+        fail "a harness child unexpectedly enqueued a host job"
+      else
+        rc=$?
+      fi
+    else
+      if OMS_HARNESS_CHILD=1 TSP_STUB_LOG="$dir/blocked-tsp.log" \
+        OMS_TSP_STATE_DIR="$dir/blocked-state" PATH="$bin:/usr/bin:/bin" \
+        "$ROOT/scripts/tsp-queue.sh" cancel 88 >"$out" 2>&1; then
+        fail "a harness child unexpectedly canceled a host job"
+      else
+        rc=$?
+      fi
+    fi
+    [ "$rc" = 2 ] || fail "child queue $action should exit 2, got $rc"
+    assert_file_contains "$out" "$expected"
+  done
+  [ ! -e "$dir/blocked-tsp.log" ] || fail "blocked queue actions reached tsp"
+  [ ! -e "$dir/blocked-state" ] || fail "blocked queue actions created queue state"
+
+  OMS_HARNESS_CHILD=1 TSP_STUB_LOG="$dir/read-tsp.log" TSP_STUB_ID=88 \
+    OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" list >"$dir/list.out" ||
+    fail "a harness child should be allowed to list host jobs"
+  OMS_HARNESS_CHILD=1 TSP_STUB_LOG="$dir/read-tsp.log" \
+    OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" logs 88 >"$dir/logs.out" ||
+    fail "a harness child should be allowed to read host job logs"
+  assert_file_contains "$dir/list.out" "88 finished job"
+  assert_file_contains "$dir/logs.out" "log for 88"
+  (cd "$project" && TSP_STUB_LOG="$dir/read-tsp.log" TSP_STUB_ID=88 \
+    OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/tsp-queue.sh" enqueue --ledger-note child-wait -- bash -c true >/dev/null)
+  (cd "$project" && OMS_HARNESS_CHILD=1 TSP_STUB_LOG="$dir/read-tsp.log" \
+    TSP_STUB_ID=88 TSP_STUB_EXIT=0 OMS_TSP_STATE_DIR="$dir/state" \
+    PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" wait 88 >/dev/null) ||
+    fail "a harness child should be allowed to wait for an existing host job"
+  assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"note": "child-wait"'
+}
+
 test_tsp_queue_missing_tsp_fallback_records_ledger() {
   local project="$TMP/tsp-fallback"
   local out
@@ -17966,6 +18149,110 @@ test_delegate_does_not_consult_an_advisor_on_a_first_failure() {
   fi
 }
 
+test_harness_child_cannot_start_recursive_peer_work() {
+  local project="$TMP/child-peer-authority"
+  local bin="$project/bin"
+  local home_dir="$project/home"
+  local counter="$project/provider-calls"
+  local router_counter="$project/router-provider-calls"
+  local router_output="$project/router-child.out"
+  local verify_sentinel="$project/reviewer-verify-ran"
+  local verdicts="$project/verdicts"
+  local output rc label
+
+  make_committed_repo "$project"
+  mkdir -p "$bin" "$home_dir" "$verdicts"
+  for provider in codex claude agy; do
+    cat > "$bin/$provider" <<'EOF'
+#!/usr/bin/env bash
+printf 'called\n' >> "$OMS_TEST_PEER_COUNTER"
+cat >/dev/null || true
+printf 'A complete fixture answer that should never be reached by a harness child.\n'
+EOF
+    chmod +x "$bin/$provider"
+  done
+
+  assert_child_peer_refused() {
+    label="$1"
+    shift
+    output="$project/$label.out"
+    rc=0
+    OMS_HARNESS_CHILD=1 OMS_TEST_PEER_COUNTER="$counter" \
+      HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$@" \
+      >"$output" 2>&1 || rc=$?
+    [ "$rc" = 2 ] ||
+      fail "harness child peer start $label returned $rc: $(cat "$output")"
+    grep -Fq 'a harness child cannot start peer calls or delegation' "$output" ||
+      fail "harness child peer refusal $label was not actionable: $(cat "$output")"
+  }
+
+  assert_child_peer_refused agent-call "$ROOT/scripts/agent-call.sh" \
+    --to codex --repo "$project" --prompt child
+  assert_child_peer_refused agent-run-read "$ROOT/scripts/agent-run.sh" \
+    --to codex --repo "$project" --prompt child --mode read --dry-run
+  assert_child_peer_refused agent-run-write "$ROOT/scripts/agent-run.sh" \
+    --to codex --repo "$project" --prompt child --mode write --no-verify \
+    --apply --dry-run
+  assert_child_peer_refused peer-ask "$ROOT/scripts/peer-ask.sh" \
+    --repo "$project" --providers codex --prompt child --dry-run
+  assert_child_peer_refused peer-review "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --providers codex --prompt child --no-diff --gate \
+    --verify 'touch reviewer-verify-ran'
+  assert_child_peer_refused peer-delegate env OMS_DELEGATE_MAX_DEPTH=999 \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --prompt child --no-verify --apply --dry-run
+  assert_child_peer_refused consult "$ROOT/scripts/consult.sh" \
+    --to codex --repo "$project" --prompt child --dry-run
+  assert_child_peer_refused advise "$ROOT/scripts/advise.sh" \
+    --to codex --repo "$project" --prompt child --no-failures \
+    --no-strategy --dry-run
+
+  # The public guards prevent ordinary callers reaching the common router.
+  # Exercise that defense directly so a future front door cannot bypass it.
+  rc=0
+  (
+    # shellcheck source=scripts/lib/peer-common.sh
+    . "$ROOT/scripts/lib/peer-common.sh"
+    ma_run_routed_provider_inner() {
+      printf 'called\n' >> "$router_counter"
+    }
+    ma_resolve_seat_recovery() { return 0; }
+    OMS_HARNESS_CHILD=1 ma_run_routed_provider codex read /dev/null \
+      "$project/router-artifact" "$project" router-test "" router-test
+  ) >"$router_output" 2>&1 || rc=$?
+  [ "$rc" = 2 ] ||
+    fail "common provider router let a harness child through: $(cat "$router_output")"
+  [ ! -e "$router_counter" ] ||
+    fail "common provider router dispatched a child-marked call"
+
+  (
+    # shellcheck source=scripts/lib/peer-common.sh
+    . "$ROOT/scripts/lib/peer-common.sh"
+    ma_run_routed_provider_inner() {
+      printf 'called\n' >> "$router_counter"
+    }
+    ma_resolve_seat_recovery() { return 0; }
+    ma_run_routed_provider codex read /dev/null "$project/router-artifact" \
+      "$project" router-test "" router-test
+  ) >/dev/null 2>&1 || fail "an unmarked owner could not use the common provider router"
+  [ -s "$router_counter" ] ||
+    fail "the common provider router regression never reached its provider stub"
+
+  [ ! -e "$counter" ] || fail "a refused child peer start reached a provider"
+  [ ! -e "$verify_sentinel" ] ||
+    fail "a refused child peer-review executed its verifier"
+  [ ! -e "$project/.oms" ] ||
+    fail "a refused child peer start wrote project authority state"
+
+  # Verdict extraction is observation, not a new peer call.
+  printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
+    > "$verdicts/codex-child-20260611T000000Z-1.md"
+  OMS_HARNESS_CHILD=1 "$ROOT/scripts/peer-review.sh" verdicts "$verdicts" \
+    >/dev/null || fail "a harness child should be able to inspect review verdicts"
+  OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-call.sh" --help >/dev/null ||
+    fail "peer help should remain available to a harness child"
+}
+
 test_delegate_refuses_to_nest_beyond_the_depth_cap() {
   local project="$TMP/delegate-depth"
   local bin="$project/bin"
@@ -17987,8 +18274,8 @@ test_delegate_refuses_to_nest_beyond_the_depth_cap() {
   [ "$rc" = 2 ] || fail "a worker must not spawn its own worker: $out"
   printf '%s' "$out" | grep -Fq 'does not spawn its own workers' ||
     fail "the refusal should say what to do instead: $out"
-  printf '%s' "$out" | grep -Fq 'oms consult' ||
-    fail "read-only help is still available and the message should say so: $out"
+  printf '%s' "$out" | grep -Fq 'let the parent fan out' ||
+    fail "the refusal should return recursive work to the parent: $out"
 
   # A two-stage job can raise the cap on purpose, in one place.
   rc=0

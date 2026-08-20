@@ -177,6 +177,8 @@ if [ "$ALLOW_SENSITIVE" -eq 1 ] && [ "$INCLUDE_SESSION" -eq 0 ]; then
   fail "--allow-sensitive only applies to the --session digest"
 fi
 
+oms_require_peer_owner || exit $?
+
 strategy_file=""
 if [ "$INCLUDE_STRATEGY" -eq 1 ]; then
   strategy_file="$("$SCRIPT_DIR/agent-role.sh" --repo "$REPO" --name "$STRATEGY" resolve)" ||

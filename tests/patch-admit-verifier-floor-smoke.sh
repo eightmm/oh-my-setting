@@ -326,16 +326,46 @@ done
 out="$(floor_proposal "/usr/bin/jq tests/suite.sh")"
 printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
   fail "a path-qualified reader must be rejected: $out"
+out="$(floor_proposal "jq ./tests/suite.sh")"
+printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+  fail "a reader using the canonical ./ spelling must be rejected: $out"
+out="$(floor_proposal "python3 - <./tests/suite.sh")"
+printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+  fail "a redirect using the canonical ./ spelling must be rejected: $out"
 out="$(floor_proposal "CHECK_MODE=strict sha256sum tests/suite.sh")"
 printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
   fail "a reader after an environment assignment must be rejected: $out"
 out="$(floor_proposal "bash -c 'base64 tests/suite.sh'")"
 printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
   fail "a reader inside bash -c must be rejected: $out"
+for verify in \
+  "command jq tests/suite.sh" \
+  "command -p jq tests/suite.sh" \
+  "command -- jq tests/suite.sh" \
+  "env jq tests/suite.sh" \
+  "env CHECK_MODE=strict jq tests/suite.sh" \
+  "env -- CHECK_MODE=strict jq tests/suite.sh" \
+  "/usr/bin/env jq tests/suite.sh"; do
+  out="$(floor_proposal "$verify")"
+  printf '%s' "$out" | grep -Fq 'floor_incompatible_verifier' ||
+    fail "a strict command wrapper must not hide a reader ($verify): $out"
+done
 
 out="$(floor_proposal "bash tests/suite.sh")"
 printf '%s' "$out" | grep -Fq 'proposal applied' ||
   fail "executing the restored suite must stay admissible: $out"
+for verify in \
+  "command -v jq tests/suite.sh" \
+  "command -V jq tests/suite.sh" \
+  "command bash tests/suite.sh" \
+  "env bash tests/suite.sh" \
+  "./env jq tests/suite.sh" \
+  "/tmp/command jq tests/suite.sh" \
+  "jq 'tests/*.sh'"; do
+  out="$(floor_proposal "$verify")"
+  printf '%s' "$out" | grep -Fq 'proposal applied' ||
+    fail "a non-reader wrapper/query must stay admissible ($verify): $out"
+done
 out="$(floor_proposal "grep -q ok docs/other.md && bash tests/suite.sh")"
 printf '%s' "$out" | grep -Fq 'proposal applied' ||
   fail "reading an unmodified path must stay admissible: $out"

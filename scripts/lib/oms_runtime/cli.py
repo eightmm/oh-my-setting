@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from .benchmark import snapshot as benchmark_snapshot
 from .capsule import diff as diff_capsules
 from .capsule import export as export_capsule
 from .capsule import import_capsule, verify as verify_capsule
+from .child_policy import CHILD_RUNTIME_ERROR, child_action_is_read_only
 from .common import CoreError, atomic_write_json, install_root, load_json_argument, repo_root
 from .context import DEFAULT_CONTEXT_BYTES, plan_context
 from .evidence import bind as bind_evidence
@@ -52,6 +54,8 @@ from .cli_parser import build_parser
 def main(argv: Optional[Sequence[str]]=None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if os.environ.get('OMS_HARNESS_CHILD') == '1' and not child_action_is_read_only(args):
+            raise CoreError(CHILD_RUNTIME_ERROR)
         repo = repo_root(args.repo)
         if args.command == 'envelope':
             value = build_envelope(repo)

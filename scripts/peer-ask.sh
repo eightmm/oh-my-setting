@@ -291,6 +291,7 @@ if [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
 else
   export MA_MODEL_OPERATION=ask
 fi
+oms_require_peer_owner || exit $?
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 if [ "$INCLUDE_STATUS" -eq 1 ] || [ "$INCLUDE_DIFF" -eq 1 ]; then
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
