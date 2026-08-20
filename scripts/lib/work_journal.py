@@ -247,15 +247,23 @@ def notion_presentation(content: str) -> str:
     update can emit near-identical bullets from its update and close events.
     Notion is the surface the human actually reads, so the mirror drops the
     trailing ``[wj_...]`` citations, the ``Commit <hash>:`` prefixes and the
-    raw evidence bullets, floats decisions, blockers, and next priorities
-    above the progress listing, folds a bullet that several sections repeat
-    down to its single highest-ranked section, and removes sections left
-    saying nothing. Deterministic text transforms only — nothing is
-    summarized or rewritten, and the local files keep full provenance.
+    raw evidence bullets, abbreviates any full commit hash those anchors did
+    not reach, floats decisions, blockers, and next priorities above the
+    progress listing, folds a bullet that several sections repeat down to its
+    single highest-ranked section — taking that bullet's indented detail lines
+    with it — and removes sections left saying nothing. Deterministic text
+    transforms only — nothing is summarized or rewritten, and the local files
+    keep full provenance.
     """
 
     citation = re.compile(r"\s*\[wj_[0-9a-f]{8,}.*\]\s*$")
     commit_prefix = re.compile(r"^- ((?:작업|work): )?Commit [0-9a-f]{7,40}: ")
+    # The prefix anchor above only reaches a leading ``Commit <hash>:``. CI and
+    # review bullets name their commit mid-sentence, so a full hash outlived it
+    # and reached the reader. Abbreviate rather than drop: a commit bullet is
+    # identified by its subject, but a CI bullet has none, so the short hash is
+    # the only identity it has left.
+    long_hash = re.compile(r"\b([0-9a-f]{7})[0-9a-f]{33}\b")
     # The renderer indents an evidence bullet under its work item, so this
     # anchor has to tolerate leading space; a top-level-only anchor let full
     # commit hashes and handoff digests through to the human page.
@@ -267,13 +275,10 @@ def notion_presentation(content: str) -> str:
         if evidence_bullet.match(line):
             continue
         if line.startswith("- "):
-            lines.append(
-                commit_prefix.sub(
-                    lambda m: "- " + (m.group(1) or ""), citation.sub("", line)
-                )
+            line = commit_prefix.sub(
+                lambda m: "- " + (m.group(1) or ""), citation.sub("", line)
             )
-        else:
-            lines.append(line)
+        lines.append(long_hash.sub(r"\1", line))
 
     preamble: List[str] = []
     sections: List[Dict[str, Any]] = []
@@ -295,11 +300,20 @@ def notion_presentation(content: str) -> str:
 
     def fold(block: Iterable[str]) -> List[str]:
         kept: List[str] = []
+        # A folded bullet has to take its own indented detail lines with it.
+        # Leaving them behind reattached them to the previous surviving bullet,
+        # which reported that bullet's outcome as the dropped one's.
+        dropping = False
         for line in block:
             if line.startswith("- ") and line not in _EMPTY_MARKERS:
-                if line in seen:
+                dropping = line in seen
+                if dropping:
                     continue
                 seen.add(line)
+            elif dropping:
+                if line[:1] in (" ", "\t") and line.strip():
+                    continue
+                dropping = False
             kept.append(line)
         return kept
 

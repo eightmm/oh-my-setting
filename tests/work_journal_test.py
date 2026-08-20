@@ -1137,6 +1137,46 @@ class NotionPresentationTest(unittest.TestCase):
         self.assertLess(rendered.index("> same line"), rendered.index("## 핵심 진전"))
         self.assertIn("- progress only", rendered)
 
+    def test_abbreviates_hashes_the_commit_prefix_never_reached(self):
+        content = "\n".join(
+            [
+                "## 핵심 진전",
+                "- CI success for commit 6bdad1f79bae90aa34f9cd7781439453b037c571"
+                " [wj_a4b7c0f523496f5d; source x; evidence y]",
+                "- 작업: CI failure for commit"
+                " ccaec14ac6974f60f2a3a679181eacfd318f3192",
+            ]
+        )
+        rendered = wj.notion_presentation(content)
+        # A CI bullet names its commit mid-sentence, where the ``Commit
+        # <hash>:`` prefix anchor never reached. It keeps a short hash rather
+        # than losing it: unlike a commit bullet it has no subject to fall
+        # back on.
+        self.assertIn("- CI success for commit 6bdad1f", rendered)
+        self.assertIn("- 작업: CI failure for commit ccaec14", rendered)
+        self.assertNotIn("6bdad1f79bae", rendered)
+        self.assertNotIn("ccaec14ac697", rendered)
+
+    def test_a_folded_bullet_takes_its_detail_lines_with_it(self):
+        content = "\n".join(
+            [
+                "## 프로젝트별 작업",
+                "### proj",
+                "- 작업: Commit da3661c808d3: fix: same subject twice",
+                "  - 결과: success",
+                "- 작업: Commit 5669cfc265b1: fix: same subject twice",
+                "  - 결과: recorded",
+            ]
+        )
+        rendered = wj.notion_presentation(content)
+        # Two commits sharing a subject render identical bullets once the hash
+        # prefix is stripped, so the fold drops the second. Its outcome line
+        # has to leave with it: left behind, it restated the survivor's result
+        # as the dropped commit's.
+        self.assertEqual(1, rendered.count("- 작업: fix: same subject twice"))
+        self.assertIn("  - 결과: success", rendered)
+        self.assertNotIn("  - 결과: recorded", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
