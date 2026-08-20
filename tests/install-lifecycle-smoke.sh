@@ -696,7 +696,7 @@ assert row.get("schema") == 2, row
 PY_RUNTIME
 (cd "$tools_home" && HOME="$tools_home" "$tools_dest/scripts/oms" list --frontdoor > "$TMP/tools-frontdoor.txt") ||
   fail "oms list --frontdoor must answer after a default install"
-grep -Fq runtime-core "$TMP/tools-frontdoor.txt" ||
+grep -Eq '^runtime( |$)' "$TMP/tools-frontdoor.txt" ||
   fail "the front-door catalog must include the runtime after install"
 # Without the opt-in flag a default install must not widen Antigravity's
 # authority — it reports the denial and names the flag instead.
