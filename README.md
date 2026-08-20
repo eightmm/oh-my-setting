@@ -73,7 +73,7 @@ Notion data-source selection — live in
 [docs/COMPONENTS.md](docs/COMPONENTS.md) and
 [docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md). Upgrading an existing install
 is one `oms update`; what each release changes underfoot is stated in its
-migration note, currently [docs/MIGRATION-0.6.md](docs/MIGRATION-0.6.md).
+migration note, currently [docs/MIGRATION-0.7.md](docs/MIGRATION-0.7.md).
 
 ## Start
 

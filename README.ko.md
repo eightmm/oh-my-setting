@@ -67,7 +67,7 @@ fast-forward하며 dirty 또는 diverged checkout은 건너뛴다. uninstall은 
 지정 — 은 [docs/COMPONENTS.md](docs/COMPONENTS.md)와
 [docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md)에 있다. 기존 설치의 업그레이드는
 `oms update` 한 번이고, 릴리스마다 무엇이 바뀌는지는 마이그레이션 노트 —
-현재 [docs/MIGRATION-0.6.md](docs/MIGRATION-0.6.md) — 에 명시된다.
+현재 [docs/MIGRATION-0.7.md](docs/MIGRATION-0.7.md) — 에 명시된다.
 
 ## 시작
 
