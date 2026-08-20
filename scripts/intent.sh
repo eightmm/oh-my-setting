@@ -457,7 +457,7 @@ PY
   adopted_goal="$(sed -n 's/^- Goal sentence: //p' "$SPEC" | head -n 1)"
   work_journal_observe "$REPO" intent "$SPEC" \
     --source-id "$INTENT_ID" --outcome "Contract adopted: $INTENT_ID" \
-    --outcome-status confirmed --verification-status not_applicable \
+    --outcome-status "confirmed" --verification-status not_applicable \
     ${adopted_goal:+--decision "adopted contract: $adopted_goal"} || true
   echo "intent: adopted $INTENT_ID -> PROJECT.md (State: confirmed)"
   echo "intent: next: oms plan-from-spec --repo $REPO   (or: oms autopilot propose ...)"

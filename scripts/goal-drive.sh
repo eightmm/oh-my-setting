@@ -356,7 +356,7 @@ park() {  # REASON NEXT
   # output as a safe failure, so a degraded journal must stay invisible here.
   work_journal_observe "$REPO" goal-drive "$PROGRESS" \
     --source-id "$RUN_ID:park" --outcome "Goal drive parked: $1" \
-    --outcome-status parked --verification-status not_verified \
+    --outcome-status "parked" --verification-status not_verified \
     --blocker "$1" --next-action "$2" >/dev/null 2>&1 || true
   # This canonical result is the one final non-empty output line. The caller
   # treats duplicates or trailing child output as a safe failure, and uses the
@@ -1971,7 +1971,7 @@ while :; do
     resolve_parks
     work_journal_observe "$REPO" goal-drive "$PROGRESS" \
       --source-id "$RUN_ID:done" --outcome "Goal drive reached acceptance" \
-      --outcome-status done --verification-status passed \
+      --outcome-status "done" --verification-status passed \
       >/dev/null 2>&1 || true
     echo "goal-drive: done run=$RUN_ID cycles=$CYCLE (acceptance passed)"
     if ! terminal_result "done" acceptance-pass; then
