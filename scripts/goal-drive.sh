@@ -22,6 +22,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/model-routing.sh
 . "$ROOT/scripts/lib/model-routing.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$ROOT/scripts/lib/work-journal.sh"
 
 REPO="$PWD"
 PROVIDER="codex"
@@ -347,6 +349,15 @@ park() {  # REASON NEXT
   # send that line to /dev/null — the threshold crossing has to be visible at
   # the one moment the run is ending on it.
   printf '%s\n' "$recorded" | grep -F 'oms advise' || true
+  # A park is the day's judgment the journal never had: the reason is a
+  # blocker and the parent's next step is a next action, both already bound
+  # by this function's own argument validation. Observed before the canonical
+  # line, and silenced on both streams -- the caller treats any trailing child
+  # output as a safe failure, so a degraded journal must stay invisible here.
+  work_journal_observe "$REPO" goal-drive "$PROGRESS" \
+    --source-id "$RUN_ID:park" --outcome "Goal drive parked: $1" \
+    --outcome-status parked --verification-status not_verified \
+    --blocker "$1" --next-action "$2" >/dev/null 2>&1 || true
   # This canonical result is the one final non-empty output line. The caller
   # treats duplicates or trailing child output as a safe failure, and uses the
   # mutable progress row only to cross-check this bound status and reason.
@@ -1958,6 +1969,10 @@ while :; do
       exit 2
     fi
     resolve_parks
+    work_journal_observe "$REPO" goal-drive "$PROGRESS" \
+      --source-id "$RUN_ID:done" --outcome "Goal drive reached acceptance" \
+      --outcome-status done --verification-status passed \
+      >/dev/null 2>&1 || true
     echo "goal-drive: done run=$RUN_ID cycles=$CYCLE (acceptance passed)"
     if ! terminal_result "done" acceptance-pass; then
       echo "error: cannot emit the goal-drive terminal result" >&2

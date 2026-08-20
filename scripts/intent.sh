@@ -17,6 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$SCRIPT_DIR/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/work-journal.sh
+. "$SCRIPT_DIR/lib/work-journal.sh"
 
 ACTION=""
 REPO="$PWD"
@@ -447,6 +449,16 @@ PY
   grep -q '^- State: confirmed$' "$tmp_spec" ||
     { rm -f "$tmp_spec"; fail "the candidate's '- State:' is not draft; only draft candidates adopt"; }
   mv "$tmp_spec" "$SPEC"
+  # Adopting is the day's clearest decision, and the goal sentence is the
+  # operator's own words rather than anything this script composed. Passing it
+  # through gives the Work Journal daily the contract a reader needs to know
+  # what the commits underneath were for. Fail-open: the contract is adopted
+  # either way.
+  adopted_goal="$(sed -n 's/^- Goal sentence: //p' "$SPEC" | head -n 1)"
+  work_journal_observe "$REPO" intent "$SPEC" \
+    --source-id "$INTENT_ID" --outcome "Contract adopted: $INTENT_ID" \
+    --outcome-status confirmed --verification-status not_applicable \
+    ${adopted_goal:+--decision "adopted contract: $adopted_goal"} || true
   echo "intent: adopted $INTENT_ID -> PROJECT.md (State: confirmed)"
   echo "intent: next: oms plan-from-spec --repo $REPO   (or: oms autopilot propose ...)"
   exit 0

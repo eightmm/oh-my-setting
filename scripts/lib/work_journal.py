@@ -2497,6 +2497,30 @@ class JournalStore:
             ).fetchall()
         return [self._decode_indexed_event(str(row[0])) for row in rows]
 
+    def _day_recorded_decision(self, day: str) -> bool:
+        """True when any active event on ``day`` carries a decision.
+
+        The bounded recent-event descriptors drop the judgment fields, so a
+        digest that asked them would report every day as decision-less. This
+        reads the indexed payloads for the one day it is asked about.
+        """
+
+        self._ensure_index_database()
+        with sqlite3.connect(str(self.index_db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload
+                FROM events
+                WHERE active = 1 AND local_date = ?
+                """,
+                (day,),
+            ).fetchall()
+        for row in rows:
+            event = self._decode_indexed_event(str(row[0]))
+            if event.get("decision"):
+                return True
+        return False
+
     def open_annotations(
         self, *, days: int = ANNOTATION_WINDOW_DAYS
     ) -> Dict[str, Any]:
@@ -2642,6 +2666,17 @@ class JournalStore:
                 "Last journal day %s: %d events, %d verified."
                 % (last_day, len(day_events), verified)
             )
+            # A day can be busy and still leave the summary unreadable: every
+            # lifecycle verb records what happened, none can record why. The
+            # landing verbs ask at their own terminals, but a day that lands
+            # nothing never reaches one, so the once-a-day digest is the
+            # fallback that names the gap while the day is still recoverable.
+            if not self._day_recorded_decision(last_day):
+                lines.append(
+                    "That day recorded no decision: 'oms agent-task update "
+                    "--decision TEXT [--next TEXT]' is what keeps the summary "
+                    "readable."
+                )
         handoff_pointer = self._newest_handoff_pointer()
         if handoff_pointer:
             lines.append(handoff_pointer)
@@ -2945,6 +2980,9 @@ def source_payload(
     verification_status: Optional[str] = None,
     outcome: Optional[str] = None,
     outcome_status: Optional[str] = None,
+    decision: Optional[str] = None,
+    blocker: Optional[str] = None,
+    next_action: Optional[str] = None,
     operation: str = "update",
 ) -> Dict[str, Any]:
     now = _utc_rfc3339(dt.datetime.now(dt.timezone.utc))
@@ -2955,7 +2993,9 @@ def source_payload(
         )
     elif source_type in {
         "autopilot",
+        "goal-drive",
         "handoff",
+        "intent",
         "oms-run",
         "patch-admit",
         "patch-land",
@@ -2965,7 +3005,9 @@ def source_payload(
         sid = source_id or source_path.stem
         default_types = {
             "autopilot": "phase_outcome",
+            "goal-drive": "phase_outcome",
             "handoff": "handoff",
+            "intent": "annotation",
             "session-handoff": "handoff",
             "oms-run": "phase_outcome",
             "patch-admit": "patch_admit",
@@ -2993,6 +3035,16 @@ def source_payload(
             ),
             "evidence": [{"type": source_type, "ref": sid}],
         }
+        # The caller states these; the adapter never reads them out of a
+        # record. A park names its own blocker and the next step it wants, and
+        # an adopted contract names the goal sentence the operator wrote.
+        for field, value in (
+            ("decision", decision),
+            ("blocker", blocker),
+            ("next_action", next_action),
+        ):
+            if value:
+                payload[field] = value
         relative = _safe_relpath(repo, evidence_path)
         if relative:
             payload["refs"] = [{"type": source_type, "path": relative, "id": sid}]
@@ -3333,6 +3385,12 @@ def _build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--verification-status")
     observe.add_argument("--outcome")
     observe.add_argument("--outcome-status")
+    # A lifecycle verb that already names its own goal, blocker, or next step
+    # in typed arguments can pass them straight through. These are the schema's
+    # existing judgment fields; nothing here derives or summarizes prose.
+    observe.add_argument("--decision")
+    observe.add_argument("--blocker")
+    observe.add_argument("--next-action", dest="next_action")
     observe.add_argument("--operation", default="update")
     tick = sub.add_parser("tick")
     tick.add_argument("--repo", required=True)
@@ -3652,6 +3710,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             verification_status=args.verification_status,
             outcome=args.outcome,
             outcome_status=args.outcome_status,
+            decision=args.decision,
+            blocker=args.blocker,
+            next_action=args.next_action,
             operation=args.operation,
         )
         store.record_event(payload)

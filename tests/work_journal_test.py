@@ -1178,5 +1178,89 @@ class NotionPresentationTest(unittest.TestCase):
         self.assertNotIn("  - 결과: recorded", rendered)
 
 
+class JudgmentCaptureTest(unittest.TestCase):
+    """The fields that make a summary readable, and the nudge when they are absent."""
+
+    def _store(self, tmp):
+        repo = pathlib.Path(tmp)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@e.com"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True)
+        (repo / "s.txt").write_text("seed\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "s.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+        return repo, wj.JournalStore(repo)
+
+    def _yesterday(self):
+        return (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_a_lifecycle_verb_carries_its_own_judgment_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, store = self._store(tmp)
+            # A park states its blocker and the next step; an adopted contract
+            # states the sentence the operator wrote. The adapter carries them
+            # rather than deriving anything.
+            payload = wj.source_payload(
+                repo, "goal-drive", repo / "s.txt", source_id="gd-1:park",
+                outcome="Goal drive parked: verifier-floor-deadlock",
+                outcome_status="parked", blocker="verifier-floor-deadlock",
+                next_action="inspect the typed review outcome",
+            )
+            self.assertEqual("verifier-floor-deadlock", payload["blocker"])
+            self.assertEqual(
+                "inspect the typed review outcome", payload["next_action"]
+            )
+            store.record_event(payload)
+            store.record_event(
+                wj.source_payload(
+                    repo, "intent", repo / "s.txt", source_id="in-1",
+                    outcome="Contract adopted: in-1", outcome_status="confirmed",
+                    verification_status="not_applicable",
+                    decision="adopted contract: block the sibling readers",
+                )
+            )
+            store.materialize()
+            rendered = wj.notion_presentation(
+                store.summary_text("daily", store._current_periods()[0])
+            )
+            # All three judgment sections were permanently empty before these
+            # verbs carried anything into them.
+            self.assertIn("> adopted contract: block the sibling readers", rendered)
+            self.assertIn("- verifier-floor-deadlock", rendered)
+            self.assertIn("- inspect the typed review outcome", rendered)
+
+    def test_the_daily_digest_names_a_day_that_recorded_no_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, store = self._store(tmp)
+            store.record_event(
+                wj.source_payload(
+                    repo, "goal-drive", repo / "s.txt", source_id="gd-quiet",
+                    occurred_at=self._yesterday(),
+                    outcome="Goal drive reached acceptance", outcome_status="done",
+                )
+            )
+            store.materialize()
+            self.assertIn("recorded no decision", store.prompt_digest())
+
+    def test_the_digest_stays_quiet_when_the_day_recorded_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, store = self._store(tmp)
+            store.record_event(
+                wj.source_payload(
+                    repo, "goal-drive", repo / "s.txt", source_id="gd-loud",
+                    occurred_at=self._yesterday(),
+                    outcome="Goal drive reached acceptance", outcome_status="done",
+                    decision="landed the sibling-reader sweep",
+                )
+            )
+            store.materialize()
+            # The bounded recent-event descriptors drop the judgment fields, so
+            # a digest reading those would call every day decision-less.
+            self.assertNotIn("recorded no decision", store.prompt_digest())
+
+
 if __name__ == "__main__":
     unittest.main()
