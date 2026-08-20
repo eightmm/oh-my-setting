@@ -7,6 +7,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## Unreleased
 
 ### Changed
+- The local gate now runs the real install/update/uninstall lifecycle.
+  That suite was CI-only, and the split had a cost this round made
+  concrete: a rename passed a green local gate and reddened all four
+  install-e2e legs on one stale catalog assertion the gate could not see.
+  It costs 38s in a sandboxed HOME and leaves the checkout's `.oms`
+  byte-identical, so the blind spot is not worth keeping.
 - One spelling per verb. The dispatcher carried five aliases — `run`,
   `state`, `init`, `thread`, `runtime` each redirected to a longer name —
   which is the same second entrance this project refuses everywhere else,

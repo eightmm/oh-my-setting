@@ -374,6 +374,11 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage supervisor bash tests/supervisor-smoke.sh
   stage lifecycle-provider-integration bash tests/lifecycle-provider-integration-smoke.sh
   stage install-lifecycle-lock bash tests/install-lifecycle-lock-smoke.sh
+  # The real install/update/uninstall lifecycle in a sandboxed HOME. It ran
+  # CI-only until a rename shipped green locally and reddened all four
+  # install-e2e legs on a stale catalog assertion: the one suite the local
+  # gate could not see was the one that broke. 30s buys that back.
+  stage install-lifecycle bash tests/install-lifecycle-smoke.sh
   stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
   stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
   stage tool-lock bash tests/tool-lock-smoke.sh

@@ -170,6 +170,7 @@ expected = {
     "supervisor": "supervisor-smoke.sh",
     "lifecycle-provider-integration": "lifecycle-provider-integration-smoke.sh",
     "install-lifecycle-lock": "install-lifecycle-lock-smoke.sh",
+    "install-lifecycle": "install-lifecycle-smoke.sh",
     "file-lock-boundary": "file-lock-boundary-smoke.sh",
     "harness-residue-boundary": "harness-residue-boundary-smoke.sh",
     "patch-land-approval": "patch-land-approval-smoke.sh",
