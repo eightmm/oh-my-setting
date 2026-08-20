@@ -1,6 +1,6 @@
 """Compatibility-preserving typed runtime core for oh-my-setting."""
 
-CORE_VERSION = "0.6.0"
+CORE_VERSION = "0.7.0"
 RUNTIME_SCHEMA = 1
 ENVELOPE_SCHEMA = 2
 CAPSULE_SCHEMA = 1

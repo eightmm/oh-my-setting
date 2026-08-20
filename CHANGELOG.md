@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 `VERSION` file.
 
-## Unreleased
+## [0.7.0] - 2026-08-20
 
 ### Changed
 - The local gate now runs the real install/update/uninstall lifecycle.
