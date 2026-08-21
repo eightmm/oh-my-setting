@@ -746,10 +746,28 @@ def open_transition_allowed(left, right):
         }
     return transition == ("repairing", "prepared") and same_repair_identity(left, right)
 
+def ref_resolves(ref):
+    try:
+        subprocess.check_output(
+            ["git", "-C", repo, "rev-parse", "--verify", "--quiet",
+             ref + "^{commit}"], stderr=subprocess.DEVNULL, text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return True
+
 def exact_commit_exists(base, tree, head_ref):
+    # The frozen ref is the proof while it resolves, and a sibling branch never
+    # inherits it. But deleting a merged work branch is ordinary hygiene, and a
+    # name that no longer exists cannot be the only proof: this projection is
+    # recomputed every run, so a closed intent would reopen forever and park
+    # every later run on intent-ref-moved with no way back. Fall back to the
+    # lineage the repository actually kept. Nothing about what counts as the
+    # commit is widened -- one parent equal to the frozen base and the frozen
+    # tree, both exact, and the caller still requires a committed terminal row.
+    lineage = head_ref if ref_resolves(head_ref) else "HEAD"
     try:
         history = subprocess.check_output(
-            ["git", "-C", repo, "rev-list", "--first-parent", head_ref],
+            ["git", "-C", repo, "rev-list", "--first-parent", lineage],
             stderr=subprocess.DEVNULL, text=True)
     except (OSError, subprocess.CalledProcessError):
         return False
@@ -1609,11 +1627,22 @@ intent_commit() {  # LABEL
 
 intent_commit_already_present() {
   local patch_abs expected_tree candidate candidate_tree parents current_head align_rc=0
-  [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$INTENT_REF" ] || return 3
+  local search_ref="$INTENT_REF"
+  # Mirror the projection's closure proof. While the frozen ref resolves it is
+  # the authority and no sibling branch inherits it; once the branch is gone
+  # the surviving lineage carries the proof, still gated on the exact base
+  # parent and frozen tree. Without this, a crash between the commit and its
+  # terminal row leaves an open intent that ordinary branch cleanup makes
+  # unrecoverable.
+  if git -C "$REPO" rev-parse --verify --quiet "$INTENT_REF^{commit}" >/dev/null 2>&1; then
+    [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$INTENT_REF" ] || return 3
+  else
+    search_ref=HEAD
+  fi
   patch_abs="$(intent_patch_file)" || return 1
   expected_tree="$(intent_expected_tree "$patch_abs" 2>/dev/null || true)"
   [ -n "$expected_tree" ] || return 1
-  candidate="$(git -C "$REPO" rev-list --first-parent "$INTENT_REF" 2>/dev/null |
+  candidate="$(git -C "$REPO" rev-list --first-parent "$search_ref" 2>/dev/null |
     while IFS= read -r commit; do
       parents="$(git -C "$REPO" rev-list --parents -n 1 "$commit" 2>/dev/null | tr -d '\r')"
       [ "$parents" = "$commit $INTENT_BASE" ] || continue
@@ -1622,7 +1651,7 @@ intent_commit_already_present() {
       printf '%s\n' "$commit"
       break
     done)"
-  current_head="$(git -C "$REPO" rev-parse "$INTENT_REF" 2>/dev/null | tr -d '\r')"
+  current_head="$(git -C "$REPO" rev-parse "$search_ref" 2>/dev/null | tr -d '\r')"
   if [ -n "$candidate" ] && intent_worktree_matches_head; then
     if [ "$current_head" != "$candidate" ]; then
       [ -z "$(git_status_porcelain)" ] && return 0

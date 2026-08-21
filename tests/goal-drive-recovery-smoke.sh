@@ -496,6 +496,98 @@ HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
 grep -Fq 'recovered commit intent' "$TMP/post-ref-descendant-resume.out" ||
   fail "same-ref descendant recovery did not close the exact intent"
 
+# Deleting a merged work branch is ordinary hygiene, and the frozen ref is only
+# a mutable label on a commit that outlives it. The committed terminal row plus
+# the exact commit -- one parent at the frozen base, carrying the frozen tree --
+# still prove the publication in the lineage that survived. This projection is
+# recomputed from progress.jsonl on every run, so without the fallback a closed
+# intent reopens forever and parks the plan with no operator way back.
+gone_repo="$TMP/deleted-work-branch"
+make_case "$gone_repo" tracked
+git -C "$gone_repo" branch work
+git -C "$gone_repo" symbolic-ref HEAD refs/heads/work
+gone_calls="$TMP/deleted-work-branch-calls"
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$gone_calls" "$ROOT/scripts/goal-drive.sh" --repo "$gone_repo" \
+  --to codex --max-cycles 2 > "$TMP/deleted-work-branch-drive.out" 2>&1 ||
+  fail "deleted-work-branch fixture did not complete: $(tail -8 "$TMP/deleted-work-branch-drive.out")"
+gone_commit="$(git -C "$gone_repo" rev-parse HEAD)"
+git -C "$gone_repo" branch -f main "$gone_commit"
+git -C "$gone_repo" symbolic-ref HEAD refs/heads/main
+git -C "$gone_repo" branch -D work
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$gone_calls" "$ROOT/scripts/goal-drive.sh" --repo "$gone_repo" \
+  --to codex --max-cycles 2 > "$TMP/deleted-work-branch-resume.out" 2>&1 ||
+  fail "deleting the merged work branch bricked the drive: $(tail -8 "$TMP/deleted-work-branch-resume.out")"
+grep -Fq 'status=done' "$TMP/deleted-work-branch-resume.out" ||
+  fail "deleted work branch resume did not reach acceptance"
+! grep -Fq 'recovered commit intent' "$TMP/deleted-work-branch-resume.out" ||
+  fail "the committed intent reopened and was re-recovered instead of staying closed"
+[ "$(wc -l < "$gone_calls" | tr -d ' ')" = 1 ] ||
+  fail "deleted work branch resume called the provider again"
+
+# The surviving-lineage fallback must not become a rubber stamp. Here the work
+# branch is gone and the lineage holds a sibling commit sharing the frozen base
+# parent but not its tree: a near miss on the one field that is not exact. The
+# intent must stay open and the run must refuse.
+stamp_repo="$TMP/deleted-branch-no-commit"
+make_case "$stamp_repo" tracked
+git -C "$stamp_repo" branch work
+git -C "$stamp_repo" symbolic-ref HEAD refs/heads/work
+stamp_base="$(git -C "$stamp_repo" rev-parse HEAD)"
+stamp_calls="$TMP/deleted-branch-no-commit-calls"
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$stamp_calls" "$ROOT/scripts/goal-drive.sh" --repo "$stamp_repo" \
+  --to codex --max-cycles 2 > "$TMP/deleted-branch-no-commit-drive.out" 2>&1 ||
+  fail "deleted-branch-no-commit fixture did not complete"
+git -C "$stamp_repo" symbolic-ref HEAD refs/heads/main
+git -C "$stamp_repo" reset -q --hard "$stamp_base"
+git -C "$stamp_repo" branch -D work
+printf 'sibling\n' > "$stamp_repo/sibling.txt"
+git -C "$stamp_repo" add sibling.txt
+git -C "$stamp_repo" commit -qm 'test: sibling commit sharing the frozen base'
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$stamp_calls" "$ROOT/scripts/goal-drive.sh" --repo "$stamp_repo" \
+  --to codex --max-cycles 2 > "$TMP/deleted-branch-no-commit-resume.out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "a deleted branch with no matching commit should park, got $rc"
+! grep -Fq 'recovered commit intent' "$TMP/deleted-branch-no-commit-resume.out" ||
+  fail "the lineage fallback closed an intent on a same-parent different-tree commit"
+grep -Fq 'reason=intent-head-moved' "$TMP/deleted-branch-no-commit-resume.out" ||
+  fail "the unprovable intent used the wrong park reason"
+
+# The same deleted-label hole exists one step earlier. A crash between the ref
+# CAS and the terminal row leaves an open intent whose commit ordinary branch
+# cleanup then makes unrecoverable through the shell recovery path, which is
+# reached before any terminal row exists to close. Recovery must locate the
+# exact commit in the surviving lineage without a second provider call.
+orphan_repo="$TMP/deleted-ref-open-intent"
+make_case "$orphan_repo" tracked
+git -C "$orphan_repo" branch work
+git -C "$orphan_repo" symbolic-ref HEAD refs/heads/work
+orphan_calls="$TMP/deleted-ref-open-intent-calls"
+rc=0
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$orphan_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REF=1 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$orphan_repo" --to codex --max-cycles 2 \
+  > "$TMP/deleted-ref-open-intent-stop.out" 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "deleted-ref open intent fixture did not stop after ref CAS"
+git -C "$orphan_repo" add -A
+orphan_commit="$(git -C "$orphan_repo" rev-parse HEAD)"
+git -C "$orphan_repo" branch -f main "$orphan_commit"
+git -C "$orphan_repo" symbolic-ref HEAD refs/heads/main
+git -C "$orphan_repo" branch -D work
+HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
+  CALL_LOG="$orphan_calls" "$ROOT/scripts/goal-drive.sh" --repo "$orphan_repo" \
+  --to codex --max-cycles 2 > "$TMP/deleted-ref-open-intent-resume.out" 2>&1 ||
+  fail "deleted ref left the open intent unrecoverable: $(tail -8 "$TMP/deleted-ref-open-intent-resume.out")"
+grep -Fq 'recovered commit intent' "$TMP/deleted-ref-open-intent-resume.out" ||
+  fail "deleted-ref recovery did not close the exact open intent"
+grep -Fq 'status=done' "$TMP/deleted-ref-open-intent-resume.out" ||
+  fail "deleted-ref recovery did not reach acceptance"
+[ "$(wc -l < "$orphan_calls" | tr -d ' ')" = 1 ] ||
+  fail "deleted-ref recovery called the provider again"
+
 # A second crash window exists after the one-shot repair publishes a new
 # review but before goal-drive freezes its replacement intent. Journal the
 # repair phase first, then recover the new same-lease receipt without a third
