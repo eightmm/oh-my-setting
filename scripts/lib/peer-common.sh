@@ -1329,6 +1329,21 @@ ma_record_seat_failure() {
   # A dry run never called the provider. Durable failure memory must not carry a
   # failure that never happened.
   [ "${DRY_RUN:-0}" != "1" ] || return 0
+  # Status 3 is this harness refusing to send, not a seat that failed to answer.
+  # Filing it against the seat is wrong twice over: it accumulates onto the
+  # provider's fingerprint until the ledger advises dropping a healthy seat, and
+  # it tells the next session to retry a call whose context will be refused
+  # again. The refused context is shared by every seat, so the row is not
+  # per-provider either. Two field occurrences read as seat failures before this.
+  if [ "$status" = 3 ]; then
+    "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
+      --cmd "peer-${MA_KIND:-call} outbound context" --exit "$status" \
+      --failure-code outbound_context_refused \
+      --summary "outbound context refused before send (sensitive-looking content); no seat was called" \
+      --next "remove absolute machine paths, secrets, cluster details, or raw logs from the prompt, task, or memory context" \
+      >/dev/null 2>&1 || true
+    return 0
+  fi
   "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
     --cmd "peer-${MA_KIND:-call} seat $provider" --exit "$status" \
     --summary "$provider ${MA_KIND:-call} seat returned no answer (exit $status)" \

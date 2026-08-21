@@ -3143,6 +3143,27 @@ test_peer_export_only_blocks_sensitive_prompt() {
   fi
 }
 
+test_blocked_outbound_context_is_not_a_seat_failure() {
+  local project="$TMP/outbound-scrub-ledger"
+  local rc=0
+
+  make_committed_repo "$project"
+  OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --to claude \
+    --prompt "Assess private path /hom""e/researcher/secret" \
+    >"$project/out" 2>"$project/error" || rc=$?
+  [ "$rc" = 3 ] || fail "a scrubbed outbound context should exit 3, got $rc"
+
+  # The seat was never called, so the row must not accumulate onto its
+  # fingerprint (which drives drop-the-seat advice) and must not read as a
+  # seat that returned no answer -- two field occurrences did exactly that.
+  if grep -Fq 'seat returned no answer' "$project/.oms/failures.jsonl"; then
+    fail "refused-before-send was filed as a seat no-answer"
+  fi
+  assert_file_contains "$project/.oms/failures.jsonl" "outbound context refused before send"
+  assert_file_contains "$project/.oms/failures.jsonl" "outbound_context_refused"
+}
+
 test_peer_review_dry_run_artifacts() {
   local project="$TMP/review"
   local artifact_dir="$project/artifacts"

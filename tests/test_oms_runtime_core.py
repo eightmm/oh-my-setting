@@ -525,6 +525,15 @@ class RuntimeFixture(RuntimeFixtureBase):
                 exit_code=124)['code'],
             'provider_timeout')
         self.assertIn('provider_no_answer', failures.codes())
+        # This harness refusing to send is not a seat that failed to answer:
+        # the seat was never called, so retrying or dropping it fixes nothing.
+        refused = failures.classify(
+            'outbound context refused before send (sensitive-looking content);'
+            ' no seat was called', exit_code=3)
+        self.assertEqual(refused['code'], 'outbound_context_refused')
+        self.assertEqual(refused['recovery'], 'remove_sensitive_context')
+        self.assertFalse(refused['retryable'])
+        self.assertFalse(refused['fallback_allowed'])
 
     def test_atomic_writer_rejects_symlink_and_preserves_parent_mode(self) -> None:
         parent = self.repo / 'tracked-config'
