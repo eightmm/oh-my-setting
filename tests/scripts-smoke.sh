@@ -5225,6 +5225,14 @@ EOF
     fail "artifact transport tail leaked into the candidate: $candidate"
   fi
   [ ! -e "$project/PROJECT.md" ] || fail "draft must never touch PROJECT.md"
+  # The provenance pointer is durable and gets embedded in the next draft's
+  # outbound prompt. An absolute machine path there is scrubber-blocked
+  # content, so the first adopted contract would brick every later draft in
+  # the same repository -- the failure that produced this assertion.
+  if grep -Fq "$project" "$candidate"; then
+    fail "absolute machine path leaked into the durable spec: $candidate"
+  fi
+  assert_file_contains "$candidate" "- Artifact: .oms/artifacts/"
 
   # A structureless answer fails closed and keeps the artifact pointer.
   printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "no structure"\n' > "$bin_dir/codex"

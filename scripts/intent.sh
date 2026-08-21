@@ -350,6 +350,15 @@ PY
 
   mkdir -p "$INTENT_DIR"
   agent_memory_ensure_oms_ignore "$REPO"
+  # The provenance pointer is durable and outbound: a later draft embeds the
+  # adopted PROJECT.md in the provider prompt, and the scrubber blocks absolute
+  # machine paths. Writing one here means the first adopted contract bricks
+  # every later draft in that repository. Artifacts live under the repo, so
+  # record the pointer the way the repository already refers to its own files.
+  artifact_ref="$answer_artifact"
+  case "$artifact_ref" in
+    "$REPO"/*) artifact_ref="${artifact_ref#"$REPO"/}" ;;
+  esac
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   intent_name="intent-$ts"
   target="$INTENT_DIR/$intent_name.md"
@@ -358,7 +367,7 @@ PY
     printf -- '- Drafted by: %s (intent.sh; content below is model output — review before adopt)\n' "$PROVIDER"
     printf -- '- Drafted at: %s\n' "$ts"
     printf -- '- Goal sentence: %s\n' "$GOAL_TEXT"
-    printf -- '- Artifact: %s\n\n' "$answer_artifact"
+    printf -- '- Artifact: %s\n\n' "$artifact_ref"
     cat "$body"
     printf '\n'
   } > "$target"
