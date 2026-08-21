@@ -7,9 +7,17 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .common import bounded_line
 
+# Rules are scanned in order and the first match wins, so a rule must be no
+# broader than the phrase its producer actually writes. provider_no_answer is
+# matched on text rather than on exit 3 for that reason: goal-drive parks and
+# failed acceptances exit 3 too, and an exit-coded rule would file all three
+# under one recovery. The phrase is the one peer-common.sh records for a seat
+# that produced nothing; a seat that timed out carries exit 124 and is still
+# classified as a timeout before this loop runs.
 FAILURE_RULES: List[Tuple[str, re.Pattern[str], Dict[str, Any]]] = [
     ("provider_capacity", re.compile(r"capacity|overloaded|rate.?limit|temporarily unavailable", re.I), {"retryable": True, "fallback_allowed": True, "context_escalation_allowed": False, "recovery": "one_explicit_fallback"}),
     ("provider_timeout", re.compile(r"timeout|timed out|wall clock", re.I), {"retryable": False, "fallback_allowed": False, "context_escalation_allowed": False, "recovery": "resize_task_or_budget"}),
+    ("provider_no_answer", re.compile(r"seat returned no answer", re.I), {"retryable": True, "fallback_allowed": True, "context_escalation_allowed": False, "recovery": "retry_or_drop_seat"}),
     ("provider_policy_decline", re.compile(r"policy decline|refus(?:e|al)|safety policy", re.I), {"retryable": False, "fallback_allowed": False, "context_escalation_allowed": False, "recovery": "terminal"}),
     ("provider_auth", re.compile(r"authentication|unauthorized|forbidden|credential.*missing|login required", re.I), {"retryable": False, "fallback_allowed": False, "context_escalation_allowed": False, "recovery": "repair_authentication"}),
     ("context_too_large", re.compile(r"context.*(?:large|limit|length)|too many tokens", re.I), {"retryable": True, "fallback_allowed": False, "context_escalation_allowed": False, "recovery": "reduce_context"}),

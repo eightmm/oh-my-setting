@@ -501,6 +501,31 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertIn('useful_work_efficiency', row)
         self.assertIn('human_corrections', row['unknown_metrics'])
 
+    def test_seat_no_answer_is_not_classified_by_exit_code(self) -> None:
+        # A seat that produced nothing is a distinct, recoverable failure, but
+        # exit 3 is not what makes it one: goal-drive parks and failed
+        # acceptances exit 3 as well. Classifying on the exit code would file
+        # all three under a single recovery, which is why the rule reads the
+        # phrase the seat recorder actually writes.
+        seat = failures.classify(
+            'claude call seat returned no answer (exit 3)', exit_code=3)
+        self.assertEqual(seat['code'], 'provider_no_answer')
+        self.assertEqual(seat['recovery'], 'retry_or_drop_seat')
+        self.assertTrue(seat['retryable'])
+        for other in ('goal-drive parked run=gd cycle=0 reason=intent-ref-moved',
+                      'plan-accept: error acceptance-files-changed'):
+            self.assertNotEqual(
+                failures.classify(other, exit_code=3)['code'],
+                'provider_no_answer', other)
+        # An explicit timeout still outranks the phrase: the seat recorder
+        # writes the same words with exit 124, and that is a timeout.
+        self.assertEqual(
+            failures.classify(
+                'claude call seat returned no answer (exit 124)',
+                exit_code=124)['code'],
+            'provider_timeout')
+        self.assertIn('provider_no_answer', failures.codes())
+
     def test_atomic_writer_rejects_symlink_and_preserves_parent_mode(self) -> None:
         parent = self.repo / 'tracked-config'
         parent.mkdir()
