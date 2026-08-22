@@ -822,7 +822,7 @@ if [ -f "$OMS/artifacts/index.jsonl" ]; then
   # An operator who cannot run gc at all also never reaps a dead delegation
   # marker, so the destructive half is now the one that has to be asked for.
   artifact_args=(--repo "$STATE_ROOT" prune "$artifact_keep")
-  [ "$DELETE_ORPHAN_FILES" = 1 ] && artifact_args+=(--files)
+  [ "$DELETE_ORPHAN_FILES" != 1 ] || artifact_args+=(--files)
   [ "$DRY_RUN" = 0 ] || artifact_args+=(--dry-run)
   artifact_out=""
   if ! artifact_out="$(OMS_ARTIFACT_ORPHAN_GRACE="$artifact_grace" \
