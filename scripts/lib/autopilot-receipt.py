@@ -1637,8 +1637,24 @@ def main() -> int:
         if args.expected != current:
             raise ReceiptError("outer receipt CAS changed (expected %s, found %s)" % (args.expected, current))
         if old_row is not None:
-            if immutable_view(old_row) != immutable_view(row):
-                raise ReceiptError("outer receipt immutable contract changed")
+            before_view = immutable_view(old_row)
+            after_view = immutable_view(row)
+            if before_view != after_view:
+                # Name the fields, never their values: an envelope or a goal
+                # sentence can carry content this file has no business echoing,
+                # but "which part of the frozen contract you changed" is what
+                # the caller cannot otherwise know. Without it the refusal
+                # reads as a bug in the receipt rather than a decision to make.
+                changed = ", ".join(sorted(
+                    key for key in set(before_view) | set(after_view)
+                    if before_view.get(key) != after_view.get(key)
+                ))
+                raise ReceiptError(
+                    "outer receipt immutable contract changed (%s); the live"
+                    " receipt froze these at intake -- rerun with the values it"
+                    " holds, or retire it with `oms autopilot abandon --reason"
+                    " TEXT` and bind a new contract" % changed
+                )
             if not valid_transition(old_row["stage"], row["stage"]):
                 raise ReceiptError(
                     "outer receipt stage transition is invalid (%s -> %s)"

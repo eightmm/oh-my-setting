@@ -853,6 +853,29 @@ test_autopilot_orchestration() {
   [ ! -f "$busy_repo/calls/plan-from-spec" ] ||
     fail "a refused propose must not reach the planner"
 
+  # A live receipt freezes its contract, so a retry that changes one of those
+  # fields is refused -- correctly. The refusal has to say which field and what
+  # the way out is, or the reader cannot tell a decision from a bug: today's
+  # field run hit it after the frozen planner timed out, and the only escape
+  # was a verb the message never mentioned.
+  local frozen_repo="$TMP/frozen-contract"
+  make_repo "$frozen_repo"
+  mkdir -p "$frozen_repo/calls"
+  rc=0
+  OMS_T_PLAN_RC=3 run_autopilot "$frozen_repo" propose --planner claude \
+    --allowed 'src,tests' --base main > "$frozen_repo/frozen-first.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "the fixture needs a live receipt from a failed propose, got $rc"
+  rc=0
+  run_autopilot "$frozen_repo" propose --planner codex \
+    --allowed 'src,tests' --base main > "$frozen_repo/frozen-retry.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a changed frozen contract should be a contract error, got $rc"
+  grep -Fq 'immutable contract changed (' "$frozen_repo/frozen-retry.out" ||
+    fail "the refusal must name the changed field: $(tail -3 "$frozen_repo/frozen-retry.out")"
+  grep -Fq 'autopilot abandon' "$frozen_repo/frozen-retry.out" ||
+    fail "the refusal must name the way out: $(tail -3 "$frozen_repo/frozen-retry.out")"
+  ! grep -Fq 'src,tests' "$frozen_repo/frozen-retry.out" ||
+    fail "the refusal must name fields, never their values: $(tail -3 "$frozen_repo/frozen-retry.out")"
+
   # The apply side has the same question as propose: an existing plan is only
   # this contract's plan when the contract says so. plan-from-spec never
   # replaces a plan or its acceptance command, so a spent plan from a
