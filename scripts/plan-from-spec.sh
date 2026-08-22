@@ -716,11 +716,29 @@ proposal_digest="$(oms_sha256_file "$proposal")" || fail "cannot hash the propos
 echo "plan-from-spec: proposed $count task(s) -> $proposal"
 echo "plan-from-spec: proposal sha256: $proposal_digest"
 python3 - "$proposal" <<'PY'
-import json, sys
+import json, re, sys
+
 for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
     deps = ",".join(t.get("depends") or []) or "-"
     print("  %-14s %s  [allowed: %s] [verify: %s] [depends: %s]" % (
         t["id"], t["title"], ",".join(t["allowed"]), t["verify"], deps))
+    # A task whose verify names a file inside its own scope is admittable only
+    # while the patch leaves that file alone: patch-admit refuses a patch that
+    # rewrites the test judging it, and asks for verifier-change consent the
+    # contract has to carry. When the task's work IS to extend that test -- the
+    # ordinary shape for "add a regression" -- the refusal is certain, and it
+    # arrives after a worker has spent its whole wall clock. Said here, where
+    # the parent is already reading the list and can still change it.
+    verify = str(t.get("verify") or "")
+    for root in t.get("allowed") or []:
+        root = str(root).rstrip("/")
+        if not root:
+            continue
+        if re.search(r"(^|[\s'\"=(])%s(/|[\s'\";)]|$)" % re.escape(root), verify):
+            print("    note: verify reads %s, which this task may also change;"
+                  " a patch that touches it is refused without verifier-change"
+                  " consent" % root)
+            break
 PY
 # Under autopilot the sole continuation is the digest-bound autopilot run,
 # which the parent prints itself; standalone advice would bypass that entrance.

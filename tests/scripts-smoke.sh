@@ -5168,6 +5168,15 @@ EOF
     fail "propose should succeed: $(tail -4 "$project/out")"
   assert_file_contains "$project/out" "proposed 2 task(s)"
   assert_file_contains "$project/out" "review the list"
+  # t2 verifies with `bash tests/run.sh` and may change tests/ -- patch-admit
+  # refuses a patch that rewrites the test judging it, so that task is
+  # unadmittable the moment it does its job, and the refusal otherwise arrives
+  # only after a worker has spent its whole wall clock. t1 verifies with the
+  # same command but may only change src/, so it carries no such note.
+  grep -Fq 'note: verify reads tests, which this task may also change' "$project/out" ||
+    fail "a verify inside the task's own scope must be flagged at review: $(cat "$project/out")"
+  [ "$(grep -Fc 'note: verify reads' "$project/out")" = 1 ] ||
+    fail "only the task whose scope contains its verifier should be flagged: $(cat "$project/out")"
   [ ! -f "$project/.oms/plan/tasks.json" ] || fail "propose must not touch the task board"
   proposal="$(find "$project/.oms/plan" -name 'proposal-*.json' | head -n 1)"
   [ -n "$proposal" ] || fail "proposal file missing"
