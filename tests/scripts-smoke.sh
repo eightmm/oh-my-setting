@@ -11998,6 +11998,35 @@ test_gc_old_marker_cannot_release_new_lease() {
   assert_not_exists "$project/.oms/delegations/old.json"
 }
 
+test_gc_keeps_orphan_artifacts_unless_asked() {
+  local project="$TMP/gc-orphan-artifacts"
+  local index orphan out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/artifacts/ask"
+  index="$project/.oms/artifacts/index.jsonl"
+  orphan="$project/.oms/artifacts/ask/council-answer.md"
+  printf 'a council answer a later round still cites\n' > "$orphan"
+  printf '{"ts":"2026-06-11T00:00:01Z","kind":"call","event_id":"evt_kept","artifact":".oms/artifacts/ask/kept.md"}\n' > "$index"
+  printf 'kept\n' > "$project/.oms/artifacts/ask/kept.md"
+
+  # Rows are retention; an orphaned file is the evidence itself, and its row was
+  # retired by an earlier prune at a lower floor. Riding that deletion along
+  # with the routine sweep is what made the sweep unrunnable here: seventeen
+  # artifacts, including 08-02 council answers, would have gone with it.
+  out="$(cd "$project" && OMS_ARTIFACT_ORPHAN_GRACE=0 "$ROOT/scripts/gc.sh" --days 0 --apply)"
+  [ -f "$orphan" ] ||
+    fail "the routine sweep must not delete an unreferenced artifact: $out"
+  printf '%s' "$out" | grep -Fq 'would delete' &&
+    fail "the routine sweep must not even plan a file deletion: $out"
+
+  out="$(cd "$project" && OMS_ARTIFACT_ORPHAN_GRACE=0 "$ROOT/scripts/gc.sh" --days 0 --apply --delete-orphan-files)"
+  [ ! -f "$orphan" ] ||
+    fail "--delete-orphan-files must remove the unreferenced artifact: $out"
+  [ -f "$project/.oms/artifacts/ask/kept.md" ] ||
+    fail "a referenced artifact must survive either way: $out"
+}
+
 test_gc_maintains_the_lifecycle_stream() {
   local project="$TMP/gc-lifecycle"
   local events="$ROOT/scripts/agent-events.sh"

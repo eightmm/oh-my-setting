@@ -19,6 +19,7 @@ ROOT_LIB="$ROOT/scripts/lib"
 REPO="$PWD"
 DAYS=30
 DRY_RUN=1
+DELETE_ORPHAN_FILES=0
 
 usage() {
   cat <<'EOF'
@@ -31,6 +32,12 @@ Options:
   --days N      Age threshold in days (default: 30).
   --dry-run     Print what would be removed (default).
   --apply       Actually remove.
+  --delete-orphan-files
+                Also delete artifact/patch files no index row references.
+                Off by default: an orphaned artifact is the evidence itself,
+                and its row was retired by an earlier prune, so the sweep that
+                runs unattended must not be the one that removes it. doctor
+                names the count and the command when they accumulate.
   -h, --help    Show help.
 
 Attempt liveness is judged on its own clock, not --days: an attempt still in
@@ -51,8 +58,9 @@ capsules of runs that are NOT open, abandoned change-guards (dead owner pid
 or aged snapshot), terminal/draft executor souls, retired failure rows
 (resolved, or automatic hook rows past OMS_HOOK_FAIL_TTL — the same predicate
 fail-ledger reads with), closed conversation threads;
-artifact index/files are delegated
-to artifact-index prune. Never touches live runs, the active task, unresolved
+artifact index rows are delegated to
+artifact-index prune; orphaned artifact files are left alone unless
+--delete-orphan-files says otherwise. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
 experiment board is left intact.
 EOF
@@ -66,6 +74,7 @@ while [ "$#" -gt 0 ]; do
     --days) [ "$#" -ge 2 ] || fail "--days requires an integer"; DAYS="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --apply) DRY_RUN=0; shift ;;
+    --delete-orphan-files) DELETE_ORPHAN_FILES=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -805,7 +814,15 @@ fi
 if [ -f "$OMS/artifacts/index.jsonl" ]; then
   artifact_keep="${OMS_ARTIFACT_INDEX_KEEP:-1000}"
   artifact_grace="${OMS_ARTIFACT_ORPHAN_GRACE:-86400}"
-  artifact_args=(--repo "$STATE_ROOT" prune "$artifact_keep" --files)
+  # Rows are retention; files are evidence. Passing --files unconditionally
+  # made one destructive act ride along with the routine sweep: on this
+  # repository a plain `gc --apply` would have deleted seventeen artifact
+  # files, among them the 08-02 council answers a later round still cites,
+  # because an earlier prune at the old row floor had already orphaned them.
+  # An operator who cannot run gc at all also never reaps a dead delegation
+  # marker, so the destructive half is now the one that has to be asked for.
+  artifact_args=(--repo "$STATE_ROOT" prune "$artifact_keep")
+  [ "$DELETE_ORPHAN_FILES" = 1 ] && artifact_args+=(--files)
   [ "$DRY_RUN" = 0 ] || artifact_args+=(--dry-run)
   artifact_out=""
   if ! artifact_out="$(OMS_ARTIFACT_ORPHAN_GRACE="$artifact_grace" \
