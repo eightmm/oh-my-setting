@@ -1713,6 +1713,17 @@ ma_provider_attempt() {
       # workers keep MCP: a project may legitimately register servers its
       # tasks depend on.
       [ "$access" = write ] || cmd+=(--strict-mcp-config)
+      # The same boundary for settings, which carry the hooks. A read seat was
+      # inheriting the user-scope hook table: resume-hook injected the parent's
+      # active task, newest handoff and open failures into a context stripped
+      # to four tools on purpose, skill-router added its hints, and the seat
+      # wrote the parent's .oms/hooks while it judged. The judge is supposed to
+      # see the prompt and the repository, not the parent's framing of them.
+      # Probed 2026-08-22: with the sources dropped a seat appends zero hook
+      # rows and still runs its belt (`cat VERSION` -> 0.7.0, no denials).
+      # Write workers keep them: they run headless and need the operator's
+      # permission rules to edit at all.
+      [ "$access" = write ] || cmd+=(--setting-sources "")
       # Four tools is the whole belt a judging seat needs (read the code,
       # search it, run read-only commands) — past four or five, tool
       # selection degrades and none of the write/spawn tools belong in a

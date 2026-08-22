@@ -6527,6 +6527,11 @@ EOF
   # Four tools is the whole belt a judging seat carries.
   grep -Fxq -- 'Read,Grep,Glob,Bash' "$home_dir/claude-argv" ||
     fail "a read seat must carry the bounded tool belt: $(cat "$home_dir/claude-argv")"
+  # Settings carry the hooks, and a judging seat inheriting the parent's hook
+  # table gets the parent's resume block injected into a context stripped to
+  # four tools -- and writes the parent's .oms while it judges.
+  grep -Fxq -- '--setting-sources' "$home_dir/claude-argv" ||
+    fail "a read seat must not inherit the user-scope hooks: $(cat "$home_dir/claude-argv")"
 }
 
 test_codex_jsonl_carries_stop_reason() {
