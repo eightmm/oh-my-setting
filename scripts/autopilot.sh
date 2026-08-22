@@ -859,6 +859,26 @@ raise SystemExit(0 if any(
 PY
 }
 
+# A plan belongs to the contract that produced it. plan-from-spec creates a
+# plan with the goal and acceptance of PROJECT.md only when none exists, and
+# never replaces an existing one -- correct, because appending a new
+# contract's tasks under the previous contract's acceptance command would
+# verify the new work against the old definition of done. So the spent plan of
+# a superseded contract has to leave, and leaving means preserved: the bytes go
+# next to the receipts they belong with, content-addressed, never deleted.
+archive_superseded_plan() {
+  local plan_digest target
+  [ -f "$PLAN_FILE" ] || return 0
+  plan_digest="$(oms_sha256_file "$PLAN_FILE")" || return 1
+  target="$(dirname "$PLAN_FILE")/tasks.$plan_digest.superseded.json"
+  if [ -e "$target" ]; then
+    rm -f "$PLAN_FILE" || return 1
+  else
+    mv "$PLAN_FILE" "$target" || return 1
+  fi
+  printf 'autopilot: superseded plan preserved at %s\n' "$target"
+}
+
 BOUND_SPEC_SHA=""
 bind_plan_contract() {
   local meta contract_spec contract_allowed requested current_spec
@@ -1080,13 +1100,22 @@ PY
   proposal_presence="$(printf '%s\n' "$proposal_meta" | sed -n 2p)"
   [ "$proposal_presence" != partial ] || fail "proposal is partially present in the plan"
   if [ "$proposal_presence" = none ]; then
-    if [ -f "$PLAN_FILE" ]; then
+    if [ -f "$PLAN_FILE" ] && plan_binds_spec "$BOUND_SPEC_SHA"; then
       [ "$prefix" = r1- ] || fail "only the single r1- remainder may append to an existing plan"
       [ "$(plan_view all-done)" = 1 ] ||
         fail "a remainder proposal requires every approved task to be done"
       [ "$(plan_view has-r1)" = 0 ] || fail "the one remainder tranche was already used"
     else
       [ -z "$prefix" ] || fail "an initial proposal cannot spend the r1- remainder tranche"
+      # The plan in front of us belongs to another contract, or to none. It
+      # cannot receive this contract's first tranche, and it cannot silently
+      # keep its own acceptance command underneath it either.
+      if [ -f "$PLAN_FILE" ]; then
+        if plan_has_open_tasks; then
+          fail "the plan in .oms/plan/ is bound to a different contract and still has unfinished tasks; finish or retire it before applying a proposal for the adopted PROJECT.md"
+        fi
+        archive_superseded_plan || fail "cannot preserve the superseded plan"
+      fi
     fi
   fi
   apply_cap="$INITIAL_TASKS"

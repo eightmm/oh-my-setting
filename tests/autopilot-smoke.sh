@@ -853,6 +853,36 @@ test_autopilot_orchestration() {
   [ ! -f "$busy_repo/calls/plan-from-spec" ] ||
     fail "a refused propose must not reach the planner"
 
+  # The apply side has the same question as propose: an existing plan is only
+  # this contract's plan when the contract says so. plan-from-spec never
+  # replaces a plan or its acceptance command, so a spent plan from a
+  # superseded contract cannot receive the new tranche -- it is preserved
+  # content-addressed and the new plan is created from PROJECT.md.
+  local superseded_repo="$TMP/superseded-plan"
+  make_repo "$superseded_repo"
+  mkdir -p "$superseded_repo/calls" "$superseded_repo/.oms/plan"
+  printf '{"schema":3,"goal":"a previous contract","accept":"true","tasks":{}}\n' \
+    > "$superseded_repo/.oms/plan/tasks.json"
+  local superseded_digest
+  superseded_digest="$(sha256_file "$superseded_repo/.oms/plan/tasks.json")"
+  cat > "$superseded_repo/.oms/plan/proposal-initial.json" <<'JSON'
+{"schema":1,"kind":"agent-plan-proposal","id_prefix":"","tasks":[{"id":"t1","title":"feat: first","allowed":["src/"],"verify":"true","depends":[]}]}
+JSON
+  local superseded_sha
+  superseded_sha="$(sha256_file "$superseded_repo/.oms/plan/proposal-initial.json")"
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$superseded_repo" run \
+    --planner claude --worker codex --allowed 'src,tests' --base main \
+    --proposal "$superseded_repo/.oms/plan/proposal-initial.json" \
+    --expected-proposal-sha256 "$superseded_sha" \
+    > "$superseded_repo/superseded.out" 2>&1 || rc=$?
+  ! grep -Fq 'only the single r1- remainder' "$superseded_repo/superseded.out" ||
+    fail "a superseded plan blocked this contract's first tranche: $(tail -5 "$superseded_repo/superseded.out")"
+  [ -f "$superseded_repo/.oms/plan/tasks.$superseded_digest.superseded.json" ] ||
+    fail "the superseded plan must be preserved, not deleted: $(ls "$superseded_repo/.oms/plan")"
+  grep -Fq -- '--apply' "$superseded_repo/calls/plan-from-spec" ||
+    fail "the reviewed proposal never reached apply: $(tail -3 "$superseded_repo/superseded.out")"
+
   # Planner failure is a parked/error result, never a fake approval boundary.
   local planner_repo="$TMP/planner-failure"
   make_repo "$planner_repo"
