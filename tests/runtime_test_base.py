@@ -30,13 +30,21 @@ class RuntimeFixtureBase(unittest.TestCase):
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True)
         subprocess.run(['git', '-C', str(self.repo), 'config', 'user.email', 'test@example.com'], check=True)
         subprocess.run(['git', '-C', str(self.repo), 'config', 'user.name', 'OMS Test'], check=True)
+        # No scripts/agent-task.sh is planted here. The fixture used to write
+        # one that printed a canned status, which is the only reason the
+        # projection's repo-relative lookup ever looked correct: outside this
+        # checkout no project has that file, so the real answer was {}. The
+        # packet below is read by the installed verb, and one test plants a
+        # hostile copy to prove the repository cannot dictate its own status.
         (self.repo / 'scripts').mkdir()
-        status_script = self.repo / 'scripts' / 'agent-task.sh'
-        status_script.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"schema":1,"present":true,"task_id":"task-fixture","status":"verified","verification":"fresh","stale":false}\'\n', encoding='utf-8')
-        status_script.chmod(493)
         (self.repo / 'PROJECT.md').write_text('# Demo\n\n## Goal\n\nShip the runtime core.\n\n## Acceptance Criteria\n\n- [id:project-api] Public API remains compatible.\n- [id:project-safe] Portable state carries no authority.\n\n## Scope\n\n- allowed_paths: scripts/, tests/\n- forbidden_paths: secrets/\n', encoding='utf-8')
         task_dir = self.repo / '.oms' / 'task'
         task_dir.mkdir(parents=True)
+        # Every real repository carries this: the harness writes .oms/.gitignore
+        # on first use and state-verify fails without it. A fixture that commits
+        # .oms instead makes packet verification impossible to keep fresh --
+        # storing the receipt would itself move the tracked-state fingerprint.
+        (self.repo / '.oms' / '.gitignore').write_text('*\n', encoding='utf-8')
         (task_dir / 'current.md').write_text('# Active Agent Task\n\n- task_id: task-fixture\n- status: verified\n\n## Goal\n\nImplement the projection.\n\n## Constraints\n\n- allowed_paths: scripts/, tests/\n\n## Done Criteria\n\n- [id:task-tests] Focused tests pass.\n\n## Verify\n\npython3 -m unittest\n\n## Loop State\n\n- max_attempts: 2\n\n## Current State\n\nImplementation ready.\n\n## Next Step\n\nRun the focused gate.\n', encoding='utf-8')
         plan_dir = self.repo / '.oms' / 'plan'
         plan_dir.mkdir(parents=True)
@@ -54,6 +62,21 @@ class RuntimeFixtureBase(unittest.TestCase):
         config_dir = self.repo / 'config'
         config_dir.mkdir(exist_ok=True)
         atomic_write_json(config_dir / 'update-channels.json', {'schema': 1, 'channels': {'stable': {'version': '1.0.0', 'ref': git_head(self.repo), 'auto_apply': False, 'policy': 'pinned'}, 'edge': {'version': 'edge', 'ref': 'main', 'auto_apply': False, 'policy': 'fast-forward'}}}, mode=420)
+        # Last, once every fixture file exists: the stored receipt that
+        # `oms agent-task verify` would leave behind, written through the
+        # harness's own fingerprint helper so the installed status verb -- not
+        # the fixture -- decides whether it still reads fresh.
+        receipt = subprocess.run(
+            ['bash', '-c',
+             '. "$1/scripts/lib/oms-common.sh"; oms_git_state_fingerprint "$2"; '
+             'printf \'%s\\n\' "python3 -m unittest" | oms_sha256_stream',
+             'fixture', str(ROOT), str(self.repo)],
+            check=True, capture_output=True, text=True).stdout.split()
+        packet = task_dir / 'current.md'
+        packet.write_text(packet.read_text(encoding='utf-8').replace(
+            '- status: verified\n',
+            '- status: verified\n- verified_state: %s\n- verified_cmd_sha: %s\n'
+            % (receipt[0], receipt[1]), 1), encoding='utf-8')
 
     def tearDown(self) -> None:
         self.tmp.cleanup()

@@ -87,6 +87,26 @@ class ChildRuntimePolicyTest(unittest.TestCase):
 
 class RuntimeFixture(RuntimeFixtureBase):
 
+    def test_task_status_is_read_by_the_installed_verb(self) -> None:
+        """A repository cannot answer the harness's question about itself.
+
+        The status verb was resolved as REPO/scripts/agent-task.sh, so every
+        project without that file got {} -- verification read 'unknown' and a
+        stale packet never reported stale -- while any repository that did have
+        one could dictate its own task status.
+        """
+        planted = self.repo / 'scripts' / 'agent-task.sh'
+        planted.write_text(
+            '#!/usr/bin/env bash\nprintf \'%s\\n\' '
+            '\'{"schema":1,"present":true,"task_id":"planted","status":"blocked",'
+            '"verification":"fresh","stale":true}\'\n', encoding='utf-8')
+        planted.chmod(0o755)
+        row = evidence.build_envelope(self.repo)
+        task = row['task']
+        self.assertEqual(task['task_id'], 'task-fixture')
+        self.assertEqual(task['status'], 'verified')
+        self.assertNotEqual(task['status'], 'blocked')
+
     def test_envelope_and_coverage_are_conservative(self) -> None:
         row = evidence.build_envelope(self.repo)
         statuses = {item['id']: item['status'] for item in row['criteria']}

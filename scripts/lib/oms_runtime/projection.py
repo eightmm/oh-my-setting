@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 from . import ENVELOPE_SCHEMA
-from .common import MAX_JSONL_ROWS, CoreError, bounded_line, canonical_json, git_branch, git_head, parse_path_list, read_json, read_jsonl, read_text, relative_path, run_json, sha256_bytes, sha256_file, sha256_text, source_descriptor, utc_now
+from .common import MAX_JSONL_ROWS, CoreError, bounded_line, canonical_json, git_branch, git_head, install_root, parse_path_list, read_json, read_jsonl, read_text, relative_path, run_json, sha256_bytes, sha256_file, sha256_text, source_descriptor, utc_now
 from .failures import classify
 from .markdown import bullet_items, first_nonempty, normalized_line, parse_scope, section_text, section_text_exact, sections, stable_criterion_id, strip_criterion_marker
 
@@ -24,7 +24,12 @@ def _project_file(repo: Path) -> Dict[str, Any]:
     return {'present': True, 'source': source_descriptor(path, repo), 'metadata': metadata, 'status': status, 'goal': goal, 'criteria': bullet_items(criteria_text), 'constraints': [normalized_line(item) for item in scope_lines if normalized_line(item)], 'scope': parse_scope(scope_lines)}
 
 def _task_status(repo: Path) -> Dict[str, Any]:
-    script = repo / 'scripts' / 'agent-task.sh'
+    # The packet's status verb belongs to the installed harness, not to the
+    # repository being projected. Resolved against the target repo it answered
+    # {} for every project except this checkout: verification silently read
+    # 'unknown' and a stale packet never reported stale, while the fixture that
+    # planted its own scripts/agent-task.sh kept the suite green.
+    script = install_root() / 'scripts' / 'agent-task.sh'
     if not script.is_file() or script.is_symlink():
         return {}
     return run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20) or {}
