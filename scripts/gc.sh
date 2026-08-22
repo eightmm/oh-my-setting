@@ -33,8 +33,15 @@ Options:
   --apply       Actually remove.
   -h, --help    Show help.
 
+Attempt liveness is judged on its own clock, not --days: an attempt still in
+starting/working/verifying with no lifecycle event for OMS_ATTEMPT_STALE_SECONDS
+(default 86400) is moved to blocked/heartbeat_expired, where the inbox can name
+it. OMS_ARTIFACT_INDEX_KEEP (default 1000) is the artifact index floor; raise it
+to keep older evidence through a sweep.
+
 Swept (older than --days): orphaned delegation markers (dead pid; a coupled
-claimed/running plan task is released back to ready), archived task packets,
+claimed/running plan task is released back to ready), the event streams of
+long-terminal attempts, archived task packets,
 handoff digests, local tracked-state checkpoints, hook events/sessions,
 terminal supervisor runtime records outside the repository (durable lifecycle
 events and attempt specs remain),
@@ -309,6 +316,38 @@ print("%s\t%s\t%s\t%s" % (d.get("pid", ""), d.get("task_id", ""), d.get("lease_i
       fi
     fi
   done
+fi
+
+# 1.5) Attempts that stopped reporting. The sweep already compacts the streams
+# of terminal attempts further down, but nothing ever closed a non-terminal one
+# whose owner died mid-flight: it stayed in working forever, `oms state` counted
+# it as active, and no attention row named it, because inbox surfaces
+# blocked/waiting/queued/review and never working. agent-events reconcile was
+# written and tested for exactly this and had no caller anywhere in the product.
+# Liveness is not retention, so it judges on its own clock rather than --days.
+lifecycle_events="$OMS/lifecycle/events.jsonl"
+if [ -f "$lifecycle_events" ] && [ ! -L "$lifecycle_events" ]; then
+  attempt_stale_seconds="${OMS_ATTEMPT_STALE_SECONDS:-86400}"
+  case "$attempt_stale_seconds" in
+    *[!0-9]*|"") echo "error: gc: OMS_ATTEMPT_STALE_SECONDS must be a non-negative integer" >&2; exit 2 ;;
+  esac
+  reconcile_args=(--repo "$STATE_ROOT" reconcile --stale-seconds "$attempt_stale_seconds")
+  [ "$DRY_RUN" = 1 ] || reconcile_args+=(--apply)
+  if ! reconcile_out="$("$ROOT/scripts/agent-events.sh" "${reconcile_args[@]}" 2>&1)"; then
+    printf '%s\n' "$reconcile_out" >&2
+    echo "error: gc: lifecycle reconcile failed" >&2
+    exit 1
+  fi
+  while IFS= read -r reconcile_line; do
+    case "$reconcile_line" in
+      ""|"no stale attempts") continue ;;
+    esac
+    printf -- '- stale-attempt: %s\n' "$reconcile_line"
+    removed=$((removed + 1))
+  done <<EOF
+$reconcile_out
+EOF
+
 fi
 
 # 2) Archived task packets older than --days.

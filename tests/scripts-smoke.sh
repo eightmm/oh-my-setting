@@ -11955,6 +11955,60 @@ test_gc_old_marker_cannot_release_new_lease() {
   assert_not_exists "$project/.oms/delegations/old.json"
 }
 
+test_gc_maintains_the_lifecycle_stream() {
+  local project="$TMP/gc-lifecycle"
+  local events="$ROOT/scripts/agent-events.sh"
+  local stuck finished out state
+
+  make_committed_repo "$project"
+  stuck="$("$events" --repo "$project" start --provider codex --tool peer-delegate)"
+  "$events" --repo "$project" transition --attempt "$stuck" --state starting --actor test >/dev/null
+  "$events" --repo "$project" transition --attempt "$stuck" --state working --actor test >/dev/null
+  finished="$("$events" --repo "$project" start --provider codex --tool ask)"
+  for state in starting working verifying review done; do
+    "$events" --repo "$project" transition --attempt "$finished" --state "$state" --actor test >/dev/null
+  done
+
+  # Backdated rather than raced against the clock: compaction compares the
+  # terminal attempt's own stamp with the cutoff, and a fixture that finishes
+  # inside the same second as the sweep is not old enough by either reading.
+  OMS_GC_FIXTURE_ATTEMPT="$finished" python3 - "$project/.oms/lifecycle/events.jsonl" <<'FIXTURE_PY'
+import json, os, sys
+
+target = os.environ["OMS_GC_FIXTURE_ATTEMPT"]
+path = sys.argv[1]
+lines = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("attempt_id") == target:
+            row["ts"] = "2026-01-01T00:00:00Z"
+        lines.append(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+with open(path, "w", encoding="utf-8") as handle:
+    handle.writelines(lines)
+FIXTURE_PY
+
+  # reconcile shipped tested and unreachable: nothing in the product called it,
+  # so a worker that died mid-flight left its attempt non-terminal forever.
+  # Compaction of the terminal one is the sweep's existing behavior, asserted
+  # here because the two halves have to agree on which streams survive.
+  out="$(cd "$project" && OMS_ATTEMPT_STALE_SECONDS=0 "$ROOT/scripts/gc.sh" --days 1 --apply)"
+  printf '%s' "$out" | grep -Fq "stale-attempt: $stuck" ||
+    fail "gc should reconcile an attempt that stopped reporting: $out"
+  "$events" --repo "$project" show --attempt "$stuck" --json |
+    grep -Fq '"state": "blocked"' ||
+    fail "a reconciled attempt should be blocked so the inbox can name it"
+  "$events" --repo "$project" show --attempt "$stuck" --json |
+    grep -Fq '"reason_code": "heartbeat_expired"' ||
+    fail "the reconciled attempt should say why it was closed"
+  ! grep -Fq "$finished" "$project/.oms/lifecycle/events.jsonl" ||
+    fail "gc should compact the stream of a long-terminal attempt"
+  grep -Fq "$stuck" "$project/.oms/lifecycle/events.jsonl" ||
+    fail "a non-terminal attempt's stream must survive compaction"
+}
+
 test_gc_sweeps_stale_change_guard() {
   local project="$TMP/gc-guard"
 
