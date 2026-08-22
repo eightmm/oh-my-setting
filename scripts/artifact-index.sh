@@ -620,6 +620,7 @@ def present(row):
             return False
     return True
 
+parsed = []
 with open(index, encoding="utf-8", errors="replace") as handle:
     for line in handle:
         if not line.strip():
@@ -627,11 +628,29 @@ with open(index, encoding="utf-8", errors="replace") as handle:
         try:
             row = json.loads(line)
         except Exception:
-            kept.append(line)   # unparseable rows are validate's business
+            row = None          # unparseable rows are validate's business
+        parsed.append((line, row))
+
+surviving = set()
+for line, row in parsed:
+    if not isinstance(row, dict) or not present(row):
+        continue
+    event_id = row.get("event_id")
+    if isinstance(event_id, str) and event_id:
+        surviving.add(event_id)
+
+for line, row in parsed:
+    if isinstance(row, dict):
+        if not present(row):
             continue
-        if isinstance(row, dict) and not present(row):
+        # A resolution says why an earlier failure is closed. Once that row is
+        # gone the resolution points at nothing, which is exactly the dangling
+        # reference validate reports and no other front door can repair -- this
+        # sweep would otherwise create it while removing a different one.
+        target = row.get("resolves_event_id")
+        if isinstance(target, str) and target and target not in surviving:
             continue
-        kept.append(line)
+    kept.append(line)
 
 with open(out, "w", encoding="utf-8") as handle:
     for line in kept:

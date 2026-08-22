@@ -6305,6 +6305,24 @@ test_artifact_index_prunes_stale_references() {
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
   printf '%s' "$out" | grep -Fq 'no stale references' || fail "second sweep should be a no-op: $out"
   [ "$(wc -l < "$index")" = "2" ] || fail "a clean index must be left alone"
+
+  # A resolution explains why an earlier failure is closed, so it cannot outlive
+  # the row it resolves: leaving it behind trades one dangling reference for
+  # another, and validate is the only thing that would ever notice.
+  printf 'temp\n' > "$project/.oms/artifacts/ask/resolved.md"
+  printf '{"ts":"2026-06-11T00:00:04Z","kind":"call","event_id":"evt_target","artifact":".oms/artifacts/ask/resolved.md"}\n' >> "$index"
+  printf '{"ts":"2026-06-11T00:00:05Z","kind":"artifact-resolution","event_id":"evt_res","resolves_event_id":"evt_target"}\n' >> "$index"
+  rm -f "$project/.oms/artifacts/ask/resolved.md"
+  out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
+  printf '%s' "$out" | grep -Fq 'dropped 2 stale row' ||
+    fail "the stale row and its orphaned resolution should go together: $out"
+  ! grep -Fq 'evt_res' "$index" || fail "a resolution outlived the row it resolves"
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" validate \
+    > "$project/validate-out" 2>&1 || true
+  # The fixture's minimal rows carry other schema gaps on purpose, so assert the
+  # one error this sweep is capable of creating rather than a clean bill.
+  ! grep -Fq 'resolution target' "$project/validate-out" ||
+    fail "the stale sweep left a dangling resolution behind"
 }
 
 test_artifact_index_prune() {
