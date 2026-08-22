@@ -129,6 +129,32 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(closed['failures'], [])
         self.assertNotIn('resolve_blocker', [item['id'] for item in closed['next_actions']])
 
+    def test_one_criterion_id_cannot_name_two_criteria(self) -> None:
+        """The id is the key evidence binds to, so it cannot name two things.
+
+        Deduplication was keyed by (id, text), which kept both rows and hid the
+        collision: coverage collapses ids to a set, so one receipt marked both
+        statements verified and the envelope reported full coverage for a
+        criterion nobody had checked.
+        """
+        project = self.repo / 'PROJECT.md'
+        original = project.read_text(encoding='utf-8')
+        project.write_text(
+            '# Demo\n\n## Goal\n\nShip it.\n\n## Acceptance Criteria\n\n'
+            '- [id:safe] The public API stays compatible.\n'
+            '- [id:safe] No data is lost.\n', encoding='utf-8')
+        with self.assertRaises(CoreError) as caught:
+            evidence.build_envelope(self.repo)
+        self.assertIn('safe', str(caught.exception))
+        # The same statement repeated is one criterion, not a collision.
+        project.write_text(
+            '# Demo\n\n## Goal\n\nShip it.\n\n## Acceptance Criteria\n\n'
+            '- [id:safe] The public API stays compatible.\n'
+            '- [id:safe] The public API stays compatible.\n', encoding='utf-8')
+        row = evidence.build_envelope(self.repo)
+        self.assertEqual([item['id'] for item in row['criteria'] if item['source'] == 'project'], ['safe'])
+        project.write_text(original, encoding='utf-8')
+
     def test_envelope_and_coverage_are_conservative(self) -> None:
         row = evidence.build_envelope(self.repo)
         statuses = {item['id']: item['status'] for item in row['criteria']}

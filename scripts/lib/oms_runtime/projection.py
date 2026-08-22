@@ -152,16 +152,34 @@ def _merge_scope(*scopes: Mapping[str, Any]) -> Dict[str, Any]:
         if allowed: effective_allowed = allowed; effective_source = name
     return {'allowed': effective_allowed, 'allowed_source': effective_source, 'forbidden': sorted(set(forbidden)), 'layers': layers, 'authoritative': False}
 
+def _claim_criterion_id(claimed: Dict[str, str], criterion_id: str, text: str) -> bool:
+    """Reserve one criterion id for one statement. Returns False for a repeat.
+
+    The id is the join key evidence binds to, and coverage collapses ids to a
+    set, so two different statements sharing one id are both marked verified by
+    the first receipt: `[id:safe] the API stays compatible` and `[id:safe] no
+    data is lost` reach 100% coverage when only one of them was ever checked.
+    Deduplication used to be keyed by (id, text), which kept both rows and hid
+    the collision instead of naming it.
+    """
+    previous = claimed.get(criterion_id)
+    if previous is None:
+        claimed[criterion_id] = text
+        return True
+    if previous == text:
+        return False
+    raise CoreError("criterion id %s names two different criteria; give each acceptance criterion its own [id:...]" % criterion_id)
+
 def _criteria(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    result: List[Dict[str, Any]] = []; seen: set = set()
+    result: List[Dict[str, Any]] = []; seen: Dict[str, str] = {}
     for source, values, weight in (('project', project.get('criteria', []), 2), ('task', task.get('criteria', []), 2)):
         if not isinstance(values, list): continue
         for raw in values:
             text = strip_criterion_marker(normalized_line(str(raw)))
             if not text: continue
-            criterion_id = stable_criterion_id(source, str(raw)); key = (criterion_id, text.lower())
-            if key in seen: continue
-            seen.add(key); result.append({'id': criterion_id, 'text': bounded_line(text, 500), 'source': source, 'weight': weight})
+            criterion_id = stable_criterion_id(source, str(raw))
+            if not _claim_criterion_id(seen, criterion_id, text.lower()): continue
+            result.append({'id': criterion_id, 'text': bounded_line(text, 500), 'source': source, 'weight': weight})
     if plan.get('acceptance_present'):
         digest = str(plan.get('acceptance_digest', '')); result.append({'id': 'criterion-plan-acceptance-' + digest[:10], 'text': 'The plan-level acceptance command passes on the final tree.', 'source': 'plan', 'weight': 3, 'command_digest': digest})
     # Every plan task is a criterion of its own: an explicit [id:...] in the
@@ -176,10 +194,8 @@ def _criteria(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping
         title = str(row.get('title', ''))
         explicit = re.search(r"\[(?:id|criterion):\s*([A-Za-z0-9._:-]{1,80})\]", title, re.I)
         criterion_id = explicit.group(1) if explicit else 'plan-task-' + task_id
-        key = (criterion_id, task_id.lower())
-        if key in seen:
+        if not _claim_criterion_id(seen, criterion_id, task_id.lower()):
             continue
-        seen.add(key)
         result.append({'id': criterion_id, 'text': bounded_line(strip_criterion_marker(title) or ('Plan task %s is admitted.' % task_id), 500), 'source': 'plan-task', 'weight': 1, 'plan_task_id': task_id})
     return result
 
