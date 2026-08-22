@@ -712,6 +712,31 @@ import json, sys
 row = json.load(sys.stdin)
 assert row["notion"]["excluded"] is True, row["notion"]
 ' || fail "status must report an excluded repo"
+# The sync bounds are the caller's, and the front door has to carry them: the
+# session hooks want a couple of summaries inside a two-second budget while the
+# operator's repair has to be able to clear a backlog. journal.sh parses this
+# subcommand itself, so a flag it does not know is refused before the Python
+# entry ever sees it.
+rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --budget 5 --max-per-tick 2 \
+  >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "journal sync should accept the caller's bounds (rc=$rc)"
+rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --budget >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "a bound without a value must be refused (rc=$rc)"
+rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --budget soon >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "a non-numeric bound must be refused (rc=$rc)"
+rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --nope >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "an unknown sync argument must still be refused (rc=$rc)"
+# Accepting a flag and dropping it is the failure this passes through to catch:
+# a fractional tick count is valid to this wrapper's numeric check and invalid
+# to the entry that has to receive it, so only a real passthrough refuses it.
+rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --max-per-tick 1.5 >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "the bounds must reach the journal entry, not stop here (rc=$rc)"
+
 "$ROOT/scripts/journal.sh" sync --repo "$unadopted" --force >/dev/null 2>&1 ||
   fail "sync in an excluded repo must stay a quiet no-op"
 [ ! -e "$unadopted/.oms/work-journal/sync/notion.json" ] ||

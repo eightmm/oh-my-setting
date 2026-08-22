@@ -42,6 +42,10 @@ case "${1:-}" in
       shift
       force_args=""
       today_args=""
+      # The bounds are the caller's: a session hook wants a couple of summaries
+      # and a two-second budget, the operator's repair has to be able to finish.
+      # Refusing them here made the flags unreachable through the front door.
+      bound_args=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --repo)
@@ -60,6 +64,20 @@ case "${1:-}" in
             today_args="--today"
             shift
             ;;
+          --budget|--max-per-tick)
+            [ "$#" -ge 2 ] || {
+              echo "error: $1 requires a value" >&2
+              exit 2
+            }
+            case "$2" in
+              ''|*[!0-9.]*)
+                echo "error: $1 requires a number" >&2
+                exit 2
+                ;;
+            esac
+            bound_args="${bound_args:+$bound_args }$1 $2"
+            shift 2
+            ;;
           *)
             echo "error: unrecognized sync argument: $1" >&2
             exit 2
@@ -70,6 +88,10 @@ case "${1:-}" in
       set --
       [ -z "$force_args" ] || set -- "$@" "$force_args"
       [ -z "$today_args" ] || set -- "$@" "$today_args"
+      # Word-split on purpose: each element is a flag or its numeric value,
+      # both already validated above.
+      # shellcheck disable=SC2086
+      [ -z "$bound_args" ] || set -- "$@" $bound_args
       work_journal_sync "$repo" "$@"
       exit $?
     fi
