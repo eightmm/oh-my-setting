@@ -823,6 +823,42 @@ print(",".join(items))
 PY
 }
 
+# A plan file is not the same thing as a plan bound to THIS contract.
+plan_binds_spec() {  # SPEC_SHA256
+  [ -f "$PLAN_FILE" ] || return 1
+  OMS_AP_SPEC="$1" python3 - "$PLAN_FILE" <<'PY'
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(1)
+contract = data.get("project_contract")
+if not isinstance(contract, dict):
+    raise SystemExit(1)
+raise SystemExit(0 if contract.get("spec_sha256") == os.environ["OMS_AP_SPEC"] else 1)
+PY
+}
+
+# True when the existing plan still holds work. An unreadable plan counts as
+# holding work: nothing here may decide that an unparseable record is spent.
+plan_has_open_tasks() {
+  [ -f "$PLAN_FILE" ] || return 1
+  python3 - "$PLAN_FILE" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+tasks = data.get("tasks") or {}
+values = tasks if isinstance(tasks, list) else list(tasks.values())
+raise SystemExit(0 if any(
+    isinstance(item, dict) and item.get("state") != "done" for item in values
+) else 1)
+PY
+}
+
 BOUND_SPEC_SHA=""
 bind_plan_contract() {
   local meta contract_spec contract_allowed requested current_spec
@@ -977,7 +1013,18 @@ if [ "$ACTION" = propose ]; then
   [ -n "$BASE" ] || fail "propose requires --base so its continuation is executable"
   git check-ref-format --branch "$BASE" >/dev/null 2>&1 ||
     fail "--base is not a valid branch name"
-  if [ ! -f "$PLAN_FILE" ]; then
+  # Generation is skipped only when a plan is bound to the contract in front of
+  # us. A plan written by plan-from-spec carries no autopilot contract at all --
+  # and that is where `intent adopt`'s own next-step hint sends an operator --
+  # while one left from a finished contract names a different spec. In both
+  # cases propose used to skip generation and then die inside the binder with
+  # "approved plan lacks a valid PROJECT.md/scope contract", naming neither the
+  # leftover plan nor what to do about it.
+  propose_spec_sha="$(oms_sha256_file "$SPEC")" || fail "cannot hash PROJECT.md"
+  if ! plan_binds_spec "$propose_spec_sha"; then
+    if plan_has_open_tasks; then
+      fail "the plan in .oms/plan/ is bound to a different contract and still has unfinished tasks; finish or retire it before proposing against the adopted PROJECT.md"
+    fi
     propose_tasks "" "$INITIAL_TASKS" || exit $?
   fi
   bind_plan_contract

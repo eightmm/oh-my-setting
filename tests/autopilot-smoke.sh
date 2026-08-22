@@ -817,6 +817,42 @@ test_autopilot_orchestration() {
   [ "$rc" = 2 ] || fail "changed PROJECT.md should invalidate resume, got $rc"
   [ ! -f "$contract_repo/calls/goal-drive" ] || fail "changed spec reached goal-drive"
 
+  # A plan that no autopilot contract binds is not a plan for this contract.
+  # `intent adopt` ends by naming plan-from-spec as a next step, and the plan
+  # that writes carries no project_contract at all, so the very next
+  # `autopilot propose` used to skip generation and die inside the binder with
+  # "approved plan lacks a valid PROJECT.md/scope contract" -- naming neither
+  # the leftover plan nor what to do about it.
+  local unbound_repo="$TMP/unbound-plan"
+  make_repo "$unbound_repo"
+  mkdir -p "$unbound_repo/calls" "$unbound_repo/.oms/plan"
+  printf '{"schema":3,"goal":"a previous contract","accept":"true","tasks":{}}\n' \
+    > "$unbound_repo/.oms/plan/tasks.json"
+  rc=0
+  run_autopilot "$unbound_repo" propose --planner claude --allowed 'src,tests' \
+    --base main --provider-timeout 10m > "$unbound_repo/unbound.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] ||
+    fail "an unbound plan must not block the first proposal, got $rc: $(tail -5 "$unbound_repo/unbound.out")"
+  ! grep -Fq 'lacks a valid PROJECT.md/scope contract' "$unbound_repo/unbound.out" ||
+    fail "the binder error surfaced instead of a proposal: $(tail -5 "$unbound_repo/unbound.out")"
+
+  # Unfinished work under another contract is refused, not overwritten, and the
+  # refusal says which plan and why.
+  local busy_repo="$TMP/unbound-plan-busy"
+  make_repo "$busy_repo"
+  mkdir -p "$busy_repo/calls" "$busy_repo/.oms/plan"
+  printf '{"schema":3,"goal":"a previous contract","accept":"true","tasks":{"t1":{"id":"t1","state":"ready"}}}\n' \
+    > "$busy_repo/.oms/plan/tasks.json"
+  rc=0
+  run_autopilot "$busy_repo" propose --planner claude --allowed 'src,tests' \
+    --base main --provider-timeout 10m > "$busy_repo/busy.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] ||
+    fail "unfinished work under another contract should be a contract error, got $rc"
+  grep -Fq 'still has unfinished tasks' "$busy_repo/busy.out" ||
+    fail "the refusal must name the leftover plan: $(tail -3 "$busy_repo/busy.out")"
+  [ ! -f "$busy_repo/calls/plan-from-spec" ] ||
+    fail "a refused propose must not reach the planner"
+
   # Planner failure is a parked/error result, never a fake approval boundary.
   local planner_repo="$TMP/planner-failure"
   make_repo "$planner_repo"
