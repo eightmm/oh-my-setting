@@ -107,6 +107,28 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(task['status'], 'verified')
         self.assertNotEqual(task['status'], 'blocked')
 
+    def test_a_resolved_failure_leaves_the_envelope(self) -> None:
+        """Resolution lives in its own ledger row, not in the failing one.
+
+        The projection read each row's own status field, so nothing in the
+        canonical ledger could ever close: resolved failures stayed listed and
+        resolve_blocker outranked every other next action forever.
+        """
+        ledger = self.repo / '.oms' / 'failures.jsonl'
+        append_jsonl(ledger, {
+            'schema': 2, 'event': 'fail', 'ts': '2026-08-20T00:00:00Z', 'agent': 'claude',
+            'fingerprint': 'aaaabbbbccccdddd', 'kind': 'cmd', 'cmd': 'make test',
+            'exit': 1, 'summary': 'make test failed'})
+        open_row = evidence.build_envelope(self.repo)
+        self.assertEqual([item['id'] for item in open_row['failures']], ['aaaabbbbccccdddd'])
+        self.assertIn('resolve_blocker', [item['id'] for item in open_row['next_actions']])
+        append_jsonl(ledger, {
+            'schema': 2, 'event': 'resolved', 'ts': '2026-08-20T01:00:00Z', 'agent': 'claude',
+            'fingerprint': 'aaaabbbbccccdddd', 'how': 'fixed the build'})
+        closed = evidence.build_envelope(self.repo)
+        self.assertEqual(closed['failures'], [])
+        self.assertNotIn('resolve_blocker', [item['id'] for item in closed['next_actions']])
+
     def test_envelope_and_coverage_are_conservative(self) -> None:
         row = evidence.build_envelope(self.repo)
         statuses = {item['id']: item['status'] for item in row['criteria']}

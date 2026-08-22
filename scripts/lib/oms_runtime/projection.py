@@ -106,9 +106,37 @@ def _failure_paths(repo: Path) -> List[Path]:
         if root.is_dir() and not root.is_symlink(): candidates.extend(root.rglob('*.jsonl'))
     return sorted({path for path in candidates if path.is_file() and not path.is_symlink()})
 
+def _canonical_ledger_failures(repo: Path, path: Path) -> List[Dict[str, Any]]:
+    # The canonical ledger does not carry resolution in the failing row: a fix
+    # is a separate `event: "resolved"` row keyed by fingerprint, and hook rows
+    # retire on a read-time TTL. Reading each row's own status field saw
+    # neither, so a resolved failure stayed open forever, every repeat of one
+    # command counted again, and resolve_blocker outranked every other next
+    # action for as long as the ledger existed. That replay already has an
+    # owner -- and a comment naming every site that must agree with it -- so
+    # ask fail-ledger instead of keeping a sixth copy of the predicate here.
+    script = install_root() / 'scripts' / 'fail-ledger.sh'
+    if not script.is_file() or script.is_symlink():
+        return []
+    payload = run_json(['bash', str(script), '--repo', str(repo), 'list', '--unresolved', '--json'], cwd=repo, timeout=20) or {}
+    rows = payload.get('failures')
+    if not isinstance(rows, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        summary = bounded_line(row.get('summary') or row.get('cmd') or '', 300)
+        result.append({'id': bounded_line(row.get('fingerprint', ''), 160), 'kind': bounded_line(row.get('kind', ''), 80), 'summary': summary, 'classification': classify(summary, row.get('exit')), 'source': relative_path(path, repo)})
+    return result
+
 def failure_rows(repo: Path) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
+    canonical = repo / '.oms' / 'failures.jsonl'
     for path in _failure_paths(repo):
+        if path == canonical:
+            result.extend(_canonical_ledger_failures(repo, path))
+            continue
         for row in read_jsonl(path, limit_rows=MAX_JSONL_ROWS):
             if str(row.get('status', row.get('state', 'open'))).lower() in ('resolved', 'closed', 'superseded', 'done'): continue
             summary = bounded_line(row.get('summary', row.get('reason', row.get('message', ''))), 300)
