@@ -153,6 +153,16 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Landing is parent authority, like goal-drive and autopilot, and this is the
+# only verb that writes the owner's tree. A delegated worker runs with
+# OMS_HARNESS_CHILD=1 inside a throwaway worktree, but git metadata still names
+# the primary checkout, so --repo was the only thing between that worker and
+# this tree; the worker-authority guard notices such a write after the bytes
+# are already applied. Refuse before them. patch-admit stays open to children:
+# reading and judging a patch is not landing it.
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
+  fail "patch-land is parent-only; a harness child cannot land onto the owner's tree"
+
 REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 

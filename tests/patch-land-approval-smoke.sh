@@ -32,6 +32,17 @@ git -C "$repo" restore file.txt
 LAND="$ROOT/scripts/patch-land.sh"
 APPROVAL="$ROOT/scripts/approval-inbox.sh"
 
+# The one mutating step is parent-only. A delegated worker carries
+# OMS_HARNESS_CHILD=1 and works in a throwaway worktree, but git metadata still
+# names this checkout, so --repo was all that stood between it and the owner's
+# tree, and the authority guard only reports such a write afterwards.
+if OMS_HARNESS_CHILD=1 "$LAND" --repo "$repo" --patch "$patch" --verify true \
+  >/dev/null 2>&1; then
+  fail "a harness child landed onto the owner's tree"
+fi
+grep -Fxq base "$repo/file.txt" || fail "a child-marked landing still changed the tree"
+[ ! -s "$repo/.oms/landings.jsonl" ] || fail "a refused landing wrote a landing row"
+
 # An untracked file can collide with a patch path or be silently included in a
 # later commit. Landing therefore requires the complete working tree, not just
 # tracked files, to be clean.
