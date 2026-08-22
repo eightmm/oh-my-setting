@@ -159,6 +159,35 @@ class JournalTestCase(unittest.TestCase):
         self.assertEqual("val_auc/scaffold", event["provenance"]["primary_metric"])
         self.assertNotIn("metrics", event)
 
+    def test_stated_judgment_survives_every_source_type(self):
+        """--decision/--blocker/--next-action are caller-stated overrides.
+
+        They were attached inside the lifecycle-verb branch only, so every
+        other source type accepted them on the command line and dropped them:
+        agent-task, run-ledger, ci-status and any generic JSON record. That is
+        the capture gap, not the rendering one.
+        """
+        source = self.repo / "record.json"
+        source.write_text(
+            json.dumps({"id": "rec-1", "ts": "2026-08-22T06:00:00Z", "summary": "a record"}),
+            encoding="utf-8",
+        )
+        for source_type in ("goal-drive", "run-ledger", "commit"):
+            payload = wj.source_payload(
+                self.repo, source_type, source,
+                decision="이 경로를 선택했다",
+                blocker="원격이 응답하지 않는다",
+                next_action="다음 세션에서 재시도",
+            )
+            self.assertEqual("이 경로를 선택했다", payload.get("decision"), source_type)
+            self.assertEqual("원격이 응답하지 않는다", payload.get("blocker"), source_type)
+            self.assertEqual("다음 세션에서 재시도", payload.get("next_action"), source_type)
+        # And it survives admission, which is what the reader ends up seeing.
+        event, _ = self.store.record_event(
+            wj.source_payload(self.repo, "commit", source, decision="기록된 결정")
+        )
+        self.assertEqual("기록된 결정", event["decision"])
+
     def test_metric_without_evidence_is_dropped(self):
         payload = base_event()
         payload.pop("evidence")

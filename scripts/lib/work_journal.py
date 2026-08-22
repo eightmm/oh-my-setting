@@ -3071,16 +3071,6 @@ def source_payload(
             ),
             "evidence": [{"type": source_type, "ref": sid}],
         }
-        # The caller states these; the adapter never reads them out of a
-        # record. A park names its own blocker and the next step it wants, and
-        # an adopted contract names the goal sentence the operator wrote.
-        for field, value in (
-            ("decision", decision),
-            ("blocker", blocker),
-            ("next_action", next_action),
-        ):
-            if value:
-                payload[field] = value
         relative = _safe_relpath(repo, evidence_path)
         if relative:
             payload["refs"] = [{"type": source_type, "path": relative, "id": sid}]
@@ -3379,6 +3369,20 @@ def source_payload(
         payload.setdefault("outcome", {})["summary"] = outcome
     if outcome_status:
         payload.setdefault("outcome", {})["status"] = outcome_status
+    # The caller states these; the adapter never reads them out of a record. A
+    # park names its own blocker and the next step it wants, and an adopted
+    # contract names the goal sentence the operator wrote. They belong with the
+    # other caller-stated overrides: attached inside one branch, they were
+    # accepted on the command line and silently dropped for every source type
+    # outside it -- agent-task, run-ledger, ci-status and every generic JSON
+    # record -- which is the same capture gap round 25 set out to close.
+    for field, value in (
+        ("decision", decision),
+        ("blocker", blocker),
+        ("next_action", next_action),
+    ):
+        if value:
+            payload[field] = value
     return payload
 
 
