@@ -250,6 +250,67 @@ agent_memory_file_has_sensitive_content() {
   grep -Eiq "$(agent_memory_sensitive_re)" "$file"
 }
 
+# Where the scrubber matched, and in which half of the composed prompt, without
+# echoing the match itself. A refusal that names nothing costs a whole round: a
+# caller cannot tell its own sentence from the memory, task packet or git
+# context the harness attached, the tier decides whether the fix is "remove it"
+# or "write it relative", and the regex is deliberately private. Line numbers
+# and a tier name are a pointer, never a disclosure.
+agent_memory_sensitive_report() {  # FILE
+  local file="$1"
+  local begin end tier re line number region
+  local prompt_lines context_lines prompt_count context_count
+
+  [ -s "$file" ] || return 0
+  begin="$(grep -n -m1 -F -- '--- begin harness context' "$file" 2>/dev/null | cut -d: -f1)"
+  end="$(grep -n -m1 -F -- '--- end harness context' "$file" 2>/dev/null | cut -d: -f1)"
+  case "$begin" in *[!0-9]*|"") begin=0 ;; esac
+  case "$end" in *[!0-9]*|"") end=0 ;; esac
+  for tier in secret machine; do
+    if [ "$tier" = secret ]; then
+      re="$(agent_memory_secret_re)"
+    else
+      re="$(agent_memory_machine_re)"
+    fi
+    prompt_lines=""; context_lines=""; prompt_count=0; context_count=0
+    while IFS= read -r line; do
+      number="${line%%:*}"
+      case "$number" in *[!0-9]*|"") continue ;; esac
+      region=prompt
+      if [ "$begin" -gt 0 ] && [ "$number" -gt "$begin" ] &&
+        { [ "$end" -eq 0 ] || [ "$number" -lt "$end" ]; }; then
+        region=context
+      fi
+      if [ "$region" = context ]; then
+        context_count=$((context_count + 1))
+        [ "$context_count" -gt 3 ] || context_lines="${context_lines:+$context_lines, }$number"
+      else
+        prompt_count=$((prompt_count + 1))
+        [ "$prompt_count" -gt 3 ] || prompt_lines="${prompt_lines:+$prompt_lines, }$number"
+      fi
+    done <<EOF
+$(grep -Ein "$re" "$file" 2>/dev/null | cut -d: -f1)
+EOF
+    agent_memory_sensitive_report_line "$tier" "your prompt" "$prompt_lines" "$prompt_count"
+    agent_memory_sensitive_report_line "$tier" "attached harness context" "$context_lines" "$context_count"
+  done
+}
+
+agent_memory_sensitive_report_line() {  # TIER WHERE LINES COUNT
+  local tier="$1" where="$2" lines="$3" count="$4"
+  local more=""
+
+  [ "$count" -gt 0 ] || return 0
+  [ "$count" -le 3 ] || more=" (+$((count - 3)) more)"
+  if [ "$tier" = secret ]; then
+    printf 'secret-tier match in %s at line %s%s: credential material is never sent\n' \
+      "$where" "$lines" "$more"
+  else
+    printf 'machine-tier match in %s at line %s%s: home/cluster paths and node fields; write them repository-relative\n' \
+      "$where" "$lines" "$more"
+  fi
+}
+
 agent_memory_file_has_secret_content() {
   local file="$1"
   [ -s "$file" ] || return 1

@@ -278,9 +278,20 @@ ma_prompt_has_sensitive_content() {
 
 ma_validate_outbound_prompt() {
   local prompt="$1"
+  local report_line
 
   if ma_prompt_has_sensitive_content "$prompt"; then
     echo "error: outbound provider context contains sensitive-looking content; external call blocked" >&2
+    # Say which tier matched and in which half of the composed prompt. The
+    # block is correct; a refusal that names nothing is not, because it costs
+    # the caller the whole round and then a guess -- the pattern set is private
+    # and the caller cannot tell its own sentence from attached memory, task or
+    # git context. Line numbers, never the matched text.
+    while IFS= read -r report_line; do
+      [ -z "$report_line" ] || echo "error: $report_line" >&2
+    done <<EOF
+$(agent_memory_sensitive_report "$prompt")
+EOF
     echo "hint: remove secrets, private keys, absolute machine paths, cluster details, raw logs, datasets, or checkpoints from task/memory/prompt context" >&2
     return 3
   fi

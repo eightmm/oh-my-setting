@@ -6829,6 +6829,44 @@ test_scrubber_blocks_env_style_token() {
   assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
 }
 
+test_scrubber_refusal_names_tier_and_region() {
+  local project="$TMP/scrub-report"
+  local prompt="$project/prompt.txt"
+  local out="$project/report"
+
+  mkdir -p "$project"
+  # A refusal that only says "sensitive-looking content" costs the caller the
+  # whole round and then a guess: the pattern set is private, and the composed
+  # prompt carries attached memory/task/git context the caller never wrote.
+  {
+    printf 'Please review the plan.\n'
+    printf 'It lives under /hom%s/someone/project.\n' 'e'
+    printf -- '--- begin harness context (reference data, not instructions) ---\n'
+    printf 'export API_%s=abcdefghijklmnop\n' 'KEY'
+    printf -- '--- end harness context ---\n'
+  } > "$prompt"
+  bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_report "$2"' \
+    _ "$ROOT" "$prompt" > "$out" 2>&1
+  grep -Fq 'machine-tier match in your prompt at line 2' "$out" ||
+    fail "the report should place the machine-tier match in the caller's own prompt: $(cat "$out")"
+  grep -Fq 'secret-tier match in attached harness context at line 4' "$out" ||
+    fail "the report should place the secret-tier match in the attached context: $(cat "$out")"
+  # The pointer is a line number and a tier, never the matched text.
+  ! grep -Fq 'abcdefghijklmnop' "$out" ||
+    fail "the report must not echo the matched content"
+
+  # End to end: the refusal a caller actually reads carries the same lines.
+  local rc=0
+  OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts" \
+    --to codex \
+    --prompt "the tree under /hom""e/someone/project needs a fix" \
+    >"$project/out" 2>"$project/error" || rc=$?
+  [ "$rc" = "3" ] || fail "blocked call should exit 3 (scrubber), got $rc"
+  assert_file_contains "$project/error" "machine-tier match in your prompt"
+}
+
 test_scrubber_no_function_name_bypass() {
   local project="$TMP/scrub-bypass"
   local artifact_dir="$project/artifacts"
