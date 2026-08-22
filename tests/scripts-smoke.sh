@@ -12003,7 +12003,7 @@ test_gc_maintains_the_lifecycle_stream() {
   "$events" --repo "$project" transition --attempt "$stuck" --state starting --actor test >/dev/null
   "$events" --repo "$project" transition --attempt "$stuck" --state working --actor test >/dev/null
   finished="$("$events" --repo "$project" start --provider codex --tool ask)"
-  for state in starting working verifying review done; do
+  for state in starting working verifying review "done"; do
     "$events" --repo "$project" transition --attempt "$finished" --state "$state" --actor test >/dev/null
   done
 
