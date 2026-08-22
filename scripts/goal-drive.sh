@@ -169,7 +169,7 @@ export GIT_CONFIG_COUNT
 PLAN_FILE="$REPO/.oms/plan/tasks.json"
 PROGRESS="$REPO/.oms/plan/progress.jsonl"
 [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; create one first (agent-plan init/add)"
-python3 "$ROOT/scripts/lib/durable-jsonl.py" check "$PROGRESS" ||
+python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl check "$PROGRESS" ||
   fail "progress.jsonl must be a repo-local regular non-symlink file"
 
 read_accept_cmd() {
@@ -289,7 +289,7 @@ TASK_RECEIPT_REPAIR_COUNT=0
 TASK_RECEIPT_SHA=""
 
 progress_append() {
-  python3 "$ROOT/scripts/lib/durable-jsonl.py" append "$PROGRESS"
+  python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl append "$PROGRESS"
 }
 
 terminal_row() {  # STATUS REASON

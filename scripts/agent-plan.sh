@@ -1306,7 +1306,7 @@ fi
 if [ "$ACTION" = "accept" ]; then
   [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; run: agent-plan init --goal ... --accept CMD"
   progress="$(dirname "$PLAN_FILE")/progress.jsonl"
-  python3 "$ROOT/scripts/lib/durable-jsonl.py" check "$progress" ||
+  python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl check "$progress" ||
     fail "progress.jsonl must be a repo-local regular non-symlink file"
   accept_cmd="$(python3 -c '
 import json, sys
@@ -1628,7 +1628,7 @@ row = {
 if os.environ.get("OMS_PA_RUN"): row["run_id"] = os.environ["OMS_PA_RUN"]
 if os.environ.get("OMS_PA_CYCLE"): row["cycle"] = int(os.environ["OMS_PA_CYCLE"])
 print(json.dumps(row, ensure_ascii=False))
-' | python3 "$ROOT/scripts/lib/durable-jsonl.py" append "$progress" || {
+' | python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl append "$progress" || {
     rm -f "$out_tmp"
     fail "cannot durably append the acceptance receipt to progress.jsonl"
   }

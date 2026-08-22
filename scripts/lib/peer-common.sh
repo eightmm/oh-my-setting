@@ -739,6 +739,7 @@ ma_append_artifact_index() {
   local verify_exit="${8:-}"
   local source_artifact="${9:-}"
   local index
+  local durable_helper
   local retention_helper
   local prompt_hash=""
   local task_goal=""
@@ -756,6 +757,7 @@ ma_append_artifact_index() {
   index="${OMS_ARTIFACT_INDEX:-$repo/.oms/artifacts/index.jsonl}"
   local telemetry_helper
   telemetry_helper="$(ma_scripts_dir)/lib/artifact-telemetry.py"
+  durable_helper="$(ma_scripts_dir)/lib/durable-jsonl.py"
   retention_helper="$(ma_scripts_dir)/lib/artifact-index-retention.py"
   mkdir -p "$(dirname "$index")" || {
     echo "error: artifact index append: cannot create $(dirname "$index")" >&2
@@ -765,6 +767,7 @@ ma_append_artifact_index() {
     echo "error: artifact index append needs python3; row not recorded" >&2
     return 1
   }
+  python3 "$durable_helper" --label "artifact index" check "$index" || return 1
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
@@ -790,9 +793,9 @@ ma_append_artifact_index() {
   OMS_INDEX_REASONING_EFFORT="${OMS_REASONING_RESOLVED:-}" \
   OMS_INDEX_SELECTED_REASONING_EFFORT="${OMS_REASONING_SELECTED:-}" \
   OMS_INDEX_FALLBACK_REASONING_EFFORT="${OMS_REASONING_FALLBACK:-}" \
-  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$retention_helper" "$telemetry_helper" <<'EOF'
-import hashlib, json, os, re, runpy, shutil, sys, tempfile, time, uuid
-repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, retention_helper, telemetry_helper = sys.argv[1:]
+  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$durable_helper" "$retention_helper" "$telemetry_helper" <<'EOF'
+import hashlib, json, os, re, runpy, sys, time, uuid
+repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, durable_helper, retention_helper, telemetry_helper = sys.argv[1:]
 event_id = "evt_" + uuid.uuid4().hex
 
 def safe_id(value):
@@ -998,8 +1001,10 @@ if verify_exit:
     row["verify_exit"] = int(verify_exit)
 if task_goal:
     row["task_goal"] = task_goal
-with open(index, "a", encoding="utf-8") as f:
-    f.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+durable = runpy.run_path(durable_helper)
+row_data = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+index_data = durable["append"](
+    index, row_data, label="artifact index", capture=True)
 
 # Amortized bounded retention. Explicit artifact-index prune remains the path
 # for stale-reference repair and orphan-file deletion.
@@ -1009,21 +1014,12 @@ try:
 except ValueError:
     keep, high = 1000, 1200
 if keep > 0 and high >= keep:
-    with open(index, "rb") as f:
-        lines = f.readlines()
+    lines = index_data.splitlines(keepends=True)
     if len(lines) > high:
         lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
-        real_index = os.path.realpath(index)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real_index))
-        try:
-            with os.fdopen(fd, "wb") as out:
-                out.writelines(lines[-keep:])
-            shutil.copymode(real_index, tmp)
-            os.replace(tmp, real_index)
-        except Exception:
-            try: os.unlink(tmp)
-            except OSError: pass
-            raise
+        durable["write"](
+            index, b"".join(lines[-keep:]), label="artifact index",
+            max_bytes=durable["MAX_FILE_BYTES"])
 EOF
 }
 

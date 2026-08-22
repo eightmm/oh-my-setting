@@ -139,6 +139,41 @@ if grep -Fq "$LEAK" "$repo/.oms/plan/progress.jsonl"; then
   fail "acceptance output leaked raw into progress receipts"
 fi
 
+# --- artifact index: labeled durable append refuses a leaf symlink --------
+artifact_repo="$TMP/artifact-index"; mk_repo "$artifact_repo"
+mkdir -p "$artifact_repo/.oms/artifacts"
+outside_index="$TMP/outside-index.jsonl"
+printf 'outside untouched\n' > "$outside_index"
+ln -s "$outside_index" "$artifact_repo/.oms/artifacts/index.jsonl"
+if artifact_error="$({
+  # shellcheck source=scripts/lib/peer-common.sh
+  . "$ROOT/scripts/lib/peer-common.sh"
+  ma_append_artifact_index "$artifact_repo" call codex 0 "" "" "" "" ""
+} 2>&1)"; then
+  fail "artifact index append must refuse a leaf symlink"
+fi
+printf '%s\n' "$artifact_error" | grep -Fq 'artifact index' ||
+  fail "artifact index refusal must name its durable-writer label: $artifact_error"
+grep -Fxq 'outside untouched' "$outside_index" ||
+  fail "artifact index append followed a planted leaf symlink"
+[ -L "$artifact_repo/.oms/artifacts/index.jsonl" ] ||
+  fail "refused artifact index append must preserve the leaf symlink"
+
+rm -f "$artifact_repo/.oms/artifacts/index.jsonl"
+(
+  # shellcheck source=scripts/lib/peer-common.sh
+  . "$ROOT/scripts/lib/peer-common.sh"
+  ma_append_artifact_index "$artifact_repo" call codex 0 "" "" "" "" ""
+) || fail "artifact index must accept a normal durable append"
+python3 - "$artifact_repo/.oms/artifacts/index.jsonl" <<'PY' ||
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    rows = [json.loads(line) for line in source]
+assert len(rows) == 1, rows
+assert rows[0]["kind"] == "call", rows
+PY
+  fail "one artifact index append must persist exactly one valid row"
+
 # --- draft-pr intent: verifier text is durable and therefore strict --------
 repo="$TMP/draft-pr"; mk_repo "$repo"
 git -C "$repo" branch -M main
