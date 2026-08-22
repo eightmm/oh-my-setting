@@ -1318,6 +1318,20 @@ print(d.get("accept", "") or "")
 ' "$PLAN_FILE")"
   [ -n "$accept_cmd" ] ||
     fail "plan has no acceptance command; set one with: agent-plan init --goal ... --accept CMD"
+  # The command and the digest the verdict is filed against have to describe
+  # the same plan. accept deliberately runs outside the plan lock, and the
+  # freeze below happens several reads later -- the contract manifest and the
+  # repository snapshot come first -- so a second session replacing the plan in
+  # between left this run executing the previous acceptance command while the
+  # post-check compared the NEW plan against itself. The old contract's pass
+  # was then recorded as the new contract's.
+  accept_plan_sha="$(oms_sha256_file "$PLAN_FILE")" ||
+    fail "cannot freeze the plan alongside its acceptance command"
+  # Test-only: replace the plan inside the window this check covers. Inert
+  # unless set, like the other OMS_*_TEST_* hooks in this tree.
+  if [ -n "${OMS_PLAN_ACCEPT_TEST_REWRITE:-}" ] && [ -f "${OMS_PLAN_ACCEPT_TEST_REWRITE}" ]; then
+    cat "$OMS_PLAN_ACCEPT_TEST_REWRITE" > "$PLAN_FILE"
+  fi
 
   # Contract-bound acceptance names every verifier/input file whose bytes were
   # reviewed. Re-open each leaf without following symlinks and compare it with
@@ -1475,6 +1489,9 @@ PY
   plan_before="$(oms_sha256_file "$PLAN_FILE")" ||
     acceptance_integrity_error acceptance-supervision-failed \
       "cannot freeze the plan before acceptance"
+  [ "$plan_before" = "$accept_plan_sha" ] ||
+    acceptance_integrity_error acceptance-command-changed \
+      "the plan changed between reading its acceptance command and freezing it"
 
   timeout_value="${OMS_PLAN_ACCEPT_TIMEOUT:-10m}"
   timeout_seconds="$(python3 - "$timeout_value" <<'PY' | tr -d '\r'

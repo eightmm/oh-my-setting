@@ -1207,6 +1207,38 @@ grep -Fq 'reason=acceptance-mutated-repository' \
 [ ! -e "$git_exec_marker" ] || fail "acceptance executed hostile diff.external"
 git -C "$git_exec_accept_repo" config --worktree --unset-all diff.external
 
+# The acceptance command and the digest the verdict is filed against have to
+# describe the same plan. accept runs outside the plan lock by design and the
+# freeze happens several reads later, so a second session replacing the plan in
+# between left this run executing the previous command while the post-check
+# compared the new plan against itself -- the old contract's pass recorded as
+# the new contract's.
+accept_swap_repo="$TMP/accept-plan-swap"
+make_case "$accept_swap_repo" tracked
+python3 - "$accept_swap_repo/.oms/plan/tasks.json" "$TMP/accept-swapped-plan.json" <<'SWAP_PY'
+import json, sys
+plan = json.load(open(sys.argv[1], encoding="utf-8"))
+plan["accept"] = "false"
+json.dump(plan, open(sys.argv[2], "w", encoding="utf-8"))
+SWAP_PY
+rc=0
+OMS_PLAN_ACCEPT_TEST_REWRITE="$TMP/accept-swapped-plan.json" \
+  "$ROOT/scripts/agent-plan.sh" --repo "$accept_swap_repo" accept \
+  > "$TMP/accept-plan-swap.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "a plan replaced before the freeze should error, got $rc"
+grep -Fq 'reason=acceptance-command-changed' "$TMP/accept-plan-swap.out" ||
+  fail "a swapped plan used the wrong reason: $(cat "$TMP/accept-plan-swap.out")"
+# The same fixture with nothing swapped reaches its own verdict on the command
+# rather than this integrity reason, so the check is the swap and not the
+# fixture. (This case's acceptance command legitimately fails: what matters is
+# that it fails as an acceptance result, not as a changed contract.)
+accept_quiet_repo="$TMP/accept-plan-quiet"
+make_case "$accept_quiet_repo" tracked
+"$ROOT/scripts/agent-plan.sh" --repo "$accept_quiet_repo" accept \
+  > "$TMP/accept-plan-quiet.out" 2>&1 || true
+! grep -Fq 'acceptance-command-changed' "$TMP/accept-plan-quiet.out" ||
+  fail "an untouched plan must not read as changed: $(cat "$TMP/accept-plan-quiet.out")"
+
 git_exec_command_repo="$TMP/git-exec-accept-command"
 make_case "$git_exec_command_repo" tracked
 rc=0
