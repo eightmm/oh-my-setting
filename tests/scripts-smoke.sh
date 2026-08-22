@@ -18626,6 +18626,29 @@ test_state_verify_clean_and_unadopted() {
     fail "missing ok verdict: $out"
 }
 
+test_state_verify_reports_unpublished_journal_summaries() {
+  local project="$TMP/sv-journal"
+  local out rc
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/work-journal/sync"
+  printf '*\n' > "$project/.oms/.gitignore"
+  # The published journal is the surface a person reads, and a summary that
+  # never reached it was visible only to whoever ran `oms journal status` by
+  # hand: seven daily summaries went unpublished for up to ten days while
+  # every attention surface reported the journal healthy.
+  printf '{"schema_version":1,"summaries":{"p:daily:2026-08-01":{"status":"failed","error":"TimeoutError","period":"2026-08-01","kind":"daily"}}}\n' \
+    > "$project/.oms/work-journal/sync/notion.json"
+
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "an unpublished summary must be a finding (rc=$rc): $out"
+  printf '%s\n' "$out" | grep -q 'warn: work-journal: 1 summary never reached the published journal' ||
+    fail "unpublished summary not reported: $out"
+  printf '%s\n' "$out" | grep -q 'remedy: oms journal sync' ||
+    fail "the finding must name the verb that repairs it: $out"
+}
+
 test_state_verify_reports_cross_family_findings() {
   local project="$TMP/sv-findings"
   local out rc

@@ -289,6 +289,16 @@ if journal.get("enabled"):
     if journal.get("event_count") and not journal.get("index_ready"):
         finding("warn", "work-journal", "event index is not ready",
                 "oms journal rebuild --repo %s" % repo)
+    # The published surface is the one a person actually reads, and its
+    # failures were visible only to whoever ran `oms journal status` by hand:
+    # seven daily summaries sat unpublished here for up to ten days while every
+    # attention surface said the journal was fine.
+    notion = journal.get("notion") if isinstance(journal.get("notion"), dict) else {}
+    unpublished = int(notion.get("failed") or 0) + int(notion.get("pending") or 0)
+    if unpublished:
+        finding("warn", "work-journal", "%d summar%s never reached the published journal"
+                % (unpublished, "y" if unpublished == 1 else "ies"),
+                "oms journal sync --repo %s" % repo)
 
 fails = sum(1 for f in findings if f["level"] == "fail")
 warns = sum(1 for f in findings if f["level"] == "warn")
