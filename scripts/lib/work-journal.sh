@@ -152,7 +152,14 @@ work_journal_finish() {
     echo "warning: Work Journal finish materialization degraded" >&2
     return 0
   fi
-  if ! work_journal_sync "$repo" --force --today >/dev/null 2>&1; then
+  # Bounded like the start boundary, and for the same reason: a Stop hook has
+  # to return. It was relying on the sync default, which now belongs to the
+  # operator's repair path -- that one has to be able to clear a backlog, and a
+  # hook must never inherit it.
+  if ! OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK=2 \
+    OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS=4 \
+    OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS=8 \
+    work_journal_sync "$repo" --force --today >/dev/null 2>&1; then
     echo "warning: Work Journal finish sync degraded; local journal is preserved" >&2
   fi
   return 0

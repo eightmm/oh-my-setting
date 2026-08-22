@@ -2689,16 +2689,37 @@ class JournalStore:
         )
         return "\n".join(lines)
 
-    def sync_notion(self, *, force: bool = False, today_only: bool = False) -> None:
+    def sync_notion(
+        self,
+        *,
+        force: bool = False,
+        today_only: bool = False,
+        budget_seconds: Optional[float] = None,
+        max_per_tick: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Push finalized summaries to Notion; report what the tick did.
+
+        The wall-clock budget and the per-tick cap are the caller's, because
+        the two callers want opposite things: a session hook must return in
+        seconds, while `oms journal sync` is a repair and has to be able to
+        finish. Sharing the hook's bound is what let a backlog become
+        permanent -- every tick spent its cap failing rows past the deadline,
+        recorded each as a failure, and the count only grew.
+        """
+        report: Dict[str, Any] = {
+            "configured": False, "attempted": 0, "synced": 0,
+            "failed": 0, "deferred": 0, "remaining": 0, "error": "",
+        }
         # Checked before auth so an excluded repo never spends a credential
         # lookup, and the exclusion is testable without one.
         if notion_repo_excluded(self.repo):
-            return
+            return report
         settings = notion_settings()
         if not notion_auth_available(settings) or not (
             settings["data_source_id"] or settings["database_id"]
         ):
-            return
+            return report
+        report["configured"] = True
         target_fingerprint = _sha256_bytes(
             _canonical_bytes(
                 {
@@ -2748,12 +2769,18 @@ class JournalStore:
                     state = loaded
             except (OSError, ValueError, TypeError):
                 pass
+        if budget_seconds is not None:
+            settings = dict(settings)
+            settings["budget_seconds"] = float(budget_seconds)
         exporter = NotionJournalExporter.from_config(**settings)
-        try:
-            maximum = int(os.environ.get("OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK", "4"))
-        except ValueError:
-            maximum = 4
-        maximum = max(1, min(maximum, 50))
+        if max_per_tick is not None:
+            maximum = int(max_per_tick)
+        else:
+            try:
+                maximum = int(os.environ.get("OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK", "4"))
+            except ValueError:
+                maximum = 4
+        maximum = max(1, min(maximum, 200))
         sync_now = self.clock()
         if sync_now.tzinfo is None:
             sync_now = sync_now.replace(tzinfo=dt.timezone.utc)
@@ -2781,7 +2808,8 @@ class JournalStore:
                 except SchemaError:
                     pass
             if attempted >= maximum:
-                break
+                report["remaining"] += 1
+                continue
             attempted += 1
             try:
                 content = notion_presentation(
@@ -2812,6 +2840,7 @@ class JournalStore:
                     "period": row["period"],
                     "kind": row["kind"],
                 }
+                report["synced"] += 1
             except Exception as exc:
                 retry_after = getattr(exc, "retry_after_seconds", None)
                 retry_seconds: Optional[float] = None
@@ -2838,7 +2867,14 @@ class JournalStore:
                         sync_now + dt.timedelta(seconds=retry_seconds)
                     )
                 state["summaries"][row["summary_key"]] = failed_state
+                if failed_state["status"] == "pending":
+                    report["deferred"] += 1
+                else:
+                    report["failed"] += 1
+                report["error"] = failed_state["error"]
             atomic_write_json(self.notion_state_path, state)
+        report["attempted"] = attempted
+        return report
 
 
 def observe_fail_open(store: JournalStore, payload: Mapping[str, Any]) -> bool:
@@ -3410,6 +3446,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--repo", default=".")
     sync.add_argument("--force", action="store_true")
     sync.add_argument("--today", action="store_true")
+    # Defaults here are the operator's, not the session hook's: the hooks pass
+    # their own tight bounds, and a repair that inherits them cannot finish.
+    sync.add_argument("--budget", type=float, default=None, metavar="SECONDS")
+    sync.add_argument("--max-per-tick", type=int, default=None, metavar="N")
     distill = sub.add_parser("distill")
     distill.add_argument("--repo", default=".")
     distill.add_argument("--dry-run", action="store_true")
@@ -3667,8 +3707,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         store.materialize()
         return 0
     if args.command == "sync":
-        store.sync_notion(force=args.force, today_only=args.today)
-        return 0
+        budget = args.budget
+        if budget is None:
+            budget = float(os.environ.get("OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS") or 180)
+        maximum = args.max_per_tick
+        if maximum is None:
+            maximum = int(os.environ.get("OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK") or 20)
+        report = store.sync_notion(
+            force=args.force, today_only=args.today,
+            budget_seconds=budget, max_per_tick=maximum,
+        )
+        # Said out loud, because this used to print nothing at all: seven days
+        # of the read surface were missing and the repair command was silent
+        # about refusing to repair them.
+        if not report.get("configured"):
+            print("journal sync: Notion is not configured for this repository")
+        elif not report.get("attempted"):
+            print("journal sync: already up to date")
+        else:
+            print("journal sync: %d summar%s updated" % (
+                report.get("synced", 0), "y" if report.get("synced", 0) == 1 else "ies"))
+            if report.get("failed"):
+                print("journal sync: %d failed (%s); next: oms journal sync" % (
+                    report["failed"], report.get("error") or "unknown error"))
+            if report.get("deferred"):
+                print("journal sync: %d deferred by the remote; next: oms journal sync"
+                      % report["deferred"])
+            if report.get("remaining"):
+                print("journal sync: %d beyond this tick's cap; next: oms journal sync"
+                      % report["remaining"])
+        return 1 if report.get("failed") else 0
     if args.command == "distill":
         lessons, dropped, skipped, deduped = store.distill(dry_run=args.dry_run)
         if args.dry_run:

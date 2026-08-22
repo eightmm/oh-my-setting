@@ -619,6 +619,73 @@ class NotionJournalTest(unittest.TestCase):
                 text = rich_text["text"]["content"]
                 self.assertLessEqual(len(text), notion.NOTION_TEXT_CHUNK)
 
+    def test_a_backlog_clears_under_the_caller_s_own_cap(self):
+        """The per-tick cap belongs to the caller, not to one shared default.
+
+        A session hook wants one or two summaries and a two-second budget; the
+        operator's repair has to finish. Sharing the hook's bound is what made
+        a backlog permanent: every tick spent its cap, recorded the rest as
+        failures, and the failed count only grew.
+        """
+        work_journal = load_work_journal()
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-notion-backlog."))
+        self.addCleanup(lambda: shutil.rmtree(tmp))
+        repo = tmp / "repo"
+        repo.mkdir()
+        store = work_journal.JournalStore(
+            repo,
+            timezone_name="UTC",
+            clock=lambda: dt.datetime(2026, 7, 20, 12, tzinfo=dt.timezone.utc),
+            project_id="proj_backlog",
+            project_name="demo",
+        )
+        for day in range(1, 8):
+            store.record_event(
+                {
+                    "event_type": "validation",
+                    "occurred_at": "2026-07-%02dT02:00:00Z" % day,
+                    "source": {"type": "test", "id": "day-%d" % day},
+                    "outcome": {"summary": "day-%d" % day, "status": "success"},
+                    "verification_status": "passed",
+                    "evidence": [{"type": "test", "ref": "day-%d" % day}],
+                }
+            )
+        store.materialize()
+        calls = []
+
+        class SuccessExporter:
+            def upsert(self, *args, **kwargs):
+                calls.append(args[0])
+                return {"status": "synced", "page_id": "page-%d" % len(calls)}
+
+        access_name = "OMS_WORK_JOURNAL_NOTION_" + "TOKEN"
+        configured = {
+            access_name: "test-" + "credential",
+            "OMS_WORK_JOURNAL_NOTION_DATABASE_ID": "database",
+        }
+        sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+        self.addCleanup(lambda: sys.path.remove(str(ROOT / "scripts" / "lib")))
+        with mock.patch.dict(os.environ, configured, clear=False), mock.patch.dict(
+            sys.modules, {"notion_journal": notion}
+        ), mock.patch.object(
+            notion.NotionJournalExporter,
+            "from_config",
+            return_value=SuccessExporter(),
+        ):
+            hook = store.sync_notion(max_per_tick=2, budget_seconds=2)
+            self.assertEqual(2, hook["synced"])
+            self.assertGreater(hook["remaining"], 0)
+            operator = store.sync_notion(max_per_tick=20, budget_seconds=180)
+            self.assertEqual(0, operator["remaining"])
+            self.assertEqual(0, operator["failed"])
+            # A second pass has nothing left to do: content hashes already
+            # matched, so no summary is sent twice.
+            again = store.sync_notion(max_per_tick=20, budget_seconds=180)
+            self.assertEqual(0, again["attempted"])
+        # Every finalized summary reached the remote exactly once.
+        self.assertEqual(len(calls), len(set(calls)))
+        self.assertGreaterEqual(len(calls), 7)
+
     def test_default_sync_only_exports_closed_periods_and_force_exports_live(self):
         work_journal = load_work_journal()
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-notion-policy."))
