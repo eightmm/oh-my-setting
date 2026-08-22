@@ -262,8 +262,11 @@ agent_memory_sensitive_report() {  # FILE
   local prompt_lines context_lines prompt_count context_count
 
   [ -s "$file" ] || return 0
-  begin="$(grep -n -m1 -F -- '--- begin harness context' "$file" 2>/dev/null | cut -d: -f1)"
-  end="$(grep -n -m1 -F -- '--- end harness context' "$file" 2>/dev/null | cut -d: -f1)"
+  # `|| true`: a prompt with no harness context has no marker, grep exits 1,
+  # and under pipefail the assignment would end the command substitution this
+  # report runs inside -- silently dropping the whole diagnostic.
+  begin="$(grep -n -m1 -F -- '--- begin harness context' "$file" 2>/dev/null | cut -d: -f1 || true)"
+  end="$(grep -n -m1 -F -- '--- end harness context' "$file" 2>/dev/null | cut -d: -f1 || true)"
   case "$begin" in *[!0-9]*|"") begin=0 ;; esac
   case "$end" in *[!0-9]*|"") end=0 ;; esac
   for tier in secret machine; do
