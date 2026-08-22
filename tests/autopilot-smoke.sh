@@ -876,6 +876,25 @@ test_autopilot_orchestration() {
   ! grep -Fq 'src,tests' "$frozen_repo/frozen-retry.out" ||
     fail "the refusal must name fields, never their values: $(tail -3 "$frozen_repo/frozen-retry.out")"
 
+  # A reviewed proposal can go stale -- HEAD moves under it, or the parent
+  # wants a different plan -- and the obvious next step is to propose again.
+  # That edge is deliberately closed so a regenerated plan cannot slip under a
+  # review that already happened, which leaves exactly one way forward; the
+  # refusal has to name it.
+  local reviewed_repo="$TMP/stale-reviewed-proposal"
+  make_repo "$reviewed_repo"
+  mkdir -p "$reviewed_repo/calls"
+  rc=0
+  run_autopilot "$reviewed_repo" propose --planner claude --allowed 'src,tests' \
+    --base main > "$reviewed_repo/stale-first.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "the fixture needs a receipt at proposal-review, got $rc: $(tail -3 "$reviewed_repo/stale-first.out")"
+  rc=0
+  run_autopilot "$reviewed_repo" propose --planner claude --allowed 'src,tests' \
+    --base main > "$reviewed_repo/stale-retry.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "re-proposing over a reviewed proposal should be refused, got $rc"
+  grep -Fq 'autopilot abandon' "$reviewed_repo/stale-retry.out" ||
+    fail "the refusal must name the way out: $(tail -3 "$reviewed_repo/stale-retry.out")"
+
   # The apply side has the same question as propose: an existing plan is only
   # this contract's plan when the contract says so. plan-from-spec never
   # replaces a plan or its acceptance command, so a spent plan from a

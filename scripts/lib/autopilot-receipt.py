@@ -1656,9 +1656,23 @@ def main() -> int:
                     " TEXT` and bind a new contract" % changed
                 )
             if not valid_transition(old_row["stage"], row["stage"]):
+                # One of these pairs is reachable by an ordinary next step: a
+                # reviewed proposal goes stale (HEAD moved under it, or the
+                # parent wants a different plan) and the obvious move is to
+                # propose again. The proposal binding may only be cleared from
+                # an active drive or a parked receipt -- deliberately, so a
+                # regenerated plan cannot slip under a review that already
+                # happened -- which leaves exactly one way forward, and the
+                # message never said what it was.
+                hint = ""
+                if (old_row["stage"], row["stage"]) == ("proposal-review", "proposing"):
+                    hint = (
+                        "; a reviewed proposal is replaced by retiring the receipt --"
+                        " `oms autopilot abandon --reason TEXT`, then propose again"
+                    )
                 raise ReceiptError(
-                    "outer receipt stage transition is invalid (%s -> %s)"
-                    % (old_row["stage"], row["stage"])
+                    "outer receipt stage transition is invalid (%s -> %s)%s"
+                    % (old_row["stage"], row["stage"], hint)
                 )
             if not valid_branch_transition(old_row, row):
                 raise ReceiptError("outer receipt branch transition is invalid")
