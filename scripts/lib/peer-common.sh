@@ -803,6 +803,34 @@ ma_artifact_index_shell_path() {
   printf '%s\n' "$value"
 }
 
+ma_artifact_index_python_path() {
+  local value="$1"
+  local platform
+
+  [ -n "$value" ] || { printf '\n'; return 0; }
+  value="${value//$'\r'/}"
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  case "$platform" in
+    *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
+      command -v cygpath >/dev/null 2>&1 || {
+        echo "error: artifact index: cygpath is required for a Windows Python path" >&2
+        return 1
+      }
+      case "$value" in
+        /*|[A-Za-z]:[\\/]*|\\\\*)
+          value="$(cygpath -m "$value")" || return 1
+          value="${value//$'\r'/}"
+          ;;
+      esac
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+ma_artifact_index_native_python() {
+  MSYS2_ARG_CONV_EXCL='*' python3 "$@"
+}
+
 ma_append_artifact_index() {
   local repo="$1"
   local kind="$2"
@@ -816,6 +844,9 @@ ma_append_artifact_index() {
   local repo_spelling="$repo"
   local index
   local store_helper
+  local native_repo native_repo_input native_index native_index_input
+  local native_store_helper native_telemetry_helper
+  local native_artifact native_patch_file native_source_artifact
   local prompt_hash=""
   local task_goal=""
 
@@ -836,8 +867,23 @@ ma_append_artifact_index() {
     echo "error: artifact index append needs python3; row not recorded" >&2
     return 1
   }
-  index="$(python3 "$store_helper" canonical --repo "$repo_spelling" --index "$index")" || return 1
-  index="$(ma_artifact_index_shell_path "$index")" || return 1
+  native_repo="$(ma_artifact_index_python_path "$repo")" || return 1
+  native_repo_input="$(ma_artifact_index_python_path "$repo_spelling")" || return 1
+  native_index_input="$(ma_artifact_index_python_path "$index")" || return 1
+  native_store_helper="$(ma_artifact_index_python_path "$store_helper")" || return 1
+  native_telemetry_helper="$(ma_artifact_index_python_path "$telemetry_helper")" || return 1
+  native_artifact="$(ma_artifact_index_python_path "$artifact")" || return 1
+  native_patch_file="$(ma_artifact_index_python_path "$patch_file")" || return 1
+  native_source_artifact="$(ma_artifact_index_python_path "$source_artifact")" || return 1
+  if ! native_index="$(MSYS2_ARG_CONV_EXCL='*' python3 \
+      "$native_store_helper" canonical --repo "$native_repo_input" \
+      --index "$native_index_input" 2>/dev/null)"; then
+    native_index="$(MSYS2_ARG_CONV_EXCL='*' python3 \
+      "$native_store_helper" canonical --repo "$native_repo" \
+      --index "$native_index_input")" || return 1
+  fi
+  native_index="${native_index//$'\r'/}"
+  index="$(ma_artifact_index_shell_path "$native_index")" || return 1
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
@@ -864,7 +910,11 @@ ma_append_artifact_index() {
   OMS_INDEX_REASONING_EFFORT="${OMS_REASONING_RESOLVED:-}" \
   OMS_INDEX_SELECTED_REASONING_EFFORT="${OMS_REASONING_SELECTED:-}" \
   OMS_INDEX_FALLBACK_REASONING_EFFORT="${OMS_REASONING_FALLBACK:-}" \
-  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$store_helper" "$telemetry_helper" <<'EOF'
+  oms_with_file_lock "$index" ma_artifact_index_native_python \
+    - "$native_repo" "$native_index" "$kind" "$provider" \
+    "$exit_code" "$native_artifact" "$native_patch_file" "$prompt_hash" \
+    "$verify_exit" "$task_goal" "$native_source_artifact" \
+    "$native_store_helper" "$native_telemetry_helper" <<'EOF'
 import hashlib, json, os, re, runpy, sys, time, uuid
 repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, store_helper, telemetry_helper = sys.argv[1:]
 event_id = "evt_" + uuid.uuid4().hex
@@ -893,7 +943,7 @@ def path_fields(label, raw):
         internal = False
     digest = file_hash(path)
     if internal:
-        relative = os.path.relpath(real, real_repo)
+        relative = os.path.relpath(real, real_repo).replace(os.sep, "/")
         return ({label: relative, label + "_sha256": digest}
                 if digest else {label: relative})
     ext = {"name": os.path.basename(path), "owned": False}

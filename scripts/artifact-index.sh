@@ -130,6 +130,49 @@ artifact_index_shell_path() {
   printf '%s\n' "$value"
 }
 
+artifact_index_python_path() {
+  local value="$1"
+  local platform
+
+  [ -n "$value" ] || { printf '\n'; return 0; }
+  value="${value//$'\r'/}"
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  case "$platform" in
+    *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
+      command -v cygpath >/dev/null 2>&1 ||
+        fail "cygpath is required for a Windows artifact-index Python path"
+      case "$value" in
+        /*|[A-Za-z]:[\\/]*|\\\\*)
+          value="$(cygpath -m "$value")" ||
+            fail "cannot normalize artifact-index path for Python"
+          value="${value//$'\r'/}"
+          ;;
+      esac
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+artifact_index_logical_repo_root() {
+  local value="$1"
+  local prefix
+
+  value="$(cd "$value" && pwd)" || return 1
+  prefix="$(git -C "$value" rev-parse --show-prefix 2>/dev/null || true)"
+  prefix="${prefix//$'\r'/}"
+  # `git rev-parse --show-toplevel` physicalizes an ancestry alias. Walk the
+  # logical caller spelling back by the same repo-relative depth instead, so
+  # canonicalization can safely rebase an explicit aliased index path.
+  while [ -n "$prefix" ]; do
+    value="$(dirname "$value")"
+    case "$prefix" in
+      */*) prefix="${prefix#*/}" ;;
+      *) prefix="" ;;
+    esac
+  done
+  printf '%s\n' "$value"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo)
@@ -245,15 +288,26 @@ esac
 [ "$LIMIT" -gt 0 ] || fail "N must be a positive integer"
 
 # Anchor to the git worktree root so the index does not fork per subdirectory.
+REPO_INPUT="$(artifact_index_logical_repo_root "$REPO")" ||
+  fail "cannot resolve logical repo path"
 REPO="$(oms_repo_root "$REPO")"
 [ -d "$REPO" ] || fail "repo does not exist: $REPO"
-REPO_SPELLING="$REPO"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve repo path"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-INDEX_FILE="$(python3 "$STORE_HELPER" canonical --repo "$REPO_SPELLING" --index "$INDEX_FILE")" ||
-  fail "artifact index path is unsafe"
-INDEX_FILE="$(artifact_index_shell_path "$INDEX_FILE")"
+PY_REPO="$(artifact_index_python_path "$REPO")"
+PY_REPO_INPUT="$(artifact_index_python_path "$REPO_INPUT")"
+PY_INDEX_INPUT="$(artifact_index_python_path "$INDEX_FILE")"
+PY_STORE_HELPER="$(artifact_index_python_path "$STORE_HELPER")"
+PY_TELEMETRY_HELPER="$(artifact_index_python_path "$ROOT_LIB/artifact-telemetry.py")"
+if ! PY_INDEX_FILE="$(MSYS2_ARG_CONV_EXCL='*' python3 "$PY_STORE_HELPER" \
+    canonical --repo "$PY_REPO_INPUT" --index "$PY_INDEX_INPUT" 2>/dev/null)"; then
+  PY_INDEX_FILE="$(MSYS2_ARG_CONV_EXCL='*' python3 "$PY_STORE_HELPER" \
+    canonical --repo "$PY_REPO" --index "$PY_INDEX_INPUT")" ||
+    fail "artifact index path is unsafe"
+fi
+PY_INDEX_FILE="${PY_INDEX_FILE//$'\r'/}"
+INDEX_FILE="$(artifact_index_shell_path "$PY_INDEX_FILE")"
 
 # Telemetry has two exits — empty index and populated — so the argument list is
 # built once; a flag added to one call site only would silently not apply to
@@ -263,20 +317,22 @@ artifact_index_telemetry() {
   # Telemetry is observational, but it is still a normal index view. Refuse a
   # partial cohort instead of letting its lenient historical parser skip a
   # corrupt row and turn incomplete evidence into a plausible-looking rate.
-  python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'PY'
+  MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+    "$PY_STORE_HELPER" <<'PY'
 import runpy, sys
 repo, index, store_helper = sys.argv[1:]
 runpy.run_path(store_helper)["read_index"](repo, index, missing_ok=True)
 PY
-  set -- --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
+  set -- --repo "$PY_REPO" --index "$PY_INDEX_FILE" --limit "$LIMIT"
   [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
   [ "$REVIEW_UPTAKE" -eq 0 ] || set -- "$@" --review-uptake
-  python3 "$ROOT_LIB/artifact-telemetry.py" "$@"
+  MSYS2_ARG_CONV_EXCL='*' python3 "$PY_TELEMETRY_HELPER" "$@"
 }
 
 if [ "$ACTION" = "salvage" ]; then
   artifact_index_salvage_locked() {
-    python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" "$APPLY" <<'PY'
+    MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+      "$PY_STORE_HELPER" "$APPLY" <<'PY'
 import runpy, sys
 
 repo, index, store_helper, apply_raw = sys.argv[1:]
@@ -358,7 +414,8 @@ if [ "$ACTION" = "resolve" ]; then
     # overwrite the scalar and silently resolve only the last one.
     OMS_ARTIFACT_REASON="$REASON" \
     OMS_ARTIFACT_PROVIDER="${OMS_AGENT:-unknown}" \
-      python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" \
+      MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+        "$PY_STORE_HELPER" \
         "${TARGET_EVENTS[@]}" <<'PY'
 import datetime, json, os, runpy, sys, uuid
 
@@ -452,7 +509,8 @@ PY
 fi
 
 if [ "$ACTION" = "validate" ]; then
-  python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'PY'
+  MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+    "$PY_STORE_HELPER" <<'PY'
 import os, re, runpy, sys
 repo, index, store_helper = sys.argv[1:]
 store = runpy.run_path(store_helper)
@@ -570,7 +628,8 @@ fi
 
 if [ "$ACTION" = "migrate" ]; then
   artifact_index_migrate_locked() {
-    python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'PY'
+    MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+      "$PY_STORE_HELPER" <<'PY'
 import hashlib, json, os, re, runpy, stat, sys
 repo, index, store_helper = sys.argv[1:]
 store = runpy.run_path(store_helper)
@@ -608,12 +667,12 @@ def migrate_path(row, key):
     try: internal = os.path.commonpath([real_repo, real]) == real_repo
     except ValueError: internal = False
     if internal and os.path.exists(path):
-        rel = os.path.relpath(real, real_repo)
+        rel = os.path.relpath(real, real_repo).replace(os.sep, "/")
         if row[key] != rel: row[key] = rel; return True
         return False
     matches = all_files.get(os.path.basename(value), [])
     if len(matches) == 1:
-        row[key] = os.path.relpath(matches[0], repo)
+        row[key] = os.path.relpath(matches[0], repo).replace(os.sep, "/")
         return True
     ext = {"name": os.path.basename(value), "owned": False, "legacy_unresolved": True}
     h = digest(path)
@@ -660,7 +719,7 @@ fi
 
 if [ "$ACTION" = "prune" ]; then
   artifact_index_prune_locked() {
-  local tmp
+  local tmp py_tmp
 
   # Stale sweep: drop rows whose referenced artifact or patch is gone. This is
   # what `validate` reports and what nothing could repair — the retention prune
@@ -668,7 +727,8 @@ if [ "$ACTION" = "prune" ]; then
   # discards good ones, and the global rules forbid editing .oms by hand.
   # Deliberately independent of --keep: a missing file is not an age question.
   if [ "$PRUNE_STALE" -eq 1 ]; then
-    OMS_STALE_DRY="$DRY_RUN" python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'EOF' || fail "stale sweep failed"
+    OMS_STALE_DRY="$DRY_RUN" MSYS2_ARG_CONV_EXCL='*' \
+      python3 - "$PY_REPO" "$PY_INDEX_FILE" "$PY_STORE_HELPER" <<'EOF' || fail "stale sweep failed"
 import json, os, runpy, sys
 
 repo, index, store_helper = sys.argv[1:4]
@@ -757,7 +817,9 @@ EOF
   if [ "$PRUNE_FILES" -eq 1 ]; then
     tmp="$(mktemp)" || fail "mktemp failed"
   fi
-  python3 - "$REPO" "$INDEX_FILE" "$tmp" "$STORE_HELPER" "$LIMIT" \
+  py_tmp="$(artifact_index_python_path "$tmp")"
+  MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+    "$py_tmp" "$PY_STORE_HELPER" "$LIMIT" \
     "$DRY_RUN" <<'EOF' || fail "artifact retention failed"
 import runpy, sys
 
@@ -796,8 +858,9 @@ if kept_path:
 EOF
 
   if [ "$PRUNE_FILES" -eq 1 ]; then
-    python3 - "$REPO" "$INDEX_FILE" "$tmp" "$DRY_RUN" \
-      "${OMS_ARTIFACT_ORPHAN_GRACE:-86400}" "$STORE_HELPER" <<'EOF'
+    MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+      "$py_tmp" "$DRY_RUN" "${OMS_ARTIFACT_ORPHAN_GRACE:-86400}" \
+      "$PY_STORE_HELPER" <<'EOF'
 import runpy, sys
 
 repo, index_file, kept_index, dry, grace_raw, store_helper = sys.argv[1:]
@@ -837,8 +900,8 @@ fi
 # the index lock, because only they append.
 artifact_index_view() {
   OMS_ARTIFACT_PROVIDER="${OMS_AGENT:-unknown}" \
-    python3 - "$REPO" "$INDEX_FILE" "$ACTION" "$LIMIT" "$AS_JSON" \
-      "$STORE_HELPER" "$DRY_RUN" <<'EOF'
+    MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
+      "$ACTION" "$LIMIT" "$AS_JSON" "$PY_STORE_HELPER" "$DRY_RUN" <<'EOF'
 import datetime, json, os, re, runpy, sys, uuid
 
 repo, path, action, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])

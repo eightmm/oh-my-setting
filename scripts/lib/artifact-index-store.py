@@ -655,7 +655,7 @@ def delete_orphans(
     DURABLE["components_unchanged"](root_snapshot, "artifact root")
     changed = []
     for path, before in sorted(candidates):
-        relative = os.path.relpath(path, root)
+        relative = os.path.relpath(path, root).replace(os.sep, "/")
         if not dry_run:
             DURABLE["components_unchanged"](root_snapshot, "artifact root")
             try:

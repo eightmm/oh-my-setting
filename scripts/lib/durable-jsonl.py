@@ -193,16 +193,21 @@ def _snapshot_matches(before, after, mixed_sources=False):
     # CPython's native-Windows fstat reports metadata change time in st_ctime,
     # while pathname stat preserves the legacy birth-time meaning there.  A
     # direct ctime comparison therefore rejects the same NTFS inode.  Python
-    # 3.12+ exposes birth time explicitly on both results; older supported
-    # Windows Pythons retain the strong file-id/size/mtime/link fences below.
+    # 3.12+ exposes birth time explicitly on both results. Older supported
+    # Windows Pythons use birth time for ctime on both sources, so keep that
+    # fence; a one-sided birth-time field is an ambiguous snapshot and fails.
     if os.name == "nt" and mixed_sources:
         birth_before = getattr(before, "st_birthtime_ns", None)
         birth_after = getattr(after, "st_birthtime_ns", None)
-        time_identity_matches = (
-            birth_before == birth_after
-            if birth_before is not None and birth_after is not None
-            else True
-        )
+        if birth_before is not None and birth_after is not None:
+            time_identity_matches = birth_before == birth_after
+        elif birth_before is None and birth_after is None:
+            time_identity_matches = (
+                getattr(before, "st_ctime_ns", None) ==
+                getattr(after, "st_ctime_ns", None)
+            )
+        else:
+            time_identity_matches = False
     else:
         time_identity_matches = (
             getattr(before, "st_ctime_ns", None) ==

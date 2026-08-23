@@ -11,6 +11,13 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+case "${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)" in
+  *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
+    python3 -c 'import os; assert os.name == "nt", os.name' ||
+      fail "Windows durable coverage requires native Windows Python"
+    ;;
+esac
+
 export HOME="$TMP/home"
 export OMS_LOCK_DIR="$TMP/locks"
 mkdir -p "$HOME"
@@ -61,6 +68,19 @@ try:
     changed_birth.st_birthtime_ns += 1
     assert not durable["_snapshot_matches"](
         opened_stat, changed_birth, mixed_sources=True)
+    legacy_opened = SimpleNamespace(
+        st_dev=7, st_ino=11, st_size=13, st_mtime_ns=17,
+        st_ctime_ns=31, st_nlink=1)
+    legacy_named = SimpleNamespace(**vars(legacy_opened))
+    assert durable["_snapshot_matches"](
+        legacy_opened, legacy_named, mixed_sources=True)
+    legacy_named.st_ctime_ns += 1
+    assert not durable["_snapshot_matches"](
+        legacy_opened, legacy_named, mixed_sources=True)
+    one_sided_birth = SimpleNamespace(**vars(legacy_opened))
+    one_sided_birth.st_birthtime_ns = 23
+    assert not durable["_snapshot_matches"](
+        one_sided_birth, legacy_opened, mixed_sources=True)
 finally:
     durable["os"].name = saved_os_name
 
@@ -326,8 +346,68 @@ grep -Fxq 'outside survives' "$hard_outside" ||
 # caller's working directory differs.
 shell_repo="$TMP/shell-repo"
 mkdir -p "$shell_repo/sub"
-native_index="$(python3 "$ROOT/scripts/lib/artifact-index-store.py" canonical \
-  --repo "$shell_repo" --index "$shell_repo/.oms/artifacts/index.jsonl")"
+test_native_path() {
+  local value="$1"
+  case "${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)" in
+    *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
+      value="$(cygpath -m "$value")" || return $?
+      value="${value//$'\r'/}"
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+native_repo="$(test_native_path "$shell_repo")"
+native_store="$(test_native_path "$ROOT/scripts/lib/artifact-index-store.py")"
+native_index_input="$(test_native_path \
+  "$shell_repo/.oms/artifacts/index.jsonl")"
+native_index="$(MSYS2_ARG_CONV_EXCL='*' python3 "$native_store" canonical \
+  --repo "$native_repo" --index "$native_index_input")"
+native_index="${native_index//$'\r'/}"
+
+# The public shell front door owns the Git-Bash/native-Python conversion. An
+# explicit missing index is a normal empty view, not a false containment error.
+missing_rc=0
+missing_out="$(MSYS2_ARG_CONV_EXCL="$shell_repo/.oms" \
+  bash "$ROOT/scripts/artifact-index.sh" --repo "$shell_repo" \
+    --file "$shell_repo/.oms/artifacts/index.jsonl" list 2>&1)" || missing_rc=$?
+[ "$missing_rc" = 2 ] ||
+  fail "native explicit missing index returned $missing_rc instead of 2"
+printf '%s\n' "$missing_out" | grep -Fq 'no artifact index at' ||
+  fail "native explicit index failed before the empty-index view: $missing_out"
+
+# The local gate fixes the converter contract even without Windows: CRLF is
+# stripped, relative artifact paths stay relative, and missing cygpath fails.
+# shellcheck source=scripts/lib/peer-common.sh
+. "$ROOT/scripts/lib/peer-common.sh"
+fake_cygpath_bin="$TMP/fake-cygpath-bin"
+fake_cygpath_log="$TMP/fake-cygpath.log"
+mkdir -p "$fake_cygpath_bin"
+cat > "$fake_cygpath_bin/cygpath" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = -m ] || exit 9
+printf '%s\n' "$*" >> "$OMS_TEST_CYGPATH_LOG"
+value="$2"
+case "$value" in /c/*) value="C:/${value#/c/}" ;; esac
+printf '%s\r\n' "$value"
+SH
+chmod +x "$fake_cygpath_bin/cygpath"
+converted="$(MSYSTEM=MINGW64 OMS_TEST_CYGPATH_LOG="$fake_cygpath_log" \
+  PATH="$fake_cygpath_bin:$PATH" \
+  ma_artifact_index_python_path /c/fixture/repo/.oms/artifacts/index.jsonl)"
+[ "$converted" = 'C:/fixture/repo/.oms/artifacts/index.jsonl' ] ||
+  fail "artifact Python path conversion kept CRLF or changed the path: $converted"
+relative="$(MSYSTEM=MINGW64 OMS_TEST_CYGPATH_LOG="$fake_cygpath_log" \
+  PATH="$fake_cygpath_bin:$PATH" ma_artifact_index_python_path answer.md)"
+[ "$relative" = answer.md ] || fail "relative artifact path was made absolute"
+[ "$(wc -l < "$fake_cygpath_log" | tr -d ' ')" -eq 1 ] ||
+  fail "relative artifact path unexpectedly invoked cygpath"
+missing_cygpath_rc=0
+(
+  MSYSTEM=MINGW64 PATH="$TMP/empty-path" \
+    ma_artifact_index_python_path /c/fixture/index.jsonl >/dev/null 2>&1
+) || missing_cygpath_rc=$?
+[ "$missing_cygpath_rc" -ne 0 ] ||
+  fail "Windows artifact path conversion ignored missing cygpath"
 root_lock="$(
   cd "$shell_repo"
   # shellcheck source=scripts/lib/peer-common.sh
@@ -344,26 +424,44 @@ sub_lock="$(
 )"
 [ "$root_lock" = "$sub_lock" ] ||
   fail "native canonical path produced CWD-dependent artifact locks"
+printf 'root artifact\n' > "$shell_repo/answer-root.md"
+printf 'sub artifact\n' > "$shell_repo/sub/answer-sub.md"
 
 (
   cd "$shell_repo"
+  export MSYS2_ARG_CONV_EXCL="$shell_repo/.oms"
   # shellcheck source=scripts/lib/peer-common.sh
   . "$ROOT/scripts/lib/peer-common.sh"
-  ma_append_artifact_index . call codex 0 "" "" "" "" ""
+  ma_append_artifact_index . call codex 0 "answer-root.md" "" "" "" ""
 ) & root_pid=$!
 (
   cd "$shell_repo/sub"
+  export MSYS2_ARG_CONV_EXCL="$shell_repo/.oms"
   # shellcheck source=scripts/lib/peer-common.sh
   . "$ROOT/scripts/lib/peer-common.sh"
-  ma_append_artifact_index .. call claude 0 "" "" "" "" ""
+  ma_append_artifact_index .. call claude 0 "answer-sub.md" "" "" "" ""
 ) & sub_pid=$!
 wait "$root_pid" || fail "root-CWD shell artifact append failed"
 wait "$sub_pid" || fail "sub-CWD shell artifact append failed"
 [ "$(wc -l < "$shell_repo/.oms/artifacts/index.jsonl" | tr -d ' ')" -eq 2 ] ||
   fail "different-CWD shell appends did not serialize into one ledger"
+if ! MSYS2_ARG_CONV_EXCL='*' python3 - "$native_index" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    rows = [json.loads(line) for line in source]
+assert sorted(row.get("artifact") for row in rows) == [
+    "answer-root.md", "sub/answer-sub.md"
+], rows
+assert all(len(row.get("artifact_sha256", "")) == 64 for row in rows), rows
+PY
+then
+  fail "relative artifact paths changed at the Git-Bash/Python boundary"
+fi
 (
   cd "$shell_repo/sub"
-  bash "$ROOT/scripts/artifact-index.sh" --repo .. validate >/dev/null
+  MSYS2_ARG_CONV_EXCL="$shell_repo/.oms" \
+    bash "$ROOT/scripts/artifact-index.sh" --repo .. validate >/dev/null
 ) || fail "sub-CWD artifact-index CLI path did not round-trip through native Python"
 
 # Directory junctions are reparse points and require no developer-mode

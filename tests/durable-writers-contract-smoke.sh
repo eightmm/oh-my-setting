@@ -996,8 +996,9 @@ printf 'alias artifact\n' > "$alias_repo/.oms/artifacts/body.md"
   [ "$(oms_file_lock_path_for_file "$alias_key")" = \
     "$(oms_file_lock_path_for_file "$physical_key")" ] ||
     fail "logical and physical callers must share one artifact lock"
-  ma_append_artifact_index "$alias_repo" call codex 0 \
-    "$alias_repo/.oms/artifacts/body.md" "" "" "" ""
+  OMS_ARTIFACT_INDEX="$alias_index" \
+    ma_append_artifact_index "$alias_repo" call codex 0 \
+      "$alias_repo/.oms/artifacts/body.md" "" "" "" ""
   ma_append_artifact_index "$alias_repo_real" call claude 0 "" "" "" "" ""
 ) || fail "artifact index must accept both benign repo spellings"
 [ "$(wc -l < "$physical_index" | tr -d ' ')" -eq 2 ] ||
@@ -1010,8 +1011,15 @@ assert rows[0]["artifact"] == ".oms/artifacts/body.md", rows
 assert ".." not in rows[0]["artifact"].split("/"), rows
 PY
   fail "alias append stored a logical path outside the physical repo"
-bash "$ROOT/scripts/artifact-index.sh" --repo "$alias_repo" validate >/dev/null ||
+bash "$ROOT/scripts/artifact-index.sh" --repo "$alias_repo" \
+  --file "$alias_index" validate >/dev/null ||
   fail "artifact index written through an ancestry alias must validate"
+mkdir -p "$alias_repo/sub"
+(
+  cd "$alias_repo/sub"
+  bash "$ROOT/scripts/artifact-index.sh" --repo . \
+    --file "$alias_index" validate >/dev/null
+) || fail "subdirectory caller lost the logical repo root for a custom index"
 
 # Migration follows the same physical relpath rule. A legacy absolute path
 # supplied through the benign alias becomes one repo-relative spelling.
