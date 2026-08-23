@@ -174,6 +174,27 @@ assert rows[0]["kind"] == "call", rows
 PY
   fail "one artifact index append must persist exactly one valid row"
 
+# --- artifact index: an ancestry symlink is the host's layout, not an escape
+real_ancestry="$TMP/real-ancestry"
+mkdir -p "$real_ancestry"
+ln -s "$real_ancestry" "$TMP/linked-ancestry"
+ancestry_repo="$TMP/linked-ancestry/repo"
+mk_repo "$ancestry_repo"
+(
+  # shellcheck source=scripts/lib/peer-common.sh
+  . "$ROOT/scripts/lib/peer-common.sh"
+  ma_append_artifact_index "$ancestry_repo" call codex 0 "" "" "" "" ""
+) || fail "artifact index append must accept a repo path behind an ancestry symlink"
+python3 - "$real_ancestry/repo/.oms/artifacts/index.jsonl" <<'PY' ||
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    rows = [json.loads(line) for line in source]
+assert len(rows) == 1, rows
+assert rows[0]["kind"] == "call", rows
+assert rows[0]["provider"] == "codex", rows
+PY
+  fail "the ancestry-symlink append must persist exactly one valid row in the physical ledger"
+
 # --- draft-pr intent: verifier text is durable and therefore strict --------
 repo="$TMP/draft-pr"; mk_repo "$repo"
 git -C "$repo" branch -M main

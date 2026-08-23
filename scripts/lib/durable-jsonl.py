@@ -30,9 +30,12 @@ def checked_parent(path, label=None):
     parent = os.path.dirname(target)
     if not parent or not os.path.isdir(parent) or os.path.islink(parent):
         fail("%s parent must be a real directory" % name)
-    if os.path.realpath(parent) != parent:
-        fail("%s parent must not cross a symlink boundary" % name)
-    return target, parent
+    # An ancestry symlink (a linked /tmp, a linked home) is the host's layout,
+    # not an escape: anchor on the physical directory instead of refusing it.
+    # The leaf guarantees stay put — the named parent may not itself be a
+    # link, and the leaf is opened O_NOFOLLOW against an anchored handle.
+    parent = os.path.realpath(parent)
+    return os.path.join(parent, os.path.basename(target)), parent
 
 
 def check_existing(path, missing_ok, label="progress.jsonl"):
