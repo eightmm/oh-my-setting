@@ -1003,8 +1003,6 @@ if task_goal:
     row["task_goal"] = task_goal
 durable = runpy.run_path(durable_helper)
 row_data = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-index_data = durable["append"](
-    index, row_data, label="artifact index", capture=True)
 
 # Amortized bounded retention. Explicit artifact-index prune remains the path
 # for stale-reference repair and orphan-file deletion.
@@ -1013,6 +1011,30 @@ try:
     high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
 except ValueError:
     keep, high = 1000, 1200
+
+# Compaction must also run BEFORE the append, not only after it: the durable
+# writer refuses a row once the ledger would cross its byte ceiling, that
+# refusal fires before the post-append retention below could ever shrink the
+# file, and the `|| true` call sites would then drop every later row
+# silently. The trigger reuses the writer's own refusal predicate so the two
+# cannot drift. A ledger whose kept rows still exceed the ceiling (giant
+# rows) stays refused — that is the writer's backstop, not a compaction bug.
+try:
+    ledger_bytes = os.path.getsize(index)
+except OSError:
+    ledger_bytes = 0
+if (keep > 0 and high >= keep and
+        ledger_bytes > durable["MAX_FILE_BYTES"] - len(row_data)):
+    with open(index, "rb") as oversized:
+        lines = oversized.read().splitlines(keepends=True)
+    lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
+    durable["write"](
+        index, b"".join(lines[-keep:]), label="artifact index",
+        max_bytes=durable["MAX_FILE_BYTES"])
+
+index_data = durable["append"](
+    index, row_data, label="artifact index", capture=True)
+
 if keep > 0 and high >= keep:
     lines = index_data.splitlines(keepends=True)
     if len(lines) > high:

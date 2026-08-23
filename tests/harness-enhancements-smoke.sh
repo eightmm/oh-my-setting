@@ -373,6 +373,40 @@ PY
     fail "source-only artifact references should count as indexed"
 }
 
+test_large_artifact_index_compacts_before_append() {
+  # A ledger already past the durable byte ceiling must compact before the
+  # append, not only after it: the durable writer refuses the row first
+  # otherwise, retention never runs, and the || true call sites drop every
+  # later row silently.
+  local repo="$TMP/oversized-repo"
+  local index="$repo/.oms/artifacts/index.jsonl"
+  mkdir -p "$repo/.oms/artifacts"
+  git -C "$repo" init -q
+  python3 - "$index" <<'PY'
+import json, sys
+row = {"schema": 1, "kind": "call", "provider": "codex", "exit": 0,
+       "filler": "x" * 65536}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    for i in range(270):
+        row["event_id"] = "evt_bulk_%d" % i
+        row["operation_id"] = "op_bulk_%d" % i
+        handle.write(json.dumps(row) + "\n")
+PY
+  [ "$(wc -c < "$index")" -gt 16777216 ] ||
+    fail "fixture must start beyond the durable byte ceiling"
+  (
+    # shellcheck source=scripts/lib/peer-common.sh
+    . "$ROOT/scripts/lib/peer-common.sh"
+    export OMS_ARTIFACT_INDEX_KEEP=5 OMS_ARTIFACT_INDEX_HIGH_WATER=5
+    ma_append_artifact_index "$repo" call codex 0 "" "" "" "" ""
+  ) || fail "an over-ceiling ledger must compact before the append, not refuse"
+  [ "$(wc -l < "$index" | tr -d ' ')" -le 6 ] ||
+    fail "pre-append compaction must bound the ledger"
+  if tail -n 1 "$index" | grep -Fq 'evt_bulk'; then
+    fail "the appended row must land at the tail after compaction"
+  fi
+}
+
 test_smoke_runner_tail_and_signal_cleanup() {
   local suite="$TMP/overlap-smoke.sh"
   local out="$TMP/overlap.out"
@@ -738,6 +772,7 @@ test_checkout_runtime_is_current
 test_smoke_shards_partition_every_definition
 test_artifact_resolution_and_dashboard_statuses
 test_artifact_retention_corruption_and_source_tracking
+test_large_artifact_index_compacts_before_append
 test_smoke_runner_tail_and_signal_cleanup
 test_smoke_runner_reports_bounded_opt_in_timings
 test_gate_fingerprints_full_oms_state
