@@ -2641,6 +2641,61 @@ PY
     fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
 }
 
+test_peer_review_blind_strips_context_and_types_the_mode() {
+  local project="$TMP/review-blind"
+  local artifact_dir="$project/artifacts"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+
+  # Blindness is a contract: shared-context attachments and debate refuse.
+  if HOME="$home_dir" PATH="/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+      --repo "$project" --artifact-dir "$artifact_dir" --blind --memory \
+      --dry-run --prompt "blind contract" >"$project/refuse-out" 2>&1; then
+    fail "--blind --memory must refuse: $(cat "$project/refuse-out")"
+  fi
+  grep -Fq 'excludes shared memory' "$project/refuse-out" ||
+    fail "the blind refusal must name the excluded attachment: $(cat "$project/refuse-out")"
+  if HOME="$home_dir" PATH="/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+      --repo "$project" --artifact-dir "$artifact_dir" --blind --debate 1 \
+      --dry-run --prompt "blind contract" >/dev/null 2>&1; then
+    fail "--blind --debate must refuse: seats must not exchange findings"
+  fi
+
+  # The blind prompt says it is blind; the informed prompt does not.
+  HOME="$home_dir" PATH="/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --blind --dry-run \
+    --providers claude --prompt "blind prompt probe" >/dev/null 2>&1 ||
+    fail "blind dry-run should succeed"
+  grep -rFq 'This is a BLIND review' "$artifact_dir" ||
+    fail "the blind prompt must carry the blind contract line"
+
+  # The typed outcome row records which mode judged the diff.
+  write_fake_review_gate_provider "$bin_dir" claude pass
+  write_fake_review_gate_provider "$bin_dir" antigravity pass
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$artifact_dir" \
+    --providers claude,antigravity \
+    --no-diff --blind \
+    --gate \
+    --prompt "Blind typed outcome" >"$project/out" 2>&1 || rc=$?
+  [ "$rc" = "0" ] || fail "blind pass gate should exit 0, got $rc: $(cat "$project/out")"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' ||
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+rows = [r for r in rows if r.get("kind") == "review-outcome"]
+assert rows, "no review-outcome row"
+review = rows[-1].get("review")
+assert isinstance(review, dict), rows[-1]
+assert review.get("mode") == "blind", review
+PY
+    fail "the blind verdict row must be marked mode=blind: $(tail -c 1500 "$project/.oms/artifacts/index.jsonl")"
+}
+
 test_peer_review_gate_covers_rides_the_mechanical_verify_receipt() {
   local project="$TMP/review-gate-covers"
   local bin_dir="$project/bin"
