@@ -17,6 +17,7 @@ set -euo pipefail
 REPO="$PWD"
 TEST_CMD=""
 BASE_REF="HEAD~1"
+CARRY=()
 
 usage() {
   cat <<'EOF'
@@ -30,11 +31,17 @@ Run CMD in a detached worktree at HEAD (must pass) and at REF (must fail).
   --base REF    The commit the test must fail on (default: HEAD~1 — the
                 ordinary fix-plus-test-in-one-commit shape). For receipt-bound
                 work pass the frozen base SHA.
+  --carry PATH  Materialize HEAD's version of PATH (file or directory,
+                repeatable) into the base worktree before the base run. This
+                is the fix-plus-test-in-one-commit shape done honestly: the
+                new test rides HEAD, so without carrying it the base run
+                fails with "no such file" — an absence, not a reproduction.
 
 Exit codes: 0 proven (fails on base, passes on HEAD); 3 the test passes on
 the base too, so it proves nothing about the fix; 4 the test fails on HEAD;
-2 setup or usage error. OMS_REPRO_TIMEOUT bounds each side (seconds,
-default 600) when the timeout binary exists.
+5 the base run exited 127 (command or test file missing — an absence is not
+a reproduction; use --carry); 2 setup or usage error. OMS_REPRO_TIMEOUT
+bounds each side (seconds, default 600) when the timeout binary exists.
 EOF
 }
 
@@ -45,6 +52,7 @@ while [ "$#" -gt 0 ]; do
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
     --test) [ "$#" -ge 2 ] || fail "--test requires a command"; TEST_CMD="$2"; shift 2 ;;
     --base) [ "$#" -ge 2 ] || fail "--base requires a git ref"; BASE_REF="$2"; shift 2 ;;
+    --carry) [ "$#" -ge 2 ] || fail "--carry requires a path"; CARRY+=("$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -79,6 +87,7 @@ run_side() {
     git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C "$REPO" \
     worktree add --detach "$SCRATCH/$side" "$sha" >/dev/null 2>&1 ||
     fail "cannot create the $side worktree at ${sha:0:12}"
+  [ -z "${BEFORE_RUN:-}" ] || "$BEFORE_RUN"
   if command -v timeout >/dev/null 2>&1; then
     ( cd "$SCRATCH/$side" &&
       timeout "${OMS_REPRO_TIMEOUT:-600}" bash -c "$TEST_CMD" ) \
@@ -90,8 +99,19 @@ run_side() {
   printf '%s\n' "$rc"
 }
 
+carry_into_base() {
+  local path
+  [ "${#CARRY[@]}" -gt 0 ] || return 0
+  for path in "${CARRY[@]}"; do
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+      git -c core.hooksPath=/dev/null -C "$SCRATCH/base" \
+      checkout "$head_sha" -- "$path" 2>/dev/null ||
+      fail "--carry path does not exist at HEAD: $path"
+  done
+}
+
 head_exit="$(run_side head "$head_sha")"
-base_exit="$(run_side base "$base_sha")"
+base_exit="$(BEFORE_RUN=carry_into_base run_side base "$base_sha")"
 
 verdict_exit=0
 verdict="proven"
@@ -101,6 +121,12 @@ if [ "$head_exit" -ne 0 ]; then
 elif [ "$base_exit" -eq 0 ]; then
   verdict_exit=3
   verdict="test-passes-on-base"
+elif [ "$base_exit" -eq 127 ]; then
+  # 127 is "no such command/file", not a reproduced failure: the usual cause
+  # is a test file that rides the same commit as the fix, so the base tree
+  # simply does not have it. An absence proves nothing.
+  verdict_exit=5
+  verdict="test-missing-on-base"
 fi
 
 artifact_dir="$REPO/.oms/artifacts/repro-check"
@@ -131,6 +157,10 @@ case "$verdict" in
   test-passes-on-base)
     echo "repro-check: fail code=test-passes-on-base base=${base_sha:0:12} (see $artifact)" >&2
     echo "remedy: a test that passes on the base proves nothing about the fix; tighten it until it goes red at $BASE_REF" >&2
+    ;;
+  test-missing-on-base)
+    echo "repro-check: fail code=test-missing-on-base base_exit=127 (see $artifact)" >&2
+    echo "remedy: the base run found no such command or file; if the test rides the fix commit, carry it: --carry <test-path>" >&2
     ;;
 esac
 exit "$verdict_exit"

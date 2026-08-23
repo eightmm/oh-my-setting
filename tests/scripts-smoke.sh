@@ -2662,7 +2662,9 @@ test_prompt_takers_refuse_a_mistyped_option() {
 test_repro_check_demands_failing_before_passing_after() {
   # The evolution discipline in one verb: a regression test is evidence only
   # when it fails at the base and passes at HEAD. Both runs happen in
-  # detached worktrees, so the dirty tree never contaminates the verdict.
+  # detached worktrees; the ordinary shape — test and fix in one commit —
+  # must carry the test into the base tree, because a base run that dies on
+  # "no such file" is an absence, not a reproduction.
   local project="$TMP/repro-check"
   local rc=0
 
@@ -2671,12 +2673,23 @@ test_repro_check_demands_failing_before_passing_after() {
   git -C "$project" add value.txt
   git -C "$project" commit -qm 'seed: bug present'
   printf 'good\n' > "$project/value.txt"
-  git -C "$project" add value.txt
-  git -C "$project" commit -qm 'fix: value corrected'
+  printf '#!/usr/bin/env bash\ngrep -q good value.txt\n' > "$project/t.sh"
+  git -C "$project" add value.txt t.sh
+  git -C "$project" commit -qm 'fix: value corrected, test added'
+
+  rc=0
+  "$ROOT/scripts/oms" repro-check --repo "$project" \
+    --test 'bash t.sh' >"$project/missing-out" 2>&1 || rc=$?
+  [ "$rc" = "5" ] ||
+    fail "a base run dying on a missing test must exit 5, got $rc: $(cat "$project/missing-out")"
+  grep -Fq 'code=test-missing-on-base' "$project/missing-out" ||
+    fail "the absence verdict must name its code: $(cat "$project/missing-out")"
+  grep -Fq -- '--carry' "$project/missing-out" ||
+    fail "the absence remedy must name --carry: $(cat "$project/missing-out")"
 
   "$ROOT/scripts/oms" repro-check --repo "$project" \
-    --test 'grep -q good value.txt' >"$project/pass-out" 2>&1 ||
-    fail "a failing-then-passing pair must be accepted: $(cat "$project/pass-out")"
+    --test 'bash t.sh' --carry t.sh >"$project/pass-out" 2>&1 ||
+    fail "a carried failing-then-passing pair must be accepted: $(cat "$project/pass-out")"
   grep -Fq 'repro-check: pass' "$project/pass-out" ||
     fail "the proven verdict must say so: $(cat "$project/pass-out")"
 
@@ -2699,7 +2712,7 @@ test_repro_check_demands_failing_before_passing_after() {
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
 exits = [r.get("exit") for r in rows if r.get("kind") == "repro-check"]
-assert exits == [0, 3, 4], exits
+assert exits == [5, 0, 3, 4], exits
 PY
     fail "repro-check verdicts must be typed index rows: $(tail -c 1200 "$project/.oms/artifacts/index.jsonl")"
   git -C "$project" worktree list | grep -Fq oh-my-setting-repro &&
