@@ -35,10 +35,34 @@ grep -Fxq 'replacement body' "$repo/.oms/plan/body.txt" ||
 python3 - "$ROOT/scripts/lib/durable-jsonl.py" \
   "$ROOT/scripts/lib/artifact-index-store.py" "$repo" <<'PY'
 import contextlib, io, json, os, runpy, stat, sys
+from types import SimpleNamespace
 durable_path, store_path, repo = sys.argv[1:]
 durable = runpy.run_path(durable_path)
 store = runpy.run_path(store_path)
 index = repo + "/.oms/artifacts/index.jsonl"
+
+# CPython 3.13 intentionally exposes different st_ctime_ns meanings for a
+# Windows descriptor (metadata change time) and pathname stat (legacy birth
+# time). A mixed-source CAS must compare the birth time available on both
+# results while retaining inode, size, mtime, and link-count fences.
+opened_stat = SimpleNamespace(
+    st_dev=7, st_ino=11, st_size=13, st_mtime_ns=17, st_ctime_ns=19,
+    st_birthtime_ns=23, st_nlink=1)
+named_stat = SimpleNamespace(
+    st_dev=7, st_ino=11, st_size=13, st_mtime_ns=17, st_ctime_ns=29,
+    st_birthtime_ns=23, st_nlink=1)
+saved_os_name = durable["os"].name
+durable["os"].name = "nt"
+try:
+    assert not durable["_snapshot_matches"](opened_stat, named_stat)
+    assert durable["_snapshot_matches"](
+        opened_stat, named_stat, mixed_sources=True)
+    changed_birth = SimpleNamespace(**vars(named_stat))
+    changed_birth.st_birthtime_ns += 1
+    assert not durable["_snapshot_matches"](
+        opened_stat, changed_birth, mixed_sources=True)
+finally:
+    durable["os"].name = saved_os_name
 
 # Native Windows reaches durable-jsonl's os.name == "nt" branch here; it is
 # not a monkeypatch. Both capture modes must refuse before a near-ceiling
@@ -71,6 +95,22 @@ resolution = {
     "resolves_event_id": "evt_target", "resolution": "resolved",
 }
 store["append_rows"](repo, index, [target])
+if os.name == "nt":
+    descriptor = os.open(index, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened_index = os.fstat(descriptor)
+        named_index = os.lstat(index)
+    finally:
+        os.close(descriptor)
+    fields = (
+        "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns",
+        "st_birthtime_ns", "st_nlink")
+    assert durable["_snapshot_matches"](
+        opened_index, named_index, mixed_sources=True), {
+            field: (getattr(opened_index, field, None),
+                    getattr(named_index, field, None))
+            for field in fields
+        }
 store["append_rows"](repo, index, [resolution], keep=2, high=2)
 rows = [json.loads(line) for line in store["read_index"](repo, index).splitlines()]
 assert [row["event_id"] for row in rows] == ["evt_target", "evt_resolution"], rows

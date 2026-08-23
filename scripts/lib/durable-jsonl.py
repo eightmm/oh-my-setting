@@ -189,11 +189,28 @@ def _read_descriptor(descriptor, limit, label):
     return body
 
 
-def _snapshot_matches(before, after):
+def _snapshot_matches(before, after, mixed_sources=False):
+    # CPython's native-Windows fstat reports metadata change time in st_ctime,
+    # while pathname stat preserves the legacy birth-time meaning there.  A
+    # direct ctime comparison therefore rejects the same NTFS inode.  Python
+    # 3.12+ exposes birth time explicitly on both results; older supported
+    # Windows Pythons retain the strong file-id/size/mtime/link fences below.
+    if os.name == "nt" and mixed_sources:
+        birth_before = getattr(before, "st_birthtime_ns", None)
+        birth_after = getattr(after, "st_birthtime_ns", None)
+        time_identity_matches = (
+            birth_before == birth_after
+            if birth_before is not None and birth_after is not None
+            else True
+        )
+    else:
+        time_identity_matches = (
+            getattr(before, "st_ctime_ns", None) ==
+            getattr(after, "st_ctime_ns", None)
+        )
     return (same_file(before, after) and before.st_size == after.st_size and
             getattr(before, "st_mtime_ns", None) == getattr(after, "st_mtime_ns", None) and
-            getattr(before, "st_ctime_ns", None) == getattr(after, "st_ctime_ns", None) and
-            after.st_nlink == 1)
+            time_identity_matches and after.st_nlink == 1)
 
 
 def read_no_follow(root, path, label="artifact index", missing_ok=False,
@@ -431,7 +448,8 @@ def atomic_mutate(path, transform, root, missing_ok=False, create_parent=False,
         if before is None:
             if named is not None:
                 fail("%s appeared during mutation" % label)
-        elif named is None or not safe_regular(named) or not _snapshot_matches(before, named):
+        elif (named is None or not safe_regular(named) or
+              not _snapshot_matches(before, named, mixed_sources=True)):
             fail("%s pathname changed before replace" % label)
 
         if directory is None:
