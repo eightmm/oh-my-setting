@@ -2641,6 +2641,53 @@ PY
     fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
 }
 
+test_repro_check_demands_failing_before_passing_after() {
+  # The evolution discipline in one verb: a regression test is evidence only
+  # when it fails at the base and passes at HEAD. Both runs happen in
+  # detached worktrees, so the dirty tree never contaminates the verdict.
+  local project="$TMP/repro-check"
+  local rc=0
+
+  make_committed_repo "$project"
+  printf 'bad\n' > "$project/value.txt"
+  git -C "$project" add value.txt
+  git -C "$project" commit -qm 'seed: bug present'
+  printf 'good\n' > "$project/value.txt"
+  git -C "$project" add value.txt
+  git -C "$project" commit -qm 'fix: value corrected'
+
+  "$ROOT/scripts/oms" repro-check --repo "$project" \
+    --test 'grep -q good value.txt' >"$project/pass-out" 2>&1 ||
+    fail "a failing-then-passing pair must be accepted: $(cat "$project/pass-out")"
+  grep -Fq 'repro-check: pass' "$project/pass-out" ||
+    fail "the proven verdict must say so: $(cat "$project/pass-out")"
+
+  rc=0
+  "$ROOT/scripts/oms" repro-check --repo "$project" \
+    --test 'true' >"$project/vacuous-out" 2>&1 || rc=$?
+  [ "$rc" = "3" ] ||
+    fail "a test green on both sides must exit 3, got $rc: $(cat "$project/vacuous-out")"
+  grep -Fq 'code=test-passes-on-base' "$project/vacuous-out" ||
+    fail "the vacuous verdict must name its code: $(cat "$project/vacuous-out")"
+
+  rc=0
+  "$ROOT/scripts/oms" repro-check --repo "$project" \
+    --test 'false' >"$project/red-out" 2>&1 || rc=$?
+  [ "$rc" = "4" ] ||
+    fail "a test red on HEAD must exit 4, got $rc: $(cat "$project/red-out")"
+
+  # Every verdict is a typed artifact-index row, success and refusal alike.
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' ||
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+exits = [r.get("exit") for r in rows if r.get("kind") == "repro-check"]
+assert exits == [0, 3, 4], exits
+PY
+    fail "repro-check verdicts must be typed index rows: $(tail -c 1200 "$project/.oms/artifacts/index.jsonl")"
+  git -C "$project" worktree list | grep -Fq oh-my-setting-repro &&
+    fail "repro-check leaked a worktree" || true
+}
+
 test_peer_review_blind_strips_context_and_types_the_mode() {
   local project="$TMP/review-blind"
   local artifact_dir="$project/artifacts"

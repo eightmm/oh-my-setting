@@ -171,6 +171,7 @@ project-doctor
 project-private
 provider-permissions
 remove-project-template
+repro-check
 research-runner
 run
 run-ledger
