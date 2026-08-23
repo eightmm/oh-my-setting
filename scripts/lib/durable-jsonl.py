@@ -106,6 +106,11 @@ def append(path, data, label="progress.jsonl", capture=False):
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             fail("%s must be a regular file" % label)
+        if opened.st_nlink != 1:
+            # A second name on this inode means the append would mutate a
+            # file outside the ledger's own path — the hard-link twin of the
+            # leaf symlink this writer already refuses.
+            fail("%s must not be hard-linked" % label)
         if opened.st_size > MAX_FILE_BYTES - len(data):
             fail("%s exceeds the %d-byte durable evidence limit" % (label, MAX_FILE_BYTES))
         try:

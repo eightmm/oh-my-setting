@@ -195,6 +195,26 @@ assert rows[0]["provider"] == "codex", rows
 PY
   fail "the ancestry-symlink append must persist exactly one valid row in the physical ledger"
 
+# --- artifact index: a hard-linked ledger inode refuses before mutation ---
+hard_repo="$TMP/artifact-hardlink"; mk_repo "$hard_repo"
+mkdir -p "$hard_repo/.oms/artifacts"
+outside_hard="$TMP/outside-hardlink.jsonl"
+printf 'outside hard untouched\n' > "$outside_hard"
+ln "$outside_hard" "$hard_repo/.oms/artifacts/index.jsonl"
+if hard_error="$({
+  # shellcheck source=scripts/lib/peer-common.sh
+  . "$ROOT/scripts/lib/peer-common.sh"
+  ma_append_artifact_index "$hard_repo" call codex 0 "" "" "" "" ""
+} 2>&1)"; then
+  fail "artifact index append must refuse a hard-linked ledger"
+fi
+printf '%s\n' "$hard_error" | grep -Fq 'artifact index' ||
+  fail "hard-link refusal must name its durable-writer label: $hard_error"
+grep -Fxq 'outside hard untouched' "$outside_hard" ||
+  fail "artifact index append mutated a hard-linked outside file"
+[ "$(wc -l < "$outside_hard")" -eq 1 ] ||
+  fail "hard-link refusal must leave the outside file byte-identical"
+
 # --- draft-pr intent: verifier text is durable and therefore strict --------
 repo="$TMP/draft-pr"; mk_repo "$repo"
 git -C "$repo" branch -M main
