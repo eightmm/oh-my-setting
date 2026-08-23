@@ -13417,6 +13417,8 @@ test_resume_hook_prints_bounded_resume_block() {
   mkdir -p "$repo/.oms/handoffs" "$repo/.oms/hooks"
   ( cd "$repo" && "$ROOT/scripts/agent-task.sh" init --goal "Ship the resume surface" \
       --next "wire hooks.json" --verify "bash tests/x.sh" >/dev/null )
+  ( cd "$repo" && "$ROOT/scripts/agent-plan.sh" init --goal "Unify the writer contract" \
+      --accept "bash tests/plan-accept.sh" >/dev/null )
   printf 'digest\n' > "$repo/.oms/handoffs/claude-abc.md"
   ( cd "$repo" && "$ROOT/scripts/fail-ledger.sh" record --cmd "pytest -k boom" --exit 1 \
       --summary "flaky assertion" --next "rerun standalone" >/dev/null 2>&1 )
@@ -13429,6 +13431,12 @@ test_resume_hook_prints_bounded_resume_block() {
   printf '%s\n' "$out" | grep -q 'Ship the resume surface' || fail "missing task goal"
   printf '%s\n' "$out" | grep -q 'next: wire hooks.json' || fail "missing next step"
   printf '%s\n' "$out" | grep -q 'verify: bash tests/x.sh' || fail "missing verify command"
+  # The plan contract must survive a compaction the way the task packet does:
+  # a live plan was previously completely silent at session start.
+  printf '%s\n' "$out" | grep -q 'plan: Unify the writer contract' ||
+    fail "missing plan goal: $out"
+  printf '%s\n' "$out" | grep -q 'accept: bash tests/plan-accept.sh' ||
+    fail "missing plan acceptance: $out"
   printf '%s\n' "$out" | grep -q 'session-handoff show claude-abc.md' ||
     fail "missing handoff pointer"
   printf '%s\n' "$out" | grep -q 'failures: 1 actionable' || fail "missing failure line"

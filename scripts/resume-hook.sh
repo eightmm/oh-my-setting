@@ -56,6 +56,51 @@ if [ -f "$task_file" ]; then
   fi
 fi
 
+# Active plan contract: the goal and its executable acceptance survive a
+# compaction the same way the task packet does. A live plan with ready work
+# was previously silent at session start — the contract the conversation is
+# bound by has to outlive the summary that dropped it.
+plan_file="$cwd/.oms/plan/tasks.json"
+if [ -s "$plan_file" ]; then
+  plan_lines="$(python3 - "$plan_file" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        plan = json.load(fh)
+except Exception:
+    sys.exit(0)
+goal = " ".join(str(plan.get("goal") or "").split())
+if not goal:
+    sys.exit(0)
+tasks = plan.get("tasks") or {}
+if isinstance(tasks, dict):
+    states = [str(t.get("state") or "?") for t in tasks.values()
+              if isinstance(t, dict)]
+else:
+    states = [str(t.get("state") or "?") for t in tasks if isinstance(t, dict)]
+if states and all(state == "done" for state in states):
+    sys.exit(0)  # a finished plan is history, not a resumption duty
+counts = {}
+for state in states:
+    counts[state] = counts.get(state, 0) + 1
+summary = " ".join("%s=%d" % item for item in sorted(counts.items()))
+if len(goal) > 160:
+    goal = goal[:157] + "..."
+print("- plan: %s%s" % (goal, (" [%s]" % summary) if summary else ""))
+accept = " ".join(str(plan.get("accept") or "").split())
+if accept:
+    if len(accept) > 140:
+        accept = accept[:137] + "..."
+    print("  accept: %s" % accept)
+PY
+)" || plan_lines=""
+  if [ -n "$plan_lines" ]; then
+    while IFS= read -r line; do append "$line"; done <<EOF_PLAN
+$plan_lines
+EOF_PLAN
+  fi
+fi
+
 # Newest handoff digest, capped at 72h: old enough to survive an overnight
 # gap, young enough not to anchor a new week on stale context. Pointer only —
 # the digest is one `show` away and inlining it would blow the line budget.
