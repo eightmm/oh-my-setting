@@ -2641,6 +2641,24 @@ PY
     fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
 }
 
+test_prompt_takers_refuse_a_mistyped_option() {
+  # Before the guard, a leading-dash argument arriving while the prompt was
+  # still empty was silently adopted as the prompt (and then usually
+  # discarded when --prompt arrived), so a typo'd flag changed nothing and
+  # said nothing. Every prompt-taking front door refuses it now.
+  local script out rc
+
+  for script in advise agent-call agent-run consult peer-ask peer-review; do
+    rc=0
+    out="$(PATH="/usr/bin:/bin" bash "$ROOT/scripts/$script.sh" \
+      --bogus-flag --prompt probe 2>&1)" || rc=$?
+    [ "$rc" != "0" ] ||
+      fail "$script must refuse a mistyped option, got success: $out"
+    printf '%s\n' "$out" | grep -Fq 'unknown option: --bogus-flag' ||
+      fail "$script must name the mistyped option: $out"
+  done
+}
+
 test_repro_check_demands_failing_before_passing_after() {
   # The evolution discipline in one verb: a regression test is evidence only
   # when it fails at the base and passes at HEAD. Both runs happen in

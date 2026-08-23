@@ -124,6 +124,9 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "$1 requires a value"; PASSTHROUGH+=("$1" "$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
+      case "$1" in
+        -*) fail "unknown option: $1" ;;
+      esac
       [ -z "$PROMPT" ] || fail "unknown argument: $1"
       PROMPT="$1"; shift ;;
   esac

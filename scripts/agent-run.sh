@@ -336,6 +336,12 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
+      # A leading dash is a mistyped option, never an intended prompt: the
+      # old fall-through silently adopted it as the question (or discarded
+      # it once --prompt arrived), and a typo'd flag changed nothing.
+      case "$1" in
+        -*) echo "error: unknown option: $1" >&2; exit 2 ;;
+      esac
       if [ -z "$PROMPT" ]; then
         PROMPT="$1"
         shift
