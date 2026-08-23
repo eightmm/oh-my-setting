@@ -337,7 +337,11 @@ def _replace_corrupt_index(
 def salvage_index(repo: str, index: str, *, apply: bool = False) -> dict:
     """Plan or repair structural JSONL corruption under the caller's lock."""
     root = DURABLE["physical_root"](repo, "artifact index")
-    target = canonical_index(root, index, False, False)
+    # Keep the caller's spelling paired with the index until canonicalization.
+    # On Windows, realpath may expand an 8.3/junction repo spelling; comparing
+    # that physical root with the still-logical absolute index would reject a
+    # benign repo-contained path before the suffix can be safely rebased.
+    target = canonical_index(repo, index, False, False)
     raw = read_raw_index(root, target)
     recovered, source_rows, dropped = _salvage_rows(raw)
     recovered_body = b"".join(recovered)
@@ -556,7 +560,10 @@ def delete_orphans(
     if grace < 0:
         fail("orphan grace must be non-negative")
     root = DURABLE["physical_root"](repo, "artifact index")
-    target = canonical_index(root, index, False, False)
+    # Preserve the original repo/index pair for the same alias-aware
+    # canonicalization used by every other store entry point. The physical root
+    # remains the sole ownership and traversal boundary below.
+    target = canonical_index(repo, index, False, False)
     artifacts_root = os.path.join(root, ".oms", "artifacts")
     # Re-validates every intermediate component without resolving a junction.
     DURABLE["canonical_repo_path"](

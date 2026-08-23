@@ -1014,6 +1014,58 @@ PY
 bash "$ROOT/scripts/artifact-index.sh" --repo "$alias_repo" \
   --file "$alias_index" validate >/dev/null ||
   fail "artifact index written through an ancestry alias must validate"
+
+# Store-internal maintenance must preserve the caller spelling until the
+# canonicalizer has rebased the repo-relative suffix.  Physicalizing the repo
+# first and then comparing it with the still-logical index rejects benign
+# Windows 8.3/junction spellings (and this POSIX ancestry alias) before cleanup.
+printf 'aged alias orphan\n' > "$alias_repo/.oms/artifacts/aged-orphan.md"
+touch -t 200001010000 "$alias_repo/.oms/artifacts/aged-orphan.md" 2>/dev/null ||
+  touch "$alias_repo/.oms/artifacts/aged-orphan.md"
+python3 - "$ROOT/scripts/lib/artifact-index-store.py" \
+  "$alias_repo" "$alias_index" <<'PY' ||
+import runpy, sys
+
+store_path, repo, index = sys.argv[1:]
+store = runpy.run_path(store_path)
+body = store["read_index"](repo, index)
+changed, _fresh = store["delete_orphans"](
+    repo, index, body, dry_run=False, grace=0)
+assert ".oms/artifacts/aged-orphan.md" in [
+    item.replace("\\", "/") for item in changed
+], changed
+PY
+  fail "orphan cleanup lost the logical repo spelling before canonicalization"
+[ ! -e "$alias_repo_real/.oms/artifacts/aged-orphan.md" ] ||
+  fail "alias orphan cleanup did not remove the owned physical artifact"
+
+# Salvage has the same repo/index pair boundary. Its plan and apply paths must
+# accept a benign ancestry alias while still publishing only to the physical
+# repository and preserving the exact corrupt source in quarantine.
+salvage_alias_real="$TMP/artifact-salvage-alias-real"; mk_repo "$salvage_alias_real"
+ln -s "$salvage_alias_real" "$TMP/artifact-salvage-alias-link"
+salvage_alias="$TMP/artifact-salvage-alias-link"
+salvage_alias_index="$salvage_alias/.oms/artifacts/index.jsonl"
+mkdir -p "$salvage_alias/.oms/artifacts"
+printf '%s\n%s\n' \
+  '{"schema":0,"event_id":"evt_alias_salvage","kind":"legacy"}' \
+  'broken' > "$salvage_alias_index"
+python3 - "$ROOT/scripts/lib/artifact-index-store.py" \
+  "$salvage_alias" "$salvage_alias_index" <<'PY' ||
+import json, os, runpy, sys
+
+store_path, repo, index = sys.argv[1:]
+store = runpy.run_path(store_path)
+planned = store["salvage_index"](repo, index, apply=False)
+assert not planned["healthy"] and not planned["applied"], planned
+applied = store["salvage_index"](repo, index, apply=True)
+assert applied["applied"], applied
+rows = [json.loads(line) for line in store["read_index"](repo, index).splitlines()]
+assert rows[-1]["kind"] == "artifact-index-salvage", rows
+quarantine = rows[-1]["quarantine"].replace("/", os.sep)
+assert os.path.isfile(os.path.join(os.path.realpath(repo), quarantine)), rows[-1]
+PY
+  fail "salvage lost the logical repo spelling before canonicalization"
 mkdir -p "$alias_repo/sub"
 (
   cd "$alias_repo/sub"
