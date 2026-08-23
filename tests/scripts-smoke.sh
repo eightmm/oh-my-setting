@@ -5413,6 +5413,54 @@ test_agent_plan_lint_verify_matches_admission_floor() {
 # The contract's implementation-shaping sections used to stop at plan-from-spec:
 # a constraint recorded under Decisions never reached the planner, so it had to
 # be smuggled into Verification to have any effect.
+test_plan_from_spec_flags_repo_wide_verifier() {
+  # allowed ["."] is the whole repo: every verify command reads inside it,
+  # but the token search can never see that -- no verify command spells the
+  # repo root as a bare dot. The admission refusal the note predicts is
+  # exactly as certain here as for a named directory.
+  local project="$TMP/plan-spec-repo-wide"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"
+  chmod +x "$project/tests/run.sh"
+  cat > "$project/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: active
+
+## Project
+
+- Goal: ship a tiny greeting CLI
+- Scope: src/, tests/
+- Non-goals: packaging
+
+## Commands
+
+- Test: bash tests/run.sh
+
+## Verification
+
+- Required checks: bash tests/run.sh
+EOF
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"tasks":[{"id":"t1","title":"chore: repo-wide sweep","allowed":["."],"verify":"bash tests/run.sh","depends":[]}]}\n'
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/out" 2>&1 ||
+    fail "propose should succeed: $(tail -4 "$project/out")"
+  grep -Fq 'note: verify reads ., which this task may also change' "$project/out" ||
+    fail "a repo-wide scope must flag its in-scope verifier: $(cat "$project/out")"
+}
+
 test_plan_from_spec_prompt_carries_contract_decisions() {
   local project="$TMP/plan-from-spec-decisions"
   local bin_dir="$project/bin"

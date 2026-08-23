@@ -734,6 +734,14 @@ for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
         root = str(root).rstrip("/")
         if not root:
             continue
+        # A repo-wide scope contains every verifier that reads a repo file;
+        # the token search below can never see that, because no verify
+        # command spells the repo root as a bare dot.
+        if root == "." and verify.strip():
+            print("    note: verify reads %s, which this task may also change;"
+                  " a patch that touches it is refused without verifier-change"
+                  " consent" % root)
+            break
         if re.search(r"(^|[\s'\"=(])%s(/|[\s'\";)]|$)" % re.escape(root), verify):
             print("    note: verify reads %s, which this task may also change;"
                   " a patch that touches it is refused without verifier-change"
