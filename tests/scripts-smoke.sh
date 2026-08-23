@@ -14260,11 +14260,22 @@ test_remove_project_template_reports_the_leftover_exclusion() {
   local project="$TMP/remove-leftover"
   local out
 
+  local apply_out
   make_committed_repo "$project"
-  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  # Kept, not discarded: hiding the agent files is best-effort inside
+  # apply-project-template, which warns and continues when project-private
+  # cannot write the exclusion. Without that warning in hand, the assertion
+  # below can only report that the exclusion is missing, never why -- and this
+  # test has failed exactly once, under four-way shard load, with no way to
+  # tell a real regression from the known parallel-load flake class.
+  apply_out="$("$ROOT/scripts/apply-project-template.sh" general "$project" 2>&1)"
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
   printf '%s' "$out" | grep -Fq "'oms project-private remove' undoes that" ||
-    fail "removing the template should mention the leftover git exclusion: $out"
+    fail "removing the template should mention the leftover git exclusion: $out
+--- apply-project-template said ---
+$apply_out
+--- .git/info/exclude ---
+$(cat "$project/.git/info/exclude" 2>&1)"
 
   "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
