@@ -84,6 +84,7 @@ case "$DAYS" in *[!0-9]*|"") fail "--days must be a non-negative integer" ;; esa
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
+STATE_ROOT="$(cd "$STATE_ROOT" && pwd -P)" || fail "cannot resolve the physical repository"
 OMS="$STATE_ROOT/.oms"
 [ -d "$OMS" ] || { echo "gc: no .oms state at $STATE_ROOT"; exit 0; }
 
@@ -267,65 +268,404 @@ if [ -f "$OMS/landings.jsonl" ] && [ -d "$OMS/landing-patches" ]; then
   esac
 fi
 
-# 1) Orphaned delegation markers: a dead pid means a crashed worker. A live
-#    pid is an in-flight delegation and is never swept (regardless of age).
-#    A marker carrying a plan task_id is the only record joining the dead
-#    worker to its still-claimed plan task, so release the task in the same
-#    sweep — otherwise the claim lingers until the reclaim TTL.
-if [ -d "$OMS/delegations" ]; then
-  for f in "$OMS/delegations"/*.json; do
-    [ -e "$f" ] || continue
-    info="$(python3 -c 'import json,sys
-d = json.load(open(sys.argv[1]))
-print("%s\t%s\t%s\t%s" % (d.get("pid", ""), d.get("task_id", ""), d.get("lease_id", ""), d.get("executor_id", "")))' "$f" 2>/dev/null || true)"
-    pid="$(printf '%s' "$info" | cut -f1)"
-    task_id="$(printf '%s' "$info" | cut -f2)"
-    marker_lease="$(printf '%s' "$info" | cut -f3)"
-    executor_id="$(printf '%s' "$info" | cut -f4)"
-    alive=0
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
-    if [ "$alive" = 0 ]; then
-      note_remove "orphan-delegation" "$f"
-      if [ -n "$executor_id" ]; then
-        executor_state="$("$ROOT/scripts/agent-executor.sh" show --repo "$STATE_ROOT" --id "$executor_id" 2>/dev/null |
-          python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
-        if [ "$executor_state" = "running" ]; then
-          printf -- '- orphan-delegation-executor: %s running -> failed\n' "$executor_id"
-          removed=$((removed + 1))
-          if [ "$DRY_RUN" = 0 ]; then
-            "$ROOT/scripts/agent-executor.sh" fail --repo "$STATE_ROOT" --id "$executor_id" \
-              --reason "gc: delegation process is not alive" >/dev/null 2>&1 ||
-              echo "warning: gc: could not fail executor $executor_id" >&2
+# 1) Orphaned delegation markers. The trigger itself is untrusted state. OMS
+#    publishers, normal cleanup, snapshots, recovery predicates, and deletes
+#    share one repo-physical marker-set lock. GC releases it between phases so
+#    a recover verb can take marker set -> plan/meta without nesting. The final
+#    bounded/no-follow digest+identity CAS preserves a generation replaced by
+#    a non-cooperative same-UID writer; OS sandboxing remains the only complete
+#    control for a swap in the final lstat/unlink syscall window.
+delegation_set_lock="$STATE_ROOT/.oms/delegations/.marker-set-lock-target"
+delegation_dir_is_safe() {  # DIRECTORY
+  python3 - "$1" "$STATE_ROOT" <<'PY'
+import os, stat, sys
+path = os.path.abspath(sys.argv[1])
+repo = os.path.realpath(sys.argv[2])
+expected = os.path.join(repo, ".oms", "delegations")
+try:
+    info = os.lstat(path)
+except FileNotFoundError:
+    raise SystemExit(1)
+except OSError:
+    raise SystemExit(2)
+if (not stat.S_ISDIR(info.st_mode) or
+        os.path.normcase(os.path.realpath(path)) !=
+        os.path.normcase(os.path.abspath(expected))):
+    raise SystemExit(2)
+PY
+}
+
+delegation_marker_names() {  # DIRECTORY
+  python3 - "$1" "$STATE_ROOT" <<'PY'
+import os, re, stat, sys
+path = os.path.abspath(sys.argv[1])
+repo = os.path.realpath(sys.argv[2])
+expected = os.path.join(repo, ".oms", "delegations")
+safe_name = re.compile(r"^[A-Za-z0-9._-]+\.json$")
+try:
+    info = os.lstat(path)
+except OSError:
+    raise SystemExit(2)
+if (not stat.S_ISDIR(info.st_mode) or
+        os.path.normcase(os.path.realpath(path)) !=
+        os.path.normcase(os.path.abspath(expected))):
+    raise SystemExit(2)
+entries = []
+try:
+    with os.scandir(path) as iterator:
+        for entry in iterator:
+            if len(entries) >= 4096:
+                raise SystemExit(2)
+            entries.append(entry)
+except OSError:
+    raise SystemExit(2)
+for entry in sorted(entries, key=lambda item: item.name):
+    if not entry.name.endswith(".json"):
+        continue
+    if not safe_name.fullmatch(entry.name):
+        sys.stderr.write("warning: gc: unsafe delegation marker name kept\n")
+        continue
+    print(entry.name)
+PY
+}
+
+delegation_marker_names_locked() {  # DIRECTORY
+  local directory_rc=0
+  delegation_dir_is_safe "$1" || directory_rc=$?
+  case "$directory_rc" in
+    0) ;;
+    1) return 1 ;;
+    *) return 20 ;;
+  esac
+  delegation_marker_names "$1" || return 21
+}
+
+delegation_marker_snapshot() {  # MARKER
+  python3 - "$1" "$STATE_ROOT" "$ROOT/scripts/lib/process_liveness.py" <<'PY'
+import hashlib, json, os, re, runpy, stat, sys
+
+path = os.path.abspath(sys.argv[1])
+repo = os.path.realpath(sys.argv[2])
+expected_dir = os.path.join(repo, ".oms", "delegations")
+marker_dir = os.path.dirname(path)
+pid_alive = runpy.run_path(sys.argv[3])["pid_alive"]
+safe_id = re.compile(r"^[A-Za-z0-9._-]*$")
+
+def unproven(message):
+    print("unproven\t" + message.replace("\t", " ").replace("\n", " "))
+    raise SystemExit(0)
+
+if not os.path.lexists(path):
+    print("gone")
+    raise SystemExit(0)
+try:
+    directory_info = os.lstat(marker_dir)
+except OSError as exc:
+    unproven("marker directory is unreadable: %s" % exc)
+if (not stat.S_ISDIR(directory_info.st_mode) or
+        os.path.normcase(os.path.realpath(marker_dir)) !=
+        os.path.normcase(os.path.abspath(expected_dir))):
+    unproven("marker directory is not the real repo-local delegation directory")
+try:
+    before = os.lstat(path)
+except OSError as exc:
+    unproven("marker is unreadable: %s" % exc)
+if not stat.S_ISREG(before.st_mode):
+    unproven("marker is not a regular file")
+if before.st_size > 64 * 1024:
+    unproven("marker exceeds 64 KiB")
+flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    descriptor = os.open(path, flags)
+except OSError as exc:
+    unproven("marker cannot be opened safely: %s" % exc)
+try:
+    opened = os.fstat(descriptor)
+    if (not stat.S_ISREG(opened.st_mode) or
+            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+        unproven("marker changed while opening")
+    payload = os.read(descriptor, 64 * 1024 + 1)
+    if len(payload) > 64 * 1024 or os.read(descriptor, 1):
+        unproven("marker exceeds 64 KiB")
+finally:
+    os.close(descriptor)
+try:
+    marker = json.loads(payload.decode("utf-8"))
+except (UnicodeError, ValueError):
+    unproven("marker is malformed JSON")
+if not isinstance(marker, dict):
+    unproven("marker is not an object")
+schema = marker.get("schema")
+pid = marker.get("pid")
+if (isinstance(schema, bool) or not isinstance(schema, int)
+        or schema not in {1, 2, 3, 4}):
+    unproven("marker schema is invalid")
+if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
+        or pid > 0x7FFFFFFF):
+    unproven("marker pid is invalid")
+native_pid = marker.get("native_pid")
+if schema == 4 and "native_pid" not in marker:
+    unproven("schema 4 marker native pid is missing")
+if "native_pid" in marker and (
+        isinstance(native_pid, bool) or not isinstance(native_pid, int)
+        or native_pid <= 0 or native_pid > 0xFFFFFFFF):
+    unproven("marker native pid is invalid")
+for key in ("id", "task_id", "lease_id", "executor_id"):
+    value = marker.get(key, "")
+    if not isinstance(value, str) or not safe_id.fullmatch(value):
+        unproven("marker %s is invalid" % key)
+if marker.get("id", "") in {".", ".."}:
+    unproven("marker id is not canonical")
+if marker.get("executor_id", "") in {".", ".."}:
+    unproven("marker executor_id is not canonical")
+if not marker.get("id"):
+    unproven("marker id is missing")
+marker_owner = marker.get("autopilot_owner_id", "")
+if (not isinstance(marker_owner, str) or
+        (marker_owner and
+         not re.fullmatch(r"owner_[0-9a-f]{32}", marker_owner))):
+    unproven("marker autopilot owner id is invalid")
+alive = pid_alive(pid, native_pid=native_pid)
+print("\t".join([
+    "alive" if alive else "dead", str(pid),
+    str(native_pid) if isinstance(native_pid, int) else "0",
+    marker.get("task_id", "") or "~", marker.get("lease_id", "") or "~",
+    marker.get("executor_id", "") or "~", hashlib.sha256(payload).hexdigest(),
+    str(opened.st_dev), str(opened.st_ino), str(opened.st_size),
+]))
+PY
+}
+
+delegation_marker_delete_snapshot() {  # MARKER DIGEST DEV INO SIZE
+  python3 - "$1" "$STATE_ROOT" "$2" "$3" "$4" "$5" <<'PY'
+import hashlib, os, stat, sys
+path = os.path.abspath(sys.argv[1])
+repo = os.path.realpath(sys.argv[2])
+expected_digest = sys.argv[3]
+expected_identity = tuple(int(value) for value in sys.argv[4:7])
+expected_dir = os.path.join(repo, ".oms", "delegations")
+marker_dir = os.path.dirname(path)
+if (os.path.normcase(os.path.realpath(marker_dir)) !=
+        os.path.normcase(os.path.abspath(expected_dir))):
+    raise SystemExit(3)
+try:
+    directory_info = os.lstat(marker_dir)
+    before = os.lstat(path)
+except OSError:
+    raise SystemExit(3)
+if not stat.S_ISDIR(directory_info.st_mode) or not stat.S_ISREG(before.st_mode):
+    raise SystemExit(3)
+if (before.st_dev, before.st_ino, before.st_size) != expected_identity:
+    raise SystemExit(3)
+flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    descriptor = os.open(path, flags)
+except OSError:
+    raise SystemExit(3)
+try:
+    opened = os.fstat(descriptor)
+    if (not stat.S_ISREG(opened.st_mode) or
+            (opened.st_dev, opened.st_ino, opened.st_size) != expected_identity):
+        raise SystemExit(3)
+    payload = os.read(descriptor, 64 * 1024 + 1)
+    if len(payload) > 64 * 1024 or os.read(descriptor, 1):
+        raise SystemExit(3)
+finally:
+    os.close(descriptor)
+if hashlib.sha256(payload).hexdigest() != expected_digest:
+    raise SystemExit(3)
+try:
+    final = os.lstat(path)
+except OSError:
+    raise SystemExit(3)
+if (not stat.S_ISREG(final.st_mode) or
+        (final.st_dev, final.st_ino, final.st_size) != expected_identity):
+    raise SystemExit(3)
+os.unlink(path)
+try:
+    directory = os.open(marker_dir, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except OSError:
+    pass
+PY
+}
+
+delegation_marker_gc() {  # MARKER
+  local marker="$1" snapshot snapshot_rc status pid _native_pid task_id
+  local marker_lease executor_id marker_digest marker_dev marker_ino marker_size
+  local executor_state task_info task_state task_lease delete_rc=0
+  local executor_show_rc executor_recovery_rc plan_show_rc plan_recovery_rc
+  local executor_recovery_out plan_recovery_out
+  local recovery_hard_failure=0
+  local -a executor_recovery_args recovery_args
+
+  snapshot_rc=0
+  snapshot="$(oms_with_file_lock "$delegation_set_lock" \
+    delegation_marker_snapshot "$marker")" || snapshot_rc=$?
+  snapshot="${snapshot//$'\r'/}"
+  if [ "$snapshot_rc" -ne 0 ]; then
+    echo "warning: gc: unproven delegation marker kept after parser failure: $marker" >&2
+    return 0
+  fi
+  [ "$snapshot" != gone ] || return 0
+  IFS=$'\t' read -r status pid _native_pid task_id marker_lease executor_id \
+    marker_digest marker_dev marker_ino marker_size <<EOF
+$snapshot
+EOF
+  if [ "$status" = unproven ]; then
+    echo "warning: gc: unproven delegation marker kept: $marker ($pid)" >&2
+    return 0
+  fi
+  [ "$task_id" != '~' ] || task_id=""
+  [ "$marker_lease" != '~' ] || marker_lease=""
+  [ "$executor_id" != '~' ] || executor_id=""
+  [ "$status" = dead ] || return 0
+
+  if [ -n "$executor_id" ]; then
+    executor_show_rc=0
+    executor_state="$("$ROOT/scripts/agent-executor.sh" show --repo "$STATE_ROOT" --id "$executor_id" 2>/dev/null |
+      python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null)" ||
+      executor_show_rc=$?
+    executor_state="${executor_state//$'\r'/}"
+    if [ "$executor_show_rc" -ne 0 ]; then
+      echo "warning: gc: executor $executor_id is unreadable; kept trigger evidence" >&2
+      recovery_hard_failure=1
+    else
+      case "$executor_state" in
+        running)
+          executor_recovery_args=(recover --repo "$STATE_ROOT" --id "$executor_id" \
+            --expected-state "$executor_state" --markers-dir "$OMS/delegations")
+          [ "$DRY_RUN" = 0 ] || executor_recovery_args+=(--check)
+          executor_recovery_rc=0
+          executor_recovery_out="$("$ROOT/scripts/agent-executor.sh" \
+            "${executor_recovery_args[@]}" 2>&1)" || executor_recovery_rc=$?
+          executor_recovery_out="${executor_recovery_out//$'\r'/}"
+          if [ "$executor_recovery_rc" -eq 0 ]; then
+            printf -- '- orphan-delegation-executor: %s running -> failed\n' "$executor_id"
+          else
+            echo "warning: gc: executor $executor_id changed or has a live exact worker; kept it" >&2
+            if [ "$executor_recovery_rc" -ne 3 ] ||
+                printf '%s\n' "$executor_recovery_out" |
+                  grep -Fxq 'executor-recovery-outcome: unproven'; then
+              recovery_hard_failure=1
+            fi
           fi
-        fi
-      fi
-      if [ -n "$task_id" ]; then
-        task_info="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>/dev/null |
-          python3 -c 'import json,sys;d=json.load(sys.stdin);print("%s\t%s"%(d.get("state",""),d.get("lease_id","")))' 2>/dev/null || true)"
-        task_state="$(printf '%s' "$task_info" | cut -f1)"
-        task_lease="$(printf '%s' "$task_info" | cut -f2)"
-        # Only claimed/running are dead-worker states; review holds a finished
-        # artifact awaiting a reviewer and must not be requeued here.
-        case "$task_state" in
-          claimed|running)
-            if [ "$marker_lease" != "$task_lease" ]; then
-              printf -- '- orphan-delegation-plan: task %s lease changed; keep current claim\n' "$task_id"
-              continue
-            fi
-            printf -- '- orphan-delegation-plan: task %s (%s) -> ready\n' "$task_id" "$task_state"
-            removed=$((removed + 1))
-            if [ "$DRY_RUN" = 0 ]; then
-              release_args=(--repo "$STATE_ROOT" release --id "$task_id")
-              [ -z "$marker_lease" ] || release_args+=(--lease-id "$marker_lease")
-              OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-plan.sh" "${release_args[@]}" >/dev/null 2>&1 ||
-                echo "warning: gc: could not release plan task $task_id" >&2
-            fi
-            ;;
-        esac
-      fi
+          ;;
+        draft|frozen|done|failed) ;;
+        *)
+          echo "warning: gc: executor $executor_id has an invalid state; kept trigger evidence" >&2
+          recovery_hard_failure=1
+          ;;
+      esac
     fi
-  done
-fi
+  fi
+  if [ -n "$task_id" ]; then
+    plan_show_rc=0
+    task_info="$("$ROOT/scripts/agent-plan.sh" --repo "$STATE_ROOT" show --id "$task_id" 2>/dev/null |
+      python3 -c 'import json,sys;d=json.load(sys.stdin);print("%s\t%s"%(d.get("state",""),d.get("lease_id","")))' 2>/dev/null)" ||
+      plan_show_rc=$?
+    task_info="${task_info//$'\r'/}"
+    task_state="$(printf '%s' "$task_info" | cut -f1)"
+    task_lease="$(printf '%s' "$task_info" | cut -f2)"
+    if [ "$plan_show_rc" -ne 0 ]; then
+      echo "warning: gc: plan task $task_id is unreadable; kept trigger evidence" >&2
+      recovery_hard_failure=1
+    else
+      case "$task_state" in
+        claimed|running)
+          if [ -z "$marker_lease" ]; then
+            printf -- '- orphan-delegation-plan: task %s marker has no lease; keep current claim\n' "$task_id"
+          elif [ "$marker_lease" != "$task_lease" ]; then
+            printf -- '- orphan-delegation-plan: task %s lease changed; keep current claim\n' "$task_id"
+          else
+            recovery_args=(--repo "$STATE_ROOT" recover-lease --id "$task_id" \
+              --lease-id "$marker_lease" --expected-state "$task_state" \
+              --markers-dir "$OMS/delegations")
+            [ "$DRY_RUN" = 0 ] || recovery_args+=(--check)
+            plan_recovery_rc=0
+            plan_recovery_out="$(OMS_HARNESS_CHILD=1 "$ROOT/scripts/agent-plan.sh" \
+              "${recovery_args[@]}" 2>&1)" || plan_recovery_rc=$?
+            plan_recovery_out="${plan_recovery_out//$'\r'/}"
+            if [ "$plan_recovery_rc" -eq 0 ]; then
+              printf -- '- orphan-delegation-plan: task %s (%s) -> ready\n' "$task_id" "$task_state"
+            else
+              echo "warning: gc: plan task $task_id changed or has a live exact worker; kept it" >&2
+              if [ "$plan_recovery_rc" -ne 3 ] ||
+                  printf '%s\n' "$plan_recovery_out" |
+                    grep -Fxq 'plan-recovery-outcome: unproven'; then
+                recovery_hard_failure=1
+              fi
+            fi
+          fi
+          ;;
+        ready|review|landing|blocked|done) ;;
+        *)
+          echo "warning: gc: plan task $task_id has an invalid state; kept trigger evidence" >&2
+          recovery_hard_failure=1
+          ;;
+      esac
+    fi
+  fi
+
+  if [ "$recovery_hard_failure" -ne 0 ]; then
+    echo "warning: gc: delegation recovery was unproven; kept trigger marker: $marker" >&2
+    return 0
+  fi
+  if [ "$DRY_RUN" = 0 ]; then
+    oms_with_file_lock "$delegation_set_lock" \
+      delegation_marker_delete_snapshot "$marker" "$marker_digest" \
+        "$marker_dev" "$marker_ino" "$marker_size" || delete_rc=$?
+    if [ "$delete_rc" -ne 0 ]; then
+      echo "warning: gc: delegation marker generation changed; kept it: $marker" >&2
+      return 0
+    fi
+  fi
+  printf -- '- orphan-delegation: %s\n' "$marker"
+}
+
+delegation_dir="$OMS/delegations"
+delegation_dir_rc=0
+delegation_names="$(oms_with_file_lock "$delegation_set_lock" \
+  delegation_marker_names_locked "$delegation_dir")" || delegation_dir_rc=$?
+delegation_names="${delegation_names//$'\r'/}"
+case "$delegation_dir_rc" in
+  0)
+    while IFS= read -r delegation_name; do
+      [ -n "$delegation_name" ] || continue
+      f="$delegation_dir/$delegation_name"
+      delegation_marker_rc=0
+      delegation_out="$(delegation_marker_gc "$f")" || delegation_marker_rc=$?
+      if [ "$delegation_marker_rc" -ne 0 ]; then
+        echo "warning: gc: could not safely inspect delegation marker (rc=$delegation_marker_rc): $f" >&2
+        continue
+      fi
+      [ -z "$delegation_out" ] || printf '%s\n' "$delegation_out"
+      delegation_changes="$(printf '%s\n' "$delegation_out" |
+        awk '/^- orphan-delegation: / ||
+             /^- orphan-delegation-executor: .* -> failed$/ ||
+             /^- orphan-delegation-plan: .* -> ready$/ {n++}
+             END {print n+0}')"
+      removed=$((removed + delegation_changes))
+    done <<EOF_DELEGATION_NAMES
+$delegation_names
+EOF_DELEGATION_NAMES
+    ;;
+  1) ;;
+  20)
+    echo "warning: gc: delegation directory is not a real repo-local directory; preserved it" >&2
+    ;;
+  21)
+    echo "warning: gc: delegation directory exceeds bounds or changed; preserved it" >&2
+    ;;
+  *)
+    echo "warning: gc: delegation marker-set lock failed (rc=$delegation_dir_rc); preserved it" >&2
+    ;;
+esac
 
 # 1.5) Attempts that stopped reporting. The sweep already compacts the streams
 # of terminal attempts further down, but nothing ever closed a non-terminal one

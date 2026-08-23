@@ -33,6 +33,7 @@ VERIFY_EXPLICIT=0
 ML=0
 PLAN_TASK=""
 EXECUTOR_ID=""
+PLAN_ID=""
 PLAN_LEASE_ID=""
 PLAN_REVIEW_LEASE_ID=""
 PLAN_STATE=""
@@ -63,6 +64,7 @@ LANDING_BASE=""
 executor_soul_sha=""
 intent_plan_receipt_sha=""
 intent_plan_done_receipt_sha=""
+intent_plan_id=""
 intent_patch_sha=""
 intent_base_sha=""
 intent_receipt_sha=""
@@ -176,13 +178,14 @@ landing_append() {  # landing_append EVENT [KEY=VALUE...]
   OMS_LD_EVENT="$event" OMS_LD_ID="$LANDING_ID" OMS_LD_FILE="$LANDINGS" \
     OMS_LD_PATCH="$intent_patch" OMS_LD_PATCH_SHA="$intent_patch_sha" \
     OMS_LD_BASE_SHA="$intent_base_sha" OMS_LD_TASK="$intent_task" \
+    OMS_LD_PLAN_ID="$intent_plan_id" \
     OMS_LD_LEASE="$intent_lease" OMS_LD_PLAN_RECEIPT_SHA="$intent_plan_receipt_sha" \
     OMS_LD_PLAN_DONE_RECEIPT_SHA="$intent_plan_done_receipt_sha" \
     OMS_LD_APPROVAL="$intent_approval" \
     OMS_LD_APPROVAL_VERSION="$intent_approval_version" \
     OMS_LD_RECEIPT_SHA="$intent_receipt_sha" \
     python3 - "$@" <<'PY'
-import json, os, sys, time
+import json, os, re, sys, time
 
 row = {
     "schema": 1,
@@ -200,6 +203,11 @@ row = {
     "approval_version": os.environ["OMS_LD_APPROVAL_VERSION"],
     "receipt_sha": os.environ["OMS_LD_RECEIPT_SHA"],
 }
+plan_id = os.environ.get("OMS_LD_PLAN_ID", "")
+if plan_id:
+    if not re.fullmatch(r"plan_[0-9a-f]{32}", plan_id):
+        raise SystemExit("invalid landing plan lineage")
+    row["plan_id"] = plan_id
 for pair in sys.argv[1:]:
     key, _, value = pair.partition("=")
     if key and value:
@@ -252,7 +260,9 @@ PY
 
 # Every first intent, annotated with terminal hints. Terminal rows are appendable
 # worker-visible evidence, not authority: recovery still proves the patch/tree
-# and external receipts before treating either outcome as closed.
+# and external receipts before treating either outcome as closed. plan_id stays
+# outside the legacy canonical hash for compatibility, but terminal matching
+# requires its exact optional value and recovery carries it from the first intent.
 landing_outstanding() {
   [ -f "$LANDINGS" ] || return 0
   OMS_LD_FILE="$LANDINGS" python3 <<'PY'
@@ -314,6 +324,7 @@ for lid in order:
             except (TypeError, ValueError):
                 continue
             if (terminal_values == expected and terminal_digest == digest
+                    and terminal.get("plan_id", "") == row.get("plan_id", "")
                     and terminal.get("receipt_sha") == digest):
                 exact.add(terminal.get("event"))
     row["_receipt_sha"] = digest
@@ -482,7 +493,8 @@ plan_abandoned_receipt_converged() {
 }
 
 complete_terminal_converged() {
-  landing_lineage_exists "$intent_patch" "$intent_patch_sha" || return 1
+  landing_lineage_exists "$intent_patch" "$intent_patch_sha" \
+    "$intent_task" "$intent_plan_id" || return 1
   plan_complete_receipt_converged || return 1
   approval_terminal_converged complete
 }
@@ -587,18 +599,22 @@ finish_superseded_plan_receipts() {  # REASON
   return 1
 }
 
-landing_lineage_exists() {  # landing_lineage_exists PATCH SHA256
+landing_lineage_exists() {  # landing_lineage_exists PATCH SHA256 TASK PLAN_ID
   local patch="$1"
   local digest="$2"
+  local task="${3:-}"
+  local plan_id="${4:-}"
   local index="${OMS_ARTIFACT_INDEX:-$REPO/.oms/artifacts/index.jsonl}"
   [ -f "$index" ] && [ -n "$digest" ] && [ "$digest" != unknown ] || return 1
-  python3 - "$REPO" "$index" "$patch" "$digest" <<'PY'
+  python3 - "$REPO" "$index" "$patch" "$digest" "$task" "$plan_id" <<'PY'
 import json, os, sys
 
 repo = os.path.abspath(sys.argv[1])
 index = os.path.abspath(sys.argv[2])
 patch = os.path.abspath(sys.argv[3])
 digest = sys.argv[4]
+task_id = sys.argv[5]
+plan_id = sys.argv[6]
 try:
     real_repo = os.path.realpath(repo)
     real_patch = os.path.realpath(patch)
@@ -634,6 +650,8 @@ try:
                 and row.get("kind") == "patch-land"
                 and row.get("patch") == relative
                 and row.get("patch_sha256") == digest
+                and row.get("task_id", "") == task_id
+                and row.get("plan_id", "") == plan_id
             ):
                 found += 1
         if found > 1:
@@ -648,18 +666,20 @@ raise SystemExit(1)
 PY
 }
 
-record_landing_lineage_once() {  # record_landing_lineage_once PATCH SHA TASK
+record_landing_lineage_once() {  # record_landing_lineage_once PATCH SHA TASK PLAN_ID
   local patch="$1"
   local digest="$2"
   local task="$3"
+  local plan_id="${4:-}"
   local status
-  if landing_lineage_exists "$patch" "$digest"; then
+  if landing_lineage_exists "$patch" "$digest" "$task" "$plan_id"; then
     return 0
   else
     status=$?
   fi
   [ "$status" = 1 ] || return "$status"
-  OMS_TASK_ID="$task" ma_append_artifact_index "$REPO" patch-land "" 0 "" "$patch"
+  OMS_TASK_ID="$task" OMS_INDEX_PLAN_ID="$plan_id" \
+    ma_append_artifact_index "$REPO" patch-land "" 0 "" "$patch"
 }
 
 # Recovery is a bookkeeping pass, never a second apply: it decides from the
@@ -681,6 +701,7 @@ if [ "$RECOVER" = 1 ]; then
     LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))')"
     intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))')"
     intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))')"
+    intent_plan_id="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_id",""))' | tr -d '\r')"
     intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))')"
     intent_plan_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_receipt_sha",""))' | tr -d '\r')"
     intent_plan_done_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_done_receipt_sha",""))' | tr -d '\r')"
@@ -779,7 +800,8 @@ if [ "$RECOVER" = 1 ]; then
         fi
       fi
       if [ "$rec_ok" = 1 ] &&
-        ! record_landing_lineage_once "$intent_patch" "$current_patch_sha" "$intent_task"; then
+        ! record_landing_lineage_once "$intent_patch" "$current_patch_sha" \
+          "$intent_task" "$intent_plan_id"; then
         rec_ok=0
         echo "warning: patch-land: recovery could not verify or record lineage for $LANDING_ID" >&2
       fi
@@ -845,8 +867,36 @@ if [ -n "$EXECUTOR_ID" ]; then
 fi
 
 if [ -n "$PLAN_TASK" ]; then
-  PLAN_JSON="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$PLAN_TASK" 2>/dev/null)" ||
+  PLAN_JSON="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" \
+    evidence-snapshot --id "$PLAN_TASK" 2>/dev/null)" ||
     fail "cannot read plan task $PLAN_TASK"
+  PLAN_ID="$(printf '%s' "$PLAN_JSON" |
+    python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
+    tr -d '\r')"
+  if [ -z "$PLAN_ID" ]; then
+    "$ROOT/scripts/agent-plan.sh" --repo "$REPO" ensure-lineage >/dev/null ||
+      fail "cannot establish plan lineage before landing task $PLAN_TASK"
+    PLAN_JSON="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" \
+      evidence-snapshot --id "$PLAN_TASK" 2>/dev/null)" ||
+      fail "cannot reread plan task $PLAN_TASK after establishing lineage"
+    PLAN_ID="$(printf '%s' "$PLAN_JSON" |
+      python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
+      tr -d '\r')"
+  fi
+  case "$PLAN_ID" in
+    plan_*)
+      case "${PLAN_ID#plan_}" in *[!0-9a-f]*) fail "plan task has malformed lineage" ;; esac
+      [ "${#PLAN_ID}" -eq 37 ] || fail "plan task has malformed lineage"
+      ;;
+    *) fail "plan task has no immutable lineage" ;;
+  esac
+  export OMS_TASK_ID="$PLAN_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
+  # The receipt digest is over the stored task. plan_id is a top-level value
+  # added only by evidence-snapshot, so strip it from this in-memory copy after
+  # freezing it; do not perform a second, racy task read.
+  PLAN_JSON="$(printf '%s' "$PLAN_JSON" |
+    python3 -c 'import json,sys;d=json.load(sys.stdin);d.pop("plan_id",None);print(json.dumps(d,ensure_ascii=False))')" ||
+    fail "cannot normalize plan task snapshot $PLAN_TASK"
   PLAN_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
     python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' | tr -d '\r')" ||
     fail "cannot read lease for plan task $PLAN_TASK"
@@ -1210,6 +1260,7 @@ intent_patch="$PATCH"
 intent_patch_sha="$PATCH_SHA"
 intent_base_sha="$LANDING_BASE"
 intent_task="$PLAN_TASK"
+intent_plan_id="$PLAN_ID"
 intent_lease="$PLAN_LEASE_ID"
 intent_plan_receipt_sha="$PLAN_REVIEW_RECEIPT_SHA"
 intent_plan_done_receipt_sha="$PLAN_DONE_RECEIPT_SHA"
@@ -1301,10 +1352,9 @@ echo "patch-land: applied $SOURCE_PATCH" >&2
 # the plan/task id via OMS_TASK_ID so the row carries lineage. A failed record
 # does not unwind the land, but it must be loud: a silent miss here makes the
 # lineage unanswerable exactly when something already went wrong.
-[ -n "$PLAN_TASK" ] && export OMS_TASK_ID="$PLAN_TASK"
 receipts_ok=1
 [ "$approval_receipt_ok" = 1 ] || receipts_ok=0
-if ! record_landing_lineage_once "$PATCH" "$PATCH_SHA" "$PLAN_TASK"; then
+if ! record_landing_lineage_once "$PATCH" "$PATCH_SHA" "$PLAN_TASK" "$PLAN_ID"; then
   receipts_ok=0
   echo "warning: patch-land: patch applied but the land row could NOT be recorded" >&2
   echo "warning: patch-land: lineage for $SOURCE_PATCH is missing from .oms/artifacts/index.jsonl" >&2

@@ -690,13 +690,14 @@ PY
 # front door, and a projection that cannot be built fails closed: an
 # unverifiable coverage claim must not ride into the index looking bound.
 ma_validate_covers_ids() {
-  local repo="$1" ids="$2"
+  local repo="$1" ids="$2" lineage="" attempt=0
   command -v python3 >/dev/null 2>&1 || {
     echo "error: --covers needs python3 to validate criterion ids" >&2
     return 2
   }
-  OMS_COVERS_REPO="$repo" OMS_COVERS_IDS="$ids" \
-  OMS_COVERS_LIB="$(ma_scripts_dir)/lib" python3 -c '
+  while [ "$attempt" -lt 2 ]; do
+    lineage="$(OMS_COVERS_REPO="$repo" OMS_COVERS_IDS="$ids" \
+      OMS_COVERS_LIB="$(ma_scripts_dir)/lib" python3 -c '
 import os, re, sys
 sys.path.insert(0, os.environ["OMS_COVERS_LIB"])
 from pathlib import Path
@@ -713,19 +714,93 @@ for cid in ids:
         sys.exit(2)
 try:
     from oms_runtime.projection import build_base_envelope
-    criteria = build_base_envelope(Path(os.environ["OMS_COVERS_REPO"])).get("criteria", [])
+    envelope = build_base_envelope(Path(os.environ["OMS_COVERS_REPO"]))
+    criteria = envelope.get("criteria", [])
 except Exception as exc:
     sys.stderr.write(
         "error: covers validation needs the runtime projection and it failed: %s\n" % exc)
     sys.exit(3)
-valid = {str(item.get("id")) for item in criteria}
+by_id = {str(item.get("id")): item for item in criteria}
+valid = set(by_id)
 unknown = [cid for cid in ids if cid not in valid]
 if unknown:
     sys.stderr.write(
         "error: unknown criterion id(s): %s (%d criteria in the current envelope)\n"
         % (" ".join(unknown), len(valid)))
     sys.exit(2)
-'
+plan_scoped = [by_id[cid] for cid in ids
+               if by_id[cid].get("source") == "plan-task"]
+if not plan_scoped:
+    print("none")
+    sys.exit(0)
+lineages = {str(item.get("plan_id", "")) for item in plan_scoped}
+if len(lineages) != 1:
+    sys.stderr.write("error: plan-task covers do not share one plan lineage\n")
+    sys.exit(3)
+lineage = next(iter(lineages))
+if not re.fullmatch(r"plan_[0-9a-f]{32}", lineage):
+    print("legacy")
+else:
+    print(lineage)
+')" || return $?
+    lineage="${lineage%$'\r'}"
+    case "$lineage" in
+      none)
+        unset OMS_INDEX_PLAN_ID
+        return 0
+        ;;
+      legacy)
+        # Evidence writers are parent-owned. Upgrade a legacy plan under the
+        # plan lock, then rebuild the projection so validation and lineage come
+        # from one current snapshot. The command itself rejects harness children.
+        bash "$(ma_scripts_dir)/agent-plan.sh" --repo "$repo" ensure-lineage >/dev/null || {
+          echo "error: cannot establish plan lineage before recording --covers" >&2
+          return 2
+        }
+        attempt=$((attempt + 1))
+        ;;
+      plan_*)
+        case "${lineage#plan_}" in
+          *[!0-9a-f]*)
+            echo "error: covers validation returned malformed plan lineage" >&2
+            return 3
+            ;;
+        esac
+        [ "${#lineage}" -eq 37 ] || {
+          echo "error: covers validation returned malformed plan lineage" >&2
+          return 3
+        }
+        OMS_INDEX_PLAN_ID="$lineage"
+        export OMS_INDEX_PLAN_ID
+        return 0
+        ;;
+      *)
+        echo "error: covers validation returned malformed plan lineage" >&2
+        return 3
+        ;;
+    esac
+  done
+  echo "error: plan lineage did not stabilize while validating --covers" >&2
+  return 3
+}
+
+ma_artifact_index_shell_path() {
+  local value="$1"
+  local platform
+
+  value="${value//$'\r'/}"
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  case "$platform" in
+    *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
+      command -v cygpath >/dev/null 2>&1 || {
+        echo "error: artifact index: cygpath is required for a Windows lock path" >&2
+        return 1
+      }
+      value="$(cygpath -u "$value")" || return 1
+      value="${value//$'\r'/}"
+      ;;
+  esac
+  printf '%s\n' "$value"
 }
 
 ma_append_artifact_index() {
@@ -738,9 +813,9 @@ ma_append_artifact_index() {
   local prompt_file="${7:-}"
   local verify_exit="${8:-}"
   local source_artifact="${9:-}"
+  local repo_spelling="$repo"
   local index
-  local durable_helper
-  local retention_helper
+  local store_helper
   local prompt_hash=""
   local task_goal=""
 
@@ -749,25 +824,20 @@ ma_append_artifact_index() {
   # so: fail-closed callers trust this function's status, and "success
   # without writing" is how a receipt vanishes while its guard stays green.
   [ -n "$repo" ] || return 0
-  repo="$(cd "$repo" && pwd)" || {
+  repo="$(cd "$repo" && pwd -P)" || {
     echo "error: artifact index append: cannot resolve repo path" >&2
     return 1
   }
-  agent_memory_ensure_oms_ignore "$repo"
   index="${OMS_ARTIFACT_INDEX:-$repo/.oms/artifacts/index.jsonl}"
   local telemetry_helper
   telemetry_helper="$(ma_scripts_dir)/lib/artifact-telemetry.py"
-  durable_helper="$(ma_scripts_dir)/lib/durable-jsonl.py"
-  retention_helper="$(ma_scripts_dir)/lib/artifact-index-retention.py"
-  mkdir -p "$(dirname "$index")" || {
-    echo "error: artifact index append: cannot create $(dirname "$index")" >&2
-    return 1
-  }
+  store_helper="$(ma_scripts_dir)/lib/artifact-index-store.py"
   command -v python3 >/dev/null 2>&1 || {
     echo "error: artifact index append needs python3; row not recorded" >&2
     return 1
   }
-  python3 "$durable_helper" --label "artifact index" check "$index" || return 1
+  index="$(python3 "$store_helper" canonical --repo "$repo_spelling" --index "$index")" || return 1
+  index="$(ma_artifact_index_shell_path "$index")" || return 1
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
@@ -779,6 +849,7 @@ ma_append_artifact_index() {
   base_sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)"
 
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
+  OMS_INDEX_PLAN_ID="${OMS_INDEX_PLAN_ID:-}" \
   OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_EXECUTOR_ID="${OMS_EXECUTOR_ID:-}" OMS_INDEX_SOUL_SHA256="${OMS_SOUL_SHA256:-}" \
@@ -793,9 +864,9 @@ ma_append_artifact_index() {
   OMS_INDEX_REASONING_EFFORT="${OMS_REASONING_RESOLVED:-}" \
   OMS_INDEX_SELECTED_REASONING_EFFORT="${OMS_REASONING_SELECTED:-}" \
   OMS_INDEX_FALLBACK_REASONING_EFFORT="${OMS_REASONING_FALLBACK:-}" \
-  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$durable_helper" "$retention_helper" "$telemetry_helper" <<'EOF'
+  oms_with_file_lock "$index" python3 - "$repo" "$index" "$kind" "$provider" "$exit_code" "$artifact" "$patch_file" "$prompt_hash" "$verify_exit" "$task_goal" "$source_artifact" "$store_helper" "$telemetry_helper" <<'EOF'
 import hashlib, json, os, re, runpy, sys, time, uuid
-repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, durable_helper, retention_helper, telemetry_helper = sys.argv[1:]
+repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, store_helper, telemetry_helper = sys.argv[1:]
 event_id = "evt_" + uuid.uuid4().hex
 
 def safe_id(value):
@@ -822,7 +893,9 @@ def path_fields(label, raw):
         internal = False
     digest = file_hash(path)
     if internal:
-        return {label: os.path.relpath(path, repo), label + "_sha256": digest} if digest else {label: os.path.relpath(path, repo)}
+        relative = os.path.relpath(real, real_repo)
+        return ({label: relative, label + "_sha256": digest}
+                if digest else {label: relative})
     ext = {"name": os.path.basename(path), "owned": False}
     if digest:
         ext["sha256"] = digest
@@ -857,6 +930,12 @@ if base_sha:
 task_id = os.environ.get("OMS_INDEX_TASK_ID", "")
 if safe_id(task_id):
     row["task_id"] = task_id
+plan_id = os.environ.get("OMS_INDEX_PLAN_ID", "")
+if plan_id:
+    if not re.fullmatch(r"plan_[0-9a-f]{32}", plan_id):
+        sys.stderr.write("error: plan_id must be an immutable plan lineage\n")
+        sys.exit(3)
+    row["plan_id"] = plan_id
 delegation_id = safe_id(os.environ.get("OMS_INDEX_DELEGATION_ID", ""))
 if delegation_id:
     row["delegation_id"] = delegation_id
@@ -1001,47 +1080,9 @@ if verify_exit:
     row["verify_exit"] = int(verify_exit)
 if task_goal:
     row["task_goal"] = task_goal
-durable = runpy.run_path(durable_helper)
-row_data = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-
-# Amortized bounded retention. Explicit artifact-index prune remains the path
-# for stale-reference repair and orphan-file deletion.
-try:
-    keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
-    high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
-except ValueError:
-    keep, high = 1000, 1200
-
-# Compaction must also run BEFORE the append, not only after it: the durable
-# writer refuses a row once the ledger would cross its byte ceiling, that
-# refusal fires before the post-append retention below could ever shrink the
-# file, and the `|| true` call sites would then drop every later row
-# silently. The trigger reuses the writer's own refusal predicate so the two
-# cannot drift. A ledger whose kept rows still exceed the ceiling (giant
-# rows) stays refused — that is the writer's backstop, not a compaction bug.
-try:
-    ledger_bytes = os.path.getsize(index)
-except OSError:
-    ledger_bytes = 0
-if (keep > 0 and high >= keep and
-        ledger_bytes > durable["MAX_FILE_BYTES"] - len(row_data)):
-    with open(index, "rb") as oversized:
-        lines = oversized.read().splitlines(keepends=True)
-    lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
-    durable["write"](
-        index, b"".join(lines[-keep:]), label="artifact index",
-        max_bytes=durable["MAX_FILE_BYTES"])
-
-index_data = durable["append"](
-    index, row_data, label="artifact index", capture=True)
-
-if keep > 0 and high >= keep:
-    lines = index_data.splitlines(keepends=True)
-    if len(lines) > high:
-        lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
-        durable["write"](
-            index, b"".join(lines[-keep:]), label="artifact index",
-            max_bytes=durable["MAX_FILE_BYTES"])
+store = runpy.run_path(store_helper)
+store["ensure_oms_ignore"](repo)
+store["append_rows"](repo, index, [row])
 EOF
 }
 

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+STORE_HELPER="$ROOT_LIB/artifact-index-store.py"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
 
@@ -22,6 +23,7 @@ LIMIT_SET=0
 PRUNE_FILES=0
 PRUNE_STALE=0
 DRY_RUN=0
+APPLY=0
 REVIEW_UPTAKE=0
 TARGET_EVENTS=()
 # Counted separately because Bash 3.2 rejects ${arr[@]} on an empty array
@@ -31,7 +33,7 @@ REASON=""
 
 usage() {
   cat <<'EOF'
-Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|prune|import] [N]
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|salvage|prune|import] [N]
 
 Inspect the harness artifact index. Provider artifacts still live under
 .oms/artifacts/; this index is a compact JSONL lookup table.
@@ -70,6 +72,9 @@ Commands:
                  Idempotent; add --dry-run to list without writing.
   validate       Validate schema, lineage ids, paths, and references.
   migrate        Idempotently upgrade legacy rows and recover unique basenames.
+  salvage        Plan structural-corruption recovery without writing. Add
+                 --apply to quarantine the exact raw index and atomically
+                 replace it with complete JSON-object rows plus one receipt.
   prune [N]      Keep only the most recent N rows (default 1000); the index is
                  append-only, so prune it when it grows. Add --files to delete
                  unreferenced regular files under REPO/.oms/artifacts, or
@@ -90,6 +95,8 @@ Options:
   --dry-run      With prune, print row/file changes without changing them. With
                  resolve-superseded or resolve-recovered, list the resolutions
                  it would append.
+  --apply        With salvage, explicitly apply the planned recovery. Agent-only;
+                 normal views and writers remain strict on corrupt input.
   --review-uptake With telemetry, partition kind=delegate rows in the same
                  window into review-fed (a recorded source artifact, internal
                  or external) and direct cohorts, and report each cohort's
@@ -104,6 +111,23 @@ EOF
 fail() {
   echo "error: $*" >&2
   exit 2
+}
+
+artifact_index_shell_path() {
+  local value="$1"
+  local platform
+
+  value="${value//$'\r'/}"
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  case "$platform" in
+    *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
+      command -v cygpath >/dev/null 2>&1 ||
+        fail "cygpath is required for a Windows artifact-index lock path"
+      value="$(cygpath -u "$value")" || fail "cannot normalize Windows artifact-index path"
+      value="${value//$'\r'/}"
+      ;;
+  esac
+  printf '%s\n' "$value"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -141,6 +165,10 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=1
       shift
       ;;
+    --apply)
+      APPLY=1
+      shift
+      ;;
     --review-uptake)
       REVIEW_UPTAKE=1
       shift
@@ -149,7 +177,7 @@ while [ "$#" -gt 0 ]; do
       AS_JSON=1
       shift
       ;;
-    list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|prune)
+    list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|salvage|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
       ACTION="$1"
@@ -172,7 +200,7 @@ done
 if { [ "$ACTION" = "latest" ] || [ "$ACTION" = "latest-run" ] || [ "$ACTION" = "resolve" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
   fail "unknown argument: $LIMIT"
 fi
-if { [ "$ACTION" = "validate" ] || [ "$ACTION" = "migrate" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
+if { [ "$ACTION" = "validate" ] || [ "$ACTION" = "migrate" ] || [ "$ACTION" = "salvage" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
   fail "unknown argument: $LIMIT"
 fi
 # The sweep answers every superseded row in the index, so a window would only
@@ -199,6 +227,9 @@ fi
 if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ] && [ "$ACTION" != "resolve-superseded" ] && [ "$ACTION" != "resolve-recovered" ]; then
   fail "--dry-run is only valid with prune, resolve-superseded, or resolve-recovered"
 fi
+if [ "$APPLY" -eq 1 ] && [ "$ACTION" != "salvage" ]; then
+  fail "--apply is only valid with salvage"
+fi
 if [ "$REVIEW_UPTAKE" -eq 1 ] && [ "$ACTION" != "telemetry" ]; then
   fail "--review-uptake is only valid with telemetry"
 fi
@@ -215,18 +246,63 @@ esac
 
 # Anchor to the git worktree root so the index does not fork per subdirectory.
 REPO="$(oms_repo_root "$REPO")"
+[ -d "$REPO" ] || fail "repo does not exist: $REPO"
+REPO_SPELLING="$REPO"
+REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve repo path"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+INDEX_FILE="$(python3 "$STORE_HELPER" canonical --repo "$REPO_SPELLING" --index "$INDEX_FILE")" ||
+  fail "artifact index path is unsafe"
+INDEX_FILE="$(artifact_index_shell_path "$INDEX_FILE")"
 
 # Telemetry has two exits — empty index and populated — so the argument list is
 # built once; a flag added to one call site only would silently not apply to
 # the other. `set --` rather than an array: Bash 3.2 rejects an empty one.
 artifact_index_telemetry() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+  # Telemetry is observational, but it is still a normal index view. Refuse a
+  # partial cohort instead of letting its lenient historical parser skip a
+  # corrupt row and turn incomplete evidence into a plausible-looking rate.
+  python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'PY'
+import runpy, sys
+repo, index, store_helper = sys.argv[1:]
+runpy.run_path(store_helper)["read_index"](repo, index, missing_ok=True)
+PY
   set -- --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
   [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
   [ "$REVIEW_UPTAKE" -eq 0 ] || set -- "$@" --review-uptake
   python3 "$ROOT_LIB/artifact-telemetry.py" "$@"
 }
+
+if [ "$ACTION" = "salvage" ]; then
+  artifact_index_salvage_locked() {
+    python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" "$APPLY" <<'PY'
+import runpy, sys
+
+repo, index, store_helper, apply_raw = sys.argv[1:]
+store = runpy.run_path(store_helper)
+result = store["salvage_index"](repo, index, apply=apply_raw == "1")
+if result["healthy"]:
+    print("artifact-index: already healthy; salvage no-op")
+elif result["applied"]:
+    print(
+        "artifact-index: salvage applied; recovered=%d dropped=%d "
+        "compacted=%d quarantine=%s sha256=%s" % (
+            result["recovered_rows"], result["dropped_rows"],
+            result["compacted_rows"], result["quarantine"], result["digest"])
+    )
+else:
+    print(
+        "artifact-index: salvage plan only; recovered=%d dropped=%d "
+        "compacted=%d quarantine=%s sha256=%s; rerun with --apply" % (
+            result["recovered_rows"], result["dropped_rows"],
+            result["compacted_rows"], result["quarantine"], result["digest"])
+    )
+PY
+  }
+  oms_with_file_lock "$INDEX_FILE" artifact_index_salvage_locked
+  exit 0
+fi
 
 if [ ! -s "$INDEX_FILE" ]; then
   if [ "$ACTION" = "telemetry" ]; then
@@ -260,8 +336,6 @@ if [ ! -s "$INDEX_FILE" ]; then
   fi
   fail "no artifact index at $INDEX_FILE"
 fi
-command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-
 if [ "$ACTION" = "telemetry" ]; then
   artifact_index_telemetry
   exit 0
@@ -284,13 +358,14 @@ if [ "$ACTION" = "resolve" ]; then
     # overwrite the scalar and silently resolve only the last one.
     OMS_ARTIFACT_REASON="$REASON" \
     OMS_ARTIFACT_PROVIDER="${OMS_AGENT:-unknown}" \
-      python3 - "$INDEX_FILE" "$ROOT_LIB/artifact-index-retention.py" \
+      python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" \
         "${TARGET_EVENTS[@]}" <<'PY'
-import datetime, json, os, runpy, shutil, sys, tempfile, uuid
+import datetime, json, os, runpy, sys, uuid
 
-index, retention_helper = sys.argv[1:3]
+repo, index, store_helper = sys.argv[1:4]
+store = runpy.run_path(store_helper)
 target_ids = []
-for value in sys.argv[3:]:
+for value in sys.argv[4:]:
     # The same id twice is one caller's copy-paste, not two resolutions.
     if value not in target_ids:
         target_ids.append(value)
@@ -298,20 +373,15 @@ reason = os.environ["OMS_ARTIFACT_REASON"]
 provider = os.environ["OMS_ARTIFACT_PROVIDER"]
 rows = []
 ids = set()
-with open(index, encoding="utf-8", errors="replace") as handle:
-    for lineno, line in enumerate(handle, 1):
-        try:
-            row = json.loads(line)
-        except Exception as exc:
-            raise SystemExit(f"error: invalid JSON at artifact index line {lineno}: {exc}")
-        if not isinstance(row, dict):
-            raise SystemExit(f"error: artifact index line {lineno} is not an object")
-        event_id = row.get("event_id")
-        if isinstance(event_id, str):
-            if event_id in ids:
-                raise SystemExit(f"error: duplicate artifact event id: {event_id}")
-            ids.add(event_id)
-        rows.append(row)
+snapshot = store["read_index"](repo, index)
+for lineno, line in enumerate(snapshot.splitlines(), 1):
+    row = json.loads(line.decode("utf-8"))
+    event_id = row.get("event_id")
+    if isinstance(event_id, str):
+        if event_id in ids:
+            raise SystemExit(f"error: duplicate artifact event id: {event_id}")
+        ids.add(event_id)
+    rows.append(row)
 
 # Every target is validated before anything is appended, so a batch with one
 # bad id leaves the index exactly as it was rather than half-resolved.
@@ -372,35 +442,7 @@ for target_id, target in pending:
     if reason:
         row["reason"] = reason
     new_rows.append(row)
-with open(index, "a", encoding="utf-8") as handle:
-    for row in new_rows:
-        handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
-    handle.flush()
-    os.fsync(handle.fileno())
-
-try:
-    keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
-    high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
-except ValueError:
-    keep, high = 1000, 1200
-if keep > 0 and high >= keep:
-    with open(index, "rb") as handle:
-        lines = handle.readlines()
-    if len(lines) > high:
-        lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
-        real = os.path.realpath(index)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real))
-        try:
-            with os.fdopen(fd, "wb") as out:
-                out.writelines(lines[-keep:])
-            shutil.copymode(real, tmp)
-            os.replace(tmp, real)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+store["append_rows"](repo, index, new_rows, expected=snapshot)
 for target_id, _target in pending:
     print(f"artifact-index: resolved {target_id}")
 PY
@@ -410,25 +452,41 @@ PY
 fi
 
 if [ "$ACTION" = "validate" ]; then
-  python3 - "$REPO" "$INDEX_FILE" <<'PY'
-import json, os, re, sys
-repo, index = sys.argv[1:]
+  python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'PY'
+import os, re, runpy, sys
+repo, index, store_helper = sys.argv[1:]
+store = runpy.run_path(store_helper)
 required = {"schema", "event_id", "operation_id", "artifact_id", "ts", "kind", "provider", "exit"}
 ids = set()
 parsed = []
 errors = warnings = rows = 0
-for lineno, line in enumerate(open(index, encoding="utf-8", errors="replace"), 1):
-    if not line.strip():
-        continue
-    rows += 1
-    try:
-        row = json.loads(line)
-    except Exception as exc:
-        print(f"BAD line {lineno}: invalid JSON: {exc}")
+
+# Validate the same bounded no-follow snapshot and LF-only physical rows used
+# by every normal store view/mutation. Python's file iterator accepts bare CR
+# as data but json.loads accepts NaN/Infinity, so neither is the shared parser.
+raw = store["read_raw_index"](repo, index)
+physical_rows = raw.split(b"\n")
+final_terminated = raw.endswith(b"\n")
+if final_terminated:
+    physical_rows = physical_rows[:-1]
+elif not raw:
+    physical_rows = []
+for lineno, payload in enumerate(physical_rows, 1):
+    if not payload.strip():
+        print(f"BAD line {lineno}: blank JSONL row")
         errors += 1
         continue
-    if not isinstance(row, dict):
-        print(f"BAD line {lineno}: row is not an object"); errors += 1; continue
+    rows += 1
+    terminated = final_terminated or lineno < len(physical_rows)
+    if not terminated:
+        print(f"BAD line {lineno}: partial final JSONL row")
+        errors += 1
+    try:
+        row = store["parse_index_line"](payload + b"\n", lineno)
+    except ValueError as exc:
+        print(f"BAD line {lineno}: {exc}")
+        errors += 1
+        continue
     missing = sorted(required - row.keys())
     if missing:
         print(f"BAD line {lineno}: missing {','.join(missing)}"); errors += 1
@@ -446,9 +504,11 @@ for lineno, line in enumerate(open(index, encoding="utf-8", errors="replace"), 1
             not re.match(r"^[0-9a-f]{64}$", soul_sha)):
         print(f"BAD line {lineno}: invalid soul_sha256"); errors += 1
     eid = row.get("event_id")
-    if eid in ids:
+    if not isinstance(eid, str) or not eid:
+        print(f"BAD line {lineno}: invalid event_id"); errors += 1
+    elif eid in ids:
         print(f"BAD line {lineno}: duplicate event_id {eid}"); errors += 1
-    elif isinstance(eid, str):
+    else:
         ids.add(eid)
     parsed.append((lineno, row))
     for key in ("artifact", "patch", "source"):
@@ -510,17 +570,27 @@ fi
 
 if [ "$ACTION" = "migrate" ]; then
   artifact_index_migrate_locked() {
-    python3 - "$REPO" "$INDEX_FILE" <<'PY'
-import hashlib, json, os, re, shutil, sys, tempfile
-repo, index = sys.argv[1:]
+    python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'PY'
+import hashlib, json, os, re, runpy, stat, sys
+repo, index, store_helper = sys.argv[1:]
+store = runpy.run_path(store_helper)
 root = os.path.join(repo, ".oms", "artifacts")
 all_files = {}
 for dirpath, _, files in os.walk(root):
     for name in files:
-        all_files.setdefault(name, []).append(os.path.join(dirpath, name))
+        candidate = os.path.join(dirpath, name)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            all_files.setdefault(name, []).append(candidate)
 
 def digest(path):
-    if not path or not os.path.isfile(path): return ""
+    if not path: return ""
+    try: info = os.lstat(path)
+    except OSError: return ""
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode): return ""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""): h.update(chunk)
@@ -538,7 +608,7 @@ def migrate_path(row, key):
     try: internal = os.path.commonpath([real_repo, real]) == real_repo
     except ValueError: internal = False
     if internal and os.path.exists(path):
-        rel = os.path.relpath(path, repo)
+        rel = os.path.relpath(real, real_repo)
         if row[key] != rel: row[key] = rel; return True
         return False
     matches = all_files.get(os.path.basename(value), [])
@@ -552,9 +622,9 @@ def migrate_path(row, key):
     return True
 
 rows = []; changed = legacy = 0
-for lineno, line in enumerate(open(index, encoding="utf-8", errors="replace"), 1):
-    if not line.strip(): continue
-    row = json.loads(line)
+snapshot = store["read_index"](repo, index)
+for lineno, line in enumerate(snapshot.splitlines(), 1):
+    row = json.loads(line.decode("utf-8"))
     before = json.dumps(row, sort_keys=True, ensure_ascii=False)
     was_legacy = row.get("schema") != 1
     if was_legacy: legacy += 1
@@ -572,17 +642,16 @@ for lineno, line in enumerate(open(index, encoding="utf-8", errors="replace"), 1
     row.setdefault("artifact_id", "sha256:" + (primary or hashlib.sha256(row["event_id"].encode()).hexdigest()))
     if json.dumps(row, sort_keys=True, ensure_ascii=False) != before: changed += 1
     rows.append(row)
-real = os.path.realpath(index)
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real))
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as out:
-        for row in rows: out.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
-    shutil.copymode(real, tmp); os.replace(tmp, real)
-except Exception:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-print(f"artifact-index: migrated {changed} row(s); legacy={legacy}; total={len(rows)}")
+body = b"".join(
+    (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    for row in rows
+)
+configured_keep, high_water = store["retention_limits"]()
+migration_keep = (max(len(rows), 1)
+                  if len(rows) <= high_water else configured_keep)
+stored = store["replace_bytes"](
+    repo, index, body, keep=migration_keep, expected=snapshot)
+print(f"artifact-index: migrated {changed} row(s); legacy={legacy}; total={len(stored.splitlines())}")
 PY
   }
   oms_with_file_lock "$INDEX_FILE" artifact_index_migrate_locked
@@ -591,10 +660,7 @@ fi
 
 if [ "$ACTION" = "prune" ]; then
   artifact_index_prune_locked() {
-  local before
   local tmp
-
-  before="$(wc -l < "$INDEX_FILE" | tr -d ' ')"
 
   # Stale sweep: drop rows whose referenced artifact or patch is gone. This is
   # what `validate` reports and what nothing could repair — the retention prune
@@ -602,11 +668,12 @@ if [ "$ACTION" = "prune" ]; then
   # discards good ones, and the global rules forbid editing .oms by hand.
   # Deliberately independent of --keep: a missing file is not an age question.
   if [ "$PRUNE_STALE" -eq 1 ]; then
-    tmp="$(mktemp)" || fail "mktemp failed"
-    OMS_STALE_DRY="$DRY_RUN" python3 - "$REPO" "$INDEX_FILE" "$tmp" <<'EOF' || fail "stale sweep failed"
-import json, os, sys
+    OMS_STALE_DRY="$DRY_RUN" python3 - "$REPO" "$INDEX_FILE" "$STORE_HELPER" <<'EOF' || fail "stale sweep failed"
+import json, os, runpy, sys
 
-repo, index, out = sys.argv[1:4]
+repo, index, store_helper = sys.argv[1:4]
+store = runpy.run_path(store_helper)
+dry_run = os.environ.get("OMS_STALE_DRY") == "1"
 kept = []
 
 def present(row):
@@ -621,210 +688,143 @@ def present(row):
     return True
 
 parsed = []
-with open(index, encoding="utf-8", errors="replace") as handle:
-    for line in handle:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except Exception:
-            row = None          # unparseable rows are validate's business
-        parsed.append((line, row))
+snapshot = store["read_index"](repo, index)
+for line in snapshot.splitlines(keepends=True):
+    parsed.append((line, json.loads(line.decode("utf-8"))))
 
-surviving = set()
-for line, row in parsed:
-    if not isinstance(row, dict) or not present(row):
-        continue
-    event_id = row.get("event_id")
-    if isinstance(event_id, str) and event_id:
-        surviving.add(event_id)
+candidates = [item for item in parsed if present(item[1])]
+while candidates:
+    id_indices = {}
+    for ordinal, (_line, row) in enumerate(candidates):
+        event_id = row.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            id_indices.setdefault(event_id, []).append(ordinal)
+    by_id = {
+        event_id: indices[0]
+        for event_id, indices in id_indices.items()
+        if len(indices) == 1
+    }
+    filtered = []
+    changed = False
+    for ordinal, item in enumerate(candidates):
+        _line, row = item
+        if row.get("kind") == "artifact-resolution":
+            target_index = by_id.get(row.get("resolves_event_id"))
+            if target_index is None or target_index >= ordinal:
+                changed = True
+                continue
+        filtered.append(item)
+    candidates = filtered
+    if not changed:
+        break
 
-for line, row in parsed:
-    if isinstance(row, dict):
-        if not present(row):
-            continue
-        # A resolution says why an earlier failure is closed. Once that row is
-        # gone the resolution points at nothing, which is exactly the dangling
-        # reference validate reports and no other front door can repair -- this
-        # sweep would otherwise create it while removing a different one.
-        target = row.get("resolves_event_id")
-        if isinstance(target, str) and target and target not in surviving:
-            continue
-    kept.append(line)
+kept = [line for line, _row in candidates]
 
-with open(out, "w", encoding="utf-8") as handle:
-    for line in kept:
-        handle.write(line if line.endswith("\n") else line + "\n")
+before = len(parsed)
+after = len(kept)
+stale = before - after
+if not stale:
+    print("artifact-index: %d rows, no stale references" % before)
+else:
+    # Stale repair is deliberately independent of --keep. Preserve every
+    # survivor by count; only the hard byte ceiling may require extra removal,
+    # and predict/report that separately instead of calling it stale cleanup.
+    survivors = after
+    bounded = store["_bounded"](
+        kept, max(survivors, 1), store["MAX_INDEX_BYTES"])
+    final = len(bounded.splitlines())
+    byte_drops = survivors - final
+    if dry_run:
+        print("artifact-index: would drop %d stale row(s), %d -> %d" %
+              (stale, before, final))
+        if byte_drops:
+            print("artifact-index: byte retention would compact %d additional row(s)" %
+                  byte_drops)
+    else:
+        stored = store["replace_bytes"](
+            repo, index, bounded, keep=max(survivors, 1), expected=snapshot)
+        final = len(stored.splitlines())
+        print("artifact-index: dropped %d stale row(s), %d -> %d" %
+              (stale, before, final))
+        if byte_drops:
+            print("artifact-index: byte retention compacted %d additional row(s)" %
+                  byte_drops)
 EOF
-    dropped="$(python3 -c "
-import sys
-print(open(sys.argv[1]).read().count(chr(10)))" "$tmp")"
-    stale="$((before - dropped))"
-    if [ "$stale" -eq 0 ]; then
-      rm -f "$tmp"
-      echo "artifact-index: $before rows, no stale references"
-      exit 0
-    fi
-    if [ "$DRY_RUN" -eq 1 ]; then
-      rm -f "$tmp"
-      echo "artifact-index: would drop $stale stale row(s), $before -> $dropped"
-      exit 0
-    fi
-    python3 - "$INDEX_FILE" "$tmp" <<'EOF' || fail "atomic index replace failed"
-import os, shutil, sys, tempfile
-index, kept = sys.argv[1], sys.argv[2]
-real = os.path.realpath(index)
-fd, tmp2 = tempfile.mkstemp(dir=os.path.dirname(real))
-try:
-    with os.fdopen(fd, "wb") as out, open(kept, "rb") as src:
-        shutil.copyfileobj(src, out)
-    shutil.copymode(real, tmp2)
-    os.replace(tmp2, real)
-except Exception:
-    os.unlink(tmp2)
-    raise
-EOF
-    rm -f "$tmp"
-    echo "artifact-index: dropped $stale stale row(s), $before -> $dropped"
     exit 0
   fi
 
-  if [ "$before" -le "$LIMIT" ] && [ "$PRUNE_FILES" -eq 0 ]; then
-    echo "artifact-index: $before rows, within keep=$LIMIT; nothing pruned"
-    exit 0
+  tmp=""
+  if [ "$PRUNE_FILES" -eq 1 ]; then
+    tmp="$(mktemp)" || fail "mktemp failed"
   fi
+  python3 - "$REPO" "$INDEX_FILE" "$tmp" "$STORE_HELPER" "$LIMIT" \
+    "$DRY_RUN" <<'EOF' || fail "artifact retention failed"
+import runpy, sys
 
-  tmp="$(mktemp)" || fail "mktemp failed"
+repo, index, kept_path, store_helper, keep_raw, dry_raw = sys.argv[1:]
+keep = int(keep_raw)
+dry = dry_raw == "1"
+store = runpy.run_path(store_helper)
 
-  if [ "$before" -le "$LIMIT" ]; then
-    cat "$INDEX_FILE" > "$tmp"
-    echo "artifact-index: $before rows, within keep=$LIMIT; nothing pruned"
-  else
-    python3 "$ROOT_LIB/artifact-index-retention.py" \
-      --input "$INDEX_FILE" --output "$tmp" --keep "$LIMIT" || fail "artifact retention failed"
-    kept="$(wc -l < "$tmp" | tr -d ' ')"
-    if [ "$DRY_RUN" -eq 1 ]; then
-      echo "artifact-index: would prune $before -> $kept rows"
-    else
-      # Atomic replace at the symlink TARGET: a truncate-then-write here left
-      # a corrupt index if the prune was killed mid-write. Resolving realpath
-      # keeps a user-symlinked index working, and the mode is copied over.
-      # $tmp itself must survive for the --files step below.
-      python3 - "$INDEX_FILE" "$tmp" <<'EOF' || fail "atomic index replace failed"
-import os, shutil, sys, tempfile
-index, kept = sys.argv[1], sys.argv[2]
-real = os.path.realpath(index)
-fd, tmp2 = tempfile.mkstemp(dir=os.path.dirname(real))
-try:
-    with os.fdopen(fd, "wb") as out, open(kept, "rb") as src:
-        shutil.copyfileobj(src, out)
-    shutil.copymode(real, tmp2)
-    os.replace(tmp2, real)
-except Exception:
-    os.unlink(tmp2)
-    raise
+# One immutable snapshot supplies the decision, replacement CAS, and the
+# orphan reference set written to kept_path. A newly appended reference can
+# never be overwritten with an older body and then have its file deleted.
+snapshot = store["read_index"](repo, index)
+lines = snapshot.splitlines(keepends=True)
+before = len(lines)
+if before > keep or len(snapshot) > store["MAX_INDEX_BYTES"]:
+    body = store["_bounded"](lines, keep, store["MAX_INDEX_BYTES"])
+else:
+    body = snapshot
+kept = len(body.splitlines())
+
+if body == snapshot:
+    print("artifact-index: %d rows, within keep=%d; nothing pruned" %
+          (before, keep))
+elif dry:
+    print("artifact-index: would prune %d -> %d rows" % (before, kept))
+else:
+    stored = store["replace_bytes"](
+        repo, index, body, keep=keep, expected=snapshot)
+    body = stored
+    kept = len(body.splitlines())
+    print("artifact-index: pruned %d -> %d rows" % (before, kept))
+
+if kept_path:
+    with open(kept_path, "wb") as output:
+        output.write(body)
 EOF
-      echo "artifact-index: pruned $before -> $kept rows"
-    fi
-  fi
 
   if [ "$PRUNE_FILES" -eq 1 ]; then
-    python3 - "$REPO" "$INDEX_FILE" "$tmp" "$DRY_RUN" "${OMS_ARTIFACT_ORPHAN_GRACE:-86400}" <<'EOF'
-import json, os, stat, sys, time
+    python3 - "$REPO" "$INDEX_FILE" "$tmp" "$DRY_RUN" \
+      "${OMS_ARTIFACT_ORPHAN_GRACE:-86400}" "$STORE_HELPER" <<'EOF'
+import runpy, sys
 
-repo, index_file, kept_index, dry, grace_raw = sys.argv[1:]
-dry = dry == "1"
+repo, index_file, kept_index, dry, grace_raw, store_helper = sys.argv[1:]
 try:
-    grace = max(0, int(grace_raw))
+    grace = int(grace_raw)
 except ValueError:
     raise SystemExit("error: OMS_ARTIFACT_ORPHAN_GRACE must be a non-negative integer")
-now = time.time()
-artifacts_root = os.path.realpath(os.path.join(repo, ".oms", "artifacts"))
-index_real = os.path.realpath(index_file)
-
-
-def inside(path, root):
-    try:
-        return os.path.commonpath([path, root]) == root
-    except ValueError:
-        return False
-
-
-def resolve_index_path(value):
-    if not isinstance(value, str) or not value:
-        return None
-    candidate = value if os.path.isabs(value) else os.path.join(repo, value)
-    real = os.path.realpath(candidate)
-    if not inside(real, artifacts_root):
-        return None
-    return real
-
-
-referenced = set()
-with open(kept_index) as f:
-    for line in f:
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        for key in ("artifact", "patch", "source"):
-            resolved = resolve_index_path(row.get(key))
-            if resolved:
-                referenced.add(resolved)
-
-orphans = []
-fresh = 0
-for dirpath, dirnames, filenames in os.walk(artifacts_root, followlinks=False):
-    dirnames[:] = [name for name in dirnames if not name.endswith(".lock")]
-    for name in filenames:
-        path = os.path.join(dirpath, name)
-        try:
-            st = os.stat(path, follow_symlinks=False)
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        real = os.path.realpath(path)
-        if not inside(real, artifacts_root):
-            continue
-        if real == index_real or name in ("index.jsonl", ".gitignore") or name.endswith(".lock"):
-            continue
-        if real not in referenced:
-            if now - st.st_mtime >= grace:
-                orphans.append(path)
-            else:
-                fresh += 1
-
-count = 0
-for path in sorted(orphans):
-    rel = os.path.relpath(path, repo)
-    if dry:
-        print(f"would delete: {rel}")
-    else:
-        try:
-            st = os.stat(path, follow_symlinks=False)
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        os.unlink(path)
-        print(f"deleted: {rel}")
-    count += 1
-
-if dry:
-    print(f"artifact-index: would delete {count} orphan file(s)")
+store = runpy.run_path(store_helper)
+with open(kept_index, "rb") as source:
+    kept = source.read()
+changed, fresh = store["delete_orphans"](
+    repo, index_file, kept, dry_run=dry == "1", grace=grace)
+for relative in changed:
+    print(("would delete: " if dry == "1" else "deleted: ") + relative)
+if dry == "1":
+    print("artifact-index: would delete %d orphan file(s)" % len(changed))
 else:
-    print(f"artifact-index: deleted {count} orphan file(s)")
+    print("artifact-index: deleted %d orphan file(s)" % len(changed))
 if fresh:
-    # "deleted 0" with no explanation reads as a broken remedy when the
-    # unindexed files simply have not aged past the grace window yet.
     print(
-        f"artifact-index: kept {fresh} recent unindexed file(s) inside the "
-        f"{grace}s grace window (in-flight writers; they age out or get indexed)"
+        "artifact-index: kept %d recent unindexed file(s) inside the %ds "
+        "grace window (in-flight writers; they age out or get indexed)" %
+        (fresh, grace)
     )
 EOF
   fi
-  rm -f "$tmp"
+  [ -z "$tmp" ] || rm -f "$tmp"
 }
 
   oms_with_file_lock "$INDEX_FILE" artifact_index_prune_locked
@@ -837,21 +837,18 @@ fi
 # the index lock, because only they append.
 artifact_index_view() {
   OMS_ARTIFACT_PROVIDER="${OMS_AGENT:-unknown}" \
-    python3 - "$INDEX_FILE" "$ACTION" "$LIMIT" "$AS_JSON" \
-      "$ROOT_LIB/artifact-index-retention.py" "$DRY_RUN" <<'EOF'
-import datetime, json, os, re, runpy, shutil, sys, tempfile, uuid
+    python3 - "$REPO" "$INDEX_FILE" "$ACTION" "$LIMIT" "$AS_JSON" \
+      "$STORE_HELPER" "$DRY_RUN" <<'EOF'
+import datetime, json, os, re, runpy, sys, uuid
 
-path, action, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
-as_json = sys.argv[4] == "1"
-retention_helper, dry_run = sys.argv[5], sys.argv[6] == "1"
+repo, path, action, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+as_json = sys.argv[5] == "1"
+store_helper, dry_run = sys.argv[6], sys.argv[7] == "1"
+store = runpy.run_path(store_helper)
+snapshot = store["read_index"](repo, path)
 all_rows = []
-with open(path) as f:
-    for line in f:
-        try:
-            r = json.loads(line)
-        except Exception:
-            continue
-        all_rows.append(r)
+for line in snapshot.splitlines():
+    all_rows.append(json.loads(line.decode("utf-8")))
 
 id_counts = {}
 for r in all_rows:
@@ -1042,9 +1039,9 @@ if action == "resolve-superseded":
         sys.exit(0)
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(path, "a", encoding="utf-8") as handle:
-        for event_id, target, winner in pending:
-            handle.write(json.dumps({
+    resolutions = []
+    for event_id, target, winner in pending:
+        resolutions.append({
                 "schema": 1,
                 "event_id": "evt_resolve_" + uuid.uuid4().hex,
                 "operation_id": target.get("operation_id"),
@@ -1057,35 +1054,8 @@ if action == "resolve-superseded":
                 "resolves_event_id": event_id,
                 "resolution": "resolved",
                 "reason": "superseded by %s (same patch bytes later succeeded)" % winner,
-            }, ensure_ascii=False, allow_nan=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-
-    # Same retention envelope as the hand-driven resolve path: an automatic
-    # writer must not be the one that grows the index past its bound.
-    try:
-        keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
-        high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
-    except ValueError:
-        keep, high = 1000, 1200
-    if keep > 0 and high >= keep:
-        with open(path, "rb") as handle:
-            lines = handle.readlines()
-        if len(lines) > high:
-            lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
-            real = os.path.realpath(path)
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real))
-            try:
-                with os.fdopen(fd, "wb") as out:
-                    out.writelines(lines[-keep:])
-                shutil.copymode(real, tmp)
-                os.replace(tmp, real)
-            except Exception:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+            })
+    store["append_rows"](repo, path, resolutions, expected=snapshot)
     for event_id, _target, winner in pending:
         print("artifact-index: resolved %s (superseded by %s)" % (event_id, winner))
     print("artifact-index: %d superseded failure(s) resolved" % len(pending))
@@ -1111,9 +1081,9 @@ if action == "resolve-recovered":
         sys.exit(0)
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(path, "a", encoding="utf-8") as handle:
-        for event_id, target, winner in pending:
-            handle.write(json.dumps({
+    resolutions = []
+    for event_id, target, winner in pending:
+        resolutions.append({
                 "schema": 1,
                 "event_id": "evt_resolve_" + uuid.uuid4().hex,
                 "operation_id": target.get("operation_id"),
@@ -1127,34 +1097,8 @@ if action == "resolve-recovered":
                 "resolution": "resolved",
                 "reason": "recovered %s by %s (same provider and kind later succeeded)" %
                           (event_id, winner),
-            }, ensure_ascii=False, allow_nan=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-
-    # Match both existing resolution writers' retention envelope.
-    try:
-        keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
-        high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
-    except ValueError:
-        keep, high = 1000, 1200
-    if keep > 0 and high >= keep:
-        with open(path, "rb") as handle:
-            lines = handle.readlines()
-        if len(lines) > high:
-            lines = runpy.run_path(retention_helper)["retained_lines"](lines, keep)
-            real = os.path.realpath(path)
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real))
-            try:
-                with os.fdopen(fd, "wb") as out:
-                    out.writelines(lines[-keep:])
-                shutil.copymode(real, tmp)
-                os.replace(tmp, real)
-            except Exception:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+            })
+    store["append_rows"](repo, path, resolutions, expected=snapshot)
     for event_id, _target, winner in pending:
         print("artifact-index: resolved %s (recovered by %s)" % (event_id, winner))
     print("artifact-index: %d recovered failure(s) resolved" % len(pending))

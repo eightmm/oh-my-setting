@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import collections
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from . import RUNTIME_SCHEMA
-from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, git_head, parse_path_list, read_jsonl, relative_path, safe_id, sha256_file, utc_now
+from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, git_head, install_root, parse_path_list, read_jsonl, relative_path, safe_id, sha256_file, utc_now
 from .projection import build_base_envelope, finalize_envelope
 
 VALID_STATUSES = {"verified", "failed", "inconclusive", "skipped_with_reason", "stale"}
+PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{32}$")
 
 
 def _artifact_paths(repo: Path) -> List[Path]:
@@ -135,9 +138,31 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
     if status not in VALID_STATUSES:
         raise CoreError("unsupported evidence status: %s" % status)
     base = build_base_envelope(repo)
-    criterion_ids = {str(item.get("id")) for item in base.get("criteria", [])}
-    if criterion_id not in criterion_ids:
+    criteria_by_id = {str(item.get("id")): item for item in base.get("criteria", [])}
+    if criterion_id not in criteria_by_id:
         raise CoreError("unknown current acceptance criterion: %s" % criterion_id)
+    criterion = criteria_by_id[criterion_id]
+    plan_id = ""
+    if criterion.get("source") == "plan-task":
+        plan_id = str(criterion.get("plan_id", ""))
+        if not PLAN_ID_RE.fullmatch(plan_id):
+            # Bind is already denied to harness children by the runtime child
+            # policy. Let the parent-owned plan primitive upgrade a legacy plan
+            # under its own lock, then take one new immutable projection.
+            command = ["bash", str(install_root() / "scripts" / "agent-plan.sh"),
+                       "--repo", str(repo), "ensure-lineage"]
+            completed = subprocess.run(command, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE, text=True,
+                                       check=False)
+            if completed.returncode != 0:
+                raise CoreError("cannot establish plan lineage before binding evidence")
+            base = build_base_envelope(repo)
+            criteria_by_id = {str(item.get("id")): item
+                              for item in base.get("criteria", [])}
+            criterion = criteria_by_id.get(criterion_id, {})
+            plan_id = str(criterion.get("plan_id", ""))
+            if criterion.get("source") != "plan-task" or not PLAN_ID_RE.fullmatch(plan_id):
+                raise CoreError("plan changed while establishing evidence lineage")
     existing = {evidence_ref(row) for row in artifact_rows(repo)}
     task_ref = "task-verification:%s" % base.get("task", {}).get("task_id", "")
     if ref not in existing and ref != task_ref:
@@ -146,6 +171,8 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
         raise CoreError("task verification is not fresh and cannot be bound")
     dependency_digests = _dependency_digests(repo, parse_path_list(list(dependencies)))
     row = {"schema": 1, "binding_id": "binding-%s" % __import__("uuid").uuid4().hex, "action": "bind", "created_at": utc_now(), "criterion_id": criterion_id, "evidence_ref": ref, "status": status, "evidence_type": bounded_line(evidence_type, 80), "note": bounded_line(note, 300), "verified_head": None if dependency_digests else (git_head(repo) or None), "dependency_digests": dependency_digests}
+    if plan_id:
+        row["plan_id"] = plan_id
     append_jsonl(repo / ".oms" / "evidence" / "bindings.jsonl", row)
     return row
 
@@ -183,14 +210,27 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     criteria = list(base_envelope.get("criteria", []))
     repo_info = base_envelope.get("repo", {}) if isinstance(base_envelope.get("repo"), Mapping) else {}
     head = str(repo_info.get("head") or "")
-    valid_ids = {str(item.get("id")) for item in criteria}
+    criteria_by_id = {str(item.get("id")): item for item in criteria}
+    valid_ids = set(criteria_by_id)
     by_criterion: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
     unbound: List[Dict[str, Any]] = []
     rows = artifact_rows(repo)
     row_by_ref = {evidence_ref(row): row for row in rows if evidence_ref(row)}
     plan_criteria = {str(item.get("id")): str(item.get("command_digest", "")) for item in criteria if item.get("source") == "plan" and item.get("command_digest")}
     for row in rows:
-        refs = [ref for ref in criterion_refs(row) if ref in valid_ids]
+        refs = []
+        for ref in criterion_refs(row):
+            criterion = criteria_by_id.get(ref)
+            if not criterion:
+                continue
+            if criterion.get("source") == "plan-task":
+                expected_plan = str(criterion.get("plan_id", ""))
+                observed_plan = str(row.get("plan_id", ""))
+                if (not PLAN_ID_RE.fullmatch(expected_plan) or
+                        not PLAN_ID_RE.fullmatch(observed_plan) or
+                        observed_plan != expected_plan):
+                    continue
+            refs.append(ref)
         support = "explicit-artifact"
         if not refs and str(row.get("kind", "")).lower() == "acceptance":
             observed = str(row.get("accept_sha256", ""))
@@ -205,10 +245,12 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
             # historical rows, no schema change. Rows whose task matches no
             # current plan task stay inert.
             admitted_task = str(row.get("task_id", ""))
-            if admitted_task:
+            admitted_plan = str(row.get("plan_id", ""))
+            if admitted_task and PLAN_ID_RE.fullmatch(admitted_plan):
                 refs = [str(item.get("id")) for item in criteria
                         if item.get("source") == "plan-task"
-                        and str(item.get("plan_task_id")) == admitted_task]
+                        and str(item.get("plan_task_id")) == admitted_task
+                        and str(item.get("plan_id", "")) == admitted_plan]
                 if refs:
                     support = "patch-admission-receipt"
                     # Admission rows speak through their exit code, not a
@@ -229,6 +271,14 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
         criterion_id = str(binding.get("criterion_id", ""))
         if criterion_id not in valid_ids:
             continue
+        criterion = criteria_by_id[criterion_id]
+        if criterion.get("source") == "plan-task":
+            expected_plan = str(criterion.get("plan_id", ""))
+            observed_plan = str(binding.get("plan_id", ""))
+            if (not PLAN_ID_RE.fullmatch(expected_plan) or
+                    not PLAN_ID_RE.fullmatch(observed_plan) or
+                    observed_plan != expected_plan):
+                continue
         merged = dict(row_by_ref.get(str(binding.get("evidence_ref", "")), {}))
         merged.update(binding)
         by_criterion[criterion_id].append(_evidence_item(merged, repo, support="explicit-binding", head=head))

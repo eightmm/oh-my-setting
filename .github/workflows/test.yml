@@ -106,6 +106,26 @@ jobs:
           OH_MY_SETTING_LINK_MODE: ${{ matrix.link_mode }}
         run: bash tests/install-lifecycle-smoke.sh
 
+  # Python's native Windows runtime cannot open/fsync a directory descriptor.
+  # Keep the durable state writers on their pathname branch under Git Bash,
+  # where the harness actually runs for Windows users.
+  windows_durable_writer:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: native durable artifact store
+        run: bash tests/windows-durable-writer-smoke.sh
+      - name: native process liveness
+        run: |
+          bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe
+          bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor
+
   # The one parser that rejects a here-document inside $( ) whose body holds an
   # odd apostrophe, and the one userland where BSD sed/awk/date differ. Both
   # classes are invisible to a Linux-only gate, and both have shipped breakage.
@@ -139,7 +159,7 @@ jobs:
   # cancelled, or skipped dependency.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, install_e2e, portability_macos, python39]
+    needs: [lint, focused, smoke_shard, install_e2e, windows_durable_writer, portability_macos, python39]
     runs-on: ubuntu-latest
     steps:
       - name: require every verification job
@@ -148,6 +168,7 @@ jobs:
           FOCUSED_RESULT: ${{ needs.focused.result }}
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
+          WINDOWS_DURABLE_WRITER_RESULT: ${{ needs.windows_durable_writer.result }}
           PORTABILITY_MACOS_RESULT: ${{ needs.portability_macos.result }}
           PYTHON39_RESULT: ${{ needs.python39.result }}
         run: |
@@ -157,6 +178,7 @@ jobs:
             "$FOCUSED_RESULT" \
             "$SMOKE_SHARD_RESULT" \
             "$INSTALL_E2E_RESULT" \
+            "$WINDOWS_DURABLE_WRITER_RESULT" \
             "$PORTABILITY_MACOS_RESULT" \
             "$PYTHON39_RESULT"; do
             if [ "$result" != success ]; then

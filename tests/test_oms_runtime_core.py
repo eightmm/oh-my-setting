@@ -273,12 +273,17 @@ class RuntimeFixture(RuntimeFixtureBase):
         # carries its task lineage is the automatic evidence — verified on
         # ADMIT (exit 0), failed on REJECT, and a receipt naming no current
         # plan task stays inert instead of guessing.
+        plan_path = self.repo / '.oms' / 'plan' / 'tasks.json'
+        plan = read_json(plan_path)
+        plan['schema'] = 3
+        plan['plan_id'] = 'plan_' + '1' * 32
+        atomic_write_json(plan_path, plan)
         row = evidence.build_envelope(self.repo)
         statuses = {item['id']: item['status'] for item in row['criteria']}
         self.assertEqual(statuses['plan-task-t1'], 'missing')
         append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
             'schema': 1, 'event_id': 'evt-admit-t1', 'kind': 'patch-admit',
-            'exit': 0, 'task_id': 't1',
+            'exit': 0, 'task_id': 't1', 'plan_id': plan['plan_id'],
         })
         append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
             'schema': 1, 'event_id': 'evt-admit-ghost', 'kind': 'patch-admit',
@@ -292,11 +297,118 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertNotIn('plan-task-no-such-task', by_id)
         append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
             'schema': 1, 'event_id': 'evt-admit-t1-reject', 'kind': 'patch-admit',
-            'exit': 3, 'task_id': 't1',
+            'exit': 3, 'task_id': 't1', 'plan_id': plan['plan_id'],
         })
         rejected = evidence.build_envelope(self.repo)
         by_id = {item['id']: item for item in rejected['criteria']}
         self.assertEqual(by_id['plan-task-t1']['status'], 'failed')
+
+    def test_plan_task_evidence_requires_the_exact_plan_lineage(self) -> None:
+        """Reusing a task id must not reuse another plan instance's evidence."""
+        plan_path = self.repo / '.oms' / 'plan' / 'tasks.json'
+        index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+        bindings = self.repo / '.oms' / 'evidence' / 'bindings.jsonl'
+        plan = read_json(plan_path)
+        plan['schema'] = 3
+        first_id = 'plan_' + 'a' * 32
+        second_id = 'plan_' + 'b' * 32
+
+        def write_plan(plan_id: str) -> None:
+            current = dict(plan)
+            current['plan_id'] = plan_id
+            atomic_write_json(plan_path, current)
+
+        def task_status() -> str:
+            row = evidence.build_envelope(self.repo)
+            return next(item['status'] for item in row['criteria']
+                        if item['id'] == 'plan-task-t1')
+
+        mechanisms = (
+            ({'schema': 1, 'event_id': 'evt-auto', 'kind': 'patch-admit',
+              'exit': 0, 'task_id': 't1', 'plan_id': first_id}, None),
+            ({'schema': 1, 'event_id': 'evt-covers', 'kind': 'verify',
+              'status': 'verified', 'covers': ['plan-task-t1'],
+              'plan_id': first_id}, None),
+            ({'schema': 1, 'event_id': 'evt-binding-source', 'kind': 'report'},
+             {'schema': 1, 'binding_id': 'binding-first', 'action': 'bind',
+              'criterion_id': 'plan-task-t1', 'evidence_ref': 'evt-binding-source',
+              'status': 'verified', 'plan_id': first_id}),
+        )
+        for artifact, binding in mechanisms:
+            with self.subTest(kind=artifact['event_id']):
+                index.write_text(json.dumps(artifact) + '\n', encoding='utf-8')
+                if bindings.exists():
+                    bindings.unlink()
+                if binding is not None:
+                    append_jsonl(bindings, binding)
+                write_plan(first_id)
+                self.assertEqual(task_status(), 'verified')
+                write_plan(second_id)
+                self.assertEqual(task_status(), 'missing')
+
+        # Missing and malformed legacy lineage is inert even when task ids and
+        # explicit criterion ids match the current plan.
+        legacy_rows = [
+            {'schema': 1, 'event_id': 'evt-missing', 'kind': 'patch-admit',
+             'exit': 0, 'task_id': 't1'},
+            {'schema': 1, 'event_id': 'evt-malformed', 'kind': 'verify',
+             'status': 'verified', 'covers': ['plan-task-t1'],
+             'plan_id': 'plan_not-a-lineage'},
+        ]
+        index.write_text(''.join(json.dumps(item) + '\n' for item in legacy_rows),
+                         encoding='utf-8')
+        if bindings.exists():
+            bindings.unlink()
+        append_jsonl(bindings, {
+            'schema': 1, 'binding_id': 'binding-missing-lineage',
+            'action': 'bind', 'criterion_id': 'plan-task-t1',
+            'evidence_ref': 'evt-missing', 'status': 'verified',
+        })
+        append_jsonl(bindings, {
+            'schema': 1, 'binding_id': 'binding-malformed-lineage',
+            'action': 'bind', 'criterion_id': 'plan-task-t1',
+            'evidence_ref': 'evt-malformed', 'status': 'verified',
+            'plan_id': 'plan_not-a-lineage',
+        })
+        write_plan(second_id)
+        self.assertEqual(task_status(), 'missing')
+
+        # Project criteria remain deliberately reusable and do not require a
+        # plan lineage. Only plan-task claims are scoped to a plan instance.
+        append_jsonl(index, {
+            'schema': 1, 'event_id': 'evt-project-stable', 'kind': 'verify',
+            'status': 'verified', 'covers': ['project-safe'],
+        })
+        projected = evidence.build_envelope(self.repo)
+        statuses = {item['id']: item['status'] for item in projected['criteria']}
+        self.assertEqual(statuses['project-safe'], 'verified')
+        self.assertEqual(statuses['plan-task-t1'], 'missing')
+
+        # The binding producer captures the current plan id. A later plan with
+        # the same task and criterion id cannot inherit it.
+        index.write_text(json.dumps({
+            'schema': 1, 'event_id': 'evt-bind-current', 'kind': 'report'}) + '\n',
+            encoding='utf-8')
+        write_plan(first_id)
+        created = evidence.bind(
+            self.repo, 'plan-task-t1', 'evt-bind-current', 'verified')
+        self.assertEqual(created['plan_id'], first_id)
+        write_plan(second_id)
+        self.assertEqual(task_status(), 'missing')
+
+        # A parent binding a legacy plan task establishes the lineage before
+        # writing. The receipt and the upgraded plan use the same locked ID.
+        if bindings.exists():
+            bindings.unlink()
+        legacy = dict(plan)
+        legacy.pop('plan_id', None)
+        legacy['tasks'] = {item['id']: dict(item) for item in legacy['tasks']}
+        atomic_write_json(plan_path, legacy)
+        created = evidence.bind(
+            self.repo, 'plan-task-t1', 'evt-bind-current', 'verified')
+        upgraded = read_json(plan_path)
+        self.assertRegex(created['plan_id'], r'^plan_[0-9a-f]{32}$')
+        self.assertEqual(created['plan_id'], upgraded['plan_id'])
 
     def test_projection_subprocess_cost_does_not_scale_with_evidence_rows(self) -> None:
         # The staleness judgment once ran `git rev-parse` per evidence row —

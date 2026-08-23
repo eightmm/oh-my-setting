@@ -221,3 +221,200 @@ grep -qx ADMIT "$TMP/admit-besteffort" || {
 }
 
 echo 'runtime-core-integration-smoke: admission fail-closed ok'
+
+# A plan instance has an immutable additive lineage. New plans mint it, every
+# ordinary mutation preserves it, and read-only commands leave legacy bytes
+# untouched. The parent-only ensure-lineage command upgrades a legacy plan once
+# before a plan-scoped evidence producer takes its snapshot.
+LINEAGE_REPO="$TMP/lineage-repo"
+mkdir -p "$LINEAGE_REPO"
+git -C "$LINEAGE_REPO" init -q
+git -C "$LINEAGE_REPO" config user.email test@example.com
+git -C "$LINEAGE_REPO" config user.name 'OMS Runtime Test'
+printf '# Lineage fixture\n' > "$LINEAGE_REPO/PROJECT.md"
+git -C "$LINEAGE_REPO" add PROJECT.md
+git -C "$LINEAGE_REPO" commit -qm fixture
+"$ROOT/scripts/agent-plan.sh" --repo "$LINEAGE_REPO" init \
+  --goal 'lineage fixture' --accept true >/dev/null
+first_plan_id="$(python3 - "$LINEAGE_REPO/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("plan_id", ""))
+PY
+)"
+printf '%s\n' "$first_plan_id" | grep -Eq '^plan_[0-9a-f]{32}$' || {
+  echo "agent-plan init did not mint a plan lineage: $first_plan_id" >&2
+  exit 1
+}
+"$ROOT/scripts/agent-plan.sh" --repo "$LINEAGE_REPO" init \
+  --goal 'lineage fixture' --accept true >/dev/null
+replacement_plan_id="$(python3 - "$LINEAGE_REPO/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["plan_id"])
+PY
+)"
+[ "$replacement_plan_id" != "$first_plan_id" ] || {
+  echo 'replacing a plan reused the previous lineage' >&2
+  exit 1
+}
+first_plan_id="$replacement_plan_id"
+"$ROOT/scripts/agent-plan.sh" --repo "$LINEAGE_REPO" add --id t1 \
+  --title 'lineage task' --allowed PROJECT.md --verify true >/dev/null
+python3 - "$LINEAGE_REPO/.oms/plan/tasks.json" "$first_plan_id" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["schema"] == 3
+assert row["plan_id"] == sys.argv[2]
+PY
+
+python3 - "$LINEAGE_REPO/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row.pop("plan_id", None)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, ensure_ascii=False, indent=2)
+PY
+legacy_before="$(git hash-object "$LINEAGE_REPO/.oms/plan/tasks.json")"
+"$ROOT/scripts/agent-plan.sh" --repo "$LINEAGE_REPO" show --id t1 >/dev/null
+"$ROOT/scripts/agent-plan.sh" --repo "$LINEAGE_REPO" status >/dev/null
+legacy_after="$(git hash-object "$LINEAGE_REPO/.oms/plan/tasks.json")"
+[ "$legacy_before" = "$legacy_after" ] || {
+  echo 'read-only plan commands rewrote a legacy plan' >&2
+  exit 1
+}
+"$ROOT/scripts/agent-plan.sh" --repo "$LINEAGE_REPO" ensure-lineage >/dev/null
+ensured_once="$(git hash-object "$LINEAGE_REPO/.oms/plan/tasks.json")"
+"$ROOT/scripts/agent-plan.sh" --repo "$LINEAGE_REPO" ensure-lineage >/dev/null
+ensured_twice="$(git hash-object "$LINEAGE_REPO/.oms/plan/tasks.json")"
+[ "$ensured_once" = "$ensured_twice" ] || {
+  echo 'ensure-lineage was not idempotent' >&2
+  exit 1
+}
+python3 - "$LINEAGE_REPO/.oms/plan/tasks.json" <<'PY'
+import json, re, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert re.fullmatch(r"plan_[0-9a-f]{32}", row.get("plan_id", "")), row
+PY
+
+# Initial reviewed-proposal apply also mints a lineage without changing the
+# schema-3 plan contract.
+PROPOSAL_REPO="$TMP/proposal-repo"
+mkdir -p "$PROPOSAL_REPO"
+git -C "$PROPOSAL_REPO" init -q
+git -C "$PROPOSAL_REPO" config user.email test@example.com
+git -C "$PROPOSAL_REPO" config user.name 'OMS Runtime Test'
+printf '%s\n' '## Status' '' '- State: confirmed' '' '## Project' '' \
+  '- Goal: proposal lineage' > "$PROPOSAL_REPO/PROJECT.md"
+git -C "$PROPOSAL_REPO" add PROJECT.md
+git -C "$PROPOSAL_REPO" commit -qm fixture
+proposal_head="$(git -C "$PROPOSAL_REPO" rev-parse HEAD)"
+proposal_spec="$(python3 - "$PROPOSAL_REPO/PROJECT.md" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+python3 - "$TMP/proposal.json" "$proposal_head" "$proposal_spec" <<'PY'
+import json, sys
+path, head, spec = sys.argv[1:]
+row = {
+    "schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec,
+    "plan_sha256": "absent", "base_sha": head, "id_prefix": "",
+    "allowed_envelope": ["PROJECT.md"], "acceptance_files": ["PROJECT.md"],
+    "tasks": [{"id": "t1", "title": "proposal task", "allowed": ["PROJECT.md"],
+               "verify": "true", "depends": []}],
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True, separators=(",", ":"))
+PY
+proposal_sha="$(python3 - "$TMP/proposal.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+"$ROOT/scripts/agent-plan.sh" --repo "$PROPOSAL_REPO" apply-proposal \
+  --proposal "$TMP/proposal.json" --expected-proposal-sha256 "$proposal_sha" \
+  --expected-plan-sha256 absent --goal 'proposal lineage' --accept true \
+  --allowed-envelope PROJECT.md --accept-files PROJECT.md >/dev/null
+proposal_plan_before="$(git hash-object "$PROPOSAL_REPO/.oms/plan/tasks.json")"
+"$ROOT/scripts/agent-plan.sh" --repo "$PROPOSAL_REPO" apply-proposal \
+  --proposal "$TMP/proposal.json" --expected-proposal-sha256 "$proposal_sha" \
+  --expected-plan-sha256 absent --goal 'proposal lineage' --accept true \
+  --allowed-envelope PROJECT.md --accept-files PROJECT.md >/dev/null
+proposal_plan_after="$(git hash-object "$PROPOSAL_REPO/.oms/plan/tasks.json")"
+[ "$proposal_plan_before" = "$proposal_plan_after" ] || {
+  echo 'reviewed proposal replay changed plan lineage or bytes' >&2
+  exit 1
+}
+python3 - "$PROPOSAL_REPO/.oms/plan/tasks.json" <<'PY'
+import json, re, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["schema"] == 3
+assert re.fullmatch(r"plan_[0-9a-f]{32}", row.get("plan_id", "")), row
+PY
+
+echo 'runtime-core-integration-smoke: plan lineage lifecycle ok'
+
+# Freeze the plan id with the task contract before a long verifier. Replacing
+# the plan while verification runs must leave the receipt on the old lineage;
+# the same task id in the new plan stays missing until a new admission runs.
+SWAP_REPO="$TMP/swap-repo"
+mkdir -p "$SWAP_REPO"
+git -C "$SWAP_REPO" init -q
+git -C "$SWAP_REPO" config user.email test@example.com
+git -C "$SWAP_REPO" config user.name 'OMS Runtime Test'
+printf '%s\n' '# Swap fixture' '' '## Acceptance Criteria' '' \
+  '- [id:swap-project] Project evidence remains stable.' > "$SWAP_REPO/PROJECT.md"
+git -C "$SWAP_REPO" add PROJECT.md
+git -C "$SWAP_REPO" commit -qm fixture
+"$ROOT/scripts/agent-plan.sh" --repo "$SWAP_REPO" init \
+  --goal 'swap lineage' --accept true >/dev/null
+"$ROOT/scripts/agent-plan.sh" --repo "$SWAP_REPO" add --id t1 \
+  --title 'swap task' --allowed PROJECT.md --verify true >/dev/null
+swap_first="$(python3 - "$SWAP_REPO/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["plan_id"])
+PY
+)"
+python3 - "$SWAP_REPO/.oms/plan/tasks.json" "$TMP/swap-plan-b.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+row["plan_id"] = "plan_" + "b" * 32
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump(row, handle, ensure_ascii=False, indent=2)
+PY
+printf '\nswap patch\n' >> "$SWAP_REPO/PROJECT.md"
+capture_patch_swap() {
+  git -C "$SWAP_REPO" add PROJECT.md
+  git -C "$SWAP_REPO" commit -qm swap-patch
+  git -C "$SWAP_REPO" diff HEAD~1 HEAD > "$TMP/swap.patch"
+  git -C "$SWAP_REPO" reset -q --hard HEAD~1
+}
+capture_patch_swap
+"$ROOT/scripts/patch-admit.sh" --repo "$SWAP_REPO" --patch "$TMP/swap.patch" \
+  --plan-task t1 --covers plan-task-t1 \
+  --verify "cp '$TMP/swap-plan-b.json' '$SWAP_REPO/.oms/plan/tasks.json'" \
+  >/dev/null
+python3 - "$SWAP_REPO/.oms/artifacts/index.jsonl" "$swap_first" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+row = [item for item in rows if item.get("kind") == "patch-admit"][-1]
+assert row.get("plan_id") == sys.argv[2], row
+PY
+"$ROOT/scripts/runtime.sh" --repo "$SWAP_REPO" envelope show > "$TMP/swap-before.json"
+python3 - "$TMP/swap-before.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+statuses = {item["id"]: item["status"] for item in row["criteria"]}
+assert statuses["plan-task-t1"] == "missing", statuses
+PY
+"$ROOT/scripts/patch-admit.sh" --repo "$SWAP_REPO" --patch "$TMP/swap.patch" \
+  --plan-task t1 --covers plan-task-t1 --verify true >/dev/null
+"$ROOT/scripts/runtime.sh" --repo "$SWAP_REPO" envelope show > "$TMP/swap-after.json"
+python3 - "$TMP/swap-after.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+statuses = {item["id"]: item["status"] for item in row["criteria"]}
+assert statuses["plan-task-t1"] == "verified", statuses
+PY
+
+echo 'runtime-core-integration-smoke: verifier plan swap lineage ok'

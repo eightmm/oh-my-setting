@@ -70,6 +70,11 @@ chmod +x "$bin/codex"
 PLAN="$ROOT/scripts/agent-plan.sh"
 RUN="$ROOT/scripts/plan-run.sh"
 "$PLAN" --repo "$repo" init --goal bounded >/dev/null
+initial_plan_id="$(python3 - "$repo/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["plan_id"])
+PY
+)"
 "$PLAN" --repo "$repo" add --id t1 --title review \
   --allowed delegated.txt --verify 'bash scripts/check.sh t1' >/dev/null
 "$PLAN" --repo "$repo" add --id t2 --title land --depends t1 \
@@ -86,6 +91,14 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --next >
 grep -Fq 'state=review' "$TMP/review.out" || fail "review result missing"
 "$PLAN" --repo "$repo" show --id t1 | grep -Fq '"state": "review"' || fail "t1 not in review"
 [ ! -e "$repo/delegated.txt" ] || fail "review-default mutated the main tree"
+python3 - "$repo/.oms/artifacts/index.jsonl" "$initial_plan_id" <<'PY' ||
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+row = next(row for row in reversed(rows)
+           if row.get("kind") == "delegate" and row.get("task_id") == "t1")
+assert row.get("plan_id") == sys.argv[2], row
+PY
+  fail "plan-bound delegation omitted its immutable plan lineage"
 
 # Continue the reviewed first task through plan-run itself. A review
 # continuation must try its stored patch before asking the provider to do the
@@ -112,6 +125,18 @@ grep -Fq 'state=done' "$TMP/land.out" || fail "land result missing"
 "$PLAN" --repo "$repo" show --id t2 | grep -Fq '"state": "done"' || fail "t2 not done"
 grep -Fxq two "$repo/delegated2.txt" || fail "plan-run --land did not apply patch"
 grep -Fq '"kind": "patch-land"' "$repo/.oms/artifacts/index.jsonl" || fail "landing lineage missing"
+python3 - "$repo/.oms/artifacts/index.jsonl" "$initial_plan_id" <<'PY' ||
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+for task_id in ("t1", "t2"):
+    row = next(row for row in reversed(rows)
+               if row.get("kind") == "patch-land" and row.get("task_id") == task_id)
+    assert row.get("plan_id") == sys.argv[2], row
+row = next(row for row in reversed(rows)
+           if row.get("kind") == "delegate" and row.get("task_id") == "t2")
+assert row.get("plan_id") == sys.argv[2], row
+PY
+  fail "plan-bound delegate/landing rows did not share the plan lineage"
 git -C "$repo" add delegated2.txt
 git -C "$repo" commit -qm 'test: commit second reviewed task'
 
@@ -812,5 +837,45 @@ verify_control() {  # ID TITLE ALLOWED VERIFY
 verify_control p2 "test: uses the committed suite" tests/ 'bash tests/run.sh'
 verify_control p3 "test: package-wide runner" . 'go test ./...'
 verify_control p4 "test: writes a report" tests/ 'bash tests/run.sh -o tests/report.xml'
+
+# A task id can be reused by a replacement plan while a provider or verifier is
+# still running. The delegation receipt belongs to the immutable plan snapshot
+# taken before that work; it must not borrow the replacement plan's id merely
+# because the task object and textual id still match.
+delegate_swap_repo="$TMP/delegate-plan-lineage-swap"
+mkdir -p "$delegate_swap_repo"
+git -C "$delegate_swap_repo" init -q
+git -C "$delegate_swap_repo" config user.email test@example.com
+git -C "$delegate_swap_repo" config user.name Test
+printf 'base\n' > "$delegate_swap_repo/README.md"
+git -C "$delegate_swap_repo" add README.md
+git -C "$delegate_swap_repo" commit -qm base
+"$PLAN" --repo "$delegate_swap_repo" init --goal lineage >/dev/null
+delegate_old_plan_id="$(python3 - "$delegate_swap_repo/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["plan_id"])
+PY
+)"
+delegate_new_plan_id="plan_cccccccccccccccccccccccccccccccc"
+delegate_swap_verify="OMS_SWAP_PLAN_FILE='$delegate_swap_repo/.oms/plan/tasks.json' OMS_SWAP_PLAN_ID='$delegate_new_plan_id' python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ[\"OMS_SWAP_PLAN_FILE\"]); d=json.loads(p.read_text(encoding=\"utf-8\")); d[\"plan_id\"]=os.environ[\"OMS_SWAP_PLAN_ID\"]; p.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding=\"utf-8\")'"
+"$PLAN" --repo "$delegate_swap_repo" add --id same-task --title lineage \
+  --allowed delegated.txt --verify "$delegate_swap_verify" >/dev/null
+"$PLAN" --repo "$delegate_swap_repo" claim --id same-task --provider codex >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+  --repo "$delegate_swap_repo" --to codex --plan-task same-task \
+  --verify "$delegate_swap_verify" >/dev/null
+python3 - "$delegate_swap_repo/.oms/plan/tasks.json" \
+  "$delegate_swap_repo/.oms/artifacts/index.jsonl" \
+  "$delegate_old_plan_id" "$delegate_new_plan_id" <<'PY' ||
+import json, sys
+plan = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+row = next(row for row in reversed(rows)
+           if row.get("kind") == "delegate" and row.get("task_id") == "same-task")
+assert plan["plan_id"] == sys.argv[4], plan
+assert row.get("plan_id") == sys.argv[3], row
+assert row["plan_id"] != plan["plan_id"], (row, plan)
+PY
+  fail "delegation borrowed a replacement plan lineage after its verifier"
 
 echo "autonomy-plan-run-smoke: ok"

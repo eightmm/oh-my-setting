@@ -107,12 +107,15 @@ OMS_SV_LIFECYCLE_EXIT="$LIFECYCLE_EXIT" OMS_SV_APPROVAL_EXIT="$APPROVAL_EXIT" \
 OMS_SV_TASK_STATUS_EXIT="$TASK_STATUS_EXIT" \
 OMS_SV_JOURNAL_STATUS_EXIT="$JOURNAL_STATUS_EXIT" \
 OMS_SV_RUNTIME_EXIT="$RUNTIME_EXIT" \
-python3 <<'PY'
+python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
 import glob
 import json
 import os
 import re
+import runpy
 import sys
+
+process_pid_alive = runpy.run_path(sys.argv[1])["pid_alive"]
 
 repo = os.environ["OMS_SV_REPO"]
 tmp = os.environ["OMS_SV_TMP"]
@@ -255,17 +258,14 @@ if os.path.isfile(current) and os.path.isfile(spine):
 orphans = 0
 for marker in sorted(glob.glob(os.path.join(oms, "delegations", "*.json"))):
     try:
-        pid = int(json.load(open(marker)).get("pid") or 0)
+        marker_row = json.load(open(marker))
+        pid = int(marker_row.get("pid") or 0)
     except Exception:
         continue
     if pid <= 0:
         continue
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    if not process_pid_alive(pid, native_pid=marker_row.get("native_pid")):
         orphans += 1
-    except PermissionError:
-        pass
 if orphans:
     finding("warn", "delegations", "%d delegation marker(s) reference dead processes" % orphans,
             "oms gc --repo %s --apply" % repo)

@@ -38,6 +38,8 @@ EXECUTOR_ID=""
 SCOPE_ALLOWED=""
 SCOPE_FORBIDDEN=""
 ACCEPTANCE_FILES=""
+PLAN_ID=""
+COVERS_PLAN_ID=""
 worktree_parent=""
 worktree=""
 worktree_created=0
@@ -149,15 +151,33 @@ oms_git_assert_plain_index "$REPO" ||
   fail "Git index has hidden or unreadable entries; clear them before patch admission"
 if [ -n "$COVERS" ]; then
   ma_validate_covers_ids "$REPO" "$COVERS" || exit 2
+  COVERS_PLAN_ID="${OMS_INDEX_PLAN_ID:-}"
 fi
 
 if [ -n "$PLAN_TASK" ]; then
   case "$PLAN_TASK" in *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;; esac
-  plan_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$PLAN_TASK")" || fail "cannot read plan task $PLAN_TASK"
+  plan_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" evidence-snapshot --id "$PLAN_TASK")" || fail "cannot read plan task $PLAN_TASK"
+  PLAN_ID="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' | tr -d '\r')"
+  if [ -z "$PLAN_ID" ]; then
+    "$ROOT/scripts/agent-plan.sh" --repo "$REPO" ensure-lineage >/dev/null ||
+      fail "cannot establish plan lineage before admitting task $PLAN_TASK"
+    plan_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" evidence-snapshot --id "$PLAN_TASK")" ||
+      fail "cannot reread plan task $PLAN_TASK after establishing lineage"
+    PLAN_ID="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' | tr -d '\r')"
+  fi
+  case "$PLAN_ID" in
+    plan_*)
+      case "${PLAN_ID#plan_}" in *[!0-9a-f]*) fail "plan task has malformed lineage" ;; esac
+      [ "${#PLAN_ID}" -eq 37 ] || fail "plan task has malformed lineage"
+      ;;
+    *) fail "plan task has no immutable lineage" ;;
+  esac
+  [ -z "$COVERS_PLAN_ID" ] || [ "$COVERS_PLAN_ID" = "$PLAN_ID" ] ||
+    fail "plan changed between criterion validation and task snapshot"
   SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("allowed_paths",[])))')"
   SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
   ACCEPTANCE_FILES="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("project_contract") or {}; print("\n".join(c.get("acceptance_files") or d.get("acceptance_files") or []))')"
-  export OMS_TASK_ID="$PLAN_TASK"
+  export OMS_TASK_ID="$PLAN_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
 fi
 if [ -n "$EXECUTOR_ID" ]; then
   case "$EXECUTOR_ID" in *[!A-Za-z0-9._-]*|"") fail "--executor must match [A-Za-z0-9._-]+" ;; esac

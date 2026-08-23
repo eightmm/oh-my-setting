@@ -108,6 +108,18 @@ Read calls scan outbound context for credentials and machine-sensitive data.
 `--export-only` writes a prompt without invoking another CLI; import the answer
 through `oms artifact-index import`.
 
+The artifact index is a repo-bound, no-follow, copy-on-write JSONL store.
+Normal views and mutations reject structural corruption. Agent recovery is
+two-step: `oms artifact-index salvage` plans without writes, while
+`salvage --apply` preserves the exact raw bytes in a content-addressed 0600
+quarantine before one CAS repair and receipt. Legacy schema repair remains the
+separate `migrate` operation. A row over 1 MiB or recovery snapshot over 256
+MiB is refused without mutation. A write that would exceed the 16 MiB healthy
+ceiling first applies lineage-aware retention and refuses only when its required
+new rows still cannot fit; salvage uses the same output ceiling. Its receipt
+references the raw quarantine, so ordinary artifact retention preserves it
+until that receipt is pruned.
+
 Provider count is not independence. Two routes backed by the same model family
 remain one opinion for diversity reporting.
 
@@ -270,6 +282,10 @@ must match it before the remainder tranche is authorized. `propose` requires
 the base; its printed continuation is shell-safe, retains every effective
 option, and accepts only a regular non-symlink proposal snapshot of at most
 1 MiB.
+`oms intent adopt` likewise validates one frozen candidate, then publishes only
+that snapshot after a locked SHA-256 and byte-for-byte comparison with the live
+candidate; an editor save during acceptance leaves the draft intact and creates
+no `PROJECT.md`.
 With `--draft-pr`, `oms draft-pr` rechecks the clean HEAD, tree, remote base,
 GitHub identity, write permission, and verifier before a create-only push and
 Draft PR. Every introduced Git object, including trees, is scanned for
@@ -308,12 +324,31 @@ same reviewed task and executor once, without changing that frozen contract;
 provider failure or signal exit blocks that repair before it can become
 claimable again, including after a restart.
 
+Each new autopilot receipt also binds an opaque run owner. Claims and worker
+markers inherit it. Re-entry recovers only that owner's exact current
+`claimed`/`running` leases under the plan lock: live markers, markerless
+running work, another owner, and `review`/`landing` evidence are preserved.
+Its owner and dead claimant come from one receipt-lock judgment token, never a
+later ledger reread. Routine GC CASes the observed state and lease and vetoes
+any exact live worker marker under the plan lock, so a retry or task that
+advances during cleanup cannot be requeued by stale evidence. Executor cleanup
+uses the same check/apply predicate under its metadata lock. Windows liveness
+binds the Git Bash PID to its native WINPID and uses a wait-only process handle;
+it never probes by sending signal zero through Python. A missing legacy native
+identity is preserved as unknown. GC treats markers as bounded, no-follow
+evidence and deletes only an unchanged generation under its marker lock. More
+than 4,096 marker entries makes the entire scan unproven and preserves every
+entry; it never turns a partial enumeration into recovery authority.
+Legacy receipts and tasks without an owner stay readable; owner-based re-entry
+never guesses them, while exact state+lease GC remains backward compatible.
+
 Recovery tools include:
 
 ```bash
 oms checkpoint create --label "before risky edit"
 oms fail-ledger list
 oms artifact-index unresolved
+oms artifact-index salvage
 oms approval-inbox expire [--apply]
 oms approval-inbox reconcile --older-than-seconds 300 [--apply]
 oms patch-land --recover

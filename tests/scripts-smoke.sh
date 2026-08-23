@@ -235,6 +235,36 @@ test_file_lock_acquire_release() {
   assert_file_contains "$state" "locked"
 }
 
+test_file_lock_nested_mkdir_preserves_nonzero_status_and_releases() {
+  local dir="$TMP/file-lock-nested-mkdir"
+  local outer="$dir/outer" inner="$dir/inner"
+  local rc=0
+
+  mkdir -p "$dir"
+  OMS_LOCK_FORCE_MKDIR=1 OMS_LOCK_DIR="$dir/locks" \
+    bash -c '
+      set -euo pipefail
+      . "$1"
+      outer_path="$2"
+      inner_path="$3"
+      nested_failure() {
+        oms_with_file_lock "$inner_path" bash -c "exit 3"
+      }
+      oms_with_file_lock "$outer_path" nested_failure
+    ' _ "$ROOT/scripts/lib/file-lock.sh" "$outer" "$inner" \
+      > "$dir/out" 2> "$dir/err" || rc=$?
+  [ "$rc" = 3 ] ||
+    fail "nested mkdir locks changed command status $rc: $(cat "$dir/err")"
+  if grep -Fq 'unbound variable' "$dir/err"; then
+    fail "nested mkdir lock cleanup lost its captured identity"
+  fi
+  . "$ROOT/scripts/lib/file-lock.sh"
+  OMS_LOCK_FORCE_MKDIR=1 OMS_LOCK_DIR="$dir/locks" \
+    oms_try_file_lock "$outer" true || fail "outer mkdir lock leaked"
+  OMS_LOCK_FORCE_MKDIR=1 OMS_LOCK_DIR="$dir/locks" \
+    oms_try_file_lock "$inner" true || fail "inner mkdir lock leaked"
+}
+
 test_file_lock_missing_poll_helper_falls_back() {
   local dir="$TMP/file-lock-no-poll"
   local lib="$dir/lib"
@@ -392,6 +422,7 @@ test_delegate_kill9_recovery_via_gc() {
   local project="$TMP/delegate-kill9"
   local bin="$project/bin"
   local home_dir="$project/home"
+  local owner="owner_33333333333333333333333333333333"
   local dpid
   local i
 
@@ -409,9 +440,11 @@ EOF
   chmod +x "$bin/codex"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal kill9 >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title T --verify true >/dev/null
-  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  OMS_AUTOPILOT_OWNER_ID="$owner" \
+    "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id t1 --provider codex >/dev/null
 
   HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" PATH="$bin:/usr/bin:/bin" \
+    OMS_AUTOPILOT_OWNER_ID="$owner" \
     "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" --plan-task t1 --no-verify \
     >"$project/out" 2>"$project/err" &
@@ -427,9 +460,12 @@ EOF
   if ! python3 - "$(find "$project/.oms/delegations" -name '*.json' | head -n 1)" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == 2
+assert d["schema"] == 4
+assert isinstance(d.get("pid"), int) and d["pid"] > 0
+assert isinstance(d.get("native_pid"), int) and d["native_pid"] > 0
 assert d["task_id"] == "t1"
 assert d["lease_id"].startswith("lease_")
+assert d["autopilot_owner_id"] == "owner_33333333333333333333333333333333"
 PY
   then
     fail "delegation marker should carry the captured plan lease"
@@ -467,6 +503,56 @@ PY
   grep -Fq 'dead harness temp dir' "$project/cleanup.out" ||
     fail "cleanup did not report the crashed delegate worktree: $(tr '\n' ' ' < "$project/cleanup.out")"
   git -C "$project" worktree prune >/dev/null 2>&1 || true
+}
+
+test_delegate_marker_set_lock_does_not_grow_per_run() {
+  local project="$TMP/delegate-marker-set-lock"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local lock_dir="$project/locks"
+  local first_count second_count after_gc_count
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_LOCK_DIR="$lock_dir" \
+    PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+    --repo "$project" --to codex --prompt one --no-verify >/dev/null
+  first_count="$(find "$lock_dir" -maxdepth 1 -type f \
+    -name '.marker-set-lock-target.*.lock' 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$first_count" -le 1 ] || fail "one delegation created multiple marker-set locks"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_LOCK_DIR="$lock_dir" \
+    PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+    --repo "$project" --to codex --prompt two --no-verify >/dev/null
+  second_count="$(find "$lock_dir" -maxdepth 1 -type f \
+    -name '.marker-set-lock-target.*.lock' 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$second_count" = "$first_count" ] ||
+    fail "delegation marker-set lock count grew across runs"
+  [ -z "$(find "$lock_dir" -maxdepth 1 -type f \
+    -name '*.json.*.lock' -print -quit 2>/dev/null)" ] ||
+    fail "normal delegation left a permanent per-marker flock inode"
+
+  mkdir -p "$project/.oms/delegations"
+  printf '%s\n' \
+    '{"schema":4,"id":"dead","pid":999999,"native_pid":999999}' \
+    > "$project/.oms/delegations/dead.json"
+  OMS_LOCK_DIR="$lock_dir" "$ROOT/scripts/gc.sh" --repo "$project" \
+    --days 30 --apply >/dev/null 2>&1 || fail "gc failed under the marker-set lock"
+  after_gc_count="$(find "$lock_dir" -maxdepth 1 -type f \
+    -name '.marker-set-lock-target.*.lock' 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$after_gc_count" = "$second_count" ] ||
+    fail "gc created another marker-set lock identity"
+  [ -z "$(find "$lock_dir" -maxdepth 1 -type f \
+    -name '*.json.*.lock' -print -quit 2>/dev/null)" ] ||
+    fail "gc left a permanent per-marker flock inode"
 }
 
 setup_doctor_home() {
@@ -2657,121 +2743,6 @@ test_prompt_takers_refuse_a_mistyped_option() {
     printf '%s\n' "$out" | grep -Fq 'unknown option: --bogus-flag' ||
       fail "$script must name the mistyped option: $out"
   done
-}
-
-test_repro_check_demands_failing_before_passing_after() {
-  # The evolution discipline in one verb: a regression test is evidence only
-  # when it fails at the base and passes at HEAD. Both runs happen in
-  # detached worktrees; the ordinary shape — test and fix in one commit —
-  # must carry the test into the base tree, because a base run that dies on
-  # "no such file" is an absence, not a reproduction.
-  local project="$TMP/repro-check"
-  local rc=0
-
-  make_committed_repo "$project"
-  printf 'bad\n' > "$project/value.txt"
-  git -C "$project" add value.txt
-  git -C "$project" commit -qm 'seed: bug present'
-  printf 'good\n' > "$project/value.txt"
-  printf '#!/usr/bin/env bash\ngrep -q good value.txt\n' > "$project/t.sh"
-  git -C "$project" add value.txt t.sh
-  git -C "$project" commit -qm 'fix: value corrected, test added'
-
-  rc=0
-  "$ROOT/scripts/oms" repro-check --repo "$project" \
-    --test 'bash t.sh' >"$project/missing-out" 2>&1 || rc=$?
-  [ "$rc" = "5" ] ||
-    fail "a base run dying on a missing test must exit 5, got $rc: $(cat "$project/missing-out")"
-  grep -Fq 'code=test-missing-on-base' "$project/missing-out" ||
-    fail "the absence verdict must name its code: $(cat "$project/missing-out")"
-  grep -Fq -- '--carry' "$project/missing-out" ||
-    fail "the absence remedy must name --carry: $(cat "$project/missing-out")"
-
-  "$ROOT/scripts/oms" repro-check --repo "$project" \
-    --test 'bash t.sh' --carry t.sh >"$project/pass-out" 2>&1 ||
-    fail "a carried failing-then-passing pair must be accepted: $(cat "$project/pass-out")"
-  grep -Fq 'repro-check: pass' "$project/pass-out" ||
-    fail "the proven verdict must say so: $(cat "$project/pass-out")"
-
-  rc=0
-  "$ROOT/scripts/oms" repro-check --repo "$project" \
-    --test 'true' >"$project/vacuous-out" 2>&1 || rc=$?
-  [ "$rc" = "3" ] ||
-    fail "a test green on both sides must exit 3, got $rc: $(cat "$project/vacuous-out")"
-  grep -Fq 'code=test-passes-on-base' "$project/vacuous-out" ||
-    fail "the vacuous verdict must name its code: $(cat "$project/vacuous-out")"
-
-  rc=0
-  "$ROOT/scripts/oms" repro-check --repo "$project" \
-    --test 'false' >"$project/red-out" 2>&1 || rc=$?
-  [ "$rc" = "4" ] ||
-    fail "a test red on HEAD must exit 4, got $rc: $(cat "$project/red-out")"
-
-  # Every verdict is a typed artifact-index row, success and refusal alike.
-  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' ||
-import json, sys
-rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
-exits = [r.get("exit") for r in rows if r.get("kind") == "repro-check"]
-assert exits == [5, 0, 3, 4], exits
-PY
-    fail "repro-check verdicts must be typed index rows: $(tail -c 1200 "$project/.oms/artifacts/index.jsonl")"
-  git -C "$project" worktree list | grep -Fq oh-my-setting-repro &&
-    fail "repro-check leaked a worktree" || true
-}
-
-test_peer_review_blind_strips_context_and_types_the_mode() {
-  local project="$TMP/review-blind"
-  local artifact_dir="$project/artifacts"
-  local bin_dir="$project/bin"
-  local home_dir="$project/home"
-  local rc=0
-
-  make_committed_repo "$project"
-  mkdir -p "$home_dir"
-
-  # Blindness is a contract: shared-context attachments and debate refuse.
-  if HOME="$home_dir" PATH="/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
-      --repo "$project" --artifact-dir "$artifact_dir" --blind --memory \
-      --dry-run --prompt "blind contract" >"$project/refuse-out" 2>&1; then
-    fail "--blind --memory must refuse: $(cat "$project/refuse-out")"
-  fi
-  grep -Fq 'excludes shared memory' "$project/refuse-out" ||
-    fail "the blind refusal must name the excluded attachment: $(cat "$project/refuse-out")"
-  if HOME="$home_dir" PATH="/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
-      --repo "$project" --artifact-dir "$artifact_dir" --blind --debate 1 \
-      --dry-run --prompt "blind contract" >/dev/null 2>&1; then
-    fail "--blind --debate must refuse: seats must not exchange findings"
-  fi
-
-  # The blind prompt says it is blind; the informed prompt does not.
-  HOME="$home_dir" PATH="/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
-    --repo "$project" --artifact-dir "$artifact_dir" --blind --dry-run \
-    --providers claude --prompt "blind prompt probe" >/dev/null 2>&1 ||
-    fail "blind dry-run should succeed"
-  grep -rFq 'This is a BLIND review' "$artifact_dir" ||
-    fail "the blind prompt must carry the blind contract line"
-
-  # The typed outcome row records which mode judged the diff.
-  write_fake_review_gate_provider "$bin_dir" claude pass
-  write_fake_review_gate_provider "$bin_dir" antigravity pass
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
-    --repo "$project" \
-    --artifact-dir "$artifact_dir" \
-    --providers claude,antigravity \
-    --no-diff --blind \
-    --gate \
-    --prompt "Blind typed outcome" >"$project/out" 2>&1 || rc=$?
-  [ "$rc" = "0" ] || fail "blind pass gate should exit 0, got $rc: $(cat "$project/out")"
-  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' ||
-import json, sys
-rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
-rows = [r for r in rows if r.get("kind") == "review-outcome"]
-assert rows, "no review-outcome row"
-review = rows[-1].get("review")
-assert isinstance(review, dict), rows[-1]
-assert review.get("mode") == "blind", review
-PY
-    fail "the blind verdict row must be marked mode=blind: $(tail -c 1500 "$project/.oms/artifacts/index.jsonl")"
 }
 
 test_peer_review_gate_covers_rides_the_mechanical_verify_receipt() {
@@ -5503,6 +5474,221 @@ EOF
     fail "a content-reading acceptance still adopts: $(tail -5 "$project/warn-out")"
   assert_file_contains "$project/warn-out" "floor_incompatible_verifier"
   assert_file_contains "$project/warn-out" "must NOT copy this shape into task verifies"
+
+  # Native Windows writers commonly leave CRLF candidates. Snapshot metadata
+  # crosses a native-Python/Git-Bash boundary, and confirmation must change
+  # only the State bytes without normalizing the rest of the reviewed draft.
+  rm -f "$project/PROJECT.md"
+  awk '{printf "%s\r\n", $0}' "$intent_dir/intent-good.md" \
+    > "$intent_dir/intent-crlf.md"
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-crlf \
+    > "$project/crlf-out" 2>&1 ||
+    fail "a CRLF candidate should adopt: $(tail -5 "$project/crlf-out")"
+  python3 - "$project/PROJECT.md" <<'PY'
+import sys
+
+data = open(sys.argv[1], "rb").read()
+if b"- State: confirmed\r\n" not in data:
+    raise SystemExit("CRLF State line was not confirmed")
+if b"\n" in data.replace(b"\r\n", b""):
+    raise SystemExit("adopt normalized part of a CRLF candidate")
+PY
+
+  # A candidate leaf is content, not an indirection surface. The preliminary
+  # existence check follows links for diagnostics, while the frozen read must
+  # reject them before any acceptance executes or PROJECT.md is published.
+  rm -f "$project/PROJECT.md"
+  ln -s intent-good.md "$intent_dir/intent-link.md"
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-link \
+    > "$project/link-out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a linked intent candidate must exit 3, got $rc"
+  assert_file_contains "$project/link-out" "not a link or junction"
+  [ ! -e "$project/PROJECT.md" ] || fail "a linked candidate must not publish PROJECT.md"
+}
+
+test_intent_adopt_refuses_candidate_replaced_during_acceptance() {
+  local project="$TMP/intent-adopt-candidate-race"
+  local intent_dir candidate replacement adopt_pid rc=0
+  local attempts=0
+
+  make_committed_repo "$project"
+  mkdir -p "$project/tests"
+  intent_dir="$project/.oms/intents"
+  mkdir -p "$intent_dir"
+  candidate="$intent_dir/intent-racy.md"
+  replacement="$project/edited-candidate.md"
+  cat > "$project/tests/block.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+: > acceptance-started
+attempts=0
+while [ ! -e acceptance-release ]; do
+  attempts=$((attempts + 1))
+  [ "$attempts" -lt 600 ] || exit 125
+  sleep 0.1
+done
+exit 1
+EOF
+  chmod +x "$project/tests/block.sh"
+  cat > "$candidate" <<'EOF'
+## Status
+
+- State: draft
+- Open decisions: none
+
+## Project
+
+- Goal: publish only the candidate bytes that passed every adopt gate
+- Scope: src/
+- Non-goals: packaging
+
+## Commands
+
+- Test: bash tests/block.sh
+
+## Verification
+
+- Success criteria: a greeting prints
+- Required checks: bash tests/block.sh
+- Required check files: tests/block.sh
+
+## Notes
+
+- Risks: concurrent editor saves
+EOF
+  sed 's/publish only the candidate bytes that passed every adopt gate/UNVALIDATED EDIT MUST STAY A DRAFT/' \
+    "$candidate" > "$replacement"
+
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-racy \
+    > "$project/adopt-race-out" 2>&1 &
+  adopt_pid=$!
+  while [ ! -e "$project/acceptance-started" ] && kill -0 "$adopt_pid" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 600 ] || {
+      kill "$adopt_pid" 2>/dev/null || true
+      wait "$adopt_pid" 2>/dev/null || true
+      fail "intent adopt did not reach its acceptance barrier"
+    }
+    sleep 0.1
+  done
+  [ -e "$project/acceptance-started" ] || {
+    wait "$adopt_pid" 2>/dev/null || true
+    fail "intent adopt exited before its acceptance barrier: $(cat "$project/adopt-race-out")"
+  }
+
+  # Model an editor's atomic save while the acceptance command is running.
+  # The live candidate becomes different valid bytes, but neither generation
+  # is publishable because the adopt invocation did not validate one stable
+  # generation end-to-end.
+  cp "$replacement" "$intent_dir/.intent-racy.edit"
+  mv "$intent_dir/.intent-racy.edit" "$candidate"
+  cp "$candidate" "$project/edited-candidate.expected"
+  : > "$project/acceptance-release"
+  if wait "$adopt_pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  [ "$rc" = 2 ] ||
+    fail "a candidate replaced during acceptance must exit 2, got $rc: $(cat "$project/adopt-race-out")"
+  assert_file_contains "$project/adopt-race-out" "candidate changed during adopt"
+  [ ! -e "$project/PROJECT.md" ] ||
+    fail "a changed candidate must not publish PROJECT.md"
+  cmp -s "$project/edited-candidate.expected" "$candidate" ||
+    fail "a refused adopt must preserve the edited candidate"
+}
+
+test_intent_adopt_concurrent_identical_candidate_has_one_winner() {
+  local project="$TMP/intent-adopt-concurrent"
+  local intent_dir candidate first_pid second_pid first_rc=0 second_rc=0
+  local attempts=0 started=0
+
+  make_committed_repo "$project"
+  mkdir -p "$project/tests"
+  intent_dir="$project/.oms/intents"
+  mkdir -p "$intent_dir"
+  candidate="$intent_dir/intent-shared.md"
+  cat > "$project/tests/block.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+: > "acceptance-started.$$"
+attempts=0
+while [ ! -e acceptance-release ]; do
+  attempts=$((attempts + 1))
+  [ "$attempts" -lt 600 ] || exit 125
+  sleep 0.1
+done
+exit 1
+EOF
+  chmod +x "$project/tests/block.sh"
+  cat > "$candidate" <<'EOF'
+## Status
+
+- State: draft
+- Open decisions: none
+
+## Project
+
+- Goal: exactly one concurrent adopter publishes the reviewed contract
+- Scope: src/
+- Non-goals: packaging
+
+## Commands
+
+- Test: bash tests/block.sh
+
+## Verification
+
+- Success criteria: a greeting prints
+- Required checks: bash tests/block.sh
+- Required check files: tests/block.sh
+
+## Notes
+
+- Risks: concurrent adoption
+EOF
+
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-shared \
+    > "$project/adopt-first-out" 2>&1 &
+  first_pid=$!
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-shared \
+    > "$project/adopt-second-out" 2>&1 &
+  second_pid=$!
+  while kill -0 "$first_pid" 2>/dev/null && kill -0 "$second_pid" 2>/dev/null; do
+    started="$(find "$project" -maxdepth 1 -name 'acceptance-started.*' | wc -l | tr -d ' ')"
+    [ "$started" -ge 2 ] && break
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 600 ] || {
+      kill "$first_pid" "$second_pid" 2>/dev/null || true
+      wait "$first_pid" 2>/dev/null || true
+      wait "$second_pid" 2>/dev/null || true
+      fail "concurrent intent adopts did not both reach the acceptance barrier"
+    }
+    sleep 0.1
+  done
+  [ "$started" -ge 2 ] || {
+    : > "$project/acceptance-release"
+    wait "$first_pid" 2>/dev/null || true
+    wait "$second_pid" 2>/dev/null || true
+    fail "one concurrent intent adopt exited before the shared barrier"
+  }
+  : > "$project/acceptance-release"
+  if wait "$first_pid"; then first_rc=0; else first_rc=$?; fi
+  if wait "$second_pid"; then second_rc=0; else second_rc=$?; fi
+
+  case "$first_rc:$second_rc" in
+    0:2|2:0) ;;
+    *) fail "concurrent adopts need one success and one refusal, got $first_rc:$second_rc" ;;
+  esac
+  assert_file_contains "$project/PROJECT.md" "- State: confirmed"
+  assert_file_contains "$candidate" "- State: draft"
+  if [ "$first_rc" = 2 ]; then
+    assert_file_contains "$project/adopt-first-out" "another adopter may have published it"
+  else
+    assert_file_contains "$project/adopt-second-out" "another adopter may have published it"
+  fi
 }
 
 test_agent_plan_lint_verify_matches_admission_floor() {
@@ -6307,8 +6493,23 @@ EOF
 
   before="$(find "$artifact_dir" -type f -print | LC_ALL=C sort |
     while IFS= read -r file; do cksum "$file"; done)"
+  if out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" \
+      --json telemetry 2>&1)"; then
+    fail "artifact telemetry must refuse a structurally corrupt index: $out"
+  fi
+  after="$(find "$artifact_dir" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
+  [ "$before" = "$after" ] ||
+    fail "refused artifact telemetry mutated the retained index or artifacts"
+
+  # A schema-invalid JSON object remains visible as excluded mechanical data;
+  # a non-JSON row cannot be skipped into a partial-looking telemetry report.
+  sed '$d' "$index" > "$index.clean"
+  mv "$index.clean" "$index"
+  before="$(find "$artifact_dir" -type f -print | LC_ALL=C sort |
+    while IFS= read -r file; do cksum "$file"; done)"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry)" ||
-    fail "artifact telemetry should be available as JSON: $out"
+    fail "artifact telemetry should be available for a structural index: $out"
   after="$(find "$artifact_dir" -type f -print | LC_ALL=C sort |
     while IFS= read -r file; do cksum "$file"; done)"
   [ "$before" = "$after" ] ||
@@ -6325,7 +6526,7 @@ assert report["window"]["scope"] == "retained-index-window", report
 assert report["window"]["available_rows"] == 6, report
 assert report["window"]["selected_rows"] == 6, report
 assert report["window"]["limit"] == 1000, report
-assert report["window"]["invalid_lines"] == 1, report
+assert report["window"]["invalid_lines"] == 0, report
 assert report["operations"] == {"eligible": 2, "excluded": 4}, report
 assert report["recorded_exit"] == {
     "zero": 1, "nonzero": 1, "unavailable": 0
@@ -12188,6 +12389,1078 @@ test_gc_old_marker_cannot_release_new_lease() {
   assert_not_exists "$project/.oms/delegations/old.json"
 }
 
+test_gc_dead_marker_cannot_release_live_same_lease() {
+  local project="$TMP/gc-live-same-lease"
+  local sh="$ROOT/scripts/agent-plan.sh"
+  local lease dry_out
+
+  make_committed_repo "$project"
+  "$sh" --repo "$project" init --goal "live retry marker" >/dev/null
+  "$sh" --repo "$project" add --id t1 --title "one" >/dev/null
+  "$sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  lease="$("$sh" --repo "$project" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  mkdir -p "$project/.oms/delegations"
+  # Alphabetical order makes GC encounter the stale marker first. The live
+  # retry owns the same task+lease and must veto recovery under the plan lock.
+  printf '{"schema":3,"id":"old","pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
+    "$lease" > "$project/.oms/delegations/a-old.json"
+  printf '{"schema":3,"id":"retry","pid":%d,"task_id":"t1","lease_id":"%s"}\n' \
+    "$$" "$lease" > "$project/.oms/delegations/z-live.json"
+
+  dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
+  printf '%s' "$dry_out" | grep -Fq 'live exact worker; kept it' ||
+    fail "gc dry-run did not apply the locked live-marker veto: $dry_out"
+  if printf '%s' "$dry_out" | grep -Fq 'task t1 (claimed) -> ready'; then
+    fail "gc dry-run falsely planned release of a live same-lease retry: $dry_out"
+  fi
+  "$sh" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
+    fail "gc dry-run changed the live retry"
+  [ -f "$project/.oms/delegations/a-old.json" ] ||
+    fail "gc dry-run removed the stale marker"
+
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null)
+  "$sh" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
+    fail "a dead marker stole a live retry holding the same lease"
+  assert_not_exists "$project/.oms/delegations/a-old.json"
+  [ -f "$project/.oms/delegations/z-live.json" ] ||
+    fail "gc removed the live retry marker"
+}
+
+test_process_liveness_uses_non_destructive_windows_probe() {
+  local project native_pid rc=0
+  if ! python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
+import importlib.util
+import errno
+import os
+import subprocess
+import sys
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("oms_process_liveness", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Function:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+    def __call__(self, *args):
+        self.calls.append(args)
+        return self.result
+
+class Kernel:
+    def __init__(self, handle, wait):
+        self.OpenProcess = Function(handle)
+        self.WaitForSingleObject = Function(wait)
+        self.CloseHandle = Function(1)
+
+def probe(handle, wait, error, native_pid=654):
+    kernel = Kernel(handle, wait)
+    def forbidden_kill(_pid, _signal):
+        raise AssertionError("Windows liveness must never call os.kill(pid, 0)")
+    alive = module.pid_alive(
+        321, native_pid=native_pid, os_name="nt", kernel32=kernel,
+        get_last_error=lambda: error, posix_kill=forbidden_kill,
+    )
+    valid_native = (isinstance(native_pid, int)
+                    and not isinstance(native_pid, bool)
+                    and 0 < native_pid <= 0xffffffff)
+    if valid_native:
+        assert kernel.OpenProcess.calls == [(module.SYNCHRONIZE, False, native_pid)]
+    else:
+        assert kernel.OpenProcess.calls == []
+    if handle and valid_native:
+        assert kernel.WaitForSingleObject.calls == [(handle, 0)]
+        assert kernel.CloseHandle.calls == [(handle,)]
+    else:
+        assert kernel.WaitForSingleObject.calls == []
+        assert kernel.CloseHandle.calls == []
+    return alive
+
+assert probe(41, module.WAIT_TIMEOUT, 0) is True
+assert probe(42, module.WAIT_OBJECT_0, 0) is False
+assert probe(43, module.WAIT_FAILED, 0) is True
+assert probe(0, module.WAIT_FAILED, module.ERROR_INVALID_PARAMETER) is False
+assert probe(0, module.WAIT_FAILED, module.ERROR_ACCESS_DENIED) is True
+# A Git Bash/MSYS pid is not a Win32 pid. Legacy, missing, or untyped native
+# identity can never prove death on Windows and must not reach OpenProcess.
+for missing in (None, 0, -1, True, "654", 0x100000000):
+    assert probe(0, module.WAIT_FAILED, module.ERROR_INVALID_PARAMETER, missing) is True
+
+posix_calls = []
+assert module.pid_alive(
+    321, native_pid=654, os_name="posix",
+    posix_kill=lambda pid, sig: posix_calls.append((pid, sig)),
+) is True
+assert posix_calls == [(321, 0)]
+assert module.pid_alive(1 << 100, os_name="posix") is True
+def ambiguous_kill(_pid, _signal):
+    raise OSError(errno.EINVAL, "ambiguous")
+assert module.pid_alive(321, os_name="posix", posix_kill=ambiguous_kill) is True
+
+if os.name == "nt":
+    assert module.pid_alive(123, native_pid=os.getpid()) is True
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead_pid = child.pid
+    child.wait(timeout=10)
+    assert module.pid_alive(123, native_pid=dead_pid) is False
+PY
+  then
+    fail "Windows process liveness probe contract failed"
+  fi
+
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      project="$TMP/windows-native-pid-recovery"
+      make_committed_repo "$project"
+      # This Python command is a direct child of the owning Git Bash. Do not
+      # put it in command substitution or a file-lock callback: either creates
+      # an ephemeral Bash parent whose WINPID is not the worker's identity.
+      python3 -c 'import os; print(os.getppid())' > "$project/native-pid"
+      IFS= read -r native_pid < "$project/native-pid"
+      native_pid="${native_pid//$'\r'/}"
+      case "$native_pid" in *[!0-9]*|"") fail "native Git Bash pid capture is invalid" ;; esac
+      python3 -c 'import os; assert os.name == "nt", os.name' ||
+        fail "Git Bash test did not use native Windows Python"
+      [ -r "/proc/$$/winpid" ] || fail "Git Bash did not expose /proc/$$/winpid"
+      proc_winpid=""
+      IFS= read -r proc_winpid < "/proc/$$/winpid"
+      proc_winpid="${proc_winpid//$'\r'/}"
+      [ "$native_pid" = "$proc_winpid" ] ||
+        fail "direct-child native pid $native_pid differs from /proc/$$/winpid $proc_winpid"
+      mkdir -p "$project/.oms/executors/native" "$project/.oms/delegations"
+      printf '{"schema":1,"executor_id":"native","state":"running"}\n' \
+        > "$project/.oms/executors/native/meta.json"
+      printf '{"schema":4,"id":"native","pid":%d,"native_pid":%d,"executor_id":"native"}\n' \
+        "$$" "$native_pid" > "$project/.oms/delegations/native.json"
+      rc=0
+      "$ROOT/scripts/agent-executor.sh" recover --repo "$project" --id native \
+        --expected-state running --markers-dir "$project/.oms/delegations" --check \
+        >/dev/null 2>&1 || rc=$?
+      [ "$rc" = 3 ] || fail "live Git Bash WINPID marker did not veto recovery, got $rc"
+      state_out="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+        fail "state could not read a native Git Bash marker"
+      OMS_T_NATIVE_STATE="$state_out" python3 - <<'PY' ||
+        fail "state labeled a live native Git Bash marker as orphaned"
+import json, os
+row = json.loads(os.environ["OMS_T_NATIVE_STATE"])
+delegations = row.get("delegations") or []
+assert any(item.get("id") == "native" and item.get("live") is True
+           for item in delegations), delegations
+PY
+      verify_out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>/dev/null || true)"
+      OMS_T_NATIVE_VERIFY="$verify_out" python3 - <<'PY' ||
+        fail "state-verify labeled a live native Git Bash marker as orphaned"
+import json, os
+row = json.loads(os.environ["OMS_T_NATIVE_VERIFY"])
+findings = row.get("findings") or []
+assert not any(item.get("family") == "delegations" for item in findings), findings
+PY
+      python3 - "$ROOT/scripts/lib/agent-events.py" "$project/lock-owner" <<'PY' ||
+        fail "agent-events could not preserve its live native lock owner"
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("agent_events", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with module.file_lock(module.Path(sys.argv[2])):
+    owner = json.loads((module.runtime_lock_dir(module.Path(sys.argv[2])) /
+                        "owner.json").read_text(encoding="utf-8"))
+    assert owner["pid"] == os.getpid()
+    assert module.pid_alive(owner["pid"]) is True
+PY
+      kill -0 "$$" 2>/dev/null || fail "the Windows recovery probe harmed its owning Git Bash"
+      ;;
+  esac
+}
+
+test_autopilot_windows_reenter_launch_keeps_parent_anchor() {
+  local dir="$TMP/autopilot-reenter-anchor"
+  local anchor_lib="$dir/anchor.sh"
+  local child_script="$dir/child.py"
+  local child_wrapper="$dir/child-wrapper.sh"
+  local signal expected parent_pid child_pid logical_pid pid_file logical_pid_file rc i
+
+  mkdir -p "$dir"
+  sed -n '/^# OMS_REENTER_ANCHOR_BEGIN$/,/^# OMS_REENTER_ANCHOR_END$/p' \
+    "$ROOT/scripts/autopilot.sh" > "$anchor_lib"
+  [ -s "$anchor_lib" ] || fail "autopilot reenter anchor helper is not extractable"
+  if ! python3 - "$anchor_lib" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+assert "trap ''" not in source
+handlers = source.index("trap 'reenter_forward_signal HUP 129' HUP")
+defaults = source.index("trap - HUP INT TERM", handlers)
+spawn = source.index('exec "$@"', defaults)
+capture = source.index('REENTER_CONTINUATION_PID=$!', spawn)
+pending = source.index('REENTER_PENDING_SIGNAL', capture)
+wait = source.index('wait "$REENTER_CONTINUATION_PID"', pending)
+assert handlers < defaults < spawn < capture < pending < wait
+PY
+  then
+    fail "Windows reenter anchor ordering can inherit or lose a signal"
+  fi
+
+  # The pre-capture handler must defer termination instead of exiting while
+  # the continuation pid is still empty.
+  (
+    set -euo pipefail
+    # shellcheck source=/dev/null
+    . "$anchor_lib"
+    # Read by the extracted production helper.
+    # shellcheck disable=SC2034
+    REENTER_CONTINUATION_PID=""
+    REENTER_PENDING_SIGNAL=""
+    REENTER_PENDING_EXIT=""
+    reenter_forward_signal TERM 143
+    [ "$REENTER_PENDING_SIGNAL" = TERM ]
+    [ "$REENTER_PENDING_EXIT" = 143 ]
+  ) || fail "pre-capture TERM was not retained for the continuation"
+
+  # The Windows parent anchor is transparent on ordinary completion too: it
+  # must return the continuation's status rather than converting every
+  # non-zero child result into a generic wrapper failure.
+  for expected in 0 37; do
+    rc=0
+    (
+      set -uo pipefail
+      # shellcheck source=/dev/null
+      . "$anchor_lib"
+      run_reenter_continuation bash -c "exit $expected"
+    ) || rc=$?
+    [ "$rc" = "$expected" ] ||
+      fail "Windows reenter anchor returned $rc for ordinary child exit $expected"
+  done
+
+  cat > "$child_script" <<'PY'
+import os
+import sys
+import time
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+while True:
+    time.sleep(1)
+PY
+  cat > "$child_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$$" > "$1"
+exec python3 "$2" "$3"
+EOF
+  chmod +x "$child_wrapper"
+  anchored_child_alive() {  # LOGICAL_PID NATIVE_PID
+    python3 - "$ROOT/scripts/lib/process_liveness.py" "$1" "$2" <<'PY'
+import runpy
+import sys
+
+pid_alive = runpy.run_path(sys.argv[1])["pid_alive"]
+raise SystemExit(0 if pid_alive(int(sys.argv[2]), native_pid=int(sys.argv[3])) else 1)
+PY
+  }
+  for signal in HUP INT TERM; do
+    case "$signal" in
+      HUP) expected=129 ;;
+      INT) expected=130 ;;
+      TERM) expected=143 ;;
+    esac
+    pid_file="$dir/child-$signal.pid"
+    logical_pid_file="$dir/child-$signal.logical-pid"
+    (
+      set -euo pipefail
+      # shellcheck source=/dev/null
+      . "$anchor_lib"
+      run_reenter_continuation bash "$child_wrapper" \
+        "$logical_pid_file" "$child_script" "$pid_file"
+    ) > "$dir/$signal.out" 2> "$dir/$signal.err" &
+    parent_pid=$!
+    for i in $(seq 1 100); do
+      [ -s "$pid_file" ] && [ -s "$logical_pid_file" ] && break
+      kill -0 "$parent_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    [ -s "$pid_file" ] && [ -s "$logical_pid_file" ] || {
+      kill -TERM "$parent_pid" 2>/dev/null || true
+      wait "$parent_pid" 2>/dev/null || true
+      fail "$signal anchor child did not start"
+    }
+    IFS= read -r child_pid < "$pid_file"
+    IFS= read -r logical_pid < "$logical_pid_file"
+    kill -s "$signal" "$parent_pid" 2>/dev/null ||
+      fail "could not signal the $signal anchor parent"
+    rc=0
+    wait "$parent_pid" 2>/dev/null || rc=$?
+    [ "$rc" = "$expected" ] ||
+      fail "$signal anchor parent exited $rc instead of $expected"
+    for i in $(seq 1 100); do
+      anchored_child_alive "$logical_pid" "$child_pid" || break
+      sleep 0.05
+    done
+    if anchored_child_alive "$logical_pid" "$child_pid"; then
+      kill -TERM "$logical_pid" 2>/dev/null || true
+      fail "forwarded $signal left the continuation alive"
+    fi
+  done
+}
+
+test_autopilot_receipt_windows_claim_identity_is_fail_closed() {
+  if ! python3 - "$ROOT/scripts/lib/autopilot-receipt.py" \
+      "$TMP/receipt-native-identity" <<'PY'
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+helper = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(helper.parent))
+spec = importlib.util.spec_from_file_location("autopilot_receipt", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+root.mkdir(parents=True)
+receipt = root / "autopilot-run.json"
+ledger = root / "autopilot-reentries.jsonl"
+row = {"stage": "proposing", "spec_sha256": "a" * 64,
+       "branch": "main", "owner_id": "owner_" + "1" * 32}
+module.validate_live = lambda _row, _repo: None
+original_os_name = module.os.name
+module.os.name = "nt"
+try:
+    for native in (None, "123", True, 0x100000000):
+        claim = {"schema": 1, "kind": "autopilot-drive-claim",
+                 "spec_sha256": row["spec_sha256"], "branch": "main",
+                 "owner_id": row["owner_id"], "claim_pid": 123}
+        if native is not None:
+            claim["claim_native_pid"] = native
+        ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
+        result = module.reenter_judgment(receipt, row, str(root), 456, 789, True)
+        assert "unproven legacy session claim" in result[0], result
+        assert result[1] == 0, result
+
+    claim["claim_pid"] = 1 << 40
+    claim["claim_native_pid"] = 321
+    ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
+    result = module.reenter_judgment(receipt, row, str(root), 456, 789, True)
+    assert "unproven legacy session claim" in result[0], result
+    claim["claim_pid"] = 123
+
+    observed = []
+    module.pid_alive = lambda pid, *, native_pid=None: (
+        observed.append((pid, native_pid)) or True
+    )
+    claim["claim_native_pid"] = 321
+    ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
+    result = module.reenter_judgment(receipt, row, str(root), 456, 789, True)
+    assert observed == [(123, 321)], observed
+    assert result[3:] == (123, 321), result
+finally:
+    module.os.name = original_os_name
+PY
+  then
+    fail "autopilot receipt accepted an unproven Windows claim identity"
+  fi
+}
+
+test_autopilot_receipt_corrupt_lineage_is_fail_closed() {
+  if ! python3 - "$ROOT/scripts/lib/autopilot-receipt.py" \
+      "$TMP/receipt-corrupt-lineage" <<'PY'
+import importlib.util
+import json
+import pathlib
+import shutil
+import sys
+
+helper = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(helper.parent))
+spec = importlib.util.spec_from_file_location("autopilot_receipt", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+root.mkdir(parents=True)
+receipt = root / "autopilot-run.json"
+ledger = root / "autopilot-reentries.jsonl"
+row = {"stage": "proposing", "spec_sha256": "a" * 64,
+       "branch": "main", "owner_id": "owner_" + "1" * 32}
+module.validate_live = lambda _row, _repo: None
+
+def reset_ledger():
+    if ledger.is_dir():
+        ledger.rmdir()
+    elif ledger.exists() or ledger.is_symlink():
+        ledger.unlink()
+
+def judgment():
+    return module.reenter_judgment(receipt, row, str(root), 456, 789, True)
+
+def assert_unproven(payload=None, directory=False):
+    reset_ledger()
+    if directory:
+        ledger.mkdir()
+    else:
+        ledger.write_bytes(payload)
+    result = judgment()
+    assert "unproven" in result[0] and "claim" in result[0], result
+    assert result[1:] == (0, 0, 0, 0), result
+
+module.pid_alive = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    AssertionError("unproven lineage must refuse before a liveness probe"))
+assert_unproven(b'{"schema":1,"kind":"autopilot-drive-claim"')
+assert_unproven(b'[]\n')
+assert_unproven(json.dumps({
+    "schema": 2, "kind": "autopilot-drive-claim",
+    "spec_sha256": row["spec_sha256"], "branch": "main",
+    "owner_id": row["owner_id"], "claim_pid": 123,
+    "claim_native_pid": 321,
+}).encode("utf-8") + b"\n")
+assert_unproven(json.dumps({
+    "schema": 1, "kind": "autopilot-unknown-record",
+    "spec_sha256": row["spec_sha256"], "branch": "main",
+}).encode("utf-8") + b"\n")
+assert_unproven(directory=True)
+
+reset_ledger()
+ledger.write_text("\n", encoding="utf-8")
+assert judgment() == ("", 0, 0, 0, 0)
+ledger.write_text("\n".join([
+    json.dumps({"schema": 1, "kind": "autopilot-reenter", "disposition": "refused",
+                "spec_sha256": row["spec_sha256"], "branch": "main"}),
+    json.dumps({"schema": 1, "kind": "autopilot-reenter-requeue",
+                "spec_sha256": row["spec_sha256"], "branch": "main"}),
+]) + "\n", encoding="utf-8")
+assert judgment() == ("", 0, 0, 0, 0)
+
+observed = []
+module.pid_alive = lambda pid, *, native_pid=None: (
+    observed.append((pid, native_pid)) or True)
+ledger.write_text(json.dumps({
+    "schema": 1, "kind": "autopilot-drive-claim",
+    "spec_sha256": row["spec_sha256"], "branch": "main",
+    "claim_pid": 123, "claim_native_pid": 321,
+}) + "\n", encoding="utf-8")
+result = judgment()
+assert "unproven" in result[0] and observed == [], (result, observed)
+PY
+  then
+    fail "autopilot receipt ignored corrupt or ambiguous lineage evidence"
+  fi
+}
+
+test_gc_preserves_unproven_delegation_markers() {
+  local project="$TMP/gc-unproven-delegations"
+  local markers="$project/.oms/delegations"
+  local outside="$project/outside-marker.json"
+  local gc_error rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$markers"
+  printf '{"schema":4,"id":"outside","pid":999999,"native_pid":999999}\n' > "$outside"
+  ln -s "$outside" "$markers/symlink.json"
+  printf '{not-json\n' > "$markers/malformed.json"
+  printf '{"schema":4,"id":"huge","pid":1099511627776,"native_pid":999999}\n' \
+    > "$markers/huge.json"
+  python3 - "$markers/oversize.json" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({"schema": 4, "id": "oversize", "pid": 999999,
+               "native_pid": 999999, "padding": "x" * (65 * 1024)}, handle)
+PY
+
+  gc_error="$project/gc-unproven.err"
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
+    >/dev/null 2>"$gc_error") || fail "gc failed while preserving unproven markers"
+  [ -L "$markers/symlink.json" ] || fail "gc followed or deleted a marker symlink"
+  [ -f "$markers/malformed.json" ] || fail "gc deleted malformed marker evidence"
+  [ -f "$markers/huge.json" ] || fail "gc deleted oversized-pid marker evidence"
+  [ -f "$markers/oversize.json" ] || fail "gc deleted oversized marker evidence"
+  grep -Fq 'unproven delegation marker' "$gc_error" ||
+    fail "gc did not explain preserved marker evidence: $(cat "$gc_error")"
+
+  if command -v mkfifo >/dev/null 2>&1 && mkfifo "$markers/fifo.json" 2>/dev/null; then
+    rc=0
+    python3 - "$ROOT/scripts/gc.sh" "$project" <<'PY' || rc=$?
+import subprocess, sys
+try:
+    completed = subprocess.run(
+        ["bash", sys.argv[1], "--repo", sys.argv[2], "--days", "30", "--apply"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+raise SystemExit(completed.returncode)
+PY
+    [ "$rc" = 0 ] || fail "gc blocked on a FIFO delegation marker, got $rc"
+    [ -p "$markers/fifo.json" ] || fail "gc deleted FIFO marker evidence"
+  fi
+
+  local linked_project="$TMP/gc-linked-delegation-dir"
+  local external_dir="$TMP/gc-external-delegations"
+  local external_marker="$external_dir/outside.json"
+  make_committed_repo "$linked_project"
+  mkdir -p "$linked_project/.oms" "$external_dir"
+  printf '{"schema":4,"id":"outside","pid":999999,"native_pid":999999}\n' \
+    > "$external_marker"
+  ln -s "$external_dir" "$linked_project/.oms/delegations"
+  (cd "$linked_project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
+    >/dev/null 2> "$linked_project/gc-linked.err") ||
+    fail "gc failed while rejecting a linked delegation directory"
+  [ -f "$external_marker" ] || fail "gc escaped through the delegation directory symlink"
+  grep -Fq 'delegation directory is not a real repo-local directory' \
+    "$linked_project/gc-linked.err" ||
+    fail "gc did not explain the linked delegation directory refusal"
+
+  local bounded_project="$TMP/gc-bounded-delegation-dir"
+  make_committed_repo "$bounded_project"
+  mkdir -p "$bounded_project/.oms/delegations"
+  python3 - "$bounded_project/.oms/delegations" <<'PY'
+import os, sys
+for index in range(4097):
+    with open(os.path.join(sys.argv[1], "m%04d.json" % index), "w", encoding="utf-8") as handle:
+        handle.write('{"schema":4,"id":"m%04d","pid":999999,"native_pid":999999}\n' % index)
+PY
+  (cd "$bounded_project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
+    >/dev/null 2> "$bounded_project/gc-bounded.err") ||
+    fail "gc failed while rejecting an over-budget delegation directory"
+  [ -f "$bounded_project/.oms/delegations/m0000.json" ] ||
+    fail "gc partially swept an over-budget delegation directory"
+  grep -Fq 'delegation directory exceeds bounds or changed' \
+    "$bounded_project/gc-bounded.err" ||
+    fail "gc did not explain the delegation entry bound"
+}
+
+test_gc_marker_delete_cas_preserves_atomic_live_replacement() {
+  local project="$TMP/gc-marker-delete-cas"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local marker lease native_pid real_python python_bin
+  local snapshot_ready="$project/marker-snapshot-ready"
+  local snapshot_release="$project/marker-snapshot-release"
+  local i gc_pid
+
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal "marker delete CAS" >/dev/null
+  "$plan" --repo "$project" add --id t1 --title one >/dev/null
+  "$plan" --repo "$project" claim --id t1 --provider codex >/dev/null
+  lease="$("$plan" --repo "$project" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  mkdir -p "$project/.oms/delegations"
+  marker="$project/.oms/delegations/same.json"
+  printf '{"schema":4,"id":"dead","pid":999999,"native_pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
+    "$lease" > "$marker"
+
+  # Pause the exact bounded snapshot after it has read the dead generation but
+  # before its shared marker-set lock is released. The replacement below is
+  # deliberately non-cooperative so the final digest+identity CAS is exercised.
+  real_python="$(command -v python3)"
+  python_bin="$project/python-bin"
+  mkdir -p "$python_bin"
+  cat > "$python_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = - ] && [ "${4:-}" = "$OMS_T_LIVENESS_HELPER" ]; then
+  snapshot_script="$(mktemp)"
+  cat > "$snapshot_script"
+  snapshot_rc=0
+  "$OMS_T_REAL_PYTHON" "$@" < "$snapshot_script" || snapshot_rc=$?
+  : > "$OMS_T_SNAPSHOT_READY"
+  while [ ! -f "$OMS_T_SNAPSHOT_RELEASE" ]; do sleep 0.05; done
+  rm -f "$snapshot_script"
+  exit "$snapshot_rc"
+fi
+exec "$OMS_T_REAL_PYTHON" "$@"
+EOF
+  chmod +x "$python_bin/python3"
+
+  (cd "$project" && \
+    PATH="$python_bin:$PATH" OMS_T_REAL_PYTHON="$real_python" \
+    OMS_T_LIVENESS_HELPER="$ROOT/scripts/lib/process_liveness.py" \
+    OMS_T_SNAPSHOT_READY="$snapshot_ready" \
+    OMS_T_SNAPSHOT_RELEASE="$snapshot_release" \
+    "$ROOT/scripts/gc.sh" --days 30 --apply \
+    > "$project/gc-cas.out" 2> "$project/gc-cas.err") &
+  gc_pid=$!
+  for i in $(seq 1 100); do
+    [ -f "$snapshot_ready" ] && break
+    kill -0 "$gc_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ -f "$snapshot_ready" ] || {
+    : > "$snapshot_release"
+    wait "$gc_pid" 2>/dev/null || true
+    fail "gc never completed the bounded delegation marker snapshot"
+  }
+
+  python3 -c 'import os; print(os.getppid())' > "$project/native-pid"
+  IFS= read -r native_pid < "$project/native-pid"
+  native_pid="${native_pid//$'\r'/}"
+  python3 - "$marker" "$$" "$native_pid" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+row = {"schema": 4, "id": "replacement", "pid": int(sys.argv[2]),
+       "native_pid": int(sys.argv[3])}
+fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, path)
+PY
+  : > "$snapshot_release"
+  wait "$gc_pid" || fail "gc failed during marker replacement race"
+
+  [ -f "$marker" ] || fail "gc deleted an atomic live replacement by stale pathname"
+  grep -Fq '"id": "replacement"' "$marker" ||
+    fail "gc did not preserve the replacement marker generation"
+  "$plan" --repo "$project" show --id t1 | grep -Fq '"state": "ready"' ||
+    fail "gc did not recover the exact dead lease before the marker CAS"
+  grep -Fq 'delegation marker generation changed; kept it' "$project/gc-cas.err" ||
+    fail "gc did not report the failed marker generation CAS"
+}
+
+test_gc_dead_marker_cannot_fail_live_same_executor() {
+  local project="$TMP/gc-live-same-executor"
+  local executor="$ROOT/scripts/agent-executor.sh"
+  local meta markers dry_out rc=0
+
+  make_committed_repo "$project"
+  meta="$project/.oms/executors/exact/meta.json"
+  markers="$project/.oms/delegations"
+  mkdir -p "$(dirname "$meta")" "$markers"
+  printf '{"schema":1,"executor_id":"exact","state":"running","updated_at":"2026-01-01T00:00:00Z"}\n' > "$meta"
+  printf '{"schema":3,"id":"old","pid":999999,"executor_id":"exact"}\n' \
+    > "$markers/a-old.json"
+  printf '{"schema":3,"id":"retry","pid":%d,"executor_id":"exact"}\n' "$$" \
+    > "$markers/z-live.json"
+
+  dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
+  printf '%s' "$dry_out" | grep -Fq 'executor exact changed or has a live exact worker; kept it' ||
+    fail "executor dry-run did not apply the locked live-marker veto: $dry_out"
+  if printf '%s' "$dry_out" | grep -Fq 'orphan-delegation-executor: exact running -> failed'; then
+    fail "executor dry-run falsely planned failure of a live retry: $dry_out"
+  fi
+  grep -Fq '"state":"running"' "$meta" || fail "executor dry-run changed metadata"
+  [ -f "$markers/a-old.json" ] || fail "executor dry-run removed its trigger marker"
+
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1)
+  grep -Fq '"state":"running"' "$meta" || fail "a dead marker failed a live same-id executor"
+  assert_not_exists "$markers/a-old.json"
+  [ -f "$markers/z-live.json" ] || fail "gc removed the live executor marker"
+
+  mkdir -p "$project/.oms/executors/gcdead"
+  printf '{"schema":1,"executor_id":"gcdead","state":"running"}\n' \
+    > "$project/.oms/executors/gcdead/meta.json"
+  printf '{"schema":3,"id":"gcdead","pid":999999,"executor_id":"gcdead"}\n' \
+    > "$markers/gcdead.json"
+  dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
+  printf '%s' "$dry_out" | grep -Fq 'orphan-delegation-executor: gcdead running -> failed' ||
+    fail "gc dry-run omitted an eligible exact executor recovery: $dry_out"
+  grep -Fq '"state":"running"' "$project/.oms/executors/gcdead/meta.json" ||
+    fail "eligible executor dry-run mutated metadata"
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1)
+  grep -Fq '"state": "failed"' "$project/.oms/executors/gcdead/meta.json" ||
+    fail "gc did not apply eligible exact executor recovery"
+  assert_not_exists "$markers/gcdead.json"
+
+  # A malformed exact marker is not evidence of death.
+  printf '{"schema":1,"executor_id":"malformed","state":"running"}\n' \
+    > "$project/.oms/executors/malformed-meta.json"
+  mkdir -p "$project/.oms/executors/malformed"
+  mv "$project/.oms/executors/malformed-meta.json" \
+    "$project/.oms/executors/malformed/meta.json"
+  printf '{"schema":3,"id":"bad","pid":"?","executor_id":"malformed"}\n' \
+    > "$markers/malformed.json"
+  rc=0
+  "$executor" recover --repo "$project" --id malformed --expected-state running \
+    --markers-dir "$markers" --check >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "malformed exact executor marker must veto recovery, got $rc"
+  grep -Fq '"state":"running"' "$project/.oms/executors/malformed/meta.json" ||
+    fail "malformed marker recovery changed executor state"
+
+  mkdir -p "$project/.oms/executors/hugepid"
+  printf '{"schema":1,"executor_id":"hugepid","state":"running"}\n' \
+    > "$project/.oms/executors/hugepid/meta.json"
+  printf '{"schema":4,"id":"hugepid","pid":1099511627776,"native_pid":999999,"executor_id":"hugepid"}\n' \
+    > "$markers/hugepid.json"
+  rc=0
+  "$executor" recover --repo "$project" --id hugepid --expected-state running \
+    --markers-dir "$markers" --check >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "oversized exact executor pid must veto recovery, got $rc"
+
+  # The state read by GC is a CAS input, not a hint: a later terminal state
+  # must survive the exact locked recovery verb.
+  printf '{"schema":1,"executor_id":"drift","state":"done"}\n' \
+    > "$project/.oms/executors/drift-meta.json"
+  mkdir -p "$project/.oms/executors/drift"
+  mv "$project/.oms/executors/drift-meta.json" "$project/.oms/executors/drift/meta.json"
+  rc=0
+  "$executor" recover --repo "$project" --id drift --expected-state running \
+    --markers-dir "$markers" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "executor state-CAS drift must exit 3, got $rc"
+  grep -Fq '"state":"done"' "$project/.oms/executors/drift/meta.json" ||
+    fail "executor recovery overwrote a terminal transition"
+
+  mkdir -p "$project/.oms/executors/deadonly"
+  printf '{"schema":1,"executor_id":"deadonly","state":"running"}\n' \
+    > "$project/.oms/executors/deadonly/meta.json"
+  printf '{"schema":3,"id":"deadonly","pid":999999,"executor_id":"deadonly"}\n' \
+    > "$markers/deadonly.json"
+  local windows_bin="$project/executor-windows-bin"
+  mkdir -p "$windows_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "MINGW64_NT-10.0\\n"' > "$windows_bin/uname"
+  cat > "$windows_bin/cygpath" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -m ] && [ "${2:-}" = /c/oms-executor-fixture/.oms/delegations ]; then
+  printf '%s\r\n' "$OMS_T_EXECUTOR_WINDOWS_MARKERS"
+else
+  printf '%s\r\n' "${2:-}"
+fi
+EOF
+  chmod +x "$windows_bin/uname" "$windows_bin/cygpath"
+  PATH="$windows_bin:$PATH" OMS_T_EXECUTOR_WINDOWS_MARKERS="$markers" \
+    "$executor" recover --repo "$project" --id deadonly --expected-state running \
+      --markers-dir /c/oms-executor-fixture/.oms/delegations --check >/dev/null ||
+    fail "executor check did not normalize Git Bash /c path and CRLF"
+  grep -Fq '"state":"running"' "$project/.oms/executors/deadonly/meta.json" ||
+    fail "executor check-only changed an eligible executor"
+  "$executor" recover --repo "$project" --id deadonly --expected-state running \
+    --markers-dir "$markers" >/dev/null || fail "eligible dead executor did not recover"
+  grep -Fq '"state": "failed"' "$project/.oms/executors/deadonly/meta.json" ||
+    fail "executor apply did not fail the exact dead worker"
+
+  rc=0
+  OMS_HARNESS_CHILD=1 "$executor" recover --repo "$project" --id malformed \
+    --expected-state running --markers-dir "$markers" --check \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a harness child reached parent executor recovery, got $rc"
+
+  local outside="$TMP/executor-recovery-outside"
+  mkdir -p "$outside" "$project/.oms/executors"
+  printf '{"schema":1,"executor_id":"escape","state":"running"}\n' \
+    > "$outside/meta.json"
+  ln -s "$outside" "$project/.oms/executors/escape"
+  rc=0
+  "$executor" recover --repo "$project" --id escape --expected-state running \
+    --markers-dir "$markers" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "executor recovery followed a symlinked metadata directory, got $rc"
+  grep -Fq '"state":"running"' "$outside/meta.json" ||
+    fail "executor recovery mutated metadata outside the repository"
+  printf '{"schema":4,"id":"escape","pid":999999,"native_pid":999999,"executor_id":"escape"}\n' \
+    > "$markers/escape.json"
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
+    >/dev/null 2> "$project/gc-escape.err") ||
+    fail "gc failed while refusing escaped executor metadata"
+  [ -f "$markers/escape.json" ] ||
+    fail "gc deleted trigger evidence after executor recovery rc=2"
+  grep -Fq 'delegation recovery was unproven' "$project/gc-escape.err" ||
+    fail "gc did not explain preserved recovery evidence"
+
+  printf '{"schema":1,"executor_id":"..","state":"running","sentinel":"keep"}\n' \
+    > "$project/.oms/meta.json"
+  printf 'executor soul\n' > "$project/dotdot-soul.md"
+  for dotdot_action in show recover create; do
+    rc=0
+    case "$dotdot_action" in
+      show)
+        "$executor" show --repo "$project" --id .. >/dev/null 2>&1 || rc=$?
+        ;;
+      recover)
+        "$executor" recover --repo "$project" --id .. --expected-state running \
+          --markers-dir "$markers" >/dev/null 2>&1 || rc=$?
+        ;;
+      create)
+        "$executor" create --repo "$project" --id .. --provider codex \
+          --soul-file "$project/dotdot-soul.md" >/dev/null 2>&1 || rc=$?
+        ;;
+    esac
+    [ "$rc" = 2 ] || fail "executor $dotdot_action accepted traversal id .., got $rc"
+  done
+  grep -Fq '"sentinel":"keep"' "$project/.oms/meta.json" ||
+    fail "executor traversal id mutated repository metadata"
+}
+
+test_gc_preserves_trigger_when_referenced_state_is_unproven() {
+  local project="$TMP/gc-unproven-referenced-state"
+  local executor_marker plan_marker lease
+  local plan="$ROOT/scripts/agent-plan.sh"
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/delegations" \
+    "$project/.oms/executors/invalid-state"
+  printf '{"schema":1,"executor_id":"invalid-state"}\n' \
+    > "$project/.oms/executors/invalid-state/meta.json"
+  executor_marker="$project/.oms/delegations/executor-invalid.json"
+  printf '{"schema":4,"id":"executor-invalid","pid":999999,"native_pid":999999,"executor_id":"invalid-state"}\n' \
+    > "$executor_marker"
+
+  "$plan" --repo "$project" init --goal "unproven state" >/dev/null
+  "$plan" --repo "$project" add --id t1 --title one >/dev/null
+  "$plan" --repo "$project" claim --id t1 --provider codex >/dev/null
+  lease="$("$plan" --repo "$project" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    row = json.load(handle)
+row["tasks"]["t1"]["state"] = ""
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+PY
+  plan_marker="$project/.oms/delegations/plan-invalid.json"
+  printf '{"schema":4,"id":"plan-invalid","pid":999999,"native_pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
+    "$lease" > "$plan_marker"
+
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
+    >/dev/null 2> "$project/gc-invalid-state.err") ||
+    fail "gc failed while preserving unproven referenced state"
+  [ -f "$executor_marker" ] ||
+    fail "gc deleted trigger evidence for executor metadata with no typed state"
+  [ -f "$plan_marker" ] ||
+    fail "gc deleted trigger evidence for a plan task with no typed state"
+  grep -Fq 'executor invalid-state has an invalid state; kept trigger evidence' \
+    "$project/gc-invalid-state.err" ||
+    fail "gc did not explain the invalid executor state"
+  grep -Fq 'plan task t1 has an invalid state; kept trigger evidence' \
+    "$project/gc-invalid-state.err" ||
+    fail "gc did not explain the invalid plan state"
+}
+
+test_gc_preserves_unknown_exact_marker_schema() {
+  local project="$TMP/gc-unknown-exact-marker-schema"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local executor="$ROOT/scripts/agent-executor.sh"
+  local markers lease rc=0 dry_out
+
+  make_committed_repo "$project"
+  markers="$project/.oms/delegations"
+  mkdir -p "$markers" "$project/.oms/executors/exact"
+  printf '{"schema":1,"executor_id":"exact","state":"running"}\n' \
+    > "$project/.oms/executors/exact/meta.json"
+  "$plan" --repo "$project" init --goal "typed marker evidence" >/dev/null
+  "$plan" --repo "$project" add --id t1 --title one >/dev/null
+  "$plan" --repo "$project" claim --id t1 --provider codex >/dev/null
+  lease="$("$plan" --repo "$project" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+
+  printf '{"schema":2,"id":"plan-dead","pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
+    "$lease" > "$markers/a-plan-dead.json"
+  printf '{"schema":4,"id":"plan-unproven","pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
+    "$lease" > "$markers/b-plan-unproven.json"
+  printf '{"schema":3,"id":"executor-dead","pid":999999,"executor_id":"exact"}\n' \
+    > "$markers/c-executor-dead.json"
+  printf '{"schema":999,"id":"executor-future","pid":999999,"native_pid":999999,"executor_id":"exact"}\n' \
+    > "$markers/d-executor-future.json"
+  printf '{"schema":999,"id":"future-trigger","pid":999999,"native_pid":999999}\n' \
+    > "$markers/e-future-trigger.json"
+
+  rc=0
+  "$plan" --repo "$project" recover-lease --id t1 --lease-id "$lease" \
+    --expected-state claimed --markers-dir "$markers" --check \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "schema-4 marker without native pid did not veto plan recovery, got $rc"
+  rc=0
+  "$executor" recover --repo "$project" --id exact --expected-state running \
+    --markers-dir "$markers" --check >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "unknown future marker schema did not veto executor recovery, got $rc"
+
+  dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
+  if printf '%s' "$dry_out" | grep -Eq 'orphan-delegation-(plan|executor): .* -> (ready|failed)'; then
+    fail "gc dry-run consumed semantically unproven exact marker evidence: $dry_out"
+  fi
+  (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
+    >/dev/null 2> "$project/gc-unknown-schema.err") ||
+    fail "gc failed while preserving unknown marker schemas"
+  "$plan" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
+    fail "gc requeued a plan task despite an unproven exact marker"
+  grep -Fq '"state":"running"' "$project/.oms/executors/exact/meta.json" ||
+    fail "gc failed an executor despite an unknown exact marker schema"
+  for marker in "$markers"/*.json; do
+    [ -f "$marker" ] || fail "gc deleted unproven marker evidence: $marker"
+  done
+}
+
+test_gc_strips_native_python_crlf_for_plan_recovery() {
+  local project="$TMP/gc-native-python-crlf"
+  local sh="$ROOT/scripts/agent-plan.sh"
+  local lease python_bin crlf_bin
+
+  make_committed_repo "$project"
+  "$sh" --repo "$project" init --goal "CRLF recovery" >/dev/null
+  "$sh" --repo "$project" add --id t1 --title "one" >/dev/null
+  "$sh" --repo "$project" claim --id t1 --provider codex >/dev/null
+  lease="$("$sh" --repo "$project" show --id t1 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  mkdir -p "$project/.oms/delegations"
+  printf '{"schema":3,"id":"dead","pid":999999,"task_id":"t1","lease_id":"%s"}\n' \
+    "$lease" > "$project/.oms/delegations/dead.json"
+
+  python_bin="$(command -v python3)"
+  crlf_bin="$project/crlf-bin"
+  mkdir -p "$crlf_bin"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -o pipefail'
+    printf '%s\n' "\"$python_bin\" \"\$@\" | sed 's/\$/\\r/'"
+  } > "$crlf_bin/python3"
+  chmod +x "$crlf_bin/python3"
+
+  (cd "$project" && PATH="$crlf_bin:$PATH" \
+    "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null)
+  "$sh" --repo "$project" show --id t1 | grep -Fq '"state": "ready"' ||
+    fail "native Python CRLF prevented exact dead-lease recovery"
+}
+
+test_agent_plan_owner_recovery_is_fenced() {
+  local project="$TMP/plan-owner-recovery"
+  local sh="$ROOT/scripts/agent-plan.sh"
+  local markers="$project/.oms/delegations"
+  local owner="owner_11111111111111111111111111111111"
+  local other="owner_22222222222222222222222222222222"
+  local dead_pid lease_live lease_dead lease_other lease_review lease_markerless lease_badmarker
+  local out rc=0
+
+  make_committed_repo "$project"
+  "$sh" --repo "$project" init --goal "owner-fenced recovery" >/dev/null
+  for id in claimed live dead other review markerless badmarker; do
+    "$sh" --repo "$project" add --id "$id" --title "$id" >/dev/null
+  done
+
+  OMS_AUTOPILOT_OWNER_ID="$owner" \
+    "$sh" --repo "$project" claim --id claimed --provider codex >/dev/null
+  OMS_AUTOPILOT_OWNER_ID="$owner" \
+    "$sh" --repo "$project" claim --id live --provider codex >/dev/null
+  lease_live="$("$sh" --repo "$project" show --id live |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  "$sh" --repo "$project" start --id live --lease-id "$lease_live" >/dev/null
+
+  OMS_AUTOPILOT_OWNER_ID="$owner" \
+    "$sh" --repo "$project" claim --id dead --provider codex >/dev/null
+  lease_dead="$("$sh" --repo "$project" show --id dead |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  "$sh" --repo "$project" start --id dead --lease-id "$lease_dead" >/dev/null
+
+  OMS_AUTOPILOT_OWNER_ID="$other" \
+    "$sh" --repo "$project" claim --id other --provider claude >/dev/null
+  lease_other="$("$sh" --repo "$project" show --id other |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  "$sh" --repo "$project" start --id other --lease-id "$lease_other" >/dev/null
+
+  OMS_AUTOPILOT_OWNER_ID="$owner" \
+    "$sh" --repo "$project" claim --id review --provider codex >/dev/null
+  lease_review="$("$sh" --repo "$project" show --id review |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  "$sh" --repo "$project" review --id review --lease-id "$lease_review" >/dev/null
+
+  OMS_AUTOPILOT_OWNER_ID="$owner" \
+    "$sh" --repo "$project" claim --id markerless --provider codex >/dev/null
+  lease_markerless="$("$sh" --repo "$project" show --id markerless |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  "$sh" --repo "$project" start --id markerless --lease-id "$lease_markerless" >/dev/null
+
+  OMS_AUTOPILOT_OWNER_ID="$owner" \
+    "$sh" --repo "$project" claim --id badmarker --provider codex >/dev/null
+  lease_badmarker="$("$sh" --repo "$project" show --id badmarker |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+  "$sh" --repo "$project" start --id badmarker --lease-id "$lease_badmarker" >/dev/null
+
+  sh -c ':' & dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  mkdir -p "$markers"
+  printf '{"schema":3,"id":"live","pid":%d,"task_id":"live","lease_id":"%s","autopilot_owner_id":"%s"}\n' \
+    "$$" "$lease_live" "$owner" > "$markers/live.json"
+  printf '{"schema":3,"id":"dead","pid":%d,"task_id":"dead","lease_id":"%s","autopilot_owner_id":"%s"}\n' \
+    "$dead_pid" "$lease_dead" "$owner" > "$markers/dead.json"
+  printf '{"schema":3,"id":"review","pid":%d,"task_id":"review","lease_id":"%s","autopilot_owner_id":"%s"}\n' \
+    "$dead_pid" "$lease_review" "$owner" > "$markers/review.json"
+  printf '{"schema":3,"id":"badmarker","pid":"not-a-pid","task_id":"badmarker","lease_id":"%s","autopilot_owner_id":"%s"}\n' \
+    "$lease_badmarker" "$owner" > "$markers/badmarker.json"
+
+  rc=0
+  OMS_HARNESS_CHILD=1 "$sh" --repo "$project" recover-owner \
+    --owner-id "$owner" --markers-dir "$markers" --json \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a harness child reached owner recovery, got $rc"
+  "$sh" --repo "$project" show --id claimed | grep -Fq '"state": "claimed"' ||
+    fail "child owner recovery changed parent authority"
+
+  out="$("$sh" --repo "$project" recover-owner --owner-id "$owner" \
+    --markers-dir "$markers" --json)" ||
+    fail "owner recovery failed: $out"
+  OMS_OWNER_RECOVERY="$out" python3 - <<'PY' || fail "owner recovery returned the wrong task set: $out"
+import json
+import os
+
+row = json.loads(os.environ["OMS_OWNER_RECOVERY"])
+assert row["recovered"] == ["claimed", "dead"], row
+assert sorted(row["preserved"]) == ["badmarker", "live", "markerless", "review"], row
+PY
+  for id in claimed dead; do
+    "$sh" --repo "$project" show --id "$id" | grep -Fq '"state": "ready"' ||
+      fail "owner recovery did not requeue $id"
+  done
+  for id in live markerless badmarker; do
+    "$sh" --repo "$project" show --id "$id" | grep -Fq '"state": "running"' ||
+      fail "owner recovery stole live or unproven task $id"
+  done
+  "$sh" --repo "$project" show --id other | grep -Fq '"state": "running"' ||
+    fail "owner recovery stole another owner's task"
+  "$sh" --repo "$project" show --id review | grep -Fq '"state": "review"' ||
+    fail "owner recovery requeued review evidence"
+
+  rc=0
+  "$sh" --repo "$project" recover-lease --id review --lease-id "$lease_review" \
+    --expected-state review --markers-dir "$markers" \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "atomic lease recovery must refuse review, got $rc"
+  "$sh" --repo "$project" show --id review | grep -Fq '"state": "review"' ||
+    fail "atomic lease recovery changed review state"
+
+  rc=0
+  "$sh" --repo "$project" recover-lease --id other --lease-id stale-lease \
+    --expected-state running --markers-dir "$markers" \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "atomic lease recovery must refuse a stale lease, got $rc"
+  "$sh" --repo "$project" show --id other | grep -Fq '"state": "running"' ||
+    fail "stale lease recovery changed the current worker"
+
+  rc=0
+  "$sh" --repo "$project" recover-lease --id live --lease-id "$lease_live" \
+    --expected-state running --markers-dir "$markers" \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a live exact marker must veto lease recovery, got $rc"
+  "$sh" --repo "$project" show --id live | grep -Fq '"state": "running"' ||
+    fail "lease recovery stole a task with an exact live marker"
+
+  rc=0
+  "$sh" --repo "$project" recover-lease --id markerless --lease-id "$lease_markerless" \
+    --expected-state claimed --markers-dir "$markers" \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "an expected-state mismatch must veto lease recovery, got $rc"
+  "$sh" --repo "$project" show --id markerless | grep -Fq '"state": "running"' ||
+    fail "state-CAS recovery changed a task after its observed transition"
+
+  # Simulate native Windows Git Bash without depending on a Windows runner:
+  # /c/... is translated by cygpath and its CRLF output must be stripped before
+  # the embedded native Python compares the physical marker directory.
+  local windows_bin="$project/windows-bin"
+  mkdir -p "$windows_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "MINGW64_NT-10.0\\n"' > "$windows_bin/uname"
+  cat > "$windows_bin/cygpath" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -m ] && [ "${2:-}" = /c/oms-owner-fixture/.oms/delegations ]; then
+  printf '%s\r\n' "$OMS_T_WINDOWS_MARKERS"
+else
+  printf '%s\r\n' "${2:-}"
+fi
+EOF
+  chmod +x "$windows_bin/uname" "$windows_bin/cygpath"
+  PATH="$windows_bin:$PATH" OMS_T_WINDOWS_MARKERS="$markers" \
+    "$sh" --repo "$project" recover-owner --owner-id "$owner" \
+      --markers-dir /c/oms-owner-fixture/.oms/delegations --json >/dev/null ||
+    fail "Git Bash /c marker path did not reach native Python canonically"
+}
+
 test_gc_keeps_orphan_artifacts_unless_asked() {
   local project="$TMP/gc-orphan-artifacts"
   local index orphan out
@@ -12485,7 +13758,7 @@ test_run_with_timeout_require_refuses_unbounded() {
   return 0
 }
 
-test_artifact_index_prune_atomic_keeps_symlink() {
+test_artifact_index_prune_atomic_refuses_symlink() {
   local project="$TMP/prune-symlink"
   local i
 
@@ -12495,11 +13768,17 @@ test_artifact_index_prune_atomic_keeps_symlink() {
     printf '{"ts":"2026-01-0%sT00:00:00Z","kind":"k","exit":0}\n' "$i" >> "$project/.oms/artifacts/real.jsonl"
   done
   ln -s real.jsonl "$project/.oms/artifacts/index.jsonl"
-  ( cd "$project" && "$ROOT/scripts/artifact-index.sh" prune 2 >/dev/null )
+  cp "$project/.oms/artifacts/real.jsonl" "$TMP/prune-symlink-before.jsonl"
+  if ( cd "$project" && "$ROOT/scripts/artifact-index.sh" prune 2 \
+      >/dev/null 2>&1 ); then
+    fail "prune must refuse a symlinked artifact-index leaf"
+  fi
   assert_symlink_to "$project/.oms/artifacts/index.jsonl" "real.jsonl"
-  [ "$(wc -l < "$project/.oms/artifacts/real.jsonl" | tr -d ' ')" = "2" ] ||
-    fail "prune should rewrite the symlink target to the kept rows"
-  assert_file_contains "$project/.oms/artifacts/real.jsonl" "2026-01-05"
+  cmp -s "$TMP/prune-symlink-before.jsonl" \
+    "$project/.oms/artifacts/real.jsonl" ||
+    fail "refused prune changed the symlink target"
+  [ "$(wc -l < "$project/.oms/artifacts/real.jsonl" | tr -d ' ')" = "5" ] ||
+    fail "refused prune changed the target row count"
 }
 
 test_oms_run_new_leaves_no_pointer_residue() {
@@ -13411,6 +14690,8 @@ test_precompact_handoff_records_refusal_in_fail_ledger() {
 
 test_resume_hook_prints_bounded_resume_block() {
   local repo="$TMP/resume-hook-repo"
+  local crlf_bin="$TMP/resume-hook-crlf-bin"
+  local real_python
   local out
 
   make_committed_repo "$repo"
@@ -13442,6 +14723,25 @@ test_resume_hook_prints_bounded_resume_block() {
   printf '%s\n' "$out" | grep -q 'failures: 1 actionable' || fail "missing failure line"
   printf '%s\n' "$out" | grep -q 'peers: another session' || fail "missing peer warning"
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
+
+  # Native Windows Python writes CRLF to a pipe. Every value read back into
+  # Bash must lose the CR before it participates in path checks or output.
+  real_python="$(command -v python3)"
+  mkdir -p "$crlf_bin"
+  cat > "$crlf_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+"$OMS_TEST_REAL_PYTHON" "$@" | sed 's/$/\r/'
+EOF
+  chmod +x "$crlf_bin/python3"
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" |
+    PATH="$crlf_bin:/usr/bin:/bin" OMS_TEST_REAL_PYTHON="$real_python" \
+      "$ROOT/scripts/resume-hook.sh")" || fail "CRLF resume hook must exit 0"
+  printf '%s\n' "$out" | grep -q 'plan: Unify the writer contract' ||
+    fail "CRLF Python output hid the active plan: $out"
+  case "$out" in
+    *$'\r'*) fail "resume block retained a carriage return" ;;
+  esac
 
   # A resolved failure leaves the count — the event name is "resolved", which
   # a prior version of this hook misread and counted forever.

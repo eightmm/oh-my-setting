@@ -38,7 +38,11 @@ oms artifact-index --repo . validate
 ```
 
 Resolve a failed outcome explicitly; never assume a sibling provider success
-resolves it. Use `migrate` and `gc` rather than editing JSONL manually.
+resolves it. Normal reads and writes fail closed on structural index damage.
+The parent agent first runs `oms artifact-index salvage` for a read-only plan;
+only `salvage --apply` may quarantine the exact raw ledger and repair complete
+JSON-object rows. Then use `migrate` for legacy schemas and `gc` for retention;
+never edit JSONL manually.
 
 Before landing a patch:
 

@@ -118,6 +118,17 @@ verification receipts. A binding is append-only and can reference only an
 existing receipt. Dependency file digests and the verified Git head turn old
 passes into `stale` evidence after relevant changes.
 
+Schema-3 plans carry an immutable `plan_id`. Automatic task admissions,
+explicit `covers`, and bindings for a plan task count only when that lineage
+matches; reusing `t1` in a replacement plan cannot inherit the old `t1` pass.
+Legacy plans stay byte-identical on reads and receive an ID once, under the
+plan lock, immediately before a parent writes plan-scoped evidence. Project
+criteria and plan-level acceptance keep their existing reusable contracts.
+Plan-bound delegate and landing rows carry the same frozen ID; landing intents
+retain it across recovery, even if a replacement plan reuses the task name.
+Missing, malformed, or mismatched lineage yields `missing`, never a vacuous
+`verified` result.
+
 Criterion statuses are:
 
 ```text

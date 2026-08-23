@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from process_liveness import pid_alive
+
 
 RECEIPT_LIMIT = 64 * 1024
 PROPOSAL_LIMIT = 1024 * 1024
@@ -32,6 +34,7 @@ REMOTE = re.compile(r"[A-Za-z0-9._-]+\Z")
 UPDATED = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z"
 )
+OWNER_ID = re.compile(r"owner_[0-9a-f]{32}\Z")
 STAGES = {
     "proposing",
     "proposal-review",
@@ -166,6 +169,9 @@ def load_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
     contract = row.get("contract")
     if isinstance(contract, dict):
         contract.setdefault("allow_verifier_change", False)
+    # Legacy receipts predate owner-fenced task recovery. Keep them readable,
+    # but leave the owner empty so recovery fails closed instead of guessing.
+    row.setdefault("owner_id", "")
     validate_receipt(row)
     return row, payload
 
@@ -199,12 +205,16 @@ def validate_receipt(row: dict[str, Any]) -> None:
         "contract",
         "proposal",
         "branch",
+        "owner_id",
         "updated",
     }
     if set(row) != expected or row.get("schema") != 1 or row.get("kind") != "autopilot-run":
         raise ReceiptError("outer receipt does not match schema 1")
     if row.get("stage") not in STAGES:
         raise ReceiptError("outer receipt stage is invalid")
+    owner_id = text(row.get("owner_id"), "autopilot owner id", empty=True)
+    if owner_id and not OWNER_ID.fullmatch(owner_id):
+        raise ReceiptError("autopilot owner id is invalid")
     repo_value = text(row.get("repo"), "repo")
     if not os.path.isabs(repo_value):
         raise ReceiptError("repo path is not absolute")
@@ -376,7 +386,9 @@ def append_reentry_ledger(path: Path, record: dict[str, Any]) -> None:
     append_jsonl_ledger(path.with_name("autopilot-reentries.jsonl"), record)
 
 
-def lineage_claims(path: Path, spec_sha: str, branch: str) -> list[tuple[int, str]]:
+def lineage_claims(
+    path: Path, spec_sha: str, branch: str, owner_id: str
+) -> list[tuple[int, int, str, bool, bool]]:
     """Claim rows for one run lineage, oldest first.
 
     Keyed by (spec_sha256, branch), never the receipt digest: the drive
@@ -384,51 +396,87 @@ def lineage_claims(path: Path, spec_sha: str, branch: str) -> list[tuple[int, st
     would go blind to a live-but-slow original session the moment its
     receipt moved (debate correction, 2026-08-19).
     """
-    rows: list[tuple[int, str]] = []
+    rows: list[tuple[int, int, str, bool, bool]] = []
+    unproven = [(0, 0, "unproven-lineage-record", False, False)]
+    ledger = path.with_name("autopilot-reentries.jsonl")
     try:
-        with open(
-            path.with_name("autopilot-reentries.jsonl"), encoding="utf-8"
-        ) as handle:
+        handle = open(ledger, encoding="utf-8")
+    except FileNotFoundError:
+        return rows
+    except (OSError, UnicodeError):
+        return unproven
+    try:
+        with handle:
             for raw_line in handle:
+                if not raw_line.strip():
+                    continue
                 try:
                     row = json.loads(raw_line)
-                except ValueError:
-                    continue
+                except (UnicodeError, ValueError):
+                    return unproven
                 if not isinstance(row, dict):
-                    continue
-                if row.get("spec_sha256") != spec_sha or row.get("branch") != branch:
-                    continue
+                    return unproven
                 kind = row.get("kind")
-                if kind == "autopilot-drive-claim" or (
+                record_schema = row.get("schema")
+                if (isinstance(record_schema, bool)
+                        or not isinstance(record_schema, int)
+                        or record_schema != 1 or kind not in {
+                        "autopilot-reenter", "autopilot-drive-claim",
+                        "autopilot-reenter-requeue"}):
+                    return unproven
+                claim_spec = row.get("spec_sha256")
+                claim_branch = row.get("branch")
+                if (not isinstance(claim_spec, str)
+                        or not SHA256.fullmatch(claim_spec)
+                        or not isinstance(claim_branch, str)):
+                    return unproven
+                if (kind == "autopilot-reenter" and
+                        row.get("disposition") not in {"refused", "resumed"}):
+                    return unproven
+                is_claim = kind == "autopilot-drive-claim" or (
                     kind == "autopilot-reenter"
                     and row.get("disposition") == "resumed"
-                ):
-                    try:
-                        pid = int(row.get("claim_pid") or 0)
-                    except (TypeError, ValueError):
-                        pid = 0
-                    if pid > 0:
-                        rows.append((pid, str(kind)))
-    except OSError:
-        pass
+                )
+                if not is_claim:
+                    continue
+                if claim_spec != spec_sha or claim_branch != branch:
+                    continue
+                claim_owner = row.get("owner_id")
+                if owner_id and claim_owner != owner_id:
+                    if (isinstance(claim_owner, str)
+                            and OWNER_ID.fullmatch(claim_owner)):
+                        continue
+                    return unproven
+                raw_pid = row.get("claim_pid")
+                pid_valid = (
+                    isinstance(raw_pid, int)
+                    and not isinstance(raw_pid, bool)
+                    and 0 < raw_pid <= 0x7FFFFFFF
+                )
+                raw_native_pid = row.get("claim_native_pid")
+                native_valid = (
+                    isinstance(raw_native_pid, int)
+                    and not isinstance(raw_native_pid, bool)
+                    and 0 < raw_native_pid <= 0xFFFFFFFF
+                )
+                # Keep malformed and legacy matching claims in the scan.
+                # Dropping them would turn unknown ownership into proof
+                # that no claimant exists, especially on Windows where
+                # an MSYS pid cannot substitute for a missing WINPID.
+                rows.append((
+                    raw_pid if pid_valid else 0,
+                    raw_native_pid if native_valid else 0,
+                    str(kind), pid_valid, native_valid,
+                ))
+    except (OSError, UnicodeError):
+        return unproven
     return rows
 
 
-def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def reenter_judgment(
-    path: Path, row: dict[str, Any], repo: str, self_pid: int, scan_claims: bool
-) -> tuple[str, int, int]:
+    path: Path, row: dict[str, Any], repo: str, self_pid: int,
+    self_native_pid: int, scan_claims: bool
+) -> tuple[str, int, int, int, int]:
     """The reenter gate's decision sequence, shared with shadow observation.
 
     Stage refusals first (done/proposal-review/parked never resume), then the
@@ -439,12 +487,15 @@ def reenter_judgment(
     caller. Shadow evidence is only worth collecting because this is the
     same function the real verb runs — a reimplementation would measure
     itself, not the gate (raise-after-evidence debate, 2026-08-19).
-    Returns (refusal, superseded_pid, live_pid).
+    Returns refusal plus emulated/native pid identities for the latest dead
+    claimant and the first live-or-unproven claimant.
     """
     stage = row["stage"]
     refusal = ""
     superseded_pid = 0
+    superseded_native_pid = 0
     live_pid = 0
+    live_native_pid = 0
     if stage == "done":
         refusal = "the run is complete; archive-done owns it"
     elif stage == "proposal-review":
@@ -463,21 +514,38 @@ def reenter_judgment(
         except ReceiptError as exc:
             refusal = "digest gate: %s" % exc
     if not refusal and scan_claims:
-        for prior_pid, prior_kind in lineage_claims(
-            path, row["spec_sha256"], row.get("branch", "")
+        for prior_pid, prior_native_pid, prior_kind, pid_valid, native_valid in lineage_claims(
+            path, row["spec_sha256"], row.get("branch", ""), row.get("owner_id", "")
         ):
-            if prior_pid == self_pid:
+            same_claimant = prior_pid == self_pid and pid_valid
+            if os.name == "nt":
+                same_claimant = (
+                    same_claimant and native_valid
+                    and prior_native_pid == self_native_pid
+                )
+            if same_claimant:
                 continue
-            if pid_alive(prior_pid):
+            if not pid_valid or (os.name == "nt" and not native_valid):
+                refusal = (
+                    "this run has an unproven legacy session claim;"
+                    " inspect or retire that claim before re-entry"
+                )
+                live_pid = prior_pid
+                live_native_pid = prior_native_pid
+                break
+            if pid_alive(prior_pid, native_pid=prior_native_pid or None):
                 refusal = (
                     "this run is already held by a live session"
                     " (pid %d, %s); a second entry would drive the"
                     " contract twice" % (prior_pid, prior_kind)
                 )
                 live_pid = prior_pid
+                live_native_pid = prior_native_pid
                 break
             superseded_pid = prior_pid
-    return refusal, superseded_pid, live_pid
+            superseded_native_pid = prior_native_pid
+    return (refusal, superseded_pid, superseded_native_pid,
+            live_pid, live_native_pid)
 
 
 def immutable_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -688,6 +756,7 @@ def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
         },
         "proposal": {"path": args.proposal, "sha256": args.proposal_sha256},
         "branch": args.branch,
+        "owner_id": args.owner_id,
         "updated": args.updated,
     }
 
@@ -718,6 +787,7 @@ def add_binding_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--proposal", default="")
     parser.add_argument("--proposal-sha256", default="")
     parser.add_argument("--branch", required=True)
+    parser.add_argument("--owner-id", required=True)
     parser.add_argument("--updated", required=True)
 
 
@@ -1326,6 +1396,8 @@ def main() -> int:
     digest_parser.add_argument("path")
     metadata = sub.add_parser("metadata")
     metadata.add_argument("path")
+    owner = sub.add_parser("owner-id")
+    owner.add_argument("path")
     archive = sub.add_parser("archive-done")
     archive.add_argument("path")
     archive.add_argument("--repo", required=True)
@@ -1342,16 +1414,21 @@ def main() -> int:
     reenter.add_argument("--reason", default="")
     reenter.add_argument("--updated", required=True)
     reenter.add_argument("--pid", type=int, default=0)
+    reenter.add_argument("--native-pid", type=int, default=0)
     drive_claim = sub.add_parser("drive-claim")
     drive_claim.add_argument("path")
     drive_claim.add_argument("--repo", required=True)
     drive_claim.add_argument("--pid", type=int, required=True)
+    drive_claim.add_argument("--native-pid", type=int, default=0)
     drive_claim.add_argument("--updated", required=True)
     reenter_note = sub.add_parser("reenter-note")
     reenter_note.add_argument("path")
     reenter_note.add_argument("--repo", required=True)
     reenter_note.add_argument("--requeued", required=True)
     reenter_note.add_argument("--dead-pid", type=int, required=True)
+    reenter_note.add_argument("--dead-native-pid", type=int, default=0)
+    reenter_note.add_argument("--expected-owner-id", default="")
+    reenter_note.add_argument("--expected-receipt-sha256", required=True)
     reenter_note.add_argument("--updated", required=True)
     shadow = sub.add_parser("shadow-judge")
     shadow.add_argument("path")
@@ -1378,6 +1455,10 @@ def main() -> int:
         if args.command == "metadata":
             row, payload = load_receipt(path)
             print("%s\t%s\t%s" % (row["stage"], row["spec_sha256"], digest(payload)))
+            return 0
+        if args.command == "owner-id":
+            row, _payload = load_receipt(path)
+            print(row.get("owner_id", ""))
             return 0
         if args.command == "abandon":
             # The append-only exit for a receipt whose frozen contract turned
@@ -1448,15 +1529,16 @@ def main() -> int:
             if len(reason) > 400:
                 raise ReceiptError("reenter --reason is too long (max 400 chars)")
             # At-most-once claim (three-family debate finding, 2026-08-19):
-            # the wrapper's lock releases before exec, so without a claim two
+            # the wrapper's lock releases before continuation, so without a claim two
             # simultaneous sessions would each record "resumed" and both run
             # — the receipt CAS only surfaces that much later, at the git
             # state gate, after both provider bills. The predecessor digest
             # IS the claim key: a prior "resumed" row for the same digest
             # means this exact receipt state was already taken. Liveness via
-            # the recorded wrapper pid (exec preserves it) is the expiry —
-            # a crashed claimant's pid is gone, so recovery needs no wait
-            # and no override verb. Pid recycling is accepted for v1: the
+            # the recorded emulated/native identity is the expiry. POSIX exec
+            # keeps that identity; Windows keeps a waiting wrapper as the
+            # anchor. A crashed claimant is therefore recoverable without an
+            # override verb. Pid recycling is accepted for v1: the
             # false positive is a refusal that says who to check, never a
             # duplicate run.
             #
@@ -1465,8 +1547,17 @@ def main() -> int:
             # stays at this call site: a manual pid-less invocation keeps
             # its historical no-claim, no-scan semantics.
             self_pid = getattr(args, "pid", 0) or 0
-            refusal, superseded_pid, _live_pid = reenter_judgment(
-                path, row, args.repo, self_pid, bool(self_pid)
+            self_native_pid = getattr(args, "native_pid", 0) or 0
+            if self_pid < 0 or self_pid > 0x7FFFFFFF:
+                raise ReceiptError("reenter pid is invalid")
+            if self_native_pid and not (0 < self_native_pid <= 0xFFFFFFFF):
+                raise ReceiptError("reenter native pid is invalid")
+            if self_pid and os.name == "nt" and not (
+                    0 < self_native_pid <= 0xFFFFFFFF):
+                raise ReceiptError("reenter requires a valid native Windows pid")
+            (refusal, superseded_pid, superseded_native_pid,
+             _live_pid, _live_native_pid) = reenter_judgment(
+                path, row, args.repo, self_pid, self_native_pid, bool(self_pid)
             )
             record = {
                 "schema": 1,
@@ -1475,13 +1566,18 @@ def main() -> int:
                 "stage_at_reentry": row["stage"],
                 "spec_sha256": row["spec_sha256"],
                 "branch": row.get("branch", ""),
+                "owner_id": row.get("owner_id", ""),
                 "disposition": "refused" if refusal else "resumed",
                 "updated": args.updated,
             }
             if getattr(args, "pid", 0):
                 record["claim_pid"] = args.pid
+            if getattr(args, "native_pid", 0):
+                record["claim_native_pid"] = args.native_pid
             if superseded_pid:
                 record["superseded_stale_claim_pid"] = superseded_pid
+            if superseded_native_pid:
+                record["superseded_stale_claim_native_pid"] = superseded_native_pid
             if reason:
                 record["reason"] = reason
             if refusal:
@@ -1489,6 +1585,18 @@ def main() -> int:
             append_reentry_ledger(path, record)
             if refusal:
                 raise ReceiptError("reenter refused: %s" % refusal)
+            # The wrapper must not rediscover judgment fields from the mutable
+            # receipt or append-only ledger after releasing this lock. Return
+            # one typed token from the same snapshot and decision that wrote
+            # the resumed row, followed by the receipt-derived continuation.
+            print(json.dumps({
+                "schema": 1,
+                "kind": "autopilot-reenter-judgment",
+                "predecessor": current,
+                "owner_id": row.get("owner_id", ""),
+                "superseded_stale_claim_pid": superseded_pid,
+                "superseded_stale_claim_native_pid": superseded_native_pid,
+            }, sort_keys=True, separators=(",", ":")))
             for value in option_args(row):
                 print(value)
             return 0
@@ -1496,12 +1604,18 @@ def main() -> int:
             # Every drive start records its wrapper pid on the lineage, so a
             # later re-entry can tell a live-but-slow original session from a
             # dead one. The wrapper is not exec'd on the run path, so the pid
-            # stays checkable for the whole drive; a reenter-exec'd run
-            # re-recording the same pid is a harmless duplicate.
+            # stays checkable for the whole drive; a resumed continuation
+            # recording another claim is a harmless duplicate.
             validate_receipt_location(path, args.repo)
             row, payload = load_receipt(path)
             if not UPDATED.fullmatch(args.updated):
                 raise ReceiptError("drive-claim requires a valid --updated timestamp")
+            if args.pid <= 0 or args.pid > 0x7FFFFFFF:
+                raise ReceiptError("drive-claim requires a positive pid")
+            if args.native_pid and not (0 < args.native_pid <= 0xFFFFFFFF):
+                raise ReceiptError("drive-claim native pid is invalid")
+            if os.name == "nt" and not args.native_pid:
+                raise ReceiptError("drive-claim requires a native Windows pid")
             append_reentry_ledger(
                 path,
                 {
@@ -1510,7 +1624,10 @@ def main() -> int:
                     "predecessor": digest(payload),
                     "spec_sha256": row["spec_sha256"],
                     "branch": row.get("branch", ""),
+                    "owner_id": row.get("owner_id", ""),
                     "claim_pid": args.pid,
+                    **({"claim_native_pid": args.native_pid}
+                       if args.native_pid else {}),
                     "updated": args.updated,
                 },
             )
@@ -1520,8 +1637,22 @@ def main() -> int:
             # leases names the task ids and the pid whose death authorized it.
             validate_receipt_location(path, args.repo)
             row, payload = load_receipt(path)
+            current = digest(payload)
             if not UPDATED.fullmatch(args.updated):
                 raise ReceiptError("reenter-note requires a valid --updated timestamp")
+            if not SHA256.fullmatch(args.expected_receipt_sha256):
+                raise ReceiptError("reenter-note requires a lowercase receipt SHA-256")
+            if (args.expected_owner_id and
+                    not OWNER_ID.fullmatch(args.expected_owner_id)):
+                raise ReceiptError("reenter-note expected owner is invalid")
+            if args.dead_pid <= 0 or args.dead_pid > 0x7FFFFFFF:
+                raise ReceiptError("reenter-note requires a positive dead pid")
+            if args.dead_native_pid and not (0 < args.dead_native_pid <= 0xFFFFFFFF):
+                raise ReceiptError("reenter-note dead native pid is invalid")
+            if args.expected_receipt_sha256 != current:
+                raise ReceiptError("reenter-note receipt CAS changed")
+            if args.expected_owner_id != row.get("owner_id", ""):
+                raise ReceiptError("reenter-note owner binding changed")
             requeued = [part for part in args.requeued.split(",") if part]
             if not requeued or any(not REMOTE.fullmatch(part) for part in requeued):
                 raise ReceiptError("reenter-note requires safe requeued task ids")
@@ -1532,8 +1663,11 @@ def main() -> int:
                     "kind": "autopilot-reenter-requeue",
                     "spec_sha256": row["spec_sha256"],
                     "branch": row.get("branch", ""),
+                    "owner_id": row.get("owner_id", ""),
                     "requeued": requeued,
                     "dead_pid": args.dead_pid,
+                    **({"dead_native_pid": args.dead_native_pid}
+                       if args.dead_native_pid else {}),
                     "updated": args.updated,
                 },
             )
@@ -1557,8 +1691,9 @@ def main() -> int:
             session = args.session.strip()
             if len(session) > 128:
                 raise ReceiptError("shadow-judge --session is too long (max 128 chars)")
-            refusal, superseded_pid, live_pid = reenter_judgment(
-                path, row, args.repo, 0, True
+            (refusal, superseded_pid, superseded_native_pid,
+             live_pid, live_native_pid) = reenter_judgment(
+                path, row, args.repo, 0, 0, True
             )
             record = {
                 "schema": 1,
@@ -1567,6 +1702,7 @@ def main() -> int:
                 "stage": row["stage"],
                 "spec_sha256": row["spec_sha256"],
                 "branch": row.get("branch", ""),
+                "owner_id": row.get("owner_id", ""),
                 "verdict": "would-refuse" if refusal else "would-resume",
                 "updated": args.updated,
             }
@@ -1574,8 +1710,12 @@ def main() -> int:
                 record["refusal"] = refusal
             if live_pid:
                 record["live_claim_pid"] = live_pid
+            if live_native_pid:
+                record["live_claim_native_pid"] = live_native_pid
             if superseded_pid:
                 record["dead_claim_pid"] = superseded_pid
+            if superseded_native_pid:
+                record["dead_claim_native_pid"] = superseded_native_pid
             if session:
                 record["session_id"] = session
             append_jsonl_ledger(path.with_name("autopilot-shadow.jsonl"), record)
@@ -1634,6 +1774,8 @@ def main() -> int:
         if path.exists() or path.is_symlink():
             old_row, old_payload = load_receipt(path)
             current = digest(old_payload)
+        if old_row is None and not row.get("owner_id"):
+            raise ReceiptError("a new outer receipt requires an autopilot owner id")
         if args.expected != current:
             raise ReceiptError("outer receipt CAS changed (expected %s, found %s)" % (args.expected, current))
         if old_row is not None:

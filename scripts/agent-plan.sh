@@ -63,6 +63,10 @@ EXPECTED_PLAN_SHA256=""
 ALLOWED_ENVELOPE=""
 MAX_TASKS=""
 ACCEPT_FILES=""
+OWNER_ID="${OMS_AUTOPILOT_OWNER_ID:-}"
+MARKERS_DIR=""
+EXPECTED_STATE=""
+CHECK_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -72,6 +76,9 @@ Commands:
   init   --goal TEXT [--accept CMD]  Create/replace the plan with a goal and an
                                      optional goal-level acceptance command —
                                      the executable definition of done.
+  ensure-lineage                     Parent-only, idempotently mint the
+                                     immutable plan_id for a legacy plan before
+                                     plan-scoped evidence is produced.
   apply-proposal --proposal FILE --expected-proposal-sha256 SHA256
          --expected-plan-sha256 absent|SHA256
          [--goal TEXT --accept CMD] --allowed-envelope "p1,p2"
@@ -126,6 +133,18 @@ Commands:
                                      plan lock before the transition.
   block  --id ID --reason TEXT       Mark a task blocked.
   release --id ID                    Requeue a claimed/running/review task to ready (worker died).
+  recover-lease --id ID --lease-id TOKEN --expected-state STATE
+                [--markers-dir PATH] [--check]
+                                     Atomically requeue only the exact current
+                                     claimed/running state+lease when no live
+                                     exact worker marker exists. --check runs
+                                     the same locked predicate without saving.
+                                     Drift exits 3.
+  recover-owner --owner-id ID [--markers-dir PATH] [--json]
+                                     Requeue only claimed/running leases owned
+                                     by one autopilot run. Exact live worker
+                                     markers and unproven running tasks remain
+                                     held; review/landing evidence is untouched.
   reclaim [--ttl SECONDS] [--include-running] [--include-review]
                                      Requeue claimed tasks whose TTL since
                                      claimed_at expired (dead-worker recovery).
@@ -139,6 +158,8 @@ Commands:
                                      its artifact/patch fields are kept.
   reopen --id ID                     Return a blocked task to ready.
   show   --id ID                     Print one task as JSON.
+  evidence-snapshot --id ID          Print one task plus its immutable plan_id
+                                     for a plan-scoped evidence producer.
   list   [--state STATE]             List tasks (optionally by state).
   ready                              Print ids actionable now (deps done).
   status                             Human-readable summary.
@@ -218,6 +239,10 @@ while [ "$#" -gt 0 ]; do
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
     --accept) [ "$#" -ge 2 ] || fail "--accept requires command"; ACCEPT="$2"; shift 2 ;;
     --accept-files) [ "$#" -ge 2 ] || fail "--accept-files requires a value"; ACCEPT_FILES="$2"; shift 2 ;;
+    --owner-id) [ "$#" -ge 2 ] || fail "--owner-id requires a value"; OWNER_ID="$2"; shift 2 ;;
+    --markers-dir) [ "$#" -ge 2 ] || fail "--markers-dir requires a path"; MARKERS_DIR="$2"; shift 2 ;;
+    --expected-state) [ "$#" -ge 2 ] || fail "--expected-state requires a value"; EXPECTED_STATE="$2"; shift 2 ;;
+    --check) CHECK_ONLY=1; shift ;;
     --proposal) [ "$#" -ge 2 ] || fail "--proposal requires a file"; PROPOSAL="$2"; shift 2 ;;
     --expected-proposal-sha256)
       [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a value"
@@ -239,18 +264,48 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|reclaim|reopen|show|list|ready|status|next|brief|accept|lint-verify)
+    init|ensure-lineage|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
+[ "$CHECK_ONLY" = 0 ] || [ "$ACTION" = recover-lease ] ||
+  fail "--check is valid only with recover-lease"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
+REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository"
 PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
 if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
     fail "unknown provider: use codex, claude, or antigravity (agy)"
+fi
+
+# Git Bash paths are valid for the shell but environment variables are not
+# rewritten when it launches native Windows Python. Resolve shell aliases
+# first, then use the mixed drive spelling understood by both runtimes.
+python_path_for_host() {  # PATH
+  local value="$1" parent base physical_parent
+  parent="$(dirname "$value")"
+  base="$(basename "$value")"
+  if physical_parent="$(cd "$parent" 2>/dev/null && pwd -P)"; then
+    value="$physical_parent/$base"
+  fi
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      command -v cygpath >/dev/null 2>&1 || return 2
+      value="$(cygpath -m "$value" | tr -d '\r')" || return $?
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+PY_REPO="$(python_path_for_host "$REPO")" || fail "cannot normalize repository path for Python"
+PY_PLAN_FILE="$(python_path_for_host "$PLAN_FILE")" || fail "cannot normalize plan path for Python"
+PY_MARKERS_DIR=""
+if [ -n "$MARKERS_DIR" ]; then
+  PY_MARKERS_DIR="$(python_path_for_host "$MARKERS_DIR")" ||
+    fail "cannot normalize worker marker path for Python"
 fi
 
 # Read-only diagnostics against the same module the admission gate loads, so
@@ -267,6 +322,14 @@ case "$ACTION" in
   init|apply-proposal|add)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
       fail "$ACTION is parent-only; a harness child cannot change plan topology"
+    ;;
+  ensure-lineage)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
+      fail "ensure-lineage is parent-only; a harness child cannot mint plan lineage"
+    ;;
+  recover-owner)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
+      fail "recover-owner is parent-only; a harness child cannot recover autopilot authority"
     ;;
 esac
 
@@ -322,8 +385,8 @@ fi
 # The whole load/decide/save section runs under a file lock so concurrent
 # `next --claim` from different agents cannot both win the same task (the write
 # itself is atomic, but the read-decide-write critical section is not).
-export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
-  OMS_REPO="$REPO" \
+export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
+  OMS_REPO="$PY_REPO" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_REFREEZE_ACCEPTANCE="$REFREEZE_ACCEPTANCE" \
@@ -349,11 +412,14 @@ export OMS_PLAN_FILE="$PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_EXPECTED_PROPOSAL_SHA256="$EXPECTED_PROPOSAL_SHA256" \
   OMS_EXPECTED_PLAN_SHA256="$EXPECTED_PLAN_SHA256" \
   OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}" \
-  OMS_ACCEPT_FILES="$ACCEPT_FILES"
+  OMS_ACCEPT_FILES="$ACCEPT_FILES" OMS_EXPECTED_STATE="$EXPECTED_STATE" \
+  OMS_CHECK_ONLY="$CHECK_ONLY"
+export OMS_AUTOPILOT_OWNER_ID="$OWNER_ID" OMS_PLAN_MARKERS_DIR="$PY_MARKERS_DIR"
 
 plan_run() {
 python3 - "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
-  "$ROOT/scripts/lib/verify-floor-lint.py" <<'PY'
+  "$ROOT/scripts/lib/verify-floor-lint.py" \
+  "$ROOT/scripts/lib/process_liveness.py" <<'PY'
 import datetime, hashlib, json, os, re, runpy, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
@@ -362,10 +428,13 @@ act = os.environ["OMS_ACTION"]
 ts = os.environ["OMS_TS"]
 proposal_path = sys.argv[1]
 landing_receipt_digest = runpy.run_path(sys.argv[2])["digest"]
+process_pid_alive = runpy.run_path(sys.argv[4])["pid_alive"]
 def env(k): return os.environ.get(k, "")
 
 STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
 ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{32}$")
+OWNER_RE = re.compile(r"^owner_[0-9a-f]{32}$")
 
 def die(msg):
     sys.stderr.write("error: %s\n" % msg); sys.exit(2)
@@ -378,6 +447,8 @@ def load():
     d.setdefault("tasks", {})
     d.setdefault("accept", "")   # schema 2 plans predate the acceptance contract
     d["schema"] = SCHEMA
+    if "plan_id" in d and not PLAN_ID_RE.fullmatch(str(d.get("plan_id", ""))):
+        die("plan_id is malformed; refusing to replace immutable lineage")
     for task in d["tasks"].values():
         task.setdefault("lease_epoch", 0)
         task.setdefault("lease_id", "")
@@ -385,7 +456,17 @@ def load():
         task.setdefault("repair_artifact", "")
         task.setdefault("executor_id", "")
         task.setdefault("executor_soul_sha256", "")
+        task.setdefault("autopilot_owner_id", "")
     return d
+
+def ensure_plan_id(d):
+    value = d.get("plan_id")
+    if value is None:
+        value = "plan_" + secrets.token_hex(16)
+        d["plan_id"] = value
+    if not isinstance(value, str) or not PLAN_ID_RE.fullmatch(value):
+        die("plan_id is malformed; refusing to replace immutable lineage")
+    return value
 
 def save(d):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -471,6 +552,122 @@ def require_current_lease(t):
     if env("OMS_HARNESS_CHILD") == "1" and current and not supplied:
         die("task %s requires --lease-id for harness child mutation" % t["id"])
 
+def owner_id():
+    value = env("OMS_AUTOPILOT_OWNER_ID")
+    if value and not OWNER_RE.fullmatch(value):
+        die("autopilot owner id is invalid")
+    return value
+
+def clear_claim(t):
+    t.update(state="ready", provider="", ttl="", claimed_at="", reason="",
+             lease_id="", autopilot_owner_id="")
+
+def same_absolute_path(left, right):
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+def worker_marker_dir():
+    repo_root = os.path.realpath(env("OMS_REPO"))
+    expected = os.path.join(repo_root, ".oms", "delegations")
+    supplied = env("OMS_PLAN_MARKERS_DIR") or expected
+    marker_dir = os.path.abspath(supplied)
+    if not same_absolute_path(marker_dir, expected):
+        die("worker marker directory must be the repo-local .oms/delegations directory")
+    return marker_dir, expected
+
+def load_worker_markers():
+    marker_dir, expected = worker_marker_dir()
+    markers = []
+    if not os.path.lexists(marker_dir):
+        return markers
+    try:
+        marker_dir_info = os.lstat(marker_dir)
+    except OSError as exc:
+        die("cannot inspect worker marker directory: %s" % exc)
+    if (not stat.S_ISDIR(marker_dir_info.st_mode) or
+            not same_absolute_path(os.path.realpath(marker_dir), expected)):
+        die("worker marker directory must be a real repo-local directory")
+    entries = []
+    with os.scandir(marker_dir) as iterator:
+        for entry in iterator:
+            if len(entries) >= 4096:
+                die("worker marker directory exceeds 4096 entries")
+            entries.append(entry)
+    for entry in entries:
+        if not entry.name.endswith(".json"):
+            continue
+        try:
+            before = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            die("cannot inspect worker marker %s: %s" % (entry.name, exc))
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024:
+            die("worker marker %s is not a bounded regular file" % entry.name)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(entry.path, flags)
+        except OSError as exc:
+            die("cannot open worker marker %s safely: %s" % (entry.name, exc))
+        try:
+            opened = os.fstat(descriptor)
+            if (not stat.S_ISREG(opened.st_mode) or
+                    (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                die("worker marker %s changed while opening" % entry.name)
+            payload = os.read(descriptor, 64 * 1024 + 1)
+            if len(payload) > 64 * 1024 or os.read(descriptor, 1):
+                die("worker marker %s exceeds 64 KiB" % entry.name)
+        finally:
+            os.close(descriptor)
+        try:
+            marker = json.loads(payload.decode("utf-8"))
+        except (UnicodeError, ValueError):
+            die("worker marker %s is malformed" % entry.name)
+        if not isinstance(marker, dict):
+            die("worker marker %s is malformed" % entry.name)
+        markers.append(marker)
+    return markers
+
+def marker_pid_alive(marker):
+    return process_pid_alive(
+        marker.get("pid"), native_pid=marker.get("native_pid")
+    )
+
+def exact_lease_markers(markers, task_id, lease):
+    return [marker for marker in markers
+            if marker.get("task_id") == task_id and marker.get("lease_id") == lease]
+
+def worker_marker_is_typed(marker):
+    schema = marker.get("schema")
+    if (isinstance(schema, bool) or not isinstance(schema, int)
+            or schema not in {1, 2, 3, 4}):
+        return False
+    marker_id = marker.get("id")
+    if (not isinstance(marker_id, str) or not ID_RE.fullmatch(marker_id)
+            or marker_id in {".", ".."}):
+        return False
+    pid = marker.get("pid")
+    if (isinstance(pid, bool) or not isinstance(pid, int)
+            or pid <= 0 or pid > 0x7FFFFFFF):
+        return False
+    native_pid = marker.get("native_pid")
+    if schema == 4 and "native_pid" not in marker:
+        return False
+    if "native_pid" in marker and (
+            isinstance(native_pid, bool) or not isinstance(native_pid, int)
+            or native_pid <= 0 or native_pid > 0xFFFFFFFF):
+        return False
+    for key in ("task_id", "lease_id", "executor_id"):
+        value = marker.get(key, "")
+        if (not isinstance(value, str)
+                or (value and not ID_RE.fullmatch(value))):
+            return False
+    if marker.get("executor_id", "") in {".", ".."}:
+        return False
+    marker_owner = marker.get("autopilot_owner_id", "")
+    if (not isinstance(marker_owner, str)
+            or (marker_owner and not OWNER_RE.fullmatch(marker_owner))):
+        return False
+    return True
+
 CLAIM_TTL = int(os.environ.get("OMS_CLAIM_TTL") or 3600)
 
 def parse_ts(s):
@@ -539,8 +736,21 @@ d = load()
 tasks = d["tasks"]
 
 if act == "init":
-    d = {"schema": SCHEMA, "goal": env("OMS_GOAL"), "accept": env("OMS_ACCEPT"), "tasks": {}}
+    d = {"schema": SCHEMA, "plan_id": "plan_" + secrets.token_hex(16),
+         "goal": env("OMS_GOAL"), "accept": env("OMS_ACCEPT"), "tasks": {}}
     save(d); print("plan: initialized (%s)" % path); sys.exit(0)
+
+if act == "ensure-lineage":
+    if not os.path.exists(path):
+        die("no plan at %s; initialize it before ensuring lineage" % path)
+    before = d.get("plan_id")
+    value = ensure_plan_id(d)
+    if before is None:
+        save(d)
+        print("plan: lineage initialized (%s)" % value)
+    else:
+        print("plan: lineage already initialized (%s)" % value)
+    sys.exit(0)
 
 if act == "apply-proposal":
     def sha256_file(filename):
@@ -780,6 +990,7 @@ if act == "apply-proposal":
             die("initial proposal apply requires --goal and --accept")
         d = {
             "schema": SCHEMA,
+            "plan_id": "plan_" + secrets.token_hex(16),
             "goal": env("OMS_GOAL"),
             "accept": env("OMS_ACCEPT"),
             "project_contract": {
@@ -813,6 +1024,7 @@ if act == "apply-proposal":
             "acceptance_files": reviewed_acceptance_files,
             "acceptance_manifest": acceptance_manifest,
         }
+        ensure_plan_id(d)
         if prepared and all(item["id"] in tasks for item in prepared):
             save(d)
             print("plan: proposal already applied (%s)" % ",".join(seen))
@@ -827,6 +1039,7 @@ if act == "apply-proposal":
             "role": item["role"], "provider": "", "ttl": "", "artifact": "",
             "patch": "", "reason": "", "executor_id": "",
             "executor_soul_sha256": "", "lease_epoch": 0, "lease_id": "",
+            "autopilot_owner_id": "",
             "review_lease_id": "", "repair_count": 0, "repair_artifact": "",
             "created": ts, "updated": ts,
         }
@@ -855,6 +1068,7 @@ if act == "add":
         "role": env("OMS_ROLE"),
         "provider": "", "ttl": "", "artifact": "", "patch": "", "reason": "",
         "executor_id": "", "executor_soul_sha256": "",
+        "autopilot_owner_id": "",
         "lease_epoch": 0, "lease_id": "", "review_lease_id": "", "repair_count": 0,
         "repair_artifact": "",
         "created": ts, "updated": ts,
@@ -866,7 +1080,7 @@ def get_task(i):
     if not t: die("no such task: %s" % i)
     return t
 
-if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "reopen", "show", "touch"):
+if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch"):
     i = require_id(); t = get_task(i)
     if act == "touch":
         # Heartbeat: a live worker refreshes claimed_at so reclaim's TTL clock
@@ -886,7 +1100,8 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("task %s has unfinished dependencies: %s" % (i, ", ".join(pending)))
         issue_lease(t)
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
-                 claimed_at=ts, reason="", repair_artifact="")
+                 claimed_at=ts, reason="", repair_artifact="",
+                 autopilot_owner_id=owner_id())
     elif act == "start":
         if t["state"] != "claimed": die("task %s is %s; claim it first" % (i, t["state"]))
         require_current_lease(t)
@@ -1093,12 +1308,37 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if t["state"] not in ("claimed", "running", "review", "landing"):
             die("task %s is %s; only a claimed/running/review/landing task can be released" % (i, t["state"]))
         require_current_lease(t)
-        t.update(state="ready", provider="", ttl="", claimed_at="", reason="", lease_id="")
+        clear_claim(t)
+    elif act == "recover-lease":
+        supplied = env("OMS_LEASE_ID")
+        expected_state = env("OMS_EXPECTED_STATE")
+        if not expected_state or expected_state not in STATES:
+            die("recover-lease requires a valid --expected-state")
+        if (not supplied or t.get("lease_id", "") != supplied or
+                t.get("state") != expected_state or
+                expected_state not in ("claimed", "running")):
+            sys.stderr.write("plan: task %s no longer holds that exact claimed/running state+lease\n" % i)
+            sys.exit(3)
+        matching = exact_lease_markers(load_worker_markers(), i, supplied)
+        # A malformed pid is not proof of death. Any exact live marker is a
+        # retry/worker veto even when an older dead marker triggered cleanup.
+        if any(not worker_marker_is_typed(marker) for marker in matching):
+            sys.stderr.write("plan-recovery-outcome: unproven\n")
+            sys.stderr.write("plan: task %s has an unproven exact worker marker\n" % i)
+            sys.exit(3)
+        if any(marker_pid_alive(marker) for marker in matching):
+            sys.stderr.write("plan-recovery-outcome: veto\n")
+            sys.stderr.write("plan: task %s still has a live exact worker marker\n" % i)
+            sys.exit(3)
+        if env("OMS_CHECK_ONLY") == "1":
+            print("plan: task %s exact state+lease is recoverable" % i)
+            sys.exit(0)
+        clear_claim(t)
     elif act == "reopen":
         if t["state"] != "blocked":
             die("task %s is %s; only a blocked task can be reopened" % (i, t["state"]))
-        t.update(state="ready", provider="", ttl="", claimed_at="", reason="", lease_id="")
-    elif act == "show":
+        clear_claim(t)
+    elif act in ("show", "evidence-snapshot"):
         # Computed on a copy: the stored task keeps exactly the fields its
         # writers put there, and a later save() cannot persist a read's view.
         view = dict(t)
@@ -1106,6 +1346,8 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             # Contract metadata is a read-only view for admission consumers. It
             # is deliberately not copied into each stored task.
             view["project_contract"] = d["project_contract"]
+        if act == "evidence-snapshot":
+            view["plan_id"] = d.get("plan_id", "")
         view["claim_expired"] = claim_expired(t)
         if t.get("state") in ("claimed", "running", "review"):
             age = claim_age(t)
@@ -1117,6 +1359,57 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
 
 # Read-only queries.
 ordered = sorted(tasks.values(), key=lambda t: t.get("created", ""))
+
+if act == "recover-owner":
+    recovery_owner = owner_id()
+    if not recovery_owner:
+        die("recover-owner requires --owner-id")
+    markers = load_worker_markers()
+
+    recovered = []
+    preserved = []
+    for task in ordered:
+        if task.get("autopilot_owner_id", "") != recovery_owner:
+            continue
+        state = task.get("state")
+        if state in ("review", "landing"):
+            preserved.append(task["id"])
+            continue
+        if state not in ("claimed", "running"):
+            continue
+        lease = task.get("lease_id", "")
+        if not lease:
+            preserved.append(task["id"])
+            continue
+        matching = exact_lease_markers(markers, task["id"], lease)
+        owned = [marker for marker in matching
+                 if marker.get("autopilot_owner_id") == recovery_owner]
+        if any(not worker_marker_is_typed(marker) for marker in matching):
+            preserved.append(task["id"])
+            continue
+        if any(marker_pid_alive(marker) for marker in matching):
+            preserved.append(task["id"])
+            continue
+        if matching and len(owned) != len(matching):
+            preserved.append(task["id"])
+            continue
+        if state == "running" and not owned:
+            preserved.append(task["id"])
+            continue
+        clear_claim(task)
+        task["updated"] = ts
+        recovered.append(task["id"])
+    if recovered:
+        save(d)
+    result = {"owner_id": recovery_owner, "recovered": recovered,
+              "preserved": preserved}
+    if env("OMS_AS_JSON") == "1":
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    else:
+        print("plan: recovered %s" % (",".join(recovered) if recovered else "(none)"))
+        if preserved:
+            print("plan: preserved %s" % ",".join(preserved))
+    sys.exit(0)
 
 if act == "reclaim":
     # Dead-worker recovery: claim/next store provider+ttl+claimed_at, and this
@@ -1154,7 +1447,7 @@ if act == "reclaim":
             continue
         prov = t.get("provider", "") or "?"
         was = t["state"]
-        t.update(state="ready", provider="", ttl="", claimed_at="", reason="", lease_id="")
+        clear_claim(t)
         t["updated"] = ts
         reclaimed += 1
         print("plan: reclaimed %s from %s (age %ss > ttl %ss, was @%s)" % (t["id"], was, age, ttl_s, prov))
@@ -1187,7 +1480,7 @@ if act == "next":
         # fails the lease check instead of racing this worker.
         issue_lease(t)
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
-                 claimed_at=ts, reason="")
+                 claimed_at=ts, reason="", autopilot_owner_id=owner_id())
         t["updated"] = ts
         save(d)
     if env("OMS_AS_JSON") == "1":
@@ -1681,5 +1974,16 @@ print(json.dumps(row, ensure_ascii=False))
   exit 0
 fi
 
-# Serialize the read-decide-write section against other agents.
-oms_with_file_lock "$PLAN_FILE" plan_run
+# Serialize the read-decide-write section against other agents. Recovery also
+# freezes worker-marker publication while it judges liveness, in the global
+# marker set -> plan order. Ordinary plan transitions never nest these locks.
+plan_run_with_plan_lock() {
+  oms_with_file_lock "$PLAN_FILE" plan_run
+}
+case "$ACTION" in
+  recover-lease|recover-owner)
+    oms_with_file_lock "$REPO/.oms/delegations/.marker-set-lock-target" \
+      plan_run_with_plan_lock
+    ;;
+  *) plan_run_with_plan_lock ;;
+esac

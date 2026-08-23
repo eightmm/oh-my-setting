@@ -52,6 +52,8 @@ WORKER_REASONING_EFFORT="auto"
 REVIEWER_REASONING_EFFORT="auto"
 OUTER_RECEIPT=""
 OUTER_RECEIPT_READY=0
+AUTOPILOT_OWNER_ID=""
+AUTOPILOT_NATIVE_PID=""
 APPROVED_PROPOSAL_PATH=""
 APPROVED_PROPOSAL_SHA=""
 review_base_sha=""
@@ -499,25 +501,177 @@ autopilot_mktemp() {
   mktemp "$AUTOPILOT_TMPDIR/item.XXXXXX"
 }
 
+autopilot_native_pid_prepare() {
+  local native_pid_file
+  [ -z "$AUTOPILOT_NATIVE_PID" ] || return 0
+  AUTOPILOT_NATIVE_PID="$$"
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      native_pid_file="$AUTOPILOT_TMPDIR/native-pid"
+      # Keep native Python a direct child of this owning Bash. Command
+      # substitution and the receipt lock both create ephemeral Bash parents.
+      python3 -c 'import os; print(os.getppid())' > "$native_pid_file" ||
+        fail "cannot capture the autopilot native Windows pid"
+      IFS= read -r AUTOPILOT_NATIVE_PID < "$native_pid_file" ||
+        fail "cannot read the autopilot native Windows pid"
+      rm -f "$native_pid_file"
+      AUTOPILOT_NATIVE_PID="${AUTOPILOT_NATIVE_PID//$'\r'/}"
+      ;;
+  esac
+  case "$AUTOPILOT_NATIVE_PID" in
+    *[!0-9]*|"") fail "autopilot native pid is invalid" ;;
+  esac
+  [ "$AUTOPILOT_NATIVE_PID" -gt 0 ] || fail "autopilot native pid is invalid"
+}
+
+autopilot_owner_prepare() {
+  [ -z "$AUTOPILOT_OWNER_ID" ] || return 0
+  if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+    AUTOPILOT_OWNER_ID="$(python3 "$RECEIPT_HELPER" owner-id "$OUTER_RECEIPT")" ||
+      fail "cannot read the autopilot owner binding"
+    AUTOPILOT_OWNER_ID="${AUTOPILOT_OWNER_ID//$'\r'/}"
+  else
+    AUTOPILOT_OWNER_ID="$(python3 - <<'PY'
+import secrets
+print("owner_" + secrets.token_hex(16))
+PY
+)" || fail "cannot create the autopilot owner binding"
+    AUTOPILOT_OWNER_ID="${AUTOPILOT_OWNER_ID//$'\r'/}"
+  fi
+  if [ -n "$AUTOPILOT_OWNER_ID" ]; then
+    case "$AUTOPILOT_OWNER_ID" in owner_*) ;; *) fail "autopilot owner binding is invalid" ;; esac
+    case "${AUTOPILOT_OWNER_ID#owner_}" in *[!0-9a-f]*|"") fail "autopilot owner binding is invalid" ;; esac
+    [ "${#AUTOPILOT_OWNER_ID}" -eq 38 ] || fail "autopilot owner binding is invalid"
+  fi
+  OMS_AUTOPILOT_OWNER_ID="$AUTOPILOT_OWNER_ID"
+  export OMS_AUTOPILOT_OWNER_ID
+}
+
+# OMS_REENTER_ANCHOR_BEGIN
+REENTER_CONTINUATION_PID=""
+REENTER_PENDING_SIGNAL=""
+REENTER_PENDING_EXIT=""
+
+reenter_forward_signal() {  # SIGNAL EXIT_CODE
+  local signal_name="$1" exit_code="$2"
+  if [ -z "$REENTER_CONTINUATION_PID" ]; then
+    # Bash may run a pending trap between the async spawn and the following
+    # $! assignment. Keep the first signal until the child identity is known;
+    # exiting here would orphan the continuation and its live owner claim.
+    if [ -z "$REENTER_PENDING_SIGNAL" ]; then
+      REENTER_PENDING_SIGNAL="$signal_name"
+      REENTER_PENDING_EXIT="$exit_code"
+    fi
+    return 0
+  fi
+  trap - HUP INT TERM
+  kill -s "$signal_name" "$REENTER_CONTINUATION_PID" 2>/dev/null || true
+  wait "$REENTER_CONTINUATION_PID" 2>/dev/null || true
+  REENTER_CONTINUATION_PID=""
+  exit "$exit_code"
+}
+
+run_reenter_continuation() {  # COMMAND...
+  local continuation_rc=0 pending_signal pending_exit
+  REENTER_CONTINUATION_PID=""
+  REENTER_PENDING_SIGNAL=""
+  REENTER_PENDING_EXIT=""
+  trap 'reenter_forward_signal HUP 129' HUP
+  trap 'reenter_forward_signal INT 130' INT
+  trap 'reenter_forward_signal TERM 143' TERM
+  # A trapped disposition would survive into the continuation on Git Bash.
+  # Reset inside the async subshell, then exec so $! remains its signalable
+  # shell identity while the recorded reentry parent waits as the WINPID anchor.
+  (
+    trap - HUP INT TERM
+    exec "$@"
+  ) &
+  REENTER_CONTINUATION_PID=$!
+  if [ -n "$REENTER_PENDING_SIGNAL" ]; then
+    pending_signal="$REENTER_PENDING_SIGNAL"
+    pending_exit="$REENTER_PENDING_EXIT"
+    REENTER_PENDING_SIGNAL=""
+    REENTER_PENDING_EXIT=""
+    reenter_forward_signal "$pending_signal" "$pending_exit"
+  fi
+  if wait "$REENTER_CONTINUATION_PID"; then
+    continuation_rc=0
+  else
+    continuation_rc=$?
+  fi
+  REENTER_CONTINUATION_PID=""
+  trap - HUP INT TERM
+  return "$continuation_rc"
+}
+# OMS_REENTER_ANCHOR_END
+
 # reenter is the audited entrance mirroring abandon's exit: a fresh session
 # re-enters the live run with zero re-explanation. The helper appends the
 # typed record first (refusals included), validates the digests through the
-# same gate every resume passes, and prints the receipt-derived continuation
-# — which is then exec'd, so execution derives from typed contract fields,
-# never from replayed prose. Runs after the child-authority guard: a harness
-# child cannot re-enter parent autopilot authority.
+# same gate every resume passes, and prints the receipt-derived continuation.
+# POSIX execs it; Windows runs it under the recorded waiting parent anchor, so
+# either path derives from typed contract fields, never replayed prose. Runs
+# after the child-authority guard: a harness child cannot re-enter authority.
 if [ "$ACTION" = reenter ]; then
   [ -f "$OUTER_RECEIPT" ] ||
     fail "no live autopilot receipt to re-enter; propose starts a new run"
+  autopilot_native_pid_prepare
   reenter_out="$(autopilot_mktemp)" || fail "mktemp failed"
-  # $$ survives the exec below, so the claim pid stays checkable for the
-  # whole resumed run: liveness is the claim's expiry.
+  # POSIX preserves $$ through exec. Windows instead keeps this shell and its
+  # native pid alive as a waiting parent anchor. Either identity therefore
+  # remains checkable for the resumed run; liveness is the claim's expiry.
   oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter \
     "$OUTER_RECEIPT" --repo "$REPO" --reason "${ACTION_REASON:-}" \
-    --pid "$$" \
+    --pid "$$" --native-pid "$AUTOPILOT_NATIVE_PID" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$reenter_out" || exit $?
+  reenter_judgment=""
+  IFS= read -r reenter_judgment < "$reenter_out" || fail "reenter judgment is missing"
+  reenter_judgment="${reenter_judgment//$'\r'/}"
+  reenter_judgment_fields="$(OMS_REENTER_JUDGMENT="$reenter_judgment" python3 - <<'PY'
+import json
+import os
+import re
+
+row = json.loads(os.environ["OMS_REENTER_JUDGMENT"])
+if not isinstance(row, dict) or row.get("schema") != 1 or row.get("kind") != "autopilot-reenter-judgment":
+    raise SystemExit(2)
+expected = {"schema", "kind", "predecessor", "owner_id",
+            "superseded_stale_claim_pid", "superseded_stale_claim_native_pid"}
+if set(row) != expected:
+    raise SystemExit(2)
+predecessor = row.get("predecessor")
+owner = row.get("owner_id")
+dead_pid = row.get("superseded_stale_claim_pid")
+dead_native_pid = row.get("superseded_stale_claim_native_pid")
+if not isinstance(predecessor, str) or not re.fullmatch(r"[0-9a-f]{64}", predecessor):
+    raise SystemExit(2)
+if not isinstance(owner, str) or (owner and not re.fullmatch(r"owner_[0-9a-f]{32}", owner)):
+    raise SystemExit(2)
+if (isinstance(dead_pid, bool) or not isinstance(dead_pid, int)
+        or dead_pid < 0 or dead_pid > 0x7fffffff):
+    raise SystemExit(2)
+if (isinstance(dead_native_pid, bool) or not isinstance(dead_native_pid, int)
+        or dead_native_pid < 0 or dead_native_pid > 0xffffffff):
+    raise SystemExit(2)
+print("%s\t%d\t%d\t%s" % (predecessor, dead_pid, dead_native_pid, owner))
+PY
+)" || fail "reenter judgment is malformed"
+  reenter_judgment_fields="${reenter_judgment_fields//$'\r'/}"
+  IFS=$'\t' read -r reenter_receipt_sha reenter_dead_pid \
+    reenter_dead_native_pid AUTOPILOT_OWNER_ID <<EOF
+$reenter_judgment_fields
+EOF
+  [ -n "$reenter_receipt_sha" ] && [ -n "$reenter_dead_pid" ] &&
+    [ -n "$reenter_dead_native_pid" ] ||
+    fail "reenter judgment is malformed"
+  OMS_AUTOPILOT_OWNER_ID="$AUTOPILOT_OWNER_ID"
+  export OMS_AUTOPILOT_OWNER_ID
+
   reenter_cont=()
+  reenter_line_number=0
   while IFS= read -r reenter_line; do
+    reenter_line_number=$((reenter_line_number + 1))
+    [ "$reenter_line_number" -ne 1 ] || continue
     reenter_line="${reenter_line//$'\r'/}"
     [ -n "$reenter_line" ] || continue
     reenter_cont+=("$reenter_line")
@@ -526,34 +680,31 @@ if [ "$ACTION" = reenter ]; then
   [ "${reenter_cont[0]}" = oms ] && [ "${reenter_cont[1]}" = autopilot ] ||
     fail "reenter continuation is malformed"
   echo "autopilot: re-entering the live run (typed record appended to .oms/plan/autopilot-reentries.jsonl)"
-  # Superseding a dead claimant is proof the previous session died; leases it
-  # still holds would otherwise park the resumed drive as tasks-exhausted
-  # (field drill, 2026-08-19). Requeue claimed/running only: review holds a
-  # frozen patch the landing path owns, and a receipt with no claim rows at
-  # all gets no requeue — the operator release path stays for those.
-  reenter_dead_pid="$(tail -n 1 "$REPO/.oms/plan/autopilot-reentries.jsonl" 2>/dev/null |
-    python3 -c 'import json,sys
-try:
-    print(int(json.loads(sys.stdin.read()).get("superseded_stale_claim_pid") or 0))
-except Exception:
-    print(0)')"
-  if [ "${reenter_dead_pid:-0}" -gt 0 ]; then
-    reenter_requeued=""
-    for reenter_state in claimed running; do
-      while IFS= read -r reenter_tid; do
-        [ -n "$reenter_tid" ] || continue
-        if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" release \
-            --id "$reenter_tid" >/dev/null 2>&1; then
-          reenter_requeued="${reenter_requeued:+$reenter_requeued,}$reenter_tid"
-        fi
-      done <<EOF_REENTER
-$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" list --state "$reenter_state" 2>/dev/null | awk '{print $1}')
-EOF_REENTER
-    done
+  # Superseding a dead claimant authorizes recovery only within the exact
+  # owner/dead-pid judgment token returned under the receipt lock above.
+  # agent-plan then performs owner/state/lease recovery under the plan lock.
+  if [ "${reenter_dead_pid:-0}" -gt 0 ] &&
+      [ -n "$AUTOPILOT_OWNER_ID" ] && [ -f "$PLAN_FILE" ]; then
+    reenter_recovery="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" \
+      recover-owner --owner-id "$AUTOPILOT_OWNER_ID" \
+      --markers-dir "$REPO/.oms/delegations" --json)" ||
+      fail "could not recover the dead session's owned leases"
+    reenter_recovery="${reenter_recovery//$'\r'/}"
+    reenter_requeued="$(OMS_REENTER_RECOVERY="$reenter_recovery" python3 - <<'PY'
+import json
+import os
+row = json.loads(os.environ["OMS_REENTER_RECOVERY"])
+print(",".join(row.get("recovered") or []))
+PY
+)" || fail "owner recovery returned malformed output"
+    reenter_requeued="${reenter_requeued//$'\r'/}"
     if [ -n "$reenter_requeued" ]; then
       oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter-note \
         "$OUTER_RECEIPT" --repo "$REPO" --requeued "$reenter_requeued" \
         --dead-pid "$reenter_dead_pid" \
+        --dead-native-pid "$reenter_dead_native_pid" \
+        --expected-owner-id "$AUTOPILOT_OWNER_ID" \
+        --expected-receipt-sha256 "$reenter_receipt_sha" \
         --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
         fail "could not record the lease requeue"
       echo "autopilot: requeued task(s) $reenter_requeued held by dead session $reenter_dead_pid"
@@ -561,7 +712,19 @@ EOF_REENTER
   fi
   trap - EXIT HUP INT TERM
   autopilot_cleanup
-  exec bash "$0" "${reenter_cont[@]:2}"
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # An MSYS/Cygwin exec may keep $$ while replacing its backing WINPID.
+      # Keep this recorded claimant alive as the synchronous parent anchor.
+      if run_reenter_continuation bash "$0" "${reenter_cont[@]:2}"; then
+        reenter_continuation_rc=0
+      else
+        reenter_continuation_rc=$?
+      fi
+      exit "$reenter_continuation_rc"
+      ;;
+    *) exec bash "$0" "${reenter_cont[@]:2}" ;;
+  esac
 fi
 
 run_phase() {  # LABEL WALL_SECONDS COMMAND...
@@ -639,7 +802,8 @@ outer_receipt_write_locked() {  # STAGE
     --replan-tasks "$REPLAN_TASKS" --review-mode "$REVIEW_MODE" \
     --proposal "$APPROVED_PROPOSAL_PATH" \
     --proposal-sha256 "$APPROVED_PROPOSAL_SHA" \
-    --branch "$receipt_branch" --updated "$now")
+    --branch "$receipt_branch" --owner-id "$AUTOPILOT_OWNER_ID" \
+    --updated "$now")
   [ "$AUTO_REPAIR" -eq 0 ] || receipt_args+=(--auto-repair)
   [ "$RETRY_KNOWN" -eq 0 ] || receipt_args+=(--retry-known)
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || receipt_args+=(--allow-verifier-change)
@@ -649,6 +813,7 @@ outer_receipt_write_locked() {  # STAGE
 
 outer_receipt_write() {  # STAGE
   local value
+  autopilot_owner_prepare
   value="$(oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_write_locked "$1")" || return $?
   value="${value//$'\r'/}"
   OUTER_RECEIPT_READY=1
@@ -1286,8 +1451,10 @@ drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
 # Record this drive's wrapper pid on the run lineage before any provider
 # spends money: a later re-entry distinguishes a live-but-slow session from
 # a dead one by exactly this claim (run-level single-flight).
+autopilot_native_pid_prepare
 oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" drive-claim \
   "$OUTER_RECEIPT" --repo "$REPO" --pid "$$" \
+  --native-pid "$AUTOPILOT_NATIVE_PID" \
   --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
   fail "could not record the drive claim"
 drive_out="$(autopilot_mktemp)" || fail "mktemp failed"

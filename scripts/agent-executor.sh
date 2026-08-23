@@ -33,6 +33,9 @@ MODEL=""
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
 GC_APPLY=0
+EXPECTED_STATE=""
+MARKERS_DIR=""
+CHECK_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -50,6 +53,9 @@ Commands:
   repair    Re-arm done -> frozen exactly once under the same soul/task/lease
             contract for a bounded reviewed-patch repair.
   fail      Move frozen/running -> failed; accepts --reason.
+  recover   Parent-only dead-worker recovery: CAS exact expected running state
+            and fail only when no exact live/malformed worker marker exists.
+            --check runs the identical locked predicate without mutation.
   gc        Remove aged draft/done/failed executors; keeps frozen/running.
 
 Repair accepts only the first done state whose exact frozen plan task has
@@ -71,6 +77,9 @@ Options:
   --fallback-model M Explicit one-shot capacity fallback model.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra; frozen.
   --reason TEXT      Failure reason for fail.
+  --expected-state S Exact state observed by the recovery caller.
+  --markers-dir PATH Repo-local worker marker directory for recovery.
+  --check             Evaluate recover under lock without mutation.
   --days N           Retention age for gc. Default: 30.
   --dry-run          Print executor gc removals without deleting (default).
   --apply            Apply executor gc removals.
@@ -81,12 +90,13 @@ fail() { echo "error: $*" >&2; exit 2; }
 need_id() {
   [ -n "$ID" ] || fail "--id is required"
   case "$ID" in *[!A-Za-z0-9._-]*|"") fail "--id must match [A-Za-z0-9._-]+" ;; esac
+  case "$ID" in .|..) fail "--id cannot be . or .." ;; esac
 }
 
 DAYS=30
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    create|validate|freeze|brief|show|list|start|done|repair|fail|gc)
+    create|validate|freeze|brief|show|list|start|done|repair|fail|recover|gc)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
     --id) [ "$#" -ge 2 ] || fail "--id requires value"; ID="$2"; shift 2 ;;
@@ -111,6 +121,9 @@ while [ "$#" -gt 0 ]; do
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"; REASONING_EFFORT="$2"; shift 2 ;;
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
+    --expected-state) [ "$#" -ge 2 ] || fail "--expected-state requires value"; EXPECTED_STATE="$2"; shift 2 ;;
+    --markers-dir) [ "$#" -ge 2 ] || fail "--markers-dir requires path"; MARKERS_DIR="$2"; shift 2 ;;
+    --check) CHECK_ONLY=1; shift ;;
     --days) [ "$#" -ge 2 ] || fail "--days requires integer"; DAYS="$2"; shift 2 ;;
     --dry-run) GC_APPLY=0; shift ;;
     --apply) GC_APPLY=1; shift ;;
@@ -119,12 +132,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
+[ "$CHECK_ONLY" = 0 ] || [ "$ACTION" = recover ] ||
+  fail "--check is valid only with recover"
+if [ "$ACTION" = recover ] && [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  fail "recover is parent-only; a harness child cannot recover executor authority"
+fi
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 case "$DAYS" in *[!0-9]*|"") fail "--days must be a non-negative integer" ;; esac
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
+REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository"
 STATE="$REPO/.oms/executors"
 
 if [ "$ACTION" = "list" ]; then
@@ -281,6 +300,263 @@ PY
 fi
 
 [ -f "$META" ] || fail "executor not found: $ID"
+
+executor_python_path_for_host() {  # PATH
+  local value="$1" parent base physical_parent
+  parent="$(dirname "$value")"
+  base="$(basename "$value")"
+  if physical_parent="$(cd "$parent" 2>/dev/null && pwd -P)"; then
+    value="$physical_parent/$base"
+  fi
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      command -v cygpath >/dev/null 2>&1 || return 2
+      value="$(cygpath -m "$value" | tr -d '\r')" || return $?
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+executor_python_lexical_path_for_host() {  # PATH
+  local value="$1"
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      command -v cygpath >/dev/null 2>&1 || return 2
+      value="$(cygpath -m "$value" | tr -d '\r')" || return $?
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+recover_executor() {
+  OMS_EXECUTOR_RECOVERY_META="$RECOVERY_META" \
+    OMS_EXECUTOR_RECOVERY_REPO="$RECOVERY_REPO" \
+    OMS_EXECUTOR_RECOVERY_MARKERS="$RECOVERY_MARKERS" \
+    OMS_EXECUTOR_RECOVERY_ID="$ID" \
+    OMS_EXECUTOR_RECOVERY_EXPECTED_STATE="$EXPECTED_STATE" \
+    OMS_EXECUTOR_RECOVERY_CHECK="$CHECK_ONLY" \
+    OMS_EXECUTOR_RECOVERY_REASON="gc: delegation process is not alive" \
+    python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
+import json
+import os
+import re
+import runpy
+import stat
+import sys
+import tempfile
+import time
+
+meta_path = os.environ["OMS_EXECUTOR_RECOVERY_META"]
+repo_root = os.path.realpath(os.environ["OMS_EXECUTOR_RECOVERY_REPO"])
+marker_dir = os.path.abspath(os.environ["OMS_EXECUTOR_RECOVERY_MARKERS"])
+executor_id = os.environ["OMS_EXECUTOR_RECOVERY_ID"]
+expected_state = os.environ["OMS_EXECUTOR_RECOVERY_EXPECTED_STATE"]
+check_only = os.environ["OMS_EXECUTOR_RECOVERY_CHECK"] == "1"
+pid_alive = runpy.run_path(sys.argv[1])["pid_alive"]
+
+def die(message):
+    sys.stderr.write("error: %s\n" % message)
+    raise SystemExit(2)
+
+def changed(message, outcome="veto"):
+    sys.stderr.write("executor-recovery-outcome: %s\n" % outcome)
+    sys.stderr.write("executor: %s\n" % message)
+    raise SystemExit(3)
+
+def same_absolute(left, right):
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+expected_markers = os.path.join(repo_root, ".oms", "delegations")
+if not same_absolute(marker_dir, expected_markers):
+    die("worker marker directory must be the repo-local .oms/delegations directory")
+
+executor_root = os.path.join(repo_root, ".oms", "executors")
+executor_dir = os.path.join(executor_root, executor_id)
+expected_meta = os.path.join(executor_dir, "meta.json")
+if (os.path.dirname(os.path.abspath(executor_dir)) !=
+        os.path.abspath(executor_root) or
+        os.path.basename(os.path.abspath(executor_dir)) != executor_id or
+        not same_absolute(meta_path, expected_meta)):
+    die("executor metadata path is outside the repo-local executor directory")
+try:
+    root_info = os.lstat(executor_root)
+    dir_info = os.lstat(executor_dir)
+    meta_before = os.lstat(meta_path)
+except OSError as exc:
+    die("executor metadata ancestry is unreadable: %s" % exc)
+if (not stat.S_ISDIR(root_info.st_mode) or
+        not stat.S_ISDIR(dir_info.st_mode) or
+        not stat.S_ISREG(meta_before.st_mode) or
+        os.path.normcase(os.path.realpath(executor_root)) !=
+        os.path.normcase(os.path.abspath(executor_root)) or
+        os.path.normcase(os.path.realpath(executor_dir)) !=
+        os.path.normcase(os.path.abspath(executor_dir)) or
+        meta_before.st_size > 64 * 1024):
+    die("executor metadata must be a bounded real repo-local file")
+meta_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+meta_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    meta_descriptor = os.open(meta_path, meta_flags)
+except OSError as exc:
+    die("executor metadata cannot be opened safely: %s" % exc)
+try:
+    meta_opened = os.fstat(meta_descriptor)
+    if (not stat.S_ISREG(meta_opened.st_mode) or
+            (meta_opened.st_dev, meta_opened.st_ino) !=
+            (meta_before.st_dev, meta_before.st_ino)):
+        die("executor metadata changed while opening")
+    meta_payload = os.read(meta_descriptor, 64 * 1024 + 1)
+    if len(meta_payload) > 64 * 1024 or os.read(meta_descriptor, 1):
+        die("executor metadata exceeds 64 KiB")
+finally:
+    os.close(meta_descriptor)
+try:
+    meta = json.loads(meta_payload.decode("utf-8"))
+except (UnicodeError, ValueError) as exc:
+    die("executor metadata is unreadable: %s" % exc)
+if not isinstance(meta, dict) or meta.get("executor_id") != executor_id:
+    die("executor metadata identity is invalid")
+if expected_state not in {"draft", "frozen", "running", "done", "failed"}:
+    die("recover requires a valid --expected-state")
+if meta.get("state") != expected_state or expected_state != "running":
+    changed("%s no longer holds the exact recoverable state" % executor_id)
+
+markers = []
+if os.path.lexists(marker_dir):
+    try:
+        directory_state = os.lstat(marker_dir)
+    except OSError as exc:
+        die("cannot inspect worker marker directory: %s" % exc)
+    if (not stat.S_ISDIR(directory_state.st_mode) or
+            not same_absolute(os.path.realpath(marker_dir), expected_markers)):
+        die("worker marker directory must be a real repo-local directory")
+    entries = []
+    with os.scandir(marker_dir) as iterator:
+        for entry in iterator:
+            if len(entries) >= 4096:
+                die("worker marker directory exceeds 4096 entries")
+            entries.append(entry)
+    for entry in entries:
+        if not entry.name.endswith(".json"):
+            continue
+        try:
+            before = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            die("cannot inspect worker marker %s: %s" % (entry.name, exc))
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024:
+            die("worker marker %s is not a bounded regular file" % entry.name)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(entry.path, flags)
+        except OSError as exc:
+            die("cannot open worker marker %s safely: %s" % (entry.name, exc))
+        try:
+            opened = os.fstat(descriptor)
+            if (not stat.S_ISREG(opened.st_mode) or
+                    (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                die("worker marker %s changed while opening" % entry.name)
+            payload = os.read(descriptor, 64 * 1024 + 1)
+            if len(payload) > 64 * 1024 or os.read(descriptor, 1):
+                die("worker marker %s exceeds 64 KiB" % entry.name)
+        finally:
+            os.close(descriptor)
+        try:
+            marker = json.loads(payload.decode("utf-8"))
+        except (UnicodeError, ValueError):
+            die("worker marker %s is malformed" % entry.name)
+        if not isinstance(marker, dict):
+            die("worker marker %s is malformed" % entry.name)
+        markers.append(marker)
+
+matching = [marker for marker in markers
+            if marker.get("executor_id") == executor_id]
+safe_id = re.compile(r"^[A-Za-z0-9._-]+$")
+owner_id = re.compile(r"^owner_[0-9a-f]{32}$")
+
+def marker_is_typed(marker):
+    schema = marker.get("schema")
+    if (isinstance(schema, bool) or not isinstance(schema, int)
+            or schema not in {1, 2, 3, 4}):
+        return False
+    marker_id = marker.get("id")
+    if (not isinstance(marker_id, str) or not safe_id.fullmatch(marker_id)
+            or marker_id in {".", ".."}):
+        return False
+    pid = marker.get("pid")
+    if (isinstance(pid, bool) or not isinstance(pid, int)
+            or pid <= 0 or pid > 0x7FFFFFFF):
+        return False
+    native_pid = marker.get("native_pid")
+    if schema == 4 and "native_pid" not in marker:
+        return False
+    if "native_pid" in marker and (
+            isinstance(native_pid, bool) or not isinstance(native_pid, int)
+            or native_pid <= 0 or native_pid > 0xFFFFFFFF):
+        return False
+    for key in ("task_id", "lease_id", "executor_id"):
+        value = marker.get(key, "")
+        if (not isinstance(value, str)
+                or (value and not safe_id.fullmatch(value))):
+            return False
+    if marker.get("executor_id", "") in {".", ".."}:
+        return False
+    marker_owner = marker.get("autopilot_owner_id", "")
+    if (not isinstance(marker_owner, str)
+            or (marker_owner and not owner_id.fullmatch(marker_owner))):
+        return False
+    return True
+
+if any(not marker_is_typed(marker) for marker in matching):
+    changed("%s has an unproven exact worker marker" % executor_id, "unproven")
+if any(pid_alive(marker.get("pid"), native_pid=marker.get("native_pid"))
+       for marker in matching):
+    changed("%s still has a live exact worker marker" % executor_id)
+if check_only:
+    print("executor: %s exact state is recoverable" % executor_id)
+    raise SystemExit(0)
+
+meta["state"] = "failed"
+meta["reason"] = os.environ["OMS_EXECUTOR_RECOVERY_REASON"]
+meta["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(meta_path))
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(meta, handle, indent=2, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, meta_path)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except OSError:
+        pass
+    raise
+print("executor: %s -> failed" % executor_id)
+PY
+}
+
+recover_executor_with_meta_lock() {
+  oms_with_file_lock "$META.lock" recover_executor
+}
+
+if [ "$ACTION" = recover ]; then
+  [ -n "$EXPECTED_STATE" ] || fail "recover requires --expected-state"
+  MARKERS_DIR="${MARKERS_DIR:-$REPO/.oms/delegations}"
+  recovery_repo_physical="$(cd "$REPO" && pwd -P)" ||
+    fail "cannot resolve the physical repository"
+  RECOVERY_REPO="$(executor_python_path_for_host "$recovery_repo_physical")" ||
+    fail "cannot normalize repository path for Python"
+  RECOVERY_META="$(executor_python_lexical_path_for_host "$META")" ||
+    fail "cannot normalize executor metadata path for Python"
+  RECOVERY_MARKERS="$(executor_python_path_for_host "$MARKERS_DIR")" ||
+    fail "cannot normalize worker marker path for Python"
+  # Recovery always judges the marker set before the executor CAS. Publishers
+  # take only the first lock, so the global order is marker set -> metadata.
+  oms_with_file_lock "$REPO/.oms/delegations/.marker-set-lock-target" \
+    recover_executor_with_meta_lock
+  exit $?
+fi
 
 validate_soul_hash() {
   local expected actual state

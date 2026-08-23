@@ -73,6 +73,8 @@ def _plan_state(repo: Path) -> Dict[str, Any]:
         return {'present': False, 'source': None, 'tasks': [], 'counts': {}, 'scope': {'allowed': [], 'forbidden': []}}
     if not isinstance(raw, dict):
         raise CoreError('plan state must be a JSON object: %s' % path)
+    raw_plan_id = raw.get('plan_id', '')
+    plan_id = raw_plan_id if isinstance(raw_plan_id, str) and re.fullmatch(r'plan_[0-9a-f]{32}', raw_plan_id) else ''
     tasks: List[Dict[str, Any]] = []; all_allowed: List[str] = []; all_forbidden: List[str] = []
     for row in _task_list(raw.get('tasks', [])):
         allowed = parse_path_list(row.get('allowed', row.get('allowed_paths', [])))
@@ -81,7 +83,7 @@ def _plan_state(repo: Path) -> Dict[str, Any]:
         verify = str(row.get('verify', '') or '')
         tasks.append({'id': bounded_line(row.get('id', ''), 160), 'title': bounded_line(row.get('title', row.get('goal', '')), 300), 'state': bounded_line(row.get('state', 'ready'), 40).lower(), 'depends': [bounded_line(item, 160) for item in row.get('depends', row.get('dependencies', []))] if isinstance(row.get('depends', row.get('dependencies', [])), list) else [], 'scope': {'allowed': allowed, 'forbidden': forbidden}, 'verify_present': bool(verify), 'verify_digest': sha256_text(verify) if verify else '', 'provider': bounded_line(row.get('provider', ''), 80), 'lease_id_present': bool(row.get('lease_id')), 'artifact_present': bool(row.get('artifact')), 'patch_present': bool(row.get('patch'))})
     acceptance = str(raw.get('accept', raw.get('acceptance', '')) or '')
-    return {'present': True, 'source': source_descriptor(path, repo), 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
+    return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
 
 def _latest_executor(repo: Path) -> Dict[str, Any]:
     candidates: List[Tuple[Path, Dict[str, Any]]] = []
@@ -196,7 +198,7 @@ def _criteria(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping
         criterion_id = explicit.group(1) if explicit else 'plan-task-' + task_id
         if not _claim_criterion_id(seen, criterion_id, task_id.lower()):
             continue
-        result.append({'id': criterion_id, 'text': bounded_line(strip_criterion_marker(title) or ('Plan task %s is admitted.' % task_id), 500), 'source': 'plan-task', 'weight': 1, 'plan_task_id': task_id})
+        result.append({'id': criterion_id, 'text': bounded_line(strip_criterion_marker(title) or ('Plan task %s is admitted.' % task_id), 500), 'source': 'plan-task', 'weight': 1, 'plan_task_id': task_id, 'plan_id': str(plan.get('plan_id', ''))})
     return result
 
 def _objective(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[str, Any]) -> Dict[str, str]:

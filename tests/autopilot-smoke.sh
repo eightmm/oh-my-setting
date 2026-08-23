@@ -1116,6 +1116,19 @@ EOF
     fail "verifier-change consent is not bound in the receipt contract"
   grep -Fq -- '--allow-verifier-change' "$avc_repo/avc.out" ||
     fail "the printed continuation dropped the verifier-change consent"
+  if ! python3 - "$avc_repo/.oms/plan/autopilot-reentries.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+claims = [row for row in rows if row.get("kind") == "autopilot-drive-claim"]
+assert claims
+assert all(isinstance(row.get("claim_pid"), int) and row["claim_pid"] > 0
+           for row in claims)
+assert all(isinstance(row.get("claim_native_pid"), int)
+           and row["claim_native_pid"] > 0 for row in claims)
+PY
+  then
+    fail "drive claim did not persist its typed native process identity"
+  fi
   rc=0
   OMS_T_GOAL_RESULT=exhausted run_autopilot "$avc_repo" run \
     --planner claude --worker codex --allowed 'src/,tests/' --base main \
@@ -1131,6 +1144,7 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     row = json.load(handle)
 row["contract"].pop("allow_verifier_change")
+row.pop("owner_id")
 with open(path, "w", encoding="utf-8") as handle:
     handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 PY
@@ -1146,7 +1160,8 @@ PY
   # any work, refusals are records too, and stages that would let re-entry
   # supply an approval refuse.
   local reenter_repo="$TMP/reenter-v1"
-  local reenter_spec reenter_branch dead_pid
+  local reenter_spec reenter_branch reenter_owner dead_pid dead_native_pid
+  local current_native_pid
   make_repo "$reenter_repo"
   mkdir -p "$reenter_repo/calls"
   rc=0
@@ -1161,6 +1176,16 @@ PY
   [ "$rc" != 0 ] || fail "digest drift must refuse re-entry"
   grep -Fq 'digest gate:' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
     fail "the drift refusal must ride the reentry ledger"
+  if ! python3 - "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+claim = [row for row in rows if row.get("kind") == "autopilot-reenter"][-1]
+assert isinstance(claim.get("claim_pid"), int) and claim["claim_pid"] > 0
+assert isinstance(claim.get("claim_native_pid"), int) and claim["claim_native_pid"] > 0
+PY
+  then
+    fail "reenter claim did not persist its typed native process identity"
+  fi
   git -C "$reenter_repo" checkout -q -- PROJECT.md
   # Run-level single-flight (debate correction): claims key on the lineage
   # (spec+branch), never the receipt digest — a live-but-slow ORIGINAL drive
@@ -1170,8 +1195,15 @@ PY
     "$reenter_repo/.oms/plan/autopilot-run.json")"
   reenter_branch="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r.get("branch",""))' \
     "$reenter_repo/.oms/plan/autopilot-run.json")"
-  printf '{"kind":"autopilot-drive-claim","spec_sha256":"%s","branch":"%s","claim_pid":%d,"schema":1}\n' \
-    "$reenter_spec" "$reenter_branch" "$$" >> "$reenter_repo/.oms/plan/autopilot-reentries.jsonl"
+  reenter_owner="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" owner-id \
+    "$reenter_repo/.oms/plan/autopilot-run.json")"
+  python3 -c 'import os; print(os.getppid())' > "$TMP/reenter-current-native-pid"
+  IFS= read -r current_native_pid < "$TMP/reenter-current-native-pid"
+  rm -f "$TMP/reenter-current-native-pid"
+  current_native_pid="${current_native_pid//$'\r'/}"
+  printf '{"kind":"autopilot-drive-claim","spec_sha256":"%s","branch":"%s","owner_id":"%s","claim_pid":%d,"claim_native_pid":%d,"schema":1}\n' \
+    "$reenter_spec" "$reenter_branch" "$reenter_owner" "$$" "$current_native_pid" \
+    >> "$reenter_repo/.oms/plan/autopilot-reentries.jsonl"
   rc=0
   run_autopilot "$reenter_repo" reenter > "$reenter_repo/reenter-claimed.out" 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail "a live drive claim on the lineage must refuse re-entry"
@@ -1196,37 +1228,51 @@ PY
     fail "the shadow row must name the live holder"
   grep -Fq '"session_id":"smoke-live"' "$shadow_ledger" ||
     fail "the shadow row must carry the observing session"
-  sh -c ':' & dead_pid=$!
+  sh -c 'python3 -c '\''import os; print(os.getppid())'\'' > "$1"; :' \
+    _ "$TMP/reenter-dead-native-pid" &
+  dead_pid=$!
   wait "$dead_pid" 2>/dev/null || true
-  python3 - "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" "$dead_pid" <<'PY' || fail "could not rewrite the claim as stale"
+  IFS= read -r dead_native_pid < "$TMP/reenter-dead-native-pid"
+  rm -f "$TMP/reenter-dead-native-pid"
+  dead_native_pid="${dead_native_pid//$'\r'/}"
+  python3 - "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" \
+    "$dead_pid" "$dead_native_pid" <<'PY' || fail "could not rewrite the claim as stale"
 import json, sys
-path, dead = sys.argv[1], int(sys.argv[2])
+path, dead, dead_native = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 rows = []
 with open(path, encoding="utf-8") as handle:
     for line in handle:
         row = json.loads(line)
         if row.get("kind") == "autopilot-drive-claim":
             row["claim_pid"] = dead
+            row["claim_native_pid"] = dead_native
         rows.append(row)
 with open(path, "w", encoding="utf-8") as handle:
     for row in rows:
         handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 PY
-  # The dead session leaves a claimed lease behind — the field drill's park
-  # cause. A contracted plan fixture with one claimed task models it.
-  python3 - "$reenter_repo/.oms/plan/tasks.json" "$reenter_repo/PROJECT.md" <<'PY' || fail "could not plant the leased plan"
+  # The dead session leaves owned leases behind — the field drill's park
+  # cause. Recovery must take only its markerless claim and exact dead worker;
+  # another owner, a live worker, markerless running work, and review evidence
+  # all remain held.
+  python3 - "$reenter_repo/.oms/plan/tasks.json" "$reenter_repo/PROJECT.md" \
+    "$reenter_owner" <<'PY' || fail "could not plant the leased plan"
 import datetime, hashlib, json, sys
 now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 spec = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
-task = {
-    "id": "t9", "title": "feat: interrupted work", "state": "claimed",
-    "depends": [], "allowed_paths": ["src/"], "forbidden_paths": [],
-    "verify": "true", "role": "", "provider": "codex", "ttl": "",
-    "artifact": "", "patch": "", "reason": "",
-    "executor_id": "", "executor_soul_sha256": "", "lease_epoch": 1,
-    "lease_id": "lease-dead", "review_lease_id": "", "repair_count": 0,
-    "repair_artifact": "", "created": now, "updated": now,
-}
+owner = sys.argv[3]
+other = "owner_22222222222222222222222222222222"
+def task(task_id, state, lease, task_owner):
+    return {
+        "id": task_id, "title": "feat: " + task_id, "state": state,
+        "depends": [], "allowed_paths": ["src/"], "forbidden_paths": [],
+        "verify": "true", "role": "", "provider": "codex", "ttl": "",
+        "artifact": "", "patch": "", "reason": "", "claimed_at": now,
+        "executor_id": "", "executor_soul_sha256": "", "lease_epoch": 1,
+        "lease_id": lease, "review_lease_id": lease if state == "review" else "",
+        "repair_count": 0, "repair_artifact": "", "created": now, "updated": now,
+        "autopilot_owner_id": task_owner,
+    }
 json.dump({
     "schema": 3, "goal": "finish", "accept": "true",
     "project_contract": {
@@ -1234,9 +1280,23 @@ json.dump({
         "allowed_envelope": ["src", "tests"],
         "acceptance_files": [], "acceptance_manifest": [],
     },
-    "tasks": {"t9": task},
+    "tasks": {
+        "t9": task("t9", "claimed", "lease-dead-claim", owner),
+        "t10": task("t10", "running", "lease-other", other),
+        "t11": task("t11", "running", "lease-live", owner),
+        "t12": task("t12", "running", "lease-dead-worker", owner),
+        "t13": task("t13", "review", "lease-review", owner),
+        "t14": task("t14", "running", "lease-markerless", owner),
+    },
 }, open(sys.argv[1], "w", encoding="utf-8"))
 PY
+  mkdir -p "$reenter_repo/.oms/delegations"
+  printf '{"schema":4,"id":"live","pid":%d,"native_pid":%d,"task_id":"t11","lease_id":"lease-live","autopilot_owner_id":"%s"}\n' \
+    "$$" "$current_native_pid" "$reenter_owner" > "$reenter_repo/.oms/delegations/live.json"
+  printf '{"schema":4,"id":"dead","pid":%d,"native_pid":%d,"task_id":"t12","lease_id":"lease-dead-worker","autopilot_owner_id":"%s"}\n' \
+    "$dead_pid" "$dead_native_pid" "$reenter_owner" > "$reenter_repo/.oms/delegations/dead.json"
+  printf '{"schema":4,"id":"review","pid":%d,"native_pid":%d,"task_id":"t13","lease_id":"lease-review","autopilot_owner_id":"%s"}\n' \
+    "$dead_pid" "$dead_native_pid" "$reenter_owner" > "$reenter_repo/.oms/delegations/review.json"
   # Shadow over the dead-claimant state, BEFORE the real reenter: the
   # verdict is would-resume naming the dead pid, and observation consumes
   # nothing — the lease stays claimed, no claim row lands, the receipt
@@ -1260,15 +1320,53 @@ PY
       "$reenter_repo/.oms/plan/tasks.json")" = claimed ] ||
     fail "shadow observation must not requeue the dead session's lease"
   rc=0
-  run_autopilot "$reenter_repo" reenter --reason "fresh session picks up the dead planner" \
-    > "$reenter_repo/reenter.out" 2>&1 || rc=$?
-  grep -Fq 'requeued task(s) t9 held by dead session' "$reenter_repo/reenter.out" ||
+  # Append an unrelated row immediately after the lock-protected reenter
+  # helper returns. Recovery must consume the judgment token returned by that
+  # same critical section, never reread the now-changed ambient ledger tail.
+  local reenter_python_bin="$TMP/reenter-python-bin"
+  local real_reenter_python
+  real_reenter_python="$(command -v python3)"
+  mkdir -p "$reenter_python_bin"
+  cat > "$reenter_python_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+set -o pipefail
+if [ "${1:-}" = "$OMS_T_RECEIPT_HELPER" ] && [ "${2:-}" = reenter ]; then
+  "$OMS_T_REAL_PYTHON" "$@" | sed 's/$/\r/'
+  helper_rc=${PIPESTATUS[0]}
+  if [ "$helper_rc" = 0 ]; then
+    printf '{"schema":1,"kind":"autopilot-reenter-requeue","spec_sha256":"%s","branch":"%s","owner_id":"%s","requeued":["ambient"],"dead_pid":1,"superseded_stale_claim_pid":0,"updated":"2026-08-19T00:00:00Z"}\n' \
+      "$OMS_T_REENTER_SPEC" "$OMS_T_REENTER_BRANCH" "$OMS_T_REENTER_OWNER" \
+      >> "$OMS_T_REENTER_LEDGER"
+  fi
+  exit "$helper_rc"
+fi
+exec "$OMS_T_REAL_PYTHON" "$@"
+EOF
+  chmod +x "$reenter_python_bin/python3"
+  OMS_T_REAL_PYTHON="$real_reenter_python" \
+    OMS_T_RECEIPT_HELPER="$ROOT/scripts/lib/autopilot-receipt.py" \
+    OMS_T_REENTER_LEDGER="$reenter_repo/.oms/plan/autopilot-reentries.jsonl" \
+    OMS_T_REENTER_SPEC="$reenter_spec" OMS_T_REENTER_BRANCH="$reenter_branch" \
+    OMS_T_REENTER_OWNER="$reenter_owner" \
+    PATH="$reenter_python_bin:$PATH" \
+    run_autopilot "$reenter_repo" reenter --reason "fresh session picks up the dead planner" \
+      > "$reenter_repo/reenter.out" 2>&1 || rc=$?
+  grep -Fq 'requeued task(s) t9,t12 held by dead session' "$reenter_repo/reenter.out" ||
     fail "the dead predecessor's lease was not requeued: $(tail -6 "$reenter_repo/reenter.out")"
   grep -Fq '"kind":"autopilot-reenter-requeue"' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
     fail "the lease requeue must leave a typed record"
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["t9"]["state"])' \
       "$reenter_repo/.oms/plan/tasks.json")" = ready ] ||
     fail "the requeued task must be ready again"
+  python3 - "$reenter_repo/.oms/plan/tasks.json" <<'PY' || fail "owner recovery stole a live, unrelated, or review task"
+import json, sys
+tasks = json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]
+assert tasks["t12"]["state"] == "ready"
+assert tasks["t10"]["state"] == "running"
+assert tasks["t11"]["state"] == "running"
+assert tasks["t13"]["state"] == "review"
+assert tasks["t14"]["state"] == "running"
+PY
   # The resumed propose then refuses honestly: the requeued work is
   # actionable, so a remainder proposal is premature — run first.
   [ "$rc" = 2 ] ||
@@ -1293,6 +1391,9 @@ PY
     fail "the reentry record must name its predecessor digest"
   grep -Fq '"superseded_stale_claim_pid":' "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
     fail "superseding a dead claim must be recorded, not silent"
+  grep -Fq '"superseded_stale_claim_native_pid":' \
+    "$reenter_repo/.oms/plan/autopilot-reentries.jsonl" ||
+    fail "superseding a dead claim must retain its native process identity"
   # The receipt now awaits parent review: re-entry cannot supply the approval.
   rc=0
   run_autopilot "$reenter_repo" reenter > "$reenter_repo/reenter-review.out" 2>&1 || rc=$?

@@ -28,6 +28,10 @@ EXECUTOR_SOUL_SHA=""
 executor_started=0
 executor_finalized=0
 liveness_file=""
+liveness_python_file=""
+delegation_lock_target=""
+DELEGATION_NATIVE_PID=""
+DELEGATION_STARTED=""
 VERIFY_CMD=""
 NO_VERIFY=0
 ARTIFACT_DIR=""
@@ -41,6 +45,9 @@ THREAD_ID=""
 TASK_ID=""
 PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
+AUTOPILOT_OWNER_ID="${OMS_AUTOPILOT_OWNER_ID:-}"
+PLAN_ID=""
+PLAN_JSON=""
 TERMINALIZE_RESUMED_REPAIR=0
 plan_started=0
 plan_finalized=0
@@ -352,6 +359,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -n "$AUTOPILOT_OWNER_ID" ]; then
+  case "$AUTOPILOT_OWNER_ID" in owner_*) ;; *) fail "autopilot owner id is invalid" ;; esac
+  case "${AUTOPILOT_OWNER_ID#owner_}" in *[!0-9a-f]*|"") fail "autopilot owner id is invalid" ;; esac
+  [ "${#AUTOPILOT_OWNER_ID}" -eq 38 ] || fail "autopilot owner id is invalid"
+fi
+
 if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ]; then
   [ -n "$PLAN_TASK_ID" ] ||
     fail "--terminalize-resumed-repair requires --plan-task"
@@ -360,11 +373,6 @@ if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ]; then
   [ "$DRY_RUN" != 1 ] ||
     fail "--terminalize-resumed-repair is not valid for --dry-run"
 fi
-
-# Stamp every artifact-index row from this delegation with the plan/task id so
-# the run can be traced back to its subtask (ma_append_artifact_index reads it).
-[ -n "$PLAN_TASK_ID" ] && [ -z "$TASK_ID" ] && TASK_ID="$PLAN_TASK_ID"
-[ -n "$TASK_ID" ] && export OMS_TASK_ID="$TASK_ID"
 
 # Plan lifecycle coupling for --plan-task. Failures release the claim so the
 # task never sticks in claimed/running when the worker dies or is rejected.
@@ -432,11 +440,12 @@ fi
 
 oms_require_peer_owner || exit $?
 
-REPO="$(cd "$REPO" && pwd)"
+REPO="$(cd "$REPO" && pwd -P)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 # Normalize to the git worktree root so --plan-task hydration and every
 # $REPO/.oms/... path agree with agent-plan.sh regardless of the invoking cwd.
 REPO="$(oms_repo_root "$REPO")"
+REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository"
 git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1 ||
   fail "repo needs at least one commit to delegate against"
 # Worktree materialization itself checks out tracked content. Reject filter,
@@ -541,19 +550,52 @@ if [ -n "$EXECUTOR_ID" ]; then
   export OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_SOUL_SHA256="$EXECUTOR_SOUL_SHA"
 fi
 
-# Capture the claim's fencing token once. Every later transition and the
-# worker environment use this exact lease; reclaiming the task invalidates the
-# stale worker instead of allowing it to publish late results.
-if [ -n "$PLAN_TASK_ID" ] && [ "$DRY_RUN" != "1" ]; then
-  PLAN_LEASE_ID="$(
-    "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" show --id "$PLAN_TASK_ID" |
-      python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))'
-  )" || fail "could not read lease for plan task $PLAN_TASK_ID"
+# Stamp every artifact-index row from this delegation with the exact plan/task
+# snapshot it belongs to. Executor resolution above may supply the plan task,
+# so this cannot happen during argv parsing. evidence-snapshot reads the task
+# and top-level immutable id under one plan lock; the frozen id intentionally
+# survives a replacement plan appearing while the worker or verifier runs.
+if [ -n "$PLAN_TASK_ID" ]; then
+  [ -z "$TASK_ID" ] || [ "$TASK_ID" = "$PLAN_TASK_ID" ] ||
+    fail "--task-id conflicts with --plan-task"
+  TASK_ID="$PLAN_TASK_ID"
+  PLAN_JSON="$(
+    "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" evidence-snapshot \
+      --id "$PLAN_TASK_ID" 2>/dev/null
+  )" || fail "could not read plan task $PLAN_TASK_ID"
+  PLAN_ID="$(printf '%s' "$PLAN_JSON" |
+    python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
+    tr -d '\r')"
+  if [ -z "$PLAN_ID" ]; then
+    "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" ensure-lineage >/dev/null ||
+      fail "could not establish plan lineage before delegating task $PLAN_TASK_ID"
+    PLAN_JSON="$(
+      "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" evidence-snapshot \
+        --id "$PLAN_TASK_ID" 2>/dev/null
+    )" || fail "could not reread plan task $PLAN_TASK_ID after establishing lineage"
+    PLAN_ID="$(printf '%s' "$PLAN_JSON" |
+      python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
+      tr -d '\r')"
+  fi
+  case "$PLAN_ID" in
+    plan_*)
+      case "${PLAN_ID#plan_}" in
+        *[!0-9a-f]*) fail "plan task has malformed lineage" ;;
+      esac
+      [ "${#PLAN_ID}" -eq 37 ] || fail "plan task has malformed lineage"
+      ;;
+    *) fail "plan task has no immutable lineage" ;;
+  esac
+  PLAN_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
+    python3 -c 'import json,sys;print(json.load(sys.stdin).get("lease_id", ""))' |
+    tr -d '\r')" || fail "could not read lease for plan task $PLAN_TASK_ID"
+  export OMS_INDEX_PLAN_ID="$PLAN_ID"
+else
+  unset OMS_INDEX_PLAN_ID
 fi
+[ -n "$TASK_ID" ] && export OMS_TASK_ID="$TASK_ID"
 if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ]; then
-  resume_plan_json="$("$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" \
-    show --id "$PLAN_TASK_ID" 2>/dev/null)" ||
-    fail "cannot read resumed repair task $PLAN_TASK_ID"
+  resume_plan_json="$PLAN_JSON"
   if ! OMS_RESUME_PLAN_JSON="$resume_plan_json" python3 - \
     "$PLAN_TASK_ID" "$TO" "$PLAN_LEASE_ID" "$REVIEW_ARTIFACT" <<'PY'
 import json
@@ -590,37 +632,44 @@ fi
 if [ -n "$PLAN_TASK_ID" ]; then
   if [ -z "$BRIEF_FILE" ] && [ -z "$PROMPT" ]; then
     plan_brief_file="$(mktemp)" || fail "mktemp failed"
-    # The EXIT trap is not installed yet, so clean the temp before failing.
-    if ! "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" brief --id "$PLAN_TASK_ID" > "$plan_brief_file"; then
+    # Render from the same task+lineage snapshot that supplied the lease. A
+    # replacement plan cannot silently change the brief after lineage froze.
+    if ! printf '%s' "$PLAN_JSON" | python3 -c '
+import json, sys
+t = json.load(sys.stdin)
+state = t.get("state", "")
+if t.get("claim_expired"):
+    state += " [claim EXPIRED; claimable]"
+lines = ["# Task %s: %s" % (t.get("id", ""), t.get("title", "")),
+         "state: %s" % state,
+         "depends: %s" % (", ".join(t.get("depends", [])) or "(none)"),
+         "allowed_paths: %s" % (", ".join(t.get("allowed_paths", [])) or "(unrestricted)")]
+if t.get("forbidden_paths"):
+    lines.append("forbidden_paths: %s" % ", ".join(t["forbidden_paths"]))
+lines.append("verify: %s" % (t.get("verify") or "(none)"))
+if t.get("role"):
+    lines.append("role: %s" % t["role"])
+print("\n".join(lines))
+' > "$plan_brief_file"; then
       rm -f "$plan_brief_file"
       fail "could not hydrate brief from plan task $PLAN_TASK_ID"
     fi
     BRIEF_FILE="$plan_brief_file"
   fi
-  if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -f "$REPO/.oms/plan/tasks.json" ]; then
-    plan_verify="$(OMS_PLAN_ID="$PLAN_TASK_ID" python3 - "$REPO/.oms/plan/tasks.json" 2>/dev/null <<'PY' || true
-import json, os, sys
-t = json.load(open(sys.argv[1])).get("tasks", {}).get(os.environ["OMS_PLAN_ID"], {})
-v = t.get("verify", "")
-if v:
-    print(v)
-PY
-)"
+  if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ]; then
+    plan_verify="$(printf '%s' "$PLAN_JSON" |
+      python3 -c 'import json,sys;v=json.load(sys.stdin).get("verify", "");print(v) if v else None' |
+      tr -d '\r')"
     if [ -n "$plan_verify" ]; then
       VERIFY_CMD="$plan_verify"
       echo "plan-verify: $VERIFY_CMD (from task $PLAN_TASK_ID)"
     fi
   fi
   # A plan task can name a role; --role wins over it.
-  if [ -z "$ROLE" ] && [ -z "$EXECUTOR_ID" ] && [ -f "$REPO/.oms/plan/tasks.json" ]; then
-    plan_role="$(OMS_PLAN_ID="$PLAN_TASK_ID" python3 - "$REPO/.oms/plan/tasks.json" 2>/dev/null <<'PY' || true
-import json, os, sys
-t = json.load(open(sys.argv[1])).get("tasks", {}).get(os.environ["OMS_PLAN_ID"], {})
-r = t.get("role", "")
-if r:
-    print(r)
-PY
-)"
+  if [ -z "$ROLE" ] && [ -z "$EXECUTOR_ID" ]; then
+    plan_role="$(printf '%s' "$PLAN_JSON" |
+      python3 -c 'import json,sys;r=json.load(sys.stdin).get("role", "");print(r) if r else None' |
+      tr -d '\r')"
     [ -n "$plan_role" ] && ROLE="$plan_role"
   fi
 fi
@@ -709,7 +758,9 @@ cleanup_delegated_worktree() {
       worktree_created=0
       rm -rf "$worktree_parent"
       worktree_parent=""
-      [ -z "$liveness_file" ] || rm -f "$liveness_file"
+      [ -z "$liveness_file" ] || [ -z "$delegation_lock_target" ] ||
+        oms_with_file_lock "$delegation_lock_target" \
+          rm -f -- "$liveness_file" 2>/dev/null || true
       liveness_file=""
       return 0
     fi
@@ -743,7 +794,9 @@ cleanup() {
   [ -z "$executor_brief_file" ] || rm -f "$executor_brief_file"
   # Remove the liveness marker; a leftover file means the process died without
   # cleanup (a crashed orphan), which oms state / gc can then flag by dead pid.
-  [ -z "$liveness_file" ] || rm -f "$liveness_file"
+  [ -z "$liveness_file" ] || [ -z "$delegation_lock_target" ] ||
+    oms_with_file_lock "$delegation_lock_target" \
+      rm -f -- "$liveness_file" 2>/dev/null || true
   cleanup_delegated_worktree || true
 }
 cleanup_signal() {
@@ -837,8 +890,7 @@ if [ "$CONTEXT_MANIFEST" -eq 1 ]; then
   context_args=(--repo "$REPO" context --manifest "$context_manifest_file")
   first_allowed=""
   if [ -n "$PLAN_TASK_ID" ]; then
-    first_allowed="$("$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" show \
-      --id "$PLAN_TASK_ID" 2>/dev/null | python3 -c '
+    first_allowed="$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json, sys
 try:
     row = json.load(sys.stdin)
@@ -911,17 +963,40 @@ fi
 # crashed orphan. No daemon, no heartbeat thread.
 if [ "$DRY_RUN" != "1" ]; then
   liveness_file="$REPO/.oms/delegations/$timestamp.json"
+  delegation_lock_target="$REPO/.oms/delegations/.marker-set-lock-target"
   mkdir -p "$(dirname "$liveness_file")"
   agent_memory_ensure_oms_ignore_for_path "$liveness_file" 2>/dev/null || true
-  OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="$EXECUTOR_ID" \
-    OMS_DL_SOUL_SHA="$EXECUTOR_SOUL_SHA" OMS_DL_PID="$$" \
-    OMS_DL_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_DL_MODEL="$OMS_MODEL_PRIMARY" \
-    OMS_DL_FALLBACK_MODEL="$OMS_MODEL_FALLBACK" \
-    OMS_DL_REASONING_EFFORT="$OMS_REASONING_RESOLVED" \
-    OMS_DL_FALLBACK_REASONING_EFFORT="$OMS_REASONING_FALLBACK" \
-    OMS_DL_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_DL_WT="$worktree" \
-    OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
-    OMS_DL_FILE="$liveness_file" python3 - <<'PY'
+  DELEGATION_NATIVE_PID="$$"
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # This must be a direct native-Python child of the owning Bash. Command
+      # substitution and oms_with_file_lock both introduce a short-lived Bash
+      # parent whose WINPID would expire before the worker does.
+      python3 -c 'import os; print(os.getppid())' \
+        > "$worktree_parent/delegation-native-pid" ||
+        fail "could not capture the worker's native Windows pid"
+      IFS= read -r DELEGATION_NATIVE_PID \
+        < "$worktree_parent/delegation-native-pid" ||
+        fail "could not read the worker's native Windows pid"
+      rm -f "$worktree_parent/delegation-native-pid"
+      DELEGATION_NATIVE_PID="${DELEGATION_NATIVE_PID//$'\r'/}"
+      ;;
+  esac
+  case "$DELEGATION_NATIVE_PID" in
+    *[!0-9]*|"") fail "worker native pid is invalid" ;;
+  esac
+  [ "$DELEGATION_NATIVE_PID" -gt 0 ] || fail "worker native pid is invalid"
+  liveness_python_file="$liveness_file"
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      command -v cygpath >/dev/null 2>&1 ||
+        fail "cygpath is required to write worker markers from Git Bash"
+      liveness_python_file="$(cygpath -m "$liveness_file" | tr -d '\r')" ||
+        fail "could not normalize the worker marker path for native Python"
+      ;;
+  esac
+  write_delegation_marker() {
+    python3 - <<'PY'
 import json, os, tempfile
 
 # Written atomically, not through a shell redirect: the redirect creates and
@@ -932,12 +1007,14 @@ import json, os, tempfile
 # same race with a wider window.
 target = os.environ["OMS_DL_FILE"]
 row = json.dumps({
-    "schema": 2, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
+    "schema": 4, "id": os.environ["OMS_DL_ID"], "provider": os.environ["OMS_DL_PROVIDER"],
     "role": os.environ.get("OMS_DL_ROLE", ""), "executor_id": os.environ.get("OMS_DL_EXECUTOR", ""),
     "soul_sha256": os.environ.get("OMS_DL_SOUL_SHA", ""), "pid": int(os.environ["OMS_DL_PID"]),
+    "native_pid": int(os.environ["OMS_DL_NATIVE_PID"]),
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
     "worktree": os.environ["OMS_DL_WT"], "task_id": os.environ.get("OMS_DL_TASK", ""),
     "lease_id": os.environ.get("OMS_DL_LEASE", ""),
+    "autopilot_owner_id": os.environ.get("OMS_DL_AUTOPILOT_OWNER", ""),
     "model_class": os.environ.get("OMS_DL_MODEL_CLASS", ""),
     "model": os.environ.get("OMS_DL_MODEL", ""),
     "fallback_model": os.environ.get("OMS_DL_FALLBACK_MODEL", ""),
@@ -959,6 +1036,21 @@ except Exception:
         pass
     raise
 PY
+  }
+  DELEGATION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
+    fail "could not timestamp the worker marker"
+  export OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="$EXECUTOR_ID" \
+    OMS_DL_SOUL_SHA="$EXECUTOR_SOUL_SHA" OMS_DL_PID="$$" \
+    OMS_DL_NATIVE_PID="$DELEGATION_NATIVE_PID" \
+    OMS_DL_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_DL_MODEL="$OMS_MODEL_PRIMARY" \
+    OMS_DL_FALLBACK_MODEL="$OMS_MODEL_FALLBACK" \
+    OMS_DL_REASONING_EFFORT="$OMS_REASONING_RESOLVED" \
+    OMS_DL_FALLBACK_REASONING_EFFORT="$OMS_REASONING_FALLBACK" \
+    OMS_DL_STARTED="$DELEGATION_STARTED" OMS_DL_WT="$worktree" \
+    OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
+    OMS_DL_AUTOPILOT_OWNER="$AUTOPILOT_OWNER_ID" \
+    OMS_DL_FILE="$liveness_python_file"
+  oms_with_file_lock "$delegation_lock_target" write_delegation_marker
 fi
 
 # Verification contract: default to the project's check.sh when present.

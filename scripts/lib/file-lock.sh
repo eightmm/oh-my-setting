@@ -412,11 +412,17 @@ oms_with_file_lock_mkdir() {
     oms_file_lock_set_current_identity
     owner_id="$OMS_FILE_LOCK_CURRENT_PID.$(date +%s).${RANDOM:-0}"
     oms_file_lock_mkdir_acquire "$state_file" "$lock_dir" "$timeout" "$owner_id" || exit $?
+    # An errexit unwind runs EXIT after this function's local scope is gone.
+    # Freeze cleanup identity in this lock subshell; a nested lock gets a child
+    # copy and therefore cannot overwrite its parent's release target.
+    OMS_FILE_LOCK_CLEANUP_DIR="$lock_dir"
+    OMS_FILE_LOCK_CLEANUP_OWNER="$owner_id"
     lock_cleanup_done=0
     oms_file_lock_cleanup() {
       [ "$lock_cleanup_done" = 0 ] || return 0
       lock_cleanup_done=1
-      oms_file_lock_mkdir_release "$lock_dir" "$owner_id"
+      oms_file_lock_mkdir_release \
+        "$OMS_FILE_LOCK_CLEANUP_DIR" "$OMS_FILE_LOCK_CLEANUP_OWNER"
     }
     oms_file_lock_cleanup_signal() {
       local code="$1"
@@ -463,11 +469,14 @@ oms_try_file_lock_mkdir() {
     oms_file_lock_set_current_identity
     owner_id="$OMS_FILE_LOCK_CURRENT_PID.$(date +%s).${RANDOM:-0}"
     oms_try_file_lock_mkdir_acquire "$lock_dir" "$timeout" "$owner_id" || exit $?
+    OMS_FILE_LOCK_CLEANUP_DIR="$lock_dir"
+    OMS_FILE_LOCK_CLEANUP_OWNER="$owner_id"
     lock_cleanup_done=0
     oms_file_lock_cleanup() {
       [ "$lock_cleanup_done" = 0 ] || return 0
       lock_cleanup_done=1
-      oms_file_lock_mkdir_release "$lock_dir" "$owner_id"
+      oms_file_lock_mkdir_release \
+        "$OMS_FILE_LOCK_CLEANUP_DIR" "$OMS_FILE_LOCK_CLEANUP_OWNER"
     }
     oms_file_lock_cleanup_signal() {
       local code="$1"

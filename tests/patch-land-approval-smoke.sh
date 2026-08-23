@@ -1539,6 +1539,96 @@ assert events == ["intent", "abandoned"], events
 PY
   fail "plan fence failure was not bracketed by a durable intent and terminal receipt"
 
+# Freeze plan lineage with the reviewed task before admission. A verifier can
+# replace only the top-level lineage while leaving the same task/lease receipt
+# in place; landing is then still mechanically valid, but every durable row
+# from this operation must retain the old lineage and stay inert for the new
+# plan's same textual task id.
+lineage_swap_repo="$TMP/patch-land-lineage-swap-repo"
+lineage_swap_patch="$TMP/patch-land-lineage-swap.patch"
+lineage_swap_artifact="$TMP/patch-land-lineage-swap.md"
+mkdir -p "$lineage_swap_repo"
+git -C "$lineage_swap_repo" init -q
+git -C "$lineage_swap_repo" config user.email test@example.com
+git -C "$lineage_swap_repo" config user.name test
+printf 'base\n' > "$lineage_swap_repo/file.txt"
+git -C "$lineage_swap_repo" add file.txt
+git -C "$lineage_swap_repo" commit -qm base
+printf 'lineage landed\n' > "$lineage_swap_repo/file.txt"
+git -C "$lineage_swap_repo" diff --binary > "$lineage_swap_patch"
+git -C "$lineage_swap_repo" restore file.txt
+printf 'reviewed\n' > "$lineage_swap_artifact"
+"$PLAN" --repo "$lineage_swap_repo" init --goal lineage >/dev/null
+lineage_old_plan_id="$(python3 - "$lineage_swap_repo/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["plan_id"])
+PY
+)"
+lineage_new_plan_id="plan_dddddddddddddddddddddddddddddddd"
+lineage_swap_verify="OMS_SWAP_PLAN_FILE='$lineage_swap_repo/.oms/plan/tasks.json' OMS_SWAP_PLAN_ID='$lineage_new_plan_id' python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ[\"OMS_SWAP_PLAN_FILE\"]); d=json.loads(p.read_text(encoding=\"utf-8\")); d[\"plan_id\"]=os.environ[\"OMS_SWAP_PLAN_ID\"]; p.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding=\"utf-8\")'"
+"$PLAN" --repo "$lineage_swap_repo" add --id same-task --title lineage \
+  --allowed file.txt --verify "$lineage_swap_verify" >/dev/null
+"$PLAN" --repo "$lineage_swap_repo" claim --id same-task --provider codex >/dev/null
+"$PLAN" --repo "$lineage_swap_repo" review --id same-task \
+  --artifact "$lineage_swap_artifact" --patch "$lineage_swap_patch" >/dev/null
+"$LAND" --repo "$lineage_swap_repo" --plan-task same-task \
+  --verify "$lineage_swap_verify" >/dev/null ||
+  fail "same-task landing failed after a top-level plan lineage replacement"
+python3 - "$lineage_swap_repo/.oms/plan/tasks.json" \
+  "$lineage_swap_repo/.oms/landings.jsonl" \
+  "$lineage_swap_repo/.oms/artifacts/index.jsonl" \
+  "$lineage_old_plan_id" "$lineage_new_plan_id" <<'PY' ||
+import json, sys
+plan = json.load(open(sys.argv[1], encoding="utf-8"))
+landings = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+artifacts = [json.loads(line) for line in open(sys.argv[3], encoding="utf-8") if line.strip()]
+assert plan["plan_id"] == sys.argv[5], plan
+assert [row["event"] for row in landings] == ["intent", "complete"], landings
+assert all(row.get("plan_id") == sys.argv[4] for row in landings), landings
+row = next(row for row in reversed(artifacts)
+           if row.get("kind") == "patch-land" and row.get("task_id") == "same-task")
+assert row.get("plan_id") == sys.argv[4], row
+assert row["plan_id"] != plan["plan_id"], (row, plan)
+PY
+  fail "patch landing borrowed a replacement plan lineage"
+"$ROOT/scripts/runtime.sh" --repo "$lineage_swap_repo" envelope show \
+  > "$TMP/patch-land-lineage-swap-envelope.json"
+python3 - "$TMP/patch-land-lineage-swap-envelope.json" <<'PY' ||
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+statuses = {item["id"]: item["status"] for item in row["criteria"]}
+assert statuses["plan-task-same-task"] == "missing", statuses
+PY
+  fail "old-lineage landing evidence leaked into the replacement plan"
+# Recreate the crash window after apply/plan completion but before lineage and
+# the terminal journal row. Recovery must source the old id from the intent,
+# never from the replacement plan that is current when --recover runs.
+python3 - "$lineage_swap_repo/.oms/landings.jsonl" \
+  "$lineage_swap_repo/.oms/artifacts/index.jsonl" <<'PY'
+import json, pathlib, sys
+landings, artifacts = map(pathlib.Path, sys.argv[1:])
+landing_rows = [json.loads(line) for line in landings.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+artifact_rows = [json.loads(line) for line in artifacts.read_text(encoding="utf-8").splitlines()
+                 if line.strip()]
+landings.write_text(json.dumps(landing_rows[0]) + "\n", encoding="utf-8")
+artifacts.write_text("".join(json.dumps(row) + "\n" for row in artifact_rows
+                             if row.get("kind") != "patch-land"), encoding="utf-8")
+PY
+"$LAND" --repo "$lineage_swap_repo" --recover >/dev/null ||
+  fail "recovery could not replay frozen landing lineage"
+python3 - "$lineage_swap_repo/.oms/landings.jsonl" \
+  "$lineage_swap_repo/.oms/artifacts/index.jsonl" "$lineage_old_plan_id" <<'PY' ||
+import json, sys
+landings = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+artifacts = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+assert [row["event"] for row in landings] == ["intent", "complete"], landings
+assert all(row.get("plan_id") == sys.argv[3] for row in landings), landings
+row = next(row for row in artifacts if row.get("kind") == "patch-land")
+assert row.get("plan_id") == sys.argv[3], row
+PY
+  fail "recovery borrowed the current plan lineage instead of its intent"
+
 # A plan applied from a reviewed proposal carries a plan-level project_contract,
 # which `agent-plan show` mixes into the read view landing hashes, while finish
 # hashes the stored task. Two projections of one receipt is a deadlock, not a

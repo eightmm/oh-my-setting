@@ -28,6 +28,7 @@ except Exception:
     sys.exit(0)
 print(data.get("cwd", "") or "")
 ' 2>/dev/null)" || cwd=""
+cwd="${cwd//$'\r'/}"
 [ -n "$cwd" ] || cwd="$PWD"
 
 # Only a harness-adopted repo has state worth resuming; a random directory
@@ -94,6 +95,7 @@ if accept:
     print("  accept: %s" % accept)
 PY
 )" || plan_lines=""
+  plan_lines="${plan_lines//$'\r'/}"
   if [ -n "$plan_lines" ]; then
     while IFS= read -r line; do append "$line"; done <<EOF_PLAN
 $plan_lines
@@ -115,6 +117,7 @@ try:
 except Exception:
     print("?")
 ' "$newest_handoff" 2>/dev/null)" || age_h="?"
+  age_h="${age_h//$'\r'/}"
   append "- handoff (${age_h}h old): oms session-handoff show $name"
 fi
 
@@ -185,6 +188,7 @@ else:
     print("- failures: %d one-shot hook failure(s), auto-retire on TTL" % retiring)
 PY
 )" || fail_line=""
+  fail_line="${fail_line//$'\r'/}"
   [ -z "$fail_line" ] || append "$fail_line"
 fi
 
@@ -202,6 +206,7 @@ except Exception:
     sys.exit(0)
 print(data.get("session_id", "") or "")
 ' 2>/dev/null)" || sid=""
+  sid="${sid//$'\r'/}"
   shadow_line="$(bash "$ROOT/scripts/autopilot.sh" --repo "$cwd" shadow \
     ${sid:+--session "$sid"} 2>/dev/null)" || shadow_line=""
   [ -z "$shadow_line" ] || append "- autopilot: $shadow_line"
@@ -264,6 +269,7 @@ if newest:
     print("- peers: another session used this worktree %dm ago — dirty-tree `git add`/`commit` can pick up its hunks; use `git add -p` or a worktree" % minutes)
 PY
 )" || peer_line=""
+  peer_line="${peer_line//$'\r'/}"
   [ -z "$peer_line" ] || append "$peer_line"
 fi
 

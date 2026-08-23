@@ -101,6 +101,192 @@ require_intent_file() {
   [ -f "$INTENT_FILE" ] || fail "no intent candidate named $INTENT_ID (see: intent.sh show)"
 }
 
+# Freeze one candidate generation before any gate runs. Opening the leaf with
+# O_NOFOLLOW and checking the descriptor/path identity on both sides catches
+# ordinary editor replacement and in-place writes; the bounded second read
+# catches a same-size write that overlaps the first. This is a cooperative
+# filesystem fence, not a claim against a hostile same-UID process.
+snapshot_intent_file() {  # SOURCE DESTINATION
+  python3 - "$1" "$2" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+limit = 1024 * 1024
+
+
+def die(message):
+    sys.stderr.write("error: intent candidate snapshot: %s\n" % message)
+    raise SystemExit(3)
+
+
+def is_link(path):
+    if os.path.islink(path):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    return bool(isjunction and isjunction(path))
+
+
+if is_link(source):
+    die("candidate must be a regular file, not a link or junction")
+flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(source, flags)
+except OSError as exc:
+    die("cannot open candidate without following links: %s" % exc)
+try:
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        die("candidate is not a regular file")
+    if before.st_size > limit:
+        die("candidate exceeds the 1 MiB limit")
+
+    def read_all():
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                die("candidate exceeds the 1 MiB limit")
+        return b"".join(chunks)
+
+    first = read_all()
+    middle = os.fstat(descriptor)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    second = read_all()
+    after = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+
+fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+if any(getattr(before, name, None) != getattr(middle, name, None) for name in fields):
+    die("candidate changed while it was being read")
+if any(getattr(middle, name, None) != getattr(after, name, None) for name in fields):
+    die("candidate changed while it was being read")
+if first != second:
+    die("candidate changed while it was being read")
+try:
+    live = os.lstat(source)
+except OSError as exc:
+    die("candidate pathname changed while it was being read: %s" % exc)
+if is_link(source) or not stat.S_ISREG(live.st_mode):
+    die("candidate pathname changed while it was being read")
+identity = ("st_dev", "st_ino")
+if any(getattr(live, name, None) != getattr(after, name, None) for name in identity):
+    die("candidate pathname changed while it was being read")
+
+out_flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+out_flags |= getattr(os, "O_NOFOLLOW", 0)
+try:
+    output = os.open(destination, out_flags)
+except OSError as exc:
+    die("cannot open snapshot destination: %s" % exc)
+try:
+    if not stat.S_ISREG(os.fstat(output).st_mode):
+        die("snapshot destination is not a regular file")
+    offset = 0
+    while offset < len(first):
+        offset += os.write(output, first[offset:])
+    os.fsync(output)
+finally:
+    os.close(output)
+print(hashlib.sha256(first).hexdigest())
+PY
+}
+
+confirmed_intent_snapshot() {  # SNAPSHOT STAGED_PROJECT
+  python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+try:
+    with open(source, "rb") as handle:
+        encoded = handle.read(1024 * 1024 + 1)
+except OSError as exc:
+    sys.stderr.write("error: cannot read frozen intent candidate: %s\n" % exc)
+    raise SystemExit(3)
+if len(encoded) > 1024 * 1024:
+    raise SystemExit(3)
+try:
+    text = encoded.decode("utf-8", errors="strict")
+except UnicodeDecodeError as exc:
+    sys.stderr.write("error: frozen intent candidate is not UTF-8: %s\n" % exc)
+    raise SystemExit(3)
+lines = text.splitlines(True)
+in_status = False
+matches = []
+for index, line in enumerate(lines):
+    plain = line.rstrip("\r\n")
+    if plain.startswith("## "):
+        in_status = plain == "## Status"
+        continue
+    if in_status and plain == "- State: draft":
+        matches.append(index)
+if len(matches) != 1:
+    sys.stderr.write("error: the candidate's '- State:' is not draft; only draft candidates adopt\n")
+    raise SystemExit(2)
+index = matches[0]
+ending = lines[index][len(lines[index].rstrip("\r\n")):]
+lines[index] = "- State: confirmed" + ending
+result = "".join(lines).encode("utf-8")
+flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+flags |= getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(destination, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("staged PROJECT.md is not a regular file")
+        offset = 0
+        while offset < len(result):
+            offset += os.write(descriptor, result[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+except OSError as exc:
+    sys.stderr.write("error: cannot stage confirmed PROJECT.md: %s\n" % exc)
+    raise SystemExit(3)
+PY
+}
+
+atomic_create_project() {  # STAGED_PROJECT PROJECT
+  python3 - "$1" "$2" <<'PY'
+import os
+import sys
+
+staged, target = sys.argv[1:]
+try:
+    os.link(staged, target)
+except FileExistsError:
+    raise SystemExit(17)
+except OSError as exc:
+    sys.stderr.write("error: cannot atomically publish PROJECT.md: %s\n" % exc)
+    raise SystemExit(3)
+
+# The hard link is the no-clobber publication point. Sync the directory where
+# the platform permits it; native Windows does not expose directory fsync.
+try:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory = os.open(os.path.dirname(target) or ".", flags)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except OSError:
+    # Publication already happened atomically. Some filesystems and native
+    # Windows reject directory fsync; treating that as a failed publication
+    # would lie to the caller while PROJECT.md is already visible.
+    pass
+PY
+}
+
 # Structural validation shared by draft (on write) and adopt (the file is
 # expected to have been hand-edited between the two — review edits are the
 # point — so adopt re-validates rather than trusting its own earlier pass).
@@ -390,14 +576,33 @@ if [ "$ACTION" = adopt ]; then
     fail "PROJECT.md already exists; back it up or remove it deliberately before adopting a new contract"
   fi
 
-  meta="$(validate_intent_file "$INTENT_FILE")" || exit 3
+  intent_snapshot="$(agent_memory_mktemp)" || fail "could not allocate intent snapshot"
+  live_snapshot="$(agent_memory_mktemp)" || {
+    rm -f "$intent_snapshot"
+    fail "could not allocate live intent snapshot"
+  }
+  staged_spec="$(agent_memory_mktemp_beside "$SPEC")" || {
+    rm -f "$intent_snapshot" "$live_snapshot"
+    fail "could not stage PROJECT.md beside its publication path"
+  }
+  intent_adopt_cleanup() {
+    rm -f "$intent_snapshot" "$live_snapshot" "$staged_spec"
+  }
+  trap intent_adopt_cleanup EXIT
+
+  candidate_sha="$(snapshot_intent_file "$INTENT_FILE" "$intent_snapshot")" || exit 3
+  candidate_sha="${candidate_sha//$'\r'/}"
+  [ -n "$candidate_sha" ] || fail "could not digest the intent candidate snapshot"
+
+  meta="$(validate_intent_file "$intent_snapshot")" || exit 3
+  meta="${meta//$'\r'/}"
   accept_cmd="$(printf '%s\n' "$meta" | sed -n 2p)"
 
   # Downstream-contract preflight (field finding: a custom acceptance
   # without its check files sailed through adopt and refused at the FIRST
   # propose): the same parser plan-from-spec runs judges the candidate now.
   if ! preflight_out="$("$ROOT/scripts/plan-from-spec.sh" --repo "$REPO" \
-      --validate-spec "$INTENT_FILE" 2>&1)"; then
+      --validate-spec "$intent_snapshot" 2>&1)"; then
     printf '%s\n' "$preflight_out" >&2
     fail "the candidate's acceptance contract would refuse at plan-from-spec; fix it before adopting (usually '- Required check files:' naming what the checks read)"
   fi
@@ -437,7 +642,7 @@ PY
   # verify dies at the admission floor. Warn so planners are not seeded with
   # a floor-incompatible pattern. Warning, not refusal: refusing would block
   # exactly the fails-until-done acceptance this gate demands.
-  scope_list="$(scope_paths "$INTENT_FILE" | tr '\n' ',' | sed 's/,$//')"
+  scope_list="$(scope_paths "$intent_snapshot" | tr -d '\r' | tr '\n' ',' | sed 's/,$//')"
   if [ -n "$scope_list" ]; then
     lint_out="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" lint-verify \
       --verify "$accept_cmd" --allowed "$scope_list" 2>&1)" || true
@@ -453,11 +658,51 @@ PY
   # adopt is the explicit approval act plan-from-spec's draft-refusal points
   # at. Everything else in the candidate is preserved byte-for-byte,
   # provenance included.
-  tmp_spec="$(agent_memory_mktemp)" || fail "mktemp failed"
-  sed 's/^- State: draft$/- State: confirmed/' "$INTENT_FILE" > "$tmp_spec"
-  grep -q '^- State: confirmed$' "$tmp_spec" ||
-    { rm -f "$tmp_spec"; fail "the candidate's '- State:' is not draft; only draft candidates adopt"; }
-  mv "$tmp_spec" "$SPEC"
+  confirmed_intent_snapshot "$intent_snapshot" "$staged_spec" || exit $?
+
+  # Serialize the only PROJECT.md publication point. A cooperative concurrent
+  # adopter sees the same lock and exactly one can create the contract. The
+  # live candidate is stable-read again inside that lock and content-bound to
+  # the generation all gates consumed; an editor save during acceptance
+  # therefore publishes neither the old nor the new generation.
+  intent_publish_locked() {
+    local expected_sha="$1"
+    local frozen="$2"
+    local live="$3"
+    local staged="$4"
+    local live_sha=""
+    local create_rc=0
+
+    if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
+      fail "a live autopilot receipt appeared during adopt; PROJECT.md was not published"
+    fi
+    if [ -e "$SPEC" ] || [ -L "$SPEC" ]; then
+      fail "PROJECT.md already exists; another adopter may have published it"
+    fi
+    live_sha="$(snapshot_intent_file "$INTENT_FILE" "$live")" || {
+      fail "candidate changed during adopt; the edited draft was preserved and PROJECT.md was not published"
+    }
+    live_sha="${live_sha//$'\r'/}"
+    if [ "$live_sha" != "$expected_sha" ] || ! cmp -s "$frozen" "$live"; then
+      fail "candidate changed during adopt; the edited draft was preserved and PROJECT.md was not published"
+    fi
+
+    atomic_create_project "$staged" "$SPEC" || create_rc=$?
+    case "$create_rc" in
+      0) ;;
+      17) fail "PROJECT.md already exists; another adopter may have published it" ;;
+      *) fail "could not atomically publish PROJECT.md" ;;
+    esac
+  }
+
+  publish_rc=0
+  oms_with_file_lock "$SPEC" intent_publish_locked \
+    "$candidate_sha" "$intent_snapshot" "$live_snapshot" "$staged_spec" || publish_rc=$?
+  case "$publish_rc" in
+    0) ;;
+    75) fail "could not acquire the PROJECT.md publication lock" ;;
+    *) exit "$publish_rc" ;;
+  esac
   # Adopting is the day's clearest decision, and the goal sentence is the
   # operator's own words rather than anything this script composed. Passing it
   # through gives the Work Journal daily the contract a reader needs to know

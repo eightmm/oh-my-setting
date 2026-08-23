@@ -391,6 +391,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   stage work-journal bash tests/work-journal-smoke.sh
   stage durable-writers bash tests/durable-writers-contract-smoke.sh
+  stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh
   stage context-core bash tests/context-core-smoke.sh
   stage prompt-budget bash tests/prompt-budget-smoke.sh
   stage source-distribution bash tests/source-distribution-smoke.sh

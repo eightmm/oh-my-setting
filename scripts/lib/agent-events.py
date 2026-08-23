@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import runpy
 import secrets
 import signal
 import shutil
@@ -28,6 +29,11 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+
+
+process_pid_alive = runpy.run_path(
+    str(Path(__file__).with_name("process_liveness.py"))
+)["pid_alive"]
 
 
 SCHEMA = 1
@@ -201,17 +207,9 @@ def runtime_lock_dir(path: Path) -> Path:
 
 
 def pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+    # agent-events lock owners are native Python processes, so their stored
+    # pid is already in the Win32 domain on Windows.
+    return process_pid_alive(pid, native_pid=pid)
 
 
 def process_start_token(pid: int) -> Optional[str]:

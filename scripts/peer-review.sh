@@ -28,7 +28,6 @@ INCLUDE_MEMORY=0
 INCLUDE_TASK=0
 INCLUDE_ML_CONTEXT=0
 DEBATE=0
-BLIND=0
 EXPORT_ONLY=0
 GATE=0
 COVERS=""
@@ -92,12 +91,6 @@ Options:
                        reference to the full answer, and the debate stops
                        early when every seat declares "none" under "Changed
                        from previous round:".
-  --blind              Blind bug-hunt: the prompt carries the diff and the
-                       question only. Shared memory, task packets, ML context,
-                       and debate rounds refuse; the typed review outcome is
-                       marked mode=blind so blind and informed verdicts are
-                       never confused. Use for adversarial review of a change
-                       whose author context would anchor the reviewer.
   --gate               Require each reviewer to end with GATE: pass or
                        GATE: fail, then print verdicts and exit with the gate
                        status. Review mode only.
@@ -423,12 +416,7 @@ write_prompt() {
 
   {
     printf 'You are one of three independent reviewers: Codex, Claude Code, and Antigravity.\n'
-    if [ "$BLIND" -eq 1 ]; then
-      printf 'This is a BLIND review: no author rationale, prior findings, or shared harness context is provided, by design.\n'
-      printf 'Judge only from the diff and the repository itself. Do not modify files.\n'
-    else
-      printf 'Answer the same question from your own perspective. Do not modify files.\n'
-    fi
+    printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Find bugs, regressions, missing tests, unclear contracts, and unsafe operations.\n'
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
     printf 'If there are no actionable findings, say "No findings".\n\n'
@@ -439,8 +427,7 @@ write_prompt() {
       printf -- '- Reproducibility/distribution: seeds, versions, checkpoint symmetry, sampler.set_epoch, rank-0 effects, metric reduction.\n'
       printf '\n'
     fi
-    [ "$BLIND" -eq 1 ] ||
-      ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$question"
+    ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$question"
     printf 'Question:\n%s\n\n' "$question"
     printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"
     if [ "$NO_DIFF" -eq 0 ]; then
@@ -595,10 +582,6 @@ while [ "$#" -gt 0 ]; do
       OMS_PEER_PRINT_TIMEOUT="$2"
       shift 2
       ;;
-    --blind)
-      BLIND=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -619,16 +602,6 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-
-# Blind review is a contract, not a preference: the reviewer judges the diff
-# with no shared context and no cross-seat exchange, so the attachments that
-# would break that contract refuse instead of silently riding along.
-if [ "$BLIND" -eq 1 ]; then
-  [ "$INCLUDE_MEMORY" -eq 0 ] || fail "--blind excludes shared memory context"
-  [ "$INCLUDE_TASK" -eq 0 ] || fail "--blind excludes the task handoff packet"
-  [ "$INCLUDE_ML_CONTEXT" -eq 0 ] || fail "--blind excludes the ML context digest"
-  [ "$DEBATE" -eq 0 ] || fail "--blind excludes debate rounds: seats must not see each other's findings"
-fi
 
 if [ -z "$PROMPT" ] && [ "$ML_PRESET" -eq 1 ]; then
   PROMPT="Review the current diff for silent ML bugs before running training or expensive experiments."
@@ -937,7 +910,6 @@ record_review_outcome() {
     # thin while looking authoritative: fail the gate loudly.
     payload="$(OMS_REVIEW_GATE_VERIFY_EXIT="${gate_verify_exit:-}" \
       OMS_REVIEW_DIFF_SHA256="$REVIEW_DIFF_SHA" \
-      OMS_REVIEW_MODE="$([ "$BLIND" -eq 1 ] && echo blind || echo informed)" \
       python3 - "$verdict_json_file" <<'PY'
 import json, os, sys
 with open(sys.argv[1], encoding="utf-8") as fh:
@@ -949,10 +921,6 @@ data["gate_verify_exit"] = int(gate_verify) if gate_verify.lstrip("-").isdigit()
 diff_sha = os.environ.get("OMS_REVIEW_DIFF_SHA256", "")
 if diff_sha:
     data["diff_sha256"] = diff_sha
-# Blind and informed verdicts measure different things (a context-free
-# bug-hunt vs a lineage-aware contract review); the row says which this was
-# so the two are never averaged together.
-data["mode"] = os.environ.get("OMS_REVIEW_MODE", "informed")
 print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
 PY
 )" || fail "typed review outcome could not be composed; failing closed"
