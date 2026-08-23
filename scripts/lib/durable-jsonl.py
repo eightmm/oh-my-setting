@@ -212,7 +212,10 @@ def write(path, data, label=None, max_bytes=MAX_ROW_BYTES):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.rename(tmp_name, name)
+        # os.replace, not os.rename: POSIX rename already overwrites, but on
+        # Windows os.rename refuses an existing destination — and this path's
+        # whole job is replacing a ledger that exists.
+        os.replace(tmp_name, name)
     except BaseException:
         try:
             os.unlink(tmp_name)
