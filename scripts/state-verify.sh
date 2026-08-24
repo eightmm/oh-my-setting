@@ -115,7 +115,11 @@ import re
 import runpy
 import sys
 
-process_pid_alive = runpy.run_path(sys.argv[1])["pid_alive"]
+process_liveness = runpy.run_path(sys.argv[1])
+process_pid_alive = process_liveness["pid_alive"]
+persisted_native_pid_is_proven = process_liveness[
+    "persisted_native_pid_is_proven"
+]
 
 repo = os.environ["OMS_SV_REPO"]
 tmp = os.environ["OMS_SV_TMP"]
@@ -264,7 +268,11 @@ for marker in sorted(glob.glob(os.path.join(oms, "delegations", "*.json"))):
         continue
     if pid <= 0:
         continue
-    if not process_pid_alive(pid, native_pid=marker_row.get("native_pid")):
+    native_pid = marker_row.get("native_pid")
+    if not persisted_native_pid_is_proven(
+            native_pid, marker_row.get("native_pid_source")):
+        continue
+    if not process_pid_alive(pid, native_pid=native_pid):
         orphans += 1
 if orphans:
     finding("warn", "delegations", "%d delegation marker(s) reference dead processes" % orphans,

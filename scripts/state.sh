@@ -123,7 +123,11 @@ OMS_RS_HAS_WORKFLOWS="$([ -d "$REPO/.github/workflows" ] && echo 1 || echo 0)" \
 python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
 import calendar, glob, json, os, runpy, sys, time
 
-process_pid_alive = runpy.run_path(sys.argv[1])["pid_alive"]
+process_liveness = runpy.run_path(sys.argv[1])
+process_pid_alive = process_liveness["pid_alive"]
+persisted_native_pid_is_proven = process_liveness[
+    "persisted_native_pid_is_proven"
+]
 
 repo = os.environ["OMS_RS_REPO"]
 as_json = os.environ["OMS_RS_JSON"] == "1"
@@ -574,11 +578,15 @@ elif ci["present"]:
 state["ci"] = ci
 
 # --- In-flight delegations (liveness files) ---------------------------------
-def pid_alive(pid, native_pid=None):
+def pid_alive(pid, native_pid=None, native_pid_source=None):
     if isinstance(pid, str) and pid.isdigit():
         pid = int(pid)
     if isinstance(native_pid, str) and native_pid.isdigit():
         native_pid = int(native_pid)
+    if not persisted_native_pid_is_proven(native_pid, native_pid_source):
+        # Read-only state must preserve an owner whose persisted Windows
+        # identity predates provenance; it cannot label that work orphaned.
+        return True
     return process_pid_alive(pid, native_pid=native_pid)
 
 delegations = []
@@ -592,7 +600,9 @@ if os.path.isdir(deleg_dir):
             continue
         # Same-host liveness: a leftover file whose pid is gone is a crashed
         # orphan (only meaningful when the record was written on this host).
-        alive = pid_alive(d.get("pid"), d.get("native_pid"))
+        alive = pid_alive(
+            d.get("pid"), d.get("native_pid"), d.get("native_pid_source")
+        )
         delegations.append({"id": d.get("id"), "provider": d.get("provider"),
                             "role": d.get("role", ""), "executor_id": d.get("executor_id", ""),
                             "soul_sha256": d.get("soul_sha256", ""), "started_at": d.get("started_at"),

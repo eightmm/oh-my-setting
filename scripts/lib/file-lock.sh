@@ -59,6 +59,47 @@ oms_file_lock_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# Return the native process id corresponding to one shell-process id. Git
+# Bash/MSYS exposes $$ in its own pid namespace, while Win32 OpenProcess needs
+# the backing Windows pid. Native children are not an identity bridge here:
+# MSYS may launch them through a short-lived process, so os.getppid() can name
+# a parent that is already gone before a marker is read.
+oms_process_native_pid() {  # LOGICAL_PID
+  local logical_pid="${1:-}"
+  local native_pid=""
+
+  case "$logical_pid" in
+    *[!0-9]*|"") return 75 ;;
+  esac
+  [ "$logical_pid" -gt 0 ] || return 75
+
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      [ -r "/proc/$logical_pid/winpid" ] || return 75
+      IFS= read -r native_pid < "/proc/$logical_pid/winpid" || return 75
+      native_pid="${native_pid//$'\r'/}"
+      ;;
+    *) native_pid="$logical_pid" ;;
+  esac
+  case "$native_pid" in
+    *[!0-9]*|"") return 75 ;;
+  esac
+  [ "$native_pid" -gt 0 ] || return 75
+  [ "$native_pid" -le 4294967295 ] || return 75
+  printf '%s\n' "$native_pid"
+}
+
+# Persist how the native pid was derived. Readers require this exact source on
+# native Windows before a stored pid may prove that an owner is dead. POSIX has
+# one pid namespace, but records its derivation too so newly written markers
+# stay self-describing without changing legacy-reader behavior.
+oms_process_native_pid_source() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) printf 'msys-proc-v1\n' ;;
+    *) printf 'logical-pid-v1\n' ;;
+  esac
+}
+
 # A PID alone is not an identity: after a crash the OS may reuse it while the
 # mkdir lock remains. Record a process-start token where the host exposes one,
 # and compare it before treating a live PID as the original holder. Linux's

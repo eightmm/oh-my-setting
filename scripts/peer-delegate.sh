@@ -31,6 +31,7 @@ liveness_file=""
 liveness_python_file=""
 delegation_lock_target=""
 DELEGATION_NATIVE_PID=""
+DELEGATION_NATIVE_PID_SOURCE=""
 DELEGATION_STARTED=""
 VERIFY_CMD=""
 NO_VERIFY=0
@@ -966,25 +967,20 @@ if [ "$DRY_RUN" != "1" ]; then
   delegation_lock_target="$REPO/.oms/delegations/.marker-set-lock-target"
   mkdir -p "$(dirname "$liveness_file")"
   agent_memory_ensure_oms_ignore_for_path "$liveness_file" 2>/dev/null || true
-  DELEGATION_NATIVE_PID="$$"
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      # This must be a direct native-Python child of the owning Bash. Command
-      # substitution and oms_with_file_lock both introduce a short-lived Bash
-      # parent whose WINPID would expire before the worker does.
-      python3 -c 'import os; print(os.getppid())' \
-        > "$worktree_parent/delegation-native-pid" ||
-        fail "could not capture the worker's native Windows pid"
-      IFS= read -r DELEGATION_NATIVE_PID \
-        < "$worktree_parent/delegation-native-pid" ||
-        fail "could not read the worker's native Windows pid"
-      rm -f "$worktree_parent/delegation-native-pid"
-      DELEGATION_NATIVE_PID="${DELEGATION_NATIVE_PID//$'\r'/}"
-      ;;
-  esac
+  # $$ is an MSYS pid on Git Bash. Resolve its long-lived backing WINPID from
+  # /proc rather than from a native child, whose parent may be a transient
+  # MSYS launcher that exits before recovery inspects this marker.
+  DELEGATION_NATIVE_PID="$(oms_process_native_pid "$$")" ||
+    fail "could not resolve the worker's native process identity"
+  DELEGATION_NATIVE_PID="${DELEGATION_NATIVE_PID//$'\r'/}"
+  DELEGATION_NATIVE_PID_SOURCE="$(oms_process_native_pid_source)" ||
+    fail "could not record the worker's native process identity source"
+  DELEGATION_NATIVE_PID_SOURCE="${DELEGATION_NATIVE_PID_SOURCE//$'\r'/}"
   case "$DELEGATION_NATIVE_PID" in
     *[!0-9]*|"") fail "worker native pid is invalid" ;;
   esac
+  [ -n "$DELEGATION_NATIVE_PID_SOURCE" ] ||
+    fail "worker native pid source is invalid"
   [ "$DELEGATION_NATIVE_PID" -gt 0 ] || fail "worker native pid is invalid"
   liveness_python_file="$liveness_file"
   case "$(uname -s 2>/dev/null || true)" in
@@ -1011,6 +1007,7 @@ row = json.dumps({
     "role": os.environ.get("OMS_DL_ROLE", ""), "executor_id": os.environ.get("OMS_DL_EXECUTOR", ""),
     "soul_sha256": os.environ.get("OMS_DL_SOUL_SHA", ""), "pid": int(os.environ["OMS_DL_PID"]),
     "native_pid": int(os.environ["OMS_DL_NATIVE_PID"]),
+    "native_pid_source": os.environ["OMS_DL_NATIVE_PID_SOURCE"],
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
     "worktree": os.environ["OMS_DL_WT"], "task_id": os.environ.get("OMS_DL_TASK", ""),
     "lease_id": os.environ.get("OMS_DL_LEASE", ""),
@@ -1042,6 +1039,7 @@ PY
   export OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="$EXECUTOR_ID" \
     OMS_DL_SOUL_SHA="$EXECUTOR_SOUL_SHA" OMS_DL_PID="$$" \
     OMS_DL_NATIVE_PID="$DELEGATION_NATIVE_PID" \
+    OMS_DL_NATIVE_PID_SOURCE="$DELEGATION_NATIVE_PID_SOURCE" \
     OMS_DL_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_DL_MODEL="$OMS_MODEL_PRIMARY" \
     OMS_DL_FALLBACK_MODEL="$OMS_MODEL_FALLBACK" \
     OMS_DL_REASONING_EFFORT="$OMS_REASONING_RESOLVED" \

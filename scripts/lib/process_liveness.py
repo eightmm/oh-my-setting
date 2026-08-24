@@ -14,6 +14,26 @@ WAIT_TIMEOUT = 0x00000102
 WAIT_FAILED = 0xFFFFFFFF
 ERROR_ACCESS_DENIED = 5
 ERROR_INVALID_PARAMETER = 87
+MSYS_PROC_NATIVE_PID_SOURCE = "msys-proc-v1"
+
+
+def persisted_native_pid_is_proven(
+    native_pid: Any,
+    source: Any,
+    os_name: Optional[str] = None,
+) -> bool:
+    """Require provenance before a persisted Win32 pid can prove death."""
+    platform = os.name if os_name is None else os_name
+    if platform != "nt":
+        # POSIX persisted logical/native pids have always shared one namespace;
+        # legacy rows therefore remain authoritative there without a source.
+        return True
+    return (
+        isinstance(native_pid, int)
+        and not isinstance(native_pid, bool)
+        and 0 < native_pid <= 0xFFFFFFFF
+        and source == MSYS_PROC_NATIVE_PID_SOURCE
+    )
 
 
 def _configure_kernel32(kernel32: Any) -> None:

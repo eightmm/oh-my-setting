@@ -348,7 +348,11 @@ path = os.path.abspath(sys.argv[1])
 repo = os.path.realpath(sys.argv[2])
 expected_dir = os.path.join(repo, ".oms", "delegations")
 marker_dir = os.path.dirname(path)
-pid_alive = runpy.run_path(sys.argv[3])["pid_alive"]
+process_liveness = runpy.run_path(sys.argv[3])
+pid_alive = process_liveness["pid_alive"]
+persisted_native_pid_is_proven = process_liveness[
+    "persisted_native_pid_is_proven"
+]
 safe_id = re.compile(r"^[A-Za-z0-9._-]*$")
 
 def unproven(message):
@@ -411,6 +415,9 @@ if "native_pid" in marker and (
         isinstance(native_pid, bool) or not isinstance(native_pid, int)
         or native_pid <= 0 or native_pid > 0xFFFFFFFF):
     unproven("marker native pid is invalid")
+if not persisted_native_pid_is_proven(
+        native_pid, marker.get("native_pid_source")):
+    unproven("marker native pid source is missing or unproven")
 for key in ("id", "task_id", "lease_id", "executor_id"):
     value = marker.get(key, "")
     if not isinstance(value, str) or not safe_id.fullmatch(value):

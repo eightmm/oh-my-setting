@@ -12429,6 +12429,13 @@ test_gc_dead_marker_cannot_release_live_same_lease() {
 
 test_process_liveness_uses_non_destructive_windows_probe() {
   local project native_pid rc=0
+  for producer in "$ROOT/scripts/autopilot.sh" "$ROOT/scripts/peer-delegate.sh"; do
+    grep -Fq 'oms_process_native_pid "$$"' "$producer" ||
+      fail "$(basename "$producer") bypassed the shared native pid resolver"
+    if grep -Fq 'os.getppid()' "$producer"; then
+      fail "$(basename "$producer") derives owner identity from a native child"
+    fi
+  done
   if ! python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
 import importlib.util
 import errno
@@ -12514,31 +12521,36 @@ PY
     MINGW*|MSYS*|CYGWIN*)
       project="$TMP/windows-native-pid-recovery"
       make_committed_repo "$project"
-      # This Python command is a direct child of the owning Git Bash. Do not
-      # put it in command substitution or a file-lock callback: either creates
-      # an ephemeral Bash parent whose WINPID is not the worker's identity.
-      python3 -c 'import os; print(os.getppid())' > "$project/native-pid"
-      IFS= read -r native_pid < "$project/native-pid"
-      native_pid="${native_pid//$'\r'/}"
-      case "$native_pid" in *[!0-9]*|"") fail "native Git Bash pid capture is invalid" ;; esac
       python3 -c 'import os; assert os.name == "nt", os.name' ||
         fail "Git Bash test did not use native Windows Python"
       [ -r "/proc/$$/winpid" ] || fail "Git Bash did not expose /proc/$$/winpid"
       proc_winpid=""
       IFS= read -r proc_winpid < "/proc/$$/winpid"
       proc_winpid="${proc_winpid//$'\r'/}"
+      native_pid="$(
+        # shellcheck source=scripts/lib/file-lock.sh
+        . "$ROOT/scripts/lib/file-lock.sh"
+        oms_process_native_pid "$$"
+      )" || fail "shared native pid resolver rejected the owning Git Bash"
+      native_pid="${native_pid//$'\r'/}"
+      case "$native_pid" in *[!0-9]*|"") fail "native Git Bash pid capture is invalid" ;; esac
       [ "$native_pid" = "$proc_winpid" ] ||
-        fail "direct-child native pid $native_pid differs from /proc/$$/winpid $proc_winpid"
+        fail "resolved native pid $native_pid differs from /proc/$$/winpid $proc_winpid"
       mkdir -p "$project/.oms/executors/native" "$project/.oms/delegations"
       printf '{"schema":1,"executor_id":"native","state":"running"}\n' \
         > "$project/.oms/executors/native/meta.json"
-      printf '{"schema":4,"id":"native","pid":%d,"native_pid":%d,"executor_id":"native"}\n' \
-        "$$" "$native_pid" > "$project/.oms/delegations/native.json"
+      # A marker from the pre-provenance producer can carry a well-typed but
+      # already-dead launcher pid. That number cannot prove that the still-live
+      # logical owner is dead.
+      printf '{"schema":4,"id":"native","pid":%d,"native_pid":999999,"executor_id":"native"}\n' \
+        "$$" > "$project/.oms/delegations/native.json"
       rc=0
       "$ROOT/scripts/agent-executor.sh" recover --repo "$project" --id native \
         --expected-state running --markers-dir "$project/.oms/delegations" --check \
-        >/dev/null 2>&1 || rc=$?
-      [ "$rc" = 3 ] || fail "live Git Bash WINPID marker did not veto recovery, got $rc"
+        > "$project/unproven.out" 2>&1 || rc=$?
+      [ "$rc" = 3 ] || fail "legacy Windows marker became dead proof, got $rc"
+      grep -Fq 'unproven' "$project/unproven.out" ||
+        fail "legacy Windows marker was not labeled unproven"
       state_out="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
         fail "state could not read a native Git Bash marker"
       OMS_T_NATIVE_STATE="$state_out" python3 - <<'PY' ||
@@ -12557,6 +12569,13 @@ row = json.loads(os.environ["OMS_T_NATIVE_VERIFY"])
 findings = row.get("findings") or []
 assert not any(item.get("family") == "delegations" for item in findings), findings
 PY
+      printf '{"schema":4,"id":"native","pid":%d,"native_pid":%d,"native_pid_source":"msys-proc-v1","executor_id":"native"}\n' \
+        "$$" "$native_pid" > "$project/.oms/delegations/native.json"
+      rc=0
+      "$ROOT/scripts/agent-executor.sh" recover --repo "$project" --id native \
+        --expected-state running --markers-dir "$project/.oms/delegations" --check \
+        >/dev/null 2>&1 || rc=$?
+      [ "$rc" = 3 ] || fail "live sourced WINPID marker did not veto recovery, got $rc"
       python3 - "$ROOT/scripts/lib/agent-events.py" "$project/lock-owner" <<'PY' ||
         fail "agent-events could not preserve its live native lock owner"
 import importlib.util, json, os, sys
@@ -12753,8 +12772,20 @@ try:
         observed.append((pid, native_pid)) or True
     )
     claim["claim_native_pid"] = 321
+    for source in (None, "", "native-child-ppid", 7):
+        claim.pop("claim_native_pid_source", None)
+        if source is not None:
+            claim["claim_native_pid_source"] = source
+        ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
+        result = module.reenter_judgment(
+            receipt, row, str(root), 456, 789, True)
+        assert "unproven legacy session claim" in result[0], result
+        assert observed == [], observed
+
+    claim["claim_native_pid_source"] = "msys-proc-v1"
     ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
-    result = module.reenter_judgment(receipt, row, str(root), 456, 789, True)
+    result = module.reenter_judgment(
+        receipt, row, str(root), 456, 789, True)
     assert observed == [(123, 321)], observed
     assert result[3:] == (123, 321), result
 finally:
@@ -12992,8 +13023,11 @@ EOF
     fail "gc never completed the bounded delegation marker snapshot"
   }
 
-  python3 -c 'import os; print(os.getppid())' > "$project/native-pid"
-  IFS= read -r native_pid < "$project/native-pid"
+  native_pid="$(
+    # shellcheck source=scripts/lib/file-lock.sh
+    . "$ROOT/scripts/lib/file-lock.sh"
+    oms_process_native_pid "$$"
+  )" || fail "could not resolve the replacement marker's native pid"
   native_pid="${native_pid//$'\r'/}"
   python3 - "$marker" "$$" "$native_pid" <<'PY'
 import json, os, sys, tempfile

@@ -352,7 +352,11 @@ marker_dir = os.path.abspath(os.environ["OMS_EXECUTOR_RECOVERY_MARKERS"])
 executor_id = os.environ["OMS_EXECUTOR_RECOVERY_ID"]
 expected_state = os.environ["OMS_EXECUTOR_RECOVERY_EXPECTED_STATE"]
 check_only = os.environ["OMS_EXECUTOR_RECOVERY_CHECK"] == "1"
-pid_alive = runpy.run_path(sys.argv[1])["pid_alive"]
+process_liveness = runpy.run_path(sys.argv[1])
+pid_alive = process_liveness["pid_alive"]
+persisted_native_pid_is_proven = process_liveness[
+    "persisted_native_pid_is_proven"
+]
 
 def die(message):
     sys.stderr.write("error: %s\n" % message)
@@ -493,6 +497,9 @@ def marker_is_typed(marker):
     if "native_pid" in marker and (
             isinstance(native_pid, bool) or not isinstance(native_pid, int)
             or native_pid <= 0 or native_pid > 0xFFFFFFFF):
+        return False
+    if not persisted_native_pid_is_proven(
+            native_pid, marker.get("native_pid_source")):
         return False
     for key in ("task_id", "lease_id", "executor_id"):
         value = marker.get(key, "")

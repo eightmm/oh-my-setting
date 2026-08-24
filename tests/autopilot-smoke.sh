@@ -1197,9 +1197,11 @@ PY
     "$reenter_repo/.oms/plan/autopilot-run.json")"
   reenter_owner="$(python3 "$ROOT/scripts/lib/autopilot-receipt.py" owner-id \
     "$reenter_repo/.oms/plan/autopilot-run.json")"
-  python3 -c 'import os; print(os.getppid())' > "$TMP/reenter-current-native-pid"
-  IFS= read -r current_native_pid < "$TMP/reenter-current-native-pid"
-  rm -f "$TMP/reenter-current-native-pid"
+  current_native_pid="$(
+    # shellcheck source=scripts/lib/file-lock.sh
+    . "$ROOT/scripts/lib/file-lock.sh"
+    oms_process_native_pid "$$"
+  )" || fail "could not resolve the live claim's native pid"
   current_native_pid="${current_native_pid//$'\r'/}"
   printf '{"kind":"autopilot-drive-claim","spec_sha256":"%s","branch":"%s","owner_id":"%s","claim_pid":%d,"claim_native_pid":%d,"schema":1}\n' \
     "$reenter_spec" "$reenter_branch" "$reenter_owner" "$$" "$current_native_pid" \

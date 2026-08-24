@@ -428,7 +428,11 @@ act = os.environ["OMS_ACTION"]
 ts = os.environ["OMS_TS"]
 proposal_path = sys.argv[1]
 landing_receipt_digest = runpy.run_path(sys.argv[2])["digest"]
-process_pid_alive = runpy.run_path(sys.argv[4])["pid_alive"]
+process_liveness = runpy.run_path(sys.argv[4])
+process_pid_alive = process_liveness["pid_alive"]
+persisted_native_pid_is_proven = process_liveness[
+    "persisted_native_pid_is_proven"
+]
 def env(k): return os.environ.get(k, "")
 
 STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
@@ -627,6 +631,12 @@ def load_worker_markers():
     return markers
 
 def marker_pid_alive(marker):
+    if not persisted_native_pid_is_proven(
+        marker.get("native_pid"), marker.get("native_pid_source")
+    ):
+        # An unproven persisted Win32 pid cannot authorize recovery. Typed
+        # recovery paths report it as unproven before reaching this fallback.
+        return True
     return process_pid_alive(
         marker.get("pid"), native_pid=marker.get("native_pid")
     )
@@ -654,6 +664,9 @@ def worker_marker_is_typed(marker):
     if "native_pid" in marker and (
             isinstance(native_pid, bool) or not isinstance(native_pid, int)
             or native_pid <= 0 or native_pid > 0xFFFFFFFF):
+        return False
+    if not persisted_native_pid_is_proven(
+            native_pid, marker.get("native_pid_source")):
         return False
     for key in ("task_id", "lease_id", "executor_id"):
         value = marker.get(key, "")

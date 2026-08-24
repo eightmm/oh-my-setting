@@ -54,6 +54,7 @@ OUTER_RECEIPT=""
 OUTER_RECEIPT_READY=0
 AUTOPILOT_OWNER_ID=""
 AUTOPILOT_NATIVE_PID=""
+AUTOPILOT_NATIVE_PID_SOURCE=""
 APPROVED_PROPOSAL_PATH=""
 APPROVED_PROPOSAL_SHA=""
 review_base_sha=""
@@ -502,26 +503,22 @@ autopilot_mktemp() {
 }
 
 autopilot_native_pid_prepare() {
-  local native_pid_file
   [ -z "$AUTOPILOT_NATIVE_PID" ] || return 0
-  AUTOPILOT_NATIVE_PID="$$"
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      native_pid_file="$AUTOPILOT_TMPDIR/native-pid"
-      # Keep native Python a direct child of this owning Bash. Command
-      # substitution and the receipt lock both create ephemeral Bash parents.
-      python3 -c 'import os; print(os.getppid())' > "$native_pid_file" ||
-        fail "cannot capture the autopilot native Windows pid"
-      IFS= read -r AUTOPILOT_NATIVE_PID < "$native_pid_file" ||
-        fail "cannot read the autopilot native Windows pid"
-      rm -f "$native_pid_file"
-      AUTOPILOT_NATIVE_PID="${AUTOPILOT_NATIVE_PID//$'\r'/}"
-      ;;
-  esac
+  # Pass the logical pid explicitly: the helper may run in command
+  # substitution, but it resolves /proc/<logical>/winpid instead of guessing
+  # from that short-lived substitution process.
+  AUTOPILOT_NATIVE_PID="$(oms_process_native_pid "$$")" ||
+    fail "cannot resolve the autopilot native process identity"
+  AUTOPILOT_NATIVE_PID="${AUTOPILOT_NATIVE_PID//$'\r'/}"
+  AUTOPILOT_NATIVE_PID_SOURCE="$(oms_process_native_pid_source)" ||
+    fail "cannot resolve the autopilot native pid provenance"
+  AUTOPILOT_NATIVE_PID_SOURCE="${AUTOPILOT_NATIVE_PID_SOURCE//$'\r'/}"
   case "$AUTOPILOT_NATIVE_PID" in
     *[!0-9]*|"") fail "autopilot native pid is invalid" ;;
   esac
   [ "$AUTOPILOT_NATIVE_PID" -gt 0 ] || fail "autopilot native pid is invalid"
+  [ -n "$AUTOPILOT_NATIVE_PID_SOURCE" ] ||
+    fail "autopilot native pid provenance is missing"
 }
 
 autopilot_owner_prepare() {
@@ -623,6 +620,7 @@ if [ "$ACTION" = reenter ]; then
   oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter \
     "$OUTER_RECEIPT" --repo "$REPO" --reason "${ACTION_REASON:-}" \
     --pid "$$" --native-pid "$AUTOPILOT_NATIVE_PID" \
+    --native-pid-source "$AUTOPILOT_NATIVE_PID_SOURCE" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$reenter_out" || exit $?
   reenter_judgment=""
   IFS= read -r reenter_judgment < "$reenter_out" || fail "reenter judgment is missing"
@@ -1454,8 +1452,9 @@ drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
 autopilot_native_pid_prepare
 oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" drive-claim \
   "$OUTER_RECEIPT" --repo "$REPO" --pid "$$" \
-  --native-pid "$AUTOPILOT_NATIVE_PID" \
-  --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
+    --native-pid "$AUTOPILOT_NATIVE_PID" \
+    --native-pid-source "$AUTOPILOT_NATIVE_PID_SOURCE" \
+    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
   fail "could not record the drive claim"
 drive_out="$(autopilot_mktemp)" || fail "mktemp failed"
 drive_rc=0

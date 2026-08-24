@@ -35,6 +35,8 @@ UPDATED = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z"
 )
 OWNER_ID = re.compile(r"owner_[0-9a-f]{32}\Z")
+NATIVE_PID_SOURCE = "msys-proc-v1"
+NATIVE_PID_SOURCES = {NATIVE_PID_SOURCE, "logical-pid-v1"}
 STAGES = {
     "proposing",
     "proposal-review",
@@ -454,10 +456,13 @@ def lineage_claims(
                     and 0 < raw_pid <= 0x7FFFFFFF
                 )
                 raw_native_pid = row.get("claim_native_pid")
+                raw_native_pid_source = row.get("claim_native_pid_source")
                 native_valid = (
                     isinstance(raw_native_pid, int)
                     and not isinstance(raw_native_pid, bool)
                     and 0 < raw_native_pid <= 0xFFFFFFFF
+                    and (os.name != "nt"
+                         or raw_native_pid_source == NATIVE_PID_SOURCE)
                 )
                 # Keep malformed and legacy matching claims in the scan.
                 # Dropping them would turn unknown ownership into proof
@@ -1415,11 +1420,13 @@ def main() -> int:
     reenter.add_argument("--updated", required=True)
     reenter.add_argument("--pid", type=int, default=0)
     reenter.add_argument("--native-pid", type=int, default=0)
+    reenter.add_argument("--native-pid-source", default="")
     drive_claim = sub.add_parser("drive-claim")
     drive_claim.add_argument("path")
     drive_claim.add_argument("--repo", required=True)
     drive_claim.add_argument("--pid", type=int, required=True)
     drive_claim.add_argument("--native-pid", type=int, default=0)
+    drive_claim.add_argument("--native-pid-source", default="")
     drive_claim.add_argument("--updated", required=True)
     reenter_note = sub.add_parser("reenter-note")
     reenter_note.add_argument("path")
@@ -1548,13 +1555,22 @@ def main() -> int:
             # its historical no-claim, no-scan semantics.
             self_pid = getattr(args, "pid", 0) or 0
             self_native_pid = getattr(args, "native_pid", 0) or 0
+            self_native_pid_source = getattr(args, "native_pid_source", "")
             if self_pid < 0 or self_pid > 0x7FFFFFFF:
                 raise ReceiptError("reenter pid is invalid")
             if self_native_pid and not (0 < self_native_pid <= 0xFFFFFFFF):
                 raise ReceiptError("reenter native pid is invalid")
+            if (not isinstance(self_native_pid_source, str)
+                    or (self_native_pid_source
+                        and self_native_pid_source not in NATIVE_PID_SOURCES)):
+                raise ReceiptError("reenter native pid source is invalid")
+            if self_native_pid_source and not self_native_pid:
+                raise ReceiptError("reenter native pid source requires a native pid")
             if self_pid and os.name == "nt" and not (
-                    0 < self_native_pid <= 0xFFFFFFFF):
-                raise ReceiptError("reenter requires a valid native Windows pid")
+                    0 < self_native_pid <= 0xFFFFFFFF
+                    and self_native_pid_source == NATIVE_PID_SOURCE):
+                raise ReceiptError(
+                    "reenter requires a proven native Windows pid")
             (refusal, superseded_pid, superseded_native_pid,
              _live_pid, _live_native_pid) = reenter_judgment(
                 path, row, args.repo, self_pid, self_native_pid, bool(self_pid)
@@ -1574,6 +1590,8 @@ def main() -> int:
                 record["claim_pid"] = args.pid
             if getattr(args, "native_pid", 0):
                 record["claim_native_pid"] = args.native_pid
+            if self_native_pid_source:
+                record["claim_native_pid_source"] = self_native_pid_source
             if superseded_pid:
                 record["superseded_stale_claim_pid"] = superseded_pid
             if superseded_native_pid:
@@ -1614,8 +1632,18 @@ def main() -> int:
                 raise ReceiptError("drive-claim requires a positive pid")
             if args.native_pid and not (0 < args.native_pid <= 0xFFFFFFFF):
                 raise ReceiptError("drive-claim native pid is invalid")
-            if os.name == "nt" and not args.native_pid:
-                raise ReceiptError("drive-claim requires a native Windows pid")
+            if (not isinstance(args.native_pid_source, str)
+                    or (args.native_pid_source
+                        and args.native_pid_source not in NATIVE_PID_SOURCES)):
+                raise ReceiptError("drive-claim native pid source is invalid")
+            if args.native_pid_source and not args.native_pid:
+                raise ReceiptError(
+                    "drive-claim native pid source requires a native pid")
+            if os.name == "nt" and not (
+                    args.native_pid
+                    and args.native_pid_source == NATIVE_PID_SOURCE):
+                raise ReceiptError(
+                    "drive-claim requires a proven native Windows pid")
             append_reentry_ledger(
                 path,
                 {
@@ -1628,6 +1656,8 @@ def main() -> int:
                     "claim_pid": args.pid,
                     **({"claim_native_pid": args.native_pid}
                        if args.native_pid else {}),
+                    **({"claim_native_pid_source": args.native_pid_source}
+                       if args.native_pid_source else {}),
                     "updated": args.updated,
                 },
             )
