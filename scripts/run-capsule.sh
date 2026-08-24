@@ -152,10 +152,10 @@ save_env_lock() {
   local bundle="$1"
   if [ -f uv.lock ]; then
     cp uv.lock "$bundle/env.uv.lock" 2>/dev/null || true
-  elif command -v uv >/dev/null 2>&1 && uv pip freeze >"$bundle/env.freeze.txt" 2>/dev/null \
-       && [ -s "$bundle/env.freeze.txt" ]; then
+  elif command -v uv >/dev/null 2>&1 &&
+       uv pip freeze >"$bundle/env.freeze.txt" 2>/dev/null; then
     :
-  elif python3 -m pip freeze >"$bundle/env.freeze.txt" 2>/dev/null && [ -s "$bundle/env.freeze.txt" ]; then
+  elif python3 -m pip freeze >"$bundle/env.freeze.txt" 2>/dev/null; then
     :
   else
     rm -f "$bundle/env.freeze.txt" 2>/dev/null || true
