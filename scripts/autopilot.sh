@@ -546,11 +546,85 @@ PY
 
 # OMS_REENTER_ANCHOR_BEGIN
 REENTER_CONTINUATION_PID=""
+REENTER_CONTINUATION_NATIVE_PID=""
 REENTER_PENDING_SIGNAL=""
 REENTER_PENDING_EXIT=""
 
+reenter_continuation_stopped() {  # PID
+  ! kill -0 "$1" 2>/dev/null
+}
+
+reenter_wait_continuation_stop() {  # PID
+  local logical_pid="$1" attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    reenter_continuation_stopped "$logical_pid" && return 0
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  reenter_continuation_stopped "$logical_pid"
+}
+
+reenter_capture_continuation_native_pid() {  # LOGICAL_PID
+  local logical_pid="$1" native_pid=""
+  REENTER_CONTINUATION_NATIVE_PID=""
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if [ -r "/proc/$logical_pid/winpid" ]; then
+        IFS= read -r native_pid < "/proc/$logical_pid/winpid" || native_pid=""
+        native_pid="${native_pid//$'\r'/}"
+      fi
+      case "$native_pid" in *[!0-9]*|""|0) native_pid="" ;; esac
+      [ -n "$native_pid" ] || return 1
+      [ "$native_pid" -le 4294967295 ] 2>/dev/null || return 1
+      REENTER_CONTINUATION_NATIVE_PID="$native_pid"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+reenter_uses_windows_process_tree() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+reenter_continuation_native_pid_is_current() {  # LOGICAL_PID
+  local logical_pid="$1" current_pid=""
+  [ -n "$REENTER_CONTINUATION_NATIVE_PID" ] || return 1
+  [ -r "/proc/$logical_pid/winpid" ] || return 1
+  IFS= read -r current_pid < "/proc/$logical_pid/winpid" || return 1
+  current_pid="${current_pid//$'\r'/}"
+  [ "$current_pid" = "$REENTER_CONTINUATION_NATIVE_PID" ]
+}
+
+reenter_taskkill_continuation_tree() {  # LOGICAL_PID FORCE(0|1)
+  local logical_pid="$1" force="$2"
+  reenter_continuation_native_pid_is_current "$logical_pid" || return 1
+  python3 - "$REENTER_CONTINUATION_NATIVE_PID" "$force" <<'PY'
+import subprocess
+import sys
+
+argv = ["taskkill.exe", "/PID", sys.argv[1], "/T"]
+if sys.argv[2] == "1":
+    argv.append("/F")
+try:
+    completed = subprocess.run(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=1,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(1)
+raise SystemExit(completed.returncode)
+PY
+}
+
 reenter_forward_signal() {  # SIGNAL EXIT_CODE
-  local signal_name="$1" exit_code="$2"
+  local signal_name="$1" exit_code="$2" windows_tree=0 tree_stop_proven=1
   if [ -z "$REENTER_CONTINUATION_PID" ]; then
     # Bash may run a pending trap between the async spawn and the following
     # $! assignment. Keep the first signal until the child identity is known;
@@ -562,15 +636,58 @@ reenter_forward_signal() {  # SIGNAL EXIT_CODE
     return 0
   fi
   trap - HUP INT TERM
-  kill -s "$signal_name" "$REENTER_CONTINUATION_PID" 2>/dev/null || true
+  if reenter_uses_windows_process_tree; then
+    windows_tree=1
+    tree_stop_proven=0
+    # Do not send an MSYS signal first: a native root may disappear before
+    # taskkill snapshots its descendants, orphaning the rest of the tree.
+    # Let taskkill request a bounded non-forced tree stop before escalating.
+    if reenter_capture_continuation_native_pid "$REENTER_CONTINUATION_PID" &&
+        reenter_continuation_native_pid_is_current "$REENTER_CONTINUATION_PID" &&
+        reenter_taskkill_continuation_tree "$REENTER_CONTINUATION_PID" 0; then
+      tree_stop_proven=1
+    fi
+  else
+    kill -s "$signal_name" "$REENTER_CONTINUATION_PID" 2>/dev/null || true
+  fi
+  if ! reenter_wait_continuation_stop "$REENTER_CONTINUATION_PID"; then
+    if [ "$windows_tree" = 1 ]; then
+      tree_stop_proven=0
+      if reenter_continuation_native_pid_is_current "$REENTER_CONTINUATION_PID" &&
+          reenter_taskkill_continuation_tree "$REENTER_CONTINUATION_PID" 1; then
+        tree_stop_proven=1
+      fi
+      # Never signal a numeric MSYS pid after its frozen native identity has
+      # disappeared; that number may already identify an unrelated process.
+      if reenter_continuation_native_pid_is_current "$REENTER_CONTINUATION_PID"; then
+        kill -KILL "$REENTER_CONTINUATION_PID" 2>/dev/null || true
+      fi
+    else
+      kill -KILL "$REENTER_CONTINUATION_PID" 2>/dev/null || true
+    fi
+    if ! reenter_wait_continuation_stop "$REENTER_CONTINUATION_PID"; then
+      echo "error: reenter continuation did not stop after $signal_name" >&2
+      REENTER_CONTINUATION_PID=""
+      REENTER_CONTINUATION_NATIVE_PID=""
+      exit 2
+    fi
+  fi
+  if [ "$windows_tree" = 1 ] && [ "$tree_stop_proven" != 1 ]; then
+    echo "error: reenter continuation tree stop was not proven after $signal_name" >&2
+    REENTER_CONTINUATION_PID=""
+    REENTER_CONTINUATION_NATIVE_PID=""
+    exit 2
+  fi
   wait "$REENTER_CONTINUATION_PID" 2>/dev/null || true
   REENTER_CONTINUATION_PID=""
+  REENTER_CONTINUATION_NATIVE_PID=""
   exit "$exit_code"
 }
 
 run_reenter_continuation() {  # COMMAND...
   local continuation_rc=0 pending_signal pending_exit
   REENTER_CONTINUATION_PID=""
+  REENTER_CONTINUATION_NATIVE_PID=""
   REENTER_PENDING_SIGNAL=""
   REENTER_PENDING_EXIT=""
   trap 'reenter_forward_signal HUP 129' HUP
@@ -597,6 +714,7 @@ run_reenter_continuation() {  # COMMAND...
     continuation_rc=$?
   fi
   REENTER_CONTINUATION_PID=""
+  REENTER_CONTINUATION_NATIVE_PID=""
   trap - HUP INT TERM
   return "$continuation_rc"
 }

@@ -12617,7 +12617,8 @@ test_autopilot_windows_reenter_launch_keeps_parent_anchor() {
   local anchor_lib="$dir/anchor.sh"
   local child_script="$dir/child.py"
   local child_wrapper="$dir/child-wrapper.sh"
-  local signal expected parent_pid child_pid logical_pid pid_file logical_pid_file rc i
+  local signal expected parent_pid child_pid grandchild_pid logical_pid
+  local pid_file grandchild_pid_file logical_pid_file rc i windows_tree_test=0
 
   mkdir -p "$dir"
   sed -n '/^# OMS_REENTER_ANCHOR_BEGIN$/,/^# OMS_REENTER_ANCHOR_END$/p' \
@@ -12656,6 +12657,66 @@ PY
     [ "$REENTER_PENDING_EXIT" = 143 ]
   ) || fail "pre-capture TERM was not retained for the continuation"
 
+  # A Windows signal result is only trustworthy when the native tree-stop
+  # command itself succeeded. Losing the logical anchor is not that proof.
+  rc=0
+  (
+    set -uo pipefail
+    # shellcheck source=/dev/null
+    . "$anchor_lib"
+    uname() { printf '%s\n' MINGW64_NT; }
+    reenter_capture_continuation_native_pid() { return 0; }
+    reenter_continuation_native_pid_is_current() { return 0; }
+    reenter_taskkill_continuation_tree() { return 1; }
+    reenter_continuation_stopped() { return 0; }
+    # Read by the dynamically sourced production helper.
+    # shellcheck disable=SC2034
+    REENTER_CONTINUATION_PID=31337
+    reenter_forward_signal HUP 129
+  ) > "$dir/unproven.out" 2> "$dir/unproven.err" || rc=$?
+  [ "$rc" = 2 ] ||
+    fail "an unproven Windows tree stop returned signal status $rc"
+
+  # If a logical pid loses its frozen Win32 mapping after taskkill, do not
+  # send a numeric fallback signal that could hit a reused MSYS pid.
+  rc=0
+  (
+    set -uo pipefail
+    # shellcheck source=/dev/null
+    . "$anchor_lib"
+    mapping_checks=0
+    stop_checks=0
+    kill_calls=0
+    uname() { printf '%s\n' MINGW64_NT; }
+    reenter_capture_continuation_native_pid() { return 0; }
+    reenter_continuation_native_pid_is_current() {
+      mapping_checks=$((mapping_checks + 1))
+      [ "$mapping_checks" -lt 3 ]
+    }
+    reenter_taskkill_continuation_tree() {
+      printf '%s\n' "$2" >> "$dir/reuse-taskkill-forces"
+      return 0
+    }
+    reenter_wait_continuation_stop() {
+      stop_checks=$((stop_checks + 1))
+      [ "$stop_checks" -gt 1 ]
+    }
+    kill() {
+      kill_calls=$((kill_calls + 1))
+      printf '%s\n' "$kill_calls" >> "$dir/reuse-kill-calls"
+      return 0
+    }
+    # Read by the dynamically sourced production helper.
+    # shellcheck disable=SC2034
+    REENTER_CONTINUATION_PID=31337
+    reenter_forward_signal HUP 129
+  ) > "$dir/reuse.out" 2> "$dir/reuse.err" || rc=$?
+  [ "$rc" = 129 ] || fail "fenced Windows tree stop returned $rc"
+  [ "$(tr '\n' ' ' < "$dir/reuse-taskkill-forces")" = "0 1 " ] ||
+    fail "Windows tree stop did not use graceful-then-forced escalation"
+  [ ! -s "$dir/reuse-kill-calls" ] ||
+    fail "Windows tree stop signaled a reused logical pid"
+
   # The Windows parent anchor is transparent on ordinary completion too: it
   # must return the continuation's status rather than converting every
   # non-zero child result into a generic wrapper failure.
@@ -12673,6 +12734,7 @@ PY
 
   cat > "$child_script" <<'PY'
 import os
+import subprocess
 import sys
 import time
 
@@ -12680,6 +12742,15 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     handle.write(str(os.getpid()) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
+if os.name == "nt":
+    grandchild = subprocess.Popen(
+        [sys.executable, "-c", "import time\nwhile True: time.sleep(1)"],
+        stdin=subprocess.DEVNULL,
+    )
+    with open(sys.argv[2], "w", encoding="utf-8") as handle:
+        handle.write(str(grandchild.pid) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 while True:
     time.sleep(1)
 PY
@@ -12687,7 +12758,7 @@ PY
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$$" > "$1"
-exec python3 "$2" "$3"
+exec python3 "$2" "$3" "$4"
 EOF
   chmod +x "$child_wrapper"
   anchored_child_alive() {  # LOGICAL_PID NATIVE_PID
@@ -12699,6 +12770,51 @@ pid_alive = runpy.run_path(sys.argv[1])["pid_alive"]
 raise SystemExit(0 if pid_alive(int(sys.argv[2]), native_pid=int(sys.argv[3])) else 1)
 PY
   }
+  anchor_wait_stopped() {  # PID ATTEMPTS
+    local watched_pid="$1" attempts="$2" n=0
+    while [ "$n" -lt "$attempts" ]; do
+      kill -0 "$watched_pid" 2>/dev/null || return 0
+      sleep 0.05
+      n=$((n + 1))
+    done
+    ! kill -0 "$watched_pid" 2>/dev/null
+  }
+  anchor_taskkill_tree() {  # NATIVE_PID
+    python3 - "$1" <<'PY'
+import subprocess
+import sys
+
+try:
+    completed = subprocess.run(
+        ["taskkill.exe", "/PID", sys.argv[1], "/T", "/F"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(1)
+raise SystemExit(completed.returncode)
+PY
+  }
+  anchor_cleanup() {  # PARENT_PID LOGICAL_PID NATIVE_PID GRANDCHILD_PID
+    local watched_parent="$1" watched_logical="$2"
+    local watched_native="$3" watched_grandchild="$4"
+    case "$(uname -s 2>/dev/null || true)" in
+      MINGW*|MSYS*|CYGWIN*)
+        [ -z "$watched_native" ] || anchor_taskkill_tree "$watched_native" || true
+        [ -z "$watched_grandchild" ] || anchor_taskkill_tree "$watched_grandchild" || true
+        ;;
+    esac
+    [ -z "$watched_logical" ] || kill -KILL "$watched_logical" 2>/dev/null || true
+    kill -KILL "$watched_parent" 2>/dev/null || true
+    anchor_wait_stopped "$watched_parent" 100 || return 1
+    wait "$watched_parent" 2>/dev/null || true
+  }
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) windows_tree_test=1 ;;
+  esac
   for signal in HUP INT TERM; do
     case "$signal" in
       HUP) expected=129 ;;
@@ -12706,40 +12822,78 @@ PY
       TERM) expected=143 ;;
     esac
     pid_file="$dir/child-$signal.pid"
+    grandchild_pid_file="$dir/child-$signal.grandchild-pid"
     logical_pid_file="$dir/child-$signal.logical-pid"
+    child_pid=""
+    grandchild_pid=""
+    logical_pid=""
     (
       set -euo pipefail
       # shellcheck source=/dev/null
       . "$anchor_lib"
       run_reenter_continuation bash "$child_wrapper" \
-        "$logical_pid_file" "$child_script" "$pid_file"
+        "$logical_pid_file" "$child_script" "$pid_file" "$grandchild_pid_file"
     ) > "$dir/$signal.out" 2> "$dir/$signal.err" &
     parent_pid=$!
-    for i in $(seq 1 100); do
-      [ -s "$pid_file" ] && [ -s "$logical_pid_file" ] && break
+    i=0
+    while [ "$i" -lt 100 ]; do
+      if [ -s "$pid_file" ] && [ -s "$logical_pid_file" ] &&
+          { [ "$windows_tree_test" = 0 ] || [ -s "$grandchild_pid_file" ]; }; then
+        break
+      fi
       kill -0 "$parent_pid" 2>/dev/null || break
       sleep 0.05
+      i=$((i + 1))
     done
-    [ -s "$pid_file" ] && [ -s "$logical_pid_file" ] || {
-      kill -TERM "$parent_pid" 2>/dev/null || true
-      wait "$parent_pid" 2>/dev/null || true
+    [ -s "$pid_file" ] && [ -s "$logical_pid_file" ] &&
+        { [ "$windows_tree_test" = 0 ] || [ -s "$grandchild_pid_file" ]; } || {
+      [ ! -s "$pid_file" ] || IFS= read -r child_pid < "$pid_file"
+      [ ! -s "$grandchild_pid_file" ] ||
+        IFS= read -r grandchild_pid < "$grandchild_pid_file"
+      [ ! -s "$logical_pid_file" ] || IFS= read -r logical_pid < "$logical_pid_file"
+      anchor_cleanup "$parent_pid" "$logical_pid" "$child_pid" "$grandchild_pid" || true
       fail "$signal anchor child did not start"
     }
     IFS= read -r child_pid < "$pid_file"
+    if [ "$windows_tree_test" = 1 ]; then
+      IFS= read -r grandchild_pid < "$grandchild_pid_file"
+    fi
     IFS= read -r logical_pid < "$logical_pid_file"
-    kill -s "$signal" "$parent_pid" 2>/dev/null ||
+    if ! kill -s "$signal" "$parent_pid" 2>/dev/null; then
+      anchor_cleanup "$parent_pid" "$logical_pid" "$child_pid" "$grandchild_pid" || true
       fail "could not signal the $signal anchor parent"
+    fi
+    if ! anchor_wait_stopped "$parent_pid" 160; then
+      anchor_cleanup "$parent_pid" "$logical_pid" "$child_pid" "$grandchild_pid" || true
+      fail "$signal anchor parent did not exit after handling"
+    fi
     rc=0
     wait "$parent_pid" 2>/dev/null || rc=$?
-    [ "$rc" = "$expected" ] ||
+    if [ "$rc" != "$expected" ]; then
+      anchor_cleanup "$parent_pid" "$logical_pid" "$child_pid" "$grandchild_pid" || true
       fail "$signal anchor parent exited $rc instead of $expected"
-    for i in $(seq 1 100); do
+    fi
+    i=0
+    while [ "$i" -lt 100 ]; do
       anchored_child_alive "$logical_pid" "$child_pid" || break
       sleep 0.05
+      i=$((i + 1))
     done
     if anchored_child_alive "$logical_pid" "$child_pid"; then
-      kill -TERM "$logical_pid" 2>/dev/null || true
-      fail "forwarded $signal left the continuation alive"
+      anchor_cleanup "$parent_pid" "$logical_pid" "$child_pid" "$grandchild_pid" || true
+      fail "handled $signal left the continuation alive"
+    fi
+    if [ "$windows_tree_test" = 1 ]; then
+      i=0
+      while [ "$i" -lt 100 ]; do
+        anchored_child_alive "$logical_pid" "$grandchild_pid" || break
+        sleep 0.05
+        i=$((i + 1))
+      done
+      if anchored_child_alive "$logical_pid" "$grandchild_pid"; then
+        anchor_cleanup "$parent_pid" "$logical_pid" "$child_pid" "$grandchild_pid" || true
+        fail "handled $signal left a native grandchild alive"
+      fi
     fi
   done
 }

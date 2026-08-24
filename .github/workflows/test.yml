@@ -121,10 +121,12 @@ jobs:
           python-version: "3.13"
       - name: native durable artifact store
         run: bash tests/windows-durable-writer-smoke.sh
-      - name: native process liveness
-        run: |
-          bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe
-          bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor
+      - name: native persisted process liveness
+        timeout-minutes: 3
+        run: bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe
+      - name: native reenter anchor
+        timeout-minutes: 3
+        run: bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor
 
   # The one parser that rejects a here-document inside $( ) whose body holds an
   # odd apostrophe, and the one userland where BSD sed/awk/date differ. Both
