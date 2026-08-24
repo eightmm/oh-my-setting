@@ -12428,7 +12428,7 @@ test_gc_dead_marker_cannot_release_live_same_lease() {
 }
 
 test_process_liveness_uses_non_destructive_windows_probe() {
-  local project native_pid rc=0
+  local project native_pid rc=0 plan lease
   for producer in "$ROOT/scripts/autopilot.sh" "$ROOT/scripts/peer-delegate.sh"; do
     grep -Fq 'oms_process_native_pid "$$"' "$producer" ||
       fail "$(basename "$producer") bypassed the shared native pid resolver"
@@ -12552,6 +12552,24 @@ PY
         fail "legacy Windows marker became dead proof, got $rc: $(cat "$project/unproven.out")"
       grep -Fq 'unproven' "$project/unproven.out" ||
         fail "legacy Windows marker was not labeled unproven"
+      plan="$ROOT/scripts/agent-plan.sh"
+      "$plan" --repo "$project" init --goal "native marker recovery" >/dev/null
+      "$plan" --repo "$project" add --id native-task --title native >/dev/null
+      "$plan" --repo "$project" claim --id native-task --provider codex >/dev/null
+      lease="$("$plan" --repo "$project" show --id native-task |
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])')"
+      lease="${lease//$'\r'/}"
+      "$plan" --repo "$project" start --id native-task --lease-id "$lease" >/dev/null
+      printf '{"schema":4,"id":"native-plan","pid":%d,"native_pid":999999,"task_id":"native-task","lease_id":"%s"}\n' \
+        "$$" "$lease" > "$project/.oms/delegations/native-plan.json"
+      rc=0
+      "$plan" --repo "$project" recover-lease --id native-task --lease-id "$lease" \
+        --expected-state running --markers-dir "$project/.oms/delegations" --check \
+        > "$project/plan-unproven.out" 2>&1 || rc=$?
+      [ "$rc" = 3 ] ||
+        fail "legacy Windows plan marker became dead proof, got $rc: $(cat "$project/plan-unproven.out")"
+      grep -Fq 'unproven' "$project/plan-unproven.out" ||
+        fail "legacy Windows plan marker was not labeled unproven"
       state_out="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
         fail "state could not read a native Git Bash marker"
       OMS_T_NATIVE_STATE="$state_out" python3 - <<'PY' ||

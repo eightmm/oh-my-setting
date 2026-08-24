@@ -600,7 +600,11 @@ def load_worker_markers():
         if not entry.name.endswith(".json"):
             continue
         try:
-            before = entry.stat(follow_symlinks=False)
+            # Windows scandir metadata can carry a directory-enumeration inode
+            # that is not comparable with the file-id returned by fstat().
+            # A pathname lstat and the opened handle share the stable identity
+            # contract used by the other bounded readers.
+            before = os.lstat(entry.path)
         except OSError as exc:
             die("cannot inspect worker marker %s: %s" % (entry.name, exc))
         if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024:
