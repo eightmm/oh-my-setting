@@ -63,10 +63,12 @@ Usage: oms <tool> [args...]
        oms list [--frontdoor|--all]
        oms help
 
-Dispatch to an oh-my-setting harness tool by name. `list` prints every
-compatibility primitive; `list --frontdoor` prints the small stable
-agent-facing catalog. Docs/COMPONENTS.md describes the existing subsystems and
-docs/OMS-RUNTIME.md explains the typed runtime projection.
+Dispatch to an oh-my-setting harness tool by name. `list` and `list --all`
+print the full public catalog; `list --frontdoor` prints the small stable set of
+agent-facing subsystem entrypoints. The `oms-agent-harness` command-routing
+reference selects intent variants behind those entries. Docs/COMPONENTS.md
+describes the existing subsystems and docs/OMS-RUNTIME.md explains the typed
+runtime projection.
 
 These tools are the agent's hands, not a human command set. If you are a person
 reading this, say what you want to your coding agent instead.
@@ -192,13 +194,15 @@ update
 "
 
 OMS_FRONTDOOR_TOOLS="
+autopilot
+consult
 doctor
 inbox
 journal
 patch-admit
+patch-land
 peer-delegate
 peer-review
-research-runner
 runtime
 update
 "

@@ -43,8 +43,9 @@ usage() {
 Usage: peer-review.sh [options] --prompt TEXT
        peer-review.sh verdicts [--json] [artifact-dir]
 
-Ask the same review question to Codex, Claude Code, and Antigravity, then persist
-each answer as an artifact.
+Review an existing diff with independent Codex, Claude Code, and Antigravity seats.
+Plain review persists seat answers as artifacts.
+With --gate, enforce and record the typed gate outcome.
 
 verdicts: inspect the latest review run's artifacts and print one line per
 provider — pass, fail, or incomplete (artifact has no exit section, e.g. the

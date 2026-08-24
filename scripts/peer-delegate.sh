@@ -516,7 +516,7 @@ if [ -n "$EXECUTOR_ID" ]; then
   [ "$executor_provider" = "$TO" ] || fail "executor provider is $executor_provider, not $TO"
   [ "$executor_state" = "frozen" ] || fail "executor $EXECUTOR_ID is $executor_state, not frozen"
   [ "$executor_mode" = "worktree-write" ] ||
-    fail "legacy read executor is unsupported; retire it and use agent-run --mode read"
+    fail "legacy read executor is unsupported; retire it and use oms peer-delegate --read-only --role repo-auditor without --executor"
   [ -z "$MODEL" ] || [ "$MODEL" = "$executor_model" ] || fail "--model conflicts with executor contract"
   [ -z "$FALLBACK_MODEL" ] || [ "$FALLBACK_MODEL" = "$executor_fallback_model" ] ||
     fail "--fallback-model conflicts with executor contract"

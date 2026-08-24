@@ -1,11 +1,16 @@
 # Delegation, Artifacts, and Landing
 
-Use one explicit provider entrypoint:
+Choose an intent-specific provider front door. See
+[command-routing.md](command-routing.md) when the commands appear to overlap:
 
 ```bash
-oms agent-run --to claude --repo . --mode read --prompt "Assess this plan."
-oms agent-run --to codex --repo . --mode write --prompt "Implement the bounded fix."
+oms consult --to claude --repo . --prompt "Assess this plan."
+oms peer-delegate --to codex --repo . --prompt "Implement the bounded fix."
 ```
+
+`agent-call` and `agent-run` remain lower-level public compatibility primitives.
+When using the `agent-run` wrapper intentionally, pass `--mode read` or
+`--mode write` instead of asking its wording classifier to infer known authority.
 
 The harness leaves model choice to the provider unless the caller passes an
 explicit `--model`. Use `oms models` to inspect cached provider catalogs,
@@ -19,9 +24,12 @@ validated against the selected model's cached scale. Codex, Claude, and
 Antigravity receive the provider-specific control only when their capability
 snapshot reports support.
 
-Read mode cannot edit the repo. Write mode uses an isolated worktree and
-returns an artifact log plus patch; workers cannot commit or push. Outbound
-context is scanned and sensitive-looking content blocks the call.
+Consultation and `agent-call` cannot produce a source patch, though they append
+their local artifacts. Write delegation uses an isolated worktree and returns
+an artifact log plus patch; workers cannot commit or push.
+`peer-delegate --read-only` uses the isolated worker boundary for an audit
+report and returns no patch. Outbound context is scanned and sensitive-looking
+content blocks the call.
 
 Use `--no-memory`, `--no-task`, or `--no-ml-context` to omit prompt layers.
 Use `--export-only` for read calls/reviews when another provider must not be

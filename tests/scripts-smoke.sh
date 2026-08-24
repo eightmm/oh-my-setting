@@ -12179,6 +12179,44 @@ test_oms_dispatcher_lists_and_dispatches() {
   done
 }
 
+test_oms_frontdoor_routes_primary_subsystems() {
+  local bin="$TMP/oms-frontdoor-bin"
+  local frontdoors all_tools help_text review_help primary compatibility duplicate
+
+  mkdir -p "$bin"
+  ln -sfn "$ROOT/scripts/oms" "$bin/oms"
+
+  frontdoors="$("$bin/oms" list --frontdoor)" || fail "oms list --frontdoor should succeed"
+  all_tools="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
+  help_text="$("$bin/oms" --help)" || fail "oms --help should succeed"
+  review_help="$("$bin/oms" peer-review --help)" || fail "peer-review --help should succeed"
+  printf '%s\n' "$help_text" | grep -Fq 'full public catalog' ||
+    fail "oms help should distinguish the full public catalog from subsystem front doors"
+  printf '%s\n' "$review_help" | grep -Fq 'Plain review persists seat answers as artifacts.' ||
+    fail "peer-review help should not promise a typed gate outcome in plain mode"
+  printf '%s\n' "$review_help" | grep -Fq 'With --gate, enforce and record the typed gate outcome.' ||
+    fail "peer-review help should scope its typed outcome to gate mode"
+
+  for primary in autopilot consult doctor inbox journal patch-admit patch-land \
+    peer-delegate peer-review runtime update; do
+    printf '%s\n' "$frontdoors" | grep -Eq "^${primary} " ||
+      fail "frontdoor catalog should route the canonical workflow: $primary"
+  done
+
+  for compatibility in agent-call agent-run research-runner; do
+    if printf '%s\n' "$frontdoors" | grep -Eq "^${compatibility} "; then
+      fail "compatibility primitive should stay behind list --all: $compatibility"
+    fi
+    printf '%s\n' "$all_tools" | grep -Eq "^${compatibility} " ||
+      fail "list --all should retain compatibility primitive: $compatibility"
+  done
+
+  duplicate="$(printf '%s\n' "$frontdoors" | awk '{ seen[$1]++ } END { for (name in seen) if (seen[name] > 1) print name }')"
+  [ -z "$duplicate" ] || fail "frontdoor catalog contains duplicate tools: $duplicate"
+  printf '%s\n' "$frontdoors" | grep -Eq '^peer-review .*diff' ||
+    fail "peer-review catalog description should distinguish diff review from peer-ask"
+}
+
 test_doctor_detects_foreign_config_link() {
   local project="$TMP/doctor-foreign-link"
   local home_dir="$TMP/doctor-home-foreign-link"
@@ -12967,10 +13005,11 @@ PY
 test_large_skills_use_progressive_disclosure() {
   local skill
   local ref
+  local routing
 
   skill="$ROOT/custom-skills/oms-agent-harness/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 650 ] || fail "oms-agent-harness router is too large"
-  for ref in state-memory plans-recovery roles-executors cross-agent-consultation \
+  for ref in command-routing state-memory plans-recovery roles-executors cross-agent-consultation \
     delegation-artifacts review-gates session-handoff; do
     assert_file_contains "$skill" "references/$ref.md"
     [ -f "$ROOT/custom-skills/oms-agent-harness/references/$ref.md" ] || fail "missing oms-agent-harness reference: $ref"
@@ -12978,6 +13017,13 @@ test_large_skills_use_progressive_disclosure() {
   for command in "oms consult" "oms peer-review --gate" "oms peer-delegate --to NAME"; do
     assert_file_contains "$skill" "$command"
   done
+  routing="$ROOT/custom-skills/oms-agent-harness/references/command-routing.md"
+  [ "$(wc -w < "$routing" | tr -d ' ')" -le 900 ] || fail "command-routing reference is too large"
+  for phrase in "compact subsystem entrypoints" '`oms status`' '`oms ops-cockpit`' \
+    '`oms doctor`' '`oms project-doctor`' '`oms checkpoint`' '`oms snapshot`'; do
+    assert_file_contains "$routing" "$phrase"
+  done
+  assert_file_contains "$routing" '`oms plan-run --to PROVIDER --id TASK --land`'
 
   skill="$ROOT/custom-skills/oms-spec-interview/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 600 ] || fail "oms-spec-interview router is too large"

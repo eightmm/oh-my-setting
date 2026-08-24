@@ -3,8 +3,11 @@
 oh-my-setting is a local control plane for Codex, Claude Code, and Antigravity.
 It gives them shared rules, skills, state, peer calls, isolated write
 delegation, and one verification boundary for OMS-managed delegated patches.
-The supported command catalog is always `oms list`; use `oms <tool> --help`
-for flags.
+The primary subsystem catalog is `oms list --frontdoor`; compatibility
+primitives and intent variants remain in `oms list --all`. Use
+`oms <tool> --help` for flags and the
+[command-routing reference](../custom-skills/oms-agent-harness/references/command-routing.md)
+when two commands appear to overlap.
 
 ## How it fits together
 
@@ -12,7 +15,7 @@ for flags.
 user request
   -> provider skill/router
   -> oms command
-       -> read: agent-call / consult / peer-review
+       -> read: consult / peer-ask / peer-review / advise
        -> write: peer-delegate -> isolated worktree -> patch
                                       -> patch-admit -> patch-land
        -> orchestrate: agent-supervisor -> agent-events -> approval-inbox
@@ -98,8 +101,7 @@ oms project-private --check
 
 | Need | Front door | Result |
 |---|---|---|
-| One independent read | `oms agent-call` | Answer artifact |
-| Continue a peer thread | `oms consult` | Threaded answer |
+| One independent read or continued peer thread | `oms consult [--to PROVIDER]` | Threaded answer |
 | Council or debate | `oms peer-ask` | Per-seat artifacts and family count |
 | Diff review | `oms peer-review --gate` | Verdicts plus mechanical backstop |
 | High-risk decision | `oms advise` | Adversarial recommendation |
@@ -156,9 +158,11 @@ does not turn that sentinel into an explicit model request.
 
 ## Delegating writes
 
-`oms agent-run` sends read work to `agent-call` and write work to
-`peer-delegate`. Auto mode uses conservative wording classification; callers
-can choose `--mode read` or `--mode write`.
+For compatibility, `oms agent-run` sends read work to `agent-call` and write
+work to `peer-delegate`. New agent guidance uses the intent-specific front
+doors above. A caller that intentionally needs the wrapper should pass
+`--mode read` or `--mode write`; auto mode remains conservative wording
+classification.
 
 A write delegation:
 
@@ -204,8 +208,8 @@ lineage outcome also converge.
 
 ```bash
 oms peer-delegate --to codex --prompt "Implement the bounded change."
-oms patch-admit --patch path/to/change.patch
-oms patch-land --patch path/to/change.patch
+oms patch-admit --patch path/to/change.patch  # optional read-only preview
+oms patch-land --patch path/to/change.patch   # runs admission, then mutates
 ```
 
 ## Security boundary
@@ -416,7 +420,9 @@ The ML/Slurm template adds local-first experiment controls:
 
 - `oms run new/current/show/timeline` for the run spine.
 - `oms run capsule` for reproducibility capture and replay metadata.
-- `oms research-runner` for hypothesis-led runs.
+- `oms runtime experiment` for comparable seed-, metric-, and invariant-bound
+  studies; `oms research-runner` remains the compact single-run/run-ledger
+  compatibility path.
 - `oms data-manifest` for fingerprints, split checks, and leakage evidence.
 - `oms experiment-board` for claims and collision avoidance.
 - `oms run-reconcile`, `oms job-digest`, and `oms tsp-queue` for Slurm or local

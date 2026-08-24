@@ -40,11 +40,12 @@ authority.
 | optional host capability | `oms runtime profile check|install-plan|install` |
 | local/container/remote execution | `oms runtime backend check|run`; execution receipts cannot land code |
 | comparable research study | `oms runtime experiment register|run|invariants|summarize` |
-| admit reviewed bytes | `oms patch-admit`, then `oms patch-land` |
+| admit or land reviewed bytes | use `oms patch-admit` for a read-only verdict; `oms patch-land` runs admission itself before mutation |
 | publish an authorized Draft PR | use the parent-owned Draft PR path; no update, merge, ready, tag, or release authority |
 
-Use `oms list --frontdoor` for the compact catalog and `oms list --all` only
-when a compatibility primitive is genuinely needed.
+Use `oms list --frontdoor` for compact subsystem entrypoints. Load the command
+routing reference for intent variants; use `oms list --all` only when a
+lower-level compatibility primitive is genuinely needed.
 
 ## Invariants
 
@@ -63,6 +64,7 @@ when a compatibility primitive is genuinely needed.
 
 ## References
 
+- Overlapping commands and canonical front doors: [command-routing.md](references/command-routing.md)
 - Typed projections, evidence, context, profiles, capsules, backends, experiments: [runtime-core.md](references/runtime-core.md)
 - Prompt hooks, memory, tasks, skills: [state-memory.md](references/state-memory.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)

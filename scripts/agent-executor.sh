@@ -112,7 +112,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--mode requires worktree-write"
       case "$2" in
         worktree-write) MODE=worktree-write ;;
-        read) fail "read executors were removed; use agent-run --mode read" ;;
+        read) fail "read executors were removed; use oms consult --to PROVIDER, or oms peer-delegate --read-only --role repo-auditor for an isolated audit" ;;
         *) fail "--mode only accepts legacy-compatible worktree-write" ;;
       esac
       shift 2
@@ -188,7 +188,7 @@ require_worktree_write_mode() {
   local stored_mode
   stored_mode="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("mode",""))' "$META")"
   [ "$stored_mode" = worktree-write ] ||
-    fail "legacy read executor is unsupported; inspect with show, retire with fail, and use agent-run --mode read"
+    fail "legacy read executor is unsupported; inspect with show, retire with fail, then use oms consult --to PROVIDER or oms peer-delegate --read-only --role repo-auditor"
 }
 
 if [ "$ACTION" = "create" ]; then

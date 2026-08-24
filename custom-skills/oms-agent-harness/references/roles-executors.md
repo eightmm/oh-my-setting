@@ -13,8 +13,10 @@ native subagent brief; the parent still supplies task, paths, constraints,
 success criteria, and expected output.
 
 Use a task-scoped executor soul only for substantial bounded write delegation.
-Executors do not have a read mode; use `oms agent-run --mode read` for an
-independent read-only pass.
+Executors do not have a read mode. Use `oms consult --to PROVIDER` for an
+ordinary independent pass, or use
+`oms peer-delegate --read-only --role repo-auditor` when the audit specifically
+needs an isolated clean-HEAD worktree. Neither read path creates an executor.
 
 1. Ask a read-only child to propose behavior using `prompts/executor-soul.md`.
 2. For a plan task, claim it with the intended provider first; executor creation

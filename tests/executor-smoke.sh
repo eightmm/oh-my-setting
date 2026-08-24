@@ -99,6 +99,10 @@ PY
     --strategy repo-auditor --soul-file "$repo/proposal.md" >/dev/null 2>"$repo/read-create.err" || rc=$?
   [ "$rc" = 2 ] || fail "read executor creation should be removed"
   contains "$repo/read-create.err" 'read executors were removed'
+  contains "$repo/read-create.err" 'oms consult --to PROVIDER'
+  if grep -Fq 'agent-run --mode read' "$repo/read-create.err"; then
+    fail "read executor diagnostic should use the canonical consult route"
+  fi
   [ ! -e "$repo/.oms/executors/read1" ] || fail "removed read executor should not create state"
 
   # The former default mode remains accepted as an unadvertised compatibility
@@ -120,11 +124,16 @@ PY
   "$tool" validate --repo "$repo" --id compat-mode >/dev/null 2>"$repo/legacy-read.err" || rc=$?
   [ "$rc" = 2 ] || fail "legacy read executor should not validate"
   contains "$repo/legacy-read.err" 'legacy read executor is unsupported'
+  contains "$repo/legacy-read.err" 'oms consult --to PROVIDER'
   rc=0
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --repo "$repo" \
     --to codex --executor compat-mode --prompt 'Do not write' >/dev/null 2>"$repo/read-delegate.err" || rc=$?
   [ "$rc" = 2 ] || fail "read executor should be rejected by write delegation"
   contains "$repo/read-delegate.err" 'legacy read executor is unsupported'
+  contains "$repo/read-delegate.err" 'oms peer-delegate --read-only --role repo-auditor'
+  if grep -Fq 'agent-run --mode read' "$repo/legacy-read.err" "$repo/read-delegate.err"; then
+    fail "legacy read diagnostics should not route back through agent-run"
+  fi
   "$tool" fail --repo "$repo" --id compat-mode --reason retired >/dev/null
   "$tool" show --repo "$repo" --id compat-mode | grep -Fq '"state": "failed"' ||
     fail "legacy read executor should remain retireable"
