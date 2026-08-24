@@ -550,18 +550,57 @@ try:
     assert os.listdir(salvage_outside) == ["sentinel.txt"], os.listdir(salvage_outside)
 finally:
     os.rmdir(salvage_link)
+
+# A reparse point planted at the leaf itself must also be rejected. Git Bash's
+# default `ln -s` mode may report success while materializing a regular-file
+# copy, so native Windows coverage uses the proven junction primitive and
+# verifies the outside target independently.
+leaf_repo = os.path.join(temp, "junction-leaf-repo")
+leaf_outside = os.path.join(temp, "junction-leaf-outside")
+os.makedirs(os.path.join(leaf_repo, ".oms", "artifacts"))
+os.makedirs(leaf_outside)
+leaf_marker = os.path.join(leaf_outside, "sentinel.txt")
+with open(leaf_marker, "wb") as handle:
+    handle.write(b"leaf junction target survives\n")
+leaf = os.path.join(leaf_repo, ".oms", "artifacts", "index.jsonl")
+create_junction(
+    leaf_outside, leaf,
+    "native Windows fixture could not create a leaf junction")
+try:
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            store["canonical_index"](leaf_repo, leaf)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("leaf directory junction was accepted")
+    assert open(leaf_marker, "rb").read() == b"leaf junction target survives\n"
+    assert os.listdir(leaf_outside) == ["sentinel.txt"], os.listdir(leaf_outside)
+finally:
+    os.rmdir(leaf)
 PY
 
 outside="$TMP/outside.jsonl"
 printf 'outside untouched\n' > "$outside"
 rm -f "$repo/.oms/artifacts/index.jsonl"
 if ln -s "$outside" "$repo/.oms/artifacts/index.jsonl" 2>/dev/null; then
-  if python3 "$ROOT/scripts/lib/artifact-index-store.py" canonical \
-      --repo "$repo" --index "$repo/.oms/artifacts/index.jsonl" >/dev/null 2>&1; then
-    fail "artifact store must refuse a leaf symlink"
+  if python3 - "$repo/.oms/artifacts/index.jsonl" <<'PY'
+import os, stat, sys
+
+info = os.lstat(sys.argv[1])
+flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+raise SystemExit(0 if stat.S_ISLNK(info.st_mode) or (
+    flag and getattr(info, "st_file_attributes", 0) & flag) else 1)
+PY
+  then
+    if python3 "$ROOT/scripts/lib/artifact-index-store.py" canonical \
+        --repo "$repo" --index "$repo/.oms/artifacts/index.jsonl" >/dev/null 2>&1; then
+      fail "artifact store must refuse a leaf symlink"
+    fi
+    grep -Fxq 'outside untouched' "$outside" ||
+      fail "artifact store followed a leaf symlink"
   fi
-  grep -Fxq 'outside untouched' "$outside" ||
-    fail "artifact store followed a leaf symlink"
+  rm -f "$repo/.oms/artifacts/index.jsonl"
 fi
 
 echo "windows-durable-writer-smoke: ok"
