@@ -12548,7 +12548,8 @@ PY
       "$ROOT/scripts/agent-executor.sh" recover --repo "$project" --id native \
         --expected-state running --markers-dir "$project/.oms/delegations" --check \
         > "$project/unproven.out" 2>&1 || rc=$?
-      [ "$rc" = 3 ] || fail "legacy Windows marker became dead proof, got $rc"
+      [ "$rc" = 3 ] ||
+        fail "legacy Windows marker became dead proof, got $rc: $(cat "$project/unproven.out")"
       grep -Fq 'unproven' "$project/unproven.out" ||
         fail "legacy Windows marker was not labeled unproven"
       state_out="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||

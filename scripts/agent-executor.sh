@@ -317,20 +317,8 @@ executor_python_path_for_host() {  # PATH
   printf '%s\n' "$value"
 }
 
-executor_python_lexical_path_for_host() {  # PATH
-  local value="$1"
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      command -v cygpath >/dev/null 2>&1 || return 2
-      value="$(cygpath -m "$value" | tr -d '\r')" || return $?
-      ;;
-  esac
-  printf '%s\n' "$value"
-}
-
 recover_executor() {
-  OMS_EXECUTOR_RECOVERY_META="$RECOVERY_META" \
-    OMS_EXECUTOR_RECOVERY_REPO="$RECOVERY_REPO" \
+  OMS_EXECUTOR_RECOVERY_REPO="$RECOVERY_REPO" \
     OMS_EXECUTOR_RECOVERY_MARKERS="$RECOVERY_MARKERS" \
     OMS_EXECUTOR_RECOVERY_ID="$ID" \
     OMS_EXECUTOR_RECOVERY_EXPECTED_STATE="$EXPECTED_STATE" \
@@ -346,9 +334,8 @@ import sys
 import tempfile
 import time
 
-meta_path = os.environ["OMS_EXECUTOR_RECOVERY_META"]
 repo_root = os.path.realpath(os.environ["OMS_EXECUTOR_RECOVERY_REPO"])
-marker_dir = os.path.abspath(os.environ["OMS_EXECUTOR_RECOVERY_MARKERS"])
+marker_input = os.path.abspath(os.environ["OMS_EXECUTOR_RECOVERY_MARKERS"])
 executor_id = os.environ["OMS_EXECUTOR_RECOVERY_ID"]
 expected_state = os.environ["OMS_EXECUTOR_RECOVERY_EXPECTED_STATE"]
 check_only = os.environ["OMS_EXECUTOR_RECOVERY_CHECK"] == "1"
@@ -371,16 +358,22 @@ def same_absolute(left, right):
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
 expected_markers = os.path.join(repo_root, ".oms", "delegations")
-if not same_absolute(marker_dir, expected_markers):
+if (os.path.normcase(os.path.realpath(marker_input)) !=
+        os.path.normcase(os.path.realpath(expected_markers))):
     die("worker marker directory must be the repo-local .oms/delegations directory")
+# From here on, derive every authority path from the one physical repository
+# spelling. Git Bash can present one directory with several benign spellings;
+# independently converting the repo, metadata, and marker argv made native
+# Python reject a repo-local marker before it could classify it as unproven.
+marker_dir = expected_markers
 
 executor_root = os.path.join(repo_root, ".oms", "executors")
 executor_dir = os.path.join(executor_root, executor_id)
 expected_meta = os.path.join(executor_dir, "meta.json")
+meta_path = expected_meta
 if (os.path.dirname(os.path.abspath(executor_dir)) !=
         os.path.abspath(executor_root) or
-        os.path.basename(os.path.abspath(executor_dir)) != executor_id or
-        not same_absolute(meta_path, expected_meta)):
+        os.path.basename(os.path.abspath(executor_dir)) != executor_id):
     die("executor metadata path is outside the repo-local executor directory")
 try:
     root_info = os.lstat(executor_root)
@@ -554,8 +547,6 @@ if [ "$ACTION" = recover ]; then
     fail "cannot resolve the physical repository"
   RECOVERY_REPO="$(executor_python_path_for_host "$recovery_repo_physical")" ||
     fail "cannot normalize repository path for Python"
-  RECOVERY_META="$(executor_python_lexical_path_for_host "$META")" ||
-    fail "cannot normalize executor metadata path for Python"
   RECOVERY_MARKERS="$(executor_python_path_for_host "$MARKERS_DIR")" ||
     fail "cannot normalize worker marker path for Python"
   # Recovery always judges the marker set before the executor CAS. Publishers
