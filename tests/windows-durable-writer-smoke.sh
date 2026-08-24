@@ -468,11 +468,32 @@ fi
 # symlink privilege. The native Windows job therefore proves an intermediate
 # component is rejected before the outside directory is touched.
 python3 - "$ROOT/scripts/lib/artifact-index-store.py" "$TMP" <<'PY'
-import contextlib, io, os, runpy, subprocess, sys
+import contextlib, io, os, runpy, stat, sys
 store_path, temp = sys.argv[1:]
 if os.name != "nt":
     raise SystemExit(0)
+import _winapi
+
 store = runpy.run_path(store_path)
+
+def create_junction(target, link, label):
+    # Call the same Win32 reparse primitive used by CPython instead of passing
+    # a built-in command through cmd.exe's second quoting/parser layer. The
+    # helper enables the required restore privilege, creates the link entry,
+    # and raises the exact Win32 error if the fixture cannot be established.
+    target = os.path.normpath(os.path.abspath(target))
+    link = os.path.normpath(os.path.abspath(link))
+    try:
+        _winapi.CreateJunction(target, link)
+    except OSError as exc:
+        try:
+            os.rmdir(link)
+        except OSError:
+            pass
+        raise AssertionError("%s: %s" % (label, exc))
+    info = os.lstat(link)
+    assert info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT, label
+
 repo = os.path.join(temp, "junction-repo")
 outside = os.path.join(temp, "junction-outside")
 assert os.path.isabs(repo) and os.path.isabs(outside), (repo, outside)
@@ -482,11 +503,7 @@ marker = os.path.join(outside, "sentinel.txt")
 with open(marker, "wb") as handle:
     handle.write(b"junction target survives\n")
 link = os.path.join(repo, ".oms")
-created = subprocess.run(
-    ["cmd.exe", "/d", "/c", "mklink", "/J", link, outside],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-if created.returncode != 0:
-    raise AssertionError("native Windows fixture could not create a directory junction")
+create_junction(outside, link, "native Windows fixture could not create a directory junction")
 try:
     try:
         with contextlib.redirect_stderr(io.StringIO()):
@@ -515,11 +532,9 @@ with open(salvage_index, "wb") as handle:
     handle.write(b'{"schema":0,"event_id":"evt_junction","kind":"legacy"}\n')
     handle.write(b"broken\n")
 salvage_link = os.path.join(salvage_repo, ".oms", "artifacts", "quarantine")
-created = subprocess.run(
-    ["cmd.exe", "/d", "/c", "mklink", "/J", salvage_link, salvage_outside],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-if created.returncode != 0:
-    raise AssertionError("native Windows fixture could not create salvage junction")
+create_junction(
+    salvage_outside, salvage_link,
+    "native Windows fixture could not create salvage junction")
 before = open(salvage_index, "rb").read()
 try:
     try:
