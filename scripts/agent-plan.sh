@@ -2065,10 +2065,19 @@ PY
   # original group, it retains nested process groups/sessions, periodically
   # refreshes descendants, and adopts daemonized Linux grandchildren. The
   # capture options preserve acceptance's exact 1 MiB output and typed receipt.
-  python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
-    --wall "$timeout_seconds" --kill-after 1 --label acceptance \
-    --cwd "$REPO" --output "$out_tmp" --output-limit 1048576 \
-    --metadata "$meta_tmp" -- bash -c "$accept_cmd" &
+  (
+    # The retirement proof binds this accept process, not commands that the
+    # repository's acceptance gate may invoke in independent temporary repos.
+    # Keep the outer shell's copy for the post-run CAS, but do not leak it into
+    # the supervised command tree.
+    unset OMS_PLAN_ACCEPT_PROOF_ID OMS_PLAN_ACCEPT_EXPECTED_PLAN_SHA \
+      OMS_PLAN_ACCEPT_EXPECTED_HEAD OMS_PLAN_ACCEPT_EXPECTED_REF \
+      OMS_PLAN_ACCEPT_GENERATION
+    exec python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
+      --wall "$timeout_seconds" --kill-after 1 --label acceptance \
+      --cwd "$REPO" --output "$out_tmp" --output-limit 1048576 \
+      --metadata "$meta_tmp" -- bash -c "$accept_cmd"
+  ) &
   accept_supervisor_pid=$!
   wait "$accept_supervisor_pid"
   runner_exit=$?

@@ -5376,6 +5376,33 @@ assert "acceptance" not in row, row
 PY
 }
 
+test_agent_plan_retire_does_not_leak_context_into_nested_acceptance() {
+  local outer="$TMP/agent-plan-retire-nested-outer"
+  local nested="$TMP/agent-plan-retire-nested-inner"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_sha out
+
+  make_committed_repo "$outer"
+  make_committed_repo "$nested"
+  "$plan" --repo "$nested" init --goal nested --accept true >/dev/null
+  "$plan" --repo "$outer" init --goal outer \
+    --accept "bash '$plan' --repo '$nested' accept >/dev/null" >/dev/null
+  "$plan" --repo "$outer" add --id t1 --title "external work" >/dev/null
+  plan_sha="$(python3 - "$outer/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+
+  out="$("$plan" --repo "$outer" retire --apply \
+    --expected-plan-sha256 "$plan_sha" \
+    --disposition completed-external \
+    --reason "nested acceptance remained isolated")" ||
+    fail "retirement leaked its proof context into nested acceptance: $out"
+  [ ! -e "$outer/.oms/plan/tasks.json" ] ||
+    fail "nested acceptance retirement left its plan active"
+}
+
 test_agent_plan_retire_recovers_receipt_before_unlink() {
   local project="$TMP/agent-plan-retire-crash"
   local different_project="$TMP/agent-plan-retire-crash-new-live"

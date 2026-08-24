@@ -522,7 +522,14 @@ assert output_check["exit"] != 0, output_check
 PY
 background_pid="$(cat "$TMP/background.pid")"
 if kill -0 "$background_pid" 2>/dev/null; then
-  fail "semantic eval left a background check descendant running"
+  # A whole-tree outer supervisor intentionally adopts the killed descendant
+  # and reaps it when the supervised check exits. kill -0 also succeeds for
+  # that non-running zombie, so distinguish it from the fixture's live sleep.
+  background_state="$(ps -o stat= -p "$background_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+  case "$background_state" in
+    Z*) ;;
+    *) fail "semantic eval left a background check descendant running" ;;
+  esac
 fi
 [ ! -e "$TMP/background-marker" ] || fail "background check escaped its evaluation lifetime"
 [ "$(cat "$repo/value.txt")" = old ] || fail "semantic eval changed the primary checkout"
