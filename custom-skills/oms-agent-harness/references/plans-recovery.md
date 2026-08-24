@@ -11,6 +11,30 @@ oms agent-plan --repo . reclaim
 oms agent-plan --repo . reclaim --include-review
 ```
 
+When the active plan is stale because the same goal was completed outside its
+task transitions, retire its exact projection instead of calling `finish`,
+`block`, or `init` to make the display look current:
+
+```bash
+oms agent-plan --repo . retire
+oms agent-plan --repo . retire --apply \
+  --expected-plan-sha256 <sha-from-check> \
+  --disposition completed-external \
+  --reason "equivalent implementation is committed on the current HEAD"
+```
+
+The apply call runs a new plan acceptance itself; an earlier passing row is not
+proof. It requires a clean committed tree and fails closed around active task
+authority or worker markers. For a reviewed replacement contract, only an old
+plan whose tasks are all `done` may use `--disposition superseded`; that receipt
+states that it did not verify completion. Replay the identical command after
+an interruption. The content-addressed archive/receipt pair makes replay
+idempotent and prevents an old replay from unlinking a newly-created live plan.
+Do not mutate the same plan around a residual retirement intent: canonical
+mutation commands fail closed until exact replay finishes. A later reviewed
+topology apply cleans only a fully validated post-unlink intent when no active
+plan remains (or a different nonempty lineage is already active).
+
 Check known dead ends before repeating them:
 
 ```bash

@@ -4987,6 +4987,1057 @@ test_agent_plan_lifecycle() {
   fi
 }
 
+test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
+  local project="$TMP/agent-plan-retire"
+  local active_project="$TMP/agent-plan-retire-active"
+  local marker_project="$TMP/agent-plan-retire-marker"
+  local superseded_project="$TMP/agent-plan-retire-superseded"
+  local failed_accept_project="$TMP/agent-plan-retire-accept-fail"
+  local mutate_accept_project="$TMP/agent-plan-retire-accept-mutate"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_file plan_sha archive receipt out before after rc state duplicate
+  local index_before index_after
+
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal "already implemented" --accept true >/dev/null
+  "$plan" --repo "$project" add --id t1 --title "external work" --verify true >/dev/null
+  plan_file="$project/.oms/plan/tasks.json"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  cp "$plan_file" "$TMP/agent-plan-retire.original"
+
+  # Retiring is destructive to the active projection, so the default is a
+  # pure check. It prints the CAS token without minting lineage, a receipt, or
+  # an archive. --apply owns the only mutation path and requires every intent
+  # field explicitly.
+  before="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  touch "$project/file.txt"
+  index_before="$(python3 - "$project/.git/index" <<'PY' | tr -d '\r'
+import hashlib, os, sys
+info = os.stat(sys.argv[1])
+print("%s:%s:%s" % (
+    getattr(info, "st_mtime_ns", int(info.st_mtime * 1000000000)),
+    getattr(info, "st_ctime_ns", int(info.st_ctime * 1000000000)),
+    hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()))
+PY
+)"
+  out="$("$plan" --repo "$project" retire)" ||
+    fail "retire check should succeed: $out"
+  printf '%s\n' "$out" | grep -Fq "$plan_sha" ||
+    fail "retire check did not print the exact plan CAS: $out"
+  after="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  [ "$before" = "$after" ] || fail "retire check rewrote the plan"
+  index_after="$(python3 - "$project/.git/index" <<'PY' | tr -d '\r'
+import hashlib, os, sys
+info = os.stat(sys.argv[1])
+print("%s:%s:%s" % (
+    getattr(info, "st_mtime_ns", int(info.st_mtime * 1000000000)),
+    getattr(info, "st_ctime_ns", int(info.st_ctime * 1000000000)),
+    hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()))
+PY
+)"
+  [ "$index_before" = "$index_after" ] ||
+    fail "retire check changed Git index bytes or generation"
+  [ ! -e "$project/.oms/plan/retirements.jsonl" ] ||
+    fail "retire check wrote a receipt"
+  if "$plan" --repo "$project" retire --apply >/dev/null 2>&1; then
+    fail "retire apply without an expected digest/disposition/reason must fail"
+  fi
+  if "$plan" --repo "$project" --file "$project/custom-tasks.json" retire \
+      >/dev/null 2>&1; then
+    fail "retire accepted a non-canonical --file authority path"
+  fi
+  if "$plan" --repo "$project" retire --apply \
+      --expected-plan-sha256 "$(printf '%064d' 0)" \
+      --disposition completed-external --reason "verified outside the plan" \
+      >/dev/null 2>&1; then
+    fail "retire accepted a stale plan CAS"
+  fi
+  if OMS_HARNESS_CHILD=1 "$plan" --repo "$project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" \
+      --disposition completed-external --reason "verified outside the plan" \
+      >/dev/null 2>&1; then
+    fail "a harness child retired the parent plan"
+  fi
+
+  # A manual acceptance row is not retirement authority. It has the additive
+  # plan digest but no unique full-digest retirement proof. The apply call
+  # must run its own fresh acceptance after its clean preflight.
+  "$plan" --repo "$project" accept >/dev/null
+  assert_file_contains "$project/.oms/plan/progress.jsonl" "\"plan_sha256\": \"$plan_sha\""
+  printf 'dirty\n' >> "$project/file.txt"
+  if "$plan" --repo "$project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" \
+      --disposition completed-external --reason "verified outside the plan" \
+      >/dev/null 2>&1; then
+    fail "completed-external retired a dirty worktree"
+  fi
+  git -C "$project" restore file.txt
+
+  make_committed_repo "$failed_accept_project"
+  "$plan" --repo "$failed_accept_project" init --goal incomplete --accept false >/dev/null
+  "$plan" --repo "$failed_accept_project" add --id t1 --title incomplete >/dev/null
+  plan_sha="$(python3 - "$failed_accept_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  if "$plan" --repo "$failed_accept_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition completed-external \
+      --reason "claimed equivalent implementation" >/dev/null 2>&1; then
+    fail "completed-external retired after its fresh acceptance failed"
+  fi
+  [ -e "$failed_accept_project/.oms/plan/tasks.json" ] &&
+    [ ! -e "$failed_accept_project/.oms/plan/retirements.jsonl" ] &&
+    [ ! -e "$failed_accept_project/.oms/plan/tasks.$plan_sha.archive.json" ] ||
+    fail "failed acceptance produced retirement authority or removed the live plan"
+
+  make_committed_repo "$mutate_accept_project"
+  "$plan" --repo "$mutate_accept_project" init --goal mutation \
+    --accept "printf changed >> file.txt" >/dev/null
+  "$plan" --repo "$mutate_accept_project" add --id t1 --title mutation >/dev/null
+  plan_sha="$(python3 - "$mutate_accept_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  if "$plan" --repo "$mutate_accept_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition completed-external \
+      --reason "claimed equivalent implementation" >/dev/null 2>&1; then
+    fail "completed-external accepted a verifier that mutated the tracked tree"
+  fi
+  [ -e "$mutate_accept_project/.oms/plan/tasks.json" ] &&
+    [ ! -e "$mutate_accept_project/.oms/plan/retirements.jsonl" ] &&
+    [ ! -e "$mutate_accept_project/.oms/plan/tasks.$plan_sha.archive.json" ] ||
+    fail "mutating acceptance produced retirement authority or removed the live plan"
+
+  plan_sha="$before"
+  out="$("$plan" --repo "$project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" \
+    --disposition completed-external --reason "verified outside the plan")" ||
+    fail "completed-external retire failed: $out"
+  archive="$project/.oms/plan/tasks.$plan_sha.archive.json"
+  receipt="$project/.oms/plan/retirements.jsonl"
+  [ ! -e "$plan_file" ] || fail "retired plan stayed active"
+  cmp -s "$TMP/agent-plan-retire.original" "$archive" ||
+    fail "retirement archive did not preserve the exact plan bytes"
+  python3 - "$receipt" "$plan_sha" <<'PY' || fail "retirement receipt is dishonest"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert len(rows) == 1, rows
+row = rows[0]
+assert row["kind"] == "plan-retirement", row
+assert row["plan_sha256"] == sys.argv[2], row
+assert row["disposition"] == "completed-external", row
+assert row["acceptance_verified"] is True, row
+assert row["task_landings_claimed"] is False, row
+assert row["acceptance"]["plan_sha256"] == sys.argv[2], row
+PY
+  python3 - "$project/.oms/plan/progress.jsonl" "$receipt" <<'PY' || fail "retire reused a stale or truncated acceptance proof"
+import json, re, sys
+acceptance = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+retirement = json.loads(open(sys.argv[2], encoding="utf-8").readline())
+assert len(acceptance) == 2, acceptance
+assert "retire_proof_id" not in acceptance[0], acceptance[0]
+fresh = acceptance[1]
+assert fresh["retire_proof_id"] == retirement["proof_id"], (fresh, retirement)
+for key in ("plan_sha256", "accept_sha256_full", "output_sha256_full", "repo_snapshot_sha256"):
+    assert re.fullmatch(r"[0-9a-f]{64}", fresh[key]), (key, fresh)
+assert retirement["acceptance"]["accept_sha256"] == fresh["accept_sha256_full"], retirement
+assert retirement["acceptance"]["output_sha256"] == fresh["output_sha256_full"], retirement
+PY
+  if "$plan" --repo "$project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition completed-external \
+      --reason "a different replay reason" >/dev/null 2>&1; then
+    fail "retire replay accepted a reason mismatch"
+  fi
+  if "$plan" --repo "$project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "verified outside the plan" >/dev/null 2>&1; then
+    fail "retire replay accepted a disposition mismatch"
+  fi
+  [ "$(wc -l < "$receipt" | tr -d ' ')" = 1 ] &&
+    cmp -s "$TMP/agent-plan-retire.original" "$archive" ||
+    fail "mismatched replay overwrote retirement authority"
+
+  # Identical bytes under a different generation are ambiguous, not proof of
+  # a new lineage. Replay fails closed and leaves that live leaf untouched.
+  cp "$TMP/agent-plan-retire.original" "$plan_file"
+  if "$plan" --repo "$project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" \
+      --disposition completed-external --reason "verified outside the plan" \
+      >/dev/null 2>&1; then
+    fail "old retirement replay treated an ambiguous same-byte lineage as new"
+  fi
+  cmp -s "$TMP/agent-plan-retire.original" "$plan_file" ||
+    fail "old retirement replay changed a new live plan"
+  [ "$(wc -l < "$receipt" | tr -d ' ')" = 1 ] ||
+    fail "retire replay duplicated its typed receipt"
+  mv "$plan_file" "$TMP/agent-plan-retire.recreated"
+
+  "$ROOT/scripts/state.sh" --repo "$project" --json > "$project/state.json"
+  "$ROOT/scripts/runtime.sh" --repo "$project" envelope show > "$project/runtime.json"
+  "$ROOT/scripts/inbox.sh" --repo "$project" --json > "$project/inbox.json"
+  python3 - "$project/state.json" "$project/runtime.json" "$project/inbox.json" <<'PY' || fail "retired plan remained active in a typed projection"
+import json, sys
+state, runtime, inbox = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+assert state["plan"]["present"] is False, state["plan"]
+assert state["plan"]["latest_retirement"]["disposition"] == "completed-external", state["plan"]
+assert not runtime["plan"]["present"], runtime["plan"]
+assert runtime["plan"]["latest_retirement"]["disposition"] == "completed-external", runtime["plan"]
+assert all(a.get("id") != "execute_ready_task" for a in runtime["next_actions"]), runtime["next_actions"]
+assert all(a.get("id") != "execute_ready_task" for a in inbox["recommended_actions"]), inbox
+PY
+  "$ROOT/scripts/state-verify.sh" --repo "$project" --json >/dev/null ||
+    fail "state-verify rejected an intact retirement archive/receipt"
+  cp "$archive" "$TMP/agent-plan-retire.archive-good"
+  printf 'tamper\n' >> "$archive"
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'plan-retirement' ||
+    fail "state-verify did not fail closed on a corrupt retirement archive: $out"
+  cp "$TMP/agent-plan-retire.archive-good" "$archive"
+  duplicate="$(tail -n 1 "$receipt")"
+  printf '%s\n' "$duplicate" >> "$receipt"
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'duplicate retirement receipts' ||
+    fail "state-verify did not reject duplicate plan retirement authority: $out"
+
+  # Active authority always wins, even for a non-verifying disposition.
+  for state in claimed running review landing; do
+    active_project="$TMP/agent-plan-retire-active-$state"
+    make_committed_repo "$active_project"
+    "$plan" --repo "$active_project" init --goal active --accept true >/dev/null
+    "$plan" --repo "$active_project" add --id t1 --title active >/dev/null
+    python3 - "$active_project/.oms/plan/tasks.json" "$state" <<'PY'
+import json, sys
+path, state = sys.argv[1:]
+row = json.load(open(path, encoding="utf-8"))
+task = row["tasks"]["t1"]
+task["state"] = state
+task["lease_id"] = "lease_" + "1" * 32
+task["review_lease_id"] = task["lease_id"] if state in ("review", "landing") else ""
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, ensure_ascii=False, indent=2)
+PY
+    plan_sha="$(python3 - "$active_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+    if "$plan" --repo "$active_project" retire --apply \
+        --expected-plan-sha256 "$plan_sha" --disposition superseded \
+        --reason "a new reviewed contract replaced the old plan" >/dev/null 2>&1; then
+      fail "retire accepted active task state $state"
+    fi
+    [ -e "$active_project/.oms/plan/tasks.json" ] ||
+      fail "retire removed an active $state plan"
+  done
+
+  # A live worker marker coupled to a ready task is still authority. A stale
+  # state label must not let retirement erase that worker's plan.
+  make_committed_repo "$marker_project"
+  "$plan" --repo "$marker_project" init --goal marker --accept true >/dev/null
+  "$plan" --repo "$marker_project" add --id t1 --title marker >/dev/null
+  mkdir -p "$marker_project/.oms/delegations"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    native_pid="$(oms_process_native_pid "$$")"
+    native_source="$(oms_process_native_pid_source)"
+    printf '{"schema":4,"id":"live","pid":%s,"native_pid":%s,"native_pid_source":"%s","task_id":"t1","lease_id":"","executor_id":""}\n' \
+      "$$" "$native_pid" "$native_source" > "$marker_project/.oms/delegations/live.json"
+  )
+  plan_sha="$(python3 - "$marker_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  rc=0
+  out="$("$plan" --repo "$marker_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
+  if [ "$rc" = 0 ]; then
+    fail "retire ignored a live task worker marker"
+  fi
+  printf '%s\n' "$out" | grep -Fq 'live worker marker prevents retirement' ||
+    fail "typed-live marker fixture hit the wrong veto path: $out"
+  printf '{"schema":99,"id":"future","pid":%s,"task_id":"t1","lease_id":"","executor_id":""}\n' \
+    "$$" > "$marker_project/.oms/delegations/live.json"
+  rc=0
+  out="$("$plan" --repo "$marker_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+    fail "future/unproven matching marker did not fail closed: $out"
+
+  python3 - "$marker_project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["tasks"]["t1"]["state"] = "done"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+PY
+  plan_sha="$(python3 - "$marker_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    native_pid="$(oms_process_native_pid "$$")"
+    native_source="$(oms_process_native_pid_source)"
+    printf '{"schema":4,"id":"duplicate","pid":%s,"native_pid":%s,"native_pid_source":"%s","task_id":"t1","task_id":"unrelated","lease_id":"","executor_id":""}\n' \
+      "$$" "$native_pid" "$native_source" > "$marker_project/.oms/delegations/live.json"
+  )
+  rc=0
+  out="$("$plan" --repo "$marker_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+    fail "duplicate task_id marker collapsed past the malformed veto: $out"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    native_pid="$(oms_process_native_pid "$$")"
+    native_source="$(oms_process_native_pid_source)"
+    printf '{"schema":4,"id":"nonfinite","pid":%s,"native_pid":%s,"native_pid_source":"%s","task_id":"t1","lease_id":"","executor_id":"","ignored":NaN}\n' \
+      "$$" "$native_pid" "$native_source" > "$marker_project/.oms/delegations/live.json"
+  )
+  rc=0
+  out="$("$plan" --repo "$marker_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+    fail "non-finite marker bypassed the malformed veto: $out"
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    native_pid="$(oms_process_native_pid "$$")"
+    native_source="$(oms_process_native_pid_source)"
+    printf '{"schema":4,"id":"overflow","pid":%s,"native_pid":%s,"native_pid_source":"%s","task_id":"t1","lease_id":"","executor_id":"","ignored":1e9999}\n' \
+      "$$" "$native_pid" "$native_source" > "$marker_project/.oms/delegations/live.json"
+  )
+  rc=0
+  out="$("$plan" --repo "$marker_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+    fail "overflowed float marker bypassed the malformed veto: $out"
+
+  # Superseded retirement is allowed only after every old task is done. It is
+  # archival, never verification, and its receipt makes that negative claim.
+  make_committed_repo "$superseded_project"
+  "$plan" --repo "$superseded_project" init --goal superseded --accept false >/dev/null
+  "$plan" --repo "$superseded_project" add --id t1 --title superseded >/dev/null
+  plan_sha="$(python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  if "$plan" --repo "$superseded_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a new reviewed contract replaced the old plan" >/dev/null 2>&1; then
+    fail "superseded retirement accepted an unfinished old plan"
+  fi
+  python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["tasks"]["t1"]["state"] = "done"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, ensure_ascii=False, indent=2)
+PY
+  plan_sha="$(python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$superseded_project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition superseded \
+    --reason "a new reviewed contract replaced the old plan" >/dev/null
+  python3 - "$superseded_project/.oms/plan/retirements.jsonl" <<'PY' || fail "superseded retirement claimed completion evidence"
+import json, sys
+row = json.loads(open(sys.argv[1], encoding="utf-8").readline())
+assert row["disposition"] == "superseded", row
+assert row["acceptance_verified"] is False, row
+assert row["task_landings_claimed"] is False, row
+assert "acceptance" not in row, row
+PY
+}
+
+test_agent_plan_retire_recovers_receipt_before_unlink() {
+  local project="$TMP/agent-plan-retire-crash"
+  local different_project="$TMP/agent-plan-retire-crash-new-live"
+  local claim_project="$TMP/agent-plan-retire-crash-claim"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_file plan_sha receipt reason different_sha rc out
+  local authority_before authority_after custom_file
+  local alias_repo hold_ready hold_release lock_pid alias_rc tries
+
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal "old completed contract" --accept false >/dev/null
+  "$plan" --repo "$project" add --id t1 --title completed >/dev/null
+  python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["tasks"]["t1"]["state"] = "done"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+PY
+  plan_file="$project/.oms/plan/tasks.json"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  reason="a reviewed PROJECT.md contract superseded this completed plan"
+
+  # Exercise the real transaction without a production fault hook: import the
+  # focused helper, let it durably write intent/archive/receipt, then replace
+  # only its process-local os.unlink for the exact live leaf. This models a
+  # process dying in the receipt-before-unlink window.
+  python3 - "$ROOT/scripts/lib/plan-retire.py" \
+    "$ROOT/scripts/lib/durable-jsonl.py" "$project" "$plan_file" \
+    "$plan_sha" "$reason" <<'PY' || fail "could not construct the receipt-before-unlink crash state"
+import contextlib, io, json, os, re, runpy, sys
+
+helper, durable, repo, plan, plan_sha, reason = sys.argv[1:]
+module = runpy.run_path(helper)
+run = module["run"]
+context = {
+    "path": plan, "ts": "2026-08-24T00:00:00Z",
+    "states": {"ready", "claimed", "running", "review", "landing", "blocked", "done"},
+    "id_re": re.compile(r"^[A-Za-z0-9._-]+$"),
+    "die": lambda message: (_ for _ in ()).throw(RuntimeError(message)),
+    "load_worker_markers": lambda: [],
+    "worker_marker_is_typed": lambda marker: True,
+    "marker_pid_alive": lambda marker: False,
+    "durable_jsonl": durable,
+}
+os.environ.update({
+    "OMS_REPO": repo, "OMS_PLAN_FILE": plan, "OMS_EXPECTED_PLAN_SHA256": plan_sha,
+    "OMS_DISPOSITION": "superseded", "OMS_REASON": reason,
+    "OMS_RETIRE_PHASE": "preflight",
+})
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    run(context)
+preflight = json.loads(output.getvalue())
+os.environ.update({
+    "OMS_RETIRE_PHASE": "finalize",
+    "OMS_RETIRE_EXPECTED_HEAD": preflight["head"],
+    "OMS_RETIRE_EXPECTED_REF": preflight["git_ref"],
+    "OMS_RETIRE_EXPECTED_GENERATION": json.dumps(
+        preflight["plan_generation"], sort_keys=True, separators=(",", ":")),
+    "OMS_RETIRE_PROOF_ID": preflight["proof_id"],
+})
+real_unlink = module["os"].unlink
+def crash_at_live_unlink(path):
+    if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(plan)):
+        raise OSError("simulated process death before live unlink")
+    return real_unlink(path)
+module["os"].unlink = crash_at_live_unlink
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        run(context)
+except OSError as exc:
+    assert "simulated process death" in str(exc), exc
+else:
+    raise AssertionError("retirement unexpectedly reached live unlink")
+finally:
+    module["os"].unlink = real_unlink
+PY
+
+  receipt="$project/.oms/plan/retirements.jsonl"
+  [ -e "$plan_file" ] || fail "crash fixture lost the still-live exact generation"
+  [ -e "$project/.oms/plan/tasks.$plan_sha.archive.json" ] ||
+    fail "archive was not durable before the crash"
+  [ -e "$project/.oms/plan/tasks.$plan_sha.retire-intent.json" ] ||
+    fail "intent was not durable before the crash"
+  [ "$(wc -l < "$receipt" | tr -d ' ')" = 1 ] ||
+    fail "crash fixture did not persist exactly one receipt"
+  authority_before="$(python3 - "$plan_file" \
+    "$project/.oms/plan/tasks.$plan_sha.retire-intent.json" "$receipt" <<'PY' | tr -d '\r'
+import hashlib, sys
+digest = hashlib.sha256()
+for path in sys.argv[1:]:
+    digest.update(open(path, "rb").read())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+)"
+  custom_file="$project/.oms/custom-plan/tasks.json"
+  "$plan" --repo "$project" --file "$custom_file" init \
+    --goal custom --accept false >/dev/null
+  authority_after="$(python3 - "$plan_file" \
+    "$project/.oms/plan/tasks.$plan_sha.retire-intent.json" "$receipt" <<'PY' | tr -d '\r'
+import hashlib, sys
+digest = hashlib.sha256()
+for path in sys.argv[1:]:
+    digest.update(open(path, "rb").read())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+)"
+  [ "$authority_before" = "$authority_after" ] && [ -e "$custom_file" ] ||
+    fail "custom --file topology mutation touched canonical retirement authority"
+  alias_repo="$TMP/agent-plan-retire-canonical-alias"
+  if ln -s "$project" "$alias_repo" 2>/dev/null && [ -L "$alias_repo" ]; then
+    hold_ready="$TMP/agent-plan-retire-lock-ready"
+    hold_release="$TMP/agent-plan-retire-lock-release"
+    (
+      . "$ROOT/scripts/lib/file-lock.sh"
+      oms_with_file_lock "$project/.oms/plan/tasks.json" sh -c '
+        : > "$1"
+        while [ ! -e "$2" ]; do sleep 0.05; done
+      ' lock-holder "$hold_ready" "$hold_release"
+    ) &
+    lock_pid=$!
+    tries=0
+    while [ ! -e "$hold_ready" ] && [ "$tries" -lt 100 ]; do
+      sleep 0.05
+      tries=$((tries + 1))
+    done
+    alias_rc=0
+    OMS_LOCK_TIMEOUT=1 "$plan" --repo "$alias_repo" \
+      --file "$alias_repo/.oms/plan/tasks.json" status >/dev/null 2>&1 || alias_rc=$?
+    : > "$hold_release"
+    wait "$lock_pid"
+    [ "$alias_rc" = 75 ] ||
+      fail "canonical and ancestry-alias plan paths used different lock keys: rc=$alias_rc"
+  fi
+
+  cp -R "$project" "$claim_project"
+  python3 - "$claim_project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["tasks"]["t1"]["state"] = "ready"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+PY
+  different_sha="$(python3 - "$claim_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  if "$plan" --repo "$claim_project" claim --id t1 --provider codex \
+      >/dev/null 2>&1; then
+    fail "ordinary claim mutated a lineage with a residual retirement intent"
+  fi
+  [ "$(python3 - "$claim_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)" = "$different_sha" ] || fail "failed residual-intent claim changed the plan"
+  if "$plan" --repo "$claim_project" next --claim --provider codex \
+      >/dev/null 2>&1; then
+    fail "next --claim bypassed the residual retirement guard"
+  fi
+  [ "$(python3 - "$claim_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)" = "$different_sha" ] || fail "failed residual-intent next --claim changed the plan"
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$claim_project" --json 2>&1)" || rc=$?
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'active plan lineage conflicts' ||
+    fail "state-verify trusted a mutated retired plan lineage: $out"
+  if "$plan" --repo "$claim_project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "$reason" >/dev/null 2>&1; then
+    fail "retire replay cleaned an intent from a mutated same-lineage plan"
+  fi
+  [ -e "$claim_project/.oms/plan/tasks.$plan_sha.retire-intent.json" ] &&
+    [ "$(python3 - "$claim_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)" = "$different_sha" ] || fail "same-lineage replay changed retirement authority"
+
+  cp -R "$project" "$different_project"
+  python3 - "$different_project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["goal"] = "a newly created, different live plan"
+row["plan_id"] = "plan_" + "2" * 32
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, ensure_ascii=False, indent=2)
+PY
+  different_sha="$(python3 - "$different_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  [ "$different_sha" != "$plan_sha" ] || fail "new-live crash fixture did not change plan bytes"
+  "$plan" --repo "$different_project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition superseded \
+    --reason "$reason" >/dev/null
+  [ "$(python3 - "$different_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)" = "$different_sha" ] || fail "old replay changed a different new live plan"
+  [ ! -e "$different_project/.oms/plan/tasks.$plan_sha.retire-intent.json" ] ||
+    fail "already-retired new-live replay left its exact residual intent"
+  [ "$(wc -l < "$different_project/.oms/plan/retirements.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "new-live replay duplicated its old retirement receipt"
+
+  "$plan" --repo "$project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition superseded \
+    --reason "$reason" >/dev/null
+  [ ! -e "$plan_file" ] || fail "replay did not unlink the exact intent-fenced generation"
+  [ ! -e "$project/.oms/plan/tasks.$plan_sha.retire-intent.json" ] ||
+    fail "replay did not clear the completed retirement intent"
+  [ "$(wc -l < "$receipt" | tr -d ' ')" = 1 ] ||
+    fail "receipt-before-unlink replay duplicated its receipt"
+}
+
+test_agent_plan_retire_recovers_intent_archive_before_receipt() {
+  local project="$TMP/agent-plan-retire-archive-crash"
+  local duplicate_project="$TMP/agent-plan-retire-archive-crash-duplicate-intent"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_file plan_sha reason out rc
+
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal "old completed contract" --accept false >/dev/null
+  plan_file="$project/.oms/plan/tasks.json"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  reason="a reviewed PROJECT.md contract superseded this completed plan"
+  python3 - "$ROOT/scripts/lib/plan-retire.py" \
+    "$ROOT/scripts/lib/durable-jsonl.py" "$project" "$plan_file" \
+    "$plan_sha" "$reason" <<'PY' || fail "could not construct the archive-before-receipt crash state"
+import contextlib, io, json, os, re, runpy, sys
+
+helper, durable, repo, plan, plan_sha, reason = sys.argv[1:]
+module = runpy.run_path(helper)
+run = module["run"]
+context = {
+    "path": plan, "ts": "2026-08-24T00:00:00Z",
+    "states": {"ready", "claimed", "running", "review", "landing", "blocked", "done"},
+    "id_re": re.compile(r"^[A-Za-z0-9._-]+$"),
+    "die": lambda message: (_ for _ in ()).throw(RuntimeError(message)),
+    "load_worker_markers": lambda: [],
+    "worker_marker_is_typed": lambda marker: True,
+    "marker_pid_alive": lambda marker: False,
+    "durable_jsonl": durable,
+}
+os.environ.update({
+    "OMS_REPO": repo, "OMS_PLAN_FILE": plan, "OMS_EXPECTED_PLAN_SHA256": plan_sha,
+    "OMS_DISPOSITION": "superseded", "OMS_REASON": reason,
+    "OMS_RETIRE_PHASE": "preflight",
+})
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    run(context)
+preflight = json.loads(output.getvalue())
+os.environ.update({
+    "OMS_RETIRE_PHASE": "finalize",
+    "OMS_RETIRE_EXPECTED_HEAD": preflight["head"],
+    "OMS_RETIRE_EXPECTED_REF": preflight["git_ref"],
+    "OMS_RETIRE_EXPECTED_GENERATION": json.dumps(
+        preflight["plan_generation"], sort_keys=True, separators=(",", ":")),
+    "OMS_RETIRE_PROOF_ID": preflight["proof_id"],
+})
+globals_ = run.__globals__
+real_append = globals_["append_receipt"]
+def crash_before_receipt(filename, row):
+    raise OSError("simulated process death before receipt append")
+globals_["append_receipt"] = crash_before_receipt
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        run(context)
+except OSError as exc:
+    assert "simulated process death" in str(exc), exc
+else:
+    raise AssertionError("retirement unexpectedly appended its receipt")
+finally:
+    globals_["append_receipt"] = real_append
+PY
+
+  [ -e "$plan_file" ] || fail "archive crash fixture lost its live generation"
+  [ -e "$project/.oms/plan/tasks.$plan_sha.retire-intent.json" ] ||
+    fail "archive crash fixture lacks its intent"
+  [ -e "$project/.oms/plan/tasks.$plan_sha.archive.json" ] ||
+    fail "archive crash fixture lacks its durable archive"
+  [ ! -e "$project/.oms/plan/retirements.jsonl" ] ||
+    fail "archive crash fixture unexpectedly appended a receipt"
+  cp -R "$project" "$duplicate_project"
+  python3 - "$duplicate_project/.oms/plan/tasks.$plan_sha.retire-intent.json" <<'PY'
+import sys
+path = sys.argv[1]
+payload = open(path, "rb").read()
+assert payload.startswith(b"{") and payload.endswith(b"\n"), payload
+with open(path, "wb") as handle:
+    handle.write(b'{"reason":"collapsed duplicate",' + payload[1:])
+PY
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$duplicate_project" --json 2>&1)" || rc=$?
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'duplicate JSON key' ||
+    fail "state-verify did not reject a duplicate-key retirement intent: $out"
+  rc=0
+  out="$("$plan" --repo "$duplicate_project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition superseded \
+    --reason "$reason" 2>&1)" || rc=$?
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'duplicate JSON key' ||
+    fail "retire replay trusted a duplicate-key intent: $out"
+  [ -e "$duplicate_project/.oms/plan/tasks.json" ] &&
+    [ ! -e "$duplicate_project/.oms/plan/retirements.jsonl" ] ||
+    fail "duplicate-key intent replay mutated retirement authority"
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'retirement intent(s) remain incomplete' ||
+    fail "state-verify did not expose the interrupted retirement intent: $out"
+  "$plan" --repo "$project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition superseded \
+    --reason "$reason" >/dev/null
+  [ ! -e "$plan_file" ] &&
+    [ ! -e "$project/.oms/plan/tasks.$plan_sha.retire-intent.json" ] &&
+    [ "$(wc -l < "$project/.oms/plan/retirements.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "intent/archive-only replay did not finish exactly once"
+}
+
+test_agent_plan_retire_refuses_occupied_authority_leaves() {
+  local archive_project="$TMP/agent-plan-retire-archive-link"
+  local receipt_project="$TMP/agent-plan-retire-receipt-link"
+  local outside="$TMP/agent-plan-retire-outside"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_sha
+
+  make_committed_repo "$archive_project"
+  "$plan" --repo "$archive_project" init --goal old --accept false >/dev/null
+  plan_sha="$(python3 - "$archive_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  printf 'outside archive sentinel\n' > "$outside"
+  if ln -s "$outside" "$archive_project/.oms/plan/tasks.$plan_sha.archive.json" 2>/dev/null &&
+      [ -L "$archive_project/.oms/plan/tasks.$plan_sha.archive.json" ]; then
+    if "$plan" --repo "$archive_project" retire --apply \
+        --expected-plan-sha256 "$plan_sha" --disposition superseded \
+        --reason "a reviewed PROJECT.md contract superseded this completed plan" \
+        >/dev/null 2>&1; then
+      fail "retire followed an occupied symlink archive leaf"
+    fi
+    grep -Fq 'outside archive sentinel' "$outside" ||
+      fail "archive refusal changed the symlink target"
+    [ -e "$archive_project/.oms/plan/tasks.json" ] ||
+      fail "archive leaf attack removed the active plan"
+  fi
+
+  make_committed_repo "$receipt_project"
+  "$plan" --repo "$receipt_project" init --goal old --accept false >/dev/null
+  plan_sha="$(python3 - "$receipt_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  if ln -s "$outside" "$receipt_project/.oms/plan/retirements.jsonl" 2>/dev/null &&
+      [ -L "$receipt_project/.oms/plan/retirements.jsonl" ]; then
+    if "$plan" --repo "$receipt_project" retire --apply \
+        --expected-plan-sha256 "$plan_sha" --disposition superseded \
+        --reason "a reviewed PROJECT.md contract superseded this completed plan" \
+        >/dev/null 2>&1; then
+      fail "retire followed an occupied symlink receipt leaf"
+    fi
+    grep -Fq 'outside archive sentinel' "$outside" ||
+      fail "receipt refusal changed the symlink target"
+    [ -e "$receipt_project/.oms/plan/tasks.json" ] ||
+      fail "receipt leaf attack removed the active plan"
+  fi
+}
+
+test_agent_plan_retirement_proof_is_cross_linked() {
+  local project="$TMP/agent-plan-retire-proof-bind"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_sha reason variant out rc
+
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal external --accept true >/dev/null
+  "$plan" --repo "$project" add --id t1 --title external >/dev/null
+  plan_sha="$(python3 - "$project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  reason="equivalent implementation is committed on this HEAD"
+  "$plan" --repo "$project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition completed-external \
+    --reason "$reason" >/dev/null
+
+  for variant in missing duplicate mismatch zero archive-state; do
+    cp -R "$project" "$TMP/agent-plan-retire-proof-$variant"
+  done
+
+  python3 - "$TMP/agent-plan-retire-proof-missing/.oms/plan" <<'PY'
+import json, os, sys
+parent = sys.argv[1]
+receipt = json.loads(open(os.path.join(parent, "retirements.jsonl"), encoding="utf-8").readline())
+path = os.path.join(parent, "progress.jsonl")
+rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+rows = [row for row in rows if row.get("retire_proof_id") != receipt["proof_id"]]
+with open(path, "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+  python3 - "$TMP/agent-plan-retire-proof-duplicate/.oms/plan" <<'PY'
+import json, os, sys
+parent = sys.argv[1]
+receipt = json.loads(open(os.path.join(parent, "retirements.jsonl"), encoding="utf-8").readline())
+path = os.path.join(parent, "progress.jsonl")
+rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+match = [row for row in rows if row.get("retire_proof_id") == receipt["proof_id"]][0]
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(match, sort_keys=True) + "\n")
+PY
+  python3 - "$TMP/agent-plan-retire-proof-mismatch/.oms/plan/progress.jsonl" <<'PY'
+import json, sys
+path = sys.argv[1]
+rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+for row in rows:
+    if row.get("retire_proof_id"):
+        row["output_sha256_full"] = "1" * 64
+with open(path, "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+  python3 - "$TMP/agent-plan-retire-proof-zero/.oms/plan/retirements.jsonl" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.loads(open(path, encoding="utf-8").readline())
+row["acceptance"]["output_sha256"] = "0" * 64
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+  python3 - "$TMP/agent-plan-retire-proof-archive-state/.oms/plan/retirements.jsonl" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.loads(open(path, encoding="utf-8").readline())
+row["disposition"] = "superseded"
+row["reason"] = "a reviewed replacement contract superseded this plan"
+row["acceptance_verified"] = False
+row.pop("acceptance", None)
+row["task_states"] = {"done": 1}
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+
+  for variant in missing duplicate mismatch zero archive-state; do
+    rc=0
+    out="$("$ROOT/scripts/state-verify.sh" \
+      --repo "$TMP/agent-plan-retire-proof-$variant" --json 2>&1)" || rc=$?
+    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'plan-retirement' ||
+      fail "state-verify trusted $variant retirement proof corruption: $out"
+  done
+
+  if "$plan" --repo "$TMP/agent-plan-retire-proof-zero" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition completed-external \
+      --reason "$reason" >/dev/null 2>&1; then
+    fail "retire replay trusted a receipt whose full acceptance hash was corrupted"
+  fi
+  if "$plan" --repo "$TMP/agent-plan-retire-proof-archive-state" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a reviewed replacement contract superseded this plan" >/dev/null 2>&1; then
+    fail "retire replay trusted superseded task states that contradicted the archive"
+  fi
+}
+
+test_agent_plan_retirement_ledger_parser_is_strict() {
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local variant project plan_sha ledger before after diagnostic out rc
+
+  for variant in bare-cr nonfinite overflow oversize junk partial blank nul; do
+    project="$TMP/agent-plan-retire-ledger-$variant"
+    make_committed_repo "$project"
+    "$plan" --repo "$project" init --goal old --accept false >/dev/null
+    "$plan" --repo "$project" add --id t1 --title old >/dev/null
+    python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["tasks"]["t1"]["state"] = "done"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+PY
+    plan_sha="$(python3 - "$project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+    ledger="$project/.oms/plan/retirements.jsonl"
+    python3 - "$ledger" "$variant" <<'PY'
+import sys
+path, variant = sys.argv[1:]
+payloads = {
+    "bare-cr": b'{"junk":1}\r{"junk":2}\n',
+    "nonfinite": b'{"schema":NaN}\n',
+    "overflow": b'{"schema":1e9999}\n',
+    "junk": b'{"junk":1}\n',
+    "partial": b'{"junk":1}',
+    "blank": b'\n',
+    "nul": b'{"junk":"\x00"}\n',
+}
+payload = payloads.get(variant)
+if payload is None:
+    payload = b'{"padding":"' + b'a' * (1024 * 1024) + b'"}\n'
+with open(path, "wb") as handle:
+    handle.write(payload)
+PY
+    case "$variant" in
+      bare-cr) diagnostic="bare CR" ;;
+      nonfinite) diagnostic="non-finite" ;;
+      overflow) diagnostic="non-finite" ;;
+      oversize) diagnostic="exceeds 1048576" ;;
+      junk) diagnostic="unexpected or missing" ;;
+      partial) diagnostic="terminal LF" ;;
+      blank) diagnostic="blank" ;;
+      nul) diagnostic="NUL" ;;
+    esac
+    before="$(python3 - "$ledger" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+    rc=0
+    out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
+    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq "$diagnostic" ||
+      fail "state-verify accepted or misclassified $variant retirement JSONL: $out"
+    rc=0
+    out="$("$plan" --repo "$project" retire --apply \
+      --expected-plan-sha256 "$plan_sha" --disposition superseded \
+      --reason "a reviewed replacement contract superseded this plan" 2>&1)" || rc=$?
+    [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq "$diagnostic" ||
+      fail "retire mutation accepted or misclassified $variant retirement JSONL: $out"
+    after="$(python3 - "$ledger" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+    [ "$before" = "$after" ] && [ -e "$project/.oms/plan/tasks.json" ] &&
+      [ ! -e "$project/.oms/plan/tasks.$plan_sha.archive.json" ] ||
+      fail "$variant retirement JSONL failure mutated plan authority"
+  done
+}
+
+test_agent_plan_retire_completed_external_supports_detached_head() {
+  local project="$TMP/agent-plan-retire-detached"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_sha head out rc
+
+  make_committed_repo "$project"
+  git -C "$project" checkout --detach HEAD >/dev/null 2>&1
+  "$plan" --repo "$project" init --goal detached --accept true >/dev/null
+  "$plan" --repo "$project" add --id t1 --title detached >/dev/null
+  plan_sha="$(python3 - "$project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  head="$(git -C "$project" rev-parse HEAD | tr -d '\r')"
+  rc=0
+  out="$("$plan" --repo "$project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition completed-external \
+    --reason "equivalent implementation is committed on detached HEAD" 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || fail "detached completed-external retirement failed: $out"
+  printf '%s\n' "$out" | grep -Fq 'Traceback' &&
+    fail "detached retirement leaked a Python traceback: $out"
+  [ ! -e "$project/.oms/plan/tasks.json" ] ||
+    fail "detached completed-external retirement left its plan active"
+  if ! python3 - "$project/.oms/plan/retirements.jsonl" "DETACHED@$head" <<'PY'
+import json, sys
+row = json.loads(open(sys.argv[1], encoding="utf-8").readline())
+assert row["git_ref"] == sys.argv[2], row
+assert row["acceptance"]["git_ref"] == sys.argv[2], row
+PY
+  then
+    fail "detached retirement receipt did not bind its HEAD sentinel"
+  fi
+}
+
+test_agent_plan_apply_proposal_cleans_completed_retirement_intent() {
+  local project="$TMP/agent-plan-retire-topology-recovery"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_sha proposal proposal_sha intent
+
+  make_committed_repo "$project"
+  printf '# PROJECT.md\n\n## Status\n\n- State: active\n' > "$project/PROJECT.md"
+  git -C "$project" add PROJECT.md
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' \
+    commit -m spec >/dev/null
+  "$plan" --repo "$project" init --goal old --accept false >/dev/null
+  plan_sha="$(python3 - "$project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$project" retire --apply \
+    --expected-plan-sha256 "$plan_sha" --disposition superseded \
+    --reason "a reviewed replacement contract superseded this plan" >/dev/null
+  intent="$project/.oms/plan/tasks.$plan_sha.retire-intent.json"
+  python3 - "$project/.oms/plan/retirements.jsonl" "$intent" <<'PY'
+import json, sys
+receipt = json.loads(open(sys.argv[1], encoding="utf-8").readline())
+row = {
+    "schema": 1, "kind": "plan-retirement-intent",
+    "plan_sha256": receipt["plan_sha256"],
+    "disposition": receipt["disposition"], "reason": receipt["reason"],
+    "head": receipt["head"], "git_ref": receipt["git_ref"],
+    "plan_generation": receipt["plan_generation"],
+    "proof_id": receipt["proof_id"], "archive": receipt["archive"],
+}
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+  proposal="$project/proposal.json"
+  python3 - "$project" "$proposal" <<'PY'
+import hashlib, json, subprocess, sys
+repo, path = sys.argv[1:]
+spec = open(repo + "/PROJECT.md", "rb").read()
+head = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"]).decode().strip()
+row = {
+    "schema": 1, "kind": "agent-plan-proposal",
+    "spec_sha256": hashlib.sha256(spec).hexdigest(),
+    "plan_sha256": "absent", "base_sha": head, "id_prefix": "",
+    "allowed_envelope": ["."], "acceptance_files": [],
+    "tasks": [{"id": "new", "title": "new contract", "allowed": ["."],
+               "verify": "true", "depends": []}],
+}
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+  proposal_sha="$(python3 - "$proposal" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$project" apply-proposal --proposal "$proposal" \
+    --expected-proposal-sha256 "$proposal_sha" --expected-plan-sha256 absent \
+    --goal "new contract" --accept true --allowed-envelope . >/dev/null
+  [ ! -e "$intent" ] && [ -e "$project/.oms/plan/tasks.json" ] &&
+    [ "$(wc -l < "$project/.oms/plan/retirements.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "topology apply did not finish the completed retirement before creating a new plan"
+  "$ROOT/scripts/state-verify.sh" --repo "$project" --json >/dev/null ||
+    fail "completed retirement cleanup left state verification broken"
+}
+
 test_delegate_task_id_lineage() {
   local d="$TMP/delegate-lineage"
   local idx

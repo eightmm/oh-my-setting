@@ -267,6 +267,28 @@ update. Frozen patch creation enters the validated physical directory, uses
 relative writes, and atomically replaces the final leaf without following a
 directory symlink; a changed absolute lookup parks before consumption.
 
+An active plan that became stale after equivalent work landed elsewhere is
+removed through `oms agent-plan retire`, never by inventing task transitions.
+The default command is a no-write check that returns the exact plan SHA-256.
+Apply is parent-only and requires that SHA, a disposition, and a reason. For
+`completed-external`, the command itself runs a fresh acceptance on one clean
+committed HEAD and binds full plan/acceptance/output hashes, ref, file
+generation, and a unique proof token. `superseded` is limited to all-done old
+plans and explicitly claims no verification. Both preserve the exact bytes in
+one disposition-independent content-addressed archive and append a typed
+receipt before unlinking the exact live generation. Claimed, running, review,
+landing, malformed/unproven markers, or a live task marker veto retirement.
+Authority JSONL is strict LF/CRLF-delimited finite JSON with bounded rows, and
+every receipt is cross-linked to its archive and, when claimed, its unique
+acceptance row. Replaying the same operation completes an interrupted unlink;
+a different nonempty plan lineage is untouched, while same/ambiguous lineage
+fails closed. Canonical plan mutations also veto that same-lineage residual.
+After unlink already completed, `init`/reviewed proposal apply may remove the
+validated intent before creating a new plan. `state` and runtime expose the
+latest receipt as display context; `state-verify` is the trust surface that
+rejects malformed/duplicate receipts, proof or task-state contradictions,
+residual intents, and active/retired lineage conflicts.
+
 `oms autopilot` is an agent-side control plane: the end user states the goal and
 authority while the top-level parent performs every transition below. It
 proposes an initial plan for parent review, atomically applies only that exact

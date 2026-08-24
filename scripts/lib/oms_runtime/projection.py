@@ -66,11 +66,27 @@ def _task_list(raw: Any) -> List[Dict[str, Any]]:
         return rows
     return [dict(item) for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
+def _latest_plan_retirement(repo: Path) -> Tuple[Dict[str, Any], Any]:
+    path = repo / '.oms' / 'plan' / 'retirements.jsonl'
+    rows = [row for row in read_jsonl(path)
+            if row.get('schema') == 1 and row.get('kind') == 'plan-retirement']
+    if not rows:
+        return {}, None
+    row = rows[-1]
+    return ({key: row.get(key) for key in (
+        'ts', 'retirement_id', 'plan_sha256', 'plan_id', 'disposition',
+        'reason', 'head', 'git_ref', 'archive', 'acceptance_verified',
+        'task_landings_claimed') if row.get(key) not in (None, '')},
+        source_descriptor(path, repo))
+
 def _plan_state(repo: Path) -> Dict[str, Any]:
     path = repo / '.oms' / 'plan' / 'tasks.json'
     raw = read_json(path, default=None)
     if raw is None:
-        return {'present': False, 'source': None, 'tasks': [], 'counts': {}, 'scope': {'allowed': [], 'forbidden': []}}
+        retirement, source = _latest_plan_retirement(repo)
+        return {'present': False, 'source': source, 'tasks': [], 'counts': {},
+                'latest_retirement': retirement,
+                'scope': {'allowed': [], 'forbidden': []}}
     if not isinstance(raw, dict):
         raise CoreError('plan state must be a JSON object: %s' % path)
     raw_plan_id = raw.get('plan_id', '')

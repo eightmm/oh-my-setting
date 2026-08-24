@@ -1148,16 +1148,12 @@ PY
 # a superseded contract has to leave, and leaving means preserved: the bytes go
 # next to the receipts they belong with, content-addressed, never deleted.
 archive_superseded_plan() {
-  local plan_digest target
+  local plan_digest
   [ -f "$PLAN_FILE" ] || return 0
   plan_digest="$(oms_sha256_file "$PLAN_FILE")" || return 1
-  target="$(dirname "$PLAN_FILE")/tasks.$plan_digest.superseded.json"
-  if [ -e "$target" ]; then
-    rm -f "$PLAN_FILE" || return 1
-  else
-    mv "$PLAN_FILE" "$target" || return 1
-  fi
-  printf 'autopilot: superseded plan preserved at %s\n' "$target"
+  "$ROOT/scripts/agent-plan.sh" --repo "$REPO" retire --apply \
+    --expected-plan-sha256 "$plan_digest" --disposition superseded \
+    --reason "a reviewed PROJECT.md contract superseded this completed plan"
 }
 
 BOUND_SPEC_SHA=""

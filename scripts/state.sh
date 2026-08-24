@@ -314,6 +314,17 @@ if os.path.isfile(pf):
             # Actionable: ready with all deps done.
             if st == "ready" and all(d in done_ids for d in t.get("depends", [])):
                 plan["actionable"].append(i)
+retirements = [row for row in read_jsonl(oms("plan", "retirements.jsonl"))
+               if row.get("schema") == 1 and row.get("kind") == "plan-retirement"]
+if retirements:
+    latest = retirements[-1]
+    plan["latest_retirement"] = {
+        key: latest.get(key) for key in (
+            "ts", "retirement_id", "plan_sha256", "plan_id", "disposition",
+            "reason", "head", "git_ref", "archive", "acceptance_verified",
+            "task_landings_claimed"
+        ) if latest.get(key) not in (None, "")
+    }
 state["plan"] = plan
 
 # --- Experiment board: active + stale (replay last-wins) --------------------
@@ -851,6 +862,11 @@ else:
                  % ", ".join(s["id"] for s in p["stale_review"]))
     else:
         line("\n## Plan: none")
+        if p.get("latest_retirement"):
+            retired = p["latest_retirement"]
+            line("  latest retired: %s %s" % (
+                retired.get("disposition", "?"),
+                str(retired.get("plan_sha256", ""))[:12] or "?"))
 
     b = state["board"]
     if b["present"]:

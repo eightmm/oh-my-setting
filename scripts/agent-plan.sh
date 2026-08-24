@@ -67,6 +67,9 @@ OWNER_ID="${OMS_AUTOPILOT_OWNER_ID:-}"
 MARKERS_DIR=""
 EXPECTED_STATE=""
 CHECK_ONLY=0
+APPLY=0
+DISPOSITION=""
+RETIRE_PHASE="${OMS_PLAN_RETIRE_PHASE:-}"
 
 usage() {
   cat <<'EOF'
@@ -79,6 +82,18 @@ Commands:
   ensure-lineage                     Parent-only, idempotently mint the
                                      immutable plan_id for a legacy plan before
                                      plan-scoped evidence is produced.
+  retire [--check]                   Inspect whether the exact active plan can
+                                     be retired; default is read-only and prints
+                                     its SHA-256 CAS token.
+         --apply --expected-plan-sha256 SHA256
+         --disposition completed-external|superseded --reason TEXT
+                                     Preserve the exact plan bytes in a
+                                     content-addressed archive and append a
+                                     typed retirement receipt. Active worker
+                                     authority vetoes every disposition.
+                                     completed-external runs a fresh acceptance
+                                     against one clean committed HEAD; the
+                                     other dispositions never claim completion.
   apply-proposal --proposal FILE --expected-proposal-sha256 SHA256
          --expected-plan-sha256 absent|SHA256
          [--goal TEXT --accept CMD] --allowed-envelope "p1,p2"
@@ -243,6 +258,8 @@ while [ "$#" -gt 0 ]; do
     --markers-dir) [ "$#" -ge 2 ] || fail "--markers-dir requires a path"; MARKERS_DIR="$2"; shift 2 ;;
     --expected-state) [ "$#" -ge 2 ] || fail "--expected-state requires a value"; EXPECTED_STATE="$2"; shift 2 ;;
     --check) CHECK_ONLY=1; shift ;;
+    --apply) APPLY=1; shift ;;
+    --disposition) [ "$#" -ge 2 ] || fail "--disposition requires a value"; DISPOSITION="$2"; shift 2 ;;
     --proposal) [ "$#" -ge 2 ] || fail "--proposal requires a file"; PROPOSAL="$2"; shift 2 ;;
     --expected-proposal-sha256)
       [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a value"
@@ -264,18 +281,21 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|ensure-lineage|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify)
+    init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
-[ "$CHECK_ONLY" = 0 ] || [ "$ACTION" = recover-lease ] ||
-  fail "--check is valid only with recover-lease"
+[ "$CHECK_ONLY" = 0 ] || [ "$ACTION" = recover-lease ] || [ "$ACTION" = retire ] ||
+  fail "--check is valid only with recover-lease or retire"
+[ "$APPLY" = 0 ] || [ "$ACTION" = retire ] || fail "--apply is valid only with retire"
+[ "$APPLY" = 0 ] || [ "$CHECK_ONLY" = 0 ] || fail "retire --apply and --check are mutually exclusive"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository"
 PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
+PLAN_LOCK_FILE=""
 if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
     fail "unknown provider: use codex, claude, or antigravity (agy)"
@@ -319,7 +339,7 @@ if [ "$ACTION" = lint-verify ]; then
 fi
 
 case "$ACTION" in
-  init|apply-proposal|add)
+  init|retire|apply-proposal|add)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
       fail "$ACTION is parent-only; a harness child cannot change plan topology"
     ;;
@@ -351,6 +371,38 @@ if [ -n "$GOAL$ACCEPT" ]; then
     fail "goal/acceptance text looks sensitive; pass credentials via environment, not command text"
   fi
   rm -f "$scan"
+fi
+
+if [ "$ACTION" = retire ]; then
+  [ -z "$PLAN_FILE" ] || [ "$PLAN_FILE" = "$REPO/.oms/plan/tasks.json" ] ||
+    fail "retire is valid only for the canonical repo-local plan"
+  case "$DISPOSITION" in
+    ""|completed-external|superseded) ;;
+    *) fail "--disposition must be completed-external or superseded" ;;
+  esac
+  if [ "$APPLY" = 1 ]; then
+    case "$EXPECTED_PLAN_SHA256" in
+      *[!0-9a-f]*|"") fail "retire --apply requires a lowercase --expected-plan-sha256" ;;
+    esac
+    [ "${#EXPECTED_PLAN_SHA256}" -eq 64 ] ||
+      fail "--expected-plan-sha256 must be a lowercase SHA-256"
+    [ -n "$DISPOSITION" ] || fail "retire --apply requires --disposition"
+    [ -n "$REASON" ] || fail "retire --apply requires --reason"
+  fi
+  [ "${#REASON}" -le 500 ] || fail "retirement reason exceeds 500 characters"
+  if [ -n "$REASON" ]; then
+    scan="$(mktemp)" || fail "mktemp failed"
+    printf '%s\n' "$REASON" > "$scan"
+    if agent_memory_file_has_secret_content "$scan"; then
+      rm -f "$scan"
+      fail "retirement reason looks sensitive; keep credentials and machine paths out of shared state"
+    fi
+    rm -f "$scan"
+  fi
+  oms_git_assert_safe_execution_config "$REPO" ||
+    fail "unsafe executable Git config is active"
+  oms_git_assert_plain_index "$REPO" ||
+    fail "hidden Git index flags are active"
 fi
 
 if [ "$ACTION" = apply-proposal ]; then
@@ -413,14 +465,16 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_EXPECTED_PLAN_SHA256="$EXPECTED_PLAN_SHA256" \
   OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}" \
   OMS_ACCEPT_FILES="$ACCEPT_FILES" OMS_EXPECTED_STATE="$EXPECTED_STATE" \
-  OMS_CHECK_ONLY="$CHECK_ONLY"
+  OMS_CHECK_ONLY="$CHECK_ONLY" OMS_APPLY="$APPLY" \
+  OMS_DISPOSITION="$DISPOSITION" OMS_RETIRE_PHASE="$RETIRE_PHASE"
 export OMS_AUTOPILOT_OWNER_ID="$OWNER_ID" OMS_PLAN_MARKERS_DIR="$PY_MARKERS_DIR"
 
 plan_run() {
 python3 - "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
   "$ROOT/scripts/lib/verify-floor-lint.py" \
-  "$ROOT/scripts/lib/process_liveness.py" <<'PY'
-import datetime, hashlib, json, os, re, runpy, secrets, stat, subprocess, sys, tempfile, unicodedata
+  "$ROOT/scripts/lib/process_liveness.py" \
+  "$ROOT/scripts/lib/plan-retire.py" <<'PY'
+import datetime, hashlib, json, math, os, re, runpy, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
 path = os.environ["OMS_PLAN_FILE"]
@@ -569,6 +623,30 @@ def clear_claim(t):
 def same_absolute_path(left, right):
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
+def is_reparse(info):
+    attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(info, "st_file_attributes", 0) & attribute)
+
+def reject_marker_constant(value):
+    raise ValueError("non-finite JSON value: %s" % value)
+
+def reject_marker_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key: %s" % key)
+        value[key] = item
+    return value
+
+def marker_json_is_finite(value):
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(marker_json_is_finite(item) for item in value.values())
+    if isinstance(value, list):
+        return all(marker_json_is_finite(item) for item in value)
+    return True
+
 def worker_marker_dir():
     repo_root = os.path.realpath(env("OMS_REPO"))
     expected = os.path.join(repo_root, ".oms", "delegations")
@@ -587,7 +665,7 @@ def load_worker_markers():
         marker_dir_info = os.lstat(marker_dir)
     except OSError as exc:
         die("cannot inspect worker marker directory: %s" % exc)
-    if (not stat.S_ISDIR(marker_dir_info.st_mode) or
+    if (not stat.S_ISDIR(marker_dir_info.st_mode) or is_reparse(marker_dir_info) or
             not same_absolute_path(os.path.realpath(marker_dir), expected)):
         die("worker marker directory must be a real repo-local directory")
     entries = []
@@ -607,7 +685,8 @@ def load_worker_markers():
             before = os.lstat(entry.path)
         except OSError as exc:
             die("cannot inspect worker marker %s: %s" % (entry.name, exc))
-        if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024:
+        if (not stat.S_ISREG(before.st_mode) or is_reparse(before) or
+                before.st_size > 64 * 1024):
             die("worker marker %s is not a bounded regular file" % entry.name)
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -617,7 +696,7 @@ def load_worker_markers():
             die("cannot open worker marker %s safely: %s" % (entry.name, exc))
         try:
             opened = os.fstat(descriptor)
-            if (not stat.S_ISREG(opened.st_mode) or
+            if (not stat.S_ISREG(opened.st_mode) or is_reparse(opened) or
                     (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
                 die("worker marker %s changed while opening" % entry.name)
             payload = os.read(descriptor, 64 * 1024 + 1)
@@ -626,11 +705,15 @@ def load_worker_markers():
         finally:
             os.close(descriptor)
         try:
-            marker = json.loads(payload.decode("utf-8"))
+            marker = json.loads(
+                payload.decode("utf-8"),
+                parse_constant=reject_marker_constant,
+                object_pairs_hook=reject_marker_duplicate_keys,
+            )
         except (UnicodeError, ValueError):
-            die("worker marker %s is malformed" % entry.name)
-        if not isinstance(marker, dict):
-            die("worker marker %s is malformed" % entry.name)
+            die("worker marker %s is malformed or unproven" % entry.name)
+        if not isinstance(marker, dict) or not marker_json_is_finite(marker):
+            die("worker marker %s is malformed or unproven" % entry.name)
         markers.append(marker)
     return markers
 
@@ -748,6 +831,31 @@ def brief_text(t):
     if t.get("role"):
         lines.append("role: %s" % t["role"])
     return "\n".join(lines)
+
+read_only_actions = {"show", "evidence-snapshot", "list", "ready", "status", "next", "brief"}
+needs_retirement_guard = act not in read_only_actions
+if act == "next" and env("OMS_CLAIM") == "1":
+    needs_retirement_guard = True
+if act in {"recover-lease", "recover-owner"} and env("OMS_CHECK_ONLY") == "1":
+    needs_retirement_guard = False
+canonical_plan = os.path.join(os.path.realpath(env("OMS_REPO")), ".oms", "plan", "tasks.json")
+if not same_absolute_path(path, canonical_plan):
+    needs_retirement_guard = False
+if needs_retirement_guard:
+    retirement = runpy.run_path(sys.argv[5])
+    retirement_context = {
+        "path": path, "ts": ts, "states": STATES, "id_re": ID_RE,
+        "die": die, "load_worker_markers": load_worker_markers,
+        "worker_marker_is_typed": worker_marker_is_typed,
+        "marker_pid_alive": marker_pid_alive,
+        "durable_jsonl": os.path.join(os.path.dirname(sys.argv[5]), "durable-jsonl.py"),
+    }
+    if act == "retire":
+        retirement["run"](retirement_context)
+        sys.exit(0)
+    retirement["cleanup_completed_retirement"](retirement_context)
+if act == "accept":
+    sys.exit(0)
 
 d = load()
 tasks = d["tasks"]
@@ -1578,6 +1686,84 @@ die("unhandled action: %s" % act)
 PY
 }
 
+# Retirement judges the worker-marker set and plan bytes as one authority
+# snapshot. Preserve the global lock order used by lease recovery so marker
+# publication can never race between the liveness check and the plan CAS.
+plan_run_with_plan_lock() {
+  local parent base physical_parent
+  if [ -z "$PLAN_LOCK_FILE" ]; then
+    parent="$(dirname "$PLAN_FILE")"
+    base="$(basename "$PLAN_FILE")"
+    physical_parent="$(cd "$parent" 2>/dev/null && pwd -P)" ||
+      fail "cannot resolve the physical plan lock parent"
+    physical_parent="$(printf '%s' "$physical_parent" | tr -d '\r')"
+    PLAN_LOCK_FILE="$physical_parent/$base"
+  fi
+  oms_with_file_lock "$PLAN_LOCK_FILE" plan_run
+}
+plan_run_with_marker_and_plan_locks() {
+  oms_with_file_lock "$REPO/.oms/delegations/.marker-set-lock-target" \
+    plan_run_with_plan_lock
+}
+
+if [ "$ACTION" = retire ]; then
+  if [ "$APPLY" = 0 ]; then
+    OMS_RETIRE_PHASE=check
+    export OMS_RETIRE_PHASE
+    plan_run_with_marker_and_plan_locks
+    exit $?
+  fi
+
+  OMS_RETIRE_PHASE=preflight
+  export OMS_RETIRE_PHASE
+  retire_meta="$(plan_run_with_marker_and_plan_locks)" || exit $?
+  retire_field() {  # JSON KEY
+    printf '%s\n' "$retire_meta" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+value = row.get(sys.argv[1])
+if sys.argv[1] == "plan_generation":
+    print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+elif isinstance(value, bool):
+    print("1" if value else "0")
+elif value is not None:
+    print(value)
+' "$1" | tr -d '\r'
+  }
+  retire_status="$(retire_field status)" || fail "retirement preflight returned invalid JSON"
+  if [ "$retire_status" = already-retired ]; then
+    printf '%s\n' "$retire_meta"
+    exit 0
+  fi
+  retire_head="$(retire_field head)" || fail "retirement preflight omitted HEAD"
+  retire_ref="$(retire_field git_ref)" || fail "retirement preflight omitted ref"
+  retire_generation="$(retire_field plan_generation)" ||
+    fail "retirement preflight omitted plan generation"
+  retire_proof="$(retire_field proof_id)" || fail "retirement preflight omitted proof token"
+  retire_resume="$(retire_field resume)" || fail "retirement preflight omitted resume state"
+  [ -n "$retire_head$retire_ref$retire_generation$retire_proof" ] ||
+    fail "retirement preflight is incomplete"
+
+  if [ "$DISPOSITION" = completed-external ] && [ "$retire_resume" != 1 ]; then
+    OMS_PLAN_ACCEPT_PROOF_ID="$retire_proof" \
+    OMS_PLAN_ACCEPT_EXPECTED_PLAN_SHA="$EXPECTED_PLAN_SHA256" \
+    OMS_PLAN_ACCEPT_EXPECTED_HEAD="$retire_head" \
+    OMS_PLAN_ACCEPT_EXPECTED_REF="$retire_ref" \
+    OMS_PLAN_ACCEPT_GENERATION="$retire_generation" \
+      "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept
+  fi
+
+  OMS_RETIRE_PHASE=finalize
+  OMS_RETIRE_EXPECTED_HEAD="$retire_head"
+  OMS_RETIRE_EXPECTED_REF="$retire_ref"
+  OMS_RETIRE_EXPECTED_GENERATION="$retire_generation"
+  OMS_RETIRE_PROOF_ID="$retire_proof"
+  export OMS_RETIRE_PHASE OMS_RETIRE_EXPECTED_HEAD OMS_RETIRE_EXPECTED_REF \
+    OMS_RETIRE_EXPECTED_GENERATION OMS_RETIRE_PROOF_ID
+  plan_run_with_marker_and_plan_locks
+  exit $?
+fi
+
 # Keep the plan dir out of git like the rest of .oms state. Acceptance is
 # read-only until its final receipt, so validate its existing authority files
 # before any mkdir/ignore helper could follow a planted state-directory link.
@@ -1603,7 +1789,7 @@ if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISREG(target_info.st_mode):
     raise SystemExit(2)
 PY
     fail "acceptance requires a safe repo-local plan file"
-else
+elif [ "$ACTION" != retire ]; then
   mkdir -p "$(dirname "$PLAN_FILE")"
   agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
 fi
@@ -1614,6 +1800,10 @@ fi
 # repo root, and appends one receipt row — the executable answer to "is the
 # goal actually met", which no per-task verify can give.
 if [ "$ACTION" = "accept" ]; then
+  # Hold the plan lock only for the residual-retirement guard. The arbitrary
+  # acceptance command still runs outside it, and retirement's exact context
+  # fence catches any plan change after this short admission check.
+  plan_run_with_plan_lock >/dev/null
   [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; run: agent-plan init --goal ... --accept CMD"
   progress="$(dirname "$PLAN_FILE")/progress.jsonl"
   python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl check "$progress" ||
@@ -1727,6 +1917,7 @@ digest = hashlib.sha256()
 git_env = os.environ.copy()
 git_env["GIT_CONFIG_GLOBAL"] = os.devnull
 git_env["GIT_CONFIG_SYSTEM"] = os.devnull
+git_env["GIT_OPTIONAL_LOCKS"] = "0"
 
 def command(argv):
     value = subprocess.check_output(
@@ -1739,8 +1930,25 @@ def command(argv):
     digest.update(b"\0")
     return value
 
-command(["git", "-C", repo, "symbolic-ref", "-q", "HEAD"])
-command(["git", "-C", repo, "rev-parse", "HEAD"])
+head = subprocess.check_output(
+    ["git", "-C", repo, "rev-parse", "HEAD"],
+    stderr=subprocess.DEVNULL, env=git_env)
+symbolic = subprocess.run(
+    ["git", "-C", repo, "symbolic-ref", "-q", "HEAD"],
+    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_env,
+    check=False)
+if symbolic.returncode == 0:
+    git_ref = symbolic.stdout.strip()
+elif symbolic.returncode == 1:
+    git_ref = b"DETACHED@" + head.strip()
+else:
+    raise SystemExit(2)
+for value in (git_ref, head):
+    total += len(value)
+    if total > limit:
+        raise SystemExit(2)
+    digest.update(value)
+    digest.update(b"\0")
 command(["git", "-C", repo, "ls-files", "--stage", "-z"])
 command(["git", "-c", "core.fsmonitor=false", "-c", "diff.external=",
          "-C", repo, "diff", "--no-ext-diff", "--no-textconv",
@@ -1780,6 +1988,11 @@ PY
     exit 2
   }
 
+  retire_accept_context_matches() {
+    python3 "$ROOT/scripts/lib/plan-retire.py" accept-context \
+      "$PY_REPO" "$PY_PLAN_FILE"
+  }
+
   command -v oms_git_assert_safe_execution_config >/dev/null 2>&1 ||
     fail "installed Git execution guard is unavailable"
   command -v oms_git_assert_plain_index >/dev/null 2>&1 ||
@@ -1802,6 +2015,21 @@ PY
   [ "$plan_before" = "$accept_plan_sha" ] ||
     acceptance_integrity_error acceptance-command-changed \
       "the plan changed between reading its acceptance command and freezing it"
+  retire_proof="${OMS_PLAN_ACCEPT_PROOF_ID:-}"
+  if [ -n "$retire_proof" ]; then
+    case "$retire_proof" in
+      *[!0-9a-f]*|"")
+        acceptance_integrity_error acceptance-retire-context-changed \
+          "retirement acceptance proof token is malformed"
+        ;;
+    esac
+    [ "${#retire_proof}" -eq 64 ] ||
+      acceptance_integrity_error acceptance-retire-context-changed \
+        "retirement acceptance proof token is malformed"
+    retire_accept_context_matches ||
+      acceptance_integrity_error acceptance-retire-context-changed \
+        "plan, HEAD, ref, generation, or clean status changed before retirement acceptance"
+  fi
 
   timeout_value="${OMS_PLAN_ACCEPT_TIMEOUT:-10m}"
   timeout_seconds="$(python3 - "$timeout_value" <<'PY' | tr -d '\r'
@@ -1904,6 +2132,8 @@ PY
     integrity_reason=acceptance-files-changed
   elif [ -z "$repo_after" ] || [ "$repo_after" != "$repo_before" ]; then
     integrity_reason=acceptance-mutated-repository
+  elif [ -n "$retire_proof" ] && ! retire_accept_context_matches; then
+    integrity_reason=acceptance-retire-context-changed
   elif [ "$runner_exit" -ne "$accept_exit" ] || \
       [ "$accept_launch_error" = 1 ] || [ "$accept_supervision_error" = 1 ]; then
     integrity_reason=acceptance-supervision-failed
@@ -1917,11 +2147,17 @@ PY
   # run_id/cycle are set by goal-drive so one run's rows correlate; manual
   # invocations leave them empty. The row is the goal-run protocol record:
   # enough to answer which command, on which tree, in which cycle, and why.
+  git_ref="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null || true)"
+  git_ref="${git_ref//$'\r'/}"
+  [ -n "$git_ref" ] || git_ref="DETACHED@$base_sha"
   OMS_PA_TS="$ts" OMS_PA_SHA="$base_sha" OMS_PA_VERDICT="$verdict" \
     OMS_PA_EXIT="$accept_exit" OMS_PA_DIGEST="$out_digest" OMS_PA_DUR="$duration" \
     OMS_PA_ACCEPT="$accept_digest" OMS_PA_RUN="${OMS_GOAL_RUN_ID:-}" \
     OMS_PA_CYCLE="${OMS_GOAL_CYCLE:-}" OMS_PA_REASON="$integrity_reason" \
     OMS_PA_TIMEOUT="$accept_timed_out" OMS_PA_LIMITED="$accept_output_limited" \
+    OMS_PA_PLAN="$plan_before" OMS_PA_REF="$git_ref" OMS_PA_REPO="$repo_before" \
+    OMS_PA_RETIRE_PROOF="$retire_proof" \
+    OMS_PA_RETIRE_GENERATION="${OMS_PLAN_ACCEPT_GENERATION:-}" \
     python3 -c '
 import json, os
 row = {
@@ -1934,9 +2170,18 @@ row = {
     "reason": os.environ.get("OMS_PA_REASON", ""),
     "timed_out": os.environ.get("OMS_PA_TIMEOUT") == "1",
     "output_limited": os.environ.get("OMS_PA_LIMITED") == "1",
+    "plan_sha256": os.environ["OMS_PA_PLAN"],
+    "git_ref": os.environ["OMS_PA_REF"],
+    "accept_sha256_full": os.environ["OMS_PA_ACCEPT"],
+    "output_sha256_full": os.environ["OMS_PA_DIGEST"],
+    "repo_snapshot_sha256": os.environ["OMS_PA_REPO"],
 }
 if os.environ.get("OMS_PA_RUN"): row["run_id"] = os.environ["OMS_PA_RUN"]
 if os.environ.get("OMS_PA_CYCLE"): row["cycle"] = int(os.environ["OMS_PA_CYCLE"])
+if os.environ.get("OMS_PA_RETIRE_PROOF"):
+    row["retire_proof_id"] = os.environ["OMS_PA_RETIRE_PROOF"]
+    row["plan_generation"] = json.loads(os.environ["OMS_PA_RETIRE_GENERATION"])
+    row["git_clean"] = True
 print(json.dumps(row, ensure_ascii=False))
 ' | python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl append "$progress" || {
     rm -f "$out_tmp"
@@ -1994,13 +2239,9 @@ fi
 # Serialize the read-decide-write section against other agents. Recovery also
 # freezes worker-marker publication while it judges liveness, in the global
 # marker set -> plan order. Ordinary plan transitions never nest these locks.
-plan_run_with_plan_lock() {
-  oms_with_file_lock "$PLAN_FILE" plan_run
-}
 case "$ACTION" in
   recover-lease|recover-owner)
-    oms_with_file_lock "$REPO/.oms/delegations/.marker-set-lock-target" \
-      plan_run_with_plan_lock
+    plan_run_with_marker_and_plan_locks
     ;;
   *) plan_run_with_plan_lock ;;
 esac

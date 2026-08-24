@@ -920,10 +920,65 @@ JSON
     > "$superseded_repo/superseded.out" 2>&1 || rc=$?
   ! grep -Fq 'only the single r1- remainder' "$superseded_repo/superseded.out" ||
     fail "a superseded plan blocked this contract's first tranche: $(tail -5 "$superseded_repo/superseded.out")"
-  [ -f "$superseded_repo/.oms/plan/tasks.$superseded_digest.superseded.json" ] ||
+  [ -f "$superseded_repo/.oms/plan/tasks.$superseded_digest.archive.json" ] ||
     fail "the superseded plan must be preserved, not deleted: $(ls "$superseded_repo/.oms/plan")"
+  grep -Fq '"acceptance_verified": false' \
+    "$superseded_repo/.oms/plan/retirements.jsonl" ||
+    fail "superseded retirement must not claim goal verification"
   grep -Fq -- '--apply' "$superseded_repo/calls/plan-from-spec" ||
     fail "the reviewed proposal never reached apply: $(tail -3 "$superseded_repo/superseded.out")"
+
+  # If the typed retirement died after unlinking the old live plan but before
+  # removing its intent, the next reviewed apply must finish that exact
+  # completed transaction before it creates the replacement plan.
+  local residual_repo="$TMP/superseded-plan-residual"
+  local residual_digest residual_intent residual_proposal residual_sha
+  make_repo "$residual_repo"
+  mkdir -p "$residual_repo/calls" "$residual_repo/.oms/plan"
+  printf '{"schema":3,"goal":"a previous contract","accept":"false","tasks":{}}\n' \
+    > "$residual_repo/.oms/plan/tasks.json"
+  residual_digest="$(sha256_file "$residual_repo/.oms/plan/tasks.json")"
+  "$ROOT/scripts/agent-plan.sh" --repo "$residual_repo" retire --apply \
+    --expected-plan-sha256 "$residual_digest" --disposition superseded \
+    --reason "a reviewed PROJECT.md contract superseded this completed plan" >/dev/null
+  residual_intent="$residual_repo/.oms/plan/tasks.$residual_digest.retire-intent.json"
+  python3 - "$residual_repo/.oms/plan/retirements.jsonl" "$residual_intent" <<'PY'
+import json, sys
+receipt = json.loads(open(sys.argv[1], encoding="utf-8").readline())
+row = {
+    "schema": 1, "kind": "plan-retirement-intent",
+    "plan_sha256": receipt["plan_sha256"],
+    "disposition": receipt["disposition"], "reason": receipt["reason"],
+    "head": receipt["head"], "git_ref": receipt["git_ref"],
+    "plan_generation": receipt["plan_generation"],
+    "proof_id": receipt["proof_id"], "archive": receipt["archive"],
+}
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+  residual_proposal="$residual_repo/proposal-initial.json"
+  write_proposal "$residual_proposal"
+  mv "$residual_proposal" "$residual_repo/.oms/plan/proposal-initial.json"
+  residual_proposal="$residual_repo/.oms/plan/proposal-initial.json"
+  residual_sha="$(sha256_file "$residual_proposal")"
+  rc=0
+  OMS_T_REPO="$residual_repo" OMS_T_CALLS="$residual_repo/calls" \
+    OMS_T_GOAL_RESULT=success \
+    OMS_AUTOPILOT_GOAL_DRIVE="$TMP/bin/goal-drive" \
+    OMS_AUTOPILOT_PLAN_FROM_SPEC="$ROOT/scripts/plan-from-spec.sh" \
+    OMS_AUTOPILOT_PEER_REVIEW="$TMP/bin/peer-review" \
+    OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
+    "$ROOT/scripts/autopilot.sh" --repo "$residual_repo" run \
+      --planner claude --worker codex --allowed 'src,tests' --base main \
+      --proposal "$residual_proposal" --expected-proposal-sha256 "$residual_sha" \
+      > "$residual_repo/residual.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] ||
+    fail "autopilot did not recover a completed retirement before retry: $(tail -8 "$residual_repo/residual.out")"
+  [ ! -e "$residual_intent" ] && [ -e "$residual_repo/.oms/plan/tasks.json" ] &&
+    [ "$(wc -l < "$residual_repo/.oms/plan/retirements.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "autopilot retry left residual retirement state or lost the new plan"
+  "$ROOT/scripts/state-verify.sh" --repo "$residual_repo" --json >/dev/null ||
+    fail "autopilot completed-retirement recovery did not restore verified state"
 
   # Planner failure is a parked/error result, never a fake approval boundary.
   local planner_repo="$TMP/planner-failure"

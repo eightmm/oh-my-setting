@@ -107,7 +107,8 @@ OMS_SV_LIFECYCLE_EXIT="$LIFECYCLE_EXIT" OMS_SV_APPROVAL_EXIT="$APPROVAL_EXIT" \
 OMS_SV_TASK_STATUS_EXIT="$TASK_STATUS_EXIT" \
 OMS_SV_JOURNAL_STATUS_EXIT="$JOURNAL_STATUS_EXIT" \
 OMS_SV_RUNTIME_EXIT="$RUNTIME_EXIT" \
-python3 - "$ROOT/scripts/lib/process_liveness.py" <<'PY'
+python3 - "$ROOT/scripts/lib/process_liveness.py" \
+  "$ROOT/scripts/lib/plan-retire.py" <<'PY'
 import glob
 import json
 import os
@@ -120,6 +121,14 @@ process_pid_alive = process_liveness["pid_alive"]
 persisted_native_pid_is_proven = process_liveness[
     "persisted_native_pid_is_proven"
 ]
+retirement_module = runpy.run_path(sys.argv[2])
+retirement_ledger_validator = retirement_module["validate_retirement_state"]
+retirement_intent_reader = retirement_module["read_single_jsonl_object"]
+
+def retirement_validation_die(message):
+    raise ValueError(message)
+
+retirement_ledger_validator.__globals__["CONTEXT"] = {"die": retirement_validation_die}
 
 repo = os.environ["OMS_SV_REPO"]
 tmp = os.environ["OMS_SV_TMP"]
@@ -215,6 +224,36 @@ else:
     if task_verification == "stale":
         finding("warn", "runtime-core", "active task verification is stale against the current tree",
                 "oms agent-task --repo %s verify" % repo)
+
+# --- plan retirement: archive/receipt are the durable truth after unlink ---
+retirement_file = os.path.join(oms, "plan", "retirements.jsonl")
+retirement_errors = []
+
+def retirement_error(message):
+    retirement_errors.append(message)
+
+if os.path.lexists(retirement_file):
+    try:
+        retirement_ledger_validator(repo, retirement_file)
+    except (OSError, TypeError, ValueError, SystemExit) as exc:
+        retirement_error(str(exc))
+
+residual_intents = glob.glob(os.path.join(oms, "plan", "tasks.*.retire-intent.json"))
+if residual_intents:
+    for intent_path in residual_intents:
+        try:
+            retirement_intent_reader(intent_path, "plan retirement intent")
+        except (OSError, TypeError, ValueError, SystemExit) as exc:
+            retirement_error("residual retirement intent is invalid: %s" % exc)
+    retirement_error("%d retirement intent(s) remain incomplete" % len(residual_intents))
+
+if retirement_errors:
+    finding(
+        "fail", "plan-retirement",
+        "%d retirement integrity error(s): %s" % (
+            len(retirement_errors), "; ".join(retirement_errors[:3])),
+        "replay the exact oms agent-plan retire --apply command or restore the archive/receipt, then oms state-verify --repo %s" % repo,
+    )
 
 # --- task packet: contradictions the status command tolerates ---
 task = load_json("task.json")
