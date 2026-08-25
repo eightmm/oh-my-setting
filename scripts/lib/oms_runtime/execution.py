@@ -25,10 +25,27 @@ def describe(profile: str) -> Dict[str, Any]:
         return {'profile': profile, 'declared': {'transport': 'external-adapter', 'isolation': 'external-adapter', 'wall_clock': True}, 'enforced': {'wall_clock': True}, 'unknown': ['remote authentication', 'remote filesystem', 'remote network', 'remote cleanup'], 'warning': 'Isolation claims are adapter attestations, not locally enforced facts.'}
     raise CoreError('unsupported execution profile: %s' % profile)
 
+def _resolve_executable(value: str) -> str:
+    if not value:
+        return ''
+    has_separator = os.sep in value or bool(os.altsep and os.altsep in value)
+    if not has_separator:
+        return shutil.which(value) or ''
+    candidate = os.path.abspath(value)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return ''
+
 def _container_engine() -> str:
+    """Resolve one engine for compatibility preflight and runtime execution."""
+    requested = (os.environ.get('OMS_CONTAINER_ENGINE', '') or
+                 os.environ.get('OMS_DOCKER_BIN', ''))
+    if requested:
+        return _resolve_executable(requested)
     return shutil.which('docker') or shutil.which('podman') or ''
 
-def check(profile: str, *, image: str='', adapter: str='') -> Dict[str, Any]:
+def check(profile: str, *, image: str='', adapter: str='',
+          _include_resolved_paths: bool=False) -> Dict[str, Any]:
     image = image or os.environ.get('OMS_ISOLATED_IMAGE', '')
     adapter = adapter or os.environ.get('OMS_REMOTE_ADAPTER', '')
     base = describe(profile)
@@ -42,6 +59,8 @@ def check(profile: str, *, image: str='', adapter: str='') -> Dict[str, Any]:
             missing.append('image')
         if engine:
             details['engine'] = Path(engine).name
+            if _include_resolved_paths:
+                details['engine_path'] = os.path.realpath(engine)
             try:
                 info = subprocess.run([engine, 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=20)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -64,11 +83,13 @@ def check(profile: str, *, image: str='', adapter: str='') -> Dict[str, Any]:
                         if inspect.returncode != 0:
                             missing.append('local-image')
     elif profile == 'remote':
-        resolved = shutil.which(adapter) if adapter and os.sep not in adapter else adapter
-        if not resolved or not os.path.isfile(resolved) or (not os.access(resolved, os.X_OK)):
+        resolved = _resolve_executable(adapter)
+        if not resolved:
             missing.append('remote-adapter')
         else:
             details['adapter'] = os.path.basename(resolved)
+            if _include_resolved_paths:
+                details['adapter_path'] = os.path.realpath(resolved)
     return dict(base, ready=not missing, missing=sorted(set(missing)), details=details)
 
 def _safe_env(inherit_names: Sequence[str], *, include_home: bool) -> Dict[str, str]:
@@ -165,7 +186,8 @@ def run(profile: str, repo: Path, command: Sequence[str], *, timeout_seconds: in
     command_text = ' '.join((str(item) for item in command))
     if SECRET_VALUE_RE.search(command_text):
         raise CoreError('command contains sensitive-looking creden' + 'tial material')
-    readiness = check(profile, image=image, adapter=adapter)
+    readiness = check(profile, image=image, adapter=adapter,
+                      _include_resolved_paths=True)
     if not readiness['ready']:
         raise CoreError('execution backend is not ready: %s' % ', '.join(readiness['missing']), exit_code=3)
     raw_cwd = worktree or repo
@@ -187,7 +209,7 @@ def run(profile: str, repo: Path, command: Sequence[str], *, timeout_seconds: in
         effective = list(command)
         popen_cwd: Optional[str] = str(cwd)
     elif profile == 'isolated':
-        engine = _container_engine()
+        engine = str(readiness.get('details', {}).get('engine_path', ''))
         if not engine or not image:
             # Never fall back to trusted-local silently: an unavailable
             # backend is an unavailable capability, reported as such.
@@ -197,7 +219,7 @@ def run(profile: str, repo: Path, command: Sequence[str], *, timeout_seconds: in
         popen_cwd = None
         env = _container_cli_env()
     else:
-        resolved = shutil.which(adapter) if os.sep not in adapter else adapter
+        resolved = str(readiness.get('details', {}).get('adapter_path', ''))
         effective = [str(resolved)]
         popen_cwd = None
         from .evidence import build_envelope

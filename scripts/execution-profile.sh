@@ -2,7 +2,9 @@
 set -euo pipefail
 
 # Describe and validate execution boundaries. This command performs probes only:
-# it never installs Docker, pulls images, connects to a remote, or launches work.
+# it never installs an engine, pulls images, connects to a remote, or launches work.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 ACTION=""
 PROFILE=""
@@ -10,7 +12,6 @@ REPO="${OMS_STATE_REPO:-$PWD}"
 AS_JSON=0
 IMAGE="${OMS_ISOLATED_IMAGE:-}"
 REMOTE_ADAPTER="${OMS_REMOTE_ADAPTER:-}"
-DOCKER_BIN="${OMS_DOCKER_BIN:-docker}"
 
 usage() {
   cat <<'EOF'
@@ -31,8 +32,9 @@ Options:
 Profiles:
   trusted-local  Runs as the current host user with inherited filesystem,
                  credentials, and network access. It provides no sandbox.
-  isolated       Requires a working Docker client and daemon plus an explicit
-                 image. This command never installs Docker or pulls the image.
+  isolated       Requires a working Docker- or Podman-compatible engine plus
+                 an explicit image. This command never installs an engine or
+                 pulls the image.
   remote         Requires an explicit executable adapter. The adapter owns
                  authentication, transport, isolation, and remote cleanup.
 EOF
@@ -85,7 +87,7 @@ profile_description() {
     trusted-local)
       printf '%s\n' 'Runs directly as the current host user. Filesystem, credentials, processes, and network are inherited; this is not a sandbox.' ;;
     isolated)
-      printf '%s\n' 'Runs through an explicitly configured Docker image. Docker installation, image pulling, mounts, credentials, and network policy remain operator-owned.' ;;
+      printf '%s\n' 'Runs through an explicitly configured container image. Engine installation, image pulling, mounts, credentials, and network policy remain operator-owned.' ;;
     remote)
       printf '%s\n' 'Runs through an external executable adapter. That adapter owns authentication, transport, remote isolation, cancellation, and cleanup.' ;;
   esac
@@ -154,7 +156,7 @@ if [ "$ACTION" = describe ]; then
     printf 'description: %s\n' "$(profile_description)"
     case "$PROFILE" in
       trusted-local) printf 'requirements: bash, git, python3\n' ;;
-      isolated) printf 'requirements: bash, git, python3, Docker client and daemon, a local --image or OMS_ISOLATED_IMAGE\n' ;;
+      isolated) printf 'requirements: bash, git, python3, Docker or Podman, a local --image or OMS_ISOLATED_IMAGE\n' ;;
       remote) printf 'requirements: bash, git, python3, --remote-adapter or OMS_REMOTE_ADAPTER\n' ;;
     esac
   fi
@@ -179,42 +181,64 @@ DOCKER_DAEMON=false
 IMAGE_LOCAL=false
 ADAPTER_EXECUTABLE=false
 RESOLVED_REMOTE_ADAPTER=""
+TYPED_CHECK=""
+
+typed_backend_check() {
+  PYTHONPATH="$ROOT/scripts/lib${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 - "$PROFILE" "$IMAGE" "$REMOTE_ADAPTER" <<'PY'
+import json
+import sys
+
+from oms_runtime.execution import check
+
+print(json.dumps(check(sys.argv[1], image=sys.argv[2], adapter=sys.argv[3],
+                       _include_resolved_paths=True),
+                 sort_keys=True))
+PY
+}
+
+typed_value() {  # JSON dotted.path
+  printf '%s\n' "$1" | python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    value = value.get(key) if isinstance(value, dict) else None
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is not None:
+    print(value)
+' "$2"
+}
 
 if [ "$PROFILE" = isolated ]; then
   [ -n "$IMAGE" ] || fail "isolated profile requires --image or OMS_ISOLATED_IMAGE; no image is pulled automatically"
-  case "$DOCKER_BIN" in
-    */*) [ -x "$DOCKER_BIN" ] || fail "isolated profile requires Docker; executable not found: $DOCKER_BIN" ;;
-    *) command -v "$DOCKER_BIN" >/dev/null 2>&1 ||
-         fail "isolated profile requires Docker; install and start Docker, then retry" ;;
-  esac
+fi
+if [ "$PROFILE" = remote ]; then
+  [ -n "$REMOTE_ADAPTER" ] ||
+    fail "remote profile requires an executable adapter via --remote-adapter or OMS_REMOTE_ADAPTER"
+fi
+
+TYPED_CHECK="$(typed_backend_check)" || fail "runtime backend readiness probe failed"
+case "$TYPED_CHECK" in *$'\r') TYPED_CHECK="${TYPED_CHECK%$'\r'}" ;; esac
+
+if [ "$PROFILE" = isolated ]; then
+  engine_path="$(typed_value "$TYPED_CHECK" details.engine_path | tr -d '\r')"
+  [ -n "$engine_path" ] ||
+    fail "isolated profile requires Docker or Podman; install a container engine, then retry"
   DOCKER_CLIENT=true
-  if ! "$DOCKER_BIN" info --format '{{json .ServerVersion}}' >/dev/null 2>&1; then
-    fail "isolated profile requires a reachable Docker daemon; start Docker and retry"
-  fi
+  [ "$(typed_value "$TYPED_CHECK" details.daemon_ready | tr -d '\r')" = true ] ||
+    fail "isolated profile requires a reachable Docker or Podman daemon; start it and retry"
   DOCKER_DAEMON=true
-  if ! "$DOCKER_BIN" image inspect --format '{{json .Id}}' "$IMAGE" >/dev/null 2>&1; then
+  if [ "$(typed_value "$TYPED_CHECK" details.image_local | tr -d '\r')" != true ]; then
     fail "isolated image is not available locally: $IMAGE; pull or build it explicitly, then retry"
   fi
   IMAGE_LOCAL=true
 fi
 
 if [ "$PROFILE" = remote ]; then
-  [ -n "$REMOTE_ADAPTER" ] ||
-    fail "remote profile requires an executable adapter via --remote-adapter or OMS_REMOTE_ADAPTER"
-  case "$REMOTE_ADAPTER" in
-    */*)
-      [ -x "$REMOTE_ADAPTER" ] ||
-        fail "remote profile requires an executable adapter: $REMOTE_ADAPTER"
-      RESOLVED_REMOTE_ADAPTER="$(cd "$(dirname "$REMOTE_ADAPTER")" && pwd -P)/$(basename "$REMOTE_ADAPTER")"
-      ;;
-    *)
-      RESOLVED_REMOTE_ADAPTER="$(command -v "$REMOTE_ADAPTER" 2>/dev/null || true)"
-      if [ -z "$RESOLVED_REMOTE_ADAPTER" ] || [ ! -x "$RESOLVED_REMOTE_ADAPTER" ]; then
-        fail "remote profile requires an executable adapter: $REMOTE_ADAPTER"
-      fi
-      ;;
-  esac
-  case "$RESOLVED_REMOTE_ADAPTER" in *$'\r') RESOLVED_REMOTE_ADAPTER="${RESOLVED_REMOTE_ADAPTER%$'\r'}" ;; esac
+  RESOLVED_REMOTE_ADAPTER="$(typed_value "$TYPED_CHECK" details.adapter_path | tr -d '\r')"
+  [ -n "$RESOLVED_REMOTE_ADAPTER" ] ||
+    fail "remote profile requires an executable adapter: $REMOTE_ADAPTER"
   ADAPTER_EXECUTABLE=true
 fi
 

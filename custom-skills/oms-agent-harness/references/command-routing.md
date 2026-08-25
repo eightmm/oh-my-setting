@@ -89,7 +89,9 @@ contracts. Do not merge them or treat one as another's authority source.
 
 Prefer `oms runtime profile`, `backend`, and `experiment` for new typed flows.
 Keep `install-profile`, `execution-profile`, and `research-runner` available for
-their direct compatibility contracts. In particular, `research-runner` is a
+their direct compatibility contracts. `execution-profile` retains its public
+report but reuses the runtime backend resolver; do not add a second engine or
+adapter probe there. In particular, `research-runner` is a
 compact single-run/run-ledger wrapper; `runtime experiment` is the comparable
 multi-arm, seed- and invariant-bound study path. Route discovery to the typed
 path without deleting or silently migrating existing ledgers.

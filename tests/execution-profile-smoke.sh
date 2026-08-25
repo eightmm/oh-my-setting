@@ -66,11 +66,11 @@ cat > "$TMP/bin/docker-fake" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$OMS_TEST_DOCKER_LOG"
-if [ "$#" -eq 3 ] && [ "$1" = info ] && [ "$2" = --format ]; then
+if [ "${1:-}" = info ]; then
   printf '"27.0.0"\n'
   exit 0
 fi
-if [ "$#" -eq 5 ] && [ "$1" = image ] && [ "$2" = inspect ] && [ "$3" = --format ]; then
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
   printf '"sha256:test"\n'
   exit 0
 fi
@@ -92,9 +92,9 @@ assert d["requirements"]["docker_daemon"] is True, d
 PY
 [ "$(wc -l < "$apply_log" | tr -d ' ')" -eq 2 ] ||
   fail "isolated check should probe the Docker daemon and image exactly once"
-grep -Fxq 'info --format {{json .ServerVersion}}' "$apply_log" ||
+grep -Fxq 'info' "$apply_log" ||
   fail "isolated check used an unexpected Docker probe"
-grep -Fxq 'image inspect --format {{json .Id}} oms/test:latest' "$apply_log" ||
+grep -Fxq 'image inspect oms/test:latest' "$apply_log" ||
   fail "isolated check did not verify the explicit local image"
 if grep -Eiq 'install|pull|run' "$apply_log"; then
   fail "isolated check attempted to install, pull, or run Docker content"
@@ -144,5 +144,42 @@ assert d["isolation"] == "external", d
 assert d["requirements"]["adapter_executable"] is True, d
 assert d["remote_adapter"], d
 PY
+
+# The compatibility preflight and the typed execution backend must resolve one
+# container engine. Before the shared resolver, only execution-profile honored
+# OMS_DOCKER_BIN while runtime silently selected docker/podman from PATH.
+shared_engine="$TMP/bin/shared-engine"
+shared_log="$TMP/shared-engine.argv"
+cat > "$shared_engine" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$OMS_SHARED_ENGINE_LOG"
+case "${1:-}" in
+  info) exit 0 ;;
+  image) [ "${2:-}" = inspect ] && exit 0 ;;
+esac
+exit 9
+EOF
+chmod +x "$shared_engine"
+
+OMS_DOCKER_BIN="$shared_engine" OMS_SHARED_ENGINE_LOG="$shared_log" \
+  "$PROFILE" check --profile isolated --repo "$ROOT" --image oms/shared:latest --json \
+  > "$TMP/shared-compat.json" || fail "compatibility preflight rejected the shared engine"
+OMS_DOCKER_BIN="$shared_engine" OMS_SHARED_ENGINE_LOG="$shared_log" \
+  "$ROOT/scripts/runtime.sh" --repo "$ROOT" backend check isolated \
+    --image oms/shared:latest > "$TMP/shared-runtime.json" ||
+  fail "runtime backend rejected the shared engine"
+if ! python3 - "$shared_engine" "$TMP/shared-runtime.json" <<'PY'
+import json, os, sys
+row = json.load(open(sys.argv[2], encoding="utf-8"))
+assert row["ready"] is True, row
+assert row["details"]["engine"] == os.path.basename(sys.argv[1]), row
+assert "engine_path" not in row["details"], row
+PY
+then
+  fail "runtime backend did not report the shared engine identity"
+fi
+[ "$(wc -l < "$shared_log" | tr -d ' ')" -eq 4 ] ||
+  fail "the two front doors did not probe one shared engine exactly twice each"
 
 echo "execution-profile-smoke: ok"

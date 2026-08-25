@@ -387,15 +387,17 @@ oms gc
 |---|---|
 | `agent-events`, `agent-supervisor` | Append-only attempt lifecycle and bounded `trusted-local` execution. Resume creates a child attempt; reconcile closes stale supervisor-owned queues that lost their runtime record. The supervisor never lands, commits, or pushes. |
 | `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode, executor+soul, and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
-| `execution-profile`, `herdr-adapter` | Environment/CLI contract preflight and optional pane/agent control. They are not a sandbox or landing authority. |
+| `execution-profile`, `herdr-adapter` | Compatibility preflight and optional pane/agent control. `execution-profile` preserves its public report while delegating backend readiness to the typed runtime engine. They are not a sandbox or landing authority. |
 | `open-in`, `ops-cockpit` | Probed VS Code/Stably Orca/Codex launch plans and a read-only, non-atomic operational summary. Its `observations` block projects the pending observation decisions — turn-guard intervention pairing, fail-ledger hook-row retirement, usage-family exposure — with no thresholds or tuning. |
 | `otel-export`, `semantic-eval` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; advisory patch evaluation from trusted host checks plus a self-reported judge result. |
 | `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |
 
 `trusted-local` inherits host files, credentials, processes, and network.
-`isolated` only checks an existing Docker daemon and local image; `remote` only
-checks an operator-owned executable adapter. The current supervisor does not
-execute those two backends. Authenticated provider-native token/cost limiting is
+`isolated` only checks an existing Docker- or Podman-compatible daemon and local
+image; `remote` only checks an operator-owned executable adapter. The compatibility
+preflight and `oms runtime backend` resolve the same executable, so readiness and
+execution cannot silently select different engines. The current supervisor does
+not execute those two backends. Authenticated provider-native token/cost limiting is
 not available, so a trusted-local job requesting either hard budget is refused
 before launch. The private approval store is outside worker-writable `.oms/`
 and uses `0700`/`0600`, but another process running as the same OS user can read

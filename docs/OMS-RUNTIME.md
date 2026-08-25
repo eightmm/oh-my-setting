@@ -210,6 +210,12 @@ capability.
 
 ## Execution backends
 
+`oms runtime backend` is the canonical readiness and execution engine. The
+legacy `oms execution-profile` command keeps its established report schema but
+uses this same resolver. `OMS_CONTAINER_ENGINE` is the preferred explicit
+container executable; `OMS_DOCKER_BIN` remains a compatibility override. With
+neither set, Docker is preferred and Podman is the fallback.
+
 ```bash
 oms runtime backend describe trusted-local
 oms runtime backend check isolated --image oms-runtime:locked
