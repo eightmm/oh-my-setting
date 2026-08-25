@@ -470,7 +470,9 @@ DIR_REQUIRED = {
     ("runs", "index.jsonl"): ("id",),
 }
 ENUMS = {
-    "experiments.jsonl": {"status": {"claimed", "running", "finished", "aborted"}},
+    # experiment-board has always emitted "done". Keep "finished" readable
+    # for legacy/imported rows while validating the writer's canonical state.
+    "experiments.jsonl": {"status": {"claimed", "running", "done", "finished", "aborted"}},
     "landings.jsonl": {"event": {"intent", "complete", "abandoned",
                                  "applied-pending-receipt",
                                  "not-applied-pending-receipt"}},

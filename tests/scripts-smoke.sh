@@ -11167,6 +11167,11 @@ test_experiment_board_lifecycle_and_duplicate_guard() {
   OMS_EXPERIMENT_BOARD="$board" "$SH" finish --id "$id" --result "AUC up" >/dev/null 2>&1 ||
     fail "finish failed"
 
+  # The board's terminal spelling is part of the shared JSONL contract. A
+  # healthy finish must remain valid when the run spine audits every stream.
+  ( cd "$d" && "$ROOT/scripts/run.sh" validate --dir "$d/.oms" ) >/dev/null 2>&1 ||
+    fail "run validation rejected a healthy finished experiment"
+
   # Active list hides the finished experiment; --all shows it, owner = claimer.
   local active all
   active="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list 2>/dev/null)"
