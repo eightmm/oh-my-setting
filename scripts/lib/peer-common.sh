@@ -1965,8 +1965,6 @@ ma_provider_attempt() {
 ma_normalize_provider_list() {
   local raw="$1"
   local entry
-  local provider
-  local model
   local canonical
   local seen=","
   local output=""
@@ -1976,14 +1974,11 @@ ma_normalize_provider_list() {
   for entry in "${provider_list[@]}"; do
     entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
     [ -n "$entry" ] || continue
-    ma_target_validate "$entry" || return 2
-    provider="$(ma_target_provider "$entry")"
-    model="$(ma_target_model "$entry")"
     # Canonicalize the agy alias before the duplicate check: the same CLI as
     # the same model is one voice however it was spelled. Different models of
     # one provider are allowed — that is the panel — and family accounting is
     # what keeps their agreement honest.
-    canonical="$provider${model:+:model=$model}"
+    canonical="$(ma_target_canonical "$entry")" || return 2
     case "$seen" in
       *",$canonical,"*) echo "error: duplicate target: $canonical" >&2; return 2 ;;
     esac
@@ -2427,6 +2422,15 @@ ma_target_validate() {
     model=?*) ;;
     *) echo "error: target must be PROVIDER or PROVIDER:model=NAME: $1" >&2; return 2 ;;
   esac
+}
+
+ma_target_canonical() {
+  local provider model
+
+  ma_target_validate "$1" || return $?
+  provider="$(ma_target_provider "$1")"
+  model="$(ma_target_model "$1")"
+  printf '%s\n' "$provider${model:+:model=$model}"
 }
 
 # The second argument may be a model name with spaces or punctuation; the

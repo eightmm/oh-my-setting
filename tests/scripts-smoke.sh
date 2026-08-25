@@ -17275,6 +17275,7 @@ assert answer.get("provider") != "claude", answer
 
 test_consult_rejects_conflicting_targets() {
   local project="$TMP/consult-misuse"
+  local out=""
 
   make_committed_repo "$project"
   if "$ROOT/scripts/consult.sh" --repo "$project" --all --to codex "x" >/dev/null 2>&1; then
@@ -17286,6 +17287,10 @@ test_consult_rejects_conflicting_targets() {
   if "$ROOT/scripts/consult.sh" --repo "$project" --model-class huge "x" >/dev/null 2>&1; then
     fail "the removed --model-class flag must be refused"
   fi
+  out="$(OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/consult.sh" --repo "$project" \
+    --to agy --to antigravity "x" 2>&1 || true)"
+  printf '%s' "$out" | grep -Fq 'duplicate target: antigravity' ||
+    fail "agy and antigravity must not count as two consultation targets"
 }
 
 test_repo_state_and_gc_cover_threads() {

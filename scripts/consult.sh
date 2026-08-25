@@ -181,35 +181,6 @@ peers() {
   fi
 }
 
-# A target is provider[:class] or provider[:model=NAME]. Splitting it here
-# keeps every downstream step (call, artifact, thread turn, family accounting)
-# talking about the same resolved pair.
-target_provider() { printf '%s\n' "${1%%:*}"; }
-
-target_model() {
-  local spec="${1#*:}"
-  [ "$spec" != "$1" ] || { printf '\n'; return 0; }
-  case "$spec" in
-    model=*) printf '%s\n' "${spec#model=}" ;;
-    *) printf '\n' ;;
-  esac
-}
-
-validate_target() {
-  local spec="${1#*:}"
-  local provider
-  provider="$(target_provider "$1")"
-  case "$provider" in
-    codex|claude|antigravity|agy) ;;
-    *) fail "unknown provider in target: $1" ;;
-  esac
-  [ "$spec" = "$1" ] && return 0
-  case "$spec" in
-    model=?*) ;;
-    *) fail "target must be PROVIDER or PROVIDER:model=NAME: $1" ;;
-  esac
-}
-
 THREAD_SH="$SCRIPT_DIR/thread.sh"
 
 resolve_thread() {
@@ -240,8 +211,8 @@ call_one() {
   local artifact_out="${2:-}"
   local provider model args rc=0 log
 
-  provider="$(target_provider "$target")"
-  model="$(target_model "$target")"
+  provider="$(ma_target_provider "$target")"
+  model="$(ma_target_model "$target")"
 
   args=("$SCRIPT_DIR/agent-call.sh" --to "$provider" --repo "$REPO"
         --artifact-dir "$REPO/.oms/artifacts/consult"
@@ -338,9 +309,14 @@ consult_with_failover() {
 
 targets=()
 if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
+  target_seen=","
   for spec in "${TARGETS_EXPLICIT[@]}"; do
-    validate_target "$spec"
-    targets+=("$spec")
+    canonical="$(ma_target_canonical "$spec")" || exit $?
+    case "$target_seen" in
+      *",$canonical,"*) fail "duplicate target: $canonical" ;;
+    esac
+    target_seen="$target_seen$canonical,"
+    targets+=("$canonical")
   done
 elif [ "$ALL" -eq 1 ]; then
   while IFS= read -r p; do
@@ -451,7 +427,7 @@ else
     fi
     usable=$((usable + 1))
     selected="$(sed -n 's/^model-result: selected=\(.*\) effort=.*/\1/p' "$art" | sed -n '1p')"
-    family="$(oms_provider_model_family "$(target_provider "$p")" "$selected" 2>/dev/null || printf 'unknown')"
+    family="$(oms_provider_model_family "$(ma_target_provider "$p")" "$selected" 2>/dev/null || printf 'unknown')"
     case "
 $families
 " in
