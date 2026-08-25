@@ -278,17 +278,34 @@ branch_upstream() {
 
 receipt_transaction_context() {
   local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
-  local schema ref owner
+  local schema ref owner channel
 
   schema="$(auto_update_receipt_field "$receipt" schema 2>/dev/null || true)"
-  ref="$(auto_update_receipt_field "$receipt" ref 2>/dev/null || true)"
   owner="$(auto_update_receipt_field "$receipt" source_root 2>/dev/null || true)"
+  case "$schema" in
+    2)
+      ref="$(auto_update_receipt_field "$receipt" ref 2>/dev/null || true)"
+      ;;
+    ""|1)
+      # Pre-schema-2 receipts stored the update pin as channel. Route those
+      # installs through update.sh too: it owns rollback, component refresh,
+      # receipt migration, and the expected-target fence. Only a truly
+      # receipt-less install stays on the legacy branch-upstream path below.
+      channel="$(auto_update_receipt_field "$receipt" channel 2>/dev/null || true)"
+      if [ "$channel" = detached ]; then
+        ref="$(auto_update_receipt_field "$receipt" commit 2>/dev/null || true)"
+      else
+        ref="$channel"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
   case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*|CYGWIN*)
       command -v cygpath >/dev/null 2>&1 && owner="$(cygpath -u "$owner")"
       ;;
   esac
-  [ "$schema" = 2 ] && [ -n "$ref" ] || return 1
+  [ -n "$ref" ] || return 1
   [ -n "$owner" ] && [ "$(cd "$owner" 2>/dev/null && pwd -P || true)" = "$(cd "$ROOT" && pwd -P)" ] || return 1
   RECEIPT_TRANSACTION_REF="$ref"
 }

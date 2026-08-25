@@ -410,6 +410,12 @@ push, or PR actions in an external frontend bypass OMS admission and landing.
 OMS is the authority only for flows started and completed through its managed
 commands; keep one flow under one authority.
 
+Scheduled `auto-update` is the unattended policy and status wrapper, not a
+second updater. Receipt-owned schema-1 and schema-2 installs both preflight and
+apply through `update.sh`, which remains the canonical rollback-capable install
+transaction. Only receipt-less legacy checkouts retain the configured-upstream
+compatibility path until a successful update creates an install receipt.
+
 `semantic-eval` calls no model. A spec command needs `--allow-host-checks`; its
 temporary worktree is not a host sandbox. A local judge file has self-reported
 provenance, so an evaluation requiring an independent judge remains

@@ -539,6 +539,80 @@ PY
   fi
 }
 
+test_schema1_auto_update_reuses_update_transaction() {
+  local repo="$TMP/schema1-auto-transaction"
+  local home="$TMP/schema1-auto-home"
+  local receipt="$home/.config/oh-my-setting/install.json"
+  local marker="$home/update.argv"
+  local state="$home/auto-update.status"
+  local base target
+
+  mkdir -p "$repo/scripts/lib" "$repo/local" "$(dirname "$receipt")"
+  cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
+  cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
+  cat > "$repo/scripts/update.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+printf '%s\n' "$*" >> "$OMS_TEST_UPDATE_MARKER"
+current="$(git -C "$root" rev-parse HEAD)"
+if [ "${1:-}" = --check ]; then
+  printf 'current: %s\n' "${current:0:7}"
+  printf 'update-check: available %s -> %s\n' "$current" "$OMS_TEST_UPDATE_TARGET"
+  exit 0
+fi
+[ "${OH_MY_SETTING_UPDATE_EXPECTED_TARGET:-}" = "$OMS_TEST_UPDATE_TARGET" ] || exit 75
+git -C "$root" checkout -q --detach "$OMS_TEST_UPDATE_TARGET"
+printf 'updated: %s -> %s\n' "${current:0:7}" "${OMS_TEST_UPDATE_TARGET:0:7}"
+EOF
+  chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
+  git -C "$repo" init -q
+  git -C "$repo" checkout -qb main
+  git -C "$repo" config user.name test
+  git -C "$repo" config user.email test@example.com
+  printf 'base\n' > "$repo/value"
+  git -C "$repo" add .
+  git -C "$repo" commit -qm base
+  base="$(git -C "$repo" rev-parse HEAD)"
+  printf 'target\n' > "$repo/value"
+  git -C "$repo" commit -qam target
+  target="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" checkout -q --detach "$base"
+
+  python3 - "$receipt" "$repo" "$base" <<'PY'
+import json, sys
+json.dump({
+    "schema": 1,
+    "source_root": sys.argv[2],
+    "commit": sys.argv[3],
+    "channel": "main",
+    "components": {},
+}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
+    OMS_TEST_UPDATE_MARKER="$marker" \
+    OMS_TEST_UPDATE_TARGET="$target" "$repo/scripts/auto-update.sh" check >/dev/null
+  grep -Fxq -- '--check' "$marker" ||
+    fail "schema-1 auto-update check bypassed the canonical updater"
+
+  : > "$marker"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
+    OMS_TEST_UPDATE_MARKER="$marker" \
+    OMS_TEST_UPDATE_TARGET="$target" "$repo/scripts/auto-update.sh" apply >/dev/null
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$target" ] ||
+    fail "schema-1 auto-update did not apply through the canonical updater"
+  [ "$(grep -c '^--check$' "$marker")" = 1 ] ||
+    fail "schema-1 auto-update did not preflight exactly once"
+  grep -Fxq -- '--no-tools' "$marker" ||
+    fail "schema-1 auto-update did not call the canonical update transaction"
+  grep -Fq 'status=applied' "$state" ||
+    fail "schema-1 auto-update did not record the canonical transaction outcome"
+}
+
 test_schema2_auto_update_apply_skips_dirty_and_diverged() {
   local repo="$TMP/schema2-skip-auto"
   local home="$TMP/schema2-skip-home"
@@ -809,6 +883,7 @@ test_doctor_failure_restores_previous_plugin_payload
 test_schema1_update_preserves_channel_pin_and_cron
 test_signal_during_doctor_rolls_back_transaction
 test_detached_schema2_auto_update_check
+test_schema1_auto_update_reuses_update_transaction
 test_schema2_auto_update_apply_skips_dirty_and_diverged
 test_missing_codex_degrades_and_dead_ref_is_fail_closed
 test_auto_update_failure_message_names_the_error
