@@ -961,6 +961,47 @@ def leader_exited_unreaped(process: subprocess.Popen[Any], expected: str) -> boo
     return state.startswith("Z")
 
 
+def _group_has_runnable_member(pgid: int) -> Optional[bool]:
+    """True/False when membership is observable, None when it is not."""
+    proc = Path("/proc")
+    expected = str(pgid)
+    scanned = False
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            tail = raw[raw.rfind(")") + 2 :].split()
+            if len(tail) < 3:
+                continue
+            scanned = True
+            if tail[2] == expected and tail[0] != "Z":
+                return True
+        if scanned:
+            return False
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pgid=,stat="],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.decode("ascii", "replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == expected and not parts[1].startswith("Z"):
+            return True
+    return False
+
+
 def process_group_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -968,11 +1009,19 @@ def process_group_alive(pid: int) -> bool:
         return ae.pid_alive(pid)
     try:
         os.killpg(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    # killpg(0) succeeds while any member exists, including a zombie whose
+    # reaper has not collected it yet. A whole-tree subreaper (autopilot
+    # receipt supervise) defers adopted reaping until its phase exits, so an
+    # orphaned member's zombie can outlive every kill this module sends; only
+    # a member that can still run keeps the group alive in fact.
+    running = _group_has_runnable_member(pid)
+    if running is None:
+        return True
+    return running
 
 
 def stop_recorded_tree(pid: int, expected_identity: str) -> bool:

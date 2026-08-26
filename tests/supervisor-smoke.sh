@@ -108,6 +108,45 @@ assert row["state"] == "timed_out", row
 assert row["reason_code"] == "wall_budget_exceeded", row
 PY
 
+# Acceptance and autopilot phases run this whole flow under a Linux
+# child-subreaper (autopilot-receipt supervise) that defers reaping adopted
+# orphans until the phase exits. An orphaned group member then stays a zombie
+# through every runner cleanup window, and killpg(pgid, 0) keeps succeeding;
+# the completed timeout kill must still be judged terminal, not a supervisor
+# error. The inner worker ignores TERM so the leader always dies first and
+# the orphaned zombie is guaranteed, making the old misclassification
+# deterministic rather than a kill-order race.
+if [ "$(uname -s)" = Linux ]; then
+  reaper_attempt="$(submit --max-wall-seconds 1 -- bash -c \
+    'bash -c "trap \"\" TERM; sleep 20" & wait')"
+  python3 - "$SUP" "$REPO" "$reaper_attempt" <<'PY' || fail "subreaper harness failed"
+import ctypes, subprocess, sys
+try:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER; best effort
+except (OSError, AttributeError):
+    pass
+sup, repo, attempt = sys.argv[1:4]
+subprocess.run(
+    [sup, "--repo", repo, "dispatch", "--max-running", "1", "--max-jobs", "1"],
+    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+# wait exits nonzero for a timed-out attempt; classification is what matters.
+# Adopted zombies stay unreaped for this process's whole lifetime, exactly
+# like a phase supervisor that only reaps after its supervised command exits.
+subprocess.run(
+    [sup, "--repo", repo, "wait", "--attempt", attempt, "--timeout", "15"],
+    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PY
+  "$EVENTS" --repo "$REPO" show --attempt "$reaper_attempt" --json \
+    > "$TMP/subreaper-timeout.json"
+  python3 - "$TMP/subreaper-timeout.json" <<'PY' || fail "wall timeout under a deferring subreaper was not terminal"
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["state"] == "timed_out", row
+assert row["reason_code"] == "wall_budget_exceeded", row
+PY
+fi
+
 # A descendant can deliberately leave the owned POSIX session with setsid and
 # keep the inherited output pipe open. That process is outside trusted-local
 # signal coverage, but it must not keep the supervisor itself nonterminal past
