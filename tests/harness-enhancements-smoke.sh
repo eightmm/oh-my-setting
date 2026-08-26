@@ -468,18 +468,20 @@ EOF
   kill -TERM "$leader"
   wait "$leader" || status=$?
   [ "$status" -eq 143 ] || fail "TERM should propagate as 143, got $status"
-  # Children may linger briefly as unreaped zombies after the leader's TERM;
-  # poll for their disappearance instead of judging a fixed 200ms snapshot,
-  # so reap latency on a loaded runner is not reported as a survivor. The
-  # startup wait above already uses this shape.
+  # Children may linger as unreaped zombies after the leader's TERM — briefly
+  # on a loaded runner, and for the whole phase under a deferring subreaper
+  # (autopilot-receipt supervise), where kill -0 keeps succeeding on the
+  # corpse forever. Poll process state instead: gone or zombie is dead; only
+  # a still-runnable child is a survivor.
   lingering=""
   for _ in $(seq 1 100); do
     lingering=""
     while IFS= read -r child; do
-      if kill -0 "$child" 2>/dev/null; then
-        lingering="$child"
-        break
-      fi
+      child_state="$(ps -o stat= -p "$child" 2>/dev/null | tr -d '[:space:]' || true)"
+      case "$child_state" in
+        ''|Z*) ;;
+        *) lingering="$child"; break ;;
+      esac
     done < "$signal_tmp/pids"
     [ -n "$lingering" ] || break
     sleep 0.05
