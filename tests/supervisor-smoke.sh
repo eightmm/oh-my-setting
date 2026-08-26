@@ -880,6 +880,57 @@ PY
 sleep 5
 [ ! -e "$runner_lost_marker" ] || fail "lost runner's child escaped reconciliation"
 
+# The same loss under a deferring Linux subreaper (autopilot-receipt supervise
+# holds this posture while its phase runs): the killed runner's zombie is
+# adopted and stays unreaped, its recorded identity still matches, and
+# liveness by identity alone would keep reconcile skipping the job forever.
+if [ "$(uname -s)" = Linux ]; then
+  zombie_lost_marker="$TMP/zombie-lost-marker"
+  zombie_lost="$(submit --max-wall-seconds 20 -- bash -c \
+    'sleep 4; printf escaped > "$1"' supervisor "$zombie_lost_marker")"
+  python3 - "$ROOT" "$SUP" "$REPO" "$zombie_lost" <<'PY' || fail "subreaper reconcile harness failed"
+import ctypes, importlib.util, os, signal, subprocess, sys, time
+from pathlib import Path
+try:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER; best effort
+except (OSError, AttributeError):
+    pass
+root, sup, repo, attempt = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location(
+    "oms_runner_probe", str(Path(root) / "scripts/lib/attempt-runner.py"))
+assert spec is not None and spec.loader is not None
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+subprocess.run(
+    [sup, "--repo", repo, "dispatch", "--max-running", "1", "--max-jobs", "1"],
+    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+runner_pid = 0
+for _ in range(100):
+    job = runner.load_job(Path(repo), attempt)
+    if job.get("runtime_state") == "running":
+        runner_pid = int(job.get("runner_pid") or 0)
+        break
+    time.sleep(0.1)
+assert runner_pid, "runner never entered running"
+os.kill(runner_pid, signal.SIGKILL)
+time.sleep(0.2)
+subprocess.run(
+    [sup, "--repo", repo, "reconcile", "--apply"],
+    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PY
+  "$EVENTS" --repo "$REPO" show --attempt "$zombie_lost" --json \
+    > "$TMP/zombie-lost.json"
+  python3 - "$TMP/zombie-lost.json" <<'PY' || fail "zombie runner was not reconciled as lost"
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["state"] == "blocked", row
+assert row["reason_code"] == "runner_lost", row
+PY
+  sleep 5
+  [ ! -e "$zombie_lost_marker" ] || fail "zombie-lost runner's child escaped reconciliation"
+fi
+
 # Serve counts the IDs dispatch accepted, even when a job finishes too quickly
 # to appear in an after-state snapshot. Runner launch failures converge to a
 # blocked record, and a malformed runtime job fails the capacity calculation.

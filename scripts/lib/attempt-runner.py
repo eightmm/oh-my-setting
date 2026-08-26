@@ -916,6 +916,34 @@ def process_matches(pid: int, expected: str) -> bool:
     return bool(current and current == expected)
 
 
+def pid_is_zombie(pid: int) -> bool:
+    """A zombie keeps its identity for kill fencing but can never run again."""
+    if pid <= 0 or os.name == "nt":
+        return False
+    try:
+        raw = (Path("/proc") / str(pid) / "stat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        tail = raw[raw.rfind(")") + 2 :].split()
+        if tail:
+            return tail[0] == "Z"
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    state = result.stdout.decode("ascii", "replace").strip()
+    return result.returncode == 0 and state.startswith("Z")
+
+
 def recorded_tree_matches(pid: int, expected: str) -> bool:
     """Validate both leader start identity and the group-leader contract."""
     if not process_matches(pid, expected):
@@ -1804,9 +1832,12 @@ def reconcile(args: argparse.Namespace) -> int:
                 continue
             runner_pid = int(job.get("runner_pid") or 0)
             child_pid = int(job.get("pid") or 0)
+            # A dead runner adopted by a deferring subreaper (autopilot
+            # receipt supervise) stays an identity-matching zombie until the
+            # phase exits; only a runner that can still run defers reconcile.
             runner_alive = process_matches(
                 runner_pid, str(job.get("runner_pid_identity") or "")
-            )
+            ) and not pid_is_zombie(runner_pid)
             if runner_alive:
                 continue
             if runtime_state == "launching" and not runner_pid:
