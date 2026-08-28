@@ -22530,7 +22530,7 @@ assert "EXTERNAL_" not in json.dumps(row), row
   fi
 }
 
-test_failure_ledger_structured_junk_fails_closed() {
+test_failure_ledger_structured_junk_quarantines_visibly() {
   local project="$TMP/failure-ledger-structured-junk"
   local bad out state_json inbox_json rc=0
 
@@ -22546,10 +22546,32 @@ test_failure_ledger_structured_junk_fails_closed() {
     printf '%s\n' "$bad" > "$project/.oms/failures.jsonl"
     rc=0
     out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list --unresolved --json 2>&1)" || rc=$?
-    [ "$rc" = 2 ] || fail "structured junk ledger list returned $rc instead of 2 for $bad: $out"
+    # Quarantine, not brick: the read stays alive, the row is counted as
+    # invalid in the payload, and the warning names it. Exit 2 here used to
+    # kill the whole runtime envelope while the inbox's remediation was this
+    # very command.
+    [ "$rc" = 0 ] || fail "quarantining ledger list returned $rc for $bad: $out"
     printf '%s' "$out" | grep -Fq 'invalid row' ||
-      fail "structured junk refusal did not identify an invalid row for $bad: $out"
+      fail "structured junk was not identified as an invalid row for $bad: $out"
+    printf '%s' "$out" | grep -q '"invalid_rows": *1' ||
+      fail "structured junk was not counted in the payload for $bad: $out"
   done
+
+  # A torn tail plus a real append: the guard opens a fresh line so the new
+  # record survives on its own, and only the torn fragment is quarantined.
+  printf '{"schema":2,"event":"fail","fingerprint":"torn","ts":"2026-08-0' \
+    > "$project/.oms/failures.jsonl"
+  (cd "$project" && "$ROOT/scripts/fail-ledger.sh" record --cmd "torn-tail-probe" --exit 1 \
+    >/dev/null 2>&1) || fail "record after a torn tail failed"
+  out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list --unresolved --json 2>&1)" ||
+    fail "list after a torn tail should stay alive: $out"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+doc = json.loads(raw[raw.index("{"):])
+assert doc["invalid_rows"] == 1, doc
+assert len(doc["failures"]) == 1, doc
+' || fail "the record appended after a torn tail was lost: $out"
 
   printf '{}\n' > "$project/.oms/failures.jsonl"
 
@@ -22560,8 +22582,11 @@ import json, sys
 row = json.load(sys.stdin)
 assert row["failures"]["present"] is True, row["failures"]
 assert row["failures"]["healthy"] is False, row["failures"]
-assert row["runtime"]["healthy"] is False, row["runtime"]
-' || fail "state treated structured junk as healthy: $state_json"
+assert row["failures"]["invalid_rows"] == 1, row["failures"]
+# The runtime envelope survives quarantined ledger junk; the corruption is
+# surfaced through the failures projection and the inbox item instead.
+assert row["runtime"]["healthy"] is True, row["runtime"]
+' || fail "state did not quarantine structured junk visibly: $state_json"
   inbox_json="$("$ROOT/scripts/inbox.sh" --repo "$project" --json)"
   printf '%s' "$inbox_json" | python3 -c '
 import json, sys
@@ -22570,8 +22595,8 @@ assert any(item["code"] == "failure-ledger-corrupt" for item in items), items
 ' || fail "inbox hid structured failure-ledger junk: $inbox_json"
 
   rc=0
-  out="$("$ROOT/scripts/runtime.sh" --repo "$project" envelope show 2>&1)" || rc=$?
-  [ "$rc" = 2 ] || fail "runtime accepted structured failure-ledger junk (rc=$rc): $out"
+  out="$("$ROOT/scripts/runtime.sh" --repo "$project" envelope show 2>&1)" ||
+    fail "the runtime envelope must survive quarantined ledger junk (rc=$?): $out"
 }
 
 test_doctor_repo_json_and_remediation_plan_are_structured() {

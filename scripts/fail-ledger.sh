@@ -167,6 +167,12 @@ state_fingerprint() {
 ledger_append() {
   local ledger="$1"
   local row_file="$2"
+  # A crash or full disk mid-append can leave a torn, unterminated line; the
+  # next append must not glue onto it and destroy its own record too. Start
+  # on a fresh line whenever the last byte is not a newline.
+  if [ -s "$ledger" ] && [ -n "$(tail -c 1 "$ledger" 2>/dev/null)" ]; then
+    printf '\n' >> "$ledger"
+  fi
   cat "$row_file" >> "$ledger"
 }
 
@@ -380,7 +386,7 @@ PY
     [ ! -L "$LEDGER" ] || fail "failure ledger must be a regular non-symlink file"
     if [ ! -f "$LEDGER" ]; then
       if [ "$AS_JSON" -eq 1 ]; then
-        echo '{"schema": 1, "failures": []}'
+        echo '{"schema": 1, "failures": [], "invalid_rows": 0}'
       else
         echo "no failures"
       fi
@@ -485,8 +491,13 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         agg[fp]["resolved"] = False
         agg[fp]["how"] = None
 if invalid:
-    sys.stderr.write("error: failure ledger contains %d invalid row(s)\n" % invalid)
-    sys.exit(2)
+    # Quarantine, never brick: a torn or foreign line is skipped and counted,
+    # the valid rows still project, and the count rides the payload so state
+    # marks the ledger unhealthy and the inbox keeps its corruption item. An
+    # exit 2 here killed the whole runtime envelope with no recovery path —
+    # the remediation the inbox names is this very command.
+    sys.stderr.write("warning: failure ledger contains %d invalid row(s); "
+                     "valid rows still project\n" % invalid)
 rows = []
 for fp in order:
     d = agg[fp]
@@ -536,7 +547,7 @@ if limit and len(rows) > limit:
     omitted = len(rows) - limit
     rows = [r for r in rows if id(r) in keep]
 if as_json:
-    doc = {"schema": 1, "failures": rows}
+    doc = {"schema": 1, "failures": rows, "invalid_rows": invalid}
     if omitted:
         doc["omitted"] = omitted
     print(json.dumps(doc, ensure_ascii=False))

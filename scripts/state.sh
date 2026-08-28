@@ -102,7 +102,7 @@ else
     > "$RS_TMP/failures.json" 2>/dev/null || FAILURE_HEALTHY=0
 fi
 if [ "$FAILURE_HEALTHY" = 1 ] && ! python3 -c \
-  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); failures=row.get("failures") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(failures, list) and all(isinstance(item, dict) and isinstance(item.get("attention"), str) and isinstance(item.get("actionable"), bool) and isinstance(item.get("retiring"), bool) for item in failures)' \
+  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); failures=row.get("failures") if isinstance(row, dict) else None; invalid=row.get("invalid_rows") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(invalid, int) and not isinstance(invalid, bool) and invalid >= 0 and isinstance(failures, list) and all(isinstance(item, dict) and isinstance(item.get("attention"), str) and isinstance(item.get("actionable"), bool) and isinstance(item.get("retiring"), bool) for item in failures)' \
   "$RS_TMP/failures.json" 2>/dev/null; then
   FAILURE_HEALTHY=0
 fi
@@ -572,7 +572,14 @@ state["artifacts"] = {
 # --- Unresolved failures (canonical fail-ledger projection) -----------------
 failure_doc = load_json_file(os.environ["OMS_RS_FAILURE_FILE"], {})
 failure_rows = failure_doc.get("failures", []) if isinstance(failure_doc, dict) else []
-failure_healthy = os.environ["OMS_RS_FAILURE_HEALTHY"] == "1"
+# Corrupt rows are quarantined by the ledger, not fatal: the valid rows still
+# project here while healthy goes false, which keeps the inbox corruption
+# item alive without bricking the envelope.
+failure_invalid_rows = failure_doc.get("invalid_rows", 0) if isinstance(failure_doc, dict) else 0
+if not isinstance(failure_invalid_rows, int) or isinstance(failure_invalid_rows, bool):
+    failure_invalid_rows = 0
+failure_healthy = (os.environ["OMS_RS_FAILURE_HEALTHY"] == "1"
+                   and failure_invalid_rows == 0)
 open_fails = []
 for row in failure_rows:
     if not isinstance(row, dict):
@@ -590,12 +597,14 @@ actionable_total = sum(1 for f in open_fails if f["actionable"])
 state["failures"] = {
     "present": os.environ["OMS_RS_FAILURE_PHYSICAL"] == "1",
     "healthy": failure_healthy,
+    "invalid_rows": failure_invalid_rows,
     "open": open_fails[-5:], "open_total": len(open_fails),
     "actionable_total": actionable_total,
     "retiring_total": len(open_fails) - actionable_total,
 }
 if not failure_healthy:
-    state["failures"]["error"] = "projection-unavailable"
+    state["failures"]["error"] = (
+        "invalid-rows" if failure_invalid_rows else "projection-unavailable")
 
 # --- Install attention (auto-update) ----------------------------------------
 au = os.environ.get("OMS_RS_AUTOUPDATE") or ""
