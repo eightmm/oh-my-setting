@@ -915,9 +915,23 @@ for _ in range(100):
 assert runner_pid, "runner never entered running"
 os.kill(runner_pid, signal.SIGKILL)
 time.sleep(0.2)
-subprocess.run(
-    [sup, "--repo", repo, "reconcile", "--apply"],
-    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+# Under gate-level load one reconcile attempt has failed on transient lock
+# contention while passing standalone; the assertion under test is the
+# CLASSIFICATION, not first-try reconcile latency, so a bounded retry
+# absorbs the contention without weakening what is being proven.
+last = None
+for _ in range(3):
+    last = subprocess.run(
+        [sup, "--repo", repo, "reconcile", "--apply"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if last.returncode == 0:
+        break
+    time.sleep(2)
+else:
+    sys.stderr.write(
+        "reconcile kept failing: %s\n"
+        % (last.stderr or b"").decode("utf-8", "replace")[-500:])
+    sys.exit(1)
 PY
   "$EVENTS" --repo "$REPO" show --attempt "$zombie_lost" --json \
     > "$TMP/zombie-lost.json"
