@@ -389,6 +389,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage debate-delta bash tests/debate-delta-smoke.sh
   stage failure-attention bash tests/failure-attention-smoke.sh
   stage harness-enhancements bash tests/harness-enhancements-smoke.sh
+  stage tsp-queue bash tests/tsp-queue-smoke.sh
   stage work-journal bash tests/work-journal-smoke.sh
   stage durable-writers bash tests/durable-writers-contract-smoke.sh
   stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh

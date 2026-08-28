@@ -396,7 +396,7 @@ fallback_list() {
     # shellcheck disable=SC1090
     . "$file"
     state="done"
-    if kill -0 "$f_pid" 2>/dev/null; then
+    if fallback_job_running "$f_pid"; then
       state="running"
     elif [ -n "$f_status" ] && [ -f "$f_status" ]; then
       state="exit $(sed -n '1p' "$f_status")"
@@ -434,6 +434,19 @@ fallback_cancel() {
   kill "$job_id" 2>/dev/null || true
 }
 
+# A finished fallback monitor can linger as an unreaped zombie when a
+# deferring subreaper holds the corpse — autopilot-receipt supervise wraps
+# every acceptance phase in exactly that posture. kill -0 stays true for the
+# zombie although its status file is already written and it can never run
+# again, so judge process state: gone or zombie is finished.
+fallback_job_running() {  # PID
+  local state
+  kill -0 "$1" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]' || true)"
+  case "$state" in ''|Z*) return 1 ;; esac
+  return 0
+}
+
 fallback_wait() {
   local job_id="$1"
   local status_file
@@ -453,7 +466,7 @@ fallback_wait() {
   . "$FALLBACK_DIR/$job_id.meta"
   status_file="$f_status"
   start="$(date +%s)"
-  while kill -0 "$job_id" 2>/dev/null; do
+  while fallback_job_running "$job_id"; do
     now="$(date +%s)"
     elapsed=$((now - start))
     oms_poll_sleep_labeled tsp-fallback "$elapsed" ""
