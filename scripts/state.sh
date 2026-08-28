@@ -90,6 +90,65 @@ APPROVAL_HEALTHY=1
     APPROVAL_HEALTHY=0
     printf '[]\n' > "$RS_TMP/approvals.json"
   }
+FAILURE_HEALTHY=1
+FAILURE_PHYSICAL=0
+if [ -e "$REPO/.oms/failures.jsonl" ] || [ -L "$REPO/.oms/failures.jsonl" ]; then
+  FAILURE_PHYSICAL=1
+fi
+if [ "$FAILURE_PHYSICAL" = 1 ] && [ ! -f "$REPO/.oms/failures.jsonl" ]; then
+  FAILURE_HEALTHY=0
+else
+  "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json \
+    > "$RS_TMP/failures.json" 2>/dev/null || FAILURE_HEALTHY=0
+fi
+if [ "$FAILURE_HEALTHY" = 1 ] && ! python3 -c \
+  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); failures=row.get("failures") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(failures, list) and all(isinstance(item, dict) and isinstance(item.get("attention"), str) and isinstance(item.get("actionable"), bool) and isinstance(item.get("retiring"), bool) for item in failures)' \
+  "$RS_TMP/failures.json" 2>/dev/null; then
+  FAILURE_HEALTHY=0
+fi
+if [ "$FAILURE_HEALTHY" = 0 ]; then
+  printf '{"schema":1,"failures":[]}\n' > "$RS_TMP/failures.json"
+fi
+TASK_HEALTHY=1
+TASK_PHYSICAL=0
+if [ -e "$REPO/.oms/task/current.md" ] || [ -L "$REPO/.oms/task/current.md" ]; then
+  TASK_PHYSICAL=1
+fi
+if [ "$TASK_PHYSICAL" = 1 ] && { [ -L "$REPO/.oms/task/current.md" ] ||
+  [ ! -f "$REPO/.oms/task/current.md" ]; }; then
+  TASK_HEALTHY=0
+else
+  "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json \
+    > "$RS_TMP/task.json" 2>/dev/null || TASK_HEALTHY=0
+fi
+if [ "$TASK_HEALTHY" = 1 ] && ! python3 -c \
+  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and (not present or (isinstance(row.get("status"), str) and isinstance(row.get("verification"), str) and isinstance(row.get("stale"), bool)))' \
+  "$RS_TMP/task.json" "$TASK_PHYSICAL" 2>/dev/null; then
+  TASK_HEALTHY=0
+fi
+if [ "$TASK_HEALTHY" = 0 ]; then
+  printf '{"schema":1,"present":false}\n' > "$RS_TMP/task.json"
+fi
+PLAN_HEALTHY=1
+PLAN_PHYSICAL=0
+if [ -e "$REPO/.oms/plan/tasks.json" ] || [ -L "$REPO/.oms/plan/tasks.json" ]; then
+  PLAN_PHYSICAL=1
+fi
+if [ "$PLAN_PHYSICAL" = 1 ] && { [ -L "$REPO/.oms/plan/tasks.json" ] ||
+  [ ! -f "$REPO/.oms/plan/tasks.json" ]; }; then
+  PLAN_HEALTHY=0
+else
+  "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json \
+    > "$RS_TMP/plan.json" 2>/dev/null || PLAN_HEALTHY=0
+fi
+if [ "$PLAN_HEALTHY" = 1 ] && ! python3 -c \
+  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; count=row.get("task_count") if isinstance(row, dict) else None; by_state=row.get("by_state") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and isinstance(count, int) and not isinstance(count, bool) and count >= 0 and all(isinstance(row.get(key), bool) for key in ("nonempty", "all_done", "has_unfinished")) and row.get("nonempty") == (count > 0) and row.get("has_unfinished") == (count > 0 and not row.get("all_done")) and isinstance(by_state, dict) and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in by_state.values()) and sum(by_state.values()) == count and all(isinstance(row.get(key), list) for key in ("actionable", "stale", "stale_review"))' \
+  "$RS_TMP/plan.json" "$PLAN_PHYSICAL" 2>/dev/null; then
+  PLAN_HEALTHY=0
+fi
+if [ "$PLAN_HEALTHY" = 0 ]; then
+  printf '{"schema":1,"present":false}\n' > "$RS_TMP/plan.json"
+fi
 RUNTIME_HEALTHY=1
 "$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show \
   > "$RS_TMP/runtime.json" 2>/dev/null || {
@@ -105,11 +164,17 @@ OMS_RS_LIFECYCLE_FILE="$RS_TMP/lifecycle.json" \
 OMS_RS_LIFECYCLE_HEALTHY="$LIFECYCLE_HEALTHY" \
 OMS_RS_APPROVAL_FILE="$RS_TMP/approvals.json" \
 OMS_RS_APPROVAL_HEALTHY="$APPROVAL_HEALTHY" \
+OMS_RS_FAILURE_FILE="$RS_TMP/failures.json" \
+OMS_RS_FAILURE_HEALTHY="$FAILURE_HEALTHY" \
+OMS_RS_FAILURE_PHYSICAL="$FAILURE_PHYSICAL" \
+OMS_RS_TASK_FILE="$RS_TMP/task.json" \
+OMS_RS_TASK_HEALTHY="$TASK_HEALTHY" \
+OMS_RS_TASK_PHYSICAL="$TASK_PHYSICAL" \
+OMS_RS_PLAN_FILE="$RS_TMP/plan.json" \
+OMS_RS_PLAN_HEALTHY="$PLAN_HEALTHY" \
+OMS_RS_PLAN_PHYSICAL="$PLAN_PHYSICAL" \
 OMS_RS_RUNTIME_FILE="$RS_TMP/runtime.json" \
 OMS_RS_RUNTIME_HEALTHY="$RUNTIME_HEALTHY" \
-OMS_RS_PLAN_TTL="${OMS_PLAN_CLAIM_TTL:-3600}" \
-OMS_RS_HOOK_FAIL_TTL="${OMS_HOOK_FAIL_TTL:-86400}" \
-OMS_RS_REVIEW_TTL="${OMS_PLAN_REVIEW_TTL:-86400}" \
 OMS_RS_BOARD_TTL="${OMS_EXPERIMENT_CLAIM_TTL:-86400}" \
 OMS_RS_RUN_TTL="${OMS_RUN_CURRENT_TTL:-86400}" \
 OMS_RS_GUARD_TTL="${OMS_GUARD_TTL:-86400}" \
@@ -131,8 +196,6 @@ persisted_native_pid_is_proven = process_liveness[
 
 repo = os.environ["OMS_RS_REPO"]
 as_json = os.environ["OMS_RS_JSON"] == "1"
-plan_ttl = int(os.environ["OMS_RS_PLAN_TTL"])
-review_ttl = int(os.environ["OMS_RS_REVIEW_TTL"])
 board_ttl = int(os.environ["OMS_RS_BOARD_TTL"])
 run_ttl = int(os.environ["OMS_RS_RUN_TTL"])
 guard_ttl = int(os.environ["OMS_RS_GUARD_TTL"])
@@ -219,19 +282,26 @@ state["agent_operations"] = agent_operations
 
 approval_rows = load_json_file(os.environ["OMS_RS_APPROVAL_FILE"], [])
 approval_by_state = {}
+approval_by_durable_state = {}
+approval_by_effective_state = {}
 pending_approvals = []
 effective_expired = 0
 for item in approval_rows:
-    approval_state = str(item.get("state") or "unknown")
-    expires = epoch(item.get("expires_at", ""))
-    if approval_state == "requested" and expires is not None and expires <= now:
+    durable_state = str(item.get("state") or "unknown")
+    effective_state = str(item.get("effective_state") or durable_state)
+    if effective_state == "expired" and durable_state != "expired":
         effective_expired += 1
-        approval_state = "expired"
-    approval_by_state[approval_state] = approval_by_state.get(approval_state, 0) + 1
-    if approval_state in {"requested", "approved", "consuming"}:
+    # Compatibility: this field historically projected only requested rows
+    # through read-time expiry. Keep that shape while naming both explicit
+    # projections additively for new consumers.
+    legacy_state = "expired" if durable_state == "requested" and effective_state == "expired" else durable_state
+    approval_by_state[legacy_state] = approval_by_state.get(legacy_state, 0) + 1
+    approval_by_durable_state[durable_state] = approval_by_durable_state.get(durable_state, 0) + 1
+    approval_by_effective_state[effective_state] = approval_by_effective_state.get(effective_state, 0) + 1
+    if effective_state in {"requested", "approved", "consuming"}:
         pending_approvals.append({
             key: item.get(key) for key in (
-                "approval_id", "version", "state", "action", "object_id", "summary",
+                "approval_id", "version", "state", "effective_state", "action", "object_id", "summary",
                 "attempt_id", "task_id", "expires_at", "updated_at"
             ) if item.get(key) not in (None, "")
         })
@@ -241,6 +311,8 @@ state["approvals"] = {
     "pending": len(pending_approvals),
     "effective_expired": effective_expired,
     "by_state": approval_by_state,
+    "by_durable_state": approval_by_durable_state,
+    "by_effective_state": approval_by_effective_state,
     "latest_pending": pending_approvals[-5:],
 }
 
@@ -262,11 +334,26 @@ state["runtime"] = {
     "warnings": runtime_raw.get("warnings", []) if runtime_healthy else [],
 }
 
-# --- Active task packet: Goal + Next Step -----------------------------------
-task = {"present": False}
+# --- Active task packet + canonical lifecycle status ------------------------
+task_status = load_json_file(os.environ["OMS_RS_TASK_FILE"], {})
+task_healthy = os.environ["OMS_RS_TASK_HEALTHY"] == "1"
+if task_healthy:
+    task = {
+        key: task_status.get(key) for key in (
+            "present", "task_id", "status", "source_session", "last_activity",
+            "closed_at", "stale", "verification"
+        ) if key in task_status
+    }
+    task.setdefault("present", False)
+    task["healthy"] = True
+else:
+    task = {
+        "present": os.environ["OMS_RS_TASK_PHYSICAL"] == "1",
+        "healthy": False,
+        "error": "status-unavailable",
+    }
 tf = oms("task", "current.md")
-if os.path.isfile(tf):
-    task["present"] = True
+if task_healthy and task["present"] and os.path.isfile(tf):
     section = None
     buf = {"## Goal": [], "## Next Step": []}
     for raw in open(tf, encoding="utf-8", errors="replace"):
@@ -280,40 +367,31 @@ if os.path.isfile(tf):
     task["next"] = " ".join(buf["## Next Step"])[:200]
 state["task"] = task
 
-# --- Plan DAG: counts by state, stale claims --------------------------------
-plan = {"present": False, "by_state": {}, "stale": [], "stale_review": [], "actionable": []}
+# --- Plan DAG: canonical read-time snapshot ---------------------------------
+plan_status = load_json_file(os.environ["OMS_RS_PLAN_FILE"], {})
+plan_healthy = os.environ["OMS_RS_PLAN_HEALTHY"] == "1"
+plan = {
+    "present": (bool(plan_status.get("present")) if plan_healthy else
+                os.environ["OMS_RS_PLAN_PHYSICAL"] == "1"),
+    "healthy": plan_healthy,
+    "task_count": int(plan_status.get("task_count") or 0),
+    "nonempty": bool(plan_status.get("nonempty")),
+    "all_done": bool(plan_status.get("all_done")),
+    "has_unfinished": bool(plan_status.get("has_unfinished")),
+    "by_state": plan_status.get("by_state", {}),
+    "stale": plan_status.get("stale", []),
+    "stale_review": plan_status.get("stale_review", []),
+    "actionable": plan_status.get("actionable", []),
+}
+if not plan_healthy:
+    plan["error"] = "status-unavailable"
 pf = oms("plan", "tasks.json")
-if os.path.isfile(pf):
+if plan_healthy and plan["present"] and os.path.isfile(pf):
     try:
         pdata = json.load(open(pf, encoding="utf-8"))
     except Exception:
         pdata = {}
-    tasks = pdata.get("tasks", {})
-    if tasks:
-        plan["present"] = True
-        plan["goal"] = (pdata.get("goal") or "")[:200]
-        done_ids = {i for i, t in tasks.items() if t.get("state") == "done"}
-        for i, t in tasks.items():
-            st = t.get("state", "?")
-            plan["by_state"][st] = plan["by_state"].get(st, 0) + 1
-            # Stale claim: claimed past the TTL since claimed_at (per-task ttl wins).
-            if st == "claimed":
-                e = epoch(t.get("claimed_at", ""))
-                ttl = plan_ttl
-                raw_ttl = t.get("ttl", "")
-                if str(raw_ttl).isdigit():
-                    ttl = int(raw_ttl)
-                if e is not None and now - e >= ttl:
-                    plan["stale"].append({"id": i, "provider": t.get("provider", "")})
-            # Stale review: reclaim never touches review, so an abandoned
-            # reviewer strands the task silently unless it is flagged here.
-            if st == "review":
-                e = epoch(t.get("updated", ""))
-                if e is not None and now - e >= review_ttl:
-                    plan["stale_review"].append({"id": i, "provider": t.get("provider", "")})
-            # Actionable: ready with all deps done.
-            if st == "ready" and all(d in done_ids for d in t.get("depends", [])):
-                plan["actionable"].append(i)
+    plan["goal"] = (pdata.get("goal") or "")[:200]
 retirements = [row for row in read_jsonl(oms("plan", "retirements.jsonl"))
                if row.get("schema") == 1 and row.get("kind") == "plan-retirement"]
 if retirements:
@@ -491,51 +569,33 @@ state["artifacts"] = {
     "latest": latest_artifacts,
 }
 
-# --- Unresolved failures (fail-ledger) --------------------------------------
-fail_rows = read_jsonl(oms("failures.jsonl"))
-fagg, forder = {}, []
-for r in fail_rows:
-    fp = r.get("fingerprint")
-    if not fp:
-        continue
-    if fp not in fagg:
-        fagg[fp] = {"count": 0, "resolved": False, "last": None}
-        forder.append(fp)
-    if r.get("event") == "resolved":
-        fagg[fp]["resolved"] = True
-        fagg[fp]["count"] = 0
-    elif r.get("event") == "fail":
-        # Same read-time predicate as fail-ledger check/list (>= at the
-        # boundary, like every other site): an expired hook row contributes
-        # nothing to the open count. Unparseable ts is never grounds for
-        # retirement.
-        if r.get("kind") == "hook":
-            fail_epoch = epoch(r.get("ts") or "")
-            if fail_epoch is not None and \
-                    now - fail_epoch >= int(os.environ["OMS_RS_HOOK_FAIL_TTL"]):
-                continue
-        fagg[fp]["count"] += 1
-        fagg[fp]["resolved"] = False
-        fagg[fp]["last"] = r
+# --- Unresolved failures (canonical fail-ledger projection) -----------------
+failure_doc = load_json_file(os.environ["OMS_RS_FAILURE_FILE"], {})
+failure_rows = failure_doc.get("failures", []) if isinstance(failure_doc, dict) else []
+failure_healthy = os.environ["OMS_RS_FAILURE_HEALTHY"] == "1"
 open_fails = []
-for fp in forder:
-    d = fagg[fp]
-    if d["resolved"] or d["count"] == 0:
+for row in failure_rows:
+    if not isinstance(row, dict):
         continue
-    last = d["last"] or {}
-    # A hook row seen once is expected one-shot noise on its way to TTL
-    # retirement; anything else — a deliberate record, or a hook failure
-    # that repeats — is actionable. Recurring hook rows stay TTL-retiring
-    # AND actionable: recurrence is the signal, retirement the janitor.
-    retiring = (last.get("kind") == "hook") and d["count"] < 2
-    open_fails.append({"fingerprint": fp, "count": d["count"],
-                       "kind": last.get("kind") or "",
-                       "retiring": retiring,
-                       "summary": (last.get("summary") or last.get("cmd", ""))[:80]})
-actionable_total = sum(1 for f in open_fails if not f["retiring"])
-state["failures"] = {"open": open_fails[-5:], "open_total": len(open_fails),
-                     "actionable_total": actionable_total,
-                     "retiring_total": len(open_fails) - actionable_total}
+    open_fails.append({
+        "fingerprint": row.get("fingerprint") or "",
+        "count": int(row.get("count") or 0),
+        "kind": row.get("kind") or "",
+        "attention": row.get("attention") or "none",
+        "actionable": row.get("actionable") is True,
+        "retiring": bool(row.get("retiring")),
+        "summary": (row.get("summary") or row.get("cmd") or "")[:80],
+    })
+actionable_total = sum(1 for f in open_fails if f["actionable"])
+state["failures"] = {
+    "present": os.environ["OMS_RS_FAILURE_PHYSICAL"] == "1",
+    "healthy": failure_healthy,
+    "open": open_fails[-5:], "open_total": len(open_fails),
+    "actionable_total": actionable_total,
+    "retiring_total": len(open_fails) - actionable_total,
+}
+if not failure_healthy:
+    state["failures"]["error"] = "projection-unavailable"
 
 # --- Install attention (auto-update) ----------------------------------------
 au = os.environ.get("OMS_RS_AUTOUPDATE") or ""
@@ -823,6 +883,8 @@ else:
     t = state["task"]
     if t["present"]:
         line("\n## Active task")
+        if not t.get("healthy", True):
+            line("  status unavailable or invalid (run: oms agent-task status --json)")
         if t.get("goal"):
             line("  goal: %s" % t["goal"])
         if t.get("next"):
@@ -850,6 +912,8 @@ else:
     p = state["plan"]
     if p["present"]:
         line("\n## Plan")
+        if not p.get("healthy", True):
+            line("  status unavailable or invalid (run: oms agent-plan status --json)")
         if p.get("goal"):
             line("  goal: %s" % p["goal"])
         line("  by state: %s" % ", ".join("%s=%d" % (k, v) for k, v in sorted(p["by_state"].items())))
@@ -961,7 +1025,9 @@ else:
         line("  recover: oms patch-land --recover")
 
     fl = state["failures"]
-    if fl["open_total"] > 0:
+    if not fl.get("healthy", True):
+        line("\n## Unresolved failures: unavailable or invalid (run: oms fail-ledger list)")
+    elif fl["open_total"] > 0:
         line("\n## Unresolved failures (%d)" % fl["open_total"])
         for e in fl["open"]:
             line("  %s  x%d  %s" % (e["fingerprint"], e["count"], e["summary"]))

@@ -44,7 +44,8 @@ conservative and based on task wording; the owning agent may pass --mode read or
 --mode write when intent is already clear.
 
 Options:
-  --to PROVIDER        codex, claude, or antigravity. Required.
+  --to PROVIDER        Registered agent transport; inspect `oms models`.
+                       Required.
   --prompt TEXT        Prompt/task to send.
   --prompt-file PATH   Prompt/task file to send.
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
@@ -353,14 +354,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$TO" in
-  codex|claude|antigravity|agy) ;;
-  "") echo "error: --to is required" >&2; exit 2 ;;
-  *) echo "error: unsupported provider: $TO" >&2; exit 2 ;;
-esac
+[ -n "$TO" ] || { echo "error: --to is required" >&2; exit 2; }
 # Canonicalize aliases so artifacts, plan claims, and worker records all carry
 # the same provider name.
-TO="$(oms_normalize_provider "$TO")"
+requested_to="$TO"
+TO="$(oms_normalize_provider "$TO")" || {
+  echo "error: unsupported provider: $requested_to" >&2
+  exit 2
+}
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?

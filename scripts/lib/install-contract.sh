@@ -547,6 +547,93 @@ except Exception:
 PY
 }
 
+# The cron marker pair is an ownership boundary, not just an installation
+# hint. Every reader and writer must classify the same bytes the same way:
+# absent has no marker, valid has exactly one ordered begin/end pair, and any
+# orphan, reversed, nested, or duplicate marker is malformed. In particular,
+# never stream-edit an unclassified crontab: an orphan begin marker would make
+# the filter consume unrelated jobs through EOF.
+OMS_INSTALL_AUTOUPDATE_CRON_MARK_BEGIN="# oh-my-setting autoupdate:begin"
+OMS_INSTALL_AUTOUPDATE_CRON_MARK_END="# oh-my-setting autoupdate:end"
+
+oms_install_autoupdate_cron_read() {
+  local cron_file="${1:-}"
+
+  if [ -n "$cron_file" ]; then
+    if [ -f "$cron_file" ]; then
+      cat "$cron_file" || return
+    fi
+    return 0
+  fi
+  command -v crontab >/dev/null 2>&1 || return 0
+  crontab -l 2>/dev/null || true
+}
+
+oms_install_autoupdate_cron_write() {
+  local cron_file="${1:-}"
+
+  if [ -n "$cron_file" ]; then
+    cat > "$cron_file"
+  else
+    crontab -
+  fi
+}
+
+# Write the input with a valid managed block removed to OUTPUT and print its
+# typed state. OUTPUT is scratch space for malformed input and must not be
+# installed unless the returned state is valid or absent.
+oms_install_autoupdate_cron_prepare() {
+  local input="$1"
+  local output="$2"
+  local status=0
+
+  awk -v begin="$OMS_INSTALL_AUTOUPDATE_CRON_MARK_BEGIN" \
+      -v end="$OMS_INSTALL_AUTOUPDATE_CRON_MARK_END" '
+    {
+      probe = $0
+      sub(/\r$/, "", probe)
+      if (probe == begin) {
+        if (inside || blocks > 0) malformed = 1
+        inside = 1
+        blocks++
+        next
+      }
+      if (probe == end) {
+        if (!inside) malformed = 1
+        inside = 0
+        next
+      }
+      if (!inside) print
+    }
+    END {
+      if (inside) malformed = 1
+      if (malformed) exit 2
+      if (blocks == 0) exit 3
+    }
+  ' "$input" > "$output" || status="$?"
+
+  case "$status" in
+    0) printf 'valid\n' ;;
+    3) printf 'absent\n' ;;
+    2) printf 'malformed\n' ;;
+    *) return "$status" ;;
+  esac
+}
+
+oms_install_autoupdate_cron_state() {
+  local cron_file="${1:-}"
+  local contents
+  local state
+
+  if ! contents="$(oms_install_autoupdate_cron_read "$cron_file")"; then
+    printf 'malformed\n'
+    return 0
+  fi
+  state="$(printf '%s' "$contents" |
+    oms_install_autoupdate_cron_prepare - /dev/null)" || return
+  printf '%s\n' "$state"
+}
+
 # The trigger scripts record their state here so an out-of-band
 # `oms auto-update install`/`remove` survives the next update: update.sh
 # reconciles the trigger from the receipt's component profile, so a timer that

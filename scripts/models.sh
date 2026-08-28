@@ -11,18 +11,26 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 JSON=0
 REFRESH=0
+PROVIDERS=default
 usage() {
   cat <<'EOF'
-Usage: models.sh [--json] [--refresh]
+Usage: models.sh [--json] [--refresh] [--providers default|auto|all|CSV]
 
 Show cached provider model catalogs and reasoning-effort capabilities. --refresh
 updates the cache first; without it this command never invokes a provider CLI.
+The default is the historical core plus installed optional agents; auto means
+only installed agents, and all also shows absent built-in transports.
 EOF
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json) JSON=1 ;;
     --refresh) REFRESH=1 ;;
+    --providers)
+      shift
+      [ "$#" -gt 0 ] || { echo 'error: --providers requires a selector' >&2; exit 2; }
+      PROVIDERS="$1"
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -33,12 +41,14 @@ done
   echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
   exit 2
 }
+PROVIDER_NAMES="$(oms_provider_selection_names "$PROVIDERS")" || exit $?
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-models.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 rows="$tmp/rows.jsonl"
 : > "$rows"
-for provider in codex claude antigravity; do
+while IFS= read -r provider; do
+  [ -n "$provider" ] || continue
   binary="$(oms_provider_binary "$provider")"
   if [ "$REFRESH" -eq 1 ]; then oms_capability_refresh "$provider" || true; fi
   file="$(oms_capability_file "$provider")"
@@ -78,7 +88,9 @@ print(json.dumps({"provider": provider, "binary": binary, "present": present == 
  "effort_values": values.split() if values else [], "model_effort_scales": scales(os.environ["OMS_EFFORTS_FILE"]),
  "catalog_probe": catalog_probe, "snapshot_age_seconds": age}, ensure_ascii=False))
 PY
-done
+done <<EOF
+$PROVIDER_NAMES
+EOF
 if [ "$JSON" -eq 1 ]; then
   python3 - "$rows" <<'PY'
 import json, sys

@@ -4,7 +4,7 @@
     "core": {
       "description": "Local state, typed projections and one coding-agent backend.",
       "required": ["bash", "git", "python3"],
-      "any_of": [["codex", "claude", "agy"]],
+      "any_of": [["codex", "claude", "agy", "cursor-agent", "grok", "gemini", "qwen", "opencode"]],
       "min_present": {},
       "optional": [],
       "managed_tools": ["primary-provider"]
@@ -13,7 +13,7 @@
       "description": "Cross-provider consultation, review and delegation.",
       "required": [],
       "any_of": [],
-      "min_present": {"commands": ["codex", "claude", "agy"], "count": 2},
+      "min_present": {"commands": ["codex", "claude", "agy", "cursor-agent", "grok", "gemini", "qwen", "opencode"], "count": 2},
       "optional": [],
       "managed_tools": ["secondary-provider"],
       "inherits": ["core"]

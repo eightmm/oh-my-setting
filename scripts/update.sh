@@ -169,17 +169,21 @@ legacy_codex_plugin() {
 
 legacy_auto_update() {
   local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
+  local cron_state
+  cron_state="$(oms_install_autoupdate_cron_state "$cron_file")"
+  if [ "$cron_state" = "malformed" ]; then
+    echo "error: malformed auto-update cron block; refusing to infer the legacy component profile" >&2
+    return 2
+  fi
   if [ -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
      [ -e "$HOME/Library/LaunchAgents/com.oh-my-setting.autoupdate.plist" ]; then
     printf 1
-  elif [ -n "$cron_file" ] && [ -f "$cron_file" ] &&
-       grep -Fq '# oh-my-setting autoupdate:begin' "$cron_file"; then
-    printf 1
-  elif [ -z "$cron_file" ] && command -v crontab >/dev/null 2>&1 &&
-       crontab -l 2>/dev/null | grep -Fq '# oh-my-setting autoupdate:begin'; then
-    printf 1
   else
-    printf 0
+    case "$cron_state" in
+      valid) printf 1 ;;
+      absent) printf 0 ;;
+      *) return 1 ;;
+    esac
   fi
 }
 

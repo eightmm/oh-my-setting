@@ -8,6 +8,8 @@ AGENT_MEMORY_DB_HELPER="$AGENT_MEMORY_COMMON_LIB_DIR/agent-memory-db.py"
 . "$AGENT_MEMORY_COMMON_LIB_DIR/file-lock.sh"
 # shellcheck source=oms-common.sh
 . "$AGENT_MEMORY_COMMON_LIB_DIR/oms-common.sh"
+# shellcheck source=provider-registry.sh
+. "$AGENT_MEMORY_COMMON_LIB_DIR/provider-registry.sh"
 
 # Normalize a repo argument to its git worktree root so shared state does not
 # silently fork when a command runs from a subdirectory (repo/src/.oms vs
@@ -45,9 +47,14 @@ oms_detect_agent() {
 # answer means unknown rather than a real family to exclude.
 oms_peer_caller() {
   local caller
+  local normalized
 
   caller="$(oms_detect_agent 2>/dev/null || printf '')"
   [ "$caller" != agent ] || caller=""
+  if [ -n "$caller" ]; then
+    normalized="$(oms_provider_normalize "$caller" 2>/dev/null)" || normalized=""
+    caller="$normalized"
+  fi
   printf '%s\n' "$caller"
 }
 
@@ -65,11 +72,7 @@ oms_require_peer_owner() {
 # delegate. Accepts the aliases users type; prints the canonical name or fails,
 # so board/artifact records never fork into "agy" vs "antigravity".
 oms_normalize_provider() {
-  case "${1:-}" in
-    codex|claude|antigravity) printf '%s\n' "$1" ;;
-    agy) printf 'antigravity\n' ;;
-    *) return 1 ;;
-  esac
+  oms_provider_normalize "${1:-}" 2>/dev/null || return 1
 }
 
 agent_memory_project_file() {

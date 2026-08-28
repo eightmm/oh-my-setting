@@ -10,8 +10,6 @@ DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SERVICE_FILE="$SYSTEMD_DIR/oh-my-setting-autoupdate.service"
 TIMER_FILE="$SYSTEMD_DIR/oh-my-setting-autoupdate.timer"
-CRON_MARK_BEGIN="# oh-my-setting autoupdate:begin"
-CRON_MARK_END="# oh-my-setting autoupdate:end"
 CRON_FILE="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
 CLAUDE_HOOKS="${OH_MY_SETTING_CLAUDE_HOOKS:-1}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-1}"
@@ -127,51 +125,71 @@ EOF
   echo "auto-update trigger: systemd timer installed ($MODE)"
 }
 
-read_cron() {
-  if [ -n "$CRON_FILE" ]; then
-    [ -f "$CRON_FILE" ] && cat "$CRON_FILE"
-    return 0
-  fi
-  crontab -l 2>/dev/null || true
-}
-
-write_cron() {
-  if [ -n "$CRON_FILE" ]; then
-    cat > "$CRON_FILE"
-  else
-    crontab -
-  fi
-}
-
 install_cron() {
+  local current
+  local filtered
   local line
+  local state
   line="17 6 * * * OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
 
+  current="$(mktemp)" || return
+  filtered="$(mktemp)" || {
+    rm -f "$current"
+    return 1
+  }
+  if ! oms_install_autoupdate_cron_read "$CRON_FILE" > "$current"; then
+    rm -f "$current" "$filtered"
+    echo "error: failed to read crontab" >&2
+    return 1
+  fi
+  state="$(oms_install_autoupdate_cron_prepare "$current" "$filtered")" || {
+    rm -f "$current" "$filtered"
+    echo "error: failed to inspect crontab" >&2
+    return 1
+  }
+  rm -f "$current"
+  if [ "$state" = "malformed" ]; then
+    rm -f "$filtered"
+    echo "error: malformed auto-update cron block; refusing to modify crontab" >&2
+    return 1
+  fi
   if [ "$DRY_RUN" = "1" ]; then
+    rm -f "$filtered"
     printf 'would install cron trigger: %s\n' "$line"
     return 0
   fi
-
-  tmp="$(mktemp)"
-  read_cron | awk -v begin="$CRON_MARK_BEGIN" -v end="$CRON_MARK_END" '
-    $0 == begin { skip = 1; next }
-    $0 == end { skip = 0; next }
-    !skip { print }
-  ' > "$tmp"
   if ! {
-    cat "$tmp"
-    printf '%s\n' "$CRON_MARK_BEGIN"
+    cat "$filtered"
+    printf '%s\n' "$OMS_INSTALL_AUTOUPDATE_CRON_MARK_BEGIN"
     printf '%s\n' "$line"
-    printf '%s\n' "$CRON_MARK_END"
-  } | write_cron; then
-    rm -f "$tmp"
+    printf '%s\n' "$OMS_INSTALL_AUTOUPDATE_CRON_MARK_END"
+  } | oms_install_autoupdate_cron_write "$CRON_FILE"; then
+    rm -f "$filtered"
     echo "error: failed to write crontab" >&2
-    exit 1
+    return 1
   fi
-  rm -f "$tmp"
+  rm -f "$filtered"
   echo "auto-update trigger: cron installed ($MODE)"
 }
 
+preflight_cron_state() {
+  local state
+
+  state="$(oms_install_autoupdate_cron_state "$CRON_FILE")" || {
+    echo "error: failed to inspect crontab" >&2
+    return 1
+  }
+  if [ "$state" = "malformed" ]; then
+    echo "error: malformed auto-update cron block; refusing to install scheduler trigger" >&2
+    return 1
+  fi
+}
+
+# Cron is one part of the scheduler ownership state even when systemd wins
+# automatic selection. Refuse malformed ownership before probing another
+# scheduler or writing its units/receipt. install_cron still reclassifies a
+# fresh snapshot immediately before its own mutation to close the read gap.
+preflight_cron_state
 chosen="$(choose_method)"
 case "$chosen" in
   systemd)

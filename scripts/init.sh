@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 ROOT="$(cd "$ROOT" && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/project-state.sh
+. "$ROOT/scripts/lib/project-state.sh"
 
 REPO="$PWD"
 PRIVATE="${OH_MY_SETTING_PRIVATE_AGENT_FILES:-1}"
@@ -83,11 +85,9 @@ if grep -lq "<!-- oh-my-setting:" "$STATE_ROOT/AGENTS.md" "$STATE_ROOT/CLAUDE.md
     grep -lq "<!-- oh-my-setting:" "$STATE_ROOT/CLAUDE.md" 2>/dev/null ||
     rules_state="partial"
 fi
-spec_state="missing"
-if [ -f "$STATE_ROOT/PROJECT.md" ]; then
-  spec_state="$(sed -n 's/^- State:[[:space:]]*//p' "$STATE_ROOT/PROJECT.md" | sed -n '1p')"
-  spec_state="${spec_state:-unset}"
-fi
+spec_state="$(oms_project_state "$STATE_ROOT/PROJECT.md")"
+spec_display="$spec_state"
+[ "$spec_display" != legacy-active ] || spec_display=active
 
 # The template step no-ops on a repo that had no git yet (the common bootstrap
 # order is scaffold -> git init), so this is where the exclusion actually lands
@@ -113,7 +113,7 @@ task_state="none"
 plan_state="none"
 [ -f "$OMS/plan/tasks.json" ] && plan_state="present"
 
-echo "oms init: $STATE_ROOT (style=$style, memory=$mem_state, rules=$rules_state, spec=$spec_state)"
+echo "oms init: $STATE_ROOT (style=$style, memory=$mem_state, rules=$rules_state, spec=$spec_display)"
 [ "$private_state" = "just-hidden" ] &&
   echo "oms init: hid the agent files from git (.git/info/exclude)"
 echo
@@ -129,9 +129,16 @@ case "$rules_state" in
     ;;
   present)
     case "$spec_state" in
-      missing) echo "- Rules applied but PROJECT.md is missing: 'oms apply-project-template auto .' recreates it." ;;
-      draft|unset) echo "- PROJECT.md state is $spec_state: confirm the spec (goal, commands, verification) before broad work." ;;
-      *) echo "- Project rules and PROJECT.md ($spec_state) are in place: 'oms project-doctor .' verifies drift." ;;
+      missing)
+        if [ -f "$STATE_ROOT/PROJECT.md" ]; then
+          echo "- PROJECT.md has no State field: confirm the spec before broad work."
+        else
+          echo "- Rules applied but PROJECT.md is missing: 'oms apply-project-template auto .' recreates it."
+        fi
+        ;;
+      draft) echo "- PROJECT.md state is draft: confirm the spec (goal, commands, verification) before broad work." ;;
+      invalid) echo "- PROJECT.md State is invalid and requires confirmation before broad work." ;;
+      confirmed|legacy-active) echo "- Project rules and PROJECT.md ($spec_display) are in place: 'oms project-doctor .' verifies drift." ;;
     esac
     ;;
 esac

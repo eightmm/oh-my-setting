@@ -11,6 +11,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/project-state.sh
+. "$ROOT/scripts/lib/project-state.sh"
 # shellcheck source=scripts/lib/model-routing.sh
 . "$ROOT/scripts/lib/model-routing.sh"
 # shellcheck source=scripts/lib/work-journal.sh
@@ -64,6 +66,7 @@ GOAL_DRIVE="${OMS_AUTOPILOT_GOAL_DRIVE:-$ROOT/scripts/goal-drive.sh}"
 PEER_REVIEW="${OMS_AUTOPILOT_PEER_REVIEW:-$ROOT/scripts/peer-review.sh}"
 DRAFT_PR_TOOL="${OMS_AUTOPILOT_DRAFT_PR:-$ROOT/scripts/draft-pr.sh}"
 RECEIPT_HELPER="$ROOT/scripts/lib/autopilot-receipt.py"
+PATH_SCOPE_HELPER="$ROOT/scripts/lib/path_scope.py"
 
 usage() {
   cat <<'EOF'
@@ -1043,11 +1046,12 @@ PY
 }
 
 [ -f "$SPEC" ] || fail "PROJECT.md is required; complete the project spec first"
-spec_state="$(sed -n 's/^- State:[[:space:]]*//p' "$SPEC" | sed -n 1p)"
-spec_state="${spec_state//$'\r'/}"
+spec_state="$(oms_project_state "$SPEC")"
 case "$spec_state" in
-  confirmed|active) ;;
-  *) fail "PROJECT.md must be confirmed (legacy active is also accepted)" ;;
+  confirmed|legacy-active) ;;
+  draft) fail "PROJECT.md is still draft; confirm the spec first" ;;
+  missing) fail "PROJECT.md has no '- State:' field" ;;
+  invalid) fail "PROJECT.md State is invalid; use confirmed (legacy active is also accepted)" ;;
 esac
 oms_git_assert_safe_execution_config "$REPO" ||
   fail "unsafe repository Git execution config"
@@ -1068,15 +1072,19 @@ if [ "$REVIEW_MODE" != off ] && [ "$REVIEWER" = "$WORKER" ]; then
 fi
 
 plan_view() {  # MODE: all-done|has-r1|accept
+  if [ "$1" = all-done ]; then
+    "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null | \
+      python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("all_done") else "0")' | \
+      tr -d '\r'
+    return
+  fi
   python3 - "$PLAN_FILE" "$1" <<'PY' | tr -d '\r'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 tasks = data.get("tasks") or {}
 mode = sys.argv[2]
-if mode == "all-done":
-    print("1" if tasks and all(t.get("state") == "done" for t in tasks.values()) else "0")
-elif mode == "has-r1":
+if mode == "has-r1":
     print("1" if any(str(key).startswith("r1-") for key in tasks) else "0")
 elif mode == "accept":
     print(data.get("accept") or "")
@@ -1084,24 +1092,7 @@ PY
 }
 
 normalize_allowed() {  # TEXT
-  python3 - "$1" <<'PY' | tr -d '\r'
-import re, sys
-
-def clean(value):
-    value = value.strip().replace("\\", "/")
-    while value.startswith("./"):
-        value = value[2:]
-    value = value.rstrip("/") or "."
-    if (value.startswith("/") or re.match(r"^[A-Za-z]:", value) or
-            (value != "." and any(part in ("", ".", "..") for part in value.split("/")))):
-        raise SystemExit(2)
-    return value
-
-items = sorted(set(clean(item) for item in re.split(r"[,\s]+", sys.argv[1]) if item.strip()))
-if not items:
-    raise SystemExit(2)
-print(",".join(items))
-PY
+  python3 "$PATH_SCOPE_HELPER" normalize-list "$1" | tr -d '\r'
 }
 
 # A plan file is not the same thing as a plan bound to THIS contract.
@@ -1125,19 +1116,13 @@ PY
 # holding work: nothing here may decide that an unparseable record is spent.
 plan_has_open_tasks() {
   [ -f "$PLAN_FILE" ] || return 1
-  python3 - "$PLAN_FILE" <<'PY'
+  local snapshot
+  snapshot="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null)" || return 0
+  printf '%s' "$snapshot" | python3 -c '
 import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        data = json.load(handle)
-except Exception:
-    raise SystemExit(0)
-tasks = data.get("tasks") or {}
-values = tasks if isinstance(tasks, list) else list(tasks.values())
-raise SystemExit(0 if any(
-    isinstance(item, dict) and item.get("state") != "done" for item in values
-) else 1)
-PY
+row = json.load(sys.stdin)
+raise SystemExit(0 if row.get("has_unfinished") else 1)
+'
 }
 
 # A plan belongs to the contract that produced it. plan-from-spec creates a
@@ -1487,12 +1472,14 @@ ensure_work_branch() {
 }
 
 work_branch_scope_check() {
-  python3 - "$REPO" "$review_base_sha" "$ALLOWED" <<'PY'
+  python3 - "$REPO" "$review_base_sha" "$ALLOWED" "$PATH_SCOPE_HELPER" <<'PY'
 import os
+import runpy
 import subprocess
 import sys
 
-repo, base, allowed_text = sys.argv[1:]
+repo, base, allowed_text, helper = sys.argv[1:]
+matches_any = runpy.run_path(helper)["matches_any"]
 try:
     raw = subprocess.check_output([
         "git", "-c", "core.fsmonitor=false", "-c", "diff.external=",
@@ -1510,8 +1497,7 @@ for value in raw.split(b"\0"):
     # backslash is a literal filename byte, so normalizing it would turn a
     # root file such as `src\\escape` into a false member of allowed `src`.
     path = os.fsdecode(value)
-    if not any(root == "." or path == root or path.startswith(root + "/")
-               for root in allowed):
+    if not matches_any(path, allowed):
         raise SystemExit(3)
 PY
 }

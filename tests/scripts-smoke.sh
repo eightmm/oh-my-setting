@@ -2610,7 +2610,7 @@ test_peer_review_writer_sits_out_of_default_council() {
   assert_file_contains "$project/out3" "writer: antigravity (excluded from reviewer council)"
 
   # Unknown writer is misuse.
-  if "$ROOT/scripts/peer-review.sh" --repo "$project" --writer gemini \
+  if "$ROOT/scripts/peer-review.sh" --repo "$project" --writer 'unregistered/provider' \
     --export-only --prompt x >/dev/null 2>&1; then
     fail "unknown --writer must be rejected"
   fi
@@ -3016,7 +3016,7 @@ test_peer_review_signal_cleans_provider_processes() {
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
   local home_dir="$project/home"
-  local peer_pid provider_pid rc=0 i=0
+  local peer_pid provider_pid provider_state rc=0 i=0
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
@@ -3046,15 +3046,23 @@ EOF
   kill -TERM "$peer_pid"
   wait "$peer_pid" || rc=$?
   [ "$rc" = 143 ] || fail "TERM should exit peer-review with 143, got $rc"
+  # A deferring subreaper (acceptance's supervise) holds the killed provider
+  # as an unreaped zombie, and kill -0 stays true for that corpse forever:
+  # judge process state — gone or zombie is dead, only runnable survives.
   i=0
-  while kill -0 "$provider_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
+  while [ "$i" -lt 30 ]; do
+    provider_state="$(ps -o stat= -p "$provider_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    case "$provider_state" in ''|Z*) break ;; esac
     sleep 0.1
     i=$((i + 1))
   done
-  if kill -0 "$provider_pid" 2>/dev/null; then
-    kill -KILL "$provider_pid" 2>/dev/null || true
-    fail "peer-review TERM left provider process $provider_pid alive"
-  fi
+  case "$provider_state" in
+    ''|Z*) ;;
+    *)
+      kill -KILL "$provider_pid" 2>/dev/null || true
+      fail "peer-review TERM left provider process $provider_pid alive"
+      ;;
+  esac
 
   # HUP and INT use the same teardown contract and keep their conventional
   # shell exit codes. Re-run short-lived fixtures to pin the handler wiring.
@@ -3089,15 +3097,22 @@ EOF
     wait "$peer_pid" || rc=$?
     case "$signal" in HUP) expected=129 ;; INT) expected=130 ;; esac
     [ "$rc" = "$expected" ] || fail "$signal should exit $expected, got $rc"
+    # Same zombie-aware probe as the TERM case: a subreaper-held corpse is
+    # not a survivor.
     i=0
-    while kill -0 "$provider_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
+    while [ "$i" -lt 30 ]; do
+      provider_state="$(ps -o stat= -p "$provider_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+      case "$provider_state" in ''|Z*) break ;; esac
       sleep 0.1
       i=$((i + 1))
     done
-    if kill -0 "$provider_pid" 2>/dev/null; then
-      kill -KILL "$provider_pid" 2>/dev/null || true
-      fail "peer-review $signal left provider process $provider_pid alive"
-    fi
+    case "$provider_state" in
+      ''|Z*) ;;
+      *)
+        kill -KILL "$provider_pid" 2>/dev/null || true
+        fail "peer-review $signal left provider process $provider_pid alive"
+        ;;
+    esac
   done
 }
 
@@ -3593,7 +3608,7 @@ test_peer_review_rejects_bad_synthesize_provider() {
     fail "review should reject bad synthesize provider"
   fi
 
-  assert_file_contains "$repo/error" "--synthesize provider must be codex, claude, antigravity, or agy"
+  assert_file_contains "$repo/error" "--synthesize requires a registered provider"
 }
 
 test_peer_review_single_provider_failure_exits() {
@@ -5539,7 +5554,8 @@ PY
     done
     alias_rc=0
     OMS_LOCK_TIMEOUT=1 "$plan" --repo "$alias_repo" \
-      --file "$alias_repo/.oms/plan/tasks.json" status >/dev/null 2>&1 || alias_rc=$?
+      --file "$alias_repo/.oms/plan/tasks.json" claim --id t1 --provider codex \
+      >/dev/null 2>&1 || alias_rc=$?
     : > "$hold_release"
     wait "$lock_pid"
     [ "$alias_rc" = 75 ] ||
@@ -6190,6 +6206,27 @@ test_change_guard_forbidden_paths_deny_beats_allow() {
   "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" end >/dev/null
 }
 
+test_change_guard_preserves_bash_bracket_scope_grammar() {
+  local project="$TMP/change-guard-bracket-grammar"
+  local state="$project/.oms/guards/test.tsv"
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" \
+    --allow '*' --deny 'secret[[:digit:]].txt' --deny 'letter[^a].txt' \
+    begin >/dev/null
+  printf 'protected\n' > "$project/secret1.txt"
+  printf 'protected\n' > "$project/letterb.txt"
+  printf 'allowed\n' > "$project/secreta.txt"
+  printf 'allowed\n' > "$project/lettera.txt"
+
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" check >"$project/out"
+  assert_file_contains "$project/out" "changed path in forbidden scope: secret1.txt"
+  assert_file_contains "$project/out" "changed path in forbidden scope: letterb.txt"
+  if grep -Eq 'forbidden scope: (secreta|lettera)\.txt' "$project/out"; then
+    fail "Bash bracket scope grammar denied a non-matching path"
+  fi
+}
+
 test_change_guard_reads_forbidden_paths_from_task() {
   local project="$TMP/change-guard-deny-task"
   local state="$project/.oms/guards/test.tsv"
@@ -6209,6 +6246,110 @@ test_change_guard_reads_forbidden_paths_from_task() {
   if grep -Fq "app.py" "$project/out"; then
     fail "non-forbidden path must not warn when no allow list is set"
   fi
+}
+
+test_path_scope_engine_is_canonical() {
+  local helper="$ROOT/scripts/lib/path_scope.py"
+  local verdict invalid rc
+
+  python3 "$helper" match-any src/app.py 'src/*.py' ||
+    fail "glob scope did not contain its concrete path"
+  if python3 "$helper" match-any src/app.txt 'src/*.py'; then
+    fail "glob scope admitted a non-matching suffix"
+  fi
+  python3 "$helper" match-any secret1.txt 'secret[[:digit:]].txt' ||
+    fail "POSIX digit class drifted from the public Bash scope grammar"
+  python3 "$helper" match-any letterb.txt 'letter[^a].txt' ||
+    fail "caret negation drifted from the public Bash scope grammar"
+  if python3 "$helper" match-any lettera.txt 'letter[^a].txt'; then
+    fail "caret-negated scope matched its excluded character"
+  fi
+  python3 "$helper" inside 'src/*.py' src ||
+    fail "literal envelope did not contain a narrower glob task scope"
+  python3 "$helper" inside src/app.py 'src/*.py' ||
+    fail "glob envelope did not contain a concrete task scope"
+  python3 "$helper" inside 'src/[ab].py' 'src/[ab].py' ||
+    fail "an exact bracket-glob task scope did not stay in its envelope"
+  if python3 "$helper" inside 'src/[a].py' 'src/???.py'; then
+    fail "a different glob language was approved by matching its pattern text"
+  fi
+  for invalid in 'src/[[:bogus:]].py' 'src/[z-a].py' 'src/[[.a.]].py'; do
+    rc=0
+    python3 "$helper" inside "$invalid" "$invalid" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] ||
+      fail "invalid exact glob scope should fail validation with rc2 ($invalid, rc=$rc)"
+    rc=0
+    python3 "$helper" normalize-list "$invalid" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] ||
+      fail "normalize-list persisted invalid glob grammar ($invalid, rc=$rc)"
+  done
+  rc=0
+  python3 "$helper" match-any src/app.py 'src/*.py' 'src/[[:bogus:]].py' \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] ||
+    fail "matches-any skipped an invalid pattern after a valid match (rc=$rc)"
+  rc=0
+  python3 "$helper" inside src/app.py 'src/*.py' 'src/[[:bogus:]].py' \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] ||
+    fail "inside skipped an invalid envelope after a valid match (rc=$rc)"
+  rc=0
+  python3 - "$helper" <<'PY' >/dev/null 2>&1 || rc=$?
+import runpy, sys
+scope = runpy.run_path(sys.argv[1])
+pattern = "src/[a-%s].py" % chr(ord("a") + 4097)
+sys.exit(scope["main"]([sys.argv[1], "match-any", "src/app.py", pattern]))
+PY
+  [ "$rc" = 2 ] ||
+    fail "oversized bracket range should fail before allocation (rc=$rc)"
+  rc=0
+  python3 - "$helper" <<'PY' >/dev/null 2>&1 || rc=$?
+import runpy, sys
+scope = runpy.run_path(sys.argv[1])
+range_end = chr(ord("a") + scope["MAX_BRACKET_RANGE"] - 1)
+pattern = "src/[a-%sa-%s].py" % (range_end, range_end)
+sys.exit(scope["main"]([sys.argv[1], "match-any", "src/a.py", pattern]))
+PY
+  [ "$rc" = 2 ] ||
+    fail "cumulative bracket expansion should fail before repeated allocation (rc=$rc)"
+  rc=0
+  python3 - "$helper" <<'PY' >/dev/null 2>&1 || rc=$?
+import runpy, sys
+scope = runpy.run_path(sys.argv[1])
+pattern = ("a" * 4097) + "*"
+sys.exit(scope["main"]([sys.argv[1], "match-any", pattern + "x", pattern]))
+PY
+  [ "$rc" = 2 ] ||
+    fail "oversized UTF-8 scope item should fail before regex construction (rc=$rc)"
+  rc=0
+  python3 - "$helper" <<'PY' >/dev/null 2>&1 || rc=$?
+import runpy, sys
+scope = runpy.run_path(sys.argv[1])
+range_end = chr(ord("a") + scope["MAX_BRACKET_RANGE"] - 1)
+pattern = "src/[a-%s][a-%s].py" % (range_end, range_end)
+sys.exit(scope["main"]([sys.argv[1], "match-any", "src/aa.py", pattern]))
+PY
+  [ "$rc" = 2 ] ||
+    fail "pattern-global bracket expansion should fail before allocation (rc=$rc)"
+  rc=0
+  python3 - "$helper" <<'PY' >/dev/null 2>&1 || rc=$?
+import runpy, sys
+scope = runpy.run_path(sys.argv[1])
+star_fragment = r"[\s\S]*"
+star_count = scope["MAX_PATTERN_REGEX_OUTPUT"] // len(star_fragment) + 1
+pattern = "*" * star_count
+sys.exit(scope["main"]([sys.argv[1], "match-any", "x", pattern]))
+PY
+  [ "$rc" = 2 ] ||
+    fail "pattern-global regex output should stay within its budget (rc=$rc)"
+  verdict="$(python3 - "$helper" <<'PY'
+import runpy, sys
+scope = runpy.run_path(sys.argv[1])
+print(scope["classify"]("src/private.py", ["src/*.py"], ["src/private.py"]))
+PY
+)"
+  [ "$verdict" = forbidden ] ||
+    fail "forbidden scope did not take precedence over allow: $verdict"
 }
 
 test_agent_call_outbound_scrubber_blocks_private_path() {
@@ -9870,6 +10011,226 @@ test_autoupdate_cron_install_and_uninstall() {
   fi
 }
 
+# A begin marker without its matching end marker is not an owned block. The
+# installer used to stream-filter that input through awk, consume everything
+# after the orphan marker, and then write a fresh block in its place. That can
+# delete unrelated user cron entries, so every scheduler mutation must refuse
+# the malformed state before writing any bytes.
+test_autoupdate_malformed_cron_fails_closed() {
+  local cron_file="$TMP/autoupdate-malformed.cron"
+  local before="$TMP/autoupdate-malformed.before"
+  local config_home="$TMP/autoupdate-malformed-config"
+  local out="$TMP/autoupdate-malformed.out"
+
+  mkdir -p "$config_home/systemd/user"
+  printf '%s\n%s\n%s\n' \
+    'MAILTO=owner@example.test' \
+    '# oh-my-setting autoupdate:begin' \
+    '0 0 * * * keep-this-unrelated-job' > "$cron_file"
+  cp "$cron_file" "$before"
+
+  if OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron >"$out" 2>&1; then
+    fail "install-autoupdate accepted an unterminated managed cron block"
+  fi
+  cmp -s "$before" "$cron_file" ||
+    fail "install-autoupdate changed malformed cron bytes"
+  grep -Fq 'malformed auto-update cron block' "$out" ||
+    fail "install-autoupdate malformed refusal was not actionable: $(cat "$out")"
+
+  # Removal owns both trigger kinds. It must classify cron before removing a
+  # systemd unit or recording auto_update=false.
+  printf '[Timer]\nOnCalendar=daily\n' > \
+    "$config_home/systemd/user/oh-my-setting-autoupdate.timer"
+  if XDG_CONFIG_HOME="$config_home" XDG_RUNTIME_DIR='' \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/uninstall-autoupdate.sh" >"$TMP/autoupdate-malformed-remove.out" 2>&1; then
+    fail "uninstall-autoupdate accepted an unterminated managed cron block"
+  fi
+  cmp -s "$before" "$cron_file" ||
+    fail "uninstall-autoupdate changed malformed cron bytes"
+  [ -f "$config_home/systemd/user/oh-my-setting-autoupdate.timer" ] ||
+    fail "uninstall-autoupdate changed systemd state before rejecting malformed cron"
+}
+
+assert_malformed_cron_blocks_systemd_install() {
+  local label="$1"
+  local method="$2"
+  local cron_file="$TMP/autoupdate-malformed-$label.cron"
+  local cron_before="$TMP/autoupdate-malformed-$label.before"
+  local config_home="$TMP/autoupdate-malformed-$label-config"
+  local home_dir="$TMP/autoupdate-malformed-$label-home"
+  local bin="$TMP/autoupdate-malformed-$label-bin"
+  local systemctl_log="$TMP/autoupdate-malformed-$label-systemctl.log"
+  local receipt="$TMP/autoupdate-malformed-$label-receipt.json"
+  local receipt_before="$TMP/autoupdate-malformed-$label-receipt.before"
+  local out="$TMP/autoupdate-malformed-$label.out"
+
+  mkdir -p "$bin" "$home_dir"
+  cat > "$bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$OMS_TEST_SYSTEMCTL_LOG"
+exit 0
+EOF
+  chmod +x "$bin/systemctl"
+  printf '%s\n%s\n' '# oh-my-setting autoupdate:begin' \
+    '0 0 * * * keep-this-unrelated-job' > "$cron_file"
+  cp "$cron_file" "$cron_before"
+  python3 - "$receipt" "$ROOT" <<'PY'
+import json
+import sys
+
+json.dump({
+    "schema": 2,
+    "source_root": sys.argv[2],
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "channel": "main",
+    "version": "0.3.0",
+    "profile": "custom",
+    "ref": "main",
+    "previous_commit": "",
+    "link_mode": "symlink",
+    "installed_at": "2026-07-12T00:00:00Z",
+    "components": {
+        "tools": False,
+        "claude_hooks": False,
+        "codex_plugin": False,
+        "auto_update": False,
+        "machine_snapshot": False,
+        "slurm_snapshot": False,
+    },
+    "managed_targets": [".local/bin/oms"],
+    "plugin": {"name": "oh-my-setting", "version": "0.1.0", "sha256": "test"},
+}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+  cp "$receipt" "$receipt_before"
+
+  if HOME="$home_dir" XDG_CONFIG_HOME="$config_home" \
+    XDG_RUNTIME_DIR="$TMP/autoupdate-malformed-$label-runtime" \
+    OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_SYSTEMCTL_LOG="$systemctl_log" \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-autoupdate.sh" \
+      --method "$method" >"$out" 2>&1; then
+    fail "$label systemd install accepted malformed cron"
+  fi
+  grep -Fq 'malformed auto-update cron block' "$out" ||
+    fail "$label systemd malformed refusal was not actionable: $(cat "$out")"
+  cmp -s "$cron_before" "$cron_file" ||
+    fail "$label systemd install changed malformed cron bytes"
+  cmp -s "$receipt_before" "$receipt" ||
+    fail "$label systemd install changed the receipt before rejecting cron"
+  [ ! -e "$config_home/systemd/user/oh-my-setting-autoupdate.service" ] ||
+    fail "$label systemd install wrote a service before rejecting cron"
+  [ ! -e "$config_home/systemd/user/oh-my-setting-autoupdate.timer" ] ||
+    fail "$label systemd install wrote a timer before rejecting cron"
+  [ ! -e "$systemctl_log" ] ||
+    fail "$label systemd install probed systemctl before rejecting cron"
+}
+
+test_autoupdate_malformed_cron_blocks_explicit_systemd_install() {
+  assert_malformed_cron_blocks_systemd_install explicit-systemd systemd
+}
+
+test_autoupdate_malformed_cron_blocks_auto_systemd_install() {
+  assert_malformed_cron_blocks_systemd_install auto-systemd auto
+}
+
+test_autoupdate_malformed_cron_precedes_systemd_status() {
+  local cron_file="$TMP/autoupdate-malformed-systemd.cron"
+  local config_home="$TMP/autoupdate-malformed-systemd-config"
+  local timer_dir="$config_home/systemd/user"
+  local out
+
+  mkdir -p "$timer_dir/timers.target.wants"
+  printf '%s\n%s\n' '# oh-my-setting autoupdate:begin' \
+    '0 0 * * * keep-this-unrelated-job' > "$cron_file"
+  printf '[Timer]\nOnCalendar=daily\n' > \
+    "$timer_dir/oh-my-setting-autoupdate.timer"
+  ln -s ../oh-my-setting-autoupdate.timer \
+    "$timer_dir/timers.target.wants/oh-my-setting-autoupdate.timer"
+
+  out="$(XDG_CONFIG_HOME="$config_home" \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s\n' "$out" | grep -Fxq -- '- trigger: cron (malformed)' ||
+    fail "active systemd masked malformed cron status: $out"
+}
+
+test_update_malformed_cron_precedes_launchd_inference() {
+  local cron_file="$TMP/autoupdate-malformed-launchd.cron"
+  local before="$TMP/autoupdate-malformed-launchd.before"
+  local project="$TMP/autoupdate-malformed-launchd-update"
+  local receipt="$TMP/autoupdate-malformed-launchd-receipt.json"
+  local update_home="$TMP/autoupdate-malformed-launchd-home"
+  local out="$TMP/autoupdate-malformed-launchd.out"
+
+  printf '%s\n%s\n' '# oh-my-setting autoupdate:begin' \
+    '0 0 * * * keep-this-unrelated-job' > "$cron_file"
+  cp "$cron_file" "$before"
+  git clone -q "$ROOT" "$project"
+  cp "$ROOT/scripts/update.sh" "$project/scripts/update.sh"
+  cp "$ROOT/scripts/lib/install-contract.sh" \
+    "$project/scripts/lib/install-contract.sh"
+  mkdir -p "$update_home/Library/LaunchAgents"
+  : > "$update_home/Library/LaunchAgents/com.oh-my-setting.autoupdate.plist"
+  python3 - "$receipt" "$project" <<'PY'
+import json
+import sys
+
+json.dump({
+    "schema": 1,
+    "source_root": sys.argv[2],
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "channel": "main",
+    "version": "0.3.0",
+    "installed_at": "2026-07-12T00:00:00Z",
+    "plugin": {"name": "oh-my-setting", "version": "0.1.0", "sha256": "x" * 64},
+}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+  if HOME="$update_home" XDG_CONFIG_HOME="$update_home/.config" \
+    OMS_INSTALL_RECEIPT="$receipt" \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    PATH="/usr/bin:/bin" "$project/scripts/update.sh" --check >"$out" 2>&1; then
+    fail "launchd masked malformed cron during legacy component inference"
+  fi
+  grep -Fq 'refusing to infer the legacy component profile' "$out" ||
+    fail "update malformed refusal was not actionable: $(cat "$out")"
+  cmp -s "$before" "$cron_file" ||
+    fail "update changed malformed cron bytes when launchd was present"
+}
+
+test_autoupdate_malformed_cron_dry_run_parity() {
+  local cron_file="$TMP/autoupdate-malformed-dry-run.cron"
+  local before="$TMP/autoupdate-malformed-dry-run.before"
+  local config_home="$TMP/autoupdate-malformed-dry-run-config"
+  local timer="$config_home/systemd/user/oh-my-setting-autoupdate.timer"
+
+  mkdir -p "$(dirname "$timer")"
+  printf '%s\n%s\n' '# oh-my-setting autoupdate:begin' \
+    '0 0 * * * keep-this-unrelated-job' > "$cron_file"
+  cp "$cron_file" "$before"
+
+  if OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron --dry-run \
+      >"$TMP/autoupdate-malformed-install-dry.out" 2>&1; then
+    fail "install-autoupdate dry-run accepted malformed cron"
+  fi
+  cmp -s "$before" "$cron_file" ||
+    fail "install-autoupdate dry-run changed malformed cron bytes"
+
+  printf '[Timer]\nOnCalendar=daily\n' > "$timer"
+  if XDG_CONFIG_HOME="$config_home" XDG_RUNTIME_DIR='' \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/uninstall-autoupdate.sh" --dry-run \
+      >"$TMP/autoupdate-malformed-remove-dry.out" 2>&1; then
+    fail "uninstall-autoupdate dry-run accepted malformed cron"
+  fi
+  cmp -s "$before" "$cron_file" ||
+    fail "uninstall-autoupdate dry-run changed malformed cron bytes"
+  [ -f "$timer" ] ||
+    fail "uninstall-autoupdate dry-run changed systemd state"
+}
+
 test_autoupdate_install_dry_run_no_writes() {
   local home_dir="$TMP/autoupdate-dry-home"
   local cron_file="$TMP/autoupdate-dry.cron"
@@ -11280,6 +11641,29 @@ test_patch_admit_admits_clean_patch() {
   [ -n "$r" ] || fail "no admission report written"
   assert_file_contains "$r" "Patch admission: ADMIT"
   assert_file_contains "$r" "apply: PASS"
+}
+
+test_patch_admit_scope_uses_canonical_glob_and_deny_precedence() {
+  local repo="$TMP/admit-canonical-scope"
+  local sh="$ROOT/scripts/patch-admit.sh"
+  local report
+
+  make_patch_repo "$repo" $'base\nmore\n'
+  "$ROOT/scripts/agent-plan.sh" --repo "$repo" init --goal scope --accept true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id allowed \
+    --title allowed --allowed '*.txt' --verify true >/dev/null
+  "$sh" --patch "$repo/change.patch" --repo "$repo" --plan-task allowed >/dev/null ||
+    fail "patch-admit did not accept the canonical glob scope"
+
+  "$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id denied \
+    --title denied --allowed '*.txt' --forbidden file.txt --verify true >/dev/null
+  if "$sh" --patch "$repo/change.patch" --repo "$repo" --plan-task denied >/dev/null; then
+    fail "a forbidden path was admitted because it also matched the allow glob"
+  fi
+  report="$(find "$repo/.oms/artifacts/admit" -name '*.md' -type f \
+    -exec ls -t {} + | sed -n '1p')"
+  [ -n "$report" ] || fail "forbidden-scope admission report missing"
+  assert_file_contains "$report" "forbidden: file.txt"
 }
 
 test_patch_admit_rejects_stale_patch() {
@@ -13329,9 +13713,13 @@ assert row["how"] == "fixed the assertion", row
 
   printf '{"schema":1,"event":"fail","fingerprint":"legacy-row","kind":"cmd","cmd":"old command","exit":1}\n' \
     >> "$project/.oms/failures.jsonl"
+  printf '{"event":"fail","fingerprint":"implicit-schema-row","cmd":"older command","exit":1}\n' \
+    >> "$project/.oms/failures.jsonl"
   out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list should parse old rows"
   printf '%s' "$out" | grep -Fq 'old command' ||
     fail "old rows without new fields must still list: $out"
+  printf '%s' "$out" | grep -Fq 'older command' ||
+    fail "legacy rows without an explicit schema must still list: $out"
 }
 
 test_ci_status_record_and_state() {
@@ -21863,6 +22251,370 @@ $name
     fail "public tool skill-doctor must dispatch"
   if "$ROOT/scripts/oms" link --help >/dev/null 2>&1; then
     fail "internal script link must not dispatch"
+  fi
+}
+
+test_state_consumes_canonical_active_task_status() {
+  local project="$TMP/state-task-status"
+  local task="$ROOT/scripts/agent-task.sh"
+  local state_json
+
+  make_committed_repo "$project"
+  "$task" --repo "$project" init --goal "Verify shared state" --verify true \
+    --state "ready" --next "inspect status" >/dev/null
+  "$task" --repo "$project" verify >/dev/null
+
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["task"]
+assert row["present"] is True, row
+assert row["task_id"].startswith("task-"), row
+assert row["status"] == "verified", row
+assert row["verification"] == "fresh", row
+assert row["stale"] is False, row
+' || fail "repo state did not consume fresh agent-task status: $state_json"
+
+  printf 'changed\n' >> "$project/file.txt"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["task"]
+assert row["verification"] == "stale", row
+assert row["status"] == "verified", row
+' || fail "repo state hid stale task verification: $state_json"
+}
+
+test_plan_snapshot_is_nonvacuous_across_state_runtime_and_goal_drive() {
+  local project="$TMP/nonvacuous-plan"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local snapshot state_json runtime_json out rc
+
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal "empty cannot be done" --accept true >/dev/null
+
+  snapshot="$("$plan" --repo "$project" status --json)" ||
+    fail "empty plan status JSON failed"
+  printf '%s' "$snapshot" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["present"] is True, row
+assert row["task_count"] == 0 and row["nonempty"] is False, row
+assert row["all_done"] is False, row
+' || fail "canonical plan snapshot treated zero tasks as done: $snapshot"
+
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)"
+  runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$project" envelope show)"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["plan"]
+assert row["present"] is True, row
+assert row["task_count"] == 0 and row["nonempty"] is False, row
+assert row["all_done"] is False, row
+' || fail "repo state disagreed on empty plan semantics: $state_json"
+  printf '%s' "$runtime_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["plan"]
+assert row["present"] is True, row
+assert row["task_count"] == 0 and row["nonempty"] is False, row
+assert row["all_done"] is False, row
+' || fail "runtime disagreed on empty plan semantics: $runtime_json"
+
+  rc=0
+  out="$("$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "goal-drive accepted a zero-task plan (rc=$rc): $out"
+  printf '%s' "$out" | grep -Fq 'no tasks' ||
+    fail "zero-task refusal did not explain the missing work contract: $out"
+  if [ -f "$project/.oms/plan/progress.jsonl" ] &&
+    grep -Eq '"status"[[:space:]]*:[[:space:]]*"(pass|done)"' \
+      "$project/.oms/plan/progress.jsonl"; then
+    fail "zero-task plan wrote successful acceptance/completion evidence"
+  fi
+  runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$project" envelope show)"
+  printf '%s' "$runtime_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+actions = [item["id"] for item in row["next_actions"]]
+assert row["evidence"]["complete"] is False, row["evidence"]
+assert "record_verified_completion" not in actions, actions
+assert "repair_empty_plan" in actions, actions
+' || fail "runtime allowed an empty plan to become verified completion: $runtime_json"
+}
+
+test_project_state_parser_is_shared_and_rejects_typos() {
+  local project="$TMP/project-state-parser"
+  local out rc
+
+  make_committed_repo "$project"
+  "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  sed -i 's/^- State: draft/- State: confirmd/; s/^- Test:$/- Test: true/; s/^- Success criteria:$/- Success criteria: checks pass/' \
+    "$project/PROJECT.md"
+
+  rc=0
+  out="$("$ROOT/scripts/project-doctor.sh" --strict "$project" 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "strict project-doctor accepted an invalid State (rc=$rc): $out"
+  printf '%s' "$out" | grep -Fq 'invalid' ||
+    fail "project-doctor did not name the invalid State: $out"
+
+  out="$("$ROOT/scripts/init.sh" --repo "$project" --no-private)" ||
+    fail "init should diagnose an invalid State without crashing"
+  printf '%s' "$out" | grep -Fq 'requires confirmation' ||
+    fail "init presented an invalid State as an in-place contract: $out"
+
+  rc=0
+  out="$("$ROOT/scripts/plan-from-spec.sh" --repo "$project" 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "plan-from-spec accepted an invalid State (rc=$rc): $out"
+  printf '%s' "$out" | grep -Fq 'invalid' ||
+    fail "plan-from-spec did not name the invalid State: $out"
+
+  rc=0
+  out="$("$ROOT/scripts/autopilot.sh" --repo "$project" --base main propose 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "autopilot accepted an invalid State (rc=$rc): $out"
+  printf '%s' "$out" | grep -Fq 'invalid' ||
+    fail "autopilot did not name the invalid State: $out"
+
+  sed -i 's/^- State: confirmd/- State: active/' "$project/PROJECT.md"
+  out="$("$ROOT/scripts/init.sh" --repo "$project" --no-private)" ||
+    fail "init rejected legacy active State"
+  printf '%s' "$out" | grep -Fq 'spec=active' ||
+    fail "init changed the public legacy active spelling: $out"
+  if printf '%s' "$out" | grep -Fq 'legacy-active'; then
+    fail "init leaked the internal typed legacy-active verdict: $out"
+  fi
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
+    fail "project-doctor rejected legacy active State"
+  printf '%s' "$out" | grep -Fq 'PROJECT.md state: active' ||
+    fail "project-doctor changed the public legacy active spelling: $out"
+}
+
+test_state_read_is_nonmutating_and_projection_failures_stay_visible() {
+  local project="$TMP/state-read-health"
+  local before after state_json inbox_json
+
+  state_inventory() {  # REPO
+    python3 - "$1" <<'PY'
+import hashlib, os, pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+for path in sorted(root.rglob("*")):
+    rel = path.relative_to(root)
+    if rel.parts and rel.parts[0] == ".git":
+        continue
+    if path.is_symlink():
+        print("L", rel.as_posix(), os.readlink(path))
+    elif path.is_dir():
+        print("D", rel.as_posix())
+    elif path.is_file():
+        print("F", rel.as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+  }
+
+  make_committed_repo "$project"
+  before="$(state_inventory "$project")"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state failed on a clean repo with no plan"
+  after="$(state_inventory "$project")"
+  [ "$after" = "$before" ] ||
+    fail "read-only state changed clean-repo paths or bytes: before=[$before] after=[$after]"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["plan"]["present"] is False and row["plan"]["healthy"] is True, row["plan"]
+assert row["task"]["present"] is False and row["task"]["healthy"] is True, row["task"]
+' || fail "clean-repo projection health is wrong: $state_json"
+
+  mkdir -p "$project/.oms/task/current.md"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state should return an explicit unhealthy task projection"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+task = json.load(sys.stdin)["task"]
+assert task["present"] is True, task
+assert task["healthy"] is False, task
+assert task["error"] == "status-unavailable", task
+' || fail "physical task status failure was disguised as normal absence: $state_json"
+  rmdir "$project/.oms/task/current.md" "$project/.oms/task"
+
+  mkdir -p "$project/.oms/plan"
+  printf '{malformed plan\n' > "$project/.oms/plan/tasks.json"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state should return an explicit unhealthy plan projection"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+plan = json.load(sys.stdin)["plan"]
+assert plan["present"] is True, plan
+assert plan["healthy"] is False, plan
+assert plan["error"] == "status-unavailable", plan
+' || fail "malformed physical plan was disguised as normal absence: $state_json"
+
+  printf 'not-json evidence\n' > "$project/.oms/failures.jsonl"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state should return explicit unhealthy failure-ledger health"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+failures = json.load(sys.stdin)["failures"]
+assert failures["present"] is True, failures
+assert failures["healthy"] is False, failures
+assert failures["error"] == "projection-unavailable", failures
+' || fail "malformed physical failure ledger was disguised as empty: $state_json"
+  inbox_json="$("$ROOT/scripts/inbox.sh" --repo "$project" --json)"
+  printf '%s' "$inbox_json" | python3 -c '
+import json, sys
+items = json.load(sys.stdin)["items"]
+assert any(item["code"] == "failure-ledger-corrupt" for item in items), items
+' || fail "inbox hid malformed canonical failure state: $inbox_json"
+}
+
+test_agent_plan_apply_rejects_noncanonical_project_state() {
+  local kind project spec_sha proposal proposal_sha base rc out
+
+  for kind in duplicate typo; do
+    project="$TMP/apply-project-state-$kind"
+    make_committed_repo "$project"
+    if [ "$kind" = duplicate ]; then
+      printf '%s\n' '# PROJECT.md' '- State: confirmed' '- State: draft' > "$project/PROJECT.md"
+    else
+      printf '%s\n' '# PROJECT.md' '- State: confirmd' > "$project/PROJECT.md"
+    fi
+    spec_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$project/PROJECT.md")"
+    base="$(git -C "$project" rev-parse HEAD)"
+    proposal="$project/proposal.json"
+    printf '{"schema":1,"kind":"agent-plan-proposal","spec_sha256":"%s","plan_sha256":"absent","base_sha":"%s","id_prefix":"","allowed_envelope":["."],"acceptance_files":[],"tasks":[{"id":"t1","title":"test state gate","allowed":["."],"verify":"true","depends":[]}]}' \
+      "$spec_sha" "$base" > "$proposal"
+    proposal_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$proposal")"
+    rc=0
+    out="$("$ROOT/scripts/agent-plan.sh" --repo "$project" apply-proposal \
+      --proposal "$proposal" --expected-proposal-sha256 "$proposal_sha" \
+      --expected-plan-sha256 absent --goal gate --accept true \
+      --allowed-envelope . 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "apply-proposal accepted $kind PROJECT State (rc=$rc): $out"
+    printf '%s' "$out" | grep -Fq 'PROJECT.md State' ||
+      fail "apply-proposal $kind refusal did not name PROJECT.md State: $out"
+    [ ! -e "$project/.oms/plan/tasks.json" ] ||
+      fail "apply-proposal mutated topology for $kind PROJECT State"
+  done
+}
+
+test_state_unhealthy_projections_never_reopen_authority() {
+  local project="$TMP/state-unhealthy-authority"
+  local external_task="$TMP/external-task-authority.md"
+  local external_plan="$TMP/external-plan-authority.json"
+  local state_json state_text
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/task" "$project/.oms/plan"
+  printf '%s\n' '## Goal' 'EXTERNAL_TASK_AUTHORITY_MARKER' '' \
+    '## Next Step' 'EXTERNAL_TASK_NEXT_MARKER' > "$external_task"
+  printf '%s\n' \
+    '{"schema":3,"goal":"EXTERNAL_PLAN_AUTHORITY_MARKER","tasks":{}}' \
+    > "$external_plan"
+  ln -s "$external_task" "$project/.oms/task/current.md"
+  ln -s "$external_plan" "$project/.oms/plan/tasks.json"
+
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state should report unhealthy symlink projections"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["task"]["present"] is True and row["task"]["healthy"] is False, row["task"]
+assert row["plan"]["present"] is True and row["plan"]["healthy"] is False, row["plan"]
+assert "goal" not in row["task"] and "next" not in row["task"], row["task"]
+assert "goal" not in row["plan"], row["plan"]
+assert "EXTERNAL_" not in json.dumps(row), row
+' || fail "unhealthy state reopened external symlink authority: $state_json"
+
+  state_text="$("$ROOT/scripts/state.sh" --repo "$project")" ||
+    fail "state text should report unhealthy symlink projections"
+  if printf '%s' "$state_text" | grep -Fq 'EXTERNAL_'; then
+    fail "state text exposed external symlink authority: $state_text"
+  fi
+}
+
+test_failure_ledger_structured_junk_fails_closed() {
+  local project="$TMP/failure-ledger-structured-junk"
+  local bad out state_json inbox_json rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  for bad in \
+    '{}' \
+    '{"schema":"2","event":"fail","fingerprint":"fp"}' \
+    '{"schema":2,"event":"other","fingerprint":"fp"}' \
+    '{"schema":2,"event":"fail","fingerprint":"fp"}' \
+    '{"schema":2,"event":"fail","fingerprint":"fp","ts":"2026-08-01T00:00:00Z","agent":"test","kind":"cmd","cmd":"false","exit":"1"}' \
+    '{"schema":1,"event":"resolved","fingerprint":7}'; do
+    printf '%s\n' "$bad" > "$project/.oms/failures.jsonl"
+    rc=0
+    out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list --unresolved --json 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "structured junk ledger list returned $rc instead of 2 for $bad: $out"
+    printf '%s' "$out" | grep -Fq 'invalid row' ||
+      fail "structured junk refusal did not identify an invalid row for $bad: $out"
+  done
+
+  printf '{}\n' > "$project/.oms/failures.jsonl"
+
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state should carry an unhealthy failure projection"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["failures"]["present"] is True, row["failures"]
+assert row["failures"]["healthy"] is False, row["failures"]
+assert row["runtime"]["healthy"] is False, row["runtime"]
+' || fail "state treated structured junk as healthy: $state_json"
+  inbox_json="$("$ROOT/scripts/inbox.sh" --repo "$project" --json)"
+  printf '%s' "$inbox_json" | python3 -c '
+import json, sys
+items = json.load(sys.stdin)["items"]
+assert any(item["code"] == "failure-ledger-corrupt" for item in items), items
+' || fail "inbox hid structured failure-ledger junk: $inbox_json"
+
+  rc=0
+  out="$("$ROOT/scripts/runtime.sh" --repo "$project" envelope show 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "runtime accepted structured failure-ledger junk (rc=$rc): $out"
+}
+
+test_doctor_repo_json_and_remediation_plan_are_structured() {
+  local project="$TMP/doctor-structured-project"
+  local other="$TMP/doctor-structured-other"
+  local home_dir="$TMP/doctor-structured-home"
+  local runtime="$home_dir/runtime"
+  local json plan rc=0
+
+  setup_doctor_home "$home_dir"
+  make_committed_repo "$project"
+  mkdir -p "$other" "$project/.oms/artifacts/call"
+  printf 'orphan\n' > "$project/.oms/artifacts/call/orphan.md"
+  touch -t 202601010000 "$project/.oms/artifacts/call/orphan.md"
+
+  json="$(cd "$other" && HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
+    XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    "$ROOT/scripts/doctor.sh" --repo "$project" --json --no-model-doctor)" || rc=$?
+  [ "$rc" = 0 ] || fail "structured doctor failed: $json"
+  printf '%s' "$json" | python3 -c '
+import json, os, sys
+row = json.load(sys.stdin)
+assert row["schema"] == 1, row
+assert row["repo"] == os.path.realpath(sys.argv[1]), row
+assert row["status"] == "ok" and row["exit"] == 0, row
+assert isinstance(row["findings"], list) and row["findings"], row
+assert any(item["level"] == "warn" and "unindexed artifact" in item["message"] for item in row["findings"]), row
+assert any(item["authority"] == "local_mutation" and "artifact-index.sh prune --files" in item["command"] for item in row["remediations"]), row
+assert "raw_output" not in row, row
+' "$project" || fail "doctor JSON contract is wrong: $json"
+
+  plan="$(cd "$other" && HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
+    XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
+    "$ROOT/scripts/doctor.sh" --repo "$project" --remediation-plan \
+      --no-model-doctor)" || fail "doctor remediation plan failed"
+  printf '%s' "$plan" | grep -Fq 'local_mutation' ||
+    fail "doctor plan omitted authority: $plan"
+  printf '%s' "$plan" | grep -Fq 'artifact-index.sh prune --files' ||
+    fail "doctor plan omitted the exact remedy: $plan"
+
+  if "$ROOT/scripts/doctor.sh" --repo "$project" --json --repair \
+      >/dev/null 2>&1; then
+    fail "structured doctor accepted a mutating repair"
   fi
 }
 

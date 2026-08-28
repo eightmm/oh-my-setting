@@ -129,6 +129,34 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(closed['failures'], [])
         self.assertNotIn('resolve_blocker', [item['id'] for item in closed['next_actions']])
 
+    def test_canonical_projection_errors_never_become_absent_state(self) -> None:
+        plan = self.repo / '.oms' / 'plan' / 'tasks.json'
+        plan.write_text(json.dumps({
+            'goal': 'invalid canonical task shape', 'accept': 'true', 'tasks': [],
+        }), encoding='utf-8')
+        with self.assertRaisesRegex(CoreError, 'canonical plan status'):
+            evidence.build_envelope(self.repo)
+
+        plan.write_text(json.dumps({
+            'goal': 'valid again', 'accept': 'true',
+            'tasks': {'t1': {'id': 't1', 'title': 'valid', 'state': 'ready'}},
+        }), encoding='utf-8')
+        ledger = self.repo / '.oms' / 'failures.jsonl'
+        ledger.write_text('{}\n', encoding='utf-8')
+        with self.assertRaisesRegex(CoreError, 'canonical failure ledger projection'):
+            evidence.build_envelope(self.repo)
+
+    def test_canonical_failure_ledger_symlink_is_not_absence(self) -> None:
+        ledger = self.repo / '.oms' / 'failures.jsonl'
+        outside = Path(self.tmp.name) / 'outside-failures.jsonl'
+        outside.write_text('', encoding='utf-8')
+        try:
+            ledger.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest('symlink unavailable: %s' % exc)
+        with self.assertRaisesRegex(CoreError, 'regular non-symlink'):
+            evidence.build_envelope(self.repo)
+
     def test_one_criterion_id_cannot_name_two_criteria(self) -> None:
         """The id is the key evidence binds to, so it cannot name two things.
 
@@ -402,7 +430,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             bindings.unlink()
         legacy = dict(plan)
         legacy.pop('plan_id', None)
-        legacy['tasks'] = {item['id']: dict(item) for item in legacy['tasks']}
+        legacy['tasks'] = {key: dict(item) for key, item in legacy['tasks'].items()}
         atomic_write_json(plan_path, legacy)
         created = evidence.bind(
             self.repo, 'plan-task-t1', 'evt-bind-current', 'verified')
@@ -767,11 +795,14 @@ class RuntimeFixture(RuntimeFixtureBase):
                 command = fake_bin / required
                 command.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
                 command.chmod(493)
-            one = fake_bin / 'codex'
+            # Optional transports satisfy the same runtime capability contract;
+            # the installer still keeps the historical core as its managed
+            # default, but an already-installed Cursor/Grok pair is usable.
+            one = fake_bin / 'cursor-agent'
             one.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
             one.chmod(493)
             self.assertFalse(profiles.check(['council'])['ready'])
-            two = fake_bin / 'claude'
+            two = fake_bin / 'grok'
             two.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
             two.chmod(493)
             self.assertTrue(profiles.check(['council'])['ready'])

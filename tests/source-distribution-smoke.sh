@@ -190,6 +190,8 @@ expected = {
     "execution-profile": "execution-profile-smoke.sh",
     "herdr-adapter": "herdr-adapter-smoke.sh",
     "operator-tools": "operator-tools-smoke.sh",
+    "skill-lifecycle": "skill-lifecycle-smoke.sh",
+    "interoperability": "interoperability-smoke.sh",
     "runtime-core": "runtime-core-smoke.sh",
     "runtime-core-integration": "runtime-core-integration-smoke.sh",
     "install-profile": "install-profile-smoke.sh",

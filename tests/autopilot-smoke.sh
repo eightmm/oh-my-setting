@@ -377,6 +377,30 @@ PY
   "$ROOT/scripts/plan-from-spec.sh" --repo "$crlf_apply_repo" \
     --apply "$crlf_apply_proposal" --allowed 'src,tests' --max-tasks 4 >/dev/null ||
     fail "full-CRLF PROJECT.md should retain its verification contract"
+
+  # Proposal validation and final branch admission share the same glob
+  # membership semantics: a concrete task path may narrow a reviewed glob.
+  local glob_plan_repo="$TMP/glob-plan-apply"
+  local glob_plan_proposal
+  make_repo "$glob_plan_repo"
+  glob_plan_proposal="$glob_plan_repo/proposal.json"
+  write_proposal "$glob_plan_proposal"
+  python3 - "$glob_plan_proposal" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    row = json.load(handle)
+row["allowed_envelope"] = ["src/*.py"]
+row["tasks"] = [{
+    "id": "t1", "title": "feat: glob-scoped task",
+    "allowed": ["src/app.py"], "verify": "true", "depends": [],
+}]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+PY
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$glob_plan_repo" \
+    --apply "$glob_plan_proposal" --allowed 'src/*.py' --max-tasks 4 >/dev/null ||
+    fail "a concrete task path should narrow its reviewed glob envelope"
 }
 
 write_done_plan() {
@@ -462,6 +486,11 @@ if [ "${OMS_T_GOAL_COMMIT_OUTSIDE:-0}" = 1 ]; then
   printf 'outside reviewed scope\n' > "$OMS_T_REPO/outside.txt"
   git -C "$OMS_T_REPO" add outside.txt
   git -C "$OMS_T_REPO" commit -qm 'chore: drive outside reviewed scope'
+fi
+if [ "${OMS_T_GOAL_COMMIT_GLOB:-0}" = 1 ]; then
+  printf 'print("inside reviewed glob")\n' > "$OMS_T_REPO/src/app.py"
+  git -C "$OMS_T_REPO" add src/app.py
+  git -C "$OMS_T_REPO" commit -qm 'feat: drive inside reviewed glob'
 fi
 if [ "${OMS_T_GOAL_ASSUME_UNCHANGED:-0}" = 1 ]; then
   git -C "$OMS_T_REPO" update-index --assume-unchanged src/app.txt
@@ -2036,6 +2065,34 @@ PY
     fail "post-drive scope failure was not identified"
   [ ! -s "$drive_scope_repo/calls/peer-review" ] ||
     fail "out-of-scope drive result reached semantic review"
+
+  # Every scope boundary accepts the same glob language. patch-admit and the
+  # live change guard already admit src/app.py for src/*.py; the final
+  # whole-branch fence must not reinterpret that reviewed pattern as a
+  # literal directory prefix and park an otherwise authorized drive.
+  local glob_scope_repo="$TMP/drive-glob-scope"
+  make_repo "$glob_scope_repo"
+  mkdir -p "$glob_scope_repo/calls"
+  write_done_plan "$glob_scope_repo" true
+  python3 - "$glob_scope_repo/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    row = json.load(handle)
+row["project_contract"]["allowed_envelope"] = ["src/*.py"]
+row["tasks"]["t1"]["allowed_paths"] = ["src/*.py"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+PY
+  rc=0
+  OMS_T_GOAL_RESULT=success OMS_T_GOAL_COMMIT_GLOB=1 \
+    run_autopilot "$glob_scope_repo" run --worker codex --reviewer claude \
+      --allowed 'src/*.py' --base main --review-mode gate \
+      > "$glob_scope_repo/scope.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] ||
+    fail "a path admitted by the reviewed glob should clear the final fence, got $rc: $(tail -8 "$glob_scope_repo/scope.out")"
+  [ -s "$glob_scope_repo/calls/peer-review" ] ||
+    fail "the glob-authorized drive did not reach semantic review"
 
   local exhausted_scope_repo="$TMP/exhausted-final-scope"
   make_repo "$exhausted_scope_repo"

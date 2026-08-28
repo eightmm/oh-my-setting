@@ -191,9 +191,8 @@ run_with_timeout() {
   ma_run_bounded "${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}" provider "$@"
 }
 
-# agy has no file-write-blocking flag: --sandbox restricts the terminal, not
-# file writes — unlike codex --sandbox read-only and claude plan mode. Read
-# passes billed as read-only therefore run from an isolated directory: a
+# Some transports have no enforceable file-write-blocking read flag. Read
+# passes for Antigravity and custom adapters therefore run from an isolated directory: a
 # detached HEAD worktree when the repo is git (same tree view, writes
 # discarded), else an empty scratch dir. Write workers keep their own
 # delegate worktree and must not use this.
@@ -321,12 +320,15 @@ ma_write_harness_context() {
       . "$(dirname "${BASH_SOURCE[0]}")/provider-registry.sh"
       . "$(dirname "${BASH_SOURCE[0]}")/model-capability.sh"
       model_lines=""
-      for provider in codex claude antigravity; do
+      while IFS= read -r provider; do
+        [ -n "$provider" ] || continue
         models="$(oms_capability_models "$provider" 2>/dev/null | sed -n '1,2p' | tr '\n' ' ' || true)"
         [ -n "$models" ] || continue
         model_lines="${model_lines}- $provider: $models
 "
-      done
+      done <<EOF_MODELS
+$(oms_provider_default_names)
+EOF_MODELS
       if [ -n "$model_lines" ]; then
         printf '### available models\n'
         printf '%s' "$model_lines"
@@ -910,12 +912,15 @@ ma_append_artifact_index() {
   OMS_INDEX_REASONING_EFFORT="${OMS_REASONING_RESOLVED:-}" \
   OMS_INDEX_SELECTED_REASONING_EFFORT="${OMS_REASONING_SELECTED:-}" \
   OMS_INDEX_FALLBACK_REASONING_EFFORT="${OMS_REASONING_FALLBACK:-}" \
+  OMS_INDEX_TRACE_LIB="$(ma_scripts_dir)/lib" \
   oms_with_file_lock "$index" ma_artifact_index_native_python \
     - "$native_repo" "$native_index" "$kind" "$provider" \
     "$exit_code" "$native_artifact" "$native_patch_file" "$prompt_hash" \
     "$verify_exit" "$task_goal" "$native_source_artifact" \
     "$native_store_helper" "$native_telemetry_helper" <<'EOF'
 import hashlib, json, os, re, runpy, sys, time, uuid
+sys.path.insert(0, os.environ["OMS_INDEX_TRACE_LIB"])
+from trace_context import attach_trace_context
 repo, index, kind, provider, exit_code, artifact_raw, patch_raw, prompt_hash, verify_exit, task_goal, source_raw, store_helper, telemetry_helper = sys.argv[1:]
 event_id = "evt_" + uuid.uuid4().hex
 
@@ -1130,6 +1135,7 @@ if verify_exit:
     row["verify_exit"] = int(verify_exit)
 if task_goal:
     row["task_goal"] = task_goal
+attach_trace_context(row)
 store = runpy.run_path(store_helper)
 store["ensure_oms_ignore"](repo)
 store["append_rows"](repo, index, [row])
@@ -1784,29 +1790,54 @@ ma_provider_attempt() {
   local authority_diff=""
   local authority_restore_detail=""
   local authority_keep_backup=0
+  local transport
+  local peer_common_dir
+  local binary
+  local prompt_arg=""
+  local prompt_bytes=0
   local -a cmd
 
+  if ! oms_provider_supports_access "$provider" "$access"; then
+    echo "error: provider '$provider' does not support $access access through this transport" > "$output_file"
+    return 2
+  fi
+  transport="$(oms_provider_transport "$provider")" || {
+    echo "error: provider transport selection failed" > "$output_file"
+    return 2
+  }
   case "$provider" in
     codex)
-      cmd=(codex exec)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      if [ "$transport" = app-server ]; then
+        if [ "$access" != read ]; then
+          echo "error: Codex app-server transport is read-only; write delegation requires cli-exec" > "$output_file"
+          return 2
+        fi
+        peer_common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+        cmd=(python3 "$peer_common_dir/codex-app-server-adapter.py"
+          --repo "$workdir" --prompt-file "$prompt_file" --model "$model"
+          --timeout "${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}")
+        [ -z "$effort" ] || cmd+=(--effort "$effort")
+      else
+        cmd=(codex exec)
+        [ "$model" = provider-default ] || cmd+=(--model "$model")
       # Empty effort means "auto: let the provider default decide" — passing
       # it through as -c model_reasoning_effort="" makes codex refuse the
       # whole config ("reasoning_effort must not be empty") and killed every
       # no-effort council seat while the dry-run smokes stayed green.
-      [ -z "$effort" ] || cmd+=(-c "model_reasoning_effort=\"$effort\"")
+        [ -z "$effort" ] || cmd+=(-c "model_reasoning_effort=\"$effort\"")
       # JSONL events are the only codex transport that says whether the turn
       # actually closed; parsed back to plain text right after the run
       # (ma_codex_jsonl_to_text), parse-or-passthrough like the claude branch.
-      cmd+=(--json)
+        cmd+=(--json)
       # A judging seat's evidence is the prompt and the repo in front of it;
       # web search widens the belt for no verdict value (same reasoning as
       # the claude four-tool belt; config key accepted, probed 2026-08-18).
-      [ "$access" = write ] || cmd+=(-c "tools.web_search=false")
-      if [ "$access" = write ]; then
-        cmd+=(--sandbox workspace-write -)
-      else
-        cmd+=(--sandbox read-only --skip-git-repo-check -)
+        [ "$access" = write ] || cmd+=(-c "tools.web_search=false")
+        if [ "$access" = write ]; then
+          cmd+=(--sandbox workspace-write -)
+        else
+          cmd+=(--sandbox read-only --skip-git-repo-check -)
+        fi
       fi
       ;;
     claude)
@@ -1878,7 +1909,86 @@ ma_provider_attempt() {
       fi
       cmd+=(--print "$(cat "$prompt_file")")
       ;;
-    *) echo "error: unsupported provider: $provider" > "$output_file"; return 2 ;;
+    cursor)
+      binary="$(oms_provider_binary "$provider")"
+      cmd=("$binary" --print --output-format text --workspace "$workdir"
+        --sandbox enabled)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      if [ "$access" = write ]; then
+        cmd+=(--force)
+      else
+        cmd+=(--mode ask)
+      fi
+      ;;
+    grok)
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Grok headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      prompt_arg="$(cat "$prompt_file")"
+      cmd=("$binary" --no-auto-update --cwd "$workdir" --output-format plain)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--effort "$effort")
+      if [ "$access" = write ]; then
+        cmd+=(--always-approve --sandbox workspace
+          --deny 'Bash(git push*)')
+      else
+        cmd+=(--permission-mode dontAsk
+          --allow Read --allow Grep --allow 'Bash(git *)'
+          --deny Edit --deny WebFetch --deny WebSearch
+          --sandbox strict --no-memory --no-subagents --disable-web-search)
+      fi
+      cmd+=(-p "$prompt_arg")
+      ;;
+    gemini)
+      binary="$(oms_provider_binary "$provider")"
+      cmd=("$binary" --output-format text --sandbox)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      if [ "$access" = write ]; then
+        cmd+=(--approval-mode yolo)
+      else
+        cmd+=(--approval-mode plan)
+      fi
+      ;;
+    qwen)
+      binary="$(oms_provider_binary "$provider")"
+      cmd=("$binary" --output-format text --sandbox)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      if [ "$access" = write ]; then
+        cmd+=(--approval-mode yolo)
+      else
+        cmd+=(--safe-mode --approval-mode plan)
+      fi
+      ;;
+    opencode)
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the OpenCode run transport carries it as argv (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      prompt_arg="$(cat "$prompt_file")"
+      cmd=("$binary" run --format default)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      if [ "$access" = write ]; then
+        cmd+=(--agent build --auto)
+      else
+        cmd+=(--agent plan)
+      fi
+      cmd+=("$prompt_arg")
+      ;;
+    *)
+      binary="$(oms_provider_binary "$provider" 2>/dev/null)" || {
+        echo "error: unsupported provider: $provider" > "$output_file"
+        return 2
+      }
+      cmd=("$binary" run --access "$access" --workdir "$workdir"
+        --prompt-file "$prompt_file")
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--effort "$effort")
+      ;;
   esac
 
   if [ "$access" = write ] && [ -n "$state_repo" ] &&
@@ -2069,16 +2179,16 @@ ma_run_routed_provider_inner() {
 
   OMS_WORKER_AUTHORITY_VIOLATION=0
   export OMS_WORKER_AUTHORITY_VIOLATION
-  [ "$provider" != agy ] || provider=antigravity
+  provider="$(oms_provider_normalize "$provider")" || return $?
   oms_model_prepare "$provider" || return $?
   # After canonicalization: the ledger files seats under the canonical name.
   ma_warn_known_seat_failures "$provider" "$artifact"
   attempt_file="$(agent_memory_mktemp)" || return 1
 
-  if [ "$access" = read ] && [ "$provider" = antigravity ]; then
+  if [ "$access" = read ] && oms_provider_requires_read_isolation "$provider"; then
     isolated_dir="$(ma_agy_read_dir "$state_repo")" || isolated_dir=""
     if [ -z "$isolated_dir" ]; then
-      printf 'SKIPPED: could not create isolation dir for agy read pass\n' >> "$artifact"
+      printf 'SKIPPED: could not create provider read-isolation directory\n' >> "$artifact"
       rm -f "$attempt_file"
       return 1
     fi
@@ -2213,12 +2323,13 @@ EOF
       OMS_MODEL_FALLBACK_REASON=capacity
     fi
 
-    if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$access" = read ] && [ "$provider" = antigravity ]; then
+    if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$access" = read ] &&
+      oms_provider_requires_read_isolation "$provider"; then
       ma_agy_read_cleanup "$state_repo" "$isolated_dir"
       isolated_dir="$(ma_agy_read_dir "$state_repo")" || isolated_dir=""
       if [ -z "$isolated_dir" ]; then
         OMS_MODEL_FALLBACK_USED=0
-        printf '\nmodel-fallback: skipped; could not recreate pristine agy isolation\n' >> "$artifact"
+        printf '\nmodel-fallback: skipped; could not recreate pristine provider isolation\n' >> "$artifact"
       else
         workdir="$isolated_dir"
       fi
@@ -2258,7 +2369,7 @@ EOF
       "$provider" "$OMS_MODEL_SELECTED" >> "$artifact"
     echo "note: $provider declined this request on $OMS_MODEL_SELECTED; it was not re-sent to another model" >&2
     export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
-    [ "$access" != read ] || [ "$provider" != antigravity ] ||
+    [ "$access" != read ] || ! oms_provider_requires_read_isolation "$provider" ||
       ma_agy_read_cleanup "$state_repo" "$isolated_dir"
     return "$status"
   fi
@@ -2298,7 +2409,7 @@ ma_run_routed_provider() {
 
   oms_require_peer_owner || return $?
 
-  [ "$provider" != agy ] || provider=antigravity
+  provider="$(oms_provider_normalize "$provider")" || return $?
   events="$(ma_scripts_dir)/agent-events.sh"
   if [ -n "$state_repo" ] && [ -x "$events" ]; then
     if [ -z "$OMS_ATTEMPT_ID" ]; then
@@ -2396,7 +2507,9 @@ PY
 # councils split targets here so the notation cannot drift between them.
 ma_target_provider() {
   local provider="${1%%:*}"
-  [ "$provider" != agy ] || provider=antigravity
+  local normalized
+  normalized="$(oms_provider_normalize "$provider" 2>/dev/null)" || normalized=""
+  [ -z "$normalized" ] || provider="$normalized"
   printf '%s\n' "$provider"
 }
 
@@ -2413,10 +2526,10 @@ ma_target_validate() {
   local spec="${1#*:}"
   local provider
   provider="$(ma_target_provider "$1")"
-  case "$provider" in
-    codex|claude|antigravity) ;;
-    *) echo "error: unsupported provider: $provider" >&2; return 2 ;;
-  esac
+  oms_provider_normalize "$provider" >/dev/null 2>&1 || {
+    echo "error: unsupported provider: $provider" >&2
+    return 2
+  }
   [ "$spec" = "$1" ] && return 0
   case "$spec" in
     model=?*) ;;
@@ -2574,10 +2687,8 @@ run_provider() {
     return 0
   fi
 
-  local binary="$provider"
-  if [ "$provider" = "antigravity" ]; then
-    binary="agy"
-  fi
+  local binary
+  binary="$(oms_provider_binary "$provider" 2>/dev/null || printf '%s' "$provider")"
 
   if ! command -v "$binary" >/dev/null 2>&1; then
     printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
@@ -2622,7 +2733,7 @@ PY_SEAT
 }
 
 ma_export_round1() {
-  local provider artifact provider_list
+  local provider artifact provider_list normalized
   ok=0
   total=0
   artifacts=()
@@ -2641,11 +2752,9 @@ ma_export_round1() {
   for provider in "${provider_list[@]}"; do
     provider="$(printf '%s' "$provider" | tr -d '[:space:]')"
     [ -n "$provider" ] || continue
-    case "$provider" in
-      codex|claude|antigravity|agy) ;;
-      *) fail "unsupported provider: $provider" ;;
-    esac
-    [ "$provider" != agy ] || provider=antigravity
+    normalized="$(oms_provider_normalize "$provider" 2>/dev/null)" ||
+      fail "unsupported provider: $provider"
+    provider="$normalized"
     # Operation is provenance metadata; it no longer selects a model.
     OMS_MODEL_OPERATION="${OMS_MODEL_OPERATION_REQUEST:-${MA_MODEL_OPERATION:-${MA_KIND:-call}}}"
     export OMS_MODEL_OPERATION

@@ -47,6 +47,12 @@ Use `oms list --frontdoor` for compact subsystem entrypoints. Load the command
 routing reference for intent variants; use `oms list --all` only when a
 lower-level compatibility primitive is genuinely needed.
 
+For skill evaluation/import/drafts, load
+[skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks, Codex
+app-server, Agent Card, or A2A, load
+[interoperability.md](references/interoperability.md); all are optional
+projections, not authority.
+
 ## Invariants
 
 - Keep secrets, private paths, machine details, raw logs/data, and checkpoints
@@ -65,6 +71,7 @@ lower-level compatibility primitive is genuinely needed.
 ## References
 
 - Overlapping commands and canonical front doors: [command-routing.md](references/command-routing.md)
+- Shared decisions and their canonical owners: [shared-projections.md](references/shared-projections.md)
 - Typed projections, evidence, context, profiles, capsules, backends, experiments: [runtime-core.md](references/runtime-core.md)
 - Prompt hooks, memory, tasks, skills: [state-memory.md](references/state-memory.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
@@ -74,6 +81,7 @@ lower-level compatibility primitive is genuinely needed.
 - Consultation: [cross-agent-consultation.md](references/cross-agent-consultation.md)
 - Review/release gates: [review-gates.md](references/review-gates.md)
 - Models/quorum: [model-routing.md](references/model-routing.md)
+- Installed agent detection, Grok/GLM carriers, and custom adapters: [provider-routing.md](references/provider-routing.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
 
 Retain internal provenance and report only useful conclusions, changed behavior,

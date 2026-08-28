@@ -9,12 +9,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/provider-registry.sh
 . "$ROOT/scripts/lib/provider-registry.sh"
 
-JSON=0 LIVE=0 REQUIRE_ALL=0 STRICT=0 PROVIDERS="codex,claude,antigravity"
+JSON=0 LIVE=0 REQUIRE_ALL=0 STRICT=0 PROVIDERS=default
 usage() { cat <<'EOF'
-Usage: model-doctor.sh [--json] [--live-models] [--require-all] [--strict-diversity] [--providers CSV]
+Usage: model-doctor.sh [--json] [--live-models] [--require-all] [--strict-diversity] [--providers default|auto|all|CSV]
 
 Check installed provider CLIs, their default invocation surface, and cached
 model/effort capabilities. --live-models refreshes catalog-capable providers.
+The default includes the historical core and installed optional agents; auto
+checks only installed agents, and all also reports absent built-ins.
 EOF
 }
 while [ "$#" -gt 0 ]; do
@@ -34,19 +36,37 @@ done
   echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
   exit 2
 }
-PROVIDERS="$(oms_provider_normalize_list "$PROVIDERS")" || exit $?
+PROVIDER_NAMES="$(oms_provider_selection_names "$PROVIDERS")" || exit $?
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-model-doctor.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 rows="$tmp/rows.jsonl"; : > "$rows"
-IFS=',' read -r -a values <<< "$PROVIDERS"
-for provider in "${values[@]}"; do
+while IFS= read -r provider; do
+  [ -n "$provider" ] || continue
   binary="$(oms_provider_binary "$provider")"; installed=false; version=""; default_reachable=false
   if command -v "$binary" >/dev/null 2>&1; then
     installed=true
-    version="$($binary --version 2>&1 | head -n 1 || true)"
-    # A help invocation confirms the CLI can start without forcing a model.
-    case "$provider" in codex) "$binary" exec --help >/dev/null 2>&1 ;; *) "$binary" --help >/dev/null 2>&1 ;; esac && default_reachable=true
-    if [ "$LIVE" -eq 1 ]; then oms_capability_refresh "$provider" || true; else OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh "$provider" || true; fi
+    version_out="$tmp/$provider.version"
+    help_out="$tmp/$provider.help"
+    version_cmd=("$binary")
+    for version_arg in $(oms_provider_version_args "$provider"); do
+      version_cmd+=("$version_arg")
+    done
+    oms_capability_run_bounded 10 "$version_out" "${version_cmd[@]}" </dev/null || true
+    version="$(sed -n '1p' "$version_out" 2>/dev/null || true)"
+    help_cmd=("$binary")
+    for help_arg in $(oms_provider_help_args "$provider"); do
+      help_cmd+=("$help_arg")
+    done
+    # A bounded help invocation confirms the CLI can start without forcing a
+    # model, login, or inference request. Grok also suppresses update checks.
+    if oms_capability_run_bounded 10 "$help_out" "${help_cmd[@]}" </dev/null; then
+      default_reachable=true
+    fi
+    if [ "$LIVE" -eq 1 ]; then
+      oms_capability_refresh "$provider" "$help_out" || true
+    else
+      OMS_CAPABILITY_SKIP_MODELS=1 oms_capability_refresh "$provider" "$help_out" || true
+    fi
   fi
   file="$(oms_capability_file "$provider")"
   family="$(oms_provider_model_family "$provider" provider-default)"
@@ -59,7 +79,9 @@ print(json.dumps({"provider":p,"binary":b,"installed":i=="true","version":v or N
  "provider_default_reachable":d=="true","family":f,"effort_mechanism":m or None,
  "effort_values":e.split() if e else []}))
 PY
-done
+done <<EOF
+$PROVIDER_NAMES
+EOF
 result="$tmp/result.json"
 python3 - "$rows" "$LIVE" "$REQUIRE_ALL" "$STRICT" > "$result" <<'PY'
 import json, sys

@@ -122,8 +122,10 @@ describe() {
 }
 
 OMS_PUBLIC_TOOLS="
+a2a-bridge
 advise
 agent-call
+agent-card
 agent-events
 agent-executor
 agent-memory

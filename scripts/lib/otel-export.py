@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from trace_context import persisted_context
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
@@ -26,6 +28,12 @@ FALLBACK_REASONS = {
     "model-safeguard",
 }
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+GEN_AI_PROVIDERS = {
+    "codex": "openai",
+    "claude": "anthropic",
+    "antigravity": "gcp.gen_ai",
+    "agy": "gcp.gen_ai",
+}
 
 
 def fail(message: str) -> "NoReturn":
@@ -91,6 +99,38 @@ def digest(namespace: str, value: str, size: int) -> str:
 
 def event_span_id(event_id: str) -> str:
     return digest("artifact-span", event_id, 16)
+
+
+def persisted_ids(
+    row: Dict[str, Any], fallback_trace: str, fallback_span: str
+) -> Tuple[str, str, Optional[str], Optional[int]]:
+    context = persisted_context(row)
+    if context is None:
+        return fallback_trace, fallback_span, None, None
+    flags = int(context["trace_flags"], 16)
+    return (
+        context["trace_id"],
+        context["span_id"],
+        context.get("parent_span_id"),
+        flags,
+    )
+
+
+def gen_ai_values(
+    *, provider: Any, operation: str, model: Any = None,
+    input_tokens: Any = None, output_tokens: Any = None,
+    cache_read_tokens: Any = None, cache_creation_tokens: Any = None,
+) -> Dict[str, Any]:
+    canonical = GEN_AI_PROVIDERS.get(str(provider)) if provider else None
+    return {
+        "gen_ai.operation.name": operation,
+        "gen_ai.provider.name": canonical,
+        "gen_ai.request.model": safe_label(model),
+        "gen_ai.usage.input_tokens": safe_metric(input_tokens, integer=True),
+        "gen_ai.usage.output_tokens": safe_metric(output_tokens, integer=True),
+        "gen_ai.usage.cache_read.input_tokens": safe_metric(cache_read_tokens, integer=True),
+        "gen_ai.usage.cache_creation.input_tokens": safe_metric(cache_creation_tokens, integer=True),
+    }
 
 
 def unix_nanos(value: Any) -> Optional[int]:
@@ -202,6 +242,9 @@ def exit_failed(row: Dict[str, Any]) -> bool:
 
 
 def artifact_trace_id(row: Dict[str, Any]) -> Optional[str]:
+    context = persisted_context(row)
+    if context is not None:
+        return context["trace_id"]
     event_id = row.get("event_id")
     if not isinstance(event_id, str) or not SAFE_NAME.fullmatch(event_id):
         return None
@@ -212,7 +255,7 @@ def artifact_trace_id(row: Dict[str, Any]) -> Optional[str]:
 
 
 def artifact_span(
-    row: Dict[str, Any], trace_by_event: Dict[str, str]
+    row: Dict[str, Any], trace_by_event: Dict[str, str], gen_ai: bool
 ) -> Optional[Dict[str, Any]]:
     if row.get("schema") != 1:
         return None
@@ -260,9 +303,20 @@ def artifact_span(
         ),
     }
     values.update(correlation_attributes(row))
+    if gen_ai:
+        values.update(
+            gen_ai_values(
+                provider=row.get("provider"),
+                operation="invoke_agent",
+                model=row.get("selected_model"),
+            )
+        )
+    trace_id, span_id, persisted_parent, trace_flags = persisted_ids(
+        row, trace_id, event_span_id(event_id)
+    )
     span: Dict[str, Any] = {
         "traceId": trace_id,
-        "spanId": event_span_id(event_id),
+        "spanId": span_id,
         "name": "oms." + kind,
         "kind": 1,
         "startTimeUnixNano": str(start),
@@ -270,8 +324,14 @@ def artifact_span(
         "attributes": attributes(values),
         "status": {"code": 2 if exit_failed(row) else 0},
     }
+    if trace_flags is not None:
+        span["flags"] = trace_flags
+    if persisted_parent is not None:
+        span["parentSpanId"] = persisted_parent
     parent = row.get("parent_event_id")
     if (
+        persisted_parent is None
+        and
         isinstance(parent, str)
         and SAFE_NAME.fullmatch(parent)
         and trace_by_event.get(parent) == trace_id
@@ -280,7 +340,7 @@ def artifact_span(
     return span
 
 
-def hook_span(line_number: int, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def hook_span(line_number: int, row: Dict[str, Any], gen_ai: bool) -> Optional[Dict[str, Any]]:
     if row.get("schema") != 1 or row.get("action") != "telemetry":
         return None
     hook = row.get("hook")
@@ -313,6 +373,18 @@ def hook_span(line_number: int, row: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "oms.cost_usd": safe_metric(row.get("cost_usd")),
         "oms.usage.trust": "advisory_provider_reported",
     }
+    if gen_ai:
+        values.update(
+            gen_ai_values(
+                provider=row.get("agent"),
+                operation="execute_tool",
+                model=row.get("model"),
+                input_tokens=row.get("input_tokens"),
+                output_tokens=row.get("output_tokens"),
+                cache_read_tokens=row.get("cache_read_tokens"),
+                cache_creation_tokens=row.get("cache_creation_tokens"),
+            )
+        )
     return {
         "traceId": digest("hook-trace", session, 32),
         "spanId": digest("hook-span", stable, 16),
@@ -326,7 +398,7 @@ def hook_span(line_number: int, row: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
 
 def lifecycle_span(
-    row: Dict[str, Any], context_by_attempt: Dict[str, Dict[str, Any]]
+    row: Dict[str, Any], context_by_attempt: Dict[str, Dict[str, Any]], gen_ai: bool
 ) -> Optional[Dict[str, Any]]:
     if row.get("schema") != 1:
         return None
@@ -373,10 +445,22 @@ def lifecycle_span(
         "oms.usage.trust": usage_trust,
     }
     values.update(correlation_attributes(merged))
+    if gen_ai:
+        values.update(
+            gen_ai_values(
+                provider=merged.get("provider"),
+                operation="invoke_agent",
+            )
+        )
     failed = row.get("to_state") in {"failed", "timed_out", "blocked"}
-    return {
-        "traceId": digest("lifecycle-trace", attempt_id, 32),
-        "spanId": digest("lifecycle-span", event_id, 16),
+    trace_id, span_id, parent_span_id, trace_flags = persisted_ids(
+        row,
+        digest("lifecycle-trace", attempt_id, 32),
+        digest("lifecycle-span", event_id, 16),
+    )
+    span = {
+        "traceId": trace_id,
+        "spanId": span_id,
         "name": "oms.lifecycle." + event_type,
         "kind": 1,
         "startTimeUnixNano": str(end),
@@ -384,6 +468,11 @@ def lifecycle_span(
         "attributes": attributes(values),
         "status": {"code": 2 if failed else 0},
     }
+    if parent_span_id is not None:
+        span["parentSpanId"] = parent_span_id
+    if trace_flags is not None:
+        span["flags"] = trace_flags
+    return span
 
 
 def approval_span(
@@ -420,9 +509,14 @@ def approval_span(
     }
     values.update(correlation_attributes(merged))
     failed = event_type in {"approval.failed", "approval.interrupted"}
-    return {
-        "traceId": digest("approval-trace", approval_id, 32),
-        "spanId": digest("approval-span", event_id, 16),
+    trace_id, span_id, parent_span_id, trace_flags = persisted_ids(
+        row,
+        digest("approval-trace", approval_id, 32),
+        digest("approval-span", event_id, 16),
+    )
+    span = {
+        "traceId": trace_id,
+        "spanId": span_id,
         "name": "oms." + event_type,
         "kind": 1,
         "startTimeUnixNano": str(end),
@@ -430,6 +524,11 @@ def approval_span(
         "attributes": attributes(values),
         "status": {"code": 2 if failed else 0},
     }
+    if parent_span_id is not None:
+        span["parentSpanId"] = parent_span_id
+    if trace_flags is not None:
+        span["flags"] = trace_flags
+    return span
 
 
 def landing_span(
@@ -459,9 +558,14 @@ def landing_span(
     }
     values.update(correlation_attributes(merged))
     failed = event in {"applied-pending-receipt", "not-applied-pending-receipt"}
-    return {
-        "traceId": digest("landing-trace", landing_id, 32),
-        "spanId": digest("landing-span", stable, 16),
+    trace_id, span_id, parent_span_id, trace_flags = persisted_ids(
+        row,
+        digest("landing-trace", landing_id, 32),
+        digest("landing-span", stable, 16),
+    )
+    span = {
+        "traceId": trace_id,
+        "spanId": span_id,
         "name": "oms.landing." + event,
         "kind": 1,
         "startTimeUnixNano": str(end),
@@ -469,6 +573,11 @@ def landing_span(
         "attributes": attributes(values),
         "status": {"code": 2 if failed else 0},
     }
+    if parent_span_id is not None:
+        span["parentSpanId"] = parent_span_id
+    if trace_flags is not None:
+        span["flags"] = trace_flags
+    return span
 
 
 def private_approval_path(repo: Path) -> Path:
@@ -514,7 +623,7 @@ def envelope(span: Dict[str, Any], scope_name: str, release: str) -> Dict[str, A
     }
 
 
-def encoded_lines(repo: Path, limit: int, hooks: bool) -> Iterable[str]:
+def encoded_lines(repo: Path, limit: int, hooks: bool, gen_ai: bool) -> Iterable[str]:
     release = version()
     artifact_path = repo / ".oms" / "artifacts" / "index.jsonl"
     artifact_rows = [row for _, row in read_rows(artifact_path, limit)]
@@ -525,7 +634,7 @@ def encoded_lines(repo: Path, limit: int, hooks: bool) -> Iterable[str]:
         if trace_id is not None
     }
     for row in artifact_rows:
-        span = artifact_span(row, trace_by_event)
+        span = artifact_span(row, trace_by_event, gen_ai)
         if span is not None:
             yield json.dumps(
                 envelope(span, "oh-my-setting.artifacts", release),
@@ -536,7 +645,7 @@ def encoded_lines(repo: Path, limit: int, hooks: bool) -> Iterable[str]:
     if hooks:
         hook_path = repo / ".oms" / "hooks" / "events.jsonl"
         for line_number, row in read_rows(hook_path, limit):
-            span = hook_span(line_number, row)
+            span = hook_span(line_number, row, gen_ai)
             if span is not None:
                 yield json.dumps(
                     envelope(span, "oh-my-setting.hooks", release),
@@ -566,7 +675,7 @@ def encoded_lines(repo: Path, limit: int, hooks: bool) -> Iterable[str]:
                 )
             }
     for row in lifecycle_rows:
-        span = lifecycle_span(row, context_by_attempt)
+        span = lifecycle_span(row, context_by_attempt, gen_ai)
         if span is not None:
             yield json.dumps(
                 envelope(span, "oh-my-setting.lifecycle", release),
@@ -675,12 +784,17 @@ def main() -> int:
     parser.add_argument("--output", default="-", help="local JSONL file, or - for stdout")
     parser.add_argument("--force", action="store_true", help="replace an existing output file")
     parser.add_argument("--no-hooks", action="store_true", help="exclude local hook telemetry")
+    parser.add_argument(
+        "--gen-ai",
+        action="store_true",
+        help="add content-free OpenTelemetry GenAI semantic attributes",
+    )
     args = parser.parse_args()
     if args.force and args.output == "-":
         fail("--force is only valid with --output FILE")
 
     repo = repo_root(args.repo)
-    lines = encoded_lines(repo, args.limit, not args.no_hooks)
+    lines = encoded_lines(repo, args.limit, not args.no_hooks, args.gen_ai)
     if args.output == "-":
         for line in lines:
             print(line)

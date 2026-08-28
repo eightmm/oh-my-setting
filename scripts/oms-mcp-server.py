@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -38,7 +39,10 @@ FALLBACK_PROTOCOL = "2025-06-18"
 # Revisions whose semantics this server actually implements. Echoing an
 # arbitrary requested revision back would advertise conformance to behavior
 # (newer handshakes, task extensions) it has never implemented.
-SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26")
+SUPPORTED_PROTOCOLS = ("2026-07-28", "2025-06-18", "2025-03-26")
+TASKS_PROTOCOL = "2026-07-28"
+TASKS_EXTENSION = "io.modelcontextprotocol/tasks"
+SESSION_PROTOCOL = FALLBACK_PROTOCOL
 OUTPUT_LIMIT = 60_000
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
@@ -52,7 +56,7 @@ PEER_KINDS = {
     "advise": {"script": "scripts/advise.sh", "artifacts": "advise"},
     "ask": {"script": "scripts/peer-ask.sh", "artifacts": "ask"},
 }
-PROVIDERS = ("codex", "claude", "antigravity", "agy")
+PROVIDER_REGISTRY = ROOT / "scripts/lib/provider-registry.sh"
 RUN_ROOT = Path(".oms/artifacts/mcp")
 OPERATION_RE = re.compile(r"[a-z]+-[0-9TZ]+-[0-9a-f]+\Z")
 LOG_TAIL_LINES = 20
@@ -82,6 +86,32 @@ def server_version() -> str:
         return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         return "unknown"
+
+
+def tasks_feature_enabled() -> bool:
+    return os.environ.get("OMS_MCP_TASKS_EXTENSION") == "1"
+
+
+def task_request_capable(params: object) -> bool:
+    if not tasks_feature_enabled() or SESSION_PROTOCOL != TASKS_PROTOCOL:
+        return False
+    if not isinstance(params, dict):
+        return False
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        return False
+    capabilities = meta.get("io.modelcontextprotocol/clientCapabilities")
+    if not isinstance(capabilities, dict):
+        return False
+    extensions = capabilities.get("extensions")
+    return isinstance(extensions, dict) and TASKS_EXTENSION in extensions
+
+
+def complete_result(value: dict) -> dict:
+    """Add the post-2026 result discriminator without changing old clients."""
+    if SESSION_PROTOCOL != TASKS_PROTOCOL or "resultType" in value:
+        return value
+    return {"resultType": "complete", **value}
 
 
 REPO_PROPERTY = {
@@ -263,8 +293,8 @@ TOOLS = [
     {
         "name": "oms_peer_start",
         "description": (
-            "Start a consultation with another agent CLI (codex, claude,"
-            " antigravity) in the background and return immediately with an"
+            "Start a consultation with a registered local agent CLI in the"
+            " background and return immediately with an"
             " operation id. kind='consult' asks a peer mid-task and keeps the"
             " exchange in a thread; kind='advise' is an adversarial review of"
             " a decision; kind='ask' puts the same question to every installed"
@@ -292,7 +322,7 @@ TOOLS = [
             "providers": {
                 "type": "string",
                 "description": (
-                    "Comma list of targets (codex, claude, antigravity), each"
+                    "Comma list of registered targets, each"
                     " optionally pinned as PROVIDER:model=NAME. Default: the"
                     " verb's own pick, which excludes the calling agent."
                     " advise takes one target."
@@ -455,6 +485,33 @@ def ensure_oms_ignore(repo: Path) -> None:
         ignore.write_text("*\n", encoding="utf-8")
 
 
+def normalize_peer_provider(provider: str) -> str:
+    """Ask the shell registry to normalize built-ins, aliases, and adapters."""
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; oms_provider_normalize "$2"',
+                "oms-provider-normalize",
+                str(PROVIDER_REGISTRY),
+                provider,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    normalized = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", normalized):
+        return ""
+    return normalized
+
+
 def peer_targets(raw: str) -> tuple[list[str], str]:
     """Validate PROVIDER[:model=NAME] entries before they become argv.
 
@@ -468,14 +525,19 @@ def peer_targets(raw: str) -> tuple[list[str], str]:
             continue
         provider, sep, spec = entry.partition(":")
         model = spec[len("model="):] if spec.startswith("model=") else ""
-        if provider not in PROVIDERS or (
-            sep and not re.fullmatch(r"[A-Za-z0-9._-]+", model)
+        normalized = normalize_peer_provider(provider)
+        if not normalized or (
+            sep
+            and (
+                not spec.startswith("model=")
+                or not re.fullmatch(r"[^\x00-\x1f\x7f,]{1,160}", model)
+            )
         ):
             return [], (
                 "error: target must be PROVIDER or PROVIDER:model=NAME with"
-                " PROVIDER in %s: %r" % ("|".join(PROVIDERS), entry)
+                " a registered provider: %r" % entry
             )
-        targets.append(entry)
+        targets.append(normalized + ((":model=" + model) if sep else ""))
     return targets, ""
 
 
@@ -931,6 +993,123 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     return json.dumps(payload, ensure_ascii=False, indent=2), code != 0
 
 
+def task_run_dir(task_id: object) -> tuple[Path | None, str]:
+    if not isinstance(task_id, str) or not OPERATION_RE.fullmatch(task_id):
+        return None, "taskId must be an operation id returned by oms_peer_start"
+    current = Path.cwd()
+    components = (".oms", "artifacts", "mcp", task_id)
+    try:
+        for component in components:
+            current = current / component
+            info = current.lstat()
+            attributes = getattr(info, "st_file_attributes", 0)
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            if not stat.S_ISDIR(info.st_mode) or attributes & reparse_flag:
+                return None, "unknown or unsafe taskId: %s" % task_id
+    except OSError:
+        return None, "unknown taskId: %s" % task_id
+    return current, ""
+
+
+def iso_mtime(paths: list[Path], fallback: str) -> str:
+    stamps = []
+    for path in paths:
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            pass
+    if not stamps:
+        return fallback
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(max(stamps)))
+
+
+def cancellation_is_valid(run_dir: Path) -> bool:
+    path = run_dir / "cancel-request.json"
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+            return False
+        with path.open("r", encoding="utf-8") as handle:
+            row = json.load(handle)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return (
+        isinstance(row, dict)
+        and row.get("schema") == 1
+        and row.get("kind") == "mcp-task-cancel-request"
+        and row.get("task_id") == run_dir.name
+    )
+
+
+def task_snapshot(run_dir: Path) -> dict:
+    meta = run_meta(run_dir)
+    _kind, inferred_start = operation_start(run_dir.name)
+    created = meta.get("started_at") if isinstance(meta.get("started_at"), str) else ""
+    created = created or inferred_start or "1970-01-01T00:00:00Z"
+    base = {
+        "resultType": "complete",
+        "taskId": run_dir.name,
+        "createdAt": created,
+        "lastUpdatedAt": iso_mtime(
+            [run_dir / "status", run_dir / "cancel-request.json", run_dir / "run.log"],
+            created,
+        ),
+        "ttlMs": None,
+        "pollIntervalMs": 5000,
+    }
+    if cancellation_is_valid(run_dir):
+        return {**base, "status": "cancelled", "statusMessage": "Cancellation requested by the client."}
+    status, code = run_status(run_dir)
+    if status == "running":
+        return {**base, "status": "working", "statusMessage": "Peer consultation is running."}
+    if status == "stalled":
+        return {
+            **base,
+            "status": "failed",
+            "statusMessage": "Peer process ended without a durable exit status.",
+            "error": {"code": -32603, "message": "peer operation stalled"},
+        }
+    text, is_error = peer_result({"repo": str(Path.cwd()), "operation": run_dir.name})
+    return {
+        **base,
+        "status": "completed",
+        "statusMessage": "Peer consultation completed with exit %s." % code,
+        "result": {
+            "resultType": "complete",
+            "content": [{"type": "text", "text": text}],
+            "isError": is_error,
+        },
+    }
+
+
+def write_cancel_request(run_dir: Path) -> None:
+    path = run_dir / "cancel-request.json"
+    row = {
+        "schema": 1,
+        "kind": "mcp-task-cancel-request",
+        "task_id": run_dir.name,
+        "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    data = (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    temp = run_dir / (".cancel-request.%d.part" % os.getpid())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(temp), flags, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(str(temp), str(path))
+    finally:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+
+
 ACTIONS = {
     "oms_peer_start": start_peer,
     "oms_peer_result": peer_result,
@@ -945,6 +1124,7 @@ def response(msg_id, result=None, error=None) -> dict:
 
 
 def handle(message: dict):
+    global SESSION_PROTOCOL
     if not isinstance(message, dict):
         return response(
             None, error={"code": -32600, "message": "invalid request: expected object"}
@@ -995,18 +1175,68 @@ def handle(message: dict):
             protocol = requested
         else:
             protocol = FALLBACK_PROTOCOL
+        SESSION_PROTOCOL = protocol
+        capabilities = {"tools": {"listChanged": False}}
+        if tasks_feature_enabled() and protocol == TASKS_PROTOCOL:
+            capabilities["extensions"] = {TASKS_EXTENSION: {}}
         return response(
             msg_id,
-            {
+            complete_result({
                 "protocolVersion": protocol,
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": capabilities,
                 "serverInfo": {"name": "oh-my-setting", "version": server_version()},
-            },
+            }),
         )
     if method == "ping":
-        return response(msg_id, {})
+        return response(msg_id, complete_result({}))
     if method == "tools/list":
-        return response(msg_id, {"tools": tool_definitions()})
+        return response(msg_id, complete_result({"tools": tool_definitions()}))
+    if method in ("tasks/get", "tasks/update", "tasks/cancel"):
+        if not tasks_feature_enabled() or SESSION_PROTOCOL != TASKS_PROTOCOL:
+            return response(
+                msg_id, error={"code": -32601, "message": "method not found: %s" % method}
+            )
+        params = message.get("params")
+        if not isinstance(params, dict):
+            return response(
+                msg_id, error={"code": -32602, "message": "invalid params: expected object"}
+            )
+        if not task_request_capable(params):
+            return response(
+                msg_id,
+                error={
+                    "code": -32003,
+                    "message": "missing required client capability: %s" % TASKS_EXTENSION,
+                },
+            )
+        run_dir, err = task_run_dir(params.get("taskId"))
+        if err:
+            return response(msg_id, error={"code": -32602, "message": err})
+        assert run_dir is not None
+        snapshot = task_snapshot(run_dir)
+        if method == "tasks/get":
+            return response(msg_id, snapshot)
+        if method == "tasks/update":
+            return response(
+                msg_id,
+                error={
+                    "code": -32602,
+                    "message": "task has no outstanding input requests",
+                },
+            )
+        if snapshot["status"] != "working":
+            return response(
+                msg_id,
+                error={"code": -32602, "message": "task is already terminal"},
+            )
+        try:
+            write_cancel_request(run_dir)
+        except OSError as exc:
+            return response(
+                msg_id,
+                error={"code": -32603, "message": "could not record cancellation: %s" % exc},
+            )
+        return response(msg_id, {"resultType": "complete"})
     if method == "tools/call":
         params = message.get("params")
         if params is None:
@@ -1040,12 +1270,34 @@ def handle(message: dict):
                     text, is_error = run_tool(tool, arguments)
                 else:
                     text, is_error = ACTIONS[tool["name"]](arguments)
+                ordinary = {
+                    "content": [{"type": "text", "text": text}],
+                    "isError": is_error,
+                }
+                if (
+                    name == "oms_peer_start"
+                    and not is_error
+                    and task_request_capable(params)
+                ):
+                    repo, repo_err = resolve_repo(arguments)
+                    try:
+                        same_repo = not repo_err and repo.resolve() == Path.cwd().resolve()
+                    except OSError:
+                        same_repo = False
+                    if same_repo:
+                        try:
+                            payload = json.loads(text)
+                        except ValueError:
+                            payload = {}
+                        operation = payload.get("operation") if isinstance(payload, dict) else None
+                        run_dir, task_err = task_run_dir(operation)
+                        if not task_err and run_dir is not None:
+                            task = task_snapshot(run_dir)
+                            task["resultType"] = "task"
+                            return response(msg_id, task)
                 return response(
                     msg_id,
-                    {
-                        "content": [{"type": "text", "text": text}],
-                        "isError": is_error,
-                    },
+                    complete_result(ordinary),
                 )
         return response(
             msg_id, error={"code": -32602, "message": "unknown tool: %r" % name}

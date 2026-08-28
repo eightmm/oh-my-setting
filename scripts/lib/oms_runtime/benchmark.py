@@ -58,6 +58,42 @@ def outcome_path(repo: Path) -> Path:
     return repo / ".oms" / "runtime" / "outcomes.jsonl"
 
 
+def skill_eval_path(repo: Path) -> Path:
+    return repo / ".oms" / "runtime" / "skill-evals.jsonl"
+
+
+def _skill_eval_summary(rows: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    summary = {
+        "count": 0,
+        "task_pass_delta_sum": 0,
+        "treatment_task_passed": 0,
+        "trigger_false_negatives": 0,
+        "trigger_false_positives": 0,
+        "trigger_true_positives": 0,
+    }
+    for number, row in enumerate(rows, 1):
+        if row.get("schema") != 1 or not isinstance(row.get("skill"), str):
+            raise CoreError("skill evaluation row %d has an invalid schema" % number)
+        trigger = row.get("trigger")
+        task = row.get("task")
+        treatment = trigger.get("treatment") if isinstance(trigger, dict) else None
+        if not isinstance(treatment, dict) or not isinstance(task, dict):
+            raise CoreError("skill evaluation row %d has invalid metrics" % number)
+        values = {
+            "task_pass_delta_sum": task.get("pass_delta"),
+            "treatment_task_passed": task.get("treatment_passed"),
+            "trigger_false_negatives": treatment.get("false_negative"),
+            "trigger_false_positives": treatment.get("false_positive"),
+            "trigger_true_positives": treatment.get("true_positive"),
+        }
+        if any(isinstance(item, bool) or not isinstance(item, int) for item in values.values()):
+            raise CoreError("skill evaluation row %d has non-integer metrics" % number)
+        summary["count"] += 1
+        for key, value in values.items():
+            summary[key] += value
+    return summary
+
+
 def record_outcome(repo: Path, *, task_id: str, status: str, human_corrections: int = 0, escaped_defects: int = 0, reverted_lines: int = 0, false_refusals: int = 0, duplicate_work: int = 0, note: str = "") -> Dict[str, Any]:
     task_id = safe_id(task_id, "task id")
     if status not in ("verified", "failed", "partial", "blocked"):
@@ -76,6 +112,7 @@ def snapshot(repo: Path) -> Dict[str, Any]:
     events = read_jsonl(repo / ".oms" / "lifecycle" / "events.jsonl", limit_rows=MAX_JSONL_ROWS) if (repo / ".oms" / "lifecycle" / "events.jsonl").is_file() else []
     contexts = _context_rows(repo)
     manual_outcomes = read_jsonl(outcome_path(repo), limit_rows=MAX_JSONL_ROWS) if outcome_path(repo).is_file() else []
+    skill_evals = read_jsonl(skill_eval_path(repo), limit_rows=MAX_JSONL_ROWS) if skill_eval_path(repo).is_file() else []
     envelope = build_envelope(repo)
     outcomes = [outcome(row) for row in artifacts]
     decided = [value for value in outcomes if value in ("verified", "failed")]
@@ -119,6 +156,7 @@ def snapshot(repo: Path) -> Dict[str, Any]:
         "context": {"manifests": len(contexts), "selected_bytes_sum": sum(context_bytes) if context_bytes else None, "selected_bytes_mean": statistics.mean(context_bytes) if context_bytes else None, "debt_sum": sum(context_debt) if context_debt else None},
         "useful_work_efficiency": efficiency,
         "manual_outcomes": {"count": len(manual_outcomes), "totals": manual_metrics},
+        "skill_evals": _skill_eval_summary(skill_evals),
         "unknown_metrics": [] if manual_outcomes else ["human_corrections", "escaped_defects", "reverted_lines", "false_refusals", "duplicate_work"],
     }
 
@@ -130,7 +168,7 @@ def persist(repo: Path, row: Optional[Mapping[str, Any]] = None) -> Dict[str, An
 
 
 def compare(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str, Any]:
-    fields = [("success_rate",), ("useful_work_efficiency",), ("acceptance", "coverage"), ("acceptance", "risk_score"), ("context", "selected_bytes_mean"), ("tokens", "sum"), ("cost_usd", "sum"), ("duration_seconds", "sum")]
+    fields = [("success_rate",), ("useful_work_efficiency",), ("acceptance", "coverage"), ("acceptance", "risk_score"), ("context", "selected_bytes_mean"), ("tokens", "sum"), ("cost_usd", "sum"), ("duration_seconds", "sum"), ("skill_evals", "task_pass_delta_sum")]
 
     def get(row: Mapping[str, Any], path: Sequence[str]) -> Any:
         value: Any = row

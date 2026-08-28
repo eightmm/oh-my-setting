@@ -228,20 +228,25 @@ auto_update_trigger_status() {
   local systemd_timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/oh-my-setting-autoupdate.timer"
   local systemd_link="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/timers.target.wants/oh-my-setting-autoupdate.timer"
   local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
+  local cron_state
+
+  cron_state="$(oms_install_autoupdate_cron_state "$cron_file")"
+  if [ "$cron_state" = "malformed" ]; then
+    printf -- '- trigger: cron (malformed)\n'
+    return 0
+  fi
 
   if [ -f "$systemd_timer" ] && [ -L "$systemd_link" ]; then
     printf -- '- trigger: systemd user timer\n'
     return 0
   fi
 
-  if [ -n "$cron_file" ] && [ -f "$cron_file" ] && grep -Fq '# oh-my-setting autoupdate:begin' "$cron_file"; then
-    printf -- '- trigger: cron\n'
-    return 0
-  fi
-  if [ -z "$cron_file" ] && command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq '# oh-my-setting autoupdate:begin'; then
-    printf -- '- trigger: cron\n'
-    return 0
-  fi
+  case "$cron_state" in
+    valid)
+      printf -- '- trigger: cron\n'
+      return 0
+      ;;
+  esac
 
   if [ -f "$systemd_timer" ]; then
     printf -- '- trigger: systemd user timer (disabled)\n'

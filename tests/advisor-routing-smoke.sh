@@ -66,4 +66,29 @@ fi
 printf '%s' "$out" | grep -Eq '(^|/)(codex|antigravity)-' ||
   fail "consult dry-run should have picked a non-claude peer: $out"
 
+# The documented preference participates only in automatic single-seat
+# selection. An explicit --to remains authoritative over the environment.
+out="$(
+  cd "$TMP/repo" &&
+    env -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX CLAUDECODE=1 \
+      OMS_CONSULT_PROVIDER=antigravity \
+      bash "$ROOT/scripts/consult.sh" --prompt "preferred routing probe" \
+      --new-thread --dry-run --quiet 2>&1
+)" || fail "preferred consult dry-run failed: $out"
+printf '%s\n' "$out" | sed -n '1p' | grep -Eq '(^|/)antigravity-' ||
+  fail "OMS_CONSULT_PROVIDER was not selected before the automatic peer order: $out"
+
+out="$(
+  cd "$TMP/repo" &&
+    env -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX CLAUDECODE=1 \
+      OMS_CONSULT_PROVIDER=antigravity \
+      bash "$ROOT/scripts/consult.sh" --prompt "explicit routing probe" \
+      --to codex --new-thread --dry-run --quiet 2>&1
+)" || fail "explicit consult dry-run failed: $out"
+printf '%s\n' "$out" | sed -n '1p' | grep -Eq '(^|/)codex-' ||
+  fail "explicit --to did not override OMS_CONSULT_PROVIDER: $out"
+if printf '%s' "$out" | grep -Eq '(^|/)antigravity-'; then
+  fail "environment preference leaked into an explicit consult: $out"
+fi
+
 echo "advisor-routing-smoke: ok"

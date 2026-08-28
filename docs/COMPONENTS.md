@@ -1,7 +1,9 @@
 # Components
 
-oh-my-setting is a local control plane for Codex, Claude Code, and Antigravity.
-It gives them shared rules, skills, state, peer calls, isolated write
+oh-my-setting is a local control plane for installed coding-agent CLIs. Codex,
+Claude Code, and Antigravity remain its managed core; Cursor, Grok Build,
+Gemini CLI, Qwen Code, OpenCode, and marker-prefixed custom adapters are
+detected as optional transports. It gives them shared rules, skills, state, peer calls, isolated write
 delegation, and one verification boundary for OMS-managed delegated patches.
 The primary subsystem catalog is `oms list --frontdoor`; compatibility
 primitives and intent variants remain in `oms list --all`. Use
@@ -70,9 +72,16 @@ Useful maintenance commands:
 ```bash
 oms status
 oms doctor
+oms doctor --repo . --json
+oms doctor --repo . --remediation-plan
 oms update
 oms uninstall
 ```
+
+Structured doctor reports adapt the existing checks; they do not create a
+second health engine. Findings carry stable IDs, severity, and content-free
+remediation metadata. `--remediation-plan` prints commands and their authority
+class but never executes them, and it cannot be combined with `--repair`.
 
 ## Project onboarding
 
@@ -96,6 +105,31 @@ oms apply-project-template general .
 oms project-doctor .
 oms project-private --check
 ```
+
+## Skill quality, supply chain, and learned drafts
+
+`oms skill-forge` remains the single project-skill authority. Local authored
+skills live under `.oms/skills`; imported bundles first pass a bounded,
+no-follow preview and then live as content-addressed immutable revisions under
+`.oms/skill-store`. Import, update, and rollback require explicit apply plus
+digest CAS. They reject links, hardlinks, nonregular entries, sensitive file
+names/content, embedded URL credentials, oversized trees, and an unprefixed
+skill name. Import never executes a bundle script.
+
+```bash
+oms skill-forge preview --source PATH_OR_GIT --json
+oms skill-forge import --source PATH_OR_GIT --expected-bundle-sha256 SHA --apply
+oms skill-forge update --source PATH_OR_GIT --expected-current-sha256 OLD --expected-bundle-sha256 NEW --apply
+oms skill-forge rollback oms-NAME --to SHA --expected-current-sha256 CURRENT --apply
+```
+
+Skill evaluation is an explicit black-box experiment. A suite declares near-
+miss trigger cases and baseline/treatment task commands; host commands run only
+with `--allow-host-commands`. The result contains aggregate counts and command
+digests, never prompts or outputs. `--record` appends content-free metrics that
+`oms runtime benchmark` projects. `derive --from thread|journal|attempt-ref`
+can turn sufficient typed evidence into `.oms/drafts/skills/...`, but the draft
+is inert until a later review and ordinary `skill-forge add|link` action.
 
 ## Asking other agents
 
@@ -124,6 +158,25 @@ until that receipt is pruned.
 
 Provider count is not independence. Two routes backed by the same model family
 remain one opinion for diversity reporting.
+
+Provider discovery separates an executable transport from its model family.
+`glm` is therefore never guessed as a provider: a GLM route names its carrier
+and exact model, for example `opencode:model=zai/glm-4.7`. `oms models
+--providers auto` lists installed transports from the shared registry;
+`model-doctor --providers auto` runs bounded local version/help probes without
+inference, login, install, update, or configuration changes. Optional agents do
+not become default council seats merely because they appear on PATH: a custom
+adapter is excluded from every automatic pool (advisor auto-pick, consult
+auto-pick and failover) and runs only when named with `--to` or under an
+explicit `consult --all` fan-out.
+
+Custom transports must be executable as `oms-agent-adapter-ID` on PATH or in
+the configured adapter directory. Their protocol is a prompt-file based
+`run --access read|write --workdir PATH` call. Read calls use a disposable
+worktree. Write is refused unless `ID` appears in
+`OMS_PROVIDER_WRITE_ADAPTERS`, then still returns through the normal isolated
+delegation and patch gate. The adapter remains a trusted host executable, not
+an OS sandbox, and carries no landing, commit, push, or publication authority.
 
 A provider subprocess is a harness child, not a new owner. Child-marked
 processes may inspect saved review verdicts, but every peer-call and delegation
@@ -389,8 +442,20 @@ oms gc
 | `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode, executor+soul, and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
 | `execution-profile`, `herdr-adapter` | Compatibility preflight and optional pane/agent control. `execution-profile` preserves its public report while delegating backend readiness to the typed runtime engine. They are not a sandbox or landing authority. |
 | `open-in`, `ops-cockpit` | Probed VS Code/Stably Orca/Codex launch plans and a read-only, non-atomic operational summary. Its `observations` block projects the pending observation decisions — turn-guard intervention pairing, fail-ledger hook-row retirement, usage-family exposure — with no thresholds or tuning. |
-| `otel-export`, `semantic-eval` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; advisory patch evaluation from trusted host checks plus a self-reported judge result. |
+| `otel-export`, `semantic-eval` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; opt-in `--gen-ai` standard semantic attributes; advisory patch evaluation from trusted host checks plus a self-reported judge result. |
 | `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |
+
+Commands that retain different authority may still share one decision engine.
+Scope consumers use one Bash-compatible literal/glob matcher with deny
+precedence; different glob declarations are never assumed to be subset-related.
+Consultation entrypoints use one provider registry for aliases, availability,
+and explicit/configured/automatic preference. State, inbox, runtime, plan, and
+resume surfaces consume the same failure-attention, approval effective-state,
+task-verification, plan-actionability, and PROJECT-state projections. These
+shared reads do not grant mutation authority: durable approval `state` remains
+distinct from its read-time `effective_state`, and `goal-drive` remains the
+bounded executor for an approved plan while `autopilot` also owns spec review,
+plan proposal, and final semantic review.
 
 `trusted-local` inherits host files, credentials, processes, and network.
 `isolated` only checks an existing Docker- or Podman-compatible daemon and local
@@ -415,12 +480,22 @@ second updater. Receipt-owned schema-1 and schema-2 installs both preflight and
 apply through `update.sh`, which remains the canonical rollback-capable install
 transaction. Only receipt-less legacy checkouts retain the configured-upstream
 compatibility path until a successful update creates an install receipt.
+Cron ownership is one exact begin/end marker pair. Install, removal, status,
+and legacy receipt inference share the same `absent | valid | malformed`
+classification; a malformed block is reported but never rewritten, so an
+orphan marker cannot consume unrelated user cron entries. That malformed
+verdict takes precedence over another installed trigger and is identical in
+dry-run and apply mode.
 
 `semantic-eval` calls no model. A spec command needs `--allow-host-checks`; its
 temporary worktree is not a host sandbox. A local judge file has self-reported
 provenance, so an evaluation requiring an independent judge remains
 `incomplete`. `otel-export` writes only to stdout or a local file and never
-sends network traffic.
+sends network traffic. Writers accept a valid incoming `OMS_TRACEPARENT`, store
+only opaque trace/span IDs and flags, and derive child context without storing
+raw `traceparent`, `tracestate`, baggage, prompts, or tool arguments. Existing
+`oms.*` attributes remain the default; `gen_ai.*` is emitted only with
+`--gen-ai`.
 
 ## ML and HPC
 
@@ -454,6 +529,11 @@ chooses a connector or tracked summary.
   absolute worktree parent. A sidecar lets uninstall remove only rules this
   install added.
   HUD/session-capture parity is not claimed.
+- Optional CLI transports: Cursor, Grok Build, Gemini CLI, Qwen Code, and
+  OpenCode join the same read/write, artifact, model-route, and provider-child
+  contracts when detected. OMS does not install, authenticate, or reconfigure
+  them. Provider-native sandbox or approval flags are pinned per invocation;
+  OpenCode and custom adapters additionally rely on the OMS worktree boundary.
 - MCP: shared state reads plus background peer actions that can incur provider
   cost and write `.oms` artifacts. Stdio records and prompts are byte-bounded;
   oversized input is rejected before provider argv or prompt files are built.
@@ -461,6 +541,20 @@ chooses a connector or tracked summary.
   them: `oms_peer_operations` lists them newest first, a run whose process died
   without an exit reads as `stalled` instead of polling as running forever, and
   a finished result names the thread to continue from.
+- MCP Tasks: disabled unless `OMS_MCP_TASKS_EXTENSION=1`. With protocol
+  `2026-07-28` and per-request `io.modelcontextprotocol/tasks` capability, a
+  same-repository `oms_peer_start` reuses its durable operation ID as a Task;
+  `tasks/get|update|cancel` add no list or second store. Older clients keep the
+  prior CallToolResult shape.
+- Codex app-server transport: `OMS_CODEX_TRANSPORT=app-server` explicitly moves
+  only read seats to one ephemeral, read-only, no-network, approval-never turn.
+  The default remains `codex exec`; adapter failure never falls back to it and
+  write delegation is refused.
+- A2A: `oms agent-card` prints a public A2A v1 card. `oms a2a-bridge` is an
+  explicit foreground HTTP+JSON bridge that accepts only loopback IP literals
+  and the synchronous `status`, `inbox`, and `capabilities` reads. It installs
+  no service, starts no model, advertises no mutation, and owns no A2A task
+  state.
 
 Integration removal failures propagate to `oms uninstall`; successful-looking
 messages are emitted only after the corresponding CLI confirms removal.

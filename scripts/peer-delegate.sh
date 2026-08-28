@@ -74,7 +74,8 @@ the caller reviews before applying. The worker never touches the main tree and
 never commits or pushes.
 
 Options:
-  --to PROVIDER        Worker: codex, claude, or antigravity. Required.
+  --to PROVIDER        Registered write-capable agent transport. Required;
+                       inspect `oms models` for detected agents.
   --prompt TEXT        Short task brief.
   --role NAME          Prepend a reusable strategy profile (agent-role.sh:
                        repo, global, then bundled fallback) to the worker brief.
@@ -423,12 +424,8 @@ plan_publish_review() {
   plan_finalized=1
 }
 
-case "$TO" in
-  codex|claude|antigravity|agy) ;;
-  "") fail "--to is required" ;;
-  *) fail "unsupported provider: $TO" ;;
-esac
-[ "$TO" = "agy" ] && TO="antigravity"
+[ -n "$TO" ] || fail "--to is required"
+TO="$(oms_provider_normalize "$TO")" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -1481,8 +1478,7 @@ if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
   echo "dry-run: $TO -> $artifact"
 else
-  binary="$TO"
-  [ "$TO" = "antigravity" ] && binary="agy"
+  binary="$(oms_provider_binary "$TO" 2>/dev/null || printf '%s' "$TO")"
   if ! command -v "$binary" >/dev/null 2>&1; then
     printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
     worker_status=127

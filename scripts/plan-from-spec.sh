@@ -11,6 +11,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/project-state.sh
+. "$ROOT/scripts/lib/project-state.sh"
 
 REPO="$PWD"
 PROVIDER="codex"
@@ -153,8 +155,11 @@ fi
 # safe to hand to plan-run (id shape, non-empty scope, non-empty verify,
 # dependencies that stay inside the proposal).
 validate_proposal() {  # FILE [APPLY] -> prints "ok <count>" or fails with reason
-  python3 - "$1" "$MAX_TASKS" "$ID_PREFIX" "$ALLOWED_ENVELOPE" "$PLAN_FILE" "${2:-0}" <<'PY'
-import json, re, sys, unicodedata
+  python3 - "$1" "$MAX_TASKS" "$ID_PREFIX" "$ALLOWED_ENVELOPE" "$PLAN_FILE" "${2:-0}" \
+    "$ROOT/scripts/lib/path_scope.py" <<'PY'
+import json, re, runpy, sys, unicodedata
+
+within_envelope = runpy.run_path(sys.argv[7])["within_envelope"]
 
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -263,8 +268,7 @@ for t in tasks:
         except ValueError as exc:
             sys.stderr.write(str(exc) + "\n"); sys.exit(3)
         for candidate in cleaned:
-            if not any(root == "." or candidate == root or candidate.startswith(root + "/")
-                       for root in envelope):
+            if not within_envelope(candidate, envelope):
                 sys.stderr.write("task %s widens the allowed path envelope\n" % tid); sys.exit(3)
     if not isinstance(t.get("verify"), str) or not t["verify"].strip():
         sys.stderr.write("task %s has no verify command\n" % tid); sys.exit(3)
@@ -549,13 +553,12 @@ if [ -n "$VALIDATE_SPEC" ]; then
 fi
 
 [ -f "$SPEC" ] || fail "no PROJECT.md in $REPO; scaffold one: apply-project-template.sh auto $REPO"
-state="$(sed -n 's/^- State:[[:space:]]*//p' "$SPEC" | sed -n 1p)"
-state="${state//$'\r'/}"
+state="$(oms_project_state "$SPEC")"
 case "$state" in
-  confirmed|active) ;;
+  confirmed|legacy-active) ;;
   draft) fail "PROJECT.md is still draft; confirm the spec first (decomposing a draft automates guessing)" ;;
-  "") fail "PROJECT.md has no '- State:' field" ;;
-  *) fail "PROJECT.md State must be confirmed (legacy active is also accepted)" ;;
+  missing) fail "PROJECT.md has no '- State:' field" ;;
+  invalid) fail "PROJECT.md State is invalid; use confirmed (legacy active is also accepted)" ;;
 esac
 
 acceptance_meta="$(acceptance_contract)" || exit 2

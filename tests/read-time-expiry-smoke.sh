@@ -358,6 +358,36 @@ printf '%s\n' "$next_out" | grep -Fq EXPIRED || fail "next brief hid the expiry"
 # None of those reads may touch the stored plan.
 cmp -s "$plan_file" "$TMP/tasks.before" || fail "a read path rewrote tasks.json"
 
+# Recovered legacy/partial claims may predate claimed_at. The canonical plan
+# clock falls back to updated; state/inbox must see the same expired claim that
+# agent-plan ready/next already offers for re-claiming.
+python3 - "$plan_file" <<'PY'
+import json, sys
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+task = plan["tasks"]["t1"]
+task.pop("claimed_at", None)
+task["updated"] = "2000-01-01T00:00:00Z"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle)
+PY
+plan_snapshot="$($PLAN --repo "$prepo" status --json)" ||
+  fail "canonical plan status JSON failed"
+printf '%s' "$plan_snapshot" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["present"] is True and row["nonempty"] is True, row
+assert row["stale"][0]["id"] == "t1", row
+assert row["actionable"] == ["t1"], row
+' || fail "canonical plan status missed updated fallback expiry: $plan_snapshot"
+state_json="$("$ROOT/scripts/state.sh" --repo "$prepo" --json)"
+printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["plan"]
+assert row["stale"][0]["id"] == "t1", row
+assert row["actionable"] == ["t1"], row
+' || fail "repo state missed updated fallback expiry: $state_json"
+
 # plan-run's pre-flight frees the dead claim so --id works without a separate
 # reclaim call; without it plan-run dies with "task t1 is claimed, not ready".
 run_rc=0

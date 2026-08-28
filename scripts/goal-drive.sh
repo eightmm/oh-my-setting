@@ -128,7 +128,7 @@ PY
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
-  fail "unknown provider: use codex, claude, or antigravity (agy)"
+  fail "unknown provider: inspect 'oms models' for registered transports"
 if [ -n "$EXPECTED_REF" ]; then
   case "$EXPECTED_REF" in
     refs/heads/*) ;;
@@ -184,17 +184,15 @@ print(d.get("accept", "") or "")
 }
 
 plan_has_unfinished_work() {  # prints 1 when any task is not done
-  # Fails closed: a plan this cannot read is not evidence that the goal is met.
-  python3 -c '
+  # Fails closed: a plan this cannot project is not evidence the goal is met.
+  "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null | python3 -c '
 import json, sys
 try:
-    d = json.load(open(sys.argv[1], encoding="utf-8"))
-    tasks = list((d.get("tasks") or {}).values())
+    row = json.load(sys.stdin)
+    print("1" if row.get("has_unfinished") else "")
 except Exception:
     print("1")
-    sys.exit(0)
-print("1" if any(t.get("state") != "done" for t in tasks) else "")
-' "$PLAN_FILE" | tr -d '\r'
+' | tr -d '\r'
 }
 
 acceptance_ever_failed() {  # prints 1 when this contract failed at an ancestor
@@ -248,6 +246,10 @@ EOF
 ACCEPT_CMD="$(read_accept_cmd)"
 [ -n "$ACCEPT_CMD" ] ||
   fail "plan has no acceptance command; set one: agent-plan init --goal ... --accept CMD"
+PLAN_NONEMPTY="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null | \
+  python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("nonempty") else "")' | tr -d '\r')" ||
+  fail "cannot read the plan snapshot"
+[ "$PLAN_NONEMPTY" = 1 ] || fail "plan has no tasks; add at least one reviewed task before goal-drive"
 ACCEPT_SNAPSHOT="$(printf '%s' "$ACCEPT_CMD" | oms_sha256_stream 2>/dev/null || echo unhashed)"
 RUN_ID="${RUN_ID_OVERRIDE:-gd-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 TERMINAL_RECEIPT="$(python3 -c 'import os; print(os.urandom(32).hex())' | tr -d '\r')" ||
@@ -636,7 +638,7 @@ def validate(row):
     text(row, "title")
     if not ident.fullmatch(intent_id) or not ident.fullmatch(task_id):
         raise ValueError("id")
-    if phase not in open_phases or provider not in ("codex", "claude", "antigravity"):
+    if phase not in open_phases or not ident.fullmatch(provider):
         raise ValueError("phase/provider")
     if (not ident.fullmatch(lease) or not base_re.fullmatch(base) or
             (not head_ref_missing and
@@ -985,7 +987,7 @@ if not ident.fullmatch(lease): raise ValueError("lease")
 if (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", head_ref) or
         ".." in head_ref or head_ref.endswith("/") or "//" in head_ref):
     raise ValueError("head_ref")
-if provider not in ("codex", "claude", "antigravity"): raise ValueError("provider")
+if not ident.fullmatch(provider): raise ValueError("provider")
 if phase not in ("prepared", "repairing", "landed"): raise ValueError("phase")
 p=pathlib.PurePosixPath(patch)
 if p.is_absolute() or p.parts[:3] != (".oms", "plan", "commit-patches") or len(p.parts) != 4:

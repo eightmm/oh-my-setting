@@ -129,22 +129,25 @@ oms_capability_run_bounded() {
 # spent to find out which models exist.
 oms_capability_probe_models() {
   local provider="$1" models_out="$2" efforts_out="$3"
-  local binary raw
+  local binary raw arg
+  local -a list_cmd
   binary="$(oms_provider_binary "$provider")"
 
   case "$(oms_provider_model_listing_kind "$provider")" in
     lines)
       # agy holds a singleton while it exits, and a `models` call that starts
-      # inside that window hangs until the timeout instead of failing. The help
-      # probe runs immediately before this, so the window is exactly where this
-      # lands. Wait it out rather than hang and recover: a measured second of
-      # separation is enough, and a wasted second beats a wasted thirty.
-      sleep "${OMS_CAPABILITY_SETTLE_WAIT:-2}"
-      if oms_capability_run_bounded 30 "$models_out" "$binary" models && [ -s "$models_out" ]; then
+      # inside that window hangs until the timeout instead of failing. Other
+      # providers do not pay this provider-specific delay.
+      [ "$provider" != antigravity ] || sleep "${OMS_CAPABILITY_SETTLE_WAIT:-2}"
+      list_cmd=("$binary")
+      for arg in $(oms_provider_model_list_args "$provider"); do
+        list_cmd+=("$arg")
+      done
+      if oms_capability_run_bounded 30 "$models_out" "${list_cmd[@]}" </dev/null && [ -s "$models_out" ]; then
         return 0
       fi
-      sleep "${OMS_CAPABILITY_SETTLE_WAIT:-2}"
-      oms_capability_run_bounded 30 "$models_out" "$binary" models
+      [ "$provider" != antigravity ] || sleep "${OMS_CAPABILITY_SETTLE_WAIT:-2}"
+      oms_capability_run_bounded 30 "$models_out" "${list_cmd[@]}" </dev/null
       ;;
     codex-app-server)
       # The app-server speaks JSON-RPC on stdio and answers model/list without
@@ -227,7 +230,7 @@ oms_capability_refresh() {
       local -a probe=("$binary")
       local arg
       for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
-      oms_capability_run_bounded 10 "$help_file" "${probe[@]}" || true
+      oms_capability_run_bounded 10 "$help_file" "${probe[@]}" </dev/null || true
     fi
     values="$(oms_provider_effort_values "$provider")"
     if [ "$mechanism" = flag ]; then

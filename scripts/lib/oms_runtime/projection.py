@@ -31,12 +31,21 @@ def _task_status(repo: Path) -> Dict[str, Any]:
     # planted its own scripts/agent-task.sh kept the suite green.
     script = install_root() / 'scripts' / 'agent-task.sh'
     if not script.is_file() or script.is_symlink():
-        return {}
-    return run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20) or {}
+        raise CoreError('canonical task status command is unavailable')
+    payload = run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20)
+    if (not isinstance(payload, dict) or payload.get('schema') != 1 or
+            payload.get('present') is not True or
+            not isinstance(payload.get('status'), str) or
+            not isinstance(payload.get('verification'), str) or
+            not isinstance(payload.get('stale'), bool)):
+        raise CoreError('canonical task status projection is unavailable or invalid')
+    return payload
 
 def _task_packet(repo: Path) -> Dict[str, Any]:
     path = repo / '.oms' / 'task' / 'current.md'
-    if not path.is_file() or path.is_symlink():
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise CoreError('task packet must be a regular file: %s' % path)
+    if not path.exists():
         return {'present': False, 'source': None, 'criteria': [], 'scope': {'allowed': [], 'forbidden': []}}
     body, metadata = sections(read_text(path))
     goal = first_nonempty(section_text(body, ['goal', 'objective', '목표']), 1000)
@@ -79,12 +88,31 @@ def _latest_plan_retirement(repo: Path) -> Tuple[Dict[str, Any], Any]:
         'task_landings_claimed') if row.get(key) not in (None, '')},
         source_descriptor(path, repo))
 
+def _plan_status(repo: Path) -> Dict[str, Any]:
+    script = install_root() / 'scripts' / 'agent-plan.sh'
+    if not script.is_file() or script.is_symlink():
+        raise CoreError('canonical plan status command is unavailable')
+    payload = run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20)
+    if (not isinstance(payload, dict) or payload.get('schema') != 1 or
+            payload.get('present') is not True or
+            isinstance(payload.get('task_count'), bool) or
+            not isinstance(payload.get('task_count'), int) or
+            payload.get('task_count', -1) < 0 or
+            not all(isinstance(payload.get(key), bool)
+                    for key in ('nonempty', 'all_done', 'has_unfinished')) or
+            not isinstance(payload.get('by_state'), dict) or
+            not all(isinstance(payload.get(key), list)
+                    for key in ('actionable', 'stale', 'stale_review'))):
+        raise CoreError('canonical plan status projection is unavailable or invalid')
+    return payload
+
 def _plan_state(repo: Path) -> Dict[str, Any]:
     path = repo / '.oms' / 'plan' / 'tasks.json'
     raw = read_json(path, default=None)
     if raw is None:
         retirement, source = _latest_plan_retirement(repo)
-        return {'present': False, 'source': source, 'tasks': [], 'counts': {},
+        return {'present': False, 'source': source, 'tasks': [], 'task_count': 0,
+                'nonempty': False, 'all_done': False, 'has_unfinished': False, 'counts': {},
                 'latest_retirement': retirement,
                 'scope': {'allowed': [], 'forbidden': []}}
     if not isinstance(raw, dict):
@@ -99,7 +127,11 @@ def _plan_state(repo: Path) -> Dict[str, Any]:
         verify = str(row.get('verify', '') or '')
         tasks.append({'id': bounded_line(row.get('id', ''), 160), 'title': bounded_line(row.get('title', row.get('goal', '')), 300), 'state': bounded_line(row.get('state', 'ready'), 40).lower(), 'depends': [bounded_line(item, 160) for item in row.get('depends', row.get('dependencies', []))] if isinstance(row.get('depends', row.get('dependencies', [])), list) else [], 'scope': {'allowed': allowed, 'forbidden': forbidden}, 'verify_present': bool(verify), 'verify_digest': sha256_text(verify) if verify else '', 'provider': bounded_line(row.get('provider', ''), 80), 'lease_id_present': bool(row.get('lease_id')), 'artifact_present': bool(row.get('artifact')), 'patch_present': bool(row.get('patch'))})
     acceptance = str(raw.get('accept', raw.get('acceptance', '')) or '')
-    return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
+    status = _plan_status(repo)
+    count = len(tasks)
+    if status['task_count'] != count or status['nonempty'] != (count > 0):
+        raise CoreError('canonical plan status disagrees with the physical plan task set')
+    return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'task_count': status['task_count'], 'nonempty': status['nonempty'], 'all_done': status['all_done'], 'has_unfinished': status['has_unfinished'], 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
 
 def _latest_executor(repo: Path) -> Dict[str, Any]:
     candidates: List[Tuple[Path, Dict[str, Any]]] = []
@@ -118,11 +150,14 @@ def _latest_executor(repo: Path) -> Dict[str, Any]:
     return {'present': True, 'active': True, 'source': source_descriptor(path, repo), 'id': bounded_line(raw.get('executor_id', raw.get('id', path.parent.name)), 160), 'state': state, 'provider': bounded_line(raw.get('provider', ''), 80), 'model': bounded_line(raw.get('selected_model', raw.get('model', '')), 120), 'reasoning_effort': bounded_line(raw.get('reasoning_effort', ''), 40), 'task_id': bounded_line(raw.get('plan_task', raw.get('task_id', '')), 160), 'base_sha': bounded_line(raw.get('base_sha', ''), 80), 'scope': {'allowed': parse_path_list(raw.get('allowed_paths', raw.get('allowed', []))), 'forbidden': parse_path_list(raw.get('forbidden_paths', raw.get('forbidden', [])))}, 'verify_present': bool(verify), 'verify_digest': sha256_text(verify) if verify else '', 'frozen': state in ('frozen', 'running') and bool(raw.get('soul_sha256'))}
 
 def _failure_paths(repo: Path) -> List[Path]:
-    oms = repo / '.oms'; candidates = [oms / 'failures.jsonl', oms / 'fail-ledger.jsonl']
+    oms = repo / '.oms'; canonical = oms / 'failures.jsonl'; candidates = [oms / 'fail-ledger.jsonl']
     for root_name in ('failures', 'failure'):
         root = oms / root_name
         if root.is_dir() and not root.is_symlink(): candidates.extend(root.rglob('*.jsonl'))
-    return sorted({path for path in candidates if path.is_file() and not path.is_symlink()})
+    paths = {path for path in candidates if path.is_file() and not path.is_symlink()}
+    if canonical.exists() or canonical.is_symlink():
+        paths.add(canonical)
+    return sorted(paths)
 
 def _canonical_ledger_failures(repo: Path, path: Path) -> List[Dict[str, Any]]:
     # The canonical ledger does not carry resolution in the failing row: a fix
@@ -133,16 +168,26 @@ def _canonical_ledger_failures(repo: Path, path: Path) -> List[Dict[str, Any]]:
     # action for as long as the ledger existed. That replay already has an
     # owner -- and a comment naming every site that must agree with it -- so
     # ask fail-ledger instead of keeping a sixth copy of the predicate here.
+    if path.is_symlink() or not path.is_file():
+        raise CoreError('canonical failure ledger must be a regular non-symlink file')
     script = install_root() / 'scripts' / 'fail-ledger.sh'
     if not script.is_file() or script.is_symlink():
-        return []
-    payload = run_json(['bash', str(script), '--repo', str(repo), 'list', '--unresolved', '--json'], cwd=repo, timeout=20) or {}
+        raise CoreError('canonical failure ledger projection command is unavailable')
+    payload = run_json(['bash', str(script), '--repo', str(repo), 'list', '--unresolved', '--json'], cwd=repo, timeout=20)
+    if not isinstance(payload, dict) or payload.get('schema') != 1:
+        raise CoreError('canonical failure ledger projection is unavailable or invalid')
     rows = payload.get('failures')
     if not isinstance(rows, list):
-        return []
+        raise CoreError('canonical failure ledger projection has invalid failures')
     result: List[Dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, Mapping):
+            raise CoreError('canonical failure ledger projection contains a non-object row')
+        if (row.get('attention') not in {'none', 'retiring', 'actionable'} or
+                not isinstance(row.get('actionable'), bool) or
+                not isinstance(row.get('retiring'), bool)):
+            raise CoreError('canonical failure ledger projection contains invalid attention state')
+        if row.get('attention') == 'retiring' or row.get('actionable') is False:
             continue
         summary = bounded_line(row.get('summary') or row.get('cmd') or '', 300)
         result.append({'id': bounded_line(row.get('fingerprint', ''), 160), 'kind': bounded_line(row.get('kind', ''), 80), 'summary': summary, 'classification': classify(summary, row.get('exit')), 'source': relative_path(path, repo)})
@@ -230,6 +275,8 @@ def _actions(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[
     if failures:
         top = failures[-1]; add('resolve_blocker', 95, 'read', 'An unresolved %s failure is recorded.' % top.get('classification', {}).get('code', 'unknown'), 'oms fail-ledger list')
     tasks = plan.get('tasks', []) if isinstance(plan.get('tasks'), list) else []
+    empty_plan = bool(plan.get('present')) and not bool(plan.get('nonempty'))
+    if empty_plan: add('repair_empty_plan', 88, 'append', 'The active plan has no tasks, so completion cannot be proven.', 'oms plan-from-spec --repo .')
     landing = [row for row in tasks if row.get('state') == 'landing']; review = [row for row in tasks if row.get('state') == 'review']; ready = [row for row in tasks if row.get('state') == 'ready']; running = [row for row in tasks if row.get('state') in ('claimed', 'running')]; active_plan = bool(landing or review or ready or running)
     if landing: add('finish_landing', 90, 'repo_write', 'A task is inside the landing transaction.', 'oms patch-land --recover')
     elif review:
@@ -239,7 +286,7 @@ def _actions(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[
     if task.get('present') and not evidence.get('complete'):
         if task.get('verification') != 'fresh': add('verify_active_task', 70, 'read', 'Acceptance evidence is incomplete and the active task gate is not fresh.', 'oms agent-task verify')
         else: add('resolve_evidence_gaps', 68, 'read', 'The task gate is fresh but one or more declared criteria still lack current evidence.', 'oms runtime evidence show')
-    if evidence.get('complete') and not active_plan: add('record_verified_completion', 50, 'append', 'Every declared criterion has current evidence and no plan task remains active.', 'oms agent-task close')
+    if evidence.get('complete') and not active_plan and not empty_plan: add('record_verified_completion', 50, 'append', 'Every declared criterion has current evidence and no plan task remains active.', 'oms agent-task close')
     if not result: add('orient', 10, 'read', 'No stronger deterministic transition is available.', 'oms inbox')
     return sorted(result, key=lambda item: (-int(item['priority']), str(item['id'])))
 
@@ -250,6 +297,7 @@ def build_base_envelope(repo: Path) -> Dict[str, Any]:
     head = git_head(repo); state_digest = sha256_bytes(canonical_json({'head': head, 'sources': sources, 'failures': failures})); warnings: List[str] = []; criteria = _criteria(project, task, plan)
     if not criteria: warnings.append('No explicit acceptance criteria were found; completion coverage cannot be proven.')
     if plan.get('present') and not plan.get('acceptance_present'): warnings.append('The active plan has no plan-level acceptance command.')
+    if plan.get('present') and not plan.get('nonempty'): warnings.append('The active plan has no tasks; completion is gated until plan work is defined.')
     if executor.get('present') and executor.get('base_sha') and head and executor.get('base_sha') != head: warnings.append('The latest executor was frozen against a different Git commit.')
     if failures: warnings.append('%d unresolved failure record(s) require attention.' % len(failures))
     return {'schema': ENVELOPE_SCHEMA, 'generated_at': utc_now(), 'repo': {'head': head or None, 'branch': git_branch(repo) or None}, 'state_digest': state_digest, 'sources': sources, 'objective': _objective(project, task, plan), 'scope': scope, 'criteria': criteria, 'budget': task.get('budget', {}), 'task': {key: value for key, value in task.items() if key not in ('criteria', 'source', 'constraints')}, 'plan': {key: value for key, value in plan.items() if key != 'source'}, 'executor': {key: value for key, value in executor.items() if key != 'source'}, 'authority': {'repo_write': 'external_parent_decision', 'remote_create': 'external_parent_decision', 'authority_transferable_by_capsule': False}, 'failures': failures, 'warnings': warnings}
@@ -274,9 +322,15 @@ def _completion_state(task: Mapping[str, Any], evidence: Mapping[str, Any]) -> s
 
 
 def finalize_envelope(base: Dict[str, Any], evidence: Mapping[str, Any]) -> Dict[str, Any]:
-    base = dict(base); base['criteria'] = evidence.get('criteria', []); base['evidence'] = {key: value for key, value in evidence.items() if key != 'criteria'}
+    base = dict(base)
+    effective_evidence = dict(evidence)
+    plan = base.get('plan', {}) if isinstance(base.get('plan'), dict) else {}
+    if plan.get('present') and not plan.get('nonempty'):
+        effective_evidence['complete'] = False
+        effective_evidence['completion_blocker'] = 'empty-plan'
+    base['criteria'] = effective_evidence.get('criteria', []); base['evidence'] = {key: value for key, value in effective_evidence.items() if key != 'criteria'}
     if isinstance(base.get('task'), dict):
-        base['task'] = dict(base['task'], completion=_completion_state(base['task'], evidence))
-    base['next_actions'] = _actions({'present': any(source.get('path') == 'PROJECT.md' for source in base.get('sources', []))}, base.get('task', {}), base.get('plan', {}), evidence, base.get('failures', []))
+        base['task'] = dict(base['task'], completion=_completion_state(base['task'], effective_evidence))
+    base['next_actions'] = _actions({'present': any(source.get('path') == 'PROJECT.md' for source in base.get('sources', []))}, base.get('task', {}), base.get('plan', {}), effective_evidence, base.get('failures', []))
     base['state_digest'] = sha256_bytes(canonical_json({'contract': base['state_digest'], 'evidence': base['evidence']}))
     return base

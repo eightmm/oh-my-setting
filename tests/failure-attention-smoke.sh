@@ -49,6 +49,21 @@ fi
 r="$(resume_of "$repo")"
 printf '%s' "$r" | grep -q 'auto-retire on TTL' ||
   fail "resume must label one-shot hook noise as retiring: $r"
+ledger_json="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved --json)"
+printf '%s' "$ledger_json" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)["failures"]
+assert len(rows) == 1, rows
+assert rows[0]["attention"] == "retiring", rows
+assert rows[0]["actionable"] is False, rows
+' || fail "the canonical ledger projection must classify a one-shot hook as retiring: $ledger_json"
+runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo" envelope show)"
+printf '%s' "$runtime_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert not any(action["id"] == "resolve_blocker" for action in row["next_actions"]), row["next_actions"]
+assert row["failures"] == [], row["failures"]
+' || fail "runtime must not promote retiring hook noise to a blocker: $runtime_json"
 
 # --- 2. hook x2: recurrence is actionable ----------------------------------
 "$ROOT/scripts/fail-ledger.sh" record --repo "$repo" --kind hook \
@@ -62,6 +77,21 @@ printf '%s' "$out" | grep -q 'actionable failure' ||
 r="$(resume_of "$repo")"
 printf '%s' "$r" | grep -q 'failures: 1 actionable' ||
   fail "resume must count the recurring hook failure as actionable: $r"
+ledger_json="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved --json)"
+printf '%s' "$ledger_json" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)["failures"]
+assert len(rows) == 1, rows
+assert rows[0]["attention"] == "actionable", rows
+assert rows[0]["actionable"] is True, rows
+' || fail "the canonical ledger projection must classify a recurring hook as actionable: $ledger_json"
+runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo" envelope show)"
+printf '%s' "$runtime_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert any(action["id"] == "resolve_blocker" for action in row["next_actions"]), row["next_actions"]
+assert len(row["failures"]) == 1, row["failures"]
+' || fail "runtime must promote a recurring hook to one blocker: $runtime_json"
 
 # --- 3. deliberate record x1: actionable immediately ------------------------
 repo2="$TMP/deliberate"

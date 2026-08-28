@@ -122,6 +122,7 @@ esac
 echo worker-ok
 EOF
 chmod +x "$bin/codex"
+ln -s codex "$bin/cursor-agent"
 
 # A delegated harness child has patch authority only. Calling the goal driver
 # would otherwise turn that patch authority into commit authority, so every
@@ -208,15 +209,15 @@ review_calls="$TMP/review-window-calls"
 rc=0
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$review_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW=1 \
-  "$ROOT/scripts/goal-drive.sh" --repo "$review_repo" --to codex --max-cycles 2 \
+  "$ROOT/scripts/goal-drive.sh" --repo "$review_repo" --to cursor --max-cycles 2 \
   > "$TMP/review-window-stop.out" 2>&1 || rc=$?
-[ "$rc" = 75 ] || fail "review-window fixture should stop after provider review"
+[ "$rc" = 75 ] || fail "review-window fixture should stop after provider review: $(tail -12 "$TMP/review-window-stop.out"); artifact: $(tail -20 "$review_repo"/.oms/artifacts/delegate/*.md 2>/dev/null || true)"
 "$ROOT/scripts/agent-plan.sh" --repo "$review_repo" show --id new |
   python3 -c 'import json,sys;assert json.load(sys.stdin)["state"] == "review"' ||
   fail "review-window fixture did not retain reviewed work"
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$review_calls" "$ROOT/scripts/goal-drive.sh" --repo "$review_repo" \
-  --to codex --max-cycles 2 > "$TMP/review-window-resume.out" 2>&1 ||
+  --to cursor --max-cycles 2 > "$TMP/review-window-resume.out" 2>&1 ||
   fail "review-window recovery failed"
 [ "$(wc -l < "$review_calls" | tr -d ' ')" = 1 ] ||
   fail "review-window recovery called the provider again"
@@ -1367,6 +1368,9 @@ goal_accept_timeout_repo="$TMP/goal-accept-timeout"
 make_case "$goal_accept_timeout_repo" tracked
 "$ROOT/scripts/agent-plan.sh" --repo "$goal_accept_timeout_repo" init \
   --goal goal-timeout --accept 'sleep 5' >/dev/null
+"$ROOT/scripts/agent-plan.sh" --repo "$goal_accept_timeout_repo" add \
+  --id goal-timeout --title 'exercise typed acceptance timeout' \
+  --allowed tracked.txt --verify true >/dev/null
 rc=0
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$TMP/goal-accept-timeout-calls" OMS_PLAN_ACCEPT_TIMEOUT=1s \

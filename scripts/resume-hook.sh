@@ -124,55 +124,18 @@ fi
 # Unresolved failures: one line, newest row's summary and suggested next.
 ledger="$cwd/.oms/failures.jsonl"
 if [ -s "$ledger" ]; then
-  fail_line="$(OMS_HOOK_TTL="${OMS_HOOK_FAIL_TTL:-86400}" python3 - "$ledger" <<'PY' 2>/dev/null
-import calendar, json, os, sys, time
-
-ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
-now = time.time()
-
-# Retirement predicate, textually identical to fail-ledger/gc/repo-state:
-# an expired hook row is retired at read time. This block used to re-parse
-# the ledger raw and announced rows every other surface had already
-# retired: 30 at session start while inbox showed 24.
-def hook_expired(r):
-    if r.get("kind") != "hook" or r.get("event") != "fail":
-        return False
-    try:
-        t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
-    except Exception:
-        return False   # an unreadable stamp is never grounds for retirement
-    return (now - t) >= ttl
-
-rows, counts = {}, {}
+  fail_line="$("$ROOT/scripts/fail-ledger.sh" --repo "$cwd" list --unresolved --json 2>/dev/null | python3 -c '
+import json, sys
 try:
-    with open(sys.argv[1], encoding="utf-8") as fh:
-        for line in fh:
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            fp = row.get("fingerprint")
-            if not fp:
-                continue
-            # The ledger names its resolution event "resolved"; legacy rows
-            # may carry a resolved flag instead (same reading as skill-router).
-            if row.get("event") == "resolved" or row.get("resolved") is True:
-                rows.pop(fp, None)
-                counts.pop(fp, None)
-            elif not hook_expired(row):
-                rows[fp] = row
-                counts[fp] = counts.get(fp, 0) + 1
-except OSError:
-    sys.exit(0)
+    rows = json.load(sys.stdin).get("failures", [])
+except Exception:
+    raise SystemExit(0)
 if not rows:
-    sys.exit(0)
-# A hook row seen once is retiring noise; deliberate records and recurring
-# hook failures are the actionable set (same split as repo-state/inbox).
-actionable = {fp: r for fp, r in rows.items()
-              if r.get("kind") != "hook" or counts.get(fp, 0) >= 2}
-retiring = len(rows) - len(actionable)
+    raise SystemExit(0)
+actionable = [row for row in rows if row.get("actionable") is True]
+retiring = sum(1 for row in rows if row.get("retiring") is True)
 if actionable:
-    newest = max(actionable.values(), key=lambda r: r.get("ts") or "")
+    newest = max(actionable, key=lambda row: row.get("ts") or "")
     head = "- failures: %d actionable" % len(actionable)
     if retiring:
         head += " (+%d retiring on TTL)" % retiring
@@ -186,8 +149,7 @@ if actionable:
     print("; ".join(bits))
 else:
     print("- failures: %d one-shot hook failure(s), auto-retire on TTL" % retiring)
-PY
-)" || fail_line=""
+' )" || fail_line=""
   fail_line="${fail_line//$'\r'/}"
   [ -z "$fail_line" ] || append "$fail_line"
 fi

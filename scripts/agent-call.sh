@@ -32,7 +32,8 @@ Call one local agent CLI for a read-only independent pass. For write tasks, use
 peer-delegate.sh so edits happen in an isolated worktree.
 
 Options:
-  --to PROVIDER        codex, claude, or antigravity. Required.
+  --to PROVIDER        Registered agent transport; inspect `oms models`.
+                       Required.
   --prompt TEXT        Prompt/question to send.
   --prompt-file PATH   Prompt file to send.
   --repo PATH          Repo/directory for context and artifacts. Default: PWD.
@@ -171,12 +172,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$TO" in
-  codex|claude|antigravity|agy) ;;
-  "") fail "--to is required" ;;
-  *) fail "unsupported provider: $TO" ;;
-esac
-[ "$TO" = "agy" ] && TO="antigravity"
+[ -n "$TO" ] || fail "--to is required"
+TO="$(oms_provider_normalize "$TO")" || exit $?
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?

@@ -8,6 +8,8 @@ ROOT="$(cd "$ROOT" && pwd)"
 # shellcheck source=scripts/lib/agent-task-common.sh
 . "$ROOT/scripts/lib/agent-task-common.sh"
 
+PATH_SCOPE_HELPER="$ROOT/scripts/lib/path_scope.py"
+
 REPO="$PWD"
 STATE_FILE=""
 STRICT=0
@@ -119,48 +121,14 @@ dirty_paths() {
 
 path_allowed() {
   local path="$1"
-  local allow
   [ "${#ALLOW_PATHS[@]}" -gt 0 ] || return 0
-  for allow in "${ALLOW_PATHS[@]}"; do
-    [ -n "$allow" ] || continue
-    case "$allow" in
-      *'*'*|*'?'*|*'['*)
-        # shellcheck disable=SC2254
-        # Intentional: --allow accepts shell-style globs for changed paths.
-        case "$path" in
-          $allow) return 0 ;;
-        esac
-        ;;
-      *)
-        if [ "$path" = "$allow" ] || [ "${path#"$allow"/}" != "$path" ]; then
-          return 0
-        fi
-        ;;
-    esac
-  done
-  return 1
+  python3 "$PATH_SCOPE_HELPER" match-any "$path" "${ALLOW_PATHS[@]}"
 }
 
 path_denied() {
   local path="$1"
-  local deny
-  for deny in "${DENY_PATHS[@]:-}"; do
-    [ -n "$deny" ] || continue
-    case "$deny" in
-      *'*'*|*'?'*|*'['*)
-        # shellcheck disable=SC2254
-        case "$path" in
-          $deny) return 0 ;;
-        esac
-        ;;
-      *)
-        if [ "$path" = "$deny" ] || [ "${path#"$deny"/}" != "$path" ]; then
-          return 0
-        fi
-        ;;
-    esac
-  done
-  return 1
+  [ "${#DENY_PATHS[@]}" -gt 0 ] || return 1
+  python3 "$PATH_SCOPE_HELPER" match-any "$path" "${DENY_PATHS[@]}"
 }
 
 load_state() {
@@ -227,7 +195,7 @@ EOF
 
 cmd_check() {
   local warnings=0
-  local path old_sha new_sha
+  local path old_sha new_sha scope_rc allow_rc
   local current_head
 
   load_state
@@ -249,13 +217,27 @@ cmd_check() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     path="$(normalize_path "$path")"
-    if path_denied "$path"; then
-      printf 'warning: changed path in forbidden scope: %s\n' "$path"
-      warnings=$((warnings + 1))
-    elif ! path_allowed "$path"; then
-      printf 'warning: changed path outside declared scope: %s\n' "$path"
-      warnings=$((warnings + 1))
-    fi
+    scope_rc=0
+    path_denied "$path" || scope_rc=$?
+    case "$scope_rc" in
+      0)
+        printf 'warning: changed path in forbidden scope: %s\n' "$path"
+        warnings=$((warnings + 1))
+        ;;
+      1)
+        allow_rc=0
+        path_allowed "$path" || allow_rc=$?
+        case "$allow_rc" in
+          0) ;;
+          1)
+            printf 'warning: changed path outside declared scope: %s\n' "$path"
+            warnings=$((warnings + 1))
+            ;;
+          *) fail "declared path scope is invalid" ;;
+        esac
+        ;;
+      *) fail "declared path scope is invalid" ;;
+    esac
   done <<EOF
 $(changed_paths)
 EOF

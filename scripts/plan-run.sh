@@ -49,7 +49,7 @@ and admission boundaries. Success stops in review by default; --land is an
 explicit request to admit and apply the reviewed patch.
 
 Options:
-  --to PROVIDER   codex, claude, or antigravity.
+  --to PROVIDER   Registered write-capable agent transport.
   --id ID         Claim and execute this ready task. With --land, a matching
                   reviewed task continues from its stored patch first.
   --next          Atomically claim the next actionable task.

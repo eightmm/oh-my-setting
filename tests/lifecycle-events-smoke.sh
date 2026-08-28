@@ -516,13 +516,16 @@ approved_expired="$($APPROVALS --repo "$REPO" request --action remote-write \
   --object-id remote-approved-expired --summary 'Approved but unused' --expires-in 120)"
 approved_expired_grant="$($APPROVALS --repo "$REPO" decide \
   --approval "$approved_expired" --decision approve --expected-version 1 --actor human)"
-python3 - "$approval_store" "$approved_expired" <<'PY'
+requested_expired="$($APPROVALS --repo "$REPO" request --action remote-write \
+  --object-id remote-requested-expired --summary 'Requested but expired' --expires-in 120)"
+python3 - "$approval_store" "$approved_expired" "$requested_expired" <<'PY'
 import json, os, sys
 
-path, target = sys.argv[1:]
+path, approved, requested = sys.argv[1:]
 rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
 for row in rows:
-    if row.get("approval_id") == target and row.get("event_type") == "approval.requested":
+    if (row.get("approval_id") in {approved, requested} and
+            row.get("event_type") == "approval.requested"):
         row["expires_at"] = "2000-01-01T00:00:00Z"
 tmp = path + ".test-rewrite"
 with open(tmp, "w", encoding="utf-8") as handle:
@@ -531,6 +534,67 @@ with open(tmp, "w", encoding="utf-8") as handle:
 os.chmod(tmp, 0o600)
 os.replace(tmp, path)
 PY
+# Durable history still says approved until expire --apply appends an event,
+# but every read path must agree that the unreserved grant is already
+# effectively expired and therefore not pending or consumable.
+$APPROVALS --repo "$REPO" show --approval "$approved_expired" --json \
+  > "$TMP/approved-expired-effective.json"
+$APPROVALS --repo "$REPO" show --approval "$approved_expired" \
+  > "$TMP/approved-expired-effective.txt"
+grep -Fxq 'state/version: approved/2' "$TMP/approved-expired-effective.txt" ||
+  fail "approval human durable state/version line changed"
+grep -Fxq 'effective state: expired' "$TMP/approved-expired-effective.txt" ||
+  fail "approval human output omitted additive effective state"
+$APPROVALS --repo "$REPO" list --pending --json \
+  > "$TMP/pending-before-expire-apply.json"
+$APPROVALS --repo "$REPO" list --state approved --json \
+  > "$TMP/durable-approved-before-expire-apply.json"
+$APPROVALS --repo "$REPO" list --state requested --json \
+  > "$TMP/durable-requested-before-expire-apply.json"
+$APPROVALS --repo "$REPO" list --effective-state expired --json \
+  > "$TMP/effective-expired-before-apply.json"
+$ROOT/scripts/state.sh --repo "$REPO" --json > "$TMP/state-before-expire-apply.json"
+$ROOT/scripts/inbox.sh --repo "$REPO" --json > "$TMP/inbox-before-expire-apply.json"
+if ! python3 - "$TMP/approved-expired-effective.json" \
+  "$TMP/pending-before-expire-apply.json" \
+  "$TMP/durable-approved-before-expire-apply.json" \
+  "$TMP/durable-requested-before-expire-apply.json" \
+  "$TMP/effective-expired-before-apply.json" \
+  "$TMP/state-before-expire-apply.json" \
+  "$TMP/inbox-before-expire-apply.json" "$approved_expired" "$requested_expired" <<'PY'
+import json, sys
+show = json.load(open(sys.argv[1], encoding="utf-8"))
+pending = json.load(open(sys.argv[2], encoding="utf-8"))
+durable_approved = json.load(open(sys.argv[3], encoding="utf-8"))
+durable_requested = json.load(open(sys.argv[4], encoding="utf-8"))
+expired = json.load(open(sys.argv[5], encoding="utf-8"))
+state = json.load(open(sys.argv[6], encoding="utf-8"))["approvals"]
+inbox = json.load(open(sys.argv[7], encoding="utf-8"))["items"]
+approved, requested = sys.argv[8:]
+assert show["state"] == "approved", show
+assert show["effective_state"] == "expired", show
+assert all(row["approval_id"] not in {approved, requested} for row in pending), pending
+assert any(row["approval_id"] == approved for row in durable_approved), durable_approved
+assert any(row["approval_id"] == requested for row in durable_requested), durable_requested
+assert {row["approval_id"] for row in expired} >= {approved, requested}, expired
+assert state["pending"] == 0, state
+assert state["effective_expired"] == 2, state
+assert state["by_state"].get("approved") == 1, state
+assert state["by_state"].get("requested", 0) == 0, state
+assert state["by_state"].get("expired") == 2, state
+assert state["by_durable_state"].get("approved") == 1, state
+assert state["by_durable_state"].get("requested") == 1, state
+assert state["by_effective_state"].get("expired") == state["by_durable_state"].get("expired", 0) + 2, state
+assert not any(row["code"] == "pending-approval" for row in inbox), inbox
+PY
+then
+  fail "approval read surfaces disagreed before durable expiry was applied"
+fi
+if $APPROVALS --repo "$REPO" begin-consume --approval "$approved_expired" \
+  --token "$approved_expired_grant" --expected-version 2 --consumer late-consumer \
+  >/dev/null 2>&1; then
+  fail "an effectively expired approved grant was consumable before expire --apply"
+fi
 $APPROVALS --repo "$REPO" expire --apply >/dev/null ||
   fail "approved-but-unused approval could not be expired"
 $APPROVALS --repo "$REPO" show --approval "$approved_expired" --json > "$TMP/approved-expired.json"

@@ -216,6 +216,9 @@ elif au in ("unwired", "no-run"):
 
 failures = state.get("failures", {})
 open_failures = int(failures.get("open_total", 0) or 0)
+if not failures.get("healthy", True):
+    add(8, "P1", "failure-ledger-corrupt", "failure ledger projection is invalid",
+        "oms fail-ledger --repo . list")
 # actionable/retiring: a hook row seen once auto-retires on its TTL and is
 # not worth P1 attention; deliberate records and recurring hook failures
 # are. An older repo-state without the split falls back to the old count.

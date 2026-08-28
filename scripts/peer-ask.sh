@@ -34,9 +34,9 @@ usage() {
   cat <<'EOF'
 Usage: peer-ask.sh [options] --prompt TEXT
 
-Ask the same question to Codex, Claude Code, and Antigravity, then persist each
-answer as an artifact. Default mode is concept/question only; no repo context is
-attached unless requested.
+Ask the same question to a provider council, then persist each answer as an
+artifact. The default council is Codex, Claude Code, and Antigravity. Default
+mode is concept/question only; no repo context is attached unless requested.
 
 Options:
   --prompt TEXT        Question/task. Required.
@@ -47,7 +47,9 @@ Options:
                        planned experiment as the prompt (--prompt or positional).
                        Use before expensive runs.
   --repo PATH          Git repo for optional context. Default: current directory.
-  --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
+  --providers LIST     Comma list of registered targets. Default: the stable
+                       Codex/Claude/Antigravity council; optional agents are
+                       available when explicitly named.
                        An entry may carry a model (codex:model=NAME) to pin it.
                        Answers from one provider share a model family, which
                        the reported family count makes explicit.
@@ -109,7 +111,7 @@ write_prompt() {
   local diff_file="$5"
 
   {
-    printf 'You are one of three independent advisors: Codex, Claude Code, and Antigravity.\n'
+    printf 'You are one seat in a multi-provider advisory council.\n'
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Prefer concrete reasoning, tradeoffs, assumptions, and actionable recommendations.\n'
     printf 'If the question is underspecified, state the key assumptions and what would change the answer.\n\n'

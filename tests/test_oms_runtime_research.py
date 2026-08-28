@@ -186,7 +186,7 @@ class RuntimeFixture(RuntimeFixtureBase):
 
     def test_effective_scope_uses_the_most_specific_allowed_layer(self) -> None:
         plan = read_json(self.repo / '.oms' / 'plan' / 'tasks.json')
-        plan['tasks'][0]['allowed'] = ['scripts/sample.py']
+        plan['tasks']['t1']['allowed'] = ['scripts/sample.py']
         atomic_write_json(self.repo / '.oms' / 'plan' / 'tasks.json', plan)
         envelope = evidence.build_envelope(self.repo)
         self.assertEqual(envelope['scope']['allowed'], ['scripts/sample.py'])

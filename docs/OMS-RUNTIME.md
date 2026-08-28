@@ -185,8 +185,8 @@ Profiles:
 
 | Profile | Contract |
 |---|---|
-| `core` | Bash, Git, Python, and any one provider |
-| `council` | Inherits `core`; at least two of Codex, Claude, Antigravity |
+| `core` | Bash, Git, Python, and any one registered built-in provider transport |
+| `council` | Inherits `core`; at least two registered built-in provider transports |
 | `github` | `gh` |
 | `notion` | `ntn`, optional Work Journal mirror |
 | `research` | `uv`; GPU inspection remains optional |
@@ -400,9 +400,32 @@ oms runtime benchmark compare before.json after.json
 
 The snapshot uses existing content-free receipts to report evidence coverage,
 risk, success rate, durations, token/cost fields when present, context bytes,
-and a useful-work efficiency denominator. It explicitly marks metrics that
+skill-evaluation trigger errors and baseline/treatment task-pass deltas, and a
+useful-work efficiency denominator. `oms skill-forge eval --record` is the
+only writer for those skill metrics; it stores aggregate outcomes and command
+digests, not prompts or output. The snapshot explicitly marks metrics that
 cannot be inferred mechanically, such as escaped defects, human corrections,
 false refusals, reverted lines, and duplicate work.
+
+## Optional interoperability adapters
+
+The stdio MCP server keeps its established tools and operations. MCP Tasks is
+a feature-flagged projection over the existing peer-operation directory, not a
+runtime task authority. It is advertised only for protocol `2026-07-28`, and
+only an individual request declaring `io.modelcontextprotocol/tasks` receives
+a task handle. There is intentionally no unscoped task listing.
+
+The Codex app-server adapter is likewise explicit and read-only. It creates one
+ephemeral thread with `approvalPolicy=never`, read-only sandboxing, and network
+disabled, then accepts only text deltas and a successful completion. Approval
+or input requests are a refusal, and an adapter failure does not retry through
+the CLI transport. `trusted-local`, isolated, remote, provider write workers,
+and patch admission retain their existing engines and authority.
+
+The A2A Agent Card and loopback bridge expose only state projections. They do
+not turn runtime envelopes into remote mutation requests, create A2A tasks, or
+start a listener during install/update. See the harness interoperability
+reference for the exact opt-ins and wire boundaries.
 
 Model routing should remain simple until this evidence exists. The core does
 not turn provider names into an unvalidated learned scheduler.

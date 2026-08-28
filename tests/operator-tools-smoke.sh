@@ -64,6 +64,10 @@ rows = [
         "fallback_reason": "SECRET FALLBACK CONTENT",
         "duration_s": 5.0,
         "tokens": 120,
+        "trace_id": "a" * 32,
+        "span_id": "b" * 16,
+        "parent_span_id": "c" * 16,
+        "trace_flags": "01",
         "task_goal": "PRIVATE GOAL MUST NOT REACH OTLP",
     },
     {
@@ -218,11 +222,12 @@ plan = {
     "goal": "operator fixture",
     "tasks": {
         "review_task": {
+            "id": "review_task",
             "state": "review",
             "updated": "2099-01-01T00:00:00Z",
             "depends": [],
         },
-        "ready_task": {"state": "ready", "depends": []},
+        "ready_task": {"id": "ready_task", "state": "ready", "depends": []},
     },
 }
 (repo / ".oms/plan/tasks.json").write_text(
@@ -304,6 +309,10 @@ by_name = {s["name"]: s for s in spans}
 assert "parentSpanId" not in by_name["oms.review"], by_name
 assert by_name["oms.review"]["status"]["code"] == 2, by_name
 assert by_name["oms.call"]["status"]["code"] == 0, by_name
+assert by_name["oms.call"]["traceId"] == "a" * 32, by_name
+assert by_name["oms.call"]["spanId"] == "b" * 16, by_name
+assert by_name["oms.call"]["parentSpanId"] == "c" * 16, by_name
+assert by_name["oms.call"]["flags"] == 1, by_name
 assert by_name["oms.hook.PostToolUse"]["status"]["code"] == 2, by_name
 assert by_name["oms.lifecycle.attempt.usage"]["status"]["code"] == 0, by_name
 assert by_name["oms.approval.consumed"]["status"]["code"] == 0, by_name
@@ -325,6 +334,63 @@ assert attrs(by_name["oms.landing.intent"])["oms.correlation.approval"] == attrs
     by_name["oms.approval.requested"]
 )["oms.correlation.approval"], by_name
 PY
+
+XDG_STATE_HOME="$TMP/state" bash "$ROOT/scripts/otel-export.sh" \
+  --repo "$repo" --limit 20 --gen-ai > "$TMP/gen-ai.jsonl"
+OMS_OTEL_FILE="$TMP/gen-ai.jsonl" python3 - <<'PY' || fail "GenAI OTLP mapping failed"
+import json, os
+
+raw = open(os.environ["OMS_OTEL_FILE"], encoding="utf-8").read()
+for forbidden in ("PRIVATE GOAL", "SECRET-HOOK-CONTENT", "gen_ai.input.messages", "gen_ai.output.messages"):
+    assert forbidden not in raw, forbidden
+spans = [
+    row["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    for row in map(json.loads, raw.splitlines()) if row
+]
+
+def attrs(span):
+    return {
+        item["key"]: next(iter(item["value"].values()))
+        for item in span["attributes"]
+    }
+
+by_name = {span["name"]: attrs(span) for span in spans}
+assert by_name["oms.call"]["gen_ai.operation.name"] == "invoke_agent", by_name
+assert by_name["oms.call"]["gen_ai.provider.name"] == "openai", by_name
+assert by_name["oms.call"]["gen_ai.request.model"] == "gpt-test", by_name
+assert by_name["oms.hook.PostToolUse"]["gen_ai.operation.name"] == "execute_tool", by_name
+assert by_name["oms.hook.PostToolUse"]["gen_ai.usage.input_tokens"] == "7", by_name
+PY
+
+trace_repo="$TMP/trace-repo"
+mkdir -p "$trace_repo"
+git -C "$trace_repo" init -q
+git -C "$trace_repo" config user.email test@example.com
+git -C "$trace_repo" config user.name test
+printf 'trace\n' > "$trace_repo/README.md"
+git -C "$trace_repo" add README.md
+git -C "$trace_repo" commit -qm init
+incoming="00-11111111111111111111111111111111-2222222222222222-01"
+attempt="$(OMS_TRACEPARENT="$incoming" OMS_TRACESTATE='vendor=must-not-persist' \
+  bash "$ROOT/scripts/agent-events.sh" --repo "$trace_repo" start \
+    --provider codex --tool fixture)" || fail "traced attempt start failed"
+bash "$ROOT/scripts/agent-events.sh" --repo "$trace_repo" transition \
+  --attempt "$attempt" --state starting >/dev/null || fail "traced transition failed"
+OMS_TRACEPARENT='00-00000000000000000000000000000000-2222222222222222-01' \
+  bash "$ROOT/scripts/agent-events.sh" --repo "$trace_repo" start \
+    --provider codex --tool invalid-trace >/dev/null || fail "invalid context should be ignored"
+python3 - "$trace_repo/.oms/lifecycle/events.jsonl" <<'PY' || fail "persisted trace contract failed"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+first, second, invalid = rows
+assert first["trace_id"] == "1" * 32 and first["parent_span_id"] == "2" * 16, first
+assert len(first["span_id"]) == 16 and first["trace_flags"] == "01", first
+assert second["trace_id"] == first["trace_id"], second
+assert second["parent_span_id"] == first["span_id"], (first, second)
+assert not any(key in first for key in ("traceparent", "tracestate", "baggage")), first
+assert not any(key in invalid for key in ("trace_id", "span_id", "parent_span_id", "trace_flags")), invalid
+PY
+
 XDG_STATE_HOME="$TMP/state" bash "$ROOT/scripts/otel-export.sh" \
   --repo "$repo" --limit 20 --output "$TMP/export.jsonl"
 [ -s "$TMP/export.jsonl" ] || fail "OTLP file output is empty"
@@ -638,5 +704,21 @@ PY
 text="$(bash "$ROOT/scripts/ops-cockpit.sh" --repo "$obs_repo")"
 printf '%s\n' "$text" | grep -Fq 'observations:' ||
   fail "cockpit text observations line missing: $text"
+
+# Persisted trace context is authority metadata, not arbitrary artifact data.
+# The validator must reject malformed IDs and raw propagation headers rather
+# than letting exporters silently synthesize a different trace.
+trace_repo="$TMP/trace-validation-repo"
+mkdir -p "$trace_repo/.oms/artifacts"
+git -C "$trace_repo" init -q
+cat > "$trace_repo/.oms/artifacts/index.jsonl" <<'EOF'
+{"schema":1,"event_id":"evt_bad_trace","operation_id":"op_bad_trace","artifact_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ts":"2026-08-27T00:00:00Z","kind":"call","provider":"codex","exit":0,"trace_id":"00000000000000000000000000000000","span_id":"bbbbbbbbbbbbbbbb","trace_flags":"01","traceparent":"00-11111111111111111111111111111111-2222222222222222-01"}
+EOF
+if bash "$ROOT/scripts/artifact-index.sh" --repo "$trace_repo" validate \
+    > "$TMP/bad-trace.out" 2>&1; then
+  fail "artifact validation accepted malformed/raw trace context"
+fi
+grep -Fq 'persisted trace context' "$TMP/bad-trace.out" ||
+  fail "artifact trace refusal was not explicit: $(cat "$TMP/bad-trace.out")"
 
 echo 'operator-tools-smoke: ok'

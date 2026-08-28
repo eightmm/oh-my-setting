@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/project-state.sh
+. "$ROOT/scripts/lib/project-state.sh"
 PROJECT_DIR="$PWD"
 FAILED=0
 WARNED=0
@@ -210,13 +212,17 @@ if [ -f "$PROJECT_DIR/PROJECT.md" ]; then
       }
     ' "$PROJECT_DIR/PROJECT.md"
   }
-  state="$(grep -E '^- State:' "$PROJECT_DIR/PROJECT.md" | head -n 1 | sed 's/^- State:[[:space:]]*//' || true)"
-  if [ -z "$state" ]; then
+  state="$(oms_project_state "$PROJECT_DIR/PROJECT.md")"
+  state_display="$state"
+  [ "$state_display" != legacy-active ] || state_display=active
+  if [ "$state" = "missing" ]; then
     warn "PROJECT.md has no '- State:' field"
   elif [ "$state" = "draft" ]; then
     warn "PROJECT.md state is draft; confirm spec before broad work"
+  elif [ "$state" = "invalid" ]; then
+    warn "PROJECT.md State is invalid; use draft or confirmed (legacy active is accepted)"
   else
-    ok "PROJECT.md state: $state"
+    ok "PROJECT.md state: $state_display"
 
     # Past draft: the project contract (commands + verification) is supposed to
     # be filled. Empty fields mean agents have no per-project success criteria
@@ -252,7 +258,7 @@ if git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
-  if [ -n "${state:-}" ] && [ "$state" != "draft" ]; then
+  if [ "${state:-}" = "confirmed" ] || [ "${state:-}" = "legacy-active" ]; then
     missing_ml=""
     for field in \
       'Prediction unit' \
@@ -400,7 +406,7 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
 fi
 
 if has_block "$agents_file" "slurm" || has_block "$claude_file" "slurm"; then
-  if [ -n "${state:-}" ] && [ "$state" != draft ]; then
+  if [ "${state:-}" = "confirmed" ] || [ "${state:-}" = "legacy-active" ]; then
     missing_slurm=""
     for field in 'Partition/account' 'CPU/GPU/memory/time' 'Logs/checkpoints'; do
       [ -n "$(pm_field "$field")" ] || missing_slurm="${missing_slurm}${missing_slurm:+, }$field"

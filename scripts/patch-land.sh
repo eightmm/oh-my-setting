@@ -184,8 +184,11 @@ landing_append() {  # landing_append EVENT [KEY=VALUE...]
     OMS_LD_APPROVAL="$intent_approval" \
     OMS_LD_APPROVAL_VERSION="$intent_approval_version" \
     OMS_LD_RECEIPT_SHA="$intent_receipt_sha" \
+    OMS_LD_TRACE_LIB="$ROOT/scripts/lib" \
     python3 - "$@" <<'PY'
 import json, os, re, sys, time
+sys.path.insert(0, os.environ["OMS_LD_TRACE_LIB"])
+from trace_context import attach_trace_context
 
 row = {
     "schema": 1,
@@ -212,6 +215,7 @@ for pair in sys.argv[1:]:
     key, _, value = pair.partition("=")
     if key and value:
         row[key] = value
+attach_trace_context(row)
 path = os.environ["OMS_LD_FILE"]
 with open(path, "a", encoding="utf-8") as f:
     f.write(json.dumps(row, ensure_ascii=False) + "\n")

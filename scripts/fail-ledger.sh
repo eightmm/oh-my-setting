@@ -377,6 +377,7 @@ PY
     echo "fail-ledger: resolved $FINGERPRINT" >&2
     ;;
   list)
+    [ ! -L "$LEDGER" ] || fail "failure ledger must be a regular non-symlink file"
     if [ ! -f "$LEDGER" ]; then
       if [ "$AS_JSON" -eq 1 ]; then
         echo '{"schema": 1, "failures": []}'
@@ -406,16 +407,61 @@ def hook_expired(r):
         return False   # an unreadable stamp is never grounds for retirement
     return (now - t) >= ttl
 
+def nonempty_string(value):
+    return isinstance(value, str) and bool(value.strip())
+
+def valid_row(row):
+    """Validate current rows strictly while retaining documented legacy rows.
+
+    Schema-less rows predate schema 2 and are read as implicit schema 1.  They
+    still need a typed event/fingerprint, and every optional legacy field that
+    is present must have the type its replay consumes.  Schema 2 is writer-
+    owned, so its event-specific required fields are enforced in full.
+    """
+    if not isinstance(row, dict):
+        return False
+    schema = row.get("schema", 1)
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema not in (1, 2):
+        return False
+    event = row.get("event")
+    if event not in ("fail", "resolved") or not nonempty_string(row.get("fingerprint")):
+        return False
+    for key in ("ts", "agent", "kind", "cmd", "summary", "next", "how",
+                "state_fingerprint", "failure_code", "recovery"):
+        if key in row and not isinstance(row[key], str):
+            return False
+    for key in ("exit", "count"):
+        if key in row and (isinstance(row[key], bool) or
+                           not isinstance(row[key], int) or row[key] < 0):
+            return False
+    if "resolved" in row and not isinstance(row["resolved"], bool):
+        return False
+    if schema == 1:
+        return True
+    if not nonempty_string(row.get("ts")) or not nonempty_string(row.get("agent")):
+        return False
+    if event == "resolved":
+        return True
+    return (nonempty_string(row.get("kind")) and
+            nonempty_string(row.get("cmd")) and
+            isinstance(row.get("exit"), int) and
+            not isinstance(row.get("exit"), bool) and row["exit"] >= 0)
+
 agg = {}
 order = []
+invalid = 0
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    if not line.strip():
+        continue
     try:
         r = json.loads(line)
     except Exception:
+        invalid += 1
+        continue
+    if not valid_row(r):
+        invalid += 1
         continue
     fp = r.get("fingerprint")
-    if not fp:
-        continue
     if fp not in agg:
         agg[fp] = {"count": 0, "last": None, "resolved": False, "how": None,
                    "expired": 0, "last_expired": None}
@@ -438,6 +484,9 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
             agg[fp]["last"] = r
         agg[fp]["resolved"] = False
         agg[fp]["how"] = None
+if invalid:
+    sys.stderr.write("error: failure ledger contains %d invalid row(s)\n" % invalid)
+    sys.exit(2)
 rows = []
 for fp in order:
     d = agg[fp]
@@ -456,6 +505,18 @@ for fp in order:
         "cmd": last.get("cmd"),
         "summary": last.get("summary"),
     }
+    if row["resolved"] or row["expired"]:
+        row["attention"] = "none"
+        row["actionable"] = False
+        row["retiring"] = False
+    elif row["kind"] == "hook" and row["count"] < 2:
+        row["attention"] = "retiring"
+        row["actionable"] = False
+        row["retiring"] = True
+    else:
+        row["attention"] = "actionable"
+        row["actionable"] = True
+        row["retiring"] = False
     if d["expired"]:
         row["expired_count"] = d["expired"]
     if last.get("next"):

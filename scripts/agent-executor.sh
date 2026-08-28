@@ -65,7 +65,7 @@ state are terminal and cannot be re-armed.
 Options:
   --repo PATH        State repository. Default: PWD or OMS_STATE_REPO.
   --id ID            Executor id ([A-Za-z0-9._-]+).
-  --provider NAME    codex, claude, or antigravity.
+  --provider NAME    Registered write-capable agent transport.
   --strategy NAME    Base strategy resolved by agent-role.sh.
   --task-id ID       Lineage id without plan hydration.
   --plan-task ID     Hydrate task/lease/scope/verify/strategy from agent-plan.

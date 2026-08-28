@@ -48,7 +48,7 @@ class RuntimeFixtureBase(unittest.TestCase):
         (task_dir / 'current.md').write_text('# Active Agent Task\n\n- task_id: task-fixture\n- status: verified\n\n## Goal\n\nImplement the projection.\n\n## Constraints\n\n- allowed_paths: scripts/, tests/\n\n## Done Criteria\n\n- [id:task-tests] Focused tests pass.\n\n## Verify\n\npython3 -m unittest\n\n## Loop State\n\n- max_attempts: 2\n\n## Current State\n\nImplementation ready.\n\n## Next Step\n\nRun the focused gate.\n', encoding='utf-8')
         plan_dir = self.repo / '.oms' / 'plan'
         plan_dir.mkdir(parents=True)
-        (plan_dir / 'tasks.json').write_text(json.dumps({'goal': 'Complete runtime integration', 'accept': 'python3 -m unittest', 'tasks': [{'id': 't1', 'title': 'Implement core', 'state': 'ready', 'allowed': ['scripts/', 'tests/'], 'verify': 'python3 -m unittest'}]}), encoding='utf-8')
+        (plan_dir / 'tasks.json').write_text(json.dumps({'goal': 'Complete runtime integration', 'accept': 'python3 -m unittest', 'tasks': {'t1': {'id': 't1', 'title': 'Implement core', 'state': 'ready', 'allowed': ['scripts/', 'tests/'], 'verify': 'python3 -m unittest'}}}), encoding='utf-8')
         artifact_dir = self.repo / '.oms' / 'artifacts'
         artifact_dir.mkdir(parents=True)
         (artifact_dir / 'index.jsonl').write_text(json.dumps({'schema': 1, 'event_id': 'evt-api', 'kind': 'verify', 'status': 'verified', 'covers': ['project-api']}) + '\n', encoding='utf-8')

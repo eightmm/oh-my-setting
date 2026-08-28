@@ -33,6 +33,17 @@ Commands:
   status                      Health summary; flags stale project skills.
   contracts                   List declared verify contracts, one
                               "name<TAB>command" row per skill that has one.
+  eval NAME --suite FILE      Evaluate an explicit black-box trigger/task
+      [--allow-host-commands] baseline. Task commands require the named flag;
+      [--record] [--json]     --record appends content-free runtime telemetry.
+  preview --source SOURCE     Validate a full skill bundle in quarantine and
+      [--ref REF] [--subdir P] print its pinned digest without project writes.
+  import|update ... --apply   Publish a reviewed immutable bundle revision;
+                              update requires an exact current digest CAS.
+  rollback NAME --to SHA      Repoint an imported skill to a verified stored
+      --expected-current-sha256 SHA --apply
+  derive --from SOURCE        Build an inert, provenance-bound draft from a
+      --id ID --name NAME     thread, attempt artifact, or journal event.
 
 Project skills live in <repo>/.oms/skills/<name>/SKILL.md. They load through
 each CLI's native project skill discovery — no router entry, no manifest.
@@ -51,6 +62,8 @@ done
 
 REPO="$(oms_repo_root "$REPO")"
 SKILLS_DIR="$REPO/.oms/skills"
+SKILL_STORE="$REPO/.oms/skill-store"
+SKILL_LIFECYCLE_HELPER="$ROOT/scripts/lib/skill-lifecycle.py"
 
 valid_name() {
   printf '%s' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
@@ -222,9 +235,36 @@ owned_link_target() {
   [ -L "$link" ] || return 1
   target="$(readlink "$link")"
   case "$target" in
-    "$SKILLS_DIR"/*) printf '%s\n' "$target" ;;
+    "$SKILLS_DIR"/*|"$SKILL_STORE"/*) printf '%s\n' "$target" ;;
     *) return 1 ;;
   esac
+}
+
+link_skill_target() {
+  local root="$1" name="$2" target="$3" existing
+  if [ -e "$root/$name" ] || [ -L "$root/$name" ]; then
+    existing="$(owned_link_target "$root/$name" 2>/dev/null || true)"
+    if [ -z "$existing" ]; then
+      echo "error: foreign project skill entry blocks link: $root/$name" >&2
+      return 2
+    fi
+  fi
+  ln -sfn "$target" "$root/$name"
+}
+
+imported_targets() {
+  [ -d "$SKILL_STORE" ] || return 0
+  python3 "$SKILL_LIFECYCLE_HELPER" --repo "$REPO" active-targets
+}
+
+imported_target_for() {
+  local wanted="$1" name target
+  while IFS=$'\t' read -r name target; do
+    [ "$name" = "$wanted" ] || continue
+    printf '%s\n' "$target"
+    return 0
+  done < <(imported_targets)
+  return 1
 }
 
 hide_from_git() {
@@ -236,41 +276,92 @@ hide_from_git() {
 }
 
 cmd_link() {
-  local root skill name reason linked=0
+  local root skill name reason target linked=0 rc=0
   while IFS= read -r root; do
     mkdir -p "$root"
     # Prune links we own whose skill no longer exists or no longer validates.
     for skill in "$root"/*; do
       [ -e "$skill" ] || [ -L "$skill" ] || continue
-      owned_link_target "$skill" >/dev/null || continue
+      target="$(owned_link_target "$skill" 2>/dev/null || true)"
+      [ -n "$target" ] || continue
       name="$(basename "$skill")"
-      if [ ! -f "$SKILLS_DIR/$name/SKILL.md" ] ||
-         ! reason="$(validate_skill_dir "$SKILLS_DIR/$name")" ||
-         ! scrub_skill_dir "$SKILLS_DIR/$name" >/dev/null; then
+      if [ ! -f "$target/SKILL.md" ] ||
+         ! reason="$(validate_skill_dir "$target")" ||
+         ! scrub_skill_dir "$target" >/dev/null; then
         rm -f "$skill"
         echo "skill-forge: unlinked $name from $root"
       fi
     done
   done < <(link_roots)
-  [ -d "$SKILLS_DIR" ] || { echo "skill-forge: no project skills"; return 0; }
-  for skill in "$SKILLS_DIR"/*; do
-    [ -d "$skill" ] || continue
-    name="$(basename "$skill")"
-    if ! reason="$(validate_skill_dir "$skill")"; then
-      echo "skill-forge: not linking $name: $reason" >&2
-      continue
-    fi
-    if ! reason="$(scrub_skill_dir "$skill")"; then
-      echo "skill-forge: not linking $name: $reason" >&2
-      continue
-    fi
-    while IFS= read -r root; do
-      ln -sfn "$skill" "$root/$name"
-    done < <(link_roots)
-    hide_from_git "$name"
-    linked=$((linked + 1))
-  done
+  if [ -d "$SKILLS_DIR" ]; then
+    for skill in "$SKILLS_DIR"/*; do
+      [ -d "$skill" ] || continue
+      name="$(basename "$skill")"
+      if ! reason="$(validate_skill_dir "$skill")"; then
+        echo "skill-forge: not linking $name: $reason" >&2
+        continue
+      fi
+      if ! reason="$(scrub_skill_dir "$skill")"; then
+        echo "skill-forge: not linking $name: $reason" >&2
+        continue
+      fi
+      while IFS= read -r root; do
+        link_skill_target "$root" "$name" "$skill" || rc=$?
+      done < <(link_roots)
+      hide_from_git "$name"
+      linked=$((linked + 1))
+    done
+  fi
+  if [ -d "$SKILL_STORE" ]; then
+    while IFS=$'\t' read -r name target; do
+      [ -n "$name" ] && [ -n "$target" ] || continue
+      if [ -e "$SKILLS_DIR/$name" ] || [ -L "$SKILLS_DIR/$name" ]; then
+        echo "error: imported and local skills share a name: $name" >&2
+        rc=2
+        continue
+      fi
+      if ! reason="$(validate_skill_dir "$target")" ||
+         ! scrub_skill_dir "$target" >/dev/null; then
+        echo "error: imported skill revision is invalid: $name: $reason" >&2
+        rc=2
+        continue
+      fi
+      while IFS= read -r root; do
+        link_skill_target "$root" "$name" "$target" || rc=$?
+      done < <(link_roots)
+      hide_from_git "$name"
+      linked=$((linked + 1))
+    done < <(imported_targets)
+  fi
   echo "skill-forge: $linked skill(s) linked"
+  return "$rc"
+}
+
+skill_lifecycle_apply_unlocked() {
+  local output rc=0
+  agent_memory_ensure_oms_ignore "$REPO" >/dev/null 2>&1 || true
+  output="$(mktemp "${TMPDIR:-/tmp}/oms-skill-lifecycle-output.XXXXXX")"
+  python3 "$SKILL_LIFECYCLE_HELPER" --repo "$REPO" "$@" >"$output" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    cmd_link >&2 || rc=$?
+  fi
+  cat "$output"
+  rm -f "$output"
+  return "$rc"
+}
+
+cmd_lifecycle() {
+  local command="$1" mutating=0 argument
+  shift
+  for argument in "$@"; do
+    [ "$argument" != --apply ] && [ "$argument" != --record ] || mutating=1
+  done
+  if [ "$mutating" -eq 1 ]; then
+    oms_with_file_lock "$SKILL_STORE/.authority" \
+      skill_lifecycle_apply_unlocked "$command" "$@"
+  else
+    python3 "$SKILL_LIFECYCLE_HELPER" --repo "$REPO" "$command" "$@"
+  fi
 }
 
 cmd_add() {
@@ -316,10 +407,9 @@ cmd_add() {
 }
 
 cmd_validate() {
-  local target="${1:-}" skill name reason rc=0 checked=0
+  local target="${1:-}" skill name reason imported rc=0 checked=0
   [ -z "$target" ] || valid_name "$target" ||
     fail "skill names are lowercase kebab-case: $target"
-  [ -d "$SKILLS_DIR" ] || { echo "skill-forge: no project skills"; return 0; }
   for skill in "$SKILLS_DIR"/*; do
     [ -d "$skill" ] || continue
     name="$(basename "$skill")"
@@ -340,12 +430,24 @@ cmd_validate() {
       echo "note: $name: top-level verify is non-portable; declare it under metadata:"
     fi
   done
+  while IFS=$'\t' read -r name imported; do
+    [ -n "$name" ] && [ -n "$imported" ] || continue
+    [ -z "$target" ] || [ "$name" = "$target" ] || continue
+    checked=$((checked + 1))
+    if ! reason="$(validate_skill_dir "$imported")" ||
+       ! scrub_skill_dir "$imported" >/dev/null; then
+      echo "invalid: $name: $reason"
+      rc=1
+      continue
+    fi
+    echo "ok: $name (imported)"
+  done < <(imported_targets)
   [ -n "$target" ] && [ "$checked" -eq 0 ] && fail "no such skill: $target"
   return "$rc"
 }
 
 cmd_list() {
-  local as_json=0 skill name state
+  local as_json=0 skill name state imported
   [ "${1:-}" = "--json" ] && as_json=1
   if [ "$as_json" -eq 1 ]; then
     printf '{"schema": 1, "skills": ['
@@ -360,10 +462,18 @@ cmd_list() {
       first=0
       python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "state": sys.argv[2]}, sort_keys=True), end="")' "$name" "$state"
     done
+    while IFS=$'\t' read -r name imported; do
+      [ -n "$name" ] && [ -n "$imported" ] || continue
+      state=valid
+      validate_skill_dir "$imported" >/dev/null 2>&1 &&
+        scrub_skill_dir "$imported" >/dev/null 2>&1 || state=invalid
+      [ "$first" -eq 1 ] || printf ', '
+      first=0
+      python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "state": sys.argv[2], "origin": "imported"}, sort_keys=True), end="")' "$name" "$state"
+    done < <(imported_targets)
     printf ']}\n'
     return 0
   fi
-  [ -d "$SKILLS_DIR" ] || { echo "no project skills"; return 0; }
   for skill in "$SKILLS_DIR"/*; do
     [ -d "$skill" ] || continue
     name="$(basename "$skill")"
@@ -374,24 +484,44 @@ cmd_list() {
       echo "invalid: $name"
     fi
   done
+  while IFS=$'\t' read -r name imported; do
+    [ -n "$name" ] && [ -n "$imported" ] || continue
+    if validate_skill_dir "$imported" >/dev/null 2>&1 &&
+       scrub_skill_dir "$imported" >/dev/null 2>&1; then
+      echo "valid: $name (imported)"
+    else
+      echo "invalid: $name (imported)"
+    fi
+  done < <(imported_targets)
 }
 
 cmd_show() {
+  local target
   [ "$#" -eq 1 ] || fail "show requires exactly one name"
   valid_name "$1" || fail "skill names are lowercase kebab-case: $1"
-  [ -f "$SKILLS_DIR/$1/SKILL.md" ] || fail "no such skill: $1"
-  cat "$SKILLS_DIR/$1/SKILL.md"
+  if [ -f "$SKILLS_DIR/$1/SKILL.md" ]; then
+    cat "$SKILLS_DIR/$1/SKILL.md"
+    return 0
+  fi
+  target="$(imported_target_for "$1" 2>/dev/null || true)"
+  [ -n "$target" ] && [ -f "$target/SKILL.md" ] || fail "no such skill: $1"
+  cat "$target/SKILL.md"
 }
 
 cmd_remove() {
   [ "$#" -eq 1 ] || fail "remove requires exactly one name"
-  local name="$1" root
+  local name="$1" root imported
   valid_name "$name" || fail "skill names are lowercase kebab-case: $name"
-  [ -d "$SKILLS_DIR/$name" ] || fail "no such skill: $name"
+  imported="$(imported_target_for "$name" 2>/dev/null || true)"
+  [ -d "$SKILLS_DIR/$name" ] || [ -n "$imported" ] || fail "no such skill: $name"
   while IFS= read -r root; do
     owned_link_target "$root/$name" >/dev/null && rm -f "$root/$name"
   done < <(link_roots)
-  rm -rf "${SKILLS_DIR:?}/$name"
+  if [ -d "$SKILLS_DIR/$name" ]; then
+    rm -rf "${SKILLS_DIR:?}/$name"
+  else
+    rm -f "$SKILL_STORE/$name/lock.json"
+  fi
   echo "skill-forge: removed $name"
 }
 
@@ -408,15 +538,11 @@ PY
 }
 
 cmd_status() {
-  local total=0 invalid=0 contracts=0 stale=0 skill stale_days
+  local total=0 invalid=0 contracts=0 stale=0 skill stale_days name imported
   stale_days="${OMS_SKILL_STALE_DAYS:-90}"
   case "$stale_days" in
     *[!0-9]*|'') fail "OMS_SKILL_STALE_DAYS must be a non-negative integer" ;;
   esac
-  if [ ! -d "$SKILLS_DIR" ]; then
-    echo "skill-forge: no project skills"
-    return 0
-  fi
   for skill in "$SKILLS_DIR"/*; do
     [ -d "$skill" ] || continue
     total=$((total + 1))
@@ -430,6 +556,19 @@ cmd_status() {
     fi
     [ -z "$(skill_verify_contract "$skill")" ] || contracts=$((contracts + 1))
   done
+  while IFS=$'\t' read -r name imported; do
+    [ -n "$name" ] && [ -n "$imported" ] || continue
+    total=$((total + 1))
+    if ! validate_skill_dir "$imported" >/dev/null 2>&1 ||
+       ! scrub_skill_dir "$imported" >/dev/null 2>&1; then
+      invalid=$((invalid + 1))
+    fi
+    [ -z "$(skill_verify_contract "$imported")" ] || contracts=$((contracts + 1))
+  done < <(imported_targets)
+  if [ "$total" -eq 0 ]; then
+    echo "skill-forge: no project skills"
+    return 0
+  fi
   if [ "$invalid" -gt 0 ]; then
     echo "skill-forge: $invalid of $total project skill(s) invalid (run 'oms skill-forge validate')"
     return 1
@@ -447,13 +586,17 @@ cmd_status() {
 # One row per declared verify contract; consumed by agent-task close to
 # remind — never to execute.
 cmd_contracts() {
-  local skill contract
-  [ -d "$SKILLS_DIR" ] || return 0
+  local skill contract name imported
   for skill in "$SKILLS_DIR"/*; do
     [ -d "$skill" ] || continue
     contract="$(skill_verify_contract "$skill")"
     [ -z "$contract" ] || printf '%s\t%s\n' "$(basename "$skill")" "$contract"
   done
+  while IFS=$'\t' read -r name imported; do
+    [ -n "$name" ] && [ -n "$imported" ] || continue
+    contract="$(skill_verify_contract "$imported")"
+    [ -z "$contract" ] || printf '%s\t%s\n' "$name" "$contract"
+  done < <(imported_targets)
 }
 
 case "${1:-}" in
@@ -465,6 +608,9 @@ case "${1:-}" in
   show) shift; cmd_show "$@" ;;
   remove) shift; cmd_remove "$@" ;;
   status) shift; cmd_status "$@" ;;
+  eval|preview|import|update|rollback|derive)
+    command="$1"; shift; cmd_lifecycle "$command" "$@"
+    ;;
   ""|help) usage ;;
   *) fail "unknown command: $1" ;;
 esac

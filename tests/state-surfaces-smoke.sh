@@ -1621,8 +1621,171 @@ test_mcp_peer_start_refuses_harness_children() {
     fail "an owner session must pass the child guard: $(cat "$out")"
 }
 
+test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations() {
+  local repo="$TMP/mcp-tasks-repo"
+  local out="$TMP/mcp-tasks-out"
+  local driver="$TMP/mcp-tasks-driver.py"
+
+  make_repo "$repo"
+  mkdir -p "$TMP/peer-bin" "$TMP/peer-home" "$TMP/peer-locks"
+  cat > "$TMP/peer-bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+tries=0
+while [ ! -f "$STUB_GATE" ] && [ "$tries" -lt 120 ]; do
+  sleep 1
+  tries=$((tries + 1))
+done
+printf 'TASK-STUB-ANSWER\n'
+EOF
+  chmod +x "$TMP/peer-bin/codex"
+  rm -f "$TMP/peer-gate"
+
+  cat > "$driver" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+
+root, repo, gate = sys.argv[1:]
+env = dict(os.environ)
+env["OMS_MCP_TASKS_EXTENSION"] = "1"
+p = subprocess.Popen(
+    [sys.executable, os.path.join(root, "scripts", "oms-mcp-server.py")],
+    cwd=repo,
+    env=env,
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+
+def call(message):
+    p.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    p.stdin.flush()
+    line = p.stdout.readline()
+    assert line, p.stderr.read()
+    return json.loads(line)
+
+caps = {
+    "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {"io.modelcontextprotocol/tasks": {}}
+    }
+}
+init = call({
+    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+    "params": {"protocolVersion": "2026-07-28", "capabilities": {},
+               "clientInfo": {"name": "fixture", "version": "1"}},
+})
+assert init["result"]["protocolVersion"] == "2026-07-28", init
+assert "io.modelcontextprotocol/tasks" in init["result"]["capabilities"]["extensions"], init
+
+# A task id is not authority to follow a repository-controlled directory
+# alias. Cancellation writes one receipt, so every existing ancestry
+# component must be a real directory before that method can be reached.
+escape_id = "consult-20260827T000000Z-deadbeef"
+outside = os.path.join(os.path.dirname(repo), "mcp-task-escape")
+os.makedirs(outside)
+os.makedirs(os.path.join(repo, ".oms", "artifacts", "mcp"), exist_ok=True)
+os.symlink(outside, os.path.join(repo, ".oms", "artifacts", "mcp", escape_id))
+escaped = call({
+    "jsonrpc": "2.0", "id": 90, "method": "tasks/cancel",
+    "params": {"taskId": escape_id, "_meta": caps},
+})
+assert escaped["error"]["code"] == -32602, escaped
+assert not os.path.exists(os.path.join(outside, "cancel-request.json")), escaped
+
+# A client that does not opt in on this individual call gets the legacy
+# CallToolResult byte shape even though the server feature is enabled.
+legacy = call({
+    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+    "params": {"name": "oms_peer_start", "arguments": {
+        "kind": "consult", "prompt": "   "}},
+})
+assert legacy["result"]["resultType"] == "complete", legacy
+assert legacy["result"]["isError"] is True, legacy
+assert "taskId" not in legacy["result"], legacy
+
+created = call({
+    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+    "params": {"name": "oms_peer_start", "arguments": {
+        "kind": "consult", "prompt": "hold until cancelled", "providers": "codex"},
+        "_meta": caps},
+})
+task = created["result"]
+assert task["resultType"] == "task" and task["status"] == "working", task
+task_id = task["taskId"]
+assert os.path.isdir(os.path.join(repo, ".oms", "artifacts", "mcp", task_id)), task
+
+missing = call({
+    "jsonrpc": "2.0", "id": 4, "method": "tasks/get",
+    "params": {"taskId": task_id},
+})
+assert missing["error"]["code"] == -32003, missing
+
+working = call({
+    "jsonrpc": "2.0", "id": 5, "method": "tasks/get",
+    "params": {"taskId": task_id, "_meta": caps},
+})
+assert working["result"]["resultType"] == "complete", working
+assert working["result"]["status"] == "working", working
+
+update = call({
+    "jsonrpc": "2.0", "id": 6, "method": "tasks/update",
+    "params": {"taskId": task_id, "inputResponses": {}, "_meta": caps},
+})
+assert update["error"]["code"] == -32602, update
+assert "input" in update["error"]["message"], update
+
+cancelled = call({
+    "jsonrpc": "2.0", "id": 7, "method": "tasks/cancel",
+    "params": {"taskId": task_id, "_meta": caps},
+})
+assert cancelled["result"] == {"resultType": "complete"}, cancelled
+after = call({
+    "jsonrpc": "2.0", "id": 8, "method": "tasks/get",
+    "params": {"taskId": task_id, "_meta": caps},
+})
+assert after["result"]["status"] == "cancelled", after
+assert "result" not in after["result"] and "error" not in after["result"], after
+
+# Cancellation is cooperative. Release the read-only fixture peer so no
+# process survives the test even if it had already entered the provider CLI.
+open(gate, "w", encoding="utf-8").close()
+status_file = os.path.join(repo, ".oms", "artifacts", "mcp", task_id, "status")
+deadline = time.time() + 10
+while time.time() < deadline and not os.path.isfile(status_file):
+    time.sleep(0.05)
+assert os.path.isfile(status_file), "cancelled fixture peer did not exit after release"
+p.stdin.close()
+p.wait(timeout=10)
+assert p.returncode == 0, p.stderr.read()
+PY
+
+  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX \
+    HOME="$TMP/peer-home" PATH="$TMP/peer-bin:$PATH" \
+    OMS_LOCK_DIR="$TMP/peer-locks" OMS_LOCK_FORCE_MKDIR=1 \
+    STUB_GATE="$TMP/peer-gate" \
+    python3 "$driver" "$ROOT" "$repo" "$TMP/peer-gate" > "$out" 2>&1 ||
+    fail "MCP Tasks extension contract failed: $(cat "$out")"
+
+  # Disabling the server feature suppresses both discovery and task methods.
+  {
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{"taskId":"consult-20260827T000000Z-deadbeef","_meta":{"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}}'
+  } | OMS_MCP_TASKS_EXTENSION=0 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
+  OMS_T_OUT="$out" python3 - <<'PY' || fail "disabled MCP Tasks surface was exposed"
+import json, os
+rows = [json.loads(line) for line in open(os.environ["OMS_T_OUT"], encoding="utf-8")]
+assert "extensions" not in rows[0]["result"]["capabilities"], rows[0]
+assert rows[1]["error"]["code"] == -32601, rows[1]
+PY
+}
+
 test_mcp_server_protocol
 test_mcp_peer_start_refuses_harness_children
+test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations
 test_mcp_server_bounds_requests_before_effects
 test_mcp_peer_actions_start_detached_and_poll
 test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt

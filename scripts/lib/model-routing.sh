@@ -101,7 +101,7 @@ oms_model_prepare() {
   local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
   local candidate filtered_chain=""
 
-  [ "$provider" != agy ] || provider=antigravity
+  provider="$(oms_provider_normalize "$provider")" || return $?
   oms_model_validate_name "$explicit" || return $?
   oms_model_validate_name "$explicit_fallback" || return $?
   oms_reasoning_validate "$effort_requested" || return $?

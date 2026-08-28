@@ -2,6 +2,10 @@
 
 Treat model selection as a runtime contract.
 
+Provider transport and model family are different identities. Load
+[provider-routing.md](provider-routing.md) when selecting an installed optional
+agent, a Grok/GLM route, or a custom adapter.
+
 1. Run `oms models` for cached catalogs and per-model effort scales. Use
    `--refresh` only when a live probe is needed.
 2. No `--model` means provider default. `--model NAME` is exact and never

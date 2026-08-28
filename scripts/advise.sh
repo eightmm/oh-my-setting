@@ -57,7 +57,7 @@ Options:
                        the digest crosses to another provider; agent-call
                        runs its own outbound scrub after this and may still
                        block the call. Requires --session.
-  --to PROVIDER        Advisor provider: codex, claude, or antigravity.
+  --to PROVIDER        Registered advisor transport; inspect `oms models`.
                        Default: OMS_ADVISOR_PROVIDER, else the first
                        available provider that is not the caller (OMS_AGENT).
   --repo PATH          Repo for context and artifacts. Default: PWD.
@@ -191,15 +191,6 @@ if [ "$INCLUDE_STRATEGY" -eq 1 ]; then
     fail "advisor strategy not found: $STRATEGY"
 fi
 
-provider_cli_available() {
-  case "$1" in
-    codex) command -v codex >/dev/null 2>&1 ;;
-    claude) command -v claude >/dev/null 2>&1 ;;
-    antigravity|agy) command -v agy >/dev/null 2>&1 ;;
-    *) return 1 ;;
-  esac
-}
-
 # Default advisor: the first available provider that is not the caller, so
 # the advice comes from an independent model family when one is installed.
 pick_advisor() {
@@ -210,27 +201,22 @@ pick_advisor() {
   local caller
   caller="$(oms_peer_caller)"
   local candidate
-
-  for candidate in claude codex antigravity; do
-    [ "$candidate" = "$caller" ] && continue
-    if provider_cli_available "$candidate"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
+  candidate="$(oms_provider_peer_candidates "$caller" | sed -n '1p')"
+  [ -n "$candidate" ] || return 1
   # Self-advice from a fresh context still beats no advice, but it must not
   # be presented as an outside read: say on stderr that this pass is the
   # caller's own family. stdout stays the provider name downstream parses.
-  if [ -n "$caller" ] && provider_cli_available "$caller"; then
+  if [ -n "$caller" ] && [ "$candidate" = "$caller" ]; then
     echo "note: no independent provider available; answering from the caller's own family (self-advice)" >&2
-    printf '%s\n' "$caller"
-    return 0
   fi
-  return 1
+  printf '%s\n' "$candidate"
 }
 
 if [ -z "$TO" ]; then
-  TO="$(pick_advisor)" || fail "no advisor provider CLI found (codex, claude, agy)"
+  TO="$(pick_advisor)" || fail "no registered advisor CLI is installed"
+else
+  TO="$(oms_provider_normalize "$TO" 2>/dev/null)" ||
+    fail "unsupported advisor provider: $TO"
 fi
 
 advise_tmpdir="$(mktemp -d)" || fail "mktemp failed"
@@ -244,7 +230,7 @@ session_digest=""
 if [ "$INCLUDE_SESSION" -eq 1 ]; then
   session_agent="$(oms_peer_caller)"
   [ -n "$session_agent" ] ||
-    fail "--session cannot identify the calling agent; export OMS_AGENT=claude|codex|antigravity"
+    fail "--session cannot identify a supported session source; export OMS_AGENT=claude|codex|antigravity"
   session_digest="$advise_tmpdir/session-digest.md"
   session_args=(--agent "$session_agent" --cwd "$REPO" --out "$session_digest" --min-user-turns 0)
   [ -z "$SESSION_ID" ] || session_args+=(--session "$SESSION_ID")

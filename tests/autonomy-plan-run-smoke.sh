@@ -657,9 +657,22 @@ HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
 grep -Fq 'tree is dirty' "$TMP/gd-dirty.out" || fail "dirty refusal reason missing"
 git -C "$repo" checkout -q README.md
 
-# Acceptance failing with no actionable task parks with a recorded reason —
-# v1 never invents new tasks on its own.
+# Acceptance failing with a nonempty but exhausted plan parks with a recorded
+# reason — v1 never invents new tasks on its own. An actually empty plan is a
+# malformed work contract and is covered by the separate non-vacuity refusal.
 "$PLAN" --repo "$repo" init --goal "unreachable" --accept 'grep -Fxq nope absent.txt' >/dev/null
+"$PLAN" --repo "$repo" add --id spent --title "test: exhausted work" \
+  --allowed README.md --verify true >/dev/null
+python3 - "$repo/.oms/plan/tasks.json" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+data["tasks"]["spent"]["state"] = "done"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+PY
 rc=0
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
   --repo "$repo" --to codex >"$TMP/gd-park.out" 2>&1 || rc=$?
@@ -766,14 +779,21 @@ assert row.get("recovery") == "repair_contract", row
 "$PLAN" --repo "$vacuous" show --id v1 | grep -Fq '"state": "ready"' ||
   fail "the pending task must stay ready after the park"
 
-# The same passing acceptance over a plan that actually finished its work is
-# the legitimate done: the guard must not turn a completed plan into a park.
+# An empty plan is not evidence that work finished. It is an invalid work
+# contract and must refuse before a passing acceptance can manufacture a
+# completion receipt; completed work is represented by a nonempty all-done
+# plan instead.
 "$PLAN" --repo "$vacuous" init --goal "already satisfied" --accept 'true' >/dev/null
+rc=0
 HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
-  --repo "$vacuous" --to codex >"$TMP/gd-empty-plan.out" 2>&1 ||
-  fail "a plan with no pending task should report done: $(tail -5 "$TMP/gd-empty-plan.out")"
-grep -Fq 'goal-drive: done' "$TMP/gd-empty-plan.out" ||
-  fail "done line missing for a plan with nothing left to do"
+  --repo "$vacuous" --to codex >"$TMP/gd-empty-plan.out" 2>&1 || rc=$?
+[ "$rc" = 2 ] ||
+  fail "an empty plan should refuse with exit 2, got $rc: $(tail -5 "$TMP/gd-empty-plan.out")"
+grep -Fq 'plan has no tasks' "$TMP/gd-empty-plan.out" ||
+  fail "empty-plan refusal did not name the missing work contract"
+if grep -Fq 'goal-drive: done' "$TMP/gd-empty-plan.out"; then
+  fail "an empty plan must not report completion"
+fi
 
 # The discriminator is evidence, not task bookkeeping: an acceptance that
 # recorded a failure at an ancestor commit and passes now describes work that

@@ -561,6 +561,27 @@ for lineno, payload in enumerate(physical_rows, 1):
     if soul_sha is not None and (not isinstance(soul_sha, str) or
             not re.match(r"^[0-9a-f]{64}$", soul_sha)):
         print(f"BAD line {lineno}: invalid soul_sha256"); errors += 1
+    trace_keys = ("trace_id", "span_id", "parent_span_id", "trace_flags")
+    if any(key in row for key in ("traceparent", "tracestate", "baggage")):
+        print(f"BAD line {lineno}: raw trace propagation headers must not be persisted"); errors += 1
+    if any(key in row for key in trace_keys):
+        trace_id = row.get("trace_id")
+        span_id = row.get("span_id")
+        parent_span = row.get("parent_span_id")
+        trace_flags = row.get("trace_flags")
+        valid_trace = (
+            isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{32}", trace_id) and
+            trace_id != "0" * 32 and
+            isinstance(span_id, str) and re.fullmatch(r"[0-9a-f]{16}", span_id) and
+            span_id != "0" * 16 and
+            isinstance(trace_flags, str) and re.fullmatch(r"[0-9a-f]{2}", trace_flags) and
+            (parent_span is None or (
+                isinstance(parent_span, str) and re.fullmatch(r"[0-9a-f]{16}", parent_span) and
+                parent_span != "0" * 16
+            ))
+        )
+        if not valid_trace:
+            print(f"BAD line {lineno}: invalid persisted trace context"); errors += 1
     eid = row.get("event_id")
     if not isinstance(eid, str) or not eid:
         print(f"BAD line {lineno}: invalid event_id"); errors += 1

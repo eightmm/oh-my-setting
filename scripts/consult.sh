@@ -152,33 +152,24 @@ fi
 
 oms_require_peer_owner || exit $?
 
-provider_cli_available() {
-  case "$1" in
-    codex) command -v codex >/dev/null 2>&1 ;;
-    claude) command -v claude >/dev/null 2>&1 ;;
-    antigravity|agy) command -v agy >/dev/null 2>&1 ;;
-    *) return 1 ;;
-  esac
-}
+CONSULT_PROVIDER_PREFERENCE=""
+if [ "${#TARGETS_EXPLICIT[@]}" -eq 0 ] && [ "$ALL" -eq 0 ] &&
+    [ -n "${OMS_CONSULT_PROVIDER:-}" ]; then
+  CONSULT_PROVIDER_PREFERENCE="$(
+    oms_provider_normalize "$OMS_CONSULT_PROVIDER" 2>/dev/null
+  )" || fail "unsupported OMS_CONSULT_PROVIDER: $OMS_CONSULT_PROVIDER"
+fi
 
 # Peers = installed providers that are not the caller, so a consult is a second
 # opinion rather than the same model answering itself. Self-consult is the last
 # resort: a fresh context still beats no answer at all.
-peers() {
+peers() {  # [builtin|all]
   # Same exclusion contract as advise.sh: detected caller, not OMS_AGENT
   # alone, or a claude session's "second opinion" panel includes claude.
-  local caller candidate found=0
-  caller="$(oms_peer_caller)"
-  for candidate in claude codex antigravity; do
-    [ "$candidate" = "$caller" ] && continue
-    if provider_cli_available "$candidate"; then
-      printf '%s\n' "$candidate"
-      found=1
-    fi
-  done
-  if [ "$found" -eq 0 ] && [ -n "$caller" ] && provider_cli_available "$caller"; then
-    printf '%s\n' "$caller"
-  fi
+  # Custom adapters join only the explicit --all fan-out; the auto-pick and
+  # failover pools stay builtin so a stray PATH adapter never answers.
+  oms_provider_peer_candidates "$(oms_peer_caller)" \
+    "$CONSULT_PROVIDER_PREFERENCE" "${1:-builtin}"
 }
 
 THREAD_SH="$SCRIPT_DIR/thread.sh"
@@ -323,7 +314,7 @@ elif [ "$ALL" -eq 1 ]; then
     [ -n "$p" ] || continue
     targets+=("$p")
   done <<EOF
-$(peers)
+$(peers all)
 EOF
 else
   first="$(peers | sed -n '1p')"

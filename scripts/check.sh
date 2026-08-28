@@ -310,7 +310,7 @@ if [ "$RUN_QUICK" = 1 ]; then
         ;;
     esac
     case "$path" in
-      config/models.json|scripts/agent-call.sh|scripts/peer-ask.sh|scripts/lib/model-routing.sh|scripts/lib/peer-common.sh|tests/model-routing-smoke.sh)
+      config/models.json|scripts/agent-call.sh|scripts/peer-ask.sh|scripts/lib/model-routing.sh|scripts/lib/provider-registry.sh|scripts/lib/peer-common.sh|tests/model-routing-smoke.sh|tests/provider-registry-smoke.sh)
         quick_models=1
         ;;
     esac
@@ -343,6 +343,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   stage functional-evolution bash tests/functional-evolution-smoke.sh
   [ "$quick_harness" = 0 ] || stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   [ "$quick_models" = 0 ] || stage model-routing bash tests/model-routing-smoke.sh
+  [ "$quick_models" = 0 ] || stage provider-registry bash tests/provider-registry-smoke.sh
   [ "$quick_models" = 0 ] || stage models-surface bash tests/models-smoke.sh
   [ "$quick_seats" = 0 ] || stage seat-reliability bash tests/seat-reliability-smoke.sh
 fi
@@ -356,6 +357,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage draft-pr bash tests/draft-pr-smoke.sh
   stage goal-drive-recovery bash tests/goal-drive-recovery-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
+  stage provider-registry bash tests/provider-registry-smoke.sh
   stage execution-profile bash tests/execution-profile-smoke.sh
   stage herdr-adapter bash tests/herdr-adapter-smoke.sh
   stage codex-hud-config bash tests/codex-hud-config-smoke.sh
@@ -365,6 +367,8 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage update-v04 bash tests/update-v04-smoke.sh
   stage state-surfaces bash tests/state-surfaces-smoke.sh
   stage operator-tools bash tests/operator-tools-smoke.sh
+  stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
+  stage interoperability bash tests/interoperability-smoke.sh
   stage runtime-core bash tests/runtime-core-smoke.sh
   stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh

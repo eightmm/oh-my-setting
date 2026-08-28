@@ -18,12 +18,12 @@ usage() {
 Usage: import-agent-result.sh --kind KIND --provider PROVIDER --file PATH [options]
 
 Import an externally run agent answer into the same artifact/index format used
-by the multi-agent harness. Use this after --export-only prompts are pasted into
-Codex, Claude Code, or Antigravity outside the current policy boundary.
+by the multi-agent harness. Use this after an --export-only prompt is answered
+by a registered or external agent outside the current policy boundary.
 
 Options:
   --kind KIND          ask, review, delegate, or call. Required.
-  --provider NAME      codex, claude, antigravity, or agy. Required.
+  --provider NAME      Registered agent transport. Required.
   --file PATH          File containing the provider answer. Required.
   --prompt-file PATH   Exported prompt artifact or prompt text file to include.
   --repo PATH          Repo/directory for artifact index. Default: PWD.
@@ -90,12 +90,8 @@ case "$KIND" in
   "") fail "--kind is required" ;;
   *) fail "--kind must be ask, review, delegate, or call" ;;
 esac
-case "$PROVIDER" in
-  codex|claude|antigravity|agy) ;;
-  "") fail "--provider is required" ;;
-  *) fail "unsupported provider: $PROVIDER" ;;
-esac
-[ "$PROVIDER" = "agy" ] && PROVIDER="antigravity"
+[ -n "$PROVIDER" ] || fail "--provider is required"
+PROVIDER="$(oms_provider_normalize "$PROVIDER")" || exit $?
 [ -n "$RESULT_FILE" ] || fail "--file is required"
 [ -f "$RESULT_FILE" ] || fail "result file not found: $RESULT_FILE"
 # An empty paste would become an artifact with a harness-written exit 0,

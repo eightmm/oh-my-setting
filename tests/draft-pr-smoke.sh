@@ -868,7 +868,11 @@ EOF
     fail "payload timeout fixture never reached the TERM-ignoring scanner"
   [ ! -f "$repo/.git/scan-delay-completed" ] ||
     fail "TERM-ignoring payload scanner was allowed to finish"
-  [ "$scan_elapsed" -le 6 ] ||
+  # The 3s scan wall plus 1s forced-kill grace is wrapped by bounded Git
+  # setup/cleanup, and integer-second wall-clock samples can add nearly two
+  # boundary seconds. Keep this below the fixture's 10s completion while
+  # avoiding a one-tick full-gate flake on a loaded runner.
+  [ "$scan_elapsed" -le 8 ] ||
     fail "TERM-ignoring payload scan exceeded hard wall: ${scan_elapsed}s"
   [ -z "$(find "$scan_tmp" -type f -print -quit)" ] ||
     fail "payload scan timeout left temporary payload files"

@@ -14,6 +14,8 @@ ROOT="$(cd "$ROOT" && pwd)"
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
+# shellcheck source=scripts/lib/project-state.sh
+. "$ROOT/scripts/lib/project-state.sh"
 
 # OMS_STATE_REPO: set by peer-delegate.sh for worktree workers so they
 # read the primary repo's shared state instead of the throwaway checkout's.
@@ -177,7 +179,7 @@ Commands:
                                      for a plan-scoped evidence producer.
   list   [--state STATE]             List tasks (optionally by state).
   ready                              Print ids actionable now (deps done).
-  status                             Human-readable summary.
+  status [--json]                    Typed plan snapshot or human summary.
   accept                             Run the stored acceptance command from the
                                      repo root (outside the plan lock), append
                                      one row to .oms/plan/progress.jsonl, and
@@ -292,13 +294,18 @@ done
   fail "--check is valid only with recover-lease or retire"
 [ "$APPLY" = 0 ] || [ "$ACTION" = retire ] || fail "--apply is valid only with retire"
 [ "$APPLY" = 0 ] || [ "$CHECK_ONLY" = 0 ] || fail "retire --apply and --check are mutually exclusive"
+PLAN_READ_ONLY=0
+case "$ACTION" in
+  show|evidence-snapshot|list|ready|status|brief) PLAN_READ_ONLY=1 ;;
+  next) [ "$CLAIM" = 1 ] || PLAN_READ_ONLY=1 ;;
+esac
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository"
 PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
 PLAN_LOCK_FILE=""
 if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
-    fail "unknown provider: use codex, claude, or antigravity (agy)"
+    fail "unknown provider: inspect 'oms models' for registered transports"
 fi
 
 # Git Bash paths are valid for the shell but environment variables are not
@@ -431,6 +438,11 @@ if [ "$ACTION" = apply-proposal ]; then
   if agent_memory_file_has_secret_content "$PROPOSAL"; then
     fail "proposal looks sensitive; task contracts must not persist credentials"
   fi
+  project_state="$(oms_project_state "$REPO/PROJECT.md")"
+  case "$project_state" in
+    confirmed|legacy-active) ;;
+    *) fail "PROJECT.md State is $project_state; confirm one canonical State before plan topology is applied" ;;
+  esac
 fi
 
 # All mutations and queries run in one python process: load -> act -> (write|print).
@@ -473,7 +485,8 @@ plan_run() {
 python3 - "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
   "$ROOT/scripts/lib/verify-floor-lint.py" \
   "$ROOT/scripts/lib/process_liveness.py" \
-  "$ROOT/scripts/lib/plan-retire.py" <<'PY'
+  "$ROOT/scripts/lib/plan-retire.py" \
+  "$ROOT/scripts/lib/path_scope.py" <<'PY'
 import datetime, hashlib, json, math, os, re, runpy, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
@@ -487,6 +500,7 @@ process_pid_alive = process_liveness["pid_alive"]
 persisted_native_pid_is_proven = process_liveness[
     "persisted_native_pid_is_proven"
 ]
+within_envelope = runpy.run_path(sys.argv[6])["within_envelope"]
 def env(k): return os.environ.get(k, "")
 
 STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
@@ -769,6 +783,8 @@ def worker_marker_is_typed(marker):
     return True
 
 CLAIM_TTL = int(os.environ.get("OMS_CLAIM_TTL") or 3600)
+raw_review_ttl = os.environ.get("OMS_PLAN_REVIEW_TTL", "86400")
+REVIEW_TTL = int(raw_review_ttl) if raw_review_ttl.isdigit() else 86400
 
 def parse_ts(s):
     try:
@@ -809,6 +825,12 @@ def claim_expired(t):
     if age is None:
         return False
     return age >= claim_ttl_for(t)
+
+def review_expired(t):
+    if t.get("state") != "review":
+        return False
+    age = claim_age(t)
+    return age is not None and age >= REVIEW_TTL
 
 def actionable(d, t):
     """Claimable right now: ready, or held by an expired claim."""
@@ -895,8 +917,7 @@ if act == "apply-proposal":
 
     def inside_envelope(value):
         candidate = clean_rel(value, "proposal allowed path")
-        return any(root == "." or candidate == root or candidate.startswith(root + "/")
-                   for root in envelope)
+        return within_envelope(candidate, envelope)
 
     proposal_bytes = read_regular_bytes(proposal_path, "proposal", 1024 * 1024)
     expected_proposal = env("OMS_EXPECTED_PROPOSAL_SHA256")
@@ -985,12 +1006,9 @@ if act == "apply-proposal":
     if hashlib.sha256(spec_bytes).hexdigest() != proposal_spec:
         die("PROJECT.md changed after proposal review")
     try:
-        spec_text = spec_bytes.decode("utf-8")
+        spec_bytes.decode("utf-8")
     except UnicodeError:
         die("PROJECT.md must be UTF-8")
-    state_match = re.search(r"(?m)^- State:[ \t]*([^\r\n]+?)[ \t]*\r?$", spec_text)
-    if not state_match or state_match.group(1) not in ("confirmed", "active"):
-        die("PROJECT.md must be confirmed before plan topology is applied")
     raw_tasks = proposal.get("tasks")
     max_tasks = int(env("OMS_MAX_TASKS") or "12")
     if not isinstance(raw_tasks, list) or not raw_tasks or len(raw_tasks) > max_tasks:
@@ -1640,6 +1658,27 @@ if act == "list":
     sys.exit(0)
 
 if act == "status":
+    by = {}
+    for t in tasks.values():
+        by[t["state"]] = by.get(t["state"], 0) + 1
+    claimable = [t["id"] for t in ordered if actionable(d, t)]
+    stale = [{"id": t["id"], "provider": t.get("provider", ""),
+              "age_seconds": claim_age(t), "ttl_seconds": claim_ttl_for(t)}
+             for t in ordered if claim_expired(t)]
+    stale_review = [{"id": t["id"], "provider": t.get("provider", ""),
+                     "age_seconds": claim_age(t), "ttl_seconds": REVIEW_TTL}
+                    for t in ordered if review_expired(t)]
+    if env("OMS_AS_JSON") == "1":
+        count = len(tasks)
+        print(json.dumps({
+            "schema": 1, "present": os.path.exists(path),
+            "task_count": count, "nonempty": count > 0,
+            "all_done": count > 0 and all(t.get("state") == "done" for t in tasks.values()),
+            "has_unfinished": any(t.get("state") != "done" for t in tasks.values()),
+            "by_state": by, "actionable": claimable,
+            "stale": stale, "stale_review": stale_review,
+        }, ensure_ascii=False, sort_keys=True))
+        sys.exit(0)
     if d.get("goal"): print("goal: %s" % d["goal"])
     contract = d.get("project_contract")
     if isinstance(contract, dict) and contract.get("spec_sha256"):
@@ -1664,12 +1703,9 @@ if act == "status":
             print("acceptance: %s at %s (base %s)" % (
                 last.get("status", "?"), last.get("ts", "?"),
                 str(last.get("base_sha", "?"))[:12]))
-    by = {}
-    for t in tasks.values(): by[t["state"]] = by.get(t["state"], 0) + 1
     order = ["ready", "claimed", "running", "review", "landing", "blocked", "done"]
     print("tasks: %d  [%s]" % (len(tasks),
         " ".join("%s=%d" % (s, by[s]) for s in order if by.get(s))))
-    claimable = [t["id"] for t in ordered if actionable(d, t)]
     print("ready now: %s" % (" ".join(claimable) if claimable else "(none)"))
     for t in ordered:
         if claim_expired(t):
@@ -1789,7 +1825,7 @@ if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISREG(target_info.st_mode):
     raise SystemExit(2)
 PY
     fail "acceptance requires a safe repo-local plan file"
-elif [ "$ACTION" != retire ]; then
+elif [ "$ACTION" != retire ] && [ "$PLAN_READ_ONLY" = 0 ]; then
   mkdir -p "$(dirname "$PLAN_FILE")"
   agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
 fi
@@ -2249,6 +2285,16 @@ fi
 # freezes worker-marker publication while it judges liveness, in the global
 # marker set -> plan order. Ordinary plan transitions never nest these locks.
 case "$ACTION" in
+  show|evidence-snapshot|list|ready|status|brief)
+    plan_run
+    ;;
+  next)
+    if [ "$CLAIM" = 1 ]; then
+      plan_run_with_plan_lock
+    else
+      plan_run
+    fi
+    ;;
   recover-lease|recover-owner)
     plan_run_with_marker_and_plan_locks
     ;;

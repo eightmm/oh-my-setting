@@ -30,7 +30,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-
+trace_context_helpers = runpy.run_path(
+    str(Path(__file__).with_name("trace_context.py"))
+)
+attach_trace_context = trace_context_helpers["attach_trace_context"]
+persisted_context = trace_context_helpers["persisted_context"]
 process_pid_alive = runpy.run_path(
     str(Path(__file__).with_name("process_liveness.py"))
 )["pid_alive"]
@@ -536,6 +540,18 @@ def fsync_directory(path: Path) -> None:
 
 
 def append_row(path: Path, row: Dict[str, Any], *, private: bool = False) -> None:
+    identity_key = "attempt_id" if row.get("attempt_id") else "approval_id" if row.get("approval_id") else ""
+    previous = None
+    if identity_key:
+        identity = row.get(identity_key)
+        try:
+            for candidate in reversed(read_rows(path)):
+                if candidate.get(identity_key) == identity:
+                    previous = candidate
+                    break
+        except OpsError:
+            raise
+        attach_trace_context(row, previous)
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     fd = os.open(str(path), flags, 0o600 if private else 0o644)
@@ -594,7 +610,10 @@ def lifecycle_semantics(row: Dict[str, Any]) -> Dict[str, Any]:
         # from_state and sequence are allocated under the append lock. Callers
         # repeat the desired effect, not those derived fields, on an
         # idempotent retry.
-        if key not in {"event_id", "ts", "seq", "from_state"}
+        if key not in {
+            "event_id", "ts", "seq", "from_state",
+            "trace_id", "span_id", "parent_span_id", "trace_flags",
+        }
     }
 
 
@@ -642,6 +661,11 @@ def validate_event_row(row: Dict[str, Any], number: int = 0) -> None:
                 raise OpsError("%s has invalid ref %s" % (where, key))
             if value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value) or ".." in Path(value).parts:
                 raise OpsError("%s contains an absolute or escaping ref" % where)
+    trace_fields = {"trace_id", "span_id", "parent_span_id", "trace_flags"}
+    if trace_fields.intersection(row) and persisted_context(row) is None:
+        raise OpsError("%s has invalid persisted trace context" % where)
+    if any(key in row for key in ("traceparent", "tracestate", "baggage")):
+        raise OpsError("%s stores forbidden raw trace context" % where)
 
 
 def project_attempts(rows: Sequence[Dict[str, Any]], *, validate: bool = True) -> Dict[str, Dict[str, Any]]:
@@ -1280,6 +1304,11 @@ def approval_projection(rows: Sequence[Dict[str, Any]], repo: Path, *, validate:
         if state not in APPROVAL_STATES:
             raise OpsError("approval row %d has invalid state" % number)
         event_type = row.get("event_type")
+        trace_fields = {"trace_id", "span_id", "parent_span_id", "trace_flags"}
+        if trace_fields.intersection(row) and persisted_context(row) is None:
+            raise OpsError("approval row %d has invalid persisted trace context" % number)
+        if any(key in row for key in ("traceparent", "tracestate", "baggage")):
+            raise OpsError("approval row %d stores forbidden raw trace context" % number)
         current = projected.get(approval_id)
         if event_type == "approval.requested":
             if current is not None or version != 1 or state != "requested":
@@ -1382,7 +1411,19 @@ def approval_projection(rows: Sequence[Dict[str, Any]], repo: Path, *, validate:
 
 
 def public_approval(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: value for key, value in row.items() if not key.startswith("_")}
+    value = {key: item for key, item in row.items() if not key.startswith("_")}
+    value["effective_state"] = approval_effective_state(row)
+    return value
+
+
+def approval_effective_state(
+    row: Dict[str, Any], now: Optional[dt.datetime] = None
+) -> str:
+    state = str(row.get("state") or "unknown")
+    if state not in {"requested", "approved"}:
+        return state
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return "expired" if now >= parse_ts(str(row.get("expires_at", ""))) else state
 
 
 def approval_action_digest(repo: Path, values: Dict[str, Any]) -> str:
@@ -1490,7 +1531,7 @@ def approval_decide(args: argparse.Namespace) -> int:
             raise OpsError("unknown approval: %s" % approval_id)
         if current["version"] != args.expected_version or current["state"] != "requested":
             raise OpsError("approval compare-and-set failed: expected requested version %d" % args.expected_version)
-        if dt.datetime.now(dt.timezone.utc) >= parse_ts(current["expires_at"]):
+        if approval_effective_state(current) == "expired":
             raise OpsError("approval expired")
         version = current["version"] + 1
         row: Dict[str, Any] = {
@@ -1548,7 +1589,7 @@ def approval_begin_consume(args: argparse.Namespace) -> int:
             raise OpsError("unknown approval: %s" % approval_id)
         if current["version"] != args.expected_version or current["state"] != "approved":
             raise OpsError("approval compare-and-set failed: expected approved version %d" % args.expected_version)
-        if dt.datetime.now(dt.timezone.utc) >= parse_ts(current["expires_at"]):
+        if approval_effective_state(current) == "expired":
             raise OpsError("approval expired")
         digest = hashlib.sha256((approval_id + ":" + proof).encode("utf-8")).hexdigest()
         if current.get("_grant_id") != grant_id or not hmac.compare_digest(current.get("_grant_hash", ""), digest):
@@ -1608,7 +1649,8 @@ def approval_expire(args: argparse.Namespace) -> int:
         projected = approval_projection(rows, repo)
         now = dt.datetime.now(dt.timezone.utc)
         for current in projected.values():
-            if current["state"] not in {"requested", "approved"} or now < parse_ts(current["expires_at"]):
+            if (current["state"] not in {"requested", "approved"} or
+                    approval_effective_state(current, now) != "expired"):
                 continue
             expired.append(current["approval_id"])
             if args.apply:
@@ -1711,7 +1753,10 @@ def approval_show(args: argparse.Namespace) -> int:
         print_json(value)
     else:
         print("approval: %s" % value["approval_id"])
+        effective = value["effective_state"]
         print("state/version: %s/%s" % (value["state"], value["version"]))
+        if effective != value["state"]:
+            print("effective state: %s" % effective)
         print("action/object: %s/%s" % (value["action"], value["object_id"]))
         print("expires: %s" % value["expires_at"])
     return 0
@@ -1722,9 +1767,11 @@ def approval_list(args: argparse.Namespace) -> int:
     values = [public_approval(value) for value in load_approvals(repo).values()]
     values.sort(key=lambda item: item["updated_at"])
     if args.pending:
-        values = [item for item in values if item["state"] in {"requested", "approved", "consuming"}]
+        values = [item for item in values if item["effective_state"] in {"requested", "approved", "consuming"}]
     if args.state:
         values = [item for item in values if item["state"] == args.state]
+    if args.effective_state:
+        values = [item for item in values if item["effective_state"] == args.effective_state]
     if args.json:
         print_json(values)
     elif not values:
@@ -1895,6 +1942,7 @@ def add_approval_parser(subparsers: argparse._SubParsersAction) -> None:
     listing = subparsers.add_parser("list", help="list approvals")
     listing.add_argument("--pending", action="store_true")
     listing.add_argument("--state", choices=sorted(APPROVAL_STATES))
+    listing.add_argument("--effective-state", choices=sorted(APPROVAL_STATES))
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(func=approval_list)
 

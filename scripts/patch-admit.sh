@@ -283,21 +283,21 @@ if [ "$apply_ok" = 1 ]; then
     } | LC_ALL=C sort -u)"
 
     # --- Gate 2: task/executor path scope ----------------------------------
-    scope_detail="$(OMS_CHANGED="$changed_files" OMS_ALLOWED="$SCOPE_ALLOWED" OMS_FORBIDDEN="$SCOPE_FORBIDDEN" python3 - <<'PY'
-import fnmatch, os, re
+    scope_detail="$(OMS_CHANGED="$changed_files" OMS_ALLOWED="$SCOPE_ALLOWED" OMS_FORBIDDEN="$SCOPE_FORBIDDEN" \
+      OMS_PATH_SCOPE_HELPER="$ROOT_LIB/path_scope.py" python3 - <<'PY'
+import os, re, runpy
+scope = runpy.run_path(os.environ["OMS_PATH_SCOPE_HELPER"])
+classify = scope["classify"]
+normalize = scope["normalize"]
 changed=[x for x in os.environ.get("OMS_CHANGED","").splitlines() if x]
 def split(v): return [x for x in re.split(r"[,\s]+",v) if x]
-allowed, forbidden=split(os.environ.get("OMS_ALLOWED","")),split(os.environ.get("OMS_FORBIDDEN",""))
-def match(path, pattern):
-    if pattern in (".", "./"): return True
-    p=pattern[2:] if pattern.startswith("./") else pattern
-    if any(c in p for c in "*?["): return fnmatch.fnmatchcase(path,p)
-    p=p.rstrip("/")
-    return path == p or path.startswith(p + "/")
+allowed = [normalize(x) for x in split(os.environ.get("OMS_ALLOWED", ""))]
+forbidden = [normalize(x) for x in split(os.environ.get("OMS_FORBIDDEN", ""))]
 bad=[]
 for path in changed:
-    if any(match(path,p) for p in forbidden): bad.append("forbidden: " + path); continue
-    if allowed and not any(match(path,p) for p in allowed): bad.append("outside allowed paths: " + path)
+    verdict = classify(path, allowed, forbidden)
+    if verdict == "forbidden": bad.append("forbidden: " + path)
+    elif verdict == "outside": bad.append("outside allowed paths: " + path)
 print("; ".join(bad))
 PY
 )"

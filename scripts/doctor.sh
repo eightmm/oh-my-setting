@@ -14,7 +14,11 @@ MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
 MODEL_DOCTOR_STRICT=0
 MODEL_DOCTOR_ARGS=()
-ORIGINAL_ARGS=("$@")
+FORWARD_ARGS=()
+REPORT_JSON=0
+REPORT_PLAN=0
+REPORT_REPO="${OMS_DOCTOR_PROJECT_DIR:-$PWD}"
+CONTRACT_ONLY=0
 
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
@@ -25,7 +29,9 @@ ORIGINAL_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
-Usage: doctor.sh [--repair] [--surfaces] [--tool-lock] [--contract] [--live-models] [--strict-diversity]
+Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
+                 [--repair] [--surfaces] [--tool-lock] [--contract]
+                 [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
@@ -45,6 +51,12 @@ with.
 --tool-lock is a standalone read-only validation of the exact versions,
 download URLs, and payload digests owned by tools.lock.json.
 
+--repo selects the project whose .oms state is inspected without changing
+install ownership. --json returns the same verdict as a bounded structured
+report. --remediation-plan prints only exact remedies already emitted by the
+doctor and labels their authority; neither mode executes a remedy and both
+refuse --repair.
+
 Environment:
   OH_MY_SETTING_MODEL_DOCTOR=auto|0|1  Auto-detect, disable, or force the
                                       local model capability check.
@@ -54,36 +66,89 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repair) REPAIR=1; shift ;;
-    --surfaces) SURFACES=1; shift ;;
-    --tool-lock) TOOL_LOCK_ONLY=1; shift ;;
+    --repo)
+      [ "$#" -ge 2 ] || { echo "error: --repo requires a path" >&2; exit 2; }
+      REPORT_REPO="$2"
+      shift 2
+      ;;
+    --json) REPORT_JSON=1; shift ;;
+    --remediation-plan) REPORT_PLAN=1; shift ;;
+    --repair) REPAIR=1; FORWARD_ARGS+=(--repair); shift ;;
+    --surfaces) SURFACES=1; FORWARD_ARGS+=(--surfaces); shift ;;
+    --tool-lock) TOOL_LOCK_ONLY=1; FORWARD_ARGS+=(--tool-lock); shift ;;
     --contract)
       # The cross-CLI conformance fixture (loader parity, MCP registration
       # parity, fail-open hook no-ops) is slower than a health pass and runs
       # only when asked — never as part of a bare doctor.
-      exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/provider-contract.sh" --check
+      CONTRACT_ONLY=1
+      FORWARD_ARGS+=(--contract)
+      shift
       ;;
     --live-models)
       MODEL_DOCTOR_MODE=1
       MODEL_DOCTOR_LIVE=1
       MODEL_DOCTOR_ARGS+=(--live-models)
+      FORWARD_ARGS+=(--live-models)
       shift
       ;;
     --strict-diversity)
       MODEL_DOCTOR_MODE=1
       MODEL_DOCTOR_STRICT=1
       MODEL_DOCTOR_ARGS+=(--strict-diversity)
+      FORWARD_ARGS+=(--strict-diversity)
       shift
       ;;
     --no-model-doctor)
       MODEL_DOCTOR_MODE=0
       MODEL_DOCTOR_ARGS+=(--no-model-doctor)
+      FORWARD_ARGS+=(--no-model-doctor)
       shift
       ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if ! REPORT_REPO="$(cd "$REPORT_REPO" 2>/dev/null && pwd -P)"; then
+  echo "error: --repo is not an accessible directory: $REPORT_REPO" >&2
+  exit 2
+fi
+OMS_DOCTOR_PROJECT_DIR="$REPORT_REPO"
+export OMS_DOCTOR_PROJECT_DIR
+
+if [ "$REPORT_JSON" = 1 ] && [ "$REPORT_PLAN" = 1 ]; then
+  echo "error: --json and --remediation-plan are mutually exclusive" >&2
+  exit 2
+fi
+if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } && [ "$REPAIR" = 1 ]; then
+  echo "error: structured doctor reports are read-only; run --repair separately" >&2
+  exit 2
+fi
+if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
+   { [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] || [ "$CONTRACT_ONLY" = 1 ]; }; then
+  echo "error: structured doctor reports cannot wrap a standalone report mode" >&2
+  exit 2
+fi
+
+if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
+   [ "${OMS_DOCTOR_REPORT_CHILD:-0}" != 1 ]; then
+  report_tmp="$(mktemp "${TMPDIR:-/tmp}/oms-doctor-report.XXXXXX")"
+  report_rc=0
+  OMS_DOCTOR_REPORT_CHILD=1 "$ROOT/scripts/doctor.sh" \
+    ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"} >"$report_tmp" 2>&1 || report_rc=$?
+  report_args=(--repo "$REPORT_REPO" --exit "$report_rc")
+  [ "$REPORT_PLAN" = 0 ] || report_args+=(--plan)
+  python3 "$ROOT/scripts/lib/doctor-report.py" \
+    "${report_args[@]}" <"$report_tmp" || report_parser_rc=$?
+  report_parser_rc="${report_parser_rc:-0}"
+  rm -f "$report_tmp"
+  [ "$report_parser_rc" = 0 ] || exit "$report_parser_rc"
+  exit "$report_rc"
+fi
+
+if [ "$CONTRACT_ONLY" = 1 ]; then
+  exec bash "$ROOT/scripts/lib/provider-contract.sh" --check
+fi
 
 if [ "$SURFACES" = "1" ] && [ "$REPAIR" = "1" ]; then
   echo "error: --surfaces is a read-only report; run --repair separately" >&2
@@ -142,13 +207,14 @@ fi
 # expected list is the stale one, so it certifies itself. The whole value of
 # the report is that it runs from a newer source against the live settings.
 if [ "$SURFACES" = "0" ] && [ "$TOOL_LOCK_ONLY" = "0" ] &&
+   [ "${OMS_DOCTOR_REPORT_CHILD:-0}" != 1 ] &&
    [ "$RECEIPT_STATE" = "valid" ] &&
    [ "$ROOT" != "$INSTALL_ROOT" ] &&
    [ -x "$INSTALL_ROOT/scripts/doctor.sh" ]; then
   echo "delegating doctor to canonical owner: $INSTALL_ROOT"
   # Plus-form: Bash 3.2 + set -u errors on an empty array expansion, and a
   # bare `doctor.sh` delegation carries no arguments at all.
-  exec "$INSTALL_ROOT/scripts/doctor.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+  exec "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
 fi
 
 check_tool_lock() {

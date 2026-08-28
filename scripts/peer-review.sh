@@ -43,7 +43,8 @@ usage() {
 Usage: peer-review.sh [options] --prompt TEXT
        peer-review.sh verdicts [--json] [artifact-dir]
 
-Review an existing diff with independent Codex, Claude Code, and Antigravity seats.
+Review an existing diff with an independent provider council. The default
+council is Codex, Claude Code, and Antigravity.
 Plain review persists seat answers as artifacts.
 With --gate, enforce and record the typed gate outcome.
 
@@ -64,7 +65,9 @@ Options:
   --repo PATH          Git repo to review. Default: current directory.
   --base REF           Diff base ref. Default: HEAD (staged + unstaged changes).
                        Use e.g. --base origin/main for branch/PR review.
-  --providers LIST     Comma list: codex,claude,antigravity. Default: all three.
+  --providers LIST     Comma list of registered targets. Default: the stable
+                       Codex/Claude/Antigravity council; optional agents are
+                       available when explicitly named.
                        An entry may carry a model (codex:model=NAME) to pin it.
   --writer PROVIDER    Name the provider that authored the change under
                        review. By default that provider is dropped from the
@@ -113,8 +116,8 @@ Options:
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
                        `oms artifact-index import`.
-  --synthesize [P]     After provider reviews, run a synthesis pass with
-                       provider P (codex|claude|antigravity). Default: claude.
+  --synthesize [P]     After provider reviews, run a synthesis pass with a
+                       registered provider P. Default: claude.
   --print-timeout DUR  Timeout for print mode wait. Default: 5m.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
@@ -416,7 +419,7 @@ write_prompt() {
   local status_file="$5"
 
   {
-    printf 'You are one of three independent reviewers: Codex, Claude Code, and Antigravity.\n'
+    printf 'You are one seat in a multi-provider review council.\n'
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Find bugs, regressions, missing tests, unclear contracts, and unsafe operations.\n'
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
@@ -560,13 +563,9 @@ while [ "$#" -gt 0 ]; do
     --synthesize)
       SYNTHESIZE="claude"
       if [ "$#" -ge 2 ] && [ "${2#-}" = "$2" ]; then
-        case "$2" in
-          codex|claude|antigravity|agy)
-            SYNTHESIZE="$2"
-            shift
-            ;;
-          *) fail "--synthesize provider must be codex, claude, antigravity, or agy" ;;
-        esac
+        SYNTHESIZE="$(oms_provider_normalize "$2" 2>/dev/null)" ||
+          fail "--synthesize requires a registered provider"
+        shift
       fi
       shift
       ;;
@@ -617,9 +616,8 @@ if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } &&
   fail "--model/--fallback-model requires exactly one provider"
 fi
 if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } && [ -n "$SYNTHESIZE" ]; then
-  sole_provider="$(printf '%s' "$PROVIDERS" | tr -d '[:space:]')"
-  [ "$sole_provider" != agy ] || sole_provider=antigravity
-  [ "$SYNTHESIZE" != agy ] || SYNTHESIZE=antigravity
+  sole_provider="$(oms_provider_normalize "$(printf '%s' "$PROVIDERS" | tr -d '[:space:]')")" || exit $?
+  SYNTHESIZE="$(oms_provider_normalize "$SYNTHESIZE")" || exit $?
   [ "$sole_provider" = "$SYNTHESIZE" ] ||
     fail "--model cannot be reused by a different synthesis provider"
 fi
