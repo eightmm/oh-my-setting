@@ -539,24 +539,70 @@ def fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _recent_identity_row(
+    path: Path, identity_key: str, identity: Any, *, max_bytes: int = 131072
+) -> Optional[Dict[str, Any]]:
+    """Best-effort newest same-identity row from the file tail.
+
+    Trace continuity only needs the most recent row for this identity, which
+    lives in the tail in practice; a full strict read here made every append
+    O(file) and let one torn line block all future writes. The bounded read
+    keeps append cost flat, a torn or foreign line is skipped rather than
+    fatal, and when no traced row is near and no traceparent is incoming
+    there is nothing to inherit, so the parse is skipped entirely.
+    """
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read(max_bytes)
+    except OSError:
+        return None
+    if not data:
+        return None
+    if not os.environ.get("OMS_TRACEPARENT") and b'"trace_id"' not in data:
+        return None
+    lines = data.split(b"\n")
+    if size > max_bytes and lines:
+        lines = lines[1:]
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            candidate = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and candidate.get(identity_key) == identity:
+            return candidate
+    return None
+
+
 def append_row(path: Path, row: Dict[str, Any], *, private: bool = False) -> None:
     identity_key = "attempt_id" if row.get("attempt_id") else "approval_id" if row.get("approval_id") else ""
-    previous = None
     if identity_key:
-        identity = row.get(identity_key)
-        try:
-            for candidate in reversed(read_rows(path)):
-                if candidate.get(identity_key) == identity:
-                    previous = candidate
-                    break
-        except OpsError:
-            raise
+        previous = _recent_identity_row(path, identity_key, row.get(identity_key))
         attach_trace_context(row, previous)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # A torn, unterminated tail (crash or full disk mid-write) must not eat
+    # this row too: start on a fresh line, so only the fragment is lost.
+    needs_newline = False
+    try:
+        with path.open("rb") as tail:
+            tail.seek(0, os.SEEK_END)
+            if tail.tell() > 0:
+                tail.seek(-1, os.SEEK_END)
+                needs_newline = tail.read(1) != b"\n"
+    except OSError:
+        needs_newline = False
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     fd = os.open(str(path), flags, 0o600 if private else 0o644)
     try:
-        write_all(fd, json_bytes(row) + b"\n")
+        payload = json_bytes(row) + b"\n"
+        if needs_newline:
+            payload = b"\n" + payload
+        write_all(fd, payload)
         os.fsync(fd)
     finally:
         os.close(fd)

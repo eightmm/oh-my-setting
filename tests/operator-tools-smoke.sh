@@ -391,6 +391,35 @@ assert not any(key in first for key in ("traceparent", "tracestate", "baggage"))
 assert not any(key in invalid for key in ("trace_id", "span_id", "parent_span_id", "trace_flags")), invalid
 PY
 
+# The trace-continuity scan in append_row must stay bounded and tolerant: a
+# torn tail line neither blocks the append nor swallows it (the guard opens
+# a fresh line), and the traced identity still inherits its trace across the
+# fragment. Library-level on purpose — the CLI transition path additionally
+# strict-reads the whole projection, a separate long-standing posture.
+python3 - "$ROOT/scripts/lib/agent-events.py" "$trace_repo/.oms/lifecycle/events.jsonl" "$attempt" <<'PY' || fail "append across a torn events tail failed"
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("ae_probe", sys.argv[1])
+ae = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ae)
+path = Path(sys.argv[2])
+attempt = sys.argv[3]
+with path.open("a", encoding="utf-8") as handle:
+    handle.write('{"attempt_id":"torn-fragment","state":"work')  # no newline
+before = path.read_bytes().count(b"\n")
+ae.append_row(path, {"attempt_id": attempt, "state": "probe-after-torn"})
+rows = []
+for line in path.read_bytes().split(b"\n"):
+    try:
+        rows.append(json.loads(line.decode("utf-8")))
+    except ValueError:
+        continue
+last = rows[-1]
+assert last["state"] == "probe-after-torn", last
+assert last.get("trace_id") == rows[0].get("trace_id"), (rows[0], last)
+assert path.read_bytes().count(b"\n") == before + 2, "fresh-line guard missing"
+PY
+
 XDG_STATE_HOME="$TMP/state" bash "$ROOT/scripts/otel-export.sh" \
   --repo "$repo" --limit 20 --output "$TMP/export.jsonl"
 [ -s "$TMP/export.jsonl" ] || fail "OTLP file output is empty"
