@@ -49,6 +49,23 @@ for host in ubuntu-latest macos-latest windows-latest; do
   grep -Fq "os: $host" "$workflow" ||
     fail "install lifecycle matrix must cover $host"
 done
+
+# The focused CI lanes are a positional partition of the stage list. If the
+# lane count here and in the workflow drift, or the partition ever drops or
+# doubles a stage, a registered suite silently stops running in CI — the
+# exact failure mode stage registration exists to prevent.
+grep -Fq -- '--focused-lane "${{ matrix.lane }}/4"' "$workflow" ||
+  fail "focused CI job must run the 4-lane partition"
+grep -Fq 'lane: [1, 2, 3, 4]' "$workflow" ||
+  fail "focused CI matrix must declare lanes 1..4"
+full_stages="$(bash "$ROOT/scripts/check.sh" --focused-only --list-stages | sort)"
+[ -n "$full_stages" ] || fail "focused stage listing is empty"
+lane_union="$( (bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 1/4 --list-stages
+  bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 2/4 --list-stages
+  bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 3/4 --list-stages
+  bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 4/4 --list-stages) | sort)"
+[ "$full_stages" = "$lane_union" ] ||
+  fail "focused lanes must partition the stage list exactly (no drop, no double)"
 # Copy mode is the Windows ownership contract. Proving it only on the Windows
 # runner means the slowest leg in the matrix is the first to report a broken
 # marker or a lost backup, so a Linux leg forces the same path early.

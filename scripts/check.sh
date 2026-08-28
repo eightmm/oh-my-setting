@@ -84,6 +84,11 @@ SKIP_LINT=0
 SMOKE_SHARD=""
 QUICK_FROM=""
 QUICK_TO=""
+FOCUSED_LANE=""
+FOCUSED_LANE_I=0
+FOCUSED_LANE_N=0
+FOCUSED_STAGE_INDEX=0
+LIST_STAGES=0
 usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
@@ -94,8 +99,17 @@ manifest) then the test suites. With no arguments it runs both.
   --no-lint             Skip lint in the otherwise complete local gate.
   --lint-only           Run only lint stages.
   --focused-only        Run only the focused test suites.
+  --focused-lane I/N    Run only every Nth focused stage starting at the Ith
+                        (with --focused-only). The partition is positional,
+                        so a newly registered stage lands in a lane
+                        automatically and the lane union is always the whole
+                        focused list.
   --scripts-smoke-only  Run only tests/scripts-smoke.sh.
   --shard I/N           Select one scripts-smoke shard (with the mode above).
+  --list-stages         Print the stage names the selected mode and lane
+                        would run, one per line, without running anything.
+                        (The scripts-smoke shards run outside the stage list
+                        and are not included.)
   --quick               Run a partial changed-file gate for protected pushes.
   --changed-from REF    Base tree for --quick.
   --changed-to REF      Target tree for --quick.
@@ -122,6 +136,12 @@ while [ "$#" -gt 0 ]; do
       SMOKE_SHARD="$2"
       shift 2
       ;;
+    --focused-lane)
+      [ "$#" -ge 2 ] || { echo "error: --focused-lane requires I/N" >&2; exit 2; }
+      FOCUSED_LANE="$2"
+      shift 2
+      ;;
+    --list-stages) LIST_STAGES=1; shift ;;
     --quick) select_mode quick; shift ;;
     --changed-from)
       [ "$#" -ge 2 ] || { echo "error: --changed-from requires a ref" >&2; exit 2; }
@@ -149,6 +169,25 @@ fi
 if [ -n "$SMOKE_SHARD" ] && [ "$MODE" != scripts-smoke ]; then
   echo "error: --shard requires --scripts-smoke-only" >&2
   exit 2
+fi
+if [ -n "$FOCUSED_LANE" ]; then
+  if [ "$MODE" != focused ]; then
+    echo "error: --focused-lane requires --focused-only" >&2
+    exit 2
+  fi
+  case "$FOCUSED_LANE" in
+    [1-9]/[1-9]|[1-9]/1[0-6]|1[0-6]/1[0-6]) ;;
+    *)
+      echo "error: --focused-lane must be I/N with 1 <= I <= N <= 16" >&2
+      exit 2
+      ;;
+  esac
+  FOCUSED_LANE_I="${FOCUSED_LANE%%/*}"
+  FOCUSED_LANE_N="${FOCUSED_LANE##*/}"
+  if [ "$FOCUSED_LANE_I" -gt "$FOCUSED_LANE_N" ]; then
+    echo "error: --focused-lane must be I/N with 1 <= I <= N <= 16" >&2
+    exit 2
+  fi
 fi
 if [ "$MODE" = quick ]; then
   [ -n "$QUICK_FROM" ] && [ -n "$QUICK_TO" ] || {
@@ -228,6 +267,21 @@ stage() {  # stage NAME COMMAND...
   local rc=0
   local started elapsed
   shift
+
+  # Lane partition is positional over the stage calls the selected mode
+  # actually reaches (focused mode reaches only the focused block), so every
+  # stage belongs to exactly one lane and a new registration cannot fall
+  # through the partition.
+  if [ -n "$FOCUSED_LANE" ]; then
+    FOCUSED_STAGE_INDEX=$((FOCUSED_STAGE_INDEX + 1))
+    if [ $(( (FOCUSED_STAGE_INDEX - 1) % FOCUSED_LANE_N )) -ne $((FOCUSED_LANE_I - 1)) ]; then
+      return 0
+    fi
+  fi
+  if [ "$LIST_STAGES" = 1 ]; then
+    echo "$name"
+    return 0
+  fi
 
   log="$(mktemp "${TMPDIR:-/tmp}/oms-check.XXXXXX")"
   started="$(date +%s)"
@@ -416,6 +470,9 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage artifact-supersession bash tests/artifact-supersession-smoke.sh
 fi
 
+if [ "$LIST_STAGES" = 1 ]; then
+  RUN_SMOKE=0
+fi
 if [ "$RUN_SMOKE" = 1 ]; then
   if [ -n "$SMOKE_SHARD" ]; then
     OMS_SMOKE_TIMINGS="$CHECK_SMOKE_TIMINGS" \
@@ -426,6 +483,11 @@ if [ "$RUN_SMOKE" = 1 ]; then
       OMS_SMOKE_TIMING_LIMIT="$CHECK_SMOKE_TIMING_LIMIT" \
       bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
   fi
+fi
+
+if [ "$LIST_STAGES" = 1 ]; then
+  # The listing IS the output; no verification ran, so no verdict line.
+  exit 0
 fi
 
 verify_oms_state

@@ -43,18 +43,26 @@ jobs:
         timeout-minutes: 15
         run: bash scripts/check.sh --lint-only
 
-  # Focused suites share state and are intentionally serialized. Their stage
-  # durations stay visible without competing for one runner's CPU and making
-  # load-sensitive process tests flaky.
+  # Focused suites stay serial WITHIN a lane — load-sensitive process tests
+  # must not compete for one runner's CPU — but the lanes are separate VMs,
+  # like the smoke shards below, because one serial pass had grown past
+  # twenty minutes of wall clock. The partition is positional
+  # (check.sh --focused-lane), so a newly registered stage lands in a lane
+  # automatically and the lane union is provably the whole focused list
+  # (source-distribution-smoke pins that invariant). runtime-core and
+  # install-profile are registered focused stages, so they are no longer
+  # repeated here as extra steps.
   focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [1, 2, 3, 4]
     runs-on: ubuntu-latest
+    name: focused (${{ matrix.lane }}/4)
     steps:
       - uses: actions/checkout@v7
       - name: focused suites
-        run: |
-          bash scripts/check.sh --focused-only
-          bash tests/runtime-core-smoke.sh
-          bash tests/install-profile-smoke.sh
+        run: bash scripts/check.sh --focused-only --focused-lane "${{ matrix.lane }}/4"
 
   # scripts-smoke is the dominant wall-clock cost. Native matrix children get
   # separate runners instead of four process trees racing on one VM. The
