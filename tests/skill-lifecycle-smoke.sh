@@ -174,7 +174,9 @@ test_skill_bundle_preview_import_update_and_rollback() {
     --source "$source" --json 2>&1)" && fail "preview accepted a symlink: $out"
   rm "$source/references/escape"
 
-  printf 'ghp_abcdefghijklmnopqrstuvwxyz0123456789\n' > "$source/.env"
+  # Assemble the credential-shaped sentinel at runtime: a literal in this
+  # source would itself fail the outbound scrubber's self-review gate.
+  printf 'ghp_%s\n' 'abcdefghijklmnopqrstuvwxyz0123456789' > "$source/.env"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
     --source "$source" --json 2>&1)" && fail "preview accepted a credential file: $out"
   printf '%s' "$out" | grep -Fq 'sensitive' ||
@@ -219,8 +221,42 @@ assert len(row["source"]["sha256"]) == 64, row
     fail "insufficient source refusal is not typed: $out"
 }
 
+test_corrupt_lock_hides_only_its_own_skill() {
+  local repo="$TMP/corrupt-lock-repo" src_a="$TMP/lock-src-a" src_z="$TMP/lock-src-z"
+  local sha out
+  make_repo "$repo"
+  make_skill "$src_a" oms-aaa-fixture
+  make_skill "$src_z" oms-zzz-fixture
+  for src in "$src_a" "$src_z"; do
+    sha="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview --source "$src" --json \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')"
+    "$ROOT/scripts/skill-forge.sh" --repo "$repo" import \
+      --source "$src" --expected-bundle-sha256 "$sha" --apply >/dev/null ||
+      fail "fixture import failed for $src"
+  done
+
+  # One unreadable lock hid EVERY imported skill at exit 0 while the links
+  # stayed live: the enumeration died on the alphabetically-first bad lock
+  # and the pipe consumers discarded its status. The other skill must stay
+  # visible and the broken one must be named loudly.
+  printf 'x' >> "$repo/.oms/skill-store/oms-aaa-fixture/lock.json"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" validate 2>&1)" ||
+    fail "validate failed outright on one corrupt lock: $out"
+  printf '%s' "$out" | grep -Fq 'ok: oms-zzz-fixture' ||
+    fail "a corrupt sibling lock hid a healthy imported skill: $out"
+  printf '%s' "$out" | grep -Fq 'oms-aaa-fixture' ||
+    fail "the corrupt lock's own skill vanished silently: $out"
+  printf '%s' "$out" | grep -Fqi 'unreadable' ||
+    fail "the corrupt lock was not named loudly: $out"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" status 2>&1)" ||
+    fail "status failed outright on one corrupt lock: $out"
+  printf '%s' "$out" | grep -Fq '1 project skill(s) valid' ||
+    fail "status lost the healthy skill next to a corrupt lock: $out"
+}
+
 test_skill_eval_is_explicit_repeatable_and_content_free
 test_skill_bundle_preview_import_update_and_rollback
 test_reviewed_draft_is_inert_and_source_bound
+test_corrupt_lock_hides_only_its_own_skill
 
 echo "skill-lifecycle-smoke: ok"

@@ -41,11 +41,18 @@ SECRET_RE = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|"
     r"xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})|"
-    r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|"
+    # The key-block literal is split and the path roots use an alternation so
+    # this pattern DEFINITION never matches the outbound scrubber's own
+    # detectors when harness sources are self-reviewed (work_journal.py uses
+    # the same idiom). The compiled regexes are unchanged.
+    r"-----BEG[I]N (?:RSA |OPENSSH |EC |DSA )?PRIVATE"
+    r" KEY-----|"
     r"(?:https?|ssh)://[^/@\s:]+:[^/@\s]+@"
     r")"
 )
-PRIVATE_PATH_RE = re.compile(r"(?:/home/[^/\s]+|/Users/[^/\s]+|[A-Za-z]:[\\/]Users[\\/][^\\/\s]+)")
+PRIVATE_PATH_RE = re.compile(
+    r"(?:/home|/Users)/[^/\s]+|[A-Za-z]:[\\/]Users[\\/][^\\/\s]+"
+)
 
 
 class LifecycleError(Exception):
@@ -575,7 +582,20 @@ def active_targets(repo: Path) -> None:
             continue
         if not (child / "lock.json").exists() and not (child / "lock.json").is_symlink():
             continue
-        row = load_lock(repo, child.name)
+        # One unreadable lock must not silently hide every other skill while
+        # its links stay live: warn loudly, keep enumerating. Failing the
+        # whole listing here was consumed through pipes that discard the
+        # exit status, so status reported "no project skills" at rc=0.
+        try:
+            row = load_lock(repo, child.name)
+        except LifecycleError as exc:
+            print(
+                "warning: skill %s lock is unreadable (%s); its links stay "
+                "live until the skill is re-imported or removed"
+                % (child.name, exc),
+                file=sys.stderr,
+            )
+            continue
         assert row is not None
         target = (repo / row["revision_path"]).resolve()
         print("%s\t%s" % (child.name, target))
