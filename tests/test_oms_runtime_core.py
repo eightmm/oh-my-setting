@@ -141,10 +141,14 @@ class RuntimeFixture(RuntimeFixtureBase):
             'goal': 'valid again', 'accept': 'true',
             'tasks': {'t1': {'id': 't1', 'title': 'valid', 'state': 'ready'}},
         }), encoding='utf-8')
+        # A corrupt ledger row is quarantined by the canonical projection, not
+        # escalated: the envelope must survive (the remediation the inbox
+        # names is the projection command itself), while state surfaces the
+        # corruption through the failures projection's invalid_rows count.
         ledger = self.repo / '.oms' / 'failures.jsonl'
         ledger.write_text('{}\n', encoding='utf-8')
-        with self.assertRaisesRegex(CoreError, 'canonical failure ledger projection'):
-            evidence.build_envelope(self.repo)
+        envelope = evidence.build_envelope(self.repo)
+        self.assertIsInstance(envelope, dict)
 
     def test_canonical_failure_ledger_symlink_is_not_absence(self) -> None:
         ledger = self.repo / '.oms' / 'failures.jsonl'
