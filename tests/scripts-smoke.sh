@@ -20132,7 +20132,8 @@ run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>o
   local out
   local guard_home="$dir-home"
 
-  printf '#!/usr/bin/env bash\n%s\necho done\n' "$body" > "$dir-bin/codex"
+  printf '#!/usr/bin/env bash\ncase "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf "codex 1.0\\n"; exit 0 ;; esac\n%s\necho done\n' \
+    "$body" > "$dir-bin/codex"
   chmod +x "$dir-bin/codex"
   out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$dir-bin:/usr/bin:/bin" \
     OMS_WORKER_GUARD_STRICT="${OMS_WORKER_GUARD_STRICT:-0}" \
@@ -22455,7 +22456,10 @@ import json, sys
 failures = json.load(sys.stdin)["failures"]
 assert failures["present"] is True, failures
 assert failures["healthy"] is False, failures
-assert failures["error"] == "projection-unavailable", failures
+# Quarantine refined the tag: the projection stays available, the corrupt
+# row is counted, and health goes false — still never disguised as empty.
+assert failures["error"] == "invalid-rows", failures
+assert failures["invalid_rows"] == 1, failures
 ' || fail "malformed physical failure ledger was disguised as empty: $state_json"
   inbox_json="$("$ROOT/scripts/inbox.sh" --repo "$project" --json)"
   printf '%s' "$inbox_json" | python3 -c '
