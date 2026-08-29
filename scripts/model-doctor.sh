@@ -15,8 +15,9 @@ Usage: model-doctor.sh [--json] [--live-models] [--require-all] [--strict-divers
 
 Check installed provider CLIs, their default invocation surface, and cached
 model/effort capabilities. --live-models refreshes catalog-capable providers.
-The default includes the historical core and installed optional agents; auto
-checks only installed agents, and all also reports absent built-ins.
+The default includes the historical core and detected optional agents; auto
+checks only detected agents, and all also reports absent built-ins. A detected
+but unusable executable is reported as broken rather than hidden.
 EOF
 }
 while [ "$#" -gt 0 ]; do
@@ -36,15 +37,20 @@ done
   echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
   exit 2
 }
-PROVIDER_NAMES="$(oms_provider_selection_names "$PROVIDERS")" || exit $?
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-model-doctor.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+provider_names_file="$tmp/providers"
+# Doctor is an inventory surface, not a router. Keep discovered-but-broken
+# executables in the report; only the routing pool filters them by usability.
+oms_provider_selection_discovered_names "$PROVIDERS" > "$provider_names_file" || exit $?
+PROVIDER_NAMES="$(cat "$provider_names_file")"
 rows="$tmp/rows.jsonl"; : > "$rows"
 while IFS= read -r provider; do
   [ -n "$provider" ] || continue
-  binary="$(oms_provider_binary "$provider")"; installed=false; version=""; default_reachable=false
-  if command -v "$binary" >/dev/null 2>&1; then
-    installed=true
+  binary="$(oms_provider_binary "$provider")"; installed=false; usable=false; version=""; default_reachable=false
+  oms_provider_cli_discovered "$provider" && installed=true
+  oms_provider_cli_available "$provider" && usable=true
+  if [ "$usable" = true ]; then
     version_out="$tmp/$provider.version"
     help_out="$tmp/$provider.help"
     version_cmd=("$binary")
@@ -70,12 +76,12 @@ while IFS= read -r provider; do
   fi
   file="$(oms_capability_file "$provider")"
   family="$(oms_provider_model_family "$provider" provider-default)"
-  python3 - "$provider" "$binary" "$installed" "$version" "$default_reachable" "$family" \
+  python3 - "$provider" "$binary" "$installed" "$usable" "$version" "$default_reachable" "$family" \
     "$(oms_capability_read_field "$file" effort_mechanism 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" >> "$rows" <<'PY'
 import json, sys
-p,b,i,v,d,f,m,e=sys.argv[1:]
-print(json.dumps({"provider":p,"binary":b,"installed":i=="true","version":v or None,
+p,b,i,u,v,d,f,m,e=sys.argv[1:]
+print(json.dumps({"provider":p,"binary":b,"installed":i=="true","usable":u=="true","version":v or None,
  "provider_default_reachable":d=="true","family":f,"effort_mechanism":m or None,
  "effort_values":e.split() if e else []}))
 PY
@@ -90,8 +96,9 @@ live, require, strict=(x=="1" for x in sys.argv[2:])
 errors=[]; warnings=[]
 for p in providers:
     if not p["installed"]: (errors if require else warnings).append("%s: provider binary '%s' is not installed" % (p["provider"],p["binary"]))
+    elif not p["usable"]: errors.append("%s: provider binary is present but its bounded version/help probe failed" % p["provider"])
     elif not p["provider_default_reachable"]: errors.append("%s: provider default invocation is not reachable" % p["provider"])
-families={p["family"] for p in providers if p["installed"] and p["provider_default_reachable"] and p["family"] != "unknown"}
+families={p["family"] for p in providers if p["usable"] and p["provider_default_reachable"] and p["family"] != "unknown"}
 if strict and len(families)<2: errors.append("model-family diversity needs at least two usable families")
 print(json.dumps({"schema":2,"ok":not errors,"live_models":live,"require_all":require,"strict_diversity":strict,"providers":providers,"warnings":warnings,"errors":errors},sort_keys=True))
 PY
@@ -99,7 +106,9 @@ if [ "$JSON" -eq 1 ]; then cat "$result"; else
   python3 - "$result" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1])); print("# oh-my-setting model doctor\n")
-for p in x["providers"]: print("%s: %s; default=%s; effort=%s"%(p["provider"],"installed" if p["installed"] else "missing",p["provider_default_reachable"],p["effort_mechanism"] or "unknown"))
+for p in x["providers"]:
+    status = "installed" if p["usable"] else ("broken" if p["installed"] else "missing")
+    print("%s: %s; default=%s; effort=%s"%(p["provider"],status,p["provider_default_reachable"],p["effort_mechanism"] or "unknown"))
 for w in x["warnings"]: print("warning: "+w)
 for e in x["errors"]: print("error: "+e)
 print("model-doctor: ok" if x["ok"] else "model-doctor: FAILED")

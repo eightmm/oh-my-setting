@@ -15,8 +15,9 @@ fail() {
 }
 
 bin="$TMP/bin"
-mkdir -p "$bin" "$TMP/cap"
+mkdir -p "$bin" "$TMP/cap" "$TMP/adapters"
 export PATH="$bin:/usr/bin:/bin"
+export OMS_PROVIDER_ADAPTER_DIR="$TMP/adapters"
 # Capability refreshes must not touch the real user cache.
 export OMS_CAPABILITY_DIR="$TMP/cap"
 

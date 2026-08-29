@@ -12,12 +12,13 @@ oms_provider_core_names() {
 }
 
 oms_provider_supported_names() {
-  printf '%s\n' codex claude antigravity cursor grok gemini qwen opencode
+  printf '%s\n' codex claude antigravity cursor grok gemini qwen opencode \
+    deepseek vibe pi copilot droid aider
 }
 
 oms_provider_is_builtin() {
   case "$1" in
-    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode) return 0 ;;
+    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode|deepseek|vibe|pi|copilot|droid|aider) return 0 ;;
   esac
   return 1
 }
@@ -62,12 +63,16 @@ oms_provider_is_custom() {
 
 # Built-ins either expose a provider-native read boundary or are covered by
 # an explicit transport contract below. Antigravity has no file-write-blocking
-# read flag, and custom adapters are user-defined executables, so both run in a
+# read flag, Aider may maintain repository-map cache state even in ask/dry-run
+# mode, and custom adapters are user-defined executables, so these run in a
 # disposable detached worktree for read calls.
 oms_provider_requires_read_isolation() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?
-  [ "$provider" = antigravity ] || oms_provider_is_custom "$provider"
+  case "$provider" in
+    antigravity|aider) return 0 ;;
+  esac
+  oms_provider_is_custom "$provider"
 }
 
 oms_provider_custom_names() {
@@ -112,7 +117,11 @@ oms_provider_normalize() {
     gemini-cli) printf 'gemini\n' ;;
     qwen-code) printf 'qwen\n' ;;
     opencode2) printf 'opencode\n' ;;
-    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode)
+    dsh|deepseek-harness) printf 'deepseek\n' ;;
+    mistral-vibe) printf 'vibe\n' ;;
+    github-copilot) printf 'copilot\n' ;;
+    factory-droid) printf 'droid\n' ;;
+    codex|claude|antigravity|cursor|grok|gemini|qwen|opencode|deepseek|vibe|pi|copilot|droid|aider)
       printf '%s\n' "$1"
       ;;
     *)
@@ -137,6 +146,12 @@ oms_provider_binary() {
     grok) printf 'grok\n' ;;
     gemini) printf 'gemini\n' ;;
     qwen) printf 'qwen\n' ;;
+    deepseek) printf 'dsh\n' ;;
+    vibe) printf 'vibe\n' ;;
+    pi) printf 'pi\n' ;;
+    copilot) printf 'copilot\n' ;;
+    droid) printf 'droid\n' ;;
+    aider) printf 'aider\n' ;;
     opencode)
       if command -v opencode >/dev/null 2>&1; then
         printf 'opencode\n'
@@ -150,10 +165,76 @@ oms_provider_binary() {
   esac
 }
 
-oms_provider_cli_available() {
+# Run a no-input provider probe behind a real wall clock. GNU timeout is the
+# native Git Bash/Linux path, gtimeout covers Homebrew coreutils, and the
+# process-group helper is the stock macOS/POSIX fallback. Native Windows
+# without Git Bash timeout fails closed rather than running an unbounded CLI.
+oms_provider_run_bounded() { # SECONDS OUTPUT COMMAND...
+  local seconds="$1" output="$2" helper
+  shift 2
+  if command -v timeout >/dev/null 2>&1 && timeout --version >/dev/null 2>&1; then
+    timeout --kill-after=1 "$seconds" "$@" > "$output" 2>&1
+  elif command -v gtimeout >/dev/null 2>&1 && gtimeout --version >/dev/null 2>&1; then
+    gtimeout --kill-after=1 "$seconds" "$@" > "$output" 2>&1
+  else
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/run-bounded.py"
+    command -v python3 >/dev/null 2>&1 && [ -f "$helper" ] || return 127
+    python3 "$helper" "${seconds}s" 1s provider-probe "$@" > "$output" 2>&1
+  fi
+}
+
+oms_provider_cli_discovered() {
   local binary
   binary="$(oms_provider_binary "$1" 2>/dev/null)" || return 1
-  command -v "$binary" >/dev/null 2>&1
+  case "$binary" in
+    */*) [ -f "$binary" ] && [ -x "$binary" ] ;;
+    *) command -v "$binary" >/dev/null 2>&1 ;;
+  esac
+}
+
+OMS_PROVIDER_PROBE_CACHE="${OMS_PROVIDER_PROBE_CACHE:-|}"
+
+oms_provider_probe_cache_reset() {
+  OMS_PROVIDER_PROBE_CACHE='|'
+}
+
+# PATH presence is only discovery. A stale nvm shim or broken interpreter is
+# not an installed provider for routing purposes until a bounded, local,
+# no-inference version/help probe proves the executable can start.
+oms_provider_cli_usable() {
+  local provider binary timeout_seconds arg result=1
+  local -a probe
+  provider="$(oms_provider_normalize "$1")" || return 1
+  case "$OMS_PROVIDER_PROBE_CACHE" in
+    *"|$provider=1|"*) return 0 ;;
+    *"|$provider=0|"*) return 1 ;;
+  esac
+  if oms_provider_cli_discovered "$provider"; then
+    binary="$(oms_provider_binary "$provider")"
+    timeout_seconds="${OMS_PROVIDER_PROBE_TIMEOUT:-5}"
+    case "$timeout_seconds" in *[!0-9]*|'') timeout_seconds=5 ;; esac
+    [ "$timeout_seconds" -gt 0 ] 2>/dev/null || timeout_seconds=5
+    probe=("$binary")
+    for arg in $(oms_provider_version_args "$provider"); do probe+=("$arg"); done
+    if oms_provider_run_bounded "$timeout_seconds" /dev/null "${probe[@]}" </dev/null; then
+      result=0
+    else
+      probe=("$binary")
+      for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
+      oms_provider_run_bounded "$timeout_seconds" /dev/null "${probe[@]}" </dev/null && result=0
+    fi
+  fi
+  if [ "$result" -eq 0 ]; then
+    OMS_PROVIDER_PROBE_CACHE="$OMS_PROVIDER_PROBE_CACHE$provider=1|"
+    return 0
+  fi
+  OMS_PROVIDER_PROBE_CACHE="$OMS_PROVIDER_PROBE_CACHE$provider=0|"
+  return 1
+}
+
+# Compatibility spelling retained for every existing router.
+oms_provider_cli_available() {
+  oms_provider_cli_usable "$1"
 }
 
 oms_provider_installed_names() {
@@ -161,6 +242,25 @@ oms_provider_installed_names() {
   while IFS= read -r provider; do
     [ -n "$provider" ] || continue
     oms_provider_cli_available "$provider" && printf '%s\n' "$provider"
+  done <<EOF
+$(oms_provider_supported_names)
+EOF
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    oms_provider_cli_available "$provider" && printf '%s\n' "$provider"
+  done <<EOF
+$(oms_provider_custom_names)
+EOF
+}
+
+# Physical discovery without executing a provider. Read-only inventory
+# surfaces use this to preserve their "no CLI invocation" contract; routing
+# and model-doctor use the usable list above.
+oms_provider_discovered_names() {
+  local provider
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    oms_provider_cli_discovered "$provider" && printf '%s\n' "$provider"
   done <<EOF
 $(oms_provider_supported_names)
 EOF
@@ -179,6 +279,17 @@ oms_provider_default_names() {
     printf '%s\n' "$provider"
   done <<EOF
 $(oms_provider_installed_names)
+EOF
+}
+
+oms_provider_default_discovered_names() {
+  local provider
+  oms_provider_core_names
+  while IFS= read -r provider; do
+    case "$provider" in codex|claude|antigravity) continue ;; esac
+    printf '%s\n' "$provider"
+  done <<EOF
+$(oms_provider_discovered_names)
 EOF
 }
 
@@ -203,6 +314,18 @@ oms_provider_supports_access() {
     [ "$candidate" = "$provider" ] && return 0
   done
   return 1
+}
+
+# Some official headless surfaces select their active model only through their
+# own profile/config. Refuse an exact OMS --model instead of pretending it was
+# honored. Multi-model transports with a documented CLI flag return true.
+oms_provider_supports_model_override() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    deepseek|vibe) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # Provider invocation transport. The installed CLI remains the default for
@@ -281,6 +404,12 @@ grok
 gemini
 qwen
 opencode
+deepseek
+vibe
+pi
+copilot
+droid
+aider
 $custom_names
 EOF
   if [ "$found" -eq 0 ] && [ -n "$caller" ] && \
@@ -299,7 +428,7 @@ oms_provider_effort_mechanism() {
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider" in
     codex) printf 'config\n' ;;
-    claude|antigravity|grok) printf 'flag\n' ;;
+    claude|antigravity|grok|pi|copilot|droid|aider) printf 'flag\n' ;;
     *) printf 'none\n' ;;
   esac
 }
@@ -309,7 +438,9 @@ oms_provider_effort_flag() {
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider" in
     codex) printf -- '-c model_reasoning_effort\n' ;;
-    claude|antigravity|grok) printf -- '--effort\n' ;;
+    claude|antigravity|grok|copilot) printf -- '--effort\n' ;;
+    pi) printf -- '--thinking\n' ;;
+    droid|aider) printf -- '--reasoning-effort\n' ;;
     *) printf '\n' ;;
   esac
 }
@@ -318,7 +449,9 @@ oms_provider_effort_values() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider" in
-    codex|claude|antigravity|grok) printf 'low medium high\n' ;;
+    codex|claude|antigravity|grok|aider) printf 'low medium high\n' ;;
+    pi) printf 'low medium high xhigh max\n' ;;
+    copilot|droid) printf 'low medium high xhigh max\n' ;;
     *) printf '\n' ;;
   esac
 }
@@ -410,6 +543,7 @@ oms_provider_model_family() {
     grok) printf 'xai\n' ;;
     gemini) printf 'google\n' ;;
     qwen) printf 'alibaba\n' ;;
+    deepseek) printf 'deepseek\n' ;;
     antigravity|cursor|opencode|*)
       printf '%s\n' "$inferred"
       ;;
@@ -459,6 +593,23 @@ oms_provider_selection_names() {
   case "$selection" in
     default|'') oms_provider_default_names ;;
     auto|installed) oms_provider_installed_names ;;
+    all)
+      oms_provider_supported_names
+      oms_provider_custom_names
+      ;;
+    *)
+      normalized="$(oms_provider_normalize_list "$selection")" || return $?
+      printf '%s\n' "$normalized" | tr ',' '\n'
+      ;;
+  esac
+}
+
+oms_provider_selection_discovered_names() {
+  local selection="${1:-default}"
+  local normalized
+  case "$selection" in
+    default|'') oms_provider_default_discovered_names ;;
+    auto|installed) oms_provider_discovered_names ;;
     all)
       oms_provider_supported_names
       oms_provider_custom_names

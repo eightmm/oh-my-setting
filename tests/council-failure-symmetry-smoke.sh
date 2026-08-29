@@ -42,6 +42,7 @@ write_stubs() {  # write_stubs BIN_DIR
   # itself and the seat exits 124 instead of escalating to a SIGKILL 137.
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat > /dev/null
 echo "PARTIAL-OPINION: a line the wall clock cut off mid-answer"
 exec sleep 30
@@ -51,6 +52,7 @@ EOF
   for provider in claude agy; do
     cat > "$bin_dir/$provider" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'provider 1.0\n'; exit 0 ;; esac
 cat > /dev/null
 echo "Verdict: the seat bookkeeping is safe to land. Evidence: the artifact row,"
 echo "the thread turn, and the failure ledger are written from one place, and"
@@ -211,6 +213,7 @@ test_failed_single_call_is_recorded_like_a_seat() {
   mkdir -p "$project/home" "$bin_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat > /dev/null
 echo "provider failed mid-run"
 exit 42
@@ -265,6 +268,7 @@ test_exit_zero_non_answer_threads_but_stays_out_of_the_ledger() {
   # meant to say "this command keeps failing".
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat > /dev/null
 echo 'add an allow-rule for the read tool, then re-run the council.'
 EOF

@@ -19,16 +19,28 @@ OMS recognizes these built-in transports when their executables are on PATH:
 | `gemini` | `gemini` | plan/yolo approval mode with sandbox |
 | `qwen` | `qwen` | safe plan/yolo mode with sandbox |
 | `opencode` | `opencode` | plan/build agent in an OMS-owned worktree |
+| `deepseek` | `dsh` | headless + read-only/workspace-write permission preset |
+| `vibe` | `vibe` | invocation-only worktree trust; plan/accept-edits with an exact tool allowlist |
+| `pi` | `pi` | ephemeral print mode; project resources off; read/edit tool allowlists |
+| `copilot` | `copilot` | programmatic mode with MCP, shell, URL, and memory writes denied |
+| `droid` | `droid` | default read-only or bounded `--auto low` edits |
+| `aider` | `aider` | ask/dry-run or code mode; commits and shell suggestions off |
 
-Detection runs only bounded `--version`, `--help`, or documented local model
-catalog commands. It never logs in, installs, upgrades, changes provider
-configuration, or starts an inference request.
+Physical discovery only resolves an executable. Automatic routing additionally
+requires a bounded `--version`/`--help` usability probe; a hanging or stale shim
+stays visible as broken but never enters a provider pool. `oms models` does not
+execute a CLI and reports `usable: null`; `--refresh` and `model-doctor` perform
+the bounded probe. Documented local model catalogs run only on explicit refresh.
+None of these probes logs in, installs, upgrades, changes configuration, or
+starts an inference request.
 
 ```bash
 oms models --providers auto
 oms model-doctor --providers auto --json
 oms consult --to grok --prompt 'Check this design assumption.'
 oms consult --to opencode:model=zai/glm-4.7 --prompt 'Review this plan.'
+oms consult --to deepseek --prompt 'Review the ownership boundary.'
+oms consult --to aider:model=deepseek/deepseek-chat --prompt 'Review this plan.'
 oms agent-run --to cursor --mode write --prompt 'Implement the reviewed change.'
 ```
 
@@ -39,10 +51,35 @@ fan-out or spend. Name optional seats explicitly; `consult --all` is also an
 explicit fan-out request.
 
 Exact model names stay attached to their carrier (`opencode` in the GLM
-example). Family inference supports known names such as GLM, Grok, Gemini,
-Claude, GPT, Qwen, DeepSeek, and Mistral. An unknown or provider-default model
-on a multi-model carrier remains `unknown`; do not count it as independent
-evidence.
+example and `aider` in the DeepSeek-model example). `deepseek` by itself is the
+official DeepSeek Harness transport. Family inference supports known names such
+as GLM, Grok, Gemini, Claude, GPT, Qwen, DeepSeek, and Mistral. An unknown or
+provider-default model on a multi-model carrier remains `unknown`; do not count
+it as independent evidence. DeepSeek Harness and Vibe have no documented exact
+model flag on these headless surfaces, so OMS refuses `--model` for them.
+DeepSeek runs with its process telemetry hard-disabled; its permission preset
+still does not claim network or universal host-process isolation.
+
+Treat provider-native user/admin configuration and previously trusted project
+configuration as host code. OMS narrows the documented agent, tool, approval,
+and worktree surface, but cannot erase native hooks, plugins, MCP servers,
+credentials, or organization policy that the CLI loads before the turn. Audit
+those layers separately when the repository or provider configuration is not
+already trusted.
+
+The built-in set is deliberately narrower than “every agent executable.” Kimi
+CLI prompt mode currently conflicts with plan mode and auto-approves tools;
+Trae, OpenHands, Goose, and similar surfaces stay custom-adapter candidates
+until a stable noninteractive read/write permission contract can be pinned.
+
+## Upstream contracts
+
+- [DeepSeek Harness CLI behavior](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md)
+- [Mistral Vibe programmatic mode](https://docs.mistral.ai/vibe/code/cli/work-with-cli)
+- [Pi CLI usage](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/usage.md)
+- [GitHub Copilot CLI programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
+- [Factory Droid Exec](https://docs.factory.ai/droid-exec/overview)
+- [Aider scripting](https://aider.chat/docs/scripting.html)
 
 ## Custom adapters
 

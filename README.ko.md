@@ -1,7 +1,9 @@
 # oh-my-setting
 
-Codex, Claude Code, Antigravity가 어느 머신에서든 같은 규칙, 같은 skill, 같은
-agent 하네스를 쓰게 하는 설정 하나.
+서로 다른 coding-agent CLI가 같은 프로젝트의 규칙, 상태, plan, evidence,
+lease와 handoff를 동일하게 읽고 이어서 작업하게 만드는 로컬 control plane.
+Codex, Claude Code, Antigravity는 managed core로 유지되고, optional provider도
+같은 capability-safe transport 계약으로 참여한다.
 
 **직접 실행할 일은 없다.** 아래 호스트 사전 조건을 준비한 뒤에는 설치 명령
 하나만 직접 치고, 그 뒤로 하네스는 사용자 것이 아니라 agent 것이다.

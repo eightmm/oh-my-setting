@@ -154,6 +154,7 @@ test_repair_and_run() {
   create_executor "$repo" repair1 EXECUTOR-REPAIR-MARKER
   cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 prompt="$(cat)"; count=0
 [ ! -f "$CAPTURE_DIR/count" ] || count="$(cat "$CAPTURE_DIR/count")"
 count=$((count + 1)); printf '%s\n' "$count" > "$CAPTURE_DIR/count"
@@ -199,6 +200,7 @@ EOF
   create_executor "$repo" default1 EXECUTOR-DEFAULT-MODEL
   cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 count=0
 [ ! -f "$CAPTURE_DIR/default.count" ] || count="$(cat "$CAPTURE_DIR/default.count")"

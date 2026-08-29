@@ -35,6 +35,18 @@ git -C "$repo" commit -qm base
 
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf 'codex 1.0\n'
+    exit 0
+    ;;
+  exec)
+    if [ "${2:-}" = "--help" ]; then
+      printf 'usage: codex exec\n'
+      exit 0
+    fi
+    ;;
+esac
 prompt="$(cat)"
 [ -z "${CALL_LOG:-}" ] || printf 'call\n' >> "$CALL_LOG"
 [ -z "${STEAL_TASK:-}" ] || [ "${OMS_TASK_ID:-}" != "$STEAL_TASK" ] || {

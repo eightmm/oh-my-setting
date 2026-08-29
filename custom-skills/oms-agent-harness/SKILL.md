@@ -81,7 +81,7 @@ projections, not authority.
 - Consultation: [cross-agent-consultation.md](references/cross-agent-consultation.md)
 - Review/release gates: [review-gates.md](references/review-gates.md)
 - Models/quorum: [model-routing.md](references/model-routing.md)
-- Installed agent detection, Grok/GLM carriers, and custom adapters: [provider-routing.md](references/provider-routing.md)
+- Installed agent detection, DeepSeek/Grok/GLM carriers, and custom adapters: [provider-routing.md](references/provider-routing.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
 
 Retain internal provenance and report only useful conclusions, changed behavior,

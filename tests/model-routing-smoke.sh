@@ -42,6 +42,7 @@ if grep -q 'model tiers' "$TMP/warn.err"; then fail 'removed tier layer must not
 # exercise the live command build, not the dry-run shortcut.
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}" in --version) echo 'codex 1.0'; exit 0 ;; esac
 printf '%s\n' "$@" > "$CODEX_ARGV_OUT"
 prompt="$(cat)"
 count=0
@@ -100,12 +101,14 @@ echo stub answer with enough substance to count
 EOF
 cat > "$TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}" in --version) echo 'claude 1.0'; exit 0 ;; esac
 printf '%s\n' "$@" > "$CLAUDE_ARGV_OUT"
 cat >/dev/null
 echo stub answer with enough substance to count
 EOF
 cat > "$TMP/bin/agy" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}" in --version) echo 'agy 1.0'; exit 0 ;; esac
 printf '%s\n' "$@" > "$AGY_ARGV_OUT"
 cat >/dev/null
 count=1

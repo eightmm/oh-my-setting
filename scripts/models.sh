@@ -18,8 +18,10 @@ Usage: models.sh [--json] [--refresh] [--providers default|auto|all|CSV]
 
 Show cached provider model catalogs and reasoning-effort capabilities. --refresh
 updates the cache first; without it this command never invokes a provider CLI.
-The default is the historical core plus installed optional agents; auto means
-only installed agents, and all also shows absent built-in transports.
+The default is the historical core plus detected optional agents; auto means
+only detected agents, and all also shows absent built-in transports. With
+--refresh, a detected executable that fails the bounded probe remains visible
+as broken and is excluded from routing.
 EOF
 }
 while [ "$#" -gt 0 ]; do
@@ -41,28 +43,43 @@ done
   echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
   exit 2
 }
-PROVIDER_NAMES="$(oms_provider_selection_names "$PROVIDERS")" || exit $?
-
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-models.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+provider_names_file="$tmp/providers"
+# Inventory always starts from physical discovery. A refresh adds a bounded
+# usability verdict; it must not make a broken PATH entry disappear from the
+# very diagnostic that should explain why routing excluded it.
+oms_provider_selection_discovered_names "$PROVIDERS" > "$provider_names_file" || exit $?
+PROVIDER_NAMES="$(cat "$provider_names_file")"
 rows="$tmp/rows.jsonl"
 : > "$rows"
 while IFS= read -r provider; do
   [ -n "$provider" ] || continue
   binary="$(oms_provider_binary "$provider")"
-  if [ "$REFRESH" -eq 1 ]; then oms_capability_refresh "$provider" || true; fi
+  present=false
+  usable=unknown
+  model_override=false
+  oms_provider_cli_discovered "$provider" && present=true
+  if [ "$REFRESH" -eq 1 ]; then
+    usable=false
+    oms_provider_cli_available "$provider" && usable=true
+  fi
+  oms_provider_supports_model_override "$provider" && model_override=true
+  if [ "$REFRESH" -eq 1 ] && [ "$usable" = true ]; then
+    oms_capability_refresh "$provider" || true
+  fi
   file="$(oms_capability_file "$provider")"
   models_file="$(oms_capability_cache_dir)/$provider.models"
   efforts_file="$(oms_capability_cache_dir)/$provider.efforts"
   OMS_MODELS_FILE="$models_file" OMS_EFFORTS_FILE="$efforts_file" python3 - \
-    "$provider" "$binary" "$(command -v "$binary" >/dev/null 2>&1 && echo true || echo false)" \
+    "$provider" "$binary" "$present" "$usable" "$model_override" \
     "$(oms_capability_read_field "$file" effort_mechanism 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" probed_at 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" models_probe 2>/dev/null || true)" \
     "$(oms_provider_model_listing_kind "$provider")" >> "$rows" <<'PY'
 import json, os, sys, time
-provider, binary, present, mechanism, values, probed, probe, listing = sys.argv[1:]
+provider, binary, present, usable, model_override, mechanism, values, probed, probe, listing = sys.argv[1:]
 def lines(path, limit=20):
     try:
         with open(path, encoding="utf-8") as f:
@@ -83,7 +100,9 @@ except ValueError: age = None
 # stored: a snapshot taken before the provider grew a listing command would
 # otherwise keep asserting it has none.
 catalog_probe = "unsupported" if listing == "none" else (probe or "unknown")
+usable_value = None if usable == "unknown" else usable == "true"
 print(json.dumps({"provider": provider, "binary": binary, "present": present == "true",
+ "usable": usable_value, "exact_model_override": model_override == "true",
  "models": lines(os.environ["OMS_MODELS_FILE"]), "effort_mechanism": mechanism or None,
  "effort_values": values.split() if values else [], "model_effort_scales": scales(os.environ["OMS_EFFORTS_FILE"]),
  "catalog_probe": catalog_probe, "snapshot_age_seconds": age}, ensure_ascii=False))
@@ -101,7 +120,9 @@ else
 import json, sys
 HINT = "'oms models --refresh' (local catalog listing, no model tokens)"
 for raw in open(sys.argv[1]):
-    row=json.loads(raw); print("## %s (%s)" % (row["provider"], "present" if row["present"] else "absent"))
+    row=json.loads(raw)
+    status = ("usable" if row["usable"] else "broken") if row["usable"] is not None else ("present" if row["present"] else "absent")
+    print("## %s (%s)" % (row["provider"], status))
     # Catalog presence decides, then catalog_probe only explains an empty one:
     # a run that skips the probe rewrites the snapshot beside a catalog an
     # earlier --refresh wrote, and a repair named there points at nothing.
@@ -112,6 +133,7 @@ for raw in open(sys.argv[1]):
         lead = "last probe failed; retry with " if row["catalog_probe"] == "failed" else "probe with "
         print("models: unknown — " + lead + HINT)
     print("effort: %s %s" % (row["effort_mechanism"] or "unknown", " ".join(row["effort_values"])))
+    print("exact model override: %s" % row["exact_model_override"])
     print("snapshot age: %s" % (str(row["snapshot_age_seconds"]) + "s" if row["snapshot_age_seconds"] is not None else "unknown"))
 PY
 fi

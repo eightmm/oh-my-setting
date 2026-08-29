@@ -327,7 +327,7 @@ ma_write_harness_context() {
         model_lines="${model_lines}- $provider: $models
 "
       done <<EOF_MODELS
-$(oms_provider_default_names)
+$(oms_provider_default_discovered_names)
 EOF_MODELS
       if [ -n "$model_lines" ]; then
         printf '### available models\n'
@@ -1795,11 +1795,30 @@ ma_provider_attempt() {
   local binary
   local prompt_arg=""
   local prompt_bytes=0
+  local provider_stdin="$prompt_file"
+  local provider_scratch=""
   local -a cmd
 
+  provider="$(oms_provider_normalize "$provider")" || {
+    echo "error: unsupported provider: $provider" > "$output_file"
+    return 2
+  }
   if ! oms_provider_supports_access "$provider" "$access"; then
     echo "error: provider '$provider' does not support $access access through this transport" > "$output_file"
     return 2
+  fi
+  if [ "$model" != provider-default ] &&
+    ! oms_provider_supports_model_override "$provider"; then
+    echo "error: provider '$provider' has no documented per-invocation model override; configure its native profile or omit --model" > "$output_file"
+    return 2
+  fi
+  if ! oms_provider_cli_discovered "$provider"; then
+    echo "error: provider command not found: $(oms_provider_binary "$provider" 2>/dev/null || printf '%s' "$provider")" > "$output_file"
+    return 127
+  fi
+  if ! oms_provider_cli_available "$provider"; then
+    echo "error: provider command is present but failed its bounded version/help probe: $(oms_provider_binary "$provider")" > "$output_file"
+    return 126
   fi
   transport="$(oms_provider_transport "$provider")" || {
     echo "error: provider transport selection failed" > "$output_file"
@@ -1979,6 +1998,136 @@ ma_provider_attempt() {
       fi
       cmd+=("$prompt_arg")
       ;;
+    deepseek)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the DeepSeek Harness headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      prompt_arg="$(cat "$prompt_file")"
+      permission=read-only
+      [ "$access" != write ] || permission=workspace-write
+      cmd=(env "DSH_PERMISSION_MODE=$permission" DSH_TELEMETRY_DISABLED=1 "$binary"
+        --profile headless "$prompt_arg")
+      ;;
+    vibe)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Vibe programmatic transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      prompt_arg="$(cat "$prompt_file")"
+      # Programmatic mode cannot ask to trust a fresh OMS worktree. Grant
+      # trust only for this invocation so the already reviewed repository can
+      # run without persisting a host-level trusted-folder decision.
+      cmd=("$binary" --trust --max-turns 24 --output text)
+      if [ "$access" = write ]; then
+        cmd+=(--agent accept-edits
+          --enabled-tools read_file --enabled-tools grep
+          --enabled-tools write_file --enabled-tools edit)
+      else
+        cmd+=(--agent plan
+          --enabled-tools read_file --enabled-tools grep)
+      fi
+      cmd+=(--prompt "$prompt_arg")
+      ;;
+    pi)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Pi print transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      prompt_arg="$(cat "$prompt_file")"
+      cmd=(env PI_SKIP_VERSION_CHECK=1 "$binary" --no-session --no-approve
+        --no-extensions --no-skills --no-prompt-templates --mode text)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--thinking "$effort")
+      cmd+=(--tools)
+      if [ "$access" = write ]; then
+        cmd+=("read,edit,write,grep,find,ls")
+      else
+        cmd+=("read,grep,find,ls")
+      fi
+      cmd+=(--print "$prompt_arg")
+      ;;
+    copilot)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+      if [ "$prompt_bytes" -gt 120000 ]; then
+        echo "error: prompt is ${prompt_bytes}B; the Copilot programmatic transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+        return 2
+      fi
+      prompt_arg="$(cat "$prompt_file")"
+      cmd=("$binary" -s --no-ask-user --disable-builtin-mcps
+        --disallow-temp-dir)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--effort "$effort")
+      cmd+=(--available-tools)
+      if [ "$access" = write ]; then
+        cmd+=("view,grep,glob,edit,create,apply_patch")
+        cmd+=(--allow-tool)
+        cmd+=("read,write")
+        cmd+=(--deny-tool shell --deny-tool url --deny-tool memory)
+      else
+        cmd+=("view,grep,glob")
+        cmd+=(--deny-tool write --deny-tool shell --deny-tool url
+          --deny-tool memory)
+      fi
+      cmd+=(-p "$prompt_arg")
+      ;;
+    droid)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      cmd=("$binary" exec --cwd "$workdir" --output-format text
+        --disable-builtin-skills)
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
+      [ "$access" != write ] || cmd+=(--auto low)
+      cmd+=(-f "$prompt_file")
+      ;;
+    aider)
+      provider_stdin=/dev/null
+      binary="$(oms_provider_binary "$provider")"
+      provider_scratch="$(mktemp -d "${TMPDIR:-/tmp}/oms-aider.XXXXXX")" || {
+        echo 'error: could not allocate private Aider invocation state' > "$output_file"
+        return 2
+      }
+      chmod 0700 "$provider_scratch" || {
+        rm -rf "$provider_scratch"
+        provider_scratch=""
+        echo 'error: could not protect private Aider invocation state' > "$output_file"
+        return 2
+      }
+      : > "$provider_scratch/empty.env"
+      chmod 0600 "$provider_scratch/empty.env" || {
+        rm -rf "$provider_scratch"
+        provider_scratch=""
+        echo 'error: could not protect private Aider environment file' > "$output_file"
+        return 2
+      }
+      cmd=("$binary" --no-auto-commits --no-dirty-commits --no-gitignore
+        --no-suggest-shell-commands --no-auto-lint --no-auto-test
+        --no-check-update --no-detect-urls --no-pretty --no-stream
+        --no-analytics --no-restore-chat-history
+        --env-file "$provider_scratch/empty.env"
+        --input-history-file "$provider_scratch/input.history"
+        --chat-history-file "$provider_scratch/chat.history")
+      [ "$model" = provider-default ] || cmd+=(--model "$model")
+      [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
+      if [ "$access" = write ]; then
+        cmd+=(--chat-mode code --yes-always --no-dry-run)
+      else
+        cmd+=(--chat-mode ask --dry-run)
+      fi
+      cmd+=(--message-file "$prompt_file")
+      ;;
     *)
       binary="$(oms_provider_binary "$provider" 2>/dev/null)" || {
         echo "error: unsupported provider: $provider" > "$output_file"
@@ -1995,6 +2144,7 @@ ma_provider_attempt() {
     [ "${OMS_WORKER_GUARD_OFF:-0}" != 1 ] &&
     [ "${OMS_WORKER_AUTHORITY_EXCLUSIVE:-0}" = 1 ]; then
     authority_backup="$(mktemp -d "${TMPDIR:-/tmp}/oms-authority.XXXXXX")" || {
+      [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
       printf 'BLOCKED: could not allocate owner authority recovery state\n' > "$output_file"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
@@ -2002,6 +2152,7 @@ ma_provider_attempt() {
     }
     chmod 0700 "$authority_backup" || {
       rm -rf "$authority_backup"
+      [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
       printf 'BLOCKED: could not protect owner authority recovery state\n' > "$output_file"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
@@ -2010,6 +2161,7 @@ ma_provider_attempt() {
     authority_before="$authority_backup/manifest"
     authority_after="$(agent_memory_mktemp)" || {
       rm -rf "$authority_backup"
+      [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
       printf 'BLOCKED: could not allocate owner authority comparison state\n' > "$output_file"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
@@ -2021,6 +2173,7 @@ ma_provider_attempt() {
         > "$output_file"
       rm -rf "$authority_backup"
       rm -f "$authority_after"
+      [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
       return 125
@@ -2030,11 +2183,12 @@ ma_provider_attempt() {
   (
     ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
     cd "$workdir" || exit 1
-    run_with_timeout "${cmd[@]}" < "$prompt_file"
+    run_with_timeout "${cmd[@]}" < "$provider_stdin"
   ) > "$output_file" 2>&1 &
   local pid="$!"
 
   if wait "$pid"; then status=0; else status=$?; fi
+  [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
   [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
   [ "$provider" != codex ] || ma_codex_jsonl_to_text "$output_file"
   if [ -n "$authority_before" ]; then

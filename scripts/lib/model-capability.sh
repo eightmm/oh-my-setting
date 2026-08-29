@@ -110,17 +110,18 @@ oms_capability_read_field() {
   sed -n "s/^$field=//p" "$file" | sed -n '1p'
 }
 
-# A CLI that hangs must not hang whatever asked for the snapshot. Where no
-# timeout binary exists the probe still runs — refusing to learn a capability
-# because a coreutils tool is missing would be worse than the risk.
+# A CLI that hangs must not hang whatever asked for the snapshot. Reuse the
+# provider registry's GNU/BSD/POSIX wall-clock ladder when it is loaded; every
+# public model surface sources both helpers before this function is called.
 oms_capability_run_bounded() {
   local seconds="$1" out="$2"
   shift 2
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@" > "$out" 2>&1
-  else
-    "$@" > "$out" 2>&1
+  if type oms_provider_run_bounded >/dev/null 2>&1; then
+    oms_provider_run_bounded "$seconds" "$out" "$@"
+    return $?
   fi
+  echo 'error: bounded provider probe helper is unavailable' > "$out"
+  return 127
 }
 
 # Read a provider's catalog into MODELS_OUT (one model per line) and, where the

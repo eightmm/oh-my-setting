@@ -12,8 +12,8 @@ from . import RUNTIME_SCHEMA
 from .common import CoreError, atomic_write_json, read_json, utc_now
 
 BUILTIN_PROFILE_DEFS: Dict[str, Dict[str, Any]] = {
-    "core": {"description": "Local state, typed projections and one coding-agent backend.", "required": ["bash", "git", "python3"], "any_of": [["codex", "claude", "agy", "cursor-agent", "grok", "gemini", "qwen", "opencode"]], "min_present": {}, "optional": [], "managed_tools": ["primary-provider"]},
-    "council": {"description": "Cross-provider consultation, review and delegation.", "inherits": ["core"], "required": [], "any_of": [], "min_present": {"commands": ["codex", "claude", "agy", "cursor-agent", "grok", "gemini", "qwen", "opencode"], "count": 2}, "optional": [], "managed_tools": ["secondary-provider"]},
+    "core": {"description": "Local state, typed projections and one coding-agent backend.", "required": ["bash", "git", "python3"], "any_of": [["codex", "claude", "agy", "cursor-agent", "grok", "gemini", "qwen", "opencode", "dsh", "vibe", "pi", "copilot", "droid", "aider"]], "min_present": {}, "optional": [], "managed_tools": ["primary-provider"]},
+    "council": {"description": "Cross-provider consultation, review and delegation.", "inherits": ["core"], "required": [], "any_of": [], "min_present": {"commands": ["codex", "claude", "agy", "cursor-agent", "grok", "gemini", "qwen", "opencode", "dsh", "vibe", "pi", "copilot", "droid", "aider"], "count": 2}, "optional": [], "managed_tools": ["secondary-provider"]},
     "github": {"description": "GitHub status, branch publication and Draft PR integration.", "required": ["gh"], "any_of": [], "min_present": {}, "optional": [], "managed_tools": ["gh"]},
     "notion": {"description": "Optional Work Journal mirror to Notion.", "required": ["ntn"], "any_of": [], "min_present": {}, "optional": [], "managed_tools": ["ntn"]},
     "research": {"description": "Reproducible ML/research runs and locked Python environments.", "required": ["uv"], "any_of": [], "min_present": {}, "optional": ["nvidia-smi"], "managed_tools": ["uv"]},

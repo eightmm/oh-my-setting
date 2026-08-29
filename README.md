@@ -1,7 +1,9 @@
 # oh-my-setting
 
-One setup that gives Codex, Claude Code, and Antigravity the same rules,
-skills, and agent harness on every machine.
+A local control plane that lets different coding-agent CLIs continue the same
+project from the same durable rules, state, plans, evidence, leases, and
+handoffs. Codex, Claude Code, and Antigravity remain the managed core; optional
+providers join through the same capability-safe transport contract.
 
 **You never run any of it.** After the host prerequisites below, install is the
 only command you type; from then on the harness is the agent's, not yours. Its

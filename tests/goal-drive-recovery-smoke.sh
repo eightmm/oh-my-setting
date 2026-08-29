@@ -112,6 +112,12 @@ calls="$TMP/provider-calls"
 mkdir -p "$bin" "$home"
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  --version:|--help:|exec:--help)
+    printf 'codex 1.0\n'
+    exit 0
+    ;;
+esac
 cat >/dev/null
 printf '%s\n' "${OMS_TASK_ID:-missing}" >> "$CALL_LOG"
 case "${OMS_TASK_ID:-}" in
@@ -286,6 +292,12 @@ git -C "$exact_repo" add tracked.txt
 git -C "$exact_repo" commit -qm 'expand exact-byte fixture'
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  --version:|--help:|exec:--help)
+    printf 'codex 1.0\n'
+    exit 0
+    ;;
+esac
 cat >/dev/null
 printf '%s\n' "${OMS_TASK_ID:-missing}" >> "$CALL_LOG"
 sed 's/^base$/autonomous-tracked/' tracked.txt > tracked.txt.next
@@ -611,6 +623,7 @@ git -C "$repair_review_repo" commit -qm base
 repair_review_calls="$TMP/repair-review-window-calls"
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 count=0
 [ ! -f "$CALL_LOG" ] || count="$(wc -l < "$CALL_LOG" | tr -d ' ')"
@@ -651,6 +664,7 @@ make_case "$repair_repo" tracked
 repair_calls="$TMP/repair-worker-calls"
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 count=0
 [ ! -f "$CALL_LOG" ] || count="$(wc -l < "$CALL_LOG" | tr -d ' ')"
@@ -730,6 +744,7 @@ git -C "$empty_repo" commit -qm base
 empty_calls="$TMP/empty-repair-calls"
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 count=0
 [ ! -f "$CALL_LOG" ] || count="$(wc -l < "$CALL_LOG" | tr -d ' ')"
@@ -763,6 +778,7 @@ fi
 # neither may hide the exact outer intent or force another provider call.
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 printf '%s\n' "${OMS_TASK_ID:-missing}" >> "$CALL_LOG"
 printf 'autonomous-tracked\n' > tracked.txt
@@ -1502,6 +1518,7 @@ route_bin="$TMP/goal-routing-bin"
 mkdir -p "$route_bin"
 cat > "$route_bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 printf '%s\n' "${OMS_TASK_ID:-missing}" >> "$CALL_LOG"
 printf '%s\n' "$@" > "$ROUTE_ARGV"
@@ -1538,6 +1555,7 @@ for goal_phase in plan-run repair; do
   mkdir -p "$phase_bin"
   cat > "$phase_bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 count=0
 [ ! -f "$CALL_LOG" ] || count="$(wc -l < "$CALL_LOG" | tr -d ' ')"
@@ -1822,6 +1840,7 @@ git -C "$rename_repo" commit -qm base
   --verify 'bash scripts/check.sh' >/dev/null
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 printf '%s\n' "${OMS_TASK_ID:-missing}" >> "$CALL_LOG"
 git mv old.txt new.txt

@@ -3,13 +3,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-models.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
-mkdir -p "$TMP/cap" "$TMP/bin"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/codex"; chmod +x "$TMP/bin/codex"
+mkdir -p "$TMP/cap" "$TMP/bin" "$TMP/adapters"
+export OMS_PROVIDER_ADAPTER_DIR="$TMP/adapters"
+cat > "$TMP/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+[ -z "${OMS_MODELS_PROVIDER_CALLED:-}" ] || : > "$OMS_MODELS_PROVIDER_CALLED"
+exit 0
+EOF
+chmod +x "$TMP/bin/codex"
 now="$(date +%s)"
 printf 'binary_key=x\neffort_mechanism=config\neffort_values=low high\nprobed_at=%s\n' "$now" > "$TMP/cap/codex.env"
 printf 'model-a\nmodel-b\n' > "$TMP/cap/codex.models"
 printf 'model-a\tlow high\n' > "$TMP/cap/codex.efforts"
-out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" "$ROOT/scripts/models.sh" --json)"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" \
+  OMS_MODELS_PROVIDER_CALLED="$TMP/provider-called" "$ROOT/scripts/models.sh" --json)"
+[ ! -e "$TMP/provider-called" ] || fail 'models without --refresh invoked a provider CLI'
 OMS_MODELS_JSON="$out" python3 - <<'PY'
 import json, os
 x=json.loads(os.environ['OMS_MODELS_JSON']); assert x['schema']==1
