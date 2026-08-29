@@ -102,7 +102,17 @@ def _plan_status(repo: Path) -> Dict[str, Any]:
                     for key in ('nonempty', 'all_done', 'has_unfinished')) or
             not isinstance(payload.get('by_state'), dict) or
             not all(isinstance(payload.get(key), list)
-                    for key in ('actionable', 'stale', 'stale_review'))):
+                    for key in ('actionable', 'stale', 'stale_review')) or
+            not isinstance(payload.get('contract'), dict) or
+            not all(isinstance(payload['contract'].get(key), bool)
+                    for key in ('bound', 'satisfied', 'project_present',
+                                'project_healthy')) or
+            not all(isinstance(payload['contract'].get(key), str)
+                    for key in ('project_state', 'blocker',
+                                'expected_spec_sha256',
+                                'current_spec_sha256')) or
+            any(not isinstance(item, str) for item in payload['actionable']) or
+            len(payload['actionable']) != len(set(payload['actionable']))):
         raise CoreError('canonical plan status projection is unavailable or invalid')
     return payload
 
@@ -131,7 +141,10 @@ def _plan_state(repo: Path) -> Dict[str, Any]:
     count = len(tasks)
     if status['task_count'] != count or status['nonempty'] != (count > 0):
         raise CoreError('canonical plan status disagrees with the physical plan task set')
-    return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'task_count': status['task_count'], 'nonempty': status['nonempty'], 'all_done': status['all_done'], 'has_unfinished': status['has_unfinished'], 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
+    task_ids = {task['id'] for task in tasks}
+    if any(item not in task_ids for item in status['actionable']):
+        raise CoreError('canonical plan status names an unknown actionable task')
+    return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'task_count': status['task_count'], 'nonempty': status['nonempty'], 'all_done': status['all_done'], 'has_unfinished': status['has_unfinished'], 'actionable': list(status['actionable']), 'contract': dict(status['contract']), 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
 
 def _latest_executor(repo: Path) -> Dict[str, Any]:
     candidates: List[Tuple[Path, Dict[str, Any]]] = []
@@ -277,16 +290,27 @@ def _actions(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[
     tasks = plan.get('tasks', []) if isinstance(plan.get('tasks'), list) else []
     empty_plan = bool(plan.get('present')) and not bool(plan.get('nonempty'))
     if empty_plan: add('repair_empty_plan', 88, 'append', 'The active plan has no tasks, so completion cannot be proven.', 'oms plan-from-spec --repo .')
-    landing = [row for row in tasks if row.get('state') == 'landing']; review = [row for row in tasks if row.get('state') == 'review']; ready = [row for row in tasks if row.get('state') == 'ready']; running = [row for row in tasks if row.get('state') in ('claimed', 'running')]; active_plan = bool(landing or review or ready or running)
+    landing = [row for row in tasks if row.get('state') == 'landing']; review = [row for row in tasks if row.get('state') == 'review']; stored_ready = [row for row in tasks if row.get('state') == 'ready']; running = [row for row in tasks if row.get('state') in ('claimed', 'running')]; active_plan = bool(landing or review or stored_ready or running)
+    actionable_ids = set(plan.get('actionable', [])) if isinstance(plan.get('actionable'), list) else set()
+    claimable = [row for row in tasks if row.get('id') in actionable_ids]
+    contract = plan.get('contract', {}) if isinstance(plan.get('contract'), dict) else {}
+    contract_blocked = contract.get('bound') is True and contract.get('satisfied') is False
     if landing: add('finish_landing', 90, 'repo_write', 'A task is inside the landing transaction.', 'oms patch-land --recover')
     elif review:
         task_id = bounded_line(review[0].get('id', ''), 160); add('review_or_land_patch', 85, 'repo_write', 'A reviewed task has a frozen patch awaiting the parent decision.', 'oms plan-run --id %s --land' % task_id if task_id else 'oms plan-run --next --land')
-    elif ready: add('execute_ready_task', 80, 'worktree_write', '%d plan task(s) are ready.' % len(ready), 'oms plan-run --next')
+    elif claimable: add('execute_ready_task', 80, 'worktree_write', '%d plan task(s) are ready.' % len(claimable), 'oms plan-run --next')
     elif running: add('inspect_active_attempt', 75, 'read', 'A plan task is claimed or running.', 'oms state')
+    if contract_blocked and stored_ready:
+        blocker = bounded_line(contract.get('blocker', 'unknown'), 80) or 'unknown'
+        add('inspect_plan_contract', 89, 'read', 'The reviewed plan is blocked by PROJECT.md contract state: %s.' % blocker, 'oms agent-plan --repo . status --json')
     if task.get('present') and not evidence.get('complete'):
         if task.get('verification') != 'fresh': add('verify_active_task', 70, 'read', 'Acceptance evidence is incomplete and the active task gate is not fresh.', 'oms agent-task verify')
         else: add('resolve_evidence_gaps', 68, 'read', 'The task gate is fresh but one or more declared criteria still lack current evidence.', 'oms runtime evidence show')
-    if evidence.get('complete') and not active_plan and not empty_plan: add('record_verified_completion', 50, 'append', 'Every declared criterion has current evidence and no plan task remains active.', 'oms agent-task close')
+    if evidence.get('complete') and not active_plan and not empty_plan:
+        if task.get('present'):
+            add('record_verified_completion', 50, 'append', 'Every declared criterion has current evidence and no plan task remains active.', 'oms agent-task close')
+        elif plan.get('present') and plan.get('all_done'):
+            add('inspect_completed_plan_retirement', 50, 'read', 'Every declared criterion has current evidence and the completed plan is still active.', 'oms agent-plan --repo . retire --check')
     if not result: add('orient', 10, 'read', 'No stronger deterministic transition is available.', 'oms inbox')
     return sorted(result, key=lambda item: (-int(item['priority']), str(item['id'])))
 

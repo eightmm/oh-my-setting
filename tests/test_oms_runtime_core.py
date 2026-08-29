@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
-from oms_runtime import capsule, context, evidence, experiment, failures, profiles, release
+from oms_runtime import capsule, context, evidence, experiment, failures, profiles, projection, release
 from oms_runtime.benchmark import record_outcome as record_benchmark_outcome
 from oms_runtime.benchmark import snapshot as benchmark_snapshot
 from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atomic_write_json, canonical_json, git_head, parse_path_list, read_json, read_jsonl, sensitive_text, sha256_bytes, sha256_file, sha256_text
@@ -197,6 +197,93 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(statuses[plan_id], 'missing')
         self.assertEqual(row['scope']['forbidden'], ['secrets/'])
         self.assertEqual(row['next_actions'][0]['id'], 'execute_ready_task')
+
+    def test_completed_plan_without_active_task_routes_to_retirement_check(self) -> None:
+        actions = projection._actions(
+            {'present': True},
+            {'present': False},
+            {
+                'present': True,
+                'nonempty': True,
+                'all_done': True,
+                'tasks': [{'id': 'finished', 'state': 'done'}],
+            },
+            {'complete': True},
+            [],
+        )
+        by_id = {item['id']: item for item in actions}
+        self.assertNotIn('record_verified_completion', by_id)
+        self.assertEqual(
+            by_id['inspect_completed_plan_retirement'],
+            {
+                'id': 'inspect_completed_plan_retirement',
+                'priority': 50,
+                'authority': 'read',
+                'reason': 'Every declared criterion has current evidence and the completed plan is still active.',
+                'command': 'oms agent-plan --repo . retire --check',
+            },
+        )
+
+    def test_contract_blocker_replaces_ready_execution_with_inspection(self) -> None:
+        actions = projection._actions(
+            {'present': True},
+            {'present': False},
+            {
+                'present': True,
+                'nonempty': True,
+                'all_done': False,
+                'actionable': [],
+                'contract': {
+                    'bound': True,
+                    'satisfied': False,
+                    'project_state': 'confirmed',
+                    'blocker': 'project-drift',
+                },
+                'tasks': [{'id': 'ready-but-blocked', 'state': 'ready'}],
+            },
+            {'complete': False},
+            [],
+        )
+        by_id = {item['id']: item for item in actions}
+        self.assertNotIn('execute_ready_task', by_id)
+        self.assertEqual(
+            by_id['inspect_plan_contract'],
+            {
+                'id': 'inspect_plan_contract',
+                'priority': 89,
+                'authority': 'read',
+                'reason': 'The reviewed plan is blocked by PROJECT.md contract state: project-drift.',
+                'command': 'oms agent-plan --repo . status --json',
+            },
+        )
+
+    def test_plan_actions_use_canonical_dependency_and_expiry_verdict(self) -> None:
+        base = {
+            'present': True,
+            'nonempty': True,
+            'all_done': False,
+            'contract': {'bound': False, 'satisfied': True},
+        }
+        dependency_blocked = dict(base, actionable=[], tasks=[
+            {'id': 'blocked-dependency', 'state': 'blocked'},
+            {'id': 'stored-ready', 'state': 'ready'},
+        ])
+        actions = projection._actions(
+            {'present': True}, {'present': False}, dependency_blocked,
+            {'complete': False}, [],
+        )
+        self.assertNotIn('execute_ready_task', [item['id'] for item in actions])
+
+        expired_claim = dict(base, actionable=['expired'], tasks=[
+            {'id': 'expired', 'state': 'claimed'},
+        ])
+        actions = projection._actions(
+            {'present': True}, {'present': False}, expired_claim,
+            {'complete': False}, [],
+        )
+        by_id = {item['id']: item for item in actions}
+        self.assertIn('execute_ready_task', by_id)
+        self.assertNotIn('inspect_active_attempt', by_id)
 
     def test_explicit_binding_and_dependency_staleness(self) -> None:
         dependency = self.repo / 'scripts' / 'sample.py'
@@ -810,6 +897,17 @@ class RuntimeFixture(RuntimeFixtureBase):
             two.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
             two.chmod(493)
             self.assertTrue(profiles.check(['council'])['ready'])
+            one.unlink()
+            two.unlink()
+            deepseek = fake_bin / 'dsh'
+            deepseek.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            deepseek.chmod(493)
+            vibe = fake_bin / 'vibe'
+            vibe.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            vibe.chmod(493)
+            result = profiles.check(['council'])
+            self.assertTrue(result['ready'], result)
+            self.assertEqual(result['minimum'][0]['present'], ['dsh', 'vibe'])
         finally:
             os.environ['PATH'] = old_path
             os.environ['HOME'] = old_home

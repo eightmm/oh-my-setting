@@ -3,6 +3,12 @@
 Use `agent-plan` only when work genuinely has parallel or dependent subtasks.
 Each claim has a lease; a reclaimed lease invalidates stale workers.
 
+For a reviewed plan, inspect `oms agent-plan --repo . status --json` before
+claiming. `contract.satisfied=false` means the current `PROJECT.md` no longer
+matches the reviewed bytes/state. Restore or review the contract; do not bypass
+the empty `actionable` list. A worker holding an existing exact lease may still
+advance or release it, because cleanup authority is distinct from a new claim.
+
 ```bash
 oms agent-plan --repo . add --id t1 --title "Fix parser" --verify "bash scripts/check.sh"
 oms agent-plan --repo . next --claim --provider codex

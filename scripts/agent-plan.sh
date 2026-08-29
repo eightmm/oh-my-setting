@@ -486,7 +486,8 @@ python3 - "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
   "$ROOT/scripts/lib/verify-floor-lint.py" \
   "$ROOT/scripts/lib/process_liveness.py" \
   "$ROOT/scripts/lib/plan-retire.py" \
-  "$ROOT/scripts/lib/path_scope.py" <<'PY'
+  "$ROOT/scripts/lib/path_scope.py" \
+  "$ROOT/scripts/lib/project-state.py" <<'PY'
 import datetime, hashlib, json, math, os, re, runpy, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
@@ -501,6 +502,7 @@ persisted_native_pid_is_proven = process_liveness[
     "persisted_native_pid_is_proven"
 ]
 within_envelope = runpy.run_path(sys.argv[6])["within_envelope"]
+project_state_snapshot = runpy.run_path(sys.argv[7])["snapshot"]
 def env(k): return os.environ.get(k, "")
 
 STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
@@ -836,6 +838,59 @@ def actionable(d, t):
     """Claimable right now: ready, or held by an expired claim."""
     return deps_done(d, t) and (t["state"] == "ready" or claim_expired(t))
 
+def project_contract_verdict(d):
+    contract = d.get("project_contract")
+    project = project_state_snapshot(os.path.join(env("OMS_REPO"), "PROJECT.md"))
+    if contract is None:
+        return {
+            "bound": False, "satisfied": True,
+            "project_state": project.get("state", "invalid"),
+            "project_present": project.get("present") is True,
+            "project_healthy": project.get("healthy") is True,
+            "blocker": "", "expected_spec_sha256": "",
+            "current_spec_sha256": project.get("sha256", "")
+            if project.get("healthy") is True else "",
+        }
+    expected = contract.get("spec_sha256", "") if isinstance(contract, dict) else ""
+    valid_contract = (
+        isinstance(contract, dict) and contract.get("schema") == 1 and
+        isinstance(expected, str) and
+        re.fullmatch(r"[0-9a-f]{64}", expected) is not None
+    )
+    current = project.get("sha256", "") if project.get("healthy") is True else ""
+    if not valid_contract:
+        blocker = "invalid-contract"
+    elif project.get("healthy") is not True:
+        blocker = "project-unreadable"
+    elif project.get("state") == "missing":
+        blocker = "project-missing"
+    elif project.get("state") == "draft":
+        blocker = "project-draft"
+    elif project.get("state") not in ("confirmed", "legacy-active"):
+        blocker = "project-invalid"
+    elif current != expected:
+        blocker = "project-drift"
+    else:
+        blocker = ""
+    return {
+        "bound": True, "satisfied": blocker == "",
+        "project_state": project.get("state", "invalid"),
+        "project_present": project.get("present") is True,
+        "project_healthy": project.get("healthy") is True,
+        "blocker": blocker,
+        "expected_spec_sha256": expected if valid_contract else "",
+        "current_spec_sha256": current,
+    }
+
+def contract_actionable(d, t):
+    return CONTRACT_VERDICT["satisfied"] and actionable(d, t)
+
+def require_project_contract_authority():
+    if CONTRACT_VERDICT["satisfied"]:
+        return
+    die("PROJECT.md contract blocks new task authority: %s" %
+        CONTRACT_VERDICT["blocker"])
+
 def expiry_note(t):
     return "claim EXPIRED (age %ss >= ttl %ss, was @%s)" % (
         claim_age(t), claim_ttl_for(t), t.get("provider", "") or "?")
@@ -881,6 +936,7 @@ if act == "accept":
 
 d = load()
 tasks = d["tasks"]
+CONTRACT_VERDICT = project_contract_verdict(d)
 
 if act == "init":
     d = {"schema": SCHEMA, "plan_id": "plan_" + secrets.token_hex(16),
@@ -1233,6 +1289,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         require_current_lease(t)
         t["claimed_at"] = ts
     elif act == "claim":
+        require_project_contract_authority()
         prov = env("OMS_PROVIDER")
         if not prov: die("--provider is required for claim")
         # Only a ready task can be claimed; a blocked task must be reopened first.
@@ -1605,8 +1662,11 @@ if act == "brief":
     sys.exit(0)
 
 if act == "next":
-    candidates = [t for t in ordered if actionable(d, t)]
+    candidates = [t for t in ordered if contract_actionable(d, t)]
     if not candidates:
+        if not CONTRACT_VERDICT["satisfied"]:
+            sys.stderr.write("plan: PROJECT.md contract blocks new task authority: %s\n" %
+                             CONTRACT_VERDICT["blocker"])
         sys.stderr.write("plan: no actionable task\n")
         sys.exit(3)
     t = candidates[0]
@@ -1637,7 +1697,7 @@ if act == "next":
 if act == "ready":
     # Ids only: this output is consumed. The expiry note goes to stderr.
     for t in ordered:
-        if not actionable(d, t):
+        if not contract_actionable(d, t):
             continue
         if claim_expired(t):
             sys.stderr.write("plan: %s %s; counted as ready\n" % (t["id"], expiry_note(t)))
@@ -1661,7 +1721,7 @@ if act == "status":
     by = {}
     for t in tasks.values():
         by[t["state"]] = by.get(t["state"], 0) + 1
-    claimable = [t["id"] for t in ordered if actionable(d, t)]
+    claimable = [t["id"] for t in ordered if contract_actionable(d, t)]
     stale = [{"id": t["id"], "provider": t.get("provider", ""),
               "age_seconds": claim_age(t), "ttl_seconds": claim_ttl_for(t)}
              for t in ordered if claim_expired(t)]
@@ -1676,6 +1736,7 @@ if act == "status":
             "all_done": count > 0 and all(t.get("state") == "done" for t in tasks.values()),
             "has_unfinished": any(t.get("state") != "done" for t in tasks.values()),
             "by_state": by, "actionable": claimable,
+            "contract": CONTRACT_VERDICT,
             "stale": stale, "stale_review": stale_review,
         }, ensure_ascii=False, sort_keys=True))
         sys.exit(0)
@@ -1707,6 +1768,8 @@ if act == "status":
     print("tasks: %d  [%s]" % (len(tasks),
         " ".join("%s=%d" % (s, by[s]) for s in order if by.get(s))))
     print("ready now: %s" % (" ".join(claimable) if claimable else "(none)"))
+    if not CONTRACT_VERDICT["satisfied"]:
+        print("contract blocker: %s" % CONTRACT_VERDICT["blocker"])
     for t in ordered:
         if claim_expired(t):
             print("expired claim %s: %s" % (t["id"], expiry_note(t)))

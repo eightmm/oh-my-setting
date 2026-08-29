@@ -1644,7 +1644,12 @@ git -C "$contract_repo" init -q
 git -C "$contract_repo" config user.email test@example.com
 git -C "$contract_repo" config user.name test
 printf 'base\n' > "$contract_repo/file.txt"
-git -C "$contract_repo" add file.txt
+cat > "$contract_repo/PROJECT.md" <<'EOF'
+# Contract-bound landing fixture
+
+- State: confirmed
+EOF
+git -C "$contract_repo" add file.txt PROJECT.md
 git -C "$contract_repo" commit -qm base
 printf 'contract reviewed\n' > "$contract_repo/file.txt"
 git -C "$contract_repo" diff --binary > "$contract_patch"
@@ -1658,13 +1663,13 @@ printf 'reviewed\n' > "$contract_artifact"
   --allowed file.txt --verify true >/dev/null
 # The contract is written the way apply-proposal writes it; this suite fences
 # the landing receipt, not the proposal path that mints the contract.
-python3 - "$contract_repo/.oms/plan/tasks.json" <<'PY'
-import json, pathlib, sys
+python3 - "$contract_repo/.oms/plan/tasks.json" "$contract_repo/PROJECT.md" <<'PY'
+import hashlib, json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 plan = json.loads(path.read_text(encoding="utf-8"))
 plan["project_contract"] = {
     "schema": 1,
-    "spec_sha256": "0" * 64,
+    "spec_sha256": hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest(),
     "allowed_envelope": ["file.txt"],
     "acceptance_files": [],
     "acceptance_manifest": [],

@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import functools
+import os
 import re
 import string
 import sys
@@ -17,6 +18,9 @@ MAX_BRACKET_EXPANSION = 4096
 MAX_BRACKET_TOKENS = 4096
 MAX_PATTERN_EXPANSION = 4096
 MAX_PATTERN_REGEX_OUTPUT = 16384
+MAX_RULE_FILE_BYTES = 1024 * 1024
+MAX_RULES = 8192
+MAX_CLASSIFY_PATHS = 100000
 
 
 def _ascii_range(first, last):
@@ -307,6 +311,73 @@ def classify(path, allowed, forbidden):
     return "allowed"
 
 
+def _classifier(allowed, forbidden):
+    allowed = validate_patterns(allowed)
+    forbidden = validate_patterns(forbidden)
+
+    def decide(path):
+        if any(matches(path, pattern) for pattern in forbidden):
+            return "forbidden"
+        if allowed and not any(matches(path, pattern) for pattern in allowed):
+            return "outside"
+        return "allowed"
+    return decide
+
+
+def _rules_from_file(path):
+    try:
+        info = os.stat(path)
+        if not os.path.isfile(path) or info.st_size > MAX_RULE_FILE_BYTES:
+            raise ValueError("scope rule file is not a bounded regular file")
+        with open(path, "rb") as handle:
+            payload = handle.read(MAX_RULE_FILE_BYTES + 1)
+    except OSError:
+        raise ValueError("cannot read scope rule file")
+    if len(payload) > MAX_RULE_FILE_BYTES or b"\0" in payload:
+        raise ValueError("scope rule file is invalid or too large")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeError:
+        raise ValueError("scope rule file must be UTF-8")
+    allowed, forbidden = [], []
+    count = 0
+    for raw in text.split("\n"):
+        line = raw[:-1] if raw.endswith("\r") else raw
+        if not line:
+            continue
+        fields = line.split("\t")
+        if fields[0] not in ("allow", "deny"):
+            continue
+        if len(fields) != 2 or not fields[1]:
+            raise ValueError("scope rule row is malformed")
+        count += 1
+        if count > MAX_RULES:
+            raise ValueError("scope rule file has too many rules")
+        target = allowed if fields[0] == "allow" else forbidden
+        target.append(normalize(fields[1], "scope rule"))
+    return validate_patterns(allowed), validate_patterns(forbidden)
+
+
+def classify_many(rule_file, input_stream, output_stream):
+    allowed, forbidden = _rules_from_file(rule_file)
+    decide = _classifier(allowed, forbidden)
+    count = 0
+    for raw in input_stream:
+        line = raw[:-1] if raw.endswith("\n") else raw
+        line = line[:-1] if line.endswith("\r") else line
+        if not line:
+            continue
+        count += 1
+        if count > MAX_CLASSIFY_PATHS:
+            raise ValueError("scope path stream has too many entries")
+        # `change-guard` historically classifies Git's emitted spelling after
+        # only its shell-level ./ and trailing-slash cleanup. Keep that path
+        # byte spelling; normalization belongs to stored scope declarations.
+        _validate_scope_item_size(line, "changed path")
+        path = line
+        output_stream.write("%s\t%s\n" % (decide(path), path))
+
+
 def normalize_list(text):
     values = [
         normalize(item)
@@ -323,7 +394,8 @@ def normalize_list(text):
 def _usage():
     print(
         "usage: path_scope.py match-any PATH PATTERN... | "
-        "inside CANDIDATE ENVELOPE... | normalize-list TEXT",
+        "inside CANDIDATE ENVELOPE... | normalize-list TEXT | "
+        "classify-many RULE_FILE",
         file=sys.stderr,
     )
     return 2
@@ -344,6 +416,9 @@ def main(argv):
             return 0 if within_envelope(candidate, envelope) else 1
         if action == "normalize-list" and len(argv) == 3:
             print(",".join(normalize_list(argv[2])))
+            return 0
+        if action == "classify-many" and len(argv) == 3:
+            classify_many(argv[2], sys.stdin, sys.stdout)
             return 0
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)

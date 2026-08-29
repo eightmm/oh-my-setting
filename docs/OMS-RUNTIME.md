@@ -89,7 +89,17 @@ The envelope projects, without copying authority:
 It returns the effective objective, merged scope, acceptance criteria, budget,
 source digests, warnings, and a small set of valid next actions. `write` stores
 only a derived snapshot under `.oms/runtime/`; the original files remain
-authoritative.
+authoritative. When current evidence completes the work, the projection keeps
+the two cleanup authorities distinct: it recommends `agent-task close` only
+for an active task packet, and the read-only `agent-plan retire --check` when
+an all-done plan is the remaining active record.
+
+Plan execution recommendations come from `agent-plan status --json.actionable`,
+not from the stored `ready` label alone. For a reviewed plan, the same snapshot
+also exposes `plan.contract`. When its PROJECT digest/state is unsatisfied,
+runtime and inbox replace `execute_ready_task` with the read-only
+`inspect_plan_contract`; already-claimed/review/landing work keeps its normal
+continuation authority.
 
 Acceptance criteria can carry explicit stable IDs:
 

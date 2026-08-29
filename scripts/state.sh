@@ -142,7 +142,7 @@ else
     > "$RS_TMP/plan.json" 2>/dev/null || PLAN_HEALTHY=0
 fi
 if [ "$PLAN_HEALTHY" = 1 ] && ! python3 -c \
-  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; count=row.get("task_count") if isinstance(row, dict) else None; by_state=row.get("by_state") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and isinstance(count, int) and not isinstance(count, bool) and count >= 0 and all(isinstance(row.get(key), bool) for key in ("nonempty", "all_done", "has_unfinished")) and row.get("nonempty") == (count > 0) and row.get("has_unfinished") == (count > 0 and not row.get("all_done")) and isinstance(by_state, dict) and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in by_state.values()) and sum(by_state.values()) == count and all(isinstance(row.get(key), list) for key in ("actionable", "stale", "stale_review"))' \
+  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; count=row.get("task_count") if isinstance(row, dict) else None; by_state=row.get("by_state") if isinstance(row, dict) else None; contract=row.get("contract") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and isinstance(count, int) and not isinstance(count, bool) and count >= 0 and all(isinstance(row.get(key), bool) for key in ("nonempty", "all_done", "has_unfinished")) and row.get("nonempty") == (count > 0) and row.get("has_unfinished") == (count > 0 and not row.get("all_done")) and isinstance(by_state, dict) and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in by_state.values()) and sum(by_state.values()) == count and all(isinstance(row.get(key), list) for key in ("actionable", "stale", "stale_review")) and isinstance(contract, dict) and all(isinstance(contract.get(key), bool) for key in ("bound", "satisfied", "project_present", "project_healthy")) and all(isinstance(contract.get(key), str) for key in ("project_state", "blocker", "expected_spec_sha256", "current_spec_sha256"))' \
   "$RS_TMP/plan.json" "$PLAN_PHYSICAL" 2>/dev/null; then
   PLAN_HEALTHY=0
 fi
@@ -382,6 +382,7 @@ plan = {
     "stale": plan_status.get("stale", []),
     "stale_review": plan_status.get("stale_review", []),
     "actionable": plan_status.get("actionable", []),
+    "contract": plan_status.get("contract", {}),
 }
 if not plan_healthy:
     plan["error"] = "status-unavailable"
@@ -926,6 +927,10 @@ else:
         if p.get("goal"):
             line("  goal: %s" % p["goal"])
         line("  by state: %s" % ", ".join("%s=%d" % (k, v) for k, v in sorted(p["by_state"].items())))
+        contract = p.get("contract", {})
+        if contract.get("bound") and not contract.get("satisfied"):
+            line("  PROJECT contract: BLOCKED (%s; inspect: oms agent-plan --repo . status --json)" %
+                 (contract.get("blocker") or "unknown"))
         if p["actionable"]:
             line("  actionable now: %s" % ", ".join(p["actionable"]))
         if p["stale"]:

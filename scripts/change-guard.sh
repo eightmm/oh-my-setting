@@ -8,7 +8,7 @@ ROOT="$(cd "$ROOT" && pwd)"
 # shellcheck source=scripts/lib/agent-task-common.sh
 . "$ROOT/scripts/lib/agent-task-common.sh"
 
-PATH_SCOPE_HELPER="$ROOT/scripts/lib/path_scope.py"
+PATH_SCOPE_HELPER="${OMS_PATH_SCOPE_HELPER:-$ROOT/scripts/lib/path_scope.py}"
 
 REPO="$PWD"
 STATE_FILE=""
@@ -119,18 +119,6 @@ dirty_paths() {
     sed -E 's/^.. //; s/^.* -> //'
 }
 
-path_allowed() {
-  local path="$1"
-  [ "${#ALLOW_PATHS[@]}" -gt 0 ] || return 0
-  python3 "$PATH_SCOPE_HELPER" match-any "$path" "${ALLOW_PATHS[@]}"
-}
-
-path_denied() {
-  local path="$1"
-  [ "${#DENY_PATHS[@]}" -gt 0 ] || return 1
-  python3 "$PATH_SCOPE_HELPER" match-any "$path" "${DENY_PATHS[@]}"
-}
-
 load_state() {
   [ -f "$STATE_FILE" ] || fail "state file not found: $STATE_FILE"
   ALLOW_PATHS=()
@@ -195,7 +183,7 @@ EOF
 
 cmd_check() {
   local warnings=0
-  local path old_sha new_sha scope_rc allow_rc
+  local path old_sha new_sha verdict scope_out
   local current_head
 
   load_state
@@ -214,33 +202,31 @@ cmd_check() {
     fi
   done < "$STATE_FILE"
 
-  while IFS= read -r path; do
+  scope_out="$(mktemp "${TMPDIR:-/tmp}/oms-change-guard-scope.XXXXXX")" ||
+    fail "cannot allocate scope result"
+  if ! changed_paths | python3 "$PATH_SCOPE_HELPER" classify-many "$STATE_FILE" > "$scope_out"; then
+    rm -f "$scope_out"
+    fail "declared path scope is invalid"
+  fi
+  while IFS=$'\t' read -r verdict path; do
     [ -n "$path" ] || continue
-    path="$(normalize_path "$path")"
-    scope_rc=0
-    path_denied "$path" || scope_rc=$?
-    case "$scope_rc" in
-      0)
+    case "$verdict" in
+      forbidden)
         printf 'warning: changed path in forbidden scope: %s\n' "$path"
         warnings=$((warnings + 1))
         ;;
-      1)
-        allow_rc=0
-        path_allowed "$path" || allow_rc=$?
-        case "$allow_rc" in
-          0) ;;
-          1)
-            printf 'warning: changed path outside declared scope: %s\n' "$path"
-            warnings=$((warnings + 1))
-            ;;
-          *) fail "declared path scope is invalid" ;;
-        esac
+      outside)
+        printf 'warning: changed path outside declared scope: %s\n' "$path"
+        warnings=$((warnings + 1))
         ;;
-      *) fail "declared path scope is invalid" ;;
+      allowed) ;;
+      *)
+        rm -f "$scope_out"
+        fail "scope classifier returned an invalid verdict"
+        ;;
     esac
-  done <<EOF
-$(changed_paths)
-EOF
+  done < "$scope_out"
+  rm -f "$scope_out"
 
   if [ "$warnings" -eq 0 ]; then
     echo "change-guard: ok"

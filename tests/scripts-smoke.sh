@@ -6352,6 +6352,75 @@ PY
     fail "forbidden scope did not take precedence over allow: $verdict"
 }
 
+test_change_guard_batches_scope_classification() {
+  local helper="$ROOT/scripts/lib/path_scope.py"
+  local project="$TMP/change-guard-batched-scope"
+  local invalid_project="$TMP/change-guard-invalid-clean-scope"
+  local invalid_state="$invalid_project/.oms/guards/invalid.tsv"
+  local state="$project/.oms/guards/batched.tsv"
+  local rules="$project/rules.tsv"
+  local wrapper="$project/count-path-scope.py"
+  local calls="$project/path-scope.calls"
+  local output="$project/check.out"
+  local index rc=0
+
+  make_committed_repo "$invalid_project"
+  "$ROOT/scripts/change-guard.sh" --repo "$invalid_project" \
+    --file "$invalid_state" --allow '../outside' begin >/dev/null
+  rc=0
+  "$ROOT/scripts/change-guard.sh" --repo "$invalid_project" \
+    --file "$invalid_state" check >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] ||
+    fail "invalid stored scope passed only because the changed set was empty (rc=$rc)"
+
+  make_committed_repo "$project"
+  printf '%s\n' \
+    $'repo\tignored' \
+    $'allow\tsrc/*.py' \
+    $'deny\tsrc/private*.py' \
+    > "$rules"
+  rc=0
+  printf '%s\n' 'src/app.py' 'src/private1.py' 'README.md' | \
+    python3 "$helper" classify-many "$rules" > "$project/classified" || rc=$?
+  [ "$rc" = 0 ] || fail "classify-many rejected a valid rule/path stream (rc=$rc)"
+  printf '%s\n' \
+    $'allowed\tsrc/app.py' \
+    $'forbidden\tsrc/private1.py' \
+    $'outside\tREADME.md' \
+    > "$project/expected"
+  cmp -s "$project/expected" "$project/classified" ||
+    fail "classify-many changed deny/allow semantics: $(cat "$project/classified")"
+
+  cat > "$wrapper" <<'PY'
+#!/usr/bin/env python3
+import os, sys
+with open(os.environ["OMS_PATH_SCOPE_CALL_LOG"], "a", encoding="utf-8") as handle:
+    handle.write("call\n")
+os.execv(sys.executable, [sys.executable, os.environ["OMS_PATH_SCOPE_REAL"]] + sys.argv[1:])
+PY
+  "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" \
+    --allow 'src/*.py' --deny 'src/private*.py' begin >/dev/null
+  mkdir -p "$project/src"
+  index=1
+  while [ "$index" -le 1000 ]; do
+    printf 'changed %s\n' "$index" > "$project/src/file$index.py"
+    index=$((index + 1))
+  done
+  printf 'private\n' > "$project/src/private1.py"
+
+  OMS_PATH_SCOPE_HELPER="$wrapper" \
+  OMS_PATH_SCOPE_REAL="$helper" \
+  OMS_PATH_SCOPE_CALL_LOG="$calls" \
+    "$ROOT/scripts/change-guard.sh" --repo "$project" --file "$state" check \
+      > "$output" || fail "batched change-guard check failed"
+  [ "$(wc -l < "$calls" | tr -d ' ')" = 1 ] ||
+    fail "change-guard started path_scope once per path instead of once: $(cat "$calls" 2>/dev/null || true)"
+  assert_file_contains "$output" "changed path in forbidden scope: src/private1.py"
+  if grep -Fq 'outside declared scope: src/file' "$output"; then
+    fail "batched classification rejected an allowed path"
+  fi
+}
+
 test_agent_call_outbound_scrubber_blocks_private_path() {
   local project="$TMP/agent-call-scrub"
   local artifact_dir="$project/artifacts"
@@ -7251,6 +7320,7 @@ test_agent_call_provider_nonzero_writes_exit_and_index() {
   mkdir -p "$project" "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 echo "provider failed mid-run"
 exit 42
@@ -7493,6 +7563,7 @@ test_agent_run_write_worker_failure_records_task_outcome() {
     --next "Inspect task outcome" >/dev/null
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 echo "worker failed mid-run"
 exit 42
@@ -19173,6 +19244,7 @@ test_delegate_worktree_lifecycle_suppresses_checkout_hooks() {
 EOF
   cat > "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
+case "\${1:-}:\${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat >/dev/null
 n=0
 [ ! -f "$counter" ] || n=\$(cat "$counter")
@@ -19539,6 +19611,7 @@ test_delegate_does_not_export_owner_authority_to_worker() {
   mkdir -p "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 for name in OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
   OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE; do
   eval "value=\${$name:-}"
@@ -20511,6 +20584,7 @@ test_parallel_delegates_do_not_erase_each_others_authority_state() {
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 set -eu
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 prompt="$(cat)"
 case "$prompt" in
   *parallel-a*) name=a ;;
@@ -21511,12 +21585,14 @@ test_delegate_consults_an_advisor_after_a_repair_also_fails() {
   # agent that is already stuck.
   cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
 cat > /dev/null
 echo "tried and failed"
 exit 1
 EOF
   cat > "$bin/claude" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}" in --version|--help) printf 'claude 1.0\n'; exit 0 ;; esac
 cat > /dev/null
 echo "VERDICT: stop. The brief names a file that does not exist in this tree."
 EOF
@@ -21547,8 +21623,8 @@ test_delegate_does_not_consult_an_advisor_on_a_first_failure() {
 
   make_committed_repo "$project"
   mkdir -p "$bin" "$home_dir"
-  printf '#!/usr/bin/env bash\ncat > /dev/null\necho nope\nexit 1\n' > "$bin/codex"
-  printf '#!/usr/bin/env bash\ncat > /dev/null\necho advice\n' > "$bin/claude"
+  printf '#!/usr/bin/env bash\ncase "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf "codex 1.0\\n"; exit 0 ;; esac\ncat > /dev/null\necho nope\nexit 1\n' > "$bin/codex"
+  printf '#!/usr/bin/env bash\ncase "${1:-}" in --version|--help) printf "claude 1.0\\n"; exit 0 ;; esac\ncat > /dev/null\necho advice\n' > "$bin/claude"
   chmod +x "$bin/codex" "$bin/claude"
 
   # One repair is the ordinary path: a worker that stumbles once and is told so
@@ -22497,6 +22573,199 @@ test_agent_plan_apply_rejects_noncanonical_project_state() {
     [ ! -e "$project/.oms/plan/tasks.json" ] ||
       fail "apply-proposal mutated topology for $kind PROJECT State"
   done
+}
+
+test_contract_bound_plan_blocks_new_authority_on_project_drift() {
+  local project="$TMP/plan-project-contract-drift"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local project_file="$project/PROJECT.md"
+  local original="$project/original-project.md"
+  local plan_file="$project/.oms/plan/tasks.json"
+  local before status runtime_file state_file inbox_file out lease rc
+
+  make_committed_repo "$project"
+  printf '%s\n' '# Demo' '- State: confirmed' '' '## Goal' 'Ship safely.' \
+    > "$project_file"
+  cp "$project_file" "$original"
+  mkdir -p "$project/.oms/plan"
+  python3 - "$project_file" "$plan_file" <<'PY'
+import hashlib, json, sys
+project, plan = sys.argv[1:]
+spec = hashlib.sha256(open(project, "rb").read()).hexdigest()
+row = {
+    "schema": 3,
+    "plan_id": "plan_" + "1" * 32,
+    "goal": "Ship safely.",
+    "accept": "true",
+    "project_contract": {
+        "schema": 1,
+        "spec_sha256": spec,
+        "allowed_envelope": ["."],
+        "acceptance_files": [],
+        "acceptance_manifest": [],
+    },
+    "tasks": {
+        "t1": {
+            "id": "t1", "title": "first", "state": "ready",
+            "depends": [], "allowed_paths": ["."],
+            "forbidden_paths": [], "verify": "true", "role": "",
+            "provider": "", "ttl": "", "artifact": "", "patch": "",
+            "reason": "", "executor_id": "", "executor_soul_sha256": "",
+            "lease_epoch": 0, "lease_id": "", "autopilot_owner_id": "",
+            "review_lease_id": "", "repair_count": 0,
+            "repair_artifact": "", "created": "2026-08-29T00:00:00Z",
+            "updated": "2026-08-29T00:00:00Z",
+        },
+        "t2": {
+            "id": "t2", "title": "second", "state": "ready",
+            "depends": [], "allowed_paths": ["."],
+            "forbidden_paths": [], "verify": "true", "role": "",
+            "provider": "", "ttl": "", "artifact": "", "patch": "",
+            "reason": "", "executor_id": "", "executor_soul_sha256": "",
+            "lease_epoch": 0, "lease_id": "", "autopilot_owner_id": "",
+            "review_lease_id": "", "repair_count": 0,
+            "repair_artifact": "", "created": "2026-08-29T00:00:01Z",
+            "updated": "2026-08-29T00:00:01Z",
+        },
+    },
+}
+with open(plan, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+PY
+
+  status="$("$plan" --repo "$project" status --json)" ||
+    fail "contract-bound plan status failed"
+  printf '%s' "$status" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["contract"]["bound"] is True, row
+assert row["contract"]["satisfied"] is True, row
+assert row["contract"]["blocker"] == "", row
+assert row["actionable"] == ["t1", "t2"], row
+' || fail "fresh PROJECT contract did not authorize ready work: $status"
+
+  "$plan" --repo "$project" claim --id t1 --provider codex --ttl 60 >/dev/null ||
+    fail "could not claim the first task before drift"
+  lease="$("$plan" --repo "$project" show --id t1 | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' | tr -d '\r')"
+  [ -n "$lease" ] || fail "could not claim the first task before drift"
+  printf '\n## Changed\ncontract drift\n' >> "$project_file"
+  before="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$plan_file")"
+
+  status="$("$plan" --repo "$project" status --json)" ||
+    fail "drifted contract status should remain readable"
+  printf '%s' "$status" | python3 -c '
+import json, re, sys
+row = json.load(sys.stdin)
+contract = row["contract"]
+assert contract["bound"] is True and contract["satisfied"] is False, row
+assert contract["project_state"] == "confirmed", contract
+assert contract["blocker"] == "project-drift", contract
+assert re.fullmatch(r"[0-9a-f]{64}", contract["expected_spec_sha256"]), contract
+assert re.fullmatch(r"[0-9a-f]{64}", contract["current_spec_sha256"]), contract
+assert row["actionable"] == [], row
+' || fail "PROJECT drift did not remove canonical actionability: $status"
+  [ -z "$("$plan" --repo "$project" ready)" ] ||
+    fail "ready exposed a task after PROJECT contract drift"
+  rc=0
+  out="$("$plan" --repo "$project" next 2>&1)" || rc=$?
+  [ "$rc" = 3 ] && printf '%s' "$out" | grep -Fq 'PROJECT.md contract' ||
+    fail "next did not report the contract blocker (rc=$rc): $out"
+  rc=0
+  out="$("$plan" --repo "$project" claim --id t2 --provider codex 2>&1)" || rc=$?
+  [ "$rc" = 2 ] && printf '%s' "$out" | grep -Fq 'PROJECT.md contract' ||
+    fail "direct claim bypassed PROJECT drift (rc=$rc): $out"
+  [ "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$plan_file")" = "$before" ] ||
+    fail "a refused drifted claim changed the plan"
+
+  # Drift cannot strand authority that already exists. The exact lease may
+  # advance and release, but it cannot create a sibling lease while drifted.
+  "$plan" --repo "$project" start --id t1 --lease-id "$lease" >/dev/null ||
+    fail "PROJECT drift blocked an already-claimed start transition"
+  "$plan" --repo "$project" release --id t1 --lease-id "$lease" >/dev/null ||
+    fail "PROJECT drift blocked exact lease cleanup"
+
+  runtime_file="$project/runtime.json"
+  state_file="$project/state.json"
+  inbox_file="$project/inbox.json"
+  "$ROOT/scripts/runtime.sh" --repo "$project" envelope show > "$runtime_file" ||
+    fail "runtime could not project a drifted contract"
+  "$ROOT/scripts/state.sh" --repo "$project" --json > "$state_file" ||
+    fail "state could not project a drifted contract"
+  "$ROOT/scripts/inbox.sh" --repo "$project" --json > "$inbox_file" ||
+    fail "inbox could not project a drifted contract"
+  python3 - "$runtime_file" "$state_file" "$inbox_file" <<'PY' ||
+    fail "runtime/state/inbox disagreed on PROJECT drift"
+import json, sys
+runtime, state, inbox = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+runtime_actions = [item["id"] for item in runtime["next_actions"]]
+inbox_actions = [item["id"] for item in inbox["recommended_actions"]]
+assert runtime["plan"]["contract"]["blocker"] == "project-drift", runtime["plan"]
+assert state["plan"]["contract"]["blocker"] == "project-drift", state["plan"]
+assert state["plan"]["actionable"] == [], state["plan"]
+assert "execute_ready_task" not in runtime_actions, runtime_actions
+assert "inspect_plan_contract" in runtime_actions, runtime_actions
+assert "execute_ready_task" not in inbox_actions, inbox_actions
+assert "inspect_plan_contract" in inbox_actions, inbox_actions
+PY
+  out="$("$ROOT/scripts/state.sh" --repo "$project")" ||
+    fail "state text could not project a drifted contract"
+  printf '%s' "$out" | grep -Fq 'PROJECT contract: BLOCKED (project-drift' ||
+    fail "state text hid the PROJECT contract blocker: $out"
+
+  rm -f "$project_file"
+  ln -s "$(basename "$original")" "$project_file"
+  status="$("$plan" --repo "$project" status --json)" ||
+    fail "status should project an unsafe PROJECT leaf without following it"
+  printf '%s' "$status" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+contract = row["contract"]
+assert contract["satisfied"] is False, contract
+assert contract["project_healthy"] is False, contract
+assert contract["blocker"] == "project-unreadable", contract
+assert contract["current_spec_sha256"] == "", contract
+assert row["actionable"] == [], row
+' || fail "PROJECT symlink was followed as plan authority: $status"
+  "$ROOT/scripts/runtime.sh" --repo "$project" envelope show > "$runtime_file" ||
+    fail "runtime collapsed when PROJECT.md was an unsafe leaf"
+  python3 - "$runtime_file" <<'PY' ||
+    fail "runtime did not preserve the typed unsafe-PROJECT blocker"
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["plan"]["contract"]["blocker"] == "project-unreadable", row["plan"]
+assert "inspect_plan_contract" in [item["id"] for item in row["next_actions"]], row["next_actions"]
+PY
+  rm -f "$project_file"
+  cp "$original" "$project_file"
+  status="$("$plan" --repo "$project" status --json)"
+  printf '%s' "$status" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["contract"]["satisfied"] is True, row
+assert row["actionable"] == ["t1", "t2"], row
+' || fail "restoring exact PROJECT bytes did not reactivate the plan: $status"
+
+  # Manual legacy plans remain usable because they carry no reviewed digest.
+  python3 - "$plan_file" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row.pop("project_contract", None)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+PY
+  printf '\nlegacy drift\n' >> "$project_file"
+  status="$("$plan" --repo "$project" status --json)"
+  printf '%s' "$status" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["contract"]["bound"] is False, row
+assert row["contract"]["satisfied"] is True, row
+assert row["actionable"] == ["t1", "t2"], row
+' || fail "legacy unbound plan lost compatibility: $status"
 }
 
 test_state_unhealthy_projections_never_reopen_authority() {

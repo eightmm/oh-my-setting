@@ -1,10 +1,12 @@
 # Components
 
 oh-my-setting is a local control plane for installed coding-agent CLIs. Codex,
-Claude Code, and Antigravity remain its managed core; Cursor, Grok Build,
-Gemini CLI, Qwen Code, OpenCode, and marker-prefixed custom adapters are
-detected as optional transports. It gives them shared rules, skills, state, peer calls, isolated write
-delegation, and one verification boundary for OMS-managed delegated patches.
+Claude Code, and Antigravity remain its managed core. Cursor, Grok Build,
+Gemini CLI, Qwen Code, OpenCode, DeepSeek Harness, Mistral Vibe, Pi, GitHub
+Copilot CLI, Factory Droid, Aider, and marker-prefixed custom adapters are
+detected as optional transports. It gives them shared rules, skills, state,
+peer calls, isolated write delegation, and one verification boundary for
+OMS-managed delegated patches.
 The primary subsystem catalog is `oms list --frontdoor`; compatibility
 primitives and intent variants remain in `oms list --all`. Use
 `oms <tool> --help` for flags and the
@@ -161,14 +163,26 @@ remain one opinion for diversity reporting.
 
 Provider discovery separates an executable transport from its model family.
 `glm` is therefore never guessed as a provider: a GLM route names its carrier
-and exact model, for example `opencode:model=zai/glm-4.7`. `oms models
---providers auto` lists installed transports from the shared registry;
-`model-doctor --providers auto` runs bounded local version/help probes without
-inference, login, install, update, or configuration changes. Optional agents do
-not become default council seats merely because they appear on PATH: a custom
-adapter is excluded from every automatic pool (advisor auto-pick, consult
-auto-pick and failover) and runs only when named with `--to` or under an
-explicit `consult --all` fan-out.
+and exact model, for example `opencode:model=zai/glm-4.7`. Likewise,
+`deepseek` names the official DeepSeek Harness transport, while a DeepSeek model
+behind Aider is expressed as `aider:model=deepseek/deepseek-chat` (or the exact
+model name configured by that carrier).
+
+`oms models --providers auto` is a no-exec physical inventory; its `usable`
+field is unknown until `--refresh`. Refresh and `model-doctor --providers auto`
+run bounded local version/help probes without inference, login, install, update,
+or configuration changes. A visible but broken shim remains in diagnostics as
+`broken`, while automatic routing admits only a probe-proven usable transport.
+Optional agents do not become default council seats merely because they appear
+on PATH: a custom adapter is excluded from every automatic pool (advisor
+auto-pick, consult auto-pick and failover) and runs only when named with `--to`
+or under an explicit `consult --all` fan-out.
+
+Provider-native user, organization, and previously trusted project
+configuration remains part of the trusted host boundary. OMS pins the
+documented noninteractive mode, tool/permission surface, and outer worktree
+fences, but those flags are not a substitute for reviewing native hooks,
+plugins, MCP servers, credentials, or managed policy loaded by the provider.
 
 Custom transports must be executable as `oms-agent-adapter-ID` on PATH or in
 the configured adapter directory. Their protocol is a prompt-file based
@@ -193,6 +207,10 @@ Routing is deliberately small:
 
 - No `--model`: use the provider default.
 - `--model NAME`: use that exact model with no implicit switch.
+- DeepSeek Harness and Vibe currently expose no documented per-invocation model
+  selector on their OMS headless surfaces. An explicit `--model` for either is
+  refused instead of being silently ignored; configure the native profile or
+  omit the flag.
 - `--fallback-model NAME`: on a recognized capacity error, retry once with
   that model. A write attempt that changed its worktree is never retried.
 - An unpinned provider-default route may use bounded catalog recovery for a
@@ -323,6 +341,23 @@ disabled for every child Git operation in the drive, not only the final ref
 update. Frozen patch creation enters the validated physical directory, uses
 relative writes, and atomically replaces the final leaf without following a
 directory symlink; a changed absolute lookup parks before consumption.
+
+`agent-plan status --json` is the canonical read-time plan decision. Its
+additive `contract` object compares the reviewed `project_contract.spec_sha256`
+with one bounded, no-follow snapshot of `PROJECT.md`, and its `actionable`
+list already includes dependency, claim-expiry, and contract gates. A bound
+plan whose project file is missing, draft, invalid, unreadable, or byte-drifted
+cannot issue a new `ready`, `next`, or `claim` authority. Exact transitions for
+an existing lease remain available so drift cannot strand running work or
+prevent cleanup. Legacy plans without a reviewed contract keep their existing
+claim behavior. Runtime, state, and inbox consume this decision rather than
+reconstructing readiness from stored task states.
+
+The change guard sends its sorted changed-path stream through the canonical
+scope engine once. The engine loads and validates the stored allow/deny rules,
+compiles each bounded Bash-compatible glob once, and emits one deny-first
+verdict per path. The public single-path scope operations remain compatible;
+the batch operation is an internal performance boundary for large diffs.
 
 An active plan that became stale after equivalent work landed elsewhere is
 removed through `oms agent-plan retire`, never by inventing task transitions.
@@ -529,11 +564,16 @@ chooses a connector or tracked summary.
   absolute worktree parent. A sidecar lets uninstall remove only rules this
   install added.
   HUD/session-capture parity is not claimed.
-- Optional CLI transports: Cursor, Grok Build, Gemini CLI, Qwen Code, and
-  OpenCode join the same read/write, artifact, model-route, and provider-child
-  contracts when detected. OMS does not install, authenticate, or reconfigure
-  them. Provider-native sandbox or approval flags are pinned per invocation;
-  OpenCode and custom adapters additionally rely on the OMS worktree boundary.
+- Optional CLI transports: Cursor, Grok Build, Gemini CLI, Qwen Code, OpenCode,
+  DeepSeek Harness (`dsh`), Mistral Vibe, Pi, GitHub Copilot CLI, Factory Droid,
+  and Aider join the same artifact, model-route, and provider-child contracts
+  when detected. OMS does not install, authenticate, or reconfigure them.
+  Provider-native read/edit modes and tool allowlists are pinned per invocation;
+  Vibe trust is invocation-only, Pi project resources are ignored, and DeepSeek
+  invocation telemetry is disabled. DeepSeek's filesystem preset does
+  not confine network reads or every host process; Aider, OpenCode, and custom
+  adapters additionally rely on the OMS worktree and post-run authority guard
+  rather than an OS sandbox.
 - MCP: shared state reads plus background peer actions that can incur provider
   cost and write `.oms` artifacts. Stdio records and prompts are byte-bounded;
   oversized input is rejected before provider argv or prompt files are built.
