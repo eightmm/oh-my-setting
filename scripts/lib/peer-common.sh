@@ -1812,18 +1812,24 @@ ma_provider_attempt() {
     echo "error: provider '$provider' has no documented per-invocation model override; configure its native profile or omit --model" > "$output_file"
     return 2
   fi
-  if ! oms_provider_cli_discovered "$provider"; then
-    echo "error: provider command not found: $(oms_provider_binary "$provider" 2>/dev/null || printf '%s' "$provider")" > "$output_file"
-    return 127
-  fi
-  if ! oms_provider_cli_available "$provider"; then
-    echo "error: provider command is present but failed its bounded version/help probe: $(oms_provider_binary "$provider")" > "$output_file"
-    return 126
-  fi
   transport="$(oms_provider_transport "$provider")" || {
     echo "error: provider transport selection failed" > "$output_file"
     return 2
   }
+  # An explicit Codex app-server command is an independent transport. Its
+  # adapter validates and launches OMS_CODEX_APP_SERVER_COMMAND itself, so a
+  # missing `codex` CLI must not reject that route before transport selection.
+  # Every cli-exec route keeps the bounded discovery/usable probe.
+  if [ "$provider" != codex ] || [ "$transport" != app-server ]; then
+    if ! oms_provider_cli_discovered "$provider"; then
+      echo "error: provider command not found: $(oms_provider_binary "$provider" 2>/dev/null || printf '%s' "$provider")" > "$output_file"
+      return 127
+    fi
+    if ! oms_provider_cli_available "$provider"; then
+      echo "error: provider command is present but failed its bounded version/help probe: $(oms_provider_binary "$provider")" > "$output_file"
+      return 126
+    fi
+  fi
   case "$provider" in
     codex)
       if [ "$transport" = app-server ]; then

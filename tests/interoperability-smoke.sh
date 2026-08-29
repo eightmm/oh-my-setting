@@ -114,6 +114,10 @@ PY
   (
     # shellcheck source=scripts/lib/peer-common.sh
     . "$ROOT/scripts/lib/peer-common.sh"
+    # The explicit adapter command is the transport authority. A host does not
+    # need the Codex CLI when that command is independently available.
+    oms_provider_cli_discovered() { return 1; }
+    oms_provider_cli_available() { return 1; }
     OMS_CODEX_TRANSPORT=app-server OMS_CODEX_APP_SERVER_COMMAND="$fake" \
       FAKE_APP_SERVER_LOG="$log" OMS_PEER_TIMEOUT=10 \
       ma_provider_attempt codex read "$prompt" "$output" "$repo" \
