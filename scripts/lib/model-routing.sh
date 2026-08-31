@@ -53,7 +53,8 @@ oms_reasoning_provider_validate() {
 }
 
 # A catalog is an advisory source for retry candidates. Its absence must not
-# invent a provider-specific model name.
+# invent a provider-specific model name. Only the routable set is a candidate:
+# recovery never lands on a previous generation or a re-hosted foreign family.
 oms_model_alternative() {
   local provider="$1" current="$2" candidate current_key candidate_key
   current_key="$(oms_model_catalog_key "$current")"
@@ -64,13 +65,13 @@ oms_model_alternative() {
     printf '%s\n' "$candidate"
     return 0
   done <<EOF
-$(oms_capability_models "$provider" 2>/dev/null || true)
+$(oms_capability_routable_models "$provider" 2>/dev/null || true)
 EOF
   [ "$current" = provider-default ] || printf '%s\n' provider-default
 }
 
-# Emit each catalog model once, excluding aliases of CURRENT. With no catalog,
-# the only safe recovery is to let the provider select its default.
+# Emit each routable catalog model once, excluding aliases of CURRENT. With no
+# catalog, the only safe recovery is to let the provider select its default.
 oms_model_distinct_chain() {
   local provider="$1" current="$2" candidate current_key candidate_key seen_key duplicate
   local -a seen=()
@@ -87,7 +88,7 @@ oms_model_distinct_chain() {
     seen+=("$candidate_key")
     printf '%s\n' "$candidate"
   done <<EOF
-$(oms_capability_models "$provider" 2>/dev/null || true)
+$(oms_capability_routable_models "$provider" 2>/dev/null || true)
 EOF
   if ! oms_capability_models "$provider" >/dev/null 2>&1 && [ "$current" != provider-default ]; then
     printf '%s\n' provider-default
@@ -99,7 +100,7 @@ oms_model_prepare() {
   local explicit_fallback="${OMS_MODEL_FALLBACK_EXPLICIT:-}"
   local effort_requested="${OMS_REASONING_EFFORT_REQUEST:-auto}"
   local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
-  local candidate filtered_chain=""
+  local candidate filtered_chain="" standing
 
   provider="$(oms_provider_normalize "$provider")" || return $?
   oms_model_validate_name "$explicit" || return $?
@@ -110,10 +111,19 @@ oms_model_prepare() {
     [ "$effort_fallback_explicit" != auto ] || { echo 'error: explicit fallback reasoning effort cannot be auto' >&2; return 2; }
   fi
 
+  OMS_MODEL_PREVIOUS_GENERATION=0
   if [ -n "$explicit" ]; then
     OMS_MODEL_PRIMARY="$explicit"
     OMS_MODEL_RESOLVED_CLASS=explicit
     OMS_MODEL_CLASS_REASON=explicit
+    # Named is named: the call runs. It is only said aloud, once, because a
+    # pin that outlived its generation otherwise keeps running in silence.
+    standing=0
+    oms_capability_model_routable "$provider" "$explicit" || standing=$?
+    if [ "$standing" -eq 1 ]; then
+      OMS_MODEL_PREVIOUS_GENERATION=1
+      echo "warning: $provider model $explicit is not in the routable set (previous generation or foreign family); it runs only because it was named — routable: $(oms_capability_routable_models "$provider" 2>/dev/null | tr '\n' ' ')" >&2
+    fi
   else
     OMS_MODEL_PRIMARY="provider-default"
     OMS_MODEL_RESOLVED_CLASS="provider-default"
@@ -169,6 +179,7 @@ EOF
   OMS_MODEL_FALLBACK_REASON=""
   export OMS_MODEL_RESOLVED_CLASS OMS_MODEL_CLASS_REASON OMS_MODEL_PRIMARY OMS_MODEL_FALLBACK
   export OMS_MODEL_ALTERNATE OMS_MODEL_DISTINCT_CHAIN OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
+  export OMS_MODEL_PREVIOUS_GENERATION
   export OMS_REASONING_EXPLICIT OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 }
 

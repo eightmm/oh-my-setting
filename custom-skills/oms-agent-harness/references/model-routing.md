@@ -17,6 +17,11 @@ agent, a Grok/GLM route, or a custom adapter.
    when a model safeguard or unavailable-name error explicitly permits
    recovery. Policy, auth, permission, context, and verification failures do
    not route around the result.
+   Only the routable set is a candidate: the provider's own family at its
+   newest generation (`oms models` lists the rest apart). A previous
+   generation or a model another vendor re-hosts through the CLI runs only
+   when named with `--model`, with a warning; it is never chosen, and
+   `model-doctor` warns when a configured default has fallen outside the set.
 5. Pass `--reasoning-effort` only after checking the selected model's cached
    scale. Supported values are `auto`, `low`, `medium`, `high`, `xhigh`, `max`,
    and `ultra`; each provider accepts only its reported subset.

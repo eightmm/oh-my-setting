@@ -322,7 +322,7 @@ ma_write_harness_context() {
       model_lines=""
       while IFS= read -r provider; do
         [ -n "$provider" ] || continue
-        models="$(oms_capability_models "$provider" 2>/dev/null | sed -n '1,2p' | tr '\n' ' ' || true)"
+        models="$(oms_capability_routable_models "$provider" 2>/dev/null | sed -n '1,2p' | tr '\n' ' ' || true)"
         [ -n "$models" ] || continue
         model_lines="${model_lines}- $provider: $models
 "

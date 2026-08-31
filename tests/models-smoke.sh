@@ -86,4 +86,26 @@ probes = {p["provider"]: p["catalog_probe"] for p in json.loads(out)["providers"
 assert probes == {"codex": "failed", "claude": "unsupported", "antigravity": "ok"}, probes
 ' "$ROOT/scripts/models.sh"
 
+# The catalog says what exists; the routable set says what a route may pick on
+# its own. Previous generations and re-hosted foreign families are printed
+# apart so the operator still sees them, without them ever entering a route.
+gen="$TMP/cap-gen"
+mkdir -p "$gen"
+printf 'binary_key=x\neffort_mechanism=config\neffort_values=low high\nprobed_at=%s\n' "$now" > "$gen/codex.env"
+printf 'gpt-5.6-sol\ngpt-5.6-luna\ngpt-5.5\ngpt-5.3-codex-spark\n' > "$gen/codex.models"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" "$ROOT/scripts/models.sh" --json --providers codex)"
+OMS_MODELS_JSON="$out" python3 - <<'PY'
+import json, os
+row = json.loads(os.environ['OMS_MODELS_JSON'])['providers'][0]
+assert row['models'] == ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.3-codex-spark'], row['models']
+assert row['routable'] == ['gpt-5.6-sol', 'gpt-5.6-luna'], row
+assert row['not_routed'] == ['gpt-5.5', 'gpt-5.3-codex-spark'], row
+PY
+text="$TMP/gen.out"
+PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" "$ROOT/scripts/models.sh" --providers codex > "$text"
+grep -Fq 'models: gpt-5.6-sol, gpt-5.6-luna' "$text" ||
+  fail "the models line lists only the routable set: $(cat "$text")"
+grep -Fq 'not routed (previous generation or foreign family): gpt-5.5, gpt-5.3-codex-spark' "$text" ||
+  fail "what is not routable must still be visible, and say why: $(cat "$text")"
+
 echo 'models-smoke: ok'

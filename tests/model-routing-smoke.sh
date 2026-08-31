@@ -35,6 +35,57 @@ out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_CLASS_REQUE
 [ "$out" = 'provider-default|provider-default' ] || fail "legacy class request must not change the route: $out"
 if grep -q 'model tiers' "$TMP/warn.err"; then fail 'removed tier layer must not warn'; fi
 
+# Only the provider's own family at its newest generation is routable on its
+# own: a previous generation, a re-hosted foreign-family model, and an
+# unversioned name beside versioned siblings never enter the default chain.
+# The generation is the first delimited digit run in the name, so both the
+# catalog notation and the accepted one (`Gemini 3.7 Flash (High)`) parse.
+gen="$TMP/cap-gen"
+mkdir -p "$gen"
+cp "$TMP/cap/codex.env" "$TMP/cap/antigravity.env" "$gen/"
+printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\ngpt-5.4-mini\ngpt-5.3-codex-spark\n' > "$gen/codex.models"
+printf 'Fetching available models...\ngemini-3.7-flash-high\ngemini-3.7-flash-low\ngemini-3.1-pro-high\nclaude-opus-4-6-thinking\ngpt-oss-120b-medium\n' > "$gen/antigravity.models"
+routable() {  # routable PROVIDER -> space-joined routable catalog
+  PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_capability_routable_models "$1"' _ "$1" | tr '\n' ' '
+}
+prepare_gen() {  # prepare_gen PROVIDER EXPLICIT ERRFILE REPORT-EXPRESSION
+  PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" OMS_MODEL_EXPLICIT="$2" OMS_REASONING_EFFORT_REQUEST=auto \
+    bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare "$1" 2>"$2"; eval "$3"' _ "$1" "$3" "$4"
+}
+out="$(routable codex)"
+[ "$out" = 'gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna ' ] ||
+  fail "codex routable set must be the newest generation only: $out"
+out="$(routable antigravity)"
+[ "$out" = 'gemini-3.7-flash-high gemini-3.7-flash-low ' ] ||
+  fail "antigravity routable set must drop the older pro line and re-hosted foreign families: $out"
+out="$(prepare_gen codex '' "$TMP/gen.err" 'printf "%s|%s" "$OMS_MODEL_ALTERNATE" "$(printf "%s" "$OMS_MODEL_DISTINCT_CHAIN" | tr "\n" " ")"')"
+[ "$out" = 'gpt-5.6-sol|gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna' ] ||
+  fail "provider-default recovery must stay inside the newest generation: $out"
+# A named previous-generation model still runs — it was named — but says so.
+out="$(prepare_gen codex gpt-5.5 "$TMP/gen.err" 'printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_PREVIOUS_GENERATION"')"
+[ "$out" = 'gpt-5.5|1' ] || fail "an explicit previous-generation model runs and is flagged: $out"
+grep -q 'previous generation' "$TMP/gen.err" ||
+  fail "an explicit previous-generation model must be named on stderr: $(cat "$TMP/gen.err")"
+out="$(prepare_gen antigravity 'Gemini 3.7 Flash (High)' "$TMP/gen2.err" 'printf "%s" "$OMS_MODEL_PREVIOUS_GENERATION"')"
+[ "$out" = 0 ] || fail "the accepted notation of a current model must not be flagged: $out"
+[ ! -s "$TMP/gen2.err" ] || fail "a current model must not warn: $(cat "$TMP/gen2.err")"
+out="$(prepare_gen antigravity 'Gemini 3.1 Pro (High)' "$TMP/gen3.err" 'printf "%s" "$OMS_MODEL_PREVIOUS_GENERATION"')"
+[ "$out" = 1 ] || fail "the accepted notation of an older line must be flagged: $out"
+out="$(prepare_gen codex gpt-7-unlisted "$TMP/gen4.err" 'printf "%s" "$OMS_MODEL_PREVIOUS_GENERATION"')"
+[ "$out" = 0 ] && [ ! -s "$TMP/gen4.err" ] || fail "a model the catalog does not know cannot be judged: $out $(cat "$TMP/gen4.err")"
+# Generations compare as numbers: 5.10 is newer than 5.6.
+printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
+out="$(routable codex)"
+[ "$out" = 'gpt-5.10-nova ' ] || fail "a two-digit minor must compare numerically: $out"
+# A catalog whose names carry no generation is kept whole — nothing to compare —
+# while an unversioned name beside versioned siblings cannot prove it is current.
+printf 'model-a\nModel B\n' > "$gen/codex.models"
+out="$(routable codex)"
+[ "$out" = 'model-a Model B ' ] || fail "an unversioned catalog stays routable: $out"
+printf 'model-a\ngpt-5.6-sol\n' > "$gen/codex.models"
+out="$(routable codex)"
+[ "$out" = 'gpt-5.6-sol ' ] || fail "an unversioned name beside versioned siblings drops: $out"
+
 # Auto effort resolves to "" (provider default). The REAL invocation must then
 # omit the effort flag entirely: codex refuses -c model_reasoning_effort=""
 # outright ("reasoning_effort must not be empty"), which silently killed every

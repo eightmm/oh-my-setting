@@ -98,4 +98,21 @@ bash "$DOCTOR" --providers codex --strict-diversity > "$TMP/strict.txt" 2>&1 || 
 grep -Fq 'diversity needs at least two usable families' "$TMP/strict.txt" ||
   fail "strict diversity error text missing"
 
+# The configured default is the one route the router never looks at: after a
+# generation rotation a config.toml pin keeps naming last year's model in
+# silence. Doctor checks it against the routable set — a warning, not a
+# failure, because the pin still runs.
+printf 'gpt-5.6-sol\ngpt-5.5\n' > "$TMP/cap/codex.models"
+printf 'model = "gpt-5.5"\nmodel_reasoning_effort = "high"\n' > "$TMP/codex-config.toml"
+OMS_CODEX_CONFIG="$TMP/codex-config.toml" bash "$DOCTOR" --providers codex > "$TMP/default.txt" ||
+  fail "a stale configured default is a warning, not a failure"
+grep -Fq 'warning: codex: configured default model gpt-5.5 is not routable (previous generation or foreign family); routable: gpt-5.6-sol' "$TMP/default.txt" ||
+  fail "doctor must name a configured default outside the routable set: $(cat "$TMP/default.txt")"
+printf 'model = "gpt-5.6-sol"\n' > "$TMP/codex-config.toml"
+OMS_CODEX_CONFIG="$TMP/codex-config.toml" bash "$DOCTOR" --providers codex > "$TMP/default-ok.txt" ||
+  fail "a current configured default must pass"
+if grep -q 'configured default model' "$TMP/default-ok.txt"; then
+  fail "a current configured default must not warn: $(cat "$TMP/default-ok.txt")"
+fi
+
 echo "model-doctor-smoke: ok"

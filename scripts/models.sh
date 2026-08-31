@@ -18,6 +18,9 @@ Usage: models.sh [--json] [--refresh] [--providers default|auto|all|CSV]
 
 Show cached provider model catalogs and reasoning-effort capabilities. --refresh
 updates the cache first; without it this command never invokes a provider CLI.
+The models line is the routable set — the provider's own family at its newest
+generation; previous generations and re-hosted foreign families are listed
+apart and are never chosen unless named with --model.
 The default is the historical core plus detected optional agents; auto means
 only detected agents, and all also shows absent built-in transports. With
 --refresh, a detected executable that fails the bounded probe remains visible
@@ -71,7 +74,9 @@ while IFS= read -r provider; do
   file="$(oms_capability_file "$provider")"
   models_file="$(oms_capability_cache_dir)/$provider.models"
   efforts_file="$(oms_capability_cache_dir)/$provider.efforts"
-  OMS_MODELS_FILE="$models_file" OMS_EFFORTS_FILE="$efforts_file" python3 - \
+  routable_file="$tmp/$provider.routable"
+  oms_capability_routable_models "$provider" > "$routable_file" 2>/dev/null || : > "$routable_file"
+  OMS_MODELS_FILE="$models_file" OMS_EFFORTS_FILE="$efforts_file" OMS_ROUTABLE_FILE="$routable_file" python3 - \
     "$provider" "$binary" "$present" "$usable" "$model_override" \
     "$(oms_capability_read_field "$file" effort_mechanism 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" \
@@ -83,7 +88,8 @@ provider, binary, present, usable, model_override, mechanism, values, probed, pr
 def lines(path, limit=20):
     try:
         with open(path, encoding="utf-8") as f:
-            return [x.rstrip("\n") for x in f if x.rstrip("\n")][:limit]
+            rows = [x.rstrip("\n") for x in f if x.rstrip("\n")]
+            return rows if limit is None else rows[:limit]
     except OSError: return []
 def scales(path):
     result = {}
@@ -101,9 +107,15 @@ except ValueError: age = None
 # otherwise keep asserting it has none.
 catalog_probe = "unsupported" if listing == "none" else (probe or "unknown")
 usable_value = None if usable == "unknown" else usable == "true"
+# The catalog is what exists; the routable set is what a route may pick on its
+# own — the provider's own family at its newest generation. The rest stays
+# visible, named for what it is, and is never chosen unless named.
+models = lines(os.environ["OMS_MODELS_FILE"])
+routable = [m for m in lines(os.environ["OMS_ROUTABLE_FILE"], limit=None) if m in models]
 print(json.dumps({"provider": provider, "binary": binary, "present": present == "true",
  "usable": usable_value, "exact_model_override": model_override == "true",
- "models": lines(os.environ["OMS_MODELS_FILE"]), "effort_mechanism": mechanism or None,
+ "models": models, "routable": routable, "not_routed": [m for m in models if m not in routable],
+ "effort_mechanism": mechanism or None,
  "effort_values": values.split() if values else [], "model_effort_scales": scales(os.environ["OMS_EFFORTS_FILE"]),
  "catalog_probe": catalog_probe, "snapshot_age_seconds": age}, ensure_ascii=False))
 PY
@@ -126,7 +138,10 @@ for raw in open(sys.argv[1]):
     # Catalog presence decides, then catalog_probe only explains an empty one:
     # a run that skips the probe rewrites the snapshot beside a catalog an
     # earlier --refresh wrote, and a repair named there points at nothing.
-    if row["models"]: print("models: " + ", ".join(row["models"]))
+    if row["models"]:
+        print("models: " + (", ".join(row["routable"]) or "none routable"))
+        if row["not_routed"]:
+            print("not routed (previous generation or foreign family): " + ", ".join(row["not_routed"]))
     elif row["catalog_probe"] == "unsupported":
         print("models: no local catalog; the CLI validates --model at call time")
     else:

@@ -550,6 +550,26 @@ oms_provider_model_family() {
   esac
 }
 
+# The family a provider serves as its own. A route picks on its own only from
+# that family: a model another vendor re-hosts through this CLI is redundant
+# with its native CLI and muddies family-diversity accounting. Empty means the
+# provider has no family of its own (an aggregator), and every family in its
+# catalog stands on its own.
+oms_provider_primary_family() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    codex) printf 'openai\n' ;;
+    claude) printf 'anthropic\n' ;;
+    antigravity|gemini) printf 'google\n' ;;
+    grok) printf 'xai\n' ;;
+    qwen) printf 'alibaba\n' ;;
+    deepseek) printf 'deepseek\n' ;;
+    vibe) printf 'mistral\n' ;;
+    *) printf '\n' ;;
+  esac
+}
+
 oms_provider_normalize_list() {
   local raw="$1"
   local provider

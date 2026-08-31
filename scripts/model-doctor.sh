@@ -76,14 +76,36 @@ while IFS= read -r provider; do
   fi
   file="$(oms_capability_file "$provider")"
   family="$(oms_provider_model_family "$provider" provider-default)"
+  # The configured default is the one route the router never looks at: after a
+  # generation rotation a config pin keeps naming last year's model in
+  # silence. Codex declares its default in config.toml; checked against the
+  # routable set, warning only, because the pin still runs.
+  configured="" configured_standing="" routable=""
+  if [ "$provider" = codex ]; then
+    codex_config="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
+    [ ! -f "$codex_config" ] ||
+      configured="$(sed -n 's/^model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$codex_config" | head -n 1)"
+  fi
+  if [ -n "$configured" ]; then
+    standing=0
+    oms_capability_model_routable "$provider" "$configured" || standing=$?
+    case "$standing" in
+      0) configured_standing=routable ;;
+      1) configured_standing=not-routable ;;
+    esac
+    routable="$(oms_capability_routable_models "$provider" 2>/dev/null | tr '\n' ' ' || true)"
+  fi
   python3 - "$provider" "$binary" "$installed" "$usable" "$version" "$default_reachable" "$family" \
     "$(oms_capability_read_field "$file" effort_mechanism 2>/dev/null || true)" \
-    "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" >> "$rows" <<'PY'
+    "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" \
+    "$configured" "$configured_standing" "$routable" >> "$rows" <<'PY'
 import json, sys
-p,b,i,u,v,d,f,m,e=sys.argv[1:]
+p,b,i,u,v,d,f,m,e,c,cs,r=sys.argv[1:]
 print(json.dumps({"provider":p,"binary":b,"installed":i=="true","usable":u=="true","version":v or None,
  "provider_default_reachable":d=="true","family":f,"effort_mechanism":m or None,
- "effort_values":e.split() if e else []}))
+ "effort_values":e.split() if e else [],"configured_default":c or None,
+ "configured_default_routable":{"routable":True,"not-routable":False}.get(cs),
+ "routable":r.split()}))
 PY
 done <<EOF
 $PROVIDER_NAMES
@@ -98,6 +120,9 @@ for p in providers:
     if not p["installed"]: (errors if require else warnings).append("%s: provider binary '%s' is not installed" % (p["provider"],p["binary"]))
     elif not p["usable"]: errors.append("%s: provider binary is present but its bounded version/help probe failed" % p["provider"])
     elif not p["provider_default_reachable"]: errors.append("%s: provider default invocation is not reachable" % p["provider"])
+    if p.get("configured_default_routable") is False:
+        warnings.append("%s: configured default model %s is not routable (previous generation or foreign family); routable: %s"
+                        % (p["provider"], p["configured_default"], ", ".join(p["routable"]) or "none"))
 families={p["family"] for p in providers if p["usable"] and p["provider_default_reachable"] and p["family"] != "unknown"}
 if strict and len(families)<2: errors.append("model-family diversity needs at least two usable families")
 print(json.dumps({"schema":2,"ok":not errors,"live_models":live,"require_all":require,"strict_diversity":strict,"providers":providers,"warnings":warnings,"errors":errors},sort_keys=True))

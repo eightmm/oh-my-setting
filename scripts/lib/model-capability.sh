@@ -354,6 +354,108 @@ oms_model_catalog_key() {
   LC_ALL=C printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9'
 }
 
+# The generation a model name carries: the first delimited run of digits, with
+# a second run as the minor — gemini-3.7-flash → 3.7, claude-opus-4-6-thinking
+# → 4.6, gpt-5.6-sol → 5.6, `Gemini 3.7 Flash (High)` → 3.7. Digits glued to
+# letters (gpt-oss-120b) are a size, not a generation. Exit 1: none carried.
+oms_model_generation() {
+  local token major="" minor=""
+  for token in $(LC_ALL=C printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' ' '); do
+    case "$token" in
+      *[!0-9]*)
+        [ -z "$major" ] || break
+        ;;
+      *)
+        if [ -z "$major" ]; then major="$token"
+        elif [ -z "$minor" ]; then minor="$token"
+        else break
+        fi
+        ;;
+    esac
+  done
+  [ -n "$major" ] || return 1
+  printf '%s.%s\n' "$major" "${minor:-0}"
+}
+
+# Is generation A newer than B? Numeric per part, so 5.10 beats 5.6.
+oms_model_generation_newer() {
+  local a_major="${1%%.*}" a_minor="${1#*.}" b_major="${2%%.*}" b_minor="${2#*.}"
+  [ "$((10#$a_major))" -gt "$((10#$b_major))" ] && return 0
+  [ "$((10#$a_major))" -eq "$((10#$b_major))" ] && [ "$((10#$a_minor))" -gt "$((10#$b_minor))" ]
+}
+
+# Catalog entries a route may pick on its own: the provider's own family (or,
+# for an aggregator, each family for itself) at that family's newest
+# generation. A family whose names carry no generation is kept whole — there is
+# nothing to compare — while an unversioned name beside versioned siblings
+# cannot prove it is current and drops. A previous generation or a re-hosted
+# foreign family still runs when named with --model; it is never chosen.
+# Same exit contract as oms_capability_models: 1 means the catalog is unknown.
+oms_capability_routable_models() {
+  local provider="$1" primary catalog model family generation i j superseded
+  local -a models=() families=() generations=()
+  provider="$(oms_provider_normalize "$provider")" || return 2
+  catalog="$(oms_capability_models "$provider")" || return 1
+  primary="$(oms_provider_primary_family "$provider")"
+  while IFS= read -r model; do
+    [ -n "$model" ] || continue
+    family="$(oms_provider_model_family "$provider" "$model")"
+    # A name the classifier cannot place, on a CLI with a family of its own,
+    # is taken as that family: not knowing a name is no evidence it is
+    # foreign. The generation rule still drops it beside versioned siblings.
+    [ "$family" != unknown ] || family="${primary:-unknown}"
+    [ -z "$primary" ] || [ "$family" = "$primary" ] || continue
+    generation="$(oms_model_generation "$model" 2>/dev/null || true)"
+    models+=("$model")
+    families+=("$family")
+    generations+=("$generation")
+  done <<EOF
+$catalog
+EOF
+  i=0
+  while [ "$i" -lt "${#models[@]}" ]; do
+    superseded=0
+    j=0
+    while [ "$j" -lt "${#models[@]}" ]; do
+      if [ "${families[$j]}" = "${families[$i]}" ] && [ -n "${generations[$j]}" ]; then
+        if [ -z "${generations[$i]}" ] ||
+           oms_model_generation_newer "${generations[$j]}" "${generations[$i]}"; then
+          superseded=1
+          break
+        fi
+      fi
+      j=$((j + 1))
+    done
+    [ "$superseded" -eq 1 ] || printf '%s\n' "${models[$i]}"
+    i=$((i + 1))
+  done
+}
+
+# Where MODEL stands: 0 routable, 1 in the catalog but not routable, 2 unknown
+# to the catalog (nothing to judge). A catalog line may carry a display name
+# after a tab; either notation of the name identifies the entry.
+oms_capability_model_routable() {
+  local provider="$1" key candidate tab
+  provider="$(oms_provider_normalize "$provider")" || return 2
+  key="$(oms_model_catalog_key "$2")"
+  tab="$(printf '\t')"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [ "$(oms_model_catalog_key "$candidate")" = "$key" ] && return 0
+    [ "$(oms_model_catalog_key "${candidate%%$tab*}")" = "$key" ] && return 0
+  done <<EOF
+$(oms_capability_routable_models "$provider" 2>/dev/null || true)
+EOF
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [ "$(oms_model_catalog_key "$candidate")" = "$key" ] && return 1
+    [ "$(oms_model_catalog_key "${candidate%%$tab*}")" = "$key" ] && return 1
+  done <<EOF
+$(oms_capability_models "$provider" 2>/dev/null || true)
+EOF
+  return 2
+}
+
 # Every effort any of a provider's models accepts, in scale order. Empty when
 # the catalog says nothing per model.
 oms_capability_effort_union() {
