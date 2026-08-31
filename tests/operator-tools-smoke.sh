@@ -59,6 +59,9 @@ rows = [
         "verify_exit": "PRIVATE-VERIFY-EXIT",
         "run_id": "run_one",
         "selected_model": "gpt-test",
+        "served_model": "gpt-served",
+        "model_attribution": "transport",
+        "cost_usd": 0.25,
         "model_class": "explicit",
         "reasoning_effort": "medium",
         "fallback_reason": "SECRET FALLBACK CONTENT",
@@ -325,6 +328,13 @@ def attrs(span):
         values[item["key"]] = next(iter(wrapped.values()))
     return values
 
+# The served model, its attribution, and the cost ride the artifact span so a
+# per-model view exists outside the plane too; the model class vocabulary
+# includes the role preset.
+call_attrs = attrs(by_name["oms.call"])
+assert call_attrs["oms.served_model"] == "gpt-served", call_attrs
+assert call_attrs["oms.model_attribution"] == "transport", call_attrs
+assert float(call_attrs["oms.cost_usd"]) == 0.25, call_attrs
 usage_attrs = attrs(by_name["oms.lifecycle.attempt.usage"])
 assert usage_attrs["oms.usage.trust"] == "advisory_provider_reported", usage_attrs
 assert usage_attrs["oms.correlation.attempt"] == attrs(
@@ -358,6 +368,7 @@ by_name = {span["name"]: attrs(span) for span in spans}
 assert by_name["oms.call"]["gen_ai.operation.name"] == "invoke_agent", by_name
 assert by_name["oms.call"]["gen_ai.provider.name"] == "openai", by_name
 assert by_name["oms.call"]["gen_ai.request.model"] == "gpt-test", by_name
+assert by_name["oms.call"]["gen_ai.response.model"] == "gpt-served", by_name
 assert by_name["oms.hook.PostToolUse"]["gen_ai.operation.name"] == "execute_tool", by_name
 assert by_name["oms.hook.PostToolUse"]["gen_ai.usage.input_tokens"] == "7", by_name
 PY

@@ -14015,6 +14015,22 @@ print(row["hookSpecificOutput"]["additionalContext"])
   out="$(cd "$plain" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$plain/broken.sh" | bash "$SH")"
   [ -z "$out" ] || fail "an unadopted repo gets no guard speech: $out"
   [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
+
+  # Codex edits arrive as apply_patch with the patch text in tool_input.command
+  # and no file_path: the files the patch names are the ones to check, each
+  # finding names its file, and a patch that touches only prose stays silent.
+  mkdir -p "$project/src"
+  printf 'def g(:\n    pass\n' > "$project/src/bad.py"
+  printf 'echo ok\n' > "$project/src/good.sh"
+  patch_payload() {  # patch_payload PATCH-TEXT
+    python3 -c 'import json, sys; print(json.dumps({"tool_name": "apply_patch", "tool_input": {"command": sys.argv[1]}, "hook_event_name": "PostToolUse", "cwd": sys.argv[2]}))' "$1" "$project"
+  }
+  out="$(cd "$project" && patch_payload $'*** Begin Patch\n*** Add File: src/bad.py\n+def g(:\n+    pass\n*** Update File: src/good.sh\n@@\n-echo\n+echo ok\n*** End Patch' | bash "$SH")"
+  out="$(context_of "$out")" || fail "a codex patch that leaves a broken file must come back as additionalContext"
+  case "$out" in *"src/bad.py"*"python:"*) ;; *) fail "the finding names the patched file: $out" ;; esac
+  case "$out" in *"good.sh"*) fail "a clean patched file is not a finding: $out" ;; *) ;; esac
+  out="$(cd "$project" && patch_payload $'*** Begin Patch\n*** Update File: notes.md\n@@\n-not code\n+still prose\n*** End Patch' | bash "$SH")"
+  [ -z "$out" ] || fail "a patch touching only prose stays silent: $out"
 }
 
 # The tier guard is the one hard edge of model tiering: an edit the session
@@ -23458,6 +23474,43 @@ assert "raw_output" not in row, row
       >/dev/null 2>&1; then
     fail "structured doctor accepted a mutating repair"
   fi
+}
+
+# Every hook the Codex plugin registers must reach a script the dispatcher
+# admits: a hooks.json row naming a tool outside harness-hook.sh's allowlist
+# fails silently at dispatch time, which is how a hook can ship registered
+# and never run. The edit-time syntax guard also has to be one of them.
+test_codex_plugin_hooks_dispatch_only_allowlisted_scripts() {
+  local hooks="$ROOT/plugins/oh-my-setting/hooks.json"
+  local dispatcher="$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh"
+  local allow tool
+
+  allow="$(sed -n 's/^case "\$tool" in \(.*\)) ;; \*) exit 0 ;; esac$/\1/p' "$dispatcher")"
+  [ -n "$allow" ] || fail "could not read the dispatcher allowlist from $dispatcher"
+  for tool in $(python3 - "$hooks" <<'PY'
+import json, re, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+tools = set()
+for entries in doc["hooks"].values():
+    for entry in entries:
+        for hook in entry.get("hooks", []):
+            match = re.search(r'harness-hook\.sh" (\S+)', hook.get("command", ""))
+            if match:
+                tools.add(match.group(1))
+print(" ".join(sorted(tools)))
+PY
+  ); do
+    case "|$allow|" in *"|$tool|"*) ;; *) fail "hooks.json dispatches $tool but the dispatcher does not admit it" ;; esac
+    [ -f "$ROOT/scripts/$tool.sh" ] || fail "hooks.json dispatches $tool but scripts/$tool.sh does not exist"
+  done
+  python3 - "$hooks" <<'PY' || fail "the Codex plugin must run the syntax guard after apply_patch"
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = [entry for entry in doc["hooks"].get("PostToolUse", [])
+        if any("syntax-guard-hook" in hook.get("command", "") for hook in entry.get("hooks", []))]
+assert len(rows) == 1, rows
+assert "apply_patch" in rows[0].get("matcher", ""), rows[0]
+PY
 }
 
 # SMOKE_TEST_CALLS_BEGIN
