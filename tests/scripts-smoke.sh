@@ -22586,6 +22586,92 @@ assert row["status"] == "verified", row
 ' || fail "repo state hid stale task verification: $state_json"
 }
 
+test_portable_capsule_import_surfaces_advisory_continuity() {
+  local project="$TMP/portable-capsule-continuity"
+  local capsule_file="$TMP/portable-capsule.json"
+  local before_nonportable after_nonportable state_json inbox_json resume_out
+
+  make_committed_repo "$project"
+  before_nonportable="$(python3 - "$project" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1]) / ".oms"
+rows = {}
+if root.exists():
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] == "portable":
+            continue
+        if path.is_symlink():
+            rows[str(relative)] = "link:" + str(path.readlink())
+        elif path.is_file():
+            rows[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+print(json.dumps(rows, sort_keys=True))
+PY
+)"
+
+  "$ROOT/scripts/runtime.sh" --repo "$project" capsule export \
+    --output "$capsule_file" >/dev/null
+  "$ROOT/scripts/runtime.sh" --repo "$project" capsule import \
+    "$capsule_file" >/dev/null
+
+  after_nonportable="$(python3 - "$project" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1]) / ".oms"
+rows = {}
+if root.exists():
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] == "portable":
+            continue
+        if path.is_symlink():
+            rows[str(relative)] = "link:" + str(path.readlink())
+        elif path.is_file():
+            rows[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+print(json.dumps(rows, sort_keys=True))
+PY
+)"
+  [ "$before_nonportable" = "$after_nonportable" ] ||
+    fail "capsule import changed canonical task/plan/evidence/authority state"
+
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)"
+  printf '%s' "$state_json" | python3 -c '
+import json, re, sys
+row = json.load(sys.stdin)["runtime"]["continuity"]["latest_import"]
+assert row["present"] is True, row
+assert row["advisory"] is True and row["authority_transfer"] is False, row
+assert re.fullmatch(r"capsule-[0-9a-f]{32}", row["capsule_id"]), row
+assert row["status"] == "current", row
+assert row["head_matches"] is True and row["state_digest_matches"] is True, row
+' || fail "state did not surface current advisory capsule continuity: $state_json"
+
+  inbox_json="$("$ROOT/scripts/inbox.sh" --repo "$project" --json)"
+  printf '%s' "$inbox_json" | python3 -c '
+import json, sys
+items = json.load(sys.stdin)["items"]
+row = next(item for item in items if item["code"] == "portable-capsule-review")
+assert row["priority"] == "P3" and "current" in row["summary"], row
+' || fail "inbox did not surface imported capsule review: $inbox_json"
+
+  resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
+    "$ROOT/scripts/resume-hook.sh")" || fail "resume hook rejected imported capsule"
+  printf '%s\n' "$resume_out" | grep -Fq 'portable capsule' ||
+    fail "resume hook did not surface imported capsule: $resume_out"
+  printf '%s\n' "$resume_out" | grep -Fq 'current; advisory only' ||
+    fail "resume hook hid capsule status or authority boundary: $resume_out"
+
+  printf 'changed\n' >> "$project/file.txt"
+  git -C "$project" add file.txt
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' \
+    commit -m drift >/dev/null
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["runtime"]["continuity"]["latest_import"]
+assert row["status"] == "head-diverged", row
+assert row["head_matches"] is False, row
+' || fail "state did not mark imported continuity stale after HEAD drift: $state_json"
+}
+
 test_plan_snapshot_is_nonvacuous_across_state_runtime_and_goal_drive() {
   local project="$TMP/nonvacuous-plan"
   local plan="$ROOT/scripts/agent-plan.sh"

@@ -331,6 +331,7 @@ state["runtime"] = {
     "criteria": runtime_raw.get("criteria", []) if runtime_healthy else [],
     "evidence": runtime_raw.get("evidence", {}) if runtime_healthy else {},
     "next_actions": runtime_raw.get("next_actions", []) if runtime_healthy else [],
+    "continuity": runtime_raw.get("continuity", {}) if runtime_healthy else {},
     "warnings": runtime_raw.get("warnings", []) if runtime_healthy else [],
 }
 
@@ -918,6 +919,11 @@ else:
         next_actions = runtime.get("next_actions", [])
         if next_actions:
             line("  next: %s" % next_actions[0].get("command", next_actions[0].get("id", "-")))
+        latest_import = runtime.get("continuity", {}).get("latest_import", {})
+        if latest_import.get("present"):
+            line("  imported capsule: %s status=%s (advisory only; no authority transferred)" % (
+                latest_import.get("capsule_id", "unknown"),
+                latest_import.get("status", "unknown")))
 
     p = state["plan"]
     if p["present"]:

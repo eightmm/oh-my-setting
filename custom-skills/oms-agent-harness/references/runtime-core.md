@@ -90,6 +90,10 @@ oms runtime capsule import capsule.json
 
 The capsule is advisory and sanitized. It never carries a lease, approval,
 command, raw transcript/log, machine path, credential, or publication right.
+After import, use the bounded `continuity.latest_import` view in `oms state`,
+`oms inbox`, or the resume hint. `current`, `head-diverged`, and
+`state-diverged` compare source provenance with local canonical state; none of
+those states restores task, plan, evidence, approval, or landing authority.
 
 ## Research work
 

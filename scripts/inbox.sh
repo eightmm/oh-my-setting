@@ -170,6 +170,13 @@ else:
     if missing_evidence:
         add(85, "P3", "runtime-evidence-missing", "%d acceptance criterion/criteria lack current evidence" % missing_evidence,
             "oms runtime evidence show", missing_evidence)
+    latest_import = runtime.get("continuity", {}).get("latest_import", {})
+    if latest_import.get("present"):
+        capsule_id = str(latest_import.get("capsule_id") or "unknown")
+        status = str(latest_import.get("status") or "unknown")
+        add(90, "P3", "portable-capsule-review",
+            "imported capsule %s is %s advisory continuity; no authority transferred" % (capsule_id, status),
+            "oms state --repo .")
 
 ci = state.get("ci", {})
 ci_state = ci.get("state")

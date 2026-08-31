@@ -339,20 +339,43 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertFalse(manifest['sufficient'])
 
     def test_capsule_digest_and_import_do_not_transfer_authority(self) -> None:
-        output = self.repo / 'capsule.json'
+        # Keep the transport file outside the checkout: placing it in the
+        # worktree legitimately changes the local state fingerprint and should
+        # make the imported capsule state-diverged.
+        output = Path(self.tmp.name) / 'capsule.json'
         exported = capsule.export(self.repo, output)
         self.assertFalse(exported['authority_transfer'])
         verified = capsule.verify(output)
         self.assertTrue(verified['valid'])
+        task_before = sha256_file(self.repo / '.oms' / 'task' / 'current.md')
         imported = capsule.import_capsule(self.repo, output)
         self.assertFalse(imported['authority_transfer'])
-        task_before = sha256_file(self.repo / '.oms' / 'task' / 'current.md')
+        self.assertEqual(task_before, sha256_file(self.repo / '.oms' / 'task' / 'current.md'))
+        continuity = evidence.build_envelope(self.repo)['continuity']['latest_import']
+        self.assertTrue(continuity['advisory'])
+        self.assertFalse(continuity['authority_transfer'])
+        self.assertEqual(continuity['status'], 'current')
         raw = read_json(output)
         raw['payload']['contract']['complete'] = True
         atomic_write_json(output, raw)
         with self.assertRaises(CoreError):
             capsule.verify(output)
         self.assertEqual(task_before, sha256_file(self.repo / '.oms' / 'task' / 'current.md'))
+
+    def test_latest_capsule_import_rejects_a_symlink_pointer(self) -> None:
+        output = self.repo / 'capsule.json'
+        exported = capsule.export(self.repo, output)
+        capsule.import_capsule(self.repo, output)
+        pointer = self.repo / '.oms' / 'portable' / 'imports' / 'LATEST'
+        outside = Path(self.tmp.name) / 'outside-latest'
+        outside.write_text(exported['capsule_id'] + '\n', encoding='ascii')
+        pointer.unlink()
+        try:
+            pointer.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest('symlink unavailable: %s' % exc)
+        with self.assertRaisesRegex(CoreError, 'regular non-symlink'):
+            evidence.build_envelope(self.repo)
 
     def test_producer_covers_and_completion_state_are_evidence_driven(self) -> None:
         # A review-verify row whose covers digest matches the plan acceptance

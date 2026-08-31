@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 from . import ENVELOPE_SCHEMA
+from .capsule import latest_import
 from .common import MAX_JSONL_ROWS, CoreError, bounded_line, canonical_json, git_branch, git_head, install_root, parse_path_list, read_json, read_jsonl, read_text, relative_path, run_json, sha256_bytes, sha256_file, sha256_text, source_descriptor, utc_now
 from .failures import classify
 from .markdown import bullet_items, first_nonempty, normalized_line, parse_scope, section_text, section_text_exact, sections, stable_criterion_id, strip_criterion_marker
@@ -322,12 +323,13 @@ def build_base_envelope(repo: Path) -> Dict[str, Any]:
     scope = _merge_scope(project.get('scope', {}), task.get('scope', {}), plan.get('scope', {}), executor.get('scope', {}))
     sources = [item for item in (project.get('source'), task.get('source'), plan.get('source'), executor.get('source')) if item]
     head = git_head(repo); state_digest = sha256_bytes(canonical_json({'head': head, 'sources': sources, 'failures': failures})); warnings: List[str] = []; criteria = _criteria(project, task, plan)
+    continuity = {'latest_import': latest_import(repo, local_head=head)}
     if not criteria: warnings.append('No explicit acceptance criteria were found; completion coverage cannot be proven.')
     if plan.get('present') and not plan.get('acceptance_present'): warnings.append('The active plan has no plan-level acceptance command.')
     if plan.get('present') and not plan.get('nonempty'): warnings.append('The active plan has no tasks; completion is gated until plan work is defined.')
     if executor.get('present') and executor.get('base_sha') and head and executor.get('base_sha') != head: warnings.append('The latest executor was frozen against a different Git commit.')
     if failures: warnings.append('%d unresolved failure record(s) require attention.' % len(failures))
-    return {'schema': ENVELOPE_SCHEMA, 'generated_at': utc_now(), 'repo': {'head': head or None, 'branch': git_branch(repo) or None}, 'state_digest': state_digest, 'sources': sources, 'objective': _objective(project, task, plan), 'scope': scope, 'criteria': criteria, 'budget': task.get('budget', {}), 'task': {key: value for key, value in task.items() if key not in ('criteria', 'source', 'constraints')}, 'plan': {key: value for key, value in plan.items() if key != 'source'}, 'executor': {key: value for key, value in executor.items() if key != 'source'}, 'authority': {'repo_write': 'external_parent_decision', 'remote_create': 'external_parent_decision', 'authority_transferable_by_capsule': False}, 'failures': failures, 'warnings': warnings}
+    return {'schema': ENVELOPE_SCHEMA, 'generated_at': utc_now(), 'repo': {'head': head or None, 'branch': git_branch(repo) or None}, 'state_digest': state_digest, 'sources': sources, 'objective': _objective(project, task, plan), 'scope': scope, 'criteria': criteria, 'budget': task.get('budget', {}), 'task': {key: value for key, value in task.items() if key not in ('criteria', 'source', 'constraints')}, 'plan': {key: value for key, value in plan.items() if key != 'source'}, 'executor': {key: value for key, value in executor.items() if key != 'source'}, 'authority': {'repo_write': 'external_parent_decision', 'remote_create': 'external_parent_decision', 'authority_transferable_by_capsule': False}, 'continuity': continuity, 'failures': failures, 'warnings': warnings}
 
 def _completion_state(task: Mapping[str, Any], evidence: Mapping[str, Any]) -> str:
     """Derived completion judgment: evidence decides, never a model's confidence.
@@ -360,4 +362,19 @@ def finalize_envelope(base: Dict[str, Any], evidence: Mapping[str, Any]) -> Dict
         base['task'] = dict(base['task'], completion=_completion_state(base['task'], effective_evidence))
     base['next_actions'] = _actions({'present': any(source.get('path') == 'PROJECT.md' for source in base.get('sources', []))}, base.get('task', {}), base.get('plan', {}), effective_evidence, base.get('failures', []))
     base['state_digest'] = sha256_bytes(canonical_json({'contract': base['state_digest'], 'evidence': base['evidence']}))
+    continuity = base.get('continuity', {}) if isinstance(base.get('continuity'), dict) else {}
+    latest = continuity.get('latest_import', {}) if isinstance(continuity.get('latest_import'), dict) else {}
+    if latest.get('present'):
+        latest = dict(latest)
+        source_digest = latest.get('source_state_digest')
+        latest['state_digest_matches'] = source_digest == base['state_digest'] if source_digest else None
+        if latest.get('head_matches') is False:
+            latest['status'] = 'head-diverged'
+        elif latest.get('state_digest_matches') is False:
+            latest['status'] = 'state-diverged'
+        elif latest.get('head_matches') is True and latest.get('state_digest_matches') is True:
+            latest['status'] = 'current'
+        else:
+            latest['status'] = 'unknown'
+        base['continuity'] = dict(continuity, latest_import=latest)
     return base

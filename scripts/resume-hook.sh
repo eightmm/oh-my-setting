@@ -121,6 +121,28 @@ except Exception:
   append "- handoff (${age_h}h old): oms session-handoff show $name"
 fi
 
+# Latest imported portable capsule: validated through the runtime projection so
+# a stale pointer, tampered digest, or authority-bearing payload never becomes
+# resume guidance. This is advisory continuity only; it cannot restore task,
+# plan, evidence, approval, lease, or publication authority.
+portable_line=""
+if [ -f "$cwd/.oms/portable/imports/LATEST" ] &&
+  [ ! -L "$cwd/.oms/portable/imports/LATEST" ]; then
+  portable_line="$("$ROOT/scripts/runtime.sh" --repo "$cwd" envelope show 2>/dev/null |
+    python3 -c '
+import json, sys
+try:
+    row = json.load(sys.stdin).get("continuity", {}).get("latest_import", {})
+except Exception:
+    raise SystemExit(0)
+if row.get("present"):
+    print("- portable capsule %s (%s; advisory only, no authority transferred): oms state" % (
+        row.get("capsule_id", "unknown"), row.get("status", "unknown")))
+' 2>/dev/null)" || portable_line=""
+fi
+portable_line="${portable_line//$'\r'/}"
+[ -z "$portable_line" ] || append "$portable_line"
+
 # Unresolved failures: one line, newest row's summary and suggested next.
 ledger="$cwd/.oms/failures.jsonl"
 if [ -s "$ledger" ]; then

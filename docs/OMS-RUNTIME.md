@@ -329,6 +329,14 @@ logs, patches, credentials, environment variables, machine paths, or remote
 publication authority. Import is advisory and cannot modify task, plan,
 approval, or Git state.
 
+The latest validated import is projected as `continuity.latest_import` in the
+TaskEnvelope and appears in `oms state`, `oms inbox`, and the session resume
+hint. Its status is `current`, `head-diverged`, `state-diverged`, or `unknown`
+after comparing the capsule's source HEAD and state digest with local canonical
+state. The imported bytes never enter the canonical state digest or satisfy an
+acceptance criterion; malformed, digest-mismatched, or symlinked pointers fail
+the runtime projection closed.
+
 The capsule and `session-handoff` split one responsibility two ways:
 `session-handoff` preserves **provider session continuity** — what one CLI's
 session was doing, for the next session of that CLI on the same machine. The
