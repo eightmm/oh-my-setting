@@ -1835,6 +1835,23 @@ os.replace(tmp, path)
 PY
 }
 
+# A provider-default codex route runs whatever config.toml names, and the
+# stream never says so (probed live 2026-08-31: no event carries a model), so
+# the configured default is the served model and is recorded beside the
+# tokens. A pinned route already records its selection; nothing to add.
+ma_note_configured_served_model() {
+  local provider="$1" model="$2" file="$3" config configured
+  [ "$provider" = codex ] || return 0
+  [ "${model:-provider-default}" = provider-default ] || return 0
+  [ -s "$file" ] || return 0
+  ! grep -q '^served model$' "$file" || return 0
+  config="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
+  [ -f "$config" ] || return 0
+  configured="$(sed -n 's/^model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -n 1)"
+  [ -n "$configured" ] || return 0
+  printf 'served model\n%s\n' "$configured" >> "$file"
+}
+
 # Spotlight quoted external text with presentation generated from metadata:
 # the block names its source and kind on machine-checkable delimiters, so a
 # reader (model or human) always knows which bytes another agent produced.
@@ -2294,6 +2311,7 @@ ma_provider_attempt() {
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
   [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
   [ "$provider" != codex ] || ma_codex_jsonl_to_text "$output_file"
+  ma_note_configured_served_model "$provider" "$model" "$output_file"
   if [ -n "$authority_before" ]; then
     if ! ma_authority_state_snapshot "$state_repo" "$authority_after"; then
       authority_diff="owner authority state became unreadable"

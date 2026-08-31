@@ -8374,22 +8374,25 @@ test_codex_jsonl_carries_stop_reason() {
 #!/usr/bin/env bash
 cat > /dev/null
 echo "ERROR rmcp::transport::worker: TRANSPORT-NOISE before the answer" >&2
-printf '%s\n' '{"type":"thread.started","thread_id":"t1","model":"gpt-5.6-terra"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"t1"}'
 printf '%s\n' '{"type":"turn.started"}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"JSONL answer body: pong."}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
 EOF
   chmod +x "$bin_dir/codex"
-  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
+  # The stream never names its model (probed live 2026-08-31: no event carries
+  # one), so a provider-default route ran whatever config.toml names.
+  printf 'model = "gpt-5.6-terra"\nmodel_reasoning_effort = "high"\n' > "$home_dir/codex-config.toml"
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_CODEX_CONFIG="$home_dir/codex-config.toml" \
+    "$ROOT/scripts/agent-call.sh" \
     --repo "$project" --artifact-dir "$artifact_dir" --to codex \
     --prompt "Jsonl probe" >/dev/null
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' \
     'stop-reason: provider=codex reason=turn_completed subtype=success is_error=0'
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'JSONL answer body: pong.'
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'tokens used'
-  # An event that names the model the stream ran on is the served model.
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'served model'
-  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "the codex index row must carry the served model"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "the codex index row must carry the configured default as the served model"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 row = [r for r in rows if r.get("provider") == "codex"][-1]
