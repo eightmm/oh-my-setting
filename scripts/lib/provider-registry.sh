@@ -555,6 +555,22 @@ oms_provider_model_family() {
 # with its native CLI and muddies family-diversity accounting. Empty means the
 # provider has no family of its own (an aggregator), and every family in its
 # catalog stands on its own.
+# The one seed routing keeps: the price order within a generation, top first.
+# Prices rot (5.6 was repriced twice in six weeks); the order does not, and a
+# new generation arrives unseeded, so it routes as the provider default until
+# someone looks. Claude's CLI lists nothing, so its seed is the alias line
+# itself and answers for any generation asked.
+oms_provider_price_order() {
+  local provider generation="${2:-}"
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider:$generation" in
+    codex:5.6) printf 'gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna\n' ;;
+    antigravity:3.7) printf 'gemini-3.7-flash-high gemini-3.7-flash-medium gemini-3.7-flash-low\n' ;;
+    claude:*) printf 'fable opus sonnet\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 oms_provider_primary_family() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?

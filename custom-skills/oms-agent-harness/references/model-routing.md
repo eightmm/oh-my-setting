@@ -8,8 +8,15 @@ agent, a Grok/GLM route, or a custom adapter.
 
 1. Run `oms models` for cached catalogs and per-model effort scales. Use
    `--refresh` only when a live probe is needed.
-2. No `--model` means provider default. `--model NAME` is exact and never
-   switches to a catalog entry or provider default.
+2. No `--model` means provider default — except for a write worker
+   (`peer-delegate`, `plan-run`, autopilot), which takes the second price
+   rank of the routable set (`gpt-5.6-terra`, `opus`, the medium Gemini
+   line): implementation runs one rank below the judging seats, which keep
+   the provider default. The order within a generation is the registry's
+   one seed (`oms_provider_price_order`); an unseeded generation routes as
+   the provider default and says so. `OMS_ROLE_ROUTING=0` switches this off.
+   `--model NAME` is exact and never switches to a catalog entry or provider
+   default.
 3. `--fallback-model NAME` is an opt-in, one-shot fallback used only for a
    recognized capacity error. A write attempt that changed its worktree is
    never retried.

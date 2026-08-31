@@ -18,7 +18,7 @@ ELIGIBLE_KINDS = frozenset(("call", "ask", "review", "delegate"))
 # Current markers plus the retired tier vocabulary: telemetry reads history,
 # and rows recorded before de-tiering must stay legible, not "unrecorded".
 MODEL_CLASSES = frozenset(
-    ("explicit", "provider-default", "fast", "balanced", "deep")
+    ("explicit", "provider-default", "role-default", "fast", "balanced", "deep")
 )
 STARTED_RE = re.compile(r"(?m)^- started:\s*(\S+)\s*$")
 TOKENS_RE = re.compile(

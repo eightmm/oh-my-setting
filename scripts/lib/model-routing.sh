@@ -95,12 +95,68 @@ EOF
   fi
 }
 
+# Which price rank a route takes, from what the caller is. A write worker
+# (delegate) takes the second rank; everything that judges — consult, advise,
+# ask, review, a plain call — keeps the provider default, which is its top.
+# Exit 1: no role-shaped route here.
+oms_model_role_rank() {
+  case "${OMS_MODEL_OPERATION:-}" in
+    delegate) printf 'worker\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# The routable model for this route's role: its rank in the newest
+# generation's price order, held to the routable set where a catalog exists
+# (a seed entry the catalog no longer routes is skipped, so a line the
+# provider stopped listing cannot be chosen). Exit 1 means the provider
+# default should run — no role here, routing switched off with
+# OMS_ROLE_ROUTING=0, or no seed for this generation yet, which is said
+# aloud so the seed gets written.
+oms_model_role_default() {
+  local provider="$1" role routable generation order candidate key model ranked=""
+  [ "${OMS_ROLE_ROUTING:-1}" != 0 ] || return 1
+  role="$(oms_model_role_rank)" || return 1
+  routable="$(oms_capability_routable_models "$provider" 2>/dev/null || true)"
+  generation=""
+  if [ -n "$routable" ]; then
+    generation="$(oms_model_generation "$(printf '%s\n' "$routable" | sed -n '1p')" 2>/dev/null || true)"
+  fi
+  order="$(oms_provider_price_order "$provider" "$generation" 2>/dev/null)" || {
+    echo "note: no price order seeded for $provider generation ${generation:-unknown}; the provider default runs (seed oms_provider_price_order)" >&2
+    return 1
+  }
+  for candidate in $order; do
+    if [ -n "$routable" ]; then
+      key="$(oms_model_catalog_key "$candidate")"
+      while IFS= read -r model; do
+        [ -n "$model" ] || continue
+        if [ "$(oms_model_catalog_key "${model%%	*}")" = "$key" ]; then
+          ranked="${ranked:+$ranked }$candidate"
+          break
+        fi
+      done <<EOF
+$routable
+EOF
+    else
+      ranked="${ranked:+$ranked }$candidate"
+    fi
+  done
+  [ -n "$ranked" ] || return 1
+  # shellcheck disable=SC2086
+  set -- $ranked
+  case "$role" in
+    worker) printf '%s\n' "${2:-$1}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 oms_model_prepare() {
   local provider="$1" explicit="${OMS_MODEL_EXPLICIT:-}"
   local explicit_fallback="${OMS_MODEL_FALLBACK_EXPLICIT:-}"
   local effort_requested="${OMS_REASONING_EFFORT_REQUEST:-auto}"
   local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
-  local candidate filtered_chain="" standing
+  local candidate filtered_chain="" standing role_model
 
   provider="$(oms_provider_normalize "$provider")" || return $?
   oms_model_validate_name "$explicit" || return $?
@@ -128,6 +184,11 @@ oms_model_prepare() {
     OMS_MODEL_PRIMARY="provider-default"
     OMS_MODEL_RESOLVED_CLASS="provider-default"
     OMS_MODEL_CLASS_REASON="provider-default"
+    if role_model="$(oms_model_role_default "$provider")" && [ -n "$role_model" ]; then
+      OMS_MODEL_PRIMARY="$role_model"
+      OMS_MODEL_RESOLVED_CLASS="role-default"
+      OMS_MODEL_CLASS_REASON="role:$(oms_model_role_rank)"
+    fi
   fi
   if [ "$effort_requested" != auto ]; then
     if [ "${OMS_REASONING_CLAMP:-0}" = 1 ]; then

@@ -284,7 +284,7 @@ def artifact_span(
         "oms.verify_exit": safe_exit(row.get("verify_exit")),
         "oms.model_class": safe_choice(
             row.get("model_class"),
-            {"explicit", "provider-default", "fast", "balanced", "deep"},
+            {"explicit", "provider-default", "role-default", "fast", "balanced", "deep"},
         ),
         "oms.selected_model": safe_label(row.get("selected_model")),
         "oms.reasoning_effort": safe_choice(

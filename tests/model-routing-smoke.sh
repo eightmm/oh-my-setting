@@ -86,6 +86,42 @@ printf 'model-a\ngpt-5.6-sol\n' > "$gen/codex.models"
 out="$(routable codex)"
 [ "$out" = 'gpt-5.6-sol ' ] || fail "an unversioned name beside versioned siblings drops: $out"
 
+# Role routing: a write worker takes the second price rank of the routable
+# set; everything that judges keeps the provider default, which is its top.
+# The order within a generation is the one seed the registry keeps, and it
+# expires with the generation: an unseeded newest generation routes as the
+# provider default and says so.
+role_prepare() {  # role_prepare PROVIDER OPERATION ROLE ERRFILE
+  PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" OMS_MODEL_EXPLICIT='' OMS_REASONING_EFFORT_REQUEST=auto \
+    OMS_MODEL_OPERATION="$2" OMS_MODEL_ROLE="$3" \
+    bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare "$1" 2>"$2"; printf "%s|%s|%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_RESOLVED_CLASS" "$OMS_MODEL_CLASS_REASON" "$OMS_MODEL_ALTERNATE"' _ "$1" "$4"
+}
+printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\n' > "$gen/codex.models"
+out="$(role_prepare codex delegate implementation-worker "$TMP/role.err")"
+[ "$out" = 'gpt-5.6-terra|role-default|role:worker|gpt-5.6-sol' ] ||
+  fail "a write worker takes the second price rank, with recovery still inside the routable set: $out"
+out="$(role_prepare codex consult '' "$TMP/role2.err")"
+[ "$out" = 'provider-default|provider-default|provider-default|gpt-5.6-sol' ] ||
+  fail "a judge keeps the provider default: $out"
+out="$(OMS_ROLE_ROUTING=0 role_prepare codex delegate implementation-worker "$TMP/role3.err")"
+[ "$out" = 'provider-default|provider-default|provider-default|gpt-5.6-sol' ] ||
+  fail "role routing must be switchable off: $out"
+# The fixture catalog lists no medium line, so the seed's second entry is not
+# routable and the next routable rank is taken instead of an unlisted name.
+out="$(role_prepare antigravity delegate implementation-worker "$TMP/role5.err")"
+case "$out" in 'gemini-3.7-flash-low|role-default|role:worker|'*) ;; *) fail "the antigravity worker rank skips a seed entry the catalog does not route: $out" ;; esac
+# No catalog at all (claude): the seed stands in for the routable set, and
+# recovery from a role-pinned model is the provider default, as with any
+# catalog-less route.
+out="$(role_prepare claude delegate implementation-worker "$TMP/role6.err")"
+[ "$out" = 'opus|role-default|role:worker|provider-default' ] || fail "a catalog-less provider routes its worker from the seed alone: $out"
+printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
+out="$(role_prepare codex delegate implementation-worker "$TMP/role4.err")"
+[ "$out" = 'provider-default|provider-default|provider-default|gpt-5.10-nova' ] ||
+  fail "an unseeded generation routes as provider default: $out"
+grep -q 'no price order' "$TMP/role4.err" ||
+  fail "an unseeded generation must say so: $(cat "$TMP/role4.err")"
+
 # Auto effort resolves to "" (provider default). The REAL invocation must then
 # omit the effort flag entirely: codex refuses -c model_reasoning_effort=""
 # outright ("reasoning_effort must not be empty"), which silently killed every

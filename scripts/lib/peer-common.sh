@@ -1039,7 +1039,7 @@ parent_event_id = safe_id(os.environ.get("OMS_INDEX_PARENT_EVENT_ID", ""))
 if parent_event_id:
     row["parent_event_id"] = parent_event_id
 model_class = os.environ.get("OMS_INDEX_MODEL_CLASS", "")
-if model_class in ("explicit", "provider-default", "fast", "balanced", "deep"):
+if model_class in ("explicit", "provider-default", "role-default", "fast", "balanced", "deep"):
     row["model_class"] = model_class
 def bounded_model(name):
     value = os.environ.get(name, "")
