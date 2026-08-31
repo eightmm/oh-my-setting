@@ -922,7 +922,7 @@ else:
         latest_import = runtime.get("continuity", {}).get("latest_import", {})
         if latest_import.get("present"):
             line("  imported capsule: %s status=%s (advisory only; no authority transferred)" % (
-                latest_import.get("capsule_id", "unknown"),
+                latest_import.get("capsule_id") or "unknown",
                 latest_import.get("status", "unknown")))
 
     p = state["plan"]

@@ -137,7 +137,7 @@ except Exception:
     raise SystemExit(0)
 if row.get("present"):
     print("- portable capsule %s (%s; advisory only, no authority transferred): oms state" % (
-        row.get("capsule_id", "unknown"), row.get("status", "unknown")))
+        row.get("capsule_id") or "unknown", row.get("status", "unknown")))
 ' 2>/dev/null)" || portable_line=""
 fi
 portable_line="${portable_line//$'\r'/}"

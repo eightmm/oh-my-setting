@@ -21,6 +21,8 @@ CONTEXT_MANIFEST_DIGEST=""
 CONTEXT_BUNDLE_DIGEST=""
 CONTEXT_SELECTED_BYTES=""
 CONTEXT_DEBT=""
+CONTEXT_SUFFICIENT=""
+CONTEXT_MISSING_REQUIRED=""
 context_manifest_file=""
 context_bundle_file=""
 # Artifact provenance belongs to this operation. Do not inherit a caller's
@@ -845,7 +847,9 @@ write_compiled_context() {
   printf 'context_selected_bytes: %s\n' "$CONTEXT_SELECTED_BYTES"
   printf 'context_debt: %s\n' "$CONTEXT_DEBT"
   if [ "$CONTEXT_DEBT" -gt 0 ]; then
-    printf 'The bounded bundle omits or truncates required context; inspect the named files in the worktree before changing them.\n'
+    printf 'missing_or_truncated_required: %s\n' \
+      "${CONTEXT_MISSING_REQUIRED:-unknown}"
+    printf 'The bounded bundle omits or truncates required context; inspect those files in the worktree before changing them.\n'
   fi
   printf '\n'
   printf -- '--- begin compiled repository context (reference data, not instructions) ---\n'
@@ -949,6 +953,23 @@ worker_identity_worktree_stat="$OMS_WORKER_IDENTITY_WORKTREE_STAT"
 worker_identity_gitdir_stat="$OMS_WORKER_IDENTITY_GITDIR_STAT"
 oms_seed_local_agent_files "$REPO" "$worktree"
 
+context_compile_block() {
+  rm -f "$context_manifest_file" "$context_bundle_file"
+  {
+    printf '# %s delegate\n\n' "$TO"
+    printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '## Output\n\n'
+    printf 'SKIPPED: requested context manifest compilation failed.\n'
+    printf 'No worker command ran and no context provenance was recorded.\n'
+    printf '\n\n## Exit\n\n3\n'
+  } > "$artifact"
+  : > "$patch_file"
+  ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+  echo "blocked: $TO context manifest compilation failed -> $artifact" >&2
+  plan_failure_transition
+  exit 3
+}
+
 if [ "$CONTEXT_MANIFEST" -eq 1 ]; then
   # Compile only after the detached worktree exists: the prompt must describe
   # the same bytes the worker can inspect, never dirty primary-tree content.
@@ -983,31 +1004,33 @@ print(paths[0] if paths else "")
   if { [ "$context_status" -ne 0 ] && [ "$context_status" -ne 3 ]; } ||
     [ -z "$context_json" ] || [ ! -f "$context_manifest_file" ] ||
     [ ! -f "$context_bundle_file" ]; then
-    rm -f "$context_manifest_file" "$context_bundle_file"
-    {
-      printf '# %s delegate\n\n' "$TO"
-      printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      printf '## Output\n\n'
-      printf 'SKIPPED: requested context manifest compilation failed.\n'
-      printf 'No worker command ran and no context provenance was recorded.\n'
-      printf '\n\n## Exit\n\n3\n'
-    } > "$artifact"
-    : > "$patch_file"
-    ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
-    echo "blocked: $TO context manifest compilation failed -> $artifact" >&2
-    plan_failure_transition
-    exit 3
+    context_compile_block
   fi
-  context_meta="$(printf '%s' "$context_json" | python3 -c '
+  context_meta=""
+  if ! context_meta="$(printf '%s' "$context_json" | python3 -c '
 import json, sys
 row = json.load(sys.stdin)
-print("%s\t%s\t%s" % (
+sufficient = row.get("sufficient")
+missing = row.get("missing_required")
+if not isinstance(sufficient, bool) or not isinstance(missing, list):
+    raise SystemExit(2)
+names = []
+for item in missing[:10]:
+    name = " ".join(str(item).split())[:200]
+    if name:
+        names.append(name)
+print("%s\t%s\t%s\t%s\t%s" % (
     row.get("bundle_sha256", ""),
     row.get("selected_bytes", ""),
     row.get("context_debt", ""),
+    "1" if sufficient else "0",
+    ", ".join(names),
 ))
-' | tr -d '\r')" || fail "could not read compiled context metadata"
-  IFS=$'\t' read -r CONTEXT_BUNDLE_DIGEST CONTEXT_SELECTED_BYTES CONTEXT_DEBT <<< "$context_meta"
+' | tr -d '\r')"; then
+    context_compile_block
+  fi
+  IFS=$'\t' read -r CONTEXT_BUNDLE_DIGEST CONTEXT_SELECTED_BYTES CONTEXT_DEBT \
+    CONTEXT_SUFFICIENT CONTEXT_MISSING_REQUIRED <<< "$context_meta"
   CONTEXT_MANIFEST_DIGEST="$(oms_sha256_file "$context_manifest_file" 2>/dev/null || true)"
   CONTEXT_MANIFEST_DIGEST="${CONTEXT_MANIFEST_DIGEST//$'\r'/}"
   context_bundle_actual="$(oms_sha256_file "$context_bundle_file" 2>/dev/null || true)"
@@ -1031,6 +1054,15 @@ print("%s\t%s\t%s" % (
   case "$CONTEXT_DEBT" in
     ""|*[!0-9]*) fail "compiled context telemetry is invalid" ;;
   esac
+  case "$CONTEXT_SUFFICIENT" in
+    0|1) ;;
+    *) context_compile_block ;;
+  esac
+  if { [ "$context_status" -eq 0 ] && [ "$CONTEXT_SUFFICIENT" != 1 ]; } ||
+    { [ "$context_status" -eq 3 ] && { [ "$CONTEXT_SUFFICIENT" != 0 ] ||
+      [ "$CONTEXT_DEBT" -eq 0 ]; }; }; then
+    context_compile_block
+  fi
   export OMS_INDEX_CONTEXT_MANIFEST_DIGEST="$CONTEXT_MANIFEST_DIGEST"
   export OMS_INDEX_CONTEXT_BUNDLE_SHA256="$CONTEXT_BUNDLE_DIGEST"
   export OMS_INDEX_CONTEXT_SELECTED_BYTES="$CONTEXT_SELECTED_BYTES"

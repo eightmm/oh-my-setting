@@ -4337,6 +4337,7 @@ EOF
     --context-manifest --no-verify >/dev/null
 
   assert_file_contains "$capture" 'context_debt: 1'
+  assert_file_contains "$capture" 'missing_or_truncated_required: large.py'
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
@@ -4346,6 +4347,36 @@ assert row["context_selected_bytes"] > 0, row
 PY
   "$ROOT/scripts/runtime.sh" --repo "$project" benchmark show |
     python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["context"]["debt_sum"] == 1, row["context"]'
+}
+
+test_delegate_context_compile_failure_never_runs_worker() {
+  local project="$TMP/delegate-context-failure"
+  local artifact_dir="$TMP/delegate-context-failure-artifacts"
+  local bin_dir="$TMP/delegate-context-failure-bin"
+  local home_dir="$TMP/delegate-context-failure-home"
+  local marker="$TMP/delegate-context-failure-worker-ran"
+  local rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/runtime" "$bin_dir" "$home_dir"
+  printf 'not a directory\n' > "$project/.oms/runtime/context"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'ran\n' > "$OMS_CONTEXT_FAILURE_MARKER"
+cat >/dev/null
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    OMS_CONTEXT_FAILURE_MARKER="$marker" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --context-manifest --no-verify \
+    --prompt "Compiler failure must block" >/dev/null 2>&1 || rc=$?
+
+  [ "$rc" = 3 ] || fail "context compiler failure should exit 3, got $rc"
+  [ ! -e "$marker" ] || fail "context compiler failure still ran the worker"
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' \
+    'SKIPPED: requested context manifest compilation failed.'
 }
 
 test_delegate_apply_refuses_dirty_tree() {
@@ -22635,7 +22666,8 @@ assert row["status"] == "verified", row
 test_portable_capsule_import_surfaces_advisory_continuity() {
   local project="$TMP/portable-capsule-continuity"
   local capsule_file="$TMP/portable-capsule.json"
-  local before_nonportable after_nonportable state_json inbox_json resume_out
+  local before_nonportable after_nonportable state_json state_text inbox_json
+  local resume_out latest_id
 
   make_committed_repo "$project"
   before_nonportable="$(python3 - "$project" <<'PY'
@@ -22716,6 +22748,31 @@ row = json.load(sys.stdin)["runtime"]["continuity"]["latest_import"]
 assert row["status"] == "head-diverged", row
 assert row["head_matches"] is False, row
 ' || fail "state did not mark imported continuity stale after HEAD drift: $state_json"
+
+  latest_id="$(tr -d '\r\n' < "$project/.oms/portable/imports/LATEST")"
+  printf '{broken\n' > "$project/.oms/portable/imports/$latest_id.json"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+runtime = json.load(sys.stdin)["runtime"]
+row = runtime["continuity"]["latest_import"]
+assert runtime["healthy"] is True, runtime
+assert row["status"] == "invalid" and row["capsule_id"] == "'"$latest_id"'", row
+' || fail "invalid advisory capsule disabled canonical runtime: $state_json"
+  state_text="$("$ROOT/scripts/state.sh" --repo "$project")"
+  printf '%s\n' "$state_text" | grep -Fq \
+    "imported capsule: $latest_id status=invalid" ||
+    fail "state rendered invalid capsule incorrectly: $state_text"
+  printf 'not-a-capsule\n' > "$project/.oms/portable/imports/LATEST"
+  state_text="$("$ROOT/scripts/state.sh" --repo "$project")"
+  printf '%s\n' "$state_text" | grep -Fq \
+    'imported capsule: unknown status=invalid' ||
+    fail "state rendered a null capsule id instead of unknown: $state_text"
+  resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
+    "$ROOT/scripts/resume-hook.sh")"
+  printf '%s\n' "$resume_out" | grep -Fq \
+    'portable capsule unknown (invalid; advisory only' ||
+    fail "resume rendered a null capsule id instead of unknown: $resume_out"
 }
 
 test_plan_snapshot_is_nonvacuous_across_state_runtime_and_goal_drive() {

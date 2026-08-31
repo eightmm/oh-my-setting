@@ -333,12 +333,13 @@ approval, or Git state.
 
 The latest validated import is projected as `continuity.latest_import` in the
 TaskEnvelope and appears in `oms state`, `oms inbox`, and the session resume
-hint. Its status is `current`, `head-diverged`, `state-diverged`, or `unknown`
-after comparing the capsule's source HEAD and state digest with local canonical
-state. The imported bytes never enter the canonical state digest or satisfy an
-acceptance criterion. Malformed, digest-mismatched, oversized, missing, or
-symlinked advisory imports are contained as `status: invalid`; they never make
-the canonical task/evidence projection unavailable.
+hint. Its status is `current`, `head-diverged`, `state-diverged`, `unknown`, or
+`invalid` after comparing the capsule's source HEAD and state digest with local
+canonical state. The imported bytes never enter the canonical state digest or
+satisfy an acceptance criterion. Malformed, digest-mismatched, oversized,
+missing, or symlinked advisory imports are contained as `status: invalid` with
+the non-sensitive reason `local-import-validation-failed`; they never make the
+canonical task/evidence projection unavailable.
 
 The capsule and `session-handoff` split one responsibility two ways:
 `session-handoff` preserves **provider session continuity** — what one CLI's

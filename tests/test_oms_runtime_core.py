@@ -388,11 +388,20 @@ class RuntimeFixture(RuntimeFixtureBase):
         row['digest'] = sha256_bytes(canonical_json(row['payload']))
         row['capsule_id'] = 'capsule-' + row['digest'][:32]
         encoded = canonical_json(row)
+        delta = capsule.MAX_CAPSULE_BYTES - 1 - len(encoded)
+        row['payload']['padding'] += 'x' * delta
+        row['digest'] = sha256_bytes(canonical_json(row['payload']))
+        row['capsule_id'] = 'capsule-' + row['digest'][:32]
+        encoded = canonical_json(row)
         self.assertLessEqual(len(encoded), capsule.MAX_CAPSULE_BYTES)
         self.assertGreater(len(encoded), capsule.MAX_CAPSULE_BYTES - 1024)
         output = Path(self.tmp.name) / 'near-limit-capsule.json'
         atomic_write_bytes(output, encoded)
         capsule.import_capsule(self.repo, output)
+        stored = (self.repo / '.oms' / 'portable' / 'imports' /
+                  (row['capsule_id'] + '.json'))
+        self.assertGreater(stored.stat().st_size, capsule.MAX_CAPSULE_BYTES)
+        self.assertLessEqual(stored.stat().st_size, capsule.MAX_IMPORT_BYTES)
         latest = evidence.build_envelope(self.repo)['continuity']['latest_import']
         self.assertNotEqual(latest['status'], 'invalid')
         self.assertEqual(latest['capsule_id'], row['capsule_id'])
