@@ -555,8 +555,10 @@ chooses a connector or tracked summary.
   (a file that does not parse after Edit/Write is reported in the same turn as
   feedback, never a block), tier guard (an implementation edit the session
   model makes itself in an adopted repo is advised once per session;
-  `OMS_TIER_GUARD=ask|deny` asks or refuses, `off` silences; subagents and
-  harness workers pass), session capture, handoff, and compact main/subagent
+  `OMS_TIER_GUARD=ask|deny` asks or refuses, `off` silences; delegated
+  subagents and harness workers pass, but only an OMS delegate guarantees the
+  seeded worker-model route because native subagents default to inheriting the
+  session model), session capture, handoff, and compact main/subagent
   HUDs.
 - Codex: local plugin hooks plus a managed native status line when the user has
   not set one. On Python 3.9/3.10, arbitrary existing TOML requires `tomli` so

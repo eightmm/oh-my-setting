@@ -11,16 +11,22 @@ agent, a Grok/GLM route, or a custom adapter.
 2. No `--model` means provider default — except for a write worker
    (`peer-delegate`, `plan-run`, autopilot), which takes the second price
    rank of the routable set (`gpt-5.6-terra`, `opus`, the medium Gemini
-   line): implementation runs one rank below the judging seats, which keep
-   the provider default. The order within a generation is the registry's
-   one seed (`oms_provider_price_order`); an unseeded generation routes as
-   the provider default and says so. `OMS_ROLE_ROUTING=0` switches this off.
+   line). This is a stable worker preset; it is not computed relative to an
+   account-specific provider default. Judging calls keep that provider
+   default. Recovery tries cheaper seeded candidates before higher ones. The
+   order within a generation is the registry's one seed
+   (`oms_provider_price_order`); an unseeded generation routes as the
+   provider default and says so. `OMS_ROLE_ROUTING=0` switches this off.
    `--model NAME` is exact and never switches to a catalog entry or provider
    default.
 3. `--fallback-model NAME` is an opt-in, one-shot fallback used only for a
    recognized capacity error. A write attempt that changed its worktree is
    never retried.
-4. An unpinned provider-default route may use a bounded distinct catalog model
+4. The Claude edit-time tier guard enforces the delegation boundary, not an
+   invisible subagent model choice. OMS delegates use the worker preset;
+   native Claude subagents default to the main model unless their `model` is
+   pinned.
+5. An unpinned provider-default route may use a bounded distinct catalog model
    when a model safeguard or unavailable-name error explicitly permits
    recovery. Policy, auth, permission, context, and verification failures do
    not route around the result.

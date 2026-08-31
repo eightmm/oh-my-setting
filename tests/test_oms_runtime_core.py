@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import runpy
 import stat
 import shutil
 import subprocess
@@ -940,7 +941,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertIn('useful_work_efficiency', row)
         self.assertIn('human_corrections', row['unknown_metrics'])
 
-    def test_benchmark_groups_outcomes_by_served_model(self) -> None:
+    def test_benchmark_groups_only_attributable_model_outcomes(self) -> None:
         # The per-model table is what a routing decision can be argued from:
         # the served model when the transport reported one, the selected model
         # when it was pinned, and nothing for a provider-default route the
@@ -951,6 +952,8 @@ class RuntimeFixture(RuntimeFixtureBase):
             {'schema': 1, 'event_id': 'evt-m2', 'kind': 'call', 'provider': 'codex', 'served_model': 'gpt-5.6-terra', 'status': 'failed', 'tokens': 50, 'duration_s': 4.0},
             {'schema': 1, 'event_id': 'evt-m3', 'kind': 'call', 'provider': 'claude', 'selected_model': 'claude-opus-5', 'status': 'success', 'tokens': 10},
             {'schema': 1, 'event_id': 'evt-m4', 'kind': 'call', 'provider': 'antigravity', 'selected_model': 'provider-default', 'status': 'success'},
+            {'schema': 1, 'event_id': 'evt-m5', 'kind': 'call', 'provider': 'codex', 'selected_model': 'gpt-5.6-sol', 'fallback_used': True, 'status': 'success', 'tokens': 200, 'cost_usd': 0.2},
+            {'schema': 1, 'event_id': 'evt-m6', 'kind': 'call', 'provider': 'codex', 'configured_model': 'gpt-5.6-luna', 'model_attribution': 'configured-default', 'status': 'success', 'tokens': 20},
         ]
         with index.open('a', encoding='utf-8') as handle:
             for item in rows:
@@ -963,9 +966,47 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(terra['tokens'], 150)
         self.assertEqual(terra['duration_seconds_mean'], 3.0)
         self.assertAlmostEqual(terra['cost_usd'], 0.01)
+        self.assertEqual(terra['sources'], {'transport': 2})
         self.assertEqual(models['claude/claude-opus-5']['calls'], 1)
+        self.assertEqual(models['codex/gpt-5.6-luna']['sources'], {'configured-default': 1})
+        self.assertNotIn('codex/gpt-5.6-sol', models)
         self.assertNotIn('antigravity/provider-default', models)
         self.assertFalse(any(key.startswith('antigravity/') for key in models))
+
+    def test_artifact_model_metrics_refuse_multi_model_attribution(self) -> None:
+        artifact = self.repo / '.oms' / 'artifacts' / 'multi-model.md'
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            '# call\n\n- started: 2026-08-31T00:00:00Z\n\n## Output\n\n'
+            'served model\nmodel-a\ntokens used\n4\ncost usd\n0.1\n'
+            'served model\nmodel-b\ntokens used\n6\ncost usd\n0.2\n',
+            encoding='utf-8',
+        )
+        telemetry = runpy.run_path(str(ROOT / 'scripts' / 'lib' / 'artifact-telemetry.py'))
+        row = {'artifact': '.oms/artifacts/multi-model.md'}
+        model_metrics = telemetry['artifact_model_metrics'](str(self.repo), row)
+        self.assertEqual(model_metrics['model_attribution'], 'ambiguous')
+        self.assertIsNone(model_metrics['served_model'])
+        self.assertIsNone(model_metrics['configured_model'])
+        self.assertAlmostEqual(model_metrics['cost_usd'], 0.3)
+        self.assertEqual(telemetry['artifact_metrics'](str(self.repo), row)[2], 10)
+
+        artifact.write_text(
+            '# call\n\n- started: 2026-08-31T00:00:00Z\n\n## Output\n\n'
+            'served model\nmodel-a\ntokens used\n4\ncost usd\n0.1\n',
+            encoding='utf-8',
+        )
+        fallback = telemetry['artifact_model_metrics'](
+            str(self.repo),
+            {
+                'artifact': '.oms/artifacts/multi-model.md',
+                'fallback_used': True,
+                'selected_model': 'model-a',
+            },
+        )
+        self.assertEqual(fallback['model_attribution'], 'ambiguous')
+        self.assertIsNone(fallback['served_model'])
+        self.assertAlmostEqual(fallback['cost_usd'], 0.1)
 
     def test_seat_no_answer_is_not_classified_by_exit_code(self) -> None:
         # A seat that produced nothing is a distinct, recoverable failure, but

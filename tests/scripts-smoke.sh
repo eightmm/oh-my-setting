@@ -8381,8 +8381,9 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_token
 EOF
   chmod +x "$bin_dir/codex"
   # The stream never names its model (probed live 2026-08-31: no event carries
-  # one), so a provider-default route ran whatever config.toml names.
-  printf 'model = "gpt-5.6-terra"\nmodel_reasoning_effort = "high"\n' > "$home_dir/codex-config.toml"
+  # one), so config.toml is useful inference, not transport-confirmed serving.
+  # Real TOML parsing must accept single quotes and comments.
+  printf "model = 'gpt-5.6-terra' # configured default\nmodel_reasoning_effort = 'high'\n" > "$home_dir/codex-config.toml"
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_CODEX_CONFIG="$home_dir/codex-config.toml" \
     "$ROOT/scripts/agent-call.sh" \
     --repo "$project" --artifact-dir "$artifact_dir" --to codex \
@@ -8391,12 +8392,14 @@ EOF
     'stop-reason: provider=codex reason=turn_completed subtype=success is_error=0'
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'JSONL answer body: pong.'
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'tokens used'
-  assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'served model'
-  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "the codex index row must carry the configured default as the served model"
+  assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'configured model'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "the codex index row must distinguish configured inference from a served model"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 row = [r for r in rows if r.get("provider") == "codex"][-1]
-assert row["served_model"] == "gpt-5.6-terra", row
+assert "served_model" not in row, row
+assert row["configured_model"] == "gpt-5.6-terra", row
+assert row["model_attribution"] == "configured-default", row
 assert row["tokens"] == 15, row
 PY
   if grep -R -Fq '"type":"item.completed"' "$artifact_dir"/codex-jsonl-probe-*.md; then
@@ -14017,8 +14020,8 @@ print(row["hookSpecificOutput"]["additionalContext"])
 # The tier guard is the one hard edge of model tiering: an edit the session
 # model itself makes to implementation in an adopted repo is advised once per
 # session by default, asked or refused when OMS_TIER_GUARD says so, and never
-# touched when a subagent or a harness worker — the tier meant to write — is
-# the one editing. Prose, .oms state, and files outside the repo pass.
+# touched after delegation to a subagent or harness worker. Prose, .oms state,
+# and files outside the repo pass.
 test_tier_guard_hook_routes_implementation_to_workers() {
   local project="$TMP/tier-guard-hook"
   local SH="$ROOT/scripts/tier-guard-hook.sh"
@@ -14057,11 +14060,19 @@ print(row["permissionDecision"] + ("|context" if row.get("additionalContext") el
   out="$(cd "$project" && payload_for Write "$project/src/main.py" s4 | OMS_TIER_GUARD=off bash "$SH")"
   [ -z "$out" ] || fail "off must be silent: $out"
 
-  # The tier meant to write passes even under deny: a subagent, a harness worker.
+  # Delegated work passes even under deny. Only an OMS harness worker carries a
+  # guaranteed worker-tier route; a native subagent may inherit unless pinned.
   out="$(cd "$project" && payload_for Write "$project/src/main.py" s5 ',"agent_id":"sub-1","agent_type":"build-error-resolver"' | OMS_TIER_GUARD=deny bash "$SH")"
   [ -z "$out" ] || fail "a subagent's edit is the policy working, not a violation: $out"
   out="$(cd "$project" && payload_for Write "$project/src/main.py" s5 | OMS_TIER_GUARD=deny OMS_HARNESS_CHILD=1 bash "$SH")"
   [ -z "$out" ] || fail "a harness worker's edit passes: $out"
+
+  # session_id is a required Claude hook field. A malformed payload must not
+  # create one permanent marker shared by every malformed/future invocation.
+  out="$(cd "$project" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"cwd":"%s"}' "$project/src/main.py" "$project" | bash "$SH")"
+  [ -z "$out" ] || fail "a payload without session identity must fail open: $out"
+  [ ! -e "$project/.oms/hooks/tier-guard-session" ] ||
+    fail "a missing session id created a cross-session marker"
 
   # Prose, harness state, files outside the repo, non-edit tools, unadopted repos.
   for path in "$project/docs/design.md" "$project/README.md" "$project/.oms/task/current.md" "$TMP/outside-the-repo.py"; do
@@ -18562,6 +18573,30 @@ ARTIFACT
     jetski:*) ;;
     *) fail "the operator needs the provider's own reason, got: $verdict" ;;
   esac
+
+  # Provider telemetry is appended after the body in label/value pairs. The
+  # numeric value after `tokens used` must not turn a refusal into an answer.
+  cat > "$dir/blocked-with-footers.md" <<'ARTIFACT'
+# codex call
+
+## Output
+
+stop-reason: provider=codex reason=turn_completed subtype=success is_error=0
+error: permission denied while reading the requested repository.
+served model
+gpt-5.6-terra
+tokens used
+15
+cost usd
+0.01
+
+## Exit
+
+0
+ARTIFACT
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/blocked-with-footers.md'")"
+  [ "$verdict" = "blocked" ] ||
+    fail "transport footers must not promote a refusal to an answer, got: $verdict"
 
   # An answer that discusses permissions is still an answer: the refusal rule
   # fires only when the whole body is diagnostics.

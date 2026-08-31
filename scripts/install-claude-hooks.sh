@@ -44,11 +44,11 @@ HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
 
-# Model tiering has one hard edge: implementation belongs to a worker one
-# rank below the session model. Before an edit the session model makes
+# Model tiering has one hard edge: implementation crosses a delegation
+# boundary. Before an edit the session model makes
 # itself in an adopted repo, the guard advises once per session by default,
-# and asks or refuses when OMS_TIER_GUARD says so; subagents and harness
-# workers pass untouched.
+# and asks or refuses when OMS_TIER_GUARD says so. Delegated subagents and
+# harness workers pass; only the OMS worker route guarantees a lower preset.
 PreToolUse|tier-guard-hook.sh|Edit|Write|MultiEdit|NotebookEdit|5
 
 # Failed Bash commands feed the shared failure memory and surface what it

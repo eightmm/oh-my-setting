@@ -30,6 +30,9 @@ TOKENS_RE = re.compile(
 SERVED_MODEL_RE = re.compile(
     r"(?im)^served model[ \t]*\r?\n[ \t]*([A-Za-z0-9][A-Za-z0-9._:+/-]{0,199})[ \t]*$"
 )
+CONFIGURED_MODEL_RE = re.compile(
+    r"(?im)^configured model[ \t]*\r?\n[ \t]*([A-Za-z0-9][A-Za-z0-9._:+/-]{0,199})[ \t]*$"
+)
 COST_RE = re.compile(r"(?im)^cost usd[ \t]*\r?\n[ \t]*([0-9]+(?:\.[0-9]+)?)[ \t]*$")
 ARTIFACT_EDGE_BYTES = 64 * 1024
 # A cohort this small cannot carry a rate. Below the floor the uptake report
@@ -96,30 +99,75 @@ def artifact_text(repo: str, row: dict[str, object]) -> Optional[str]:
 
 def artifact_model_metrics(
     repo: str, row: dict[str, object]
-) -> tuple[Optional[str], Optional[float]]:
-    """Served model and cost from the artifact's Output footers.
+) -> dict[str, object]:
+    """Return bounded model provenance and operation-level provider cost.
 
-    Cached row values win, as for duration and tokens. Otherwise the last
-    served-model footer is the final route's model, and cost sums across the
-    bounded retries the artifact records, the way tokens do.
+    Cost may span retries, but a per-model identity is published only when the
+    whole operation has one attributable route. Multi-model or fallback rows
+    keep their total cost while refusing a misleading model assignment.
     """
     saved_model = row.get("served_model")
     saved_model = saved_model if isinstance(saved_model, str) and saved_model else None
+    saved_configured = row.get("configured_model")
+    saved_configured = saved_configured if isinstance(saved_configured, str) and saved_configured else None
     saved_cost = row.get("cost_usd")
     saved_cost = float(saved_cost) if isinstance(saved_cost, (int, float)) and not isinstance(saved_cost, bool) else None
-    if saved_model is not None and saved_cost is not None:
-        return saved_model, saved_cost
     text = artifact_text(repo, row)
-    if text is None:
-        return saved_model, saved_cost
-    marker = re.search(r"(?m)^## Output$", text)
-    if marker:
-        text = text[marker.end():]
-    models = SERVED_MODEL_RE.findall(text)
-    costs = COST_RE.findall(text)
-    served = saved_model if saved_model is not None else (models[-1] if models else None)
+    if text is not None:
+        marker = re.search(r"(?m)^## Output$", text)
+        if marker:
+            text = text[marker.end():]
+        models = SERVED_MODEL_RE.findall(text)
+        configured = CONFIGURED_MODEL_RE.findall(text)
+        costs = COST_RE.findall(text)
+    else:
+        models, configured, costs = [], [], []
+    if saved_model:
+        models.append(saved_model)
+    if saved_configured:
+        configured.append(saved_configured)
+
+    # The first implementation joined multiple Claude modelUsage keys with
+    # '+'. Split that historical shape so old internally-fallback calls become
+    # ambiguous instead of a synthetic model name.
+    expanded = []
+    for model in models:
+        expanded.extend(part for part in model.split("+") if part)
+    models = list(dict.fromkeys(expanded))
+    configured = list(dict.fromkeys(configured))
     cost = saved_cost if saved_cost is not None else (round(sum(float(c) for c in costs), 6) if costs else None)
-    return served, cost
+    ambiguous = bool(row.get("fallback_used")) or len(models) > 1 or len(configured) > 1
+    if models and configured and set(models) != set(configured):
+        ambiguous = True
+    if row.get("model_attribution") == "ambiguous":
+        ambiguous = True
+    if ambiguous:
+        return {
+            "served_model": None,
+            "configured_model": None,
+            "cost_usd": cost,
+            "model_attribution": "ambiguous",
+        }
+    if models:
+        return {
+            "served_model": models[0],
+            "configured_model": None,
+            "cost_usd": cost,
+            "model_attribution": "transport",
+        }
+    if configured:
+        return {
+            "served_model": None,
+            "configured_model": configured[0],
+            "cost_usd": cost,
+            "model_attribution": "configured-default",
+        }
+    return {
+        "served_model": None,
+        "configured_model": None,
+        "cost_usd": cost,
+        "model_attribution": "unknown",
+    }
 
 
 def artifact_metrics(
@@ -140,7 +188,7 @@ def artifact_metrics(
         return False, saved_duration, saved_tokens
 
     token_matches = TOKENS_RE.findall(text)
-    tokens = int(token_matches[-1].replace(",", "")) if token_matches else None
+    tokens = sum(int(value.replace(",", "")) for value in token_matches) if token_matches else None
     started_match = STARTED_RE.search(text)
     started = parse_timestamp(started_match.group(1)) if started_match else None
     finished = parse_timestamp(row.get("ts"))

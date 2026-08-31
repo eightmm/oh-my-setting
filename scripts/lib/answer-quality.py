@@ -22,7 +22,7 @@ REFUSAL = re.compile(
 )
 
 
-PAIRED_FOOTERS = ("served model", "configured model", "cost usd")
+PAIRED_FOOTERS = ("served model", "configured model", "tokens used", "cost usd")
 
 STOP_REASON = re.compile(
     r"^stop-reason: provider=\S+ reason=(?P<reason>\S+) subtype=(?P<subtype>\S+)"

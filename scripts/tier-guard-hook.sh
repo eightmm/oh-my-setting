@@ -2,13 +2,15 @@
 set -euo pipefail
 
 # PreToolUse hook on the edit tools: model tiering's one hard edge. Planning
-# and review belong to the session model; implementation belongs to a worker
-# one price rank below — a subagent, or an OMS delegate. This hook sees an
+# and review belong to the session model; implementation crosses a delegation
+# boundary — through a model-pinned subagent or an OMS delegate. This hook sees an
 # edit the session model itself is about to make inside an adopted repo and,
 # by OMS_TIER_GUARD, says so once per session (advise, the default), asks the
 # operator (ask), or refuses (deny). Edits by a subagent (the payload carries
 # agent_id) or by a harness worker (OMS_HARNESS_CHILD=1) pass untouched: they
-# are the tier the policy wants writing. Files outside the repo, under .oms/,
+# cross the delegation boundary. Only an OMS harness worker guarantees the
+# seeded worker-model route; native Claude subagents may inherit unless their
+# model is pinned. Files outside the repo, under .oms/,
 # under docs/, and markdown pass too — prose is not implementation. Fail-open
 # by construction: it exits 0 on every path, and advise only adds context.
 
@@ -26,9 +28,9 @@ root="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$re
 
 OMS_TGH_PAYLOAD="$payload" OMS_TGH_ROOT="$root" OMS_TGH_MODE="${OMS_TIER_GUARD:-advise}" \
   python3 - <<'PY' 2>/dev/null || true
+import hashlib
 import json
 import os
-import re
 import sys
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -39,7 +41,8 @@ except (ValueError, KeyError):
     raise SystemExit(0)
 if not isinstance(row, dict) or row.get("tool_name") not in EDIT_TOOLS:
     raise SystemExit(0)
-# A subagent is the worker tier: its edits are the ones the policy wants.
+# A subagent crosses the delegation boundary. Its model is not visible in this
+# hook and may inherit; only OMS_HARNESS_CHILD proves the OMS worker route.
 if row.get("agent_id") or row.get("agent_type"):
     raise SystemExit(0)
 tool_input = row.get("tool_input")
@@ -61,8 +64,9 @@ if rel.startswith(".oms" + os.sep) or rel.startswith("docs" + os.sep) or rel.low
 
 mode = os.environ.get("OMS_TGH_MODE", "advise")
 reason = (
-    "tier guard: %s is implementation. The session model plans and reviews; "
-    "a worker one rank below writes (oms peer-delegate, or a subagent). "
+    "tier guard: %s is implementation. Keep the session model on planning "
+    "and review; delegate writing with oms peer-delegate (worker-tier route) "
+    "or a model-pinned subagent. "
     "OMS_TIER_GUARD=off|advise|ask|deny selects how firmly this holds." % rel
 )
 if mode in ("deny", "ask"):
@@ -76,7 +80,10 @@ if mode in ("deny", "ask"):
 
 # advise: once per session, so the reminder is a fact the model has read, not
 # a line on every edit.
-session = re.sub(r"[^A-Za-z0-9_-]", "", str(row.get("session_id") or ""))[:80] or "session"
+raw_session = row.get("session_id")
+if not isinstance(raw_session, str) or not raw_session:
+    raise SystemExit(0)
+session = hashlib.sha256(raw_session.encode("utf-8", errors="replace")).hexdigest()[:24]
 marker_dir = os.path.join(root, ".oms", "hooks")
 marker = os.path.join(marker_dir, "tier-guard-" + session)
 if os.path.exists(marker):

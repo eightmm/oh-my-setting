@@ -86,8 +86,8 @@ printf 'model-a\ngpt-5.6-sol\n' > "$gen/codex.models"
 out="$(routable codex)"
 [ "$out" = 'gpt-5.6-sol ' ] || fail "an unversioned name beside versioned siblings drops: $out"
 
-# Role routing: a write worker takes the second price rank of the routable
-# set; everything that judges keeps the provider default, which is its top.
+# Role routing: a write worker takes the second seeded price rank of the
+# routable set; everything that judges keeps its account-specific default.
 # The order within a generation is the one seed the registry keeps, and it
 # expires with the generation: an unseeded newest generation routes as the
 # provider default and says so.
@@ -98,8 +98,8 @@ role_prepare() {  # role_prepare PROVIDER OPERATION ROLE ERRFILE
 }
 printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\n' > "$gen/codex.models"
 out="$(role_prepare codex delegate implementation-worker "$TMP/role.err")"
-[ "$out" = 'gpt-5.6-terra|role-default|role:worker|gpt-5.6-sol' ] ||
-  fail "a write worker takes the second price rank, with recovery still inside the routable set: $out"
+[ "$out" = 'gpt-5.6-terra|role-default|role:worker|gpt-5.6-luna' ] ||
+  fail "a write worker takes the second price rank and tries cheaper recovery first: $out"
 out="$(role_prepare codex consult '' "$TMP/role2.err")"
 [ "$out" = 'provider-default|provider-default|provider-default|gpt-5.6-sol' ] ||
   fail "a judge keeps the provider default: $out"
@@ -111,10 +111,9 @@ out="$(OMS_ROLE_ROUTING=0 role_prepare codex delegate implementation-worker "$TM
 out="$(role_prepare antigravity delegate implementation-worker "$TMP/role5.err")"
 case "$out" in 'gemini-3.7-flash-low|role-default|role:worker|'*) ;; *) fail "the antigravity worker rank skips a seed entry the catalog does not route: $out" ;; esac
 # No catalog at all (claude): the seed stands in for the routable set, and
-# recovery from a role-pinned model is the provider default, as with any
-# catalog-less route.
+# recovery tries the cheaper seeded rank before a higher one.
 out="$(role_prepare claude delegate implementation-worker "$TMP/role6.err")"
-[ "$out" = 'opus|role-default|role:worker|provider-default' ] || fail "a catalog-less provider routes its worker from the seed alone: $out"
+[ "$out" = 'opus|role-default|role:worker|sonnet' ] || fail "a catalog-less provider routes its worker and recovery from the seed: $out"
 printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
 out="$(role_prepare codex delegate implementation-worker "$TMP/role4.err")"
 [ "$out" = 'provider-default|provider-default|provider-default|gpt-5.10-nova' ] ||

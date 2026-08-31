@@ -5,7 +5,7 @@ from __future__ import annotations
 import collections
 import statistics
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import RUNTIME_SCHEMA
 from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, read_json, read_jsonl, safe_id, sha256_text, utc_now
@@ -42,27 +42,35 @@ def _artifact_tokens(row: Mapping[str, Any]) -> Optional[float]:
     return float(input_tokens or 0.0) + float(output_tokens or 0.0)
 
 
-def _served_model(row: Mapping[str, Any]) -> Optional[str]:
-    # The model that actually ran when the transport reported it, else the
-    # one the route pinned; a provider-default route the transport left
-    # anonymous has no model to be argued from.
-    for key in ("served_model", "selected_model", "requested_model"):
+def _model_identity(row: Mapping[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    # A fallback row combines more than one attempt's outcome, duration, and
+    # usage. It stays in operation-level totals but cannot honestly vote in a
+    # per-model table until attempts have separate receipts.
+    if row.get("fallback_used") is True or row.get("model_attribution") == "ambiguous":
+        return None, None
+    for key, source in (
+        ("served_model", "transport"),
+        ("configured_model", "configured-default"),
+        ("selected_model", "selected"),
+        ("requested_model", "selected"),
+    ):
         value = row.get(key)
         if isinstance(value, str) and value and value != "provider-default":
-            return value
-    return None
+            return value, source
+    return None, None
 
 
 def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
     table: Dict[str, Dict[str, Any]] = {}
     durations: Dict[str, List[float]] = {}
     for row in artifacts:
-        name = _served_model(row)
+        name, source = _model_identity(row)
         if not name:
             continue
         key = "%s/%s" % (row.get("provider") or "unknown", name)
-        entry = table.setdefault(key, {"calls": 0, "verified": 0, "failed": 0, "tokens": 0.0, "cost_usd": 0.0})
+        entry = table.setdefault(key, {"calls": 0, "verified": 0, "failed": 0, "tokens": 0.0, "cost_usd": 0.0, "sources": {}})
         entry["calls"] += 1
+        entry["sources"][source] = entry["sources"].get(source, 0) + 1
         value = outcome(row)
         if value == "verified":
             entry["verified"] += 1
@@ -82,6 +90,7 @@ def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
         entry["success_rate"] = entry["verified"] / decided if decided else None
         samples = durations.get(key, [])
         entry["duration_seconds_mean"] = statistics.mean(samples) if samples else None
+        entry["sources"] = dict(sorted(entry["sources"].items()))
     return dict(sorted(table.items()))
 
 

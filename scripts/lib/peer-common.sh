@@ -1171,15 +1171,21 @@ if telemetry_helper and os.path.isfile(telemetry_helper) and row.get("artifact")
             row["duration_s"] = metrics[1]
         if metrics[2] is not None:
             row["tokens"] = metrics[2]
-        # The served model and the cost are the two facts a per-model report
-        # needs that a provider-default route otherwise never records.
+        # Model provenance is transport-confirmed, configured inference, or
+        # ambiguous. Operation cost remains useful even when retries prevent a
+        # truthful per-model assignment.
         model_metrics = telemetry.get("artifact_model_metrics")
         if model_metrics:
-            served_model, cost_usd = model_metrics(os.path.realpath(repo), row)
-            if served_model:
-                row["served_model"] = served_model
-            if cost_usd is not None:
-                row["cost_usd"] = cost_usd
+            model_row = model_metrics(os.path.realpath(repo), row)
+            if model_row.get("served_model"):
+                row["served_model"] = model_row["served_model"]
+            if model_row.get("configured_model"):
+                row["configured_model"] = model_row["configured_model"]
+            attribution = model_row.get("model_attribution")
+            if attribution in ("transport", "configured-default", "ambiguous", "unknown"):
+                row["model_attribution"] = attribution
+            if model_row.get("cost_usd") is not None:
+                row["cost_usd"] = model_row["cost_usd"]
     except Exception:
         pass
 
@@ -1702,10 +1708,10 @@ if isinstance(result, str) and result:
 # actually ran — a provider-default route names none itself — the tokens,
 # and the cost. "tokens used" is the codex shape, read by the same parser.
 model_usage = envelope.get("modelUsage")
-served = sorted(k for k in model_usage if isinstance(k, str) and k.strip()) if isinstance(model_usage, dict) else []
-if served:
+served = sorted(k.strip() for k in model_usage if isinstance(k, str) and k.strip()) if isinstance(model_usage, dict) else []
+for name in served:
     out.append("served model")
-    out.append("+".join(name.strip() for name in served))
+    out.append(name)
 usage = envelope.get("usage")
 usage = usage if isinstance(usage, dict) else {}
 tokens = 0
@@ -1835,11 +1841,11 @@ os.replace(tmp, path)
 PY
 }
 
-# A provider-default codex route runs whatever config.toml names, and the
-# stream never says so (probed live 2026-08-31: no event carries a model), so
-# the configured default is the served model and is recorded beside the
-# tokens. A pinned route already records its selection; nothing to add.
-ma_note_configured_served_model() {
+# A provider-default Codex route normally runs what config.toml names, but the
+# stream does not confirm that fact (probed live 2026-08-31). Keep it as
+# configured-model inference, distinct from transport-confirmed serving. A
+# pinned route already records its exact OMS selection; nothing to add.
+ma_note_configured_default_model() {
   local provider="$1" model="$2" file="$3" config configured
   [ "$provider" = codex ] || return 0
   [ "${model:-provider-default}" = provider-default ] || return 0
@@ -1847,9 +1853,27 @@ ma_note_configured_served_model() {
   ! grep -q '^served model$' "$file" || return 0
   config="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
   [ -f "$config" ] || return 0
-  configured="$(sed -n 's/^model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -n 1)"
+  configured="$(python3 - "$config" <<'PY' 2>/dev/null || true
+import re, sys
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        raise SystemExit(0)
+try:
+    with open(sys.argv[1], "rb") as handle:
+        value = tomllib.load(handle).get("model")
+except (OSError, ValueError):
+    raise SystemExit(0)
+if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}", value):
+    print(value)
+PY
+)"
+  configured="${configured//$'\r'/}"
   [ -n "$configured" ] || return 0
-  printf 'served model\n%s\n' "$configured" >> "$file"
+  printf 'configured model\n%s\n' "$configured" >> "$file"
 }
 
 # Spotlight quoted external text with presentation generated from metadata:
@@ -2311,7 +2335,7 @@ ma_provider_attempt() {
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
   [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
   [ "$provider" != codex ] || ma_codex_jsonl_to_text "$output_file"
-  ma_note_configured_served_model "$provider" "$model" "$output_file"
+  ma_note_configured_default_model "$provider" "$model" "$output_file"
   if [ -n "$authority_before" ]; then
     if ! ma_authority_state_snapshot "$state_repo" "$authority_after"; then
       authority_diff="owner authority state became unreadable"
