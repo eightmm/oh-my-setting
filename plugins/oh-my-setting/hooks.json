@@ -51,6 +51,16 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" syntax-guard-hook",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "hooks": [
           {
             "type": "command",

@@ -560,8 +560,9 @@ chooses a connector or tracked summary.
   seeded worker-model route because native subagents default to inheriting the
   session model), session capture, handoff, and compact main/subagent
   HUDs.
-- Codex: local plugin hooks plus a managed native status line when the user has
-  not set one. On Python 3.9/3.10, arbitrary existing TOML requires `tomli` so
+- Codex: local plugin hooks, including the edit-time syntax guard, plus a
+  managed native status line when the user has not set one. On Python 3.9/3.10,
+  arbitrary existing TOML requires `tomli` so
   the helper never rewrites an unvalidated config.
 - Antigravity: shared rules, skills, MCP, and provider calls. Hooks are enabled
   only after the installed binary passes a live surface probe; otherwise it is

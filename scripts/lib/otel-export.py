@@ -28,6 +28,7 @@ FALLBACK_REASONS = {
     "model-safeguard",
 }
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+MODEL_ATTRIBUTIONS = {"transport", "configured-default", "ambiguous", "unknown"}
 GEN_AI_PROVIDERS = {
     "codex": "openai",
     "claude": "anthropic",
@@ -118,6 +119,7 @@ def persisted_ids(
 
 def gen_ai_values(
     *, provider: Any, operation: str, model: Any = None,
+    response_model: Any = None,
     input_tokens: Any = None, output_tokens: Any = None,
     cache_read_tokens: Any = None, cache_creation_tokens: Any = None,
 ) -> Dict[str, Any]:
@@ -126,6 +128,7 @@ def gen_ai_values(
         "gen_ai.operation.name": operation,
         "gen_ai.provider.name": canonical,
         "gen_ai.request.model": safe_label(model),
+        "gen_ai.response.model": safe_label(response_model),
         "gen_ai.usage.input_tokens": safe_metric(input_tokens, integer=True),
         "gen_ai.usage.output_tokens": safe_metric(output_tokens, integer=True),
         "gen_ai.usage.cache_read.input_tokens": safe_metric(cache_read_tokens, integer=True),
@@ -276,6 +279,8 @@ def artifact_span(
     if trace_id is None:
         return None
 
+    served_model = safe_label(row.get("served_model"))
+    configured_model = safe_label(row.get("configured_model"))
     values = {
         "oms.source": "artifact",
         "oms.kind": kind,
@@ -287,6 +292,11 @@ def artifact_span(
             {"explicit", "provider-default", "role-default", "fast", "balanced", "deep"},
         ),
         "oms.selected_model": safe_label(row.get("selected_model")),
+        "oms.served_model": served_model,
+        "oms.configured_model": configured_model,
+        "oms.model_attribution": safe_choice(
+            row.get("model_attribution"), MODEL_ATTRIBUTIONS
+        ),
         "oms.reasoning_effort": safe_choice(
             row.get("reasoning_effort"), REASONING_EFFORTS
         ),
@@ -296,6 +306,7 @@ def artifact_span(
         "oms.fallback_reason": safe_choice(row.get("fallback_reason"), FALLBACK_REASONS),
         "oms.duration_s": safe_metric(row.get("duration_s")),
         "oms.tokens": safe_metric(row.get("tokens"), integer=True),
+        "oms.cost_usd": safe_metric(row.get("cost_usd")),
         "oms.usage.trust": (
             "advisory_provider_reported"
             if safe_metric(row.get("tokens"), integer=True) is not None
@@ -309,6 +320,7 @@ def artifact_span(
                 provider=row.get("provider"),
                 operation="invoke_agent",
                 model=row.get("selected_model"),
+                response_model=served_model or configured_model,
             )
         )
     trace_id, span_id, persisted_parent, trace_flags = persisted_ids(
