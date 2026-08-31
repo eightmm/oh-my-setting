@@ -16,6 +16,12 @@ contracts.
   Stop only when hard to reverse; otherwise build.
 - Preserve unrelated work and fail explicitly. Continue inspect -> act -> verify
   while safe in-scope work remains; bound retries.
+- Before adding code, trace the affected flow and stop at the first sufficient option:
+  no change, existing repo code, stdlib, a portable native feature, an
+  already-declared dependency, then the smallest correct implementation.
+- Minimal never means incomplete: preserve explicit requirements, trust-boundary
+  validation, data-loss protection, security, accessibility, portability,
+  compatibility, and required verification.
 
 ## Safety
 

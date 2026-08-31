@@ -827,9 +827,16 @@ quote_tail() {  # quote_tail FILE BYTES LABEL
   tail -c "$bytes" "$file"
 }
 
+write_minimal_change_doctrine() {
+  printf 'Before adding code, understand the affected flow and prefer no change, existing repo code, stdlib or portable native features, and already-declared dependencies before the smallest correct implementation.\n'
+  printf 'Minimal never means weakening explicit requirements, trust-boundary validation, data-loss protection, security, accessibility, portability, compatibility, or required verification.\n'
+}
+
 {
   printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
-  printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized. If blocked, report it without asking questions.\n\n'
+  printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized. If blocked, report it without asking questions.\n'
+  write_minimal_change_doctrine
+  printf '\n'
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$PROMPT"
   ma_write_thread_context "$REPO" "$THREAD_ID"
   if [ -n "$role_file" ]; then
@@ -1309,7 +1316,9 @@ write_repair_prompt() {
     printf 'Your previous attempt did not pass. Fix it in place; do not start over unless necessary.\n'
     printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
     printf 'Do not run git commit, git push, or change git config.\n'
-    printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n\n'
+    printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n'
+    write_minimal_change_doctrine
+    printf '\n'
     if [ -n "$role_file" ]; then
       printf '## Role\n\n'; cat "$role_file"; printf '\n\n'
     fi

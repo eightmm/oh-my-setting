@@ -422,6 +422,7 @@ write_prompt() {
     printf 'You are one seat in a multi-provider review council.\n'
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
     printf 'Find bugs, regressions, missing tests, unclear contracts, and unsafe operations.\n'
+    printf 'Treat material unnecessary scope or complexity as a regression only when an existing repo, standard-library, portable native, or narrower behavior-equivalent solution replaces it; line count and style alone are not findings.\n'
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
     printf 'If there are no actionable findings, say "No findings".\n\n'
     if [ "$ML_PRESET" -eq 1 ]; then

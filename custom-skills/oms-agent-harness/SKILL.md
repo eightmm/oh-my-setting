@@ -83,6 +83,7 @@ projections, not authority.
 - Models/quorum: [model-routing.md](references/model-routing.md)
 - Installed agent detection, DeepSeek/Grok/GLM carriers, and custom adapters: [provider-routing.md](references/provider-routing.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
+- Minimal implementation and complexity review: [minimal-change.md](references/minimal-change.md)
 
 Retain internal provenance and report only useful conclusions, changed behavior,
 verification, skipped checks, and genuine blockers.
