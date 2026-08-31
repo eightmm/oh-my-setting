@@ -4302,6 +4302,52 @@ PY
     python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["context"]["manifests"] == 1, row["context"]'
 }
 
+test_delegate_context_debt_reaches_worker() {
+  local project="$TMP/delegate-context-debt"
+  local artifact_dir="$TMP/delegate-context-debt-artifacts"
+  local bin_dir="$TMP/delegate-context-debt-bin"
+  local home_dir="$TMP/delegate-context-debt-home"
+  local capture="$TMP/delegate-context-debt-prompt"
+
+  make_committed_repo "$project"
+  python3 - "$project/large.py" <<'PY'
+import sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write("VALUE = 1\n" * 8000)
+PY
+  git -C "$project" add large.py
+  git -C "$project" -c user.email=test@example.com -c user.name='Test User' \
+    commit -m large-context >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id context-debt \
+    --title "Use a bounded large target" --allowed large.py --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id context-debt \
+    --provider codex >/dev/null
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > "$OMS_CONTEXT_DEBT_CAPTURE"
+printf 'worker done\n'
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    OMS_CONTEXT_DEBT_CAPTURE="$capture" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --plan-task context-debt \
+    --context-manifest --no-verify >/dev/null
+
+  assert_file_contains "$capture" 'context_debt: 1'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+row = [item for item in rows if item.get("kind") == "delegate"][-1]
+assert row["context_debt"] == 1, row
+assert row["context_selected_bytes"] > 0, row
+PY
+  "$ROOT/scripts/runtime.sh" --repo "$project" benchmark show |
+    python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["context"]["debt_sum"] == 1, row["context"]'
+}
+
 test_delegate_apply_refuses_dirty_tree() {
   local project="$TMP/delegate-dirty"
   local artifact_dir="$project/artifacts"

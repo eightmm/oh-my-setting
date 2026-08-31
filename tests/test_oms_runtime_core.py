@@ -362,7 +362,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             capsule.verify(output)
         self.assertEqual(task_before, sha256_file(self.repo / '.oms' / 'task' / 'current.md'))
 
-    def test_latest_capsule_import_rejects_a_symlink_pointer(self) -> None:
+    def test_invalid_latest_capsule_import_is_contained_as_advisory_state(self) -> None:
         output = self.repo / 'capsule.json'
         exported = capsule.export(self.repo, output)
         capsule.import_capsule(self.repo, output)
@@ -374,8 +374,28 @@ class RuntimeFixture(RuntimeFixtureBase):
             pointer.symlink_to(outside)
         except OSError as exc:
             self.skipTest('symlink unavailable: %s' % exc)
-        with self.assertRaisesRegex(CoreError, 'regular non-symlink'):
-            evidence.build_envelope(self.repo)
+        projected = evidence.build_envelope(self.repo)
+        latest = projected['continuity']['latest_import']
+        self.assertEqual(latest['status'], 'invalid')
+        self.assertFalse(latest['authority_transfer'])
+        self.assertIn('project-api', [item['id'] for item in projected['criteria']])
+
+    def test_near_limit_capsule_import_remains_readable(self) -> None:
+        row = capsule.build(self.repo)
+        target_size = capsule.MAX_CAPSULE_BYTES - 256
+        row['payload']['padding'] = 'x' * max(
+            0, target_size - len(canonical_json(row)) - 128)
+        row['digest'] = sha256_bytes(canonical_json(row['payload']))
+        row['capsule_id'] = 'capsule-' + row['digest'][:32]
+        encoded = canonical_json(row)
+        self.assertLessEqual(len(encoded), capsule.MAX_CAPSULE_BYTES)
+        self.assertGreater(len(encoded), capsule.MAX_CAPSULE_BYTES - 1024)
+        output = Path(self.tmp.name) / 'near-limit-capsule.json'
+        atomic_write_bytes(output, encoded)
+        capsule.import_capsule(self.repo, output)
+        latest = evidence.build_envelope(self.repo)['continuity']['latest_import']
+        self.assertNotEqual(latest['status'], 'invalid')
+        self.assertEqual(latest['capsule_id'], row['capsule_id'])
 
     def test_producer_covers_and_completion_state_are_evidence_driven(self) -> None:
         # A review-verify row whose covers digest matches the plan acceptance

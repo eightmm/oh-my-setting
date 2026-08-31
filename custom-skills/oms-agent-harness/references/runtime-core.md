@@ -31,7 +31,9 @@ For a write worker, prefer `oms peer-delegate --context-manifest`: it compiles
 against the detached `HEAD` the worker receives, embeds that exact bundle in
 initial and repair prompts, and records manifest/bundle digests on the artifact
 row. A requested compilation or outbound-content check that fails blocks the
-call instead of falling back to a prompt without the bundle.
+call instead of falling back to a prompt without the bundle. A valid partial
+bundle remains usable: nonzero debt is attached to the prompt and artifact row,
+and the worker must inspect the missing or truncated paths before editing them.
 
 ## Complete by evidence coverage
 
@@ -93,7 +95,9 @@ command, raw transcript/log, machine path, credential, or publication right.
 After import, use the bounded `continuity.latest_import` view in `oms state`,
 `oms inbox`, or the resume hint. `current`, `head-diverged`, and
 `state-diverged` compare source provenance with local canonical state; none of
-those states restores task, plan, evidence, approval, or landing authority.
+those states restores task, plan, evidence, approval, or landing authority. A
+damaged local import is isolated as `invalid` instead of disabling canonical
+runtime state.
 
 ## Research work
 

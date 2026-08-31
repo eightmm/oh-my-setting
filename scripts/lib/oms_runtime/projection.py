@@ -368,7 +368,9 @@ def finalize_envelope(base: Dict[str, Any], evidence: Mapping[str, Any]) -> Dict
         latest = dict(latest)
         source_digest = latest.get('source_state_digest')
         latest['state_digest_matches'] = source_digest == base['state_digest'] if source_digest else None
-        if latest.get('head_matches') is False:
+        if latest.get('status') == 'invalid':
+            pass
+        elif latest.get('head_matches') is False:
             latest['status'] = 'head-diverged'
         elif latest.get('state_digest_matches') is False:
             latest['status'] = 'state-diverged'

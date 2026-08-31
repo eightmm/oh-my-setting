@@ -10,6 +10,7 @@ from . import CAPSULE_SCHEMA, RUNTIME_SCHEMA
 from .common import CoreError, atomic_write_bytes, atomic_write_json, bounded_line, canonical_json, read_json, read_text, relative_path, sanitize_portable, sensitive_text, sha256_bytes, utc_now
 
 MAX_CAPSULE_BYTES = 1024 * 1024
+MAX_IMPORT_BYTES = MAX_CAPSULE_BYTES + 4096
 
 
 def _payload(repo: Path) -> Dict[str, Any]:
@@ -137,7 +138,7 @@ def import_capsule(repo: Path, path: Path) -> Dict[str, Any]:
     destination = repo / ".oms" / "portable" / "imports" / (row["capsule_id"] + ".json")
     idempotent = False
     if destination.exists() or destination.is_symlink():
-        existing = read_json(destination, default=None, limit=MAX_CAPSULE_BYTES)
+        existing = read_json(destination, default=None, limit=MAX_IMPORT_BYTES)
         existing_capsule = existing.get("capsule") if isinstance(existing, dict) else None
         if not isinstance(existing_capsule, dict):
             raise CoreError("existing portable capsule import is invalid: %s" % destination, exit_code=75)
@@ -149,7 +150,11 @@ def import_capsule(repo: Path, path: Path) -> Dict[str, Any]:
             raise CoreError("portable capsule import conflicts with existing local state", exit_code=75)
         idempotent = True
     else:
-        atomic_write_json(destination, {"schema": 1, "imported_at": utc_now(), "advisory": True, "capsule": row})
+        wrapper = {"schema": 1, "imported_at": utc_now(), "advisory": True, "capsule": row}
+        encoded = canonical_json(wrapper) + b"\n"
+        if len(encoded) > MAX_IMPORT_BYTES:
+            raise CoreError("portable capsule import wrapper exceeds %d bytes" % MAX_IMPORT_BYTES)
+        atomic_write_bytes(destination, encoded)
     atomic_write_bytes(destination.parent / "LATEST", (row["capsule_id"] + "\n").encode("ascii"))
     return {
         "schema": RUNTIME_SCHEMA,
@@ -168,29 +173,42 @@ def latest_import(repo: Path, *, local_head: str = "") -> Dict[str, Any]:
     oms_root = repo / ".oms"
     portable_root = oms_root / "portable"
     imports_root = portable_root / "imports"
-    for directory in (oms_root, portable_root, imports_root):
-        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
-            raise CoreError("portable capsule import directory must be a regular non-symlink directory: %s" % directory)
-    if not imports_root.exists():
+    if not imports_root.exists() and not imports_root.is_symlink():
         return {"present": False}
+    capsule_id = ""
+    try:
+        for directory in (oms_root, portable_root, imports_root):
+            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                raise CoreError("portable capsule import directory is invalid")
+        pointer = imports_root / "LATEST"
+        if not pointer.exists() and not pointer.is_symlink():
+            return {"present": False}
+        capsule_id = read_text(pointer, limit=128)
+        if not re.fullmatch(r"capsule-[0-9a-f]{32}\n", capsule_id):
+            raise CoreError("portable capsule LATEST pointer is invalid")
+        capsule_id = capsule_id.rstrip("\n")
 
-    pointer = imports_root / "LATEST"
-    if not pointer.exists() and not pointer.is_symlink():
-        return {"present": False}
-    capsule_id = read_text(pointer, limit=128)
-    if not re.fullmatch(r"capsule-[0-9a-f]{32}\n", capsule_id):
-        raise CoreError("portable capsule LATEST pointer is invalid")
-    capsule_id = capsule_id.rstrip("\n")
-
-    path = imports_root / (capsule_id + ".json")
-    wrapper = read_json(path, default=None, limit=MAX_CAPSULE_BYTES)
-    if (not isinstance(wrapper, dict) or wrapper.get("schema") != 1 or
-            wrapper.get("advisory") is not True or
-            not isinstance(wrapper.get("capsule"), dict)):
-        raise CoreError("latest portable capsule import wrapper is invalid")
-    row = validate(wrapper["capsule"])
-    if row.get("capsule_id") != capsule_id:
-        raise CoreError("portable capsule LATEST pointer does not match its import")
+        path = imports_root / (capsule_id + ".json")
+        wrapper = read_json(path, default=None, limit=MAX_IMPORT_BYTES)
+        if (not isinstance(wrapper, dict) or wrapper.get("schema") != 1 or
+                wrapper.get("advisory") is not True or
+                not isinstance(wrapper.get("capsule"), dict)):
+            raise CoreError("latest portable capsule import wrapper is invalid")
+        row = validate(wrapper["capsule"])
+        if row.get("capsule_id") != capsule_id:
+            raise CoreError("portable capsule LATEST pointer does not match its import")
+    except (CoreError, OSError, TypeError, ValueError):
+        safe_id = capsule_id if re.fullmatch(r"capsule-[0-9a-f]{32}", capsule_id) else None
+        return {
+            "present": True,
+            "advisory": True,
+            "authority_transfer": False,
+            "capsule_id": safe_id,
+            "head_matches": None,
+            "state_digest_matches": None,
+            "status": "invalid",
+            "reason": "local-import-validation-failed",
+        }
 
     project = row.get("payload", {}).get("project", {})
     source_head = str(project.get("head") or "") if isinstance(project, dict) else ""

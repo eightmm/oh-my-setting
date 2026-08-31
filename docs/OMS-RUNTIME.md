@@ -188,7 +188,9 @@ reproducibility matters.
 `HEAD`, appends that exact bundle to the initial and repair prompts, and records
 both the manifest and bundle SHA-256 plus selected-byte and debt counts on the
 delegation row. Compilation or outbound-content validation failure stops before
-the provider runs; the option never silently degrades to an unscoped prompt.
+the provider runs; the option never silently degrades to an unscoped prompt. A
+valid bounded bundle with nonzero context debt is still delivered, labeled with
+the missing/truncated requirement count so the worker can inspect those paths.
 
 ## Optional capability profiles
 
@@ -334,8 +336,9 @@ TaskEnvelope and appears in `oms state`, `oms inbox`, and the session resume
 hint. Its status is `current`, `head-diverged`, `state-diverged`, or `unknown`
 after comparing the capsule's source HEAD and state digest with local canonical
 state. The imported bytes never enter the canonical state digest or satisfy an
-acceptance criterion; malformed, digest-mismatched, or symlinked pointers fail
-the runtime projection closed.
+acceptance criterion. Malformed, digest-mismatched, oversized, missing, or
+symlinked advisory imports are contained as `status: invalid`; they never make
+the canonical task/evidence projection unavailable.
 
 The capsule and `session-handoff` split one responsibility two ways:
 `session-handoff` preserves **provider session continuity** — what one CLI's
