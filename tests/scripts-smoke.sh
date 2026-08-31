@@ -4256,6 +4256,52 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-create-delegated-file-*.md' 'worker done'
 }
 
+test_delegate_context_manifest_reaches_worker() {
+  local project="$TMP/delegate-context"
+  local artifact_dir="$TMP/delegate-context-artifacts"
+  local bin_dir="$TMP/delegate-context-bin"
+  local home_dir="$TMP/delegate-context-home"
+  local capture="$TMP/delegate-context-prompt"
+
+  make_committed_repo "$project"
+  printf '%s\n' '# Context fixture' '' '## Goal' '' \
+    'delegate-context-sentinel reaches the worker from the detached snapshot.' \
+    > "$project/PROJECT.md"
+  git -C "$project" add PROJECT.md
+  git -C "$project" commit -qm context-fixture
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > "$OMS_CONTEXT_CAPTURE"
+printf 'worker done\n'
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    OMS_CONTEXT_CAPTURE="$capture" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" \
+    --context-manifest --no-verify --prompt "Use compiled context" >/dev/null
+
+  assert_file_contains "$capture" '## Compiled repository context'
+  assert_file_contains "$capture" 'delegate-context-sentinel reaches the worker'
+  python3 - "$project/.oms/artifacts/index.jsonl" \
+    "$project/.oms/runtime/context" <<'PY'
+import json, pathlib, re, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+delegates = [row for row in rows if row.get("kind") == "delegate"]
+assert len(delegates) == 1, delegates
+row = delegates[0]
+assert re.fullmatch(r"[0-9a-f]{64}", row.get("context_manifest_digest", "")), row
+assert re.fullmatch(r"[0-9a-f]{64}", row.get("context_bundle_sha256", "")), row
+root = pathlib.Path(sys.argv[2])
+assert len(list(root.glob("*.json"))) == 1, list(root.glob("*"))
+assert len(list(root.glob("*.txt"))) == 1, list(root.glob("*"))
+PY
+  "$ROOT/scripts/runtime.sh" --repo "$project" benchmark show |
+    python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["context"]["manifests"] == 1, row["context"]'
+}
+
 test_delegate_apply_refuses_dirty_tree() {
   local project="$TMP/delegate-dirty"
   local artifact_dir="$project/artifacts"

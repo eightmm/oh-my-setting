@@ -27,6 +27,12 @@ bounded prompt size matter. A nonzero context-debt result means retrieve the
 missing required source before patching. Do not force it onto every interactive
 parent turn.
 
+For a write worker, prefer `oms peer-delegate --context-manifest`: it compiles
+against the detached `HEAD` the worker receives, embeds that exact bundle in
+initial and repair prompts, and records manifest/bundle digests on the artifact
+row. A requested compilation or outbound-content check that fails blocks the
+call instead of falling back to a prompt without the bundle.
+
 ## Complete by evidence coverage
 
 Use stable criterion IDs in project/task acceptance lists. Bind only an existing

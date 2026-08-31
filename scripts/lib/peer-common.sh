@@ -924,6 +924,9 @@ ma_append_artifact_index() {
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
   OMS_INDEX_PLAN_ID="${OMS_INDEX_PLAN_ID:-}" \
   OMS_INDEX_ACTIVE_TASK_ID="${OMS_INDEX_ACTIVE_TASK_ID:-}" \
+  OMS_INDEX_CONTEXT_BUNDLE_SHA256="${OMS_INDEX_CONTEXT_BUNDLE_SHA256:-}" \
+  OMS_INDEX_CONTEXT_SELECTED_BYTES="${OMS_INDEX_CONTEXT_SELECTED_BYTES:-}" \
+  OMS_INDEX_CONTEXT_DEBT="${OMS_INDEX_CONTEXT_DEBT:-}" \
   OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_EXECUTOR_ID="${OMS_EXECUTOR_ID:-}" OMS_INDEX_SOUL_SHA256="${OMS_SOUL_SHA256:-}" \
@@ -1082,6 +1085,21 @@ if manifest_digest:
         sys.stderr.write("error: context manifest digest must be a hex digest\n")
         sys.exit(3)
     row["context_manifest_digest"] = manifest_digest
+bundle_digest = os.environ.get("OMS_INDEX_CONTEXT_BUNDLE_SHA256", "")
+if bundle_digest:
+    if not re.fullmatch(r"[0-9a-f]{64}", bundle_digest):
+        sys.stderr.write("error: context bundle digest must be a sha256 digest\n")
+        sys.exit(3)
+    row["context_bundle_sha256"] = bundle_digest
+for env_name, field_name in (
+        ("OMS_INDEX_CONTEXT_SELECTED_BYTES", "context_selected_bytes"),
+        ("OMS_INDEX_CONTEXT_DEBT", "context_debt")):
+    value = os.environ.get(env_name, "")
+    if value:
+        if not value.isdigit():
+            sys.stderr.write("error: %s must be a non-negative integer\n" % field_name)
+            sys.exit(3)
+        row[field_name] = int(value)
 covers_payload = os.environ.get("OMS_INDEX_COVERS_JSON", "")
 if covers_payload:
     if len(covers_payload) > 8192:

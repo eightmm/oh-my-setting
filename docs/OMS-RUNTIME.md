@@ -184,6 +184,12 @@ This is intentionally not a mandatory compiler for every interactive turn.
 It is suited to delegated implementation and review boundaries where context
 reproducibility matters.
 
+`oms peer-delegate --context-manifest` compiles from the worker's detached
+`HEAD`, appends that exact bundle to the initial and repair prompts, and records
+both the manifest and bundle SHA-256 plus selected-byte and debt counts on the
+delegation row. Compilation or outbound-content validation failure stops before
+the provider runs; the option never silently degrades to an unscoped prompt.
+
 ## Optional capability profiles
 
 Notion, GitHub, multiple providers, research tooling, HPC commands, and
