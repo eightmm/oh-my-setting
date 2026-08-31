@@ -830,6 +830,7 @@ quote_tail() {  # quote_tail FILE BYTES LABEL
 write_minimal_change_doctrine() {
   printf 'Before adding code, understand the affected flow and prefer no change, existing repo code, stdlib or portable native features, and already-declared dependencies before the smallest correct implementation.\n'
   printf 'Minimal never means weakening explicit requirements, trust-boundary validation, data-loss protection, security, accessibility, portability, compatibility, or required verification.\n'
+  printf 'Comments/docstrings preserve task/repo-established public contracts and non-obvious rationale; never restate code, types, tests, or names, and do not delete documentation merely to reduce volume.\n'
 }
 
 {

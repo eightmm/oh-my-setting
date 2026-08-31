@@ -35,6 +35,20 @@ decision through the existing project, journal, memory, or handoff path when
 future agents need it; do not create tool-branded comments or another debt
 ledger by default.
 
+## Document what code cannot carry
+
+When writing or materially changing comments and docstrings, keep public
+contracts established by the task or repository when code and types do not
+make them clear: units, ranges, failure behavior, ownership, side effects, and
+similar caller obligations. Keep non-obvious rationale, invariants,
+compatibility constraints, and workarounds whose removal would change risk.
+
+Omit narration that restates names, types, control flow, literals, or tests.
+Do not infer a public contract from naming or visibility alone, delete useful
+existing documentation merely to reduce volume, or sweep untouched prose.
+Review stale or misleading documentation and lost established contracts as
+real risks; documentation density and style alone are not findings.
+
 ## Review through existing routes
 
 - Current diff: use `oms peer-review --gate`. A complexity finding needs a

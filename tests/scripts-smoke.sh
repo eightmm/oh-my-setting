@@ -4162,6 +4162,10 @@ test_delegate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'Before adding code, understand the affected flow'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
+    'Comments/docstrings preserve task/repo-established public contracts'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
+    'never restate code, types, tests, or names'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'DRY RUN: worker command skipped.'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '(path omitted)'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'worktree: temporary (removed after run)'
@@ -12297,6 +12301,8 @@ prompt="$(cat)"
 if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
   printf '%s' "$prompt" | grep -q 'Before adding code, understand the affected flow' || exit 8
   printf '%s' "$prompt" | grep -q 'Minimal never means weakening' || exit 8
+  printf '%s' "$prompt" | grep -q 'Comments/docstrings preserve task/repo-established public contracts' || exit 8
+  printf '%s' "$prompt" | grep -q 'never restate code, types, tests, or names' || exit 8
   printf '%s' "$prompt" | grep -q 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
   printf 'fixed\n' > delegated.txt
   echo "worker repaired"
@@ -13471,6 +13477,10 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should carry the minimal-change decision ladder"
   grep -Fq 'Minimal never means incomplete' "$global_rules" ||
     fail "global rules should preserve correctness and safety floors"
+  grep -Fq 'Comments/docstrings preserve task/repo-established public contracts' "$global_rules" ||
+    fail "global rules should preserve established public documentation contracts"
+  grep -Fq 'never restate code, types, tests, or names' "$global_rules" ||
+    fail "global rules should reject commentary that only restates the implementation"
   grep -Fq '## Multi-Agent Work' "$global_rules" ||
     fail "global rules should retain a compact multi-agent policy"
   grep -Fq 'oms-agent-harness' "$global_rules" ||

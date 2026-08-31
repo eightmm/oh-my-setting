@@ -1,6 +1,6 @@
 # Global Coding Rules
 
-Default: concise, scoped, evidence-driven. Keep procedures in skills or project
+Default: concise, scoped, evidence-driven. Keep procedures in skills or
 contracts.
 
 ## Communication
@@ -22,6 +22,8 @@ contracts.
 - Minimal never means incomplete: preserve explicit requirements, trust-boundary
   validation, data-loss protection, security, accessibility, portability,
   compatibility, and required verification.
+- Comments/docstrings preserve task/repo-established public contracts and
+  non-obvious rationale; never restate code, types, tests, or names.
 
 ## Safety
 
