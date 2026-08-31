@@ -634,6 +634,24 @@ oms_install_autoupdate_cron_state() {
   printf '%s\n' "$state"
 }
 
+# One reading of the systemd trigger for status and attention. A unit file
+# alone is not a trigger: the manager fires what timers.target.wants links, so
+# a written-but-never-enabled or later-disabled unit is `disabled`. Field
+# incident: attention read the updater as wired for days on a unit file whose
+# enablement a gate run had removed, while status called the same file
+# "(disabled)".
+oms_install_autoupdate_systemd_state() {
+  local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+  if [ ! -f "$unit_dir/oh-my-setting-autoupdate.timer" ]; then
+    printf 'absent\n'
+  elif [ -L "$unit_dir/timers.target.wants/oh-my-setting-autoupdate.timer" ]; then
+    printf 'enabled\n'
+  else
+    printf 'disabled\n'
+  fi
+}
+
 # The trigger scripts record their state here so an out-of-band
 # `oms auto-update install`/`remove` survives the next update: update.sh
 # reconciles the trigger from the receipt's component profile, so a timer that

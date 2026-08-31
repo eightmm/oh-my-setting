@@ -195,6 +195,26 @@ write_au_receipt "$ROOT" true
 out="$(attention env)"
 case "$out" in "attention: unwired"*) ;; *) fail "enabled without trigger must be unwired: $out" ;; esac
 
+# A unit file is not a trigger: the manager follows the timers.target.wants
+# link. A written-but-never-enabled (or later disabled) unit used to read as
+# wired here while status.sh called the same file "(disabled)" — and the only
+# hint of a dead updater was the overdue heuristic, days later.
+au_unit_dir="$au_xdg/systemd/user"
+mkdir -p "$au_unit_dir/timers.target.wants"
+printf '[Timer]\nOnCalendar=daily\n' > "$au_unit_dir/oh-my-setting-autoupdate.timer"
+printf 'last_run=%s\nstatus=up_to_date\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$au_state"
+out="$(attention env)"
+case "$out" in
+  "attention: unwired"*"not enabled"*) ;;
+  *) fail "a disabled systemd unit must read unwired: $out" ;;
+esac
+ln -s ../oh-my-setting-autoupdate.timer \
+  "$au_unit_dir/timers.target.wants/oh-my-setting-autoupdate.timer"
+out="$(attention env)"
+case "$out" in "attention: ok"*) ;; *) fail "an enabled systemd timer must read ok: $out" ;; esac
+rm -f "$au_unit_dir/timers.target.wants/oh-my-setting-autoupdate.timer" \
+  "$au_unit_dir/oh-my-setting-autoupdate.timer"
+
 printf 'auto-update.sh apply\n' > "$au_cron"
 rm -f "$au_state"
 out="$(attention env)"

@@ -22,6 +22,9 @@ case "${1:-}" in
   remove) shift; exec "$ROOT/scripts/uninstall-autoupdate.sh" "$@" ;;
 esac
 
+# shellcheck source=scripts/lib/install-contract.sh
+. "$ROOT/scripts/lib/install-contract.sh"
+
 # This script's check/apply modes run unattended (cron, systemd timer). Git's
 # credential and host-key questions read /dev/tty, so an interactive fallback
 # is never answerable here: fail fast into the existing failure branches
@@ -119,10 +122,9 @@ auto_update_error_line() {
 # no matter what a historical status file says.
 print_attention() {
   local receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
-  local timer_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/oh-my-setting-autoupdate.timer"
   local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
   local overdue="${OMS_AUTO_UPDATE_OVERDUE:-172800}"
-  local owner enabled wired=0 status last_run message age now epoch_last
+  local owner enabled wired=0 systemd_state status last_run message age now epoch_last
 
   owner="$(auto_update_receipt_field "$receipt" source_root 2>/dev/null || true)"
   if [ -z "$owner" ] ||
@@ -136,7 +138,8 @@ print_attention() {
     return 0
   fi
 
-  [ -f "$timer_file" ] && wired=1
+  systemd_state="$(oms_install_autoupdate_systemd_state)"
+  [ "$systemd_state" = "enabled" ] && wired=1
   if [ "$wired" = 0 ]; then
     if [ -n "$cron_file" ]; then
       grep -Fq "auto-update.sh" "$cron_file" 2>/dev/null && wired=1
@@ -145,7 +148,11 @@ print_attention() {
     fi
   fi
   if [ "$wired" = 0 ]; then
-    echo "attention: unwired — auto-update is enabled but no timer or cron trigger is installed (run: auto-update.sh install)"
+    if [ "$systemd_state" = "disabled" ]; then
+      echo "attention: unwired — the systemd timer unit exists but is not enabled, so nothing fires it (run: auto-update.sh install)"
+    else
+      echo "attention: unwired — auto-update is enabled but no timer or cron trigger is installed (run: auto-update.sh install)"
+    fi
     return 0
   fi
 

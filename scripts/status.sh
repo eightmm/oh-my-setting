@@ -225,10 +225,8 @@ active_task_status() {
 }
 
 auto_update_trigger_status() {
-  local systemd_timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/oh-my-setting-autoupdate.timer"
-  local systemd_link="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/timers.target.wants/oh-my-setting-autoupdate.timer"
   local cron_file="${OH_MY_SETTING_AUTO_UPDATE_CRON_FILE:-}"
-  local cron_state
+  local cron_state systemd_state
 
   cron_state="$(oms_install_autoupdate_cron_state "$cron_file")"
   if [ "$cron_state" = "malformed" ]; then
@@ -236,7 +234,8 @@ auto_update_trigger_status() {
     return 0
   fi
 
-  if [ -f "$systemd_timer" ] && [ -L "$systemd_link" ]; then
+  systemd_state="$(oms_install_autoupdate_systemd_state)"
+  if [ "$systemd_state" = "enabled" ]; then
     printf -- '- trigger: systemd user timer\n'
     return 0
   fi
@@ -248,7 +247,7 @@ auto_update_trigger_status() {
       ;;
   esac
 
-  if [ -f "$systemd_timer" ]; then
+  if [ "$systemd_state" = "disabled" ]; then
     printf -- '- trigger: systemd user timer (disabled)\n'
     return 0
   fi
