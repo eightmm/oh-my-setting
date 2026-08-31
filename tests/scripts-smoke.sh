@@ -22484,6 +22484,7 @@ pre-push-check
 precompact-handoff
 resume-hook
 skill-router
+syntax-guard-hook
 turn-guard
 unlink
 "
