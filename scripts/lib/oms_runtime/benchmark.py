@@ -42,6 +42,49 @@ def _artifact_tokens(row: Mapping[str, Any]) -> Optional[float]:
     return float(input_tokens or 0.0) + float(output_tokens or 0.0)
 
 
+def _served_model(row: Mapping[str, Any]) -> Optional[str]:
+    # The model that actually ran when the transport reported it, else the
+    # one the route pinned; a provider-default route the transport left
+    # anonymous has no model to be argued from.
+    for key in ("served_model", "selected_model", "requested_model"):
+        value = row.get(key)
+        if isinstance(value, str) and value and value != "provider-default":
+            return value
+    return None
+
+
+def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    table: Dict[str, Dict[str, Any]] = {}
+    durations: Dict[str, List[float]] = {}
+    for row in artifacts:
+        name = _served_model(row)
+        if not name:
+            continue
+        key = "%s/%s" % (row.get("provider") or "unknown", name)
+        entry = table.setdefault(key, {"calls": 0, "verified": 0, "failed": 0, "tokens": 0.0, "cost_usd": 0.0})
+        entry["calls"] += 1
+        value = outcome(row)
+        if value == "verified":
+            entry["verified"] += 1
+        elif value == "failed":
+            entry["failed"] += 1
+        tokens = _artifact_tokens(row)
+        if tokens is not None:
+            entry["tokens"] += tokens
+        cost = _one_number(row, ("cost_usd", "cost"))
+        if cost is not None:
+            entry["cost_usd"] += cost
+        duration = _one_number(row, ("duration_seconds", "duration_s"))
+        if duration is not None:
+            durations.setdefault(key, []).append(duration)
+    for key, entry in table.items():
+        decided = entry["verified"] + entry["failed"]
+        entry["success_rate"] = entry["verified"] / decided if decided else None
+        samples = durations.get(key, [])
+        entry["duration_seconds_mean"] = statistics.mean(samples) if samples else None
+    return dict(sorted(table.items()))
+
+
 def _context_rows(repo: Path) -> List[Dict[str, Any]]:
     root = repo / ".oms" / "runtime" / "context"
     rows: List[Dict[str, Any]] = []
@@ -149,6 +192,7 @@ def snapshot(repo: Path) -> Dict[str, Any]:
         "verified_outcomes": verified,
         "success_rate": verified / len(decided) if decided else None,
         "providers": dict(sorted(providers.items())),
+        "models": _model_table(artifacts),
         "artifact_kinds": dict(sorted(kinds.items())),
         "duration_seconds": {"count": len(durations), "sum": sum(durations) if durations else None, "mean": statistics.mean(durations) if durations else None},
         "tokens": {"count": len(tokens), "sum": sum(tokens) if tokens else None},

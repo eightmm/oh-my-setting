@@ -24,6 +24,13 @@ STARTED_RE = re.compile(r"(?m)^- started:\s*(\S+)\s*$")
 TOKENS_RE = re.compile(
     r"(?im)^tokens used[ \t]*\r?\n[ \t]*([0-9][0-9,]*)[ \t]*$"
 )
+# The transport parsers leave these beside "tokens used": the model the
+# provider says actually ran (a provider-default route records none itself)
+# and the cost where the provider reports one.
+SERVED_MODEL_RE = re.compile(
+    r"(?im)^served model[ \t]*\r?\n[ \t]*([A-Za-z0-9][A-Za-z0-9._:+/-]{0,199})[ \t]*$"
+)
+COST_RE = re.compile(r"(?im)^cost usd[ \t]*\r?\n[ \t]*([0-9]+(?:\.[0-9]+)?)[ \t]*$")
 ARTIFACT_EDGE_BYTES = 64 * 1024
 # A cohort this small cannot carry a rate. Below the floor the uptake report
 # prints counts and withholds every ratio, because two delegations shaped into
@@ -64,6 +71,57 @@ def cached_duration(row: dict[str, object]) -> Optional[float]:
     return round(float(value), 3)
 
 
+def artifact_text(repo: str, row: dict[str, object]) -> Optional[str]:
+    """The artifact's head and tail — the footers live at the end — or None
+    when the row names no readable artifact inside the repository."""
+    artifact = row.get("artifact")
+    if not isinstance(artifact, str) or not artifact or os.path.isabs(artifact):
+        return None
+    candidate = os.path.realpath(os.path.join(repo, artifact))
+    if not inside(candidate, repo) or not os.path.isfile(candidate):
+        return None
+    try:
+        with open(candidate, "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size <= ARTIFACT_EDGE_BYTES * 2:
+                raw = handle.read()
+            else:
+                head = handle.read(ARTIFACT_EDGE_BYTES)
+                handle.seek(-ARTIFACT_EDGE_BYTES, os.SEEK_END)
+                raw = head + b"\n" + handle.read(ARTIFACT_EDGE_BYTES)
+    except OSError:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def artifact_model_metrics(
+    repo: str, row: dict[str, object]
+) -> tuple[Optional[str], Optional[float]]:
+    """Served model and cost from the artifact's Output footers.
+
+    Cached row values win, as for duration and tokens. Otherwise the last
+    served-model footer is the final route's model, and cost sums across the
+    bounded retries the artifact records, the way tokens do.
+    """
+    saved_model = row.get("served_model")
+    saved_model = saved_model if isinstance(saved_model, str) and saved_model else None
+    saved_cost = row.get("cost_usd")
+    saved_cost = float(saved_cost) if isinstance(saved_cost, (int, float)) and not isinstance(saved_cost, bool) else None
+    if saved_model is not None and saved_cost is not None:
+        return saved_model, saved_cost
+    text = artifact_text(repo, row)
+    if text is None:
+        return saved_model, saved_cost
+    marker = re.search(r"(?m)^## Output$", text)
+    if marker:
+        text = text[marker.end():]
+    models = SERVED_MODEL_RE.findall(text)
+    costs = COST_RE.findall(text)
+    served = saved_model if saved_model is not None else (models[-1] if models else None)
+    cost = saved_cost if saved_cost is not None else (round(sum(float(c) for c in costs), 6) if costs else None)
+    return served, cost
+
+
 def artifact_metrics(
     repo: str, row: dict[str, object]
 ) -> tuple[bool, Optional[float], Optional[int]]:
@@ -77,23 +135,8 @@ def artifact_metrics(
     saved_duration = cached_duration(row)
     saved_tokens = integer(row.get("tokens"))
 
-    artifact = row.get("artifact")
-    if not isinstance(artifact, str) or not artifact or os.path.isabs(artifact):
-        return False, saved_duration, saved_tokens
-    candidate = os.path.realpath(os.path.join(repo, artifact))
-    if not inside(candidate, repo) or not os.path.isfile(candidate):
-        return False, saved_duration, saved_tokens
-    try:
-        with open(candidate, "rb") as handle:
-            size = os.fstat(handle.fileno()).st_size
-            if size <= ARTIFACT_EDGE_BYTES * 2:
-                raw = handle.read()
-            else:
-                head = handle.read(ARTIFACT_EDGE_BYTES)
-                handle.seek(-ARTIFACT_EDGE_BYTES, os.SEEK_END)
-                raw = head + b"\n" + handle.read(ARTIFACT_EDGE_BYTES)
-            text = raw.decode("utf-8", errors="replace")
-    except OSError:
+    text = artifact_text(repo, row)
+    if text is None:
         return False, saved_duration, saved_tokens
 
     token_matches = TOKENS_RE.findall(text)

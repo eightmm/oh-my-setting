@@ -8314,7 +8314,7 @@ test_claude_envelope_carries_stop_reason() {
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$HOME/claude-argv"
 cat > /dev/null
-printf '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Envelope answer body: pong."}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Envelope answer body: pong.","usage":{"input_tokens":12,"output_tokens":3},"total_cost_usd":0.0123,"modelUsage":{"claude-opus-5":{"inputTokens":12,"outputTokens":3,"costUSD":0.0123}}}\n'
 EOF
   chmod +x "$bin_dir/claude"
 
@@ -8323,7 +8323,8 @@ EOF
     --prompt "Envelope probe" >/dev/null
 
   # The envelope is parsed back to text: the answer reads as prose, and the
-  # one fact plain text cannot carry — why the model stopped — is kept.
+  # facts plain text cannot carry — why the model stopped, which model was
+  # actually served, what it cost — are kept as footer lines.
   assert_one_artifact_contains "$artifact_dir" 'claude-envelope-probe-*.md' \
     'stop-reason: provider=claude reason=end_turn subtype=success is_error=0'
   assert_one_artifact_contains "$artifact_dir" 'claude-envelope-probe-*.md' \
@@ -8331,6 +8332,19 @@ EOF
   if grep -R -Fq '"type":"result"' "$artifact_dir"/claude-envelope-probe-*.md; then
     fail "the JSON envelope must be parsed away, not quoted as the answer"
   fi
+  # A provider-default route is the one place the selected model says nothing;
+  # the served model is what the envelope reports, and it rides the index row
+  # so a later report can group by it without the artifact still existing.
+  assert_one_artifact_contains "$artifact_dir" 'claude-envelope-probe-*.md' 'served model'
+  assert_one_artifact_contains "$artifact_dir" 'claude-envelope-probe-*.md' 'claude-opus-5'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "the index row must carry the served model, tokens, and cost"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+row = [r for r in rows if r.get("provider") == "claude"][-1]
+assert row["served_model"] == "claude-opus-5", row
+assert row["tokens"] == 15, row
+assert abs(row["cost_usd"] - 0.0123) < 1e-9, row
+PY
   grep -Fxq -- '--output-format' "$home_dir/claude-argv" ||
     fail "claude must be asked for the JSON envelope: $(cat "$home_dir/claude-argv")"
   # A read seat judges text and gets no MCP tool surface.
@@ -8360,7 +8374,7 @@ test_codex_jsonl_carries_stop_reason() {
 #!/usr/bin/env bash
 cat > /dev/null
 echo "ERROR rmcp::transport::worker: TRANSPORT-NOISE before the answer" >&2
-printf '%s\n' '{"type":"thread.started","thread_id":"t1"}'
+printf '%s\n' '{"type":"thread.started","thread_id":"t1","model":"gpt-5.6-terra"}'
 printf '%s\n' '{"type":"turn.started"}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"JSONL answer body: pong."}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
@@ -8373,6 +8387,15 @@ EOF
     'stop-reason: provider=codex reason=turn_completed subtype=success is_error=0'
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'JSONL answer body: pong.'
   assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'tokens used'
+  # An event that names the model the stream ran on is the served model.
+  assert_one_artifact_contains "$artifact_dir" 'codex-jsonl-probe-*.md' 'served model'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "the codex index row must carry the served model"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+row = [r for r in rows if r.get("provider") == "codex"][-1]
+assert row["served_model"] == "gpt-5.6-terra", row
+assert row["tokens"] == 15, row
+PY
   if grep -R -Fq '"type":"item.completed"' "$artifact_dir"/codex-jsonl-probe-*.md; then
     fail "the JSONL events must be parsed away, not quoted as the answer"
   fi

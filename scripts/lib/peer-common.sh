@@ -1165,12 +1165,21 @@ row.update(path_fields("source", source_raw))
 # be silent: accounting is not worth failing a recorded call over.
 if telemetry_helper and os.path.isfile(telemetry_helper) and row.get("artifact"):
     try:
-        metrics = runpy.run_path(telemetry_helper)["artifact_metrics"](
-            os.path.realpath(repo), row)
+        telemetry = runpy.run_path(telemetry_helper)
+        metrics = telemetry["artifact_metrics"](os.path.realpath(repo), row)
         if metrics[1] is not None:
             row["duration_s"] = metrics[1]
         if metrics[2] is not None:
             row["tokens"] = metrics[2]
+        # The served model and the cost are the two facts a per-model report
+        # needs that a provider-default route otherwise never records.
+        model_metrics = telemetry.get("artifact_model_metrics")
+        if model_metrics:
+            served_model, cost_usd = model_metrics(os.path.realpath(repo), row)
+            if served_model:
+                row["served_model"] = served_model
+            if cost_usd is not None:
+                row["cost_usd"] = cost_usd
     except Exception:
         pass
 
@@ -1689,6 +1698,29 @@ out.extend(others)
 result = envelope.get("result")
 if isinstance(result, str) and result:
     out.append(result)
+# Footers for what plain text cannot carry: the model the envelope says
+# actually ran — a provider-default route names none itself — the tokens,
+# and the cost. "tokens used" is the codex shape, read by the same parser.
+model_usage = envelope.get("modelUsage")
+served = sorted(k for k in model_usage if isinstance(k, str) and k.strip()) if isinstance(model_usage, dict) else []
+if served:
+    out.append("served model")
+    out.append("+".join(name.strip() for name in served))
+usage = envelope.get("usage")
+usage = usage if isinstance(usage, dict) else {}
+tokens = 0
+for key in ("input_tokens", "output_tokens"):
+    try:
+        tokens += int(usage.get(key) or 0)
+    except (TypeError, ValueError):
+        pass
+if tokens:
+    out.append("tokens used")
+    out.append(str(tokens))
+cost = envelope.get("total_cost_usd")
+if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+    out.append("cost usd")
+    out.append(("%.6f" % cost).rstrip("0").rstrip(".") or "0")
 tmp = path + ".envelope"
 with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")
@@ -1740,8 +1772,23 @@ texts = []
 errors = []
 completed = False
 tokens = 0
+served = set()
+
+
+def note_model(value):
+    if isinstance(value, str) and value.strip():
+        served.add(value.strip())
+
+
 for doc in events:
     kind = doc.get("type")
+    # Whichever event names the model the stream ran on: a provider-default
+    # route learns its served model nowhere else.
+    note_model(doc.get("model"))
+    for nested in ("thread", "turn", "item"):
+        inner = doc.get(nested)
+        if isinstance(inner, dict):
+            note_model(inner.get("model"))
     if kind == "item.completed":
         item = doc.get("item") or {}
         if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
@@ -1773,6 +1820,9 @@ out = [stop]
 out.extend(others)
 out.extend(texts)
 out.extend(errors)
+if served:
+    out.append("served model")
+    out.append("+".join(sorted(served)))
 if tokens:
     # The observability footer plain-mode codex used to print; the usage
     # parser reads this exact shape and treats it as non-authoritative.

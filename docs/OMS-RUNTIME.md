@@ -435,7 +435,12 @@ oms runtime benchmark compare before.json after.json
 The snapshot uses existing content-free receipts to report evidence coverage,
 risk, success rate, durations, token/cost fields when present, context bytes,
 skill-evaluation trigger errors and baseline/treatment task-pass deltas, and a
-useful-work efficiency denominator. `oms skill-forge eval --record` is the
+useful-work efficiency denominator. Its `models` table groups artifact rows by
+`provider/model` — the served model the transport reported (claude's
+`modelUsage`, a codex event naming the model), else the pinned selection; an
+anonymous provider-default route has no row — with calls, verified/failed
+counts, success rate, tokens, cost, and mean duration, so a routing choice can
+be argued from outcomes rather than from a table someone maintains. `oms skill-forge eval --record` is the
 only writer for those skill metrics; it stores aggregate outcomes and command
 digests, not prompts or output. The snapshot explicitly marks metrics that
 cannot be inferred mechanically, such as escaped defects, human corrections,
