@@ -181,6 +181,7 @@ assert re.match(r"^[0-9a-f]{16}$", admitted[0].get("scope_digest", "")), admitte
 rejected = [row for row in admits if row.get("covers") == ["integration-task-gate"]]
 assert len(rejected) == 1, admits
 assert rejected[0]["status"] == "failed", rejected[0]
+assert rejected[0]["active_task_id"] == "integration-task", rejected[0]
 PY
 "$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show > "$TMP/envelope3.json"
 python3 - "$TMP/envelope3.json" <<'PY'

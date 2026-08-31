@@ -44,6 +44,11 @@ oms runtime evidence bind \
 A changed dependency makes the binding stale. Provider confidence is not a
 completion signal.
 
+Task-packet criteria are scoped to their `active_task_id`. A successor packet
+that reuses a criterion ID does not inherit the predecessor's binding or
+`covers` receipt; project criteria remain reusable, and a fresh successor task
+gate still counts.
+
 ## Choose the minimum capability profile
 
 ```bash

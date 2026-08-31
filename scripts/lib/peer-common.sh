@@ -692,13 +692,13 @@ PY
 # front door, and a projection that cannot be built fails closed: an
 # unverifiable coverage claim must not ride into the index looking bound.
 ma_validate_covers_ids() {
-  local repo="$1" ids="$2" lineage="" attempt=0
+  local repo="$1" ids="$2" lineage="" active_task_id="" validation="" attempt=0
   command -v python3 >/dev/null 2>&1 || {
     echo "error: --covers needs python3 to validate criterion ids" >&2
     return 2
   }
   while [ "$attempt" -lt 2 ]; do
-    lineage="$(OMS_COVERS_REPO="$repo" OMS_COVERS_IDS="$ids" \
+    validation="$(OMS_COVERS_REPO="$repo" OMS_COVERS_IDS="$ids" \
       OMS_COVERS_LIB="$(ma_scripts_dir)/lib" python3 -c '
 import os, re, sys
 sys.path.insert(0, os.environ["OMS_COVERS_LIB"])
@@ -732,23 +732,43 @@ if unknown:
     sys.exit(2)
 plan_scoped = [by_id[cid] for cid in ids
                if by_id[cid].get("source") == "plan-task"]
-if not plan_scoped:
-    print("none")
-    sys.exit(0)
-lineages = {str(item.get("plan_id", "")) for item in plan_scoped}
-if len(lineages) != 1:
-    sys.stderr.write("error: plan-task covers do not share one plan lineage\n")
+task_scoped = [by_id[cid] for cid in ids
+               if by_id[cid].get("source") == "task"]
+task_lineages = {str(item.get("active_task_id", "")) for item in task_scoped}
+if len(task_lineages) > 1:
+    sys.stderr.write("error: task covers do not share one active task lineage\n")
     sys.exit(3)
-lineage = next(iter(lineages))
-if not re.fullmatch(r"plan_[0-9a-f]{32}", lineage):
-    print("legacy")
+active_task_id = next(iter(task_lineages)) if task_lineages else ""
+if active_task_id and not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", active_task_id):
+    sys.stderr.write("error: task covers have malformed active task lineage\n")
+    sys.exit(3)
+if not plan_scoped:
+    lineage = "none"
 else:
-    print(lineage)
+    lineages = {str(item.get("plan_id", "")) for item in plan_scoped}
+    if len(lineages) != 1:
+        sys.stderr.write("error: plan-task covers do not share one plan lineage\n")
+        sys.exit(3)
+    lineage = next(iter(lineages))
+    if not re.fullmatch(r"plan_[0-9a-f]{32}", lineage):
+        lineage = "legacy"
+print("%s\t%s" % (lineage, active_task_id))
 ')" || return $?
-    lineage="${lineage%$'\r'}"
+    validation="${validation//$'\r'/}"
+    lineage="${validation%%$'\t'*}"
+    if [ "$validation" = "$lineage" ]; then
+      active_task_id=""
+    else
+      active_task_id="${validation#*$'\t'}"
+    fi
     case "$lineage" in
       none)
         unset OMS_INDEX_PLAN_ID
+        if [ -n "$active_task_id" ]; then
+          export OMS_INDEX_ACTIVE_TASK_ID="$active_task_id"
+        else
+          unset OMS_INDEX_ACTIVE_TASK_ID
+        fi
         return 0
         ;;
       legacy)
@@ -774,6 +794,11 @@ else:
         }
         OMS_INDEX_PLAN_ID="$lineage"
         export OMS_INDEX_PLAN_ID
+        if [ -n "$active_task_id" ]; then
+          export OMS_INDEX_ACTIVE_TASK_ID="$active_task_id"
+        else
+          unset OMS_INDEX_ACTIVE_TASK_ID
+        fi
         return 0
         ;;
       *)
@@ -898,6 +923,7 @@ ma_append_artifact_index() {
 
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
   OMS_INDEX_PLAN_ID="${OMS_INDEX_PLAN_ID:-}" \
+  OMS_INDEX_ACTIVE_TASK_ID="${OMS_INDEX_ACTIVE_TASK_ID:-}" \
   OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_EXECUTOR_ID="${OMS_EXECUTOR_ID:-}" OMS_INDEX_SOUL_SHA256="${OMS_SOUL_SHA256:-}" \
@@ -985,6 +1011,9 @@ if base_sha:
 task_id = os.environ.get("OMS_INDEX_TASK_ID", "")
 if safe_id(task_id):
     row["task_id"] = task_id
+active_task_id = os.environ.get("OMS_INDEX_ACTIVE_TASK_ID", "")
+if safe_id(active_task_id):
+    row["active_task_id"] = active_task_id
 plan_id = os.environ.get("OMS_INDEX_PLAN_ID", "")
 if plan_id:
     if not re.fullmatch(r"plan_[0-9a-f]{32}", plan_id):

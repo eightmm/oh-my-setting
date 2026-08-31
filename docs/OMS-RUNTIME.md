@@ -139,6 +139,12 @@ retain it across recovery, even if a replacement plan reuses the task name.
 Missing, malformed, or mismatched lineage yields `missing`, never a vacuous
 `verified` result.
 
+Task-packet criteria have a separate `active_task_id` lineage. A binding or
+explicit `covers` receipt validated for one active task cannot verify a later
+packet that reuses the same criterion ID; legacy task-scoped rows without that
+lineage are inert. This does not change project criteria, and the successor's
+own fresh task-verification gate still verifies its current criteria.
+
 Criterion statuses are:
 
 ```text

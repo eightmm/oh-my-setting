@@ -529,6 +529,94 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertRegex(created['plan_id'], r'^plan_[0-9a-f]{32}$')
         self.assertEqual(created['plan_id'], upgraded['plan_id'])
 
+    def test_task_source_evidence_requires_exact_active_task_lineage(self) -> None:
+        """A successor task cannot inherit evidence through a reused id."""
+        task_path = self.repo / '.oms' / 'task' / 'current.md'
+        index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+        bindings = self.repo / '.oms' / 'evidence' / 'bindings.jsonl'
+        original_task = task_path.read_text(encoding='utf-8')
+        original_index = index.read_text(encoding='utf-8')
+
+        def write_successor() -> None:
+            task_path.write_text(
+                original_task.replace(
+                    '- task_id: task-fixture\n',
+                    '- task_id: task-successor\n',
+                    1,
+                ).replace(
+                    '\npython3 -m unittest\n\n## Loop State',
+                    '\npython3 -m unittest -q\n\n## Loop State',
+                    1,
+                ),
+                encoding='utf-8',
+            )
+
+        mechanisms = ('binding', 'cover', 'legacy-cover')
+        for mechanism in mechanisms:
+            with self.subTest(mechanism=mechanism):
+                task_path.write_text(original_task, encoding='utf-8')
+                index.write_text(original_index, encoding='utf-8')
+                if bindings.exists():
+                    bindings.unlink()
+
+                if mechanism == 'binding':
+                    created = evidence.bind(
+                        self.repo,
+                        'task-tests',
+                        'task-verification:task-fixture',
+                        'verified',
+                    )
+                    self.assertEqual(
+                        created.get('active_task_id'), 'task-fixture')
+                else:
+                    row = {
+                        'schema': 1,
+                        'event_id': 'evt-task-cover',
+                        'kind': 'review-verify',
+                        'status': 'verified',
+                        'covers': ['task-tests'],
+                    }
+                    if mechanism == 'cover':
+                        row['active_task_id'] = 'task-fixture'
+                    append_jsonl(index, row)
+
+                write_successor()
+                projected = evidence.build_envelope(self.repo)
+                by_id = {item['id']: item for item in projected['criteria']}
+                self.assertEqual(by_id['task-tests']['status'], 'missing')
+                self.assertEqual(by_id['project-api']['status'], 'verified')
+
+        # The successor's own fresh gate remains valid after old task-scoped
+        # evidence becomes inert.
+        receipt = subprocess.run(
+            [
+                'bash', '-c',
+                '. "$1/scripts/lib/oms-common.sh"; '
+                'oms_git_state_fingerprint "$2"; '
+                'printf \'%s\\n\' "python3 -m unittest -q" | oms_sha256_stream',
+                'fixture', str(ROOT), str(self.repo),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        refreshed = []
+        for line in task_path.read_text(encoding='utf-8').splitlines():
+            if line.startswith('- verified_state:'):
+                line = '- verified_state: %s' % receipt[0]
+            elif line.startswith('- verified_cmd_sha:'):
+                line = '- verified_cmd_sha: %s' % receipt[1]
+            refreshed.append(line)
+        task_path.write_text('\n'.join(refreshed) + '\n', encoding='utf-8')
+        projected = evidence.build_envelope(self.repo)
+        successor = next(
+            item for item in projected['criteria'] if item['id'] == 'task-tests')
+        self.assertEqual(successor['status'], 'verified')
+        self.assertEqual(
+            [item['support'] for item in successor['evidence']],
+            ['fresh-task-gate'],
+        )
+
     def test_projection_subprocess_cost_does_not_scale_with_evidence_rows(self) -> None:
         # The staleness judgment once ran `git rev-parse` per evidence row —
         # ~4.5s of a ~5s build on a thousand-row index. Every row is now

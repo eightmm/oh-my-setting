@@ -14,6 +14,7 @@ from .projection import build_base_envelope, finalize_envelope
 
 VALID_STATUSES = {"verified", "failed", "inconclusive", "skipped_with_reason", "stale"}
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{32}$")
+ACTIVE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 
 
 def _artifact_paths(repo: Path) -> List[Path]:
@@ -143,6 +144,7 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
         raise CoreError("unknown current acceptance criterion: %s" % criterion_id)
     criterion = criteria_by_id[criterion_id]
     plan_id = ""
+    active_task_id = ""
     if criterion.get("source") == "plan-task":
         plan_id = str(criterion.get("plan_id", ""))
         if not PLAN_ID_RE.fullmatch(plan_id):
@@ -163,6 +165,10 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
             plan_id = str(criterion.get("plan_id", ""))
             if criterion.get("source") != "plan-task" or not PLAN_ID_RE.fullmatch(plan_id):
                 raise CoreError("plan changed while establishing evidence lineage")
+    elif criterion.get("source") == "task":
+        active_task_id = str(criterion.get("active_task_id", ""))
+        if not ACTIVE_TASK_ID_RE.fullmatch(active_task_id):
+            raise CoreError("current task criterion has no valid active task lineage")
     existing = {evidence_ref(row) for row in artifact_rows(repo)}
     task_ref = "task-verification:%s" % base.get("task", {}).get("task_id", "")
     if ref not in existing and ref != task_ref:
@@ -173,6 +179,8 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
     row = {"schema": 1, "binding_id": "binding-%s" % __import__("uuid").uuid4().hex, "action": "bind", "created_at": utc_now(), "criterion_id": criterion_id, "evidence_ref": ref, "status": status, "evidence_type": bounded_line(evidence_type, 80), "note": bounded_line(note, 300), "verified_head": None if dependency_digests else (git_head(repo) or None), "dependency_digests": dependency_digests}
     if plan_id:
         row["plan_id"] = plan_id
+    if active_task_id:
+        row["active_task_id"] = active_task_id
     append_jsonl(repo / ".oms" / "evidence" / "bindings.jsonl", row)
     return row
 
@@ -230,6 +238,13 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                         not PLAN_ID_RE.fullmatch(observed_plan) or
                         observed_plan != expected_plan):
                     continue
+            elif criterion.get("source") == "task":
+                expected_task = str(criterion.get("active_task_id", ""))
+                observed_task = str(row.get("active_task_id", ""))
+                if (not ACTIVE_TASK_ID_RE.fullmatch(expected_task) or
+                        not ACTIVE_TASK_ID_RE.fullmatch(observed_task) or
+                        observed_task != expected_task):
+                    continue
             refs.append(ref)
         support = "explicit-artifact"
         if not refs and str(row.get("kind", "")).lower() == "acceptance":
@@ -278,6 +293,13 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
             if (not PLAN_ID_RE.fullmatch(expected_plan) or
                     not PLAN_ID_RE.fullmatch(observed_plan) or
                     observed_plan != expected_plan):
+                continue
+        elif criterion.get("source") == "task":
+            expected_task = str(criterion.get("active_task_id", ""))
+            observed_task = str(binding.get("active_task_id", ""))
+            if (not ACTIVE_TASK_ID_RE.fullmatch(expected_task) or
+                    not ACTIVE_TASK_ID_RE.fullmatch(observed_task) or
+                    observed_task != expected_task):
                 continue
         merged = dict(row_by_ref.get(str(binding.get("evidence_ref", "")), {}))
         merged.update(binding)

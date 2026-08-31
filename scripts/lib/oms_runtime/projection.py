@@ -255,7 +255,10 @@ def _criteria(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping
             if not text: continue
             criterion_id = stable_criterion_id(source, str(raw))
             if not _claim_criterion_id(seen, criterion_id, text.lower()): continue
-            result.append({'id': criterion_id, 'text': bounded_line(text, 500), 'source': source, 'weight': weight})
+            item = {'id': criterion_id, 'text': bounded_line(text, 500), 'source': source, 'weight': weight}
+            if source == 'task':
+                item['active_task_id'] = bounded_line(task.get('task_id', ''), 160)
+            result.append(item)
     if plan.get('acceptance_present'):
         digest = str(plan.get('acceptance_digest', '')); result.append({'id': 'criterion-plan-acceptance-' + digest[:10], 'text': 'The plan-level acceptance command passes on the final tree.', 'source': 'plan', 'weight': 3, 'command_digest': digest})
     # Every plan task is a criterion of its own: an explicit [id:...] in the
