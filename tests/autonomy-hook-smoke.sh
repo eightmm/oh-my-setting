@@ -182,8 +182,15 @@ test_fail_ledger_hook_resolves_on_success() {
   [ -z "$out" ] || fail "a success is not agent context: $out"
   [ ! -e "$repo/.oms/failures.jsonl" ] || fail "a success seeded a ledger"
 
-  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null
-  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null
+  (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null ||
+    fail "a first failure has nothing to say, so the hook must exit 0"
+  # The repeat speaks — on stderr with exit 2, the non-blocking channel Claude
+  # Code shows to the model on this event; stdout would reach only the log.
+  if (cd "$repo" && printf '%s' "$failed" | bash "$hook") >/dev/null 2>"$repo/hook-ledger.err"; then
+    fail "a repeated failure must surface ledger speech through exit 2"
+  fi
+  grep -Fq 'oms advise' "$repo/hook-ledger.err" ||
+    fail "the repeat should carry the ledger's advise hint: $(cat "$repo/hook-ledger.err")"
   [ "$(ledger_rows "$repo")" = 2 ] || fail "two failures should file two rows"
 
   out="$(cd "$repo" && printf '%s' "$passed" | bash "$hook")" ||

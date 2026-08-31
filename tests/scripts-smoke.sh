@@ -13732,23 +13732,27 @@ test_fail_ledger_hook_gives_failed_commands_a_memory() {
 
   # The ledger only ever spoke when something called it, and the primary agent
   # mid-failure-loop never did. The hook is that call: silent on a first
-  # failure, prior context plus the advise hint on the repeat.
+  # failure, prior context plus the advise hint on the repeat. Speech rides
+  # stderr with exit 2 — the channel Claude Code shows to the model on this
+  # event without blocking; stdout would reach only the debug log.
   make_committed_repo "$project"
   mkdir -p "$project/.oms"
-  out="$(cd "$project" && printf '%s' "$payload" | bash "$SH")" ||
-    fail "hook must never exit nonzero"
+  out="$(cd "$project" && printf '%s' "$payload" | bash "$SH" 2>&1)" ||
+    fail "a first failure has nothing to say, so the hook must exit 0"
   [ -z "$out" ] || fail "a first failure has no context to surface: $out"
   [ "$(wc -l < "$project/.oms/failures.jsonl" | tr -d ' ')" = 1 ] ||
     fail "the hook should have recorded the failure"
 
-  out="$(cd "$project" && printf '%s' "$payload" | bash "$SH")" ||
-    fail "hook must never exit nonzero on a repeat"
-  printf '%s' "$out" | grep -Fq 'already failed 1x' ||
-    fail "the repeat should surface prior ledger context: $out"
-  printf '%s' "$out" | grep -Fq 'oms advise' ||
-    fail "the repeat should name the advisor: $out"
-  if printf '%s' "$out" | grep -Fq 'recorded '; then
-    fail "bookkeeping receipts are not agent context: $out"
+  local rc=0 err="$TMP/fail-ledger-hook.err"
+  out="$(cd "$project" && printf '%s' "$payload" | bash "$SH" 2>"$err")" || rc=$?
+  [ "$rc" = 2 ] || fail "ledger speech must use the exit-2 feedback channel, got exit $rc"
+  [ -z "$out" ] || fail "speech on stdout is invisible to the model: $out"
+  grep -Fq 'already failed 1x' "$err" ||
+    fail "the repeat should surface prior ledger context: $(cat "$err")"
+  grep -Fq 'oms advise' "$err" ||
+    fail "the repeat should name the advisor: $(cat "$err")"
+  if grep -Fq 'recorded ' "$err"; then
+    fail "bookkeeping receipts are not agent context: $(cat "$err")"
   fi
 
   # Non-Bash failures, interrupts, disabled hook, and unadopted repos are

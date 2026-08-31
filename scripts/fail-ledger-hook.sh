@@ -6,14 +6,18 @@ set -euo pipefail
 # has recorded, warned, and named `oms advise` at the repeat threshold since it
 # existed — but only when something called it, which the primary agent
 # mid-failure-loop never did. This hook is that call: when a Bash tool run
-# fails, it first surfaces what the ledger already knows about this command
-# (hook stdout becomes agent context), then records the failure so the second
-# identical attempt crosses the advise threshold mechanically. When the same
-# command later exits 0, the hook resolves its own row — the ledger's
-# resolved-on-success contract, honored by the writer that produced the rows
-# instead of by a human sweep. Fail-open by construction: it cannot change the
-# tool result, it never exits nonzero, and it prints nothing unless the ledger
-# has something to say. OMS_FAIL_LEDGER_HOOK=0 disables the whole script;
+# fails, it first surfaces what the ledger already knows about this command,
+# then records the failure so the second identical attempt crosses the advise
+# threshold mechanically. When the same command later exits 0, the hook
+# resolves its own row — the ledger's resolved-on-success contract, honored by
+# the writer that produced the rows instead of by a human sweep. Fail-open by
+# construction: it cannot change the tool result, and it says nothing unless
+# the ledger has something to say. When it does, the speech goes to stderr
+# with exit 2 — on PostToolUse/PostToolUseFailure that is the one channel
+# Claude Code shows to the model without blocking anything; plain stdout on
+# these events reaches only the debug log, which is where this hook's context
+# went unread until a probe showed the second identical failure arriving with
+# no ledger line attached. OMS_FAIL_LEDGER_HOOK=0 disables the whole script;
 # OMS_FAIL_LEDGER_RESOLVE=0 disables only the success side.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -222,6 +226,8 @@ advise="$(printf '%s\n' "$recorded" | grep -F 'oms advise' || true)"
 # Emit only ledger speech, once per line: prior context and the advise-at-
 # threshold hint. The routine "recorded <fp>" receipt is bookkeeping, not
 # something the agent should read after every failed command.
-printf '%s\n%s\n' "$known" "$advise" |
-  grep '^fail-ledger:' | awk '!seen[$0]++' || true
-exit 0
+speech="$(printf '%s\n%s\n' "$known" "$advise" |
+  grep '^fail-ledger:' | awk '!seen[$0]++' || true)"
+[ -n "$speech" ] || exit 0
+printf '%s\n' "$speech" >&2
+exit 2
