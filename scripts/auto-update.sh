@@ -22,8 +22,28 @@ case "${1:-}" in
   remove) shift; exec "$ROOT/scripts/uninstall-autoupdate.sh" "$@" ;;
 esac
 
-# shellcheck source=scripts/lib/install-contract.sh
-. "$ROOT/scripts/lib/install-contract.sh"
+# The install contract is the canonical home of the trigger predicate status
+# shares with attention. This script also runs from minimal trees — update
+# transaction fixtures, a checkout mid-upgrade — that carry only its lock and
+# poll helpers, and an unattended timer job must not die there, so the
+# contract is optional and the one reading it needs travels with the script.
+if [ -f "$ROOT/scripts/lib/install-contract.sh" ]; then
+  # shellcheck source=scripts/lib/install-contract.sh
+  . "$ROOT/scripts/lib/install-contract.sh"
+fi
+if ! declare -F oms_install_autoupdate_systemd_state >/dev/null; then
+  oms_install_autoupdate_systemd_state() {
+    local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+    if [ ! -f "$unit_dir/oh-my-setting-autoupdate.timer" ]; then
+      printf 'absent\n'
+    elif [ -L "$unit_dir/timers.target.wants/oh-my-setting-autoupdate.timer" ]; then
+      printf 'enabled\n'
+    else
+      printf 'disabled\n'
+    fi
+  }
+fi
 
 # This script's check/apply modes run unattended (cron, systemd timer). Git's
 # credential and host-key questions read /dev/tty, so an interactive fallback
