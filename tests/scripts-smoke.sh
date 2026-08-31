@@ -10035,32 +10035,33 @@ test_auto_update_skips_without_upstream() {
 test_autoupdate_cron_install_and_uninstall() {
   local cron_file="$TMP/autoupdate.cron"
   local config_home="$TMP/autoupdate-config"
+  local receipt="$TMP/autoupdate-receipt.json"
   local out
 
   mkdir -p "$config_home"
   # Default mode is apply: a fresh install keeps itself current on the
   # schedule (fast-forward only; auto-update.sh skips dirty/diverged trees).
-  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron >"$TMP/autoupdate-default"
   assert_file_contains "$TMP/autoupdate-default" "cron installed (apply)"
   grep -Fq 'auto-update.sh" apply' "$cron_file" ||
     fail "default auto-update trigger must schedule apply"
-  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
 
   # --check-only opts down to recording update availability without touching
   # the checkout.
-  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --check-only \
     >"$TMP/autoupdate-checkonly"
   assert_file_contains "$TMP/autoupdate-checkonly" "cron installed (check)"
   if grep -Fq 'auto-update.sh" apply' "$cron_file"; then
     fail "--check-only trigger must not schedule apply"
   fi
-  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
 
-  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --apply >"$TMP/autoupdate-install"
   assert_file_contains "$TMP/autoupdate-install" "cron installed (apply)"
@@ -10078,12 +10079,79 @@ test_autoupdate_cron_install_and_uninstall() {
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
   printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "disabled systemd file hid active cron trigger"
 
-  OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+  OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >"$TMP/autoupdate-uninstall"
   assert_file_contains "$TMP/autoupdate-uninstall" "auto-update trigger: removed"
   if grep -Fq "oh-my-setting autoupdate" "$cron_file"; then
     fail "uninstall-autoupdate should remove cron marker block"
   fi
+}
+
+# The unit name is global to the user's systemd manager, but the unit file the
+# uninstaller manages lives under XDG_CONFIG_HOME. Removing the trigger from a
+# foreign config home (a test fixture, another profile) used to reach the real
+# manager anyway, so every gate run disabled the operator's own updater: the
+# daily timer went inactive at the exact minute of a push gate.
+test_autoupdate_uninstall_touches_only_its_own_systemd_unit() {
+  local cron_file="$TMP/autoupdate-foreign.cron"
+  local config_home="$TMP/autoupdate-foreign-config"
+  local bin="$TMP/autoupdate-foreign-bin"
+  local log="$TMP/autoupdate-foreign-systemctl.log"
+  local unit_dir="$config_home/systemd/user"
+  local timer="$unit_dir/oh-my-setting-autoupdate.timer"
+  local service="$unit_dir/oh-my-setting-autoupdate.service"
+
+  mkdir -p "$bin" "$unit_dir"
+  cat > "$bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$OMS_TEST_SYSTEMCTL_LOG"
+case "$*" in
+  *show*FragmentPath*) printf '%s\n' "${OMS_TEST_SYSTEMCTL_FRAGMENT:-}" ;;
+esac
+exit 0
+EOF
+  chmod +x "$bin/systemctl"
+
+  uninstall_here() {  # uninstall_here FRAGMENT_PATH
+    XDG_CONFIG_HOME="$config_home" XDG_RUNTIME_DIR="$TMP/autoupdate-foreign-runtime" \
+      OMS_INSTALL_RECEIPT="$TMP/autoupdate-foreign-receipt.json" \
+      OMS_TEST_SYSTEMCTL_LOG="$log" OMS_TEST_SYSTEMCTL_FRAGMENT="$1" \
+      OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+      PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/uninstall-autoupdate.sh" >/dev/null
+  }
+
+  # 1. No unit file under this config home: the manager is never consulted.
+  OMS_INSTALL_RECEIPT="$TMP/autoupdate-foreign-receipt.json" \
+    OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
+    "$ROOT/scripts/install-autoupdate.sh" --method cron >/dev/null
+  uninstall_here ""
+  [ ! -e "$log" ] ||
+    fail "uninstall without a unit file reached systemctl: $(cat "$log")"
+  if grep -Fq "oh-my-setting autoupdate" "$cron_file"; then
+    fail "uninstall must still remove its cron block"
+  fi
+
+  # 2. A unit file here, but the manager loaded one from elsewhere: remove
+  #    the file, leave the manager's unit alone.
+  printf '[Timer]\nOnCalendar=daily\n' > "$timer"
+  printf '[Service]\nType=oneshot\n' > "$service"
+  uninstall_here "$TMP/elsewhere/oh-my-setting-autoupdate.timer"
+  [ ! -e "$timer" ] && [ ! -e "$service" ] ||
+    fail "uninstall left its own unit files behind"
+  if grep -Eq 'disable|daemon-reload' "$log"; then
+    fail "uninstall touched a manager unit it does not own: $(cat "$log")"
+  fi
+
+  # 3. The manager's unit is this very file: disable it and reload.
+  : > "$log"
+  printf '[Timer]\nOnCalendar=daily\n' > "$timer"
+  printf '[Service]\nType=oneshot\n' > "$service"
+  uninstall_here "$timer"
+  grep -Fq -- '--user disable --now oh-my-setting-autoupdate.timer' "$log" ||
+    fail "uninstall must disable the unit it owns: $(cat "$log")"
+  grep -Fq -- '--user daemon-reload' "$log" ||
+    fail "uninstall must reload the manager after removing its unit: $(cat "$log")"
+  [ ! -e "$timer" ] || fail "uninstall left its owned unit file behind"
 }
 
 # A begin marker without its matching end marker is not an owned block. The

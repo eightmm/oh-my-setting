@@ -35,19 +35,47 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+physical_file_path() {
+  local dir
+  dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || {
+    printf '%s\n' "$1"
+    return 0
+  }
+  printf '%s/%s\n' "$dir" "$(basename "$1")"
+}
+
+# The unit name is global to the user's manager while the unit file lives under
+# XDG_CONFIG_HOME, so the unit is ours only when the fragment the manager loaded
+# is this file. A foreign config home (a test fixture, another profile) shares
+# the name and nothing else; disabling by name from there switched off the
+# operator's real updater on every gate run.
+systemd_owns_unit() {
+  local fragment
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+  fragment="$(systemctl --user show -p FragmentPath --value \
+    oh-my-setting-autoupdate.timer 2>/dev/null)" || return 1
+  fragment="${fragment#FragmentPath=}"
+  [ -n "$fragment" ] || return 1
+  [ "$(physical_file_path "$fragment")" = "$(physical_file_path "$TIMER_FILE")" ]
+}
+
 remove_systemd() {
   if [ "$DRY_RUN" = "1" ]; then
     printf 'would remove systemd user timer: %s\n' "$TIMER_FILE"
     return 0
   fi
 
-  if command -v systemctl >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  if [ ! -e "$TIMER_FILE" ] && [ ! -e "$SERVICE_FILE" ]; then
+    return 0
+  fi
+  if systemd_owns_unit; then
     systemctl --user disable --now oh-my-setting-autoupdate.timer >/dev/null 2>&1 || true
+    rm -f "$TIMER_FILE" "$SERVICE_FILE"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    return 0
   fi
   rm -f "$TIMER_FILE" "$SERVICE_FILE"
-  if command -v systemctl >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-  fi
 }
 
 remove_cron() {
