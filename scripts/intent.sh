@@ -518,8 +518,17 @@ if not anchors:
     raise SystemExit(3)
 kept = lines[anchors[-1]:]
 footer = re.compile(r"^(stop-reason: |tokens used$|[0-9][0-9,]*$|model-result: |model-route: |model-fallback: )")
-while kept and (not kept[-1].strip() or footer.match(kept[-1])):
-    kept.pop()
+# Two-line footers: the label names what the next line is (a model name, a
+# cost), and neither line is the answer.
+paired = ("served model", "configured model", "cost usd", "tokens used")
+while kept:
+    if not kept[-1].strip() or footer.match(kept[-1]):
+        kept.pop()
+    elif len(kept) >= 2 and kept[-2].strip() in paired:
+        kept.pop()
+        kept.pop()
+    else:
+        break
 print("\n".join(kept))
 PY
   then

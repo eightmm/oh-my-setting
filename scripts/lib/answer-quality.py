@@ -22,6 +22,8 @@ REFUSAL = re.compile(
 )
 
 
+PAIRED_FOOTERS = ("served model", "configured model", "cost usd")
+
 STOP_REASON = re.compile(
     r"^stop-reason: provider=\S+ reason=(?P<reason>\S+) subtype=(?P<subtype>\S+)"
     r" is_error=(?P<is_error>[01])$"
@@ -55,9 +57,23 @@ def main(path: str) -> None:
             return
         break
 
+    # Two-line transport footers: the label says what the next line is (a
+    # model name, a cost), and neither line is answer. A seat that produced
+    # nothing but its footers must still read as empty.
+    unpaired = []
+    skip_next = False
+    for line in raw_lines:
+        if skip_next:
+            skip_next = False
+            continue
+        if line.strip() in PAIRED_FOOTERS:
+            skip_next = True
+            continue
+        unpaired.append(line)
+
     lines = [
         line.strip()
-        for line in raw_lines
+        for line in unpaired
         if line.strip()
         and not NOISE.match(line)
         and not STOP_REASON.match(line.strip())
