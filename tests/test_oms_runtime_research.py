@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 from oms_runtime import capsule, context, evidence, experiment, failures, profiles, release
 from oms_runtime.benchmark import record_outcome as record_benchmark_outcome
+from oms_runtime.benchmark import compare as compare_benchmark_snapshots
 from oms_runtime.benchmark import snapshot as benchmark_snapshot
 from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atomic_write_json, canonical_json, git_head, parse_path_list, read_json, read_jsonl, sensitive_text, sha256_bytes, sha256_file, sha256_text
 from oms_runtime.execution import check as check_backend
@@ -47,6 +48,21 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(row['manual_outcomes']['count'], 1)
         self.assertEqual(row['manual_outcomes']['totals']['duplicate_work'], 5)
         self.assertEqual(row['unknown_metrics'], [])
+
+    def test_manual_effectiveness_outcomes_are_compared(self) -> None:
+        names = ('human_corrections', 'escaped_defects', 'reverted_lines',
+                 'false_refusals', 'duplicate_work')
+        left = {'manual_outcomes': {'totals': {
+            name: value for value, name in enumerate(names, start=1)}}}
+        right = {'manual_outcomes': {'totals': {
+            name: value + 10 for value, name in enumerate(names, start=1)}}}
+        changes = {
+            item['field']: item
+            for item in compare_benchmark_snapshots(left, right)['changes']
+        }
+        for name in names:
+            field = 'manual_outcomes.totals.%s' % name
+            self.assertEqual(changes[field]['delta'], 10)
 
     def test_install_plan_points_to_selective_installer(self) -> None:
         plan = profiles.install_plan(['core', 'notion'], 'claude')

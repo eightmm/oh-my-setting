@@ -415,7 +415,9 @@ useful-work efficiency denominator. `oms skill-forge eval --record` is the
 only writer for those skill metrics; it stores aggregate outcomes and command
 digests, not prompts or output. The snapshot explicitly marks metrics that
 cannot be inferred mechanically, such as escaped defects, human corrections,
-false refusals, reverted lines, and duplicate work.
+false refusals, reverted lines, and duplicate work. Once recorded through the
+existing manual-outcome path, `benchmark compare` includes their deltas beside
+the mechanically collected metrics.
 
 ## Optional interoperability adapters
 

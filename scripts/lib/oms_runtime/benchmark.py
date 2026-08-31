@@ -169,6 +169,9 @@ def persist(repo: Path, row: Optional[Mapping[str, Any]] = None) -> Dict[str, An
 
 def compare(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str, Any]:
     fields = [("success_rate",), ("useful_work_efficiency",), ("acceptance", "coverage"), ("acceptance", "risk_score"), ("context", "selected_bytes_mean"), ("tokens", "sum"), ("cost_usd", "sum"), ("duration_seconds", "sum"), ("skill_evals", "task_pass_delta_sum")]
+    fields.extend(("manual_outcomes", "totals", name) for name in (
+        "human_corrections", "escaped_defects", "reverted_lines",
+        "false_refusals", "duplicate_work"))
 
     def get(row: Mapping[str, Any], path: Sequence[str]) -> Any:
         value: Any = row
