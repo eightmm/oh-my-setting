@@ -14014,6 +14014,69 @@ print(row["hookSpecificOutput"]["additionalContext"])
   [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
 }
 
+# The tier guard is the one hard edge of model tiering: an edit the session
+# model itself makes to implementation in an adopted repo is advised once per
+# session by default, asked or refused when OMS_TIER_GUARD says so, and never
+# touched when a subagent or a harness worker — the tier meant to write — is
+# the one editing. Prose, .oms state, and files outside the repo pass.
+test_tier_guard_hook_routes_implementation_to_workers() {
+  local project="$TMP/tier-guard-hook"
+  local SH="$ROOT/scripts/tier-guard-hook.sh"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms" "$project/docs"
+  payload_for() {  # payload_for TOOL FILE SESSION [EXTRA-JSON-FIELDS]
+    printf '{"tool_name":"%s","tool_input":{"file_path":"%s"},"hook_event_name":"PreToolUse","session_id":"%s","cwd":"%s"%s}' \
+      "$1" "$2" "$3" "$project" "${4:-}"
+  }
+  decision_of() {  # decision_of HOOK_OUTPUT -> permissionDecision|context-flag
+    printf '%s' "$1" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)["hookSpecificOutput"]
+assert row["hookEventName"] == "PreToolUse", row
+print(row["permissionDecision"] + ("|context" if row.get("additionalContext") else "|") + ("|reason" if row.get("permissionDecisionReason") else "|"))
+'
+  }
+
+  # advise (default): context once per session, allow always.
+  out="$(cd "$project" && payload_for Write "$project/src/main.py" s1 | bash "$SH")" ||
+    fail "the hook must never exit nonzero"
+  [ "$(decision_of "$out")" = 'allow|context|' ] || fail "the first implementation edit in a session is advised: $out"
+  printf '%s' "$out" | grep -Fq 'src/main.py is implementation' || fail "the advice names the file: $out"
+  out="$(cd "$project" && payload_for Edit "$project/src/other.py" s1 | bash "$SH")"
+  [ -z "$out" ] || fail "the same session is advised once: $out"
+  out="$(cd "$project" && payload_for Edit "$project/src/other.py" s2 | bash "$SH")"
+  [ "$(decision_of "$out")" = 'allow|context|' ] || fail "a new session is advised again: $out"
+
+  # ask and deny carry the reason; off is silent.
+  out="$(cd "$project" && payload_for Write "$project/src/main.py" s3 | OMS_TIER_GUARD=ask bash "$SH")"
+  [ "$(decision_of "$out")" = 'ask||reason' ] || fail "ask mode must ask with a reason: $out"
+  out="$(cd "$project" && payload_for Write "$project/src/main.py" s3 | OMS_TIER_GUARD=deny bash "$SH")"
+  [ "$(decision_of "$out")" = 'deny||reason' ] || fail "deny mode must refuse with a reason: $out"
+  out="$(cd "$project" && payload_for Write "$project/src/main.py" s4 | OMS_TIER_GUARD=off bash "$SH")"
+  [ -z "$out" ] || fail "off must be silent: $out"
+
+  # The tier meant to write passes even under deny: a subagent, a harness worker.
+  out="$(cd "$project" && payload_for Write "$project/src/main.py" s5 ',"agent_id":"sub-1","agent_type":"build-error-resolver"' | OMS_TIER_GUARD=deny bash "$SH")"
+  [ -z "$out" ] || fail "a subagent's edit is the policy working, not a violation: $out"
+  out="$(cd "$project" && payload_for Write "$project/src/main.py" s5 | OMS_TIER_GUARD=deny OMS_HARNESS_CHILD=1 bash "$SH")"
+  [ -z "$out" ] || fail "a harness worker's edit passes: $out"
+
+  # Prose, harness state, files outside the repo, non-edit tools, unadopted repos.
+  for path in "$project/docs/design.md" "$project/README.md" "$project/.oms/task/current.md" "$TMP/outside-the-repo.py"; do
+    out="$(cd "$project" && payload_for Write "$path" s6 | OMS_TIER_GUARD=deny bash "$SH")"
+    [ -z "$out" ] || fail "$path is not guarded implementation: $out"
+  done
+  out="$(cd "$project" && printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"},"session_id":"s7"}' | OMS_TIER_GUARD=deny bash "$SH")"
+  [ -z "$out" ] || fail "a Bash call is not an edit: $out"
+  local plain="$TMP/tier-guard-plain"
+  mkdir -p "$plain"
+  out="$(cd "$plain" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s"},"session_id":"s8"}' "$plain/main.py" | OMS_TIER_GUARD=deny bash "$SH")"
+  [ -z "$out" ] || fail "an unadopted repo is not guarded: $out"
+  [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
+}
+
 test_fail_ledger_records_checks_resolves() {
   local project="$TMP/fail-ledger"
   local SH="$ROOT/scripts/fail-ledger.sh"
@@ -16659,6 +16722,12 @@ assert len(guard) == 1, d["hooks"]["PostToolUse"]
 # The matcher is a tool list; the surface row must survive its own pipes.
 assert guard[0]["matcher"] == "Edit|Write|MultiEdit", guard
 assert guard[0]["hooks"][0]["timeout"] == 5, guard
+tier = [
+    entry for entry in d["hooks"]["PreToolUse"]
+    if "tier-guard-hook.sh" in entry["hooks"][0]["command"]
+]
+assert len(tier) == 1, d["hooks"]["PreToolUse"]
+assert tier[0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit", tier
 precompact = d["hooks"]["PreCompact"]
 assert len(precompact) == 1, precompact
 assert "precompact-handoff.sh" in precompact[0]["hooks"][0]["command"]
@@ -22634,6 +22703,7 @@ precompact-handoff
 resume-hook
 skill-router
 syntax-guard-hook
+tier-guard-hook
 turn-guard
 unlink
 "

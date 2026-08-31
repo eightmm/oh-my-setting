@@ -39,10 +39,17 @@ PRINT_EXPECTED=0
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=2
+HOOKS_SCHEMA=3
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
+
+# Model tiering has one hard edge: implementation belongs to a worker one
+# rank below the session model. Before an edit the session model makes
+# itself in an adopted repo, the guard advises once per session by default,
+# and asks or refuses when OMS_TIER_GUARD says so; subagents and harness
+# workers pass untouched.
+PreToolUse|tier-guard-hook.sh|Edit|Write|MultiEdit|NotebookEdit|5
 
 # Failed Bash commands feed the shared failure memory and surface what it
 # already knows. Matcher-scoped so other tools failures never pay for it; a 5s
@@ -104,7 +111,7 @@ Usage: install-claude-hooks.sh [--remove] [--settings PATH] [--print-expected]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
-edit-time syntax-guard hook, PreCompact/SessionEnd
+edit-time syntax-guard hook, PreToolUse tier-guard hook, PreCompact/SessionEnd
 handoff-snapshot hooks, SessionStart resume hook,
 SessionStart/PostToolUse/SubagentStop/SessionEnd telemetry hooks, main usage
 HUD, and compact subagent HUD in Claude Code's
@@ -193,6 +200,7 @@ fi
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
 [ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/syntax-guard-hook.sh" ] || fail "syntax-guard-hook.sh not found under $ROOT"
+[ -f "$ROOT/scripts/tier-guard-hook.sh" ] || fail "tier-guard-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/precompact-handoff.sh" ] || fail "precompact-handoff.sh not found under $ROOT"
 [ -f "$ROOT/scripts/resume-hook.sh" ] || fail "resume-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/telemetry-hook.sh" ] || fail "telemetry-hook.sh not found under $ROOT"
@@ -229,8 +237,8 @@ subagent_status_cmd = "python3 %s" % shlex.quote(
 )
 MARKS = (
     "skill-router.sh", "turn-guard.sh", "fail-ledger-hook.sh",
-    "syntax-guard-hook.sh", "precompact-handoff.sh", "resume-hook.sh",
-    "telemetry-hook.sh",
+    "syntax-guard-hook.sh", "tier-guard-hook.sh", "precompact-handoff.sh",
+    "resume-hook.sh", "telemetry-hook.sh",
 )
 
 settings = {}
