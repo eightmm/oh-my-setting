@@ -39,7 +39,7 @@ PRINT_EXPECTED=0
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=1
+HOOKS_SCHEMA=2
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
@@ -54,6 +54,12 @@ PostToolUseFailure|fail-ledger-hook.sh|Bash|5
 # to stay readable. Same matcher and ceiling; a repo with no failure history
 # costs one stat.
 PostToolUse|fail-ledger-hook.sh|Bash|5
+
+# A file that does not parse after an edit is reported in the same turn, as
+# feedback, never a block. Matcher-scoped to the edit tools (the matcher may
+# carry alternatives: the row keeps its first two and last fields, the matcher
+# is everything between); a 5s ceiling bounds bash -n on a pathological file.
+PostToolUse|syntax-guard-hook.sh|Edit|Write|MultiEdit|5
 
 # Compaction discards transcript detail; snapshot a handoff digest first. The
 # hook is best-effort and self-bounded, but a ceiling keeps a huge transcript
@@ -97,7 +103,8 @@ usage() {
 Usage: install-claude-hooks.sh [--remove] [--settings PATH] [--print-expected]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
-hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PreCompact/SessionEnd
+hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
+edit-time syntax-guard hook, PreCompact/SessionEnd
 handoff-snapshot hooks, SessionStart resume hook,
 SessionStart/PostToolUse/SubagentStop/SessionEnd telemetry hooks, main usage
 HUD, and compact subagent HUD in Claude Code's
@@ -132,10 +139,14 @@ for line in os.environ["OMS_CH_SURFACES"].splitlines():
     if not line or line.startswith("#"):
         continue
     parts = line.split("|")
-    if len(parts) != 4:
+    if len(parts) < 4:
         sys.stderr.write("error: malformed hook surface row: %s\n" % line)
         sys.exit(2)
-    event, script, matcher, timeout = (part.strip() for part in parts)
+    # event|script|matcher|timeout, where the matcher itself may be a
+    # pipe-separated tool list: the first two and the last field are fixed,
+    # the matcher is whatever lies between.
+    event, script, timeout = parts[0].strip(), parts[1].strip(), parts[-1].strip()
+    matcher = "|".join(part.strip() for part in parts[2:-1])
     if not event or not script:
         sys.stderr.write("error: hook surface row needs an event and a script: %s\n" % line)
         sys.exit(2)
@@ -181,6 +192,7 @@ fi
 [ -f "$ROOT/scripts/skill-router.sh" ] || fail "skill-router.sh not found under $ROOT"
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
 [ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
+[ -f "$ROOT/scripts/syntax-guard-hook.sh" ] || fail "syntax-guard-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/precompact-handoff.sh" ] || fail "precompact-handoff.sh not found under $ROOT"
 [ -f "$ROOT/scripts/resume-hook.sh" ] || fail "resume-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/telemetry-hook.sh" ] || fail "telemetry-hook.sh not found under $ROOT"
@@ -217,7 +229,8 @@ subagent_status_cmd = "python3 %s" % shlex.quote(
 )
 MARKS = (
     "skill-router.sh", "turn-guard.sh", "fail-ledger-hook.sh",
-    "precompact-handoff.sh", "resume-hook.sh", "telemetry-hook.sh",
+    "syntax-guard-hook.sh", "precompact-handoff.sh", "resume-hook.sh",
+    "telemetry-hook.sh",
 )
 
 settings = {}

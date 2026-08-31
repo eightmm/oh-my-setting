@@ -13777,6 +13777,84 @@ test_fail_ledger_hook_gives_failed_commands_a_memory() {
   [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
 }
 
+# The edit-time syntax guard is feedback in the same turn: a file that does not
+# parse after an Edit/Write comes back as additionalContext (plain stdout on
+# PostToolUse never reaches the model), a clean file stays silent, and the
+# hook never blocks, never exits nonzero, and never writes anything.
+test_syntax_guard_hook_reports_broken_edits() {
+  local project="$TMP/syntax-guard-hook"
+  local SH="$ROOT/scripts/syntax-guard-hook.sh"
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  payload_for() {  # payload_for TOOL FILE
+    printf '{"tool_name":"%s","tool_input":{"file_path":"%s"},"tool_response":{"filePath":"%s"},"hook_event_name":"PostToolUse","cwd":"%s"}' \
+      "$1" "$2" "$2" "$project"
+  }
+  context_of() {  # context_of HOOK_OUTPUT -> additionalContext
+    printf '%s' "$1" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["hookSpecificOutput"]["hookEventName"] == "PostToolUse", row
+print(row["hookSpecificOutput"]["additionalContext"])
+'
+  }
+
+  printf 'if true; then\n  echo unclosed\n' > "$project/broken.sh"
+  out="$(cd "$project" && payload_for Write "$project/broken.sh" | bash "$SH")" ||
+    fail "the hook must never exit nonzero"
+  out="$(context_of "$out")" || fail "a broken shell file must come back as additionalContext: $out"
+  case "$out" in
+    "syntax-guard: broken.sh does not parse after this Write"*"bash -n"*) ;;
+    *) fail "the finding must name the file, the tool, and the check: $out" ;;
+  esac
+  case "$out" in
+    *"$project"*) fail "the finding shows a repo-relative path, not the machine path: $out" ;;
+  esac
+
+  printf 'echo fine\n' > "$project/fine.sh"
+  out="$(cd "$project" && payload_for Edit "$project/fine.sh" | bash "$SH")"
+  [ -z "$out" ] || fail "a clean file must stay silent: $out"
+
+  printf 'def f(:\n    pass\n' > "$project/broken.py"
+  out="$(cd "$project" && payload_for Edit "$project/broken.py" | bash "$SH")"
+  out="$(context_of "$out")" || fail "a broken python file must come back as additionalContext"
+  case "$out" in *"broken.py"*"python:"*) ;; *) fail "python finding is wrong: $out" ;; esac
+  [ ! -d "$project/__pycache__" ] || fail "the check must not write bytecode"
+
+  printf '{"a": 1,}\n' > "$project/broken.json"
+  out="$(cd "$project" && payload_for Write "$project/broken.json" | bash "$SH")"
+  out="$(context_of "$out")" || fail "a broken json file must come back as additionalContext"
+  case "$out" in *"broken.json"*"json:"*) ;; *) fail "json finding is wrong: $out" ;; esac
+  printf '{\n  // comments are the point of this file\n  "a": 1\n}\n' > "$project/tsconfig.json"
+  out="$(cd "$project" && payload_for Write "$project/tsconfig.json" | bash "$SH")"
+  [ -z "$out" ] || fail "JSON-with-comments files are not findings: $out"
+
+  printf '#!/usr/bin/env bash\nfor x in; do\n' > "$project/tool"
+  out="$(cd "$project" && payload_for Write "$project/tool" | bash "$SH")"
+  out="$(context_of "$out")" || fail "a shebang script without an extension is still checked"
+  case "$out" in *"tool does not parse"*"bash -n"*) ;; *) fail "shebang finding is wrong: $out" ;; esac
+
+  # Non-edit tools, missing files, unknown kinds, the opt-out, and unadopted
+  # repos are exact no-ops — and the hook never seeds .oms.
+  out="$(cd "$project" && printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' | bash "$SH")"
+  [ -z "$out" ] || fail "a Bash call is not edit material: $out"
+  out="$(cd "$project" && payload_for Write "$project/missing.sh" | bash "$SH")"
+  [ -z "$out" ] || fail "a file that is gone has nothing to parse: $out"
+  printf 'not code\n' > "$project/notes.md"
+  out="$(cd "$project" && payload_for Write "$project/notes.md" | bash "$SH")"
+  [ -z "$out" ] || fail "an unjudged file kind must stay silent: $out"
+  out="$(cd "$project" && payload_for Write "$project/broken.sh" | OMS_SYNTAX_GUARD_HOOK=0 bash "$SH")"
+  [ -z "$out" ] || fail "the opt-out must silence the hook: $out"
+  local plain="$TMP/syntax-guard-plain"
+  mkdir -p "$plain"
+  printf 'if true; then\n' > "$plain/broken.sh"
+  out="$(cd "$plain" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$plain/broken.sh" | bash "$SH")"
+  [ -z "$out" ] || fail "an unadopted repo gets no guard speech: $out"
+  [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
+}
+
 test_fail_ledger_records_checks_resolves() {
   local project="$TMP/fail-ledger"
   local SH="$ROOT/scripts/fail-ledger.sh"
@@ -16414,6 +16492,14 @@ assert len(failure) == 1, failure
 assert failure[0]["matcher"] == "Bash"
 assert "fail-ledger-hook.sh" in failure[0]["hooks"][0]["command"]
 assert failure[0]["hooks"][0]["timeout"] == 5
+guard = [
+    entry for entry in d["hooks"]["PostToolUse"]
+    if "syntax-guard-hook.sh" in entry["hooks"][0]["command"]
+]
+assert len(guard) == 1, d["hooks"]["PostToolUse"]
+# The matcher is a tool list; the surface row must survive its own pipes.
+assert guard[0]["matcher"] == "Edit|Write|MultiEdit", guard
+assert guard[0]["hooks"][0]["timeout"] == 5, guard
 precompact = d["hooks"]["PreCompact"]
 assert len(precompact) == 1, precompact
 assert "precompact-handoff.sh" in precompact[0]["hooks"][0]["command"]

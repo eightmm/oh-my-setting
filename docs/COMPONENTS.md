@@ -551,8 +551,10 @@ chooses a connector or tracked summary.
 
 ## Provider integrations
 
-- Claude Code: skill hints, turn guard, session capture, handoff, and compact
-  main/subagent HUDs.
+- Claude Code: skill hints, turn guard, failure memory, edit-time syntax guard
+  (a file that does not parse after Edit/Write is reported in the same turn as
+  feedback, never a block), session capture, handoff, and compact main/subagent
+  HUDs.
 - Codex: local plugin hooks plus a managed native status line when the user has
   not set one. On Python 3.9/3.10, arbitrary existing TOML requires `tomli` so
   the helper never rewrites an unvalidated config.
