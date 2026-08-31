@@ -3,6 +3,18 @@
 These adapters expose existing OMS reads and peer operations. They do not add a
 new task, approval, landing, provider-write, or publication authority.
 
+## MCP protocol revisions
+
+The stdio server is dual-era. A legacy client opens with `initialize` and is
+served on the revision it negotiated. A modern client (revision `2026-07-28`)
+sends no handshake: it names its revision in every request's
+`_meta["io.modelcontextprotocol/protocolVersion"]`, may probe
+`server/discover` first, and receives `resultType` plus `ttlMs`/`cacheScope`
+on list results. The per-request field wins wherever it is present; a named
+revision the server does not implement is refused with error `-32022` and the
+supported list, never served on the fallback. Requests without the field
+follow the session, so existing clients see the same bytes as before.
+
 ## MCP Tasks extension
 
 The default MCP wire stays unchanged. Enable the server with

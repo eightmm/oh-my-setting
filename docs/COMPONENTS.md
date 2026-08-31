@@ -581,6 +581,11 @@ chooses a connector or tracked summary.
   them: `oms_peer_operations` lists them newest first, a run whose process died
   without an exit reads as `stalled` instead of polling as running forever, and
   a finished result names the thread to continue from.
+- MCP protocol revisions: the server is dual-era. `initialize` still
+  negotiates for legacy clients; a `2026-07-28` client needs no handshake —
+  `server/discover` answers statelessly and the revision named in each
+  request's `_meta` selects the result shape, with `-32022` for a revision the
+  server does not implement. Requests naming no revision keep their bytes.
 - MCP Tasks: disabled unless `OMS_MCP_TASKS_EXTENSION=1`. With protocol
   `2026-07-28` and per-request `io.modelcontextprotocol/tasks` capability, a
   same-repository `oms_peer_start` reuses its durable operation ID as a Task;

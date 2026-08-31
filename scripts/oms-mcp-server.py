@@ -42,6 +42,17 @@ FALLBACK_PROTOCOL = "2025-06-18"
 SUPPORTED_PROTOCOLS = ("2026-07-28", "2025-06-18", "2025-03-26")
 TASKS_PROTOCOL = "2026-07-28"
 TASKS_EXTENSION = "io.modelcontextprotocol/tasks"
+# 2026-07-28 dropped the initialize handshake: a modern client names its
+# revision on every request instead, so a server that learned the revision
+# only from initialize pinned such a client to the legacy fallback for the
+# life of the process. The per-request field wins wherever it is present; the
+# negotiated session value serves clients that still open with initialize.
+META_PROTOCOL = "io.modelcontextprotocol/protocolVersion"
+META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+UNSUPPORTED_PROTOCOL_CODE = -32022
+# Freshness hint on cacheable list results; the tool set is fixed per process.
+LIST_TTL_MS = 300_000
 SESSION_PROTOCOL = FALLBACK_PROTOCOL
 OUTPUT_LIMIT = 60_000
 MAX_REQUEST_BYTES = 256 * 1024
@@ -92,26 +103,60 @@ def tasks_feature_enabled() -> bool:
     return os.environ.get("OMS_MCP_TASKS_EXTENSION") == "1"
 
 
+def request_meta(params: object) -> dict:
+    if isinstance(params, dict):
+        meta = params.get("_meta")
+        if isinstance(meta, dict):
+            return meta
+    return {}
+
+
+def requested_protocol(params: object):
+    """The revision a modern client names on this request; None when absent."""
+    value = request_meta(params).get(META_PROTOCOL)
+    return value if isinstance(value, str) else None
+
+
+def effective_protocol(params: object) -> str:
+    requested = requested_protocol(params)
+    if requested in SUPPORTED_PROTOCOLS:
+        return requested
+    return SESSION_PROTOCOL
+
+
+def server_info() -> dict:
+    return {"name": "oh-my-setting", "version": server_version()}
+
+
+def server_capabilities(protocol: str) -> dict:
+    capabilities = {"tools": {"listChanged": False}}
+    if tasks_feature_enabled() and protocol == TASKS_PROTOCOL:
+        capabilities["extensions"] = {TASKS_EXTENSION: {}}
+    return capabilities
+
+
 def task_request_capable(params: object) -> bool:
-    if not tasks_feature_enabled() or SESSION_PROTOCOL != TASKS_PROTOCOL:
+    if not tasks_feature_enabled() or effective_protocol(params) != TASKS_PROTOCOL:
         return False
-    if not isinstance(params, dict):
-        return False
-    meta = params.get("_meta")
-    if not isinstance(meta, dict):
-        return False
-    capabilities = meta.get("io.modelcontextprotocol/clientCapabilities")
+    capabilities = request_meta(params).get(META_CLIENT_CAPABILITIES)
     if not isinstance(capabilities, dict):
         return False
     extensions = capabilities.get("extensions")
     return isinstance(extensions, dict) and TASKS_EXTENSION in extensions
 
 
-def complete_result(value: dict) -> dict:
+def complete_result(value: dict, params: object = None) -> dict:
     """Add the post-2026 result discriminator without changing old clients."""
-    if SESSION_PROTOCOL != TASKS_PROTOCOL or "resultType" in value:
+    if effective_protocol(params) != TASKS_PROTOCOL or "resultType" in value:
         return value
     return {"resultType": "complete", **value}
+
+
+def cacheable(value: dict, params: object) -> dict:
+    """List results carry a freshness hint only where the revision defines one."""
+    if effective_protocol(params) != TASKS_PROTOCOL:
+        return value
+    return {**value, "ttlMs": LIST_TTL_MS, "cacheScope": "private"}
 
 
 REPO_PROPERTY = {
@@ -1162,8 +1207,41 @@ def handle(message: dict):
         )
     if msg_id is None:
         return None  # notification (e.g. notifications/initialized)
+    params = message.get("params")
+    requested = requested_protocol(params)
+    if requested is not None and requested not in SUPPORTED_PROTOCOLS:
+        # A named-but-unknown revision is a modern client to retry with one
+        # of ours, never a legacy client to serve on the fallback.
+        return response(
+            msg_id,
+            error={
+                "code": UNSUPPORTED_PROTOCOL_CODE,
+                "message": "Unsupported protocol version",
+                "data": {
+                    "supported": list(SUPPORTED_PROTOCOLS),
+                    "requested": requested[:64],
+                },
+            },
+        )
+    if method == "server/discover":
+        # Stateless by design: the probe a modern client sends first must
+        # not pin the process the way initialize does.
+        if params is not None and not isinstance(params, dict):
+            return response(
+                msg_id, error={"code": -32602, "message": "invalid params: expected object"}
+            )
+        return response(
+            msg_id,
+            {
+                "resultType": "complete",
+                "supportedVersions": list(SUPPORTED_PROTOCOLS),
+                "capabilities": server_capabilities(TASKS_PROTOCOL),
+                "_meta": {META_SERVER_INFO: server_info()},
+                "ttlMs": LIST_TTL_MS,
+                "cacheScope": "private",
+            },
+        )
     if method == "initialize":
-        params = message.get("params")
         if params is None:
             params = {}
         if not isinstance(params, dict):
@@ -1176,27 +1254,26 @@ def handle(message: dict):
         else:
             protocol = FALLBACK_PROTOCOL
         SESSION_PROTOCOL = protocol
-        capabilities = {"tools": {"listChanged": False}}
-        if tasks_feature_enabled() and protocol == TASKS_PROTOCOL:
-            capabilities["extensions"] = {TASKS_EXTENSION: {}}
         return response(
             msg_id,
             complete_result({
                 "protocolVersion": protocol,
-                "capabilities": capabilities,
-                "serverInfo": {"name": "oh-my-setting", "version": server_version()},
-            }),
+                "capabilities": server_capabilities(protocol),
+                "serverInfo": server_info(),
+            }, params),
         )
     if method == "ping":
-        return response(msg_id, complete_result({}))
+        return response(msg_id, complete_result({}, params))
     if method == "tools/list":
-        return response(msg_id, complete_result({"tools": tool_definitions()}))
+        return response(
+            msg_id,
+            complete_result(cacheable({"tools": tool_definitions()}, params), params),
+        )
     if method in ("tasks/get", "tasks/update", "tasks/cancel"):
-        if not tasks_feature_enabled() or SESSION_PROTOCOL != TASKS_PROTOCOL:
+        if not tasks_feature_enabled() or effective_protocol(params) != TASKS_PROTOCOL:
             return response(
                 msg_id, error={"code": -32601, "message": "method not found: %s" % method}
             )
-        params = message.get("params")
         if not isinstance(params, dict):
             return response(
                 msg_id, error={"code": -32602, "message": "invalid params: expected object"}
@@ -1238,7 +1315,6 @@ def handle(message: dict):
             )
         return response(msg_id, {"resultType": "complete"})
     if method == "tools/call":
-        params = message.get("params")
         if params is None:
             params = {}
         if not isinstance(params, dict):
@@ -1297,7 +1373,7 @@ def handle(message: dict):
                             return response(msg_id, task)
                 return response(
                     msg_id,
-                    complete_result(ordinary),
+                    complete_result(ordinary, params),
                 )
         return response(
             msg_id, error={"code": -32602, "message": "unknown tool: %r" % name}

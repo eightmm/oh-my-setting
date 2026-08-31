@@ -1783,7 +1783,96 @@ assert rows[1]["error"]["code"] == -32601, rows[1]
 PY
 }
 
+# Protocol revision 2026-07-28 removed the initialize handshake: a modern
+# client names its revision on every request and may probe server/discover
+# first. The server used to learn the revision only from initialize, so such a
+# client stayed on the legacy fallback for the whole process — no resultType,
+# no task surface — and the probe answered "method not found". Legacy clients
+# keep their byte shape: the per-request field wins only where it is present.
+test_mcp_server_serves_modern_clients_without_a_handshake() {
+  local repo="$TMP/mcp-modern-repo"
+  local out="$TMP/mcp-modern-out"
+  local meta='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"t","version":"0"},"io.modelcontextprotocol/clientCapabilities":{}}'
+  local caps='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}'
+
+  make_repo "$repo"
+  {
+    printf '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{%s}}\n' "$meta"
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{%s}}\n' "$meta"
+    printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/list"}'
+    printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"oms_task_state","arguments":{"repo":"%s"},%s}}\n' "$repo" "$meta"
+    printf '%s\n' '{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"1900-01-01"}}}'
+    printf '{"jsonrpc":"2.0","id":6,"method":"ping","params":{%s}}\n' "$meta"
+    printf '{"jsonrpc":"2.0","id":7,"method":"tasks/get","params":{"taskId":"consult-20260827T000000Z-deadbeef",%s}}\n' "$caps"
+    printf '%s\n' '{"jsonrpc":"2.0","id":8,"method":"tasks/get","params":{"taskId":"consult-20260827T000000Z-deadbeef","_meta":{"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":10,"method":"tools/list"}'
+    printf '{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{%s}}\n' "$meta"
+  } | OMS_MCP_TASKS_EXTENSION=1 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
+
+  OMS_T_OUT="$out" python3 - <<'PY' || fail "modern MCP client contract failed: $(head -c 800 "$out")"
+import json, os
+
+by_id = {}
+with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
+    for line in fh:
+        msg = json.loads(line)
+        by_id[msg.get("id")] = msg
+
+discover = by_id[1]["result"]
+assert discover["resultType"] == "complete", discover
+assert discover["supportedVersions"][0] == "2026-07-28", discover
+assert "2025-06-18" in discover["supportedVersions"], discover
+assert discover["capabilities"]["tools"] == {"listChanged": False}, discover
+assert "io.modelcontextprotocol/tasks" in discover["capabilities"]["extensions"], discover
+assert discover["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "oh-my-setting", discover
+assert isinstance(discover["ttlMs"], int) and discover["ttlMs"] > 0, discover
+assert discover["cacheScope"] in ("public", "private"), discover
+
+modern = by_id[2]["result"]
+assert modern["resultType"] == "complete", modern
+assert isinstance(modern["ttlMs"], int) and modern["cacheScope"] in ("public", "private"), modern
+# A deterministic order is what lets a client cache the list and keep its
+# prompt cache warm across sessions; pin it.
+names = [t["name"] for t in modern["tools"]]
+assert names == [
+    "oms_inbox", "oms_repo_state", "oms_agent_operations", "oms_approvals",
+    "oms_task_state", "oms_fail_ledger", "oms_handoffs", "oms_handoff_show",
+    "oms_journal", "oms_runtime_release", "oms_runtime_profile",
+    "oms_runtime_failures", "oms_peer_start", "oms_peer_result",
+    "oms_peer_operations"], names
+
+# The legacy byte shape is untouched wherever the request names no revision.
+legacy = by_id[3]["result"]
+assert set(legacy) == {"tools"}, sorted(legacy)
+assert [t["name"] for t in legacy["tools"]] == names, legacy
+
+called = by_id[4]["result"]
+assert called["resultType"] == "complete" and not called["isError"], called
+
+unsupported = by_id[5]["error"]
+assert unsupported["code"] == -32022, unsupported
+assert unsupported["data"]["requested"] == "1900-01-01", unsupported
+assert "2026-07-28" in unsupported["data"]["supported"], unsupported
+
+assert by_id[6]["result"] == {"resultType": "complete"}, by_id[6]
+
+# The task surface opens on the per-request revision alone: an unknown task
+# id is refused as invalid params, not as an unknown method ...
+assert by_id[7]["error"]["code"] == -32602, by_id[7]
+# ... while the same request without the revision stays legacy: not found.
+assert by_id[8]["error"]["code"] == -32601, by_id[8]
+
+# Dual era in one process: a legacy handshake still negotiates, a bare
+# request then follows the session, and a modern request keeps winning.
+assert by_id[9]["result"]["protocolVersion"] == "2025-03-26", by_id[9]
+assert "resultType" not in by_id[10]["result"], by_id[10]
+assert by_id[11]["result"]["resultType"] == "complete", by_id[11]
+PY
+}
+
 test_mcp_server_protocol
+test_mcp_server_serves_modern_clients_without_a_handshake
 test_mcp_peer_start_refuses_harness_children
 test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations
 test_mcp_server_bounds_requests_before_effects
