@@ -31,10 +31,31 @@ def state_dir(repo: Path, override: Optional[Path] = None) -> Path:
     return Path(override) if override else repo / ".oms" / "project-graph"
 
 
+def _ensure_state_marker(repo: Path, directory: Path) -> None:
+    """Drop the `.oms/.gitignore` ownership marker every harness tool leaves.
+
+    The graph may be the first OMS state a repository ever gets (an auto-build
+    behind a reader); without the marker `git status` would show `?? .oms/`
+    and the cache could reach a commit. An explicit state directory outside
+    `.oms` is the caller's to ignore.
+    """
+    oms = Path(repo) / ".oms"
+    try:
+        inside = Path(directory).resolve().is_relative_to(oms.resolve())
+    except (OSError, ValueError, AttributeError):
+        inside = str(Path(directory)).startswith(str(oms))
+    if not inside:
+        return
+    marker = oms / ".gitignore"
+    if not marker.exists() and not marker.is_symlink():
+        atomic_write_bytes(marker, b"*\n", mode=0o644)
+
+
 def build(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = (), exclude: Sequence[str] = (), max_bytes: int = 2 * 1024 * 1024, force: bool = False) -> Dict[str, Any]:
     """Write graph.json (no timestamps) and manifest.json; return the manifest summary."""
     repo = Path(repo).resolve()
     directory = ensure_private_dir(state_dir(repo, state))
+    _ensure_state_marker(repo, directory)
     discovery = discover_files(repo, include=include, exclude=exclude, max_bytes=max_bytes)
     extractions: List[Dict[str, Any]] = []
     files: Dict[str, Dict[str, Any]] = {}

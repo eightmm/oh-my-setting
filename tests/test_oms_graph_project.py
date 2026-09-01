@@ -189,6 +189,14 @@ class ProjectGraphTest(unittest.TestCase):
             self.assertEqual(second["stats"]["cached"], second["stats"]["files"])
             self.assertEqual(first["revision"], second["revision"])
 
+    def test_default_state_dir_leaves_the_oms_ignore_marker(self) -> None:
+        self.write("a.py", "def f(): pass\n")
+        build(self.repo)
+        self.assertEqual((self.repo / ".oms" / ".gitignore").read_text(encoding="utf-8"), "*\n")
+        self.assertFalse((self.state / ".gitignore").exists())
+        build(self.repo, state=self.state)
+        self.assertFalse((Path(self.temp.name) / ".gitignore").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
