@@ -73,7 +73,7 @@ projections, not authority.
 - Overlapping commands and canonical front doors: [command-routing.md](references/command-routing.md)
 - Shared decisions and their canonical owners: [shared-projections.md](references/shared-projections.md)
 - Typed projections, evidence, context, profiles, capsules, backends, experiments: [runtime-core.md](references/runtime-core.md)
-- Project graph (code structure, blast radius, context packs) and execution graph (GraphSpec, routes, runs): [graphs.md](references/graphs.md)
+- Project and execution graphs: [graphs.md](references/graphs.md)
 - Prompt hooks, memory, tasks, skills: [state-memory.md](references/state-memory.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
 - Autonomous stopping: [autonomy-loop.md](references/autonomy-loop.md)

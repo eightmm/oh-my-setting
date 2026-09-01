@@ -95,18 +95,3 @@ adapter probe there. In particular, `research-runner` is a
 compact single-run/run-ledger wrapper; `runtime experiment` is the comparable
 multi-arm, seed- and invariant-bound study path. Route discovery to the typed
 path without deleting or silently migrating existing ledgers.
-
-## Understand the code or the orchestration
-
-| Need | Use | Boundary |
-|---|---|---|
-| Where a symbol is defined, who calls it, what a change touches | `oms graph project find`, `trace`, `blast` | Regenerable cache built by `oms graph project build`; `INFERRED`/`AMBIGUOUS` edges are hints, not facts. |
-| A bounded context pack for one task | `oms graph project context --task TEXT [--bundle]` | Selection only; `--bundle` compiles through `oms runtime context`, which stays the bundle owner. |
-| Validate or draw a workflow before running it | `oms graph exec validate`, `render`, `test` | Pure checks; no state is written. |
-| The next legal step given current facts | `oms graph exec route` | Deterministic evaluation; it never claims, lands, or finishes a plan task. |
-| Drive a GraphSpec through existing primitives | `oms graph exec run` / `resume` / `decide` | Agent nodes call `plan-run`; landing remains `patch-land`'s serialized transaction; gates wait for `decide`. |
-| Evidence that the evaluator agrees with the control plane | `oms graph exec shadow` | Observation only; `goal-drive` and `autopilot` keep their authority. |
-
-`oms runtime envelope|next` remains the canonical typed projection of the
-plane; the execution graph reads the same facts and adds route semantics, it
-does not replace that projection.
