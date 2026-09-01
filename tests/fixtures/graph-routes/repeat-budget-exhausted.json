@@ -1,0 +1,20 @@
+{
+  "name": "the implement repeat budget is spent",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.present": true,
+    "plan.task.implement.state": "failed",
+    "plan.task.implement.repair_count": 3
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "failed"
+  },
+  "gates": {},
+  "repeats": {
+    "implement->implement": 3
+  },
+  "expect": {
+    "status": "exhausted"
+  }
+}

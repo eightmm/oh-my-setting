@@ -1,0 +1,19 @@
+{
+  "name": "a review asking for changes routes back to implement",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.task.implement.patch_present": true,
+    "plan.task.implement.state": "review"
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "completed"
+  },
+  "gates": {
+    "review": "changes_requested"
+  },
+  "expect": {
+    "status": "actionable",
+    "primary": "implement"
+  }
+}

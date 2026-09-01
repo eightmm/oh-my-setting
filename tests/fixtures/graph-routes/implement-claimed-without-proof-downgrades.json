@@ -1,0 +1,19 @@
+{
+  "name": "claimed completion without receipt is unverified",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.task.implement.state": "claimed"
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "completed"
+  },
+  "gates": {},
+  "expect": {
+    "status": "actionable",
+    "primary": "implement",
+    "downgrades": [
+      "implement"
+    ]
+  }
+}

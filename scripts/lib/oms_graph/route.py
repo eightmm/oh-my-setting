@@ -114,16 +114,19 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         return result("exhausted", None, [], "step budget exhausted")
 
     gates = state.get("gates", {}) if isinstance(state.get("gates", {}), Mapping) else {}
-    for node_id, node in nodes.items():
-        node_state = node_states.get(node_id, {}) if isinstance(node_states.get(node_id, {}), Mapping) else {}
+
+    def node_state_of(node_id: str) -> Mapping[str, Any]:
+        value = node_states.get(node_id, {})
+        return value if isinstance(value, Mapping) else {}
+
+    def recorded_outcome(node_id: str) -> Tuple[Optional[str], Optional[str]]:
+        """(claimed, recorded): the worker's claim and the outcome recorded after proof."""
+        node_state = node_state_of(node_id)
         claimed = node_state.get("claimed_outcome", node_state.get("outcome"))
         if claimed is None and node_id in gates:
             claimed = gates[node_id]
-        if node_state.get("status") == "finished" and claimed is not None:
-            outcome, absent = effective_outcome(node, str(claimed), facts)
-            effective[node_id] = outcome
-            if absent:
-                downgrades.append({"node": node_id, "claimed": str(claimed), "effective": outcome, "missing": absent})
+        recorded = node_state.get("outcome", claimed)
+        return (None if claimed is None else str(claimed), None if recorded is None else str(recorded))
 
     outgoing: Dict[str, List[Mapping[str, Any]]] = {node_id: [] for node_id in nodes}
     incoming: Dict[str, List[Mapping[str, Any]]] = {node_id: [] for node_id in nodes}
@@ -154,10 +157,41 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
 
     def source_matches(edge: Mapping[str, Any]) -> bool:
         source = edge["from"]
-        source_state = node_states.get(source, {}) if isinstance(node_states.get(source, {}), Mapping) else {}
-        if source_state.get("status") != "finished" or source not in effective:
+        if node_state_of(source).get("status") != "finished":
             return False
-        return effective[source] in edge.get("outcomes", []) and all(holds(item, facts) for item in edge.get("when", []))
+        outcome = effective.get(source)
+        if outcome is None:
+            outcome = recorded_outcome(source)[1]
+        return outcome in edge.get("outcomes", []) and all(holds(item, facts) for item in edge.get("when", []))
+
+    def settle(node_id: str, ancestry: Set[str]) -> Optional[str]:
+        """Effective outcome of a finished node.
+
+        Only the frontier is re-proved against current facts: a node whose
+        recorded route already led to further finished work keeps the outcome
+        the runner recorded after its own proof check. Re-checking history
+        against today's facts would contradict the spec's own happy path (an
+        implement node proved by `state=review` is still complete after the
+        landing that moved the task to `done`).
+        """
+        if node_id in effective:
+            return effective[node_id]
+        claimed, recorded = recorded_outcome(node_id)
+        if claimed is None or recorded is None:
+            return None
+        targets = [edge["to"] for edge in selected_edges(node_id, recorded)]
+        frontier = not targets or any(
+            node_state_of(target).get("status") != "finished" or target in ancestry or target == node_id
+            for target in targets
+        )
+        if frontier:
+            outcome, absent = effective_outcome(nodes[node_id], claimed, facts)
+            if absent:
+                downgrades.append({"node": node_id, "claimed": claimed, "effective": outcome, "missing": absent})
+        else:
+            outcome = recorded
+        effective[node_id] = outcome
+        return outcome
 
     def join_ready(node_id: str) -> bool:
         edges = [edge for edge in incoming.get(node_id, [])
@@ -182,7 +216,9 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         for edge in selected:
             target = edge["to"]
             trace.append("%s --%s--> %s" % (node_id, outcome, target))
-            if edge.get("kind") == "repeat":
+            # A back-edge into the current path re-runs finished work exactly
+            # like a declared repeat edge, and spends the same budget.
+            if edge.get("kind") == "repeat" or target in ancestry or target == node_id:
                 key = "%s->%s" % (node_id, target)
                 next_count = prospective_repeats.get(key, 0) + 1
                 if next_count > max_repeats:
@@ -206,11 +242,14 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         if node_state.get("status") == "active":
             push("active", node_id, "%s is active without an outcome" % node_id)
             return
-        if node_state.get("status") == "finished" and node_id in effective:
-            if node.get("kind") == "terminal":
+        if node_state.get("status") == "finished":
+            outcome = settle(node_id, ancestry)
+            if outcome is None:
+                push("active", node_id, "%s finished without a recorded outcome" % node_id)
+            elif node.get("kind") == "terminal":
                 push("terminal", node_id)
             else:
-                follow_from(node_id, effective[node_id], ancestry)
+                follow_from(node_id, outcome, ancestry)
             return
         if decision is not None:
             gate_outcome, absent = effective_outcome(node, str(decision), facts)
@@ -318,7 +357,11 @@ def run_fixture(fixture: Mapping[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     repeats = fixture.get("repeats", {})
     if not all(isinstance(value, Mapping) for value in (facts, outcomes, gates, repeats)):
         raise GraphError("fixture facts, outcomes, gates, and repeats must be objects")
-    actual_route = evaluate(graph, state_from_outcomes(graph, outcomes, gates=gates, repeats=repeats), facts)
+    state = state_from_outcomes(graph, outcomes, gates=gates, repeats=repeats)
+    steps = fixture.get("steps")
+    if isinstance(steps, int) and not isinstance(steps, bool) and steps >= 0:
+        state["steps"] = steps
+    actual_route = evaluate(graph, state, facts)
     expected = dict(fixture.get("expect", {})) if isinstance(fixture.get("expect", {}), Mapping) else {}
     actual: Dict[str, Any] = {}
     diff: List[Dict[str, Any]] = []

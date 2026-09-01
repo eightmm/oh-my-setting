@@ -1,0 +1,17 @@
+{
+  "name": "implement completed with a stored patch reaches the review gate",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.task.implement.patch_present": true,
+    "plan.task.implement.state": "review"
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "completed"
+  },
+  "gates": {},
+  "expect": {
+    "status": "gate",
+    "primary": "review"
+  }
+}

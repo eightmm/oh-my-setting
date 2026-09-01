@@ -1,0 +1,39 @@
+{
+  "name": "an inline spec with an unknown endpoint is invalid",
+  "spec": {
+    "schema": 1,
+    "id": "inline-unknown-endpoint",
+    "entry": "start",
+    "budget": {
+      "max_steps": 5,
+      "max_repeats": 1
+    },
+    "stop_facts": [],
+    "nodes": {
+      "start": {
+        "kind": "tool",
+        "effect": "read",
+        "command": "true"
+      },
+      "finish": {
+        "kind": "terminal",
+        "title": "Never reachable"
+      }
+    },
+    "edges": [
+      {
+        "from": "start",
+        "to": "missing",
+        "outcomes": [
+          "completed"
+        ]
+      }
+    ]
+  },
+  "facts": {},
+  "outcomes": {},
+  "gates": {},
+  "expect": {
+    "status": "invalid"
+  }
+}

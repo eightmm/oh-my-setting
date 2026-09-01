@@ -1,0 +1,17 @@
+{
+  "name": "the step budget is spent",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.present": true,
+    "plan.task.implement.state": "failed"
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "failed"
+  },
+  "gates": {},
+  "steps": 20,
+  "expect": {
+    "status": "exhausted"
+  }
+}

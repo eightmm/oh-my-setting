@@ -1,0 +1,19 @@
+{
+  "name": "an approved review routes to land",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.task.implement.patch_present": true,
+    "plan.task.implement.state": "review"
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "completed"
+  },
+  "gates": {
+    "review": "approved"
+  },
+  "expect": {
+    "status": "actionable",
+    "primary": "land"
+  }
+}

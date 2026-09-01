@@ -1,0 +1,15 @@
+{
+  "name": "an empty run routes to the entry node",
+  "spec_ref": "coding-change",
+  "facts": {
+    "git.branch": "work",
+    "plan.present": true,
+    "plan.task.implement.state": "todo"
+  },
+  "outcomes": {},
+  "gates": {},
+  "expect": {
+    "status": "actionable",
+    "primary": "inspect"
+  }
+}

@@ -306,5 +306,32 @@ class GraphFactsTest(unittest.TestCase):
             self.assertTrue(facts["receipt.acceptance.fresh"])
 
 
+class GraphFixtureCorpusTest(unittest.TestCase):
+    def test_every_bundled_fixture_routes_as_expected(self):
+        import json
+        fixtures = sorted((ROOT / "tests" / "fixtures" / "graph-routes").glob("*.json"))
+        self.assertGreaterEqual(len(fixtures), 14)
+        for path in fixtures:
+            with self.subTest(fixture=path.name):
+                ok, detail = run_fixture(json.loads(path.read_text(encoding="utf-8")))
+                self.assertTrue(ok, detail)
+
+    def test_history_keeps_its_recorded_proof(self):
+        # After landing, the task is done: implement's own proof (state=review)
+        # no longer holds, but its completion is history, not the frontier.
+        graph = load_spec("coding-change")
+        facts = {"plan.task.implement.state": "done", "plan.task.implement.patch_present": True, "receipt.land.implement.present": True}
+        state = state_from_outcomes(graph, {"inspect": "completed", "implement": "completed", "land": "completed"}, gates={"review": "approved"})
+        route = evaluate(graph, state, facts)
+        self.assertEqual((route["status"], route["primary"]), ("actionable", "acceptance"))
+        self.assertEqual(route["downgrades"], [])
+
+    def test_back_edge_spends_the_repeat_budget(self):
+        graph = load_spec("coding-change")
+        facts = {"plan.task.implement.state": "review", "plan.task.implement.patch_present": True}
+        state = state_from_outcomes(graph, {"inspect": "completed", "implement": "completed"}, gates={"review": "changes_requested"}, repeats={"review->implement": 3})
+        self.assertEqual(evaluate(graph, state, facts)["status"], "exhausted")
+
+
 if __name__ == "__main__":
     unittest.main()

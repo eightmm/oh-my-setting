@@ -1,0 +1,18 @@
+{
+  "name": "implement failed repeats implement over the repeat edge",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.present": true,
+    "plan.task.implement.state": "failed",
+    "plan.task.implement.repair_count": 1
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "failed"
+  },
+  "gates": {},
+  "expect": {
+    "status": "actionable",
+    "primary": "implement"
+  }
+}

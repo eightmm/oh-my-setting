@@ -1,0 +1,22 @@
+{
+  "name": "land completed with a landing receipt routes to acceptance",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.task.implement.patch_present": true,
+    "plan.task.implement.state": "done",
+    "receipt.admit.implement.latest": "verified",
+    "receipt.land.implement.present": true
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "completed",
+    "land": "completed"
+  },
+  "gates": {
+    "review": "approved"
+  },
+  "expect": {
+    "status": "actionable",
+    "primary": "acceptance"
+  }
+}

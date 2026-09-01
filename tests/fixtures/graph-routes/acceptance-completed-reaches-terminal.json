@@ -1,0 +1,26 @@
+{
+  "name": "acceptance completed on a fresh pass receipt reaches the terminal node",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.task.implement.patch_present": true,
+    "plan.task.implement.state": "done",
+    "receipt.admit.implement.latest": "verified",
+    "receipt.land.implement.present": true,
+    "plan.all_done": true,
+    "receipt.acceptance.latest": "pass",
+    "receipt.acceptance.fresh": true
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "completed",
+    "land": "completed",
+    "acceptance": "completed"
+  },
+  "gates": {
+    "review": "approved"
+  },
+  "expect": {
+    "status": "terminal",
+    "primary": "done"
+  }
+}

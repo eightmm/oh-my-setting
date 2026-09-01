@@ -1,0 +1,25 @@
+{
+  "name": "a failed acceptance repeats implement",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.task.implement.patch_present": true,
+    "plan.task.implement.state": "done",
+    "receipt.admit.implement.latest": "verified",
+    "receipt.land.implement.present": true,
+    "receipt.acceptance.latest": "fail",
+    "receipt.acceptance.fresh": true
+  },
+  "outcomes": {
+    "inspect": "completed",
+    "implement": "completed",
+    "land": "completed",
+    "acceptance": "failed"
+  },
+  "gates": {
+    "review": "approved"
+  },
+  "expect": {
+    "status": "actionable",
+    "primary": "implement"
+  }
+}

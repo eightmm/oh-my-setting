@@ -1,0 +1,16 @@
+{
+  "name": "inspect completed routes to implement",
+  "spec_ref": "coding-change",
+  "facts": {
+    "plan.present": true,
+    "plan.task.implement.state": "todo"
+  },
+  "outcomes": {
+    "inspect": "completed"
+  },
+  "gates": {},
+  "expect": {
+    "status": "actionable",
+    "primary": "implement"
+  }
+}
