@@ -92,11 +92,11 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(reasons["large.py"], "too-large")
         if (self.repo / "link.py").is_symlink():
             self.assertEqual(reasons["link.py"], "symlink")
+        self.write("keep.py", "def changed(): pass\n")
+        self.assertEqual(check(self.repo, state=self.state)["stale"], ["keep.py"])
         excluded = build(self.repo, state=self.state, exclude=("keep.py",))
         self.assertNotIn("keep.py", excluded["files"])
         self.assertEqual(check(self.repo, state=self.state)["new"], [])
-        self.write("keep.py", "def changed(): pass\n")
-        self.assertEqual(check(self.repo, state=self.state)["stale"], ["keep.py"])
         graph = self.graph()
         pack = context_pack(self.repo, graph, task="change keep", max_files=1, state=self.state)
         self.assertLessEqual(len(pack["files"]), 1)
