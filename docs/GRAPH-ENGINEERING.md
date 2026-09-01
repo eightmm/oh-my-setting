@@ -74,8 +74,9 @@ Adapter rules that follow from the audit (do not relearn these the hard way):
   `forbidden_paths` or `role`.
 - Harness children (`OMS_HARNESS_CHILD=1`) cannot `init`/`add`/`apply-proposal`
   and must pass `--lease-id` for leased mutations.
-- `.oms/project-graph/` and `.oms/graph/` are **not** ambient for the
-  `check.sh` state guard: every test writes into a temporary `--repo`.
+- `.oms/project-graph/` is ambient for the `check.sh` state guard (the
+  session-start hook refreshes it on the session's own schedule); `.oms/graph/`
+  is **not**. Every test still writes into a temporary `--repo`.
 - Every durable writer into `.oms` is under the durable-writers contract:
   secret-shaped values are refused and absolute home paths never persist.
   Free text goes through `oms_runtime.common.bounded_line` and is refused
