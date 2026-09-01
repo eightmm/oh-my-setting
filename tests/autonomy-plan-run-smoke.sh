@@ -49,6 +49,7 @@ case "${1:-}" in
 esac
 prompt="$(cat)"
 [ -z "${CALL_LOG:-}" ] || printf 'call\n' >> "$CALL_LOG"
+[ -z "${PROMPT_DUMP:-}" ] || printf '%s\n' "$prompt" > "$PROMPT_DUMP"
 [ -z "${STEAL_TASK:-}" ] || [ "${OMS_TASK_ID:-}" != "$STEAL_TASK" ] || {
   "$STEAL_PLAN" --repo "$STEAL_REPO" release --id "$STEAL_TASK" \
     --lease-id "$STEAL_LEASE" >/dev/null
@@ -909,5 +910,155 @@ assert row.get("plan_id") == sys.argv[3], row
 assert row["plan_id"] != plan["plan_id"], (row, plan)
 PY
   fail "delegation borrowed a replacement plan lineage after its verifier"
+
+# --- --context-pack: typed Project Graph orientation, never a write scope ----
+# The pack says where to look; the brief's allowed_paths stay the only place a
+# worker may write. It is validated as a typed input before anything is
+# claimed, so a malformed or secret-shaped pack costs no lease and no provider
+# call, and nothing about it is stored in plan state.
+pack_repo="$TMP/context-pack"
+packs="$TMP/packs"
+mkdir -p "$pack_repo" "$packs"
+git -C "$pack_repo" init -q
+git -C "$pack_repo" config user.email test@example.com
+git -C "$pack_repo" config user.name Test
+printf 'base\n' > "$pack_repo/README.md"
+mkdir -p "$pack_repo/scripts" "$pack_repo/tests"
+cp "$repo/scripts/check.sh" "$pack_repo/scripts/check.sh"
+printf 'ORIENTATION-FILE-BODY\n' > "$pack_repo/tests/run.sh"
+git -C "$pack_repo" add README.md scripts/check.sh tests/run.sh
+git -C "$pack_repo" commit -qm base
+"$PLAN" --repo "$pack_repo" init --goal orientation >/dev/null
+"$PLAN" --repo "$pack_repo" add --id cp-ok --title orient \
+  --allowed delegated.txt --verify 'bash scripts/check.sh t1' >/dev/null
+"$PLAN" --repo "$pack_repo" add --id cp-refuse --title refuse \
+  --allowed other.txt --verify 'bash scripts/check.sh t1' >/dev/null
+
+pack_digest='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+cat > "$packs/valid.json" <<EOF
+{"task": "carry orientation to the worker",
+ "pack_digest": "$pack_digest",
+ "project_graph_revision": "rev-abc",
+ "files": ["scripts/check.sh", "tests/run.sh"],
+ "tests": ["tests/run.sh"],
+ "evidence": [{"path": "scripts/check.sh", "reason": "query:file", "score": 1001}],
+ "hubs": [{"id": "file:scripts/check.sh", "degree": 3}]}
+EOF
+ln -s "$packs/valid.json" "$packs/symlink.json"
+cat > "$packs/absolute.json" <<EOF
+{"pack_digest": "$pack_digest", "files": ["/etc/passwd"], "tests": []}
+EOF
+cat > "$packs/traversal.json" <<EOF
+{"pack_digest": "$pack_digest", "files": ["scripts/../../outside.py"], "tests": []}
+EOF
+# A field name, not key material: SECRET_VALUE_RE keys on the shape, and the
+# brief's AKIA fixture matches no rule in it at all.
+cat > "$packs/secret.json" <<EOF
+{"pack_digest": "$pack_digest", "task": "api_key: fixture",
+ "files": ["scripts/check.sh"], "tests": []}
+EOF
+python3 - "$packs/oversized.json" "$pack_digest" <<'PY'
+import json, sys
+json.dump({"pack_digest": sys.argv[2], "task": "x" * 300000,
+           "files": ["scripts/check.sh"], "tests": []},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
+
+# 1. The orientation section reaches the worker prompt, and the task's write
+#    scope and plan row are exactly what they were before the pack existed.
+: > "$TMP/cp-prompt.txt"
+PROMPT_DUMP="$TMP/cp-prompt.txt" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$pack_repo" --to codex --id cp-ok \
+  --context-pack "$packs/valid.json" >"$TMP/cp-ok.out" 2>&1 ||
+  fail "context-pack run failed: $(tail -5 "$TMP/cp-ok.out")"
+grep -Fq '## Project Graph orientation' "$TMP/cp-prompt.txt" ||
+  fail "the worker prompt has no orientation section"
+grep -Fq 'project_graph_revision: rev-abc' "$TMP/cp-prompt.txt" ||
+  fail "the orientation section dropped the graph revision"
+grep -Eq '^context_pack_sha256: [0-9a-f]{64}$' "$TMP/cp-prompt.txt" ||
+  fail "the orientation section dropped the pack digest"
+grep -Fq -- '- scripts/check.sh  (query:file)' "$TMP/cp-prompt.txt" ||
+  fail "the orientation section dropped a pack file and its evidence reason"
+grep -Fq -- '- tests/run.sh' "$TMP/cp-prompt.txt" ||
+  fail "the orientation section dropped the pack tests"
+grep -Fq 'the only write scope' "$TMP/cp-prompt.txt" ||
+  fail "the orientation section must say it does not widen the write scope"
+grep -Fq 'ORIENTATION-FILE-BODY' "$TMP/cp-prompt.txt" &&
+  fail "the orientation section inlined file contents"
+"$PLAN" --repo "$pack_repo" show --id cp-ok |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["allowed_paths"] == ["delegated.txt"], d' ||
+  fail "the pack widened the task allowed_paths"
+python3 - "$pack_repo/.oms/plan/tasks.json" "$pack_digest" <<'PY' ||
+import json, sys
+raw = open(sys.argv[1], encoding="utf-8").read()
+plan = json.loads(raw)
+task = plan["tasks"]["cp-ok"]
+assert task["allowed_paths"] == ["delegated.txt"], task
+assert "context_pack" not in raw, "pack provenance leaked into plan state"
+assert sys.argv[2] not in raw, "pack digest leaked into plan state"
+PY
+  fail "the orientation pack was stored in plan state"
+cp_artifact="$(awk -F': ' '$1 == "artifact" {v=$2} END {print v}' "$TMP/cp-ok.out")"
+[ -n "$cp_artifact" ] && [ -f "$cp_artifact" ] ||
+  fail "the context-pack delegation left no artifact"
+grep -Eq '^- context_pack_sha256: [0-9a-f]{64}$' "$cp_artifact" ||
+  fail "the delegation artifact records no pack provenance"
+grep -Fq -- '- context_file_count: 2' "$cp_artifact" ||
+  fail "the delegation artifact records no pack file count"
+
+# 2. Every typed violation refuses before the claim, without a provider call,
+#    and leaves the task claimable.
+refuse_pack() {  # LABEL PACK
+  local rc=0
+  : > "$TMP/cp-calls"
+  CALL_LOG="$TMP/cp-calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    "$RUN" --repo "$pack_repo" --to codex --id cp-refuse --context-pack "$2" \
+    >"$TMP/cp-refuse.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "$1 pack was accepted"
+  # The exact prefix, not the flag name: "unknown argument: --context-pack"
+  # would satisfy a looser match on a build where nothing was implemented.
+  grep -Fq 'error: context-pack: ' "$TMP/cp-refuse.out" ||
+    fail "$1 refusal did not name context-pack: $(tail -3 "$TMP/cp-refuse.out")"
+  [ ! -s "$TMP/cp-calls" ] || fail "$1 pack reached the provider"
+  "$PLAN" --repo "$pack_repo" show --id cp-refuse | grep -Fq '"state": "ready"' ||
+    fail "$1 refusal did not leave the task claimable"
+}
+refuse_pack symlink "$packs/symlink.json"
+refuse_pack absolute "$packs/absolute.json"
+refuse_pack traversal "$packs/traversal.json"
+refuse_pack secret "$packs/secret.json"
+refuse_pack oversized "$packs/oversized.json"
+refuse_pack missing "$packs/absent.json"
+
+# 3. The dry run names the pack it would forward.
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$pack_repo" --to codex \
+  --id cp-refuse --context-pack "$packs/valid.json" --dry-run \
+  >"$TMP/cp-dry.out" 2>&1 || fail "dry run with a valid pack must not refuse"
+grep -Eq '^plan-run: context-pack=.*/valid\.json files=2 sha256=[0-9a-f]{64}$' \
+  "$TMP/cp-dry.out" ||
+  fail "the dry run did not print the context-pack line: $(tail -3 "$TMP/cp-dry.out")"
+
+# 4. peer-delegate is a public front door: it renders and revalidates the pack
+#    on its own, without plan-run in front of it.
+: > "$TMP/cp-direct-prompt.txt"
+PROMPT_DUMP="$TMP/cp-direct-prompt.txt" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$pack_repo" --to codex --no-verify \
+  --prompt 'direct orientation check' --context-pack "$packs/valid.json" \
+  >"$TMP/cp-direct.out" 2>&1 ||
+  fail "direct peer-delegate --context-pack failed: $(tail -5 "$TMP/cp-direct.out")"
+grep -Fq '## Project Graph orientation' "$TMP/cp-direct-prompt.txt" ||
+  fail "direct peer-delegate rendered no orientation section"
+grep -Fq -- '- scripts/check.sh  (query:file)' "$TMP/cp-direct-prompt.txt" ||
+  fail "direct peer-delegate dropped the pack files"
+cp_direct_rc=0
+: > "$TMP/cp-calls"
+CALL_LOG="$TMP/cp-calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$pack_repo" --to codex --no-verify \
+  --prompt 'direct orientation check' --context-pack "$packs/traversal.json" \
+  >"$TMP/cp-direct-bad.out" 2>&1 || cp_direct_rc=$?
+[ "$cp_direct_rc" != 0 ] || fail "direct peer-delegate accepted a traversing pack"
+grep -Fq 'error: context-pack: ' "$TMP/cp-direct-bad.out" ||
+  fail "direct refusal did not name context-pack: $(tail -3 "$TMP/cp-direct-bad.out")"
+[ ! -s "$TMP/cp-calls" ] || fail "a traversing pack reached the provider"
 
 echo "autonomy-plan-run-smoke: ok"

@@ -39,6 +39,9 @@ EXECUTOR_PLAN_TASK=""
 CONTINUE_REVIEW=0
 POSSIBLE_REPAIR_RESUME=0
 RESUME_REPAIR=0
+CONTEXT_PACK=""
+CONTEXT_PACK_FILES=""
+CONTEXT_PACK_SHA=""
 
 usage() {
   cat <<'EOF'
@@ -70,6 +73,8 @@ Options:
   --fallback-model M  Explicit one-shot capacity fallback model.
   --reasoning-effort E  auto, low, medium, high, xhigh, max, or ultra.
   --repo PATH     Target repo (default: current directory).
+  --context-pack FILE  Typed Project Graph orientation pack (validated; orientation only,
+                  never widens allowed_paths). Forwarded to peer-delegate.
   --dry-run       Show the selected task and command without claiming/calling.
   -h, --help      Show help.
 
@@ -98,6 +103,7 @@ while [ "$#" -gt 0 ]; do
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"; REASONING_EFFORT="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
+    --context-pack) [ "$#" -ge 2 ] || fail "--context-pack requires path"; CONTEXT_PACK="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -118,6 +124,21 @@ case "$TASK_ID$EXECUTOR_ID" in *[!A-Za-z0-9._-]* ) fail "task/executor ids must 
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
+
+# The orientation pack is a typed input, so it is validated before anything is
+# claimed or written: a malformed or secret-shaped pack must cost no lease and
+# no provider call. It stays orientation-only — the task's allowed_paths remain
+# the sole write scope and nothing here reaches .oms/plan or the task row.
+if [ -n "$CONTEXT_PACK" ]; then
+  context_pack_summary="$(PYTHONDONTWRITEBYTECODE=1 python3 \
+    "$ROOT/scripts/lib/oms_runtime/context_pack.py" --repo "$REPO" "$CONTEXT_PACK" 2>&1)" ||
+    fail "context-pack: $context_pack_summary"
+  context_pack_values="$(printf '%s' "$context_pack_summary" |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); print("\t".join([str(d["file_count"]), d["sha256"]]))')" ||
+    fail "context-pack: could not decode the validated summary"
+  CONTEXT_PACK_FILES="$(printf '%s' "$context_pack_values" | cut -f1)"
+  CONTEXT_PACK_SHA="$(printf '%s' "$context_pack_values" | cut -f2)"
+fi
 
 if [ -n "$EXECUTOR_ID" ]; then
   executor_meta="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" --id "$EXECUTOR_ID")" ||
@@ -450,6 +471,8 @@ fi
 
 echo "plan-run: task=$TASK_ID provider=$TO title=$TITLE"
 echo "plan-run: scope=$ALLOWED verify=$VERIFY"
+[ -z "$CONTEXT_PACK" ] ||
+  echo "plan-run: context-pack=$CONTEXT_PACK files=$CONTEXT_PACK_FILES sha256=$CONTEXT_PACK_SHA"
 if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$CONTINUE_REVIEW" -eq 1 ]; then
     echo "plan-run: dry-run; would continue the stored review without a provider call before landing"
@@ -469,6 +492,9 @@ delegate_common_cmd=("$delegate_script" --repo "$REPO" --to "$TO" --plan-task "$
 [ -n "$FALLBACK_MODEL" ] && delegate_common_cmd+=(--fallback-model "$FALLBACK_MODEL")
 [ -n "$REASONING_EFFORT" ] && [ "$REASONING_EFFORT" != auto ] &&
   delegate_common_cmd+=(--reasoning-effort "$REASONING_EFFORT")
+# Shared with the repair path on purpose: a repaired attempt reads the same
+# orientation the first one did.
+[ -n "$CONTEXT_PACK" ] && delegate_common_cmd+=(--context-pack "$CONTEXT_PACK")
 delegate_cmd=("${delegate_common_cmd[@]}" --repair "$delegate_repair")
 if [ "$RESUME_REPAIR" -eq 1 ]; then
   resume_review_artifact="$repair_artifact"

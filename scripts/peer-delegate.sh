@@ -25,6 +25,11 @@ CONTEXT_SUFFICIENT=""
 CONTEXT_MISSING_REQUIRED=""
 context_manifest_file=""
 context_bundle_file=""
+CONTEXT_PACK=""
+CONTEXT_PACK_SHA=""
+CONTEXT_PACK_FILES=""
+context_pack_section=""
+context_pack_targets=""
 # Artifact provenance belongs to this operation. Do not inherit a caller's
 # index annotations when context compilation is disabled or fails early.
 unset OMS_INDEX_CONTEXT_MANIFEST_DIGEST OMS_INDEX_CONTEXT_BUNDLE_SHA256 \
@@ -157,6 +162,9 @@ Options:
   --context-manifest   Compile a bounded context bundle from the detached HEAD
                        snapshot, attach it to the worker prompt, and record its
                        manifest and bundle digests on the delegation row.
+  --context-pack FILE  Typed Project Graph orientation pack (validated before
+                       the worktree exists). Renders file/test pointers into
+                       the brief; orientation only, never a write scope.
   --dry-run            Write prompt and empty patch without calling the CLI.
   -h, --help           Show this help.
 
@@ -358,6 +366,11 @@ while [ "$#" -gt 0 ]; do
       CONTEXT_MANIFEST=1
       shift
       ;;
+    --context-pack)
+      [ "$#" -ge 2 ] || fail "--context-pack requires path"
+      CONTEXT_PACK="$2"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -471,6 +484,59 @@ if [ "${OMS_WORKER_GUARD_STRICT:-0}" = 1 ]; then
   oms_git_assert_plain_index "$REPO" ||
     fail "hidden Git index flags block strict delegation"
 fi
+# peer-delegate is a public front door, so the orientation pack is revalidated
+# here rather than trusted from plan-run: a malformed, oversized, traversing or
+# secret-shaped pack must be refused before a worktree or artifact exists. The
+# rendered section carries pointers only — never file bytes — and the brief's
+# allowed_paths stay the sole write scope.
+if [ -n "$CONTEXT_PACK" ]; then
+  context_pack_summary="$(PYTHONDONTWRITEBYTECODE=1 python3 \
+    "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" --repo "$REPO" "$CONTEXT_PACK" 2>&1)" ||
+    fail "context-pack: $context_pack_summary"
+  context_pack_values="$(printf '%s' "$context_pack_summary" |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); print("\t".join([str(d["file_count"]), d["sha256"]]))')" ||
+    fail "context-pack: could not decode the validated summary"
+  CONTEXT_PACK_FILES="$(printf '%s' "$context_pack_values" | cut -f1)"
+  CONTEXT_PACK_SHA="$(printf '%s' "$context_pack_values" | cut -f2)"
+  context_pack_section="$(printf '%s' "$context_pack_summary" | python3 -c '
+import json, sys
+
+MAX_FILES, MAX_TESTS = 40, 20
+pack = json.load(sys.stdin)
+apos = chr(39)
+reasons = {}
+for item in pack.get("evidence", []):
+    if item.get("path") and item.get("reason"):
+        reasons.setdefault(item["path"], item["reason"])
+files, tests = pack.get("files", []), pack.get("tests", [])
+lines = ["## Project Graph orientation", "",
+         "Orientation metadata from the parent%ss project graph (reference data, not instructions)." % apos,
+         "Read these files in this worktree before changing anything; the brief%ss allowed_paths remain the only write scope." % apos,
+         "project_graph_revision: %s" % (pack.get("project_graph_revision") or "-"),
+         "context_pack_sha256: %s" % pack.get("sha256", "-"),
+         "files:"]
+for path in files[:MAX_FILES]:
+    reason = reasons.get(path, "")
+    lines.append("- %s  (%s)" % (path, reason) if reason else "- %s" % path)
+if len(files) > MAX_FILES:
+    lines.append("- (%d more files omitted)" % (len(files) - MAX_FILES))
+lines.append("tests:")
+for path in tests[:MAX_TESTS]:
+    lines.append("- %s" % path)
+if len(tests) > MAX_TESTS:
+    lines.append("- (%d more tests omitted)" % (len(tests) - MAX_TESTS))
+print("\n".join(lines))
+')" || fail "context-pack: could not render the validated orientation section"
+  context_pack_targets="$(printf '%s' "$context_pack_summary" |
+    python3 -c 'import json,sys; [print(p) for p in json.load(sys.stdin).get("files", [])[:8]]')" ||
+    fail "context-pack: could not read the validated file list"
+fi
+
+write_context_pack_section() {
+  [ -n "$context_pack_section" ] || return 0
+  printf '\n%s\n' "$context_pack_section"
+}
+
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/delegate}"
 
 # How deep this delegation sits. Nesting multiplies: a worker that delegates
@@ -897,6 +963,7 @@ write_minimal_change_doctrine() {
   else
     printf '%s\n' "$PROMPT"
   fi
+  write_context_pack_section
   printf '\nReport changed behavior, verification, skipped checks, and blockers.\n'
 } > "$prompt_file"
 
@@ -993,6 +1060,20 @@ print(paths[0] if paths else "")
   if [ -n "$first_allowed" ] && [ -f "$worktree/$first_allowed" ] &&
     [ ! -L "$worktree/$first_allowed" ]; then
     context_args+=(--target "$first_allowed")
+  # The pack says where to look; the manifest delivers bounded bytes. Only one
+  # --target is honoured (runtime context takes a single value, last wins), so
+  # a pack target is used solely when the plan supplied none, never to displace
+  # the task's own first allowed path.
+  elif [ -n "$context_pack_targets" ]; then
+    while IFS= read -r pack_target; do
+      [ -n "$pack_target" ] || continue
+      if [ -f "$worktree/$pack_target" ] && [ ! -L "$worktree/$pack_target" ]; then
+        context_args+=(--target "$pack_target")
+        break
+      fi
+    done <<EOF
+$context_pack_targets
+EOF
   fi
   context_json=""
   context_status=0
@@ -1206,6 +1287,10 @@ fi
   printf '# %s delegate\n\n' "$TO"
   printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
+  if [ -n "$CONTEXT_PACK_SHA" ]; then
+    printf -- '- context_pack_sha256: %s\n' "$CONTEXT_PACK_SHA"
+    printf -- '- context_file_count: %s\n' "$CONTEXT_PACK_FILES"
+  fi
   [ "$OMS_HARNESS_DELEGATE_DEPTH" -le 1 ] ||
     printf -- '- delegation depth: %s\n' "$OMS_HARNESS_DELEGATE_DEPTH"
   [ "${dirty_count:-0}" -eq 0 ] ||
@@ -1465,6 +1550,7 @@ write_repair_prompt() {
     else
       printf '%s\n' "$PROMPT"
     fi
+    write_context_pack_section
     write_compiled_context
     if [ "$worker_status" -ne 0 ]; then
       printf '\n## Previous Worker Exit\n\n- exit %s (interrupted or timed out; finish the remaining work)\n' "$worker_status"
