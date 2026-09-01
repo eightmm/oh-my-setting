@@ -201,6 +201,18 @@ class GraphValidationTest(unittest.TestCase):
             for verb in ("land", "finish", "claim", "review", "start", "release", "block"):
                 self.assertNotIn(verb, line, "line %d names agent-plan %s" % (number, verb))
         self.assertEqual(capabilities.names(), ["commit_bound", "plan_acceptance", "project_context"])
+        # The agent-plan verb is a fixed literal, never a parameter: no registry
+        # entry accepts a verb, and the only agent-plan argv ends in `accept`.
+        for entry in capabilities.REGISTRY.values():
+            self.assertNotIn("verb", entry["params"])
+        for name in capabilities.names():
+            node = {"kind": "tool", "tool": name, "binding": "work_item", "task": "x", "max_files": 2}
+            command = capabilities.argv(Path("/tmp/repo"), node, run_id="run-x")
+            if command[1].endswith("agent-plan.sh"):
+                self.assertEqual(command[2:], ["--repo", "/tmp/repo", "accept"])
+            else:
+                self.assertTrue(command[1].endswith("graph.sh"), command)
+                self.assertIn(command[4], ("project", "exec"))
 
     def test_bundled_specs_use_capabilities_only(self):
         for name in ("coding-change", "goal-drive"):
