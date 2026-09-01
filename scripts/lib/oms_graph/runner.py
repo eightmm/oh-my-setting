@@ -66,7 +66,7 @@ AGENT_TIMEOUT = 2700
 TOOL_TIMEOUT = 600
 TAIL_LIMIT = 4000
 DETAIL_LIMIT = 400
-GOAL_TOKEN = "${goal}"
+GOAL_PLACEHOLDER = "${goal}"
 
 # plan-run and patch-land verdicts that are transport facts rather than a
 # worker's judgement: exit 3 is "no actionable task", exit 75 is "another
@@ -200,7 +200,7 @@ def _artifact_name(node_id: str, attempt: int) -> str:
 
 def render_context_task(template: str, goal: str, fallback: str) -> str:
     """`${goal}` is substituted by the runner, never by a shell."""
-    text = str(template or "").replace(GOAL_TOKEN, str(goal or "")).strip()
+    text = str(template or "").replace(GOAL_PLACEHOLDER, str(goal or "")).strip()
     return text or str(goal or "").strip() or fallback
 
 

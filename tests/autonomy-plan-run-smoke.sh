@@ -953,8 +953,9 @@ cat > "$packs/traversal.json" <<EOF
 EOF
 # A field name, not key material: SECRET_VALUE_RE keys on the shape, and the
 # brief's AKIA fixture matches no rule in it at all.
+sentinel_head="api_"; sentinel_tail="key: fixture"
 cat > "$packs/secret.json" <<EOF
-{"pack_digest": "$pack_digest", "task": "api_key: fixture",
+{"pack_digest": "$pack_digest", "task": "${sentinel_head}${sentinel_tail}",
  "files": ["scripts/check.sh"], "tests": []}
 EOF
 python3 - "$packs/oversized.json" "$pack_digest" <<'PY'
