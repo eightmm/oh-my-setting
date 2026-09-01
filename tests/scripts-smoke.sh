@@ -20810,6 +20810,100 @@ EOF
     fail "symlink worktree metadata should be named as gitmeta: $out"
 }
 
+make_live_managed_sibling() {  # make_live_managed_sibling PROJECT SIBLING_PARENT — registered wt + live marker
+  local project="$1"
+  local sibling_parent="$2"
+  local sibling="$sibling_parent/wt"
+
+  mkdir -p "$sibling_parent"
+  git -C "$project" worktree add --quiet --detach "$sibling" HEAD >/dev/null 2>&1 ||
+    fail "could not create the live managed sibling fixture"
+  {
+    printf 'kind=oh-my-setting-temp\n'
+    printf 'pid=%s\n' "$$"
+    printf 'repo=%s\n' "$project"
+    printf 'worktree=%s\n' "$sibling"
+    printf 'temporary=1\n'
+  } > "$sibling_parent/.oh-my-setting-tmp"
+}
+
+run_delegate_beside_sibling() {  # run_delegate_beside_sibling PROJECT MANAGED_ROOT WORKER_BODY -> "rc<TAB>output"
+  local project="$1"
+  local managed_root="$2"
+  local body="$3"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local rc=0
+  local out
+
+  printf '#!/usr/bin/env bash\ncat >/dev/null\n%s\necho done\n' "$body" > "$bin_dir/codex"
+  chmod +x "$bin_dir/codex"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || rc=$?
+  printf '%s\t%s' "$rc" "$out"
+}
+
+test_worker_guard_exempts_a_live_sibling_mid_removal() {
+  local project="$TMP/guard-sibling-removal"
+  local managed_root="$TMP/guard-sibling-removal-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local result
+
+  make_guard_repo "$project"
+  make_live_managed_sibling "$project" "$sibling_parent"
+  # `git worktree remove` deletes the checkout before the registry entry, so a
+  # final capture inside that window sees a registered worktree with no
+  # checkout while the sibling's marker is still live.
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "rm -rf $sibling_parent/wt")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a live sibling mid-removal must not fail the run: $result"
+  if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
+    fail "a live sibling mid-removal should not be reported as a change: $result"
+  fi
+}
+
+test_worker_guard_exempts_a_live_sibling_mid_creation() {
+  local project="$TMP/guard-sibling-creation"
+  local managed_root="$TMP/guard-sibling-creation-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local result
+
+  make_guard_repo "$project"
+  make_live_managed_sibling "$project" "$sibling_parent"
+  # The marker is written before `git worktree add`, which registers the entry
+  # before the checkout exists: the pre-provider snapshot sees a registered
+  # worktree with no checkout, the final capture sees the same entry live.
+  mv "$sibling_parent/wt" "$sibling_parent/pending"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "mv $sibling_parent/pending $sibling_parent/wt")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a live sibling mid-creation must not fail the run: $result"
+  if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
+    fail "a live sibling mid-creation should not be reported as a change: $result"
+  fi
+}
+
+test_worker_guard_flags_a_sibling_whose_marker_died() {
+  local project="$TMP/guard-sibling-dead"
+  local managed_root="$TMP/guard-sibling-dead-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local result
+
+  make_guard_repo "$project"
+  make_live_managed_sibling "$project" "$sibling_parent"
+  # The exemption is a liveness claim re-checked at every capture: an entry
+  # that was managed at the pre-provider snapshot inherits nothing once its
+  # marker is gone, so a worker cannot hide behind a sibling by killing it.
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "rm -f $sibling_parent/.oh-my-setting-tmp")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "a sibling whose marker died must stay a hard gitmeta violation: $result"
+  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+    fail "a dead-marker sibling should be named as gitmeta: $result"
+}
+
 test_worker_guard_reports_a_bounded_scan() {
   local project="$TMP/guard-budget"
   local out

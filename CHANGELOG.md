@@ -70,6 +70,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and `oms_execution_graph_*` expose bounded views. `exec shadow` records
   evaluator-versus-control-plane agreement without taking authority.
 
+### Fixed
+- The worker guard no longer fails a parallel delegate because a sibling
+  delegate's `git worktree add`/`remove` was mid-flight at a capture. A
+  registry entry without a usable checkout is exempt only while the residue
+  marker beside it is live, re-checked at every capture (a marker that dies
+  still fails the run), and `gitmeta` is re-captured briefly before it is
+  named. Under load `oms graph exec run --jobs 2` had one worker of a wave
+  end in `plan-run-exit-1 proof-missing=plan.task.<id>.patch_present`
+  about one run in five, with the task released back to `ready`.
+
 ## [0.7.0] - 2026-08-20
 
 ### Changed

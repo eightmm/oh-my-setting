@@ -1029,6 +1029,10 @@ oms_worker_surface_diff() {
     [ -f "$before_dir/$name" ] || continue
     if ! oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
+      if [ "$name" = gitmeta ] && oms_worker_gitmeta_settles "$repo" \
+        "$before_dir/gitmeta" "$current_worktree_physical"; then
+        continue
+      fi
       changed="${changed:+$changed, }$name"
     fi
   done
@@ -1092,10 +1096,15 @@ oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE
     *) return 1 ;;
   esac
   wt_physical="$(oms_harness_physical_dir "$wt_path" 2>/dev/null || true)"
-  [ -n "$wt_physical" ] || return 1
-  [ -z "$current_worktree_physical" ] ||
-    [ "$wt_physical" != "$current_worktree_physical" ] || return 1
-  [ -f "$wt_physical/.git" ] && [ ! -L "$wt_physical/.git" ] || return 1
+  if [ -n "$wt_physical" ] && [ -n "$current_worktree_physical" ] &&
+    [ "$wt_physical" = "$current_worktree_physical" ]; then
+    return 1
+  fi
+  if [ -z "$wt_physical" ] || [ ! -f "$wt_physical/.git" ] || [ -L "$wt_physical/.git" ]; then
+    oms_worker_gitmeta_is_pending_managed_worktree "$repo" "$wt_path" \
+      "$current_worktree_physical"
+    return $?
+  fi
   metadata_physical="$(oms_harness_physical_dir "$metadata_dir" 2>/dev/null || true)"
   [ -n "$metadata_physical" ] || return 1
   worktree_git_dir="$(
@@ -1128,6 +1137,99 @@ oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE
   done <<EOF
 $(oms_harness_temp_bases)
 EOF
+  return 1
+}
+
+# A sibling's registration passes through two states where its checkout cannot
+# vouch for it: `git worktree add` registers the entry before the checkout and
+# its `.git` backpointer exist (the residue marker is written before the add),
+# and `git worktree remove` deletes the checkout before the entry. A capture
+# inside either window must not turn harness lifecycle into a metadata
+# violation, so an entry without a usable checkout is exempt only while the
+# residue marker beside it is live: valid kind, a running pid, this repository,
+# the pathname the entry points at, and a residue directory that is a direct
+# child of a harness temp base. Every capture re-evaluates this, so a marker
+# that dies -- or an entry whose checkout exists but fails the strict validator
+# above -- stays on the hard surface. The current worker's own residue directory
+# is never exempt.
+oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKTREE
+  local repo="$1"
+  local wt_path="$2"
+  local current_worktree_physical="${3:-}"
+  local residue_dir=""
+  local residue_physical=""
+  local residue_parent=""
+  local marker=""
+  local marker_kind=""
+  local marker_pid=""
+  local marker_repo=""
+  local marker_worktree=""
+  local marker_temporary=""
+  local marker_parent=""
+  local repo_physical=""
+  local base=""
+  local base_physical=""
+
+  command -v oms_harness_temp_bases >/dev/null 2>&1 || return 1
+  command -v oms_harness_read_marker_value >/dev/null 2>&1 || return 1
+  case "$wt_path" in /*/wt) ;; *) return 1 ;; esac
+  residue_dir="${wt_path%/wt}"
+  case "$(basename "$residue_dir")" in
+    oh-my-setting-delegate.*|oh-my-setting-admit.*) ;;
+    *) return 1 ;;
+  esac
+  residue_physical="$(oms_harness_physical_dir "$residue_dir" 2>/dev/null || true)"
+  [ -n "$residue_physical" ] || return 1
+  [ -z "$current_worktree_physical" ] ||
+    [ "$residue_physical" != "$(dirname "$current_worktree_physical")" ] || return 1
+  marker="$residue_dir/.oh-my-setting-tmp"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_kind="$(oms_harness_read_marker_value "$marker" kind)"
+  marker_pid="$(oms_harness_read_marker_value "$marker" pid)"
+  marker_repo="$(oms_harness_read_marker_value "$marker" repo)"
+  marker_worktree="$(oms_harness_read_marker_value "$marker" worktree)"
+  marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
+  [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
+  case "$marker_pid" in *[!0-9]*|"") return 1 ;; esac
+  kill -0 "$marker_pid" 2>/dev/null || return 1
+  repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
+  [ -n "$repo_physical" ] || return 1
+  [ "$(oms_harness_physical_dir "$marker_repo" 2>/dev/null || true)" = "$repo_physical" ] ||
+    return 1
+  case "$marker_worktree" in /*/wt) ;; *) return 1 ;; esac
+  marker_parent="$(oms_harness_physical_dir "${marker_worktree%/wt}" 2>/dev/null || true)"
+  [ -n "$marker_parent" ] && [ "$marker_parent" = "$residue_physical" ] || return 1
+  residue_parent="$(dirname "$residue_physical")"
+  while IFS= read -r base; do
+    [ -n "$base" ] || continue
+    base_physical="$(oms_harness_physical_dir "$base" 2>/dev/null || true)"
+    [ -n "$base_physical" ] || continue
+    [ "$base_physical" != "$residue_parent" ] || return 0
+  done <<EOF
+$(oms_harness_temp_bases)
+EOF
+  return 1
+}
+
+# Neither `git worktree add` nor `remove` is atomic: for a moment the registry
+# entry exists without its `gitdir` file, or the file is already gone while the
+# entry directory remains, and no marker can classify what cannot be read.
+# Those states resolve on their own; a worker's write to the metadata surface
+# does not. Re-capture briefly before naming gitmeta as changed.
+oms_worker_gitmeta_settles() {  # REPO BEFORE_FILE CURRENT_WORKTREE
+  local repo="$1"
+  local before="$2"
+  local current_worktree_physical="${3:-}"
+  local attempt=0
+
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.3
+    if oms_worker_surface_capture_one "$repo" gitmeta \
+      "$current_worktree_physical" | cmp -s - "$before"; then
+      return 0
+    fi
+  done
   return 1
 }
 
