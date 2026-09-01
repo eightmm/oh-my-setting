@@ -115,6 +115,8 @@ class GraphValidationTest(unittest.TestCase):
         cases["unreachable_task_binding"] = value
         value = simple_spec(); value["nodes"]["work"] = {"kind": "agent", "plan_task": "t1", "context": {"task": 3, "max_files": 0}}
         cases["invalid_context"] = value
+        value = simple_spec(); value["nodes"]["work"] = {"kind": "tool", "tool": "teleport"}
+        cases["unknown_tool_capability"] = value
 
         self.assertEqual(set(cases), set(ERROR_CODES))
         for code, graph in cases.items():
@@ -145,6 +147,69 @@ class GraphValidationTest(unittest.TestCase):
         graph = simple_spec(); graph["nodes"]["work"] = {"kind": "subgraph", "graph": "child"}
         graph["subgraphs"] = {"child": {"entry": "again", "nodes": {"again": {"kind": "subgraph", "graph": "child"}, "end": {"kind": "terminal"}}, "edges": [{"from": "again", "to": "end", "outcomes": ["completed"]}]}}
         self.assertIn("recursive_subgraph", {item["code"] for item in validate_spec(graph)["errors"]})
+
+    def test_tool_capabilities(self):
+        from oms_graph import capabilities
+        # A capability node needs no command and takes its effect from the registry.
+        graph = simple_spec(); graph["nodes"]["work"] = {"kind": "tool", "tool": "plan_acceptance"}
+        verdict = validate_spec(graph)
+        self.assertTrue(verdict["ok"], verdict["errors"])
+        self.assertEqual(normalize_spec(graph)["nodes"]["work"]["effect"], "read")
+        self.assertNotIn("unverified_effect_declaration", {item["code"] for item in verdict["warnings"]})
+        # A raw command with a read declaration is legal but unverified.
+        raw = simple_spec(); raw["nodes"]["work"] = {"kind": "tool", "effect": "read", "command": "echo one"}
+        self.assertIn("unverified_effect_declaration", {item["code"] for item in validate_spec(raw)["warnings"]})
+        wrote = simple_spec(); wrote["nodes"]["work"] = {"kind": "tool", "effect": "write", "command": "touch x"}
+        self.assertNotIn("unverified_effect_declaration", {item["code"] for item in validate_spec(wrote)["warnings"]})
+        # Both a capability and a command, a conflicting effect, a non-cacheable
+        # capability marked cacheable, a bad parameter, and a commit without a writer.
+        for node, code in (
+            ({"kind": "tool", "tool": "plan_acceptance", "command": "true"}, "invalid_command"),
+            ({"kind": "tool", "tool": "plan_acceptance", "effect": "write"}, "invalid_effect"),
+            ({"kind": "tool", "tool": "plan_acceptance", "cacheable": True}, "invalid_command"),
+            ({"kind": "tool", "tool": "project_context", "max_files": 0}, "invalid_command"),
+            ({"kind": "tool", "tool": "project_context", "task": 7}, "invalid_command"),
+            ({"kind": "tool", "tool": "commit_bound"}, "invalid_command"),
+            ({"kind": "tool", "tool": "commit_bound", "binding": "no such"}, "invalid_task_binding"),
+            ({"kind": "tool", "tool": "commit_bound", "binding": "orphan"}, "unknown_task_binding"),
+        ):
+            graph = simple_spec(); graph["nodes"]["work"] = node
+            self.assertIn(code, {item["code"] for item in validate_spec(graph)["errors"]}, node)
+        # The argv is the registry's, built without a shell.
+        repo = Path("/tmp/repo")
+        self.assertEqual(capabilities.argv(repo, {"kind": "tool", "tool": "plan_acceptance"})[-3:], ["--repo", "/tmp/repo", "accept"])
+        context = capabilities.argv(repo, {"kind": "tool", "tool": "project_context", "task": "fix ${goal}", "max_files": 3}, goal="lease")
+        self.assertEqual(context[-7:], ["project", "context", "--task", "fix lease", "--max-files", "3", "--json"])
+        commit = capabilities.argv(repo, {"kind": "tool", "tool": "commit_bound", "binding": "work_item"}, run_id="run-x")
+        self.assertEqual(commit[-6:], ["exec", "commit", "--binding", "work_item", "--run", "run-x"])
+        self.assertTrue(all(item.endswith((".sh", "accept", "context", "commit")) or not item.endswith(".py") for item in commit))
+        with self.assertRaises(GraphError):
+            capabilities.argv(repo, {"kind": "tool", "tool": "teleport"})
+        self.assertEqual(capabilities.render_goal("${goal}", "fix parser", "fallback"), "fix parser")
+        self.assertEqual(capabilities.render_goal("", "", "fallback"), "fallback")
+
+    def test_capabilities_name_only_their_three_front_doors(self):
+        import ast as ast_module
+        from oms_graph import capabilities
+        source = Path(capabilities.__file__).read_text(encoding="utf-8")
+        scripts = {node.value for node in ast_module.walk(ast_module.parse(source))
+                   if isinstance(node, ast_module.Constant) and isinstance(node.value, str) and node.value.endswith(".sh")}
+        self.assertEqual(scripts, {"agent-plan.sh", "graph.sh"})
+        for number, line in enumerate(source.splitlines(), 1):
+            if "agent-plan" not in line:
+                continue
+            for verb in ("land", "finish", "claim", "review", "start", "release", "block"):
+                self.assertNotIn(verb, line, "line %d names agent-plan %s" % (number, verb))
+        self.assertEqual(capabilities.names(), ["commit_bound", "plan_acceptance", "project_context"])
+
+    def test_bundled_specs_use_capabilities_only(self):
+        for name in ("coding-change", "goal-drive"):
+            graph = load_spec(name)
+            for node_id, node in graph["nodes"].items():
+                if node.get("kind") == "tool":
+                    self.assertIn("tool", node, "%s.%s is a raw command node" % (name, node_id))
+                    self.assertNotIn("command", node)
+            self.assertNotIn("unverified_effect_declaration", {item["code"] for item in validate_spec(graph)["warnings"]})
 
     def test_binding_rules(self):
         # A repeating writer may rebind its own name; a binder on a static task is legal;

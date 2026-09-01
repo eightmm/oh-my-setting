@@ -7,9 +7,8 @@
   "nodes": {
     "acceptance": {
       "kind": "tool",
-      "effect": "read",
+      "tool": "plan_acceptance",
       "title": "Run the plan acceptance contract",
-      "command": "oms agent-plan accept",
       "proof": ["receipt.acceptance.latest=pass", "receipt.acceptance.fresh"]
     },
     "implement": {
@@ -31,9 +30,9 @@
     },
     "commit": {
       "kind": "tool",
-      "effect": "write",
+      "tool": "commit_bound",
+      "binding": "work_item",
       "title": "Commit exactly the landed patch of the bound task",
-      "command": "oms graph exec commit --binding work_item",
       "proof": ["!git.dirty"]
     },
     "done": {"kind": "terminal", "title": "Acceptance passed"},

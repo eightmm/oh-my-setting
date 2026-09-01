@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Mapping
 
 from oms_runtime.common import canonical_json, install_root, read_json, sha256_bytes
 
+from .capabilities import REGISTRY
 from .errors import GraphError
 
 
@@ -95,6 +96,15 @@ def _normalize_graph(raw: Mapping[str, Any], graph_id: str) -> Dict[str, Any]:
         if kind == "tool":
             node["timeout"] = node.get("timeout", 600)
             node["cacheable"] = node.get("cacheable", False)
+            capability = node.get("tool")
+            if isinstance(capability, str) and capability:
+                # A capability owns its effect; the registry fills it in and
+                # the validator refuses a declaration that disagrees.
+                entry = REGISTRY.get(capability)
+                if entry is not None and "effect" not in value:
+                    node["effect"] = entry["effect"]
+            elif capability is None:
+                node.pop("tool", None)
         if kind == "gate":
             node["authority"] = node.get("authority", "parent")
             node["decisions"] = _string_list(

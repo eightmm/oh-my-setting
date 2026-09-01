@@ -1057,19 +1057,23 @@ paths = row.get("allowed_paths") or []
 print(paths[0] if paths else "")
 ' | tr -d '\r')"
   fi
+  # Every direct target is required in the bundle: the task's own first
+  # allowed path first, then the pack's files — the pack says where to look,
+  # the manifest delivers the bounded bytes. Missing or symlinked paths are
+  # skipped here so a stale pack cannot fail the compile.
+  context_targets=""
   if [ -n "$first_allowed" ] && [ -f "$worktree/$first_allowed" ] &&
     [ ! -L "$worktree/$first_allowed" ]; then
     context_args+=(--target "$first_allowed")
-  # The pack says where to look; the manifest delivers bounded bytes. Only one
-  # --target is honoured (runtime context takes a single value, last wins), so
-  # a pack target is used solely when the plan supplied none, never to displace
-  # the task's own first allowed path.
-  elif [ -n "$context_pack_targets" ]; then
+    context_targets="$first_allowed"
+  fi
+  if [ -n "$context_pack_targets" ]; then
     while IFS= read -r pack_target; do
       [ -n "$pack_target" ] || continue
+      [ "$pack_target" != "$first_allowed" ] || continue
       if [ -f "$worktree/$pack_target" ] && [ ! -L "$worktree/$pack_target" ]; then
         context_args+=(--target "$pack_target")
-        break
+        context_targets="$context_targets${context_targets:+ }$pack_target"
       fi
     done <<EOF
 $context_pack_targets

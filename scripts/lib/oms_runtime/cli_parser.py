@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     classify.add_argument('--code', default='')
     failure_sub.add_parser('catalog')
     context = commands.add_parser('context', help='compile a bounded context manifest and bundle')
-    context.add_argument('--target', default='')
+    context.add_argument('--target', action='append', default=[])
     context.add_argument('--file', action='append', default=[], help='PATH[:reason]')
     context.add_argument('--require', action='append', default=[])
     context.add_argument('--max-bytes', type=int, default=DEFAULT_CONTEXT_BYTES)

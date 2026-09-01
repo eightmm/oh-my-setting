@@ -1062,4 +1062,36 @@ grep -Fq 'error: context-pack: ' "$TMP/cp-direct-bad.out" ||
   fail "direct refusal did not name context-pack: $(tail -3 "$TMP/cp-direct-bad.out")"
 [ ! -s "$TMP/cp-calls" ] || fail "a traversing pack reached the provider"
 
+# 5. With --context-manifest, every pack file becomes a direct target of the
+#    bounded bundle: orientation says where to look, the manifest delivers the
+#    bytes, and each target is required rather than best-effort.
+#    (The fixture check script reads as sensitive to the bundle scrubber and
+#    is omitted with debt by design, so this pack names two clean files.)
+cat > "$packs/manifest.json" <<EOF
+{"task": "orientation plus bounded bytes", "pack_digest": "$pack_digest",
+ "files": ["README.md", "tests/run.sh"], "tests": ["tests/run.sh"]}
+EOF
+: > "$TMP/cp-manifest-prompt.txt"
+PROMPT_DUMP="$TMP/cp-manifest-prompt.txt" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$ROOT/scripts/peer-delegate.sh" --repo "$pack_repo" --to codex --no-verify \
+  --prompt 'orientation plus bounded bytes' --context-pack "$packs/manifest.json" \
+  --context-manifest >"$TMP/cp-manifest.out" 2>&1 ||
+  fail "peer-delegate --context-pack --context-manifest failed: $(tail -5 "$TMP/cp-manifest.out")"
+cp_manifest="$(ls -t "$pack_repo"/.oms/runtime/context/delegate-*.json 2>/dev/null | head -n 1)"
+[ -n "$cp_manifest" ] || fail "no context manifest was compiled beside the pack"
+python3 - "$cp_manifest" <<'PY' || fail "the manifest did not carry every pack file as a required direct target"
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+targets = manifest.get("targets", [])
+# A default layer may already carry a target under a stronger reason; what
+# matters is that every target is required and present in the bundle.
+selected = {item["path"] for item in manifest.get("selected", [])}
+assert targets == ["README.md", "tests/run.sh"], targets
+assert {"README.md", "tests/run.sh"} <= selected, selected
+assert manifest.get("sufficient") is True, manifest.get("missing_required")
+assert not manifest.get("missing_required"), manifest.get("missing_required")
+PY
+grep -Fq 'ORIENTATION-FILE-BODY' "$TMP/cp-manifest-prompt.txt" ||
+  fail "the compiled bundle did not deliver the pack file's bytes to the worker"
+
 echo "autonomy-plan-run-smoke: ok"

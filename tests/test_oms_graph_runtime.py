@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from oms_graph import events, runner, commit as exec_commit
+from oms_graph import capabilities, events, runner, commit as exec_commit
 from oms_graph.adapters import plan as plan_adapter
 from oms_graph.errors import GraphError
 from oms_graph.spec import load_spec
@@ -573,16 +573,44 @@ class ContextBridgeTest(RuntimeFixture, unittest.TestCase):
         self.assertNotIn("context_pack_sha256", started)
 
 
+@unittest.skipUnless(HAVE_GIT, "git is required to drive plan-run")
+class CapabilityToolTest(RuntimeFixture, unittest.TestCase):
+
+    def test_a_capability_node_runs_the_registry_argv_without_a_shell_or_oms_on_path(self) -> None:
+        (self.bin / "oms").unlink()  # the registry reaches the checkout's scripts directly
+        spec = _spec("inspect", {
+            "inspect": {"kind": "tool", "tool": "project_context", "task": "${goal}", "max_files": 4, "cacheable": True},
+            "accept": {"kind": "tool", "tool": "plan_acceptance", "proof": ["receipt.acceptance.latest"]},
+            "done": {"kind": "terminal"},
+        }, [{"from": "inspect", "to": "accept", "outcomes": ["completed"]},
+            {"from": "accept", "to": "done", "outcomes": ["completed", "failed"]}])
+        result = self.run_graph(spec, goal="check script")
+        self.assertEqual(result["status"], "terminal", result)
+        run_id = result["run_id"]
+        recorded = {row["node"]: row for row in self.outcomes(run_id)}
+        self.assertEqual(recorded["inspect"]["outcome"], "completed")
+        pack = json.loads((events.run_dir(self.repo, run_id) / "artifacts" / "inspect-1.txt").read_text(encoding="utf-8"))
+        self.assertEqual(pack["task"], "check script")
+        self.assertIn("scripts/check.sh", pack["files"])
+        # The acceptance contract ran and left its receipt (it fails: nothing is delegated yet).
+        self.assertEqual(recorded["accept"]["outcome"], "failed")
+        self.assertEqual(recorded["accept"]["facts"].get("receipt.acceptance.latest"), "fail")
+        # A second run replays the cached orientation pack.
+        again = self.run_graph(spec, goal="check script")
+        self.assertTrue({row["node"]: row for row in self.outcomes(again["run_id"])}["inspect"]["cached"])
+
+
 class BundledSpecShapeTest(unittest.TestCase):
     def test_bundled_specs_bind_selection_and_commit_exactly(self) -> None:
         for name in ("goal-drive", "coding-change"):
             spec = load_spec(name)
             self.assertEqual(spec["nodes"]["implement"]["bind_task"], "work_item")
             self.assertEqual(spec["nodes"]["land"]["plan_task_from"], "work_item")
-            self.assertEqual(spec["nodes"]["commit"]["command"], "oms graph exec commit --binding work_item")
+            self.assertEqual((spec["nodes"]["commit"]["tool"], spec["nodes"]["commit"]["binding"]), ("commit_bound", "work_item"))
             self.assertEqual(spec["nodes"]["commit"]["effect"], "write")
-        self.assertEqual(runner.render_context_task("${goal}", "fix parser", "fallback"), "fix parser")
-        self.assertEqual(runner.render_context_task("", "", "fallback"), "fallback")
+            self.assertEqual(spec["nodes"]["acceptance"]["tool"], "plan_acceptance")
+        self.assertEqual(capabilities.render_goal("${goal}", "fix parser", "fallback"), "fix parser")
+        self.assertEqual(capabilities.render_goal("", "", "fallback"), "fallback")
 
 
 if __name__ == "__main__":

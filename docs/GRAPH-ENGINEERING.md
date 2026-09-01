@@ -161,7 +161,7 @@ JSON is canonical; there is no YAML dependency.
   "budget": {"max_steps": 20, "max_repeats": 3},
   "stop_facts": [],
   "nodes": {
-    "inspect":    {"kind": "tool",  "effect": "read",  "command": "oms graph project context --task \"$OMS_GRAPH_GOAL\"", "cacheable": true},
+    "inspect":    {"kind": "tool",  "tool": "project_context", "task": "${goal}", "max_files": 12, "cacheable": true},
     "implement":  {"kind": "agent", "effect": "write", "plan_task": "next", "bind_task": "work_item", "mode": "run",
                    "context": {"task": "${goal}", "max_files": 12},
                    "proof": ["binding.work_item.patch_present", "binding.work_item.state=review"]},
@@ -169,9 +169,8 @@ JSON is canonical; there is no YAML dependency.
                    "decisions": ["approved", "changes_requested"]},
     "land":       {"kind": "agent", "effect": "write", "plan_task_from": "work_item", "mode": "land",
                    "proof": ["binding.work_item.receipt.land.present", "binding.work_item.state=done"]},
-    "commit":     {"kind": "tool",  "effect": "write", "command": "oms graph exec commit --binding work_item",
-                   "proof": ["!git.dirty"]},
-    "acceptance": {"kind": "tool",  "effect": "read",  "command": "oms agent-plan accept",
+    "commit":     {"kind": "tool",  "tool": "commit_bound", "binding": "work_item", "proof": ["!git.dirty"]},
+    "acceptance": {"kind": "tool",  "tool": "plan_acceptance",
                    "proof": ["receipt.acceptance.latest=pass", "receipt.acceptance.fresh"]},
     "done":       {"kind": "terminal"},
     "replan":     {"kind": "terminal"},
@@ -212,7 +211,10 @@ Normalized node fields (`spec.normalize_spec` fills defaults):
 | `plan_task_from` | agent | — | run the task another node bound under this name; blocked with `required_resources: [{"kind": "task_binding"}]` until it is bound |
 | `mode` | agent | `run` | `run` stops in review; `land` continues through `patch-land` |
 | `provider` | agent | run option `--worker` | write-capable transport |
-| `command` | tool | required | run with `bash -c` from the repo root, bounded by `timeout` |
+| `tool` | tool | — | a registered capability (`plan_acceptance`, `project_context`, `commit_bound`); the runner builds the exact argv, no shell; exactly one of `tool` / `command` |
+| `task`, `max_files` | tool `project_context` | `${goal}`, 12 | the pack's query (`${goal}` substituted by the runner) and file bound |
+| `binding` | tool `commit_bound` | required | the task binding whose landed patch is committed |
+| `command` | tool | — | run with `bash -c` from the repo root, bounded by `timeout`; its `effect` is a declaration the validator warns about |
 | `timeout` | tool | 600 | seconds |
 | `proof` | agent, tool | `[]` | fact predicates that must hold for a claimed `completed` to stand |
 | `requires` | all but terminal | `[]` | fact predicates that must hold before the node is actionable |
@@ -251,12 +253,31 @@ Error codes (exact strings): `invalid_schema`, `duplicate_node`,
 `invalid_effect`, `invalid_kind`, `invalid_join`, `invalid_command`,
 `invalid_budget`, `invalid_gate`, `invalid_task_binding`,
 `unknown_task_binding`, `duplicate_task_binding_writer`,
-`unreachable_task_binding`, `invalid_context`.
+`unreachable_task_binding`, `invalid_context`, `unknown_tool_capability`.
 
 Cycles are legal. Every cycle must contain at least one `repeat` edge (which
 `max_repeats` bounds) or the spec must declare `stop_facts`; `max_steps`
 must be a positive integer regardless. Warnings: `unrouted_outcome` (a
-non-terminal node has no edge for `failed`/`unverified`), `dead_end`.
+non-terminal node has no edge for `failed`/`unverified`), `dead_end`,
+`unverified_effect_declaration` (a `command` tool node declares
+`effect: read`; nothing verifies the shell text, so prefer a capability).
+
+### Tool capabilities
+
+`capabilities.py` is the registry: a tool node that says `tool: <name>`
+carries no shell text, takes its `effect` from the registry (a conflicting
+declaration is `invalid_effect`), and runs the registry's exact argv.
+
+| capability | effect | parameters | runs |
+|---|---|---|---|
+| `plan_acceptance` | read | — | `agent-plan --repo R accept` (the plan's own acceptance contract; records its receipt) |
+| `project_context` | read, cacheable | `task` (`${goal}` substituted), `max_files` | `graph --repo R project context --task T --max-files N --json` |
+| `commit_bound` | write | `binding` (must have a writer) | `graph --repo R exec commit --binding B --run RUN` |
+
+The registry names exactly two scripts (`agent-plan.sh`, `graph.sh`) and no
+lifecycle verb; a test pins that. `command` nodes stay legal for
+operator-authored specs — a planner that generates GraphSpecs should be held
+to capabilities only. The bundled specs use capabilities only.
 
 Binding rules: `bind_task` and `plan_task_from` are identifiers
 (`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`); `plan_task` and `plan_task_from` are
@@ -572,9 +593,11 @@ renders a "Project Graph orientation" section into the worker brief
 own isolated worktree). The pack never widens `allowed_paths` and is written
 into no plan state; only `project_graph_revision`, `context_pack_sha256`, and
 `context_file_count` are recorded on the node's `node_started` row. The
-existing `--context-manifest` bundle stays opt-in; when both are on, the
-pack's files become the manifest's targets — orientation says where to look,
-the manifest delivers the bounded bytes.
+existing `--context-manifest` bundle stays opt-in; when both are on, every
+pack file (after the task's own first allowed path) becomes a required direct
+target of the bundle (`oms runtime context --target` is repeatable and the
+manifest lists `targets`) — orientation says where to look, the manifest
+delivers the bounded bytes.
 
 ## Caching
 

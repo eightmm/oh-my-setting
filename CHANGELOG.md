@@ -7,6 +7,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Tool capabilities for the execution graph (`oms_graph/capabilities.py`):
+  a tool node may say `{"kind": "tool", "tool": "plan_acceptance" |
+  "project_context" | "commit_bound"}` and the runner builds the exact
+  argv with no shell; the registry owns the effect (a conflicting
+  declaration is `invalid_effect`), the parameters, and the two scripts it
+  may name. Bundled specs use capabilities only. Raw `command` nodes stay
+  legal for operator-authored specs and get an `unverified_effect_declaration`
+  warning when they declare `effect: read`.
+- `oms runtime context --target` is repeatable (`plan_context(targets=[...])`;
+  the manifest lists `targets`), so `peer-delegate --context-pack
+  --context-manifest` now compiles every pack file into the bounded bundle as
+  a required direct target instead of the first one only.
 - Graph Runtime v2 (`docs/GRAPH-ENGINEERING.md`, "Selector versus
   identity"): task selection and task identity are separate. `plan_task:
   "next"` is resolved by one read-only peek before anything is scheduled,

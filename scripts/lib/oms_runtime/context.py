@@ -161,16 +161,23 @@ def _slice(data: bytes, budget: int, policy: str) -> Tuple[bytes, int, str]:
     return selected[:budget], len(data) - min(len(data), usable), policy
 
 
-def plan_context(repo: Path, *, target: str = "", explicit: Sequence[Tuple[str, str]] = (), required: Sequence[str] = (), max_bytes: int = DEFAULT_CONTEXT_BYTES, bundle_path: Optional[Path] = None, manifest_path: Optional[Path] = None, allow_external: bool = False, phase: str = "implementation") -> Dict[str, Any]:
+def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[Tuple[str, str]] = (), required: Sequence[str] = (), max_bytes: int = DEFAULT_CONTEXT_BYTES, bundle_path: Optional[Path] = None, manifest_path: Optional[Path] = None, allow_external: bool = False, phase: str = "implementation") -> Dict[str, Any]:
+    """Compile a bounded context bundle. Every `targets` entry is a direct
+    target (required, with its Python imports discovered); a project-graph
+    context pack hands its whole file list here, in pack order."""
     if phase not in ("orientation", "implementation", "verification", "review", "research"):
         raise CoreError("unsupported context phase: %s" % phase)
     if max_bytes < MIN_CONTEXT_BYTES or max_bytes > MAX_CONTEXT_BYTES:
         raise CoreError("context budget must be between %d and %d bytes" % (MIN_CONTEXT_BYTES, MAX_CONTEXT_BYTES))
     candidates: List[Tuple[Path, str, int, str]] = _default_layers(repo)
-    target_label = ""
-    if target:
+    target_labels: List[str] = []
+    for target in targets:
+        if not target:
+            continue
         target_path = _safe_repo_file(repo, target, allow_external=allow_external)
-        target_label = relative_path(target_path, repo) or (target_path.name if allow_external else "")
+        label = relative_path(target_path, repo) or (target_path.name if allow_external else "")
+        if label and label not in target_labels:
+            target_labels.append(label)
         candidates.append((target_path, "direct target", 120, "middle"))
         for path, reason, priority in _python_import_candidates(repo, target_path):
             candidates.append((path, reason, priority, "middle"))
@@ -200,8 +207,7 @@ def plan_context(repo: Path, *, target: str = "", explicit: Sequence[Tuple[str, 
     max_nonrequired_source = max(MIN_CONTEXT_BYTES, max_bytes // 3)
     included_paths: Set[str] = set()
     required_paths = set(required_resolved.values())
-    if target_label:
-        required_paths.add(target_label)
+    required_paths.update(target_labels)
     for path, (reason, priority, policy) in ordered:
         label = relative_path(path, repo) or (path.name if allow_external else "")
         if not label:
@@ -241,7 +247,7 @@ def plan_context(repo: Path, *, target: str = "", explicit: Sequence[Tuple[str, 
     bundle = b"".join(bundle_parts)
     if sensitive_text(bundle.decode("utf-8", "replace")):
         raise CoreError("compiled context contains sensitive-looking content")
-    manifest: Dict[str, Any] = {"schema": RUNTIME_SCHEMA, "generated_at": utc_now(), "phase": phase, "budget_bytes": max_bytes, "selected_bytes": len(bundle), "remaining_bytes": remaining, "max_nonrequired_source_bytes": max_nonrequired_source, "selected": selected, "omitted": omitted, "context_debt": len(missing_required), "missing_required": missing_required, "truncated_required": truncated_required, "sufficient": not missing_required, "bundle_sha256": sha256_bytes(bundle), "contract_state_digest": build_envelope(repo).get("state_digest")}
+    manifest: Dict[str, Any] = {"schema": RUNTIME_SCHEMA, "generated_at": utc_now(), "phase": phase, "budget_bytes": max_bytes, "targets": list(target_labels), "selected_bytes": len(bundle), "remaining_bytes": remaining, "max_nonrequired_source_bytes": max_nonrequired_source, "selected": selected, "omitted": omitted, "context_debt": len(missing_required), "missing_required": missing_required, "truncated_required": truncated_required, "sufficient": not missing_required, "bundle_sha256": sha256_bytes(bundle), "contract_state_digest": build_envelope(repo).get("state_digest")}
     digest = sha256_bytes(canonical_json(manifest))
     if bundle_path is None:
         bundle_path = repo / ".oms" / "runtime" / "context" / (digest + ".txt")

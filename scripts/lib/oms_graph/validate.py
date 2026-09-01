@@ -6,10 +6,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import EDGE_KINDS, EFFECTS, EXEC_SCHEMA, GATE_AUTHORITIES, JOINS, NODE_KINDS, OUTCOMES
 from . import binding
+from . import capabilities
 from .predicates import validate_all
 
-ERROR_CODES = ("invalid_schema", "duplicate_node", "unknown_endpoint", "missing_entry", "unreachable_node", "missing_terminal", "terminal_outgoing_edge", "invalid_outcome", "invalid_repeat_edge", "unbounded_cycle", "unknown_subgraph", "recursive_subgraph", "invalid_fact_reference", "invalid_plan_task_reference", "ambiguous_routes", "invalid_effect", "invalid_kind", "invalid_join", "invalid_command", "invalid_budget", "invalid_gate", "invalid_task_binding", "unknown_task_binding", "duplicate_task_binding_writer", "unreachable_task_binding", "invalid_context")
-WARNING_CODES = ("unrouted_outcome", "dead_end")
+ERROR_CODES = ("invalid_schema", "duplicate_node", "unknown_endpoint", "missing_entry", "unreachable_node", "missing_terminal", "terminal_outgoing_edge", "invalid_outcome", "invalid_repeat_edge", "unbounded_cycle", "unknown_subgraph", "recursive_subgraph", "invalid_fact_reference", "invalid_plan_task_reference", "ambiguous_routes", "invalid_effect", "invalid_kind", "invalid_join", "invalid_command", "invalid_budget", "invalid_gate", "invalid_task_binding", "unknown_task_binding", "duplicate_task_binding_writer", "unreachable_task_binding", "invalid_context", "unknown_tool_capability")
+WARNING_CODES = ("unrouted_outcome", "dead_end", "unverified_effect_declaration")
 
 
 def validate_spec(spec: Mapping[str, Any], *, plan_tasks: Optional[Sequence[str]] = None) -> Dict[str, Any]:
@@ -136,8 +137,20 @@ def validate_spec(spec: Mapping[str, Any], *, plan_tasks: Optional[Sequence[str]
                             add(errors, "invalid_context", "%s.context" % where, "unknown context fields: %s" % ", ".join(unknown))
             elif node.get("bind_task") is not None:
                 add(errors, "invalid_task_binding", "%s.bind_task" % where, "only an agent node may bind a task")
-            if kind == "tool" and (not isinstance(node.get("command"), str) or not node.get("command", "").strip()):
-                add(errors, "invalid_command", "%s.command" % where, "tool command must be a non-empty string")
+            if kind == "tool":
+                has_command = isinstance(node.get("command"), str) and bool(node.get("command", "").strip())
+                if capabilities.is_capability_node(node):
+                    for code, field, message in capabilities.validate_node(node):
+                        add(errors, code, "%s.%s" % (where, field), message)
+                elif node.get("tool") is not None:
+                    add(errors, "unknown_tool_capability", "%s.tool" % where, "tool must name a capability: %s" % ", ".join(capabilities.names()))
+                elif not has_command:
+                    add(errors, "invalid_command", "%s.command" % where, "tool command must be a non-empty string, or tool must name a capability")
+                elif effect == "read":
+                    # Nothing verifies that shell text honours a read
+                    # declaration; a capability node carries that guarantee.
+                    add(warnings, "unverified_effect_declaration", "%s.command" % where,
+                        "a command node's effect is declared, not verified; prefer a tool capability")
             if kind == "gate":
                 decisions = node.get("decisions", ["approved", "changes_requested"])
                 if (node.get("authority", "parent") not in GATE_AUTHORITIES or
@@ -217,6 +230,11 @@ def validate_spec(spec: Mapping[str, Any], *, plan_tasks: Optional[Sequence[str]
             if len(binding_writers[name]) > 1:
                 add(errors, "duplicate_task_binding_writer", "%s.nodes" % prefix,
                     "binding %s is written by more than one node: %s" % (name, ", ".join(binding_writers[name])))
+        for node_id, node in nodes.items():
+            if capabilities.is_capability_node(node) and node.get("tool") == "commit_bound":
+                bound = node.get("binding")
+                if binding.valid_name(bound) and bound not in binding_writers:
+                    add(errors, "unknown_task_binding", "%s.nodes.%s.binding" % (prefix, node_id), "no node binds %s" % bound)
         for name in sorted(binding_readers):
             for reader in binding_readers[name]:
                 where = "%s.nodes.%s.plan_task_from" % (prefix, reader)

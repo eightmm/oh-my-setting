@@ -303,15 +303,31 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(statuses['project-safe'], 'stale')
 
     def test_context_manifest_selects_target_imports_tests_and_reports_debt(self) -> None:
-        manifest = context.plan_context(self.repo, target='scripts/sample.py', required=['scripts/helper.py', 'missing-required.py'], max_bytes=32768)
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], required=['scripts/helper.py', 'missing-required.py'], max_bytes=32768)
         selected = {item['path'] for item in manifest['selected']}
         self.assertIn('scripts/sample.py', selected)
         self.assertIn('scripts/helper.py', selected)
         self.assertIn('tests/test_sample.py', selected)
         self.assertFalse(manifest['sufficient'])
         self.assertIn('missing-required.py', manifest['missing_required'])
+        self.assertEqual(manifest['targets'], ['scripts/sample.py'])
         self.assertTrue((self.repo / manifest['manifest_path']).is_file())
         self.assertTrue((self.repo / manifest['bundle_path']).is_file())
+
+    def test_context_accepts_several_direct_targets_each_required(self) -> None:
+        (self.repo / 'notes.md').write_text('orientation notes\n', encoding='utf-8')
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py', 'notes.md', 'scripts/sample.py'], max_bytes=32768)
+        self.assertEqual(manifest['targets'], ['scripts/sample.py', 'notes.md'])
+        direct = {item['path'] for item in manifest['selected'] if item['reason'] == 'direct target'}
+        self.assertEqual(direct, {'scripts/sample.py', 'notes.md'})
+        self.assertTrue(manifest['sufficient'])
+        # A target that cannot be read is a compile error, never a silent skip.
+        with self.assertRaises(CoreError):
+            context.plan_context(self.repo, targets=['scripts/sample.py', '../outside.py'], max_bytes=32768)
+        # The CLI spells the same thing as a repeatable flag.
+        from oms_runtime.cli_parser import build_parser
+        args = build_parser().parse_args(['context', '--target', 'a.py', '--target', 'b.py'])
+        self.assertEqual(args.target, ['a.py', 'b.py'])
 
     def test_path_lists_reject_parent_traversal_and_jsonl_fails_closed_on_truncation(self) -> None:
         self.assertEqual(parse_path_list(['./src', '../outside', 'tests/../secret', 'safe/**']), ['safe/**', 'src'])
@@ -333,7 +349,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         (package / 'target.py').write_text('from .helper import VALUE\n', encoding='utf-8')
         large = self.repo / 'required-large.txt'
         large.write_text('x' * 20000, encoding='utf-8')
-        manifest = context.plan_context(self.repo, target='pkg/target.py', required=['required-large.txt'], max_bytes=8192)
+        manifest = context.plan_context(self.repo, targets=['pkg/target.py'], required=['required-large.txt'], max_bytes=8192)
         selected = {item['path'] for item in manifest['selected']}
         self.assertIn('pkg/helper.py', selected)
         self.assertIn('required-large.txt', manifest['truncated_required'])

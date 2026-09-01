@@ -35,6 +35,7 @@ from oms_runtime.common import (
 
 from . import EXEC_SCHEMA, OUTCOMES
 from . import binding
+from . import capabilities
 from . import events as events_module
 from . import predicates
 from . import route as route_module
@@ -66,7 +67,6 @@ AGENT_TIMEOUT = 2700
 TOOL_TIMEOUT = 600
 TAIL_LIMIT = 4000
 DETAIL_LIMIT = 400
-GOAL_PLACEHOLDER = "${goal}"
 
 # plan-run and patch-land verdicts that are transport facts rather than a
 # worker's judgement: exit 3 is "no actionable task", exit 75 is "another
@@ -196,12 +196,6 @@ def cache_key(node: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[
 def _artifact_name(node_id: str, attempt: int) -> str:
     safe = "".join(char if (char.isalnum() or char in "._-") else "_" for char in str(node_id))
     return "%s-%d.txt" % (safe or "node", attempt)
-
-
-def render_context_task(template: str, goal: str, fallback: str) -> str:
-    """`${goal}` is substituted by the runner, never by a shell."""
-    text = str(template or "").replace(GOAL_PLACEHOLDER, str(goal or "")).strip()
-    return text or str(goal or "").strip() or fallback
 
 
 # --------------------------------------------------------------------------
@@ -350,7 +344,7 @@ def prepare_context(repo: Path, node: Mapping[str, Any], node_id: str, goal: str
     context = node.get("context")
     if not isinstance(context, Mapping):
         return None
-    task = render_context_task(str(context.get("task", "")), goal, str(node.get("title") or node_id))
+    task = capabilities.render_goal(str(context.get("task", "")), goal, str(node.get("title") or node_id))
     max_files = context.get("max_files", 12)
     if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files <= 0:
         max_files = 12
@@ -419,14 +413,23 @@ def _tool_env(run_id: str, node_id: str, attempt: int, goal: str, bindings: Mapp
 
 def _run_tool_process(repo: Path, run_id: str, node_id: str, node: Mapping[str, Any], attempt: int,
                       options: Mapping[str, Any], bindings: Mapping[str, Any]) -> Dict[str, Any]:
-    """The subprocess half of a tool node; the proof check happens on the coordinator."""
-    command = str(node.get("command", "") or "")
-    if not command:
-        raise GraphError("tool node %s has no command" % bounded_line(node_id, 60))
+    """The subprocess half of a tool node; the proof check happens on the coordinator.
+
+    A capability node runs the registry's exact argv with no shell; a command
+    node runs its declared text through `bash -c`.
+    """
+    goal = str(options.get("goal", ""))
+    if capabilities.is_capability_node(node):
+        argv = capabilities.argv(repo, node, goal=goal, run_id=run_id, fallback_task=str(node.get("title") or node_id))
+    else:
+        command = str(node.get("command", "") or "")
+        if not command:
+            raise GraphError("tool node %s has no command" % bounded_line(node_id, 60))
+        argv = ["bash", "-c", command]
     try:
         completed = subprocess.run(
-            ["bash", "-c", command], cwd=str(repo),
-            env=_tool_env(run_id, node_id, attempt, str(options.get("goal", "")), bindings),
+            argv, cwd=str(repo),
+            env=_tool_env(run_id, node_id, attempt, goal, bindings),
             capture_output=True, text=True,
             timeout=int(node.get("timeout", TOOL_TIMEOUT) or TOOL_TIMEOUT),
         )

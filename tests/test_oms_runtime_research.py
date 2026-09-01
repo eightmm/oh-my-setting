@@ -36,7 +36,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         task.write_text(task.read_text(encoding='utf-8') + '\n## Verification\n\nold prose receipt\n', encoding='utf-8')
         envelope = evidence.build_envelope(self.repo)
         self.assertEqual(envelope['task']['verify_digest'], sha256_text('python3 -m unittest'))
-        manifest = context.plan_context(self.repo, target='scripts/sample.py', phase='review', max_bytes=32768)
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], phase='review', max_bytes=32768)
         self.assertEqual(manifest['phase'], 'review')
 
     def test_manual_effectiveness_outcomes_are_aggregated(self) -> None:
@@ -170,7 +170,7 @@ class RuntimeFixture(RuntimeFixtureBase):
     def test_target_is_required_context_and_truncation_creates_debt(self) -> None:
         target = self.repo / 'scripts' / 'large_target.py'
         target.write_text("VALUE = '" + 'x' * 20000 + "'\n", encoding='utf-8')
-        manifest = context.plan_context(self.repo, target='scripts/large_target.py', max_bytes=8192)
+        manifest = context.plan_context(self.repo, targets=['scripts/large_target.py'], max_bytes=8192)
         self.assertIn('scripts/large_target.py', manifest['truncated_required'])
         self.assertFalse(manifest['sufficient'])
 

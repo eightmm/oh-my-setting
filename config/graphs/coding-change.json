@@ -7,9 +7,10 @@
   "nodes": {
     "inspect": {
       "kind": "tool",
-      "effect": "read",
+      "tool": "project_context",
+      "task": "${goal}",
+      "max_files": 12,
       "title": "Project-graph context for the goal",
-      "command": "oms graph project context --task \"${OMS_GRAPH_GOAL:-repository orientation}\" --json",
       "cacheable": true
     },
     "implement": {
@@ -38,16 +39,15 @@
     },
     "commit": {
       "kind": "tool",
-      "effect": "write",
+      "tool": "commit_bound",
+      "binding": "work_item",
       "title": "Commit exactly the landed patch of the bound task",
-      "command": "oms graph exec commit --binding work_item",
       "proof": ["!git.dirty"]
     },
     "acceptance": {
       "kind": "tool",
-      "effect": "read",
+      "tool": "plan_acceptance",
       "title": "Plan-level acceptance command",
-      "command": "oms agent-plan accept",
       "proof": ["receipt.acceptance.latest=pass", "receipt.acceptance.fresh"]
     },
     "done": {"kind": "terminal", "title": "Change accepted"},

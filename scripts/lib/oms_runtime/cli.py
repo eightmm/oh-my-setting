@@ -89,7 +89,7 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             emit(value, args.pretty)
             return 0
         if args.command == 'context':
-            value = plan_context(repo, target=args.target, explicit=[_file_reason(item) for item in args.file], required=args.require, max_bytes=args.max_bytes, bundle_path=_path(repo, args.bundle) if args.bundle else None, manifest_path=_path(repo, args.manifest) if args.manifest else None, allow_external=args.allow_external, phase=args.phase)
+            value = plan_context(repo, targets=args.target, explicit=[_file_reason(item) for item in args.file], required=args.require, max_bytes=args.max_bytes, bundle_path=_path(repo, args.bundle) if args.bundle else None, manifest_path=_path(repo, args.manifest) if args.manifest else None, allow_external=args.allow_external, phase=args.phase)
             emit(value, args.pretty)
             return 0 if value['sufficient'] else 3
         if args.command == 'profile':
