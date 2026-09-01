@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "goal-drive",
+  "entry": "acceptance",
+  "budget": {"max_steps": 12, "max_repeats": 3},
+  "stop_facts": [],
+  "nodes": {
+    "acceptance": {
+      "kind": "tool",
+      "effect": "read",
+      "title": "Run the plan acceptance contract",
+      "command": "oms agent-plan accept",
+      "proof": ["receipt.acceptance.latest=pass", "receipt.acceptance.fresh"]
+    },
+    "implement": {
+      "kind": "agent",
+      "effect": "write",
+      "title": "Execute the next actionable plan task",
+      "plan_task": "next",
+      "mode": "run",
+      "proof": ["plan.task.next.patch_present"]
+    },
+    "land": {
+      "kind": "agent",
+      "effect": "write",
+      "title": "Admit and land the reviewed task",
+      "plan_task": "next",
+      "mode": "land",
+      "proof": ["receipt.land.next.present"]
+    },
+    "done": {"kind": "terminal", "title": "Acceptance passed"},
+    "parked": {"kind": "terminal", "title": "Plan task is blocked"}
+  },
+  "edges": [
+    {"from": "acceptance", "to": "done", "outcomes": ["completed"]},
+    {"from": "acceptance", "to": "implement", "outcomes": ["failed", "unverified"]},
+    {"from": "implement", "to": "land", "outcomes": ["completed"]},
+    {"from": "implement", "to": "parked", "outcomes": ["blocked"]},
+    {"from": "land", "to": "acceptance", "outcomes": ["completed"], "kind": "repeat"}
+  ]
+}
