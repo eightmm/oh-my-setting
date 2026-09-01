@@ -303,6 +303,19 @@ with no outcome yet), `gate` (primary is a gate node awaiting
 unmet, or a `stop_facts` predicate holds), `exhausted` (`max_steps` or a
 repeat budget spent), `terminal`, `invalid` (validator failed).
 
+Two rules keep "current reality first" from contradicting history:
+
+- Proofs are re-verified against current facts **only at the frontier** —
+  the finished node whose route leads to unfinished work. A node whose
+  recorded route already led to further finished nodes keeps the outcome
+  the runner recorded after its own proof check. Otherwise the spec's own
+  happy path would fail: `implement` is proved by `state=review`, and after
+  landing the task is `done`.
+- An edge that leads back into the current path (for example
+  `review --changes_requested--> implement`) re-runs finished work exactly
+  like a `repeat` edge and spends the same `max_repeats` budget under the
+  key `from->to`.
+
 Fixture shape (`tests/fixtures/graph-routes/*.json`):
 
 ```json
@@ -315,6 +328,9 @@ Fixture shape (`tests/fixtures/graph-routes/*.json`):
 ```
 
 `spec_ref` names a bundled spec in `config/graphs/`; `spec` may inline one.
+Optional `repeats` (`{"from->to": n}`) and `steps` (int) pre-load the budget
+counters. `expect.downgrades` is a list of node ids; every other `expect`
+key is compared verbatim, and keys absent from `expect` are not checked.
 
 ## Run events
 
@@ -351,9 +367,11 @@ then reconciles every `active` node from current facts through its adapter
 with key `outcome:<node>:<attempt>`; the next route follows from that.
 Conversation memory is never an input.
 
-Work Journal: `run_finished` and gate decisions are mirrored best-effort via
-`scripts/journal.sh observe --source-type graph-run ...`; the events file
-stays the only authoritative record.
+Work Journal: `run_finished` is mirrored best-effort through the journal's
+own observer (`work_journal_observe` in `scripts/lib/work-journal.sh`, event
+type `phase_outcome`, source `projection.json`); the journal keys one row per
+(source type, source id), so gate decisions are not mirrored separately and
+the events file stays the only authoritative record.
 
 ## Plan adapter
 
@@ -408,9 +426,11 @@ Project-graph extraction cache (required): key =
 files reuse their extraction verbatim.
 
 Execution node cache (limited): only `tool` nodes with `effect: read` and
-`cacheable: true`. Key = `sha256(EXEC_SCHEMA, normalized node, command,
-git.head, sorted digests of files named in node.inputs, upstream outcome
-digests)`. Write, land, gate, and agent nodes are never cached.
+`cacheable: true`. Key = `sha256(EXEC_SCHEMA, normalized node (command
+included), git.head, upstream finished outcomes)`, stored under
+`.oms/graph/cache/<key>.json`. Only a *proved* completion is cached: a cached
+failure would replay forever behind a repeat edge, because a retry changes
+nothing in the key. Write, land, gate, and agent nodes are never cached.
 
 ## Project Graph
 
@@ -470,7 +490,17 @@ instruction, and any `crux` excerpt is dropped when `sensitive_text()` matches.
 
 Determinism: `graph.json` contains `schema`, `revision`, `nodes` (sorted by
 id), `edges` (sorted by `source, target, relation`) and **no timestamps**;
-the same working tree produces identical bytes. `revision = sha256` over the
+the same working tree produces identical bytes. It is written as canonical
+one-line JSON and read under its own 256 MiB ceiling: this repository alone
+is ~7 MB, past the runtime's 8 MiB state-file default. `map_summary()`
+returns `{"revision", "counts": {"kind", "language"}, "hubs": [{"id",
+"kind", "degree"}], "groups": {top-level dir: [module ids]}}`, the shape
+the text renderer consumes.
+
+Known limit: code embedded in shell heredocs (this repository's own
+`python3 - <<'PY'` blocks) is skipped by the shell parser, so the Python
+functions inside `agent-plan.sh` are not symbol nodes; the file and its
+shell functions are. `revision = sha256` over the
 sorted `path\tsha256` lines plus `PARSER_VERSION` and `PROJECT_SCHEMA`.
 `manifest.json` carries `generated_at`, per-file digests, parser names,
 cache hits, and skipped entries. `build.check` compares working-tree bytes
@@ -528,7 +558,10 @@ oms graph exec test      PATH   (route fixtures; a file or a directory)
 ```
 
 `SPEC` is a path or the name of a bundled spec in `config/graphs/`. Common
-options: `--repo PATH`, `--pretty`.
+options: `--repo PATH`, `--pretty`. `build` and `check` accept `--json`;
+`check` exits 3 when the graph is stale or absent. `OMS_PROJECT_GRAPH_STATE`
+(absolute path) relocates the project-graph state directory, which is how
+tests and dogfood runs keep a cache out of the inspected tree.
 
 Harness children (`OMS_HARNESS_CHILD=1`) may only run readers: `project
 check|map|find|neighbors|trace|blast|analyze` and `exec

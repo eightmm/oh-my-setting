@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 `VERSION` file.
 
+## [Unreleased]
+
+### Added
+- `oms graph`: a Project Graph and an Execution Graph above the existing
+  control plane (`docs/GRAPH-ENGINEERING.md`). The Project Graph is a
+  deterministic, content-addressed structural graph of the repository
+  (Python `ast`, bounded shell regexes, Markdown references; `EXTRACTED`/
+  `INFERRED`/`AMBIGUOUS` edge confidence) with `map`, `find`, `neighbors`,
+  `trace`, `blast`, `analyze`, and bounded task `context` packs that reuse
+  `oms runtime context` for bundles. The Execution Graph makes orchestration
+  a first-class, validated GraphSpec with typed semantic outcomes separate
+  from the plan lifecycle, proof-backed completion (a claimed `completed`
+  without its receipts is `unverified`), budgeted repeat edges, gates,
+  joins, subgraphs, a pure route evaluator with model-free route fixtures,
+  append-only run events with idempotency keys and resume from disk, a
+  write-scope-aware scheduler, and an agent-node adapter that only ever
+  calls `plan-run`/`patch-land`. Read-only MCP tools `oms_project_graph_*`
+  and `oms_execution_graph_*` expose bounded views. `exec shadow` records
+  evaluator-versus-control-plane agreement without taking authority.
+
 ## [0.7.0] - 2026-08-20
 
 ### Changed

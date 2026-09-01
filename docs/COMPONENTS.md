@@ -469,6 +469,51 @@ oms patch-land --recover
 oms gc
 ```
 
+## Graphs
+
+`oms graph` (`scripts/lib/oms_graph/`, standard library only) adds two
+inspectable graphs above the plane described in the previous section; the
+contract is `docs/GRAPH-ENGINEERING.md`.
+
+The **Project Graph** (`oms graph project build|check|map|find|neighbors|trace|blast|analyze|context`)
+is a deterministic structural graph of the repository — file, module,
+class/function/method, test, config, and document nodes with `contains`,
+`imports`, `calls`, `references`, and `tests` edges — extracted by
+stdlib parsers (Python `ast`, bounded shell regexes, Markdown path
+references) without a model, key, or network. Every edge carries
+`EXTRACTED`, `INFERRED`, or `AMBIGUOUS` confidence, so inference is never
+presented as fact. Extraction is content-addressed under
+`.oms/project-graph/cache/`, `graph.json` carries no timestamps and is
+byte-identical for the same working tree, and `check` judges freshness by
+working-tree bytes, not by commit. `blast` walks reverse dependencies from
+the changed files; `context` produces a bounded task-specific pack (files,
+tests, blast radius, hubs, a byte estimate that is never called tokens) and
+can compile it through `oms runtime context`. Discovery honors `.gitignore`,
+skips symlinks, binaries, oversized and secret-shaped files, and treats
+every source byte as data.
+
+The **Execution Graph** (`oms graph exec validate|render|route|run|resume|decide|status|events|shadow|test`)
+makes orchestration a first-class object. A GraphSpec (`config/graphs/*.json`)
+declares `agent`, `tool`, `gate`, `router`, `subgraph`, and `terminal` nodes,
+typed semantic outcomes (`completed failed unverified partial blocked
+changes_requested approved skipped`, deliberately separate from the plan
+task lifecycle), edges keyed by outcome with `repeat` budgets, `join`
+semantics, and proof predicates over facts. The validator rejects unknown
+endpoints, unreachable nodes, missing terminals, cycles without a stop
+policy, ambiguous routes, and recursive subgraphs. `route` is a pure
+evaluation over facts (plan state, admission/landing/acceptance receipts,
+git) and recorded outcomes: a claimed `completed` whose proof facts are
+absent is `unverified`, and no model participates in routing. Runs live in
+`.oms/graph/runs/<run-id>/` as a frozen spec, an append-only `events.jsonl`
+with idempotency keys, and a derived projection; `resume` rebuilds state
+from events and current facts, never from conversation memory. Agent nodes
+execute through `plan-run --id TASK [--land]`; the adapter has no path to
+`agent-plan land/finish`, landing stays serialized by `patch-land`, and the
+scheduler admits concurrent nodes only when their write scopes are known
+and disjoint. `exec shadow` records how the evaluator's route compares with
+the control plane's canonical next action; the evaluator takes no authority
+from `goal-drive` or `autopilot`.
+
 ## Durable operations and optional frontends
 
 | Front door | Actual boundary |
