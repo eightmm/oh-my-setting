@@ -8,10 +8,23 @@ from ..model import make_edge, make_node, node_id
 from .base import ParseResult, Parser
 
 
+def _dotted_name(node: ast.AST) -> str:
+    """`a.b.c` for a Name/Attribute chain, '' for anything else (calls, subscripts)."""
+    parts = []
+    cursor = node
+    while isinstance(cursor, ast.Attribute):
+        parts.append(cursor.attr)
+        cursor = cursor.value
+    if isinstance(cursor, ast.Name):
+        parts.append(cursor.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
 class PythonParser(Parser):
     language = "python"
     extensions = (".py",)
-    version = 1
+    version = 2
 
     def parse(self, path: str, text: str, source_digest: str) -> ParseResult:
         result = ParseResult()
@@ -28,6 +41,9 @@ class PythonParser(Parser):
             def __init__(self) -> None:
                 self.class_name = ""
                 self.symbol = ""
+                # Method names of the enclosing class bodies, so a `self.x()`
+                # call resolves to a sibling method as a fact rather than by name.
+                self.methods_stack = []
 
             def _source(self) -> str:
                 return self.symbol or file_id
@@ -44,8 +60,14 @@ class PythonParser(Parser):
                 old_class, old_symbol = self.class_name, self.symbol
                 self.class_name = node.name
                 self.symbol = self._add_symbol("class", node.name, node.lineno)
+                self.methods_stack.append({child.name for child in node.body if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))})
+                for base in node.bases:
+                    base_name = _dotted_name(base)
+                    if base_name:
+                        result.refs.append({"from": self.symbol, "relation": "depends_on", "kind": "name", "value": base_name, "line": node.lineno})
                 for child in node.body:
                     self.visit(child)
+                self.methods_stack.pop()
                 self.class_name, self.symbol = old_class, old_symbol
 
             def _visit_function(self, node: ast.AST) -> None:
@@ -70,19 +92,15 @@ class PythonParser(Parser):
                     result.refs.append({"from": self._source(), "relation": "imports", "kind": "module", "value": module, "line": node.lineno, "binding": alias.asname or alias.name, "imported": alias.name})
 
             def visit_Call(self, node: ast.Call) -> None:
-                value = ""
-                if isinstance(node.func, ast.Name):
-                    value = node.func.id
-                elif isinstance(node.func, ast.Attribute):
-                    parts = []
-                    cursor = node.func
-                    while isinstance(cursor, ast.Attribute):
-                        parts.append(cursor.attr)
-                        cursor = cursor.value
-                    if isinstance(cursor, ast.Name):
-                        parts.append(cursor.id)
-                        value = ".".join(reversed(parts))
-                if value:
+                value = _dotted_name(node.func)
+                receiver, _, member = value.partition(".")
+                if receiver in ("self", "cls") and self.class_name and member and "." not in member:
+                    if self.methods_stack and member in self.methods_stack[-1]:
+                        result.edges.append(make_edge(self._source(), node_id("method", path, self.class_name + "." + member), "calls", "EXTRACTED", path=path, source_digest=source_digest, line=node.lineno))
+                    else:
+                        # Inherited or mixed-in: resolve by name across the repo.
+                        result.refs.append({"from": self._source(), "relation": "calls", "kind": "name", "value": member, "line": node.lineno})
+                elif value:
                     result.refs.append({"from": self._source(), "relation": "calls", "kind": "name", "value": value, "line": node.lineno})
                 self.generic_visit(node)
 

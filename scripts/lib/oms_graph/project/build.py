@@ -130,7 +130,16 @@ def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
     stale = sorted(path for path in current & known if sha256_file(Path(repo) / path) != manifest["files"][path].get("sha256"))
     missing = sorted(known - current)
     new = sorted(current - known)
-    return {"present": True, "fresh": not (stale or missing or new), "revision": manifest.get("revision", ""), "stale": stale, "missing": missing, "new": new}
+    # A parser or schema upgrade changes what the same bytes mean, so it makes
+    # the whole graph stale even when no file moved; the per-file cache keys
+    # carry the parser version, so the refresh re-parses everything.
+    outdated = {}
+    if manifest.get("parser_version") != PARSER_VERSION:
+        outdated["parser_version"] = {"built": manifest.get("parser_version"), "current": PARSER_VERSION}
+    if manifest.get("schema") != PROJECT_SCHEMA:
+        outdated["schema"] = {"built": manifest.get("schema"), "current": PROJECT_SCHEMA}
+    return {"present": True, "fresh": not (stale or missing or new or outdated), "revision": manifest.get("revision", ""),
+            "stale": stale, "missing": missing, "new": new, "outdated": outdated}
 
 
 def load_graph(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:

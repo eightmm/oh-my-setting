@@ -38,12 +38,29 @@ class Graph:
             for rows in mapping.values():
                 rows.sort(key=lambda item: (item["source"], item["target"], item["relation"]))
 
+    def is_test(self, node_id: str) -> bool:
+        node = self.nodes.get(node_id, {})
+        return node.get("kind") == "test" or ("test:" + str(node.get("path", ""))) in self.nodes
+
+    def without_tests(self) -> "Graph":
+        """The same graph minus test files and everything they define or touch.
+
+        Tests name many paths, so they dominate hubs and communities; the
+        overview verbs drop them by default while blast/context keep them.
+        """
+        keep = {ident for ident in self.nodes if not self.is_test(ident)}
+        return Graph({"schema": self.graph.get("schema"), "revision": self.graph.get("revision"),
+                      "nodes": [self.nodes[ident] for ident in sorted(keep)],
+                      "edges": [edge for edge in self.graph.get("edges", []) if edge["source"] in keep and edge["target"] in keep]})
+
     def node(self, node_id: str) -> Dict[str, Any]:
         if node_id not in self.nodes:
             raise GraphError("unknown graph node: %s" % node_id)
         return dict(self.nodes[node_id])
 
-    def find(self, query: str, *, kinds: Sequence[str] = (), limit: int = 20) -> List[Dict[str, Any]]:
+    def find(self, query: str, *, kinds: Sequence[str] = (), limit: int = 20, include_tests: bool = False) -> List[Dict[str, Any]]:
+        if not include_tests and "test" not in kinds:
+            return self.without_tests().find(query, kinds=kinds, limit=limit, include_tests=True)
         needle = query.strip().lower()
         tokens = [item for item in re.findall(r"[a-z0-9]+", needle) if item]
         rows = []

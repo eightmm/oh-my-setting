@@ -22,7 +22,9 @@ to stderr so `--json` stdout stays clean; the session-start hook already
 starts an absent one in the background. `ensure` is the explicit form and
 `check` the report; `--no-refresh` (or `OMS_GRAPH_AUTOBUILD=0`) reads the
 graph as it stands. Edges carry `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
-confidence: treat only `EXTRACTED` edges as facts.
+confidence: treat only `EXTRACTED` edges as facts. `map`, `find`, and
+`analyze` hide test files by default (`--include-tests` to see them); `blast`
+and `context` always report the tests a change touches.
 
 ## Give a worker a bounded context pack instead of the repository
 

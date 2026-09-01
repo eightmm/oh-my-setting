@@ -61,12 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
     check = project_sub.add_parser("check")
     check.add_argument("--json", action="store_true")
     show_map = project_sub.add_parser("map")
+    show_map.add_argument("--include-tests", action="store_true", help="keep test files in the overview (dropped by default)")
     show_map.add_argument("--json", action="store_true")
     show_map.add_argument("--mermaid", action="store_true")
     find = project_sub.add_parser("find")
     find.add_argument("query")
     find.add_argument("--kind", default="")
     find.add_argument("--limit", type=int, default=20)
+    find.add_argument("--include-tests", action="store_true", help="rank test files too (dropped by default unless --kind test)")
     find.add_argument("--json", action="store_true")
     neighbors = project_sub.add_parser("neighbors")
     neighbors.add_argument("node")
@@ -88,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--cycles", action="store_true")
     analyze.add_argument("--communities", action="store_true")
     analyze.add_argument("--path", nargs=2, default=None, metavar=("FROM", "TO"))
+    analyze.add_argument("--include-tests", action="store_true", help="keep test files in hubs, cycles, and communities")
     analyze.add_argument("--json", action="store_true")
     context = project_sub.add_parser("context")
     context.add_argument("--task", required=True)
@@ -220,6 +223,9 @@ def _project_check(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
     graph, index = _index(repo, state)
+    if not args.include_tests:
+        index = index.without_tests()
+        graph = index.graph
     summary = index.map_summary()
     if args.json:
         emit(summary, args.pretty)
@@ -231,7 +237,7 @@ def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 
 def _project_find(args: argparse.Namespace, repo: Path, state: Path) -> int:
-    rows = _index(repo, state)[1].find(args.query, kinds=(args.kind,) if args.kind else (), limit=args.limit)
+    rows = _index(repo, state)[1].find(args.query, kinds=(args.kind,) if args.kind else (), limit=args.limit, include_tests=args.include_tests)
     if args.json:
         emit(rows, args.pretty)
         return 0
@@ -311,7 +317,9 @@ def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 
 def _project_analyze(args: argparse.Namespace, repo: Path, state: Path) -> int:
-    graph = _index(repo, state)[0]
+    graph, index = _index(repo, state)
+    if not args.include_tests:
+        graph = index.without_tests().graph
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
     result: Dict[str, Any] = {

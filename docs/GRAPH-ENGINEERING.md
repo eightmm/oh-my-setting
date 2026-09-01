@@ -633,7 +633,9 @@ candidates; the edge targets the first in sorted order and lists the rest in
 
 Parsers (`parsers/`): Python via `ast` (classes, functions, methods, imports
 resolved to repo files, calls resolved through import bindings and local
-definitions); shell via bounded regexes (`name()` / `function name`
+definitions; a `self.x()`/`cls.x()` call to a sibling method is an `EXTRACTED`
+`calls` edge, an inherited one resolves by name, and every base class becomes a
+`depends_on` edge when it lives in the repository); shell via bounded regexes (`name()` / `function name`
 definitions, `source`/`.` includes, invocations of repo scripts by literal
 path, bare-name calls to functions defined in sourced files); Markdown
 (document nodes, `references` to literal repo paths); JSON/YAML/TOML config
@@ -669,10 +671,15 @@ sorted `path\tsha256` lines plus `PARSER_VERSION` and `PROJECT_SCHEMA`.
 `manifest.json` carries `generated_at`, per-file digests, parser names,
 cache hits, and skipped entries. `build.check` compares working-tree bytes
 against the manifest (unstaged edits count) and reports `stale`, `missing`,
-and `new` paths; a commit alone is never the freshness criterion.
+and `new` paths plus `outdated` when the manifest's parser or schema version
+no longer matches the code (a parser upgrade re-parses everything on the next
+`ensure`); a commit alone is never the freshness criterion.
 
 Queries (`query.Graph`): `find(query, kinds, limit)` scores name, path,
-qualname, and summary matches; `neighbors(id, relation, direction)`;
+qualname, and summary matches; the overview verbs (`map`, `find`, `analyze`)
+drop test files and their edges by default because tests name many paths and
+otherwise dominate hubs and communities — `--include-tests` (or `--kind test`)
+brings them back, while `blast` and `context` always keep them; `neighbors(id, relation, direction)`;
 `trace(id, direction, depth, relations)`; `map_summary()` returns counts by
 kind and language, top hubs, module groups, and communities. Analytics
 (`analytics.py`) are stdlib: degrees, hubs, connected components,

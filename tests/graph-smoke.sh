@@ -126,7 +126,8 @@ summary = json.load(open(sys.argv[1]))
 for key in ("revision", "counts", "hubs", "groups"):
     assert key in summary, (key, sorted(summary))
 assert summary["counts"]["kind"].get("function"), summary["counts"]
-assert summary["counts"]["kind"].get("test"), summary["counts"]
+# Test files are dropped from the overview by default; --include-tests keeps them.
+assert not summary["counts"]["kind"].get("test"), summary["counts"]
 assert summary["hubs"] and set(summary["hubs"][0]) == {"id", "kind", "degree"}, summary["hubs"]
 PY
 
@@ -142,6 +143,15 @@ assert row["components"] and row["components"][0]["size"] >= 2, row["components"
 assert isinstance(row["cycles"], list), row
 assert row["communities"] and row["communities"][0]["members"], row["communities"]
 assert row["path"] and row["path"][0] == "file:beta.py", row["path"]
+PY
+
+run_graph "$work/map-tests.json" project map --json --include-tests
+[ "$graph_rc" -eq 0 ] || fail "map --include-tests exited $graph_rc: $(cat "$work/map-tests.json")"
+python3 - "$work/map-tests.json" <<'PY'
+import json
+import sys
+summary = json.load(open(sys.argv[1]))
+assert summary["counts"]["kind"].get("test"), summary["counts"]
 PY
 
 run_graph "$work/find.out" project find alpha_entry --limit 5

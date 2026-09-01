@@ -197,6 +197,40 @@ class ProjectGraphTest(unittest.TestCase):
         build(self.repo, state=self.state)
         self.assertFalse((Path(self.temp.name) / ".gitignore").exists())
 
+    def test_methods_and_inheritance_are_linked(self) -> None:
+        self.write("base.py", "class Base:\n    def run(self):\n        return self.step()\n    def step(self):\n        return 1\n")
+        self.write("child.py", "from base import Base\nclass Child(Base):\n    def go(self):\n        return self.step()\n")
+        graph = self.graph()
+        edges = {(e["source"], e["target"], e["relation"], e["confidence"]) for e in graph["edges"]}
+        self.assertIn(("symbol:base.py::Base.run", "symbol:base.py::Base.step", "calls", "EXTRACTED"), edges)
+        self.assertIn(("symbol:child.py::Child", "symbol:base.py::Base", "depends_on", "EXTRACTED"), edges)
+        inherited = [e for e in graph["edges"] if e["source"] == "symbol:child.py::Child.go" and e["relation"] == "calls"]
+        self.assertEqual([(e["target"], e["confidence"]) for e in inherited], [("symbol:base.py::Base.step", "INFERRED")])
+
+    def test_parser_upgrade_makes_the_graph_stale(self) -> None:
+        import json as _json
+        self.write("a.py", "def f(): pass\n")
+        build(self.repo, state=self.state)
+        manifest_path = self.state / "manifest.json"
+        manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["parser_version"] = manifest["parser_version"] - 1
+        manifest_path.write_text(_json.dumps(manifest), encoding="utf-8")
+        verdict = check(self.repo, state=self.state)
+        self.assertFalse(verdict["fresh"])
+        self.assertIn("parser_version", verdict["outdated"])
+        from oms_graph.project.build import ensure
+        self.assertEqual(ensure(self.repo, state=self.state)["action"], "refreshed")
+        self.assertTrue(check(self.repo, state=self.state)["fresh"])
+
+    def test_overview_views_drop_tests_unless_asked(self) -> None:
+        self.write("a.py", "def f(): pass\n")
+        self.write("tests/test_a.py", "from a import f\ndef test_f():\n    assert f() is None\n")
+        graph = Graph(self.graph())
+        self.assertNotIn("test", graph.without_tests().map_summary()["counts"]["kind"])
+        self.assertIn("test", graph.map_summary()["counts"]["kind"])
+        self.assertNotIn("symbol:tests/test_a.py::test_f", [row["id"] for row in graph.find("test_f")])
+        self.assertIn("symbol:tests/test_a.py::test_f", [row["id"] for row in graph.find("test_f", include_tests=True)])
+        self.assertIn("symbol:tests/test_a.py::test_f", [row["id"] for row in graph.find("test_f", kinds=("test", "function"))])
 
 if __name__ == "__main__":
     unittest.main()
