@@ -45,6 +45,8 @@ test_mcp_server_protocol() {
     printf '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"oms_runtime_release","arguments":{"repo":"%s"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"oms_runtime_profile","arguments":{"repo":"%s"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"oms_runtime_failures","arguments":{"repo":"%s"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"oms_project_graph_trace","arguments":{"repo":"%s","node":"symbol:a/b.py::f"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"oms_project_graph_trace","arguments":{"repo":"%s","node":"../escape"}}}\n' "$repo"
   } | python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "MCP protocol exchange did not match the contract"
@@ -132,6 +134,17 @@ failure_body = json.loads(failures["content"][0]["text"])
 assert "provider_timeout" in failure_body, sorted(failure_body)
 assert failure_body["provider_timeout"]["recovery"], failure_body
 assert len(failure_body) >= 15, sorted(failure_body)
+# A graph reader is a subcommand call like any other: no graph is built in
+# this fixture, so the subcommand's own nonzero exit is what comes back —
+# passed through as an error result, never as a server-side crash.
+trace = by_id[14]["result"]
+assert trace["isError"], trace
+assert "Traceback" not in trace["content"][0]["text"], trace
+# A node id becomes argv. A structured id is allowed to carry a path, which
+# is exactly why the escape has to be refused here rather than downstream.
+node_escape = by_id[15]["result"]
+assert node_escape["isError"], node_escape
+assert "oms_project_graph_trace" in node_escape["content"][0]["text"], node_escape
 PY
 }
 
@@ -1840,7 +1853,10 @@ assert names == [
     "oms_task_state", "oms_fail_ledger", "oms_handoffs", "oms_handoff_show",
     "oms_journal", "oms_runtime_release", "oms_runtime_profile",
     "oms_runtime_failures", "oms_peer_start", "oms_peer_result",
-    "oms_peer_operations"], names
+    "oms_peer_operations", "oms_project_graph_map", "oms_project_graph_query",
+    "oms_project_graph_trace", "oms_project_graph_blast",
+    "oms_execution_graph_status", "oms_execution_graph_route",
+    "oms_execution_graph_events"], names
 
 # The legacy byte shape is untouched wherever the request names no revision.
 legacy = by_id[3]["result"]

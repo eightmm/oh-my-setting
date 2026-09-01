@@ -187,6 +187,15 @@ START_PEER = {
     "idempotentHint": False,
     "openWorldHint": True,
 }
+# Graph ids are structured, not bare names: a project-graph node carries its
+# path and qualified name (symbol:scripts/plan-run.sh::main), so the bare-name
+# rule below would refuse every real id. This is the widest shape such an id
+# takes, and nothing more — it cannot begin with a dash, and check_positional
+# refuses a '..' segment inside it.
+GRAPH_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$"
+# A search query may carry spaces between words; it still cannot lead with a
+# dash or climb a path, which check_positional enforces for every positional.
+GRAPH_QUERY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@ -]{0,511}$"
 
 TOOLS = [
     {
@@ -426,6 +435,120 @@ TOOLS = [
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
+    # Graph readers: the project graph answers what depends on what, the
+    # execution graph answers where a run stands and which route is legal
+    # next. Both are fixed read-only subcommands onto the graph front door;
+    # nothing here builds, rebuilds, or advances anything.
+    {
+        "name": "oms_project_graph_map",
+        "description": (
+            "Read-only project-graph overview: counts by kind and language,"
+            " hubs, module groups (requires a prior `oms graph project"
+            " build`)."
+        ),
+        "argv": ["bash", "scripts/graph.sh", "project", "map", "--json"],
+        "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_project_graph_query",
+        "description": "Find project-graph nodes by name, path, or qualified name.",
+        "argv": ["bash", "scripts/graph.sh", "project", "find", "--json", "--limit", "40"],
+        "properties": {
+            **REPO_PROPERTY,
+            "query": {
+                "type": "string",
+                "description": (
+                    "Name, path, or qualified-name fragment to match, such as"
+                    " plan-run or scripts/graph.sh."
+                ),
+            },
+        },
+        "required": ["query"],
+        "positional": "query",
+        "positional_pattern": GRAPH_QUERY_PATTERN,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_project_graph_trace",
+        "description": (
+            "Trace one project-graph node's dependency edges two hops"
+            " outward: what it reaches, and through which edges."
+        ),
+        "argv": [
+            "bash", "scripts/graph.sh", "project", "trace", "--json",
+            "--depth", "2", "--direction", "out",
+        ],
+        "properties": {
+            **REPO_PROPERTY,
+            "node": {
+                "type": "string",
+                "description": (
+                    "Project-graph node id from oms_project_graph_query, such"
+                    " as symbol:scripts/plan-run.sh::main."
+                ),
+            },
+        },
+        "required": ["node"],
+        "positional": "node",
+        "positional_pattern": GRAPH_ID_PATTERN,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_project_graph_blast",
+        "description": "Dependency blast radius of the working tree's changed files.",
+        "argv": ["bash", "scripts/graph.sh", "project", "blast", "--json"],
+        "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_execution_graph_status",
+        "description": "Latest execution-graph run: projection and next legal route.",
+        "argv": ["bash", "scripts/graph.sh", "exec", "status", "--json"],
+        "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_execution_graph_route",
+        "description": (
+            "Next legal route of one execution-graph run: which transitions"
+            " its current state allows, and what each requires."
+        ),
+        "argv": ["bash", "scripts/graph.sh", "exec", "route", "--json", "--run"],
+        "properties": {
+            **REPO_PROPERTY,
+            "run": {
+                "type": "string",
+                "description": "Run id from oms_execution_graph_status.",
+            },
+        },
+        "required": ["run"],
+        "positional": "run",
+        "positional_pattern": GRAPH_ID_PATTERN,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_execution_graph_events",
+        "description": (
+            "Execution-graph events of one run, most recent 40: the"
+            " transitions it actually took, in order."
+        ),
+        "argv": [
+            "bash", "scripts/graph.sh", "exec", "events", "--json",
+            "--limit", "40", "--run",
+        ],
+        "properties": {
+            **REPO_PROPERTY,
+            "run": {
+                "type": "string",
+                "description": "Run id from oms_execution_graph_status.",
+            },
+        },
+        "required": ["run"],
+        "positional": "run",
+        "positional_pattern": GRAPH_ID_PATTERN,
+        "annotations": READ_ONLY,
+    },
 ]
 
 
@@ -468,6 +591,35 @@ def text_argument(
     return value, ""
 
 
+def check_positional(tool: dict, value: str) -> str:
+    """Refusal text for a positional that must not become argv, else "".
+
+    Every positional here is appended to a fixed subcommand, so one rule holds
+    for all of them: it may never read as a flag of its own, and it may never
+    climb out of the repository. What varies is the shape underneath. The
+    default is a bare name — that is what keeps oms_handoff_show a state
+    reader instead of an arbitrary-file reader — and a tool whose ids are
+    structured declares the exact pattern it accepts instead. text_argument
+    has already refused a NUL byte and an oversized value before this runs.
+    """
+    pattern = tool.get("positional_pattern")
+    requirement = (
+        "an id matching %s" % pattern if pattern else "a bare digest file name"
+    )
+    if not value or value.startswith("-"):
+        return "error: %s requires %s" % (tool["name"], requirement)
+    if any(segment == ".." for segment in re.split(r"[/\\]", value)):
+        return "error: %s requires %s" % (tool["name"], requirement)
+    if pattern:
+        # fullmatch, not match: a '$'-anchored pattern still admits a trailing
+        # newline, and a newline has no business in argv.
+        if not re.fullmatch(pattern, value):
+            return "error: %s requires %s" % (tool["name"], requirement)
+    elif "/" in value or "\\" in value:
+        return "error: %s requires %s" % (tool["name"], requirement)
+    return ""
+
+
 def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
     repo_path, err = resolve_repo(arguments)
     if err:
@@ -483,10 +635,9 @@ def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
         value, err = text_argument(arguments, positional, MAX_PATH_BYTES)
         if err:
             return err, True
-        # Bare digest names only: this tool reads .oms/handoffs/<name>, and a
-        # path here would turn a state reader into an arbitrary-file reader.
-        if not value or value.startswith("-") or "/" in value or "\\" in value:
-            return "error: %s requires a bare digest file name" % tool["name"], True
+        err = check_positional(tool, value)
+        if err:
+            return err, True
         argv.append(value)
     try:
         proc = subprocess.run(
