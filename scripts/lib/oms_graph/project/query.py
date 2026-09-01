@@ -8,6 +8,21 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..errors import GraphError
 
+
+def _token_hits(tokens: Sequence[str], text: str) -> int:
+    """Query tokens found in the text, where a 4+ character stem shared in either
+    direction counts (``recovery`` finds ``recover_lease``)."""
+    words = set(re.findall(r"[a-z0-9]+", text.lower()))
+    hits = 0
+    for token in tokens:
+        if token in words:
+            hits += 1
+            continue
+        if len(token) >= 4 and any(word.startswith(token) or (len(word) >= 4 and token.startswith(word)) for word in words):
+            hits += 1
+    return hits
+
+
 class Graph:
     """In-memory index over a loaded graph.json."""
 
@@ -30,7 +45,7 @@ class Graph:
 
     def find(self, query: str, *, kinds: Sequence[str] = (), limit: int = 20) -> List[Dict[str, Any]]:
         needle = query.strip().lower()
-        tokens = set(re.findall(r"[a-z0-9_]+", needle))
+        tokens = [item for item in re.findall(r"[a-z0-9]+", needle) if item]
         rows = []
         for node in self.nodes.values():
             if kinds and node.get("kind") not in kinds:
@@ -38,14 +53,18 @@ class Graph:
             name = str(node.get("name", "")).lower()
             path = str(node.get("path", "")).lower()
             qualname = str(node.get("metadata", {}).get("qualname", "")).lower()
-            corpus = " ".join((name, path, qualname, str(node.get("summary") or "").lower()))
+            summary = str(node.get("summary") or "").lower()
             if name == needle:
                 score = 100
-            elif needle and (needle in path or needle in qualname or needle in name):
-                score = 60
+            elif needle and (needle in qualname or needle in name):
+                score = 70
+            elif needle and needle in path:
+                score = 50
             else:
-                overlap = len(tokens & set(re.findall(r"[a-z0-9_]+", corpus)))
-                score = overlap * 10
+                score = (15 * _token_hits(tokens, name + " " + qualname) + 5 * _token_hits(tokens, path)
+                         + 3 * _token_hits(tokens, summary))
+            if score and node.get("kind") in ("class", "function", "method"):
+                score += 2
             if score:
                 item = dict(node); item["score"] = score; rows.append(item)
         return sorted(rows, key=lambda item: (-item["score"], item["id"]))[:max(0, limit)]
@@ -83,13 +102,21 @@ class Graph:
                 "nodes": sorted(seen.values(), key=lambda item: (item["distance"], item["id"])),
                 "edges": sorted(edges, key=lambda item: (item["source"], item["target"], item["relation"]))}
 
+    def degree(self, node_id: str) -> int:
+        return len(self.out.get(node_id, [])) + len(self.ins.get(node_id, []))
+
     def map_summary(self) -> Dict[str, Any]:
-        by_kind: Dict[str, int] = {}; by_language: Dict[str, int] = {}; modules: Dict[str, List[str]] = {}
+        by_kind: Dict[str, int] = {}
+        by_language: Dict[str, int] = {}
+        groups: Dict[str, List[str]] = {}
         for node in self.nodes.values():
             by_kind[node["kind"]] = by_kind.get(node["kind"], 0) + 1
-            by_language[node.get("language", "")] = by_language.get(node.get("language", ""), 0) + 1
-            if node["kind"] == "module": modules.setdefault(node.get("path", "").split("/", 1)[0], []).append(node["id"])
-        degree = lambda ident: len(self.out.get(ident, [])) + len(self.ins.get(ident, []))
-        hubs = sorted(({"id": ident, "degree": degree(ident)} for ident in self.nodes), key=lambda item: (-item["degree"], item["id"]))[:10]
-        return {"kinds": dict(sorted(by_kind.items())), "languages": dict(sorted(by_language.items())), "hubs": hubs,
-                "modules": {key: sorted(value) for key, value in sorted(modules.items())}}
+            language = node.get("language", "") or "unknown"
+            by_language[language] = by_language.get(language, 0) + 1
+            if node["kind"] == "module":
+                path = node.get("path", "")
+                groups.setdefault(path.split("/", 1)[0] if "/" in path else "root", []).append(node["id"])
+        hubs = sorted(({"id": ident, "kind": node["kind"], "degree": self.degree(ident)} for ident, node in self.nodes.items()),
+                      key=lambda item: (-item["degree"], item["id"]))[:10]
+        return {"revision": str(self.graph.get("revision", "")), "counts": {"kind": dict(sorted(by_kind.items())), "language": dict(sorted(by_language.items()))},
+                "hubs": hubs, "groups": {key: sorted(value) for key, value in sorted(groups.items())}}

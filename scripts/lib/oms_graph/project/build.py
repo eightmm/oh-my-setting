@@ -6,9 +6,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from oms_graph import PARSER_VERSION, PROJECT_SCHEMA
-from oms_runtime.common import atomic_write_json, ensure_private_dir, read_json, sha256_bytes, sha256_file, utc_now
+from oms_runtime.common import atomic_write_bytes, atomic_write_json, canonical_json, ensure_private_dir, read_json, sha256_bytes, sha256_file, utc_now
 
 from ..errors import GraphError
+
+# A whole-repository graph outgrows the runtime's 8 MiB state-file default
+# (this repository alone is ~4 MiB canonical); the graph is a regenerable
+# cache, so it gets its own ceiling. Canonical one-line JSON keeps the bytes
+# deterministic and about half the size of the pretty form.
+GRAPH_BYTES_LIMIT = 256 * 1024 * 1024
 
 from .cache import cache_key, load_cached, prune, store
 from .extract import discover_files, extract_file
@@ -50,7 +56,7 @@ def build(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = 
     revision_source = "\n".join("%s\t%s" % (path, files[path]["sha256"]) for path in sorted(files)) + "\n%d\n%d" % (PARSER_VERSION, PROJECT_SCHEMA)
     revision = sha256_bytes(revision_source.encode("utf-8"))
     graph = {"schema": PROJECT_SCHEMA, "revision": revision, "nodes": nodes, "edges": edges}
-    atomic_write_json(directory / "graph.json", graph)
+    atomic_write_bytes(directory / "graph.json", canonical_json(graph) + b"\n")
     manifest = {"schema": PROJECT_SCHEMA, "revision": revision, "generated_at": utc_now(), "parser_version": PARSER_VERSION,
                 "discovery": {"include": sorted(include), "exclude": sorted(exclude), "max_bytes": int(max_bytes)},
                 "files": {path: files[path] for path in sorted(files)}, "skipped": discovery["skipped"],
@@ -77,7 +83,7 @@ def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def load_graph(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
-    graph = read_json(state_dir(Path(repo).resolve(), state) / "graph.json", None)
+    graph = read_json(state_dir(Path(repo).resolve(), state) / "graph.json", None, limit=GRAPH_BYTES_LIMIT)
     if not isinstance(graph, dict):
         raise GraphError("project graph has not been built; run: oms graph project build")
     return graph

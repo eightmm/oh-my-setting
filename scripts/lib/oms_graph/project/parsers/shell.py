@@ -7,6 +7,11 @@ import re
 from ..model import make_edge, make_node, node_id
 from .base import ParseResult, Parser
 
+# A script invoked by path, whether bare (`bash scripts/x.sh`), quoted, or
+# behind a directory variable (`"$ROOT/scripts/x.sh"`); the variable prefix
+# marks the reference INFERRED because the prefix is resolved by convention.
+INVOCATION_RE = re.compile(r"(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/)?((?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)+[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:sh|bash|py))\b")
+
 
 class ShellParser(Parser):
     language = "shell"
@@ -51,12 +56,10 @@ class ShellParser(Parser):
                 if cleaned:
                     result.refs.append({"from": file_id, "relation": "imports", "kind": "path", "value": cleaned, "line": number, "variable": variable, "shell_include": True})
                 continue
-            for match in re.finditer(r"(?:bash|sh|python3?|python)\s+(?:['\"])?([^\s'\"]+)", raw):
-                token = match.group(1)
-                variable = "$" in token
-                cleaned = re.sub(r"^\$\{?ROOT\}?/?", "", token).lstrip("./")
-                if "/" in cleaned and (cleaned.startswith("scripts/") or cleaned.startswith("tests/")):
-                    result.refs.append({"from": file_id, "relation": "calls", "kind": "path", "value": cleaned, "line": number, "variable": variable})
+            for match in INVOCATION_RE.finditer(raw):
+                cleaned = match.group(2).lstrip("./")
+                if "/" in cleaned and cleaned != path:
+                    result.refs.append({"from": file_id, "relation": "calls", "kind": "path", "value": cleaned, "line": number, "variable": bool(match.group(1))})
             command = raw.strip().split()
             if command and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", command[0]) and command[0] not in ("if", "then", "fi", "for", "while", "do", "done", "case", "esac", "function", "source", "return", "local", "export") and command[0] not in definitions:
                 result.refs.append({"from": file_id, "relation": "calls", "kind": "name", "value": command[0], "line": number, "shell_bare": True})

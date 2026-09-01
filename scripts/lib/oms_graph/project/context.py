@@ -20,13 +20,23 @@ def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_
     stopwords = {"the", "and", "for", "with", "from", "that", "this", "into", "add", "fix", "use", "are", "was", "will", "please"}
     tokens = [item for item in re.findall(r"[a-z0-9_]+", task.lower()) if len(item) >= 3 and item not in stopwords]
     entries = index.find(" ".join(tokens), limit=6) if tokens else []
+    # Entry files always outrank expansion: a lexical hit is the strongest
+    # signal, neighbor and blast contributions are capped so a hub test file
+    # cannot crowd the pack, and tests are reported in their own list.
     score: Dict[str, int] = {}; reasons: Dict[str, str] = {}
+    neighbor_hits: Dict[str, int] = {}
     selected_nodes = set()
+    entry_files: List[str] = []
     for entry in entries:
         selected_nodes.add(entry["id"])
         node = index.nodes[entry["id"]]
-        if node.get("path"):
-            score[node["path"]] = score.get(node["path"], 0) + entry["score"]; reasons[node["path"]] = "query:%s" % entry["id"]
+        path = node.get("path", "")
+        if path:
+            score[path] = score.get(path, 0) + 1000 + entry["score"]
+            reasons[path] = "query:%s" % entry["id"]
+            if path not in entry_files:
+                entry_files.append(path)
+    for entry in entries:
         # An undirected expansion makes call/import neighbors useful whichever
         # side lexical matching found; Graph.trace intentionally has in/out API.
         for direction in ("out", "in"):
@@ -35,23 +45,26 @@ def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_
                 selected_nodes.add(item["id"])
                 node = index.nodes.get(item["id"], {})
                 path = node.get("path", "")
-                if path:
-                    score[path] = score.get(path, 0) + max(1, entry["score"] - item["distance"] * 5)
-                    reasons.setdefault(path, "neighbor:%s" % entry["id"])
-    entry_files = sorted(score)
+                if not path or path in entry_files or neighbor_hits.get(path, 0) >= 3:
+                    continue
+                neighbor_hits[path] = neighbor_hits.get(path, 0) + 1
+                score[path] = score.get(path, 0) + max(10, 40 - item["distance"] * 10)
+                reasons.setdefault(path, "neighbor:%s" % entry["id"])
     blast = blast_radius(index, entry_files, depth=depth)
     for path in blast["files"]:
-        score[path] = score.get(path, 0) + 3; reasons.setdefault(path, "blast")
+        if path not in entry_files:
+            score[path] = score.get(path, 0) + 20; reasons.setdefault(path, "blast")
     selected_paths = set(score)
     for edge in index.graph.get("edges", []):
         source = index.nodes.get(edge["source"], {})
         target = index.nodes.get(edge["target"], {})
         if source.get("kind") == "test" and target.get("path") in selected_paths:
             path = source.get("path", "")
-            if path:
-                score[path] = score.get(path, 0) + 4; reasons.setdefault(path, "connected-test")
-    ordered = sorted(score, key=lambda path: (-score[path], path))[:max(0, max_files)]
-    tests = sorted(path for path in blast["tests"] if path in ordered)
+            if path and reasons.get(path) != "connected-test":
+                score[path] = score.get(path, 0) + 25; reasons[path] = reasons.get(path, "connected-test")
+    is_test = lambda path: index.nodes.get("test:" + path, {}).get("kind") == "test"
+    ordered = sorted(score, key=lambda path: (is_test(path) and path not in entry_files, -score[path], path))[:max(0, max_files)]
+    tests = sorted(set(path for path in blast["tests"]) | set(path for path in score if is_test(path)))[:max(0, max_files)]
     degree = lambda ident: len(index.out.get(ident, [])) + len(index.ins.get(ident, []))
     hubs = sorted(({"id": ident, "degree": degree(ident)} for ident in selected_nodes if ident in index.nodes), key=lambda item: (-item["degree"], item["id"]))[:10]
     raw_bytes = sum((Path(repo) / path).stat().st_size for path in score if (Path(repo) / path).is_file())
