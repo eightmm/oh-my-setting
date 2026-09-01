@@ -425,6 +425,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage interoperability bash tests/interoperability-smoke.sh
   stage runtime-core bash tests/runtime-core-smoke.sh
   stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
+  stage graph bash tests/graph-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh
   stage functional-evolution bash tests/functional-evolution-smoke.sh
   stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh

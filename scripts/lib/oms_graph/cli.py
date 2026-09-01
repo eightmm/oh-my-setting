@@ -6,12 +6,20 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Optional, Sequence
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import GRAPH_PACKAGE_VERSION
+from . import render
 from .child_policy import CHILD_GRAPH_ERROR, child_action_is_read_only
 from .errors import GraphError
-from oms_runtime.common import CoreError
+from .project import blast as project_blast
+from .project import build as project_build
+from .project import context as project_context
+from .project.query import Graph
+from oms_runtime.common import CoreError, repo_root
+
+PROJECT_STATE_ENV = "OMS_PROJECT_GRAPH_STATE"
 
 
 def emit(value: Any, pretty: bool = False) -> None:
@@ -24,14 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pretty", action="store_true", help="pretty-print JSON")
     parser.add_argument("--version", action="version", version=GRAPH_PACKAGE_VERSION)
     groups = parser.add_subparsers(dest="group", required=True)
-    project = groups.add_parser("project", help="structural code graph: build, query, blast radius, context packs")
+    project = groups.add_parser("project", help="structural code graph: build, query, blast radius, context packs",
+                               description="Structural code graph over --repo. State lives in <repo>/.oms/project-graph/ unless %s names an absolute directory to use instead." % PROJECT_STATE_ENV)
     project_sub = project.add_subparsers(dest="action", required=True)
     build = project_sub.add_parser("build")
     build.add_argument("--force", action="store_true")
     build.add_argument("--include", action="append", default=[])
     build.add_argument("--exclude", action="append", default=[])
     build.add_argument("--max-bytes", type=int, default=2 * 1024 * 1024)
-    project_sub.add_parser("check")
+    build.add_argument("--json", action="store_true")
+    check = project_sub.add_parser("check")
+    check.add_argument("--json", action="store_true")
     show_map = project_sub.add_parser("map")
     show_map.add_argument("--json", action="store_true")
     show_map.add_argument("--mermaid", action="store_true")
@@ -118,8 +129,149 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _project_state(args: argparse.Namespace) -> Tuple[Path, Path]:
+    """Repository root plus the project-graph state directory this run writes to."""
+    repo = repo_root(args.repo)
+    override = os.environ.get(PROJECT_STATE_ENV, "").strip()
+    if override and not os.path.isabs(override):
+        raise GraphError("%s must be an absolute path: %s" % (PROJECT_STATE_ENV, override))
+    return repo, project_build.state_dir(repo, Path(override) if override else None)
+
+
+def _index(repo: Path, state: Path) -> Tuple[Dict[str, Any], Graph]:
+    graph = project_build.load_graph(repo, state=state)
+    return graph, Graph(graph)
+
+
+def _project_build(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    manifest = project_build.build(repo, state=state, include=args.include, exclude=args.exclude, max_bytes=args.max_bytes, force=args.force)
+    if args.json:
+        emit(manifest, args.pretty)
+        return 0
+    stats = manifest["stats"]
+    print("graph: built revision=%s files=%d nodes=%d edges=%d cached=%d parsed=%d skipped=%d"
+          % (manifest["revision"][:12], stats["files"], stats["nodes"], stats["edges"], stats["cached"], stats["parsed"], len(manifest["skipped"])))
+    return 0
+
+
+def _project_check(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    result = project_build.check(repo, state=state)
+    if args.json:
+        emit(result, args.pretty)
+        return 0 if result["fresh"] else 3
+    if result["fresh"]:
+        print("fresh")
+        return 0
+    if not result["present"]:
+        print("absent: run: oms graph project build")
+    for label in ("stale", "missing", "new"):
+        for path in result[label]:
+            print("%s: %s" % (label, path))
+    return 3
+
+
+def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    graph, index = _index(repo, state)
+    summary = index.map_summary()
+    if args.json:
+        emit(summary, args.pretty)
+    elif args.mermaid:
+        print(render.render_project_mermaid(graph.get("nodes", []), graph.get("edges", []), limit=200))
+    else:
+        print(render.render_project_map_text(summary))
+    return 0
+
+
+def _project_find(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    rows = _index(repo, state)[1].find(args.query, kinds=(args.kind,) if args.kind else (), limit=args.limit)
+    if args.json:
+        emit(rows, args.pretty)
+        return 0
+    for row in rows:
+        print("%s  %s  %s  %d" % (row["id"], row["kind"], row.get("path", ""), row["score"]))
+    return 0
+
+
+def _project_neighbors(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    rows = _index(repo, state)[1].neighbors(args.node, relation=args.relation, direction=args.direction)
+    if args.json:
+        emit(rows, args.pretty)
+        return 0
+    for row in rows:
+        print("%s  %s  %s  %s" % (row["direction"], row["relation"], row["confidence"], row["id"]))
+    return 0
+
+
+def _project_trace(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    result = _index(repo, state)[1].trace(args.node, direction=args.direction, depth=args.depth)
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    for row in result["nodes"]:
+        via = "  via %s" % row["via"] if row["via"] else ""
+        print("%s%s%s" % ("  " * int(row["distance"]), row["id"], via))
+    return 0
+
+
+def _project_blast(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    changed = project_blast.changed_paths(repo, base=args.base)
+    paths = sorted(set(args.path)) if args.path else sorted(set(changed["changed"]) | set(changed["untracked"]))
+    result = project_blast.blast_radius(_index(repo, state)[1], paths, depth=args.depth)
+    if args.json:
+        payload = dict(result)
+        payload["paths"] = paths
+        payload["changed_paths"] = changed
+        emit(payload, args.pretty)
+        return 0
+    for path in paths:
+        print("path: %s" % path)
+    for ident in result["seeds"]:
+        print("seed: %s" % ident)
+    for row in result["dependents"]:
+        print("%d  %s  (%s)" % (row["distance"], row["id"], row["via"]))
+    print("files:")
+    for path in result["files"]:
+        print("  %s" % path)
+    print("tests:")
+    for path in result["tests"]:
+        print("  %s" % path)
+    return 0
+
+
+def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    pack = project_context.context_pack(repo, _index(repo, state)[1], task=args.task, max_files=args.max_files, base=args.base, state=state)
+    if args.bundle:
+        pack["bundle"] = project_context.compile_bundle(repo, pack)
+    if args.json:
+        emit(pack, args.pretty)
+        return 0
+    print("task: %s" % pack["task"])
+    for entry in pack["entries"]:
+        print("entry: %s" % entry)
+    print("files:")
+    for item in pack["evidence"]:
+        print("  %s  %s  %d" % (item["path"], item["reason"], item["score"]))
+    print("tests:")
+    for path in pack["tests"]:
+        print("  %s" % path)
+    estimate = pack["byte_estimate"]
+    print("byte_estimate: raw_candidate_files=%d pack=%d" % (estimate["raw_candidate_files"], estimate["pack"]))
+    print("pack_path: %s" % pack["pack_path"])
+    if args.bundle:
+        print("bundle: selected_bytes=%d path=%s" % (pack["bundle"]["selected_bytes"], pack["bundle"]["bundle_path"]))
+    return 0
+
+
+PROJECT_ACTIONS = {"build": _project_build, "check": _project_check, "map": _project_map, "find": _project_find,
+                   "neighbors": _project_neighbors, "trace": _project_trace, "blast": _project_blast,
+                   "context": _project_context}
+
+
 def dispatch(args: argparse.Namespace) -> int:
-    raise GraphError("oms graph %s %s is not implemented yet" % (args.group, args.action))
+    if args.group != "project" or args.action not in PROJECT_ACTIONS:
+        raise GraphError("oms graph %s %s is not implemented yet" % (args.group, args.action))
+    repo, state = _project_state(args)
+    return PROJECT_ACTIONS[args.action](args, repo, state)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
