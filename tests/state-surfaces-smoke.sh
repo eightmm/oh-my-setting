@@ -537,9 +537,13 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
   local state="$TMP/inventory/.oms"
   local out="$TMP/inventory-out"
 
-  mkdir -p "$state/hooks" "$state/work-journal" "$state/plan"
+  mkdir -p "$state/hooks" "$state/work-journal" "$state/project-graph/cache" "$state/plan"
   printf 'row\n' > "$state/hooks/turn.jsonl"
   printf 'row\n' > "$state/work-journal/today.jsonl"
+  # The session-start hook refreshes an absent or stale project graph in the
+  # background, so a build can land mid-gate exactly like a hook turn does.
+  printf '{}\n' > "$state/project-graph/graph.json"
+  printf '{}\n' > "$state/project-graph/cache/abc.json"
   printf 'row\n' > "$state/ci.jsonl"
   printf '*\n' > "$state/.gitignore"
   printf 'row\n' > "$state/failures.jsonl"
@@ -550,7 +554,7 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
   grep -q '"failures.jsonl"' "$out" ||
     fail "failures.jsonl must stay covered: a forgotten --repo writes it"
   grep -q '"plan/tasks.json"' "$out" || fail "plan state must stay covered"
-  for ambient in ci.jsonl .gitignore hooks work-journal; do
+  for ambient in ci.jsonl .gitignore hooks work-journal project-graph; do
     if grep -q "\"$ambient" "$out"; then
       fail "$ambient is written by the live session and must not be inventoried"
     fi
@@ -559,11 +563,15 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
   # A nested path that merely repeats an ambient name is not ambient.
   printf 'row\n' > "$state/plan/ci.jsonl"
   printf '*\n' > "$state/plan/.gitignore"
+  mkdir -p "$state/plan/project-graph"
+  printf '{}\n' > "$state/plan/project-graph/graph.json"
   python3 "$ROOT/scripts/lib/oms-state-inventory.py" "$state" > "$out"
   grep -q '"plan/ci.jsonl"' "$out" ||
     fail "the exclusion must be anchored at the top level, not by name anywhere"
   grep -q '"plan/.gitignore"' "$out" ||
     fail "a nested .gitignore is state, not the top-level ownership marker"
+  grep -q '"plan/project-graph/graph.json"' "$out" ||
+    fail "only the top-level project-graph cache is ambient, not the name anywhere"
 
   # The shadow-judgment ledger is the one path-precise ambient entry: any
   # session starting in this checkout appends a row mid-gate. Only the

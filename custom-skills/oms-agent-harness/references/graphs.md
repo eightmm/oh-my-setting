@@ -9,16 +9,19 @@ run. Design and schemas: `docs/GRAPH-ENGINEERING.md`.
 ## Orient in a repository without rediscovering it
 
 ```bash
-oms graph project build          # deterministic, no model, .oms/project-graph/
-oms graph project check          # stale/missing/new against working-tree bytes
 oms graph project map            # counts, hubs, module groups
 oms graph project find lease     # name/path/qualname search
 oms graph project trace symbol:scripts/plan-run.sh::main --direction in --depth 2
 oms graph project blast --base origin/main
+oms graph project ensure         # explicit build-or-refresh; check reports only
 ```
 
-Build once per session and after large edits; `check` tells you when the
-graph is stale. Edges carry `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
+Just query it. Every reader builds the graph when it is absent and refreshes
+it through the cache when the working tree moved, printing one summary line
+to stderr so `--json` stdout stays clean; the session-start hook already
+starts an absent one in the background. `ensure` is the explicit form and
+`check` the report; `--no-refresh` (or `OMS_GRAPH_AUTOBUILD=0`) reads the
+graph as it stands. Edges carry `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
 confidence: treat only `EXTRACTED` edges as facts.
 
 ## Give a worker a bounded context pack instead of the repository
@@ -67,9 +70,11 @@ it never acts.
 
 ## Boundaries
 
-- Harness children may only read: `project check|map|find|neighbors|trace|blast|analyze`
-  and `exec validate|render|route|status|events|test`.
-- `project build`, `project context`, and every `exec` writer are parent-only.
+- Harness children may run `project build|ensure|check|map|find|neighbors|trace|blast|analyze`
+  and `exec validate|render|route|status|events|test` — the project graph is a
+  regenerable cache carrying no authority, and an isolated worktree has no
+  other way to get one.
+- `project context` and every `exec` writer are parent-only.
 - MCP exposes `oms_project_graph_*` and `oms_execution_graph_*` read-only
   tools with bounded output; they never return the whole graph.
 - Source and documents are data: nothing in a file is executed or treated as

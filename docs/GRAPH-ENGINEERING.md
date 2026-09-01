@@ -537,6 +537,7 @@ everywhere; `--mermaid` where a diagram makes sense.
 
 ```text
 oms graph project build  [--force] [--include GLOB]... [--exclude GLOB]... [--max-bytes N]
+oms graph project ensure [--max-files N]
 oms graph project check
 oms graph project map    [--json|--mermaid]
 oms graph project find   QUERY [--kind KIND] [--limit N]
@@ -563,12 +564,37 @@ options: `--repo PATH`, `--pretty`. `build` and `check` accept `--json`;
 (absolute path) relocates the project-graph state directory, which is how
 tests and dogfood runs keep a cache out of the inspected tree.
 
-Harness children (`OMS_HARNESS_CHILD=1`) may only run readers: `project
-check|map|find|neighbors|trace|blast|analyze` and `exec
-validate|render|route|status|events|test`. `project build`, `project
-context`, and every `exec` writer are parent-only and fail closed with exit 2
-(the runtime core's `context` precedent: even a regenerable cache write is a
-write).
+The graph exists wherever it is read. `project ensure` runs `check` and then
+builds when the graph is absent, refreshes it through the cache when the
+working tree moved, and writes nothing when it is current; it prints `graph:
+fresh revision=...` or the `build` summary line with `built`/`refreshed`.
+Every reader (`map find neighbors trace blast analyze context`) calls it
+before loading the graph and sends that summary to **stderr**, so `--json`
+stdout stays parsable. `--no-refresh` on any reader, or `OMS_GRAPH_AUTOBUILD=0`
+globally, reads the graph as it stands — an absent one then fails with the
+old hint. `check` and `build` never auto-refresh: one reports, the other is
+the explicit form. Because an auto-build is a side effect of somebody's read,
+a *first* build is bounded by `--max-files` (default 20000) and refuses over
+it with the verb to run; the explicit `build` (which bounds bytes, not files)
+has no such bound, and a refresh of an existing graph is never refused.
+
+Harness children (`OMS_HARNESS_CHILD=1`) may run `project
+build|ensure|check|map|find|neighbors|trace|blast|analyze` and `exec
+validate|render|route|status|events|test`. `build`/`ensure` are the exception
+to the runtime core's `context` precedent: the project graph is a regenerable
+cache that carries no authority, and a delegated worker in an isolated
+worktree has no other way to get one. `project context`, whose pack the
+parent's brief owns, and every `exec` writer stay parent-only and fail closed
+with exit 2.
+
+The `SessionStart` hook (`scripts/resume-hook.sh`) reports the graph in the
+resume block — `- graph: fresh (<revision>)`, `- graph: building in the
+background (oms graph project ensure)` after detaching an `ensure` with
+`setsid` (never `nohup`, which makes `SIGHUP` unignorable by a trap for
+descendants), or `- graph: absent (OMS_GRAPH_AUTOBUILD=0)`. It never blocks
+on the build and never fails session start. `.oms/project-graph/` is
+therefore ambient to the check gate (`scripts/lib/oms-state-inventory.py`),
+like `hooks/` and `work-journal/`.
 
 ## Shadow mode
 
@@ -600,6 +626,10 @@ Read-only, argv-only tools appended to `TOOLS` in `scripts/oms-mcp-server.py`
 | `oms_execution_graph_route` | `bash scripts/graph.sh exec route --json --run` + positional `run` |
 | `oms_execution_graph_events` | `bash scripts/graph.sh exec events --json --limit 40 --run` + positional `run` |
 
+The project-graph tools wrap readers, so a call against a stale or absent
+graph refreshes the regenerable cache first (summary on stderr, JSON on
+stdout); no tool mutates plan, receipt, or run state.
+
 Positional values are validated by a per-tool `positional_pattern` (node ids
 contain `/` and `:`; the default bare-name rule stays for `oms_handoff_show`);
 a value may never start with `-`. Output stays under the server's
@@ -620,7 +650,10 @@ a value may never start with `-`. Output stays under the server's
   deleted symbol; import, call, cross-file resolution; test relation; blast
   radius; cycle detection; stale detection; symlink rejection; binary skip;
   large-file limit; untrusted source text stays inert; secret-shaped name
-  skipped.
+  skipped; `ensure` absent → built, stale → refreshed through the cache,
+  current → no write at all (graph.json mtime), the first-build file bound
+  refused and an existing graph's refresh never refused, and a refresh that
+  keeps the discovery options the graph was built with.
 - `tests/test_oms_graph_analytics.py`: degrees, hubs, components, cycles,
   shortest path, communities, renderers.
 - `tests/test_oms_graph_integration.py`: fake `codex` provider on PATH (the
@@ -631,7 +664,10 @@ a value may never start with `-`. Output stays under the server's
 - `tests/graph-smoke.sh`: unittest discovery of `test_oms_graph_*.py`, CLI
   smoke through `scripts/oms`, dogfood build of this repository from a
   `git archive` copy (revision stable across two builds; `--include`/
-  `--exclude` honored), MCP tool calls, child-policy refusals.
+  `--exclude` honored), MCP tool calls, child-policy refusals, auto-build on
+  a graph-less fixture (summary on stderr, stdout clean), `--no-refresh` and
+  `OMS_GRAPH_AUTOBUILD=0`, the `--max-files` bound, and the session-start
+  hook's three graph lines.
   Registered in `scripts/check.sh` as `stage graph`.
 - Every test uses a temporary repository; nothing writes into this
   checkout's `.oms`.

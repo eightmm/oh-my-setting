@@ -10,7 +10,8 @@ import sys
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from oms_graph.project.blast import blast_radius
-from oms_graph.project.build import build, check, load_graph
+from oms_graph.errors import GraphError
+from oms_graph.project.build import build, check, ensure, load_graph
 from oms_graph.project.context import context_pack
 from oms_graph.project.query import Graph
 
@@ -104,6 +105,62 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertTrue((self.state / pack["pack_path"]).is_file() if not pack["pack_path"].startswith("context/") else (self.state / pack["pack_path"]).is_file())
         included = build(self.repo, state=self.state, include=("keep.py",))
         self.assertEqual(list(included["files"]), ["keep.py"])
+
+    def test_ensure_builds_refreshes_and_leaves_a_current_graph_alone(self) -> None:
+        self.write("a.py", "def first():\n    return 1\n")
+        self.write("b.py", "import a\n")
+        first = ensure(self.repo, state=self.state)
+        self.assertEqual(first["action"], "built")
+        self.assertEqual(first["stats"]["cached"], 0)
+        self.assertTrue(load_graph(self.repo, state=self.state)["nodes"])
+
+        # A current graph is read, never rewritten: the bytes and the mtime of
+        # graph.json are the evidence, since a rebuild is deterministic and
+        # would otherwise be invisible.
+        graph_file = self.state / "graph.json"
+        before = (graph_file.read_bytes(), graph_file.stat().st_mtime_ns)
+        os.utime(graph_file, ns=(before[1] - 2_000_000_000, before[1] - 2_000_000_000))
+        stamp = graph_file.stat().st_mtime_ns
+        fresh = ensure(self.repo, state=self.state)
+        self.assertEqual(fresh["action"], "fresh")
+        self.assertEqual(fresh["revision"], first["revision"])
+        self.assertNotIn("stats", fresh)
+        self.assertEqual(graph_file.stat().st_mtime_ns, stamp)
+
+        # A stale graph is refreshed through the cache, so only the edited
+        # file is re-parsed.
+        self.write("a.py", "def second():\n    return 2\n")
+        refreshed = ensure(self.repo, state=self.state)
+        self.assertEqual(refreshed["action"], "refreshed")
+        self.assertNotEqual(refreshed["revision"], first["revision"])
+        self.assertLess(refreshed["stats"]["cached"], refreshed["stats"]["files"])
+        self.assertEqual(refreshed["stats"]["parsed"], 1)
+        self.assertTrue(check(self.repo, state=self.state)["fresh"])
+
+    def test_ensure_refuses_a_first_build_over_the_file_bound_but_never_a_refresh(self) -> None:
+        self.write("a.py", "def first():\n    return 1\n")
+        self.write("b.py", "def second():\n    return 2\n")
+        with self.assertRaises(GraphError) as caught:
+            ensure(self.repo, state=self.state, max_files=1)
+        self.assertIn("2 files exceed the 1-file bound", str(caught.exception))
+        self.assertFalse((self.state / "graph.json").exists())
+        # The explicit build has no file bound, and once a graph exists its
+        # refresh is never refused: whoever built it already decided.
+        build(self.repo, state=self.state)
+        self.assertEqual(ensure(self.repo, state=self.state, max_files=1)["action"], "fresh")
+        self.write("a.py", "def third():\n    return 3\n")
+        self.assertEqual(ensure(self.repo, state=self.state, max_files=1)["action"], "refreshed")
+
+    def test_ensure_refresh_keeps_the_discovery_options_the_graph_was_built_with(self) -> None:
+        self.write("keep.py", "def keep():\n    return 1\n")
+        self.write("drop.py", "def drop():\n    return 2\n")
+        build(self.repo, state=self.state, exclude=("drop.py",))
+        self.write("keep.py", "def kept():\n    return 1\n")
+        refreshed = ensure(self.repo, state=self.state)
+        self.assertEqual(refreshed["action"], "refreshed")
+        self.assertEqual(refreshed["stats"]["files"], 1)
+        self.assertNotIn("symbol:drop.py::drop", {node["id"] for node in load_graph(self.repo, state=self.state)["nodes"]})
+        self.assertTrue(check(self.repo, state=self.state)["fresh"])
 
     def test_import_cycle_and_cache_reuse(self) -> None:
         self.write("a.py", "import b\n")

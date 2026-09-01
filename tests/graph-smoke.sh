@@ -24,7 +24,12 @@ PYTHONPATH="$ROOT/scripts/lib" python3 -m unittest discover -v -s "$ROOT/tests" 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-fixture.XXXXXX")"
 work="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-work.XXXXXX")"
 dog="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-dogfood.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog"' EXIT INT TERM HUP
+# Two more copies of the fixture: the auto-build assertions need a repository
+# nobody has built a graph in, and the session-start hook needs one of its own
+# because its build lands in the background.
+auto="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-auto.XXXXXX")"
+hook="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-hook.XXXXXX")"
+trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$hook"' EXIT INT TERM HUP
 
 mkdir -p "$tmp/scripts/lib" "$tmp/docs" "$tmp/tests"
 git -C "$tmp" init -q -b main
@@ -69,6 +74,9 @@ cat > "$tmp/tests/smoke-test.sh" <<'EOF'
 set -euo pipefail
 bash scripts/run.sh
 EOF
+
+# Copy the six fixture files before anything builds a graph over them.
+cp -R "$tmp/." "$auto/"
 
 graph_rc=0
 run_graph() {  # run_graph OUTPUT ARGS...
@@ -192,13 +200,125 @@ assert pack["pack_path"].startswith(".oms/project-graph/context/"), pack["pack_p
 assert os.path.isfile(os.path.join(sys.argv[2], pack["pack_path"])), pack["pack_path"]
 PY
 
-# A delegated harness child may read the graph but never write one, and the
-# refusal has to be actionable.
+# --- auto-build -------------------------------------------------------------
+# A graph nobody built is not the reader's problem: every reader ensures one
+# first. The summary goes to stderr so a --json stdout stays parsable.
+auto_rc=0
+"$OMS" graph --repo "$auto" project find alpha_entry \
+  > "$work/auto-find.out" 2> "$work/auto-find.err" || auto_rc=$?
+[ "$auto_rc" -eq 0 ] || fail "find without a graph exited $auto_rc: $(cat "$work/auto-find.err")"
+grep -Eq '^graph: built revision=[0-9a-f]{12} files=6 ' "$work/auto-find.err" \
+  || fail "the auto-build summary did not reach stderr: $(cat "$work/auto-find.err")"
+grep -Fq 'symbol:alpha.py::alpha_entry' "$work/auto-find.out" \
+  || fail "find did not answer from the graph it built: $(cat "$work/auto-find.out")"
+if grep -Fq 'graph:' "$work/auto-find.out"; then
+  fail "the auto-build summary polluted stdout: $(cat "$work/auto-find.out")"
+fi
+
+# An edit is refreshed through the cache, so a stale graph costs one re-parse.
+printf '\n\ndef alpha_more(value):\n    return value\n' >> "$auto/alpha.py"
+auto_rc=0
+"$OMS" graph --repo "$auto" project map --json \
+  > "$work/auto-map.json" 2> "$work/auto-map.err" || auto_rc=$?
+[ "$auto_rc" -eq 0 ] || fail "map after an edit exited $auto_rc: $(cat "$work/auto-map.err")"
+grep -Eq '^graph: refreshed revision=[0-9a-f]{12} .* cached=5 parsed=1 ' "$work/auto-map.err" \
+  || fail "the reader did not refresh incrementally: $(cat "$work/auto-map.err")"
+python3 - "$work/auto-map.json" <<'PY'
+import json
+import sys
+summary = json.load(open(sys.argv[1]))
+assert summary["counts"]["kind"].get("function"), summary["counts"]
+PY
+
+run_graph_auto() {  # run_graph_auto OUTPUT ARGS...
+  out="$1"
+  shift
+  auto_rc=0
+  "$OMS" graph --repo "$auto" "$@" > "$out" 2>&1 || auto_rc=$?
+}
+
+run_graph_auto "$work/auto-ensure.out" project ensure
+[ "$auto_rc" -eq 0 ] || fail "ensure on a current graph exited $auto_rc: $(cat "$work/auto-ensure.out")"
+grep -Eqx 'graph: fresh revision=[0-9a-f]{12}' "$work/auto-ensure.out" \
+  || fail "ensure did not report a current graph: $(cat "$work/auto-ensure.out")"
+
+# The opt-out restores the old contract: an absent graph is the reader's
+# error, with the hint that names the verb to run.
+auto_rc=0
+OMS_GRAPH_AUTOBUILD=0 OMS_PROJECT_GRAPH_STATE="$work/no-autobuild" \
+  "$OMS" graph --repo "$auto" project find alpha_entry > "$work/no-autobuild.out" 2>&1 || auto_rc=$?
+[ "$auto_rc" -eq 2 ] || fail "opt-out find exited $auto_rc, expected 2: $(cat "$work/no-autobuild.out")"
+grep -Fq 'project graph has not been built; run: oms graph project build' "$work/no-autobuild.out" \
+  || fail "the opt-out refusal lost its hint: $(cat "$work/no-autobuild.out")"
+
+# --no-refresh reads the graph as it stands and leaves it stale.
+printf '\n\ndef alpha_again(value):\n    return value\n' >> "$auto/alpha.py"
+auto_rc=0
+"$OMS" graph --repo "$auto" project map --json --no-refresh \
+  > "$work/no-refresh.json" 2> "$work/no-refresh.err" || auto_rc=$?
+[ "$auto_rc" -eq 0 ] || fail "--no-refresh map exited $auto_rc: $(cat "$work/no-refresh.err")"
+[ ! -s "$work/no-refresh.err" ] || fail "--no-refresh still refreshed: $(cat "$work/no-refresh.err")"
+run_graph_auto "$work/no-refresh-check.out" project check
+[ "$auto_rc" -eq 3 ] || fail "--no-refresh rebuilt the graph anyway: $(cat "$work/no-refresh-check.out")"
+grep -Fq 'stale: alpha.py' "$work/no-refresh-check.out" \
+  || fail "--no-refresh check lost the stale path: $(cat "$work/no-refresh-check.out")"
+
+# The file bound belongs to the auto-build alone: the explicit `build` (which
+# bounds bytes, not files) has none, and a refresh is never refused.
+auto_rc=0
+OMS_PROJECT_GRAPH_STATE="$work/bounded" "$OMS" graph --repo "$auto" project ensure --max-files 1 \
+  > "$work/bounded.out" 2>&1 || auto_rc=$?
+[ "$auto_rc" -eq 2 ] || fail "the bounded ensure exited $auto_rc, expected 2: $(cat "$work/bounded.out")"
+grep -Fq '6 files exceed the 1-file bound' "$work/bounded.out" \
+  || fail "the refusal did not name the bound: $(cat "$work/bounded.out")"
+auto_rc=0
+OMS_PROJECT_GRAPH_STATE="$work/bounded" "$OMS" graph --repo "$auto" project build \
+  > "$work/bounded-build.out" 2>&1 || auto_rc=$?
+[ "$auto_rc" -eq 0 ] || fail "the explicit build inherited the file bound: $(cat "$work/bounded-build.out")"
+auto_rc=0
+OMS_PROJECT_GRAPH_STATE="$work/bounded" "$OMS" graph --repo "$auto" project ensure --max-files 1 \
+  > "$work/bounded-again.out" 2>&1 || auto_rc=$?
+[ "$auto_rc" -eq 0 ] || fail "an existing graph was refused a refresh: $(cat "$work/bounded-again.out")"
+
+# --- session-start hook -----------------------------------------------------
+# The hook reports the graph and starts an absent one in the background; it
+# never blocks and never fails session start.
+hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$tmp" | "$ROOT/scripts/resume-hook.sh")" \
+  || fail "the resume hook must exit 0"
+printf '%s\n' "$hook_out" | grep -Eq '^- graph: fresh \([0-9a-f]{12}\)$' \
+  || fail "the hook did not report a current graph: $hook_out"
+hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$auto" |
+  OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" || fail "the resume hook must exit 0"
+printf '%s\n' "$hook_out" | grep -Fq -- '- graph: absent (OMS_GRAPH_AUTOBUILD=0)' \
+  || fail "the hook ignored the auto-build opt-out: $hook_out"
+cp -R "$auto/." "$hook/"
+rm -rf "$hook/.oms/project-graph"
+hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$hook" | "$ROOT/scripts/resume-hook.sh")" \
+  || fail "the resume hook must exit 0"
+printf '%s\n' "$hook_out" | grep -Fq -- '- graph: building in the background (oms graph project ensure)' \
+  || fail "the hook did not start a background build: $hook_out"
+# Reap the detached build before the trap removes its repository. The line
+# above is the contract; landing inside this window is not asserted.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if [ -f "$hook/.oms/project-graph/graph.json" ]; then break; fi
+  sleep 1
+done
+
+# A delegated harness child may build the cache it needs — a regenerable graph
+# carries no authority and an isolated worktree has no other way to get one —
+# but the context pack a parent's brief owns stays parent-only.
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$tmp" project build > "$work/child-build.out" 2>&1 || child_rc=$?
-[ "$child_rc" -eq 2 ] || fail "child build exited $child_rc, expected 2: $(cat "$work/child-build.out")"
-grep -Fq 'a harness child may only use read-only graph actions' "$work/child-build.out" \
-  || fail "child refusal was not actionable: $(cat "$work/child-build.out")"
+[ "$child_rc" -eq 0 ] || fail "child build exited $child_rc: $(cat "$work/child-build.out")"
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$tmp" project ensure > "$work/child-ensure.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 0 ] || fail "child ensure exited $child_rc: $(cat "$work/child-ensure.out")"
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$tmp" project context --task alpha \
+  > "$work/child-context.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 2 ] || fail "child context exited $child_rc, expected 2: $(cat "$work/child-context.out")"
+grep -Fq 'a harness child may only use read-only graph actions' "$work/child-context.out" \
+  || fail "child refusal was not actionable: $(cat "$work/child-context.out")"
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$tmp" project map --json > "$work/child-map.json" 2>&1 || child_rc=$?
 [ "$child_rc" -eq 0 ] || fail "child read exited $child_rc: $(cat "$work/child-map.json")"
@@ -239,7 +359,7 @@ dog_files2="$(sed -n 's/^graph: built .* files=\([0-9][0-9]*\) .*$/\1/p' "$work/
 # receipt facts, so an empty tree would exercise nothing. No provider is
 # needed here — `exec run` only ever appears as --dry-run.
 exec_repo="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-exec.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog" "$exec_repo"' EXIT INT TERM HUP
+trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$hook" "$exec_repo"' EXIT INT TERM HUP
 
 exec_rc=0
 # The gate scrubs the invoking session's own harness identity: a run that

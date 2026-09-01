@@ -8,11 +8,13 @@ and empty directories.
 
 Ambient entries are excluded because the live agent session writes them on its
 own schedule, with no relation to the gate: hooks/ and work-journal/ on every
-turn, ci.jsonl whenever the CI watcher records a run for a push, and the
-autopilot shadow-judgment ledger whenever any session starts in this checkout
-— a green 25-minute gate is a wide window for those to land and read as a
-suite defect. Everything else stays covered, including failures.jsonl, where
-a forgotten --repo is exactly the bug worth catching.
+turn, ci.jsonl whenever the CI watcher records a run for a push, project-graph/
+whenever a session starts in this checkout without a current graph and the
+session-start hook refreshes it in the background, and the autopilot
+shadow-judgment ledger whenever any session starts here — a green 25-minute
+gate is a wide window for those to land and read as a suite defect. Everything
+else stays covered, including failures.jsonl, where a forgotten --repo is
+exactly the bug worth catching.
 
 Usage: oms-state-inventory.py OMS_DIR
 """
@@ -25,7 +27,7 @@ import os
 import stat
 import sys
 
-AMBIENT_DIRS = {"hooks", "work-journal"}
+AMBIENT_DIRS = {"hooks", "work-journal", "project-graph"}
 # .gitignore is the constant ownership marker ("*") every harness tool drops
 # when it first touches a repository's .oms; the ambient CI watcher creates it
 # together with ci.jsonl, so excluding one without the other still failed a

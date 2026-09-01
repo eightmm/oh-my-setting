@@ -15,6 +15,11 @@ from ..errors import GraphError
 # cache, so it gets its own ceiling. Canonical one-line JSON keeps the bytes
 # deterministic and about half the size of the pretty form.
 GRAPH_BYTES_LIMIT = 256 * 1024 * 1024
+# An auto-build is a side effect of somebody's read, so it carries a bound the
+# explicit `build` does not: a first graph over an enormous tree has to be a
+# decision, not a surprise. A refresh of an existing graph is never refused —
+# whoever built it already made that decision.
+AUTOBUILD_MAX_FILES = 20000
 
 from .cache import cache_key, load_cached, prune, store
 from .extract import discover_files, extract_file
@@ -64,6 +69,31 @@ def build(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = 
     atomic_write_json(directory / "manifest.json", manifest)
     prune(directory, keys)
     return manifest
+
+
+def ensure(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = (), exclude: Sequence[str] = (), max_bytes: int = 2 * 1024 * 1024, max_files: int = AUTOBUILD_MAX_FILES) -> Dict[str, Any]:
+    """Make the graph current and say what that cost: {"action": fresh|built|refreshed, "revision", ["stats", "skipped"]}."""
+    repo = Path(repo).resolve()
+    status = check(repo, state=state)
+    if status["present"] and status["fresh"]:
+        return {"action": "fresh", "revision": status["revision"]}
+    if status["present"]:
+        # A refresh keeps the discovery options the graph was built with. A
+        # reader must never widen (or narrow) an explicit --include/--exclude
+        # by refreshing with this call's defaults; `check` compares against
+        # those same stored options, so anything else would also never settle.
+        manifest = read_json(state_dir(repo, state) / "manifest.json", {})
+        options = manifest.get("discovery") if isinstance(manifest, dict) and isinstance(manifest.get("discovery"), dict) else {}
+        include = tuple(options.get("include") or ())
+        exclude = tuple(options.get("exclude") or ())
+        max_bytes = int(options.get("max_bytes", max_bytes))
+    else:
+        found = len(discover_files(repo, include=include, exclude=exclude, max_bytes=max_bytes)["files"])
+        if found > max_files:
+            raise GraphError("project graph auto-build skipped: %d files exceed the %d-file bound; run: oms graph project build" % (found, max_files))
+    manifest = build(repo, state=state, include=include, exclude=exclude, max_bytes=max_bytes)
+    return {"action": "refreshed" if status["present"] else "built", "revision": manifest["revision"],
+            "stats": manifest["stats"], "skipped": len(manifest["skipped"])}
 
 
 def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:

@@ -15,7 +15,7 @@ from . import render
 from . import route as exec_route
 from . import runner
 from . import shadow as exec_shadow
-from .child_policy import CHILD_GRAPH_ERROR, child_action_is_read_only
+from .child_policy import CHILD_GRAPH_ERROR, child_action_is_allowed
 from .errors import GraphError
 from .facts import collect_facts
 from .project import analytics
@@ -28,6 +28,11 @@ from .validate import validate_spec
 from oms_runtime.common import CoreError, read_json, repo_root
 
 PROJECT_STATE_ENV = "OMS_PROJECT_GRAPH_STATE"
+AUTOBUILD_ENV = "OMS_GRAPH_AUTOBUILD"
+# Readers that keep the graph current themselves, so `oms graph project find`
+# works in a repository nobody has built yet. `check` reports freshness and
+# `build` is the explicit form: neither may refresh behind the caller's back.
+AUTO_REFRESH_ACTIONS = ("map", "find", "neighbors", "trace", "blast", "analyze", "context")
 
 
 def emit(value: Any, pretty: bool = False) -> None:
@@ -41,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=GRAPH_PACKAGE_VERSION)
     groups = parser.add_subparsers(dest="group", required=True)
     project = groups.add_parser("project", help="structural code graph: build, query, blast radius, context packs",
-                               description="Structural code graph over --repo. State lives in <repo>/.oms/project-graph/ unless %s names an absolute directory to use instead." % PROJECT_STATE_ENV)
+                               description="Structural code graph over --repo. State lives in <repo>/.oms/project-graph/ unless %s names an absolute directory to use instead. Readers build or refresh it themselves unless --no-refresh or %s=0 says otherwise." % (PROJECT_STATE_ENV, AUTOBUILD_ENV))
     project_sub = project.add_subparsers(dest="action", required=True)
     build = project_sub.add_parser("build")
     build.add_argument("--force", action="store_true")
@@ -49,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--exclude", action="append", default=[])
     build.add_argument("--max-bytes", type=int, default=2 * 1024 * 1024)
     build.add_argument("--json", action="store_true")
+    ensure = project_sub.add_parser("ensure")
+    ensure.add_argument("--max-files", type=int, default=project_build.AUTOBUILD_MAX_FILES)
+    ensure.add_argument("--json", action="store_true")
     check = project_sub.add_parser("check")
     check.add_argument("--json", action="store_true")
     show_map = project_sub.add_parser("map")
@@ -86,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--bundle", action="store_true")
     context.add_argument("--base", default="")
     context.add_argument("--json", action="store_true")
+    for reader in (show_map, find, neighbors, trace, blast, analyze, context):
+        reader.add_argument("--no-refresh", action="store_true", help="read the graph as it stands; never build or refresh it")
     execution = groups.add_parser("exec", help="execution graph: validate, route, run, resume, decide, status, events")
     exec_sub = execution.add_subparsers(dest="action", required=True)
     validate = exec_sub.add_parser("validate")
@@ -157,14 +167,32 @@ def _index(repo: Path, state: Path) -> Tuple[Dict[str, Any], Graph]:
     return graph, Graph(graph)
 
 
+def _build_summary(action: str, revision: str, stats: Dict[str, int], skipped: int) -> str:
+    return ("graph: %s revision=%s files=%d nodes=%d edges=%d cached=%d parsed=%d skipped=%d"
+            % (action, revision[:12], stats["files"], stats["nodes"], stats["edges"], stats["cached"], stats["parsed"], skipped))
+
+
+def _ensure_summary(result: Dict[str, Any]) -> str:
+    if result["action"] == "fresh":
+        return "graph: fresh revision=%s" % result["revision"][:12]
+    return _build_summary(result["action"], result["revision"], result["stats"], result["skipped"])
+
+
 def _project_build(args: argparse.Namespace, repo: Path, state: Path) -> int:
     manifest = project_build.build(repo, state=state, include=args.include, exclude=args.exclude, max_bytes=args.max_bytes, force=args.force)
     if args.json:
         emit(manifest, args.pretty)
         return 0
-    stats = manifest["stats"]
-    print("graph: built revision=%s files=%d nodes=%d edges=%d cached=%d parsed=%d skipped=%d"
-          % (manifest["revision"][:12], stats["files"], stats["nodes"], stats["edges"], stats["cached"], stats["parsed"], len(manifest["skipped"])))
+    print(_build_summary("built", manifest["revision"], manifest["stats"], len(manifest["skipped"])))
+    return 0
+
+
+def _project_ensure(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    result = project_build.ensure(repo, state=state, max_files=args.max_files)
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print(_ensure_summary(result))
     return 0
 
 
@@ -309,9 +337,9 @@ def _project_analyze(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
-PROJECT_ACTIONS = {"build": _project_build, "check": _project_check, "map": _project_map, "find": _project_find,
-                   "neighbors": _project_neighbors, "trace": _project_trace, "blast": _project_blast,
-                   "analyze": _project_analyze, "context": _project_context}
+PROJECT_ACTIONS = {"build": _project_build, "ensure": _project_ensure, "check": _project_check, "map": _project_map,
+                   "find": _project_find, "neighbors": _project_neighbors, "trace": _project_trace,
+                   "blast": _project_blast, "analyze": _project_analyze, "context": _project_context}
 
 STOP_STATUSES = ("gate", "blocked", "exhausted", "waiting", "invalid")
 
@@ -499,9 +527,25 @@ EXEC_ACTIONS = {"validate": _exec_validate, "render": _exec_render, "route": _ex
                 "shadow": _exec_shadow, "test": _exec_test}
 
 
+def _auto_refresh(args: argparse.Namespace, repo: Path, state: Path) -> None:
+    """Keep a reader's graph current, so no verb ever asks its caller to go build one.
+
+    The summary goes to stderr: a build is a side effect of the read, and
+    `--json` stdout has to stay parsable.
+    """
+    if args.action not in AUTO_REFRESH_ACTIONS or getattr(args, "no_refresh", False):
+        return
+    if os.environ.get(AUTOBUILD_ENV, "").strip() == "0":
+        return
+    result = project_build.ensure(repo, state=state)
+    if result["action"] != "fresh":
+        print(_ensure_summary(result), file=sys.stderr)
+
+
 def dispatch(args: argparse.Namespace) -> int:
     if args.group == "project" and args.action in PROJECT_ACTIONS:
         repo, state = _project_state(args)
+        _auto_refresh(args, repo, state)
         return PROJECT_ACTIONS[args.action](args, repo, state)
     if args.group == "exec" and args.action in EXEC_ACTIONS:
         return EXEC_ACTIONS[args.action](args)
@@ -511,7 +555,7 @@ def dispatch(args: argparse.Namespace) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if os.environ.get("OMS_HARNESS_CHILD") == "1" and not child_action_is_read_only(args):
+        if os.environ.get("OMS_HARNESS_CHILD") == "1" and not child_action_is_allowed(args):
             raise GraphError(CHILD_GRAPH_ERROR)
         return dispatch(args)
     except CoreError as exc:

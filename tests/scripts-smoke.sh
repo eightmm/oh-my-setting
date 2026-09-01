@@ -16923,7 +16923,7 @@ test_resume_hook_prints_bounded_resume_block() {
   printf '{"session":"peer111","ts":"%s","cwd_hash":"x","hook":"PostToolUse"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$repo/.oms/hooks/events.jsonl"
 
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0"
   printf '%s\n' "$out" | grep -q '^\[oms resume\]' || fail "missing resume header: $out"
   printf '%s\n' "$out" | grep -q 'Ship the resume surface' || fail "missing task goal"
@@ -16939,6 +16939,11 @@ test_resume_hook_prints_bounded_resume_block() {
     fail "missing handoff pointer"
   printf '%s\n' "$out" | grep -q 'failures: 1 actionable' || fail "missing failure line"
   printf '%s\n' "$out" | grep -q 'peers: another session' || fail "missing peer warning"
+  # The project graph is reported every session; OMS_GRAPH_AUTOBUILD=0 keeps
+  # this test hermetic, since otherwise each call here detaches a real build
+  # into the fixture repository.
+  printf '%s\n' "$out" | grep -Fq -- '- graph: absent (OMS_GRAPH_AUTOBUILD=0)' ||
+    fail "missing project-graph line: $out"
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
 
   # Native Windows Python writes CRLF to a pipe. Every value read back into
@@ -16953,7 +16958,8 @@ EOF
   chmod +x "$crlf_bin/python3"
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" |
     PATH="$crlf_bin:/usr/bin:/bin" OMS_TEST_REAL_PYTHON="$real_python" \
-      "$ROOT/scripts/resume-hook.sh")" || fail "CRLF resume hook must exit 0"
+      OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" ||
+    fail "CRLF resume hook must exit 0"
   printf '%s\n' "$out" | grep -q 'plan: Unify the writer contract' ||
     fail "CRLF Python output hid the active plan: $out"
   case "$out" in
@@ -16963,7 +16969,7 @@ EOF
   # A resolved failure leaves the count — the event name is "resolved", which
   # a prior version of this hook misread and counted forever.
   ( cd "$repo" && "$ROOT/scripts/fail-ledger.sh" resolve --cmd "pytest -k boom" >/dev/null 2>&1 )
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
   if printf '%s\n' "$out" | grep -q 'failures:'; then
     fail "a resolved failure must drop out of the resume count: $out"
   fi
@@ -16978,7 +16984,7 @@ row = {"session": me,
        "hook": "PostToolUse"}
 open(sys.argv[1], "w").write(json.dumps(row) + "\n")
 PY
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
   if printf '%s\n' "$out" | grep -q 'peers:'; then
     fail "own session must not be reported as a peer"
   fi
@@ -16994,7 +17000,7 @@ rows = [{"session": "child0", "ts": now, "hook": "UserPromptSubmit",
         {"session": "child1", "ts": now, "hook": "Stop", "origin": "peer-review"}]
 open(sys.argv[1], "w").write("".join(json.dumps(row) + "\n" for row in rows))
 PY
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
   if printf '%s\n' "$out" | grep -q 'peers:'; then
     fail "harness child rows must not be reported as a peer"
   fi
@@ -17004,7 +17010,7 @@ PY
   # refuses to load (the refusal is the receipt's problem, not the hook's).
   mkdir -p "$repo/.oms/plan"
   printf 'not json\n' > "$repo/.oms/plan/autopilot-run.json"
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0 with a malformed receipt"
   if printf '%s\n' "$out" | grep -q 'autopilot:'; then
     fail "a malformed receipt must not produce an autopilot line: $out"
@@ -17012,11 +17018,11 @@ PY
   rm -f "$repo/.oms/plan/autopilot-run.json"
 
   # Outside an adopted repo, and when disabled: exit 0 with no output.
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$TMP" | "$ROOT/scripts/resume-hook.sh")" ||
+  out="$(printf '{"session_id":"me","cwd":"%s"}' "$TMP" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0 outside an adopted repo"
   [ -z "$out" ] || fail "non-adopted dir must stay silent"
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" |
-    OMS_RESUME_HOOK=0 "$ROOT/scripts/resume-hook.sh")"
+    OMS_RESUME_HOOK=0 OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
   [ -z "$out" ] || fail "OMS_RESUME_HOOK=0 must disable the hook"
 }
 
@@ -22878,7 +22884,8 @@ assert row["priority"] == "P3" and "current" in row["summary"], row
 ' || fail "inbox did not surface imported capsule review: $inbox_json"
 
   resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
-    "$ROOT/scripts/resume-hook.sh")" || fail "resume hook rejected imported capsule"
+    OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" ||
+    fail "resume hook rejected imported capsule"
   printf '%s\n' "$resume_out" | grep -Fq 'portable capsule' ||
     fail "resume hook did not surface imported capsule: $resume_out"
   printf '%s\n' "$resume_out" | grep -Fq 'current; advisory only' ||
@@ -22916,7 +22923,7 @@ assert row["status"] == "invalid" and row["capsule_id"] == "'"$latest_id"'", row
     'imported capsule: unknown status=invalid' ||
     fail "state rendered a null capsule id instead of unknown: $state_text"
   resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
-    "$ROOT/scripts/resume-hook.sh")"
+    OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
   printf '%s\n' "$resume_out" | grep -Fq \
     'portable capsule unknown (invalid; advisory only' ||
     fail "resume rendered a null capsule id instead of unknown: $resume_out"

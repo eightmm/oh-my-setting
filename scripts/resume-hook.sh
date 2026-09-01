@@ -5,10 +5,10 @@ set -uo pipefail
 # knowing what this repo was doing — active task packet (goal, next step,
 # verify), newest handoff digest, unresolved failures, and whether another
 # live session is using the same worktree. Everything here is read from .oms
-# state that was scrubbed at write time. The one write this hook makes is
-# the autopilot shadow-judgment row (append-only evidence ledger, ambient
-# to the check gate); receipts, claims, and every other surface stay
-# untouched.
+# state that was scrubbed at write time. The two writes this hook makes are
+# the autopilot shadow-judgment row and a detached project-graph build, both
+# regenerable and both ambient to the check gate; receipts, claims, and every
+# other surface stay untouched.
 # Best-effort by contract: a hook that blocks session start costs more than a
 # missing resume line, so every failure path exits 0. OMS_RESUME_HOOK=0
 # disables; harness children stay silent (their parent already has context).
@@ -256,6 +256,57 @@ PY
   peer_line="${peer_line//$'\r'/}"
   [ -z "$peer_line" ] || append "$peer_line"
 fi
+
+# Project graph: `oms graph project find` used to fail in any repository
+# nobody had built one in, so the session opens by saying whether this one has
+# a current graph — and starts the build itself when it does not. The build is
+# detached and its output discarded: session start never waits on it, never
+# fails because of it, and an inherited stdout would hang every caller that
+# captures this hook. setsid, never nohup — nohup makes SIGHUP unignorable by
+# a trap for descendants, which the harness's signal tests depend on. The
+# check is bounded well inside the hook's own 10s budget.
+graph_state=""
+# Only a repository that already uses OMS gets a graph on its own: a session
+# opened in a plain directory (or a home directory) must not start a scan.
+if [ -f "$ROOT/scripts/graph.sh" ] && [ -d "$cwd/.oms" ] &&
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # `check` exits 3 on a stale or absent graph and still prints the verdict,
+  # so the status is discarded rather than the payload.
+  graph_json=""
+  if command -v timeout >/dev/null 2>&1; then
+    graph_json="$(timeout 5 bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
+      project check --json 2>/dev/null || true)"
+  else
+    graph_json="$(bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
+      project check --json 2>/dev/null || true)"
+  fi
+  graph_state="$(printf '%s' "$graph_json" | python3 -c '
+import json, sys
+try:
+    row = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+print("fresh %s" % str(row.get("revision") or "")[:12] if row.get("fresh") else "refresh")
+' 2>/dev/null)" || graph_state=""
+  graph_state="${graph_state//$'\r'/}"
+fi
+case "$graph_state" in
+  "fresh "*) append "- graph: fresh (${graph_state#fresh })" ;;
+  refresh)
+    if [ "${OMS_GRAPH_AUTOBUILD:-1}" = "0" ]; then
+      append "- graph: absent (OMS_GRAPH_AUTOBUILD=0)"
+    else
+      if command -v setsid >/dev/null 2>&1; then
+        setsid bash "$ROOT/scripts/graph.sh" --repo "$cwd" project ensure \
+          > /dev/null 2>&1 < /dev/null &
+      else
+        ( bash "$ROOT/scripts/graph.sh" --repo "$cwd" project ensure \
+          > /dev/null 2>&1 < /dev/null & )
+      fi
+      append "- graph: building in the background (oms graph project ensure)"
+    fi
+    ;;
+esac
 
 [ -n "$out" ] || exit 0
 printf '[oms resume] %s\n%s- more: oms state\n' "$(basename "$cwd")" "$out"
