@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import EDGE_KINDS, EFFECTS, EXEC_SCHEMA, GATE_AUTHORITIES, JOINS, NODE_KINDS, OUTCOMES
+from . import binding
 from .predicates import validate_all
 
-ERROR_CODES = ("invalid_schema", "duplicate_node", "unknown_endpoint", "missing_entry", "unreachable_node", "missing_terminal", "terminal_outgoing_edge", "invalid_outcome", "invalid_repeat_edge", "unbounded_cycle", "unknown_subgraph", "recursive_subgraph", "invalid_fact_reference", "invalid_plan_task_reference", "ambiguous_routes", "invalid_effect", "invalid_kind", "invalid_join", "invalid_command", "invalid_budget", "invalid_gate")
+ERROR_CODES = ("invalid_schema", "duplicate_node", "unknown_endpoint", "missing_entry", "unreachable_node", "missing_terminal", "terminal_outgoing_edge", "invalid_outcome", "invalid_repeat_edge", "unbounded_cycle", "unknown_subgraph", "recursive_subgraph", "invalid_fact_reference", "invalid_plan_task_reference", "ambiguous_routes", "invalid_effect", "invalid_kind", "invalid_join", "invalid_command", "invalid_budget", "invalid_gate", "invalid_task_binding", "unknown_task_binding", "duplicate_task_binding_writer", "unreachable_task_binding", "invalid_context")
 WARNING_CODES = ("unrouted_outcome", "dead_end")
 
 
@@ -104,12 +105,37 @@ def validate_spec(spec: Mapping[str, Any], *, plan_tasks: Optional[Sequence[str]
                 malformed_facts(node.get("proof", []), "%s.proof" % where)
             if kind == "agent":
                 task = node.get("plan_task")
-                if not isinstance(task, str) or not task:
-                    add(errors, "invalid_plan_task_reference", "%s.plan_task" % where, "agent node must name a plan task")
-                elif allowed_tasks is not None and task != "next" and task not in allowed_tasks:
+                source = node.get("plan_task_from")
+                has_task = isinstance(task, str) and bool(task)
+                has_source = source is not None
+                if has_task and has_source:
+                    add(errors, "invalid_task_binding", where, "plan_task and plan_task_from are mutually exclusive")
+                elif not has_task and not has_source:
+                    add(errors, "invalid_plan_task_reference", "%s.plan_task" % where, "agent node must name a plan task or a plan_task_from binding")
+                elif has_task and allowed_tasks is not None and not binding.is_selector(task) and task not in allowed_tasks:
                     add(errors, "invalid_plan_task_reference", "%s.plan_task" % where, "unknown plan task %s" % task)
+                if has_source and not binding.valid_name(source):
+                    add(errors, "invalid_task_binding", "%s.plan_task_from" % where, "plan_task_from must be a binding identifier")
+                bound = node.get("bind_task")
+                if bound is not None and not binding.valid_name(bound):
+                    add(errors, "invalid_task_binding", "%s.bind_task" % where, "bind_task must be a binding identifier")
                 if node.get("mode", "run") not in ("run", "land"):
                     add(errors, "invalid_plan_task_reference", "%s.mode" % where, "agent mode must be run or land")
+                context = node.get("context")
+                if context is not None:
+                    if not isinstance(context, Mapping):
+                        add(errors, "invalid_context", "%s.context" % where, "context must be an object")
+                    else:
+                        if not isinstance(context.get("task", ""), str):
+                            add(errors, "invalid_context", "%s.context.task" % where, "context.task must be a string")
+                        max_files = context.get("max_files", 12)
+                        if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files <= 0 or max_files > 200:
+                            add(errors, "invalid_context", "%s.context.max_files" % where, "context.max_files must be an integer from 1 to 200")
+                        unknown = sorted(set(context) - {"task", "max_files"})
+                        if unknown:
+                            add(errors, "invalid_context", "%s.context" % where, "unknown context fields: %s" % ", ".join(unknown))
+            elif node.get("bind_task") is not None:
+                add(errors, "invalid_task_binding", "%s.bind_task" % where, "only an agent node may bind a task")
             if kind == "tool" and (not isinstance(node.get("command"), str) or not node.get("command", "").strip()):
                 add(errors, "invalid_command", "%s.command" % where, "tool command must be a non-empty string")
             if kind == "gate":
@@ -179,6 +205,35 @@ def validate_spec(spec: Mapping[str, Any], *, plan_tasks: Optional[Sequence[str]
                 pending.extend(adjacency.get(current, ()))
             for node_id in sorted(set(nodes) - reachable):
                 add(errors, "unreachable_node", "%s.nodes.%s" % (prefix, node_id), "node is unreachable from entry")
+
+        # Task bindings: one writer per name (a repeating node may rewrite its
+        # own binding), every reader names a written binding, and the reader
+        # must be reachable from that writer — a binding is only ever set by
+        # an attempt that ran before the reader.
+        graph_view = {"nodes": nodes}
+        binding_writers = binding.writers(graph_view)
+        binding_readers = binding.readers(graph_view)
+        for name in sorted(binding_writers):
+            if len(binding_writers[name]) > 1:
+                add(errors, "duplicate_task_binding_writer", "%s.nodes" % prefix,
+                    "binding %s is written by more than one node: %s" % (name, ", ".join(binding_writers[name])))
+        for name in sorted(binding_readers):
+            for reader in binding_readers[name]:
+                where = "%s.nodes.%s.plan_task_from" % (prefix, reader)
+                if name not in binding_writers:
+                    add(errors, "unknown_task_binding", where, "no node binds %s" % name)
+                    continue
+                writer_reach: Set[str] = set()
+                pending = list(adjacency.get(binding_writers[name][0], ()))
+                while pending:
+                    current = pending.pop()
+                    if current in writer_reach:
+                        continue
+                    writer_reach.add(current)
+                    pending.extend(adjacency.get(current, ()))
+                if reader not in writer_reach:
+                    add(errors, "unreachable_task_binding", where,
+                        "%s is not reachable from the node that binds %s" % (reader, name))
 
         stop_facts = raw.get("stop_facts", [])
         if not stop_facts:

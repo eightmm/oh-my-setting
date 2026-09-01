@@ -8,16 +8,21 @@
     "receipt.land.implement.present": true,
     "plan.all_done": true,
     "receipt.acceptance.latest": "pass",
-    "receipt.acceptance.fresh": true
+    "receipt.acceptance.fresh": true,
+    "git.dirty": false
   },
   "outcomes": {
     "inspect": "completed",
     "implement": "completed",
     "land": "completed",
+    "commit": "completed",
     "acceptance": "completed"
   },
   "gates": {
     "review": "approved"
+  },
+  "bindings": {
+    "work_item": "implement"
   },
   "expect": {
     "status": "terminal",

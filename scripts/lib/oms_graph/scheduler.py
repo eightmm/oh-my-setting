@@ -8,6 +8,13 @@ serializes landing regardless of what is scheduled here.
 Overlap is deliberately conservative — an unknown write scope conflicts with
 everything — because a false "no overlap" costs a corrupted tree while a false
 "overlap" costs only serialization.
+
+Task identity is an input, never derived here: the runner resolves every
+agent node to a concrete plan task (a literal id, a binding, or one read-only
+peek at the plan's `next`) and passes `resolved_tasks`. Two nodes on the same
+task never share a wave — the lifecycle lease is one resource whatever their
+path scopes say — and at most one node whose task came from a dynamic
+selector runs per wave, because two peeks can return the same task.
 """
 
 from __future__ import annotations
@@ -100,7 +107,7 @@ def _is_exclusive(node: Mapping[str, Any]) -> bool:
 
 
 def _write_scope(
-    node: Mapping[str, Any], task_scopes: Mapping[str, Mapping[str, Sequence[str]]]
+    node: Mapping[str, Any], task_scopes: Mapping[str, Mapping[str, Sequence[str]]], task_id: str
 ) -> Tuple[bool, Optional[List[str]]]:
     """Return (is_write, allowed_scope); ``None`` scope means unknown."""
     if str(node.get("effect", "read")) != "write":
@@ -108,7 +115,7 @@ def _write_scope(
     if str(node.get("kind", "")) != "agent":
         # A write-capable tool declares no plan scope; it is exclusive instead.
         return True, None
-    entry = task_scopes.get(str(node.get("plan_task", "") or ""))
+    entry = task_scopes.get(task_id) if task_id else None
     if not isinstance(entry, Mapping):
         return True, None
     allowed = entry.get("allowed")
@@ -137,8 +144,15 @@ def eligible(
     task_scopes: Mapping[str, Mapping[str, Sequence[str]]],
     capacity: int = 1,
     active: Sequence[str] = (),
+    resolved_tasks: Optional[Mapping[str, str]] = None,
+    selectors: Sequence[str] = (),
 ) -> Dict[str, Any]:
-    """Which routed candidates may start now, and why the others may not."""
+    """Which routed candidates may start now, and why the others may not.
+
+    `resolved_tasks` maps node id -> concrete plan task for candidates and
+    active nodes; `selectors` lists the candidates whose task came from a
+    dynamic selector this wave.
+    """
     alternatives = route.get("alternatives") or []
     if not isinstance(alternatives, (list, tuple)):
         alternatives = []
@@ -159,22 +173,37 @@ def eligible(
             deferred.append({"node": name, "reason": reason})
         return {"eligible": eligible_nodes, "deferred": deferred, "conflicts": conflicts}
 
+    tasks = {str(key): str(value) for key, value in (resolved_tasks or {}).items() if str(value or "")}
+    selector_nodes = {str(item) for item in selectors}
+
+    def task_of(name: str, node: Mapping[str, Any]) -> str:
+        if name in tasks:
+            return tasks[name]
+        literal = str(node.get("plan_task", "") or "")
+        return "" if not literal or literal == "next" else literal
+
     active_ids = [str(item) for item in active if str(item)]
     # An active write node constrains every later selection; an active node the
     # spec does not describe is treated as an unknown writer, not as absent.
     held: List[Tuple[str, Optional[List[str]]]] = []
+    held_tasks: Dict[str, str] = {}
     for name in active_ids:
         node = _node_of(spec, name)
         if node is None:
             held.append((name, None))
             continue
-        is_write, scope = _write_scope(node, task_scopes)
+        task_id = task_of(name, node)
+        if task_id:
+            held_tasks[task_id] = name
+        is_write, scope = _write_scope(node, task_scopes, task_id)
         if is_write:
             held.append((name, scope))
 
     limit = capacity if isinstance(capacity, int) and capacity > 0 else 1
     exclusive_selected = False
+    selector_selected = any(name in selector_nodes for name in active_ids)
     selected_scopes: List[Tuple[str, Optional[List[str]]]] = []
+    selected_tasks: Dict[str, str] = {}
 
     for name in candidates:
         node = _node_of(spec, name)
@@ -192,11 +221,22 @@ def eligible(
             deferred.append({"node": name, "reason": "exclusive"})
             continue
 
-        is_write, scope = _write_scope(node, task_scopes)
+        task_id = task_of(name, node)
+        is_agent = str(node.get("kind", "")) == "agent"
+        if is_agent and task_id:
+            other = held_tasks.get(task_id) or selected_tasks.get(task_id)
+            if other:
+                conflicts.append({"node": name, "with": other, "reason": "same-task"})
+                continue
+        if name in selector_nodes and selector_selected:
+            deferred.append({"node": name, "reason": "dynamic-selector-exclusive"})
+            continue
+
+        is_write, scope = _write_scope(node, task_scopes, task_id)
         exclusive = _is_exclusive(node)
         # A write-capable tool declares no plan scope by design and is fenced by
         # exclusivity instead. An agent node without a scope is a real unknown.
-        if is_write and scope is None and str(node.get("kind", "")) == "agent":
+        if is_write and scope is None and is_agent:
             conflicts.append({"node": name, "with": "", "reason": "unknown-scope"})
             continue
         if exclusive and (active_ids or eligible_nodes):
@@ -218,6 +258,10 @@ def eligible(
             continue
 
         eligible_nodes.append(name)
+        if is_agent and task_id:
+            selected_tasks[task_id] = name
+        if name in selector_nodes:
+            selector_selected = True
         if is_write:
             selected_scopes.append((name, scope))
         if exclusive:

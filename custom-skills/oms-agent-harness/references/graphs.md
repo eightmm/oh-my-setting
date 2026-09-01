@@ -54,19 +54,29 @@ and gates wait for `exec decide`. Fixtures test routing without a model.
 ## Run a graph through the existing primitives
 
 ```bash
-oms graph exec run coding-change --worker codex --goal "..."
-oms graph exec status --run RUN_ID
+oms graph exec run goal-drive --worker codex --goal "..." [--jobs 2]
+oms graph exec status --run RUN_ID          # shows bindings: work_item -> t1
 oms graph exec decide --run RUN_ID --node review --outcome approved
 oms graph exec resume --run RUN_ID --worker codex
 ```
 
-Agent nodes call `plan-run --id TASK [--land]`; the run store under
-`.oms/graph/runs/<run-id>/` (frozen spec, append-only events, derived
-projection) is what `resume` reads — never conversation memory. The runner
-has no path to `agent-plan land/finish`; landing stays serialized inside
-`patch-land`. `exec shadow` compares the evaluator's route with the control
-plane's canonical next action and appends evidence to `.oms/graph/shadow.jsonl`;
-it never acts.
+`plan_task: "next"` is a selector, not a task: the runner peeks the plan once
+(read-only), records the concrete id on the node's `node_started` row, and a
+`bind_task` name lets later `plan_task_from` nodes execute exactly that task
+even after the plan's `next` moved on. Agent nodes call
+`plan-run --id TASK [--land] [--context-pack FILE]`; a node's `context`
+field turns into a project-graph pack that reaches the worker brief as
+orientation only. The bundled specs land, then `exec commit --binding
+work_item` commits exactly the landed patch (the tree must otherwise be
+clean), then re-run acceptance. `--jobs N` runs a wave concurrently only for
+disjoint explicit tasks. The run store under `.oms/graph/runs/<run-id>/`
+(frozen spec, append-only events, derived projection) is what `resume`
+reads — never conversation memory; a crashed node is reconciled against the
+plan (live lease → waiting, expired → unverified, dead write tool →
+blocked). The runner has no path to `agent-plan land/finish/claim`; landing
+stays serialized inside `patch-land`. `exec shadow` compares the evaluator's
+route with the control plane's canonical next action and appends evidence
+to `.oms/graph/shadow.jsonl`; it never acts.
 
 ## Boundaries
 

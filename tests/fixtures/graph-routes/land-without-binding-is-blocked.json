@@ -1,5 +1,5 @@
 {
-  "name": "an approved review routes to land",
+  "name": "land cannot run before implement binds work_item",
   "spec_ref": "coding-change",
   "facts": {
     "plan.task.implement.patch_present": true,
@@ -12,11 +12,15 @@
   "gates": {
     "review": "approved"
   },
-  "bindings": {
-    "work_item": "implement"
-  },
+  "bindings": {},
   "expect": {
-    "status": "actionable",
-    "primary": "land"
+    "status": "blocked",
+    "primary": "land",
+    "required_resources": [
+      {
+        "kind": "task_binding",
+        "name": "work_item"
+      }
+    ]
   }
 }

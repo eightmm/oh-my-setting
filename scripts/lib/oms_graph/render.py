@@ -143,6 +143,29 @@ def _glyph(node_id: str, node: Mapping[str, Any], projection: Optional[Mapping[s
     return GLYPH_PENDING
 
 
+def _binding_label(node: Mapping[str, Any], state: Mapping[str, Any], projection: Optional[Mapping[str, Any]]) -> str:
+    """`[work_item=t1]` on a writer that bound a task, `[task=work_item→t1]`
+    on a reader whose binding is set, `[task=t1]` on any other node that
+    recorded a task; nothing when no identity is known yet."""
+    if node.get("kind") != "agent" or not isinstance(projection, dict):
+        return ""
+    task_id = state.get("task_id")
+    bound = str(node.get("bind_task") or "")
+    source = str(node.get("plan_task_from") or "")
+    bindings = projection.get("bindings") if isinstance(projection, dict) else None
+    if bound and isinstance(task_id, str) and task_id:
+        return " [%s=%s]" % (bound, task_id)
+    if source:
+        entry = bindings.get(source) if isinstance(bindings, dict) else None
+        held = entry.get("task_id") if isinstance(entry, dict) else None
+        if isinstance(held, str) and held:
+            return " [task=%s→%s]" % (source, held)
+        return " [task=%s→?]" % source
+    if isinstance(task_id, str) and task_id:
+        return " [task=%s]" % task_id
+    return ""
+
+
 def render_exec_text(spec: Mapping[str, Any], projection: Optional[Mapping[str, Any]] = None, route: Optional[Mapping[str, Any]] = None) -> str:
     nodes = _spec_nodes(spec)
     edges = _spec_edges(spec, nodes)
@@ -165,6 +188,7 @@ def render_exec_text(spec: Mapping[str, Any], projection: Optional[Mapping[str, 
         outcome = _node_state(projection, node_id).get("outcome")
         if isinstance(outcome, str) and outcome:
             line += " [%s]" % outcome
+        line += _binding_label(node, _node_state(projection, node_id), projection)
         title = node.get("title")
         if isinstance(title, str) and title and title != node_id:
             line += " — %s" % title

@@ -1,5 +1,5 @@
 {
-  "name": "land completed with a landing receipt routes to acceptance",
+  "name": "land completed with a landing receipt routes to the exact commit step",
   "spec_ref": "coding-change",
   "facts": {
     "plan.task.implement.patch_present": true,
@@ -15,8 +15,11 @@
   "gates": {
     "review": "approved"
   },
+  "bindings": {
+    "work_item": "implement"
+  },
   "expect": {
     "status": "actionable",
-    "primary": "acceptance"
+    "primary": "commit"
   }
 }

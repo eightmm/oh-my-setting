@@ -11,6 +11,9 @@
     "implement": "failed"
   },
   "gates": {},
+  "bindings": {
+    "work_item": "implement"
+  },
   "expect": {
     "status": "actionable",
     "primary": "implement"

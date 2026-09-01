@@ -69,17 +69,32 @@ def agent_node(task_id="implement", mode="run", **extra):
     return node
 
 
-class NextTaskCommandTest(unittest.TestCase):
-    def test_next_selects_plan_run_next(self):
-        argv = plan_adapter.build_command(Path("/repo"), {"kind": "agent", "plan_task": "next", "mode": "run"}, provider="codex")
-        self.assertIn("--next", argv)
-        self.assertNotIn("--id", argv)
-        landing = plan_adapter.build_command(Path("/repo"), {"kind": "agent", "plan_task": "next", "mode": "land"}, provider="codex")
-        self.assertEqual(landing[-2:], ["--next", "--land"])
+class ConcreteTaskOnlyTest(unittest.TestCase):
+    """The adapter never sees a selector or a binding: identity is frozen upstream."""
 
-    def test_result_line_resolves_the_selected_task(self):
-        found = plan_adapter.RESULT_TASK_RE.search("plan-run: result task=t7 state=review artifact=- patch=- next=review-or-land\n")
-        self.assertEqual(found.group(1), "t7")
+    def test_a_selector_or_a_binding_reference_is_refused(self):
+        for node in ({"kind": "agent", "plan_task": "next", "mode": "run"},
+                     {"kind": "agent", "plan_task": "next", "mode": "land"},
+                     {"kind": "agent", "plan_task_from": "work_item", "mode": "land"}):
+            with self.assertRaises(GraphError):
+                plan_adapter.build_command(Path("/repo"), node, provider="codex")
+
+    def test_plan_run_never_receives_next(self):
+        argv = plan_adapter.build_command(Path("/repo"), {"kind": "agent", "plan_task": "t7", "mode": "land"}, provider="codex")
+        self.assertEqual(argv[-3:], ["--id", "t7", "--land"])
+        self.assertNotIn("--next", argv)
+
+    def test_a_context_pack_is_forwarded_as_a_plain_path_only(self):
+        argv = plan_adapter.build_command(Path("/repo"), agent_node("t1"), provider="codex", context_pack="/tmp/pack.json")
+        self.assertEqual(argv[-2:], ["--context-pack", "/tmp/pack.json"])
+        with self.assertRaises(GraphError):
+            plan_adapter.build_command(Path("/repo"), agent_node("t1"), provider="codex", context_pack="--land")
+
+    def test_the_peek_can_never_claim(self):
+        with self.assertRaises(GraphError):
+            plan_adapter._plan_argv(Path("/repo"), "next", "--claim", "--provider", "codex")
+        argv = plan_adapter._plan_argv(Path("/repo"), "next", "--json")
+        self.assertEqual(argv[-2:], ["next", "--json"])
 
 
 class ScopeOverlapTest(unittest.TestCase):
@@ -180,9 +195,59 @@ class EligibilityTest(unittest.TestCase):
     def test_an_active_write_scope_also_blocks_a_new_writer(self) -> None:
         result = self.run_eligible("implement", capacity=2, active=("docs",))
         self.assertEqual(result["eligible"], ["implement"])
+        # The same node again is the same task before it is the same scope.
         blocked = self.run_eligible("docs", capacity=2, active=("docs",))
         self.assertEqual(blocked["eligible"], [])
-        self.assertEqual(blocked["conflicts"], [{"node": "docs", "with": "docs", "reason": "scope-overlap"}])
+        self.assertEqual(blocked["conflicts"], [{"node": "docs", "with": "docs", "reason": "same-task"}])
+        spec = {"nodes": dict(self.SPEC["nodes"], sibling=agent_node("sibling"))}
+        scopes = dict(self.SCOPES, sibling={"allowed": ["src/app"], "forbidden": []})
+        route = {"status": "actionable", "primary": "sibling", "alternatives": []}
+        overlap = scheduler.eligible(spec, {}, {}, route=route, task_scopes=scopes, capacity=2, active=("implement",))
+        self.assertEqual(overlap["conflicts"], [{"node": "sibling", "with": "implement", "reason": "scope-overlap"}])
+
+    def test_two_nodes_on_the_same_task_never_share_a_wave(self) -> None:
+        # Different path scopes cannot make one lifecycle lease two resources.
+        spec = {"nodes": {"a": agent_node("t1"), "b": agent_node("t1")}}
+        scopes = {"t1": {"allowed": ["src"], "forbidden": []}}
+        route = {"status": "actionable", "primary": "a", "alternatives": ["b"]}
+        result = scheduler.eligible(spec, {}, {}, route=route, task_scopes=scopes, capacity=2)
+        self.assertEqual(result["eligible"], ["a"])
+        self.assertEqual(result["conflicts"], [{"node": "b", "with": "a", "reason": "same-task"}])
+        held = scheduler.eligible(spec, {}, {}, route={"status": "actionable", "primary": "b", "alternatives": []},
+                                  task_scopes=scopes, capacity=2, active=("a",))
+        self.assertEqual(held["conflicts"], [{"node": "b", "with": "a", "reason": "same-task"}])
+
+    def test_resolved_tasks_replace_the_raw_plan_task_string(self) -> None:
+        spec = {"nodes": {"pick": agent_node("next"), "after": {"kind": "agent", "effect": "write", "plan_task_from": "item", "mode": "run"}}}
+        scopes = {"t1": {"allowed": ["src"], "forbidden": []}, "t2": {"allowed": ["docs"], "forbidden": []}}
+        route = {"status": "actionable", "primary": "pick", "alternatives": ["after"]}
+        # Unresolved: a selector has no scope and a reader has no task.
+        unresolved = scheduler.eligible(spec, {}, {}, route=route, task_scopes=scopes, capacity=2)
+        self.assertEqual(unresolved["eligible"], [])
+        self.assertEqual([item["reason"] for item in unresolved["conflicts"]], ["unknown-scope", "unknown-scope"])
+        # Resolved to disjoint tasks: both run.
+        resolved = scheduler.eligible(spec, {}, {}, route=route, task_scopes=scopes, capacity=2,
+                                      resolved_tasks={"pick": "t1", "after": "t2"}, selectors=["pick"])
+        self.assertEqual(resolved["eligible"], ["pick", "after"])
+        # Resolved to the same task: the reader waits for the selector's holder.
+        same = scheduler.eligible(spec, {}, {}, route=route, task_scopes=scopes, capacity=2,
+                                  resolved_tasks={"pick": "t1", "after": "t1"}, selectors=["pick"])
+        self.assertEqual(same["eligible"], ["pick"])
+        self.assertEqual(same["conflicts"], [{"node": "after", "with": "pick", "reason": "same-task"}])
+
+    def test_only_one_dynamic_selector_runs_per_wave(self) -> None:
+        spec = {"nodes": {"a": agent_node("next"), "b": agent_node("next")}}
+        scopes = {"t1": {"allowed": ["src"], "forbidden": []}, "t2": {"allowed": ["docs"], "forbidden": []}}
+        route = {"status": "actionable", "primary": "a", "alternatives": ["b"]}
+        # Even when the two peeks would land on disjoint tasks, the second selector defers.
+        result = scheduler.eligible(spec, {}, {}, route=route, task_scopes=scopes, capacity=2,
+                                    resolved_tasks={"a": "t1", "b": "t2"}, selectors=["a", "b"])
+        self.assertEqual(result["eligible"], ["a"])
+        self.assertEqual(result["deferred"], [{"node": "b", "reason": "dynamic-selector-exclusive"}])
+        # An active selector node holds the slot too.
+        held = scheduler.eligible(spec, {}, {}, route={"status": "actionable", "primary": "b", "alternatives": []},
+                                  task_scopes=scopes, capacity=2, active=("a",), resolved_tasks={"a": "t1", "b": "t2"}, selectors=["a", "b"])
+        self.assertEqual(held["deferred"], [{"node": "b", "reason": "dynamic-selector-exclusive"}])
 
     def test_an_agent_node_without_a_known_scope_is_a_conflict(self) -> None:
         result = self.run_eligible("orphan")
@@ -284,7 +349,7 @@ class FrontDoorTest(unittest.TestCase):
     TREE = ast.parse(SOURCE)
 
     def test_the_read_verb_allowlist_is_frozen(self) -> None:
-        self.assertEqual(plan_adapter.PLAN_READ_VERBS, ("status", "show", "evidence-snapshot"))
+        self.assertEqual(plan_adapter.PLAN_READ_VERBS, ("status", "show", "evidence-snapshot", "next"))
 
     def test_every_fenced_verb_is_refused_at_runtime(self) -> None:
         for verb in self.FENCED:
@@ -517,6 +582,30 @@ class AdapterEndToEndTest(unittest.TestCase):
         self.assertEqual(sorted(status["actionable"]), ["t1", "t2"])
         self.assertEqual(view["state"], "ready")
         self.assertEqual(plan_adapter.scope_of(view)["allowed"], ["delegated.txt"])
+
+    def test_peek_reads_the_next_task_without_a_lease(self) -> None:
+        self.worker_env()
+        try:
+            peeked = plan_adapter.peek_next_task(self.repo)
+            again = plan_adapter.peek_next_task(self.repo)
+            after = plan_adapter.task_view(self.repo, "t1")
+        finally:
+            self._restore_env()
+        self.assertEqual(peeked["id"], "t1")
+        self.assertEqual(again["id"], "t1")
+        self.assertEqual(after["state"], "ready")
+        self.assertFalse(after.get("lease_id"))
+
+    def test_peek_returns_none_only_for_no_actionable_task(self) -> None:
+        self.plan("block", "--id", "t1", "--reason", "parked")
+        self.plan("block", "--id", "t2", "--reason", "parked")
+        self.worker_env()
+        try:
+            self.assertIsNone(plan_adapter.peek_next_task(self.repo))
+            with self.assertRaises(GraphError):
+                plan_adapter.peek_next_task(self.tmp / "not-a-repo")
+        finally:
+            self._restore_env()
 
 
 if __name__ == "__main__":

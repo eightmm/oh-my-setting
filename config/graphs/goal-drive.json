@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "goal-drive",
   "entry": "acceptance",
-  "budget": {"max_steps": 12, "max_repeats": 3},
+  "budget": {"max_steps": 40, "max_repeats": 10},
   "stop_facts": [],
   "nodes": {
     "acceptance": {
@@ -15,27 +15,40 @@
     "implement": {
       "kind": "agent",
       "effect": "write",
-      "title": "Execute the next actionable plan task",
+      "title": "Select the next actionable plan task, bind it, and execute it",
       "plan_task": "next",
+      "bind_task": "work_item",
       "mode": "run",
-      "proof": ["plan.task.next.patch_present"]
+      "proof": ["binding.work_item.patch_present", "binding.work_item.state=review"]
     },
     "land": {
       "kind": "agent",
       "effect": "write",
-      "title": "Admit and land the reviewed task",
-      "plan_task": "next",
+      "title": "Admit and land the bound task",
+      "plan_task_from": "work_item",
       "mode": "land",
-      "proof": ["receipt.land.next.present"]
+      "proof": ["binding.work_item.receipt.land.present", "binding.work_item.state=done"]
+    },
+    "commit": {
+      "kind": "tool",
+      "effect": "write",
+      "title": "Commit exactly the landed patch of the bound task",
+      "command": "oms graph exec commit --binding work_item",
+      "proof": ["!git.dirty"]
     },
     "done": {"kind": "terminal", "title": "Acceptance passed"},
-    "parked": {"kind": "terminal", "title": "Plan task is blocked"}
+    "parked": {"kind": "terminal", "title": "No actionable task, or the bound task could not land or commit"}
   },
   "edges": [
     {"from": "acceptance", "to": "done", "outcomes": ["completed"]},
     {"from": "acceptance", "to": "implement", "outcomes": ["failed", "unverified"]},
     {"from": "implement", "to": "land", "outcomes": ["completed"]},
+    {"from": "implement", "to": "implement", "outcomes": ["failed", "unverified"], "kind": "repeat"},
     {"from": "implement", "to": "parked", "outcomes": ["blocked"]},
-    {"from": "land", "to": "acceptance", "outcomes": ["completed"], "kind": "repeat"}
+    {"from": "land", "to": "commit", "outcomes": ["completed"]},
+    {"from": "land", "to": "land", "outcomes": ["partial"], "kind": "repeat"},
+    {"from": "land", "to": "parked", "outcomes": ["failed", "unverified", "blocked"]},
+    {"from": "commit", "to": "acceptance", "outcomes": ["completed"], "kind": "repeat"},
+    {"from": "commit", "to": "parked", "outcomes": ["failed", "unverified"]}
   ]
 }

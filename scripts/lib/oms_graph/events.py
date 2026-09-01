@@ -121,6 +121,9 @@ def project(events: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> Dic
     }
     gates: Dict[str, str] = {}
     repeats: Dict[str, int] = {}
+    # A binding is the concrete task an attempt froze; the latest row for a
+    # name wins, so a repeating writer rebinds and replay reproduces it.
+    bindings: Dict[str, Dict[str, Any]] = {}
     seen: set = set()
     attempts_seen: set = set()
     child_events: Dict[str, List[Dict[str, Any]]] = {}
@@ -160,18 +163,33 @@ def project(events: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> Dic
             attempt = node["attempts"] or 1
             if event == "node_started" and node["status"] != "active":
                 attempt = node["attempts"] + 1
+        # The row's sequence orders one node's latest attempt against another's:
+        # the route evaluator uses it to tell a repeat that already happened
+        # from one that is due.
+        seq = raw.get("seq")
+        if event in ("node_started", "node_outcome", "gate_decision") and isinstance(seq, int) and not isinstance(seq, bool):
+            node["seq"] = max(int(node.get("seq", 0) or 0), seq)
+        task_id = str(raw.get("task_id", "") or "")
         if event == "node_started":
             node["attempts"] = max(node["attempts"], attempt)
             node["status"] = "active"
             node["outcome"] = None
             node["claimed_outcome"] = None
+            if task_id:
+                node["task_id"] = task_id
             attempts_seen.add((raw_node, attempt))
         elif event == "node_outcome":
             node["attempts"] = max(node["attempts"], attempt)
             node["status"] = "finished"
             node["claimed_outcome"] = raw.get("claimed_outcome", raw.get("outcome"))
             node["outcome"] = raw.get("outcome", raw.get("claimed_outcome"))
+            if task_id:
+                node["task_id"] = task_id
             attempts_seen.add((raw_node, attempt))
+        if event in ("node_started", "node_outcome") and task_id:
+            name = str(raw.get("binding", "") or "")
+            if name:
+                bindings[name] = {"task_id": task_id, "node": raw_node, "attempt": attempt}
         elif event == "gate_decision":
             decision = str(raw.get("outcome", raw.get("decision", "")))
             if decision:
@@ -193,6 +211,7 @@ def project(events: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> Dic
         "steps": len(attempts_seen),
         "repeats": dict(sorted(repeats.items())),
         "gates": dict(sorted(gates.items())),
+        "bindings": dict(sorted(bindings.items())),
         "subgraphs": subgraph_states,
     }
 

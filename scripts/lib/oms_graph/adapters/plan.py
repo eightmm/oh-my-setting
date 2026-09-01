@@ -13,6 +13,7 @@ downgraded to `unverified`.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -22,19 +23,20 @@ from oms_runtime.common import CoreError, bounded_line, install_root, parse_path
 from oms_runtime.evidence import artifact_rows
 
 from .. import AGENT_MODES
+from .. import binding
 from .. import predicates
 from ..errors import GraphError
 
-PLAN_READ_VERBS = ("status", "show", "evidence-snapshot")
+# A bare `next` is a read (the plan marks it PLAN_READ_ONLY and mints no
+# lease): the graph selects, plan-run owns the lease.
+PLAN_READ_VERBS = ("status", "show", "evidence-snapshot", "next")
 PROVIDER_RE = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,80}$")
 EFFORT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,20}$")
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{32}$")
 MAX_REPAIR_ROUNDS = 3
-# The bundled goal-drive spec names the plan's next actionable task rather
-# than a fixed id; plan-run owns that selection through --next.
-NEXT_TASK = "next"
-RESULT_TASK_RE = re.compile(r"^plan-run: (?:result|failed|parked) task=([A-Za-z0-9._-]+)", re.M)
+NO_ACTIONABLE_EXIT = 3
+PEEK_TIMEOUT = 60
 TAIL_LIMIT = 2000
 
 
@@ -46,9 +48,36 @@ def _plan_argv(repo: Path, verb: str, *args: str) -> List[str]:
     """Build one read-only agent-plan invocation, refusing every other verb."""
     if verb not in PLAN_READ_VERBS:
         raise GraphError("the graph layer reads plan state only through %s, not %s" % (", ".join(PLAN_READ_VERBS), bounded_line(verb, 40)))
+    if any(str(item) == "--claim" for item in args):
+        raise GraphError("the graph layer never claims a plan task; plan-run owns the lease")
     argv = ["bash", _script("agent-plan.sh"), "--repo", str(repo), verb]
     argv.extend(str(item) for item in args)
     return argv
+
+
+def peek_next_task(repo: Path) -> Optional[Dict[str, Any]]:
+    """The task `plan-run --next` would claim right now, without claiming it.
+
+    `None` when the plan offers nothing actionable (agent-plan exit 3). Any
+    other failure is an error, never a silent "no task".
+    """
+    argv = _plan_argv(repo, "next", "--json")
+    try:
+        completed = subprocess.run(argv, cwd=str(repo), capture_output=True, text=True, timeout=PEEK_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GraphError("could not peek the plan's next task: %s" % bounded_line(exc, 200))
+    if completed.returncode == NO_ACTIONABLE_EXIT:
+        return None
+    if completed.returncode != 0:
+        raise GraphError("agent-plan next failed (exit %d): %s" % (completed.returncode, bounded_line(completed.stderr, 200)))
+    try:
+        payload = json.loads(completed.stdout or "")
+    except ValueError:
+        raise GraphError("agent-plan next returned no JSON task")
+    if not isinstance(payload, Mapping) or not payload.get("id"):
+        raise GraphError("agent-plan next returned no task id")
+    _task_id(payload.get("id"))
+    return dict(payload)
 
 
 def plan_status(repo: Path) -> Dict[str, Any]:
@@ -132,10 +161,14 @@ def _check_option(value: Any, pattern: "re.Pattern", label: str) -> str:
     return text
 
 
-def build_command(repo: Path, node_spec: Mapping[str, Any], *, provider: str, model: str = "", reasoning_effort: str = "", repair: int = 0, dry_run: bool = False) -> List[str]:
+def build_command(repo: Path, node_spec: Mapping[str, Any], *, provider: str, model: str = "", reasoning_effort: str = "", repair: int = 0, dry_run: bool = False, context_pack: str = "") -> List[str]:
     kind = str(node_spec.get("kind", ""))
     if kind != "agent":
         raise GraphError("only an agent node runs through plan-run, not kind %s" % bounded_line(kind or "(missing)", 40))
+    if binding.is_selector(node_spec.get("plan_task")) or node_spec.get("plan_task_from"):
+        # Identity is frozen before execution: the runner resolves a selector
+        # or a binding to one task id and hands this adapter the concrete node.
+        raise GraphError("an agent node reaches plan-run only with a concrete plan task")
     task_id = _task_id(node_spec.get("plan_task", ""))
     mode = _mode_of(node_spec)
     provider_text = str(provider or "")
@@ -153,8 +186,7 @@ def build_command(repo: Path, node_spec: Mapping[str, Any], *, provider: str, mo
     model_text = _check_option(model, MODEL_RE, "model")
     effort_text = _check_option(reasoning_effort, EFFORT_RE, "reasoning effort")
 
-    argv = ["bash", _script("plan-run.sh"), "--repo", str(repo), "--to", str(provider)]
-    argv.extend(["--next"] if task_id == NEXT_TASK else ["--id", task_id])
+    argv = ["bash", _script("plan-run.sh"), "--repo", str(repo), "--to", str(provider), "--id", task_id]
     if mode == "land":
         argv.append("--land")
     if rounds > 0:
@@ -163,6 +195,11 @@ def build_command(repo: Path, node_spec: Mapping[str, Any], *, provider: str, mo
         argv.extend(["--model", model_text])
     if effort_text:
         argv.extend(["--reasoning-effort", effort_text])
+    pack = str(context_pack or "")
+    if pack:
+        if pack.startswith("-") or "\n" in pack or "\0" in pack:
+            raise GraphError("context pack path is not a plain file path")
+        argv.extend(["--context-pack", pack])
     if dry_run:
         argv.append("--dry-run")
     return argv
@@ -211,9 +248,9 @@ def _tail(value: Any) -> str:
     return bounded_line(value if isinstance(value, str) else (value.decode("utf-8", "replace") if isinstance(value, bytes) else ""), TAIL_LIMIT)
 
 
-def execute(repo: Path, node_spec: Mapping[str, Any], *, provider: str, model: str = "", reasoning_effort: str = "", repair: int = 0, timeout: int = 2700, dry_run: bool = False) -> Dict[str, Any]:
+def execute(repo: Path, node_spec: Mapping[str, Any], *, provider: str, model: str = "", reasoning_effort: str = "", repair: int = 0, timeout: int = 2700, dry_run: bool = False, context_pack: str = "") -> Dict[str, Any]:
     """Run one agent node through plan-run and read the outcome off the plan."""
-    argv = build_command(repo, node_spec, provider=provider, model=model, reasoning_effort=reasoning_effort, repair=repair, dry_run=dry_run)
+    argv = build_command(repo, node_spec, provider=provider, model=model, reasoning_effort=reasoning_effort, repair=repair, dry_run=dry_run, context_pack=context_pack)
     task_id = _task_id(node_spec.get("plan_task", ""))
 
     timed_out = False
@@ -228,16 +265,13 @@ def execute(repo: Path, node_spec: Mapping[str, Any], *, provider: str, model: s
     except OSError as exc:
         raise GraphError("plan-run could not be launched: %s" % bounded_line(exc, 200))
 
-    if task_id == NEXT_TASK:
-        found = RESULT_TASK_RE.search((stdout_text or "") + "\n" + (stderr_text or ""))
-        task_id = found.group(1) if found else ""
     task: Dict[str, Any] = {}
-    task_readable = bool(task_id)
+    task_readable = True
     try:
-        task = task_view(repo, task_id) if task_id else {}
+        task = task_view(repo, task_id)
     except GraphError:
         task_readable = False
-    facts = _task_facts(repo, task_id, task) if task_id else {}
+    facts = _task_facts(repo, task_id, task)
 
     proof_missing: List[str] = []
     if dry_run:

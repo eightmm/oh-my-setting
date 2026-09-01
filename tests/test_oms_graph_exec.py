@@ -105,6 +105,16 @@ class GraphValidationTest(unittest.TestCase):
         cases["invalid_budget"] = value
         value = simple_spec(); value["nodes"]["work"] = {"kind": "gate", "authority": "agent", "decisions": []}
         cases["invalid_gate"] = value
+        value = simple_spec(); value["nodes"]["work"] = {"kind": "agent", "plan_task": "t1", "plan_task_from": "item"}
+        cases["invalid_task_binding"] = value
+        value = simple_spec(); value["nodes"]["work"] = {"kind": "agent", "plan_task_from": "ghost"}
+        cases["unknown_task_binding"] = value
+        value = simple_spec(); value["nodes"]["work"] = {"kind": "agent", "plan_task": "next", "bind_task": "item"}; value["nodes"]["twin"] = {"kind": "agent", "plan_task": "next", "bind_task": "item"}; value["edges"] = [{"from": "work", "to": "twin", "outcomes": ["completed"]}, {"from": "twin", "to": "done", "outcomes": ["completed"]}]
+        cases["duplicate_task_binding_writer"] = value
+        value = simple_spec(); value["nodes"]["work"] = {"kind": "agent", "plan_task_from": "item"}; value["nodes"]["binder"] = {"kind": "agent", "plan_task": "next", "bind_task": "item"}; value["edges"] = [{"from": "work", "to": "binder", "outcomes": ["completed"]}, {"from": "binder", "to": "done", "outcomes": ["completed"]}]
+        cases["unreachable_task_binding"] = value
+        value = simple_spec(); value["nodes"]["work"] = {"kind": "agent", "plan_task": "t1", "context": {"task": 3, "max_files": 0}}
+        cases["invalid_context"] = value
 
         self.assertEqual(set(cases), set(ERROR_CODES))
         for code, graph in cases.items():
@@ -136,14 +146,95 @@ class GraphValidationTest(unittest.TestCase):
         graph["subgraphs"] = {"child": {"entry": "again", "nodes": {"again": {"kind": "subgraph", "graph": "child"}, "end": {"kind": "terminal"}}, "edges": [{"from": "again", "to": "end", "outcomes": ["completed"]}]}}
         self.assertIn("recursive_subgraph", {item["code"] for item in validate_spec(graph)["errors"]})
 
+    def test_binding_rules(self):
+        # A repeating writer may rebind its own name; a binder on a static task is legal;
+        # a selector on a write node is legal; a non-agent binder is not.
+        graph = simple_spec()
+        graph["nodes"]["work"] = {"kind": "agent", "effect": "write", "plan_task": "next", "bind_task": "item"}
+        graph["nodes"]["after"] = {"kind": "agent", "plan_task_from": "item", "mode": "land"}
+        graph["edges"] = [{"from": "work", "to": "after", "outcomes": ["completed"]},
+                          {"from": "work", "to": "work", "outcomes": ["failed"], "kind": "repeat"},
+                          {"from": "after", "to": "done", "outcomes": ["completed"]}]
+        self.assertTrue(validate_spec(graph)["ok"], validate_spec(graph)["errors"])
+        graph["nodes"]["work"]["plan_task"] = "t1"
+        self.assertTrue(validate_spec(graph)["ok"])
+        graph["nodes"]["done"]["bind_task"] = "other"
+        self.assertIn("invalid_task_binding", {item["code"] for item in validate_spec(graph)["errors"]})
+        for bad in ("", "no spaces", "a.b", "-lead"):
+            graph = simple_spec(); graph["nodes"]["work"] = {"kind": "agent", "plan_task": "t1", "bind_task": bad}
+            self.assertIn("invalid_task_binding", {item["code"] for item in validate_spec(graph)["errors"]}, bad)
+
 
 class GraphRouteTest(unittest.TestCase):
     def setUp(self):
         self.graph = load_spec("coding-change")
 
-    def route(self, outcomes=None, facts=None, gates=None, repeats=None):
-        state = state_from_outcomes(self.graph, outcomes or {}, gates=gates or {}, repeats=repeats or {})
+    def route(self, outcomes=None, facts=None, gates=None, repeats=None, bindings=None):
+        # The bundled spec binds its selection as `work_item`; fixtures name the task `implement`.
+        bound = {"work_item": "implement"} if bindings is None else bindings
+        state = state_from_outcomes(self.graph, outcomes or {}, gates=gates or {}, repeats=repeats or {}, bindings=bound)
         return evaluate(self.graph, state, facts or {})
+
+    def test_a_reader_without_its_binding_is_a_named_missing_resource(self):
+        facts = {"plan.task.implement.patch_present": True, "plan.task.implement.state": "review"}
+        route = self.route({"inspect": "completed", "implement": "completed"}, facts, {"review": "approved"}, bindings={})
+        self.assertEqual((route["status"], route["primary"]), ("blocked", "land"))
+        self.assertEqual(route["required_resources"], [{"kind": "task_binding", "name": "work_item"}])
+        self.assertIn("missing task binding: work_item", route["reason"])
+
+    def test_actionable_resources_name_the_concrete_task_or_the_selector(self):
+        selector = self.route({"inspect": "completed"})
+        self.assertEqual(selector["required_resources"], [{"kind": "plan_task", "id": "next", "selector": True}])
+        facts = {"plan.task.implement.patch_present": True, "plan.task.implement.state": "review"}
+        bound = self.route({"inspect": "completed", "implement": "completed"}, facts, {"review": "approved"})
+        self.assertEqual(bound["required_resources"], [{"kind": "plan_task", "id": "implement", "binding": "work_item"}])
+
+    def test_changes_requested_reaches_replan_not_an_invented_repair(self):
+        facts = {"plan.task.implement.patch_present": True, "plan.task.implement.state": "review"}
+        route = self.route({"inspect": "completed", "implement": "completed"}, facts, {"review": "changes_requested"})
+        self.assertEqual((route["status"], route["primary"]), ("terminal", "replan"))
+
+    def test_a_terminal_reached_by_alternative_failure_edges_is_not_a_join(self):
+        facts = {"plan.task.implement.state": "blocked"}
+        route = self.route({"inspect": "completed", "implement": "blocked"}, facts)
+        self.assertEqual((route["status"], route["primary"]), ("terminal", "parked"))
+
+    def _sequenced(self, seqs, outcomes, gates=None):
+        """A projection whose node seqs order the latest attempts."""
+        state = state_from_outcomes(self.graph, outcomes, gates=gates or {}, bindings={"work_item": "implement"})
+        for node_id, seq in seqs.items():
+            state["nodes"][node_id]["seq"] = seq
+        return state
+
+    def test_a_repeat_that_already_happened_is_walked_past(self):
+        # acceptance failed (seq 12) then implement re-ran (seq 15): the repeat is history,
+        # and land (seq 9) is stale relative to its upstream, so land is due — without budget.
+        facts = {"plan.task.implement.patch_present": True, "plan.task.implement.state": "review",
+                 "receipt.land.implement.present": True, "receipt.acceptance.latest": "fail", "receipt.acceptance.fresh": True}
+        state = self._sequenced({"inspect": 3, "implement": 15, "review": 7, "land": 9, "acceptance": 12},
+                                {"inspect": "completed", "implement": "completed", "land": "completed", "acceptance": "failed"},
+                                gates={"review": "approved"})
+        route = evaluate(self.graph, state, facts)
+        self.assertEqual((route["status"], route["primary"]), ("gate", "review"), route)
+        # The review gate is stale as well: it awaits a fresh decision, and no repeat budget was spent on it.
+        self.assertEqual(route["budget"]["repeats"].get("review->land", 0), 0)
+
+    def test_a_stale_downstream_node_is_due_again(self):
+        facts = {"plan.task.implement.patch_present": True, "plan.task.implement.state": "review"}
+        state = self._sequenced({"inspect": 3, "implement": 15, "review": 17, "land": 9},
+                                {"inspect": "completed", "implement": "completed", "land": "completed"},
+                                gates={"review": "approved"})
+        route = evaluate(self.graph, state, facts)
+        self.assertEqual((route["status"], route["primary"]), ("actionable", "land"))
+        self.assertEqual(route["downgrades"], [])
+
+    def test_order_free_states_keep_the_repeat_semantics(self):
+        facts = {"plan.task.implement.state": "done", "plan.task.implement.patch_present": True, "git.dirty": False,
+                 "receipt.land.implement.present": True, "receipt.acceptance.latest": "fail", "receipt.acceptance.fresh": True}
+        route = self.route({"inspect": "completed", "implement": "completed", "land": "completed", "commit": "completed", "acceptance": "failed"},
+                           facts, {"review": "approved"})
+        self.assertEqual((route["status"], route["primary"]), ("actionable", "implement"))
+        self.assertEqual(route["budget"]["repeats"]["acceptance->implement"], 1)
 
     def test_initial_route(self):
         route = self.route()
@@ -267,6 +358,69 @@ class GraphEventsTest(unittest.TestCase):
         self.assertEqual(projection["nodes"]["work"]["status"], "active")
         self.assertEqual(evaluate(simple_spec(), projection, {})["status"], "waiting")
 
+    def _binding_spec(self):
+        graph = simple_spec()
+        graph["nodes"]["work"] = {"kind": "agent", "effect": "write", "plan_task": "next", "bind_task": "item"}
+        graph["nodes"]["after"] = {"kind": "agent", "plan_task_from": "item", "mode": "land"}
+        graph["edges"] = [{"from": "work", "to": "after", "outcomes": ["completed"]},
+                          {"from": "after", "to": "work", "outcomes": ["failed"], "kind": "repeat"},
+                          {"from": "after", "to": "done", "outcomes": ["completed"]}]
+        return graph
+
+    def test_binding_is_projected_from_node_started_and_survives_replay(self):
+        graph = self._binding_spec()
+        rows = [{"schema": 1, "seq": 1, "run_id": "r", "event": "node_started", "node": "work", "attempt": 1,
+                 "task_id": "t1", "binding": "item", "idempotency_key": "start:work:1"}]
+        projection = events.project(rows, graph)
+        self.assertEqual(projection["bindings"], {"item": {"task_id": "t1", "node": "work", "attempt": 1}})
+        self.assertEqual(projection["nodes"]["work"]["task_id"], "t1")
+        self.assertEqual(projection["nodes"]["work"]["seq"], 1)
+        # The binding survives the outcome row and duplicate rows alike.
+        rows.append({"schema": 1, "seq": 2, "run_id": "r", "event": "node_outcome", "node": "work", "attempt": 1,
+                     "outcome": "completed", "claimed_outcome": "completed", "task_id": "t1", "idempotency_key": "outcome:work:1"})
+        once = events.project(rows, graph)
+        twice = events.project(rows + [copy.deepcopy(rows[0])], graph)
+        self.assertEqual(once["bindings"]["item"]["task_id"], "t1")
+        self.assertEqual(once, twice)
+        self.assertEqual(once["nodes"]["work"]["seq"], 2)
+
+    def test_a_later_attempt_overwrites_the_binding(self):
+        graph = self._binding_spec()
+        rows = [{"schema": 1, "seq": 1, "run_id": "r", "event": "node_started", "node": "work", "attempt": 1, "task_id": "t1", "binding": "item"},
+                {"schema": 1, "seq": 2, "run_id": "r", "event": "node_outcome", "node": "work", "attempt": 1, "outcome": "completed", "task_id": "t1"},
+                {"schema": 1, "seq": 3, "run_id": "r", "event": "node_started", "node": "after", "attempt": 1, "task_id": "t1"},
+                {"schema": 1, "seq": 4, "run_id": "r", "event": "node_outcome", "node": "after", "attempt": 1, "outcome": "failed", "task_id": "t1"},
+                {"schema": 1, "seq": 5, "run_id": "r", "event": "node_started", "node": "work", "attempt": 2, "task_id": "t2", "binding": "item"}]
+        projection = events.project(rows, graph)
+        self.assertEqual(projection["bindings"]["item"], {"task_id": "t2", "node": "work", "attempt": 2})
+        # Rows without a binding name never bind, and old rows without task ids still project.
+        legacy = events.project([{"schema": 1, "seq": 1, "run_id": "r", "event": "node_outcome", "node": "work", "attempt": 1, "outcome": "failed"}], graph)
+        self.assertEqual(legacy["bindings"], {})
+        self.assertEqual(legacy["nodes"]["work"]["status"], "finished")
+
+    def test_binding_facts_are_derived_not_stored(self):
+        from oms_graph import binding
+        graph = self._binding_spec()
+        projection = {"bindings": {"item": {"task_id": "t1", "node": "work", "attempt": 1}}}
+        facts = {"plan.task.t1.state": "review", "plan.task.t1.patch_present": True, "receipt.land.t1.present": False,
+                 "receipt.admit.t1.latest": "verified", "plan.task.t2.state": "ready"}
+        derived = binding.augment_binding_facts(graph, projection, facts)
+        self.assertEqual(derived["binding.item.task_id"], "t1")
+        self.assertEqual(derived["binding.item.state"], "review")
+        self.assertTrue(derived["binding.item.patch_present"])
+        self.assertFalse(derived["binding.item.receipt.land.present"])
+        self.assertEqual(derived["binding.item.receipt.admit.latest"], "verified")
+        self.assertNotIn("binding.item.t2", derived)
+        self.assertEqual(binding.augment_binding_facts(graph, {"bindings": {}}, facts), facts)
+        # The concrete node the adapter sees names the task, not the binding.
+        concrete = binding.effective_node({"kind": "agent", "plan_task_from": "item", "mode": "land",
+                                           "proof": ["binding.item.receipt.land.present", "binding.item.state=done", "!binding.item.reason"]}, "t1")
+        self.assertEqual(concrete["plan_task"], "t1")
+        self.assertNotIn("plan_task_from", concrete)
+        self.assertEqual(concrete["proof"], ["receipt.land.t1.present", "plan.task.t1.state=done", "!plan.task.t1.reason"])
+        with self.assertRaises(GraphError):
+            binding.effective_node({"kind": "agent", "plan_task": "next"}, "next")
+
     def test_detail_scrubbing(self):
         with self.assertRaises(GraphError):
             events.append_event(self.repo, self.run_id, "note", detail="api_" "key=supersecretvalue12345")
@@ -321,16 +475,34 @@ class GraphFixtureCorpusTest(unittest.TestCase):
         # no longer holds, but its completion is history, not the frontier.
         graph = load_spec("coding-change")
         facts = {"plan.task.implement.state": "done", "plan.task.implement.patch_present": True, "receipt.land.implement.present": True}
-        state = state_from_outcomes(graph, {"inspect": "completed", "implement": "completed", "land": "completed"}, gates={"review": "approved"})
-        route = evaluate(graph, state, facts)
+        state = state_from_outcomes(graph, {"inspect": "completed", "implement": "completed", "land": "completed", "commit": "completed"},
+                                    gates={"review": "approved"}, bindings={"work_item": "implement"})
+        route = evaluate(graph, dict(state), dict(facts, **{"git.dirty": False}))
         self.assertEqual((route["status"], route["primary"]), ("actionable", "acceptance"))
         self.assertEqual(route["downgrades"], [])
 
     def test_back_edge_spends_the_repeat_budget(self):
         graph = load_spec("coding-change")
-        facts = {"plan.task.implement.state": "review", "plan.task.implement.patch_present": True}
-        state = state_from_outcomes(graph, {"inspect": "completed", "implement": "completed"}, gates={"review": "changes_requested"}, repeats={"review->implement": 3})
+        facts = {"plan.task.implement.state": "done", "plan.task.implement.patch_present": True, "git.dirty": False,
+                 "receipt.land.implement.present": True, "receipt.acceptance.latest": "fail", "receipt.acceptance.fresh": True}
+        state = state_from_outcomes(graph, {"inspect": "completed", "implement": "completed", "land": "completed", "commit": "completed", "acceptance": "failed"},
+                                    gates={"review": "approved"}, repeats={"acceptance->implement": 3}, bindings={"work_item": "implement"})
         self.assertEqual(evaluate(graph, state, facts)["status"], "exhausted")
+
+    def test_bundled_goal_drive_binds_its_selection(self):
+        graph = load_spec("goal-drive")
+        self.assertEqual(graph["nodes"]["implement"]["bind_task"], "work_item")
+        self.assertEqual(graph["nodes"]["land"]["plan_task_from"], "work_item")
+        self.assertNotIn("plan_task", graph["nodes"]["land"])
+        # Before implement binds, land is a named missing resource, not an unknown scope.
+        state = state_from_outcomes(graph, {"acceptance": "failed", "implement": "completed"})
+        route = evaluate(graph, state, {"plan.task.t1.state": "review", "plan.task.t1.patch_present": True})
+        self.assertEqual(route["status"], "actionable")
+        self.assertEqual(route["primary"], "implement")  # unproved claim -> unverified -> repeat implement
+        bound = state_from_outcomes(graph, {"acceptance": "failed", "implement": "completed"}, bindings={"work_item": "t1"})
+        route = evaluate(graph, bound, {"plan.task.t1.state": "review", "plan.task.t1.patch_present": True})
+        self.assertEqual((route["status"], route["primary"]), ("actionable", "land"))
+        self.assertEqual(route["required_resources"], [{"kind": "plan_task", "id": "t1", "binding": "work_item"}])
 
 
 if __name__ == "__main__":

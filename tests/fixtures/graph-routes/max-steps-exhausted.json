@@ -10,6 +10,9 @@
     "implement": "failed"
   },
   "gates": {},
+  "bindings": {
+    "work_item": "implement"
+  },
   "steps": 20,
   "expect": {
     "status": "exhausted"

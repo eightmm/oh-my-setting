@@ -1,5 +1,5 @@
 {
-  "name": "a review asking for changes routes back to implement",
+  "name": "a review asking for changes reaches the replan terminal: the graph invents no repair",
   "spec_ref": "coding-change",
   "facts": {
     "plan.task.implement.patch_present": true,
@@ -12,8 +12,11 @@
   "gates": {
     "review": "changes_requested"
   },
+  "bindings": {
+    "work_item": "implement"
+  },
   "expect": {
-    "status": "actionable",
-    "primary": "implement"
+    "status": "terminal",
+    "primary": "replan"
   }
 }

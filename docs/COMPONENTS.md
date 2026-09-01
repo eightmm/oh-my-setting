@@ -492,7 +492,7 @@ can compile it through `oms runtime context`. Discovery honors `.gitignore`,
 skips symlinks, binaries, oversized and secret-shaped files, and treats
 every source byte as data.
 
-The **Execution Graph** (`oms graph exec validate|render|route|run|resume|decide|status|events|shadow|test`)
+The **Execution Graph** (`oms graph exec validate|render|route|run|resume|decide|status|events|shadow|test|commit`)
 makes orchestration a first-class object. A GraphSpec (`config/graphs/*.json`)
 declares `agent`, `tool`, `gate`, `router`, `subgraph`, and `terminal` nodes,
 typed semantic outcomes (`completed failed unverified partial blocked
@@ -506,13 +506,26 @@ git) and recorded outcomes: a claimed `completed` whose proof facts are
 absent is `unverified`, and no model participates in routing. Runs live in
 `.oms/graph/runs/<run-id>/` as a frozen spec, an append-only `events.jsonl`
 with idempotency keys, and a derived projection; `resume` rebuilds state
-from events and current facts, never from conversation memory. Agent nodes
-execute through `plan-run --id TASK [--land]`; the adapter has no path to
-`agent-plan land/finish`, landing stays serialized by `patch-land`, and the
-scheduler admits concurrent nodes only when their write scopes are known
-and disjoint. `exec shadow` records how the evaluator's route compares with
-the control plane's canonical next action; the evaluator takes no authority
-from `goal-drive` or `autopilot`.
+from events and current facts, never from conversation memory. Task identity
+is frozen before work starts: `plan_task: "next"` is a selector resolved by
+one read-only peek, the concrete id is recorded on the `node_started` row
+and, under `bind_task`, as a run-scoped binding that `plan_task_from` nodes
+execute exactly (`implement` choosing `t1` means `land` lands `t1` after the
+plan's `next` has moved on). Agent nodes execute through
+`plan-run --id TASK [--land] [--context-pack FILE]` — the project-graph
+context pack an agent node's `context` field builds is orientation for the
+worker brief, never authority; the adapter has no path to `agent-plan
+land/finish/claim`, landing stays serialized by `patch-land`, and `--jobs N`
+runs a scheduler wave concurrently only for disjoint explicit tasks (same
+task, unknown or overlapping scope, landing, write tools, and a second
+selector serialize). The read-tool cache is keyed by a workspace fingerprint
+as well as HEAD and fails closed. `resume` reconciles a crashed node against
+the plan — a live lease waits, an expired one is `unverified`, a dead write
+tool is `blocked`. `exec commit --binding NAME` commits exactly the bound
+task's landed patch so the next landing finds a clean tree. `exec shadow`
+records how the evaluator's route compares with the control plane's
+canonical next action; the evaluator takes no authority from `goal-drive` or
+`autopilot`.
 
 ## Durable operations and optional frontends
 

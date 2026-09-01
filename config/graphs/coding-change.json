@@ -15,10 +15,12 @@
     "implement": {
       "kind": "agent",
       "effect": "write",
-      "title": "Implement the plan task in an isolated worktree",
-      "plan_task": "implement",
+      "title": "Select the next ready plan task, bind it, and implement it in an isolated worktree",
+      "plan_task": "next",
+      "bind_task": "work_item",
       "mode": "run",
-      "proof": ["plan.task.implement.patch_present", "plan.task.implement.state=review"]
+      "context": {"task": "${goal}", "max_files": 12},
+      "proof": ["binding.work_item.patch_present", "binding.work_item.state=review"]
     },
     "review": {
       "kind": "gate",
@@ -29,10 +31,17 @@
     "land": {
       "kind": "agent",
       "effect": "write",
-      "title": "Admit and land the reviewed patch",
-      "plan_task": "implement",
+      "title": "Admit and land the reviewed, bound task",
+      "plan_task_from": "work_item",
       "mode": "land",
-      "proof": ["receipt.land.implement.present", "plan.task.implement.state=done"]
+      "proof": ["binding.work_item.receipt.land.present", "binding.work_item.state=done"]
+    },
+    "commit": {
+      "kind": "tool",
+      "effect": "write",
+      "title": "Commit exactly the landed patch of the bound task",
+      "command": "oms graph exec commit --binding work_item",
+      "proof": ["!git.dirty"]
     },
     "acceptance": {
       "kind": "tool",
@@ -41,16 +50,22 @@
       "command": "oms agent-plan accept",
       "proof": ["receipt.acceptance.latest=pass", "receipt.acceptance.fresh"]
     },
-    "done": {"kind": "terminal", "title": "Change accepted"}
+    "done": {"kind": "terminal", "title": "Change accepted"},
+    "replan": {"kind": "terminal", "title": "Changes requested: the reviewed task waits for the parent to requeue it"},
+    "parked": {"kind": "terminal", "title": "No actionable task, or the bound task could not land or commit"}
   },
   "edges": [
     {"from": "inspect", "to": "implement", "outcomes": ["completed", "unverified", "skipped", "failed"]},
     {"from": "implement", "to": "review", "outcomes": ["completed"]},
     {"from": "implement", "to": "implement", "outcomes": ["failed", "unverified"], "kind": "repeat"},
-    {"from": "review", "to": "implement", "outcomes": ["changes_requested"]},
+    {"from": "implement", "to": "parked", "outcomes": ["blocked"]},
+    {"from": "review", "to": "replan", "outcomes": ["changes_requested"]},
     {"from": "review", "to": "land", "outcomes": ["approved"]},
-    {"from": "land", "to": "acceptance", "outcomes": ["completed"]},
+    {"from": "land", "to": "commit", "outcomes": ["completed"]},
     {"from": "land", "to": "land", "outcomes": ["partial"], "kind": "repeat"},
+    {"from": "land", "to": "parked", "outcomes": ["failed", "unverified", "blocked"]},
+    {"from": "commit", "to": "acceptance", "outcomes": ["completed"]},
+    {"from": "commit", "to": "parked", "outcomes": ["failed", "unverified"]},
     {"from": "acceptance", "to": "done", "outcomes": ["completed"]},
     {"from": "acceptance", "to": "implement", "outcomes": ["failed", "unverified"], "kind": "repeat"}
   ]

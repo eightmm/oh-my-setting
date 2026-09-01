@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import GRAPH_PACKAGE_VERSION
+from . import commit as exec_commit
 from . import events as exec_events
 from . import render
 from . import route as exec_route
@@ -150,6 +151,11 @@ def build_parser() -> argparse.ArgumentParser:
     test = exec_sub.add_parser("test")
     test.add_argument("path")
     test.add_argument("--json", action="store_true")
+    commit = exec_sub.add_parser("commit", help="commit exactly the landed patch of a bound task (parent-only)")
+    commit.add_argument("--binding", required=True)
+    commit.add_argument("--run", default=os.environ.get("OMS_GRAPH_RUN_ID", ""))
+    commit.add_argument("--message", default="")
+    commit.add_argument("--json", action="store_true")
     return parser
 
 
@@ -474,6 +480,12 @@ def _exec_status(args: argparse.Namespace) -> int:
         sys.stdout.write(render.render_exec_mermaid(spec, projection))
         return 0
     print("run: %s spec=%s status=%s" % (run_id, spec.get("id", ""), route["status"]))
+    bindings = projection.get("bindings", {})
+    if bindings:
+        print("bindings:")
+        for name in sorted(bindings):
+            entry = bindings[name]
+            print("  %s -> %s (bound by %s#%s)" % (name, entry.get("task_id", "-"), entry.get("node", "-"), entry.get("attempt", "-")))
     sys.stdout.write(render.render_exec_text(spec, projection, route))
     return 0
 
@@ -522,9 +534,18 @@ def _exec_test(args: argparse.Namespace) -> int:
     return 0 if passed else 3
 
 
+def _exec_commit(args: argparse.Namespace) -> int:
+    result = exec_commit.commit_bound(repo_root(args.repo), binding=args.binding, run_id=args.run, message=args.message)
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print("commit: %s task=%s status=%s paths=%d" % (result["commit"][:12], result["task_id"], result["status"], len(result["paths"])))
+    return 0
+
+
 EXEC_ACTIONS = {"validate": _exec_validate, "render": _exec_render, "route": _exec_route, "run": _exec_run,
                 "resume": _exec_resume, "decide": _exec_decide, "status": _exec_status, "events": _exec_events,
-                "shadow": _exec_shadow, "test": _exec_test}
+                "shadow": _exec_shadow, "test": _exec_test, "commit": _exec_commit}
 
 
 def _auto_refresh(args: argparse.Namespace, repo: Path, state: Path) -> None:

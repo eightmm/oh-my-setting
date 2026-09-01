@@ -10,6 +10,9 @@
     "implement": "completed"
   },
   "gates": {},
+  "bindings": {
+    "work_item": "implement"
+  },
   "expect": {
     "status": "gate",
     "primary": "review"

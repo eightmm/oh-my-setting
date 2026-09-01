@@ -13,6 +13,9 @@
   "gates": {
     "review": "approved"
   },
+  "bindings": {
+    "work_item": "implement"
+  },
   "expect": {
     "status": "actionable",
     "primary": "land"

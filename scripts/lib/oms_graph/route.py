@@ -4,10 +4,29 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from . import binding
 from .errors import GraphError
 from .predicates import holds, missing
 from .spec import load_spec, normalize_spec
 from .validate import validate_spec
+
+
+def normalize_bindings(value: Any) -> Dict[str, Dict[str, Any]]:
+    """Fixture shorthand `{"name": "t1"}` or projection rows -> projection rows."""
+    result: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(value, Mapping):
+        return result
+    for raw_name in sorted(value, key=str):
+        entry = value[raw_name]
+        name = str(raw_name)
+        if isinstance(entry, Mapping):
+            task_id = str(entry.get("task_id", "") or "")
+            if task_id:
+                result[name] = {"task_id": task_id, "node": str(entry.get("node", "") or ""),
+                                "attempt": entry.get("attempt", 1)}
+        elif isinstance(entry, str) and entry:
+            result[name] = {"task_id": entry, "node": "", "attempt": 1}
+    return result
 
 
 def effective_outcome(node_spec: Mapping[str, Any], claimed: str, facts: Mapping[str, Any]) -> Tuple[str, List[str]]:
@@ -18,7 +37,7 @@ def effective_outcome(node_spec: Mapping[str, Any], claimed: str, facts: Mapping
     return ("unverified", absent) if absent else (claimed, [])
 
 
-def state_from_outcomes(spec: Mapping[str, Any], outcomes: Mapping[str, str], *, gates: Optional[Mapping[str, str]] = None, repeats: Optional[Mapping[str, int]] = None) -> Dict[str, Any]:
+def state_from_outcomes(spec: Mapping[str, Any], outcomes: Mapping[str, str], *, gates: Optional[Mapping[str, str]] = None, repeats: Optional[Mapping[str, int]] = None, bindings: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Build an evaluator state from recorded outcomes (fixtures, tests)."""
     normalized = normalize_spec(spec)
     nodes = {
@@ -59,6 +78,7 @@ def state_from_outcomes(spec: Mapping[str, Any], outcomes: Mapping[str, str], *,
         "steps": steps,
         "repeats": {str(key): int(value) for key, value in (repeats or {}).items()},
         "gates": gate_values,
+        "bindings": normalize_bindings(bindings),
         "subgraphs": child_states,
     }
 
@@ -71,6 +91,9 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
     except GraphError as exc:
         validation = {"ok": False, "errors": [{"code": "invalid_schema", "where": "spec", "message": str(exc)}], "warnings": []}
         graph = {"nodes": {}, "edges": [], "budget": {"max_steps": 20, "max_repeats": 3}, "entry": "", "stop_facts": []}
+    # `binding.<name>.*` is derived here, never stored, so every caller proves
+    # against the same view of what a bound task currently is.
+    facts = binding.augment_binding_facts(graph, state, facts)
     nodes = graph.get("nodes", {})
     node_states = state.get("nodes", {}) if isinstance(state.get("nodes", {}), Mapping) else {}
     steps = state.get("steps", 0)
@@ -118,6 +141,12 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
     def node_state_of(node_id: str) -> Mapping[str, Any]:
         value = node_states.get(node_id, {})
         return value if isinstance(value, Mapping) else {}
+
+    def node_seq(node_id: str) -> int:
+        """Event order of the node's latest attempt; 0 when the state carries
+        no order (fixtures), which keeps the order-free semantics."""
+        value = node_state_of(node_id).get("seq", 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
     def recorded_outcome(node_id: str) -> Tuple[Optional[str], Optional[str]]:
         """(claimed, recorded): the worker's claim and the outcome recorded after proof."""
@@ -172,7 +201,9 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         the runner recorded after its own proof check. Re-checking history
         against today's facts would contradict the spec's own happy path (an
         implement node proved by `state=review` is still complete after the
-        landing that moved the task to `done`).
+        landing that moved the task to `done`). Work that finished *before*
+        this node's latest attempt is not further work: the node is then the
+        frontier again.
         """
         if node_id in effective:
             return effective[node_id]
@@ -182,6 +213,7 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         targets = [edge["to"] for edge in selected_edges(node_id, recorded)]
         frontier = not targets or any(
             node_state_of(target).get("status") != "finished" or target in ancestry or target == node_id
+            or node_seq(target) < node_seq(node_id)
             for target in targets
         )
         if frontier:
@@ -194,6 +226,10 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         return outcome
 
     def join_ready(node_id: str) -> bool:
+        # A terminal ends the run for whichever path reaches it first; several
+        # failure edges converging on `parked` are alternatives, not a fan-in.
+        if nodes[node_id].get("kind") == "terminal":
+            return True
         edges = [edge for edge in incoming.get(node_id, [])
                  if edge.get("kind", "normal") == "normal" and edge["from"] != node_id and
                  edge["from"] not in reachable.get(node_id, set())]
@@ -205,8 +241,33 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
     frontier: List[Dict[str, Any]] = []
     prospective_repeats = dict(repeat_counts)
 
-    def push(kind: str, node_id: str, reason: str = "") -> None:
-        frontier.append({"kind": kind, "node": node_id, "reason": reason})
+    def push(kind: str, node_id: str, reason: str = "", required: Optional[List[Dict[str, str]]] = None) -> None:
+        item: Dict[str, Any] = {"kind": kind, "node": node_id, "reason": reason}
+        if required:
+            item["required"] = required
+        frontier.append(item)
+
+    def task_resource(node_id: str, node: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        """The plan task an agent node would occupy: literal, bound, or a selector."""
+        if node.get("kind") != "agent":
+            return None
+        source = node.get("plan_task_from")
+        if isinstance(source, str) and source:
+            bound = binding.bound_task(state, source)
+            return {"kind": "plan_task", "id": bound, "binding": source} if bound else None
+        task = str(node.get("plan_task", "") or "")
+        if not task:
+            return None
+        if binding.is_selector(task):
+            return {"kind": "plan_task", "id": task, "selector": True}
+        return {"kind": "plan_task", "id": task}
+
+    def push_due(target: str) -> None:
+        """A node that must run (again): a gate awaits a fresh decision."""
+        if nodes[target].get("kind") == "gate":
+            push("gate", target, "%s awaits a new gate decision" % target)
+        else:
+            push("candidate", target)
 
     def follow_from(node_id: str, outcome: str, ancestry: Set[str]) -> None:
         selected = selected_edges(node_id, outcome)
@@ -216,16 +277,29 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         for edge in selected:
             target = edge["to"]
             trace.append("%s --%s--> %s" % (node_id, outcome, target))
+            target_finished = node_state_of(target).get("status") == "finished"
+            back_edge = edge.get("kind") == "repeat" or target in ancestry or target == node_id
+            if target_finished and node_seq(target) > node_seq(node_id):
+                # The target's latest attempt came after this outcome: the
+                # repeat (or the plain continuation) already happened, so the
+                # route continues past it instead of asking for it again.
+                expand(target, ancestry | {node_id})
+                continue
             # A back-edge into the current path re-runs finished work exactly
             # like a declared repeat edge, and spends the same budget.
-            if edge.get("kind") == "repeat" or target in ancestry or target == node_id:
+            if back_edge:
                 key = "%s->%s" % (node_id, target)
                 next_count = prospective_repeats.get(key, 0) + 1
                 if next_count > max_repeats:
                     push("exhausted", target, "repeat budget exhausted for %s" % key)
                 else:
                     prospective_repeats[key] = next_count
-                    push("candidate", target)
+                    push_due(target)
+                continue
+            if target_finished and node_seq(target) < node_seq(node_id):
+                # Finished before its upstream re-ran: due again. The cycle's
+                # own repeat edge already paid the budget for this pass.
+                push_due(target)
                 continue
             expand(target, ancestry | {node_id})
 
@@ -291,6 +365,11 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
             push("terminal", node_id)
         elif kind == "gate":
             push("gate", node_id, "%s awaits a gate decision" % node_id)
+        elif kind == "agent" and isinstance(node.get("plan_task_from"), str) and not binding.bound_task(state, str(node["plan_task_from"])):
+            # An unbound reader is a missing resource, named as such: never a
+            # scheduler-internal "unknown scope".
+            name = str(node["plan_task_from"])
+            push("blocked", node_id, "missing task binding: %s" % name, [{"kind": "task_binding", "name": name}])
         else:
             push("candidate", node_id)
 
@@ -318,8 +397,9 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
         node_id = primary.split(".", 1)[0]
         node = nodes.get(node_id, {})
         resources = []
-        if node.get("kind") == "agent" and node.get("plan_task"):
-            resources.append({"kind": "plan_task", "id": str(node["plan_task"])})
+        resource = task_resource(node_id, node)
+        if resource:
+            resources.append(resource)
         return result("actionable", primary, alternatives, "%s is actionable" % primary, resources)
     if gate_items:
         node_id = gate_items[0]["node"]
@@ -336,7 +416,7 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
     if joins and not blocked:
         return result("waiting", joins[0]["node"], [], joins[0]["reason"])
     if blocked:
-        return result("blocked", blocked[0]["node"], [], blocked[0]["reason"])
+        return result("blocked", blocked[0]["node"], [], blocked[0]["reason"], blocked[0].get("required"))
     if terminal:
         return result("terminal", terminal[0]["node"], [], "terminal %s reached" % terminal[0]["node"])
     return result("blocked", None, [], "no actionable route")
@@ -355,9 +435,10 @@ def run_fixture(fixture: Mapping[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     outcomes = fixture.get("outcomes", {})
     gates = fixture.get("gates", {})
     repeats = fixture.get("repeats", {})
-    if not all(isinstance(value, Mapping) for value in (facts, outcomes, gates, repeats)):
-        raise GraphError("fixture facts, outcomes, gates, and repeats must be objects")
-    state = state_from_outcomes(graph, outcomes, gates=gates, repeats=repeats)
+    bindings = fixture.get("bindings", {})
+    if not all(isinstance(value, Mapping) for value in (facts, outcomes, gates, repeats, bindings)):
+        raise GraphError("fixture facts, outcomes, gates, repeats, and bindings must be objects")
+    state = state_from_outcomes(graph, outcomes, gates=gates, repeats=repeats, bindings=bindings)
     steps = fixture.get("steps")
     if isinstance(steps, int) and not isinstance(steps, bool) and steps >= 0:
         state["steps"] = steps
@@ -368,6 +449,8 @@ def run_fixture(fixture: Mapping[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     for key, wanted in expected.items():
         if key == "downgrades":
             got = [item.get("node") for item in actual_route.get("downgrades", [])]
+        elif key == "required_resources":
+            got = actual_route.get("required_resources", [])
         else:
             got = actual_route.get(key)
         actual[key] = got

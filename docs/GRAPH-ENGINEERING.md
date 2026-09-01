@@ -162,29 +162,43 @@ JSON is canonical; there is no YAML dependency.
   "stop_facts": [],
   "nodes": {
     "inspect":    {"kind": "tool",  "effect": "read",  "command": "oms graph project context --task \"$OMS_GRAPH_GOAL\"", "cacheable": true},
-    "implement":  {"kind": "agent", "effect": "write", "plan_task": "implement", "mode": "run",
-                   "proof": ["plan.task.implement.patch_present"]},
+    "implement":  {"kind": "agent", "effect": "write", "plan_task": "next", "bind_task": "work_item", "mode": "run",
+                   "context": {"task": "${goal}", "max_files": 12},
+                   "proof": ["binding.work_item.patch_present", "binding.work_item.state=review"]},
     "review":     {"kind": "gate",  "authority": "parent",
                    "decisions": ["approved", "changes_requested"]},
-    "land":       {"kind": "agent", "effect": "write", "plan_task": "implement", "mode": "land",
-                   "proof": ["receipt.land.implement.present"]},
+    "land":       {"kind": "agent", "effect": "write", "plan_task_from": "work_item", "mode": "land",
+                   "proof": ["binding.work_item.receipt.land.present", "binding.work_item.state=done"]},
+    "commit":     {"kind": "tool",  "effect": "write", "command": "oms graph exec commit --binding work_item",
+                   "proof": ["!git.dirty"]},
     "acceptance": {"kind": "tool",  "effect": "read",  "command": "oms agent-plan accept",
-                   "proof": ["receipt.acceptance.latest=pass"]},
-    "done":       {"kind": "terminal"}
+                   "proof": ["receipt.acceptance.latest=pass", "receipt.acceptance.fresh"]},
+    "done":       {"kind": "terminal"},
+    "replan":     {"kind": "terminal"},
+    "parked":     {"kind": "terminal"}
   },
   "edges": [
-    {"from": "inspect",    "to": "implement",  "outcomes": ["completed", "unverified", "skipped"]},
+    {"from": "inspect",    "to": "implement",  "outcomes": ["completed", "unverified", "skipped", "failed"]},
     {"from": "implement",  "to": "review",     "outcomes": ["completed"]},
     {"from": "implement",  "to": "implement",  "outcomes": ["failed", "unverified"], "kind": "repeat"},
-    {"from": "review",     "to": "implement",  "outcomes": ["changes_requested"]},
+    {"from": "implement",  "to": "parked",     "outcomes": ["blocked"]},
+    {"from": "review",     "to": "replan",     "outcomes": ["changes_requested"]},
     {"from": "review",     "to": "land",       "outcomes": ["approved"]},
-    {"from": "land",       "to": "acceptance", "outcomes": ["completed"]},
+    {"from": "land",       "to": "commit",     "outcomes": ["completed"]},
     {"from": "land",       "to": "land",       "outcomes": ["partial"], "kind": "repeat"},
+    {"from": "land",       "to": "parked",     "outcomes": ["failed", "unverified", "blocked"]},
+    {"from": "commit",     "to": "acceptance", "outcomes": ["completed"]},
+    {"from": "commit",     "to": "parked",     "outcomes": ["failed", "unverified"]},
     {"from": "acceptance", "to": "done",       "outcomes": ["completed"]},
     {"from": "acceptance", "to": "implement",  "outcomes": ["failed", "unverified"], "kind": "repeat"}
   ]
 }
 ```
+
+`changes_requested` ends at the `replan` terminal on purpose. `plan-run --id`
+accepts a `review` task only with `--land`; the canonical way back to `ready`
+is the parent's `agent-plan release`, which the graph layer never calls, so
+the graph does not pretend a repair transition exists.
 
 Normalized node fields (`spec.normalize_spec` fills defaults):
 
@@ -193,8 +207,10 @@ Normalized node fields (`spec.normalize_spec` fills defaults):
 | `kind` | all | required | `agent tool gate router subgraph terminal` |
 | `title` | all | node id | display only |
 | `effect` | agent, tool | `read` | `read write none`; `write` nodes are never cached and are scope-checked by the scheduler |
-| `plan_task` | agent | — | `agent-plan` task id; the adapter maps it to `plan-run --id` |
-| `mode` | agent with `plan_task` | `run` | `run` stops in review; `land` continues through `patch-land` |
+| `plan_task` | agent | — | a literal `agent-plan` task id, or the selector `next`; exactly one of `plan_task` / `plan_task_from` |
+| `bind_task` | agent | — | name under which the resolved concrete task is recorded for the run (`binding.<name>.*` facts) |
+| `plan_task_from` | agent | — | run the task another node bound under this name; blocked with `required_resources: [{"kind": "task_binding"}]` until it is bound |
+| `mode` | agent | `run` | `run` stops in review; `land` continues through `patch-land` |
 | `provider` | agent | run option `--worker` | write-capable transport |
 | `command` | tool | required | run with `bash -c` from the repo root, bounded by `timeout` |
 | `timeout` | tool | 600 | seconds |
@@ -205,7 +221,7 @@ Normalized node fields (`spec.normalize_spec` fills defaults):
 | `decisions` | gate | `["approved","changes_requested"]` | outcomes a decision may record |
 | `join` | any node with ≥2 incoming edges | `all` | `all` waits for every incoming source, `any` for the first |
 | `graph` | subgraph | required | key in `subgraphs`; one level deep |
-| `context` | agent | `null` | `{"task": str, "max_files": int}` — project-graph context pack hint |
+| `context` | agent | `null` | `{"task": str, "max_files": int}` — build a project-graph context pack before the node runs and hand it to `plan-run --context-pack`; `${goal}` in `task` is substituted by the runner, never by a shell |
 
 Normalized edge fields: `from`, `to`, `outcomes` (non-empty list of
 outcomes), `kind` (`normal` or `repeat`), `priority` (int, default 0, lower
@@ -233,12 +249,65 @@ Error codes (exact strings): `invalid_schema`, `duplicate_node`,
 `unbounded_cycle`, `unknown_subgraph`, `recursive_subgraph`,
 `invalid_fact_reference`, `invalid_plan_task_reference`, `ambiguous_routes`,
 `invalid_effect`, `invalid_kind`, `invalid_join`, `invalid_command`,
-`invalid_budget`, `invalid_gate`.
+`invalid_budget`, `invalid_gate`, `invalid_task_binding`,
+`unknown_task_binding`, `duplicate_task_binding_writer`,
+`unreachable_task_binding`, `invalid_context`.
 
 Cycles are legal. Every cycle must contain at least one `repeat` edge (which
 `max_repeats` bounds) or the spec must declare `stop_facts`; `max_steps`
 must be a positive integer regardless. Warnings: `unrouted_outcome` (a
 non-terminal node has no edge for `failed`/`unverified`), `dead_end`.
+
+Binding rules: `bind_task` and `plan_task_from` are identifiers
+(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`); `plan_task` and `plan_task_from` are
+mutually exclusive and one is required on every agent node; only an agent
+node may bind; a name has exactly one writer node (a repeating writer may
+rebind its own name); every reader names a written binding and must be
+reachable from that writer. `plan_task: next` on a write node is legal.
+
+## Selector versus identity: task bindings
+
+`plan_task: "next"` is a *selector* — a rule for choosing a task — not a task.
+The runner resolves it to one concrete id before anything is scheduled, through
+`adapters.plan.peek_next_task` (`agent-plan next --json`, never `--claim`):
+the graph selects, `plan-run` claims. The concrete id is written onto the
+`node_started` row as `task_id`, together with `binding: <bind_task>` when
+the node declares one, and only then does `plan-run --id <id>` run. Because
+the durable row precedes the subprocess, a runner that dies immediately
+afterwards still knows which task it meant.
+
+`events.project()` folds those rows into `projection["bindings"]`
+(`{"work_item": {"task_id": "t1", "node": "implement", "attempt": 1}}`);
+the latest row for a name wins, so a repeating writer rebinds and replay
+reproduces the sequence. There is no second store. A node that says
+`plan_task_from: work_item` executes exactly that task — `implement(next)`
+choosing `t1` means `land` lands `t1` even after the plan's own `next` has
+moved on to `t2`. The invariant: **once an attempt has chosen a concrete
+task, its identity does not change during that attempt**; a task claimed by
+another session between the peek and `plan-run` is recorded as that task's
+`unverified`/`failed` outcome, never silently replaced.
+
+`binding.<name>.*` facts are derived on every evaluation from the projection
+plus `collect_facts` (`binding.augment_binding_facts`): `binding.<n>.task_id`,
+`plan.task.<id>.<field>` → `binding.<n>.<field>`, and
+`receipt.<kind>.<id>.<rest>` → `binding.<n>.receipt.<kind>.<rest>`. The adapter
+never sees a binding: the runner hands it an *effective node* whose
+`plan_task` is the id and whose proof predicates name that id
+(`binding.effective_node`). The legacy `plan.task.next.*` alias remains for
+old specs; bundled specs prove `binding.work_item.*`.
+
+A selector with nothing to select (`agent-plan next` exit 3) is recorded as
+the node's `blocked` outcome with detail `no-actionable-task` — the plan's
+verdict, routed like any other — and a reader whose binding is missing is
+`blocked` with `required_resources: [{"kind": "task_binding", "name": ...}]`,
+never an anonymous scheduler conflict.
+
+The route evaluator orders attempts by event `seq`: a repeat edge whose
+target already ran *after* the source's latest outcome is history the route
+walks past, and a finished node older than the node that feeds it is due
+again (a gate then awaits a fresh decision). Order-free states (fixtures)
+keep the plain repeat semantics. A terminal reached by several alternative
+edges is never a join.
 
 ## Facts, outcomes, instructions
 
@@ -362,10 +431,28 @@ through `oms_runtime.common.append_jsonl` (locked, atomic).
 without a later `node_outcome` leaves the node `active`; duplicate keys are
 folded once. `projection.json` is a cache of `project()` and never an input.
 
+Optional row fields (schema 1, old rows still read): `task_id` and
+`binding` on `node_started`/`node_outcome` (the frozen identity — see
+"Selector versus identity"), `wave_id`/`wave_index` (which scheduler wave
+launched the attempt), and context provenance on `node_started`:
+`project_graph_revision`, `context_pack_sha256`, `context_file_count` (or
+`context: {"status": "unavailable", "reason"}` when the pack could not be
+built). The projection carries `bindings`, per-node `task_id`, and per-node
+`seq` (the row order of the latest attempt).
+
 Recovery: `runner.resume` rebuilds state from `graph.json` + `events.jsonl`,
-then reconciles every `active` node from current facts through its adapter
-(`adapters.plan.outcome_from_task`), appending the missing `node_outcome`
-with key `outcome:<node>:<attempt>`; the next route follows from that.
+then reconciles every `active` node against current reality, appending the
+missing `node_outcome` with key `outcome:<node>:<attempt>` and actor
+`resume`; the next route follows from that. An agent node's task is the id
+its own `node_started` row froze: `review` with a patch (mode run) or `done`
+with a landing receipt (mode land) reconstruct `completed`; `blocked` is
+`blocked`; a task still `claimed`/`running` under a **live** lease is left
+`active` and the run reports `waiting` (the graph never restarts a live
+worker and never releases a lease); an **expired** claim is `unverified`
+with detail `claim-expired`, for the repeat or recovery route to judge. A
+read tool that died is `unverified` and may be re-run by a repeat edge; a
+write tool that died is `blocked` (`resumed-write-tool-uncertain`) — rerunning
+it blindly could repeat a side effect, so that decision is the operator's.
 Conversation memory is never an input.
 
 Work Journal: `run_finished` is mirrored best-effort through the journal's
@@ -381,13 +468,17 @@ the events file stays the only authoritative record.
 ```python
 plan_status(repo) -> dict                       # agent-plan status --json
 task_view(repo, task_id) -> dict                # agent-plan show --id
+peek_next_task(repo) -> dict | None             # agent-plan next --json (read-only; None = nothing actionable)
 scope_of(task_view) -> {"allowed": [...], "forbidden": [...]}
 outcome_from_task(node_spec, task_view, facts) -> (outcome, proof_missing)
-build_command(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, dry_run=False) -> List[str]
-execute(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, timeout=2700, dry_run=False) -> dict
+build_command(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, dry_run=False, context_pack="") -> List[str]
+execute(repo, node_spec, *, provider, model="", reasoning_effort="", repair=0, timeout=2700, dry_run=False, context_pack="") -> dict
 ```
 
-`execute` runs `plan-run --repo R --to P --id T [--land] [--repair N]`,
+The adapter accepts only a concrete node: a `plan_task` selector or a
+`plan_task_from` reference is refused, and `_plan_argv` refuses `--claim`
+outright. `execute` runs
+`plan-run --repo R --to P --id T [--land] [--repair N] [--context-pack FILE]`,
 then rereads the task. Outcome mapping:
 
 | mode | condition after `plan-run` | outcome |
@@ -407,18 +498,83 @@ The adapter has, by construction, no code path to `agent-plan land`,
 
 ```python
 scheduler.scopes_overlap(a, b) -> bool
-scheduler.eligible(spec, state, facts, *, route, task_scopes, capacity=1, active=()) -> {"eligible": [...], "deferred": [{"node": ..., "reason": ...}], "conflicts": [...]}
+scheduler.eligible(spec, state, facts, *, route, task_scopes, capacity=1, active=(),
+                   resolved_tasks=None, selectors=()) -> {"eligible": [...], "deferred": [{"node": ..., "reason": ...}], "conflicts": [...]}
 ```
 
+Task identity is an input: the runner resolves every candidate agent node
+(literal id, bound name, or one read-only peek per wave shared by all
+selector nodes) and passes `resolved_tasks` plus the `selectors` list; the
+scheduler never reads the raw `plan_task` string as an identity, and
+`task_scopes` is keyed by concrete task id.
+
 Eligibility: route says the node may run **and** `requires` holds **and** it
-is not a gate **and** its write scope does not overlap any selected or
-active write scope **and** capacity remains. Overlap is conservative: an
-empty or unknown write scope conflicts with everything; a literal directory
-overlaps a glob whose static prefix falls under it; two globs overlap unless
-their static prefixes diverge. `mode: land` nodes and any `effect: write`
-tool node are exclusive — they run only when nothing else is active. Worker
-execution parallelism never implies landing parallelism: landing is
-serialized by `patch-land` itself and the scheduler keeps it that way.
+is not a gate **and** no active or selected node holds the same task
+(`same-task` — one lifecycle lease is one resource whatever the path scopes
+say) **and** at most one selector-resolved node per wave
+(`dynamic-selector-exclusive`) **and** its write scope does not overlap any
+selected or active write scope **and** capacity remains. Overlap is
+conservative: an empty or unknown write scope conflicts with everything; a
+literal directory overlaps a glob whose static prefix falls under it; two
+globs overlap unless their static prefixes diverge. `mode: land` nodes and
+any `effect: write` tool node are exclusive — they run only when nothing
+else is active. Worker execution parallelism never implies landing
+parallelism: landing is serialized by `patch-land` itself and the scheduler
+keeps it that way.
+
+### Waves and real concurrency
+
+`--jobs N` is real fan-out. Each loop iteration is one wave: route → resolve
+tasks → scheduler → `node_started` for every eligible node (coordinator
+thread, in order, `wave_id`/`wave_index` recorded) → the nodes' subprocesses
+on a `concurrent.futures.ThreadPoolExecutor` (stdlib; agent work is a
+subprocess, so threads suffice) → one `node_outcome` per node appended by the
+coordinator as each finishes. Threads run subprocesses only; every
+`events.jsonl` write, every proof check against post-run facts, and every
+cache write happens on the coordinator. A wave that cannot even launch a node
+records that node as `unverified` (`runner-error: ...`) rather than leaving it
+active. Two disjoint explicit tasks may share a wave; the same task, an
+overlapping or unknown scope, a landing, a write tool, and a second selector
+never do. `tests/test_oms_graph_runtime.py` proves overlap with a barrier
+worker, not a wall clock: under `--jobs 2` both workers pass, under
+`--jobs 1` the first times out.
+
+Tool nodes see the run in their environment: `OMS_GRAPH_RUN_ID`,
+`OMS_GRAPH_NODE`, `OMS_GRAPH_ATTEMPT`, `OMS_GRAPH_GOAL`, and one
+`OMS_GRAPH_TASK_<NAME>` per binding (`OMS_GRAPH_TASK_WORK_ITEM=t1`).
+
+### Exact commit of a bound task
+
+`patch-land` applies a reviewed patch and never commits, and it refuses to
+land onto a dirty tree, so a multi-task run needs a commit between landings.
+`oms graph exec commit --binding NAME [--run ID]` is the narrowest step that
+provides one (`oms_graph/commit.py`): the bound task must be `done` with a
+landing receipt (both read through the adapter's read verbs), the paths are
+taken from the task's stored patch headers, the tree may hold no other
+change (strangers are refused, never swept), and the commit is made with
+`--no-verify` — the same choice the canonical goal-drive driver makes for
+its exact commits: admission plus the task verifier are the gate for
+autonomous work. It is parent-only, it is not a landing, and it never touches
+plan state. The bundled specs run it as a `tool` node with `effect: write`
+(exclusive, never cached) proved by `!git.dirty`.
+
+### Context handoff
+
+An agent node with `context` gets a project-graph context pack before it
+starts: `project.build.ensure` (a stale or absent graph is rebuilt — it is a
+regenerable cache), `project.context.context_pack(task, max_files)`, and the
+pack's path goes to `plan-run --context-pack FILE`, which validates it as a
+typed input (regular file, not a symlink, bounded size, JSON with
+repo-relative `files`/`tests` only — no absolute paths or `..` — and no
+secret-shaped text) and forwards it to `peer-delegate --context-pack`, which
+renders a "Project Graph orientation" section into the worker brief
+(file and test names with reasons; never source bytes — the worker reads its
+own isolated worktree). The pack never widens `allowed_paths` and is written
+into no plan state; only `project_graph_revision`, `context_pack_sha256`, and
+`context_file_count` are recorded on the node's `node_started` row. The
+existing `--context-manifest` bundle stays opt-in; when both are on, the
+pack's files become the manifest's targets — orientation says where to look,
+the manifest delivers the bounded bytes.
 
 ## Caching
 
@@ -427,11 +583,18 @@ Project-graph extraction cache (required): key =
 files reuse their extraction verbatim.
 
 Execution node cache (limited): only `tool` nodes with `effect: read` and
-`cacheable: true`. Key = `sha256(EXEC_SCHEMA, normalized node (command
-included), git.head, upstream finished outcomes)`, stored under
-`.oms/graph/cache/<key>.json`. Only a *proved* completion is cached: a cached
-failure would replay forever behind a repeat edge, because a retry changes
-nothing in the key. Write, land, gate, and agent nodes are never cached.
+`cacheable: true`. Key v2 = `sha256(EXEC_SCHEMA, normalized node (command
+included), git.head, workspace fingerprint, upstream finished outcomes)`,
+stored under `.oms/graph/cache/<key>.json`. The workspace fingerprint
+(`oms_graph/workspace.py`) covers what HEAD cannot: tracked modified paths,
+staged blobs (`git diff-index --cached`), and untracked non-ignored paths,
+each with a content digest; `.oms/` and `.git/` are excluded (the run's own
+event appends must not invalidate the cache). It fails closed — a symlink,
+an unreadable or oversized dirty file, or more than 200 dirty paths yields no
+key, and the cache is then neither read nor written — instead of degrading
+to HEAD. Only a *proved* completion is cached: a cached failure would replay
+forever behind a repeat edge, because a retry changes nothing in the key.
+Write, land, gate, and agent nodes are never cached.
 
 ## Project Graph
 
@@ -557,7 +720,13 @@ oms graph exec status    [--run ID] [--json|--mermaid]
 oms graph exec events    --run ID [--limit N]
 oms graph exec shadow    [--spec NAME]
 oms graph exec test      PATH   (route fixtures; a file or a directory)
+oms graph exec commit    --binding NAME [--run ID] [--message TEXT]   (parent-only exact commit of the bound task's landed patch)
 ```
+
+`exec status` prints `bindings:` (`work_item -> t1 (bound by implement#1)`)
+and labels agent nodes `[work_item=t1]` (writer) or `[task=work_item→t1]`
+(reader); `--json` carries `projection.bindings`. `exec run --dry-run` reports
+`resolved_tasks` and `unavailable` selectors beside the eligible set.
 
 `SPEC` is a path or the name of a bundled spec in `config/graphs/`. Common
 options: `--repo PATH`, `--pretty`. `build` and `check` accept `--json`;
@@ -662,6 +831,20 @@ a value may never start with `-`. Output stays under the server's
   `plan-run`; regression guards: no lease/scope/admission/review/acceptance
   bypass, no fake landing receipt, no `done` from prose; sequential landing
   of two patches from different bases; exit 75 → `partial`.
+- `tests/test_oms_graph_runtime.py`: the bundled `goal-drive` on a real
+  two-task plan through an `oms` shim (evidence A: implement bound `t1`,
+  the plan's `next` became `t2`, resume landed `t1`, the next cycle rebound
+  `t2`, both landed and committed exactly); a selection race (t1 claimed by
+  another session after the peek → recorded against `t1`, `t2` untouched);
+  the barrier fan-out proof (evidence B) and the same-task / landing /
+  selector exclusions; workspace-aware cache hits and misses (unstaged,
+  staged, untracked, unsafe → no cache); every resume reconciliation case
+  (review, done+receipt, blocked, live lease → waiting, expired lease →
+  unverified, dead write tool → blocked, binding preserved); the exact
+  commit step's refusals.
+- `tests/test_oms_graph_workspace.py`: the fingerprint's relations (clean,
+  modified, staged blobs with unchanged bytes, untracked, ignored, `.oms/`,
+  deleted, renamed) and its fail-closed reasons.
 - `tests/graph-smoke.sh`: unittest discovery of `test_oms_graph_*.py`, CLI
   smoke through `scripts/oms`, dogfood build of this repository from a
   `git archive` copy (revision stable across two builds; `--include`/
@@ -681,6 +864,7 @@ a value may never start with `-`. Output stays under the server's
 | W2 project | `oms_graph/project/{model,extract,cache,build,query,blast,context}.py`, `oms_graph/project/parsers/*`, `tests/test_oms_graph_project.py` |
 | W-G analytics | `oms_graph/project/analytics.py`, `oms_graph/render.py`, `tests/fixtures/graph-routes/*.json`, `tests/test_oms_graph_analytics.py` |
 | W3 integration | `oms_graph/{cli,child_policy,scheduler,runner,shadow}.py`, `oms_graph/adapters/plan.py`, `scripts/graph.sh`, `scripts/lib/oms_graph_core.py`, `scripts/oms-mcp-server.py`, `scripts/check.sh`, `tests/graph-smoke.sh`, `tests/test_oms_graph_integration.py`, `tests/state-surfaces-smoke.sh`, docs |
+| Runtime v2 | `oms_graph/{binding,workspace,commit}.py`, binding-aware `spec/validate/events/route/scheduler/runner`, concrete-only `adapters/plan.py`, `plan-run --context-pack` + `peer-delegate --context-pack` (`oms_runtime/context_pack.py`), `tests/test_oms_graph_runtime.py`, `tests/test_oms_graph_workspace.py` |
 
 ## Non-goals (v1)
 

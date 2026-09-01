@@ -80,8 +80,18 @@ def _normalize_graph(raw: Mapping[str, Any], graph_id: str) -> Dict[str, Any]:
         if kind in ("agent", "tool"):
             node["effect"] = node.get("effect", "read")
             node["proof"] = _string_list(node.get("proof", []), "node %s proof" % node_id)
-        if kind == "agent" and node.get("plan_task"):
-            node["mode"] = node.get("mode", "run")
+        if kind == "agent":
+            # `plan_task` is a literal id or the `next` selector; `plan_task_from`
+            # reads a run-scoped binding that a `bind_task` node wrote. The
+            # validator owns the exclusivity and reachability rules.
+            if node.get("plan_task") or node.get("plan_task_from"):
+                node["mode"] = node.get("mode", "run")
+            for field in ("bind_task", "plan_task_from", "context"):
+                if field in node and node[field] is None:
+                    node.pop(field)
+            context = node.get("context")
+            if isinstance(context, Mapping):
+                node["context"] = {"task": context.get("task", ""), "max_files": context.get("max_files", 12)}
         if kind == "tool":
             node["timeout"] = node.get("timeout", 600)
             node["cacheable"] = node.get("cacheable", False)

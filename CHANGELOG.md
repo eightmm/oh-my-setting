@@ -7,6 +7,52 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- Graph Runtime v2 (`docs/GRAPH-ENGINEERING.md`, "Selector versus
+  identity"): task selection and task identity are separate. `plan_task:
+  "next"` is resolved by one read-only peek before anything is scheduled,
+  the concrete id is frozen on the `node_started` row, and `bind_task` /
+  `plan_task_from` carry it to downstream nodes as a run-scoped binding
+  folded from `events.jsonl` (no second store) — `implement` choosing `t1`
+  means `land` lands `t1` after the plan's `next` has moved on, which the
+  previous bundled `goal-drive` could not guarantee (its `land` re-read
+  `next`). `binding.<name>.*` facts, validator codes for binding misuse,
+  `blocked` with `required_resources: task_binding` for an unbound reader,
+  `exec status` binding display, and a real two-task `goal-drive` E2E.
+- `--jobs N` is real concurrency: a scheduler wave runs on a stdlib thread
+  pool while the coordinator stays the only `events.jsonl` writer; the same
+  task, unknown or overlapping scopes, landings, write tools, and a second
+  dynamic selector never share a wave (proved with a barrier worker, not a
+  wall clock). `wave_id`/`wave_index` on `node_started`.
+- The read-tool cache key carries a workspace fingerprint (tracked edits,
+  staged blobs, untracked files; `.oms/` excluded) and fails closed on an
+  unhashable tree instead of replaying a stale result behind an unchanged
+  HEAD.
+- Context handoff: an agent node's `context` builds a project-graph pack
+  that `plan-run --context-pack FILE` validates as a typed input and
+  `peer-delegate --context-pack` renders into the worker brief as
+  orientation (never source bytes, never wider `allowed_paths`);
+  provenance (`project_graph_revision`, `context_pack_sha256`,
+  `context_file_count`) is recorded on the node's `node_started` row.
+- `oms graph exec commit --binding NAME`: the exact, parent-only commit of
+  a bound task's landed patch (paths from the stored patch, strangers
+  refused, `--no-verify` like the goal-drive driver) so a multi-task run
+  can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
+
+### Changed
+- `resume` reconciliation reads the frozen identity: a task under a live
+  lease keeps its node `active` (the run reports `waiting`), an expired
+  claim is `unverified`, and a write tool that died is `blocked` rather
+  than re-run.
+- The route evaluator orders attempts by event `seq`, so a repeat that
+  already happened is walked past and a node older than its upstream is
+  due again; a terminal reached by alternative edges is not a join.
+- Bundled `coding-change` routes `changes_requested` to a `replan`
+  terminal: `plan-run --id` accepts a review task only with `--land` and
+  the requeue (`agent-plan release`) belongs to the parent, so the graph
+  invents no repair transition. Both bundled specs now select with
+  `next`, bind `work_item`, and commit exactly after landing.
+- The plan adapter accepts only concrete nodes and its read allowlist gains
+  a bare `next` (`--claim` is refused at the argv boundary).
 - `oms graph`: a Project Graph and an Execution Graph above the existing
   control plane (`docs/GRAPH-ENGINEERING.md`). The Project Graph is a
   deterministic, content-addressed structural graph of the repository

@@ -7,16 +7,21 @@
     "receipt.admit.implement.latest": "verified",
     "receipt.land.implement.present": true,
     "receipt.acceptance.latest": "fail",
-    "receipt.acceptance.fresh": true
+    "receipt.acceptance.fresh": true,
+    "git.dirty": false
   },
   "outcomes": {
     "inspect": "completed",
     "implement": "completed",
     "land": "completed",
+    "commit": "completed",
     "acceptance": "failed"
   },
   "gates": {
     "review": "approved"
+  },
+  "bindings": {
+    "work_item": "implement"
   },
   "expect": {
     "status": "actionable",

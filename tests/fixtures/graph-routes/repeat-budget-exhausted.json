@@ -11,6 +11,9 @@
     "implement": "failed"
   },
   "gates": {},
+  "bindings": {
+    "work_item": "implement"
+  },
   "repeats": {
     "implement->implement": 3
   },
