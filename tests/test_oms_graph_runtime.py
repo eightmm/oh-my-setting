@@ -295,7 +295,10 @@ class FanOutTest(RuntimeFixture, unittest.TestCase):
         self.barrier.mkdir()
 
     def test_jobs_2_runs_two_disjoint_workers_at_the_same_time(self) -> None:
-        result = self.run_graph(fanout_spec(), jobs=2, env_extra={"BARRIER_DIR": str(self.barrier), "BARRIER_WAIT": "20"})
+        # The window only has to outlast the second plan-run's own start-up
+        # (claim, worktree, provider launch) under gate load; the proof is the
+        # exchange itself, not the elapsed time.
+        result = self.run_graph(fanout_spec(), jobs=2, env_extra={"BARRIER_DIR": str(self.barrier), "BARRIER_WAIT": "120"})
         self.assertEqual(result["status"], "terminal", result)
         run_id = result["run_id"]
         recorded = {row["node"]: row["outcome"] for row in self.outcomes(run_id)}
