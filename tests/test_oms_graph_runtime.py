@@ -515,6 +515,61 @@ class ExactCommitTest(RuntimeFixture, unittest.TestCase):
             exec_commit.patch_paths('diff --git "a/we ird" "b/we ird"\n')
 
 
+PROMPT_DUMP_CODEX = FAKE_CODEX.replace('prompt="$(cat)"\n', 'prompt="$(cat)"\n[ -z "${PROMPT_DUMP:-}" ] || printf \'%s\' "$prompt" > "$PROMPT_DUMP"\n')
+
+
+@unittest.skipUnless(HAVE_GIT, "git is required to drive plan-run")
+class ContextBridgeTest(RuntimeFixture, unittest.TestCase):
+
+    CODEX = PROMPT_DUMP_CODEX
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / "target.py").write_text("def target():\n    return 1\n", encoding="utf-8")
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "test_target.py").write_text("from target import target\n\ndef test_target():\n    assert target() == 1\n", encoding="utf-8")
+        self.git("add", "target.py", "tests/test_target.py")
+        self.git("commit", "-qm", "add target")
+
+    def test_the_project_graph_pack_reaches_the_worker_brief_without_widening_scope(self) -> None:
+        dump = self.tmp / "prompt.txt"
+        spec = _spec("implement", {
+            "implement": {"kind": "agent", "effect": "write", "plan_task": "t1", "mode": "run",
+                          "context": {"task": "${goal}", "max_files": 6},
+                          "proof": ["plan.task.t1.patch_present"]},
+            "done": {"kind": "terminal"},
+        }, [{"from": "implement", "to": "done", "outcomes": ["completed"]}])
+        result = self.run_graph(spec, goal="change target and its test", env_extra={"PROMPT_DUMP": str(dump)})
+        self.assertEqual(result["status"], "terminal", result)
+        started = self.started(result["run_id"], "implement")[0]
+        self.assertRegex(started["context_pack_sha256"], r"^[0-9a-f]{64}$")
+        self.assertGreaterEqual(started["context_file_count"], 1)
+        self.assertTrue(started["project_graph_revision"])
+        prompt = dump.read_text(encoding="utf-8")
+        self.assertIn("## Project Graph orientation", prompt)
+        self.assertIn("target.py", prompt)
+        self.assertIn("tests/test_target.py", prompt)
+        self.assertNotIn("def target():", prompt)  # orientation names files; it never inlines source
+        # The pack expanded nothing: the task's write scope is untouched and the brief still states it.
+        code, view = self.plan_json("show", "--id", "t1")
+        self.assertEqual(view["allowed_paths"], ["delegated.txt"])
+        self.assertIn("allowed_paths: delegated.txt", prompt)
+
+    def test_an_unbuildable_pack_is_recorded_not_fatal(self) -> None:
+        spec = _spec("implement", {
+            "implement": {"kind": "agent", "effect": "write", "plan_task": "t1", "mode": "run",
+                          "context": {"task": "anything", "max_files": 3}, "proof": ["plan.task.t1.patch_present"]},
+            "done": {"kind": "terminal"},
+        }, [{"from": "implement", "to": "done", "outcomes": ["completed"]}])
+        with mock.patch.object(runner.project_build, "ensure", side_effect=OSError("disk full")):
+            result = self.run_graph(spec)
+        self.assertEqual(result["status"], "terminal", result)
+        started = self.started(result["run_id"], "implement")[0]
+        self.assertEqual(started["context"]["status"], "unavailable")
+        self.assertIn("disk full", started["context"]["reason"])
+        self.assertNotIn("context_pack_sha256", started)
+
+
 class BundledSpecShapeTest(unittest.TestCase):
     def test_bundled_specs_bind_selection_and_commit_exactly(self) -> None:
         for name in ("goal-drive", "coding-change"):

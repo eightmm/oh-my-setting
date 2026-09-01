@@ -14,7 +14,7 @@ from oms_graph.project import analytics
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "graph-routes"
 SPEC_DIR = ROOT / "config" / "graphs"
 REQUIRED_KEYS = {"name", "facts", "outcomes", "gates", "expect"}
-OPTIONAL_KEYS = {"repeats", "steps"}
+OPTIONAL_KEYS = {"repeats", "steps", "bindings"}
 
 
 def node(node_id, kind="function", path="", name=""):
@@ -344,6 +344,15 @@ class RouteFixtureTest(unittest.TestCase):
                         self.assertIsInstance(value, int)
                 if "steps" in payload:
                     self.assertIsInstance(payload["steps"], int)
+                if "bindings" in payload:
+                    # `name: task_id` shorthand or a projection row with task_id.
+                    self.assertIsInstance(payload["bindings"], dict)
+                    for name, value in payload["bindings"].items():
+                        self.assertRegex(name, r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+                        if isinstance(value, dict):
+                            self.assertIsInstance(value.get("task_id"), str)
+                        else:
+                            self.assertIsInstance(value, str)
 
                 if "spec_ref" in payload:
                     spec_path = SPEC_DIR / ("%s.json" % payload["spec_ref"])
