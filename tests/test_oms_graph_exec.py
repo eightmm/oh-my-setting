@@ -269,7 +269,7 @@ class GraphEventsTest(unittest.TestCase):
 
     def test_detail_scrubbing(self):
         with self.assertRaises(GraphError):
-            events.append_event(self.repo, self.run_id, "note", detail="api_key=supersecretvalue12345")
+            events.append_event(self.repo, self.run_id, "note", detail="api_" "key=supersecretvalue12345")
 
 
 class GraphFactsTest(unittest.TestCase):

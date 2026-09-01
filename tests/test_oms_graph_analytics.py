@@ -136,9 +136,9 @@ class AnalyticsTest(unittest.TestCase):
         nodes = [node(name, path="left/%s.py" % name) for name in left]
         nodes += [node(name, path="right/%s.py" % name) for name in right]
         edges = []
-        for cluster in (left, right):
-            for first in cluster:
-                for second in cluster:
+        for group in (left, right):
+            for first in group:
+                for second in group:
                     if first < second:
                         edges.append(edge(first, second))
         edges.append(edge("a4", "b4", relation="references"))

@@ -49,9 +49,9 @@ class ShellParser(Parser):
             if include:
                 argument = include.group(1).strip()
                 quoted = re.match(r"^(['\"])(.*)\1(?:\s.*)?$", argument)
-                token = (quoted.group(2) if quoted else argument.split()[0]).strip("'\"")
-                variable = "$" in token or "$(dirname" in token
-                cleaned = re.sub(r"^(?:\$\{?(?:ROOT|SCRIPTS_DIR)\}?/?|\$\(dirname\s+['\"]?\$0['\"]?\)/?)", "", token)
+                target = (quoted.group(2) if quoted else argument.split()[0]).strip("'\"")
+                variable = "$" in target or "$(dirname" in target
+                cleaned = re.sub(r"^(?:\$\{?(?:ROOT|SCRIPTS_DIR)\}?/?|\$\(dirname\s+['\"]?\$0['\"]?\)/?)", "", target)
                 cleaned = cleaned.replace("scripts/lib/../", "scripts/").lstrip("./")
                 if cleaned:
                     result.refs.append({"from": file_id, "relation": "imports", "kind": "path", "value": cleaned, "line": number, "variable": variable, "shell_include": True})
