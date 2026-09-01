@@ -115,11 +115,25 @@ python3 - "$work/map.json" <<'PY'
 import json
 import sys
 summary = json.load(open(sys.argv[1]))
-for key in ("kinds", "languages", "hubs", "modules"):
+for key in ("revision", "counts", "hubs", "groups"):
     assert key in summary, (key, sorted(summary))
-assert summary["kinds"].get("function"), summary["kinds"]
-assert summary["kinds"].get("test"), summary["kinds"]
-assert summary["hubs"] and set(summary["hubs"][0]) == {"id", "degree"}, summary["hubs"]
+assert summary["counts"]["kind"].get("function"), summary["counts"]
+assert summary["counts"]["kind"].get("test"), summary["counts"]
+assert summary["hubs"] and set(summary["hubs"][0]) == {"id", "kind", "degree"}, summary["hubs"]
+PY
+
+run_graph "$work/analyze.json" project analyze --hubs 3 --cycles --communities --path 'file:beta.py' 'file:alpha.py' --json
+[ "$graph_rc" -eq 0 ] || fail "analyze --json exited $graph_rc: $(cat "$work/analyze.json")"
+python3 - "$work/analyze.json" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1]))
+assert 0 < len(row["hubs"]) <= 3, row["hubs"]
+assert set(row["hubs"][0]) == {"id", "kind", "degree"}, row["hubs"][0]
+assert row["components"] and row["components"][0]["size"] >= 2, row["components"]
+assert isinstance(row["cycles"], list), row
+assert row["communities"] and row["communities"][0]["members"], row["communities"]
+assert row["path"] and row["path"][0] == "file:beta.py", row["path"]
 PY
 
 run_graph "$work/find.out" project find alpha_entry --limit 5
@@ -219,5 +233,181 @@ dog_rc=0
 dog_cached="$(sed -n 's/^graph: built .* cached=\([0-9][0-9]*\) .*$/\1/p' "$work/dog-build2.out")"
 dog_files2="$(sed -n 's/^graph: built .* files=\([0-9][0-9]*\) .*$/\1/p' "$work/dog-build2.out")"
 [ "$dog_cached" = "$dog_files2" ] || fail "second dogfood build re-parsed: cached=$dog_cached files=$dog_files2"
+
+# --- execution graph --------------------------------------------------------
+# A second repository with a real plan: the execution verbs read plan and
+# receipt facts, so an empty tree would exercise nothing. No provider is
+# needed here — `exec run` only ever appears as --dry-run.
+exec_repo="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-exec.XXXXXX")"
+trap 'rm -rf "$tmp" "$work" "$dog" "$exec_repo"' EXIT INT TERM HUP
+
+exec_rc=0
+# The gate scrubs the invoking session's own harness identity: a run that
+# inherits OMS_HARNESS_CHILD=1 loses agent-plan init/add and every exec writer.
+run_exec() {  # run_exec OUTPUT ARGS...
+  out="$1"
+  shift
+  exec_rc=0
+  (
+    unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
+      OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+      OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
+      OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
+    OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 \
+      "$@"
+  ) > "$out" 2>&1 || exec_rc=$?
+}
+
+run_graph_exec() {  # run_graph_exec OUTPUT ARGS...
+  out="$1"
+  shift
+  run_exec "$out" "$OMS" graph --repo "$exec_repo" "$@"
+}
+
+git -C "$exec_repo" init -q -b main
+git -C "$exec_repo" config user.email test@example.com
+git -C "$exec_repo" config user.name test
+mkdir -p "$exec_repo/src"
+printf 'base\n' > "$exec_repo/README.md"
+git -C "$exec_repo" add README.md
+git -C "$exec_repo" commit -qm base
+
+run_exec "$work/plan-init.out" bash "$ROOT/scripts/agent-plan.sh" --repo "$exec_repo" \
+  init --goal "graph smoke" --accept true
+[ "$exec_rc" -eq 0 ] || fail "plan init exited $exec_rc: $(cat "$work/plan-init.out")"
+run_exec "$work/plan-add.out" bash "$ROOT/scripts/agent-plan.sh" --repo "$exec_repo" \
+  add --id implement --title implement --allowed src/ --verify true
+[ "$exec_rc" -eq 0 ] || fail "plan add exited $exec_rc: $(cat "$work/plan-add.out")"
+
+for spec_name in coding-change goal-drive; do
+  run_graph_exec "$work/validate-$spec_name.out" exec validate "$spec_name"
+  [ "$exec_rc" -eq 0 ] || fail "validate $spec_name exited $exec_rc: $(cat "$work/validate-$spec_name.out")"
+  grep -Fqx 'ok' "$work/validate-$spec_name.out" || fail "validate $spec_name did not say ok: $(cat "$work/validate-$spec_name.out")"
+done
+
+cat > "$work/broken.json" <<'EOF'
+{"schema": 1, "id": "broken", "entry": "work",
+ "budget": {"max_steps": 4, "max_repeats": 1},
+ "nodes": {"work": {"kind": "tool", "command": "true"}, "done": {"kind": "terminal"}},
+ "edges": [{"from": "work", "to": "ghost", "outcomes": ["completed"]}]}
+EOF
+run_graph_exec "$work/validate-broken.out" exec validate "$work/broken.json"
+[ "$exec_rc" -eq 3 ] || fail "invalid spec exited $exec_rc, expected 3: $(cat "$work/validate-broken.out")"
+grep -Fq 'unknown_endpoint' "$work/validate-broken.out" \
+  || fail "invalid spec did not name unknown_endpoint: $(cat "$work/validate-broken.out")"
+
+run_graph_exec "$work/render.out" exec render coding-change
+[ "$exec_rc" -eq 0 ] || fail "render exited $exec_rc: $(cat "$work/render.out")"
+grep -Fq 'inspect' "$work/render.out" || fail "render omitted the entry node: $(cat "$work/render.out")"
+grep -Fq '↻' "$work/render.out" || fail "render did not mark a repeat edge: $(cat "$work/render.out")"
+run_graph_exec "$work/render-mermaid.out" exec render coding-change --mermaid
+[ "$exec_rc" -eq 0 ] || fail "render --mermaid exited $exec_rc: $(cat "$work/render-mermaid.out")"
+head -n 1 "$work/render-mermaid.out" | grep -Fqx 'flowchart TD' \
+  || fail "mermaid render is not a flowchart: $(head -n 1 "$work/render-mermaid.out")"
+
+run_graph_exec "$work/route.out" exec route coding-change --outcomes '{"inspect":"completed"}'
+[ "$exec_rc" -eq 0 ] || fail "route exited $exec_rc: $(cat "$work/route.out")"
+grep -Fq 'implement' "$work/route.out" || fail "route did not name the next node: $(cat "$work/route.out")"
+
+run_graph_exec "$work/fixtures.out" exec test "$ROOT/tests/fixtures/graph-routes"
+[ "$exec_rc" -eq 0 ] || fail "fixture corpus exited $exec_rc: $(cat "$work/fixtures.out")"
+grep -Fq 'PASS ' "$work/fixtures.out" || fail "fixture corpus reported no result: $(cat "$work/fixtures.out")"
+
+run_graph_exec "$work/dry-run.json" exec run coding-change --worker codex --dry-run --json
+[ "$exec_rc" -eq 0 ] || fail "dry run exited $exec_rc: $(cat "$work/dry-run.json")"
+python3 - "$work/dry-run.json" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1]))
+assert row["dry_run"] is True, row
+assert row["route"]["status"] == "actionable", row["route"]
+assert "trace" not in row["route"], row["route"]
+assert row["eligible"] == ["inspect"], row["eligible"]
+PY
+
+# Nothing has run yet: status is a reader that says so instead of inventing one.
+run_graph_exec "$work/status-empty.out" exec status
+[ "$exec_rc" -eq 3 ] || fail "empty status exited $exec_rc, expected 3: $(cat "$work/status-empty.out")"
+
+run_graph_exec "$work/shadow.json" exec shadow --json
+[ "$exec_rc" -eq 0 ] || fail "shadow exited $exec_rc: $(cat "$work/shadow.json")"
+python3 - "$work/shadow.json" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1]))
+assert isinstance(row["agree"], bool), row
+assert row["kind"] == "graph-route-shadow", row
+assert set(row["control_plane"]) == {"action", "mapped"}, row["control_plane"]
+PY
+shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"
+[ "$shadow_lines" = "1" ] || fail "shadow ledger holds $shadow_lines rows, expected 1"
+
+# A delegated child may evaluate a route but never record a comparison.
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec route coding-change \
+  > "$work/child-route.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 0 ] || fail "child route exited $child_rc: $(cat "$work/child-route.out")"
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec shadow \
+  > "$work/child-shadow.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 2 ] || fail "child shadow exited $child_rc, expected 2: $(cat "$work/child-shadow.out")"
+grep -Fq 'a harness child may only use read-only graph actions' "$work/child-shadow.out" \
+  || fail "child shadow refusal was not actionable: $(cat "$work/child-shadow.out")"
+
+# A run-less repository reaches the MCP reader as an error result, not a crash.
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_execution_graph_status","arguments":{"repo":"%s"}}}\n' "$exec_repo"
+} | python3 "$ROOT/scripts/oms-mcp-server.py" > "$work/mcp-status.out" 2>&1
+python3 - "$work/mcp-status.out" <<'PY'
+import json
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+assert "Traceback" not in text, text
+rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+result = [row for row in rows if row.get("id") == 2][0]["result"]
+assert result["isError"] is True, result
+PY
+
+# One recorded run through the front door, so the readers the MCP tools wrap
+# are exercised against real events. Tool nodes only: no provider is involved.
+cat > "$work/gate-spec.json" <<'EOF'
+{"schema": 1, "id": "smoke-gate", "entry": "work",
+ "budget": {"max_steps": 6, "max_repeats": 1},
+ "nodes": {"work": {"kind": "tool", "effect": "read", "command": "echo work"},
+           "review": {"kind": "gate", "authority": "parent", "decisions": ["approved", "changes_requested"]},
+           "done": {"kind": "terminal"}},
+ "edges": [{"from": "work", "to": "review", "outcomes": ["completed"]},
+           {"from": "review", "to": "done", "outcomes": ["approved"]},
+           {"from": "review", "to": "work", "outcomes": ["changes_requested"], "kind": "repeat"}]}
+EOF
+run_graph_exec "$work/run-gate.out" exec run "$work/gate-spec.json" --worker codex
+[ "$exec_rc" -eq 3 ] || fail "gated run exited $exec_rc, expected 3: $(cat "$work/run-gate.out")"
+grep -Fq 'status=gate primary=review' "$work/run-gate.out" \
+  || fail "gated run did not stop at the gate: $(cat "$work/run-gate.out")"
+
+run_graph_exec "$work/status-run.json" exec status --json
+[ "$exec_rc" -eq 0 ] || fail "status exited $exec_rc: $(cat "$work/status-run.json")"
+exec_run_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$work/status-run.json")"
+[ -n "$exec_run_id" ] || fail "status reported no run id: $(cat "$work/status-run.json")"
+
+run_graph_exec "$work/events.out" exec events --run "$exec_run_id" --limit 4
+[ "$exec_rc" -eq 0 ] || fail "events exited $exec_rc: $(cat "$work/events.out")"
+grep -Fq 'node_outcome work completed' "$work/events.out" \
+  || fail "events did not record the tool outcome: $(cat "$work/events.out")"
+
+run_graph_exec "$work/route-run.out" exec route --run "$exec_run_id"
+[ "$exec_rc" -eq 0 ] || fail "route --run exited $exec_rc: $(cat "$work/route-run.out")"
+grep -Fq 'gate review' "$work/route-run.out" || fail "route --run lost the gate: $(cat "$work/route-run.out")"
+
+# Only a gate records a decision, and only one of its declared outcomes.
+run_graph_exec "$work/decide-bad.out" exec decide --run "$exec_run_id" --node work --outcome approved
+[ "$exec_rc" -eq 2 ] || fail "deciding a non-gate exited $exec_rc, expected 2: $(cat "$work/decide-bad.out")"
+run_graph_exec "$work/decide.out" exec decide --run "$exec_run_id" --node review --outcome approved --note reviewed
+[ "$exec_rc" -eq 0 ] || fail "decide exited $exec_rc: $(cat "$work/decide.out")"
+run_graph_exec "$work/resume.out" exec resume --run "$exec_run_id" --worker codex
+[ "$exec_rc" -eq 0 ] || fail "resume exited $exec_rc: $(cat "$work/resume.out")"
+grep -Fq 'status=terminal' "$work/resume.out" || fail "resume did not reach the terminal: $(cat "$work/resume.out")"
 
 echo "graph-smoke: ok"

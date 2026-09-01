@@ -16,7 +16,9 @@ def changed_paths(repo: Path, *, base: str = "") -> Dict[str, List[str]]:
     """{"changed": [...], "untracked": [...]} from git; never writes."""
     ref = base or "HEAD"
     changed = [item for item in run_output(["git", "-C", str(repo), "diff", "--name-only", ref]).splitlines() if item]
-    status = run_output(["git", "-C", str(repo), "status", "--porcelain"])
+    # `--untracked-files=all` names each new file; the default collapses a new
+    # directory to its own name, which no graph node ever matches.
+    status = run_output(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"])
     untracked = sorted(line[3:] for line in status.splitlines() if line.startswith("?? "))
     return {"changed": sorted(set(changed)), "untracked": untracked}
 

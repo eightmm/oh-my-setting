@@ -1,4 +1,4 @@
-"""Argparse front door for `oms graph` (W3 completes the dispatch)."""
+"""Argparse front door for `oms graph`."""
 
 from __future__ import annotations
 
@@ -10,14 +10,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import GRAPH_PACKAGE_VERSION
+from . import events as exec_events
 from . import render
+from . import route as exec_route
+from . import runner
+from . import shadow as exec_shadow
 from .child_policy import CHILD_GRAPH_ERROR, child_action_is_read_only
 from .errors import GraphError
+from .facts import collect_facts
+from .project import analytics
 from .project import blast as project_blast
 from .project import build as project_build
 from .project import context as project_context
 from .project.query import Graph
-from oms_runtime.common import CoreError, repo_root
+from .spec import load_spec
+from .validate import validate_spec
+from oms_runtime.common import CoreError, read_json, repo_root
 
 PROJECT_STATE_ENV = "OMS_PROJECT_GRAPH_STATE"
 
@@ -102,16 +110,22 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--goal", default="")
     run.add_argument("--run", default="")
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument("--json", action="store_true")
     resume = exec_sub.add_parser("resume")
     resume.add_argument("--run", required=True)
     resume.add_argument("--worker", required=True)
     resume.add_argument("--model", default="")
     resume.add_argument("--reasoning-effort", default="")
+    resume.add_argument("--max-steps", type=int, default=None)
+    resume.add_argument("--jobs", type=int, default=1)
+    resume.add_argument("--goal", default="")
+    resume.add_argument("--json", action="store_true")
     decide = exec_sub.add_parser("decide")
     decide.add_argument("--run", required=True)
     decide.add_argument("--node", required=True)
     decide.add_argument("--outcome", required=True)
     decide.add_argument("--note", default="")
+    decide.add_argument("--json", action="store_true")
     status = exec_sub.add_parser("status")
     status.add_argument("--run", default="")
     status.add_argument("--json", action="store_true")
@@ -262,16 +276,236 @@ def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
+def _project_analyze(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    graph = _index(repo, state)[0]
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+    result: Dict[str, Any] = {
+        "schema": 1,
+        "hubs": analytics.hubs(nodes, edges, limit=args.hubs),
+        "components": [{"size": len(members), "members": members} for members in analytics.connected_components(nodes, edges)],
+    }
+    if args.cycles:
+        result["cycles"] = analytics.cycles(nodes, edges)
+    if args.communities:
+        result["communities"] = analytics.communities(nodes, edges)
+    if args.path:
+        result["path"] = analytics.shortest_path(nodes, edges, args.path[0], args.path[1])
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print("hubs:")
+    for position, row in enumerate(result["hubs"], 1):
+        print("  %2d. %s  (%s)  degree %d" % (position, row["id"], row["kind"], row["degree"]))
+    sizes = [row["size"] for row in result["components"]]
+    print("components: %d (largest %d)" % (len(sizes), sizes[0] if sizes else 0))
+    for cycle in result.get("cycles", []):
+        print("cycle: %s" % " -> ".join(cycle))
+    for community in result.get("communities", []):
+        print("community %s (%s): %d nodes" % (community["id"], community["label"], len(community["members"])))
+    if args.path:
+        path = result.get("path")
+        print("path: %s" % (" -> ".join(path) if path else "none"))
+    return 0
+
+
 PROJECT_ACTIONS = {"build": _project_build, "check": _project_check, "map": _project_map, "find": _project_find,
                    "neighbors": _project_neighbors, "trace": _project_trace, "blast": _project_blast,
-                   "context": _project_context}
+                   "analyze": _project_analyze, "context": _project_context}
+
+STOP_STATUSES = ("gate", "blocked", "exhausted", "waiting", "invalid")
+
+
+def _json_option(value: str) -> Dict[str, Any]:
+    """A JSON object given inline or as `@file`; an empty option means none."""
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    parsed = read_json(Path(text[1:]), default=None) if text.startswith("@") else None
+    if parsed is None and not text.startswith("@"):
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise GraphError("option is not a JSON object: %s" % exc)
+    if not isinstance(parsed, dict):
+        raise GraphError("option must be a JSON object")
+    return parsed
+
+
+def _run_view(repo: Path, run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Frozen spec, events projection, and current facts for one recorded run."""
+    spec = exec_events.load_run_spec(repo, run_id)
+    rows = exec_events.read_events(repo, run_id)
+    projection = exec_events.project(rows, spec)
+    return spec, projection, runner.alias_facts(collect_facts(repo), rows, spec)
+
+
+def _exec_validate(args: argparse.Namespace) -> int:
+    verdict = validate_spec(load_spec(args.spec))
+    if args.json:
+        emit(verdict, args.pretty)
+        return 0 if verdict["ok"] else 3
+    if verdict["ok"]:
+        print("ok")
+    for label, items in (("error", verdict["errors"]), ("warning", verdict["warnings"])):
+        for item in items:
+            print("%s %s %s: %s" % (label, item["code"], item["where"], item["message"]))
+    return 0 if verdict["ok"] else 3
+
+
+def _exec_render(args: argparse.Namespace) -> int:
+    spec = load_spec(args.spec)
+    sys.stdout.write(render.render_exec_mermaid(spec) if args.mermaid else render.render_exec_text(spec))
+    return 0
+
+
+def _print_route(route: Dict[str, Any]) -> None:
+    print("%s %s %s" % (route["status"], route["primary"] or "-", route["reason"]))
+    for item in route["alternatives"]:
+        print("alternative: %s" % item)
+    for item in route["downgrades"]:
+        print("downgrade: %s claimed=%s effective=%s missing=%s"
+              % (item.get("node"), item.get("claimed"), item.get("effective"), ",".join(item.get("missing", []))))
+
+
+def _exec_route(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    if args.run:
+        spec, state, facts = _run_view(repo, args.run)
+    elif args.spec:
+        spec = load_spec(args.spec)
+        state = exec_route.state_from_outcomes(spec, _json_option(args.outcomes))
+        facts = read_json(Path(args.facts), default=None) if args.facts else collect_facts(repo)
+        if not isinstance(facts, dict):
+            raise GraphError("fact file must hold a JSON object: %s" % args.facts)
+    else:
+        raise GraphError("exec route needs a spec or --run")
+    route = exec_route.evaluate(spec, state, facts)
+    if args.json:
+        emit(route, args.pretty)
+        return 0
+    _print_route(route)
+    return 0
+
+
+def _exec_run(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    result = runner.run(repo, args.spec, worker=args.worker, run_id=args.run, model=args.model,
+                        reasoning_effort=args.reasoning_effort, max_steps=args.max_steps,
+                        jobs=args.jobs, goal=args.goal, dry_run=args.dry_run)
+    return _report_run(args, result)
+
+
+def _report_run(args: argparse.Namespace, result: Dict[str, Any]) -> int:
+    if result.get("dry_run"):
+        if args.json:
+            emit(result, args.pretty)
+        else:
+            print("run: dry-run status=%s primary=%s" % (result["route"]["status"], result["route"]["primary"] or "-"))
+            for argv in result["commands"]:
+                print("command: %s" % " ".join(argv))
+        return 0
+    if args.json:
+        emit(result, args.pretty)
+    else:
+        print("run: %s status=%s primary=%s" % (result["run_id"], result["status"], result["primary"] or "-"))
+        if result.get("reason"):
+            print("reason: %s" % result["reason"])
+    return 3 if result["status"] in STOP_STATUSES else 0
+
+
+def _exec_resume(args: argparse.Namespace) -> int:
+    result = runner.resume(repo_root(args.repo), args.run, worker=args.worker, model=args.model,
+                           reasoning_effort=args.reasoning_effort, max_steps=args.max_steps,
+                           jobs=args.jobs, goal=args.goal)
+    return _report_run(args, result)
+
+
+def _exec_decide(args: argparse.Namespace) -> int:
+    result = runner.decide(repo_root(args.repo), args.run, args.node, args.outcome, note=args.note)
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print("decide: %s %s=%s" % (args.run, args.node, args.outcome))
+    _print_route(result["route"])
+    return 0
+
+
+def _exec_status(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    run_id = args.run or exec_events.latest_run_id(repo)
+    if not run_id:
+        print("graph: no execution graph run is recorded; run: oms graph exec run SPEC --worker P", file=sys.stderr)
+        return 3
+    spec, projection, facts = _run_view(repo, run_id)
+    route = exec_route.evaluate(spec, projection, facts)
+    if args.json:
+        emit({"schema": 1, "run_id": run_id, "spec_id": spec.get("id", ""), "route": route, "projection": projection}, args.pretty)
+        return 0
+    if args.mermaid:
+        sys.stdout.write(render.render_exec_mermaid(spec, projection))
+        return 0
+    print("run: %s spec=%s status=%s" % (run_id, spec.get("id", ""), route["status"]))
+    sys.stdout.write(render.render_exec_text(spec, projection, route))
+    return 0
+
+
+def _exec_events(args: argparse.Namespace) -> int:
+    rows = exec_events.read_events(repo_root(args.repo), args.run)
+    selected = rows[-args.limit:] if args.limit > 0 else rows
+    if args.json:
+        emit({"schema": 1, "run_id": args.run, "events": selected}, args.pretty)
+        return 0
+    for row in selected:
+        print("%s %s %s %s %s" % (row.get("seq"), row.get("ts"), row.get("event"),
+                                  row.get("node") or "-", row.get("outcome") or row.get("status") or "-"))
+    return 0
+
+
+def _exec_shadow(args: argparse.Namespace) -> int:
+    row = exec_shadow.shadow(repo_root(args.repo), spec_name=args.spec)
+    if args.json:
+        emit(row, args.pretty)
+        return 0
+    print("shadow: agree=%s route=%s/%s control=%s->%s"
+          % (row["agree"], row["route"]["status"], row["route"]["primary"] or "-",
+             row["control_plane"]["action"] or "-", row["control_plane"]["mapped"] or "-"))
+    return 0
+
+
+def _exec_test(args: argparse.Namespace) -> int:
+    path = Path(args.path)
+    files = sorted(path.glob("*.json")) if path.is_dir() else [path]
+    if not files:
+        raise GraphError("no route fixtures found: %s" % args.path)
+    rows: List[Dict[str, Any]] = []
+    for item in files:
+        fixture = read_json(item, default=None)
+        if not isinstance(fixture, dict):
+            raise GraphError("route fixture must be a JSON object: %s" % item.name)
+        ok, detail = exec_route.run_fixture(fixture)
+        rows.append({"name": str(fixture.get("name") or item.stem), "ok": ok, "diff": detail["diff"]})
+    passed = all(row["ok"] for row in rows)
+    if args.json:
+        emit({"schema": 1, "ok": passed, "results": rows}, args.pretty)
+        return 0 if passed else 3
+    for row in rows:
+        print("PASS %s" % row["name"] if row["ok"] else "FAIL %s: %s" % (row["name"], json.dumps(row["diff"], sort_keys=True)))
+    return 0 if passed else 3
+
+
+EXEC_ACTIONS = {"validate": _exec_validate, "render": _exec_render, "route": _exec_route, "run": _exec_run,
+                "resume": _exec_resume, "decide": _exec_decide, "status": _exec_status, "events": _exec_events,
+                "shadow": _exec_shadow, "test": _exec_test}
 
 
 def dispatch(args: argparse.Namespace) -> int:
-    if args.group != "project" or args.action not in PROJECT_ACTIONS:
-        raise GraphError("oms graph %s %s is not implemented yet" % (args.group, args.action))
-    repo, state = _project_state(args)
-    return PROJECT_ACTIONS[args.action](args, repo, state)
+    if args.group == "project" and args.action in PROJECT_ACTIONS:
+        repo, state = _project_state(args)
+        return PROJECT_ACTIONS[args.action](args, repo, state)
+    if args.group == "exec" and args.action in EXEC_ACTIONS:
+        return EXEC_ACTIONS[args.action](args)
+    raise GraphError("oms graph %s %s is not a known action" % (args.group, args.action))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
