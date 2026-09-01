@@ -5,11 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .errors import GraphError
+from oms_graph import PARSER_VERSION, PROJECT_SCHEMA
+from oms_runtime.common import atomic_write_json, ensure_private_dir, read_json, sha256_bytes, sha256_file, utc_now
 
+from ..errors import GraphError
 
-def _todo(name):
-    raise GraphError("%s is not implemented yet" % name)
+from .cache import cache_key, load_cached, prune, store
+from .extract import discover_files, extract_file
+from .parsers import parser_for
+from .model import make_edge, node_id, sort_edges, sort_nodes
 
 
 def state_dir(repo: Path, override: Optional[Path] = None) -> Path:
@@ -18,18 +22,176 @@ def state_dir(repo: Path, override: Optional[Path] = None) -> Path:
 
 def build(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = (), exclude: Sequence[str] = (), max_bytes: int = 2 * 1024 * 1024, force: bool = False) -> Dict[str, Any]:
     """Write graph.json (no timestamps) and manifest.json; return the manifest summary."""
-    _todo("project.build.build")
+    repo = Path(repo).resolve()
+    directory = ensure_private_dir(state_dir(repo, state))
+    discovery = discover_files(repo, include=include, exclude=exclude, max_bytes=max_bytes)
+    extractions: List[Dict[str, Any]] = []
+    files: Dict[str, Dict[str, Any]] = {}
+    keys: List[str] = []
+    cached_count = 0
+    for relpath in discovery["files"]:
+        path = repo / relpath
+        digest = sha256_file(path)
+        # Parser versions are currently registry-wide, but keep the individual
+        # version in the cache key so an added parser can invalidate safely.
+        parser = parser_for(relpath)
+        key = cache_key(relpath, digest, parser.version if parser else PARSER_VERSION, PROJECT_SCHEMA)
+        keys.append(key)
+        payload = None if force else load_cached(directory, key)
+        was_cached = payload is not None
+        if payload is None:
+            payload = extract_file(repo, relpath)
+            store(directory, key, payload)
+        if was_cached:
+            cached_count += 1
+        extractions.append(payload)
+        files[relpath] = {"sha256": digest, "bytes": path.stat().st_size, "parser": payload["parser"], "cached": was_cached}
+    nodes, edges = resolve(extractions)
+    revision_source = "\n".join("%s\t%s" % (path, files[path]["sha256"]) for path in sorted(files)) + "\n%d\n%d" % (PARSER_VERSION, PROJECT_SCHEMA)
+    revision = sha256_bytes(revision_source.encode("utf-8"))
+    graph = {"schema": PROJECT_SCHEMA, "revision": revision, "nodes": nodes, "edges": edges}
+    atomic_write_json(directory / "graph.json", graph)
+    manifest = {"schema": PROJECT_SCHEMA, "revision": revision, "generated_at": utc_now(), "parser_version": PARSER_VERSION,
+                "discovery": {"include": sorted(include), "exclude": sorted(exclude), "max_bytes": int(max_bytes)},
+                "files": {path: files[path] for path in sorted(files)}, "skipped": discovery["skipped"],
+                "stats": {"files": len(files), "nodes": len(nodes), "edges": len(edges), "cached": cached_count, "parsed": len(files) - cached_count}}
+    atomic_write_json(directory / "manifest.json", manifest)
+    prune(directory, keys)
+    return manifest
 
 
 def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
     """{"present","fresh","revision","stale":[...],"missing":[...],"new":[...]} from working-tree bytes."""
-    _todo("project.build.check")
+    directory = state_dir(Path(repo).resolve(), state)
+    manifest = read_json(directory / "manifest.json", None)
+    if not isinstance(manifest, dict):
+        return {"present": False, "fresh": False, "revision": "", "stale": [], "missing": [], "new": []}
+    options = manifest.get("discovery") if isinstance(manifest.get("discovery"), dict) else {}
+    listed = discover_files(Path(repo).resolve(), include=tuple(options.get("include", ())), exclude=tuple(options.get("exclude", ())), max_bytes=int(options.get("max_bytes", 2 * 1024 * 1024)))
+    current = set(listed["files"])
+    known = set(manifest.get("files", {}))
+    stale = sorted(path for path in current & known if sha256_file(Path(repo) / path) != manifest["files"][path].get("sha256"))
+    missing = sorted(known - current)
+    new = sorted(current - known)
+    return {"present": True, "fresh": not (stale or missing or new), "revision": manifest.get("revision", ""), "stale": stale, "missing": missing, "new": new}
 
 
 def load_graph(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
-    _todo("project.build.load_graph")
+    graph = read_json(state_dir(Path(repo).resolve(), state) / "graph.json", None)
+    if not isinstance(graph, dict):
+        raise GraphError("project graph has not been built; run: oms graph project build")
+    return graph
 
 
 def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Turn per-file extractions (with unresolved refs) into sorted nodes and edges with confidence."""
-    _todo("project.build.resolve")
+    node_map: Dict[str, Dict[str, Any]] = {}
+    for item in extractions:
+        for node in item.get("nodes", []):
+            node_map[node["id"]] = dict(node)
+    nodes = sort_nodes(list(node_map.values()))
+    raw_edges = [edge for item in extractions for edge in item.get("edges", [])]
+    by_id = {node["id"]: node for node in nodes}
+    files = {item["path"]: item for item in extractions}
+    symbols_by_name: Dict[str, List[str]] = {}
+    symbols_by_file: Dict[str, Dict[str, str]] = {}
+    for node in nodes:
+        if node["kind"] in ("class", "function", "method", "symbol"):
+            symbols_by_name.setdefault(node["name"], []).append(node["id"])
+            symbols_by_file.setdefault(node["path"], {})[node["name"]] = node["id"]
+    for values in symbols_by_name.values():
+        values.sort()
+    module_to_path: Dict[str, str] = {}
+    for path in files:
+        if path.endswith(".py"):
+            for prefix in ("", "src/", "scripts/", "scripts/lib/"):
+                if path.startswith(prefix):
+                    trimmed = path[len(prefix):]
+                    module = trimmed[:-3].replace("/", ".")
+                    if module.endswith(".__init__"):
+                        module = module[:-9]
+                    module_to_path.setdefault(module, path)
+
+    def module_path(value: str, source_path: str) -> str:
+        if value.startswith("."):
+            level = len(value) - len(value.lstrip("."))
+            rest = value[level:]
+            base = source_path.rsplit("/", 1)[0] if "/" in source_path else ""
+            parts = base.split("/") if base else []
+            for _ in range(max(0, level - 1)):
+                if parts: parts.pop()
+            candidate = "/".join(parts + (rest.split(".") if rest else []))
+            for suffix in (".py", "/__init__.py"):
+                if candidate + suffix in files: return candidate + suffix
+            return ""
+        if value in module_to_path:
+            return module_to_path[value]
+        relative = value.replace(".", "/")
+        choices = [relative + ".py", relative + "/__init__.py"]
+        source_dir = source_path.rsplit("/", 1)[0] if "/" in source_path else ""
+        choices += [source_dir + "/" + candidate for candidate in choices] if source_dir else []
+        for candidate in choices:
+            if candidate in files: return candidate
+        return ""
+
+    imported: Dict[str, Dict[str, Tuple[str, str]]] = {}
+    include_paths: Dict[str, List[str]] = {}
+    for item in extractions:
+        source_path = item["path"]
+        for ref in item.get("refs", []):
+            if ref.get("relation") != "imports":
+                continue
+            target_path = module_path(ref["value"], source_path) if ref.get("kind") == "module" else ref["value"]
+            if target_path not in files and ref.get("kind") == "path":
+                for prefix in ("", "scripts/", "scripts/lib/"):
+                    if prefix + target_path in files:
+                        target_path = prefix + target_path; break
+            if target_path in files:
+                imported.setdefault(source_path, {})[ref.get("binding", "")] = (target_path, ref.get("imported", ""))
+                include_paths.setdefault(source_path, []).append(target_path)
+    for item in extractions:
+        source_path, digest = item["path"], item["sha256"]
+        source_file_id = node_id("test" if any(node.get("id") == node_id("test", source_path) for node in item["nodes"]) else "file", source_path)
+        for ref in item.get("refs", []):
+            target = ""; confidence = "EXTRACTED"; candidates: List[str] = []
+            relation = ref.get("relation", "references")
+            value = ref.get("value", "")
+            if ref.get("kind") == "module":
+                target_path = module_path(value, source_path)
+                if not target_path and ref.get("imported"):
+                    target_path = module_path(value + ref["imported"], source_path)
+                if target_path:
+                    target = node_id("module", target_path) if node_id("module", target_path) in by_id else node_id("file", target_path)
+                    if source_file_id.startswith("test:"): relation = "tests"
+            elif ref.get("kind") == "path":
+                target_path = value
+                if target_path not in files:
+                    for prefix in ("", "scripts/", "scripts/lib/"):
+                        if prefix + target_path in files:
+                            target_path = prefix + target_path; break
+                if target_path in files:
+                    target = node_id("test" if node_id("test", target_path) in by_id else "file", target_path)
+                    confidence = "INFERRED" if ref.get("variable") else "EXTRACTED"
+            elif ref.get("kind") == "name":
+                first, _, member = value.partition(".")
+                target_path = ""
+                if first in imported.get(source_path, {}):
+                    target_path, imported_name = imported[source_path][first]
+                    wanted = member or imported_name
+                    target = symbols_by_file.get(target_path, {}).get(wanted, "")
+                if not target:
+                    target = symbols_by_file.get(source_path, {}).get(first, "")
+                if not target and ref.get("shell_bare"):
+                    for included in include_paths.get(source_path, []):
+                        if first in symbols_by_file.get(included, {}):
+                            target = symbols_by_file[included][first]; confidence = "INFERRED"; break
+                if not target:
+                    choices = symbols_by_name.get(first, [])
+                    if len(choices) == 1:
+                        target, confidence = choices[0], "INFERRED"
+                    elif len(choices) > 1:
+                        target, confidence, candidates = choices[0], "AMBIGUOUS", choices[1:]
+            if target:
+                raw_edges.append(make_edge(ref.get("from", source_file_id), target, relation, confidence, path=source_path, source_digest=digest, line=ref.get("line"), candidates=candidates))
+    unique = {(edge["source"], edge["target"], edge["relation"], edge["confidence"], edge.get("evidence", {}).get("path"), edge.get("evidence", {}).get("line")): edge for edge in raw_edges}
+    return nodes, sort_edges(list(unique.values()))
