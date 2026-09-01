@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "id": "coding-change",
+  "entry": "inspect",
+  "budget": {"max_steps": 20, "max_repeats": 3},
+  "stop_facts": [],
+  "nodes": {
+    "inspect": {
+      "kind": "tool",
+      "effect": "read",
+      "title": "Project-graph context for the goal",
+      "command": "oms graph project context --task \"${OMS_GRAPH_GOAL:-repository orientation}\" --json",
+      "cacheable": true
+    },
+    "implement": {
+      "kind": "agent",
+      "effect": "write",
+      "title": "Implement the plan task in an isolated worktree",
+      "plan_task": "implement",
+      "mode": "run",
+      "proof": ["plan.task.implement.patch_present", "plan.task.implement.state=review"]
+    },
+    "review": {
+      "kind": "gate",
+      "authority": "parent",
+      "title": "Parent reviews the stored patch",
+      "decisions": ["approved", "changes_requested"]
+    },
+    "land": {
+      "kind": "agent",
+      "effect": "write",
+      "title": "Admit and land the reviewed patch",
+      "plan_task": "implement",
+      "mode": "land",
+      "proof": ["receipt.land.implement.present", "plan.task.implement.state=done"]
+    },
+    "acceptance": {
+      "kind": "tool",
+      "effect": "read",
+      "title": "Plan-level acceptance command",
+      "command": "oms agent-plan accept",
+      "proof": ["receipt.acceptance.latest=pass", "receipt.acceptance.fresh"]
+    },
+    "done": {"kind": "terminal", "title": "Change accepted"}
+  },
+  "edges": [
+    {"from": "inspect", "to": "implement", "outcomes": ["completed", "unverified", "skipped", "failed"]},
+    {"from": "implement", "to": "review", "outcomes": ["completed"]},
+    {"from": "implement", "to": "implement", "outcomes": ["failed", "unverified"], "kind": "repeat"},
+    {"from": "review", "to": "implement", "outcomes": ["changes_requested"]},
+    {"from": "review", "to": "land", "outcomes": ["approved"]},
+    {"from": "land", "to": "acceptance", "outcomes": ["completed"]},
+    {"from": "land", "to": "land", "outcomes": ["partial"], "kind": "repeat"},
+    {"from": "acceptance", "to": "done", "outcomes": ["completed"]},
+    {"from": "acceptance", "to": "implement", "outcomes": ["failed", "unverified"], "kind": "repeat"}
+  ]
+}
