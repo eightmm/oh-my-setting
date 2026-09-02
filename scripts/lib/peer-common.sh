@@ -811,12 +811,20 @@ print("%s\t%s" % (lineage, active_task_id))
   return 3
 }
 
+# The kernel name never changes within a process, and the path normalizers
+# below run several times per artifact-index append; ask uname once.
+ma_kernel_name() {
+  [ -n "${MA_KERNEL_NAME:-}" ] ||
+    MA_KERNEL_NAME="$(uname -s 2>/dev/null || printf unknown)"
+}
+
 ma_artifact_index_shell_path() {
   local value="$1"
   local platform
 
   value="${value//$'\r'/}"
-  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  ma_kernel_name
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$MA_KERNEL_NAME"
   case "$platform" in
     *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
       command -v cygpath >/dev/null 2>&1 || {
@@ -836,7 +844,8 @@ ma_artifact_index_python_path() {
 
   [ -n "$value" ] || { printf '\n'; return 0; }
   value="${value//$'\r'/}"
-  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  ma_kernel_name
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$MA_KERNEL_NAME"
   case "$platform" in
     *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
       command -v cygpath >/dev/null 2>&1 || {
@@ -862,6 +871,10 @@ ma_append_artifact_index() {
   local repo="$1"
   local kind="$2"
   local provider="$3"
+  # Filled here, in the parent shell, so the eight path normalizations below
+  # (each a command substitution, so a subshell) inherit it instead of each
+  # asking uname again.
+  ma_kernel_name
   local exit_code="$4"
   local artifact="$5"
   local patch_file="${6:-}"

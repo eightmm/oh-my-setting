@@ -319,7 +319,8 @@ python_path_for_host() {  # PATH
   if physical_parent="$(cd "$parent" 2>/dev/null && pwd -P)"; then
     value="$physical_parent/$base"
   fi
-  case "$(uname -s 2>/dev/null || true)" in
+  [ -n "${PLAN_KERNEL_NAME:-}" ] || PLAN_KERNEL_NAME="$(uname -s 2>/dev/null || true)"
+  case "$PLAN_KERNEL_NAME" in
     MINGW*|MSYS*|CYGWIN*)
       command -v cygpath >/dev/null 2>&1 || return 2
       value="$(cygpath -m "$value" | tr -d '\r')" || return $?

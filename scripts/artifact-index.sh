@@ -113,12 +113,20 @@ fail() {
   exit 2
 }
 
+# Asked once per invocation, in the parent shell: the normalizers below run
+# in command substitutions and would otherwise each spawn uname.
+artifact_index_kernel_name() {
+  [ -n "${ARTIFACT_INDEX_KERNEL_NAME:-}" ] ||
+    ARTIFACT_INDEX_KERNEL_NAME="$(uname -s 2>/dev/null || printf unknown)"
+}
+
 artifact_index_shell_path() {
   local value="$1"
   local platform
 
   value="${value//$'\r'/}"
-  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  artifact_index_kernel_name
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$ARTIFACT_INDEX_KERNEL_NAME"
   case "$platform" in
     *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
       command -v cygpath >/dev/null 2>&1 ||
@@ -136,7 +144,8 @@ artifact_index_python_path() {
 
   [ -n "$value" ] || { printf '\n'; return 0; }
   value="${value//$'\r'/}"
-  platform="${MSYSTEM:-}:${OSTYPE:-}:$(uname -s 2>/dev/null || printf unknown)"
+  artifact_index_kernel_name
+  platform="${MSYSTEM:-}:${OSTYPE:-}:$ARTIFACT_INDEX_KERNEL_NAME"
   case "$platform" in
     *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
       command -v cygpath >/dev/null 2>&1 ||
@@ -295,6 +304,7 @@ REPO="$(oms_repo_root "$REPO")"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve repo path"
 INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+artifact_index_kernel_name
 PY_REPO="$(artifact_index_python_path "$REPO")"
 PY_REPO_INPUT="$(artifact_index_python_path "$REPO_INPUT")"
 PY_INDEX_INPUT="$(artifact_index_python_path "$INDEX_FILE")"

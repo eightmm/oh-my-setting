@@ -76,6 +76,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The artifact-index path normalizers ask `uname` once per process instead
+  of once per path: the kernel name is cached in the parent shell before the
+  command-substitution calls that inherit it (an artifact-index append ran
+  eight of them; `artifact-index.sh` five per invocation), and agent-plan's
+  host path helper caches it the same way. The durable-writers suite spawns
+  109 `uname` processes instead of 534.
 - Locks for state under the temp directory (test fixtures, throwaway
   checkouts) live in a per-user directory under that temp root instead of
   `~/.cache/oh-my-setting/locks`, which suites run outside `check.sh` had
