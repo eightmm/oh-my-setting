@@ -3015,8 +3015,16 @@ class JournalStore:
             ):
                 continue
             if previous.get("next_retry_at"):
+                # A backed-off failure is retried early only for new content:
+                # the summary changed since the refusal, so the page deserves
+                # a fresh attempt rather than the old one's wait.
+                content_changed = (
+                    previous.get("status") == "failed"
+                    and previous.get("pending_content_hash") != row["content_hash"]
+                )
                 try:
-                    if parse_rfc3339(str(previous["next_retry_at"])) > sync_now:
+                    if (not content_changed
+                            and parse_rfc3339(str(previous["next_retry_at"])) > sync_now):
                         continue
                 except SchemaError:
                     pass
@@ -3079,6 +3087,28 @@ class JournalStore:
                     failed_state["next_retry_at"] = _utc_rfc3339(
                         sync_now + dt.timedelta(seconds=retry_seconds)
                     )
+                else:
+                    # A refusal the server did not schedule is retried once
+                    # on the next tick (a timeout is usually transient), then
+                    # waits with exponential backoff from the second
+                    # consecutive failure of the same content: one minute
+                    # doubling to a day. Only a Retry-After scheduled a next
+                    # attempt before, so the prompt hook's one-row tick spent
+                    # a live HTTPS round trip on every prompt re-failing the
+                    # same page for weeks. New content restarts the sequence.
+                    attempts = 0
+                    if (previous.get("status") == "failed"
+                            and previous.get("pending_content_hash") == row["content_hash"]):
+                        stored = previous.get("attempts", 0)
+                        if isinstance(stored, int) and not isinstance(stored, bool) and stored > 0:
+                            attempts = stored
+                    attempts += 1
+                    failed_state["attempts"] = attempts
+                    if attempts >= 2:
+                        failed_state["next_retry_at"] = _utc_rfc3339(
+                            sync_now + dt.timedelta(
+                                seconds=min(86400.0, 60.0 * (2 ** min(attempts - 2, 20))))
+                        )
                 state["summaries"][row["summary_key"]] = failed_state
                 if failed_state["status"] == "pending":
                     report["deferred"] += 1

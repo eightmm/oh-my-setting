@@ -158,6 +158,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- A Notion summary the exporter keeps refusing no longer costs a live HTTPS
+  round trip on every prompt. Only a `Retry-After` scheduled the next attempt
+  before, so the prompt hook's one-row sync re-failed the same page (a
+  `NotionHTTPError` from July) at every `UserPromptSubmit` for weeks. A
+  refusal is retried once on the next tick, then waits with exponential
+  backoff from its second consecutive failure (one minute doubling to a day,
+  recorded as `attempts`/`next_retry_at` in the sync state); new content for
+  the period restarts the sequence, and the skipped row hands its tick slot
+  to the next summary instead of starving it.
 - `oms journal observe` no longer fails silently. A `--verification-status`
   or `--event-type` outside the journal's sets is refused by the parser with
   the allowed values, and a refused record (an unregistered source type whose

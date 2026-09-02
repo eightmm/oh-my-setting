@@ -10,6 +10,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -1072,6 +1073,106 @@ class JournalTestCase(unittest.TestCase):
             {"eightmm/oh-my-setting"},
             {row[1] for row in identities},
         )
+
+
+class NotionFailureBackoffTest(unittest.TestCase):
+    """A summary the exporter keeps refusing must not be retried on every
+    tick: the prompt hook's one-row sync spent a live HTTPS round trip per
+    prompt re-failing the same page for weeks, because only a Retry-After
+    scheduled a next attempt."""
+
+    def setUp(self) -> None:
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-backoff."))
+        self.now = NOW
+        self.store = wj.JournalStore(
+            self.tmp / "demo", timezone_name="Asia/Seoul",
+            clock=lambda: self.now, project_id="proj_test", project_name="demo",
+        )
+        self.store.record_event(base_event("refused-summary"))
+        self.store.materialize()
+        self.upserts = 0
+        test = self
+
+        class FakeExporter:
+            @classmethod
+            def from_config(cls, **_settings):
+                return cls()
+
+            def upsert(self, *_args, **_kwargs):
+                test.upserts += 1
+                raise RuntimeError("refused")
+
+        fake_module = type(sys)("notion_journal")
+        fake_module.NotionJournalExporter = FakeExporter
+        patches = [
+            mock.patch.dict(sys.modules, {"notion_journal": fake_module}),
+            mock.patch.object(wj, "notion_repo_excluded", lambda _repo: False),
+            mock.patch.object(wj, "notion_auth_available", lambda _settings: True),
+            mock.patch.object(wj, "notion_settings", lambda: {
+                "data_source_id": "ds-1", "database_id": "",
+                **{key: key for key in (
+                    "title_property", "key_property", "hash_property",
+                    "project_property", "kind_property", "period_property",
+                    "blocker_property", "sessions_property",
+                    "commits_property", "verified_property")},
+            }),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def state(self):
+        return json.loads(self.store.notion_state_path.read_text(encoding="utf-8"))
+
+    def sync(self):
+        return self.store.sync_notion(force=True, max_per_tick=1, budget_seconds=2)
+
+    def row(self):
+        return self.state()["summaries"]["proj_test:daily:2026-07-31"]
+
+    def test_a_refused_summary_backs_off_from_its_second_failure_until_its_content_changes(self):
+        first = self.sync()
+        self.assertEqual(1, first["attempted"])
+        self.assertEqual("failed", self.row()["status"])
+        self.assertEqual(1, self.row()["attempts"])
+        self.assertNotIn("next_retry_at", self.row())
+        # One immediate retry: a timeout is usually transient.
+        second = self.sync()
+        self.assertEqual(1, second["attempted"])
+        self.assertEqual(2, self.row()["attempts"])
+        self.assertEqual(wj.parse_rfc3339(self.row()["next_retry_at"]),
+                         NOW + dt.timedelta(seconds=60))
+        # Same tick again: the backed-off daily is skipped (the one-row tick
+        # goes to the weekly instead, so a stuck page starves nothing).
+        self.sync()
+        self.assertEqual(2, self.row()["attempts"])
+        self.assertEqual(wj.parse_rfc3339(self.row()["next_retry_at"]),
+                         NOW + dt.timedelta(seconds=60))
+        # Past the deadline the retry happens once and the wait doubles.
+        self.now = NOW + dt.timedelta(seconds=61)
+        self.sync()
+        self.assertEqual(3, self.row()["attempts"])
+        self.assertEqual(wj.parse_rfc3339(self.row()["next_retry_at"]),
+                         self.now + dt.timedelta(seconds=120))
+        # New content for the period is a fresh attempt, not a backed-off one.
+        self.store.record_event(base_event("fresh-content"))
+        self.store.materialize()
+        self.sync()
+        self.assertEqual(1, self.row()["attempts"])
+        self.assertNotIn("next_retry_at", self.row())
+
+    def test_the_wait_is_capped_at_a_day(self):
+        self.sync()
+        for _ in range(13):
+            self.sync()
+            self.now = wj.parse_rfc3339(self.row()["next_retry_at"]) + dt.timedelta(seconds=1)
+        self.assertEqual(14, self.row()["attempts"])
+        self.assertLessEqual(
+            wj.parse_rfc3339(self.row()["next_retry_at"]) - (self.now - dt.timedelta(seconds=1)),
+            dt.timedelta(days=1))
 
 
 class ObserveDiagnosticsTest(unittest.TestCase):
