@@ -44,7 +44,8 @@ Attempt liveness is judged on its own clock, not --days: an attempt still in
 starting/working/verifying with no lifecycle event for OMS_ATTEMPT_STALE_SECONDS
 (default 86400) is moved to blocked/heartbeat_expired, where the inbox can name
 it. OMS_ARTIFACT_INDEX_KEEP (default 1000) is the artifact index floor; raise it
-to keep older evidence through a sweep.
+to keep older evidence through a sweep (the compaction high-water follows it
+unless OMS_ARTIFACT_INDEX_HIGH_WATER is set explicitly).
 
 Swept (older than --days): orphaned delegation markers (dead pid; a coupled
 claimed/running plan task is released back to ready), the event streams of

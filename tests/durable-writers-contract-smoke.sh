@@ -203,6 +203,23 @@ cmp -s "$TMP/invalid-retention-before.jsonl" \
   "$artifact_repo/.oms/artifacts/index.jsonl" ||
   fail "invalid inverted retention changed the artifact index"
 
+# Raising only the keep floor (the documented way to keep older evidence
+# through a sweep) must not turn every append into a refusal: an unset
+# high-water follows keep instead of staying at its 1200 default below it.
+if ! (
+  # shellcheck source=scripts/lib/peer-common.sh
+  . "$ROOT/scripts/lib/peer-common.sh"
+  unset OMS_ARTIFACT_INDEX_HIGH_WATER
+  OMS_ARTIFACT_INDEX_KEEP=5000 \
+    ma_append_artifact_index "$artifact_repo" call claude 0 "" "" "" "" ""
+) >"$TMP/raised-keep.out" 2>&1; then
+  cat "$TMP/raised-keep.out" >&2
+  fail "raising only the artifact keep floor rejected an append"
+fi
+[ "$(wc -l < "$artifact_repo/.oms/artifacts/index.jsonl")" -gt \
+  "$(wc -l < "$TMP/invalid-retention-before.jsonl")" ] ||
+  fail "append under a raised keep floor recorded no row"
+
 # Validation and mutation must agree on structural corruption. A blank row or
 # a valid-looking JSON object without its final newline is not a healthy JSONL
 # ledger and must never be reported as one.

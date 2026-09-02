@@ -38,10 +38,19 @@ def retention_limits(
         except ValueError:
             keep = 1000
     if high is None:
-        try:
-            high = int(os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER", "1200"))
-        except ValueError:
-            high = 1200
+        # An operator raises only the keep floor to keep older evidence through
+        # a sweep (gc.sh says so). A high-water left at its own default would
+        # then sit below keep and every append or salvage would refuse, which
+        # callers that record best-effort swallow: the index silently stops
+        # growing. Unset high-water follows keep with the default headroom.
+        high_env = os.environ.get("OMS_ARTIFACT_INDEX_HIGH_WATER")
+        if high_env is None:
+            high = keep + keep // 5
+        else:
+            try:
+                high = int(high_env)
+            except ValueError:
+                high = keep + keep // 5
     if keep <= 0 or high < keep:
         fail("retention requires positive keep and high-water >= keep")
     return keep, high

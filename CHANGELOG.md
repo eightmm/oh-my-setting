@@ -108,6 +108,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- Raising only `OMS_ARTIFACT_INDEX_KEEP` above the 1200 high-water default
+  (the documented way to keep older evidence through a `gc` sweep) made every
+  artifact-index append and salvage refuse with "high-water >= keep", and the
+  best-effort callers swallowed the refusal: receipts silently stopped being
+  recorded while their guards stayed green. An unset
+  `OMS_ARTIFACT_INDEX_HIGH_WATER` now follows keep with the default headroom;
+  an explicit high-water below keep is still rejected.
 - Project graph reference resolution is scope-aware (`PARSER_VERSION` 4,
   Python parser 3): a Python call through a parameter, local, or module
   variable yields no edge; a member of an import binding must exist in the
