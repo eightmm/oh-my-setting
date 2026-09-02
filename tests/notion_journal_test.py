@@ -751,6 +751,73 @@ class NotionJournalTest(unittest.TestCase):
             {call[0][0] for call in calls},
         )
 
+    def test_recent_sync_limits_daily_and_overlapping_weekly_pages(self):
+        work_journal = load_work_journal()
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-notion-recent."))
+        self.addCleanup(lambda: shutil.rmtree(tmp))
+        repo = tmp / "repo"
+        repo.mkdir()
+        store = work_journal.JournalStore(
+            repo,
+            timezone_name="UTC",
+            clock=lambda: dt.datetime(2026, 8, 5, 12, tzinfo=dt.timezone.utc),
+            project_id="proj_recent",
+            project_name="demo",
+        )
+        for source, occurred_at in (
+            ("old-week", "2026-07-22T02:00:00Z"),
+            ("outside-day", "2026-07-29T02:00:00Z"),
+            ("range-start", "2026-07-30T02:00:00Z"),
+            ("today", "2026-08-05T02:00:00Z"),
+        ):
+            store.record_event(
+                {
+                    "event_type": "validation",
+                    "occurred_at": occurred_at,
+                    "source": {"type": "test", "id": source},
+                    "outcome": {"summary": source, "status": "success"},
+                    "verification_status": "passed",
+                    "evidence": [{"type": "test", "ref": source}],
+                }
+            )
+        store.materialize()
+        calls = []
+
+        class SuccessExporter:
+            def upsert(self, *args, **kwargs):
+                del kwargs
+                calls.append(args[0])
+                return {"status": "synced", "page_id": "page-%d" % len(calls)}
+
+        access_name = "OMS_WORK_JOURNAL_NOTION_" + "TOKEN"
+        configured = {
+            access_name: "test-credential",
+            "OMS_WORK_JOURNAL_NOTION_DATABASE_ID": "database",
+        }
+        sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+        self.addCleanup(lambda: sys.path.remove(str(ROOT / "scripts" / "lib")))
+        with mock.patch.dict(os.environ, configured, clear=False), mock.patch.dict(
+            sys.modules, {"notion_journal": notion}
+        ), mock.patch.object(
+            notion.NotionJournalExporter,
+            "from_config",
+            return_value=SuccessExporter(),
+        ):
+            report = store.sync_notion(force=True, recent_days=7)
+
+        self.assertEqual(4, report["synced"])
+        self.assertEqual(
+            {
+                "proj_recent:daily:2026-07-30",
+                "proj_recent:daily:2026-08-05",
+                "proj_recent:weekly:2026-W31",
+                "proj_recent:weekly:2026-W32",
+            },
+            set(calls),
+        )
+        with self.assertRaises(work_journal.JournalError):
+            store.sync_notion(force=True, recent_days=0)
+
     def test_coordinator_materializes_before_remote_and_retries_pending(self):
         work_journal = load_work_journal()
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-notion."))
@@ -942,6 +1009,27 @@ class HumanPageTest(unittest.TestCase):
         self.assertEqual(
             ["heading_2", "bulleted_list_item"],
             [block["type"] for block in children[1:]],
+        )
+
+    def test_indented_details_render_under_their_work_item(self):
+        children = notion.NotionJournalExporter._summary_children(
+            "## 프로젝트별 작업\n"
+            "- 작업: refresh token 처리\n"
+            "  - 결과: success\n"
+            "  - 해석: token expiry 해소\n"
+        )
+        listing = children[0]["toggle"]["children"]
+        self.assertEqual(1, len(listing))
+        parent = listing[0]
+        self.assertEqual("bulleted_list_item", parent["type"])
+        rich_text = parent["bulleted_list_item"]["rich_text"]
+        self.assertEqual(
+            [
+                "작업: refresh token 처리",
+                "\n↳ 결과: success",
+                "\n↳ 해석: token expiry 해소",
+            ],
+            [item["text"]["content"] for item in rich_text],
         )
 
     def test_toggle_nested_overflow_is_truncated_with_a_note(self):

@@ -722,6 +722,18 @@ rc=0
   >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || fail "journal sync should accept the caller's bounds (rc=$rc)"
 rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --force --recent-days 7 \
+  >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "journal sync should accept a recent-day scope (rc=$rc)"
+rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --recent-days 0 \
+  >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "a non-positive recent-day scope must be refused (rc=$rc)"
+rc=0
+"$ROOT/scripts/journal.sh" sync --repo "$unadopted" --today --recent-days 7 \
+  >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "today and recent-day scopes must be exclusive (rc=$rc)"
+rc=0
 "$ROOT/scripts/journal.sh" sync --repo "$unadopted" --budget >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "a bound without a value must be refused (rc=$rc)"
 rc=0

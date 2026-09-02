@@ -42,6 +42,7 @@ case "${1:-}" in
       shift
       force_args=""
       today_args=""
+      recent_days=""
       # The bounds are the caller's: a session hook wants a couple of summaries
       # and a two-second budget, the operator's repair has to be able to finish.
       # Refusing them here made the flags unreachable through the front door.
@@ -64,6 +65,20 @@ case "${1:-}" in
             today_args="--today"
             shift
             ;;
+          --recent-days)
+            [ "$#" -ge 2 ] || {
+              echo "error: --recent-days requires a value" >&2
+              exit 2
+            }
+            case "$2" in
+              ''|0|*[!0-9]*)
+                echo "error: --recent-days requires a positive integer" >&2
+                exit 2
+                ;;
+            esac
+            recent_days="$2"
+            shift 2
+            ;;
           --budget|--max-per-tick)
             [ "$#" -ge 2 ] || {
               echo "error: $1 requires a value" >&2
@@ -84,10 +99,15 @@ case "${1:-}" in
             ;;
         esac
       done
+      if [ -n "$today_args" ] && [ -n "$recent_days" ]; then
+        echo "error: --today and --recent-days cannot be used together" >&2
+        exit 2
+      fi
       work_journal_call_local "$repo" materialize --repo "$repo"
       set --
       [ -z "$force_args" ] || set -- "$@" "$force_args"
       [ -z "$today_args" ] || set -- "$@" "$today_args"
+      [ -z "$recent_days" ] || set -- "$@" --recent-days "$recent_days"
       # Word-split on purpose: each element is a flag or its numeric value,
       # both already validated above.
       # shellcheck disable=SC2086

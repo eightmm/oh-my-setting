@@ -329,6 +329,66 @@ class JournalTestCase(unittest.TestCase):
         self.assertTrue(weekly.is_file())
         self.assertEqual(1, json.loads(self.store.index_path.read_text())["event_count"])
 
+    def test_summaries_open_with_counts_and_judgment_context(self):
+        decided = base_event("decided")
+        decided["decision"] = "map-style sharding을 유지한다"
+        decided["blocker"] = "Windows 검증 대기"
+        decided["next_action"] = "Windows runner 결과를 확인한다"
+        pending = base_event("pending", "2026-08-01T02:00:00Z")
+        pending["outcome"] = {
+            "summary": "Windows runner queued",
+            "status": "recorded",
+        }
+        pending["verification_status"] = "not_verified"
+        self.store.record_event(decided)
+        self.store.record_event(pending)
+        self.store.materialize()
+
+        daily = self.store.summary_text("daily", "2026-07-31")
+        weekly = self.store.summary_text("weekly", "2026-W31")
+        self.assertIn("## 한눈에 보기", daily)
+        self.assertIn("기록 1", daily)
+        self.assertIn("검증 1", daily)
+        self.assertIn("Blocker 1", daily)
+        self.assertIn(
+            "- map-style sharding을 유지한다 — 관련 작업: focused verification passed",
+            daily,
+        )
+        self.assertIn(
+            "- Windows 검증 대기 — 관련 작업: focused verification passed",
+            daily,
+        )
+        self.assertIn("## 한눈에 보기", weekly)
+        self.assertIn("기록 2", weekly)
+        self.assertIn("미검증 1", weekly)
+        self.assertIn(
+            "- 2026-07-31 · map-style sharding을 유지한다"
+            " — 관련 작업: focused verification passed",
+            weekly,
+        )
+
+        daily_notion = wj.notion_presentation(daily)
+        weekly_notion = wj.notion_presentation(weekly)
+        self.assertIn(
+            "> map-style sharding을 유지한다 — 관련 작업: focused verification passed",
+            daily_notion,
+        )
+        self.assertIn(
+            "- 2026-07-31 · map-style sharding을 유지한다"
+            " — 관련 작업: focused verification passed",
+            weekly_notion,
+        )
+        self.assertNotIn(
+            "> 2026-07-31 · map-style sharding을 유지한다", weekly_notion
+        )
+        noisy = dict(decided)
+        noisy["decision"] = "짧은 결정"
+        noisy["outcome"] = {"summary": "x" * 300, "status": "recorded"}
+        self.assertEqual(
+            "짧은 결정",
+            wj._judgment_summary(noisy, "decision", wj._headings()),
+        )
+
     def test_incremental_index_avoids_full_log_scan_and_untouched_rewrite(self):
         self.store.record_event(base_event("old", "2026-07-01T02:00:00Z"))
         self.store.materialize()
@@ -509,6 +569,19 @@ class JournalTestCase(unittest.TestCase):
         }
         self.assertEqual(before, after)
 
+    def test_renderer_version_change_rematerializes_existing_periods(self):
+        self.store.record_event(base_event("renderer-upgrade"))
+        self.store.materialize()
+        daily = self.store.daily_dir / "2026-07-31.md"
+        daily.write_text("stale renderer\n", encoding="utf-8")
+
+        with mock.patch.object(wj, "RENDERER_VERSION", wj.RENDERER_VERSION + 1):
+            self.store.materialize()
+
+        refreshed = daily.read_text(encoding="utf-8")
+        self.assertIn("# Daily Work Journal — 2026-07-31", refreshed)
+        self.assertIn("## 한눈에 보기", refreshed)
+
     def test_comparable_metric_trend_only(self):
         for source, value in (("run-1", 0.7), ("run-2", 0.8)):
             payload = base_event(source)
@@ -601,7 +674,16 @@ class JournalTestCase(unittest.TestCase):
         payload["refs"] = [{"type": "artifact", "id": str(i)} for i in range(1000)]
         event, _ = self.store.record_event(payload)
         self.assertLessEqual(len(event["outcome"]["summary"].encode()), wj.MAX_TEXT_BYTES)
+        self.assertTrue(event["outcome"]["summary"].endswith("…"))
         self.assertLessEqual(len(event["refs"]), wj.MAX_COLLECTION_ITEMS)
+        legacy = {
+            "decision": "가" * 666,
+            "local_date": "2026-07-31",
+            "outcome": {},
+        }
+        self.assertTrue(
+            wj._judgment_summary(legacy, "decision", wj._headings()).endswith("…")
+        )
 
     def test_optional_enrichment_timeout_falls_back_to_template(self):
         def timeout(_text, _content_hash):
@@ -796,6 +878,8 @@ class JournalTestCase(unittest.TestCase):
             daily = (self.store.daily_dir / "2026-07-31.md").read_text(
                 encoding="utf-8"
             )
+            self.assertIn("## At a glance", daily)
+            self.assertIn("Events 1", daily)
             self.assertIn("## Key progress", daily)
             self.assertIn("- none recorded", daily)
             self.assertNotIn("기록 없음", daily)
@@ -813,6 +897,38 @@ class JournalTestCase(unittest.TestCase):
         self.store.rebuild()
         daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
         self.assertIn("## 핵심 진전", daily)
+
+    def test_bounded_summary_keeps_judgment_sections_and_marks_omission(self):
+        for index in range(6):
+            payload = base_event("verbose-%d" % index)
+            payload["outcome"] = {
+                "summary": ("상세 구현 결과 %d " % index) + ("x" * 420),
+                "status": "success",
+            }
+            if index == 5:
+                payload["blocker"] = "Windows 검증 대기"
+                payload["next_action"] = "Windows runner 결과를 확인한다"
+            self.store.record_event(payload)
+
+        with mock.patch.object(wj, "MAX_EXPORT_BYTES", 1800):
+            self.store.materialize()
+        summary = self.store.summary_text("daily", "2026-07-31")
+        self.assertLessEqual(len(summary.encode("utf-8")), 1800)
+        self.assertIn("## Blockers", summary)
+        self.assertIn("Windows 검증 대기", summary)
+        self.assertIn("## 다음 우선순위", summary)
+        self.assertIn("상세 항목 일부 생략", summary)
+        self.assertTrue(self.store._summary_has_blocker(summary))
+
+    def test_materialized_summary_preserves_detail_indentation(self):
+        payload = base_event("nested-details")
+        payload["outcome"]["interpretation"] = "token expiry가 해소됨"
+        self.store.record_event(payload)
+        self.store.materialize()
+
+        summary = self.store.summary_text("daily", "2026-07-31")
+        self.assertIn("\n  - 결과: success", summary)
+        self.assertIn("\n  - 해석: token expiry가 해소됨", summary)
 
     def test_notion_mirror_of_a_rendered_day_carries_no_raw_reference(self):
         sha = "0e0390aa95893b50e14bdf78d60f5c5d3090cf8d"
@@ -884,7 +1000,11 @@ class JournalTestCase(unittest.TestCase):
         rendered = wj.notion_presentation(daily)
         # The decision keeps its text but trades its bullet for a quote mark,
         # which the exporter renders as a callout.
-        self.assertIn("> going with map-style sharding", rendered)
+        self.assertIn(
+            "> going with map-style sharding"
+            " — 관련 작업: focused verification passed",
+            rendered,
+        )
         self.assertNotIn("- going with map-style sharding", rendered)
         # Sessions are reference material: they rank below the verified work.
         self.assertLess(

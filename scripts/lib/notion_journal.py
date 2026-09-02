@@ -894,7 +894,12 @@ class NotionJournalExporter:
     @staticmethod
     def _summary_children(content):
         children = []
-        state = {"total": 0, "toggle": None, "toggle_full": False}
+        state = {
+            "total": 0,
+            "toggle": None,
+            "toggle_full": False,
+            "last_list": None,
+        }
 
         def note_block(text):
             return {
@@ -928,8 +933,10 @@ class NotionJournalExporter:
         def close_toggle():
             state["toggle"] = None
             state["toggle_full"] = False
+            state["last_list"] = None
 
         def append_text_blocks(block_type, text, **attributes):
+            first = None
             for offset in range(0, len(text), NOTION_TEXT_CHUNK):
                 chunk_type = block_type if offset == 0 else "paragraph"
                 payload = {
@@ -941,18 +948,34 @@ class NotionJournalExporter:
                 }
                 if offset == 0:
                     payload.update(attributes)
-                if not emit(
-                    {
-                        "object": "block",
-                        "type": chunk_type,
-                        chunk_type: payload,
-                    }
-                ):
+                block = {
+                    "object": "block",
+                    "type": chunk_type,
+                    chunk_type: payload,
+                }
+                if not emit(block):
+                    return first
+                if first is None:
+                    first = block
+            return first
+
+        def append_list_detail(parent, text):
+            payload = parent[parent["type"]]
+            rich_text = payload["rich_text"]
+            width = NOTION_TEXT_CHUNK - len("\n↳ ")
+            for offset in range(0, len(text), width):
+                if len(rich_text) >= NOTION_CHILD_BATCH:
                     return
+                rich_text.append(
+                    NotionJournalExporter._text_object(
+                        "\n↳ " + text[offset : offset + width]
+                    )
+                )
 
         for raw_line in str(content or "").splitlines():
             if state["total"] >= NOTION_MAX_BLOCKS:
                 break
+            indented = bool(raw_line[:1] in (" ", "\t"))
             line = raw_line.strip()
             if not line:
                 continue
@@ -968,6 +991,7 @@ class NotionJournalExporter:
                 # A per-project ### subsection belongs to the listing above
                 # it: only a section heading (## or #) leaves an open toggle.
                 if len(heading.group(1)) >= 3 and state["toggle"] is not None:
+                    state["last_list"] = None
                     append_text_blocks(
                         "heading_%d" % len(heading.group(1)), heading.group(2)
                     )
@@ -995,24 +1019,33 @@ class NotionJournalExporter:
                         "heading_%d" % len(heading.group(1)), title
                     )
             elif todo:
-                append_text_blocks(
+                state["last_list"] = append_text_blocks(
                     "to_do",
                     todo.group(2),
                     checked=todo.group(1).lower() == "x",
                 )
             elif quote:
-                # Quoted lines carry the judgment layer (decisions); a callout
-                # keeps them visually distinct from the listing bullets.
+                # Daily decision quotes become callouts; the weekly projection
+                # deliberately keeps its larger decision set as list items.
+                state["last_list"] = None
                 append_text_blocks(
                     "callout",
                     quote.group(1),
                     icon={"type": "emoji", "emoji": "\U0001f4a1"},
                 )
             elif bullet:
-                append_text_blocks("bulleted_list_item", bullet.group(1))
+                if indented and state["last_list"] is not None:
+                    append_list_detail(state["last_list"], bullet.group(1))
+                else:
+                    state["last_list"] = append_text_blocks(
+                        "bulleted_list_item", bullet.group(1)
+                    )
             elif numbered:
-                append_text_blocks("numbered_list_item", numbered.group(1))
+                state["last_list"] = append_text_blocks(
+                    "numbered_list_item", numbered.group(1)
+                )
             else:
+                state["last_list"] = None
                 append_text_blocks("paragraph", line)
 
         if state["total"] >= NOTION_MAX_BLOCKS and children:

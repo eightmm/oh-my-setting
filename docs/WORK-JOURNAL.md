@@ -82,6 +82,7 @@ oms journal rebuild --repo .
 oms journal sync --repo .
 oms journal sync --repo . --force
 oms journal sync --repo . --force --today
+oms journal sync --repo . --force --recent-days 7
 ```
 
 `show` reads only the requested summary or bounded indexed event slice.
@@ -90,6 +91,9 @@ the credential. `rebuild` is the explicit full JSONL scan and recreates all
 derived views. Routine capture, reads, and sync use the SQLite index instead.
 These commands share the same local and remote locks as automatic lifecycle
 capture, so an explicit rebuild or sync cannot race an observer.
+`sync --recent-days N` limits the mirror update to the last `N` local calendar
+days and every ISO-week page that overlaps them. Combine it with `--force` when
+the range includes today's open daily page or the current open week.
 
 ## Summaries
 
@@ -98,6 +102,7 @@ Daily files use this stable shape:
 ```markdown
 # Daily Work Journal — 2026-07-31
 
+## 한눈에 보기
 ## 핵심 진전
 ## 프로젝트별 작업
 ### project-name
@@ -109,19 +114,28 @@ Daily files use this stable shape:
 ## 다음 우선순위
 ```
 
+`한눈에 보기` / `At a glance` is a mechanical period summary: event count,
+passed and unverified checks, failed or parked outcomes, and distinct decision,
+blocker, and next-action counts. It does not infer completion or progress. A
+short decision, blocker, or next action also carries its short related outcome
+so a sentence such as "retry it" is not detached from the work it refers to;
+long context is left out instead of making the page noisier.
+
 Labels follow the environment: `OMS_WORK_JOURNAL_LANG` wins, then
 `oms journal configure --lang ko|en`, then the locale (`ko*` renders Korean),
 then English. After changing the language, run `oms journal rebuild --repo .`
 to re-render existing daily/weekly views. This changes only derived Markdown,
-never canonical events.
+never canonical events. Renderer upgrades similarly mark every indexed period
+dirty and recreate those derived views on the next materialization.
 
 Weekly files group progress, verified outcomes, repeated blockers, decisions,
 comparable experiment series, and next priorities directly from structured
-events—not from daily prose. Claims cite an event ID and, when available, the
-authoritative evidence reference. Metrics are compared only when name, unit,
-dataset/split, and evaluation conditions match; Work Journal never invents
-progress percentages or treats a successful process exit as a scientific
-conclusion.
+events—not from daily prose. Weekly decisions and next actions carry their
+local date; the daily page itself already supplies that context. Claims cite an
+event ID and, when available, the authoritative evidence reference. Metrics
+are compared only when name, unit, dataset/split, and evaluation conditions
+match; Work Journal never invents progress percentages or treats a successful
+process exit as a scientific conclusion.
 
 Representative generated weekly content is deliberately evidence-first:
 
@@ -240,15 +254,26 @@ target values are set, the data source takes precedence. A hashed target and
 property-schema fingerprint scopes local sync state, so changing the target
 resynchronizes summaries instead of reusing page IDs from the old mirror.
 
-The mirror writes native Notion heading, paragraph, list, to-do, and divider
-blocks rather than one large code block. It uses a stable summary key and
-content hash: unchanged content is a no-op, changed content updates the known
-page, and missing local sync state first queries by key before creating a page.
+The mirror writes native Notion heading, paragraph, list, to-do, callout,
+toggle, and divider blocks rather than one large code block. Daily decisions
+remain prominent callouts; weekly decisions stay a compact dated list so a busy
+week does not open as a wall of callout boxes. Result and interpretation detail
+stays visually attached to its work item, while evidence IDs remain in the
+complete local summary. It uses a stable summary key and content hash:
+unchanged content is a no-op, changed content updates the known page, and
+missing local sync state first queries by key before creating a page.
 HTTP 429 and retryable 5xx responses use bounded retries and respect
 `Retry-After`. Delays longer than the small inline allowance become `pending`
 with `next_retry_at` instead of sleeping in a lifecycle hook. Each sync tick has
 an eight-second total network budget; timeouts and permanent 4xx responses
 remain pending or failed locally without touching the canonical summary.
+
+The indexed/exportable summary remains bounded. If a very busy period exceeds
+the display budget, complete lines from overview, decisions, blockers, and next
+actions are kept ahead of low-signal listings and an explicit omission marker
+is added. The local Markdown file remains complete, and `Has Blocker` is
+computed from that full rendering rather than the bounded mirror. Individual
+bounded fields end with `…` when truncated.
 
 The target data source must provide these properties:
 

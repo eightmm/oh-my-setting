@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - only old Python installations
 
 
 SCHEMA_VERSION = 1
-RENDERER_VERSION = 1
+RENDERER_VERSION = 2
 INDEX_SCHEMA_VERSION = 2
 INDEX_RECENT_EVENT_LIMIT = 256
 CONFIG_SCHEMA_VERSION = 1
@@ -53,6 +53,8 @@ MAX_TEXT_BYTES = 2000
 MAX_EXPORT_BYTES = 65536
 MAX_COLLECTION_ITEMS = 64
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
+JUDGMENT_CONTEXT_MAX_CHARS = 96
+JUDGMENT_CONTEXT_MAX_OUTCOME_CHARS = 180
 VERIFICATION_STATUSES = {
     "passed",
     "failed",
@@ -84,6 +86,16 @@ EVENT_TYPES = {
 _HEADINGS = {
     "ko": {
         "empty": "- 기록 없음",
+        "overview": "한눈에 보기",
+        "overview_line": (
+            "기록 %d · 검증 %d · 미검증 %d · 실패/보류 %d · "
+            "의사결정 %d · Blocker %d · 다음 작업 %d"
+        ),
+        "context": "관련 작업",
+        "truncated": (
+            "- … 표시 한도로 상세 항목 일부 생략; "
+            "전체 내용은 로컬 Work Journal 파일에 있음"
+        ),
         "daily_progress": "핵심 진전",
         "daily_by_project": "프로젝트별 작업",
         "verified": "검증된 것",
@@ -108,6 +120,16 @@ _HEADINGS = {
     },
     "en": {
         "empty": "- none recorded",
+        "overview": "At a glance",
+        "overview_line": (
+            "Events %d · verified %d · unverified %d · failed/parked %d · "
+            "decisions %d · blockers %d · next actions %d"
+        ),
+        "context": "related work",
+        "truncated": (
+            "- … Some detail was omitted at the display limit; "
+            "the complete summary remains in the local Work Journal file"
+        ),
         "daily_progress": "Key progress",
         "daily_by_project": "Work by project",
         "verified": "Verified",
@@ -227,6 +249,7 @@ class SchemaError(JournalError):
 # day's judgment first (decisions, blockers, what is next) and the raw
 # progress listing last. Unknown titles keep their relative order in between.
 _NOTION_SECTION_RANK = {
+    "한눈에 보기": -1, "At a glance": -1,
     "의사결정": 0, "Decisions": 0, "주요 의사결정": 0, "Key decisions": 0,
     "Blockers": 1, "반복 Blockers": 1, "Recurring blockers": 1,
     "다음 우선순위": 2, "Next priorities": 2,
@@ -237,6 +260,21 @@ _NOTION_SECTION_RANK = {
     "프로젝트별 진전": 5, "Progress by project": 5,
     "세션": 6, "Sessions": 6,
 }
+
+
+def _partition_summary_sections(
+    lines: Iterable[str],
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    preamble: List[str] = []
+    sections: List[Dict[str, Any]] = []
+    for line in lines:
+        if line.startswith("## "):
+            sections.append({"title": line[3:].strip(), "lines": [line]})
+        elif sections:
+            sections[-1]["lines"].append(line)
+        else:
+            preamble.append(line)
+    return preamble, sections
 
 
 def notion_presentation(content: str) -> str:
@@ -280,17 +318,10 @@ def notion_presentation(content: str) -> str:
             )
         lines.append(long_hash.sub(r"\1", line))
 
-    preamble: List[str] = []
-    sections: List[Dict[str, Any]] = []
-    for line in lines:
-        if line.startswith("## "):
-            sections.append({"title": line[3:].strip(), "lines": [line]})
-        elif sections:
-            sections[-1]["lines"].append(line)
-        else:
-            preamble.append(line)
+    preamble, sections = _partition_summary_sections(lines)
 
     ordered = sorted(sections, key=lambda s: _NOTION_SECTION_RANK.get(s["title"], 3))
+    is_weekly = any(line.startswith("# Weekly Work Journal") for line in preamble)
 
     # The same fact reaches progress, verified, and by-project listings, so a
     # per-section fold left the reader the same bullet three times. Folding
@@ -331,11 +362,11 @@ def notion_presentation(content: str) -> str:
 
     ordered = [s for s in ordered if not says_nothing(s)]
 
-    # Decisions are the page's judgment layer: mark their bullets as quotes so
-    # the exporter renders them as callouts instead of one more bullet list.
-    # Deterministic transform only — the text itself is untouched.
+    # A daily page has few decisions, so callouts keep its judgment prominent.
+    # Weekly decisions stay a dated list: turning a busy week's entries into
+    # separate callout boxes made the summary harder to scan.
     for section in ordered:
-        if _NOTION_SECTION_RANK.get(section["title"], 3) == 0:
+        if _NOTION_SECTION_RANK.get(section["title"], 3) == 0 and not is_weekly:
             section["lines"] = [
                 "> " + line[2:]
                 if line.startswith("- ") and line not in _EMPTY_MARKERS
@@ -365,7 +396,11 @@ def _truncate_utf8(value: str, maximum: int = MAX_TEXT_BYTES) -> str:
     raw = value.encode("utf-8")
     if len(raw) <= maximum:
         return value
-    return raw[:maximum].decode("utf-8", errors="ignore")
+    marker = "…".encode("utf-8")
+    if maximum < len(marker):
+        return raw[:maximum].decode("utf-8", errors="ignore")
+    prefix = raw[: maximum - len(marker)].decode("utf-8", errors="ignore")
+    return prefix + marker.decode("utf-8")
 
 
 def sanitize_text(value: str, maximum: int = MAX_TEXT_BYTES) -> str:
@@ -392,11 +427,59 @@ def sanitize_multiline(value: str, maximum: int = MAX_EXPORT_BYTES) -> str:
 
     sanitize_text() folds newlines into spaces, which turns a summary into one
     unparseable line: heading/bullet detection in the Notion exporter and the
-    blocker scan both read line starts.
+    blocker scan both read line starts. Generated detail indentation is also
+    structural: keep its bounded prefix so a result cannot become an unrelated
+    top-level bullet in the human view.
     """
 
-    lines = [sanitize_text(line) for line in str(value).splitlines()]
+    lines = []
+    for line in str(value).splitlines():
+        leading = re.match(r"^[ \t]*", line)
+        prefix = (leading.group(0) if leading else "")[:8]
+        clean = sanitize_text(line[len(leading.group(0)) :] if leading else line)
+        lines.append((prefix + clean) if clean else "")
     return _truncate_utf8("\n".join(lines), maximum)
+
+
+def _bounded_summary(value: str, maximum: int = MAX_EXPORT_BYTES) -> str:
+    """Keep judgment before low-signal listings when a summary is oversized."""
+
+    source = str(value)
+    sanitize_bound = max(
+        maximum,
+        len(source.encode("utf-8")) + 8 * (source.count("\n") + 1),
+    )
+    sanitized = sanitize_multiline(source, sanitize_bound)
+    if len(sanitized.encode("utf-8")) <= maximum:
+        return sanitized
+
+    preamble, sections = _partition_summary_sections(sanitized.splitlines())
+    ordered = sorted(
+        sections, key=lambda section: _NOTION_SECTION_RANK.get(section["title"], 3)
+    )
+    prioritized = list(preamble)
+    for section in ordered:
+        while prioritized and not prioritized[-1].strip():
+            prioritized.pop()
+        prioritized.extend(["", *section["lines"]])
+
+    marker = _headings()["truncated"]
+    marker_bytes = len(marker.encode("utf-8"))
+    kept: List[str] = []
+    used = 0
+    for line in prioritized:
+        line_bytes = len(line.encode("utf-8"))
+        separator = 1 if kept else 0
+        marker_separator = 1 if kept or line else 0
+        if used + separator + line_bytes + marker_separator + marker_bytes > maximum:
+            break
+        kept.append(line)
+        used += separator + line_bytes
+    while kept and not kept[-1].strip():
+        kept.pop()
+    if not kept:
+        return _truncate_utf8(marker, maximum)
+    return "\n".join([*kept, marker])
 
 
 def sanitize(value: Any, key: str = "") -> Any:
@@ -1237,8 +1320,75 @@ def _event_citation(event: Mapping[str, Any]) -> str:
 def _outcome_summary(event: Mapping[str, Any]) -> str:
     outcome = event.get("outcome") or {}
     if outcome.get("summary"):
-        return str(outcome["summary"])
+        return _display_text(str(outcome["summary"]))
     return event["event_type"].replace("_", " ")
+
+
+def _display_text(value: str) -> str:
+    text = str(value).strip()
+    if (
+        not text.endswith("…")
+        and len(text.encode("utf-8")) >= MAX_TEXT_BYTES - len("…".encode("utf-8"))
+    ):
+        return text + "…"
+    return text
+
+
+_FAILED_OUTCOME_STATUSES = {
+    "failure",
+    "failed",
+    "deferred",
+    "cancelled",
+    "aborted",
+    "parked",
+}
+
+
+def _event_failed(event: Mapping[str, Any]) -> bool:
+    status = str((event.get("outcome") or {}).get("status") or "").lower()
+    return (
+        event["verification_status"] in {"failed", "skipped"}
+        or status in _FAILED_OUTCOME_STATUSES
+    )
+
+
+def _overview_summary(
+    events: Sequence[Mapping[str, Any]], labels: Mapping[str, str]
+) -> str:
+    unique_counts = [
+        len({str(event.get(field)).strip() for event in events if event.get(field)})
+        for field in ("decision", "blocker", "next_action")
+    ]
+    return labels["overview_line"] % (
+        len(events),
+        sum(event["verification_status"] == "passed" for event in events),
+        sum(event["verification_status"] == "not_verified" for event in events),
+        sum(_event_failed(event) for event in events),
+        *unique_counts,
+    )
+
+
+def _judgment_summary(
+    event: Mapping[str, Any],
+    field: str,
+    labels: Mapping[str, str],
+    *,
+    include_date: bool = False,
+) -> str:
+    raw_statement = str(event[field]).strip()
+    statement = _display_text(raw_statement)
+    rendered = (
+        "%s · %s" % (event["local_date"], statement) if include_date else statement
+    )
+    context = str((event.get("outcome") or {}).get("summary") or "").strip()
+    if (
+        context
+        and context != raw_statement
+        and len(raw_statement) <= JUDGMENT_CONTEXT_MAX_CHARS
+        and len(context) <= JUDGMENT_CONTEXT_MAX_OUTCOME_CHARS
+    ):
+        rendered += " — %s: %s" % (labels["context"], context)
+    return rendered
 
 
 def _empty_or_lines(lines: Iterable[str]) -> List[str]:
@@ -1287,29 +1437,26 @@ def render_daily(period: str, events: Sequence[Mapping[str, Any]]) -> str:
         for event in ordered
         if event["verification_status"] == "not_verified"
     ]
-    failed = []
-    for event in ordered:
-        status = (event.get("outcome") or {}).get("status")
-        if event["verification_status"] in {"failed", "skipped"} or status in {
-            "failure",
-            "failed",
-            "deferred",
-            "cancelled",
-            "aborted",
-        }:
-            failed.append("- %s %s" % (_outcome_summary(event), _event_citation(event)))
+    failed = [
+        "- %s %s" % (_outcome_summary(event), _event_citation(event))
+        for event in ordered
+        if _event_failed(event)
+    ]
     decisions = [
-        "- %s %s" % (event["decision"], _event_citation(event))
+        "- %s %s"
+        % (_judgment_summary(event, "decision", labels), _event_citation(event))
         for event in ordered
         if event.get("decision")
     ]
     blockers = [
-        "- %s %s" % (event["blocker"], _event_citation(event))
+        "- %s %s"
+        % (_judgment_summary(event, "blocker", labels), _event_citation(event))
         for event in ordered
         if event.get("blocker")
     ]
     next_actions = [
-        "- %s %s" % (event["next_action"], _event_citation(event))
+        "- %s %s"
+        % (_judgment_summary(event, "next_action", labels), _event_citation(event))
         for event in ordered
         if event.get("next_action")
     ]
@@ -1336,6 +1483,10 @@ def render_daily(period: str, events: Sequence[Mapping[str, Any]]) -> str:
 
     sections: List[str] = [
         "# Daily Work Journal — %s" % period,
+        "",
+        "## %s" % labels["overview"],
+        "",
+        _overview_summary(ordered, labels),
         "",
         "## %s" % labels["daily_progress"],
         "",
@@ -1413,12 +1564,24 @@ def render_weekly(period: str, events: Sequence[Mapping[str, Any]]) -> str:
         if len(group) >= 2
     ]
     decisions = [
-        "- %s %s" % (event["decision"], _event_citation(event))
+        "- %s %s"
+        % (
+            _judgment_summary(
+                event, "decision", labels, include_date=True
+            ),
+            _event_citation(event),
+        )
         for event in ordered
         if event.get("decision")
     ]
     next_actions = [
-        "- %s %s" % (event["next_action"], _event_citation(event))
+        "- %s %s"
+        % (
+            _judgment_summary(
+                event, "next_action", labels, include_date=True
+            ),
+            _event_citation(event),
+        )
         for event in ordered
         if event.get("next_action")
     ]
@@ -1453,6 +1616,10 @@ def render_weekly(period: str, events: Sequence[Mapping[str, Any]]) -> str:
 
     sections: List[str] = [
         "# Weekly Work Journal — %s" % period,
+        "",
+        "## %s" % labels["overview"],
+        "",
+        _overview_summary(ordered, labels),
         "",
         "## %s" % labels["weekly_by_project"],
         "",
@@ -1700,6 +1867,7 @@ class JournalStore:
             connection,
             {
                 "schema_version": INDEX_SCHEMA_VERSION,
+                "renderer_version": RENDERER_VERSION,
                 "events_size": size,
                 "events_mtime_ns": modified,
             },
@@ -2059,6 +2227,16 @@ class JournalStore:
         self.daily_dir.mkdir(parents=True, exist_ok=True)
         self.weekly_dir.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.index_db_path)) as connection:
+            metadata = self._metadata(connection)
+            if metadata.get("renderer_version") != str(RENDERER_VERSION):
+                connection.execute(
+                    "INSERT OR IGNORE INTO dirty_periods(kind, period) "
+                    "SELECT 'daily', local_date FROM events WHERE active = 1"
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO dirty_periods(kind, period) "
+                    "SELECT 'weekly', iso_week FROM events WHERE active = 1"
+                )
             dirty = [
                 (str(kind), str(period))
                 for kind, period in connection.execute(
@@ -2085,7 +2263,7 @@ class JournalStore:
                     else render_weekly(period, rows)
                 )
                 atomic_write_text(target, rendered)
-                export_content = sanitize_multiline(rendered, MAX_EXPORT_BYTES)
+                export_content = _bounded_summary(rendered, MAX_EXPORT_BYTES)
                 connection.execute(
                     """
                     INSERT OR REPLACE INTO summaries(
@@ -2097,13 +2275,16 @@ class JournalStore:
                         period,
                         _sha256_bytes(export_content.encode("utf-8")),
                         export_content,
-                        1 if self._summary_has_blocker(export_content) else 0,
+                        1 if self._summary_has_blocker(rendered) else 0,
                     ),
                 )
 
             index = self._index_summary(connection)
             atomic_write_json(self.index_path, index)
             connection.execute("DELETE FROM dirty_periods")
+            self._set_metadata(
+                connection, {"renderer_version": RENDERER_VERSION}
+            )
 
         if events is not None:
             self._remove_stale_views(
@@ -2694,6 +2875,7 @@ class JournalStore:
         *,
         force: bool = False,
         today_only: bool = False,
+        recent_days: Optional[int] = None,
         budget_seconds: Optional[float] = None,
         max_per_tick: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -2706,6 +2888,14 @@ class JournalStore:
         permanent -- every tick spent its cap failing rows past the deadline,
         recorded each as a failure, and the count only grew.
         """
+        if recent_days is not None and (
+            isinstance(recent_days, bool)
+            or not isinstance(recent_days, int)
+            or recent_days < 1
+        ):
+            raise JournalError("recent days must be a positive integer")
+        if today_only and recent_days is not None:
+            raise JournalError("today and recent days are mutually exclusive")
         report: Dict[str, Any] = {
             "configured": False, "attempted": 0, "synced": 0,
             "failed": 0, "deferred": 0, "remaining": 0, "error": "",
@@ -2793,6 +2983,29 @@ class JournalStore:
                 row
                 for row in rows
                 if row["kind"] == "daily" and row["period"] == current_day
+            ]
+        elif recent_days is not None:
+            current_day, current_week = self._current_periods()
+            try:
+                start_date = dt.date.fromisoformat(current_day) - dt.timedelta(
+                    days=recent_days - 1
+                )
+            except (OverflowError, ValueError):
+                raise JournalError("recent days is outside the supported date range")
+            calendar = start_date.isocalendar()
+            start_day = start_date.isoformat()
+            start_week = "%04d-W%02d" % (calendar[0], calendar[1])
+            rows = [
+                row
+                for row in rows
+                if (
+                    row["kind"] == "daily"
+                    and start_day <= row["period"] <= current_day
+                )
+                or (
+                    row["kind"] == "weekly"
+                    and start_week <= row["period"] <= current_week
+                )
             ]
         for row in rows:
             previous = state["summaries"].get(row["summary_key"], {})
@@ -3449,7 +3662,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("sync")
     sync.add_argument("--repo", default=".")
     sync.add_argument("--force", action="store_true")
-    sync.add_argument("--today", action="store_true")
+    sync_scope = sync.add_mutually_exclusive_group()
+    sync_scope.add_argument("--today", action="store_true")
+    sync_scope.add_argument("--recent-days", type=int, metavar="N")
     # Defaults here are the operator's, not the session hook's: the hooks pass
     # their own tight bounds, and a repair that inherits them cannot finish.
     sync.add_argument("--budget", type=float, default=None, metavar="SECONDS")
@@ -3718,7 +3933,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if maximum is None:
             maximum = int(os.environ.get("OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK") or 20)
         report = store.sync_notion(
-            force=args.force, today_only=args.today,
+            force=args.force, today_only=args.today, recent_days=args.recent_days,
             budget_seconds=budget, max_per_tick=maximum,
         )
         # Said out loud, because this used to print nothing at all: seven days
