@@ -68,6 +68,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The gate's `shellcheck` stage runs parallel batches, largest files first,
+  instead of one serial invocation over the whole tree: 282s in CI and 160s
+  on a workstation become about a third of that. Workers are bounded by
+  `OMS_LINT_JOBS_MAX` (default 4) because the largest suite alone peaks near
+  6.5 GB of parser memory; a failing batch still fails the stage. The
+  `--quick` changed-file lint uses the same helper.
 - `exec shadow` reconstructs where the graph stands against current reality
   before comparing (`shadow.reconstruct`): a primary whose proof holds is
   settled `completed`, an effect-free check whose proof fails is assumed

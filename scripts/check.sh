@@ -218,6 +218,23 @@ esac
 # Binary name is overridable so tests can exercise the missing-tool path
 # deterministically without PATH surgery.
 SHELLCHECK="${OMS_SHELLCHECK_BIN:-shellcheck}"
+
+# With -x, ShellCheck parses every sourced library again for each script that
+# sources it, and the largest suite alone holds gigabytes of AST: one serial
+# invocation over the tree spent 282s in CI and 160s on a workstation. Batches
+# run in parallel, largest files first so the long pole starts at once. The
+# worker count is bounded by memory rather than cores (the biggest file peaks
+# near 6.5 GB), and xargs exits non-zero when any batch does, which the stage
+# reads as a failure like any other.
+lint_shell() {  # lint_shell FILE...
+  local jobs
+  jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 2)"
+  case "$jobs" in ''|*[!0-9]*) jobs=2 ;; esac
+  [ "$jobs" -le "${OMS_LINT_JOBS_MAX:-4}" ] || jobs="${OMS_LINT_JOBS_MAX:-4}"
+  [ "$jobs" -ge 1 ] || jobs=1
+  ls -S -- "$@" | tr '\n' '\0' |
+    xargs -0 -P "$jobs" -n 2 "$SHELLCHECK" -x -S warning
+}
 if [ "$RUN_LINT" = 1 ] && ! command -v "$SHELLCHECK" >/dev/null 2>&1; then
   echo "FATAL: shellcheck is not installed — CI enforces it, so passing here" >&2
   echo "would be false confidence. Install one of:" >&2
@@ -319,7 +336,7 @@ stage() {  # stage NAME COMMAND...
 if [ "$RUN_LINT" = 1 ]; then
   # scripts/oms is named explicitly: the dispatcher has no .sh extension, so
   # the glob alone would silently skip it.
-  stage shellcheck "$SHELLCHECK" -x -S warning install.sh scripts/oms scripts/*.sh \
+  stage shellcheck lint_shell install.sh scripts/oms scripts/*.sh \
     scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh
 
   stage bash-compat bash scripts/check-bash32.sh
@@ -385,7 +402,7 @@ if [ "$RUN_QUICK" = 1 ]; then
       echo "FATAL: shellcheck is required for changed shell files" >&2
       exit 1
     }
-    stage shellcheck-changed "$SHELLCHECK" -x -S warning "${quick_shell_files[@]}"
+    stage shellcheck-changed lint_shell "${quick_shell_files[@]}"
     stage bash-compat-changed bash scripts/check-bash32.sh "${quick_shell_files[@]}"
   fi
   stage python-syntax bash scripts/check-python.sh
