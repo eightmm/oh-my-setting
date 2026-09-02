@@ -2280,11 +2280,26 @@ class JournalStore:
                 )
 
             index = self._index_summary(connection)
-            atomic_write_json(self.index_path, index)
-            connection.execute("DELETE FROM dirty_periods")
-            self._set_metadata(
-                connection, {"renderer_version": RENDERER_VERSION}
+            # Every prompt, Stop, and session start ticks the journal. With
+            # nothing dirty the index is byte-identical to what is on disk,
+            # so compare before the fsync-backed rewrite instead of paying
+            # it on every tick; a missing or altered file is still restored.
+            index_text = (
+                json.dumps(index, ensure_ascii=False, sort_keys=True,
+                           indent=2, allow_nan=False) + "\n"
             )
+            try:
+                unchanged = self.index_path.read_text(encoding="utf-8") == index_text
+            except (OSError, UnicodeError):
+                unchanged = False
+            if not unchanged:
+                atomic_write_text(self.index_path, index_text)
+            if dirty:
+                connection.execute("DELETE FROM dirty_periods")
+            if metadata.get("renderer_version") != str(RENDERER_VERSION):
+                self._set_metadata(
+                    connection, {"renderer_version": RENDERER_VERSION}
+                )
 
         if events is not None:
             self._remove_stale_views(

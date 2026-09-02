@@ -76,6 +76,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- A Work Journal tick with nothing dirty no longer fsync-rewrites the summary
+  index: the rendered index is compared with the file first, and the dirty
+  and renderer bookkeeping is written only when it changed. Every prompt,
+  Stop, and session start ticks the journal, so that was one durable write
+  per prompt for a byte-identical file.
 - The focused gate stages are registered in an order that balances the four
   CI lanes: `--focused-lane I/N` takes every Nth registration, and the old
   thematic order put goal-drive-recovery (318s) and graph (213s) in the same

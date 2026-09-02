@@ -707,6 +707,9 @@ class JournalTestCase(unittest.TestCase):
         self.store.materialize()
         prior_index = self.store.index_path.read_bytes()
         prior_daily = (self.store.daily_dir / "2026-07-31.md").read_bytes()
+        # An idle tick rewrites nothing, so give the index a real change on
+        # another day; the 07-31 view stays untouched either way.
+        self.store.record_event(base_event("other-day", "2026-07-30T02:00:00Z"))
         real_replace = os.replace
 
         def fail_index_replace(source, target):
@@ -1073,6 +1076,36 @@ class JournalTestCase(unittest.TestCase):
             {"eightmm/oh-my-setting"},
             {row[1] for row in identities},
         )
+
+
+class IdleMaterializeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-idle."))
+        self.store = wj.JournalStore(
+            self.tmp / "demo", timezone_name="Asia/Seoul", clock=lambda: NOW,
+            project_id="proj_test", project_name="demo",
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_materialize_with_nothing_dirty_rewrites_no_view(self):
+        """Every prompt, Stop, and session start ticks the journal; a tick with
+        no new event must not fsync-rewrite the summary index or any view."""
+        self.store.record_event(base_event("first"))
+        self.store.materialize()
+        index = self.store.index_path
+        daily = self.store.daily_dir / "2026-07-31.md"
+        before = (index.stat().st_ino, index.stat().st_mtime_ns,
+                  daily.stat().st_ino, daily.stat().st_mtime_ns)
+        self.assertEqual(self.store.materialize(), self.store.materialize())
+        after = (index.stat().st_ino, index.stat().st_mtime_ns,
+                 daily.stat().st_ino, daily.stat().st_mtime_ns)
+        self.assertEqual(before, after)
+        # A new event still re-renders its period and the index.
+        self.store.record_event(base_event("second"))
+        self.store.materialize()
+        self.assertNotEqual(before[:2], (index.stat().st_ino, index.stat().st_mtime_ns))
 
 
 class NotionFailureBackoffTest(unittest.TestCase):
