@@ -1179,8 +1179,12 @@ class NotionFailureBackoffTest(unittest.TestCase):
         self.assertEqual(wj.parse_rfc3339(self.row()["next_retry_at"]),
                          NOW + dt.timedelta(seconds=60))
         # Same tick again: the backed-off daily is skipped (the one-row tick
-        # goes to the weekly instead, so a stuck page starves nothing).
-        self.sync()
+        # goes to the weekly instead, so a stuck page starves nothing), and
+        # the report says a row is waiting rather than reading as idle.
+        third = self.sync()
+        self.assertEqual(1, third["waiting"])
+        self.assertEqual(wj.parse_rfc3339(third["next_retry_at"]),
+                         NOW + dt.timedelta(seconds=60))
         self.assertEqual(2, self.row()["attempts"])
         self.assertEqual(wj.parse_rfc3339(self.row()["next_retry_at"]),
                          NOW + dt.timedelta(seconds=60))

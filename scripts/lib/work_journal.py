@@ -2913,7 +2913,8 @@ class JournalStore:
             raise JournalError("today and recent days are mutually exclusive")
         report: Dict[str, Any] = {
             "configured": False, "attempted": 0, "synced": 0,
-            "failed": 0, "deferred": 0, "remaining": 0, "error": "",
+            "failed": 0, "deferred": 0, "remaining": 0, "waiting": 0,
+            "next_retry_at": "", "error": "",
         }
         # Checked before auth so an excluded repo never spends a credential
         # lookup, and the exclusion is testable without one.
@@ -3038,8 +3039,14 @@ class JournalStore:
                     and previous.get("pending_content_hash") != row["content_hash"]
                 )
                 try:
-                    if (not content_changed
-                            and parse_rfc3339(str(previous["next_retry_at"])) > sync_now):
+                    retry_at = parse_rfc3339(str(previous["next_retry_at"]))
+                    if not content_changed and retry_at > sync_now:
+                        # Counted, so a repair sync after a refusal says a
+                        # row is waiting instead of reading as idle.
+                        report["waiting"] += 1
+                        stamp = _utc_rfc3339(retry_at)
+                        if not report["next_retry_at"] or stamp < report["next_retry_at"]:
+                            report["next_retry_at"] = stamp
                         continue
                 except SchemaError:
                     pass
@@ -4003,6 +4010,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if report.get("remaining"):
                 print("journal sync: %d beyond this tick's cap; next: oms journal sync"
                       % report["remaining"])
+            if report.get("waiting"):
+                print("journal sync: %d waiting for a retry window (earliest %s); "
+                      "next: oms journal sync after that, or new content for the period"
+                      % (report["waiting"], report.get("next_retry_at") or "unknown"))
         return 1 if report.get("failed") else 0
     if args.command == "distill":
         lessons, dropped, skipped, deduped = store.distill(dry_run=args.dry_run)
