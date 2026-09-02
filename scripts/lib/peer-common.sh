@@ -2734,12 +2734,12 @@ ma_run_routed_provider() {
         start_args+=(--max-tokens "$OMS_ATTEMPT_MAX_TOKENS")
       [ -z "${OMS_ATTEMPT_MAX_COST_MICROUSD:-}" ] ||
         start_args+=(--max-cost-microusd "$OMS_ATTEMPT_MAX_COST_MICROUSD")
+      # One process appends the creation and the routed starting/working
+      # rows; the rows, keys, and actor are what three commands produced.
+      start_args+=(--then starting:routed-starting --then working:routed-working
+        --then-actor provider-router)
       OMS_ATTEMPT_ID="$("$events" "${start_args[@]}")" || return 2
       OMS_ATTEMPT_OWNED=1
-      "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
-        --state starting --actor provider-router --idempotency-key routed-starting >/dev/null || return 2
-      "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
-        --state working --actor provider-router --idempotency-key routed-working >/dev/null || return 2
     fi
     export OMS_ATTEMPT_ID
   fi

@@ -999,6 +999,27 @@ def event_start(args: argparse.Namespace) -> int:
         budget=budget,
         idempotency_key=args.idempotency_key,
     )
+    # The routine lifecycle opening is create, starting, working: three
+    # interpreter starts per delegation when issued as three commands. Each
+    # --then appends exactly the row `transition` would, with the same
+    # validation, actor, and idempotency key, so a replay after a crash
+    # meets the same idempotent rows.
+    for spec in args.then:
+        state, _sep, key = spec.partition(":")
+        if state not in ALL_STATES:
+            raise OpsError("invalid lifecycle state: %s" % state)
+        event = new_event(
+            attempt,
+            0,
+            "attempt.state_changed",
+            from_state=None,
+            to_state=state,
+            reason_code="",
+            actor={"kind": safe_id(args.then_actor_kind, "actor kind"),
+                   "name": safe_id(args.then_actor, "actor")},
+            idempotency_key=safe_id(key, "idempotency_key", optional=True),
+        )
+        append_lifecycle(repo, event)
     print(attempt)
     return 0
 
@@ -1858,6 +1879,12 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     start.add_argument("--max-tokens", type=int)
     start.add_argument("--max-cost-microusd", type=int)
     start.add_argument("--idempotency-key", default="")
+    start.add_argument(
+        "--then", action="append", default=[], metavar="STATE[:KEY]",
+        help="append this state transition right after creation, in the same "
+             "process; KEY is its idempotency key (repeatable, in order)")
+    start.add_argument("--then-actor", default="agent-events")
+    start.add_argument("--then-actor-kind", default="owner")
     start.set_defaults(func=event_start)
 
     transition = subparsers.add_parser("transition", help="append a validated state transition")

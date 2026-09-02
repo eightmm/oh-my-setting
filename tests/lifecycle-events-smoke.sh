@@ -757,4 +757,34 @@ if $EVENTS --repo "$compact_repo" show --attempt "$dead" >/dev/null 2>&1; then
   fail "the terminal attempt must be gone after compaction"
 fi
 
+# start --then appends the routed opening rows in the creating process: the
+# projection reads exactly what start + two transitions produced, and a replay
+# with the same keys is idempotent rather than a second opening.
+batched="$($EVENTS --repo "$REPO" start --provider codex --tool agent-call \
+  --idempotency-key batched-open --then starting:routed-starting \
+  --then working:routed-working --then-actor provider-router)" ||
+  fail "batched start failed"
+$EVENTS --repo "$REPO" show --attempt "$batched" --json > "$TMP/batched.json"
+python3 - "$TMP/batched.json" <<'PY' || fail "batched start projection is wrong"
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["state"] == "working", row
+assert row["sequence"] == 3, row
+PY
+replay="$($EVENTS --repo "$REPO" start --provider codex --tool agent-call \
+  --idempotency-key batched-open --then starting:routed-starting \
+  --then working:routed-working --then-actor provider-router)" ||
+  fail "batched start replay failed"
+[ "$replay" = "$batched" ] || fail "batched start replay minted a second attempt"
+$EVENTS --repo "$REPO" show --attempt "$batched" --json > "$TMP/batched2.json"
+python3 - "$TMP/batched2.json" <<'PY' || fail "batched start replay appended rows again"
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["state"] == "working" and row["sequence"] == 3, row
+PY
+if $EVENTS --repo "$REPO" start --provider codex --tool agent-call \
+    --then nonsense:key >/dev/null 2>&1; then
+  fail "start --then accepted an invalid lifecycle state"
+fi
+
 echo "lifecycle-events-smoke: ok"

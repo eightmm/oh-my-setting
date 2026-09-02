@@ -76,6 +76,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- `agent-events start --then STATE[:KEY]` (repeatable, with `--then-actor`
+  and `--then-actor-kind`) appends the routed opening transitions in the
+  creating process, with the same validation, actor, and idempotency keys
+  `transition` would record, so a replay meets the same rows. The provider
+  router opens an attempt with one command instead of three (create,
+  starting, working): two interpreter starts fewer per delegation.
 - The artifact-index path normalizers ask `uname` once per process instead
   of once per path: the kernel name is cached in the parent shell before the
   command-substitution calls that inherit it (an artifact-index append ran
