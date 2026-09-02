@@ -42,6 +42,18 @@ AMBIENT_FILES = {"ci.jsonl", ".gitignore"}
 AMBIENT_PATHS = {"plan/autopilot-shadow.jsonl", "graph/shadow.jsonl"}
 
 
+def _holds_only_ambient(rel: str, listed: set[str]) -> bool:
+    """A directory that exists only to hold ambient entries is itself ambient.
+
+    The session-start hook creates `graph/` for `graph/shadow.jsonl` in a
+    repository that never ran the execution graph; that directory must compare
+    equal to its absence, while `graph/runs/` (real run state) still lists."""
+    prefix = rel + "/"
+    if not any(path.startswith(prefix) for path in AMBIENT_PATHS):
+        return False
+    return not any(other.startswith(prefix) for other in listed)
+
+
 def inventory(root: str) -> list[tuple]:
     entries: list[tuple] = []
     for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
@@ -87,7 +99,8 @@ def inventory(root: str) -> list[tuple]:
                     entries.append((rel, "other", mode, ""))
             except OSError as exc:
                 entries.append((rel, "error", 0, exc.__class__.__name__))
-    return entries
+    listed = {entry[0] for entry in entries}
+    return [entry for entry in entries if not (entry[1] == "dir" and _holds_only_ambient(entry[0], listed))]
 
 
 def main(argv: list[str]) -> int:

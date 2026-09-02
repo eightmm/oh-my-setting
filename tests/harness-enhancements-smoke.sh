@@ -570,6 +570,8 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
   journal) mkdir -p "$root/.oms/work-journal"; printf 'ambient\n' >> "$root/.oms/work-journal/index.json" ;;
   ci) printf 'ambient\n' >> "$root/.oms/ci.jsonl"; printf '*\n' > "$root/.oms/.gitignore" ;;
   nested-ci) mkdir -p "$root/.oms/plan"; printf 'leak\n' >> "$root/.oms/plan/ci.jsonl" ;;
+  graph-shadow) mkdir -p "$root/.oms/graph"; printf 'ambient\n' >> "$root/.oms/graph/shadow.jsonl" ;;
+  graph-run) mkdir -p "$root/.oms/graph/runs/r1"; printf 'leak\n' >> "$root/.oms/graph/runs/r1/events.jsonl" ;;
 esac
 EOF
   done
@@ -586,7 +588,7 @@ EOF
   git -C "$gate" commit -qm head
   head="$(git -C "$gate" rev-parse HEAD)"
 
-  for mutation in content symlink directory mode lint failed-content nested-ci; do
+  for mutation in content symlink directory mode lint failed-content nested-ci graph-run; do
     rm -rf "$gate/.oms"
     mkdir -p "$gate/.oms"
     printf 'before\n' > "$gate/.oms/state"
@@ -603,7 +605,7 @@ EOF
   # test: two trees it writes every turn, plus the CI row it records whenever a
   # push lands. Their ambient writes must not make a clean gate flaky, while
   # the same file name one level down stays a leak (see nested-ci above).
-  for mutation in hooks journal ci; do
+  for mutation in hooks journal ci graph-shadow; do
     rm -rf "$gate/.oms"
     mkdir -p "$gate/.oms"
     printf 'before\n' > "$gate/.oms/state"

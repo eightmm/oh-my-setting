@@ -18,7 +18,7 @@ the work reality still owes, and the point of comparison.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping
 
 from oms_runtime.common import append_jsonl, bounded_line, install_root, run_json, utc_now
 
@@ -198,24 +198,3 @@ def shadow(repo: Path, *, spec_name: str = "goal-drive") -> Dict[str, Any]:
     }
     append_jsonl(repo / ".oms" / "graph" / "shadow.jsonl", row)
     return row
-
-
-def latest_row(repo: Path) -> Optional[Dict[str, Any]]:
-    """The newest shadow row, for surfaces that must not evaluate themselves."""
-    path = Path(repo) / ".oms" / "graph" / "shadow.jsonl"
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    import json
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, Mapping) and row.get("kind") == "graph-route-shadow":
-            return dict(row)
-    return None

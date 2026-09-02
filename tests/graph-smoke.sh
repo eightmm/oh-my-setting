@@ -499,17 +499,31 @@ if printf '%s\n' "$hook_out" | grep -Fq -- '- graph route:'; then
   fail "OMS_GRAPH_SHADOW=0 must suppress the shadow line: $hook_out"
 fi
 python3 - "$ROOT/scripts/lib/oms-state-inventory.py" "$exec_repo/.oms" <<'PY'
+import json
 import subprocess
 import sys
 listing = subprocess.run([sys.executable, sys.argv[1], sys.argv[2]], capture_output=True, text=True, check=True).stdout
 assert "graph/shadow.jsonl" not in listing, listing
+# The hook created `.oms/graph/` for that one file: the directory itself must
+# compare equal to its absence, or a session opening mid-gate fails the gate.
+assert not any(json.loads(line)[0].split("/")[0] == "graph" for line in listing.splitlines() if line.strip()), listing
 PY
 
 # Co-change coupling reads Git history, never the graph store: a young
 # repository yields no pair but a complete, parsable report, and a harness
 # child may read it like any other reader.
-run_graph_exec "$work/coupling.json" project coupling --json --min-shared 1 --min-degree 0 --limit 5
-[ "$exec_rc" -eq 0 ] || fail "coupling exited $exec_rc: $(cat "$work/coupling.json")"
+# A reader's auto-refresh summary goes to stderr, so the JSON is read from
+# stdout alone (run_exec merges the two).
+coupling_rc=0
+(
+  unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
+    OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+    OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
+    OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
+  OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 \
+    "$OMS" graph --repo "$exec_repo" project coupling --json --min-shared 1 --min-degree 0 --limit 5
+) > "$work/coupling.json" 2> "$work/coupling.err" || coupling_rc=$?
+[ "$coupling_rc" -eq 0 ] || fail "coupling exited $coupling_rc: $(cat "$work/coupling.err")"
 python3 - "$work/coupling.json" <<'PY'
 import json
 import sys

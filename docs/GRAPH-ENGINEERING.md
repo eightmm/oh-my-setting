@@ -826,7 +826,9 @@ like `hooks/` and `work-journal/`. When the repository has a plan
 (`.oms/plan/tasks.json`) the hook also runs `exec shadow` (bounded, output
 discarded on any failure, `OMS_GRAPH_SHADOW=0` opts out) and reports
 `- graph route: <frontier> (agrees|disagrees with runtime next <action>)`;
-the one row it appends to `.oms/graph/shadow.jsonl` is ambient by exact path.
+the one row it appends to `.oms/graph/shadow.jsonl` is ambient by exact path,
+and a `.oms/graph/` directory holding nothing else compares equal to its
+absence (a `runs/` entry inside it is state and still lists).
 
 ## Shadow mode
 
@@ -863,8 +865,7 @@ same next effectful step). Mapping: `execute_ready_task`→`implement`,
 A blocker the control plane sees and the graph's facts do not (the failure
 ledger) is a recorded disagreement, which is the point: disagreements are
 evidence for the next round, never an action. The `SessionStart` hook is the
-trigger (see CLI); `shadow.latest_row` reads the newest row for surfaces that
-must not evaluate on their own.
+trigger (see CLI).
 
 ## MCP
 
