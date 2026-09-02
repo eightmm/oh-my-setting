@@ -661,72 +661,80 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
-  stage autonomy-hook bash tests/autonomy-hook-smoke.sh
-  stage autonomy-verification bash tests/autonomy-verification-smoke.sh
-  stage autonomy-failure bash tests/autonomy-failure-smoke.sh
+  # Registration order decides the lanes. --focused-lane I/N takes every Nth
+  # stage from here, so the order below is not thematic. It interleaves a
+  # longest-processing-time assignment of the measured stage costs (CI run of
+  # 2026-09-02: goal-drive-recovery 318s, graph 213s, autonomy-plan-run 160s,
+  # autopilot 158s, draft-pr 116s, the rest under 70s) so that four lanes
+  # carry about 410s each instead of 677/408/368/184. Re-derive the order
+  # when a heavy suite is added or one changes by minutes: sort by cost,
+  # assign each to the lightest lane, then list lane 1, 2, 3, 4, 1, 2, ...
+  stage goal-drive-recovery bash tests/goal-drive-recovery-smoke.sh
+  stage graph bash tests/graph-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
   stage autopilot bash tests/autopilot-smoke.sh
-  stage draft-pr bash tests/draft-pr-smoke.sh
-  stage goal-drive-recovery bash tests/goal-drive-recovery-smoke.sh
+  stage durable-writers bash tests/durable-writers-contract-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
-  stage provider-registry bash tests/provider-registry-smoke.sh
-  stage execution-profile bash tests/execution-profile-smoke.sh
-  stage herdr-adapter bash tests/herdr-adapter-smoke.sh
-  stage codex-hud-config bash tests/codex-hud-config-smoke.sh
-  stage models-surface bash tests/models-smoke.sh
-  stage model-doctor bash tests/model-doctor-smoke.sh
-  stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
-  stage update-v04 bash tests/update-v04-smoke.sh
-  stage state-surfaces bash tests/state-surfaces-smoke.sh
-  stage operator-tools bash tests/operator-tools-smoke.sh
-  stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
-  stage interoperability bash tests/interoperability-smoke.sh
-  stage runtime-core bash tests/runtime-core-smoke.sh
-  stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
-  stage graph bash tests/graph-smoke.sh
-  stage install-profile bash tests/install-profile-smoke.sh
-  stage functional-evolution bash tests/functional-evolution-smoke.sh
-  stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
-  stage lifecycle-events bash tests/lifecycle-events-smoke.sh
-  stage supervisor bash tests/supervisor-smoke.sh
-  stage lifecycle-provider-integration bash tests/lifecycle-provider-integration-smoke.sh
-  stage install-lifecycle-lock bash tests/install-lifecycle-lock-smoke.sh
+  stage patch-land-approval bash tests/patch-land-approval-smoke.sh
+  stage draft-pr bash tests/draft-pr-smoke.sh
+  stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
+  stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   # The real install/update/uninstall lifecycle in a sandboxed HOME. It ran
   # CI-only until a rename shipped green locally and reddened all four
   # install-e2e legs on a stale catalog assertion: the one suite the local
   # gate could not see was the one that broke. 30s buys that back.
   stage install-lifecycle bash tests/install-lifecycle-smoke.sh
-  stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
-  stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
-  stage tool-lock bash tests/tool-lock-smoke.sh
-  stage provider-permissions-mcp-boundary bash tests/provider-permissions-mcp-boundary-smoke.sh
-  stage atomic-state bash tests/atomic-state-smoke.sh
-  stage advisor-routing bash tests/advisor-routing-smoke.sh
-  stage advisor-session bash tests/advisor-session-smoke.sh
-  stage debate-delta bash tests/debate-delta-smoke.sh
-  stage failure-attention bash tests/failure-attention-smoke.sh
-  stage harness-enhancements bash tests/harness-enhancements-smoke.sh
-  stage tsp-queue bash tests/tsp-queue-smoke.sh
+  stage provider-registry bash tests/provider-registry-smoke.sh
+  stage install-lifecycle-lock bash tests/install-lifecycle-lock-smoke.sh
+  stage supervisor bash tests/supervisor-smoke.sh
+  stage runtime-core bash tests/runtime-core-smoke.sh
+  stage update-v04 bash tests/update-v04-smoke.sh
+  stage lifecycle-provider-integration bash tests/lifecycle-provider-integration-smoke.sh
+  stage lifecycle-events bash tests/lifecycle-events-smoke.sh
   stage work-journal bash tests/work-journal-smoke.sh
-  stage durable-writers bash tests/durable-writers-contract-smoke.sh
-  stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh
-  stage context-core bash tests/context-core-smoke.sh
-  stage prompt-budget bash tests/prompt-budget-smoke.sh
-  stage source-distribution bash tests/source-distribution-smoke.sh
-  stage platform-portability bash tests/platform-portability-smoke.sh
-  stage bsd-portability bash tests/bsd-portability-smoke.sh
-  stage turn-guard-fuse bash tests/turn-guard-fuse-smoke.sh
-  stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
-  stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
-  stage patch-admit-structural bash tests/patch-admit-structural-smoke.sh
-  stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
-  stage patch-land-approval bash tests/patch-land-approval-smoke.sh
+  stage state-surfaces bash tests/state-surfaces-smoke.sh
+  stage operator-tools bash tests/operator-tools-smoke.sh
   stage ci-status bash tests/ci-status-smoke.sh
-  stage read-time-expiry bash tests/read-time-expiry-smoke.sh
   stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
-  stage seat-reliability bash tests/seat-reliability-smoke.sh
+  stage failure-attention bash tests/failure-attention-smoke.sh
+  stage autonomy-hook bash tests/autonomy-hook-smoke.sh
+  stage advisor-routing bash tests/advisor-routing-smoke.sh
+  stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
+  stage read-time-expiry bash tests/read-time-expiry-smoke.sh
+  stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
+  stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
+  stage functional-evolution bash tests/functional-evolution-smoke.sh
+  stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
+  stage turn-guard-fuse bash tests/turn-guard-fuse-smoke.sh
+  stage atomic-state bash tests/atomic-state-smoke.sh
   stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
+  stage seat-reliability bash tests/seat-reliability-smoke.sh
+  stage provider-permissions-mcp-boundary bash tests/provider-permissions-mcp-boundary-smoke.sh
+  stage advisor-session bash tests/advisor-session-smoke.sh
+  stage autonomy-verification bash tests/autonomy-verification-smoke.sh
+  stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh
+  stage patch-admit-structural bash tests/patch-admit-structural-smoke.sh
+  stage autonomy-failure bash tests/autonomy-failure-smoke.sh
+  stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
+  stage model-doctor bash tests/model-doctor-smoke.sh
+  stage tsp-queue bash tests/tsp-queue-smoke.sh
+  stage interoperability bash tests/interoperability-smoke.sh
+  stage herdr-adapter bash tests/herdr-adapter-smoke.sh
+  stage tool-lock bash tests/tool-lock-smoke.sh
   stage artifact-supersession bash tests/artifact-supersession-smoke.sh
+  stage debate-delta bash tests/debate-delta-smoke.sh
+  stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
+  stage bsd-portability bash tests/bsd-portability-smoke.sh
+  stage execution-profile bash tests/execution-profile-smoke.sh
+  stage prompt-budget bash tests/prompt-budget-smoke.sh
+  stage install-profile bash tests/install-profile-smoke.sh
+  stage source-distribution bash tests/source-distribution-smoke.sh
+  stage models-surface bash tests/models-smoke.sh
+  stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
+  stage codex-hud-config bash tests/codex-hud-config-smoke.sh
+  stage platform-portability bash tests/platform-portability-smoke.sh
+  stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
+  stage context-core bash tests/context-core-smoke.sh
 fi
 
 if [ "$LIST_STAGES" = 1 ]; then

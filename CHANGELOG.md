@@ -76,6 +76,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The focused gate stages are registered in an order that balances the four
+  CI lanes: `--focused-lane I/N` takes every Nth registration, and the old
+  thematic order put goal-drive-recovery (318s) and graph (213s) in the same
+  lane, so one lane ran 677s while another ran 184s. The new order interleaves
+  a longest-processing-time assignment of the measured costs; the projected
+  lanes are 412/410/406/409s, and the comment above the block says how to
+  re-derive it when a heavy suite changes.
 - `oms doctor` names the remedy under a tool version drift warning once per
   report (`oms install-profile --reapply --upgrade` restores the locked
   release; a newer release is adopted by updating `tools.lock.json` with its
