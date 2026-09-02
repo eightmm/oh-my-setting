@@ -62,19 +62,21 @@ def plan_facts(repo: Path) -> Dict[str, Any]:
         raise GraphError("canonical plan status has invalid contract")
     result["plan.contract.satisfied"] = contract["satisfied"]
 
-    task_ids: List[str] = []
-    plan_path = repo / ".oms" / "plan" / "tasks.json"
-    physical = read_json(plan_path, default={})
-    if isinstance(physical, Mapping):
-        tasks = physical.get("tasks", {})
-        if isinstance(tasks, Mapping):
-            task_ids = [str(item) for item in tasks]
-        elif isinstance(tasks, list):
-            task_ids = [str(item.get("id")) for item in tasks if isinstance(item, Mapping) and item.get("id")]
-    for task_id in sorted(set(task_ids)):
-        view = run_json(["bash", str(script), "--repo", str(repo), "show", "--id", task_id], cwd=repo)
-        if not isinstance(view, Mapping):
-            raise GraphError("canonical plan task projection is unavailable: %s" % task_id)
+    # One `list --json` is the same read view `show --id` computes, for every
+    # task in one agent-plan process; per-task `show` made a route or shadow
+    # cost one interpreter start per plan task.
+    if not status.get("present"):
+        return dict(sorted(result.items()))
+    listing = run_json(["bash", str(script), "--repo", str(repo), "list", "--json"], cwd=repo)
+    if not isinstance(listing, Mapping) or not isinstance(listing.get("tasks"), list):
+        raise GraphError("canonical plan task projection is unavailable")
+    views: Dict[str, Mapping] = {}
+    for view in listing["tasks"]:
+        if not isinstance(view, Mapping) or not isinstance(view.get("id"), str) or not view["id"]:
+            raise GraphError("canonical plan task projection contains an invalid task")
+        views[view["id"]] = view
+    for task_id in sorted(views):
+        view = views[task_id]
         prefix = "plan.task.%s." % task_id
         result[prefix + "state"] = str(view.get("state", ""))
         result[prefix + "patch_present"] = bool(view.get("patch"))

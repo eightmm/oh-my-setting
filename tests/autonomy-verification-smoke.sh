@@ -243,4 +243,23 @@ grep -Fq '"kind":"manifest-refreeze"' "$rf_repo/.oms/plan/manifest-refreeze.json
 grep -Fq '"path":"f_touched.txt"' "$rf_repo/.oms/plan/manifest-refreeze.jsonl" ||
   fail "the refreeze row must name the refrozen entry"
 
+# list --json is the per-task `show` view for every task in one process; a
+# consumer must be able to replace N show calls with it without a field drift.
+python3 - "$plan" "$rf_repo" <<'PY' || fail "list --json drifted from the per-task show view"
+import json, subprocess, sys
+plan, repo = sys.argv[1], sys.argv[2]
+listing = json.loads(subprocess.check_output(["bash", plan, "--repo", repo, "list", "--json"]))
+assert listing["schema"] == 1 and isinstance(listing["plan_id"], str), listing
+views = {view["id"]: view for view in listing["tasks"]}
+stored = json.load(open(repo + "/.oms/plan/tasks.json"))["tasks"]
+assert sorted(views) == sorted(stored), (sorted(views), sorted(stored))
+for tid, view in views.items():
+    shown = json.loads(subprocess.check_output(["bash", plan, "--repo", repo, "show", "--id", tid]))
+    shown.pop("project_contract", None)
+    for volatile in ("claim_age_s",):
+        shown.pop(volatile, None); view.pop(volatile, None)
+    assert shown == view, (tid, shown, view)
+    assert "claim_expired" in view, view
+PY
+
 echo "autonomy verification smoke: ok"

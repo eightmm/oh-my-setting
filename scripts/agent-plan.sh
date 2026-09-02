@@ -177,7 +177,8 @@ Commands:
   show   --id ID                     Print one task as JSON.
   evidence-snapshot --id ID          Print one task plus its immutable plan_id
                                      for a plan-scoped evidence producer.
-  list   [--state STATE]             List tasks (optionally by state).
+  list   [--state STATE] [--json]    List tasks (optionally by state); --json
+                                     emits every task's `show` view at once.
   ready                              Print ids actionable now (deps done).
   status [--json]                    Typed plan snapshot or human summary.
   accept                             Run the stored acceptance command from the
@@ -1707,6 +1708,23 @@ if act == "ready":
 if act == "list":
     sf = env("OMS_STATE_FILTER")
     if sf and sf not in STATES: die("unknown --state: %s" % sf)
+    if env("OMS_AS_JSON") == "1":
+        # The same read view `show` computes per task, for every task in one
+        # process: a consumer that needs every task's state (the execution
+        # graph's plan facts) was starting one agent-plan per task.
+        views = []
+        for t in ordered:
+            if sf and t["state"] != sf: continue
+            view = dict(t)
+            view["claim_expired"] = claim_expired(t)
+            if t.get("state") in ("claimed", "running", "review"):
+                age = claim_age(t)
+                if age is not None:
+                    view["claim_age_s"] = age
+            views.append(view)
+        print(json.dumps({"schema": 1, "plan_id": d.get("plan_id", ""),
+                          "tasks": views}, ensure_ascii=False, indent=2))
+        sys.exit(0)
     for t in ordered:
         if sf and t["state"] != sf: continue
         dep = (" depends=%s" % ",".join(t["depends"])) if t["depends"] else ""

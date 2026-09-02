@@ -68,6 +68,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- `agent-plan list --json` emits every task's `show` view in one process
+  (`{"schema": 1, "plan_id", "tasks": [...]}`), and the execution graph's
+  plan facts read it instead of running one `show --id` per task, so a route,
+  shadow, or status no longer costs one interpreter start per plan task (the
+  `SessionStart` shadow included).
 - The gate's `shellcheck` stage runs parallel batches, largest files first,
   instead of one serial invocation over the whole tree: 282s in CI and 160s
   on a workstation become about a third of that. Workers are bounded by
