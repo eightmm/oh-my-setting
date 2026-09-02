@@ -76,6 +76,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- `oms doctor` names the remedy under a tool version drift warning once per
+  report (`oms install-profile --reapply --upgrade` restores the locked
+  release; a newer release is adopted by updating `tools.lock.json` with its
+  digests) instead of repeating a warning nobody can act on.
 - The Git execution-boundary guards that front every harness git call no
   longer start python3 twice per call: the command-scope `GIT_CONFIG_*`
   inspection and the hidden index-flag scan (skip-worktree, assume-unchanged)

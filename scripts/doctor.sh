@@ -255,6 +255,13 @@ report_tool_drift() {  # LABEL DETAIL
   else
     echo "warn: tool version drift: $1 ($2)"
   fi
+  # A drift warning repeated on every doctor and update with nothing to run is
+  # noise an operator learns to skip. Name the verb that restores the locked
+  # release and the file that adopts a newer one, once per report.
+  if [ "${TOOL_DRIFT_REMEDY_SHOWN:-0}" != 1 ]; then
+    TOOL_DRIFT_REMEDY_SHOWN=1
+    echo "  next: oms install-profile --reapply --upgrade restores the release in tools.lock.json; adopt a newer one by updating that lock with its digests"
+  fi
 }
 
 check_locked_command_version() {  # LABEL COMMAND LOCK_FIELD
