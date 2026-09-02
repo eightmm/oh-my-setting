@@ -1597,7 +1597,14 @@ def wait_for(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + args.timeout
     while True:
         row = public_job(repo, load_job(repo, attempt_id))
-        if row["state"] in ae.TERMINAL_STATES or row["state"] == "review":
+        # Review settles a wait only for a job whose submit contract ends
+        # there. A job submitted with --completion-state done passes through
+        # review on its way to done, and returning at review handed callers a
+        # projection that had not landed yet.
+        settled = row["state"] in ae.TERMINAL_STATES or (
+            row["state"] == "review" and row.get("completion_state") != "done"
+        )
+        if settled:
             if args.json:
                 ae.print_json(row)
             else:

@@ -176,6 +176,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- `agent-supervisor wait` honors the submit contract: a job submitted with
+  `--completion-state done` passes through `review` on its way to `done`,
+  and `wait` used to return at `review`, handing callers a projection that
+  had not landed yet (a CI run asserted `done` and read `review`). Review now
+  settles a wait only for a job whose completion state is review.
 - `oms journal sync` counts the summaries a retry window is holding back
   (`waiting`, with the earliest `next_retry_at`) and says so, instead of
   reporting "0 summaries updated" as if nothing were pending.

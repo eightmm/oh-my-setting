@@ -1121,4 +1121,41 @@ if "$SUP" --repo "$REPO" status --attempt "$top_gc_attempt" >/dev/null 2>&1; the
   fail "top-level GC did not prune terminal supervisor runtime"
 fi
 
+# `wait` honors the submit contract. A job submitted with --completion-state
+# done passes through review on its way to done; returning at review let a
+# caller read `done` from a projection that had not landed yet (a CI run
+# asserted state == done and saw review). Review is final only for a job
+# whose completion state is review.
+WAIT_REPO="$TMP/wait-contract"
+mkdir -p "$WAIT_REPO"
+git -C "$WAIT_REPO" init -q
+wait_transition() {  # ATTEMPT STATE
+  "$EVENTS" --repo "$WAIT_REPO" transition --attempt "$1" --state "$2" \
+    --actor supervisor-smoke --idempotency-key "wait-contract-$1-$2" >/dev/null
+}
+done_attempt="$("$SUP" --repo "$WAIT_REPO" submit --provider local --profile trusted-local \
+  --completion-state 'done' --max-wall-seconds 10 -- true)"
+review_attempt="$("$SUP" --repo "$WAIT_REPO" submit --provider local --profile trusted-local \
+  --completion-state review --max-wall-seconds 10 -- true)"
+for attempt in "$done_attempt" "$review_attempt"; do
+  wait_transition "$attempt" starting
+  wait_transition "$attempt" working
+  wait_transition "$attempt" review
+done
+rc=0
+"$SUP" --repo "$WAIT_REPO" wait --attempt "$done_attempt" --timeout 1 --interval 0.2 \
+  > "$TMP/wait-done.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "wait returned at review for a job whose completion state is done"
+grep -Fq "remained review" "$TMP/wait-done.out" ||
+  fail "wait did not name the state it timed out in: $(cat "$TMP/wait-done.out")"
+"$SUP" --repo "$WAIT_REPO" wait --attempt "$review_attempt" --timeout 1 --interval 0.2 \
+  > "$TMP/wait-review.out" 2>&1 || fail "wait must settle at review for a review job"
+grep -Fq "$review_attempt review" "$TMP/wait-review.out" ||
+  fail "wait did not report the review settlement: $(cat "$TMP/wait-review.out")"
+wait_transition "$done_attempt" 'done'
+"$SUP" --repo "$WAIT_REPO" wait --attempt "$done_attempt" --timeout 1 --interval 0.2 \
+  > "$TMP/wait-done2.out" 2>&1 || fail "wait must settle once the done job reaches done"
+grep -Fq "$done_attempt "'done' "$TMP/wait-done2.out" ||
+  fail "wait did not report done: $(cat "$TMP/wait-done2.out")"
+
 echo "supervisor-smoke: ok"
