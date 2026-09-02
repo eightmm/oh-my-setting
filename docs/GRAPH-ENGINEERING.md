@@ -727,6 +727,20 @@ Blast radius (`blast.py`): `changed_paths(repo, base)` = `git diff
 relations)` walks reverse `imports/calls/references/tests/uses/depends_on`
 edges and returns seeds, dependents with distance, affected files, and tests.
 
+Co-change coupling (`history.py`): `oms graph project coupling` reads the last
+N commits (`--commits`, default 500, `--no-merges`, commits touching more than
+`--max-changeset` 50 files skipped as bulk moves and counted) and scores every
+pair of tracked paths by Code Maat's temporal-coupling measure,
+`degree = shared_revs / average(revs_a, revs_b) × 100`, keeping pairs with at
+least `--min-shared` 5 shared commits and `--min-degree` 30. Each pair says
+whether the Project Graph holds any non-`contains` edge between the two paths:
+`structural: false` is the coupling no parser can see (config to code, fixture
+to module, shell to Python) and `hidden` counts it. History is evidence for
+orientation and review, never a dependency: nothing is written to `graph.json`,
+deleted paths are dropped, `--path` focuses on pairs touching a path, and
+`--limit` bounds the JSON with `truncated`/`omitted`. Harness children may run
+it (read-only, regenerable, like the other readers).
+
 Context pack (`context.py`): lexical query → entry nodes → neighborhood
 (depth 2) → files, tests, blast radius, hubs, bounded by `max_files`
 (default 12) and `max_nodes` (default 40); written to
@@ -751,6 +765,7 @@ oms graph project find   QUERY [--kind KIND] [--limit N]
 oms graph project neighbors NODE [--relation R] [--direction in|out|both]
 oms graph project trace  NODE [--direction in|out] [--depth N]
 oms graph project blast  [--base REF] [--path P]... [--depth N] [--limit N]   # --limit bounds every JSON list; `truncated`/`omitted` report the cut
+oms graph project coupling [--path P]... [--commits N] [--max-changeset N] [--min-shared N] [--min-degree PCT] [--limit N]
 oms graph project analyze [--hubs N] [--cycles] [--communities] [--path FROM TO]
 oms graph project context --task TEXT [--max-files N] [--bundle] [--base REF]
 oms graph exec validate  SPEC
@@ -792,7 +807,7 @@ it with the verb to run; the explicit `build` (which bounds bytes, not files)
 has no such bound, and a refresh of an existing graph is never refused.
 
 Harness children (`OMS_HARNESS_CHILD=1`) may run `project
-build|ensure|check|map|find|neighbors|trace|blast|analyze` and `exec
+build|ensure|check|map|find|neighbors|trace|blast|analyze|coupling` and `exec
 validate|render|route|status|events|test`. `build`/`ensure` are the exception
 to the runtime core's `context` precedent: the project graph is a regenerable
 cache that carries no authority, and a delegated worker in an isolated
@@ -923,6 +938,10 @@ a value may never start with `-`. Output stays under the server's
 - `tests/test_oms_graph_workspace.py`: the fingerprint's relations (clean,
   modified, staged blobs with unchanged bytes, untracked, ignored, `.oms/`,
   deleted, renamed) and its fail-closed reasons.
+- `tests/test_oms_graph_history.py`: the coupling measure, thresholds and
+  focus, structural annotation from path pairs, and a real repository where
+  config-to-code coupling is `structural: false` while an import is `true`,
+  a bulk commit is skipped and counted, and a deleted path never appears.
 - `tests/test_oms_graph_shadow.py`: reconstruction against synthetic facts
   (ready task → `implement` bound to it with `acceptance` assumed failed;
   task in review → `land`; fresh passing acceptance → `done`; stale acceptance

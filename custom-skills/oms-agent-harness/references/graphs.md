@@ -13,6 +13,7 @@ oms graph project map            # counts, hubs, module groups
 oms graph project find lease     # name/path/qualname search
 oms graph project trace symbol:scripts/plan-run.sh::main --direction in --depth 2
 oms graph project blast --base origin/main   # --limit N bounds the JSON lists
+oms graph project coupling --path scripts/plan-run.sh   # co-change pairs from Git history; structural=no = the parsers cannot see it
 oms graph project ensure         # explicit build-or-refresh; check reports only
 ```
 
@@ -86,7 +87,7 @@ with runtime next <action>)`; `OMS_GRAPH_SHADOW=0` opts out.
 
 ## Boundaries
 
-- Harness children may run `project build|ensure|check|map|find|neighbors|trace|blast|analyze`
+- Harness children may run `project build|ensure|check|map|find|neighbors|trace|blast|analyze|coupling`
   and `exec validate|render|route|status|events|test` — the project graph is a
   regenerable cache carrying no authority, and an isolated worktree has no
   other way to get one.

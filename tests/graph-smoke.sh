@@ -505,6 +505,25 @@ listing = subprocess.run([sys.executable, sys.argv[1], sys.argv[2]], capture_out
 assert "graph/shadow.jsonl" not in listing, listing
 PY
 
+# Co-change coupling reads Git history, never the graph store: a young
+# repository yields no pair but a complete, parsable report, and a harness
+# child may read it like any other reader.
+run_graph_exec "$work/coupling.json" project coupling --json --min-shared 1 --min-degree 0 --limit 5
+[ "$exec_rc" -eq 0 ] || fail "coupling exited $exec_rc: $(cat "$work/coupling.json")"
+python3 - "$work/coupling.json" <<'PY'
+import json
+import sys
+report = json.load(open(sys.argv[1]))
+assert report["schema"] == 1 and report["commits"] >= 1, report
+assert set(report) >= {"pairs", "hidden", "truncated", "omitted", "skipped_bulk", "params", "graph_revision"}, sorted(report)
+assert all(set(row) == {"a", "b", "shared_revs", "revs", "degree", "structural"} for row in report["pairs"]), report["pairs"]
+assert len(report["pairs"]) <= 5, report["pairs"]
+PY
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" project coupling --limit 1 \
+  > "$work/child-coupling.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 0 ] || fail "a child must be able to read coupling (exit $child_rc): $(cat "$work/child-coupling.out")"
+
 # A delegated child may evaluate a route but never record a comparison.
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec route coding-change \

@@ -7,6 +7,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms graph project coupling`: co-change pairs from Git history scored by
+  Code Maat's temporal-coupling measure (shared commits over average
+  revisions), bulk commits skipped and counted, deleted paths dropped, each
+  pair annotated `structural: true|false` against the Project Graph so the
+  coupling no parser extracts (config to code, fixture to module, shell to
+  Python) is the visible remainder. `--path` focuses, `--limit` bounds the
+  JSON; nothing is written to `graph.json`; harness children may run it.
 - The `SessionStart` hook triggers the execution graph's shadow: with a plan
   present it runs `oms graph exec shadow`, reports `- graph route: <frontier>
   (agrees|disagrees with runtime next <action>)`, and appends one row to

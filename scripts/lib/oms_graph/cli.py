@@ -21,6 +21,7 @@ from .errors import GraphError
 from .facts import collect_facts
 from .project import analytics
 from .project import blast as project_blast
+from .project import history as project_history
 from .project import build as project_build
 from .project import context as project_context
 from .project.query import Graph
@@ -33,7 +34,7 @@ AUTOBUILD_ENV = "OMS_GRAPH_AUTOBUILD"
 # Readers that keep the graph current themselves, so `oms graph project find`
 # works in a repository nobody has built yet. `check` reports freshness and
 # `build` is the explicit form: neither may refresh behind the caller's back.
-AUTO_REFRESH_ACTIONS = ("map", "find", "neighbors", "trace", "blast", "analyze", "context")
+AUTO_REFRESH_ACTIONS = ("map", "find", "neighbors", "trace", "blast", "analyze", "coupling", "context")
 
 
 def emit(value: Any, pretty: bool = False) -> None:
@@ -87,6 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
     blast.add_argument("--limit", type=int, default=0, metavar="N",
                        help="keep at most N dependents, files, tests per list in JSON (0 = all; the text view is never cut)")
     blast.add_argument("--json", action="store_true")
+    coupling = project_sub.add_parser("coupling", help="paths that change together in Git history; structural=no marks coupling the parsers cannot see")
+    coupling.add_argument("--path", action="append", default=[], help="keep pairs touching this path (repeatable)")
+    coupling.add_argument("--commits", type=int, default=project_history.DEFAULT_COMMITS, help="history window, newest first")
+    coupling.add_argument("--max-changeset", type=int, default=project_history.DEFAULT_MAX_CHANGESET, help="skip commits touching more files than this")
+    coupling.add_argument("--min-shared", type=int, default=project_history.DEFAULT_MIN_SHARED, help="minimum commits a pair shared")
+    coupling.add_argument("--min-degree", type=float, default=project_history.DEFAULT_MIN_DEGREE, help="minimum coupling degree, percent of average revisions")
+    coupling.add_argument("--limit", type=int, default=40)
+    coupling.add_argument("--json", action="store_true")
     analyze = project_sub.add_parser("analyze")
     analyze.add_argument("--hubs", type=int, default=10)
     analyze.add_argument("--cycles", action="store_true")
@@ -100,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--bundle", action="store_true")
     context.add_argument("--base", default="")
     context.add_argument("--json", action="store_true")
-    for reader in (show_map, find, neighbors, trace, blast, analyze, context):
+    for reader in (show_map, find, neighbors, trace, blast, analyze, coupling, context):
         reader.add_argument("--no-refresh", action="store_true", help="read the graph as it stands; never build or refresh it")
     execution = groups.add_parser("exec", help="execution graph: validate, route, run, resume, decide, status, events")
     exec_sub = execution.add_subparsers(dest="action", required=True)
@@ -331,6 +340,25 @@ def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
+def _project_coupling(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    if args.commits < 1 or args.max_changeset < 2 or args.min_shared < 1 or args.min_degree < 0 or args.limit < 0:
+        raise GraphError("coupling: --commits >= 1, --max-changeset >= 2, --min-shared >= 1, --min-degree >= 0, --limit >= 0")
+    graph, _ = _index(repo, state)
+    report = project_history.coupling_report(repo, graph, commits=args.commits, max_changeset=args.max_changeset,
+                                             min_shared=args.min_shared, min_degree=args.min_degree,
+                                             focus=args.path, limit=args.limit)
+    if args.json:
+        emit(report, args.pretty)
+        return 0
+    print("co-change coupling: %d commits read (%d bulk commits skipped), min shared %d, min degree %.0f%%, %d pair(s) shown%s, %d without a structural edge"
+          % (report["commits"], report["skipped_bulk"], args.min_shared, args.min_degree, len(report["pairs"]),
+             " of %d" % (len(report["pairs"]) + report["omitted"]) if report["truncated"] else "", report["hidden"]))
+    for row in report["pairs"]:
+        print("%5.1f%%  shared %2d  revs %d/%d  structural=%s  %s  <->  %s"
+              % (row["degree"], row["shared_revs"], row["revs"][0], row["revs"][1], "yes" if row["structural"] else "no", row["a"], row["b"]))
+    return 0
+
+
 def _project_analyze(args: argparse.Namespace, repo: Path, state: Path) -> int:
     graph, index = _index(repo, state)
     if not args.include_tests:
@@ -368,7 +396,8 @@ def _project_analyze(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 PROJECT_ACTIONS = {"build": _project_build, "ensure": _project_ensure, "check": _project_check, "map": _project_map,
                    "find": _project_find, "neighbors": _project_neighbors, "trace": _project_trace,
-                   "blast": _project_blast, "analyze": _project_analyze, "context": _project_context}
+                   "blast": _project_blast, "analyze": _project_analyze, "coupling": _project_coupling,
+                   "context": _project_context}
 
 STOP_STATUSES = ("gate", "blocked", "exhausted", "waiting", "invalid")
 
