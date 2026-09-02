@@ -46,6 +46,59 @@ def load_spec(name):
 
 
 class AnalyticsTest(unittest.TestCase):
+    def test_structural_assurance_is_provider_neutral_and_counts_unresolved_sites(self):
+        nodes = [
+            node("file:src/covered.py", kind="file", path="src/covered.py"),
+            node("symbol:src/covered.py::covered", path="src/covered.py"),
+            node("symbol:src/covered.py::duplicate", path="src/covered.py", name="duplicate"),
+            node("symbol:src/caller.py::caller", path="src/caller.py"),
+            node("symbol:src/other.py::duplicate", path="src/other.py", name="duplicate"),
+            node("symbol:src/inferred.py::inferred", path="src/inferred.py"),
+            node("test:tests/test_covered.py", kind="test", path="tests/test_covered.py"),
+            node("symbol:tests/test_covered.py::test_covered", path="tests/test_covered.py"),
+        ]
+        ambiguous_a = edge("symbol:src/caller.py::caller", "symbol:src/covered.py::duplicate")
+        ambiguous_a.update({"confidence": "AMBIGUOUS", "evidence": {
+            "path": "src/caller.py", "line": 7,
+            "candidate_count": 2,
+        }})
+        ambiguous_b = edge("symbol:src/caller.py::caller", "symbol:src/other.py::duplicate")
+        ambiguous_b.update({"confidence": "AMBIGUOUS", "evidence": {
+            "path": "src/caller.py", "line": 7,
+            "candidate_count": 2,
+        }})
+        inferred = edge("symbol:src/inferred.py::inferred", "symbol:src/covered.py::covered")
+        inferred["confidence"] = "INFERRED"
+        test_link = edge("symbol:tests/test_covered.py::test_covered", "symbol:src/covered.py::covered")
+        second_test_link = edge("symbol:tests/test_covered.py::test_covered", "symbol:src/covered.py::covered")
+        second_test_link["evidence"]["line"] = 2
+        edges = [
+            test_link,
+            second_test_link,
+            ambiguous_a,
+            ambiguous_b,
+            inferred,
+        ]
+
+        projection = analytics.structural_assurance(nodes, edges)
+        states = projection["nodes"]
+        self.assertEqual(projection["schema"], 1)
+        self.assertEqual(projection["basis"], "structural-evidence")
+        self.assertNotIn("test:tests/test_covered.py", states)
+        self.assertEqual(states["symbol:src/covered.py::covered"]["assurance"], "supported")
+        self.assertEqual(
+            states["symbol:src/covered.py::covered"]["signals"]["extracted_test_paths"],
+            ["tests/test_covered.py"],
+        )
+        self.assertEqual(states["symbol:src/caller.py::caller"]["assurance"], "attention")
+        self.assertEqual(states["symbol:src/caller.py::caller"]["signals"]["ambiguous_sites"], 1)
+        self.assertEqual(states["symbol:src/inferred.py::inferred"]["signals"]["inferred_sites"], 1)
+        evidence_degree = analytics.evidence_degrees(nodes, edges)
+        self.assertEqual(evidence_degree["symbol:src/caller.py::caller"]["out"], 1)
+        self.assertEqual(evidence_degree["symbol:tests/test_covered.py::test_covered"]["out"], 2)
+        hub = next(row for row in analytics.hubs(nodes, edges) if row["id"] == "symbol:src/caller.py::caller")
+        self.assertEqual(hub["degree"], 1)
+
     def test_degrees_count_every_node_and_ignore_unknown_endpoints(self):
         nodes = [node("a"), node("b"), node("c")]
         edges = [edge("a", "b"), edge("b", "c"), edge("a", "ghost"), edge("ghost", "c")]
@@ -245,7 +298,15 @@ class ProjectRenderTest(unittest.TestCase):
     def test_project_map_text_reports_counts_hubs_and_groups(self):
         summary = {
             "revision": "abc123",
-            "counts": {"kind": {"function": 12, "file": 30}, "language": {"python": 40, "shell": 2}},
+            "counts": {
+                "kind": {"function": 12, "file": 30},
+                "language": {"python": 40, "shell": 2},
+                "confidence": {"EXTRACTED": 35, "INFERRED": 5, "AMBIGUOUS": 2},
+            },
+            "assurance": {"schema": 1, "basis": "structural-evidence",
+                          "counts": {"supported": 20, "needs-evidence": 18, "attention": 4}},
+            "coverage": {"parsed": 42, "unparsed": 3,
+                         "unparsed_by_extension": {".ts": 2, ".go": 1}},
             "hubs": [{"id": "module:scripts/lib/x.py", "kind": "module", "degree": 9}],
             "groups": {"scripts": ["a", "b", "c", "d", "e", "f"], "tests": ["t1"]},
         }
@@ -260,6 +321,11 @@ class ProjectRenderTest(unittest.TestCase):
         )
         self.assertIn("  file      30", lines)
         self.assertIn("  python  40", text)
+        self.assertIn("edges by confidence:", text)
+        self.assertIn("structural assurance:", text)
+        self.assertIn("  supported       20", text)
+        self.assertIn("parser coverage: parsed 42, unparsed 3", text)
+        self.assertIn("unparsed extensions: .go=1, .ts=2", text)
         self.assertIn("   1. module:scripts/lib/x.py  (module)  degree 9", text)
         self.assertIn("  scripts (6): a, b, c, d, e, +1 more", text)
         self.assertIn("  tests (1): t1", text)
@@ -291,11 +357,21 @@ class ProjectRenderTest(unittest.TestCase):
         self.assertEqual(text, render.render_project_mermaid(nodes, edges, limit=3))
 
     def test_project_mermaid_labels_by_name_and_dedupes_edges(self):
-        nodes = [node("symbol:a.py::f", name="f"), node("symbol:b.py::g", name="g")]
+        nodes = [node("symbol:a.py::f", name="f"), node("symbol:b.py::g", name="g"),
+                 node("symbol:c.py::h", name="h"), node("symbol:d.py::i", name="i")]
         edges = [edge("symbol:a.py::f", "symbol:b.py::g", relation="calls")] * 2
+        inferred = edge("symbol:a.py::f", "symbol:c.py::h", relation="calls")
+        inferred["confidence"] = "INFERRED"
+        ambiguous = edge("symbol:a.py::f", "symbol:d.py::i", relation="calls")
+        ambiguous["confidence"] = "AMBIGUOUS"
+        edges.extend((inferred, ambiguous))
         text = render.render_project_mermaid(nodes, edges)
         self.assertIn('["f"]', text)
-        self.assertEqual(len([line for line in text.splitlines() if "-->" in line]), 1)
+        arrows = [line for line in text.splitlines() if "-->" in line or "-.->" in line]
+        self.assertEqual(len(arrows), 3)
+        self.assertIn('    symbol_a_py__f -->|"calls"| symbol_b_py__g', arrows)
+        self.assertIn('    symbol_a_py__f -.->|"calls (inferred)"| symbol_c_py__h', arrows)
+        self.assertIn('    symbol_a_py__f -.->|"calls (ambiguous)"| symbol_d_py__i', arrows)
 
 
 class RouteFixtureTest(unittest.TestCase):

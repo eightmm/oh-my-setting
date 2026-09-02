@@ -35,6 +35,64 @@ Principles (from the design conversation, kept verbatim in spirit):
 - The graph owns orchestration ("what is legal next?"); the harness owns
   authority and execution safety ("may this actually execute?").
 
+### External design anchors
+
+OMS adopts the useful invariants, not another graph database or agent
+framework:
+
+- [Aider repository maps](https://aider.chat/docs/repomap.html) rank graph-
+  connected definitions against the active request and fit them to a context
+  budget. OMS keeps its graph local and deterministic, but follows the same
+  progressive-disclosure rule: task entries first, then a small neighborhood,
+  then explicit expansion.
+- [RepoGraph](https://arxiv.org/abs/2410.14684) retrieves task-centered ego
+  graphs; its reported direct flattened two-hop variant performed worse than
+  the bounded alternatives. OMS therefore opens a task view at one
+  `EXTRACTED` hop and leaves two hops or the complete visual slice opt-in.
+- [Graft](https://github.com/trailhq/Graft) demonstrates query-time freshness,
+  a signatures-only file API, symbol-grouped exhaustive search, and diff blast
+  radius. OMS adopts those interfaces over its existing regenerable graph. It
+  does not copy Graft's npm/tree-sitter/LSP runtime, model enrichment,
+  host-level wiring, telemetry, or viewer server into the portable core;
+  unsupported-language coverage is explicit and external parsing remains an
+  optional adapter boundary.
+- [Sourcegraph precise code navigation](https://sourcegraph.com/docs/code-navigation/precise-code-navigation)
+  distinguishes SCIP-backed precise results from search-based fallback, while
+  [GitHub Stack Graphs](https://github.github.com/stack-graph-docs/) builds
+  per-file partial graphs and stitches paths across files. OMS likewise keeps
+  `EXTRACTED`, `INFERRED`, and `AMBIGUOUS` provenance separate and incrementally
+  rebuilds file extractions instead of relabeling search resolution as fact.
+- [Graphiti](https://github.com/getzep/graphiti) keeps source provenance,
+  incremental updates, temporal validity, and hybrid retrieval explicit. OMS
+  maps those ideas to repo-relative path/line/source-digest evidence,
+  incremental parser cache, Git history, and lexical-plus-edge retrieval. A
+  regenerable code graph does not need Graphiti's graph database or LLM
+  extraction, and durable run history remains append-only execution events.
+- [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence)
+  and [interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)
+  make thread identity, checkpoints, replay, and idempotent resume explicit.
+  OMS uses a frozen GraphSpec, `run_id`, append-only events, derived
+  projections, parent gates, and reconciliation against the canonical plan;
+  conversation memory is never the recovery source.
+- [Nx affected](https://nx.dev/docs/features/ci-features/affected) combines
+  changed files with the project graph and reverse dependents, while
+  [Bazel query](https://bazel.build/query/language) defines reverse-dependency
+  closure and test expansion precisely. OMS therefore follows the complete
+  reverse closure of source-extracted dependency evidence for test selection.
+  An explicitly bounded traversal that can see more dependents fails open to
+  the full gate.
+- [Graphite](https://graphite.com/docs/intro-to-graphite) is a stacked-PR and
+  review workflow, not a code or execution graph engine. Its small,
+  independently testable change slices already map to OMS plan tasks,
+  isolated patches, admission receipts, and serialized landing; OMS does not
+  add Graphite's remote PR authority or CLI dependency.
+- [D3 force simulation](https://d3js.org/d3-force/simulation) recommends a
+  worker for large static layouts, so the optional browser view stays capped
+  and pre-ticks only its small projection. Following
+  [W3C SVG accessibility guidance](https://www.w3.org/TR/SVG/access.html), the
+  fragment also exposes keyboard controls and an always-present text listing;
+  a missing CDN renderer degrades to that listing rather than losing the graph.
+
 ## Phase 0 — who owns what today
 
 Audited on `main` at `3d1f5a1`. The graph layer calls these owners; it never
@@ -112,7 +170,7 @@ scripts/lib/oms_graph/
     scheduler.py           eligibility + write-scope conflicts
     runner.py              `exec run` step loop, gates, tool nodes, caching
     shadow.py              evaluator-vs-control-plane comparison ledger
-    render.py              text / mermaid renderers
+    render.py              text / Mermaid / bounded interactive HTML renderers
     child_policy.py        harness-child allowlist
     cli.py                 argparse front door (`oms graph ...`)
     adapters/
@@ -592,7 +650,11 @@ repo-relative `files`/`tests` only — no absolute paths or `..` — and no
 secret-shaped text) and forwards it to `peer-delegate --context-pack`, which
 renders a "Project Graph orientation" section into the worker brief
 (file and test names with reasons; never source bytes — the worker reads its
-own isolated worktree). The pack never widens `allowed_paths` and is written
+own isolated worktree). Entries are deduplicated by path, ambiguous edges are
+excluded, extracted edges rank ahead of inferred ones, and related tests and
+selectable cases rank by confidence and graph distance rather than filename.
+The pack carries the graph revision and a capped blast view instead of an
+unbounded subgraph. It never widens `allowed_paths` and is written
 into no plan state; only `project_graph_revision`, `context_pack_sha256`, and
 `context_file_count` are recorded on the node's `node_started` row. The
 existing `--context-manifest` bundle stays opt-in; when both are on, every
@@ -653,8 +715,14 @@ Relations: `contains imports calls references depends_on uses produces
 configures validates tests part_of`. Confidence: `EXTRACTED` (the source
 states it: an `import`, a `def`, a `source` line, a literal repo path),
 `INFERRED` (resolved by name to exactly one candidate), `AMBIGUOUS` (several
-candidates; the edge targets the first in sorted order and lists the rest in
-`evidence.candidates`). Inferred edges are never presented as facts.
+candidates; one edge is emitted for every candidate and carries the site's
+bounded `evidence.candidate_count`). Candidate ids are reconstructed by
+grouping edges on source/path/line/relation instead of copying N-1 ids onto all
+N edges. Inferred and ambiguous edges are never presented as facts. They remain
+available for orientation and diagnostics, while affected test selection
+traverses only `EXTRACTED` edges and reports ignored frontier confidence counts
+without calling those relationships proof.
+
 Resolution by name reaches only what the call could name: a Python call
 through a parameter, local, or module variable (`node.get()`,
 `parser.add_argument()`) yields no edge at all; a member of an import binding
@@ -675,8 +743,13 @@ definitions; a `self.x()`/`cls.x()` call to a sibling method is an `EXTRACTED`
 definitions, `source`/`.` includes, invocations of repo scripts by literal
 path, bare-name calls to functions defined in sourced files); Markdown
 (document nodes, `references` to literal repo paths); JSON/YAML/TOML config
-nodes. Test files (`tests/**`, `test_*.py`, `*_test.py`, `*-smoke.sh`) are
-`kind: test` and get `tests` edges to the repo paths they name. Each parser
+nodes. Python docstrings, the contiguous comment immediately above a shell
+function, and a Markdown document's first prose paragraph become optional,
+bounded deterministic summaries after the shared sensitive-text guard. Python
+and shell symbols also carry a bodies-free signature and source span for
+`project api`. Test files in conventional test/e2e/integration directories or
+with conventional Python/shell test names are `kind: test` and get `tests`
+edges to the repo paths they name. Each parser
 declares `language`, `extensions`, `version`; `parsers.registry()` maps
 extensions to parsers and adding a language is one new module.
 
@@ -690,14 +763,16 @@ Source text is data: nothing in a file is ever executed or interpreted as an
 instruction, and any `crux` excerpt is dropped when `sensitive_text()` matches.
 `--include` / `--exclude` globs override the defaults.
 
-Determinism: `graph.json` contains `schema`, `revision`, `nodes` (sorted by
+Determinism: schema 2 `graph.json` contains `schema`, `revision`, `nodes` (sorted by
 id), `edges` (sorted by `source, target, relation`) and **no timestamps**;
 the same working tree produces identical bytes. It is written as canonical
-one-line JSON and read under its own 256 MiB ceiling: this repository alone
-is ~7 MB, past the runtime's 8 MiB state-file default. `map_summary()`
-returns `{"revision", "counts": {"kind", "language"}, "hubs": [{"id",
+one-line JSON and read under its own 256 MiB ceiling: dense ambiguous evidence
+can make a repository graph tens of MiB, past the runtime's 8 MiB state-file
+default. `map_summary()`
+returns `{"revision", "counts": {"kind", "language", "confidence"}, "hubs": [{"id",
 "kind", "degree"}], "groups": {top-level dir: [module ids]}}`, the shape
-the text renderer consumes.
+the text renderer consumes. The CLI adds the bounded canonical structural-
+assurance summary; it never returns the whole graph.
 
 Known limit: code embedded in shell heredocs (this repository's own
 `python3 - <<'PY'` blocks) is skipped by the shell parser, so the Python
@@ -705,27 +780,46 @@ functions inside `agent-plan.sh` are not symbol nodes; the file and its
 shell functions are. `revision = sha256` over the
 sorted `path\tsha256` lines plus `PARSER_VERSION` and `PROJECT_SCHEMA`.
 `manifest.json` carries `generated_at`, per-file digests, parser names,
-cache hits, and skipped entries. `build.check` compares working-tree bytes
+cache hits, skipped entries, and a path-free coverage summary (`parsed`,
+`unparsed`, unsupported extensions, skipped reasons). `map`, `check --json`,
+and context packs project that same coverage. `build.check` compares working-tree bytes
 against the manifest (unstaged edits count) and reports `stale`, `missing`,
 and `new` paths plus `outdated` when the manifest's parser or schema version
 no longer matches the code (a parser upgrade re-parses everything on the next
 `ensure`); a commit alone is never the freshness criterion.
 
-Queries (`query.Graph`): `find(query, kinds, limit)` scores name, path,
-qualname, and summary matches; the overview verbs (`map`, `find`, `analyze`)
+Queries (`query.Graph`): `find(query, kinds, limit)` normalizes snake_case and
+CamelCase before scoring name, path, qualname, and summary matches;
+`file_api(path)` projects ordered signatures and summaries without bodies;
+`search(repo, query)` exhaustively scans indexed files for a case-insensitive
+literal, groups hits by enclosing symbol, and ranks them by incoming coupling.
+Search previews are bounded, secret-shaped lines are withheld, and source
+previews are labelled untrusted data. The overview verbs (`map`, `find`, `analyze`)
 drop test files and their edges by default because tests name many paths and
 otherwise dominate hubs and communities — `--include-tests` (or `--kind test`)
 brings them back, while `blast` and `context` always keep them; `neighbors(id, relation, direction)`;
-`trace(id, direction, depth, relations)`; `map_summary()` returns counts by
+`trace(id, direction, depth, relations, confidences)` returns at most 128 nodes
+and 160 slim edges by default, with `limits`, `truncated`, and omitted-edge
+metadata instead of a broken partial JSON value; `map_summary()` returns counts by
 kind and language, top hubs, module groups, and communities. Analytics
 (`analytics.py`) are stdlib: degrees, hubs, connected components,
 bounded simple cycles, shortest path, deterministic label-propagation
 communities labelled by their dominant top-level directory.
 
-Blast radius (`blast.py`): `changed_paths(repo, base)` = `git diff
---name-only <base>` plus untracked files; `blast_radius(graph, paths, depth,
-relations)` walks reverse `imports/calls/references/tests/uses/depends_on`
-edges and returns seeds, dependents with distance, affected files, and tests.
+Blast radius (`blast.py`): `changed_paths(repo, base)` compares the working
+tree with `merge-base(base, HEAD)` plus untracked files. Without a base it
+compares with `HEAD`, or combines staged and unstaged paths before the first
+commit. `blast_radius(graph, paths, depth,
+relations, confidences)` walks reverse
+`imports/calls/references/tests/uses/depends_on` edges and returns seeds,
+dependents with distance/confidence, affected files, tests, selectable test
+cases, path coverage, and whether a finite depth truncated the closure.
+`project affected` uses `depth=0` for the complete reverse closure. A positive
+explicit depth is diagnostic-only for selection: if it truncates, the plan is
+`mode: full`, never a silently incomplete affected set. Selection follows only
+`EXTRACTED` edges; `INFERRED`/`AMBIGUOUS` frontier counts are diagnostic. An
+unmatched path or a non-document change with no extracted runnable test still
+falls back to the complete gate.
 
 Co-change coupling (`history.py`): `oms graph project coupling` reads the last
 N commits (`--commits`, default 500, `--no-merges`, commits touching more than
@@ -741,40 +835,92 @@ deleted paths are dropped, `--path` focuses on pairs touching a path, and
 `--limit` bounds the JSON with `truncated`/`omitted`. Harness children may run
 it (read-only, regenerable, like the other readers).
 
-Context pack (`context.py`): lexical query → entry nodes → neighborhood
-(depth 2) → files, tests, blast radius, hubs, bounded by `max_files`
-(default 12) and `max_nodes` (default 40); written to
+Context pack (`context.py`): lexical query → path-deduplicated entry nodes →
+EXTRACTED/INFERRED neighborhood (depth 2; AMBIGUOUS omitted) → confidence-
+and-distance-ranked files, tests, selectable test cases, capped blast view,
+hubs, canonical structural assurance, graph revision, and parser coverage,
+bounded by
+`max_files` (default 12), `max_nodes`
+(default 40), and 40 test cases; written to
 `.oms/project-graph/context/<digest>.json`. Size is reported as
 `byte_estimate` (never called tokens): raw candidate file bytes versus pack
-bytes. `--bundle` compiles the selected files through
+bytes. With `--base`, a separate change projection marks changed/untracked
+paths and their `EXTRACTED` reverse-dependency impact; inferred or ambiguous
+edges never become impact proof. `--bundle` compiles the selected files through
 `oms_runtime.context.plan_context(explicit=...)` so the existing bounded
 bundle format is reused, not duplicated.
+
+Interactive view (`render.py`): Project Graph views select a deterministic
+hub neighborhood or the production entries/files in a context pack, then cap
+the payload at 200 nodes and 1 MiB. Schema 3 hides test files, cases, and their
+symbols from the normal topology while retaining their edges as assurance
+evidence. `supported` means the production path has an `EXTRACTED` cross-test
+link, `needs-evidence` means its path has no such link, and `attention` means
+both that no test link exists and the node itself emits an `AMBIGUOUS`
+production relation. Ambiguous candidate fan-out remains navigable, but all
+candidates from one unresolved source occurrence count as one source site for
+assurance and hub ranking. `INFERRED` relations remain visible in the node detail but
+do not by themselves turn a node red. Candidate targets remain edge evidence
+but are not colored as weak merely because a caller could not resolve between
+them. Test evidence is shared by the production path because file-level imports
+are common; uncertainty is not spread to unrelated symbols in that file. These
+states do not assert that a test passed or a feature is complete. The same
+canonical projection appears in `map --json`, `find --json`, context JSON, and
+HTML, so every provider sees the same reason and signals. `map --include-tests`
+remains an explicit diagnostic
+override; context HTML is production-only while context JSON keeps tests and
+test cases. The first view shows only `EXTRACTED` edges; relation, confidence,
+and assurance filters can reveal weak areas. A task view opens at its
+`EXTRACTED` one-hop neighborhood; focus-only, two-hop, all-node, and
+changed/impacted views are explicit controls. Search, node selection, keyboard
+zoom/reset, zoom/pan, drag, and semantic label reveal stay local to the
+fragment. Selecting a node fills and focuses an editable instruction draft;
+the user may revise it before the explicit `Send to Codex` action, or use the
+clipboard fallback when the host bridge is absent. An escaped text-node listing
+remains usable by assistive technology and when D3 cannot load. The draft
+retains the current user request, identifies the selected node as untrusted
+repository metadata, asks the agent to refresh graph context, and strengthens
+implementation or the narrowest existing verification without adding a new
+test by default.
+Execution views use the same renderer with projected status, outcomes,
+bindings, gates, and repeat edges. The output contains graph metadata only,
+never source bytes or `.oms` event details. It loads pinned D3 in the UI and
+has no graph-build/runtime dependency on JavaScript.
 
 ## CLI
 
 `oms graph` is one public verb (`scripts/graph.sh` → `oms_graph_core.py`
 → `oms_graph.cli.main`). Text is the default output; `--json` is available
-everywhere; `--mermaid` where a diagram makes sense.
+everywhere; `--mermaid` where a static diagram makes sense. The selected
+readers also accept `--html-fragment ABSOLUTE_PATH`; the explicit file write
+is parent-owned and produces an inline agent-UI fragment, not a standalone
+website. `project map`, `project context`, and `exec status` can return JSON
+and write that fragment in one call; their JSON then includes the exact
+`html_fragment` path. This keeps machine evidence and the displayed view on
+one graph revision.
 
 ```text
 oms graph project build  [--force] [--include GLOB]... [--exclude GLOB]... [--max-bytes N]
 oms graph project ensure [--max-files N]
 oms graph project check
-oms graph project map    [--json|--mermaid]
+oms graph project map    [--json] [--mermaid|--html-fragment ABS|--ui-model] [--limit 1..200] [--depth 0..4]
 oms graph project find   QUERY [--kind KIND] [--limit N]
+oms graph project api    PATH [--limit 1..2000]
+oms graph project search TEXT [--limit 1..500]
 oms graph project neighbors NODE [--relation R] [--direction in|out|both]
 oms graph project trace  NODE [--direction in|out] [--depth N]
 oms graph project blast  [--base REF] [--path P]... [--depth N] [--limit N]   # --limit bounds every JSON list; `truncated`/`omitted` report the cut
 oms graph project coupling [--path P]... [--commits N] [--max-changeset N] [--min-shared N] [--min-degree PCT] [--limit N]
+oms graph project affected --base REF [--head REF] [--depth N]  # 0 = complete closure
 oms graph project analyze [--hubs N] [--cycles] [--communities] [--path FROM TO]
-oms graph project context --task TEXT [--max-files N] [--bundle] [--base REF]
+oms graph project context --task TEXT [--max-files N] [--bundle] [--base REF] [--json] [--html-fragment ABS|--ui-model]
 oms graph exec validate  SPEC
-oms graph exec render    SPEC [--mermaid]
+oms graph exec render    SPEC [--mermaid|--html-fragment ABS]
 oms graph exec route     SPEC|--run ID [--facts FILE] [--outcomes JSON] [--json]
 oms graph exec run       SPEC --worker PROVIDER [--model M] [--reasoning-effort E] [--max-steps N] [--jobs N] [--goal TEXT] [--dry-run]
 oms graph exec resume    --run ID --worker PROVIDER
 oms graph exec decide    --run ID --node NODE --outcome OUTCOME [--note TEXT]
-oms graph exec status    [--run ID] [--json|--mermaid]
+oms graph exec status    [--run ID] [--json] [--mermaid|--html-fragment ABS]
 oms graph exec events    --run ID [--limit N]
 oms graph exec shadow    [--spec NAME]
 oms graph exec test      PATH   (route fixtures; a file or a directory)
@@ -796,7 +942,7 @@ The graph exists wherever it is read. `project ensure` runs `check` and then
 builds when the graph is absent, refreshes it through the cache when the
 working tree moved, and writes nothing when it is current; it prints `graph:
 fresh revision=...` or the `build` summary line with `built`/`refreshed`.
-Every reader (`map find neighbors trace blast analyze context`) calls it
+Every reader (`map find api search neighbors trace blast affected analyze coupling context`) calls it
 before loading the graph and sends that summary to **stderr**, so `--json`
 stdout stays parsable. `--no-refresh` on any reader, or `OMS_GRAPH_AUTOBUILD=0`
 globally, reads the graph as it stands — an absent one then fails with the
@@ -807,8 +953,8 @@ it with the verb to run; the explicit `build` (which bounds bytes, not files)
 has no such bound, and a refresh of an existing graph is never refused.
 
 Harness children (`OMS_HARNESS_CHILD=1`) may run `project
-build|ensure|check|map|find|neighbors|trace|blast|analyze|coupling` and `exec
-validate|render|route|status|events|test`. `build`/`ensure` are the exception
+build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|analyze|coupling`
+and `exec validate|render|route|status|events|test`. `build`/`ensure` are the exception
 to the runtime core's `context` precedent: the project graph is a regenerable
 cache that carries no authority, and a delegated worker in an isolated
 worktree has no other way to get one. `project context`, whose pack the
@@ -876,6 +1022,7 @@ Read-only, argv-only tools appended to `TOOLS` in `scripts/oms-mcp-server.py`
 | tool | argv |
 |---|---|
 | `oms_project_graph_map` | `bash scripts/graph.sh project map --json` |
+| `oms_project_graph_render` | bounded `project map|context --ui-model`; returns `structuredContent.graph` and links `ui://oms/project-graph/v1.html` |
 | `oms_project_graph_query` | `bash scripts/graph.sh project find --json --limit 40` + positional `query` |
 | `oms_project_graph_trace` | `bash scripts/graph.sh project trace --json --depth 2 --direction out` + positional `node` |
 | `oms_project_graph_blast` | `bash scripts/graph.sh project blast --json --limit 120` |
@@ -886,6 +1033,12 @@ Read-only, argv-only tools appended to `TOOLS` in `scripts/oms-mcp-server.py`
 The project-graph tools wrap readers, so a call against a stale or absent
 graph refreshes the regenerable cache first (summary on stderr, JSON on
 stdout); no tool mutates plan, receipt, or run state.
+
+The server advertises `resources/list`/`resources/read` and serves the viewer
+as `text/html;profile=mcp-app`. Only the render tool carries
+`_meta.ui.resourceUri` (plus the OpenAI compatibility alias), keeping data
+queries decoupled from presentation. The resource consumes the render tool's
+bounded structured graph; it never reads source bytes in the browser.
 
 Positional values are validated by a per-tool `positional_pattern` (node ids
 contain `/` and `:`; the default bare-name rule stays for `oms_handoff_show`);

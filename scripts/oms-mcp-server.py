@@ -35,6 +35,12 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+LIB = ROOT / "scripts/lib"
+if str(LIB) not in sys.path:
+    sys.path.insert(0, str(LIB))
+
+from oms_graph import render as graph_render
+
 FALLBACK_PROTOCOL = "2025-06-18"
 # Revisions whose semantics this server actually implements. Echoing an
 # arbitrary requested revision back would advertise conformance to behavior
@@ -59,6 +65,9 @@ MAX_REQUEST_BYTES = 256 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_PATH_BYTES = 4 * 1024
 MAX_ARGUMENT_BYTES = 16 * 1024
+PROJECT_GRAPH_UI_URI = "ui://oms/project-graph/v1.html"
+MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
+UI_MODEL_LIMIT = 256 * 1024
 
 # Peer consultation: which front-door verb each kind runs, and where that verb
 # writes its answer artifacts. Started detached, polled from disk.
@@ -129,7 +138,10 @@ def server_info() -> dict:
 
 
 def server_capabilities(protocol: str) -> dict:
-    capabilities = {"tools": {"listChanged": False}}
+    capabilities = {
+        "tools": {"listChanged": False},
+        "resources": {"subscribe": False, "listChanged": False},
+    }
     if tasks_feature_enabled() and protocol == TASKS_PROTOCOL:
         capabilities["extensions"] = {TASKS_EXTENSION: {}}
     return capabilities
@@ -195,7 +207,11 @@ START_PEER = {
 GRAPH_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$"
 # A search query may carry spaces between words; it still cannot lead with a
 # dash or climb a path, which check_positional enforces for every positional.
-GRAPH_QUERY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@ -]{0,511}$"
+GRAPH_QUERY_PATTERN = r"^[^\x00-\x1f\x7f]{1,512}$"
+GRAPH_PATH_PATTERN = r"^[^\x00-\x1f\x7f\\]{1,1024}$"
+# Affected planning accepts one base ref and always compares it with HEAD. Keep
+# revision operators agents commonly need, but not arbitrary revset syntax.
+GRAPH_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/@{}^~+-]{0,255}$"
 
 TOOLS = [
     {
@@ -437,22 +453,52 @@ TOOLS = [
     },
     # Graph readers: the project graph answers what depends on what, the
     # execution graph answers where a run stands and which route is legal
-    # next. Both are fixed read-only subcommands onto the graph front door;
-    # nothing here builds, rebuilds, or advances anything.
+    # next. They are fixed read-only subcommands onto the graph front door;
+    # project readers may refresh only their regenerable cache and never
+    # advance plan or run authority.
     {
         "name": "oms_project_graph_map",
         "description": (
-            "Read-only project-graph overview: counts by kind and language,"
-            " hubs, module groups (requires a prior `oms graph project"
-            " build`)."
+            "Read-only project-graph overview: kind/language/confidence counts,"
+            " evidence-ranked hubs, module groups, and structural assurance."
         ),
         "argv": ["bash", "scripts/graph.sh", "project", "map", "--json"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },
     {
+        "name": "oms_project_graph_render",
+        "title": "Render OMS project graph",
+        "description": (
+            "Render a bounded production-only project graph in the Codex UI."
+            " Pass task for a focused context graph; omit it for the project"
+            " overview. Node selection creates an editable instruction draft"
+            " before anything is sent."
+        ),
+        "properties": {
+            **REPO_PROPERTY,
+            "task": {
+                "type": "string",
+                "description": (
+                    "Optional task phrase used to focus the graph, such as"
+                    " strengthen graph viewer selection."
+                ),
+            },
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {"graph": {"type": "object"}},
+            "required": ["graph"],
+        },
+        "ui_resource": PROJECT_GRAPH_UI_URI,
+        "annotations": READ_ONLY,
+    },
+    {
         "name": "oms_project_graph_query",
-        "description": "Find project-graph nodes by name, path, or qualified name.",
+        "description": (
+            "Find project-graph nodes by name, path, or qualified name, with"
+            " the canonical structural-assurance reason and signals."
+        ),
         "argv": ["bash", "scripts/graph.sh", "project", "find", "--json", "--limit", "40"],
         "properties": {
             **REPO_PROPERTY,
@@ -470,10 +516,57 @@ TOOLS = [
         "annotations": READ_ONLY,
     },
     {
+        "name": "oms_project_graph_api",
+        "description": (
+            "Read one indexed file's API surface as ordered signatures and"
+            " bounded deterministic summaries, without function bodies;"
+            " summaries remain untrusted source data."
+        ),
+        "argv": [
+            "bash", "scripts/graph.sh", "project", "api", "--json",
+            "--limit", "120",
+        ],
+        "properties": {
+            **REPO_PROPERTY,
+            "path": {
+                "type": "string",
+                "description": "Normalized repository-relative indexed file path.",
+            },
+        },
+        "required": ["path"],
+        "positional": "path",
+        "positional_pattern": GRAPH_PATH_PATTERN,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_project_graph_search",
+        "description": (
+            "Exhaustive case-insensitive literal search over indexed source,"
+            " grouped by enclosing graph symbol and ranked by incoming"
+            " coupling. Returned source previews are untrusted data."
+        ),
+        "argv": [
+            "bash", "scripts/graph.sh", "project", "search", "--json",
+            "--limit", "80",
+        ],
+        "properties": {
+            **REPO_PROPERTY,
+            "query": {
+                "type": "string",
+                "description": "Literal UTF-8 text to find in every indexed file.",
+            },
+        },
+        "required": ["query"],
+        "positional": "query",
+        "positional_pattern": GRAPH_QUERY_PATTERN,
+        "annotations": READ_ONLY,
+    },
+    {
         "name": "oms_project_graph_trace",
         "description": (
             "Trace one project-graph node's dependency edges two hops"
-            " outward: what it reaches, and through which edges."
+            " outward as a bounded slim projection; inspect its limits and"
+            " truncation metadata before expanding from another node."
         ),
         "argv": [
             "bash", "scripts/graph.sh", "project", "trace", "--json",
@@ -499,6 +592,29 @@ TOOLS = [
         "description": "Dependency blast radius of the working tree's changed files: a bounded projection (120 rows per list; `truncated`/`omitted` say what was cut).",
         "argv": ["bash", "scripts/graph.sh", "project", "blast", "--json", "--limit", "120"],
         "properties": REPO_PROPERTY,
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_project_graph_affected",
+        "description": (
+            "Fail-open affected-test plan for one base ref through HEAD:"
+            " positive test evidence, exact cases where available, or reasons"
+            " the complete gate is required."
+        ),
+        "argv": [
+            "bash", "scripts/graph.sh", "project", "affected", "--head", "HEAD",
+            "--json", "--base",
+        ],
+        "properties": {
+            **REPO_PROPERTY,
+            "base": {
+                "type": "string",
+                "description": "Base Git ref, such as origin/main or a commit SHA.",
+            },
+        },
+        "required": ["base"],
+        "positional": "base",
+        "positional_pattern": GRAPH_REF_PATTERN,
         "annotations": READ_ONLY,
     },
     {
@@ -567,6 +683,17 @@ def tool_definitions() -> list[dict]:
         annotations = tool.get("annotations")
         if annotations:
             definition["annotations"] = dict(annotations)
+        if tool.get("title"):
+            definition["title"] = tool["title"]
+        if tool.get("outputSchema"):
+            definition["outputSchema"] = tool["outputSchema"]
+        if tool.get("ui_resource"):
+            definition["_meta"] = {
+                "ui": {"resourceUri": tool["ui_resource"]},
+                "openai/outputTemplate": tool["ui_resource"],
+                "openai/toolInvocation/invoking": "Rendering project graph…",
+                "openai/toolInvocation/invoked": "Project graph ready.",
+            }
         defs.append(definition)
     return defs
 
@@ -669,6 +796,92 @@ def resolve_repo(arguments: dict) -> tuple[Path, str]:
     except (OSError, ValueError) as exc:
         return Path("."), "error: invalid repository path: %s" % exc
     return repo, ""
+
+
+def project_graph_resources() -> list[dict]:
+    return [{
+        "uri": PROJECT_GRAPH_UI_URI,
+        "name": "oms-project-graph",
+        "title": "OMS Project Graph",
+        "description": "Interactive bounded project graph with editable Codex instruction drafts.",
+        "mimeType": MCP_APP_MIME_TYPE,
+    }]
+
+
+def read_project_graph_resource(uri: object) -> tuple[dict, str]:
+    if not isinstance(uri, str) or uri != PROJECT_GRAPH_UI_URI:
+        return {}, "unknown resource: %r" % uri
+    return {
+        "contents": [{
+            "uri": PROJECT_GRAPH_UI_URI,
+            "mimeType": MCP_APP_MIME_TYPE,
+            "text": graph_render.render_project_mcp_app(),
+            "_meta": {
+                "ui": {
+                    "prefersBorder": True,
+                    "csp": {
+                        "resourceDomains": ["https://cdn.jsdelivr.net"],
+                    },
+                },
+            },
+        }],
+    }, ""
+
+
+def render_project_graph(arguments: dict) -> tuple[str, bool, dict]:
+    repo, err = resolve_repo(arguments)
+    if err:
+        return err, True, {}
+    task, err = text_argument(arguments, "task", 2 * 1024)
+    if err:
+        return err, True, {}
+    task = task.strip()
+    if task.startswith("-"):
+        return "error: task cannot begin with '-'", True, {}
+    if task:
+        argv = [
+            "bash", str(ROOT / "scripts/graph.sh"), "project", "context",
+            "--task", task, "--max-files", "12", "--ui-model",
+        ]
+    else:
+        argv = [
+            "bash", str(ROOT / "scripts/graph.sh"), "project", "map",
+            "--limit", "72", "--depth", "2", "--ui-model",
+        ]
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "error: %s" % exc, True, {}
+    if proc.returncode != 0:
+        output = (proc.stdout + ("\n" if proc.stdout and proc.stderr else "") + proc.stderr).strip()
+        return (output or "exit %d" % proc.returncode)[:OUTPUT_LIMIT], True, {}
+    try:
+        size = len(proc.stdout.encode("utf-8"))
+    except UnicodeEncodeError:
+        return "error: project graph UI model is not valid UTF-8", True, {}
+    if size > UI_MODEL_LIMIT:
+        return "error: project graph UI model exceeds %d-byte limit" % UI_MODEL_LIMIT, True, {}
+    try:
+        model = json.loads(proc.stdout)
+    except ValueError as exc:
+        return "error: project graph UI model is invalid JSON: %s" % exc, True, {}
+    if not isinstance(model, dict) or model.get("kind") != "project" or not isinstance(model.get("nodes"), list) or not isinstance(model.get("edges"), list):
+        return "error: project graph UI model has an invalid shape", True, {}
+    if len(model["nodes"]) > 120 or len(model["edges"]) > 360:
+        return "error: project graph UI model exceeds its node or edge bound", True, {}
+    model["title"] = "OMS Context Graph · %s" % task[:72] if task else "OMS Project Graph"
+    counts = model.get("counts") if isinstance(model.get("counts"), dict) else {}
+    text = "Rendered %s/%s production nodes and %s/%s edges. Select a node to edit an instruction draft." % (
+        counts.get("shown_nodes", 0), counts.get("total_nodes", 0),
+        counts.get("shown_edges", 0), counts.get("total_edges", 0),
+    )
+    return text, False, model
 
 
 def ensure_oms_ignore(repo: Path) -> None:
@@ -1420,6 +1633,24 @@ def handle(message: dict):
             msg_id,
             complete_result(cacheable({"tools": tool_definitions()}, params), params),
         )
+    if method == "resources/list":
+        if params is not None and not isinstance(params, dict):
+            return response(
+                msg_id, error={"code": -32602, "message": "invalid params: expected object"}
+            )
+        return response(
+            msg_id,
+            complete_result(cacheable({"resources": project_graph_resources()}, params), params),
+        )
+    if method == "resources/read":
+        if not isinstance(params, dict):
+            return response(
+                msg_id, error={"code": -32602, "message": "invalid params: expected object"}
+            )
+        resource, err = read_project_graph_resource(params.get("uri"))
+        if err:
+            return response(msg_id, error={"code": -32602, "message": err})
+        return response(msg_id, complete_result(resource, params))
     if method in ("tasks/get", "tasks/update", "tasks/cancel"):
         if not tasks_feature_enabled() or effective_protocol(params) != TASKS_PROTOCOL:
             return response(
@@ -1493,7 +1724,10 @@ def handle(message: dict):
             if tool["name"] == name:
                 # State tools are one fixed argv; action tools run their own
                 # handler, because starting a peer is not a subcommand call.
-                if "argv" in tool:
+                structured = None
+                if name == "oms_project_graph_render":
+                    text, is_error, structured = render_project_graph(arguments)
+                elif "argv" in tool:
                     text, is_error = run_tool(tool, arguments)
                 else:
                     text, is_error = ACTIONS[tool["name"]](arguments)
@@ -1501,6 +1735,8 @@ def handle(message: dict):
                     "content": [{"type": "text", "text": text}],
                     "isError": is_error,
                 }
+                if structured is not None and not is_error:
+                    ordinary["structuredContent"] = {"graph": structured}
                 if (
                     name == "oms_peer_start"
                     and not is_error

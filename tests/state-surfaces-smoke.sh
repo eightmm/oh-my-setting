@@ -30,6 +30,7 @@ test_mcp_server_protocol() {
   local out="$TMP/mcp-out"
 
   make_repo "$repo"
+  printf 'def alpha_entry(value):\n    return value\n' > "$repo/a.py"
   {
     printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
     printf '%s\n' '{"jsonrpc":"2.0","id":6,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
@@ -47,6 +48,12 @@ test_mcp_server_protocol() {
     printf '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"oms_runtime_failures","arguments":{"repo":"%s"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"oms_project_graph_trace","arguments":{"repo":"%s","node":"symbol:a/b.py::f"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"oms_project_graph_trace","arguments":{"repo":"%s","node":"../escape"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"oms_project_graph_affected","arguments":{"repo":"%s","base":"HEAD"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"oms_project_graph_api","arguments":{"repo":"%s","path":"a.py"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"oms_project_graph_search","arguments":{"repo":"%s","query":"alpha_entry"}}}\n' "$repo"
+    printf '%s\n' '{"jsonrpc":"2.0","id":19,"method":"resources/list"}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":20,"method":"resources/read","params":{"uri":"ui://oms/project-graph/v1.html"}}'
+    printf '{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"oms_project_graph_render","arguments":{"repo":"%s","task":"inspect alpha entry"}}}\n' "$repo"
   } | python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "MCP protocol exchange did not match the contract"
@@ -63,6 +70,7 @@ init = by_id[1]["result"]
 # echoed back as false conformance; a supported revision is honored.
 assert init["protocolVersion"] == "2025-06-18", init
 assert init["serverInfo"]["name"] == "oh-my-setting", init
+assert init["capabilities"]["resources"] == {"subscribe": False, "listChanged": False}, init
 assert by_id[6]["result"]["protocolVersion"] == "2025-03-26", by_id[6]
 listed = {t["name"]: t for t in by_id[2]["result"]["tools"]}
 tools = set(listed)
@@ -145,6 +153,33 @@ assert "Traceback" not in trace["content"][0]["text"], trace
 node_escape = by_id[15]["result"]
 assert node_escape["isError"], node_escape
 assert "oms_project_graph_trace" in node_escape["content"][0]["text"], node_escape
+affected = by_id[16]["result"]
+assert affected["isError"], affected
+assert "Traceback" not in affected["content"][0]["text"], affected
+api = by_id[17]["result"]
+assert not api["isError"], api
+api_body = json.loads(api["content"][0]["text"])
+assert api_body["path"] == "a.py", api_body
+assert api_body["symbols"][0]["signature"] == "def alpha_entry(value)", api_body
+search = by_id[18]["result"]
+assert not search["isError"], search
+search_body = json.loads(search["content"][0]["text"])
+assert search_body["total_hits"] == 1, search_body
+assert search_body["groups"][0]["id"] == "symbol:a.py::alpha_entry", search_body
+resources = by_id[19]["result"]["resources"]
+assert [row["uri"] for row in resources] == ["ui://oms/project-graph/v1.html"], resources
+resource = by_id[20]["result"]["contents"][0]
+assert resource["mimeType"] == "text/html;profile=mcp-app", resource
+assert "Instruction draft" in resource["text"], resource["text"][:500]
+assert "window.openai.toolOutput" in resource["text"], resource["text"][:500]
+render_tool = listed["oms_project_graph_render"]
+assert render_tool["_meta"]["ui"]["resourceUri"] == resources[0]["uri"], render_tool
+assert render_tool["_meta"]["openai/outputTemplate"] == resources[0]["uri"], render_tool
+rendered = by_id[21]["result"]
+assert not rendered["isError"], rendered
+assert rendered["structuredContent"]["graph"]["kind"] == "project", rendered
+assert rendered["structuredContent"]["graph"]["nodes"], rendered
+assert rendered["structuredContent"]["graph"]["title"].startswith("OMS Context Graph"), rendered
 PY
 }
 
@@ -1845,6 +1880,7 @@ assert discover["resultType"] == "complete", discover
 assert discover["supportedVersions"][0] == "2026-07-28", discover
 assert "2025-06-18" in discover["supportedVersions"], discover
 assert discover["capabilities"]["tools"] == {"listChanged": False}, discover
+assert discover["capabilities"]["resources"] == {"subscribe": False, "listChanged": False}, discover
 assert "io.modelcontextprotocol/tasks" in discover["capabilities"]["extensions"], discover
 assert discover["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "oh-my-setting", discover
 assert isinstance(discover["ttlMs"], int) and discover["ttlMs"] > 0, discover
@@ -1861,8 +1897,10 @@ assert names == [
     "oms_task_state", "oms_fail_ledger", "oms_handoffs", "oms_handoff_show",
     "oms_journal", "oms_runtime_release", "oms_runtime_profile",
     "oms_runtime_failures", "oms_peer_start", "oms_peer_result",
-    "oms_peer_operations", "oms_project_graph_map", "oms_project_graph_query",
-    "oms_project_graph_trace", "oms_project_graph_blast",
+    "oms_peer_operations", "oms_project_graph_map", "oms_project_graph_render",
+    "oms_project_graph_query",
+    "oms_project_graph_api", "oms_project_graph_search", "oms_project_graph_trace",
+    "oms_project_graph_blast", "oms_project_graph_affected",
     "oms_execution_graph_status", "oms_execution_graph_route",
     "oms_execution_graph_events"], names
 

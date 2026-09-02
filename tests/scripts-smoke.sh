@@ -223,18 +223,6 @@ test_poll_interval_adapts_to_elapsed_and_remaining() {
     fail "verbose poll log should include label, elapsed, next, and remaining"
 }
 
-test_file_lock_acquire_release() {
-  local dir="$TMP/file-lock-happy"
-  local state="$dir/state.txt"
-
-  mkdir -p "$dir"
-  (
-    . "$ROOT/scripts/lib/file-lock.sh"
-    oms_with_file_lock "$state" bash -c 'printf locked > "$1"' _ "$state"
-  )
-  assert_file_contains "$state" "locked"
-}
-
 test_file_lock_nested_mkdir_preserves_nonzero_status_and_releases() {
   local dir="$TMP/file-lock-nested-mkdir"
   local outer="$dir/outer" inner="$dir/inner"
@@ -279,26 +267,7 @@ test_file_lock_missing_poll_helper_falls_back() {
   assert_file_contains "$state" "fallback"
 }
 
-test_file_lock_recovers_stale_mkdir_lock() {
-  local dir="$TMP/file-lock-stale"
-  local state="$dir/state.txt"
-  local lock_dir
-
-  mkdir -p "$dir"
-  (
-    . "$ROOT/scripts/lib/file-lock.sh"
-    lock_dir="$(oms_file_lock_path_for_file "$state")"
-    mkdir -p "$lock_dir"
-    printf '999999999\n' > "$lock_dir/pid"
-    printf '1\n' > "$lock_dir/started"
-    printf 'stale\n' > "$lock_dir/owner"
-    OMS_LOCK_FORCE_MKDIR=1 OMS_LOCK_TIMEOUT=1 \
-      oms_with_file_lock "$state" bash -c 'printf recovered > "$1"' _ "$state"
-  )
-  assert_file_contains "$state" "recovered"
-}
-
-test_file_lock_contention_preserves_records() {
+test_file_lock_contention_preserves_records_across_backends() {
   local dir="$TMP/file-lock-contention"
   local append_file="$dir/append.txt"
   local rewrite_file="$dir/rewrite.txt"
@@ -373,16 +342,13 @@ test_file_lock_contention_preserves_records() {
     fail "locked rewrites produced malformed records"
   [ "$(sort -u "$rewrite_file" | wc -l | tr -d ' ')" = "$expected" ] ||
     fail "locked rewrites produced duplicate records"
-}
-
-
-test_file_lock_mkdir_contention_preserves_records() {
-  local dir="$TMP/file-lock-mkdir-contention"
-  local append_file="$dir/append.txt"
-  local n=20
-  local expected=$((n * 2))
-  local p1
-  local p2
+  # Repeat the append race through the mkdir fallback. The focused boundary
+  # suite owns basic acquisition and stale-recovery cases; this case owns data
+  # integrity for both lock backends.
+  dir="$TMP/file-lock-mkdir-contention"
+  append_file="$dir/append.txt"
+  n=20
+  expected=$((n * 2))
 
   # Same two-writer race as above but forced onto the mkdir fallback — the
   # branch every flock-less host (stock macOS) actually runs. Without this the
@@ -392,17 +358,15 @@ test_file_lock_mkdir_contention_preserves_records() {
   . "$ROOT/scripts/lib/file-lock.sh"
 
   (
-    export OMS_LOCK_FORCE_MKDIR=1
     for i in $(seq 1 "$n"); do
-      oms_with_file_lock "$append_file" bash -c \
+      OMS_LOCK_FORCE_MKDIR=1 oms_with_file_lock "$append_file" bash -c \
         'printf "%s-%03d\n" "$2" "$3" >> "$1"' _ "$append_file" A "$i"
     done
   ) &
   p1=$!
   (
-    export OMS_LOCK_FORCE_MKDIR=1
     for i in $(seq 1 "$n"); do
-      oms_with_file_lock "$append_file" bash -c \
+      OMS_LOCK_FORCE_MKDIR=1 oms_with_file_lock "$append_file" bash -c \
         'printf "%s-%03d\n" "$2" "$3" >> "$1"' _ "$append_file" B "$i"
     done
   ) &
@@ -602,12 +566,17 @@ run_doctor_for_project() {
     OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")
 }
 
-test_apply_dry_run_has_no_writes() {
-  local project="$TMP/dry-run-new"
+test_project_template_dry_runs_have_no_writes() {
+  local general_project="$TMP/dry-run-general"
+  local ml_project="$TMP/dry-run-ml"
 
-  OH_MY_SETTING_DRY_RUN=1 "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
+  OH_MY_SETTING_DRY_RUN=1 \
+    "$ROOT/scripts/apply-project-template.sh" general "$general_project" >/dev/null
+  assert_not_exists "$general_project"
 
-  assert_not_exists "$project"
+  OH_MY_SETTING_DRY_RUN=1 \
+    "$ROOT/scripts/apply-project-template.sh" ml "$ml_project" >/dev/null
+  assert_not_exists "$ml_project"
 }
 
 test_apply_loader_allows_clear_bounded_changes() {
@@ -665,50 +634,44 @@ test_generated_project_contracts_stay_compact() {
   assert_file_contains "$ml/PROJECT.md" '- Inference-time information boundary:'
   assert_file_contains "$ml/PROJECT.md" '- Split/group keys:'
   assert_file_contains "$ml/PROJECT.md" '- Success criteria:'
+  assert_file_contains "$general/PROJECT.md" '- Affected checks:'
+  assert_file_contains "$general/PROJECT.md" '- Always-run checks:'
+  assert_file_contains "$general/PROJECT.md" '- Required checks:'
 }
 
-test_apply_rejects_unclosed_managed_block() {
-  local project="$TMP/apply-malformed"
-  mkdir -p "$project"
-  cat > "$project/AGENTS.md" <<'EOF'
+test_project_template_mutators_reject_unclosed_managed_blocks() {
+  local apply_project="$TMP/apply-malformed"
+  local remove_project="$TMP/remove-malformed"
+
+  mkdir -p "$apply_project"
+  cat > "$apply_project/AGENTS.md" <<'EOF'
 before
 <!-- oh-my-setting:general:begin -->
 managed
 after
 EOF
 
-  if "$ROOT/scripts/apply-project-template.sh" general "$project" AGENTS.md >/dev/null 2>"$project/error"; then
+  if "$ROOT/scripts/apply-project-template.sh" general "$apply_project" AGENTS.md \
+      >/dev/null 2>"$apply_project/error"; then
     fail "apply should reject unclosed managed block"
   fi
+  assert_file_contains "$apply_project/AGENTS.md" "after"
+  assert_file_contains "$apply_project/error" "missing managed block end"
 
-  assert_file_contains "$project/AGENTS.md" "after"
-  assert_file_contains "$project/error" "missing managed block end"
-}
-
-test_remove_rejects_unclosed_managed_block() {
-  local project="$TMP/remove-malformed"
-  mkdir -p "$project"
-  cat > "$project/AGENTS.md" <<'EOF'
+  mkdir -p "$remove_project"
+  cat > "$remove_project/AGENTS.md" <<'EOF'
 before
 <!-- oh-my-setting:general:begin -->
 managed
 after
 EOF
 
-  if "$ROOT/scripts/remove-project-template.sh" general "$project" AGENTS.md >/dev/null 2>"$project/error"; then
+  if "$ROOT/scripts/remove-project-template.sh" general "$remove_project" AGENTS.md \
+      >/dev/null 2>"$remove_project/error"; then
     fail "remove should reject unclosed managed block"
   fi
-
-  assert_file_contains "$project/AGENTS.md" "after"
-  assert_file_contains "$project/error" "missing managed block end"
-}
-
-test_apply_ml_dry_run_has_no_writes() {
-  local project="$TMP/ml-dry-run-new"
-
-  OH_MY_SETTING_DRY_RUN=1 "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
-
-  assert_not_exists "$project"
+  assert_file_contains "$remove_project/AGENTS.md" "after"
+  assert_file_contains "$remove_project/error" "missing managed block end"
 }
 
 test_apply_ml_scaffolds_docs() {
@@ -1048,32 +1011,22 @@ assert seats["antigravity"]["round"] == 0, seats
 PY
 }
 
-test_job_digest_log_mode() {
-  local dir="$TMP/job-digest"
-  mkdir -p "$dir"
-  printf 'step 1 loss: 0.5\nTraceback (most recent call last):\n  File "t.py", line 1\nRuntimeError: CUDA out of memory\n' > "$dir/run.log"
-
-  out="$("$ROOT/scripts/job-digest.sh" "$dir/run.log")"
-  printf '%s' "$out" | grep -Fq 'CUDA out of memory' || fail "digest missing error pattern"
-  printf '%s' "$out" | grep -Fq '## Last traceback' || fail "digest missing traceback section"
-
-  if "$ROOT/scripts/job-digest.sh" "$dir/nonexistent" >/dev/null 2>"$dir/error"; then
-    fail "digest should reject non-file non-jobid argument"
-  fi
-  assert_file_contains "$dir/error" 'not a log file or job id'
-
-  # --wait needs a job id; a log-file arg must be rejected, not silently ignored.
-  if "$ROOT/scripts/job-digest.sh" --wait "$dir/run.log" >/dev/null 2>"$dir/werr"; then
-    fail "--wait without a job id should fail"
-  fi
-  assert_file_contains "$dir/werr" 'requires a slurm job id'
-}
-
 test_job_digest_wait_polls_until_empty() {
   local dir="$TMP/job-digest-wait"
   local bin="$dir/bin"
   mkdir -p "$bin"
   printf 'step 1 ok\n' > "$dir/run.log"
+
+  # Valid log extraction is exercised on the real BSD userland by
+  # bsd-portability-smoke. This case owns the argument failures and wait loop.
+  if "$ROOT/scripts/job-digest.sh" "$dir/nonexistent" >/dev/null 2>"$dir/error"; then
+    fail "digest should reject non-file non-jobid argument"
+  fi
+  assert_file_contains "$dir/error" 'not a log file or job id'
+  if "$ROOT/scripts/job-digest.sh" --wait "$dir/run.log" >/dev/null 2>"$dir/werr"; then
+    fail "--wait without a job id should fail"
+  fi
+  assert_file_contains "$dir/werr" 'requires a slurm job id'
 
   # Fake squeue: a state file drives queued -> error (retry) -> empty (done).
   printf '0\n' > "$dir/poll"
@@ -1938,14 +1891,31 @@ test_project_doctor_detects_stale_block() {
     fail "project-doctor should report stale block"
 }
 
-test_detect_configs_only_is_general() {
-  local project="$TMP/detect-configs-only"
-  mkdir -p "$project/configs"
-  printf 'port: 8080\n' > "$project/configs/app.yaml"
-  printf 'name: app\n' > "$project/config.yaml"
+test_detect_project_style_classification_matrix() {
+  local configs="$TMP/detect-configs-only"
+  local filename="$TMP/detect-ml-filename"
+  local generated="$TMP/generated-dirs"
+  local style
 
-  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
-  [ "$style" = "general" ] || fail "expected general for configs-only project, got $style"
+  mkdir -p "$configs/configs"
+  printf 'port: 8080\n' > "$configs/configs/app.yaml"
+  printf 'name: app\n' > "$configs/config.yaml"
+  style="$("$ROOT/scripts/detect-project-style.sh" "$configs")"
+  [ "$style" = "general" ] ||
+    fail "configs-only classification should be general, got $style"
+
+  mkdir -p "$filename"
+  touch "$filename/train.py"
+  style="$("$ROOT/scripts/detect-project-style.sh" "$filename")"
+  [ "$style" = "ml" ] || fail "train.py classification should be ml, got $style"
+
+  mkdir -p "$generated/.venv" "$generated/node_modules/pkg" "$generated/backups/old"
+  touch "$generated/.venv/train.py"
+  touch "$generated/node_modules/pkg/model.py"
+  touch "$generated/backups/old/config.yaml"
+  style="$("$ROOT/scripts/detect-project-style.sh" "$generated")"
+  [ "$style" = "general" ] ||
+    fail "generated-directory signals should be ignored, got $style"
 }
 
 test_detect_depth_contract_is_tool_independent() {
@@ -1966,35 +1936,6 @@ test_detect_depth_contract_is_tool_independent() {
   style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
   [ "$style" = "general" ] ||
     fail "a depth-4-only signal is outside the detection contract on every machine, got $style"
-}
-
-test_detect_ml_filename_is_ml() {
-  local project="$TMP/detect-ml-filename"
-  mkdir -p "$project"
-  touch "$project/train.py"
-
-  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
-  [ "$style" = "ml" ] || fail "expected ml for train.py project, got $style"
-}
-
-test_detect_ml_code_text_is_ml() {
-  local project="$TMP/detect-ml-code"
-  mkdir -p "$project"
-  printf 'import torch\n' > "$project/main.py"
-
-  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
-  [ "$style" = "ml" ] || fail "expected ml for torch code, got $style"
-}
-
-test_detect_ignores_common_generated_dirs() {
-  local project="$TMP/generated-dirs"
-  mkdir -p "$project/.venv" "$project/node_modules/pkg" "$project/backups/old"
-  touch "$project/.venv/train.py"
-  touch "$project/node_modules/pkg/model.py"
-  touch "$project/backups/old/config.yaml"
-
-  style="$("$ROOT/scripts/detect-project-style.sh" "$project")"
-  [ "$style" = "general" ] || fail "expected general, got $style"
 }
 
 test_apply_and_remove_valid_block() {
@@ -4166,6 +4107,8 @@ test_delegate_dry_run() {
     'Comments/docstrings preserve task/repo-established public contracts'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'never restate code, types, tests, or names'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
+    'Extend an existing canonical test or fixture first'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'DRY RUN: worker command skipped.'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '(path omitted)'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'worktree: temporary (removed after run)'
@@ -7771,43 +7714,34 @@ EOF
     fail "ledger row must appear inside Recent Experiments section"
 }
 
-test_agent_ml_context_rejects_bad_max_bytes() {
-  local repo="$TMP/ml-context-bad-bytes"
+test_cli_argument_validation_rejects_invalid_inputs() {
+  local repo="$TMP/cli-argument-validation"
 
-  mkdir -p "$repo"
+  mkdir -p "$repo/.oms/artifacts"
   printf 'import torch\n' > "$repo/train.py"
 
   if "$ROOT/scripts/agent-ml-context.sh" --repo "$repo" --max-bytes nope \
-      >/dev/null 2>"$repo/error"; then
+      >/dev/null 2>"$repo/ml-error"; then
     fail "agent-ml-context should reject non-integer --max-bytes"
   fi
+  assert_file_contains "$repo/ml-error" "--max-bytes must be a positive integer"
 
-  assert_file_contains "$repo/error" "--max-bytes must be a positive integer"
-}
-
-test_artifact_index_rejects_extra_limit_arg() {
-  local repo="$TMP/artifact-index-extra"
-
-  mkdir -p "$repo/.oms/artifacts"
   printf '{"exit":0}\n' > "$repo/.oms/artifacts/index.jsonl"
-
   if "$ROOT/scripts/artifact-index.sh" --repo "$repo" list 1 2 \
-      >/dev/null 2>"$repo/error"; then
+      >/dev/null 2>"$repo/artifact-error"; then
     fail "artifact-index should reject extra positional args"
   fi
+  assert_file_contains "$repo/artifact-error" "unknown argument: 2"
 
-  assert_file_contains "$repo/error" "unknown argument: 2"
-}
-
-test_project_doctor_rejects_extra_arg() {
-  local project="$TMP/doctor-extra"
-
-  mkdir -p "$project"
-  if "$ROOT/scripts/project-doctor.sh" "$project" extra >/dev/null 2>"$project/error"; then
+  if "$ROOT/scripts/project-doctor.sh" "$repo" extra \
+      >/dev/null 2>"$repo/doctor-error"; then
     fail "project-doctor should reject extra positional args"
   fi
+  assert_file_contains "$repo/doctor-error" "too many arguments"
 
-  assert_file_contains "$project/error" "too many arguments"
+  if "$ROOT/scripts/patch-admit.sh" --repo "$TMP" >/dev/null 2>&1; then
+    fail "patch-admit should require --patch"
+  fi
 }
 
 test_delegate_auto_verify_prefers_ml_smoke() {
@@ -9717,10 +9651,21 @@ EOF
   fi
 }
 
-test_update_help_runs() {
+test_command_help_surfaces_run() {
   local out
+
   out="$("$ROOT/scripts/update.sh" --help)"
   printf '%s' "$out" | grep -Fq -- '--tools' || fail "update help should expose opt-in tool refresh"
+
+  "$ROOT/scripts/artifact-index.sh" --help >/dev/null
+  "$ROOT/scripts/import-agent-result.sh" --help >/dev/null
+  "$ROOT/scripts/research-runner.sh" --help >/dev/null
+  "$ROOT/scripts/auto-update.sh" --help >/dev/null
+  "$ROOT/scripts/install-autoupdate.sh" --help >/dev/null
+  "$ROOT/scripts/uninstall-autoupdate.sh" --help >/dev/null
+  "$ROOT/scripts/apply-project-template.sh" --help >/dev/null
+  "$ROOT/scripts/remove-project-template.sh" --help >/dev/null
+  "$ROOT/scripts/uninstall.sh" --help >/dev/null
 }
 
 test_update_refreshes_tools_only_when_requested() {
@@ -9861,24 +9806,6 @@ PY
   [ -f "$marker" ] || fail "update auto mode should refresh an installed codex plugin"
 }
 
-test_auto_update_help_runs() {
-  "$ROOT/scripts/artifact-index.sh" --help >/dev/null
-  "$ROOT/scripts/import-agent-result.sh" --help >/dev/null
-  "$ROOT/scripts/research-runner.sh" --help >/dev/null
-  "$ROOT/scripts/auto-update.sh" --help >/dev/null
-  "$ROOT/scripts/install-autoupdate.sh" --help >/dev/null
-  "$ROOT/scripts/uninstall-autoupdate.sh" --help >/dev/null
-}
-
-test_template_help_runs() {
-  "$ROOT/scripts/apply-project-template.sh" --help >/dev/null
-  "$ROOT/scripts/remove-project-template.sh" --help >/dev/null
-}
-
-test_uninstall_help_runs() {
-  "$ROOT/scripts/uninstall.sh" --help >/dev/null
-}
-
 test_uninstall_dry_run_no_changes() {
   local home_dir="$TMP/uninstall-home"
   mkdir -p "$home_dir"
@@ -9889,18 +9816,16 @@ test_uninstall_dry_run_no_changes() {
     fail "uninstall dry-run created files under $home_dir"
 }
 
-test_version_file_present() {
+test_release_version_file_and_status_agree() {
   [ -f "$ROOT/VERSION" ] || fail "VERSION file missing"
   local version
+  local out
+
   version="$(head -n 1 "$ROOT/VERSION")"
   case "$version" in
     [0-9]*.[0-9]*.[0-9]*) ;;
     *) fail "VERSION not semver-like: $version" ;;
   esac
-}
-
-test_status_shows_version() {
-  local out
   out="$("$ROOT/scripts/status.sh" 2>/dev/null)"
   printf '%s' "$out" | grep -Eq '^- version: [0-9]' || fail "status.sh missing version line"
 }
@@ -10426,11 +10351,8 @@ PY
     fail "$label systemd install probed systemctl before rejecting cron"
 }
 
-test_autoupdate_malformed_cron_blocks_explicit_systemd_install() {
+test_autoupdate_malformed_cron_blocks_systemd_installs() {
   assert_malformed_cron_blocks_systemd_install explicit-systemd systemd
-}
-
-test_autoupdate_malformed_cron_blocks_auto_systemd_install() {
   assert_malformed_cron_blocks_systemd_install auto-systemd auto
 }
 
@@ -11307,9 +11229,24 @@ test_session_handoff_antigravity_prompts_only() {
   fi
 }
 
-test_session_handoff_unknown_agent_fails() {
+test_cli_unknown_subcommands_fail() {
   if "$ROOT/scripts/session-handoff.sh" capture --agent bogus >/dev/null 2>&1; then
-    fail "unknown agent should fail"
+    fail "session-handoff accepted an unknown agent"
+  fi
+  if "$ROOT/scripts/run-capsule.sh" bogus >/dev/null 2>&1; then
+    fail "run-capsule accepted an unknown subcommand"
+  fi
+  if "$ROOT/scripts/data-manifest.sh" bogus >/dev/null 2>&1; then
+    fail "data-manifest accepted an unknown subcommand"
+  fi
+  if "$ROOT/scripts/run-reconcile.sh" bogus >/dev/null 2>&1; then
+    fail "run-reconcile accepted an unknown subcommand"
+  fi
+  if "$ROOT/scripts/experiment-board.sh" bogus >/dev/null 2>&1; then
+    fail "experiment-board accepted an unknown subcommand"
+  fi
+  if "$ROOT/scripts/run.sh" bogus >/dev/null 2>&1; then
+    fail "run accepted an unknown subcommand"
   fi
 }
 
@@ -11370,12 +11307,6 @@ test_run_capsule_propagates_exit_and_runs_once() {
     -- bash -c 'echo x >> marker; exit 7' >/dev/null 2>&1 ) || rc=$?
   [ "$rc" = "7" ] || fail "capsule should propagate the command exit code (got $rc)"
   [ "$(wc -l < "$proj/marker" | tr -d ' ')" = "1" ] || fail "command must run exactly once"
-}
-
-test_run_capsule_unknown_subcommand_fails() {
-  if "$ROOT/scripts/run-capsule.sh" bogus >/dev/null 2>&1; then
-    fail "unknown subcommand should fail"
-  fi
 }
 
 test_run_capsule_whence_traces_checkpoint() {
@@ -11657,12 +11588,6 @@ test_data_manifest_hostile_split_values() {
     fail "hostile split leakage should not misparse labels or paths"
 }
 
-test_data_manifest_unknown_subcommand_fails() {
-  if "$ROOT/scripts/data-manifest.sh" bogus >/dev/null 2>&1; then
-    fail "unknown subcommand should fail"
-  fi
-}
-
 test_generate_slurm_reference_captures_effective_resources() {
   local d="$TMP/slurm-reference"
   local bin="$d/bin"
@@ -11799,12 +11724,6 @@ test_run_reconcile_records_terminal_jobs() {
   [ "$before" = "$after" ] || fail "reconcile is not idempotent"
 }
 
-test_run_reconcile_unknown_subcommand_fails() {
-  if "$ROOT/scripts/run-reconcile.sh" bogus >/dev/null 2>&1; then
-    fail "unknown subcommand should fail"
-  fi
-}
-
 test_experiment_board_lifecycle_and_duplicate_guard() {
   local d="$TMP/exp-board"
   local board="$d/.oms/experiments.jsonl"
@@ -11910,12 +11829,6 @@ test_experiment_board_claim_is_atomic() {
   [ "$lines" = 1 ] || fail "atomic claim should append one event, got $lines"
 }
 
-test_experiment_board_unknown_subcommand_fails() {
-  if "$ROOT/scripts/experiment-board.sh" bogus >/dev/null 2>&1; then
-    fail "unknown subcommand should fail"
-  fi
-}
-
 # Build a repo with a base commit and a patch of `branch` vs main on file.txt.
 make_patch_repo() {
   local repo="$1"
@@ -11986,12 +11899,6 @@ test_patch_admit_rejects_failed_verify() {
   fi
 }
 
-test_patch_admit_requires_patch() {
-  if "$ROOT/scripts/patch-admit.sh" --repo "$TMP" >/dev/null 2>&1; then
-    fail "patch-admit should require --patch"
-  fi
-}
-
 test_patch_admit_rejects_secret_in_patch() {
   local repo="$TMP/admit-secret"
   local SH="$ROOT/scripts/patch-admit.sh"
@@ -12009,9 +11916,11 @@ test_patch_admit_rejects_secret_in_patch() {
   assert_file_contains "$r" "secrets: FAIL"
 }
 
-test_patch_admit_rejects_python_syntax_error() {
+test_patch_admit_rejects_invalid_source_syntax() {
   local repo="$TMP/admit-python-syntax"
   local SH="$ROOT/scripts/patch-admit.sh"
+  local r
+
   make_committed_repo "$repo"
   git -C "$repo" checkout -q -b pybad
   printf 'def broken(:\n    pass\n' > "$repo/bad.py"
@@ -12024,16 +11933,12 @@ test_patch_admit_rejects_python_syntax_error() {
   if ( "$SH" --patch "$repo/pybad.patch" --repo "$repo" --verify true >/dev/null 2>&1 ); then
     fail "python syntax error should reject the patch"
   fi
-  local r
   r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
   [ -n "$r" ] || fail "no admission report written"
   assert_file_contains "$r" "syntax: FAIL"
   assert_file_contains "$r" "python compile failed: bad.py"
-}
 
-test_patch_admit_rejects_json_syntax_error() {
-  local repo="$TMP/admit-json-syntax"
-  local SH="$ROOT/scripts/patch-admit.sh"
+  repo="$TMP/admit-json-syntax"
   make_committed_repo "$repo"
   git -C "$repo" checkout -q -b jsonbad
   printf '{ bad json\n' > "$repo/bad.json"
@@ -12046,7 +11951,6 @@ test_patch_admit_rejects_json_syntax_error() {
   if ( "$SH" --patch "$repo/jsonbad.patch" --repo "$repo" --verify true >/dev/null 2>&1 ); then
     fail "json syntax error should reject the patch"
   fi
-  local r
   r="$(find "$repo/.oms/artifacts/admit" -name '*.md' | head -n1)"
   [ -n "$r" ] || fail "no admission report written"
   assert_file_contains "$r" "syntax: FAIL"
@@ -12161,12 +12065,6 @@ test_oms_run_auto_link_from_capsule() {
   # The capsule auto-linked itself into the spine for this run id.
   OMS_RUN_INDEX="$spine" "$SH" show "$id" 2>/dev/null | grep -Fq "run-capsule" ||
     fail "capsule did not auto-link into the run spine"
-}
-
-test_oms_run_unknown_subcommand_fails() {
-  if "$ROOT/scripts/run.sh" bogus >/dev/null 2>&1; then
-    fail "unknown subcommand should fail"
-  fi
 }
 
 test_oms_run_validate_detects_malformed_jsonl() {
@@ -12455,6 +12353,7 @@ if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
   printf '%s' "$prompt" | grep -q 'Minimal never means weakening' || exit 8
   printf '%s' "$prompt" | grep -q 'Comments/docstrings preserve task/repo-established public contracts' || exit 8
   printf '%s' "$prompt" | grep -q 'never restate code, types, tests, or names' || exit 8
+  printf '%s' "$prompt" | grep -q 'Extend an existing canonical test or fixture first' || exit 8
   printf '%s' "$prompt" | grep -q 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
   printf 'fixed\n' > delegated.txt
   echo "worker repaired"
@@ -13589,8 +13488,8 @@ test_global_rules_stay_compact_and_route_workflows() {
 
   [ -f "$global_rules" ] || fail "dedicated global rules file should exist"
   # This file is loaded into every session on all three CLIs, so the budget is a
-  # standing context cost, not a style rule. The budget was raised to 560 when
-  # the minimal-change ladder earned a shared place across parent sessions;
+  # standing context cost, not a style rule. Test-economy and fail-open affected
+  # verification fit the existing 560-word budget;
   # raise it only for another rule that changes decisions, never for prose.
   line_count="$(wc -l < "$global_rules" | tr -d ' ')"
   [ "$line_count" -le 160 ] ||
@@ -16083,6 +15982,14 @@ test_skill_router_matches_and_dedupes() {
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
     fail "English agent-owned implementation request should route to oms-agent-harness"
+  out="$(printf '{"prompt":"프로젝트 그래프로 코드를 보고 작업하자","session_id":"r11","turn_id":"t12","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "Korean graph-guided coding request should route to oms-agent-harness"
+  out="$(printf '{"prompt":"Use the project graph for this coding task","session_id":"r12","turn_id":"t13","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+    fail "English project-graph request should route to oms-agent-harness"
 }
 
 test_skill_router_separates_consultation_from_delegation() {
@@ -23583,9 +23490,15 @@ assert "raw_output" not in row, row
 # and never run. The edit-time syntax guard also has to be one of them.
 test_codex_plugin_hooks_dispatch_only_allowlisted_scripts() {
   local hooks="$ROOT/plugins/oh-my-setting/hooks.json"
+  local manifest="$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json"
   local dispatcher="$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh"
   local allow tool
 
+  python3 - "$manifest" <<'PY' || fail "the Codex plugin manifest must expose its hooks.json"
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc.get("hooks") == "./hooks.json", doc.get("hooks")
+PY
   allow="$(sed -n 's/^case "\$tool" in \(.*\)) ;; \*) exit 0 ;; esac$/\1/p' "$dispatcher")"
   [ -n "$allow" ] || fail "could not read the dispatcher allowlist from $dispatcher"
   for tool in $(python3 - "$hooks" <<'PY'

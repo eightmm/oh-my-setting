@@ -283,6 +283,10 @@ def file_lock(target: Path, timeout_seconds: float = 15.0) -> Iterator[None]:
             holder.terminate()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 holder.wait(timeout=5)
+        for stream in (holder.stdin, holder.stdout):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
 
 
 def append_jsonl(path: Path, row: Mapping[str, Any]) -> None:

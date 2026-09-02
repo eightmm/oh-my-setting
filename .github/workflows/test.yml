@@ -53,6 +53,8 @@ jobs:
   # install-profile are registered focused stages, so they are no longer
   # repeated here as extra steps.
   focused:
+    needs: affected_plan
+    if: always() && (github.event_name != 'pull_request' || needs.affected_plan.outputs.mode == 'full')
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +71,8 @@ jobs:
   # deterministic partition and bounded slow-test timing make rebalancing
   # evidence-driven.
   smoke_shard:
+    needs: affected_plan
+    if: always() && (github.event_name != 'pull_request' || needs.affected_plan.outputs.mode == 'full')
     strategy:
       fail-fast: false
       matrix:
@@ -81,6 +85,45 @@ jobs:
         env:
           OMS_SMOKE_TIMINGS: "1"
         run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
+
+  # Project the fail-open decision before scheduling the expensive jobs. A
+  # full result fans back out through the existing matrices instead of putting
+  # the complete gate on one runner.
+  affected_plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: project affected mode
+        id: plan
+        timeout-minutes: 5
+        run: |
+          mode="$(bash scripts/check.sh --affected --print-affected-mode \
+            --changed-from "${{ github.event.pull_request.base.sha }}" \
+            --changed-to HEAD)"
+          case "$mode" in affected|full) ;; *) exit 2 ;; esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+  # Positive Project Graph evidence runs existing tests, never declares an
+  # untested change safe. Lint remains independent, so it is not repeated.
+  affected:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'affected'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: affected tests
+        timeout-minutes: 35
+        run: |
+          bash scripts/check.sh --affected --no-lint \
+            --changed-from "${{ github.event.pull_request.base.sha }}" \
+            --changed-to HEAD
 
   # Exercise the same install -> update -> uninstall contract on every
   # supported host, and in both ownership modes. Windows selects copy mode on
@@ -169,14 +212,18 @@ jobs:
   # cancelled, or skipped dependency.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, install_e2e, windows_durable_writer, portability_macos, python39]
+    needs: [lint, focused, smoke_shard, affected_plan, affected, install_e2e, windows_durable_writer, portability_macos, python39]
     runs-on: ubuntu-latest
     steps:
       - name: require every verification job
         env:
+          EVENT_NAME: ${{ github.event_name }}
           LINT_RESULT: ${{ needs.lint.result }}
           FOCUSED_RESULT: ${{ needs.focused.result }}
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
+          AFFECTED_PLAN_RESULT: ${{ needs.affected_plan.result }}
+          AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
+          AFFECTED_RESULT: ${{ needs.affected.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           WINDOWS_DURABLE_WRITER_RESULT: ${{ needs.windows_durable_writer.result }}
           PORTABILITY_MACOS_RESULT: ${{ needs.portability_macos.result }}
@@ -185,8 +232,6 @@ jobs:
           status=0
           for result in \
             "$LINT_RESULT" \
-            "$FOCUSED_RESULT" \
-            "$SMOKE_SHARD_RESULT" \
             "$INSTALL_E2E_RESULT" \
             "$WINDOWS_DURABLE_WRITER_RESULT" \
             "$PORTABILITY_MACOS_RESULT" \
@@ -196,4 +241,26 @@ jobs:
               status=1
             fi
           done
+          if [ "$EVENT_NAME" = pull_request ]; then
+            [ "$AFFECTED_PLAN_RESULT" = success ] || status=1
+            if [ "$AFFECTED_MODE" = affected ]; then
+              [ "$AFFECTED_RESULT" = success ] || status=1
+              [ "$FOCUSED_RESULT" = skipped ] || status=1
+              [ "$SMOKE_SHARD_RESULT" = skipped ] || status=1
+            elif [ "$AFFECTED_MODE" = full ]; then
+              [ "$AFFECTED_RESULT" = skipped ] || status=1
+              [ "$FOCUSED_RESULT" = success ] || status=1
+              [ "$SMOKE_SHARD_RESULT" = success ] || status=1
+            else
+              status=1
+            fi
+          else
+            [ "$AFFECTED_PLAN_RESULT" = skipped ] || status=1
+            [ "$AFFECTED_RESULT" = skipped ] || status=1
+            [ "$FOCUSED_RESULT" = success ] || status=1
+            [ "$SMOKE_SHARD_RESULT" = success ] || status=1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "event-specific results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE affected=$AFFECTED_RESULT focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT" >&2
+          fi
           exit "$status"

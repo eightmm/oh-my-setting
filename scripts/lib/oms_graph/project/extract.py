@@ -14,10 +14,19 @@ from .parsers import parser_for
 
 DEFAULT_EXCLUDES = (".git/", ".oms/", "node_modules/", "vendor/", "dist/", "build/", "target/", "__pycache__/")
 SECRET_NAME_GLOBS = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "*.p12", "*.pfx")
+TEST_DIRECTORIES = {"test", "tests", "testing", "__tests__", "e2e", "integration-tests", "integration_tests"}
+TEST_NAME_GLOBS = ("test_*.py", "*_test.py", "*_spec.py", "test-*.sh", "*-test.sh", "*_test.sh", "*-smoke.sh")
 
 
 def _excluded_path(path: str) -> bool:
     return any(path.startswith(prefix) or ("/" + prefix) in path for prefix in DEFAULT_EXCLUDES)
+
+
+def is_test_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    parts = normalized.split("/")
+    return (any(part.lower() in TEST_DIRECTORIES for part in parts[:-1])
+            or any(fnmatch.fnmatch(parts[-1], pattern) for pattern in TEST_NAME_GLOBS))
 
 
 def discover_files(repo: Path, *, include: Sequence[str] = (), exclude: Sequence[str] = (), max_bytes: int = 2 * 1024 * 1024) -> Dict[str, Any]:
@@ -82,7 +91,7 @@ def extract_file(repo: Path, relpath: str) -> Dict[str, Any]:
         raise ValueError("no parser for %s" % relpath)
     text = data.decode("utf-8", "replace")
     parsed = parser.parse(relpath, text, digest).as_dict()
-    is_test = relpath.startswith("tests/") or fnmatch.fnmatch(Path(relpath).name, "test_*.py") or fnmatch.fnmatch(Path(relpath).name, "*_test.py") or fnmatch.fnmatch(Path(relpath).name, "*-smoke.sh")
+    is_test = is_test_path(relpath)
     file_kind = "test" if is_test else "file"
     file_node = make_node(file_kind, Path(relpath).name, relpath, parser.language, digest)
     if is_test:

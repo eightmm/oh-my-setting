@@ -941,6 +941,8 @@ cat > "$packs/valid.json" <<EOF
  "project_graph_revision": "rev-abc",
  "files": ["scripts/check.sh", "tests/run.sh"],
  "tests": ["tests/run.sh"],
+ "test_cases": [{"id": "symbol:tests/run.sh::test_selected", "language": "shell",
+                  "name": "test_selected", "path": "tests/run.sh"}],
  "evidence": [{"path": "scripts/check.sh", "reason": "query:file", "score": 1001}],
  "hubs": [{"id": "file:scripts/check.sh", "degree": 3}]}
 EOF
@@ -982,6 +984,8 @@ grep -Fq -- '- scripts/check.sh  (query:file)' "$TMP/cp-prompt.txt" ||
   fail "the orientation section dropped a pack file and its evidence reason"
 grep -Fq -- '- tests/run.sh' "$TMP/cp-prompt.txt" ||
   fail "the orientation section dropped the pack tests"
+grep -Fq -- '- test_selected  (shell, tests/run.sh)' "$TMP/cp-prompt.txt" ||
+  fail "the orientation section dropped the graph-selected test case"
 grep -Fq 'the only write scope' "$TMP/cp-prompt.txt" ||
   fail "the orientation section must say it does not widen the write scope"
 grep -Fq 'ORIENTATION-FILE-BODY' "$TMP/cp-prompt.txt" &&

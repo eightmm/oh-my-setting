@@ -84,11 +84,18 @@ SKIP_LINT=0
 SMOKE_SHARD=""
 QUICK_FROM=""
 QUICK_TO=""
+AFFECTED_MODE=""
+AFFECTED_REASONS=""
+AFFECTED_TESTS=()
+AFFECTED_CASE_LANGS=()
+AFFECTED_CASE_PATHS=()
+AFFECTED_CASE_SELECTORS=()
 FOCUSED_LANE=""
 FOCUSED_LANE_I=0
 FOCUSED_LANE_N=0
 FOCUSED_STAGE_INDEX=0
 LIST_STAGES=0
+PRINT_AFFECTED_MODE=0
 usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
@@ -96,7 +103,8 @@ usage: check.sh [MODE] [OPTIONS]
 Runs the repository gate: lint (shellcheck, Bash 3.2, Python syntax, skill
 manifest) then the test suites. With no arguments it runs both.
 
-  --no-lint             Skip lint in the otherwise complete local gate.
+  --no-lint             Skip lint in the complete or affected gate. CI uses
+                        this with --affected because lint is an independent job.
   --lint-only           Run only lint stages.
   --focused-only        Run only the focused test suites.
   --focused-lane I/N    Run only every Nth focused stage starting at the Ith
@@ -111,8 +119,12 @@ manifest) then the test suites. With no arguments it runs both.
                         (The scripts-smoke shards run outside the stage list
                         and are not included.)
   --quick               Run a partial changed-file gate for protected pushes.
-  --changed-from REF    Base tree for --quick.
-  --changed-to REF      Target tree for --quick.
+  --affected            Use the Project Graph to run positively affected tests;
+                        uncertainty falls back to the complete test gate.
+  --print-affected-mode With --affected, print affected or full after planning
+                        and exit without running test stages.
+  --changed-from REF    Base tree for --quick or --affected.
+  --changed-to REF      Target tree for --quick or --affected.
 EOF
 }
 
@@ -143,6 +155,8 @@ while [ "$#" -gt 0 ]; do
       ;;
     --list-stages) LIST_STAGES=1; shift ;;
     --quick) select_mode quick; shift ;;
+    --affected) select_mode affected; shift ;;
+    --print-affected-mode) PRINT_AFFECTED_MODE=1; shift ;;
     --changed-from)
       [ "$#" -ge 2 ] || { echo "error: --changed-from requires a ref" >&2; exit 2; }
       QUICK_FROM="$2"
@@ -162,8 +176,12 @@ if [ "$MODE" = lint ] && [ "$SKIP_LINT" = 1 ]; then
   echo "error: --no-lint and --lint-only leave nothing to run" >&2
   exit 2
 fi
-if [ "$SKIP_LINT" = 1 ] && [ "$MODE" != full ] && [ "$MODE" != lint ]; then
-  echo "error: --no-lint only modifies the default complete gate" >&2
+if [ "$PRINT_AFFECTED_MODE" = 1 ] && { [ "$MODE" != affected ] || [ "$LIST_STAGES" = 1 ]; }; then
+  echo "error: --print-affected-mode requires --affected and cannot combine with --list-stages" >&2
+  exit 2
+fi
+if [ "$SKIP_LINT" = 1 ] && [ "$MODE" != full ] && [ "$MODE" != lint ] && [ "$MODE" != affected ]; then
+  echo "error: --no-lint only modifies the complete or affected gate" >&2
   exit 2
 fi
 if [ -n "$SMOKE_SHARD" ] && [ "$MODE" != scripts-smoke ]; then
@@ -189,13 +207,13 @@ if [ -n "$FOCUSED_LANE" ]; then
     exit 2
   fi
 fi
-if [ "$MODE" = quick ]; then
+if [ "$MODE" = quick ] || [ "$MODE" = affected ]; then
   [ -n "$QUICK_FROM" ] && [ -n "$QUICK_TO" ] || {
-    echo "error: --quick requires --changed-from and --changed-to" >&2
+    echo "error: --$MODE requires --changed-from and --changed-to" >&2
     exit 2
   }
 elif [ -n "$QUICK_FROM" ] || [ -n "$QUICK_TO" ]; then
-  echo "error: --changed-from/--changed-to require --quick" >&2
+  echo "error: --changed-from/--changed-to require --quick or --affected" >&2
   exit 2
 fi
 
@@ -203,6 +221,7 @@ RUN_LINT=0
 RUN_FOCUSED=0
 RUN_SMOKE=0
 RUN_QUICK=0
+RUN_AFFECTED=0
 case "$MODE" in
   full)
     [ "$SKIP_LINT" = 1 ] || RUN_LINT=1
@@ -213,6 +232,7 @@ case "$MODE" in
   focused) RUN_FOCUSED=1 ;;
   scripts-smoke) RUN_SMOKE=1 ;;
   quick) RUN_QUICK=1 ;;
+  affected) RUN_AFFECTED=1 ;;
 esac
 
 # Binary name is overridable so tests can exercise the missing-tool path
@@ -333,6 +353,183 @@ stage() {  # stage NAME COMMAND...
   echo "ok: $name (${elapsed}s)"
 }
 
+compile_affected_plan() {  # compile_affected_plan PLAN_JSON
+  python3 - "$1" "$ROOT" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+plan_path, root = sys.argv[1:]
+try:
+    with open(plan_path, encoding="utf-8") as handle:
+        plan = json.load(handle)
+except (OSError, ValueError) as exc:
+    raise SystemExit("invalid affected plan: %s" % exc)
+if not isinstance(plan, dict) or plan.get("schema") != 1:
+    raise SystemExit("invalid affected plan schema")
+mode = plan.get("mode")
+if mode not in ("affected", "full"):
+    raise SystemExit("invalid affected plan mode")
+
+def clean(value, label):
+    if not isinstance(value, str) or any(char in value for char in "\0\r\n\t"):
+        raise ValueError("invalid %s" % label)
+    return value
+
+def test_path(value):
+    value = clean(value, "test path")
+    pure = pathlib.PurePosixPath(value)
+    if pure.is_absolute() or ".." in pure.parts or not value.startswith("tests/"):
+        raise ValueError("unsafe test path:%s" % value)
+    target = pathlib.Path(root, *pure.parts)
+    if target.is_symlink() or not target.is_file():
+        raise ValueError("missing test:%s" % value)
+    if value.endswith(".sh"):
+        return value, "shell"
+    if pure.name.startswith("test_") and value.endswith(".py"):
+        return value, "python"
+    raise ValueError("unsupported test:%s" % value)
+
+raw_reasons = plan.get("reasons", [])
+raw_tests = plan.get("tests", [])
+raw_cases = plan.get("test_cases", [])
+if not isinstance(raw_reasons, list) or not isinstance(raw_tests, list) or not isinstance(raw_cases, list):
+    raise SystemExit("invalid affected plan collections")
+reasons = []
+try:
+    reasons.extend(clean(reason, "reason") for reason in raw_reasons)
+except ValueError as exc:
+    raise SystemExit(str(exc))
+
+tests = []
+languages = {}
+if mode == "affected":
+    try:
+        for raw in raw_tests:
+            path, language = test_path(raw)
+            if path not in languages:
+                tests.append(path)
+                languages[path] = language
+    except ValueError as exc:
+        mode = "full"
+        reasons.append(str(exc))
+
+cases = []
+if mode == "affected":
+    try:
+        for row in raw_cases:
+            if not isinstance(row, dict):
+                raise ValueError("invalid test case")
+            path = clean(row.get("path"), "test case path")
+            language = clean(row.get("language"), "test case language")
+            ident = clean(row.get("id"), "test case id")
+            name = clean(row.get("name"), "test case name")
+            if path not in languages or language != languages[path]:
+                raise ValueError("orphan test case:%s" % ident)
+            if path == "tests/scripts-smoke.sh":
+                if language != "shell" or not re.fullmatch(r"test_[A-Za-z0-9_]+", name):
+                    raise ValueError("unsupported test case:%s" % ident)
+                cases.append((language, path, name))
+            elif language == "python":
+                prefix = "symbol:%s::" % path
+                selector = ident[len(prefix):] if ident.startswith(prefix) else ""
+                atom = r"[A-Za-z_][A-Za-z0-9_]*"
+                if not re.fullmatch(atom + r"(?:\." + atom + r")+", selector):
+                    raise ValueError("unsupported test case:%s" % ident)
+                cases.append((language, path, selector))
+    except ValueError as exc:
+        mode = "full"
+        reasons.append(str(exc))
+
+print("mode\t%s" % mode)
+for reason in sorted(set(reasons)):
+    print("reason\t%s" % reason)
+if mode == "affected":
+    for path in tests:
+        print("test\t%s" % path)
+    for language, path, selector in sorted(set(cases)):
+        print("case\t%s\t%s\t%s" % (language, path, selector))
+PY
+}
+
+prepare_affected_gate() {
+  local plan_json="$CHECK_RUNTIME/affected-plan.json"
+  local plan_rows="$CHECK_RUNTIME/affected-plan.rows"
+  local graph_err="$CHECK_RUNTIME/affected-graph.err"
+  local selector_changes="$CHECK_RUNTIME/affected-selector-changes"
+  local kind first second third path
+
+  git diff --name-only "$QUICK_FROM" "$QUICK_TO" -- > "$selector_changes"
+  while IFS= read -r path; do
+    case "$path" in
+      .github/workflows/*|scripts/check.sh|scripts/graph.sh|scripts/lib/oms_graph/*|tests/graph-smoke.sh|tests/run-smoke-shard.sh)
+        AFFECTED_MODE=full
+        AFFECTED_REASONS="selector-boundary:$path"
+        break
+        ;;
+    esac
+  done < "$selector_changes"
+
+  if [ "$AFFECTED_MODE" = full ]; then
+    : # The selector cannot be the sole judge of changes to its own boundary.
+  elif ! bash scripts/graph.sh project affected \
+      --base "$QUICK_FROM" --head "$QUICK_TO" \
+      --guard 'scripts/graph.sh' --guard 'scripts/lib/oms_graph/**' \
+      --guard 'tests/graph-smoke.sh' --json > "$plan_json" 2> "$graph_err"; then
+    AFFECTED_MODE=full
+    AFFECTED_REASONS=graph-error
+    echo "affected: Project Graph failed; running the complete test gate" >&2
+    tail -20 "$graph_err" >&2 || true
+  elif ! compile_affected_plan "$plan_json" | tr -d '\r' > "$plan_rows"; then
+    AFFECTED_MODE=full
+    AFFECTED_REASONS=invalid-plan
+    echo "affected: invalid Project Graph plan; running the complete test gate" >&2
+  else
+    while IFS="$(printf '\t')" read -r kind first second third; do
+      case "$kind" in
+        mode) AFFECTED_MODE="$first" ;;
+        reason) AFFECTED_REASONS="${AFFECTED_REASONS:+$AFFECTED_REASONS, }$first" ;;
+        test) AFFECTED_TESTS[${#AFFECTED_TESTS[@]}]="$first" ;;
+        case)
+          AFFECTED_CASE_LANGS[${#AFFECTED_CASE_LANGS[@]}]="$first"
+          AFFECTED_CASE_PATHS[${#AFFECTED_CASE_PATHS[@]}]="$second"
+          AFFECTED_CASE_SELECTORS[${#AFFECTED_CASE_SELECTORS[@]}]="$third"
+          ;;
+      esac
+    done < "$plan_rows"
+  fi
+
+  if [ "$AFFECTED_MODE" = affected ]; then
+    RUN_QUICK=1
+    echo "affected: selected ${#AFFECTED_TESTS[@]} existing test file(s) from positive graph evidence" >&2
+  else
+    AFFECTED_MODE=full
+    RUN_FOCUSED=1
+    RUN_SMOKE=1
+    echo "affected: full test fallback (${AFFECTED_REASONS:-uncertain})" >&2
+  fi
+}
+
+if [ "$RUN_QUICK" = 1 ] || [ "$RUN_AFFECTED" = 1 ]; then
+  git rev-parse --verify "$QUICK_FROM^{tree}" >/dev/null 2>&1 || {
+    echo "error: --changed-from is not a tree: $QUICK_FROM" >&2
+    exit 2
+  }
+  git rev-parse --verify "$QUICK_TO^{tree}" >/dev/null 2>&1 || {
+    echo "error: --changed-to is not a tree: $QUICK_TO" >&2
+    exit 2
+  }
+fi
+if [ "$RUN_AFFECTED" = 1 ]; then
+  prepare_affected_gate
+  if [ "$PRINT_AFFECTED_MODE" = 1 ]; then
+    printf '%s\n' "$AFFECTED_MODE"
+    verify_oms_state
+    exit 0
+  fi
+fi
+
 if [ "$RUN_LINT" = 1 ]; then
   # scripts/oms is named explicitly: the dispatcher has no .sh extension, so
   # the glob alone would silently skip it.
@@ -352,15 +549,6 @@ if [ "$MODE" = lint ]; then
 fi
 
 if [ "$RUN_QUICK" = 1 ]; then
-  git rev-parse --verify "$QUICK_FROM^{tree}" >/dev/null 2>&1 || {
-    echo "error: --changed-from is not a tree: $QUICK_FROM" >&2
-    exit 2
-  }
-  git rev-parse --verify "$QUICK_TO^{tree}" >/dev/null 2>&1 || {
-    echo "error: --changed-to is not a tree: $QUICK_TO" >&2
-    exit 2
-  }
-
   changed_file="$CHECK_RUNTIME/changed-files"
   git diff --name-only --diff-filter=ACMR "$QUICK_FROM" "$QUICK_TO" -- > "$changed_file"
   quick_harness=0
@@ -397,7 +585,7 @@ if [ "$RUN_QUICK" = 1 ]; then
     esac
   done < "$changed_file"
 
-  if [ "${#quick_shell_files[@]}" -gt 0 ]; then
+  if [ "${#quick_shell_files[@]}" -gt 0 ] && [ "$SKIP_LINT" = 0 ]; then
     command -v "$SHELLCHECK" >/dev/null 2>&1 || {
       echo "FATAL: shellcheck is required for changed shell files" >&2
       exit 1
@@ -405,9 +593,9 @@ if [ "$RUN_QUICK" = 1 ]; then
     stage shellcheck-changed lint_shell "${quick_shell_files[@]}"
     stage bash-compat-changed bash scripts/check-bash32.sh "${quick_shell_files[@]}"
   fi
-  stage python-syntax bash scripts/check-python.sh
+  [ "$SKIP_LINT" = 1 ] || stage python-syntax bash scripts/check-python.sh
   stage codex-hud-config bash tests/codex-hud-config-smoke.sh
-  [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh
+  [ "$SKIP_LINT" = 1 ] || [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh
   stage source-distribution bash tests/source-distribution-smoke.sh
   stage platform-portability bash tests/platform-portability-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh
@@ -417,6 +605,59 @@ if [ "$RUN_QUICK" = 1 ]; then
   [ "$quick_models" = 0 ] || stage provider-registry bash tests/provider-registry-smoke.sh
   [ "$quick_models" = 0 ] || stage models-surface bash tests/models-smoke.sh
   [ "$quick_seats" = 0 ] || stage seat-reliability bash tests/seat-reliability-smoke.sh
+fi
+
+affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
+  case "$1" in
+    tests/codex-hud-config-smoke.sh|tests/source-distribution-smoke.sh|tests/platform-portability-smoke.sh|tests/bsd-portability-smoke.sh|tests/functional-evolution-smoke.sh)
+      return 0
+      ;;
+    tests/harness-enhancements-smoke.sh) [ "$quick_harness" = 1 ]; return ;;
+    tests/model-routing-smoke.sh|tests/provider-registry-smoke.sh|tests/models-smoke.sh)
+      [ "$quick_models" = 1 ]; return
+      ;;
+    tests/seat-reliability-smoke.sh) [ "$quick_seats" = 1 ]; return ;;
+  esac
+  return 1
+}
+
+if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
+  for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
+    affected_test_was_run_by_quick "$affected_test" && continue
+    if [ "$affected_test" = tests/scripts-smoke.sh ]; then
+      affected_args=()
+      affected_index=0
+      while [ "$affected_index" -lt "${#AFFECTED_CASE_PATHS[@]}" ]; do
+        if [ "${AFFECTED_CASE_LANGS[$affected_index]}" = shell ] && \
+            [ "${AFFECTED_CASE_PATHS[$affected_index]}" = "$affected_test" ]; then
+          affected_args[${#affected_args[@]}]=--only
+          affected_args[${#affected_args[@]}]="${AFFECTED_CASE_SELECTORS[$affected_index]}"
+        fi
+        affected_index=$((affected_index + 1))
+      done
+      if [ "${#affected_args[@]}" -gt 0 ]; then
+        stage affected-scripts-smoke bash tests/run-smoke-shard.sh "${affected_args[@]}"
+      else
+        stage affected-scripts-smoke bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
+      fi
+    elif [ "${affected_test%.py}" != "$affected_test" ]; then
+      affected_args=()
+      affected_index=0
+      while [ "$affected_index" -lt "${#AFFECTED_CASE_PATHS[@]}" ]; do
+        if [ "${AFFECTED_CASE_LANGS[$affected_index]}" = python ] && \
+            [ "${AFFECTED_CASE_PATHS[$affected_index]}" = "$affected_test" ]; then
+          affected_args[${#affected_args[@]}]=-k
+          affected_args[${#affected_args[@]}]="${AFFECTED_CASE_SELECTORS[$affected_index]}"
+        fi
+        affected_index=$((affected_index + 1))
+      done
+      stage "affected:$affected_test" env \
+        "PYTHONPATH=$ROOT/scripts/lib${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m unittest "${affected_args[@]}" "$affected_test"
+    else
+      stage "affected:$affected_test" bash "$affected_test"
+    fi
+  done
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
@@ -514,5 +755,6 @@ case "$MODE" in
   focused) echo "check: ok (focused only)" ;;
   scripts-smoke) echo "check: ok (scripts-smoke only)" ;;
   quick) echo "check: ok (quick local checks; full CI gate required)" ;;
+  affected) echo "check: ok (affected tests; mode=$AFFECTED_MODE)" ;;
   *) echo "check: ok" ;;
 esac

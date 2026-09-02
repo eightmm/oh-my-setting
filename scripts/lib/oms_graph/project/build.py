@@ -27,6 +27,36 @@ from .parsers import parser_for
 from .model import make_edge, node_id, sort_edges, sort_nodes
 
 
+def _coverage(discovery: Mapping[str, Any]) -> Dict[str, Any]:
+    skipped_by_reason: Dict[str, int] = {}
+    unparsed_by_extension: Dict[str, int] = {}
+    for row in discovery.get("skipped", []):
+        if not isinstance(row, Mapping):
+            continue
+        reason = str(row.get("reason", "unknown") or "unknown")
+        skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+        if reason == "unparsed":
+            suffix = Path(str(row.get("path", ""))).suffix.lower() or "<none>"
+            unparsed_by_extension[suffix] = unparsed_by_extension.get(suffix, 0) + 1
+    files = discovery.get("files", {})
+    parsed = len(files) if isinstance(files, (dict, list, tuple)) else 0
+    return {
+        "parsed": parsed,
+        "unparsed": skipped_by_reason.get("unparsed", 0),
+        "unparsed_by_extension": dict(sorted(unparsed_by_extension.items())),
+        "skipped_by_reason": dict(sorted(skipped_by_reason.items())),
+    }
+
+
+def coverage(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
+    manifest = read_json(state_dir(Path(repo).resolve(), state) / "manifest.json", {})
+    if not isinstance(manifest, Mapping):
+        return _coverage({"files": [], "skipped": []})
+    if isinstance(manifest.get("coverage"), Mapping):
+        return dict(manifest["coverage"])
+    return _coverage({"files": manifest.get("files", {}), "skipped": manifest.get("skipped", [])})
+
+
 def state_dir(repo: Path, override: Optional[Path] = None) -> Path:
     return Path(override) if override else repo / ".oms" / "project-graph"
 
@@ -86,6 +116,7 @@ def build(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] = 
     manifest = {"schema": PROJECT_SCHEMA, "revision": revision, "generated_at": utc_now(), "parser_version": PARSER_VERSION,
                 "discovery": {"include": sorted(include), "exclude": sorted(exclude), "max_bytes": int(max_bytes)},
                 "files": {path: files[path] for path in sorted(files)}, "skipped": discovery["skipped"],
+                "coverage": _coverage(discovery),
                 "stats": {"files": len(files), "nodes": len(nodes), "edges": len(edges), "cached": cached_count, "parsed": len(files) - cached_count}}
     atomic_write_json(directory / "manifest.json", manifest)
     prune(directory, keys)
@@ -122,7 +153,8 @@ def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
     directory = state_dir(Path(repo).resolve(), state)
     manifest = read_json(directory / "manifest.json", None)
     if not isinstance(manifest, dict):
-        return {"present": False, "fresh": False, "revision": "", "stale": [], "missing": [], "new": []}
+        return {"present": False, "fresh": False, "revision": "", "stale": [], "missing": [], "new": [],
+                "coverage": _coverage({"files": [], "skipped": []})}
     options = manifest.get("discovery") if isinstance(manifest.get("discovery"), dict) else {}
     listed = discover_files(Path(repo).resolve(), include=tuple(options.get("include", ())), exclude=tuple(options.get("exclude", ())), max_bytes=int(options.get("max_bytes", 2 * 1024 * 1024)))
     current = set(listed["files"])
@@ -139,7 +171,8 @@ def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
     if manifest.get("schema") != PROJECT_SCHEMA:
         outdated["schema"] = {"built": manifest.get("schema"), "current": PROJECT_SCHEMA}
     return {"present": True, "fresh": not (stale or missing or new or outdated), "revision": manifest.get("revision", ""),
-            "stale": stale, "missing": missing, "new": new, "outdated": outdated}
+            "stale": stale, "missing": missing, "new": new, "outdated": outdated,
+            "coverage": _coverage(listed)}
 
 
 def load_graph(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
@@ -298,6 +331,13 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
                         elif len(choices) > 1:
                             target, confidence, candidates = choices[0], "AMBIGUOUS", choices[1:]
             if target:
-                raw_edges.append(make_edge(ref.get("from", source_file_id), target, relation, confidence, path=source_path, source_digest=digest, line=ref.get("line"), candidates=candidates))
+                targets = [target] + candidates if confidence == "AMBIGUOUS" else [target]
+                for resolved_target in targets:
+                    alternatives = [item for item in targets if item != resolved_target]
+                    raw_edges.append(make_edge(
+                        ref.get("from", source_file_id), resolved_target, relation, confidence,
+                        path=source_path, source_digest=digest, line=ref.get("line"),
+                        candidates=alternatives,
+                    ))
     unique = {(edge["source"], edge["target"], edge["relation"], edge["confidence"], edge.get("evidence", {}).get("path"), edge.get("evidence", {}).get("line")): edge for edge in raw_edges}
     return nodes, sort_edges(list(unique.values()))

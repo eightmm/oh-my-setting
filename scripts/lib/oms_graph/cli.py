@@ -20,6 +20,7 @@ from .child_policy import CHILD_GRAPH_ERROR, child_action_is_allowed
 from .errors import GraphError
 from .facts import collect_facts
 from .project import analytics
+from .project import affected as project_affected
 from .project import blast as project_blast
 from .project import history as project_history
 from .project import build as project_build
@@ -27,18 +28,35 @@ from .project import context as project_context
 from .project.query import Graph
 from .spec import load_spec
 from .validate import validate_spec
-from oms_runtime.common import CoreError, read_json, repo_root
+from oms_runtime.common import CoreError, atomic_write_bytes, read_json, repo_root
 
 PROJECT_STATE_ENV = "OMS_PROJECT_GRAPH_STATE"
 AUTOBUILD_ENV = "OMS_GRAPH_AUTOBUILD"
+HTML_FRAGMENT_MAX_BYTES = 1024 * 1024
 # Readers that keep the graph current themselves, so `oms graph project find`
 # works in a repository nobody has built yet. `check` reports freshness and
 # `build` is the explicit form: neither may refresh behind the caller's back.
-AUTO_REFRESH_ACTIONS = ("map", "find", "neighbors", "trace", "blast", "analyze", "coupling", "context")
+AUTO_REFRESH_ACTIONS = (
+    "map", "find", "api", "search", "neighbors", "trace", "blast",
+    "affected", "analyze", "coupling", "context",
+)
 
 
 def emit(value: Any, pretty: bool = False) -> None:
     print(json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2 if pretty else None, separators=None if pretty else (",", ":")))
+
+
+def _write_html_fragment(value: str, fragment: str, announce: bool = True) -> Path:
+    path = Path(str(value or ""))
+    if not path.is_absolute():
+        raise GraphError("--html-fragment requires an absolute output path")
+    encoded = fragment.encode("utf-8")
+    if len(encoded) > HTML_FRAGMENT_MAX_BYTES:
+        raise GraphError("HTML fragment exceeds the 1 MiB agent-view limit")
+    target = atomic_write_bytes(path, encoded)
+    if announce:
+        print("html_fragment: %s" % target)
+    return target
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,14 +81,29 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--json", action="store_true")
     show_map = project_sub.add_parser("map")
     show_map.add_argument("--include-tests", action="store_true", help="keep test files in the overview (dropped by default)")
+    show_map.add_argument("--limit", type=int, default=100, help="maximum nodes in a visual output (1-200)")
+    show_map.add_argument("--depth", type=int, default=2, help="neighbor depth in the HTML overview (0-4)")
     show_map.add_argument("--json", action="store_true")
-    show_map.add_argument("--mermaid", action="store_true")
+    map_visual = show_map.add_mutually_exclusive_group()
+    map_visual.add_argument("--mermaid", action="store_true")
+    map_visual.add_argument("--html-fragment", default="", metavar="ABSOLUTE_PATH",
+                            help="write a bounded interactive HTML fragment for an agent UI")
+    map_visual.add_argument("--ui-model", action="store_true",
+                            help="emit the bounded graph data consumed by an MCP Apps renderer")
     find = project_sub.add_parser("find")
     find.add_argument("query")
     find.add_argument("--kind", default="")
     find.add_argument("--limit", type=int, default=20)
     find.add_argument("--include-tests", action="store_true", help="rank test files too (dropped by default unless --kind test)")
     find.add_argument("--json", action="store_true")
+    api = project_sub.add_parser("api", help="signatures and summaries for one indexed file, without bodies")
+    api.add_argument("path")
+    api.add_argument("--limit", type=int, default=500)
+    api.add_argument("--json", action="store_true")
+    search = project_sub.add_parser("search", help="exhaustive case-insensitive literal search grouped by graph symbol")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=200)
+    search.add_argument("--json", action="store_true")
     neighbors = project_sub.add_parser("neighbors")
     neighbors.add_argument("node")
     neighbors.add_argument("--relation", default="")
@@ -96,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
     coupling.add_argument("--min-degree", type=float, default=project_history.DEFAULT_MIN_DEGREE, help="minimum coupling degree, percent of average revisions")
     coupling.add_argument("--limit", type=int, default=40)
     coupling.add_argument("--json", action="store_true")
+    affected = project_sub.add_parser("affected", help="fail-open affected-test plan for an exact Git range")
+    affected.add_argument("--base", required=True)
+    affected.add_argument("--head", default="HEAD")
+    affected.add_argument("--depth", type=int, default=0,
+                          help="reverse dependency depth; 0 follows the complete closure")
+    affected.add_argument("--guard", action="append", default=[], help="additional always-full path glob")
+    affected.add_argument("--json", action="store_true")
     analyze = project_sub.add_parser("analyze")
     analyze.add_argument("--hubs", type=int, default=10)
     analyze.add_argument("--cycles", action="store_true")
@@ -109,7 +149,15 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--bundle", action="store_true")
     context.add_argument("--base", default="")
     context.add_argument("--json", action="store_true")
-    for reader in (show_map, find, neighbors, trace, blast, analyze, coupling, context):
+    context_visual = context.add_mutually_exclusive_group()
+    context_visual.add_argument("--html-fragment", default="", metavar="ABSOLUTE_PATH",
+                                help="write the task-oriented graph as an interactive HTML fragment")
+    context_visual.add_argument("--ui-model", action="store_true",
+                                help="emit the bounded task graph data consumed by an MCP Apps renderer")
+    for reader in (
+        show_map, find, api, search, neighbors, trace, blast, affected,
+        analyze, coupling, context,
+    ):
         reader.add_argument("--no-refresh", action="store_true", help="read the graph as it stands; never build or refresh it")
     execution = groups.add_parser("exec", help="execution graph: validate, route, run, resume, decide, status, events")
     exec_sub = execution.add_subparsers(dest="action", required=True)
@@ -118,7 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--json", action="store_true")
     render = exec_sub.add_parser("render")
     render.add_argument("spec")
-    render.add_argument("--mermaid", action="store_true")
+    render_output = render.add_mutually_exclusive_group()
+    render_output.add_argument("--mermaid", action="store_true")
+    render_output.add_argument("--html-fragment", default="", metavar="ABSOLUTE_PATH",
+                               help="write an interactive HTML fragment for an agent UI")
     route = exec_sub.add_parser("route")
     route.add_argument("spec", nargs="?", default="")
     route.add_argument("--run", default="")
@@ -154,7 +205,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = exec_sub.add_parser("status")
     status.add_argument("--run", default="")
     status.add_argument("--json", action="store_true")
-    status.add_argument("--mermaid", action="store_true")
+    status_visual = status.add_mutually_exclusive_group()
+    status_visual.add_argument("--mermaid", action="store_true")
+    status_visual.add_argument("--html-fragment", default="", metavar="ABSOLUTE_PATH",
+                               help="write the live execution graph as an interactive HTML fragment")
     events = exec_sub.add_parser("events")
     events.add_argument("--run", required=True)
     events.add_argument("--limit", type=int, default=50)
@@ -233,27 +287,113 @@ def _project_check(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 
 def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
-    graph, index = _index(repo, state)
+    if args.limit < 1 or args.limit > 200:
+        raise GraphError("project map --limit must be between 1 and 200")
+    if args.depth < 0 or args.depth > 4:
+        raise GraphError("project map --depth must be between 0 and 4")
+    if args.json and (args.mermaid or args.ui_model):
+        raise GraphError("project map cannot combine --json with a visual output")
+    full_graph, index = _index(repo, state)
+    graph = full_graph
     if not args.include_tests:
         index = index.without_tests()
         graph = index.graph
     summary = index.map_summary()
+    summary["coverage"] = project_build.coverage(repo, state=state)
+    assurance = analytics.structural_assurance(
+        full_graph.get("nodes", []), full_graph.get("edges", []),
+        include_tests=args.include_tests,
+    )
+    assurance_degree = analytics.evidence_degrees(
+        graph.get("nodes", []), graph.get("edges", []),
+    )
+    attention = sorted(
+        (ident for ident, row in assurance["nodes"].items()
+         if row["assurance"] == "attention" and ident in assurance_degree),
+        key=lambda ident: (-assurance_degree[ident]["total"], ident),
+    )[:10]
+    summary["assurance"] = {
+        "schema": assurance["schema"], "basis": assurance["basis"],
+        "note": assurance["note"], "counts": assurance["counts"],
+        "attention": attention,
+    }
+    if args.ui_model:
+        emit(render.project_visual_model(
+            full_graph.get("nodes", []), full_graph.get("edges", []),
+            revision=str(full_graph.get("revision", "")), limit=args.limit, depth=args.depth,
+            include_tests=args.include_tests, coverage=summary["coverage"],
+        ), args.pretty)
+        return 0
+    fragment = None
+    if args.html_fragment:
+        fragment = _write_html_fragment(args.html_fragment, render.render_project_html_fragment(
+            full_graph.get("nodes", []), full_graph.get("edges", []),
+            revision=str(full_graph.get("revision", "")), limit=args.limit, depth=args.depth,
+            include_tests=args.include_tests, coverage=summary["coverage"],
+        ), announce=not args.json)
     if args.json:
-        emit(summary, args.pretty)
+        payload = dict(summary)
+        if fragment:
+            payload["html_fragment"] = str(fragment)
+        emit(payload, args.pretty)
     elif args.mermaid:
-        print(render.render_project_mermaid(graph.get("nodes", []), graph.get("edges", []), limit=200))
-    else:
+        print(render.render_project_mermaid(graph.get("nodes", []), graph.get("edges", []), limit=args.limit))
+    elif not fragment:
         print(render.render_project_map_text(summary))
     return 0
 
 
 def _project_find(args: argparse.Namespace, repo: Path, state: Path) -> int:
-    rows = _index(repo, state)[1].find(args.query, kinds=(args.kind,) if args.kind else (), limit=args.limit, include_tests=args.include_tests)
+    full_graph, index = _index(repo, state)
+    rows = index.find(args.query, kinds=(args.kind,) if args.kind else (), limit=args.limit, include_tests=args.include_tests)
     if args.json:
+        assurance = analytics.structural_assurance(
+            full_graph.get("nodes", []), full_graph.get("edges", []),
+            include_tests=args.include_tests or args.kind == "test",
+        )
+        for row in rows:
+            state_row = assurance["nodes"].get(row["id"])
+            if state_row:
+                row.update(state_row)
+                row["assurance_basis"] = assurance["basis"]
         emit(rows, args.pretty)
         return 0
     for row in rows:
         print("%s  %s  %s  %d" % (row["id"], row["kind"], row.get("path", ""), row["score"]))
+    return 0
+
+
+def _project_api(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    if args.limit < 1 or args.limit > 2000:
+        raise GraphError("project api --limit must be between 1 and 2000")
+    result = _index(repo, state)[1].file_api(args.path, limit=args.limit)
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print("path: %s" % result["path"])
+    print("language: %s" % (result["language"] or "unknown"))
+    if result.get("summary"):
+        print("summary: %s" % result["summary"])
+    for row in result["symbols"]:
+        suffix = " — %s" % row["summary"] if row.get("summary") else ""
+        print("%d  %s  %s%s" % (row["line"], row["kind"], row["signature"], suffix))
+    return 0
+
+
+def _project_search(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    if args.limit < 1 or args.limit > 500:
+        raise GraphError("project search --limit must be between 1 and 500")
+    result = _index(repo, state)[1].search(repo, args.query, limit=args.limit)
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print("search: %d hits in %d groups%s" % (
+        result["total_hits"], len(result["groups"]), " (truncated)" if result["truncated"] else "",
+    ))
+    for group in result["groups"]:
+        print("%s  %s  %d incoming" % (group["id"], group["path"], group["incoming"]))
+        for hit in group["hits"]:
+            print("  L%d: %s" % (hit["line"], hit["text"]))
     return 0
 
 
@@ -303,6 +443,10 @@ def _project_blast(args: argparse.Namespace, repo: Path, state: Path) -> int:
         return 0
     for path in paths:
         print("path: %s" % path)
+    print("path_coverage: %s" % result["path_coverage"])
+    print("truncated: %s" % str(result["truncated"]).lower())
+    for path in result["unmatched"]:
+        print("unmatched: %s" % path)
     for ident in result["seeds"]:
         print("seed: %s" % ident)
     for row in result["dependents"]:
@@ -313,17 +457,79 @@ def _project_blast(args: argparse.Namespace, repo: Path, state: Path) -> int:
     print("tests:")
     for path in result["tests"]:
         print("  %s" % path)
+    print("test_cases:")
+    for row in result["test_cases"]:
+        print("  %s" % row["id"])
+    return 0
+
+
+def _project_affected(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    changes = project_affected.changed_entries(repo, args.base, args.head)
+    boundaries = tuple(project_affected.DEFAULT_BOUNDARIES) + tuple(args.guard)
+    result = project_affected.affected_plan(
+        _index(repo, state)[1],
+        [row["path"] for row in changes],
+        changes=changes,
+        depth=args.depth,
+        boundary_patterns=boundaries,
+        workspace_exact=project_affected.workspace_matches_head(repo, args.head),
+    )
+    result["base"] = args.base
+    result["head"] = args.head
+    result["changes"] = changes
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print("mode: %s" % result["mode"])
+    print("path_coverage: %s" % result["path_coverage"])
+    for confidence, count in result["ignored_confidence_counts"].items():
+        print("ignored_confidence: %s %d" % (confidence, count))
+    for reason in result["reasons"]:
+        print("reason: %s" % reason)
+    for path in result["tests"]:
+        print("test: %s" % path)
+    for row in result["test_cases"]:
+        print("test_case: %s" % row["id"])
     return 0
 
 
 def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
-    pack = project_context.context_pack(repo, _index(repo, state)[1], task=args.task, max_files=args.max_files, base=args.base, state=state)
+    graph, index = _index(repo, state)
+    pack = project_context.context_pack(repo, index, task=args.task, max_files=args.max_files, base=args.base, state=state)
     if args.bundle:
         pack["bundle"] = project_context.compile_bundle(repo, pack)
+    if args.ui_model:
+        emit(render.project_visual_model(
+            graph.get("nodes", []), graph.get("edges", []),
+            revision=str(graph.get("revision", "")),
+            focus_ids=list(pack["entries"]), focus_paths=list(pack["files"]),
+            changed_paths=list(pack["change"]["changed"]) + list(pack["change"]["untracked"]),
+            impacted_paths=list(pack["change"]["impacted"]), coverage=pack["coverage"],
+            limit=min(120, max(48, args.max_files * 6)), depth=2,
+        ), args.pretty)
+        return 0
+    fragment = None
+    if args.html_fragment:
+        fragment = _write_html_fragment(args.html_fragment, render.render_project_html_fragment(
+            graph.get("nodes", []), graph.get("edges", []),
+            revision=str(graph.get("revision", "")),
+            focus_ids=list(pack["entries"]), focus_paths=list(pack["files"]),
+            changed_paths=list(pack["change"]["changed"]) + list(pack["change"]["untracked"]),
+            impacted_paths=list(pack["change"]["impacted"]),
+            coverage=pack["coverage"],
+            limit=min(120, max(48, args.max_files * 6)), depth=2,
+            title="OMS Context Graph · %s" % str(args.task)[:72],
+        ), announce=not args.json)
     if args.json:
-        emit(pack, args.pretty)
+        payload = dict(pack)
+        if fragment:
+            payload["html_fragment"] = str(fragment)
+        emit(payload, args.pretty)
+        return 0
+    if fragment:
         return 0
     print("task: %s" % pack["task"])
+    print("project_graph_revision: %s" % pack["project_graph_revision"])
     for entry in pack["entries"]:
         print("entry: %s" % entry)
     print("files:")
@@ -332,6 +538,9 @@ def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
     print("tests:")
     for path in pack["tests"]:
         print("  %s" % path)
+    print("test_cases:")
+    for row in pack["test_cases"]:
+        print("  %s" % row["id"])
     estimate = pack["byte_estimate"]
     print("byte_estimate: raw_candidate_files=%d pack=%d" % (estimate["raw_candidate_files"], estimate["pack"]))
     print("pack_path: %s" % pack["pack_path"])
@@ -395,8 +604,10 @@ def _project_analyze(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 
 PROJECT_ACTIONS = {"build": _project_build, "ensure": _project_ensure, "check": _project_check, "map": _project_map,
-                   "find": _project_find, "neighbors": _project_neighbors, "trace": _project_trace,
-                   "blast": _project_blast, "analyze": _project_analyze, "coupling": _project_coupling,
+                   "find": _project_find, "api": _project_api, "search": _project_search,
+                   "neighbors": _project_neighbors, "trace": _project_trace,
+                   "blast": _project_blast, "affected": _project_affected,
+                   "analyze": _project_analyze, "coupling": _project_coupling,
                    "context": _project_context}
 
 STOP_STATUSES = ("gate", "blocked", "exhausted", "waiting", "invalid")
@@ -441,7 +652,10 @@ def _exec_validate(args: argparse.Namespace) -> int:
 
 def _exec_render(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
-    sys.stdout.write(render.render_exec_mermaid(spec) if args.mermaid else render.render_exec_text(spec))
+    if args.html_fragment:
+        _write_html_fragment(args.html_fragment, render.render_exec_html_fragment(spec))
+    else:
+        sys.stdout.write(render.render_exec_mermaid(spec) if args.mermaid else render.render_exec_text(spec))
     return 0
 
 
@@ -525,11 +739,24 @@ def _exec_status(args: argparse.Namespace) -> int:
         return 3
     spec, projection, facts = _run_view(repo, run_id)
     route = exec_route.evaluate(spec, projection, facts)
+    if args.json and args.mermaid:
+        raise GraphError("exec status cannot combine --json with --mermaid")
+    payload = {"schema": 1, "run_id": run_id, "spec_id": spec.get("id", ""),
+               "route": route, "projection": projection}
+    fragment = None
+    if args.html_fragment:
+        fragment = _write_html_fragment(args.html_fragment, render.render_exec_html_fragment(
+            spec, projection, route, title="OMS Execution Run · %s" % run_id,
+        ), announce=not args.json)
     if args.json:
-        emit({"schema": 1, "run_id": run_id, "spec_id": spec.get("id", ""), "route": route, "projection": projection}, args.pretty)
+        if fragment:
+            payload["html_fragment"] = str(fragment)
+        emit(payload, args.pretty)
         return 0
     if args.mermaid:
         sys.stdout.write(render.render_exec_mermaid(spec, projection))
+        return 0
+    if fragment:
         return 0
     print("run: %s spec=%s status=%s" % (run_id, spec.get("id", ""), route["status"]))
     bindings = projection.get("bindings", {})

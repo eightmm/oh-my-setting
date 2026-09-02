@@ -624,6 +624,122 @@ EOF
     fail "check gate treated ambient-only .oms creation as a suite leak"
 }
 
+test_affected_gate_runs_positive_evidence_and_fails_open() {
+  local gate="$TMP/check-affected-gate"
+  local base head boundary_base out log="$TMP/check-affected.log"
+
+  mkdir -p "$gate/scripts/lib" "$gate/tests" "$gate/lib"
+  cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
+  cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
+  cp "$ROOT/tests/run-smoke-shard.sh" "$gate/tests/run-smoke-shard.sh"
+  for script in check-python.sh check-bash32.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/$script"
+  done
+  for suite in codex-hud-config-smoke.sh source-distribution-smoke.sh \
+      platform-portability-smoke.sh bsd-portability-smoke.sh functional-evolution-smoke.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/$suite"
+  done
+  cat > "$gate/scripts/graph.sh" <<'EOF'
+#!/usr/bin/env bash
+case "${OMS_TEST_GRAPH_MODE:-affected}" in
+  full)
+    printf '%s\n' '{"schema":1,"mode":"full","reasons":["unmatched:lib/leaf.py"],"tests":[],"test_cases":[]}'
+    ;;
+  error) exit 23 ;;
+  *)
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
+    ;;
+esac
+EOF
+  chmod +x "$gate/scripts/graph.sh"
+  cat > "$gate/tests/scripts-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+test_selected() {
+  printf 'shell-selected\n' >> "$OMS_TEST_AFFECTED_LOG"
+}
+test_unselected() {
+  printf 'shell-unselected\n' >> "$OMS_TEST_AFFECTED_LOG"
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_selected
+test_unselected
+# SMOKE_TEST_CALLS_END
+EOF
+  cat > "$gate/tests/leaf-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'shell-file\n' >> "$OMS_TEST_AFFECTED_LOG"
+EOF
+  cat > "$gate/tests/test_leaf.py" <<'EOF'
+import os
+import unittest
+
+class LeafTest(unittest.TestCase):
+    def test_selected(self):
+        with open(os.environ["OMS_TEST_AFFECTED_LOG"], "a", encoding="utf-8") as handle:
+            handle.write("python-selected\n")
+
+    def test_unselected(self):
+        with open(os.environ["OMS_TEST_AFFECTED_LOG"], "a", encoding="utf-8") as handle:
+            handle.write("python-unselected\n")
+EOF
+  printf 'one\n' > "$gate/lib/leaf.py"
+  git -C "$gate" init -q
+  git -C "$gate" config user.name test
+  git -C "$gate" config user.email test@example.com
+  git -C "$gate" add .
+  git -C "$gate" commit -qm base
+  base="$(git -C "$gate" rev-parse HEAD)"
+  printf 'two\n' >> "$gate/lib/leaf.py"
+  git -C "$gate" add lib/leaf.py
+  git -C "$gate" commit -qm head
+  head="$(git -C "$gate" rev-parse HEAD)"
+
+  out="$(cd "$gate" && bash scripts/check.sh --affected --print-affected-mode \
+    --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||
+    fail "affected gate could not expose its plan mode"
+  [ "$out" = affected ] || fail "positive graph plan reported the wrong mode: $out"
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full \
+    bash scripts/check.sh --affected --print-affected-mode \
+    --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||
+    fail "full fallback could not expose its plan mode"
+  [ "$out" = full ] || fail "uncertain graph plan reported the wrong mode: $out"
+
+  : > "$log"
+  (cd "$gate" && OMS_TEST_AFFECTED_LOG="$log" \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" >/dev/null) ||
+    fail "affected gate rejected a positive graph plan"
+  grep -Fxq shell-selected "$log" || fail "affected gate omitted the selected shell case"
+  grep -Fxq python-selected "$log" || fail "affected gate omitted the selected Python case"
+  grep -Fxq shell-file "$log" || fail "affected gate omitted the selected shell file"
+  if grep -Fq unselected "$log"; then
+    fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
+  fi
+
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages)" ||
+    fail "affected gate rejected a fail-open graph plan"
+  printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
+    fail "uncertain affected plan did not fall back to the full focused gate: $out"
+  printf '%s\n' "$out" | grep -Fxq artifact-supersession ||
+    fail "fail-open affected stage listing stopped before the full focused gate: $out"
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)" ||
+    fail "affected gate propagated a graph-reader failure"
+  printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
+    fail "graph-reader failure did not fail open to the focused gate: $out"
+
+  boundary_base="$head"
+  printf '# selector changed\n' >> "$gate/scripts/graph.sh"
+  git -C "$gate" add scripts/graph.sh
+  git -C "$gate" commit -qm selector-boundary
+  head="$(git -C "$gate" rev-parse HEAD)"
+  out="$(cd "$gate" && bash scripts/check.sh --affected \
+    --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
+    fail "affected gate rejected its own selector-boundary change"
+  printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
+    fail "check.sh trusted the graph to validate its own selector change: $out"
+}
+
 test_uninstall_stops_before_unlink_on_removal_failure() {
   local checkout="$TMP/uninstall-removal-failure"
   local log="$TMP/uninstall-removal-failure.log"
@@ -779,6 +895,7 @@ test_artifact_retention_corruption_and_source_tracking
 test_large_artifact_index_compacts_before_append
 test_smoke_runner_tail_and_signal_cleanup
 test_smoke_runner_reports_bounded_opt_in_timings
+test_affected_gate_runs_positive_evidence_and_fails_open
 test_gate_fingerprints_full_oms_state
 test_uninstall_stops_before_unlink_on_removal_failure
 test_install_owner_guards_and_stale_status

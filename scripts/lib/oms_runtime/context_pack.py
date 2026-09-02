@@ -76,6 +76,27 @@ def _check_evidence(value: Any) -> List[Dict[str, str]]:
     return rows
 
 
+def _check_test_cases(value: Any) -> List[Dict[str, str]]:
+    if not isinstance(value, list):
+        raise CoreError("test_cases must be a list")
+    if len(value) > MAX_ENTRIES:
+        raise CoreError("test_cases has %d entries, over the %d cap" % (len(value), MAX_ENTRIES))
+    rows = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise CoreError("test_cases entries must be objects")
+        row = {"path": _check_path(item.get("path"), "test_cases")}
+        for field in ("id", "language", "name"):
+            raw = item.get(field)
+            if not isinstance(raw, str):
+                raise CoreError("test_cases %s must be a string" % field)
+            if len(raw) > MAX_PATH_CHARS or any(char in raw for char in "\0\r\n"):
+                raise CoreError("test_cases %s is not a bounded line" % field)
+            row[field] = raw
+        rows.append(row)
+    return rows
+
+
 def _read_pack_bytes(path: Path, max_bytes: int) -> Tuple[bytes, str]:
     try:
         info = os.lstat(str(path))
@@ -125,6 +146,7 @@ def validate_context_pack(path: Path, repo: Path, *, max_bytes: int = MAX_PACK_B
 
     files = _check_str_list(pack.get("files", []), "files", MAX_ENTRIES)
     tests = _check_str_list(pack.get("tests", []), "tests", MAX_ENTRIES)
+    test_cases = _check_test_cases(pack.get("test_cases", []))
     evidence = _check_evidence(pack["evidence"]) if "evidence" in pack else []
     if "hubs" in pack and not isinstance(pack["hubs"], list):
         raise CoreError("hubs must be a list")
@@ -141,6 +163,7 @@ def validate_context_pack(path: Path, repo: Path, *, max_bytes: int = MAX_PACK_B
         "project_graph_revision": revision,
         "files": files,
         "tests": tests,
+        "test_cases": test_cases,
         "evidence": evidence,
         "file_count": len(files),
         "sha256": sha256_bytes(raw),

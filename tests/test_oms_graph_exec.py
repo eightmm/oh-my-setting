@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from oms_graph.errors import GraphError
-from oms_graph import events
+from oms_graph import events, render
 from oms_graph.facts import collect_facts
 from oms_graph.route import evaluate, run_fixture, state_from_outcomes
 from oms_graph.spec import load_spec, normalize_spec, spec_digest
@@ -130,6 +130,16 @@ class GraphValidationTest(unittest.TestCase):
                 graph = load_spec(name)
                 self.assertTrue(validate_spec(graph)["ok"])
                 self.assertEqual(spec_digest(graph), spec_digest(normalize_spec(graph)))
+                self.assertEqual(graph["nodes"]["implement"]["context"]["task"], "${goal}")
+                fragment = render.render_exec_html_fragment(graph)
+                self.assertTrue(fragment.startswith("<section id=\"oms-graph-view-"))
+                self.assertIn("OMS Execution Graph", fragment)
+                self.assertIn('"kind":"execution"', fragment)
+                self.assertIn('"confidence":"REPEAT"', fragment)
+                self.assertIn("Instruction draft", fragment)
+                self.assertIn("Send to Codex", fragment)
+                self.assertIn("Refresh run status", fragment)
+                self.assertLess(len(fragment.encode("utf-8")), 1024 * 1024)
 
     def test_unknown_endpoint(self):
         graph = simple_spec(); graph["edges"][0]["to"] = "unknown"

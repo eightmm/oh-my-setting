@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import builtins
 
-from ..model import make_edge, make_node, node_id
+from ..model import compact_summary, make_edge, make_node, node_id
 from .base import ParseResult, Parser
 
 _BUILTIN_NAMES = frozenset(dir(builtins))
@@ -62,6 +62,32 @@ def _bound_names(node: ast.AST) -> set:
     return names
 
 
+def _python_signature(node: ast.AST, qualname: str, kind: str) -> str:
+    if isinstance(node, ast.ClassDef):
+        bases = [name for name in (_dotted_name(item) for item in node.bases) if name]
+        return "class %s%s" % (qualname, "(%s)" % ", ".join(bases) if bases else "")
+    args = getattr(node, "args", None)
+    if not isinstance(args, ast.arguments):
+        return qualname
+    positional = list(getattr(args, "posonlyargs", [])) + list(args.args)
+    defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    parts = [item.arg + ("=..." if default is not None else "")
+             for item, default in zip(positional, defaults)]
+    posonly = len(getattr(args, "posonlyargs", []))
+    if posonly:
+        parts.insert(posonly, "/")
+    if args.vararg is not None:
+        parts.append("*" + args.vararg.arg)
+    elif args.kwonlyargs:
+        parts.append("*")
+    for item, default in zip(args.kwonlyargs, args.kw_defaults):
+        parts.append(item.arg + ("=..." if default is not None else ""))
+    if args.kwarg is not None:
+        parts.append("**" + args.kwarg.arg)
+    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    return "%s %s(%s)" % (prefix, qualname, ", ".join(parts))
+
+
 class PythonParser(Parser):
     language = "python"
     extensions = (".py",)
@@ -77,6 +103,7 @@ class PythonParser(Parser):
             tree = ast.parse(text, filename=path)
         except (SyntaxError, ValueError):
             return result
+        result.nodes[0]["summary"] = compact_summary(ast.get_docstring(tree, clean=True))
 
         import_bindings: set = set()
         for child in ast.walk(tree):
@@ -111,18 +138,26 @@ class PythonParser(Parser):
                     return False
                 return name in module_variables or any(name in frame for frame in self.locals_stack)
 
-            def _add_symbol(self, kind: str, name: str, line: int) -> str:
+            def _add_symbol(self, kind: str, name: str, node: ast.AST) -> str:
                 qualname = (self.class_name + "." + name) if self.class_name and kind == "method" else name
                 ident = node_id(kind, path, qualname)
-                result.nodes.append(make_node(kind, name, path, "python", source_digest, qualname=qualname, line=line))
+                metadata = {
+                    "signature": _python_signature(node, qualname, kind),
+                    "end_line": int(getattr(node, "end_lineno", getattr(node, "lineno", 1))),
+                }
+                result.nodes.append(make_node(
+                    kind, name, path, "python", source_digest, qualname=qualname,
+                    line=int(getattr(node, "lineno", 1)),
+                    summary=ast.get_docstring(node, clean=True), metadata=metadata,
+                ))
                 parent = node_id("class", path, self.class_name) if kind == "method" else file_id
-                result.edges.append(make_edge(parent, ident, "contains", "EXTRACTED", path=path, source_digest=source_digest, line=line))
+                result.edges.append(make_edge(parent, ident, "contains", "EXTRACTED", path=path, source_digest=source_digest, line=int(getattr(node, "lineno", 1))))
                 return ident
 
             def visit_ClassDef(self, node: ast.ClassDef) -> None:
                 old_class, old_symbol = self.class_name, self.symbol
                 self.class_name = node.name
-                self.symbol = self._add_symbol("class", node.name, node.lineno)
+                self.symbol = self._add_symbol("class", node.name, node)
                 self.methods_stack.append({child.name for child in node.body if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))})
                 for base in node.bases:
                     base_name = _dotted_name(base)
@@ -137,7 +172,7 @@ class PythonParser(Parser):
                 name = getattr(node, "name")
                 kind = "method" if self.class_name else "function"
                 old = self.symbol
-                self.symbol = self._add_symbol(kind, name, getattr(node, "lineno", 1))
+                self.symbol = self._add_symbol(kind, name, node)
                 self.locals_stack.append(_bound_names(node))
                 for child in getattr(node, "body", []):
                     self.visit(child)

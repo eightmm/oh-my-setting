@@ -21,6 +21,9 @@ def _pack(**overrides):
         "entries": ["file:scripts/plan-run.sh"],
         "files": ["scripts/plan-run.sh", "scripts/peer-delegate.sh"],
         "tests": ["tests/autonomy-plan-run-smoke.sh"],
+        "test_cases": [{"id": "symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack",
+                         "language": "shell", "name": "test_context_pack",
+                         "path": "tests/autonomy-plan-run-smoke.sh"}],
         "evidence": [{"path": "scripts/plan-run.sh", "reason": "query:file", "score": 1001}],
         "hubs": [{"id": "file:scripts/plan-run.sh", "degree": 4}],
         "pack_digest": "a" * 64,
@@ -59,6 +62,7 @@ class ContextPackValidatorTest(unittest.TestCase):
         self.assertEqual(summary["file_count"], 2)
         self.assertEqual(summary["files"], ["scripts/plan-run.sh", "scripts/peer-delegate.sh"])
         self.assertEqual(summary["tests"], ["tests/autonomy-plan-run-smoke.sh"])
+        self.assertEqual(summary["test_cases"][0]["name"], "test_context_pack")
         self.assertEqual(summary["evidence"], [{"path": "scripts/plan-run.sh", "reason": "query:file"}])
         self.assertEqual(summary["project_graph_revision"], "")
         self.assertEqual(summary["sha256"], __import__("hashlib").sha256(path.read_bytes()).hexdigest())
@@ -106,6 +110,9 @@ class ContextPackValidatorTest(unittest.TestCase):
         self.refuses(_pack(evidence=[{"reason": "no path"}]), "evidence")
         self.refuses(_pack(hubs={"id": "x"}), "hubs must be a list")
         self.refuses(_pack(project_graph_revision=7), "project_graph_revision")
+        self.refuses(_pack(test_cases="test_context_pack"), "test_cases must be a list")
+        self.refuses(_pack(test_cases=[{"id": "x", "language": "shell", "name": "test_x",
+                                      "path": "/tmp/test.sh"}]), "path")
         self.refuses(None, "not valid JSON", text="[not json")
         self.refuses(None, "must be a JSON object", text="[]")
 

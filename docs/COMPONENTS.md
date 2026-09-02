@@ -475,17 +475,21 @@ oms gc
 inspectable graphs above the plane described in the previous section; the
 contract is `docs/GRAPH-ENGINEERING.md`.
 
-The **Project Graph** (`oms graph project build|check|map|find|neighbors|trace|blast|analyze|context`)
+The **Project Graph** (`oms graph project build|check|map|find|api|search|neighbors|trace|blast|affected|analyze|context`)
 is a deterministic structural graph of the repository — file, module,
 class/function/method, test, config, and document nodes with `contains`,
 `imports`, `calls`, `references`, and `tests` edges — extracted by
 stdlib parsers (Python `ast`, bounded shell regexes, Markdown path
 references) without a model, key, or network. Every edge carries
 `EXTRACTED`, `INFERRED`, or `AMBIGUOUS` confidence, so inference is never
-presented as fact. Extraction is content-addressed under
+presented as fact. Deterministic source summaries improve task ranking;
+`api` projects signatures without bodies, `search` groups exhaustive literal
+hits by enclosing symbol, and overviews report unsupported-extension coverage
+instead of presenting an empty graph as complete. Extraction is content-addressed under
 `.oms/project-graph/cache/`, `graph.json` carries no timestamps and is
 byte-identical for the same working tree, and `check` judges freshness by
-working-tree bytes, not by commit. `blast` walks reverse dependencies from
+working-tree bytes, not by commit. `blast --base` uses the merge base and
+handles an unborn `HEAD`; `blast` walks reverse dependencies from
 the changed files; `context` produces a bounded task-specific pack (files,
 tests, blast radius, hubs, a byte estimate that is never called tokens) and
 can compile it through `oms runtime context`. Discovery honors `.gitignore`,
@@ -647,6 +651,11 @@ chooses a connector or tracked summary.
   them: `oms_peer_operations` lists them newest first, a run whose process died
   without an exit reads as `stalled` instead of polling as running forever, and
   a finished result names the thread to continue from.
+- MCP Apps: `oms_project_graph_render` is the presentation-only graph tool. It
+  links the versioned `ui://oms/project-graph/v1.html` resource, while map,
+  query, trace, blast, API, search, and affected remain reusable data tools.
+  Node selection creates an editable instruction draft and never sends it
+  without an explicit user action.
 - MCP protocol revisions: the server is dual-era. `initialize` still
   negotiates for legacy clients; a `2026-07-28` client needs no handshake —
   `server/discover` answers statelessly and the revision named in each

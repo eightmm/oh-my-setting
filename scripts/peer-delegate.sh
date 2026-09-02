@@ -501,7 +501,7 @@ if [ -n "$CONTEXT_PACK" ]; then
   context_pack_section="$(printf '%s' "$context_pack_summary" | python3 -c '
 import json, sys
 
-MAX_FILES, MAX_TESTS = 40, 20
+MAX_FILES, MAX_TESTS, MAX_CASES = 40, 20, 40
 pack = json.load(sys.stdin)
 apos = chr(39)
 reasons = {}
@@ -525,6 +525,12 @@ for path in tests[:MAX_TESTS]:
     lines.append("- %s" % path)
 if len(tests) > MAX_TESTS:
     lines.append("- (%d more tests omitted)" % (len(tests) - MAX_TESTS))
+lines.append("test cases:")
+test_cases = pack.get("test_cases", [])
+for item in test_cases[:MAX_CASES]:
+    lines.append("- %s  (%s, %s)" % (item["name"], item["language"], item["path"]))
+if len(test_cases) > MAX_CASES:
+    lines.append("- (%d more test cases omitted)" % (len(test_cases) - MAX_CASES))
 print("\n".join(lines))
 ')" || fail "context-pack: could not render the validated orientation section"
   context_pack_targets="$(printf '%s' "$context_pack_summary" |
@@ -926,6 +932,7 @@ write_compiled_context() {
 write_minimal_change_doctrine() {
   printf 'Before adding code, understand the affected flow and prefer no change, existing repo code, stdlib or portable native features, and already-declared dependencies before the smallest correct implementation.\n'
   printf 'Minimal never means weakening explicit requirements, trust-boundary validation, data-loss protection, security, accessibility, portability, compatibility, or required verification.\n'
+  printf 'Extend an existing canonical test or fixture first; add a new test only when the behavior or boundary is not already covered.\n'
   printf 'Comments/docstrings preserve task/repo-established public contracts and non-obvious rationale; never restate code, types, tests, or names, and do not delete documentation merely to reduce volume.\n'
 }
 

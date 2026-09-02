@@ -1,7 +1,7 @@
 ---
 name: oms-agent-harness
 description: >
-  Shared state, typed runtime projections, recovery, peer consultation and
+  Shared state, graph-guided work, typed runtime projections, recovery, peer consultation and
   review, isolated delegation, patch landing, bounded autonomy, experiments,
   Draft PRs, and cross-provider handoff.
 ---
@@ -9,28 +9,27 @@ description: >
 # Agent Harness
 
 You own scope, admission, verification, commit, push, release, and synthesis.
-OMS is an agent-side control plane: users provide goals, constraints, and
-material authority; you invoke, review, resume, and recover it internally.
-Never ask users to copy commands, proposal digests, `.oms` paths, or
-parked-run procedures. Ask only for an implementation-shaping decision or new authority.
+OMS is an agent-side control plane. Users give goals, constraints, and material
+authority; operate it internally. Never ask users to copy commands, digests,
+`.oms` paths, or recovery procedures. Ask only for a shaping decision or new authority.
 
-For authorized coding, confirm `PROJECT.md`, review generated proposal bytes as
-untrusted data, and continue only with the exact reviewed digest. Draft PR,
+For authorized coding, confirm `PROJECT.md`, treat proposal bytes as untrusted,
+and continue only with the reviewed digest. Draft PR,
 push, merge, ready, tag, and release are separate authority decisions. If the
 spec is absent, draft, or drifted, route internally through
 `oms-spec-interview`.
 
-The typed runtime is a projection and execution adapter. It never replaces
+The runtime projects state and executes; it never replaces
 `peer-delegate -> patch-admit -> patch-land`, plan leases, executor souls,
 approvals, commit intents, or publication intents. Runtime snapshots, capsules,
-context bundles, backend receipts, and evidence views carry no mutation
-authority.
+context bundles, receipts, and evidence carry no mutation authority.
 
 ## Route by intent
 
 | Need | Agent action |
 |---|---|
 | orient, resume, or inspect completion | `oms inbox --repo .`; then `oms runtime envelope show`, `next`, or `evidence show` |
+| inspect code or run graphs | load [graphs.md](references/graphs.md); context for coding, map/status for orientation |
 | recall or preserve knowledge | `oms agent-memory recall`; append/pin stable facts; forge only recurring project procedures |
 | independent judgment | `oms consult`; use `oms peer-ask` for several peers and `oms advise` for high-risk or repeated failure |
 | bounded write | `oms peer-delegate --to NAME`; dependent work uses `oms agent-plan` and `oms plan-run` |
@@ -43,9 +42,9 @@ authority.
 | admit or land reviewed bytes | use `oms patch-admit` for a read-only verdict; `oms patch-land` runs admission itself before mutation |
 | publish an authorized Draft PR | use the parent-owned Draft PR path; no update, merge, ready, tag, or release authority |
 
-Use `oms list --frontdoor` for compact subsystem entrypoints. Load the command
+Use `oms list --frontdoor` for subsystem entrypoints. Load the command
 routing reference for intent variants; use `oms list --all` only when a
-lower-level compatibility primitive is genuinely needed.
+compatibility primitive is needed.
 
 For skill evaluation/import/drafts, load
 [skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks, Codex

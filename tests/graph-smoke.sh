@@ -29,7 +29,8 @@ dog="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-dogfood.XXXXXX")"
 # because its build lands in the background.
 auto="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-auto.XXXXXX")"
 hook="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-hook.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$hook"' EXIT INT TERM HUP
+impact="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-impact.XXXXXX")"
+trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$hook" "$impact"' EXIT INT TERM HUP
 
 mkdir -p "$tmp/scripts/lib" "$tmp/docs" "$tmp/tests"
 git -C "$tmp" init -q -b main
@@ -123,9 +124,13 @@ python3 - "$work/map.json" <<'PY'
 import json
 import sys
 summary = json.load(open(sys.argv[1]))
-for key in ("revision", "counts", "hubs", "groups"):
+for key in ("revision", "counts", "hubs", "groups", "assurance"):
     assert key in summary, (key, sorted(summary))
 assert summary["counts"]["kind"].get("function"), summary["counts"]
+assert summary["counts"]["confidence"].get("EXTRACTED"), summary["counts"]
+assert summary["assurance"]["basis"] == "structural-evidence", summary["assurance"]
+assert summary["coverage"]["parsed"] == 6, summary["coverage"]
+assert summary["coverage"]["unparsed"] == 0, summary["coverage"]
 # Test files are dropped from the overview by default; --include-tests keeps them.
 assert not summary["counts"]["kind"].get("test"), summary["counts"]
 assert summary["hubs"] and set(summary["hubs"][0]) == {"id", "kind", "degree"}, summary["hubs"]
@@ -154,6 +159,56 @@ summary = json.load(open(sys.argv[1]))
 assert summary["counts"]["kind"].get("test"), summary["counts"]
 PY
 
+run_graph "$work/map-ui.json" project map --limit 20 --ui-model
+[ "$graph_rc" -eq 0 ] || fail "map --ui-model exited $graph_rc: $(cat "$work/map-ui.json")"
+python3 - "$work/map-ui.json" <<'PY'
+import json
+import sys
+model = json.load(open(sys.argv[1]))
+assert model["kind"] == "project" and model["schema"] == 3, model
+assert 0 < len(model["nodes"]) <= 20, len(model["nodes"])
+assert model["display"]["production_only"] is True, model["display"]
+assert model["counts"]["hidden_test_nodes"] > 0, model["counts"]
+PY
+
+run_graph "$work/map-fragment.json" project map --limit 20 --json \
+  --html-fragment "$work/project-map.html"
+[ "$graph_rc" -eq 0 ] || fail "map JSON + HTML fragment exited $graph_rc: $(cat "$work/map-fragment.json")"
+python3 - "$work/map-fragment.json" "$work/project-map.html" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1]))
+assert row["html_fragment"] == sys.argv[2], row
+assert not row["counts"]["kind"].get("test"), row["counts"]
+PY
+python3 - "$work/project-map.html" <<'PY'
+import re
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+assert text.startswith('<section id="oms-graph-view-'), text[:80]
+assert "<!doctype" not in text.lower(), text[:80]
+assert "d3@7.9.0" in text, "missing pinned renderer"
+assert "Instruction draft" in text, "missing editable work instruction"
+assert "Copy text" in text, "missing clipboard fallback"
+assert "Send to Codex" in text, "missing explicit Codex send action"
+assert "draft.focus()" in text, "node selection does not focus the instruction draft"
+assert "Refresh task context first" in text, "follow-up does not refresh project evidence"
+assert "Do not add a new test by default" in text, "follow-up may create redundant tests"
+assert "Focus + 1 hop" in text, "missing task-centered scope control"
+assert "Zoom in" in text and "Zoom out" in text, "zoom is mouse-only"
+assert "Graph nodes (text alternative)" in text, "missing accessible/offline fallback"
+assert len(text.encode("utf-8")) < 1024 * 1024, len(text)
+match = re.search(r'<script id="[^"]+-data" type="application/json">(.*?)</script>', text, re.S)
+assert match, "missing project model"
+model = __import__("json").loads(match.group(1))
+assert model["kind"] == "project", model
+assert model["schema"] == 3, model
+assert model["coverage"] == {"parsed": 6, "unparsed": 0, "unparsed_by_extension": {}}, model["coverage"]
+assert model["counts"]["hidden_test_nodes"] > 0, model["counts"]
+assert all(row["kind"] != "test" and not row["path"].startswith("tests/") for row in model["nodes"]), model["nodes"]
+assert {row["assurance"] for row in model["nodes"]} <= {"supported", "needs-evidence", "attention"}, model["nodes"]
+PY
+
 run_graph "$work/find.out" project find alpha_entry --limit 5
 [ "$graph_rc" -eq 0 ] || fail "find exited $graph_rc: $(cat "$work/find.out")"
 grep -Fq 'symbol:alpha.py::alpha_entry  function  alpha.py  ' "$work/find.out" \
@@ -166,6 +221,35 @@ rows = json.load(open(sys.argv[1]))
 assert isinstance(rows, list) and rows, rows
 assert rows[0]["id"] == "symbol:alpha.py::alpha_entry", rows[0]
 assert rows[0]["score"] > 0, rows[0]
+assert rows[0]["assurance"] in ("supported", "needs-evidence", "attention"), rows[0]
+assert rows[0]["assurance_basis"] == "structural-evidence", rows[0]
+PY
+
+run_graph "$work/api.json" project api beta.py --json
+[ "$graph_rc" -eq 0 ] || fail "api --json exited $graph_rc: $(cat "$work/api.json")"
+python3 - "$work/api.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    row = json.load(handle)
+assert row["path"] == "beta.py" and row["language"] == "python", row
+assert [item["qualname"] for item in row["symbols"]] == ["BetaRunner", "BetaRunner.run"], row
+assert row["symbols"][1]["signature"] == "def BetaRunner.run(self, value)", row
+PY
+
+run_graph "$work/search.json" project search alpha_entry --limit 10 --json
+[ "$graph_rc" -eq 0 ] || fail "search --json exited $graph_rc: $(cat "$work/search.json")"
+python3 - "$work/search.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    row = json.load(handle)
+assert row["match"] == "literal-case-insensitive", row
+assert row["content_trust"] == "untrusted-source-data", row
+assert row["total_hits"] == 3 and row["returned_hits"] == 3, row
+ids = {item["id"] for item in row["groups"]}
+assert "symbol:alpha.py::alpha_entry" in ids, ids
+assert "symbol:beta.py::BetaRunner.run" in ids, ids
 PY
 
 run_graph "$work/neighbors.out" project neighbors 'symbol:alpha.py::alpha_entry'
@@ -178,11 +262,21 @@ run_graph "$work/trace.out" project trace 'file:beta.py' --depth 2
 grep -Fqx 'file:beta.py' "$work/trace.out" || fail "trace omitted its root: $(cat "$work/trace.out")"
 grep -Fqx '  module:alpha.py  via imports' "$work/trace.out" \
   || fail "trace did not indent by distance with via: $(cat "$work/trace.out")"
+run_graph "$work/trace.json" project trace 'file:beta.py' --depth 2 --json
+python3 - "$work/trace.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["limits"] == {"nodes": 128, "edges": 160}, row
+assert isinstance(row["truncated"], bool), row
+assert isinstance(row["omitted_edges"], int), row
+assert all("candidates" not in edge.get("evidence", {}) for edge in row["edges"]), row["edges"]
+PY
 
 run_graph "$work/blast.out" project blast --path scripts/run.sh
 [ "$graph_rc" -eq 0 ] || fail "blast exited $graph_rc: $(cat "$work/blast.out")"
 grep -Fqx 'path: scripts/run.sh' "$work/blast.out" || fail "blast omitted its seed path: $(cat "$work/blast.out")"
 grep -Fqx 'seed: file:scripts/run.sh' "$work/blast.out" || fail "blast omitted its seed node: $(cat "$work/blast.out")"
+grep -Fqx 'path_coverage: complete' "$work/blast.out" || fail "blast omitted its path coverage: $(cat "$work/blast.out")"
 grep -Fq 'test:tests/smoke-test.sh' "$work/blast.out" || fail "blast omitted the dependent test: $(cat "$work/blast.out")"
 grep -Fqx '  tests/smoke-test.sh' "$work/blast.out" || fail "blast omitted its tests section: $(cat "$work/blast.out")"
 run_graph "$work/blast.json" project blast --path scripts/run.sh --json
@@ -193,7 +287,53 @@ row = json.load(open(sys.argv[1]))
 assert row["paths"] == ["scripts/run.sh"], row["paths"]
 assert row["seeds"] == ["file:scripts/run.sh"], row["seeds"]
 assert row["tests"] == ["tests/smoke-test.sh"], row["tests"]
+assert row["test_cases"] == [], row["test_cases"]
+assert row["path_coverage"] == "complete" and row["unmatched"] == [], row
 assert set(row["changed_paths"]) == {"changed", "untracked"}, row["changed_paths"]
+PY
+
+# Affected is a fail-open machine projection: it names positive test evidence
+# for a supported leaf, while an unparsed entrypoint requires the full gate.
+mkdir -p "$impact/scripts" "$impact/tests"
+git -C "$impact" init -q -b main
+git -C "$impact" config user.email test@example.com
+git -C "$impact" config user.name test
+cat > "$impact/scripts/leaf.sh" <<'EOF'
+#!/usr/bin/env bash
+echo leaf
+EOF
+cat > "$impact/tests/leaf-smoke.sh" <<'EOF'
+test_leaf() {
+  bash scripts/leaf.sh
+}
+EOF
+git -C "$impact" add .
+git -C "$impact" commit -qm base
+printf '# changed\n' >> "$impact/scripts/leaf.sh"
+git -C "$impact" commit -qam leaf
+impact_rc=0
+"$OMS" graph --repo "$impact" project affected --base HEAD^ --head HEAD --json \
+  > "$work/affected.json" 2> "$work/affected.err" || impact_rc=$?
+[ "$impact_rc" -eq 0 ] || fail "affected exited $impact_rc: $(cat "$work/affected.err")"
+python3 - "$work/affected.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["mode"] == "affected", row
+assert row["tests"] == ["tests/leaf-smoke.sh"], row
+assert [item["name"] for item in row["test_cases"]] == ["test_leaf"], row
+assert row["changes"] == [{"path": "scripts/leaf.sh", "status": "M"}], row
+PY
+printf '#!/usr/bin/env bash\n' > "$impact/scripts/oms"
+git -C "$impact" add scripts/oms
+git -C "$impact" commit -qm boundary
+"$OMS" graph --repo "$impact" project affected --base HEAD^ --head HEAD --json \
+  > "$work/affected-full.json" 2> "$work/affected-full.err" || impact_rc=$?
+[ "$impact_rc" -eq 0 ] || fail "boundary affected exited $impact_rc: $(cat "$work/affected-full.err")"
+python3 - "$work/affected-full.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+assert row["mode"] == "full", row
+assert "unmatched:scripts/oms" in row["reasons"], row
 PY
 
 run_graph "$work/context.json" project context --task "alpha entry helper for the beta runner" --max-files 3 --json
@@ -206,8 +346,42 @@ pack = json.load(open(sys.argv[1]))
 assert 0 < len(pack["files"]) <= 3, pack["files"]
 assert "alpha.py" in pack["files"], pack["files"]
 assert len(pack["evidence"]) == len(pack["files"]), pack["evidence"]
+assert len(pack["project_graph_revision"]) == 64, pack["project_graph_revision"]
+assert pack["assurance"]["basis"] == "structural-evidence", pack["assurance"]
+assert pack["assurance"]["nodes"], pack["assurance"]
+assert isinstance(pack["test_cases"], list), pack["test_cases"]
+assert len(pack["blast"]["dependents"]) <= 40, pack["blast"]
 assert pack["pack_path"].startswith(".oms/project-graph/context/"), pack["pack_path"]
 assert os.path.isfile(os.path.join(sys.argv[2], pack["pack_path"])), pack["pack_path"]
+PY
+run_graph "$work/context-fragment.json" project context \
+  --task "alpha entry helper for the beta runner" --max-files 3 \
+  --json --html-fragment "$work/project-context.html"
+[ "$graph_rc" -eq 0 ] || fail "context JSON + HTML fragment exited $graph_rc: $(cat "$work/context-fragment.json")"
+python3 - "$work/context-fragment.json" "$work/project-context.html" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1]))
+assert row["html_fragment"] == sys.argv[2], row
+assert row["entries"], row
+PY
+grep -Fq 'OMS Context Graph' "$work/project-context.html" \
+  || fail "context HTML fragment lost its task orientation"
+grep -Fq 'symbol:alpha.py::alpha_entry' "$work/project-context.html" \
+  || fail "context HTML fragment omitted its lexical entry"
+python3 - "$work/project-context.html" <<'PY'
+import json
+import re
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r'<script id="[^"]+-data" type="application/json">(.*?)</script>', text, re.S)
+assert match, "missing context graph model"
+model = json.loads(match.group(1))
+assert model["display"]["default_scope"] == "neighbors", model["display"]
+assert model["counts"]["shown_nodes"] <= 48, model["counts"]
+assert model["counts"]["hidden_test_nodes"] > 0, model["counts"]
+assert all(row["kind"] != "test" and not row["path"].startswith("tests/") for row in model["nodes"]), model["nodes"]
+assert sum(bool(row["show_label"]) for row in model["nodes"]) <= 24, model["nodes"]
 PY
 
 # --- auto-build -------------------------------------------------------------
@@ -332,6 +506,11 @@ grep -Fq 'a harness child may only use read-only graph actions' "$work/child-con
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$tmp" project map --json > "$work/child-map.json" 2>&1 || child_rc=$?
 [ "$child_rc" -eq 0 ] || fail "child read exited $child_rc: $(cat "$work/child-map.json")"
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$tmp" project map \
+  --html-fragment "$work/child-map.html" > "$work/child-map-html.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 2 ] || fail "child HTML output exited $child_rc, expected 2: $(cat "$work/child-map-html.out")"
+[ ! -e "$work/child-map.html" ] || fail "child HTML output wrote before its authority check"
 
 # The state override keeps a cache out of the inspected tree; a relative value
 # is refused rather than resolved against an unknown working directory.
@@ -434,14 +613,25 @@ run_graph_exec "$work/render-mermaid.out" exec render coding-change --mermaid
 [ "$exec_rc" -eq 0 ] || fail "render --mermaid exited $exec_rc: $(cat "$work/render-mermaid.out")"
 head -n 1 "$work/render-mermaid.out" | grep -Fqx 'flowchart TD' \
   || fail "mermaid render is not a flowchart: $(head -n 1 "$work/render-mermaid.out")"
+run_graph_exec "$work/render-html.out" exec render coding-change \
+  --html-fragment "$work/execution-graph.html"
+[ "$exec_rc" -eq 0 ] || fail "render HTML fragment exited $exec_rc: $(cat "$work/render-html.out")"
+grep -Fq 'OMS Execution Graph' "$work/execution-graph.html" \
+  || fail "execution HTML fragment lost its graph title"
+grep -Fq '"confidence":"REPEAT"' "$work/execution-graph.html" \
+  || fail "execution HTML fragment omitted its repeat edge"
 
 run_graph_exec "$work/route.out" exec route coding-change --outcomes '{"inspect":"completed"}'
 [ "$exec_rc" -eq 0 ] || fail "route exited $exec_rc: $(cat "$work/route.out")"
 grep -Fq 'implement' "$work/route.out" || fail "route did not name the next node: $(cat "$work/route.out")"
 
-run_graph_exec "$work/fixtures.out" exec test "$ROOT/tests/fixtures/graph-routes"
-[ "$exec_rc" -eq 0 ] || fail "fixture corpus exited $exec_rc: $(cat "$work/fixtures.out")"
-grep -Fq 'PASS ' "$work/fixtures.out" || fail "fixture corpus reported no result: $(cat "$work/fixtures.out")"
+# The Python corpus test owns exhaustive fixture evaluation. One representative
+# fixture here preserves the CLI/process boundary without evaluating all routes
+# a second time.
+run_graph_exec "$work/fixtures.out" exec test \
+  "$ROOT/tests/fixtures/graph-routes/initial-route.json"
+[ "$exec_rc" -eq 0 ] || fail "fixture CLI exited $exec_rc: $(cat "$work/fixtures.out")"
+grep -Fq 'PASS ' "$work/fixtures.out" || fail "fixture CLI reported no result: $(cat "$work/fixtures.out")"
 
 run_graph_exec "$work/dry-run.json" exec run coding-change --worker codex --dry-run --json
 [ "$exec_rc" -eq 0 ] || fail "dry run exited $exec_rc: $(cat "$work/dry-run.json")"
@@ -587,6 +777,20 @@ run_graph_exec "$work/status-run.json" exec status --json
 [ "$exec_rc" -eq 0 ] || fail "status exited $exec_rc: $(cat "$work/status-run.json")"
 exec_run_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$work/status-run.json")"
 [ -n "$exec_run_id" ] || fail "status reported no run id: $(cat "$work/status-run.json")"
+run_graph_exec "$work/status-html.json" exec status --run "$exec_run_id" --json \
+  --html-fragment "$work/execution-run.html"
+[ "$exec_rc" -eq 0 ] || fail "status JSON + HTML fragment exited $exec_rc: $(cat "$work/status-html.json")"
+python3 - "$work/status-html.json" "$work/execution-run.html" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1]))
+assert row["html_fragment"] == sys.argv[2], row
+assert row["route"]["status"] == "gate", row["route"]
+PY
+grep -Fq "OMS Execution Run · $exec_run_id" "$work/execution-run.html" \
+  || fail "live execution HTML fragment omitted its run id"
+grep -Fq '"status":"finished"' "$work/execution-run.html" \
+  || fail "live execution HTML fragment omitted projected node state"
 
 run_graph_exec "$work/events.out" exec events --run "$exec_run_id" --limit 4
 [ "$exec_rc" -eq 0 ] || fail "events exited $exec_rc: $(cat "$work/events.out")"

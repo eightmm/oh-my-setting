@@ -24,6 +24,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `limits`/`truncated`/`omitted`; the MCP `oms_project_graph_blast` tool passes
   `--limit 120`. On a real change set the tool used to return JSON cut
   mid-object at the server's 60,000-character output limit.
+- A versioned `ui://oms/project-graph/v1.html` MCP Apps resource and
+  `oms_project_graph_render` tool surface the bounded production graph in
+  compatible Codex clients. Selecting a node now fills and focuses an editable
+  instruction draft; sending remains explicit, with a clipboard fallback.
+- Project Graph parity surfaces distilled from Graft without adding its
+  runtime dependency: deterministic doc/comment summaries, bodies-free
+  `project api`, exhaustive symbol-grouped literal `project search`, matching
+  MCP tools, and explicit parsed/unparsed extension coverage.
 - Tool capabilities for the execution graph (`oms_graph/capabilities.py`):
   a tool node may say `{"kind": "tool", "tool": "plan_acceptance" |
   "project_context" | "commit_bound"}` and the runner builds the exact
@@ -95,6 +103,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   (`frontier`, `successor`, `blocked`). An empty run's primary was always the
   entry node, so every earlier row compared `acceptance` against whatever the
   control plane said. `verify_active_task` now maps to `acceptance`.
+- Project Graph ambiguity evidence is linear rather than quadratic (one edge
+  per candidate with a shared candidate count); namespace-package imports,
+  compound shell calls, conventional test directories, snake/camel queries,
+  merge-base blast seeds, and pre-first-commit staged changes now resolve
+  correctly. Project schema 2/parser version 4 rebuild old regenerable caches.
+- Work Journal daily and weekly pages now open with a deterministic
+  `At a glance` line, attach short judgment statements to short related-work
+  context, date weekly decisions and next actions, keep daily decisions as
+  callouts, and render a busy week's decisions as a compact list. Notion also
+  keeps result and interpretation detail visually attached to its work item;
+  `journal sync --recent-days N` can republish a bounded calendar window and
+  its overlapping ISO weeks without touching the full mirror.
 - `resume` reconciliation reads the frozen identity: a task under a live
   lease keeps its node `active` (the run reports `waiting`), an expired
   claim is `unverified`, and a write tool that died is `blocked` rather
@@ -155,6 +175,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   shell `git` invocations linked to a Python function named `git`) and added
   207 `EXTRACTED` ones, and the hub list stopped naming `semantic-eval.py::git`,
   `a2a-readonly.py::parser`, and `Graph.node`.
+- Oversized Work Journal summaries preserve overview, decisions, blockers, and
+  next actions before low-signal listings, end at complete lines with an
+  omission marker, and derive `Has Blocker` from the complete local rendering.
+  Bounded individual fields now end in `…`, and Markdown detail indentation is
+  no longer flattened before Notion projection.
 - The worker guard no longer fails a parallel delegate because a sibling
   delegate's `git worktree add`/`remove` was mid-flight at a capture. A
   registry entry without a usable checkout is exempt only while the residue

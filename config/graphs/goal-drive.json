@@ -18,6 +18,7 @@
       "plan_task": "next",
       "bind_task": "work_item",
       "mode": "run",
+      "context": {"task": "${goal}", "max_files": 12},
       "proof": ["binding.work_item.patch_present", "binding.work_item.state=review"]
     },
     "land": {

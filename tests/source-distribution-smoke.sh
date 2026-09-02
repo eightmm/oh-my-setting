@@ -97,6 +97,23 @@ grep -Fq -- '--scripts-smoke-only' "$workflow" ||
   fail "each matrix child must run only its assigned scripts-smoke shard"
 grep -Fq 'OMS_SMOKE_TIMINGS: "1"' "$workflow" ||
   fail "CI smoke shards must emit bounded timing evidence"
+# Pull requests first project the graph mode. Positive evidence runs one narrow
+# job; a fail-open result reuses the existing focused and smoke matrices rather
+# than serializing the complete gate on one runner.
+grep -Fq 'affected_plan:' "$workflow" || fail "workflow must expose an affected-plan job"
+grep -Fq 'affected:' "$workflow" || fail "workflow must expose an affected-test job"
+grep -Fq -- '--affected --no-lint' "$workflow" ||
+  fail "the PR affected job must avoid repeating the independent lint job"
+grep -Fq -- '--print-affected-mode' "$workflow" ||
+  fail "the PR plan job must project affected versus full before scheduling tests"
+grep -Fq "needs.affected_plan.outputs.mode == 'full'" "$workflow" ||
+  fail "full fallback must reuse the parallel focused and smoke matrices"
+grep -Fq "needs.affected_plan.outputs.mode == 'affected'" "$workflow" ||
+  fail "positive graph evidence must schedule the narrow affected job"
+grep -Fq "if: github.event_name == 'pull_request'" "$workflow" ||
+  fail "the affected plan must run only for pull requests"
+grep -Fq 'EVENT_NAME: ${{ github.event_name }}' "$workflow" ||
+  fail "the stable gate must distinguish intentional event-specific skips"
 
 # The public floor is Python 3.9, so syntax and the parser-less Codex HUD path
 # need a real 3.9 interpreter in CI rather than only a modern-parser promise.
@@ -173,7 +190,7 @@ if unread:
     raise SystemExit("gate does not inspect the result of: %s" % ", ".join(unread))
 PY
 
-for mode in --focused-only --scripts-smoke-only --quick; do
+for mode in --focused-only --scripts-smoke-only --quick --affected; do
   grep -Fq -- "$mode" "$ROOT/scripts/check.sh" ||
     fail "check.sh does not expose $mode"
 done
@@ -181,11 +198,14 @@ done
 # Standalone smoke suites belong to the focused gate. The full local gate
 # composes that same block, while lint already covers tests/*.sh. Keep each
 # suite in exactly one execution list so full mode cannot run it twice.
-python3 - "$ROOT/scripts/check.sh" <<'PY' || fail "new focused smoke registration is incomplete or duplicated"
+python3 - "$ROOT/scripts/check.sh" "$workflow" "$ROOT/tests" <<'PY' || fail "standalone smoke registration is incomplete or duplicated"
 import pathlib
+import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+workflow = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+tests = pathlib.Path(sys.argv[3])
 start = 'if [ "$RUN_FOCUSED" = 1 ]; then'
 end = 'if [ "$RUN_SMOKE" = 1 ]; then'
 if text.count(start) != 1 or text.count(end) != 1:
@@ -221,6 +241,32 @@ for stage, suite in expected.items():
         raise SystemExit("gate duplicates suite invocation: %s" % suite)
 if "tests/*.sh" not in text:
     raise SystemExit("shellcheck lint no longer covers tests/*.sh")
+
+# Follow literal suite invocations from the gate and workflow through any
+# registered suite that composes another one. This catches an orphaned test
+# file without maintaining a second hand-written catalog.
+pattern = re.compile(r"tests/([A-Za-z0-9_.-]+-smoke\.sh)")
+all_suites = {path.name for path in tests.glob("*-smoke.sh")}
+
+def invocations(source):
+    rows = []
+    for line in source.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        rows.extend(pattern.findall(line))
+    return rows
+
+reachable = set(invocations(text + "\n" + workflow))
+pending = list(reachable & all_suites)
+while pending:
+    owner = pending.pop()
+    for child in invocations((tests / owner).read_text(encoding="utf-8")):
+        if child in all_suites and child not in reachable:
+            reachable.add(child)
+            pending.append(child)
+missing = sorted(all_suites - reachable)
+if missing:
+    raise SystemExit("standalone smoke suite is never executed: %s" % ", ".join(missing))
 PY
 
 # An env prefix would export into every test the suite runs; a flag cannot.

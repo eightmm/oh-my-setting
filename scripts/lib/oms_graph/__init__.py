@@ -5,7 +5,7 @@ See docs/GRAPH-ENGINEERING.md for the implementation contract."""
 GRAPH_PACKAGE_VERSION = "0.1.0"
 EXEC_SCHEMA = 1
 EVENTS_SCHEMA = 1
-PROJECT_SCHEMA = 1
+PROJECT_SCHEMA = 2
 PARSER_VERSION = 4
 
 OUTCOMES = ("completed", "failed", "unverified", "partial", "blocked", "changes_requested", "approved", "skipped")

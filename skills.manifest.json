@@ -18,7 +18,7 @@
       "name": "oms-agent-harness",
       "source": "custom-skills/oms-agent-harness",
       "enabled": true,
-      "reason": "Share harness state and route provider/model work, peer consultation, independent review, and bounded write delegation.",
+      "reason": "Share harness state, graph-guided project work, provider/model routing, independent review, and bounded write delegation.",
       "triggers": [
         "oms state",
         "이어서 해줘",
@@ -94,7 +94,13 @@
         "알아서 구현",
         "자동 코딩",
         "끝까지 구현",
-        "take this confirmed goal through implementation"
+        "take this confirmed goal through implementation",
+        "프로젝트 그래프",
+        "그래프 뷰",
+        "그래프로 프로젝트",
+        "project graph",
+        "execution graph",
+        "graph-guided"
       ]
     },
     {

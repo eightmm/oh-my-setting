@@ -8,6 +8,7 @@
   "homepage": "https://github.com/eightmm/oh-my-setting",
   "repository": "https://github.com/eightmm/oh-my-setting",
   "license": "MIT",
+  "hooks": "./hooks.json",
   "keywords": [
     "codex",
     "hooks",
