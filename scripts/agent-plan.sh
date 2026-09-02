@@ -1450,6 +1450,12 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                         for line in ph:
                             if line.startswith("+++ b/"):
                                 touched.add(line[6:].strip())
+                            elif line.startswith("diff --git a/") and " b/" in line:
+                                # A `git diff --binary` hunk carries no +++
+                                # line, so a binary acceptance file would keep
+                                # its stale frozen hash and park the next
+                                # accept. The header names the post-image.
+                                touched.add(line.rsplit(" b/", 1)[1].strip())
                 except OSError:
                     touched = set()
                 files = contract.get("acceptance_files") or []

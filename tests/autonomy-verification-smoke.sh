@@ -175,7 +175,7 @@ json.dump({
             {"path": "f_touched.txt", "sha256": sha("f_touched.txt")},
         ],
     },
-    "tasks": {"t1": task("t1"), "t2": task("t2")},
+    "tasks": {"t1": task("t1"), "t2": task("t2"), "t3": task("t3")},
 }, open(os.path.join(repo, ".oms", "plan", "tasks.json"), "w", encoding="utf-8"))
 PY
 rf_patch="$rf_repo/change.patch"
@@ -227,6 +227,44 @@ rf_finish t1
   fail "an unconsented finish must not touch the frozen manifest"
 [ ! -e "$rf_repo/.oms/plan/manifest-refreeze.jsonl" ] ||
   fail "an unconsented finish must not write a refreeze row"
+
+# A binary patch (`git diff --binary` output) carries no `+++ b/` line, only
+# the `diff --git a/X b/X` header and a `GIT binary patch` section. The touched
+# set must still come from the fenced patch, so the header names the file.
+rf_binary_patch="$rf_repo/binary.patch"
+cat > "$rf_binary_patch" <<'EOF'
+diff --git a/f_touched.txt b/f_touched.txt
+index 1111111..2222222 100644
+GIT binary patch
+literal 11
+ScmZQzU|?icN-P9`00000
+EOF
+rf_binary_finish() {  # TASK
+  local tid="$1"
+  "$plan" --repo "$rf_repo" start --id "$tid" --lease-id "lease-$tid" >/dev/null
+  "$plan" --repo "$rf_repo" review --id "$tid" --lease-id "lease-$tid" \
+    --artifact "$rf_art" --patch "$rf_binary_patch" >/dev/null
+  rf_lease="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][sys.argv[2]]["review_lease_id"])' \
+    "$rf_repo/.oms/plan/tasks.json" "$tid")"
+  rf_patch_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rf_binary_patch")"
+  "$plan" --repo "$rf_repo" land --id "$tid" --lease-id "$rf_lease" \
+    --expected-review-patch "$rf_binary_patch" \
+    --expected-review-patch-sha256 "$rf_patch_sha" \
+    --expected-review-verify true \
+    --expected-review-executor-id "" \
+    --expected-review-executor-soul-sha256 "" \
+    --expected-review-lease-id "$rf_lease" >/dev/null
+  rf_receipt="$("$plan" --repo "$rf_repo" show --id "$tid" | python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)
+for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract"):
+    d.pop(name, None)
+print(hashlib.sha256(json.dumps(
+ d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
+')"
+  "$plan" --repo "$rf_repo" finish --id "$tid" --lease-id "$rf_lease" \
+    --expected-landing-receipt-sha256 "$rf_receipt" --refreeze-acceptance >/dev/null
+}
 # Consented: only the touched entry refreezes to the landed tree's hash.
 rf_finish t2 --refreeze-acceptance
 rf_new_touched="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rf_repo/f_touched.txt")"
@@ -242,6 +280,19 @@ grep -Fq '"kind":"manifest-refreeze"' "$rf_repo/.oms/plan/manifest-refreeze.json
   fail "a consented refreeze must leave a typed row"
 grep -Fq '"path":"f_touched.txt"' "$rf_repo/.oms/plan/manifest-refreeze.jsonl" ||
   fail "the refreeze row must name the refrozen entry"
+
+# Consented binary landing: the file named only by the diff --git header
+# refreezes; the untouched entry keeps its frozen hash.
+printf 'touched v3\n' > "$rf_repo/f_touched.txt"
+rf_binary_finish t3
+rf_new_touched="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rf_repo/f_touched.txt")"
+python3 - "$rf_repo/.oms/plan/tasks.json" "$rf_new_touched" <<'PY' || fail "a binary patch's file was not refrozen"
+import hashlib, json, sys
+plan = json.load(open(sys.argv[1]))
+manifest = {m["path"]: m["sha256"] for m in plan["project_contract"]["acceptance_manifest"]}
+assert manifest["f_touched.txt"] == sys.argv[2], manifest
+assert manifest["f_other.txt"] == hashlib.sha256(b"other v1\n").hexdigest(), manifest
+PY
 
 # list --json is the per-task `show` view for every task in one process; a
 # consumer must be able to replace N show calls with it without a field drift.

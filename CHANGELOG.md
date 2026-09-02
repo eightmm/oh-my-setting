@@ -119,6 +119,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- `agent-plan finish --refreeze-acceptance` took the touched-file set from
+  `+++ b/` lines only, so a `git diff --binary` hunk (which has none) left a
+  binary acceptance file's frozen hash stale and the next `accept` parked.
+  The `diff --git a/X b/X` header now names the file as well.
 - The Codex plugin's `SessionEnd` telemetry hook declared a 5s timeout, which
   Codex clamps to 3s and reports as an `error` item on every `codex exec`
   turn, including every council seat and delegate transcript. The hook
