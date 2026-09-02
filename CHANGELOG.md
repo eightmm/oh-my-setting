@@ -101,6 +101,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   install-e2e legs on one stale catalog assertion the gate could not see.
   It costs 38s in a sandboxed HOME and leaves the checkout's `.oms`
   byte-identical, so the blind spot is not worth keeping.
+- Project graph reference resolution is scope-aware (`PARSER_VERSION` 4,
+  Python parser 3): a Python call through a parameter, local, or module
+  variable yields no edge; a member of an import binding must exist in the
+  bound file; a bare Python name never resolves to a method and a builtin's
+  name resolves in-file only; a shell command word reaches only shell
+  functions; `from pkg import submodule` binds the submodule file and
+  `Class.method()` resolves to the method. On this repository the change
+  removed 1,733 `AMBIGUOUS` and 1,146 `INFERRED` call edges (1,165 of them
+  shell `git` invocations linked to a Python function named `git`) and added
+  207 `EXTRACTED` ones, and the hub list stopped naming `semantic-eval.py::git`,
+  `a2a-readonly.py::parser`, and `Graph.node`.
 - One spelling per verb. The dispatcher carried five aliases — `run`,
   `state`, `init`, `thread`, `runtime` each redirected to a longer name —
   which is the same second entrance this project refuses everywhere else,

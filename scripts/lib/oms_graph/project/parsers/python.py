@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import ast
+import builtins
 
 from ..model import make_edge, make_node, node_id
 from .base import ParseResult, Parser
+
+_BUILTIN_NAMES = frozenset(dir(builtins))
 
 
 def _dotted_name(node: ast.AST) -> str:
@@ -21,10 +24,48 @@ def _dotted_name(node: ast.AST) -> str:
     return ""
 
 
+def _target_names(target: ast.AST, into: set) -> None:
+    if isinstance(target, ast.Name):
+        into.add(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            _target_names(element, into)
+    elif isinstance(target, ast.Starred):
+        _target_names(target.value, into)
+
+
+def _bound_names(node: ast.AST) -> set:
+    """Every name a statement subtree binds as a variable (imports excluded).
+
+    Over-approximation is deliberate: a nested scope's binding also counts for
+    the enclosing function, so a call through such a name yields no edge rather
+    than a repo-wide guess by name."""
+    names: set = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Assign):
+            for target in child.targets:
+                _target_names(target, names)
+        elif isinstance(child, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension, ast.NamedExpr)):
+            _target_names(child.target, names)
+        elif isinstance(child, (ast.With, ast.AsyncWith)):
+            for item in child.items:
+                if item.optional_vars is not None:
+                    _target_names(item.optional_vars, names)
+        elif isinstance(child, ast.ExceptHandler) and child.name:
+            names.add(child.name)
+        elif isinstance(child, ast.arguments):
+            for arg in child.posonlyargs + child.args + child.kwonlyargs:
+                names.add(arg.arg)
+            for arg in (child.vararg, child.kwarg):
+                if arg is not None:
+                    names.add(arg.arg)
+    return names
+
+
 class PythonParser(Parser):
     language = "python"
     extensions = (".py",)
-    version = 2
+    version = 3
 
     def parse(self, path: str, text: str, source_digest: str) -> ParseResult:
         result = ParseResult()
@@ -37,6 +78,20 @@ class PythonParser(Parser):
         except (SyntaxError, ValueError):
             return result
 
+        import_bindings: set = set()
+        for child in ast.walk(tree):
+            if isinstance(child, ast.Import):
+                import_bindings.update(alias.asname or alias.name.split(".")[0] for alias in child.names)
+            elif isinstance(child, ast.ImportFrom):
+                import_bindings.update(alias.asname or alias.name for alias in child.names)
+        # Module-level variables (not definitions, not imports): a call through
+        # one of them is an object of unknown type, never a repo symbol by name.
+        module_variables: set = set()
+        for statement in tree.body:
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                module_variables.update(_bound_names(statement))
+        module_variables -= import_bindings
+
         class Visitor(ast.NodeVisitor):
             def __init__(self) -> None:
                 self.class_name = ""
@@ -44,9 +99,17 @@ class PythonParser(Parser):
                 # Method names of the enclosing class bodies, so a `self.x()`
                 # call resolves to a sibling method as a fact rather than by name.
                 self.methods_stack = []
+                # Names bound by the enclosing function bodies (arguments and
+                # assignment targets); a call through one is a variable.
+                self.locals_stack = []
 
             def _source(self) -> str:
                 return self.symbol or file_id
+
+            def _is_variable(self, name: str) -> bool:
+                if name in import_bindings:
+                    return False
+                return name in module_variables or any(name in frame for frame in self.locals_stack)
 
             def _add_symbol(self, kind: str, name: str, line: int) -> str:
                 qualname = (self.class_name + "." + name) if self.class_name and kind == "method" else name
@@ -63,7 +126,7 @@ class PythonParser(Parser):
                 self.methods_stack.append({child.name for child in node.body if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))})
                 for base in node.bases:
                     base_name = _dotted_name(base)
-                    if base_name:
+                    if base_name and not self._is_variable(base_name.partition(".")[0]):
                         result.refs.append({"from": self.symbol, "relation": "depends_on", "kind": "name", "value": base_name, "line": node.lineno})
                 for child in node.body:
                     self.visit(child)
@@ -75,8 +138,10 @@ class PythonParser(Parser):
                 kind = "method" if self.class_name else "function"
                 old = self.symbol
                 self.symbol = self._add_symbol(kind, name, getattr(node, "lineno", 1))
+                self.locals_stack.append(_bound_names(node))
                 for child in getattr(node, "body", []):
                     self.visit(child)
+                self.locals_stack.pop()
                 self.symbol = old
 
             visit_FunctionDef = _visit_function
@@ -98,10 +163,19 @@ class PythonParser(Parser):
                     if self.methods_stack and member in self.methods_stack[-1]:
                         result.edges.append(make_edge(self._source(), node_id("method", path, self.class_name + "." + member), "calls", "EXTRACTED", path=path, source_digest=source_digest, line=node.lineno))
                     else:
-                        # Inherited or mixed-in: resolve by name across the repo.
-                        result.refs.append({"from": self._source(), "relation": "calls", "kind": "name", "value": member, "line": node.lineno})
-                elif value:
-                    result.refs.append({"from": self._source(), "relation": "calls", "kind": "name", "value": value, "line": node.lineno})
+                        # Inherited or mixed-in: resolve by name across the repo,
+                        # where a method is the expected kind of target.
+                        result.refs.append({"from": self._source(), "relation": "calls", "kind": "name", "value": member, "line": node.lineno, "method_call": True})
+                elif value and not self._is_variable(receiver):
+                    # `scoped`: resolve only through this file's import bindings
+                    # or its own definitions — an attribute call on a name that
+                    # is not an import, or a builtin's name, is never matched to
+                    # a repo symbol just because the names agree.
+                    scoped = bool(member and receiver not in import_bindings) or receiver in _BUILTIN_NAMES
+                    ref = {"from": self._source(), "relation": "calls", "kind": "name", "value": value, "line": node.lineno}
+                    if scoped:
+                        ref["scoped"] = True
+                    result.refs.append(ref)
                 self.generic_visit(node)
 
         Visitor().visit(tree)

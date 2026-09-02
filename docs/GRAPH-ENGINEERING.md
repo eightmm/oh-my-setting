@@ -655,7 +655,18 @@ candidates; the edge targets the first in sorted order and lists the rest in
 `evidence.candidates`). Inferred edges are never presented as facts.
 
 Parsers (`parsers/`): Python via `ast` (classes, functions, methods, imports
-resolved to repo files, calls resolved through import bindings and local
+Resolution by name reaches only what the call could name: a Python call
+through a parameter, local, or module variable (`node.get()`,
+`parser.add_argument()`) yields no edge at all; a member of an import binding
+must exist in the bound file (`events.project()` with no `project` there stays
+unresolved rather than guessing); a bare Python name never resolves to a
+method (only a `self.`/`cls.` member lookup does) and a builtin's name
+resolves in-file only; a shell command word (`git`, `wait`, `command`) reaches
+only shell functions, never a Python symbol that happens to share the word.
+`Class.method()` through a same-file class or an imported one resolves to the
+method node.
+resolved to repo files — `from pkg import name` binds the submodule file when
+`name` is one — calls resolved through import bindings and local
 definitions; a `self.x()`/`cls.x()` call to a sibling method is an `EXTRACTED`
 `calls` edge, an inherited one resolves by name, and every base class becomes a
 `depends_on` edge when it lives in the repository); shell via bounded regexes (`name()` / `function name`
@@ -886,6 +897,13 @@ a value may never start with `-`. Output stays under the server's
 - Every test uses a temporary repository; nothing writes into this
   checkout's `.oms`.
 
+- `tests/test_oms_graph_parsers.py`: what a call can and cannot be linked to —
+  shell command words never reach Python functions, attribute calls on
+  parameters/locals/module variables yield no edge, builtin names resolve
+  in-file only, a bare name never resolves to a method while an inherited
+  `self.` call still does, `from pkg import submodule` binds the module file,
+  a binding without the member stays unresolved, `Class.method()` resolves to
+  the method, a local shadowing a same-file function yields no edge.
 ## Work split
 
 | worker | files (disjoint) |

@@ -200,6 +200,28 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
             if candidate in files: return candidate
         return ""
 
+    def submodule_path(value: str, imported_name: str, source_path: str) -> str:
+        """`from pkg import name` binds a file when `name` is a module of the package."""
+        if not imported_name:
+            return ""
+        dotted = value + imported_name if value.endswith(".") else value + "." + imported_name
+        return module_path(dotted, source_path)
+
+    def name_candidate_ok(candidate: str, ref: Mapping[str, Any], language: str) -> bool:
+        """Repo-wide resolution by bare name only reaches symbols the call could name.
+
+        A shell command word can only be a shell function; a Python call can only
+        be a Python symbol, and a bare call never reaches a method (only a `self.`
+        member lookup, flagged `method_call`, is allowed to)."""
+        node = by_id.get(candidate, {})
+        if ref.get("shell_bare"):
+            return node.get("language") == "shell" and node.get("kind") == "function"
+        if language == "python":
+            if node.get("language") != "python":
+                return False
+            return node.get("kind") != "method" or bool(ref.get("method_call"))
+        return True
+
     imported: Dict[str, Dict[str, Tuple[str, str]]] = {}
     include_paths: Dict[str, List[str]] = {}
     for item in extractions:
@@ -207,13 +229,21 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
         for ref in item.get("refs", []):
             if ref.get("relation") != "imports":
                 continue
-            target_path = module_path(ref["value"], source_path) if ref.get("kind") == "module" else ref["value"]
+            if ref.get("kind") == "module":
+                target_path = module_path(ref["value"], source_path)
+                submodule = submodule_path(ref["value"], ref.get("imported", ""), source_path)
+                imported_name = ref.get("imported", "")
+                if submodule:
+                    # The binding names the module itself; a member is looked up in it.
+                    target_path, imported_name = submodule, ""
+            else:
+                target_path, imported_name = ref["value"], ref.get("imported", "")
             if target_path not in files and ref.get("kind") == "path":
                 for prefix in ("", "scripts/", "scripts/lib/"):
                     if prefix + target_path in files:
                         target_path = prefix + target_path; break
             if target_path in files:
-                imported.setdefault(source_path, {})[ref.get("binding", "")] = (target_path, ref.get("imported", ""))
+                imported.setdefault(source_path, {})[ref.get("binding", "")] = (target_path, imported_name)
                 include_paths.setdefault(source_path, []).append(target_path)
     for item in extractions:
         source_path, digest = item["path"], item["sha256"]
@@ -223,9 +253,7 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
             relation = ref.get("relation", "references")
             value = ref.get("value", "")
             if ref.get("kind") == "module":
-                target_path = module_path(value, source_path)
-                if not target_path and ref.get("imported"):
-                    target_path = module_path(value + ref["imported"], source_path)
+                target_path = submodule_path(value, ref.get("imported", ""), source_path) or module_path(value, source_path)
                 if target_path:
                     target = node_id("module", target_path) if node_id("module", target_path) in by_id else node_id("file", target_path)
                     if source_file_id.startswith("test:"): relation = "tests"
@@ -240,23 +268,35 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
                     confidence = "INFERRED" if ref.get("variable") else "EXTRACTED"
             elif ref.get("kind") == "name":
                 first, _, member = value.partition(".")
-                target_path = ""
                 if first in imported.get(source_path, {}):
+                    # Bound by an import: the member must exist in the bound file.
+                    # A binding without that member stays unresolved — never a
+                    # repo-wide guess by the binding's name.
                     target_path, imported_name = imported[source_path][first]
-                    wanted = member or imported_name
-                    target = symbols_by_file.get(target_path, {}).get(wanted, "")
-                if not target:
-                    target = symbols_by_file.get(source_path, {}).get(first, "")
-                if not target and ref.get("shell_bare"):
-                    for included in include_paths.get(source_path, []):
-                        if first in symbols_by_file.get(included, {}):
-                            target = symbols_by_file[included][first]; confidence = "INFERRED"; break
-                if not target:
-                    choices = symbols_by_name.get(first, [])
-                    if len(choices) == 1:
-                        target, confidence = choices[0], "INFERRED"
-                    elif len(choices) > 1:
-                        target, confidence, candidates = choices[0], "AMBIGUOUS", choices[1:]
+                    if member and imported_name:
+                        method_id = node_id("method", target_path, imported_name + "." + member)
+                        target = method_id if method_id in by_id else ""
+                    if not target:
+                        target = symbols_by_file.get(target_path, {}).get(member or imported_name, "")
+                else:
+                    if member:
+                        method_id = node_id("method", source_path, value)
+                        target = method_id if method_id in by_id else ""
+                    if not target:
+                        target = symbols_by_file.get(source_path, {}).get(first, "")
+                    if not target and ref.get("shell_bare"):
+                        for included in include_paths.get(source_path, []):
+                            if first in symbols_by_file.get(included, {}):
+                                target = symbols_by_file[included][first]; confidence = "INFERRED"; break
+                    # `member` without a binding is an attribute of an unknown
+                    # object; `scoped` refs (builtin names) resolve in-file only.
+                    if not target and not member and not ref.get("scoped"):
+                        choices = [candidate for candidate in symbols_by_name.get(first, [])
+                                   if name_candidate_ok(candidate, ref, str(item.get("parser", "")))]
+                        if len(choices) == 1:
+                            target, confidence = choices[0], "INFERRED"
+                        elif len(choices) > 1:
+                            target, confidence, candidates = choices[0], "AMBIGUOUS", choices[1:]
             if target:
                 raw_edges.append(make_edge(ref.get("from", source_file_id), target, relation, confidence, path=source_path, source_digest=digest, line=ref.get("line"), candidates=candidates))
     unique = {(edge["source"], edge["target"], edge["relation"], edge["confidence"], edge.get("evidence", {}).get("path"), edge.get("evidence", {}).get("line")): edge for edge in raw_edges}
