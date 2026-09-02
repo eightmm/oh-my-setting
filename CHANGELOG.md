@@ -133,8 +133,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   The `diff --git a/X b/X` header now names the file as well.
 - The Codex plugin's `SessionEnd` telemetry hook declared a 5s timeout, which
   Codex clamps to 3s and reports as an `error` item on every `codex exec`
-  turn, including every council seat and delegate transcript. The hook
-  finishes in well under 100ms; the declared timeout now matches the cap.
+  turn. The plugin's declared timeout now matches the cap (the hook finishes
+  in well under 100ms). Codex also keeps a user-level `~/.codex/hooks.json`
+  that oh-my-setting does not write; where that copy still says 5s the item
+  persists until it is edited or regenerated.
 - Raising only `OMS_ARTIFACT_INDEX_KEEP` above the 1200 high-water default
   (the documented way to keep older evidence through a `gc` sweep) made every
   artifact-index append and salvage refuse with "high-water >= keep", and the

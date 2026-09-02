@@ -145,8 +145,8 @@ oms_git_assert_safe_execution_config() {  # REPO [diff-read]
   # native Windows Python/Git and must not become part of the pathname.
   common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
   worktree_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
-  common_dir="$(printf '%s' "$common_dir" | tr -d '\r')"
-  worktree_dir="$(printf '%s' "$worktree_dir" | tr -d '\r')"
+  common_dir="${common_dir//$'\r'/}"
+  worktree_dir="${worktree_dir//$'\r'/}"
   if [ -z "$common_dir" ] || [ -z "$worktree_dir" ]; then
     echo "cannot inspect repository Git config paths" >&2
     return 2
@@ -301,9 +301,9 @@ oms_git_execution_state_snapshot() {  # REPO OUT [config-only]
   common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
   worktree_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
   index_path="$(git -C "$root" rev-parse --git-path index 2>/dev/null || true)"
-  common_dir="$(printf '%s' "$common_dir" | tr -d '\r')"
-  worktree_dir="$(printf '%s' "$worktree_dir" | tr -d '\r')"
-  index_path="$(printf '%s' "$index_path" | tr -d '\r')"
+  common_dir="${common_dir//$'\r'/}"
+  worktree_dir="${worktree_dir//$'\r'/}"
+  index_path="${index_path//$'\r'/}"
   [ -n "$common_dir" ] && [ -n "$worktree_dir" ] && [ -n "$index_path" ] || return 2
   case "$common_dir" in /*|[A-Za-z]:/*) ;; *) common_dir="$root/$common_dir" ;; esac
   case "$worktree_dir" in /*|[A-Za-z]:/*) ;; *) worktree_dir="$root/$worktree_dir" ;; esac
@@ -1400,7 +1400,7 @@ PY
   # Native Windows Python writes CRLF, and the same worktree can have more than
   # one path spelling. Paths were canonicalized above; strip CR only from this
   # compact device/inode receipt before comparing it across provider phases.
-  identity_stats="$(printf '%s' "$identity_stats" | tr -d '\r')"
+  identity_stats="${identity_stats//$'\r'/}"
   identity_tab="$(printf '\t')"
   case "$identity_stats" in
     *"$identity_tab"*) ;;
