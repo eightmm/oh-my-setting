@@ -13,6 +13,52 @@ fail() {
 mkdir -p "$TMP/home" "$TMP/locks"
 export HOME="$TMP/home"
 export OMS_LOCK_DIR="$TMP/locks"
+
+# Locks for state under the temp root stay under the temp root (a per-user
+# directory the system clears), not in the per-user cache that suites run
+# outside check.sh used to fill with empty flock files; production state
+# under HOME keeps the cache directory, and a planted symlink or a directory
+# someone else owns is never opened through.
+test_temp_state_locks_under_the_temp_root() {
+  local home="$TMP/home" tmp_root="$TMP/tmp-root" lock
+  mkdir -p "$home" "$tmp_root"
+  lock="$(cd "$tmp_root" && HOME="$home" TMPDIR="$tmp_root" bash -c '
+    unset OMS_LOCK_DIR
+    . "$1/scripts/lib/file-lock.sh"
+    oms_file_lock_path_for_file "$TMPDIR/fixture/.oms/plan/tasks.json"' _ "$ROOT")"
+  case "$lock" in
+    "$tmp_root/oh-my-setting-locks-"*/tasks.json.*.lock) ;;
+    *) fail "temp-root state must lock under the temp root, got $lock" ;;
+  esac
+  [ -d "$tmp_root/oh-my-setting-locks-$(id -u)" ] ||
+    fail "the temp lock directory was not created"
+  lock="$(HOME="$home" TMPDIR="$tmp_root" bash -c '
+    unset OMS_LOCK_DIR
+    . "$1/scripts/lib/file-lock.sh"
+    oms_file_lock_path_for_file "$HOME/project/.oms/plan/tasks.json"' _ "$ROOT")"
+  case "$lock" in
+    "$home/.cache/oh-my-setting/locks/"tasks.json.*.lock) ;;
+    *) fail "state under HOME must keep the cache lock directory, got $lock" ;;
+  esac
+  rm -rf "$tmp_root/oh-my-setting-locks-$(id -u)"
+  ln -s "$TMP/elsewhere" "$tmp_root/oh-my-setting-locks-$(id -u)"
+  lock="$(HOME="$home" TMPDIR="$tmp_root" bash -c '
+    unset OMS_LOCK_DIR
+    . "$1/scripts/lib/file-lock.sh"
+    oms_file_lock_path_for_file "$TMPDIR/fixture/.oms/plan/tasks.json"' _ "$ROOT")"
+  case "$lock" in
+    "$home/.cache/oh-my-setting/locks/"*) ;;
+    *) fail "a planted symlink lock directory must fall back to the cache, got $lock" ;;
+  esac
+  rm -f "$tmp_root/oh-my-setting-locks-$(id -u)"
+  lock="$(HOME="$home" TMPDIR="$tmp_root" OMS_LOCK_DIR="$TMP/explicit" bash -c '
+    . "$1/scripts/lib/file-lock.sh"
+    oms_file_lock_path_for_file "$TMPDIR/fixture/.oms/plan/tasks.json"' _ "$ROOT")"
+  case "$lock" in
+    "$TMP/explicit/"*) ;;
+    *) fail "OMS_LOCK_DIR must still win for temp-root state, got $lock" ;;
+  esac
+}
 export OMS_LOCK_FORCE_MKDIR=1
 
 # shellcheck source=scripts/lib/file-lock.sh
@@ -194,4 +240,5 @@ test_bash32_fallback_records_the_holder_process
 test_crashed_reclaimer_does_not_wedge_the_generation
 test_two_stale_contenders_do_not_reclaim_the_winner
 
+test_temp_state_locks_under_the_temp_root
 echo "file-lock-boundary-smoke: ok"

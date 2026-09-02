@@ -47,7 +47,39 @@ oms_file_lock_path_for_file() {
   esac
   name="$(printf '%s' "$(basename "$abs")" | tr -c 'A-Za-z0-9._-' '_')"
   sum="$(printf '%s' "$abs" | cksum | awk '{print $1 "-" $2}')"
-  printf '%s/%s.%s.lock\n' "$(oms_file_lock_dir)" "$name" "$sum"
+  printf '%s/%s.%s.lock\n' "$(oms_file_lock_dir_for_path "$abs")" "$name" "$sum"
+}
+
+# State that lives under the temp directory is a fixture or a throwaway
+# checkout, and its locks used to accumulate in the per-user cache forever:
+# every suite run outside check.sh (which sets OMS_LOCK_DIR) left hundreds of
+# empty flock files behind, fifteen thousand on one workstation. Those locks
+# go to a per-user directory under the same temp root instead, which the
+# system clears and which no production state ever resolves through. The
+# choice keys off the state path alone (not an ambient variable), so every
+# process resolves the same lock for the same file. The directory must be
+# ours and not a symlink before a lock is opened through it, because the
+# lock open truncates; anything else falls back to the cache directory.
+oms_file_lock_dir_for_path() {  # ABSOLUTE_STATE_PATH
+  local abs="$1"
+  local tmp_root="${TMPDIR:-/tmp}"
+  local candidate
+
+  [ -z "${OMS_LOCK_DIR:-}" ] || { oms_file_lock_dir; return 0; }
+  tmp_root="${tmp_root%/}"
+  case "$abs" in
+    "$tmp_root"/*) ;;
+    *) oms_file_lock_dir; return 0 ;;
+  esac
+  candidate="$tmp_root/oh-my-setting-locks-${UID:-$(id -u)}"
+  if [ ! -e "$candidate" ]; then
+    mkdir -m 700 "$candidate" 2>/dev/null || true
+  fi
+  if [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ -O "$candidate" ]; then
+    printf '%s\n' "$candidate"
+  else
+    oms_file_lock_dir
+  fi
 }
 
 oms_file_lock_pid_alive() {

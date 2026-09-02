@@ -76,6 +76,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- Locks for state under the temp directory (test fixtures, throwaway
+  checkouts) live in a per-user directory under that temp root instead of
+  `~/.cache/oh-my-setting/locks`, which suites run outside `check.sh` had
+  filled with fifteen thousand empty flock files on one workstation. The
+  choice keys off the state path alone, so every process resolves the same
+  lock; the directory must be owned and not a symlink before a lock is
+  opened through it, and `OMS_LOCK_DIR` still wins.
 - A Work Journal tick with nothing dirty no longer fsync-rewrites the summary
   index: the rendered index is compared with the file first, and the dirty
   and renderer bookkeeping is written only when it changed. Every prompt,
