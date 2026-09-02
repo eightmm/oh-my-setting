@@ -1160,6 +1160,41 @@ EOF
   grep -Fq 'unsafe command-scope Git config' "$repo/hostile-command.out" ||
     fail "command-scope Git config refusal was not explained"
 
+  # The command-scope inspection is pure shell now (it fronts every git call
+  # the harness makes). Each rule keeps the verdict and the message the python
+  # implementation gave: canonical count, complete pairs, only an exact
+  # hooksPath=/dev/null pair, and inherited GIT_CONFIG_PARAMETERS last.
+  cs_case() {  # EXPECTED ENV...
+    local expected="$1" got=""
+    shift
+    got="$(cd "$repo" && env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS "$@" \
+      bash -c '. "$1/scripts/lib/oms-common.sh" >/dev/null 2>&1
+        oms_git_assert_safe_execution_config "$2" 2>&1; echo "rc=$?"' _ "$ROOT" "$repo")" || true
+    got="$(printf '%s\n' "$got" | tr '\n' '|')"
+    case "$got" in
+      "$expected") ;;
+      *) fail "command-scope inspection [$*]: want [$expected], got [$got]" ;;
+    esac
+  }
+  cs_case 'rc=0|'
+  cs_case 'unsafe command-scope Git config: invalid GIT_CONFIG_COUNT|rc=2|' GIT_CONFIG_COUNT=abc
+  cs_case 'unsafe command-scope Git config: invalid GIT_CONFIG_COUNT|rc=2|' GIT_CONFIG_COUNT=01
+  cs_case 'unsafe command-scope Git config: oversized GIT_CONFIG_COUNT|rc=2|' GIT_CONFIG_COUNT=65
+  cs_case 'unsafe command-scope Git config: oversized GIT_CONFIG_COUNT|rc=2|' GIT_CONFIG_COUNT=99999999999999999999
+  cs_case 'unsafe command-scope Git config: incomplete command-scope config|rc=2|' \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath
+  cs_case 'rc=0|' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.HOOKSPATH GIT_CONFIG_VALUE_0=/dev/null
+  cs_case 'unsafe command-scope Git config: core.hooksPath|rc=2|' \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp
+  cs_case 'unsafe command-scope Git config: empty command-scope key|rc=2|' \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0= GIT_CONFIG_VALUE_0=/dev/null
+  cs_case 'unsafe command-scope Git config: diff.external|rc=2|' \
+    GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+    GIT_CONFIG_KEY_1=diff.external GIT_CONFIG_VALUE_1=x
+  cs_case 'unsafe command-scope Git config: GIT_CONFIG_PARAMETERS|rc=2|' GIT_CONFIG_PARAMETERS=x
+  cs_case 'unsafe command-scope Git config: GIT_CONFIG_PARAMETERS|rc=2|' \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_PARAMETERS=y
+
   # UI/task cancellation targets the publisher PID. It must synchronously
   # terminate the whole push group, including a descendant that ignores TERM,
   # before returning 143; no delayed remote effect may survive cancellation.

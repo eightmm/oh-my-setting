@@ -86,36 +86,53 @@ oms_git_assert_safe_execution_config() {  # REPO [diff-read]
   local common_dir=""
   local worktree_dir=""
 
-  command_problem="$(python3 - <<'PY'
-import os
-
-raw = os.environ.get("GIT_CONFIG_COUNT", "0")
-if (not raw.isdigit() or (len(raw) > 1 and raw.startswith("0"))):
-    print("invalid GIT_CONFIG_COUNT")
-    raise SystemExit(0)
-count = int(raw)
-if count > 64:
-    print("oversized GIT_CONFIG_COUNT")
-    raise SystemExit(0)
-for index in range(count):
-    key_name = "GIT_CONFIG_KEY_%d" % index
-    value_name = "GIT_CONFIG_VALUE_%d" % index
-    if key_name not in os.environ or value_name not in os.environ:
-        print("incomplete command-scope config")
+  # Pure shell on purpose: this guard fronts every git call the harness
+  # makes, and a python3 start per call was the single largest process cost
+  # in the control plane (two of every three interpreter starts in a
+  # goal-drive cycle). The rules are unchanged: the count must be a canonical
+  # non-negative decimal of at most 64, every pair must be present, only an
+  # exact hooksPath=/dev/null pair is admitted, and with no pair rejected an
+  # inherited GIT_CONFIG_PARAMETERS is itself the problem.
+  local raw_count="${GIT_CONFIG_COUNT:-0}"
+  local count=0 index=0 key_name="" value_name="" key="" value="" rejected=0
+  case "$raw_count" in
+    ''|*[!0-9]*) command_problem="invalid GIT_CONFIG_COUNT" ;;
+    0) count=0 ;;
+    0*) command_problem="invalid GIT_CONFIG_COUNT" ;;
+    *) count="$raw_count" ;;
+  esac
+  if [ -z "$command_problem" ]; then
+    if [ "${#count}" -gt 3 ] || [ "$count" -gt 64 ]; then
+      command_problem="oversized GIT_CONFIG_COUNT"
+    fi
+  fi
+  if [ -z "$command_problem" ]; then
+    while [ "$index" -lt "$count" ]; do
+      key_name="GIT_CONFIG_KEY_$index"
+      value_name="GIT_CONFIG_VALUE_$index"
+      if [ -z "${!key_name+set}" ] || [ -z "${!value_name+set}" ]; then
+        command_problem="incomplete command-scope config"
+        rejected=1
         break
-    if (os.environ[key_name].lower(), os.environ[value_name]) != (
-            "core.hookspath", "/dev/null"):
-        print(os.environ[key_name] or "empty command-scope key")
-        break
-else:
-    if os.environ.get("GIT_CONFIG_PARAMETERS"):
-        print("GIT_CONFIG_PARAMETERS")
-PY
-  )" || {
-    echo "cannot inspect command-scope Git config" >&2
-    return 2
-  }
-  command_problem="$(printf '%s' "$command_problem" | tr -d '\r')"
+      fi
+      key="${!key_name}"
+      value="${!value_name}"
+      case "$key" in
+        [Cc][Oo][Rr][Ee].[Hh][Oo][Oo][Kk][Ss][Pp][Aa][Tt][Hh])
+          if [ "$value" = /dev/null ]; then
+            index=$((index + 1))
+            continue
+          fi
+          ;;
+      esac
+      command_problem="${key:-empty command-scope key}"
+      rejected=1
+      break
+    done
+    if [ "$rejected" -eq 0 ] && [ -n "${GIT_CONFIG_PARAMETERS:-}" ]; then
+      command_problem="GIT_CONFIG_PARAMETERS"
+    fi
+  fi
   if [ -n "$command_problem" ]; then
     echo "unsafe command-scope Git config: $command_problem" >&2
     return 2
@@ -251,24 +268,19 @@ oms_git_assert_plain_index() {  # REPO
     echo "cannot inspect Git index flags" >&2
     return 2
   fi
-  if ! python3 - "$listing" <<'PY'
-import sys
-raw = open(sys.argv[1], "rb").read()
-for record in raw.split(b"\0"):
-    if not record:
-        continue
-    tag = record[:1]
-    if tag == b"S" or b"a" <= tag <= b"z":
-        name = record[2:] if len(record) > 2 else b"<unknown>"
-        print("hidden Git index flag: %s" %
-              name.decode("utf-8", "backslashreplace"), file=sys.stderr)
-        raise SystemExit(2)
-PY
-  then
-    rm -f "$listing"
+  # Records are "<tag> <name>" NUL-delimited; skip-worktree is S and
+  # assume-unchanged lowercases the tag. Splitting on NUL keeps every tag at a
+  # line start, so a newline inside a name can only add a spurious match,
+  # never hide one. Shell rather than python3: this runs before most git reads.
+  local hidden=""
+  hidden="$(tr '\0' '\n' < "$listing" | LC_ALL=C grep -a -m 1 -E '^(S|[a-z])( |$)' || true)"
+  rm -f "$listing"
+  if [ -n "$hidden" ]; then
+    hidden="${hidden#? }"
+    [ -n "$hidden" ] || hidden="<unknown>"
+    echo "hidden Git index flag: $hidden" >&2
     return 2
   fi
-  rm -f "$listing"
   return 0
 }
 

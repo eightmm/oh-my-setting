@@ -68,6 +68,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The Git execution-boundary guards that front every harness git call no
+  longer start python3 twice per call: the command-scope `GIT_CONFIG_*`
+  inspection and the hidden index-flag scan (skip-worktree, assume-unchanged)
+  are pure shell with the same rules and messages, verified against the old
+  implementation case by case. Those two starts were half of every python3
+  process a goal-drive cycle spawned; the guard costs 22ms instead of 36ms
+  and the index scan 7ms instead of 14ms. The repository config parse stays
+  in python3.
 - `agent-plan list --json` emits every task's `show` view in one process
   (`{"schema": 1, "plan_id", "tasks": [...]}`), and the execution graph's
   plan facts read it instead of running one `show --id` per task, so a route,
