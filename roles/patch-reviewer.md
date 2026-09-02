@@ -18,4 +18,4 @@ and regression issues. Do not edit the patch.
 ## Output
 
 - `[P1|P2|P3] title`
-- Evidence, impact, and smallest regression test.
+- Evidence, impact, and smallest missing coverage; do not demand a redundant test.

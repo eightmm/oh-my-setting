@@ -21,6 +21,8 @@ Minimum `PROJECT.md` sections:
 - Run:
 ## Verification
 - Success criteria:
+- Affected checks:
+- Always-run checks:
 - Required checks:
 - Required check files:
 ## Decisions
@@ -31,6 +33,12 @@ Minimum `PROJECT.md` sections:
 Keep the state draft while task-relevant decisions remain. Record paths,
 resources, security constraints, and do-not-touch boundaries only when they
 apply; use `n/a` with a reason rather than invented detail.
+
+`Affected checks` names the repository's narrow changed-file or test-selector
+entrypoint. `Always-run checks` lists the small portability, schema, security,
+or lifecycle floor that selection may not remove. Leave either `n/a` when the
+repository has no supported distinction; never infer safety from an empty or
+partial selector.
 
 Keep `Required checks` to one executable Markdown line. One complete inline
 code wrapper is allowed (for example, `` `bash scripts/check.sh` ``). For a

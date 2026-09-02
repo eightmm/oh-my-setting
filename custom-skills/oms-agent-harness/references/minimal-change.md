@@ -21,6 +21,22 @@ Higher on the list is preferred only when behavior stays equivalent. A short
 but clever expression, hidden state, shifted cost, duplicated authority, or
 new compatibility branch is not minimal.
 
+## Spend test coverage once
+
+Before adding a test, inspect the related tests surfaced by repository search,
+the Project Graph context pack, or a native affected-test tool. Extend the
+canonical interface test, table, or fixture when it already owns the contract.
+Create a test only for an uncovered observable contract, a reproduced bug, or
+a safety boundary; a changed line, refactor, document, or wiring task does not
+earn a new test by itself.
+
+Keep one primary test layer per behavior and use thinner smoke checks only for
+real serialization, process, install, platform, or trust boundaries. Graph
+relationships are positive reuse evidence, not proof that an omitted test is
+irrelevant: an empty, partial, ambiguous, stale, or unsupported selection must
+fall back to the project's broader verification contract. Consolidate coverage
+only with an explicit reviewed reduction and passing before/after verification.
+
 ## Floors that always win
 
 Never trade away an explicit requirement, trust-boundary validation, data-loss

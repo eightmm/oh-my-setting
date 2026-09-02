@@ -5,8 +5,8 @@
 - Inspect the implementation before editing; change only task-relevant lines.
 - Do not add dependencies, alter public contracts, or mask failures without
   explicit authority.
-- Verify user-visible behavior with the narrowest relevant command. Add a
-  regression test for fragile behavior or a reproduced bug.
+- Verify with the narrowest relevant command. Reuse existing coverage; add a
+  test only for an uncovered observable contract, reproduced bug, or safety boundary.
 - Keep generated artifacts, secrets, and private data out of git.
 
 Project-specific commands, paths, interfaces, do-not-touch areas, and success

@@ -19,7 +19,8 @@
   the marker: name them `oms <verb>`, never `oms oms-<verb>`. One spelling
   per verb — the dispatcher holds no aliases, and the verb is the script
   filename.
-- Write a behavior regression before changing scripts or install contracts.
+- Preserve regression coverage when changing scripts or install contracts.
+  Extend the canonical test or fixture first; add one only for uncovered behavior.
 - Keep install, update, repair, and uninstall ownership transitions reversible.
 - Run `bash scripts/check.sh` before commit or push. CI additionally verifies
   the real lifecycle on Linux, macOS, and Windows Git Bash, and only the macOS

@@ -48,11 +48,10 @@ contracts.
 
 ## Verification
 
-- Verify syntax, focused behavior, then broader checks; test risky changes early.
-- Batch edits and tests at feature boundaries; run the final gate once unless
-  risk warrants more.
-- Report every skipped, failed, or impossible check. State changed behavior
-  and evidence.
+- Reuse coverage; test uncovered contracts, bugs, or safety boundaries.
+- Use native affected checks; graph uncertainty widens verification.
+- Verify syntax and focused behavior before broader checks; run final gate once.
+- Report every skipped, failed, or impossible check. State evidence.
 
 ## Multi-Agent Work
 

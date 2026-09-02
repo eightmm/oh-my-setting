@@ -19,4 +19,4 @@ gaps, regressions, or unsafe behavior. Do not edit files.
 
 - Severity and concise title.
 - Evidence and reproduction.
-- Smallest fix and regression test.
+- Smallest fix and missing coverage, explicitly saying when no new test is needed.

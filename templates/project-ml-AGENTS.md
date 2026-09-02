@@ -18,6 +18,8 @@
 - Run focused data, one-batch model, loss, and resume/inference smoke checks
   before long training or expensive compute. Never launch heavy work from an
   unverified data/model contract.
+- Reuse existing interface cases and fixtures. Add a test only for uncovered
+  behavior, a reproduced bug, leakage risk, or a data/model safety boundary.
 - For claim-bearing experiments, pre-register the hypothesis, predicted
   outcome, one changed variable, baseline, metric/split, and stop threshold;
   record negative and null results too.
