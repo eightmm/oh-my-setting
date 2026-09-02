@@ -471,6 +471,39 @@ assert set(row["control_plane"]) == {"action", "mapped"}, row["control_plane"]
 PY
 shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"
 [ "$shadow_lines" = "1" ] || fail "shadow ledger holds $shadow_lines rows, expected 1"
+python3 - "$work/shadow.json" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1]))
+# Reconstruction against reality: the ready task is bound and the unproven
+# check is assumed failed, so the frontier is the effectful work, not the entry.
+assert row["route"]["primary"] == "implement", row["route"]
+assert row["reconstructed"]["assumed_failed"] == ["acceptance"], row["reconstructed"]
+assert row["reconstructed"]["bindings"] == {"work_item": "implement"}, row["reconstructed"]
+assert row["basis"] in ("", "frontier", "successor", "blocked"), row
+PY
+
+# The session-start hook records one shadow row for a repository with a plan
+# and reports the frontier on its own line; the ledger is ambient to the gate.
+hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
+  OMS_GRAPH_AUTOBUILD=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh")" \
+  || fail "the resume hook must exit 0 with a plan present"
+printf '%s\n' "$hook_out" | grep -Eq -- '^- graph route: implement \((agrees|disagrees) with runtime next [a-z_-]+\)$' \
+  || fail "the hook did not report the graph route: $hook_out"
+shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"
+[ "$shadow_lines" = "2" ] || fail "the hook did not append exactly one shadow row (rows: $shadow_lines)"
+hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
+  OMS_GRAPH_AUTOBUILD=0 OMS_GRAPH_SHADOW=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh")" \
+  || fail "the resume hook must exit 0"
+if printf '%s\n' "$hook_out" | grep -Fq -- '- graph route:'; then
+  fail "OMS_GRAPH_SHADOW=0 must suppress the shadow line: $hook_out"
+fi
+python3 - "$ROOT/scripts/lib/oms-state-inventory.py" "$exec_repo/.oms" <<'PY'
+import subprocess
+import sys
+listing = subprocess.run([sys.executable, sys.argv[1], sys.argv[2]], capture_output=True, text=True, check=True).stdout
+assert "graph/shadow.jsonl" not in listing, listing
+PY
 
 # A delegated child may evaluate a route but never record a comparison.
 child_rc=0

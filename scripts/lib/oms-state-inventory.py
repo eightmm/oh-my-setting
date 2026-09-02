@@ -35,10 +35,11 @@ AMBIENT_DIRS = {"hooks", "work-journal", "project-graph"}
 # any real leak brings its own entries.
 AMBIENT_FILES = {"ci.jsonl", ".gitignore"}
 # Path-precise ambient entries below the root: the session-start hook appends
-# a shadow-judgment row whenever a session opens this checkout mid-gate. Only
-# the ledger itself is ambient — every other plan/ entry (receipts, tasks,
-# claims) stays covered.
-AMBIENT_PATHS = {"plan/autopilot-shadow.jsonl"}
+# a shadow-judgment row (autopilot) and a graph-route shadow row whenever a
+# session opens this checkout mid-gate. Only the ledgers themselves are
+# ambient — every other plan/ or graph/ entry (receipts, tasks, claims, runs,
+# events) stays covered.
+AMBIENT_PATHS = {"plan/autopilot-shadow.jsonl", "graph/shadow.jsonl"}
 
 
 def inventory(root: str) -> list[tuple]:

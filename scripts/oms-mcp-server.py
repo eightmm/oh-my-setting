@@ -496,8 +496,8 @@ TOOLS = [
     },
     {
         "name": "oms_project_graph_blast",
-        "description": "Dependency blast radius of the working tree's changed files.",
-        "argv": ["bash", "scripts/graph.sh", "project", "blast", "--json"],
+        "description": "Dependency blast radius of the working tree's changed files: a bounded projection (120 rows per list; `truncated`/`omitted` say what was cut).",
+        "argv": ["bash", "scripts/graph.sh", "project", "blast", "--json", "--limit", "120"],
         "properties": REPO_PROPERTY,
         "annotations": READ_ONLY,
     },

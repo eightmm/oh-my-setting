@@ -12,7 +12,7 @@ run. Design and schemas: `docs/GRAPH-ENGINEERING.md`.
 oms graph project map            # counts, hubs, module groups
 oms graph project find lease     # name/path/qualname search
 oms graph project trace symbol:scripts/plan-run.sh::main --direction in --depth 2
-oms graph project blast --base origin/main
+oms graph project blast --base origin/main   # --limit N bounds the JSON lists
 oms graph project ensure         # explicit build-or-refresh; check reports only
 ```
 
@@ -76,9 +76,13 @@ disjoint explicit tasks. The run store under `.oms/graph/runs/<run-id>/`
 reads — never conversation memory; a crashed node is reconciled against the
 plan (live lease → waiting, expired → unverified, dead write tool →
 blocked). The runner has no path to `agent-plan land/finish/claim`; landing
-stays serialized inside `patch-land`. `exec shadow` compares the evaluator's
-route with the control plane's canonical next action and appends evidence
-to `.oms/graph/shadow.jsonl`; it never acts.
+stays serialized inside `patch-land`. `exec shadow` reconstructs where the
+graph stands against current reality (proven nodes settled, an unproven
+check assumed failed, the task reality names bound) and compares that
+frontier with the control plane's canonical next action, appending evidence
+to `.oms/graph/shadow.jsonl`; it never acts. The session-start hook runs it
+whenever a plan exists and reports `- graph route: <frontier> (agrees|disagrees
+with runtime next <action>)`; `OMS_GRAPH_SHADOW=0` opts out.
 
 ## Boundaries
 

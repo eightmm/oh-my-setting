@@ -75,8 +75,10 @@ Adapter rules that follow from the audit (do not relearn these the hard way):
 - Harness children (`OMS_HARNESS_CHILD=1`) cannot `init`/`add`/`apply-proposal`
   and must pass `--lease-id` for leased mutations.
 - `.oms/project-graph/` is ambient for the `check.sh` state guard (the
-  session-start hook refreshes it on the session's own schedule); `.oms/graph/`
-  is **not**. Every test still writes into a temporary `--repo`.
+  session-start hook refreshes it on the session's own schedule), and so is the
+  one file the hook appends under `.oms/graph/`, `shadow.jsonl`; the rest of
+  `.oms/graph/` (runs, events, projections) is **not**. Every test still
+  writes into a temporary `--repo`.
 - Every durable writer into `.oms` is under the durable-writers contract:
   secret-shaped values are refused and absolute home paths never persist.
   Free text goes through `oms_runtime.common.bounded_line` and is refused
@@ -653,8 +655,6 @@ states it: an `import`, a `def`, a `source` line, a literal repo path),
 `INFERRED` (resolved by name to exactly one candidate), `AMBIGUOUS` (several
 candidates; the edge targets the first in sorted order and lists the rest in
 `evidence.candidates`). Inferred edges are never presented as facts.
-
-Parsers (`parsers/`): Python via `ast` (classes, functions, methods, imports
 Resolution by name reaches only what the call could name: a Python call
 through a parameter, local, or module variable (`node.get()`,
 `parser.add_argument()`) yields no edge at all; a member of an import binding
@@ -665,6 +665,8 @@ resolves in-file only; a shell command word (`git`, `wait`, `command`) reaches
 only shell functions, never a Python symbol that happens to share the word.
 `Class.method()` through a same-file class or an imported one resolves to the
 method node.
+
+Parsers (`parsers/`): Python via `ast` (classes, functions, methods, imports
 resolved to repo files — `from pkg import name` binds the submodule file when
 `name` is one — calls resolved through import bindings and local
 definitions; a `self.x()`/`cls.x()` call to a sibling method is an `EXTRACTED`
@@ -748,7 +750,7 @@ oms graph project map    [--json|--mermaid]
 oms graph project find   QUERY [--kind KIND] [--limit N]
 oms graph project neighbors NODE [--relation R] [--direction in|out|both]
 oms graph project trace  NODE [--direction in|out] [--depth N]
-oms graph project blast  [--base REF] [--path P]... [--depth N]
+oms graph project blast  [--base REF] [--path P]... [--depth N] [--limit N]   # --limit bounds every JSON list; `truncated`/`omitted` report the cut
 oms graph project analyze [--hubs N] [--cycles] [--communities] [--path FROM TO]
 oms graph project context --task TEXT [--max-files N] [--bundle] [--base REF]
 oms graph exec validate  SPEC
@@ -805,21 +807,49 @@ background (oms graph project ensure)` after detaching an `ensure` with
 descendants), or `- graph: absent (OMS_GRAPH_AUTOBUILD=0)`. It never blocks
 on the build and never fails session start. `.oms/project-graph/` is
 therefore ambient to the check gate (`scripts/lib/oms-state-inventory.py`),
-like `hooks/` and `work-journal/`.
+like `hooks/` and `work-journal/`. When the repository has a plan
+(`.oms/plan/tasks.json`) the hook also runs `exec shadow` (bounded, output
+discarded on any failure, `OMS_GRAPH_SHADOW=0` opts out) and reports
+`- graph route: <frontier> (agrees|disagrees with runtime next <action>)`;
+the one row it appends to `.oms/graph/shadow.jsonl` is ambient by exact path.
 
 ## Shadow mode
 
 The evaluator never takes authority from `goal-drive`/`autopilot` in this
-round. `oms graph exec shadow` (parent-only) evaluates the bundled
-`goal-drive` spec against current facts, maps the route to the control
-plane's own canonical next action (`oms runtime next` → `next_actions[0]`,
-the deterministic transition `inbox`/`state`/`runtime` already share), and
-appends one typed row to `.oms/graph/shadow.jsonl`:
-`{"schema":1,"kind":"graph-route-shadow","ts","spec_id","spec_digest","route":{...},"control_plane":{"action":"execute_ready_task"},"agree":true|false,"reason"}`.
-Mapping: `execute_ready_task`→`implement`, `review_or_land_patch`→`land`,
-`finish_landing`→`land`, `record_verified_completion`/`inspect_completed_plan_retirement`→`done`,
+round. `oms graph exec shadow` (parent-only) reconstructs where the bundled
+`goal-drive` spec would stand against current reality, maps the control
+plane's own canonical next action (`oms runtime next` → `actions[0]`, the
+deterministic transition `inbox`/`state`/`runtime` already share) onto a
+node, and appends one typed row to `.oms/graph/shadow.jsonl`:
+`{"schema":1,"kind":"graph-route-shadow","ts","spec_id","spec_digest","route":{"status","primary","reason"},"reconstructed":{"completed":[...],"assumed_failed":[...],"bindings":{"work_item":"t1"},"successors":[...],"stop"},"control_plane":{"action","mapped"},"agree":true|false,"basis":"frontier|successor|blocked|","reason"}`.
+
+Reconstruction (`shadow.reconstruct`, pure) exists because no run exists in a
+repository that never used `exec run`, and an empty run's primary is always
+the entry node, which compares nothing. Starting from the empty state, the
+evaluator's primary is settled and the route re-evaluated until reality can
+no longer confirm it: a primary whose proof holds under the facts is
+`completed`; an effect-free tool (a check such as `acceptance`) whose proof
+does not hold is assumed `failed`, so the route reaches the effectful work the
+check guards; any other unproven node, and a node without a proof, is the
+frontier. A `bind_task` selector binds the task reality names
+(`shadow.reality_task`: a task already `claimed`/`running`/`review`/`landing`,
+else `plan.actionable[0]`), recorded in `reconstructed.bindings`; a check whose
+failure path finds no task to bind is itself the frontier (`stop: check`).
+Nothing is executed and nothing is written but the row.
+
+Comparison (`shadow.compare`, pure): `frontier` when the mapped node is the
+frontier; `blocked` when the control plane names a blocker and the route
+refuses to advance; `successor` when the frontier is an effect-free tool and
+the mapped node is one of its immediate successors (both sides then name the
+same next effectful step). Mapping: `execute_ready_task`→`implement`,
+`review_or_land_patch`/`finish_landing`→`land`, `verify_active_task`→`acceptance`,
+`record_verified_completion`/`inspect_completed_plan_retirement`→`done`,
 `resolve_blocker`/`inspect_plan_contract`→`blocked`, `orient`→`inspect`.
-Disagreements are evidence for the next round, never an action.
+A blocker the control plane sees and the graph's facts do not (the failure
+ledger) is a recorded disagreement, which is the point: disagreements are
+evidence for the next round, never an action. The `SessionStart` hook is the
+trigger (see CLI); `shadow.latest_row` reads the newest row for surfaces that
+must not evaluate on their own.
 
 ## MCP
 
@@ -832,7 +862,7 @@ Read-only, argv-only tools appended to `TOOLS` in `scripts/oms-mcp-server.py`
 | `oms_project_graph_map` | `bash scripts/graph.sh project map --json` |
 | `oms_project_graph_query` | `bash scripts/graph.sh project find --json --limit 40` + positional `query` |
 | `oms_project_graph_trace` | `bash scripts/graph.sh project trace --json --depth 2 --direction out` + positional `node` |
-| `oms_project_graph_blast` | `bash scripts/graph.sh project blast --json` |
+| `oms_project_graph_blast` | `bash scripts/graph.sh project blast --json --limit 120` |
 | `oms_execution_graph_status` | `bash scripts/graph.sh exec status --json` |
 | `oms_execution_graph_route` | `bash scripts/graph.sh exec route --json --run` + positional `run` |
 | `oms_execution_graph_events` | `bash scripts/graph.sh exec events --json --limit 40 --run` + positional `run` |
@@ -867,6 +897,13 @@ a value may never start with `-`. Output stays under the server's
   keeps the discovery options the graph was built with.
 - `tests/test_oms_graph_analytics.py`: degrees, hubs, components, cycles,
   shortest path, communities, renderers.
+- `tests/test_oms_graph_parsers.py`: what a call can and cannot be linked to —
+  shell command words never reach Python functions, attribute calls on
+  parameters/locals/module variables yield no edge, builtin names resolve
+  in-file only, a bare name never resolves to a method while an inherited
+  `self.` call still does, `from pkg import submodule` binds the module file,
+  a binding without the member stays unresolved, `Class.method()` resolves to
+  the method, a local shadowing a same-file function yields no edge.
 - `tests/test_oms_graph_integration.py`: fake `codex` provider on PATH (the
   `autonomy-plan-run-smoke.sh` pattern) driving `exec run` through
   `plan-run`; regression guards: no lease/scope/admission/review/acceptance
@@ -886,6 +923,10 @@ a value may never start with `-`. Output stays under the server's
 - `tests/test_oms_graph_workspace.py`: the fingerprint's relations (clean,
   modified, staged blobs with unchanged bytes, untracked, ignored, `.oms/`,
   deleted, renamed) and its fail-closed reasons.
+- `tests/test_oms_graph_shadow.py`: reconstruction against synthetic facts
+  (ready task → `implement` bound to it with `acceptance` assumed failed;
+  task in review → `land`; fresh passing acceptance → `done`; stale acceptance
+  with nothing to bind → the check itself) and every comparison basis.
 - `tests/graph-smoke.sh`: unittest discovery of `test_oms_graph_*.py`, CLI
   smoke through `scripts/oms`, dogfood build of this repository from a
   `git archive` copy (revision stable across two builds; `--include`/
@@ -897,13 +938,6 @@ a value may never start with `-`. Output stays under the server's
 - Every test uses a temporary repository; nothing writes into this
   checkout's `.oms`.
 
-- `tests/test_oms_graph_parsers.py`: what a call can and cannot be linked to —
-  shell command words never reach Python functions, attribute calls on
-  parameters/locals/module variables yield no edge, builtin names resolve
-  in-file only, a bare name never resolves to a method while an inherited
-  `self.` call still does, `from pkg import submodule` binds the module file,
-  a binding without the member stays unresolved, `Class.method()` resolves to
-  the method, a local shadowing a same-file function yields no edge.
 ## Work split
 
 | worker | files (disjoint) |

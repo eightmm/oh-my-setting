@@ -290,6 +290,36 @@ print("fresh %s" % str(row.get("revision") or "")[:12] if row.get("fresh") else 
 ' 2>/dev/null)" || graph_state=""
   graph_state="${graph_state//$'\r'/}"
 fi
+# Execution graph shadow: with a plan present, record where the bundled
+# goal-drive graph would stand against current reality and whether that agrees
+# with the control plane's own next action. Observe-only evidence, one
+# append-only row (ambient to the check gate, like the autopilot shadow);
+# never a run, never an action. Bounded well inside the hook's budget.
+if [ -f "$ROOT/scripts/graph.sh" ] && [ -f "$cwd/.oms/plan/tasks.json" ] &&
+  [ "${OMS_GRAPH_SHADOW:-1}" != "0" ]; then
+  route_json=""
+  if command -v timeout >/dev/null 2>&1; then
+    route_json="$(timeout 8 bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
+      exec shadow --json 2>/dev/null || true)"
+  else
+    route_json="$(bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
+      exec shadow --json 2>/dev/null || true)"
+  fi
+  route_line="$(printf '%s' "$route_json" | python3 -c '
+import json, sys
+try:
+    row = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+primary = row.get("route", {}).get("primary") or row.get("route", {}).get("status") or "-"
+plane = row.get("control_plane", {})
+verdict = "agrees" if row.get("agree") else "disagrees"
+print("- graph route: %s (%s with runtime next %s)" % (primary, verdict, plane.get("action") or "-"))
+' 2>/dev/null)" || route_line=""
+  route_line="${route_line//$'\r'/}"
+  [ -z "$route_line" ] || append "$route_line"
+fi
+
 case "$graph_state" in
   "fresh "*) append "- graph: fresh (${graph_state#fresh })" ;;
   refresh)

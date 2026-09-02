@@ -84,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     blast.add_argument("--base", default="")
     blast.add_argument("--path", action="append", default=[])
     blast.add_argument("--depth", type=int, default=3)
+    blast.add_argument("--limit", type=int, default=0, metavar="N",
+                       help="keep at most N dependents, files, tests per list in JSON (0 = all; the text view is never cut)")
     blast.add_argument("--json", action="store_true")
     analyze = project_sub.add_parser("analyze")
     analyze.add_argument("--hubs", type=int, default=10)
@@ -275,6 +277,19 @@ def _project_blast(args: argparse.Namespace, repo: Path, state: Path) -> int:
         payload = dict(result)
         payload["paths"] = paths
         payload["changed_paths"] = changed
+        if args.limit and args.limit > 0:
+            # A projection, not the closure: every list is cut to the same bound
+            # and the omitted counts say so, so a bounded consumer (MCP) never
+            # receives a payload truncated mid-object.
+            omitted = {}
+            for key in ("dependents", "files", "tests", "test_cases", "seeds"):
+                rows = payload.get(key)
+                if isinstance(rows, list) and len(rows) > args.limit:
+                    omitted[key] = len(rows) - args.limit
+                    payload[key] = rows[:args.limit]
+            payload["limits"] = {"per_list": args.limit}
+            payload["truncated"] = bool(omitted)
+            payload["omitted"] = omitted
         emit(payload, args.pretty)
         return 0
     for path in paths:
@@ -515,8 +530,9 @@ def _exec_shadow(args: argparse.Namespace) -> int:
     if args.json:
         emit(row, args.pretty)
         return 0
-    print("shadow: agree=%s route=%s/%s control=%s->%s"
-          % (row["agree"], row["route"]["status"], row["route"]["primary"] or "-",
+    print("shadow: agree=%s basis=%s route=%s/%s settled=%s control=%s->%s"
+          % (row["agree"], row.get("basis") or "-", row["route"]["status"], row["route"]["primary"] or "-",
+             ",".join(row.get("reconstructed", {}).get("completed", [])) or "-",
              row["control_plane"]["action"] or "-", row["control_plane"]["mapped"] or "-"))
     return 0
 

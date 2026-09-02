@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- The `SessionStart` hook triggers the execution graph's shadow: with a plan
+  present it runs `oms graph exec shadow`, reports `- graph route: <frontier>
+  (agrees|disagrees with runtime next <action>)`, and appends one row to
+  `.oms/graph/shadow.jsonl`, which is now ambient by exact path for the check
+  gate (like `plan/autopilot-shadow.jsonl`); `OMS_GRAPH_SHADOW=0` opts out.
+  Until now nothing in the live control plane ever invoked the execution graph.
+- `oms graph project blast --limit N` bounds every JSON list and reports
+  `limits`/`truncated`/`omitted`; the MCP `oms_project_graph_blast` tool passes
+  `--limit 120`. On a real change set the tool used to return JSON cut
+  mid-object at the server's 60,000-character output limit.
 - Tool capabilities for the execution graph (`oms_graph/capabilities.py`):
   a tool node may say `{"kind": "tool", "tool": "plan_acceptance" |
   "project_context" | "commit_bound"}` and the runner builds the exact
@@ -51,6 +61,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- `exec shadow` reconstructs where the graph stands against current reality
+  before comparing (`shadow.reconstruct`): a primary whose proof holds is
+  settled `completed`, an effect-free check whose proof fails is assumed
+  `failed`, `bind_task` selectors bind the task reality names, and the
+  comparison happens at the resulting frontier with a recorded `basis`
+  (`frontier`, `successor`, `blocked`). An empty run's primary was always the
+  entry node, so every earlier row compared `acceptance` against whatever the
+  control plane said. `verify_active_task` now maps to `acceptance`.
 - `resume` reconciliation reads the frozen identity: a task under a live
   lease keeps its node `active` (the run reports `waiting`), an expired
   claim is `unverified`, and a write tool that died is `blocked` rather
@@ -83,6 +101,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- Project graph reference resolution is scope-aware (`PARSER_VERSION` 4,
+  Python parser 3): a Python call through a parameter, local, or module
+  variable yields no edge; a member of an import binding must exist in the
+  bound file; a bare Python name never resolves to a method and a builtin's
+  name resolves in-file only; a shell command word reaches only shell
+  functions; `from pkg import submodule` binds the submodule file and
+  `Class.method()` resolves to the method. On this repository the change
+  removed 1,733 `AMBIGUOUS` and 1,146 `INFERRED` call edges (1,165 of them
+  shell `git` invocations linked to a Python function named `git`) and added
+  207 `EXTRACTED` ones, and the hub list stopped naming `semantic-eval.py::git`,
+  `a2a-readonly.py::parser`, and `Graph.node`.
 - The worker guard no longer fails a parallel delegate because a sibling
   delegate's `git worktree add`/`remove` was mid-flight at a capture. A
   registry entry without a usable checkout is exempt only while the residue
@@ -101,17 +130,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   install-e2e legs on one stale catalog assertion the gate could not see.
   It costs 38s in a sandboxed HOME and leaves the checkout's `.oms`
   byte-identical, so the blind spot is not worth keeping.
-- Project graph reference resolution is scope-aware (`PARSER_VERSION` 4,
-  Python parser 3): a Python call through a parameter, local, or module
-  variable yields no edge; a member of an import binding must exist in the
-  bound file; a bare Python name never resolves to a method and a builtin's
-  name resolves in-file only; a shell command word reaches only shell
-  functions; `from pkg import submodule` binds the submodule file and
-  `Class.method()` resolves to the method. On this repository the change
-  removed 1,733 `AMBIGUOUS` and 1,146 `INFERRED` call edges (1,165 of them
-  shell `git` invocations linked to a Python function named `git`) and added
-  207 `EXTRACTED` ones, and the hub list stopped naming `semantic-eval.py::git`,
-  `a2a-readonly.py::parser`, and `Graph.node`.
 - One spelling per verb. The dispatcher carried five aliases — `run`,
   `state`, `init`, `thread`, `runtime` each redirected to a longer name —
   which is the same second entrance this project refuses everywhere else,
