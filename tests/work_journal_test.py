@@ -1074,6 +1074,43 @@ class JournalTestCase(unittest.TestCase):
         )
 
 
+class ObserveDiagnosticsTest(unittest.TestCase):
+    """A refused observe must say why: the operator front door printed
+    nothing and exited 1 for a wrong --verification-status or an unregistered
+    source type whose file is not JSON, which reads as "nothing happened"."""
+
+    def setUp(self) -> None:
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".oms").mkdir(parents=True)
+        subprocess.run(["git", "-C", str(self.repo), "init", "-q"], check=True)
+        self.source = self.repo / "notes.md"
+        self.source.write_text("not json\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def observe(self, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["python3", str(MODULE_PATH), "observe", "--repo", str(self.repo),
+             "--source-file", str(self.source), *extra],
+            capture_output=True, text=True, check=False)
+
+    def test_wrong_verification_status_is_refused_with_the_allowed_values(self):
+        result = self.observe("--source-type", "oms-run",
+                              "--verification-status", "verified")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("verification-status", result.stderr)
+        self.assertIn("passed", result.stderr)
+        self.assertFalse((self.repo / ".oms" / "work-journal" / "events.jsonl").exists())
+
+    def test_unregistered_source_type_without_a_json_record_says_so(self):
+        result = self.observe("--source-type", "evolution-round")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("error: work journal: source record is not JSON", result.stderr)
+        self.assertNotIn(str(self.source), result.stderr)
+
+
 class NotionTransportPersistenceTest(unittest.TestCase):
     def test_configure_persists_and_settings_prefer_the_transport_choice(self):
         with tempfile.TemporaryDirectory() as tmp:

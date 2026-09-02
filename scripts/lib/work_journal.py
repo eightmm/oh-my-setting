@@ -3115,7 +3115,10 @@ def _source_ref(repo: pathlib.Path, source_path: pathlib.Path, source_id: str) -
 def _read_json_source(path: pathlib.Path) -> Dict[str, Any]:
     if path.stat().st_size > MAX_SOURCE_BYTES:
         raise JournalError("source record exceeds Work Journal bound")
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        raise JournalError("source record is not JSON") from None
     if not isinstance(data, dict):
         raise JournalError("source record is not an object")
     return data
@@ -3631,11 +3634,11 @@ def _build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--source-type", required=True)
     observe.add_argument("--source-file", required=True)
     observe.add_argument("--record-path")
-    observe.add_argument("--event-type")
+    observe.add_argument("--event-type", choices=sorted(EVENT_TYPES))
     observe.add_argument("--source-id")
     observe.add_argument("--operation-id")
     observe.add_argument("--occurred-at")
-    observe.add_argument("--verification-status")
+    observe.add_argument("--verification-status", choices=sorted(VERIFICATION_STATUSES))
     observe.add_argument("--outcome")
     observe.add_argument("--outcome-status")
     # A lifecycle verb that already names its own goal, blocker, or next step
@@ -4018,8 +4021,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (JournalError, OSError, ValueError, TypeError):
-        # The shell observer emits one fixed, bounded diagnostic. Avoid echoing
-        # exception messages here because source paths or remote errors may be
-        # sensitive.
+    except JournalError as exc:
+        # Journal errors carry fixed wording (a field name at most, never a
+        # path or a remote message), so the operator learns why the observe
+        # was refused instead of reading exit 1 as "nothing happened".
+        print("error: work journal: %s" % exc, file=sys.stderr)
+        raise SystemExit(1)
+    except (OSError, ValueError, TypeError) as exc:
+        # Source paths and remote errors may be sensitive: name the class only.
+        print("error: work journal: %s" % type(exc).__name__, file=sys.stderr)
         raise SystemExit(1)

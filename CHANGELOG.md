@@ -158,6 +158,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- `oms journal observe` no longer fails silently. A `--verification-status`
+  or `--event-type` outside the journal's sets is refused by the parser with
+  the allowed values, and a refused record (an unregistered source type whose
+  file is not a JSON record, a schema violation) prints one bounded
+  `error: work journal: ...` line with the journal's own fixed wording; OS
+  and value errors name only their class, never a path.
 - `agent-plan finish --refreeze-acceptance` took the touched-file set from
   `+++ b/` lines only, so a `git diff --binary` hunk (which has none) left a
   binary acceptance file's frozen hash stale and the next `accept` parked.
