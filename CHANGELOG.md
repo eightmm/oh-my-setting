@@ -76,6 +76,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- `oms doctor` names the remedy under a stale artifact-index reference
+  warning (`oms artifact-index prune --stale`, the operator's call because
+  rows are evidence) instead of listing the stale rows with nothing to run.
 - `agent-events start --then STATE[:KEY]` (repeatable, with `--then-actor`
   and `--then-actor-kind`) appends the routed opening transitions in the
   creating process, with the same validation, actor, and idempotency keys

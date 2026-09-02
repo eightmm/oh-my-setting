@@ -1414,6 +1414,10 @@ PY
 
   if [ "${stale:-0}" -gt 0 ]; then
     echo "warn: artifact index has $stale stale artifact/patch reference(s)"
+    # The rows point at files a gc sweep already removed; the canonical
+    # validation below fails on the same rows. Name the verb that drops them,
+    # and that it is the operator's call because rows are evidence.
+    echo "  next: oms artifact-index --repo $project_dir prune --stale drops the rows whose artifact or patch is gone; keep them if those receipts still matter"
   else
     echo "ok: artifact index references"
   fi
