@@ -166,7 +166,7 @@ pick_method() {
 }
 install_tick() {
   local method; method="$(pick_method)" || exit 2
-  [ ! -d "$PWD/.oms" ] || register_repo "$PWD" >/dev/null || true
+  [ "$DRY_RUN" = 1 ] || [ ! -d "$PWD/.oms" ] || register_repo "$PWD" >/dev/null || true
   case "$method" in
     systemd)
       if [ "$DRY_RUN" = 1 ]; then echo "would install systemd user timer: $TIMER_FILE (hourly)"; return 0; fi

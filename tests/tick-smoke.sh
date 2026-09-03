@@ -55,9 +55,11 @@ PY
 [ ! -f "$b/.oms/tick/last.json" ] || fail "dry-run must not write a receipt"
 
 # --- install / status / uninstall through the stub --------------------------
-"$TICK" install --method systemd --dry-run | grep -q 'would install' || fail "install dry-run must print"
+(cd "$b" && "$TICK" install --method systemd --dry-run) | grep -q 'would install' || fail "install dry-run must print"
 [ ! -f "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" ] || fail "dry-run must not write units"
-"$TICK" install --method systemd | grep -q 'systemd timer installed' || fail "install must report"
+grep -Fxq "$b" "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt" && fail "a dry-run install must not register the cwd"
+(cd "$b" && "$TICK" install --method systemd) | grep -q 'systemd timer installed' || fail "install must report"
+grep -Fxq "$b" "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt" || fail "install must register the adopted cwd"
 grep -q 'OnCalendar=hourly' "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" || fail "timer must be hourly"
 grep -q "tick.sh\" run" "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.service" || fail "service must run the tick"
 grep -q 'enable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "install must enable the timer"
@@ -70,6 +72,7 @@ grep -q 'disable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "u
 st="$("$TICK" status)"
 printf '%s' "$st" | grep -q 'timer: none' || fail "status must report no timer: $st"
 "$TICK" unregister --repo "$a" >/dev/null
+"$TICK" unregister --repo "$b" >/dev/null
 "$TICK" run | grep -q 'nothing registered' || fail "an empty registry must say so"
 
 echo "tick-smoke: ok"
