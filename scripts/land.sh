@@ -20,8 +20,9 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
 (default: bash scripts/check.sh when the repo has one).
-Stages, each recorded in .oms/land/<stamp>-<sha>-<pid>.json; the gate log lives
-under $XDG_STATE_HOME/oh-my-setting/land/ (path in the receipt), outside the repo:
+Stages, each recorded beside its gate log under
+$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<stamp>-<sha>-<pid>.json,
+outside the repo:
   gate    the gate command; a failure is recorded in the fail ledger
   push    git push --no-verify REMOTE HEAD:TARGET, only if HEAD and the tree
           are unchanged since the gate started
@@ -54,11 +55,35 @@ done
 case "$CI_WAIT" in ''|*[!0-9]*) echo "error: --ci-wait must be seconds" >&2; exit 2 ;; esac
 REPO="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" ||
   { echo "error: --repo is not a git checkout: $REPO" >&2; exit 2; }
-LAND_DIR="$REPO/.oms/land"
-# Gate output streams outside the repo: the gate's purity guard inventories
-# .oms before and after the suite, and a log growing under it reads as the
-# suite mutating the checkout.
-LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land"
+REPO="$(oms_strip_cr "$REPO")"
+REPO="$(cd "$REPO" 2>/dev/null && pwd -P)" ||
+  { echo "error: cannot resolve --repo path" >&2; exit 2; }
+
+land_state_dir() {  # one durable, safe state directory for all linked worktrees
+  local common_dir common_root name digest
+
+  common_dir="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  common_dir="$(oms_strip_cr "$common_dir")"
+  case "$common_dir" in
+    /*|[A-Za-z]:/*) ;;
+    *) common_dir="$REPO/$common_dir" ;;
+  esac
+  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || return 1
+  common_root="$(cd "$common_dir/.." 2>/dev/null && pwd -P)" || return 1
+  name="$(basename "$common_root")"
+  name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+  name="${name//../_}"
+  case "$name" in ''|.|..) name=repo ;; esac
+  digest="$(printf '%s' "$common_root" | cksum | awk '{print $1 "-" $2}')"
+  case "$digest" in ''|*[!0-9-]*) return 1 ;; esac
+  printf '%s/%s-%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land" "$name" "$digest"
+}
+
+LAND_DIR="$(land_state_dir)" ||
+  { echo "error: cannot resolve land state directory" >&2; exit 2; }
+# Gate output and receipts share an XDG state directory. A gate purity check
+# inventories .oms, so neither can live in the checkout.
+LOG_DIR="$LAND_DIR"
 
 # rset KEY=VALUE... merges fields into the receipt; dotted keys nest one
 # level, integers stay integers.
@@ -115,8 +140,8 @@ finish() {  # finish STATE SUMMARY
 
 run_job() {
   cd "$REPO"
+  mkdir -p "$LAND_DIR"
   RECEIPT="$LAND_DIR/$STAMP.json" LOG="$LOG_DIR/$STAMP.log"
-  mkdir -p "$LOG_DIR"
   SHA="$(git rev-parse HEAD)" SHORT="${SHA:0:7}"
   rset pid="$$" state=running started_at="$(now)" sha="$SHA" gate.command="$GATE" \
     remote="$REMOTE" target="$TARGET" log="$LOG"

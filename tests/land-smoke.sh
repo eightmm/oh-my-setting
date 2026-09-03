@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # `oms land` end to end against a bare remote: a green gate pushes and writes a
-# passed receipt, a red gate records the failure and pushes nothing, a HEAD
-# that moves during the gate is never pushed, dirty or diverged trees are
-# refused before any job starts, and the detached mode leaves a receipt the
-# status verb reads. No CI (--ci-wait 0) and no install refresh (the fixture
-# is not the harness checkout), so nothing here reaches the network.
+# passed receipt beside its XDG-state log, a red gate records the failure and
+# pushes nothing, a HEAD that moves during the gate is never pushed, dirty or
+# diverged trees are refused before any job starts, and the detached mode
+# leaves a receipt the status verb reads. No CI (--ci-wait 0) and no install
+# refresh (the fixture is not the harness checkout), so nothing here reaches
+# the network.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-land.XXXXXX")"
@@ -15,11 +16,12 @@ export OMS_WORK_JOURNAL_SUPPRESS=1 XDG_STATE_HOME="$TMP/state" GIT_AUTHOR_NAME=t
   GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 log_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["log"])' "$1"; }
 LAND="$ROOT/scripts/land.sh"
+state_land="$XDG_STATE_HOME/oh-my-setting/land"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 git init -q --bare -b main "$TMP/remote.git"
-repo="$TMP/work"
+repo="$TMP/work.. tree"
 git clone -q "$TMP/remote.git" "$repo" 2>/dev/null
 mkdir -p "$repo/scripts" "$repo/.oms"
 printf '*\n' > "$repo/.oms/.gitignore"
@@ -35,13 +37,24 @@ remote_tip() { git -C "$TMP/remote.git" rev-parse main; }
 # --- 1. nothing to land ------------------------------------------------------
 out="$("$LAND" --repo "$repo" --wait --ci-wait 0)"
 printf '%s' "$out" | grep -q 'nothing to land' || fail "an up-to-date tree lands nothing: $out"
+[ ! -e "$state_land" ] || fail "an up-to-date landing must not leave receipt state"
 
-# --- 2. green gate: pushed, receipt passed, update skipped --------------------
-echo one > "$repo/one"; git -C "$repo" add one; git -C "$repo" commit -q -m one
-head="$(git -C "$repo" rev-parse HEAD)"
-"$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/pass.out" || fail "green gate must land: $(cat "$TMP/pass.out")"
+# --- 2. green worktree gate: state survives worktree removal ------------------
+peer="$TMP/landing-worktree"
+git -C "$repo" worktree add -q -b land-receipt "$peer" HEAD
+mkdir -p "$peer/.oms"
+printf '*\n' > "$peer/.oms/.gitignore"
+peer_oms_before="$(find "$peer/.oms" -mindepth 1 -print | sort)"
+echo one > "$peer/one"; git -C "$peer" add one; git -C "$peer" commit -q -m one
+head="$(git -C "$peer" rev-parse HEAD)"
+"$LAND" --repo "$peer" --wait --ci-wait 0 > "$TMP/pass.out" || fail "green gate must land: $(cat "$TMP/pass.out")"
 [ "$(remote_tip)" = "$head" ] || fail "remote main must be the landed commit"
-receipt="$(ls "$repo"/.oms/land/*.json | tail -n 1)"
+receipt="$(find "$state_land" -type f -name '*.json' -print | sort | tail -n 1)"
+[ -n "$receipt" ] || fail "green gate must write an XDG-state receipt"
+receipt_dir="$(dirname "$receipt")"
+case "$receipt_dir" in "$state_land"/*) ;; *) fail "receipt must live under XDG state: $receipt" ;; esac
+slug="${receipt_dir#"$state_land"/}"
+case "$slug" in ''|.|..|*/*|*..*|*[!A-Za-z0-9._-]*) fail "unsafe receipt slug: $slug" ;; esac
 python3 - "$receipt" "$head" <<'PY' || fail "passed receipt is wrong: $(cat "$receipt")"
 import json, sys
 r = json.load(open(sys.argv[1]))
@@ -50,8 +63,16 @@ assert r["gate"]["rc"] == 0 and r["push"]["rc"] == 0, r
 assert r["update"]["rc"] == "skipped" and r["ci"]["conclusion"] == "skipped", r
 PY
 grep -q 'gate ok' "$(log_of "$receipt")" || fail "gate output must land in the receipt log"
-case "$(log_of "$receipt")" in "$TMP/state/"*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
-"$LAND" status --repo "$repo" | grep -q '^land .*: passed' || fail "status must read the newest receipt"
+case "$(log_of "$receipt")" in "$state_land"/*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
+[ "$(dirname "$(log_of "$receipt")")" = "$receipt_dir" ] || fail "receipt and gate log must share a state directory"
+[ "$peer_oms_before" = "$(find "$peer/.oms" -mindepth 1 -print | sort)" ] ||
+  fail "a landing must not add receipt state under its worktree .oms"
+"$LAND" status --repo "$peer" | grep -q '^land .*: passed' || fail "status must read a worktree receipt"
+git -C "$repo" worktree remove --force "$peer"
+[ ! -e "$peer" ] || fail "landing worktree removal must succeed"
+"$LAND" status --repo "$repo" | grep -q '^land .*: passed' ||
+  fail "main checkout must read the removed worktree's receipt"
+git -C "$repo" pull -q --ff-only origin main
 
 # --- 3. red gate: failure recorded, nothing pushed -----------------------------
 gate 'echo boom; exit 3'
@@ -76,18 +97,27 @@ grep -q 'HEAD or the tree changed' "$TMP/moved.out" || fail "moved-HEAD reason m
 
 # --- 5. refusals before any job: dirty tree, diverged remote -----------------
 gate 'echo gate ok'
+receipts_before_refusal="$(find "$receipt_dir" -maxdepth 1 -type f -name '*.json' -print | sort)"
 echo dirty >> "$repo/one"
 "$LAND" --repo "$repo" --wait --ci-wait 0 2>"$TMP/dirty.err" && fail "a dirty tree must be refused"
 grep -q 'commit or stash' "$TMP/dirty.err" || fail "dirty refusal must say so: $(cat "$TMP/dirty.err")"
 git -C "$repo" checkout -q -- one
-git clone -q "$TMP/remote.git" "$TMP/other" 2>/dev/null
-echo other > "$TMP/other/other"; git -C "$TMP/other" add other
-git -C "$TMP/other" commit -q -m other; git -C "$TMP/other" push -q origin HEAD:main
+other="$TMP/other-clone/work.. tree"
+mkdir -p "$(dirname "$other")"
+git clone -q "$TMP/remote.git" "$other" 2>/dev/null
+if "$LAND" status --repo "$other" > "$TMP/other-status.out" 2>&1; then
+  fail "a distinct clone must not read this repository's receipt"
+fi
+other_dir="$(sed -n 's/^no landing recorded under //p' "$TMP/other-status.out" | sed -n '1p')"
+if [ -z "$other_dir" ] || [ "$other_dir" = "$receipt_dir" ]; then
+  fail "distinct clones with the same basename must have separate state directories"
+fi
+echo other > "$other/other"; git -C "$other" add other
+git -C "$other" commit -q -m other; git -C "$other" push -q origin HEAD:main
 "$LAND" --repo "$repo" --wait --ci-wait 0 2>"$TMP/diverged.err" && fail "a diverged remote must be refused"
 grep -q 'rebase first' "$TMP/diverged.err" || fail "diverged refusal must say so: $(cat "$TMP/diverged.err")"
-if ls "$repo"/.oms/land/*-"$(git -C "$repo" rev-parse --short HEAD)"-*.json >/dev/null 2>&1; then
+[ "$receipts_before_refusal" = "$(find "$receipt_dir" -maxdepth 1 -type f -name '*.json' -print | sort)" ] ||
   fail "a refused landing must not leave a receipt"
-fi
 
 # --- 6. detached mode: receipt appears, status reads it -----------------------
 git -C "$repo" pull -q --rebase origin main
