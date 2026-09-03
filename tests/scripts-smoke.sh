@@ -12821,8 +12821,8 @@ test_oms_frontdoor_routes_primary_subsystems() {
   printf '%s\n' "$review_help" | grep -Fq 'With --gate, enforce and record the typed gate outcome.' ||
     fail "peer-review help should scope its typed outcome to gate mode"
 
-  for primary in autopilot consult doctor inbox journal patch-admit patch-land \
-    peer-delegate peer-review runtime update; do
+  for primary in autopilot consult doctor inbox journal land patch-admit patch-land \
+    peer-delegate peer-review runtime tick update; do
     printf '%s\n' "$frontdoors" | grep -Eq "^${primary} " ||
       fail "frontdoor catalog should route the canonical workflow: $primary"
   done
