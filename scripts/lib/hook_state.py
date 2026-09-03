@@ -961,7 +961,8 @@ def ctx_state_path(hooks_dir: Path, payload: dict[str, Any]) -> Path:
     return hooks_dir / "sessions" / f"{session_hash(payload)}.ctx.json"
 
 
-def start_handoff_capture(repo: Path, payload: dict[str, Any], agent: str, left: float) -> bool:
+def start_handoff_capture(repo: Path, payload: dict[str, Any], agent: str, left: float,
+                          note: str | None = None) -> bool:
     """Detach a mechanical digest capture; the advisory never waits on it."""
     if os.environ.get("OMS_CTX_CAPTURE", "1") != "1":
         return False
@@ -977,7 +978,7 @@ def start_handoff_capture(repo: Path, payload: dict[str, Any], agent: str, left:
         "--cwd",
         payload_cwd(payload) or str(repo),
         "--note",
-        "auto: context pressure (~%d%% left)" % int(left),
+        note or "auto: context pressure (~%d%% left)" % int(left),
     ]
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
     if session:
@@ -1104,13 +1105,16 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
 
     warn = env_int("OMS_CTX_WARN_PCT", 15, minimum=1, maximum=90)
     urgent = min(env_int("OMS_CTX_URGENT_PCT", 8, minimum=0, maximum=89), warn)
-    rearm = max(env_int("OMS_CTX_REARM_PCT", 30, minimum=2, maximum=100), warn)
+    # A silent digest capture well before the advisory bands (user decision
+    # 2026-09-03, superseding the 2026-08-06 council's advisory-only verdict).
+    capture = env_int("OMS_CTX_CAPTURE_PCT", 30, minimum=0, maximum=90)
+    rearm = max(env_int("OMS_CTX_REARM_PCT", 30, minimum=2, maximum=100), warn, capture)
     hooks_dir = ensure_oms(repo)
     state_path = ctx_state_path(hooks_dir, payload)
     state = load_state(state_path)
     stage = state.get("stage") if state.get("stage") in ("warn", "urgent") else None
 
-    def save(new_stage: str | None) -> None:
+    def save(new_stage: str | None, captured: bool = False) -> None:
         write_json_atomic(
             state_path,
             {
@@ -1118,22 +1122,29 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
                 "updated_at": utc_now(),
                 "session": session_hash(payload),
                 "stage": new_stage,
+                "captured": captured,
                 "percent_left": round(left, 1),
             },
         )
 
     if left > rearm:
         # Compaction or a fresh reading recovered the window; re-arm.
-        if stage:
+        if stage or state.get("captured"):
             save(None)
         return None
     rank = {"warn": 1, "urgent": 2}
     new_stage = "urgent" if left <= urgent else "warn" if left <= warn else None
     if new_stage is None or (stage and rank[new_stage] <= rank[stage]):
+        if new_stage is None and left <= capture and not state.get("captured"):
+            started = start_handoff_capture(repo, payload, agent, left)
+            save(stage, captured=True)
+            append_event(repo, payload, action="context_capture", status="early",
+                         percent_left=round(left, 1), source=agent,
+                         capture="started" if started else "skipped")
         # Between bands, or a band this session already announced; only an
         # escalation (warn -> urgent) speaks again before re-arming.
         return None
-    save(new_stage)
+    save(new_stage, captured=True)
     captured = start_handoff_capture(repo, payload, agent, left)
     append_event(
         repo,
@@ -1304,6 +1315,11 @@ def cmd_guard(_: argparse.Namespace) -> int:
         append_event(repo, payload, action="turn_guard", status="allow_no_state")
         return 0
 
+    budget = session_budget_reason(repo, payload, state, state_path)
+    if budget:
+        print(json.dumps({"decision": "block", "reason": budget}, ensure_ascii=False))
+        return 0
+
     dirty = git_dirty(repo)
     risk = str(state.get("risk") or "low")
     workflow = str(state.get("workflow") or "unknown")
@@ -1358,6 +1374,42 @@ def cmd_guard(_: argparse.Namespace) -> int:
     )
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
     return 0
+
+
+def session_budget_reason(repo: Path, payload: dict[str, Any], state: dict[str, Any],
+                          state_path: Path) -> str | None:
+    """Count Stops and wall-clock per routed session; past the budget, block the
+    Stop once per further quarter so the model lands what is verified and hands
+    off instead of running until the context dies (user decision 2026-09-03)."""
+    turns_cap = env_int("OMS_SESSION_BUDGET_TURNS", 200, minimum=0)
+    hours_cap = env_int("OMS_SESSION_BUDGET_HOURS", 6, minimum=0)
+    started = str(state.get("started_at") or "")
+    try:
+        began = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        began = datetime.now(timezone.utc)
+        state["started_at"] = began.strftime("%Y-%m-%dT%H:%M:%SZ")
+    turns = int(state.get("budget_turns") or 0) + 1
+    hours = (datetime.now(timezone.utc) - began).total_seconds() / 3600
+    state["budget_turns"] = turns
+    state["updated_at"] = utc_now()
+    band = int(4 * max(turns / turns_cap if turns_cap else 0, hours / hours_cap if hours_cap else 0))
+    latched = int(state.get("budget_band") or 0)
+    continuing = bool(payload.get("stop_hook_active") or payload.get("stopHookActive"))
+    if band >= 4 and band > latched and not continuing:
+        state["budget_band"] = band
+    write_json_atomic(state_path, state)
+    if band < 4 or band <= latched or continuing:
+        return None
+    captured = start_handoff_capture(repo, payload, "claude", 0.0,
+                                     note="auto: session budget (%d turns, %.1fh)" % (turns, hours))
+    append_event(repo, payload, action="session_budget", status="block", turns=turns,
+                 hours=round(hours, 1), capture="started" if captured else "skipped")
+    return (
+        "[oms] session budget: %d turns and %.1fh since this session started (budget %d turns / %dh);"
+        " a handoff digest capture %s. Land what is verified, summarize the state for the user,"
+        " and stop; continue only on an explicit go-ahead." % (
+            turns, hours, turns_cap, hours_cap, "was started" if captured else "was skipped"))
 
 
 def cmd_repo(_: argparse.Namespace) -> int:

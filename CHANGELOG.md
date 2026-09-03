@@ -7,6 +7,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms tick`: an hourly user-level timer sweeps registered repos (journal
+  sync, attempt reconcile, threads idle over 7d closed, stale Codex plugin
+  cache refreshed) so a session starts on a swept tree; gc stays opt-in.
 - `oms land`: gate, push, install refresh, and CI wait as one detached job
   with a receipt (`oms land status`), so an agent starts a landing and reads
   the outcome instead of spending turns watching the gate.
@@ -79,6 +82,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- Hooks capture a handoff digest silently at 30% context left
+  (`OMS_CTX_CAPTURE_PCT`), ahead of the 15%/8% advisories, and the Stop hook
+  blocks once per further quarter past a session budget of 200 turns or 6
+  hours (`OMS_SESSION_BUDGET_TURNS`, `OMS_SESSION_BUDGET_HOURS`; 0 disables)
+  so a long session lands what is verified and hands off instead of running
+  until the context dies. User decision of 2026-09-03; it supersedes the
+  2026-08-06 council verdict that kept context handling advisory-only.
 - The peer ask seat default timeout is 15m (was 10m): the codex seat answered
   36 of 48 asks since 2026-08-08 and timed out on the rest at exactly 10m.
 - `oms fail-ledger list` classifies a single unresolved failure recorded

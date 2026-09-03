@@ -16204,6 +16204,36 @@ test_context_pressure_warns_once_at_low_context() {
   fi
 }
 
+test_context_capture_starts_silently_at_thirty_percent_left() {
+  local d="$TMP/ctx-capture-early"
+  local project="$d/project"
+  local hud="$d/hud-cache"
+  local out digest
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms" "$hud"
+  digest="$(ctx_cache_digest ctxcap1)"
+  printf '{"schema":1,"used_percentage":72}\n' > "$hud/ctx-$digest.json"
+  out="$(printf '{"prompt":"이어서 계속 봐줘","session_id":"ctxcap1","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+    fail "28% left is a capture, not an advisory: $out"
+  fi
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "context_capture"'
+  # Once per window: the next reading inside the band captures nothing new.
+  printf '{"schema":1,"used_percentage":75}\n' > "$hud/ctx-$digest.json"
+  printf '{"prompt":"이어서 계속 봐줘 2","session_id":"ctxcap1","turn_id":"t2","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  [ "$(grep -c '"action": "context_capture"' "$project/.oms/hooks/events.jsonl")" -eq 1 ] ||
+    fail "the early capture must fire once per window"
+  # The advisory band still speaks after the early capture.
+  printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
+  out="$(printf '{"prompt":"이어서 계속 봐줘 3","session_id":"ctxcap1","turn_id":"t3","cwd":"%s"}' "$project" |
+    TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq '[oms] context low (~10% left)' ||
+    fail "the warn band must still announce after an early capture: $out"
+}
+
 test_context_pressure_escalates_and_rearms() {
   local d="$TMP/ctx-pressure-bands"
   local project="$d/project"
@@ -16485,6 +16515,27 @@ test_turn_guard_blocks_unverified_dirty_task_once() {
   out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "turn guard should block at most once per turn"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_block_limit"'
+}
+
+test_session_budget_blocks_once_past_the_turn_cap() {
+  local d="$TMP/session-budget"
+  local project="$d/project"
+  local stop_payload out
+  make_committed_repo "$project"
+  printf '{"prompt":"fix this helper","session_id":"s-budget","turn_id":"t1","cwd":"%s"}' "$project" |
+    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s-budget","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
+  out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "one turn is inside a two-turn budget: $out"
+  out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
+  printf '%s' "$out" | grep -Fq '[oms] session budget: 2 turns' ||
+    fail "the second stop must hit the budget: $out"
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "session_budget"'
+  # The continuation Stop after a block, and the same band, stay silent.
+  out="$(printf '%s' "${stop_payload%\}},\"stop_hook_active\":true}" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "a stop_hook_active continuation must not be blocked again: $out"
+  out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=0 OMS_SESSION_BUDGET_HOURS=0 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "a zero budget disables the block: $out"
 }
 
 test_turn_guard_allows_routine_dirty_task() {
