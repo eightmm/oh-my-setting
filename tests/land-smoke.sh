@@ -11,8 +11,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-land.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
-export OMS_WORK_JOURNAL_SUPPRESS=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
+export OMS_WORK_JOURNAL_SUPPRESS=1 XDG_STATE_HOME="$TMP/state" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
   GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+log_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["log"])' "$1"; }
 LAND="$ROOT/scripts/land.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -48,7 +49,8 @@ assert r["state"] == "passed" and r["sha"] == sys.argv[2], r
 assert r["gate"]["rc"] == 0 and r["push"]["rc"] == 0, r
 assert r["update"]["rc"] == "skipped" and r["ci"]["conclusion"] == "skipped", r
 PY
-grep -q 'gate ok' "${receipt%.json}.log" || fail "gate output must land in the receipt log"
+grep -q 'gate ok' "$(log_of "$receipt")" || fail "gate output must land in the receipt log"
+case "$(log_of "$receipt")" in "$TMP/state/"*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
 "$LAND" status --repo "$repo" | grep -q '^land .*: passed' || fail "status must read the newest receipt"
 
 # --- 3. red gate: failure recorded, nothing pushed -----------------------------
@@ -109,7 +111,7 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 grep -q '"state": "passed"' "$receipt" || fail "signal probe landing did not pass: $(cat "$receipt" 2>/dev/null)"
-grep -Eq 'SigIgn:.*[0-9a-f]*[01489]$' "${receipt%.json}.log" ||
-  fail "the detached gate must see SIGINT and SIGQUIT unignored: $(grep SigIgn "${receipt%.json}.log")"
+grep -Eq 'SigIgn:.*[0-9a-f]*[01489]$' "$(log_of "$receipt")" ||
+  fail "the detached gate must see SIGINT and SIGQUIT unignored: $(grep SigIgn "$(log_of "$receipt")")"
 
 echo "land-smoke: ok"

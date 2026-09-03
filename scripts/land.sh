@@ -20,7 +20,8 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
 (default: bash scripts/check.sh when the repo has one).
-Stages, each recorded in .oms/land/<stamp>-<sha>-<pid>.json with its log beside it:
+Stages, each recorded in .oms/land/<stamp>-<sha>-<pid>.json; the gate log lives
+under $XDG_STATE_HOME/oh-my-setting/land/ (path in the receipt), outside the repo:
   gate    the gate command; a failure is recorded in the fail ledger
   push    git push --no-verify REMOTE HEAD:TARGET, only if HEAD and the tree
           are unchanged since the gate started
@@ -54,6 +55,10 @@ case "$CI_WAIT" in ''|*[!0-9]*) echo "error: --ci-wait must be seconds" >&2; exi
 REPO="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" ||
   { echo "error: --repo is not a git checkout: $REPO" >&2; exit 2; }
 LAND_DIR="$REPO/.oms/land"
+# Gate output streams outside the repo: the gate's purity guard inventories
+# .oms before and after the suite, and a log growing under it reads as the
+# suite mutating the checkout.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land"
 
 # rset KEY=VALUE... merges fields into the receipt; dotted keys nest one
 # level, integers stay integers.
@@ -110,7 +115,8 @@ finish() {  # finish STATE SUMMARY
 
 run_job() {
   cd "$REPO"
-  RECEIPT="$LAND_DIR/$STAMP.json" LOG="$LAND_DIR/$STAMP.log"
+  RECEIPT="$LAND_DIR/$STAMP.json" LOG="$LOG_DIR/$STAMP.log"
+  mkdir -p "$LOG_DIR"
   SHA="$(git rev-parse HEAD)" SHORT="${SHA:0:7}"
   rset pid="$$" state=running started_at="$(now)" sha="$SHA" gate.command="$GATE" \
     remote="$REMOTE" target="$TARGET" log="$LOG"
