@@ -83,7 +83,7 @@ echo other > "$TMP/other/other"; git -C "$TMP/other" add other
 git -C "$TMP/other" commit -q -m other; git -C "$TMP/other" push -q origin HEAD:main
 "$LAND" --repo "$repo" --wait --ci-wait 0 2>"$TMP/diverged.err" && fail "a diverged remote must be refused"
 grep -q 'rebase first' "$TMP/diverged.err" || fail "diverged refusal must say so: $(cat "$TMP/diverged.err")"
-if ls "$repo"/.oms/land/*-"$(git -C "$repo" rev-parse --short HEAD)".json >/dev/null 2>&1; then
+if ls "$repo"/.oms/land/*-"$(git -C "$repo" rev-parse --short HEAD)"-*.json >/dev/null 2>&1; then
   fail "a refused landing must not leave a receipt"
 fi
 

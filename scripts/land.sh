@@ -20,7 +20,7 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
 (default: bash scripts/check.sh when the repo has one).
-Stages, each recorded in .oms/land/<stamp>-<sha>.json with its log beside it:
+Stages, each recorded in .oms/land/<stamp>-<sha>-<pid>.json with its log beside it:
   gate    the gate command; a failure is recorded in the fail ledger
   push    git push --no-verify REMOTE HEAD:TARGET, only if HEAD and the tree
           are unchanged since the gate started
@@ -153,9 +153,9 @@ run_job() {
   esac
 }
 
-show_status() {
-  local newest
-  newest="$(ls -1 "$LAND_DIR"/*.json 2>/dev/null | sort | tail -n 1)" || true
+show_status() {  # show_status [RECEIPT]; default: the most recently written one
+  local newest="${1:-}"
+  [ -n "$newest" ] || newest="$(ls -t "$LAND_DIR"/*.json 2>/dev/null | head -n 1)" || true
   [ -n "$newest" ] || { echo "no landing recorded under $LAND_DIR"; return 1; }
   if [ "$JSON" -eq 1 ]; then cat "$newest"; return 0; fi
   python3 - "$newest" <<'PY'
@@ -191,14 +191,14 @@ if [ "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse "$REMOTE/$
   echo "nothing to land: HEAD is already $REMOTE/$TARGET"; exit 0
 fi
 mkdir -p "$LAND_DIR"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$REPO" rev-parse --short HEAD)"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$REPO" rev-parse --short HEAD)-$$"
 job=("$ROOT/scripts/land.sh" --run-job "$STAMP" --repo "$REPO" --remote "$REMOTE" \
   --target "$TARGET" --gate "$GATE" --ci-wait "$CI_WAIT")
 [ "$UPDATE" -eq 1 ] || job+=(--no-update)
 if [ "$WAIT" -eq 1 ]; then
   rc=0
   bash "${job[@]}" || rc=$?
-  JSON=0 show_status
+  JSON=0 show_status "$LAND_DIR/$STAMP.json"
   exit "$rc"
 fi
 setsid bash "${job[@]}" < /dev/null > /dev/null 2>&1 &
