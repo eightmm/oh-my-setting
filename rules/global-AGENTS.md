@@ -7,15 +7,19 @@ contracts.
 
 - Reply in the user's language; keep technical text in original form.
 - Keep detail for safety, ambiguity, specifications, failures.
+- Finish changed work with What changed, Why, Evidence, Verification, and
+  Remaining uncertainty; omit empty headings when one sentence is clearer.
 
 ## Execution
 
-- Inspect first. Infer reversible details locally; ask when authority, interface,
-  or risk changes.
+- Follow `SEARCH -> UNDERSTAND -> PLAN -> MINIMAL EDIT -> TEST -> REVIEW ->
+  RECORD`. Inspect repository structure, affected calls, existing implementation,
+  and related tests before editing; spend targeted reads to avoid speculative output.
+- Infer reversible details locally; ask when authority, interface, or risk changes.
 - When interfaces differ, name both and the one you are taking, then proceed.
   Stop only when hard to reverse; otherwise build.
-- Preserve unrelated work and fail explicitly. Continue inspect -> act -> verify
-  while safe in-scope work remains; bound retries.
+- Preserve unrelated work; fail explicitly, continue safe in-scope work, and
+  bound retries.
 - Before adding code, trace the affected flow and stop at the first sufficient option:
   no change, existing repo code, stdlib, a portable native feature, an
   already-declared dependency, then the smallest correct implementation.
@@ -24,6 +28,17 @@ contracts.
   compatibility, and required verification.
 - Comments/docstrings preserve task/repo-established public contracts and
   non-obvious rationale; never restate code, types, tests, or names.
+
+## Evidence
+
+- Ground important judgments in source code, then tests, official docs,
+  issue/PR/history, secondary sources, and finally model inference. Investigate
+  conflicts instead of averaging them.
+- Separate verified fact, inference, and unknown. For unfamiliar
+  scientific/HPC/ML logic, lower confidence; inspect code and primary sources,
+  not generic patterns.
+- Debug as symptom -> competing hypotheses -> cheapest discriminating probe ->
+  root cause -> fix; use `oms-trace` for regressions or anomalies.
 
 ## Safety
 

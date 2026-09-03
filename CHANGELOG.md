@@ -100,6 +100,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   recorded` when the packet has none, and `idle=Nd` on the plan line.
 - Journal `handoff` rows carry the digest's last assistant summary as their
   outcome instead of the fixed "Session handoff captured" label.
+- Coding guidance is now explicitly evidence-first across the install-wide
+  rules and delegated implementation briefs: agents search and trace before
+  editing, rank source/tests/docs/history ahead of inference, lower confidence
+  in unfamiliar scientific/HPC/ML code, debug with discriminating hypotheses,
+  and report What changed, Why, Evidence, Verification, and uncertainty. This
+  extends the existing minimal-change and `oms-trace` contracts without adding
+  another mode or state store.
 - `oms doctor` names the remedy under a stale artifact-index reference
   warning (`oms artifact-index prune --stale`, the operator's call because
   rows are evidence) instead of listing the stale rows with nothing to run.

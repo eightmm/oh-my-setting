@@ -930,7 +930,10 @@ write_compiled_context() {
 }
 
 write_minimal_change_doctrine() {
-  printf 'Before adding code, understand the affected flow and prefer no change, existing repo code, stdlib or portable native features, and already-declared dependencies before the smallest correct implementation.\n'
+  printf 'Search repository structure, affected call paths and contracts, current implementation, and related tests before editing; spend targeted reads to reduce speculative output and state the narrowest change boundary.\n'
+  printf 'For important judgments prefer source code, tests, official docs, issue/PR/history, secondary sources, then inference; label verified facts, inference, and unknowns, and lower confidence in unfamiliar scientific, HPC, or ML logic.\n'
+  printf 'For a failure preserve the symptom, test competing hypotheses with the cheapest discriminating probe, identify the root cause, then fix it; do not rewrite while the cause is undiscriminated.\n'
+  printf 'Before adding code, prefer no change, existing repo code, stdlib or portable native features, and already-declared dependencies before the smallest correct implementation.\n'
   printf 'Minimal never means weakening explicit requirements, trust-boundary validation, data-loss protection, security, accessibility, portability, compatibility, or required verification.\n'
   printf 'Extend an existing canonical test or fixture first; add a new test only when the behavior or boundary is not already covered.\n'
   printf 'Comments/docstrings preserve task/repo-established public contracts and non-obvious rationale; never restate code, types, tests, or names, and do not delete documentation merely to reduce volume.\n'
@@ -971,7 +974,7 @@ write_minimal_change_doctrine() {
     printf '%s\n' "$PROMPT"
   fi
   write_context_pack_section
-  printf '\nReport changed behavior, verification, skipped checks, and blockers.\n'
+  printf '\nReport What changed, Why, Evidence, Verification (including skipped checks), Remaining uncertainty, and blockers.\n'
 } > "$prompt_file"
 
 # Pre-flight: fail before any worker runs, so no work is wasted. Untracked
@@ -1573,7 +1576,7 @@ write_repair_prompt() {
       quote_tail "$verify_out" 4000 "verification output"
       printf '\n'
     fi
-    printf '\nWhen done, report: changed files, what you verified, what you did not verify, and any blockers.\n'
+    printf '\nWhen done, report What changed, Why, Evidence, Verification (including skipped checks), Remaining uncertainty, and blockers.\n'
   } > "$output"
 }
 

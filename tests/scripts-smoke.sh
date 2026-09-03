@@ -4102,13 +4102,19 @@ test_delegate_dry_run() {
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
-    'Before adding code, understand the affected flow'
+    'Search repository structure, affected call paths and contracts'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
+    'source code, tests, official docs, issue/PR/history'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
+    'test competing hypotheses with the cheapest discriminating probe'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'Comments/docstrings preserve task/repo-established public contracts'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'never restate code, types, tests, or names'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'Extend an existing canonical test or fixture first'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
+    'Report What changed, Why, Evidence, Verification'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'DRY RUN: worker command skipped.'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '(path omitted)'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'worktree: temporary (removed after run)'
@@ -12349,7 +12355,7 @@ test_delegate_repair_retries_failed_verify() {
 #!/usr/bin/env bash
 prompt="$(cat)"
 if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
-  printf '%s' "$prompt" | grep -q 'Before adding code, understand the affected flow' || exit 8
+  printf '%s' "$prompt" | grep -q 'Search repository structure, affected call paths and contracts' || exit 8
   printf '%s' "$prompt" | grep -q 'Minimal never means weakening' || exit 8
   printf '%s' "$prompt" | grep -q 'Comments/docstrings preserve task/repo-established public contracts' || exit 8
   printf '%s' "$prompt" | grep -q 'never restate code, types, tests, or names' || exit 8
@@ -13488,16 +13494,16 @@ test_global_rules_stay_compact_and_route_workflows() {
 
   [ -f "$global_rules" ] || fail "dedicated global rules file should exist"
   # This file is loaded into every session on all three CLIs, so the budget is a
-  # standing context cost, not a style rule. Test-economy and fail-open affected
-  # verification fit the existing 560-word budget;
+  # standing context cost, not a style rule. The evidence-first workflow earns
+  # a small input increase because it prevents larger speculative outputs;
   # raise it only for another rule that changes decisions, never for prose.
   line_count="$(wc -l < "$global_rules" | tr -d ' ')"
   [ "$line_count" -le 160 ] ||
     fail "global rules should stay compact (got $line_count lines)"
   word_count="$(wc -w < "$global_rules" | tr -d ' ')"
-  [ "$word_count" -le 560 ] ||
-    fail "global rules should stay under 560 words (got $word_count)"
-  for heading in Communication Execution Safety 'Context and Tools' Specification Verification 'Multi-Agent Work' 'Project Rules'; do
+  [ "$word_count" -le 680 ] ||
+    fail "global rules should stay under 680 words (got $word_count)"
+  for heading in Communication Execution Evidence Safety 'Context and Tools' Specification Verification 'Multi-Agent Work' 'Project Rules'; do
     [ "$(grep -Fxc "## $heading" "$global_rules")" = "1" ] ||
       fail "global rules should contain exactly one $heading section"
   done
@@ -13532,6 +13538,16 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should preserve established public documentation contracts"
   grep -Fq 'never restate code, types, tests, or names' "$global_rules" ||
     fail "global rules should reject commentary that only restates the implementation"
+  grep -Fq 'SEARCH -> UNDERSTAND -> PLAN -> MINIMAL EDIT -> TEST -> REVIEW ->' "$global_rules" ||
+    fail "global rules should carry the evidence-first workflow"
+  grep -Fq 'source code, then tests, official docs' "$global_rules" ||
+    fail "global rules should carry the evidence hierarchy"
+  grep -Fq 'Separate verified fact, inference, and unknown' "$global_rules" ||
+    fail "global rules should distinguish facts from inference"
+  grep -Fq 'symptom -> competing hypotheses -> cheapest discriminating probe' "$global_rules" ||
+    fail "global rules should require hypothesis-driven debugging"
+  grep -Fq 'What changed, Why, Evidence, Verification, and' "$global_rules" ||
+    fail "global rules should require a traceable completion record"
   grep -Fq '## Multi-Agent Work' "$global_rules" ||
     fail "global rules should retain a compact multi-agent policy"
   grep -Fq 'oms-agent-harness' "$global_rules" ||

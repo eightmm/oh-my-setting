@@ -4,6 +4,26 @@ Use this when choosing an implementation, reviewing a diff for avoidable
 complexity, or auditing a repository for duplicated facilities. It guides
 judgment only; it creates no mode, hook, state, or mutation authority.
 
+## Evidence before output
+
+Use `SEARCH -> UNDERSTAND -> PLAN -> MINIMAL EDIT -> TEST -> REVIEW -> RECORD`.
+Before editing, inspect repository structure, trace the affected call path and
+contracts, read the existing implementation, and locate the tests that own the
+behavior. Prefer a few more targeted reads over a speculative patch, but stop
+when further context cannot change the boundary or verification plan.
+
+For important judgments, prefer repository source, then tests, official docs,
+issue/PR/history, secondary sources, and only then model inference. A conflict
+is a reason to investigate the contract, not average the sources. Label what is
+verified, inferred, and still unknown. In unfamiliar scientific, HPC, or ML
+logic, lower confidence and inspect the codebase and primary sources rather
+than forcing a familiar generic pattern.
+
+For regressions, silent wrong results, flakiness, or anomalies, use
+`oms-trace`: preserve the symptom, list competing hypotheses, run the cheapest
+probe whose outcomes distinguish them, identify the root cause, then fix it.
+Do not rewrite a subsystem while the hypotheses are still undiscriminated.
+
 ## Decide after understanding
 
 Trace the affected flow, callers, contracts, and verification first. Then stop
@@ -79,6 +99,14 @@ real risks; documentation density and style alone are not findings.
 File/line evidence, the maintenance or behavioral failure, and the replacement
 are required. Line count alone is not evidence, and complexity cannot override
 a mechanical verification failure.
+
+## Record a traceable result
+
+Report What changed, Why, Evidence, Verification, and Remaining uncertainty.
+Evidence names the source, test, command, official document, or history item
+that changed the decision; model confidence is not evidence. Include failed,
+skipped, or impossible checks. Keep the record short enough for the next agent
+to reuse without reconstructing the session.
 
 ## Measure without another benchmark
 
