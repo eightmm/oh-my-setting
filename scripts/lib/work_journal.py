@@ -3172,7 +3172,8 @@ def _handoff_summary(path: pathlib.Path) -> str:
                           path.read_text(encoding="utf-8"), re.M)
     except OSError:
         match = None
-    return " ".join(match.group(1).split()).strip("* ")[:240] if match else "Session handoff captured"
+    line = " ".join(match.group(1).split()).strip("* ") if match else ""
+    return line[:240] if line and not line.startswith("#") else "Session handoff captured"
 
 def _read_json_source(path: pathlib.Path) -> Dict[str, Any]:
     if path.stat().st_size > MAX_SOURCE_BYTES:

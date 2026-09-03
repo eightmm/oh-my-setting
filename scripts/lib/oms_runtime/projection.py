@@ -197,7 +197,7 @@ def _canonical_ledger_failures(repo: Path, path: Path) -> List[Dict[str, Any]]:
     for row in rows:
         if not isinstance(row, Mapping):
             raise CoreError('canonical failure ledger projection contains a non-object row')
-        if (row.get('attention') not in {'none', 'retiring', 'actionable'} or
+        if (row.get('attention') not in {'none', 'retiring', 'stale', 'actionable'} or
                 not isinstance(row.get('actionable'), bool) or
                 not isinstance(row.get('retiring'), bool)):
             raise CoreError('canonical failure ledger projection contains invalid attention state')

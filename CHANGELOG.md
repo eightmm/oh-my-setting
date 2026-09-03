@@ -194,6 +194,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- The runtime projection accepts the `stale` failure attention state; the
+  first stale row made `oms runtime envelope show` fail and the resume hook
+  print `disagrees with runtime next -`. That line now says `runtime next
+  unavailable` when the control plane has no action, the failure-attention
+  smoke asserts the runtime envelope for stale rows, and a handoff digest
+  with an empty last assistant summary keeps the generic journal label.
 - `agent-supervisor wait` honors the submit contract: a job submitted with
   `--completion-state done` passes through `review` on its way to `done`,
   and `wait` used to return at `review`, handing callers a projection that

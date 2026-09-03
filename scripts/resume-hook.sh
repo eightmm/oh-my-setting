@@ -338,7 +338,9 @@ except Exception:
 primary = row.get("route", {}).get("primary") or row.get("route", {}).get("status") or "-"
 plane = row.get("control_plane", {})
 verdict = "agrees" if row.get("agree") else "disagrees"
-print("- graph route: %s (%s with runtime next %s)" % (primary, verdict, plane.get("action") or "-"))
+action = plane.get("action")
+print("- graph route: %s (%s)" % (
+    primary, "%s with runtime next %s" % (verdict, action) if action else "runtime next unavailable"))
 ' 2>/dev/null)" || route_line=""
   route_line="${route_line//$'\r'/}"
   [ -z "$route_line" ] || append "$route_line"

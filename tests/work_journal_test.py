@@ -1250,6 +1250,10 @@ class ObserveDiagnosticsTest(unittest.TestCase):
         events = self.repo / ".oms" / "work-journal" / "events.jsonl"
         row = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(row["outcome"]["summary"], "Done: pushed x")
+        self.source.write_text("## Last assistant summary\n\n## Open dissents\n", encoding="utf-8")
+        self.assertEqual(self.observe("--source-type", "session-handoff", "--source-id", "s2").returncode, 0)
+        row = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["outcome"]["summary"], "Session handoff captured")
 
     def test_unregistered_source_type_without_a_json_record_says_so(self):
         result = self.observe("--source-type", "evolution-round")

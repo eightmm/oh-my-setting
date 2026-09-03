@@ -163,11 +163,24 @@ printf '%s' "$out" | grep -q 'P3 stale-failures' ||
 if printf '%s' "$out" | grep -q 'P1 open-failures'; then
   fail "a stale row must not raise P1: $out"
 fi
+runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo5" envelope show)"
+printf '%s' "$runtime_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["failures"] == [], row["failures"]
+assert not any(action["id"] == "resolve_blocker" for action in row["next_actions"]), row["next_actions"]
+' || fail "runtime must accept the stale state and not promote it to a blocker: $runtime_json"
 "$ROOT/scripts/fail-ledger.sh" record --repo "$repo5" --kind verify \
   --cmd "bash scripts/check.sh" --exit 1 --summary "gate failed again" >/dev/null
 r="$(resume_of "$repo5")"
 printf '%s' "$r" | grep -q 'failures: 1 actionable' ||
   fail "a recurrence across commits is tree-independent and actionable: $r"
+runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo5" envelope show)"
+printf '%s' "$runtime_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert len(row["failures"]) == 1, row["failures"]
+' || fail "runtime must promote the recurrence: $runtime_json"
 
 # --- auto-update attention: one verdict over intent, wiring, outcome --------
 # Codex's matrix: enabled+fresh, enabled+failed, enabled+overdue,
