@@ -865,13 +865,25 @@ test_autopilot_orchestration() {
   ! grep -Fq 'lacks a valid PROJECT.md/scope contract' "$unbound_repo/unbound.out" ||
     fail "the binder error surfaced instead of a proposal: $(tail -5 "$unbound_repo/unbound.out")"
 
-  # Unfinished work under another contract is refused, not overwritten, and the
-  # refusal says which plan and why.
-  local busy_repo="$TMP/unbound-plan-busy"
+  # Unfinished work from a prior, contract-bound project is refused, not
+  # overwritten, and the refusal says which plan and why.
+  local busy_repo="$TMP/foreign-plan-busy"
   make_repo "$busy_repo"
-  mkdir -p "$busy_repo/calls" "$busy_repo/.oms/plan"
-  printf '{"schema":3,"goal":"a previous contract","accept":"true","tasks":{"t1":{"id":"t1","state":"ready"}}}\n' \
-    > "$busy_repo/.oms/plan/tasks.json"
+  mkdir -p "$busy_repo/calls"
+  write_done_plan "$busy_repo" false
+  python3 - "$busy_repo/.oms/plan/tasks.json" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    plan = json.load(handle)
+plan["tasks"]["t1"]["state"] = "ready"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle)
+PY
+  printf '\n## Decisions\n\n- Contract revision: successor.\n' >> "$busy_repo/PROJECT.md"
+  git -C "$busy_repo" add PROJECT.md
+  git -C "$busy_repo" commit -qm 'docs: adopt successor contract'
   rc=0
   run_autopilot "$busy_repo" propose --planner claude --allowed 'src,tests' \
     --base main --provider-timeout 10m > "$busy_repo/busy.out" 2>&1 || rc=$?
