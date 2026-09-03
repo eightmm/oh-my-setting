@@ -43,7 +43,7 @@ default_for() {  # default_for MA_KIND_VALUE_OR_EMPTY
   fi
 }
 
-[ "$(default_for ask)" = 10m ] || fail "ask default should be 10m"
+[ "$(default_for ask)" = 15m ] || fail "ask default should be 15m"
 [ "$(default_for call)" = 20m ] || fail "call default should be 20m"
 [ "$(default_for review)" = 20m ] || fail "review default should be 20m"
 [ "$(default_for delegate)" = 30m ] || fail "delegate default should be 30m"

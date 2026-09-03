@@ -180,7 +180,7 @@ ma_run_bounded() {
 # override for every verb.
 ma_peer_timeout_default() {
   case "${MA_KIND:-call}" in
-    ask) printf '10m\n' ;;
+    ask) printf '15m\n' ;;
     call|review) printf '20m\n' ;;
     delegate) printf '30m\n' ;;
     *) printf '5m\n' ;;
