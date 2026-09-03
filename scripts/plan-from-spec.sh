@@ -22,6 +22,7 @@ MAX_TASKS=6
 ID_PREFIX=""
 ALLOWED_ENVELOPE=""
 EXPECTED_PROPOSAL_SHA=""
+ALLOW_VERIFIER_CHANGE=0
 MODEL=""
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
@@ -47,6 +48,9 @@ for review — nothing touches the task board until --apply.
                   autopilot replans use r1- so a second tranche is observable.
   --allowed PATHS Comma-separated immutable path envelope for every proposed
                   task. Stored in the proposal and rechecked during apply.
+  --allow-verifier-change
+                  The contract already permits verifier changes; suppress the
+                  advisory warning for a verify path inside task scope.
   --validate-spec FILE  Preflight a spec candidate's acceptance contract
                    (same parser as propose; state is not checked — a
                    candidate is draft by design). Used by intent adopt.
@@ -87,6 +91,7 @@ while [ "$#" -gt 0 ]; do
     --allowed)
       [ "$#" -ge 2 ] || fail "--allowed requires paths"
       ALLOWED_ENVELOPE="$2"; shift 2 ;;
+    --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --model)
       [ "$#" -ge 2 ] || fail "--model requires a value"
       MODEL="$2"; shift 2 ;;
@@ -718,9 +723,10 @@ count="${out#ok }"
 proposal_digest="$(oms_sha256_file "$proposal")" || fail "cannot hash the proposal"
 echo "plan-from-spec: proposed $count task(s) -> $proposal"
 echo "plan-from-spec: proposal sha256: $proposal_digest"
-python3 - "$proposal" <<'PY'
+python3 - "$proposal" "$ALLOW_VERIFIER_CHANGE" <<'PY'
 import json, re, sys
 
+allow_verifier_change = sys.argv[2] == "1"
 for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
     deps = ",".join(t.get("depends") or []) or "-"
     print("  %-14s %s  [allowed: %s] [verify: %s] [depends: %s]" % (
@@ -740,12 +746,13 @@ for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
         # A repo-wide scope contains every verifier that reads a repo file;
         # the token search below can never see that, because no verify
         # command spells the repo root as a bare dot.
-        if root == "." and verify.strip():
+        if not allow_verifier_change and root == "." and verify.strip():
             print("    note: verify reads %s, which this task may also change;"
                   " a patch that touches it is refused without verifier-change"
                   " consent" % root)
             break
-        if re.search(r"(^|[\s'\"=(])%s(/|[\s'\";)]|$)" % re.escape(root), verify):
+        if (not allow_verifier_change and
+                re.search(r"(^|[\s'\"=(])%s(/|[\s'\";)]|$)" % re.escape(root), verify)):
             print("    note: verify reads %s, which this task may also change;"
                   " a patch that touches it is refused without verifier-change"
                   " consent" % root)

@@ -945,7 +945,7 @@ PY
   cat > "$successor_bin/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-printf '%s\n' '{"tasks":[{"id":"t1","title":"feat: successor core","allowed":["src/"],"verify":"true","depends":[]},{"id":"t2","title":"test: successor coverage","allowed":["tests/"],"verify":"true","depends":["t1"]}]}'
+printf '%s\n' '{"tasks":[{"id":"t1","title":"feat: successor core","allowed":["src/"],"verify":"true","depends":[]},{"id":"t2","title":"test: successor coverage","allowed":["tests/"],"verify":"bash tests/autopilot-smoke.sh","depends":["t1"]}]}'
 EOF
   chmod +x "$successor_bin/codex"
   git -C "$successor_repo" switch -q main
@@ -964,9 +964,13 @@ EOF
     OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
     "$ROOT/scripts/autopilot.sh" --repo "$successor_repo" propose \
       --planner codex --worker claude --allowed 'src,tests' --base main \
+      --allow-verifier-change \
       > "$successor_repo/propose.out" 2>&1 || rc=$?
   [ "$rc" = 4 ] ||
     fail "a successor contract should produce a reviewed proposal, got $rc: $(tail -8 "$successor_repo/propose.out")"
+  if grep -Fq 'note: verify reads tests, which this task may also change' "$successor_repo/propose.out"; then
+    fail "contract verifier-change consent should silence the planner advisory: $(tail -8 "$successor_repo/propose.out")"
+  fi
   [ -f "$successor_repo/.oms/plan/tasks.$successor_digest.archive.json" ] ||
     fail "propose must preserve the spent predecessor before planning"
   [ ! -f "$successor_repo/.oms/plan/tasks.json" ] ||
@@ -993,6 +997,7 @@ PY
     OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
     "$ROOT/scripts/autopilot.sh" --repo "$successor_repo" run \
       --planner codex --worker claude --allowed 'src,tests' --base main \
+      --allow-verifier-change \
       --proposal "$successor_proposal" --expected-proposal-sha256 "$successor_sha" \
       > "$successor_repo/run.out" 2>&1 || rc=$?
   [ "$rc" = 0 ] ||
@@ -1005,6 +1010,36 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 assert list(tasks) == ["t1", "t2"], tasks
 assert tasks["t2"]["depends"] == ["t1"], tasks
 PY
+
+  # The advisory remains useful when no consent carries into the planner, and
+  # the root-scope branch follows the same consent rule as a token match.
+  local verifier_note_repo="$TMP/verifier-change-note"
+  local verifier_note_bin="$TMP/verifier-change-note-bin"
+  local verifier_note_home="$TMP/verifier-change-note-home"
+  make_repo "$verifier_note_repo"
+  mkdir -p "$verifier_note_bin" "$verifier_note_home"
+  cat > "$verifier_note_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"tasks":[{"id":"t1","title":"chore: repo-wide verification","allowed":["."],"verify":"true","depends":[]}]}'
+EOF
+  chmod +x "$verifier_note_bin/codex"
+  HOME="$verifier_note_home" NVM_DIR="$verifier_note_home/.nvm" \
+    PATH="$verifier_note_bin:$PATH" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$verifier_note_repo" --to codex \
+      > "$verifier_note_repo/unconsented.out" 2>&1 ||
+    fail "an unconsented planner proposal should succeed: $(tail -4 "$verifier_note_repo/unconsented.out")"
+  grep -Fq 'note: verify reads ., which this task may also change' \
+    "$verifier_note_repo/unconsented.out" ||
+    fail "an unconsented repo-wide verifier should retain its advisory: $(cat "$verifier_note_repo/unconsented.out")"
+  HOME="$verifier_note_home" NVM_DIR="$verifier_note_home/.nvm" \
+    PATH="$verifier_note_bin:$PATH" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$verifier_note_repo" --to codex \
+      --allow-verifier-change > "$verifier_note_repo/consented.out" 2>&1 ||
+    fail "a consented planner proposal should succeed: $(tail -4 "$verifier_note_repo/consented.out")"
+  if grep -Fq 'note: verify reads' "$verifier_note_repo/consented.out"; then
+    fail "verifier-change consent should silence the repo-wide planner advisory: $(cat "$verifier_note_repo/consented.out")"
+  fi
 
   # A live receipt freezes its contract, so a retry that changes one of those
   # fields is refused -- correctly. The refusal has to say which field and what

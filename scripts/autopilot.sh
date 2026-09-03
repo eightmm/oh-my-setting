@@ -1220,6 +1220,7 @@ propose_tasks() {  # PREFIX MAX
     fail "cannot bind this planning call to the durable outer receipt"
   args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED")
   [ -z "$prefix" ] || args+=(--id-prefix "$prefix")
+  [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || args+=(--allow-verifier-change)
   [ -z "$PLANNER_MODEL" ] || args+=(--model "$PLANNER_MODEL")
   [ -z "$PLANNER_FALLBACK_MODEL" ] || args+=(--fallback-model "$PLANNER_FALLBACK_MODEL")
   args+=(--reasoning-effort "$PLANNER_REASONING_EFFORT" \

@@ -93,6 +93,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   superseded `PROJECT.md` contract before calling the planner, so a successor
   proposal starts from a clean task graph and can apply without dependencies on
   retired task IDs. Unfinished predecessor plans still refuse safely.
+- `oms autopilot --allow-verifier-change` now forwards its bound consent to
+  `plan-from-spec`, which omits the otherwise useful verifier-in-scope advisory
+  when the contract already permits that landing path.
 - Hooks capture a handoff digest silently at 30% context left
   (`OMS_CTX_CAPTURE_PCT`), ahead of the 15%/8% advisories, and the Stop hook
   blocks once per further quarter past a session budget of 200 turns or 6
