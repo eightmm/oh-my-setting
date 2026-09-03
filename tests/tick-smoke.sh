@@ -13,6 +13,7 @@ TICK="$ROOT/scripts/tick.sh"
 export XDG_CONFIG_HOME="$TMP/xdg" XDG_RUNTIME_DIR="$TMP/rt" OMS_INSTALL_RECEIPT="$TMP/no-receipt.json" \
   OMS_WORK_JOURNAL_CONFIG="$TMP/no-journal.json" OMS_TICK_THREAD_IDLE_DAYS=7
 mkdir -p "$XDG_RUNTIME_DIR" "$TMP/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/ntn"; chmod +x "$TMP/bin/ntn"
 cat > "$TMP/bin/systemctl" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/systemctl.log"
@@ -62,6 +63,8 @@ grep -Fxq "$b" "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt" && fail "a dry-ru
 grep -Fxq "$b" "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt" || fail "install must register the adopted cwd"
 grep -q 'OnCalendar=hourly' "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" || fail "timer must be hourly"
 grep -q "tick.sh\" run" "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.service" || fail "service must run the tick"
+grep -q "^Environment=PATH=$TMP/bin:" "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.service" ||
+  fail "the unit must carry the resolved tool dirs first in PATH: $(grep Environment "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.service")"
 grep -q 'enable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "install must enable the timer"
 st="$("$TICK" status)"
 printf '%s' "$st" | grep -q 'timer: systemd (owned)' || fail "status must see the owned timer: $st"

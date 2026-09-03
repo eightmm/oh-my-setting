@@ -157,6 +157,15 @@ record_component() {  # best effort; only the receipt owner records
   [ -f "$receipt" ] && [ "$(oms_install_receipt_owner "$receipt" 2>/dev/null)" = "$(oms_install_physical_root "$ROOT")" ] || return 0
   oms_install_receipt_set_component tick "$1" "$receipt" >/dev/null 2>&1 || true
 }
+tool_path() {  # PATH for the trigger: user managers and cron do not see nvm or ~/.local/bin
+  local t d out=""
+  for t in ntn codex gh claude agy; do
+    d="$(command -v "$t" 2>/dev/null)" || continue
+    d="$(dirname "$d")"
+    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
+  done
+  printf '%s' "${out:+$out:}$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+}
 pick_method() {
   case "$METHOD" in
     systemd|cron) printf '%s\n' "$METHOD" ;;
@@ -171,13 +180,14 @@ install_tick() {
     systemd)
       if [ "$DRY_RUN" = 1 ]; then echo "would install systemd user timer: $TIMER_FILE (hourly)"; return 0; fi
       mkdir -p "$SYSTEMD_DIR"
-      printf '[Unit]\nDescription=oh-my-setting tick\n[Service]\nType=oneshot\nExecStart="%s/scripts/tick.sh" run\n' "$ROOT" > "$SERVICE_FILE"
+      printf '[Unit]\nDescription=oh-my-setting tick\n[Service]\nType=oneshot\nEnvironment=PATH=%s\nExecStart="%s/scripts/tick.sh" run\n' "$(tool_path)" "$ROOT" > "$SERVICE_FILE"
       printf '[Unit]\nDescription=Run oh-my-setting tick hourly\n[Timer]\nOnCalendar=hourly\nPersistent=true\nRandomizedDelaySec=10m\n[Install]\nWantedBy=timers.target\n' > "$TIMER_FILE"
       systemctl --user daemon-reload
       systemctl --user enable --now oh-my-setting-tick.timer >/dev/null
       echo "tick trigger: systemd timer installed (hourly)" ;;
     cron)
-      local line="23 * * * * \"$ROOT/scripts/tick.sh\" run >/dev/null 2>&1 $CRON_MARK"
+      local line
+      line="23 * * * * PATH=$(tool_path) \"$ROOT/scripts/tick.sh\" run >/dev/null 2>&1 $CRON_MARK"
       if [ "$DRY_RUN" = 1 ]; then echo "would install cron line: $line"; return 0; fi
       { crontab -l 2>/dev/null | grep -Fv "$CRON_MARK" || true; printf '%s\n' "$line"; } | crontab -
       echo "tick trigger: cron line installed (hourly)" ;;

@@ -216,6 +216,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- The `oms tick` timer and cron line carry a PATH with the resolved tool
+  directories (ntn, codex, gh, claude, agy, `~/.local/bin`): a user manager
+  runs with a bare system PATH, so the first unattended sweep could not have
+  reached Notion once rows were pending.
 - `oms land` launches its detached job with job control on, so the gate no
   longer inherits ignored SIGINT/SIGQUIT (its interrupt tests failed under
   that); the install-refresh stage now recognises the harness checkout by
