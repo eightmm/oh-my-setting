@@ -99,4 +99,17 @@ done
 grep -q '"state": "passed"' "$receipt" || fail "detached landing did not pass in time: $(cat "$receipt" 2>/dev/null)"
 [ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] || fail "detached landing must push"
 
+# --- 7. the detached job must not inherit ignored SIGINT/SIGQUIT --------------
+gate 'grep SigIgn /proc/$$/status'
+echo three > "$repo/three"; git -C "$repo" add three; git -C "$repo" commit -q -m three
+out="$("$LAND" --repo "$repo" --ci-wait 0)"
+receipt="$(printf '%s\n' "$out" | sed -n 's/^receipt: //p')"
+for _ in $(seq 1 60); do
+  [ -f "$receipt" ] && grep -q '"state": "passed"' "$receipt" && break
+  sleep 0.5
+done
+grep -q '"state": "passed"' "$receipt" || fail "signal probe landing did not pass: $(cat "$receipt" 2>/dev/null)"
+grep -Eq 'SigIgn:.*[0-9a-f]*[01489]$' "${receipt%.json}.log" ||
+  fail "the detached gate must see SIGINT and SIGQUIT unignored: $(grep SigIgn "${receipt%.json}.log")"
+
 echo "land-smoke: ok"

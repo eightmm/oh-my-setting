@@ -24,7 +24,8 @@ Stages, each recorded in .oms/land/<stamp>-<sha>-<pid>.json with its log beside 
   gate    the gate command; a failure is recorded in the fail ledger
   push    git push --no-verify REMOTE HEAD:TARGET, only if HEAD and the tree
           are unchanged since the gate started
-  update  oms update, only when the repo is the installed harness checkout
+  update  the install checkout's update.sh, only when REMOTE is that
+          checkout's origin (so a push there is what the install pulls)
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
           seconds (default 1500; 0 skips; needs gh)
 Without --wait the job detaches (setsid) and this prints the receipt path.
@@ -84,12 +85,19 @@ PY
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 clean_tree() { git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; }
 
-harness_checkout() {  # the repo whose scripts the install receipt points at
-  local receipt source common
+repo_slug() {  # host/owner/name for ssh, https, and .git spellings alike
+  printf '%s' "$1" | tr 'A-Z' 'a-z' |
+    sed -E 's#^[a-z]+://##; s#^[^@/]+@##; s#^([^/:]+):#\1/#; s#\.git/?$##; s#/$##'
+}
+
+install_root() {  # the install checkout when REMOTE pushes to its origin; else nothing
+  local receipt source theirs mine
   receipt="$(oms_install_receipt_path)"
   source="$(oms_install_receipt_field source_root "$receipt" 2>/dev/null)" || return 1
-  common="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
-  [ -n "$source" ] && [ "$(cd "$source" 2>/dev/null && pwd -P)/.git" = "$common" ]
+  [ -n "$source" ] && [ -f "$source/scripts/update.sh" ] || return 1
+  theirs="$(git -C "$source" remote get-url origin 2>/dev/null)" || return 1
+  mine="$(git -C "$REPO" remote get-url "$REMOTE" 2>/dev/null)" || return 1
+  [ -n "$theirs" ] && [ "$(repo_slug "$theirs")" = "$(repo_slug "$mine")" ] && printf '%s\n' "$source"
 }
 
 finish() {  # finish STATE SUMMARY
@@ -123,9 +131,10 @@ run_job() {
   git push --no-verify "$REMOTE" "HEAD:refs/heads/$TARGET" >> "$LOG" 2>&1 || rc=$?
   rset push.rc="$rc"
   [ "$rc" -eq 0 ] || { finish failed "push exit $rc"; return 1; }
-  if [ "$UPDATE" -eq 1 ] && harness_checkout; then
+  local install
+  if [ "$UPDATE" -eq 1 ] && install="$(install_root)"; then
     rc=0
-    "$ROOT/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
+    "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
     rset update.rc="$rc"
   else
     rset update.rc=skipped
@@ -201,7 +210,11 @@ if [ "$WAIT" -eq 1 ]; then
   JSON=0 show_status "$LAND_DIR/$STAMP.json"
   exit "$rc"
 fi
+# Job control on for the launch: a plain `&` from a script leaves SIGINT and
+# SIGQUIT ignored in the child, and the gate's own interrupt tests then fail.
+set -m
 setsid bash "${job[@]}" < /dev/null > /dev/null 2>&1 &
+set +m
 echo "landing $(git -C "$REPO" rev-parse --short HEAD) in the background"
 echo "receipt: $LAND_DIR/$STAMP.json"
 echo "status: oms land status --repo $REPO"

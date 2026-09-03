@@ -141,6 +141,16 @@ if printf '%s' "$out" | grep -q 'P1 open-failures'; then
   fail "resolve must reset the recurrence count: $out"
 fi
 
+# --- resolve refuses a fingerprint the ledger never saw ------------------------
+if "$ROOT/scripts/fail-ledger.sh" resolve --repo "$repo4" --fingerprint 0123456789abcdef \
+    --how "typo" >/dev/null 2>"$TMP/unknown.err"; then
+  fail "resolving an unknown fingerprint must be refused"
+fi
+grep -q 'unknown fingerprint' "$TMP/unknown.err" || fail "the refusal must name the cause: $(cat "$TMP/unknown.err")"
+if grep -q '0123456789abcdef' "$repo4/.oms/failures.jsonl"; then
+  fail "a refused resolve must not append a phantom row"
+fi
+
 # --- 6. one failure on an older commit: stale, not actionable ---------------
 repo5="$TMP/stale"
 make_repo "$repo5"

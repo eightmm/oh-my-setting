@@ -366,6 +366,8 @@ PY
     fi
     [ -n "$FINGERPRINT" ] || fail "resolve requires --fingerprint or --cmd"
     [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
+    grep -Fq "\"fingerprint\": \"$FINGERPRINT\"" "$LEDGER" ||
+      fail "unknown fingerprint: $FINGERPRINT (see: fail-ledger list)"
     mkdir -p "$(dirname "$LEDGER")"
     row_tmp="$(mktemp)" || fail "mktemp failed"
     OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \

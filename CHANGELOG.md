@@ -209,6 +209,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- `oms land` launches its detached job with job control on, so the gate no
+  longer inherits ignored SIGINT/SIGQUIT (its interrupt tests failed under
+  that); the install-refresh stage now recognises the harness checkout by
+  remote URL instead of `.git` path, which never matched a worktree.
+- `oms fail-ledger resolve` refuses a fingerprint the ledger never recorded
+  instead of appending a phantom resolved row.
 - The runtime projection accepts the `stale` failure attention state; the
   first stale row made `oms runtime envelope show` fail and the resume hook
   print `disagrees with runtime next -`. That line now says `runtime next
