@@ -52,6 +52,7 @@ IDLE_DAYS="${OMS_TICK_THREAD_IDLE_DAYS:-7}"
 TASK_IDLE_DAYS="${OMS_TICK_TASK_IDLE_DAYS:-7}"
 PLAN_IDLE_DAYS="${OMS_TICK_PLAN_IDLE_DAYS:-14}"
 RETIRE="${OMS_TICK_RETIRE:-1}"
+case "$RETIRE" in 0|false|no|off) RETIRE=0 ;; esac
 STEP_TIMEOUT="${OMS_TICK_STEP_TIMEOUT:-600}"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 METHOD=auto
@@ -140,72 +141,23 @@ raise SystemExit(0 if task.get("present") is True and task.get("status") == "act
 ' "$TASK_IDLE_DAYS"
 }
 
-plan_tasks_are_idle() {  # PLAN JSON -> every nonempty done task is older than the idle threshold
+plan_tasks_are_idle() {  # PLAN JSON -> every task done and idle (a superseded retirement needs all done)
   python3 - "$1" "$PLAN_IDLE_DAYS" <<'PY'
-import datetime
-import json
-import os
-import stat
-import sys
-
-maximum = 1024 * 1024
-path = sys.argv[1]
-
-def is_reparse(info):
-    attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(getattr(info, "st_file_attributes", 0) & attribute)
-
+import datetime, json, sys
 try:
-    before = os.lstat(path)
-    if (stat.S_ISLNK(before.st_mode) or is_reparse(before) or
-            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
-            before.st_size > maximum):
-        raise ValueError
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (not stat.S_ISREG(opened.st_mode) or is_reparse(opened) or
-                opened.st_nlink != 1 or
-                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
-            raise ValueError
-        chunks = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(maximum + 1 - total, 1024 * 1024))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > maximum:
-                raise ValueError
-    finally:
-        os.close(descriptor)
-    after = os.lstat(path)
-    if (after.st_dev, after.st_ino, after.st_size) != (
-            opened.st_dev, opened.st_ino, opened.st_size):
-        raise ValueError
-    plan = json.loads(b"".join(chunks).decode("utf-8"))
-    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    tasks = json.load(open(sys.argv[1], encoding="utf-8")).get("tasks") or {}
     days = int(sys.argv[2])
+    now = datetime.datetime.now(datetime.timezone.utc)
     if not isinstance(tasks, dict) or not tasks:
         raise ValueError
-    now = datetime.datetime.now(datetime.timezone.utc)
     for task in tasks.values():
-        if not isinstance(task, dict) or task.get("state") != "done":
+        if task.get("state") != "done":
             raise ValueError
-        updated = task.get("updated")
-        if not isinstance(updated, str):
-            raise ValueError
-        then = datetime.datetime.strptime(updated, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=datetime.timezone.utc
-        )
+        then = datetime.datetime.strptime(task["updated"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
         if (now - then).total_seconds() < days * 86400:
             raise ValueError
-except (OSError, TypeError, UnicodeError, ValueError):
+except (OSError, KeyError, TypeError, ValueError):
     raise SystemExit(1)
-raise SystemExit(0)
 PY
 }
 
@@ -271,12 +223,12 @@ sweep_repo() {  # sweep_repo ROOT -> one summary line; receipt in .oms/tick/last
       if plan_sha="$(printf '%s\n' "$plan_check" | plan_retire_check_sha | tr -d '\r')"; then
         if bounded "$oms" agent-plan --repo "$root" retire --apply \
           --expected-plan-sha256 "$plan_sha" --disposition superseded \
-          --reason "retired by oms tick: all tasks idle over ${PLAN_IDLE_DAYS}d" >/dev/null 2>&1; then
+          --reason "retired by oms tick: all tasks done and idle over ${PLAN_IDLE_DAYS}d" >/dev/null 2>&1; then
           plans_retired=$((plans_retired + 1))
           plan_retire_rc=0
           work_journal_observe "$root" oms-run "$root/.oms/plan/retirements.jsonl" \
             --source-id "plan-retire:$plan_sha" --event-type phase_outcome \
-            --outcome "Idle all-done plan retired" --outcome-status success \
+            --outcome "Idle unclaimed plan retired" --outcome-status success \
             --verification-status not_verified
         else
           plan_retire_rc=$?

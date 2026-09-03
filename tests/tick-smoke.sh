@@ -135,8 +135,8 @@ out="$("$TICK" run --repo "$c")"
 printf '%s' "$out" | grep -q 'tasks_closed=0' || fail "a non-active task must stay active: $out"
 [ -f "$c/.oms/task/current.md" ] || fail "a non-active task must stay active"
 
-# --- sweep: idle all-done plans retire; nonempty active plans stay ---------
-p="$TMP/idle-plan"; make_committed_repo "$p"; make_stale_plan "$p" done
+# --- sweep: idle all-done plans retire; undone, fresh, or claimed plans stay --
+p="$TMP/idle-plan"; make_committed_repo "$p"; make_stale_plan "$p" 'done'
 out="$("$TICK" run --repo "$p")"
 printf '%s' "$out" | grep -q 'plans_retired=1' || fail "the idle all-done plan must retire: $out"
 [ ! -e "$p/.oms/plan/tasks.json" ] || fail "the retired plan must not stay active"
@@ -155,6 +155,20 @@ assert any(row["source"]["type"] == "oms-run" and
            row["source"]["id"].startswith("plan-retire:") and
            row["verification_status"] == "not_verified" for row in journal), journal
 PY
+r="$TMP/ready-plan"; make_committed_repo "$r"; make_stale_plan "$r" ready
+out="$("$TICK" run --repo "$r")"
+printf '%s' "$out" | grep -q 'plans_retired=0' || fail "an idle plan with undone tasks is a parent decision, not a sweep: $out"
+[ -e "$r/.oms/plan/tasks.json" ] || fail "an undone plan must not be retired"
+f="$TMP/fresh-plan"; make_committed_repo "$f"; make_stale_plan "$f" 'done'
+python3 - "$f/.oms/plan/tasks.json" <<'PY'
+import datetime, json, sys
+p = sys.argv[1]; d = json.load(open(p, encoding="utf-8"))
+d["tasks"]["t1"]["updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+out="$("$TICK" run --repo "$f")"
+printf '%s' "$out" | grep -q 'plans_retired=0' || fail "a plan finished inside the idle window must stay: $out"
+[ -e "$f/.oms/plan/tasks.json" ] || fail "a fresh plan must not be retired"
 q="$TMP/claimed-plan"; make_committed_repo "$q"; make_stale_plan "$q" ready
 "$PLAN" --repo "$q" claim --id t1 --provider codex >/dev/null
 set_plan_activity "$q"
@@ -171,7 +185,7 @@ printf '{not json\n' > "$i/.oms/plan/tasks.json"
 out="$("$TICK" run --repo "$i")"
 printf '%s' "$out" | grep -q 'plans_retired=0' || fail "an invalid plan must stay active: $out"
 [ -f "$i/.oms/plan/tasks.json" ] || fail "an invalid plan must stay active"
-u="$TMP/uncommitted-plan"; make_repo "$u"; make_stale_plan "$u" done
+u="$TMP/uncommitted-plan"; make_repo "$u"; make_stale_plan "$u" 'done'
 out="$("$TICK" run --repo "$u")"
 printf '%s' "$out" | grep -q 'plans_retired=0' || fail "a failed plan retirement must not abort a sweep: $out"
 [ -f "$u/.oms/plan/tasks.json" ] || fail "a failed plan retirement must keep the active plan"
@@ -213,7 +227,7 @@ import sys
 receipt = json.load(open(sys.argv[1], encoding="utf-8"))
 assert isinstance(receipt["artifact_resolve_rc"], int) and receipt["artifact_resolve_rc"] != 0, receipt
 PY
-o="$TMP/retire-off"; make_committed_repo "$o"; make_stale_plan "$o" done
+o="$TMP/retire-off"; make_committed_repo "$o"; make_stale_plan "$o" 'done'
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$o")"
 printf '%s' "$out" | grep -q 'plans_retired=0' || fail "retirement opt-out must keep plans: $out"
 [ -f "$o/.oms/plan/tasks.json" ] || fail "retirement opt-out must keep plans"

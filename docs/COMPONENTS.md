@@ -365,7 +365,7 @@ The default command is a no-write check that returns the exact plan SHA-256.
 Apply is parent-only and requires that SHA, a disposition, and a reason. For
 `completed-external`, the command itself runs a fresh acceptance on one clean
 committed HEAD and binds full plan/acceptance/output hashes, ref, file
-generation, and a unique proof token. `superseded` is limited to all-done old
+generation, and a unique proof token. `superseded` is limited to unclaimed old
 plans and explicitly claims no verification. Both preserve the exact bytes in
 one disposition-independent content-addressed archive and append a typed
 receipt before unlinking the exact live generation. Claimed, running, review,
