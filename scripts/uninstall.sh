@@ -138,6 +138,8 @@ run_removal() {  # LABEL COMMAND...
 
 run_removal "the auto-update trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
   "$ROOT/scripts/uninstall-autoupdate.sh"
+run_removal "the tick trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
+  "$ROOT/scripts/tick.sh" uninstall
 if [ "$DRY_RUN" = "1" ]; then
   echo "would remove claude oh-my-setting hooks/HUD from ~/.claude/settings.json"
   echo "would remove codex oh-my-setting plugin"

@@ -223,6 +223,7 @@ expected = {
     "harness-residue-boundary": "harness-residue-boundary-smoke.sh",
     "patch-land-approval": "patch-land-approval-smoke.sh",
     "land": "land-smoke.sh",
+    "tick": "tick-smoke.sh",
     "tool-lock": "tool-lock-smoke.sh",
     "provider-permissions-mcp-boundary": "provider-permissions-mcp-boundary-smoke.sh",
     "execution-profile": "execution-profile-smoke.sh",

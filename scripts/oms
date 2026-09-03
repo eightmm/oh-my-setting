@@ -192,6 +192,7 @@ state-verify
 status
 support-bundle
 thread
+tick
 tsp-queue
 uninstall
 update

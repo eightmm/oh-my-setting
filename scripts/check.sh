@@ -698,6 +698,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
   stage failure-attention bash tests/failure-attention-smoke.sh
   stage land bash tests/land-smoke.sh
+  stage tick bash tests/tick-smoke.sh
   stage autonomy-hook bash tests/autonomy-hook-smoke.sh
   stage advisor-routing bash tests/advisor-routing-smoke.sh
   stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
