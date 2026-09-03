@@ -192,7 +192,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   settles a wait only for a job whose completion state is review.
 - `oms journal sync` counts the summaries a retry window is holding back
   (`waiting`, with the earliest `next_retry_at`) and says so, instead of
-  reporting "0 summaries updated" as if nothing were pending.
+  reporting "0 summaries updated" or "already up to date" as if nothing
+  were pending.
 - A Notion summary the exporter keeps refusing no longer costs a live HTTPS
   round trip on every prompt. Only a `Retry-After` scheduled the next attempt
   before, so the prompt hook's one-row sync re-failed the same page (a

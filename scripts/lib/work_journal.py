@@ -3996,7 +3996,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # about refusing to repair them.
         if not report.get("configured"):
             print("journal sync: Notion is not configured for this repository")
-        elif not report.get("attempted"):
+        elif not report.get("attempted") and not report.get("waiting"):
             print("journal sync: already up to date")
         else:
             print("journal sync: %d summar%s updated" % (
