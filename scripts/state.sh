@@ -596,13 +596,15 @@ for row in failure_rows:
         "summary": (row.get("summary") or row.get("cmd") or "")[:80],
     })
 actionable_total = sum(1 for f in open_fails if f["actionable"])
+stale_total = sum(1 for f in open_fails if f["attention"] == "stale")
 state["failures"] = {
     "present": os.environ["OMS_RS_FAILURE_PHYSICAL"] == "1",
     "healthy": failure_healthy,
     "invalid_rows": failure_invalid_rows,
     "open": open_fails[-5:], "open_total": len(open_fails),
     "actionable_total": actionable_total,
-    "retiring_total": len(open_fails) - actionable_total,
+    "retiring_total": len(open_fails) - actionable_total - stale_total,
+    "stale_total": stale_total,
 }
 if not failure_healthy:
     state["failures"]["error"] = (
@@ -1048,9 +1050,11 @@ else:
     if not fl.get("healthy", True):
         line("\n## Unresolved failures: unavailable or invalid (run: oms fail-ledger list)")
     elif fl["open_total"] > 0:
-        line("\n## Unresolved failures (%d)" % fl["open_total"])
+        line("\n## Unresolved failures (%d%s)" % (
+            fl["open_total"], ", %d stale" % fl["stale_total"] if fl.get("stale_total") else ""))
         for e in fl["open"]:
-            line("  %s  x%d  %s" % (e["fingerprint"], e["count"], e["summary"]))
+            line("  %s  x%d  %s%s" % (e["fingerprint"], e["count"], e["summary"],
+                                     "  [stale]" if e["attention"] == "stale" else ""))
 
     a = state["artifacts"]
     line("\n## Artifacts (%d total)" % a["total"])

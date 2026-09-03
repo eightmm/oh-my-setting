@@ -42,6 +42,18 @@ append() { out="${out}${1}
 # Active task packet: id/status from the status front door, goal and next
 # step straight from the packet sections. A fresh active task was previously
 # completely silent at session start — that is the gap this closes.
+days_since() {  # days_since ISO8601Z -> whole days when >= 1, else empty
+  python3 - "$1" <<'PY' 2>/dev/null
+import datetime, sys
+try:
+    then = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+except Exception:
+    raise SystemExit(0)
+days = (datetime.datetime.now(datetime.timezone.utc) - then).days
+print(days if days >= 1 else "", end="")
+PY
+}
+
 task_file="$cwd/.oms/task/current.md"
 if [ -f "$task_file" ]; then
   status_line="$(cd "$cwd" && "$ROOT/scripts/agent-task.sh" status 2>/dev/null)" || status_line=""
@@ -51,7 +63,8 @@ if [ -f "$task_file" ]; then
     goal="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null)"
     next_step="$(awk '/^## Next Step$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null)"
     verify_cmd="$(awk '/^## Verify$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null)"
-    append "- task $task_id ($task_status)${goal:+: $goal}"
+    idle="$(days_since "$(printf '%s\n' "$status_line" | sed -n 's/^last_activity: //p')")"
+    append "- task $task_id ($task_status${idle:+, idle ${idle}d}): ${goal:-no goal recorded}"
     [ -z "$next_step" ] || append "  next: $next_step"
     [ -z "$verify_cmd" ] || append "  verify: $verify_cmd (oms agent-task verify)"
   fi
@@ -64,7 +77,7 @@ fi
 plan_file="$cwd/.oms/plan/tasks.json"
 if [ -s "$plan_file" ]; then
   plan_lines="$(python3 - "$plan_file" <<'PY' 2>/dev/null
-import json, sys
+import datetime, json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
         plan = json.load(fh)
@@ -85,6 +98,14 @@ counts = {}
 for state in states:
     counts[state] = counts.get(state, 0) + 1
 summary = " ".join("%s=%d" % item for item in sorted(counts.items()))
+try:
+    newest = max(str(t.get("updated") or "") for t in
+                 (tasks.values() if isinstance(tasks, dict) else tasks) if isinstance(t, dict))
+    idle = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.strptime(
+        newest, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)).days
+    summary += " idle=%dd" % idle if idle >= 1 else ""
+except Exception:
+    pass
 if len(goal) > 160:
     goal = goal[:157] + "..."
 print("- plan: %s%s" % (goal, (" [%s]" % summary) if summary else ""))
@@ -156,12 +177,12 @@ if not rows:
     raise SystemExit(0)
 actionable = [row for row in rows if row.get("actionable") is True]
 retiring = sum(1 for row in rows if row.get("retiring") is True)
+stale = sum(1 for row in rows if row.get("attention") == "stale")
+side = ", ".join(t % n for t, n in (("+%d retiring on TTL", retiring),
+                                    ("+%d stale on an older commit", stale)) if n)
 if actionable:
     newest = max(actionable, key=lambda row: row.get("ts") or "")
-    head = "- failures: %d actionable" % len(actionable)
-    if retiring:
-        head += " (+%d retiring on TTL)" % retiring
-    bits = [head]
+    bits = ["- failures: %d actionable%s" % (len(actionable), " (%s)" % side if side else "")]
     summary = (newest.get("summary") or newest.get("cmd") or "").strip()
     if summary:
         bits.append("latest: %s" % summary[:120])
@@ -170,7 +191,10 @@ if actionable:
         bits.append("next: %s" % nxt[:120])
     print("; ".join(bits))
 else:
-    print("- failures: %d one-shot hook failure(s), auto-retire on TTL" % retiring)
+    bits = ["%d one-shot hook failure(s), auto-retire on TTL" % retiring] if retiring else []
+    if stale:
+        bits.append("%d stale on an older commit (oms fail-ledger list)" % stale)
+    print("- failures: " + "; ".join(bits))
 ' )" || fail_line=""
   fail_line="${fail_line//$'\r'/}"
   [ -z "$fail_line" ] || append "$fail_line"

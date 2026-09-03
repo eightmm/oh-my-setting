@@ -392,12 +392,21 @@ PY
       fi
       exit 0
     fi
-    OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" OMS_LIMIT="$LIMIT" python3 - "$LEDGER" <<'PY'
+    OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" OMS_LIMIT="$LIMIT" \
+      OMS_HEAD="$(git -c core.fsmonitor=false -C "$STATE_ROOT" rev-parse HEAD 2>/dev/null || printf unborn)" \
+      python3 - "$LEDGER" <<'PY'
 import calendar, json, os, sys, time
 unresolved_only = os.environ.get("OMS_UNRESOLVED") == "1"
 as_json = os.environ.get("OMS_JSON") == "1"
 ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 now = time.time()
+head = os.environ.get("OMS_HEAD") or ""
+
+def stale_head(r):
+    # One failure against another commit is evidence about a tree that is
+    # gone; a recurrence across commits is the tree-independent kind.
+    fp = str(r.get("state_fingerprint") or "")
+    return bool(head and fp) and fp.split(":", 1)[0] != head
 
 # Retirement predicate, textually identical in fail-ledger.sh (record's repeat
 # count, check, list), gc.sh's failure compaction, state.sh (both its
@@ -524,6 +533,10 @@ for fp in order:
         row["attention"] = "retiring"
         row["actionable"] = False
         row["retiring"] = True
+    elif row["count"] < 2 and stale_head(last):
+        row["attention"] = "stale"
+        row["actionable"] = False
+        row["retiring"] = False
     else:
         row["attention"] = "actionable"
         row["actionable"] = True
@@ -557,6 +570,8 @@ else:
             tag = "resolved"
         elif r["expired"]:
             tag = "EXPIRED"
+        elif r["attention"] == "stale":
+            tag = "stale"
         else:
             tag = "OPEN"
         print("%s  %-8s count=%d exit=%s  %s" % (

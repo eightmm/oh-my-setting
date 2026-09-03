@@ -141,6 +141,34 @@ if printf '%s' "$out" | grep -q 'P1 open-failures'; then
   fail "resolve must reset the recurrence count: $out"
 fi
 
+# --- 6. one failure on an older commit: stale, not actionable ---------------
+repo5="$TMP/stale"
+make_repo "$repo5"
+"$ROOT/scripts/fail-ledger.sh" record --repo "$repo5" --kind verify \
+  --cmd "bash scripts/check.sh" --exit 1 --summary "gate failed" >/dev/null
+git -C "$repo5" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+ledger_json="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo5" list --unresolved --json)"
+printf '%s' "$ledger_json" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)["failures"]
+assert len(rows) == 1 and rows[0]["attention"] == "stale", rows
+assert rows[0]["actionable"] is False and rows[0]["retiring"] is False, rows
+' || fail "one failure recorded against another commit must be stale: $ledger_json"
+r="$(resume_of "$repo5")"
+printf '%s' "$r" | grep -q 'failures: 1 stale on an older commit' ||
+  fail "resume must count the stale row apart from actionable ones: $r"
+out="$(inbox_of "$repo5")"
+printf '%s' "$out" | grep -q 'P3 stale-failures' ||
+  fail "inbox must file a stale row under P3: $out"
+if printf '%s' "$out" | grep -q 'P1 open-failures'; then
+  fail "a stale row must not raise P1: $out"
+fi
+"$ROOT/scripts/fail-ledger.sh" record --repo "$repo5" --kind verify \
+  --cmd "bash scripts/check.sh" --exit 1 --summary "gate failed again" >/dev/null
+r="$(resume_of "$repo5")"
+printf '%s' "$r" | grep -q 'failures: 1 actionable' ||
+  fail "a recurrence across commits is tree-independent and actionable: $r"
+
 # --- auto-update attention: one verdict over intent, wiring, outcome --------
 # Codex's matrix: enabled+fresh, enabled+failed, enabled+overdue,
 # disabled+historical-failure (the false-alarm trap: an opted-out machine

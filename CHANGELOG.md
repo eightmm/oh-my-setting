@@ -76,6 +76,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- `oms fail-ledger list` classifies a single unresolved failure recorded
+  against another commit as `stale` (not actionable, not retiring); the
+  resume hook, `oms state`, and the inbox count those apart, so a session
+  no longer starts with fixture and one-off rows from an older tree in its
+  "actionable" headline. A recurrence across commits stays actionable.
+- The resume hook prints idle ages: `task ... (active, idle 2d)`, `no goal
+  recorded` when the packet has none, and `idle=Nd` on the plan line.
+- Journal `handoff` rows carry the digest's last assistant summary as their
+  outcome instead of the fixed "Session handoff captured" label.
 - `oms doctor` names the remedy under a stale artifact-index reference
   warning (`oms artifact-index prune --stale`, the operator's call because
   rows are evidence) instead of listing the stale rows with nothing to run.

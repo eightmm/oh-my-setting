@@ -1242,6 +1242,15 @@ class ObserveDiagnosticsTest(unittest.TestCase):
         self.assertIn("passed", result.stderr)
         self.assertFalse((self.repo / ".oms" / "work-journal" / "events.jsonl").exists())
 
+    def test_session_handoff_summary_is_the_last_assistant_line(self):
+        self.source.write_text("# Session handoff\n\n## Last assistant summary\n\n"
+                               "**Done: pushed x**\n\n## Open dissents\n", encoding="utf-8")
+        result = self.observe("--source-type", "session-handoff", "--source-id", "s1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.repo / ".oms" / "work-journal" / "events.jsonl"
+        row = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["outcome"]["summary"], "Done: pushed x")
+
     def test_unregistered_source_type_without_a_json_record_says_so(self):
         result = self.observe("--source-type", "evolution-round")
         self.assertEqual(result.returncode, 1)

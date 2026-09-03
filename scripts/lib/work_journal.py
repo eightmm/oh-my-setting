@@ -3164,6 +3164,16 @@ def _source_ref(repo: pathlib.Path, source_path: pathlib.Path, source_id: str) -
     return ("%s#%s" % (relative, source_id)) if relative else source_id
 
 
+def _handoff_summary(path: pathlib.Path) -> str:
+    """First line of the digest's last assistant summary: the human page then
+    reads what the session concluded instead of identical 'captured' rows."""
+    try:
+        match = re.search(r"^## Last assistant summary\n+(.+)$",
+                          path.read_text(encoding="utf-8"), re.M)
+    except OSError:
+        match = None
+    return " ".join(match.group(1).split()).strip("* ")[:240] if match else "Session handoff captured"
+
 def _read_json_source(path: pathlib.Path) -> Dict[str, Any]:
     if path.stat().st_size > MAX_SOURCE_BYTES:
         raise JournalError("source record exceeds Work Journal bound")
@@ -3325,7 +3335,7 @@ def source_payload(
             "outcome": {
                 "summary": outcome
                 or (
-                    "Session handoff captured"
+                    _handoff_summary(source_path)
                     if source_type in {"handoff", "session-handoff"}
                     else source_type.replace("-", " ")
                 ),

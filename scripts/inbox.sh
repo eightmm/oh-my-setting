@@ -244,6 +244,11 @@ elif retiring:
     add(15, "P3", "retiring-failures",
         "%d one-shot hook failure(s) auto-retire on their TTL" % retiring,
         "oms fail-ledger --repo . list", retiring)
+stale = int(failures.get("stale_total", 0) or 0)
+if stale:
+    add(14, "P3", "stale-failures",
+        "%d failure(s) recorded on an older commit; resolve or retry" % stale,
+        "oms fail-ledger --repo . list", stale)
 
 stale_reviews = plan.get("stale_review", [])
 if stale_reviews:
