@@ -7,6 +7,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms land`: gate, push, install refresh, and CI wait as one detached job
+  with a receipt (`oms land status`), so an agent starts a landing and reads
+  the outcome instead of spending turns watching the gate.
 - `oms graph project coupling`: co-change pairs from Git history scored by
   Code Maat's temporal-coupling measure (shared commits over average
   revisions), bulk commits skipped and counted, deleted paths dropped, each
@@ -76,6 +79,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The peer ask seat default timeout is 15m (was 10m): the codex seat answered
+  36 of 48 asks since 2026-08-08 and timed out on the rest at exactly 10m.
 - `oms fail-ledger list` classifies a single unresolved failure recorded
   against another commit as `stale` (not actionable, not retiring); the
   resume hook, `oms state`, and the inbox count those apart, so a session
