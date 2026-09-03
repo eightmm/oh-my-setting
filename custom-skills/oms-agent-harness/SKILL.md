@@ -29,17 +29,19 @@ context bundles, receipts, and evidence carry no mutation authority.
 | Need | Agent action |
 |---|---|
 | orient, resume, or inspect completion | `oms inbox --repo .`; then `oms runtime envelope show`, `next`, or `evidence show` |
-| inspect code or run graphs | load [graphs.md](references/graphs.md); context for coding, map/status for orientation |
-| recall or preserve knowledge | `oms agent-memory recall`; append/pin stable facts; forge only recurring project procedures |
-| independent judgment | `oms consult`; use `oms peer-ask` for several peers and `oms advise` for high-risk or repeated failure |
-| bounded write | `oms peer-delegate --to NAME`; dependent work uses `oms agent-plan` and `oms plan-run` |
-| implement confirmed scope | parent reviews `oms autopilot … propose`, then runs its digest-bound continuation |
+| inspect code or graphs | load [graphs.md](references/graphs.md); context for coding, map/status for orientation |
+| preserve knowledge | `oms agent-memory recall`; pin stable facts; forge recurring procedures |
+| independent judgment | `oms consult`; use `oms peer-ask` for several peers and `oms advise` for high-risk/repeated failure |
+| bounded write | `oms peer-delegate --to NAME`; dependent work uses `agent-plan` and `plan-run` |
+| implement confirmed scope | review `oms autopilot … propose`, then run its digest-bound continuation |
 | judge a diff | `oms peer-review --gate`; peer agreement is evidence, never admission |
-| bounded context or continuity | `oms runtime context`; use sanitized `oms runtime capsule export|verify|import`, never raw `.oms` |
+| context or continuity | `oms runtime context`; use sanitized `oms runtime capsule export|verify|import`, never raw `.oms` |
 | optional host capability | `oms runtime profile check|install-plan|install` |
-| local/container/remote execution | `oms runtime backend check|run`; execution receipts cannot land code |
+| execution backends | `oms runtime backend check|run`; execution receipts cannot land code |
 | comparable research study | `oms runtime experiment register|run|invariants|summarize` |
-| admit or land reviewed bytes | use `oms patch-admit` for a read-only verdict; `oms patch-land` runs admission itself before mutation |
+| land an authorized worktree | `oms land`; read `oms land status`; detached gate/push/update/CI; receipt outside repo, not `patch-land`. |
+| schedule adopted-repo maintenance | `oms tick register`, then `oms tick install`; hourly sweep; GC needs `OMS_TICK_GC=1`. |
+| admit or land reviewed bytes | use `oms patch-admit`; `oms patch-land` admits before mutation |
 | publish an authorized Draft PR | use the parent-owned Draft PR path; no update, merge, ready, tag, or release authority |
 
 Use `oms list --frontdoor` for subsystem entrypoints. Load the command
@@ -69,11 +71,11 @@ projections, not authority.
 
 ## References
 
-- Overlapping commands and canonical front doors: [command-routing.md](references/command-routing.md)
-- Shared decisions and their canonical owners: [shared-projections.md](references/shared-projections.md)
-- Typed projections, evidence, context, profiles, capsules, backends, experiments: [runtime-core.md](references/runtime-core.md)
-- Project and execution graphs: [graphs.md](references/graphs.md)
-- Prompt hooks, memory, tasks, skills: [state-memory.md](references/state-memory.md)
+- Command routing: [command-routing.md](references/command-routing.md)
+- Shared decisions: [shared-projections.md](references/shared-projections.md)
+- Runtime core: [runtime-core.md](references/runtime-core.md)
+- Graphs: [graphs.md](references/graphs.md)
+- State and memory: [state-memory.md](references/state-memory.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
 - Autonomous stopping: [autonomy-loop.md](references/autonomy-loop.md)
 - Roles/executors: [roles-executors.md](references/roles-executors.md)
@@ -83,7 +85,7 @@ projections, not authority.
 - Models/quorum: [model-routing.md](references/model-routing.md)
 - Installed agent detection, DeepSeek/Grok/GLM carriers, and custom adapters: [provider-routing.md](references/provider-routing.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
-- Evidence-first implementation and review: [minimal-change.md](references/minimal-change.md)
+- Evidence-first changes: [minimal-change.md](references/minimal-change.md)
 
 Retain internal provenance and report only useful conclusions, changed behavior,
 verification, skipped checks, and genuine blockers.

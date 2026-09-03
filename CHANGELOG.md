@@ -11,8 +11,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   sync, attempt reconcile, threads idle over 7d closed, stale Codex plugin
   cache refreshed) so a session starts on a swept tree; gc stays opt-in.
 - `oms land`: gate, push, install refresh, and CI wait as one detached job
-  with a receipt (`oms land status`), so an agent starts a landing and reads
-  the outcome instead of spending turns watching the gate.
+  with a receipt beside its gate log under
+  `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` (`oms land status`), so an
+  agent starts a landing and reads the outcome instead of spending turns
+  watching the gate.
 - `oms graph project coupling`: co-change pairs from Git history scored by
   Code Maat's temporal-coupling measure (shared commits over average
   revisions), bulk commits skipped and counted, deleted paths dropped, each

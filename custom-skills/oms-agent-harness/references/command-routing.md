@@ -1,37 +1,35 @@
 # Command Routing
 
-Use this reference when two OMS commands appear to overlap. Choose the narrowest
-intent-specific front door; keep compatibility primitives for callers that need
-their exact lower-level contract.
+When OMS commands overlap, choose the narrowest front door;
+keep compatibility primitives when callers need their lower-level contract.
 
-`oms list --frontdoor` exposes compact subsystem entrypoints, not every command
-named below. `consult` represents peer judgment while `peer-ask` and `advise`
-select council and escalation variants; `autopilot` represents bounded autonomy
-while `plan-run` and `goal-drive` select narrower approved scopes. Those variants
-remain discoverable here and in `oms list --all` without flattening the compact
-catalog into every public verb.
+`oms list --frontdoor` exposes compact subsystem entrypoints, not every verb
+below. `consult` is peer judgment; `peer-ask` and `advise` are council and
+escalation variants. `autopilot` is bounded autonomy; `plan-run` and
+`goal-drive` select narrower approved scopes. These stay discoverable here and
+in `oms list --all` without expanding the compact catalog.
 
 ## Orient and resume
 
 | Need | Use | Boundary |
 |---|---|---|
-| Ranked attention and one next command | `oms inbox --repo .` | First read on resume; `--fix-safe` is the only narrow repair mode. |
-| Decisions and blockers from prior sessions | `oms journal show --blockers`, then `--today` | Derived history, not current authority. Read it when work crosses a session or day. |
+| Ranked attention and one next command | `oms inbox --repo .` | First read on resume; `--fix-safe` is the only repair mode. |
+| Decisions and blockers from prior sessions | `oms journal show --blockers`, then `--today` | Derived history, not current authority; read across sessions or days. |
 | Effective goal, next action, or completion evidence | `oms runtime envelope show`, `next`, or `evidence show` | Typed projection; never mutation authority. |
-| Full underlying dashboard | `oms state --repo .` | Drill down when the inbox or runtime warning needs source detail. |
-| State consistency verdict | `oms state-verify --repo .` | Diagnosis only; it does not repair state. |
+| Full underlying dashboard | `oms state --repo .` | Drill down for source detail. |
+| State consistency verdict | `oms state-verify --repo .` | Diagnosis only; never repairs state. |
 
 ## Diagnose and preserve
 
 | Need | Use | Boundary |
 |---|---|---|
-| Installation summary | `oms status` | Link identity, installed tools, update state, and a small active-task summary. |
+| Installation summary | `oms status` | Link identity, tools, update state, and active tasks. |
 | One repository's full OMS plane | `oms state` | Repo-local tasks, plans, runs, artifacts, and guards. |
-| Composed operational view | `oms ops-cockpit` | Read-only lifecycle, review, approval, and telemetry projection; non-atomic by design. |
+| Composed operational view | `oms ops-cockpit` | Read-only, non-atomic lifecycle, review, approval, and telemetry projection. |
 | Aggregate installation health | `oms doctor` | Managed files, tools, skills, manifests, and provider surfaces. |
 | Narrow domain health | `oms project-doctor`, `oms model-doctor`, or `oms skill-doctor` | Diagnose only that project, model-routing, or skill surface. |
-| Restorable tracked Git edits | `oms checkpoint` | Same-HEAD tracked staged/unstaged snapshot; restore is dry-run unless applied. |
-| Private machine or cluster context | `oms snapshot` | Local reference facts for agents, not a Git restore point. |
+| Restorable tracked Git edits | `oms checkpoint` | Same-HEAD tracked snapshot; restore is dry-run unless applied. |
+| Private machine or cluster context | `oms snapshot` | Local agent facts, not a Git restore point. |
 
 ## Ask, review, and delegate
 
@@ -41,13 +39,12 @@ catalog into every public verb.
 | Several independent positions or a bounded debate | `oms peer-ask` | A repeated consult is not a symmetric council. |
 | Findings on an existing diff | `oms peer-review --gate` | `peer-ask --diff` does not provide the same typed review and mechanical gate. |
 | High-risk decision, repeated failure, or release go/no-go | `oms advise` | Do not spend an advisor on routine completion. |
-| One bounded implementation | `oms peer-delegate --to PROVIDER` | A write worker returns a patch and gains no commit or push authority. |
-| Isolated clean-HEAD audit with a worker role | `oms peer-delegate --read-only` | This is not an executor; it produces a report, never a patch. |
+| One bounded implementation | `oms peer-delegate --to PROVIDER` | Write workers return a patch, with no commit/push authority. |
+| Isolated clean-HEAD audit with a worker role | `oms peer-delegate --read-only` | Not an executor: report only, never a patch. |
 
 `agent-call` and `agent-run` remain public compatibility primitives. `agent-run`
-dispatches to `agent-call` or `peer-delegate`; use an explicit `--mode` when a
-caller genuinely needs that wrapper, and never rely on wording classification
-when read versus write authority is already known.
+dispatches to `agent-call` or `peer-delegate`; use `--mode` only when a caller
+needs that wrapper, never wording classification when authority is known.
 
 ## Plan and autonomy depth
 
@@ -62,6 +59,13 @@ when read versus write authority is already known.
 `agent-plan` owns the task graph and leases; it is not another execution loop.
 Each autonomy layer retains its own stopping and publication contract, so do not
 alias or collapse these commands.
+
+## Land and maintain
+
+| Need | Use | Boundary |
+|---|---|---|
+| Gate/push/update/CI a committed worktree | `oms land`; read `oms land status` | Detached job; receipt and log live under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/`; not `patch-land`. |
+| Schedule adopted-repo maintenance | `oms tick register`, then `oms tick install` | Hourly sweep; GC requires `OMS_TICK_GC=1`. |
 
 ## Admit or mutate
 
