@@ -76,6 +76,13 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(plan, handle, ensure_ascii=False, indent=2)
 PY
 }
+make_recovered_artifact_index() {
+  mkdir -p "$1/.oms/artifacts"
+  cat > "$1/.oms/artifacts/index.jsonl" <<'EOF'
+{"schema":1,"event_id":"evt_wall_death","operation_id":"op_1","artifact_id":"sha256:a1","ts":"2026-08-12T01:01:00Z","kind":"ask","provider":"codex","exit":124}
+{"schema":1,"event_id":"evt_seat_back","operation_id":"op_2","artifact_id":"sha256:a2","ts":"2026-08-12T01:02:00Z","kind":"ask","provider":"codex","exit":0}
+EOF
+}
 
 # --- registry -----------------------------------------------------------------
 a="$TMP/a"; b="$TMP/b"; make_repo "$a"; make_repo "$b"
@@ -108,6 +115,7 @@ import json, sys
 r = json.load(open(sys.argv[1]))
 assert r["gc"] == "skipped" and r["threads_closed"] == ["old-thread"], r
 assert r["tasks_closed"] == 1, r
+assert r["artifacts_resolved"] == 0 and r["artifact_resolve_rc"] == 0, r
 assert isinstance(r["journal_rc"], int) and isinstance(r["reconcile_rc"], int), r
 PY
 "$TASK" --repo "$a" init >/dev/null
@@ -174,6 +182,37 @@ import sys
 receipt = json.load(open(sys.argv[1], encoding="utf-8"))
 assert isinstance(receipt["plan_retire_rc"], int) and receipt["plan_retire_rc"] != 0, receipt
 PY
+
+# --- sweep: mechanically recovered artifact failures resolve every pass -----
+v="$TMP/recovered-artifacts"; make_repo "$v"; make_recovered_artifact_index "$v"
+out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$v")"
+printf '%s' "$out" | grep -q 'artifacts_resolved=1' ||
+  fail "a recovered artifact failure must resolve even with retirement off: $out"
+python3 - "$v/.oms/tick/last.json" "$v/.oms/artifacts/index.jsonl" <<'PY' || fail "artifact recovery sweep evidence is wrong"
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+resolutions = [row for row in rows if row.get("kind") == "artifact-resolution"]
+assert receipt["artifacts_resolved"] == 1 and receipt["artifact_resolve_rc"] == 0, receipt
+assert len(resolutions) == 1 and resolutions[0]["resolves_event_id"] == "evt_wall_death", resolutions
+PY
+out="$("$TICK" run --repo "$v")"
+printf '%s' "$out" | grep -q 'artifacts_resolved=0' ||
+  fail "a second artifact recovery sweep must be idempotent: $out"
+w="$TMP/invalid-artifacts"; make_repo "$w"; mkdir -p "$w/.oms/artifacts"
+printf '{not json\n' > "$w/.oms/artifacts/index.jsonl"
+out="$("$TICK" run --repo "$w")"
+printf '%s' "$out" | grep -q 'artifacts_resolved=0' ||
+  fail "a failed artifact resolver must not abort a sweep: $out"
+python3 - "$w/.oms/tick/last.json" <<'PY' || fail "a failed artifact resolver must record its exit"
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+assert isinstance(receipt["artifact_resolve_rc"], int) and receipt["artifact_resolve_rc"] != 0, receipt
+PY
 o="$TMP/retire-off"; make_committed_repo "$o"; make_stale_plan "$o" done
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$o")"
 printf '%s' "$out" | grep -q 'plans_retired=0' || fail "retirement opt-out must keep plans: $out"
@@ -216,6 +255,7 @@ printf '%s' "$st" | grep -q 'timer: systemd (owned)' || fail "status must see th
 printf '%s' "$st" | grep -q "$a  last:" || fail "status must show the last sweep: $st"
 printf '%s' "$st" | grep -q 'tasks_closed=0' || fail "status must report task closures: $st"
 printf '%s' "$st" | grep -q 'plans_retired=0' || fail "status must report plan retirements: $st"
+printf '%s' "$st" | grep -q 'artifacts_resolved=0' || fail "status must report artifact recoveries: $st"
 "$TICK" uninstall | grep -q 'removed' || fail "uninstall must report"
 [ ! -f "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" ] || fail "uninstall must remove the timer"
 grep -q 'disable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "uninstall must disable the owned timer"

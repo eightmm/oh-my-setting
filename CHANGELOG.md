@@ -9,7 +9,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ### Added
 - `oms tick`: an hourly user-level timer sweeps registered repos (journal
   sync, attempt reconcile, threads idle over 7d closed, stale Codex plugin
-  cache refreshed) so a session starts on a swept tree; gc stays opt-in.
+  cache refreshed) so a session starts on a swept tree; it also closes
+  goal-less task packets idle over 7d, retires all-done plans idle over 14d,
+  and resolves mechanically recovered artifact timeouts. `OMS_TICK_RETIRE=0`
+  leaves task and plan state alone, gc stays opt-in, and the receipt plus
+  summary line expose `tasks_closed`, `plans_retired`, and
+  `artifacts_resolved`.
 - `oms land`: gate, push, install refresh, and CI wait as one detached job
   with a receipt beside its gate log under
   `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` (`oms land status`), so an
