@@ -879,8 +879,120 @@ test_autopilot_orchestration() {
     fail "unfinished work under another contract should be a contract error, got $rc"
   grep -Fq 'still has unfinished tasks' "$busy_repo/busy.out" ||
     fail "the refusal must name the leftover plan: $(tail -3 "$busy_repo/busy.out")"
+  grep -Fq 'oms autopilot abandon' "$busy_repo/busy.out" ||
+    fail "the refusal must distinguish the outer receipt from the leftover plan: $(tail -3 "$busy_repo/busy.out")"
   [ ! -f "$busy_repo/calls/plan-from-spec" ] ||
     fail "a refused propose must not reach the planner"
+
+  # A retirement veto must leave the old plan live and stop before either the
+  # outer receipt or planner begins. A typed live marker is authority even
+  # when the task state says done.
+  local archive_failure_repo="$TMP/superseded-plan-propose-veto"
+  make_repo "$archive_failure_repo"
+  mkdir -p "$archive_failure_repo/calls" "$archive_failure_repo/.oms/delegations"
+  write_done_plan "$archive_failure_repo" false
+  (
+    . "$ROOT/scripts/lib/file-lock.sh"
+    native_pid="$(oms_process_native_pid "$$")"
+    native_source="$(oms_process_native_pid_source)"
+    printf '{"schema":4,"id":"live","pid":%s,"native_pid":%s,"native_pid_source":"%s","task_id":"t1","lease_id":"","executor_id":""}\n' \
+      "$$" "$native_pid" "$native_source" \
+      > "$archive_failure_repo/.oms/delegations/live.json"
+  )
+  printf '\n## Decisions\n\n- Contract revision: successor.\n' >> "$archive_failure_repo/PROJECT.md"
+  git -C "$archive_failure_repo" add PROJECT.md
+  git -C "$archive_failure_repo" commit -qm 'docs: adopt successor contract'
+  rc=0
+  run_autopilot "$archive_failure_repo" propose --planner claude \
+    --allowed 'src,tests' --base main > "$archive_failure_repo/veto.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] ||
+    fail "a failed superseded-plan retirement should refuse propose, got $rc"
+  grep -Fq 'cannot preserve the superseded plan' "$archive_failure_repo/veto.out" ||
+    fail "the retirement veto did not preserve its cause: $(tail -5 "$archive_failure_repo/veto.out")"
+  [ -f "$archive_failure_repo/.oms/plan/tasks.json" ] ||
+    fail "a refused superseded-plan retirement removed the live plan"
+  [ ! -e "$archive_failure_repo/.oms/plan/retirements.jsonl" ] ||
+    fail "a refused superseded-plan retirement wrote retirement authority"
+  [ ! -e "$archive_failure_repo/.oms/plan/autopilot-run.json" ] ||
+    fail "a retirement veto bound an outer receipt before retirement"
+  [ ! -e "$archive_failure_repo/calls/plan-from-spec" ] ||
+    fail "a retirement veto reached the planner"
+
+  # Retire a completed plan from the prior contract before asking the planner
+  # about its successor. The real planner sees existing done tasks and may use
+  # them as dependencies, so generating first and retiring only at run leaves
+  # an initial proposal that cannot apply after its predecessor disappears.
+  local successor_repo="$TMP/superseded-plan-propose"
+  local successor_bin="$TMP/superseded-plan-propose-bin"
+  local successor_home="$TMP/superseded-plan-propose-home"
+  local successor_digest successor_proposal successor_sha
+  make_repo "$successor_repo"
+  mkdir -p "$successor_repo/calls" "$successor_bin" "$successor_home"
+  write_done_plan "$successor_repo" false
+  successor_digest="$(sha256_file "$successor_repo/.oms/plan/tasks.json")"
+  cat > "$successor_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"tasks":[{"id":"t1","title":"feat: successor core","allowed":["src/"],"verify":"true","depends":[]},{"id":"t2","title":"test: successor coverage","allowed":["tests/"],"verify":"true","depends":["t1"]}]}'
+EOF
+  chmod +x "$successor_bin/codex"
+  git -C "$successor_repo" switch -q main
+  printf '\n## Decisions\n\n- Contract revision: successor.\n' >> "$successor_repo/PROJECT.md"
+  git -C "$successor_repo" add PROJECT.md
+  git -C "$successor_repo" commit -qm 'docs: adopt successor contract'
+  git -C "$successor_repo" switch -qc \
+    "oms/autopilot-$(sha256_file "$successor_repo/PROJECT.md" | cut -c1-12)"
+  rc=0
+  HOME="$successor_home" NVM_DIR="$successor_home/.nvm" \
+    PATH="$successor_bin:$PATH" OMS_T_REPO="$successor_repo" \
+    OMS_T_CALLS="$successor_repo/calls" \
+    OMS_AUTOPILOT_GOAL_DRIVE="$TMP/bin/goal-drive" \
+    OMS_AUTOPILOT_PLAN_FROM_SPEC="$ROOT/scripts/plan-from-spec.sh" \
+    OMS_AUTOPILOT_PEER_REVIEW="$TMP/bin/peer-review" \
+    OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
+    "$ROOT/scripts/autopilot.sh" --repo "$successor_repo" propose \
+      --planner codex --worker claude --allowed 'src,tests' --base main \
+      > "$successor_repo/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] ||
+    fail "a successor contract should produce a reviewed proposal, got $rc: $(tail -8 "$successor_repo/propose.out")"
+  [ -f "$successor_repo/.oms/plan/tasks.$successor_digest.archive.json" ] ||
+    fail "propose must preserve the spent predecessor before planning"
+  [ ! -f "$successor_repo/.oms/plan/tasks.json" ] ||
+    fail "the spent predecessor remained live while successor planning ran"
+  successor_proposal="$(find "$successor_repo/.oms/plan" -type f -name 'proposal-*.json' | head -n 1)"
+  [ -n "$successor_proposal" ] || fail "successor proposal was not written"
+  python3 - "$successor_proposal" <<'PY' || fail "successor proposal retained predecessor task ids"
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    tasks = json.load(handle)["tasks"]
+ids = [task["id"] for task in tasks]
+assert ids[0] == "t1", ids
+assert all(dep in ids for task in tasks for dep in task["depends"]), tasks
+PY
+  successor_sha="$(sha256_file "$successor_proposal")"
+  rc=0
+  HOME="$successor_home" NVM_DIR="$successor_home/.nvm" \
+    PATH="$successor_bin:$PATH" OMS_T_REPO="$successor_repo" \
+    OMS_T_CALLS="$successor_repo/calls" OMS_T_GOAL_RESULT=success \
+    OMS_AUTOPILOT_GOAL_DRIVE="$TMP/bin/goal-drive" \
+    OMS_AUTOPILOT_PLAN_FROM_SPEC="$ROOT/scripts/plan-from-spec.sh" \
+    OMS_AUTOPILOT_PEER_REVIEW="$TMP/bin/peer-review" \
+    OMS_AUTOPILOT_DRAFT_PR="$TMP/bin/draft-pr" \
+    "$ROOT/scripts/autopilot.sh" --repo "$successor_repo" run \
+      --planner codex --worker claude --allowed 'src,tests' --base main \
+      --proposal "$successor_proposal" --expected-proposal-sha256 "$successor_sha" \
+      > "$successor_repo/run.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] ||
+    fail "the clean successor proposal should apply, got $rc: $(tail -8 "$successor_repo/run.out")"
+  python3 - "$successor_repo/.oms/plan/tasks.json" <<'PY' || fail "successor tasks were not applied"
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    tasks = json.load(handle)["tasks"]
+assert list(tasks) == ["t1", "t2"], tasks
+assert tasks["t2"]["depends"] == ["t1"], tasks
+PY
 
   # A live receipt freezes its contract, so a retry that changes one of those
   # fields is refused -- correctly. The refusal has to say which field and what

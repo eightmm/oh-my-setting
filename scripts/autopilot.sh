@@ -1305,8 +1305,9 @@ if [ "$ACTION" = propose ]; then
   propose_spec_sha="$(oms_sha256_file "$SPEC")" || fail "cannot hash PROJECT.md"
   if ! plan_binds_spec "$propose_spec_sha"; then
     if plan_has_open_tasks; then
-      fail "the plan in .oms/plan/ is bound to a different contract and still has unfinished tasks; finish or retire it before proposing against the adopted PROJECT.md"
+      fail "the plan in .oms/plan/ is bound to a different contract and still has unfinished tasks; finish or resolve and retire it through the plan lifecycle before proposing against the adopted PROJECT.md; oms autopilot abandon only retires a frozen outer receipt, not this plan"
     fi
+    archive_superseded_plan || fail "cannot preserve the superseded plan"
     propose_tasks "" "$INITIAL_TASKS" || exit $?
   fi
   bind_plan_contract
