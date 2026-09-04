@@ -7,6 +7,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms intent draft` retries once on a fallback provider after a transient
+  primary failure (timeout, 529/overload/rate-limit output, or an empty answer
+  window). `--fallback-to PROVIDER|none` controls the seat; direct `codex` and
+  `claude` drafts default to the installed counterpart, the retry gets a
+  doubled parseable timeout, and fallback provenance retains both
+  repo-relative call artifacts.
 - `oms init` registers its just-seeded canonical repo root with the `oms tick`
   registry. It is idempotent and reports `registered`, `already registered`, or
   `not registered`; an unavailable tick helper or unwritable registry does not

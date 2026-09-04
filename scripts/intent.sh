@@ -13,8 +13,8 @@ set -euo pipefail
 #   goal sentence -> intent draft -> [review] -> intent adopt
 #     -> plan-from-spec -> [review] -> goal-drive / autopilot.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$SCRIPT_DIR/lib/agent-memory-common.sh"
 # shellcheck source=scripts/lib/work-journal.sh
@@ -25,6 +25,8 @@ REPO="$PWD"
 PROVIDER="codex"
 MODEL=""
 FALLBACK_MODEL=""
+FALLBACK_PROVIDER=""
+FALLBACK_PROVIDER_SET=0
 REASONING_EFFORT="auto"
 PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
 GOAL_TEXT=""
@@ -34,7 +36,8 @@ usage() {
   cat <<'EOF'
 usage:
   intent.sh draft --goal "TEXT" [--to PROVIDER] [--repo PATH]
-                  [--model M] [--fallback-model M] [--reasoning-effort E]
+                  [--model M] [--fallback-model M] [--fallback-to PROVIDER|none]
+                  [--reasoning-effort E] [--provider-timeout DUR]
   intent.sh show [--id ID] [--repo PATH]
   intent.sh adopt --id ID [--repo PATH]
 
@@ -44,7 +47,9 @@ draft   Ask a provider to expand the goal into a structured intent spec
         (Goal/Scope/Non-goals, Commands, a single-line Required checks
         acceptance, edge cases). Writes a candidate under .oms/intents/
         with provenance; never touches PROJECT.md. Review the candidate —
-        editing it is expected — then adopt.
+        editing it is expected — then adopt. A transient failed call retries
+        once on the other installed core provider by default; --fallback-to
+        none disables that retry.
 show    List candidates, or print one with --id.
 adopt   The explicit approval act and the only PROJECT.md writer. Refuses
         while a live autopilot receipt exists (a spec swap under a live
@@ -70,6 +75,9 @@ while [ "$#" -gt 0 ]; do
     --fallback-model)
       [ "$#" -ge 2 ] || fail "--fallback-model requires a name"
       FALLBACK_MODEL="$2"; shift 2 ;;
+    --fallback-to)
+      [ "$#" -ge 2 ] || fail "--fallback-to requires a provider or 'none'"
+      FALLBACK_PROVIDER="$2"; FALLBACK_PROVIDER_SET=1; shift 2 ;;
     --reasoning-effort)
       [ "$#" -ge 2 ] || fail "--reasoning-effort requires a level"
       REASONING_EFFORT="$2"; shift 2 ;;
@@ -85,7 +93,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
-REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
+REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
 INTENT_DIR="$REPO/.oms/intents"
 SPEC="$REPO/PROJECT.md"
 OUTER_RECEIPT="$REPO/.oms/plan/autopilot-run.json"
@@ -389,6 +397,97 @@ for entry in re.split(r"[ \t,]+", scope):
 PY
 }
 
+# The transport's Prompt section is input, not an answer. Keep this one window
+# rule shared by retry classification and candidate extraction so a goal word
+# in the outbound prompt cannot spend the fallback seat.
+intent_artifact_output_window() {  # ARTIFACT
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+try:
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError as exc:
+    sys.stderr.write("error: could not read intent call artifact: %s\n" % exc)
+    raise SystemExit(3)
+windows = text.split("\n## Output\n")
+if len(windows) > 1:
+    text = windows[-1]
+sys.stdout.write(re.split(r"\n## Exit\b", text)[0])
+PY
+}
+
+# A retriable failure is deliberately narrow. Exit 3 means the outbound
+# scrubber refused the same prompt and 127 means the seat is absent, so neither
+# can improve by sending an identical prompt to another provider.
+intent_first_call_is_transient() {  # EXIT_CODE OUTPUT_WINDOW
+  python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+status = int(sys.argv[1])
+try:
+    text = open(sys.argv[2], encoding="utf-8", errors="replace").read()
+except OSError:
+    raise SystemExit(1)
+if status in (3, 127):
+    raise SystemExit(1)
+if status == 124:
+    raise SystemExit(0)
+if re.search(r"529|overloaded|rate limit", text, re.IGNORECASE):
+    raise SystemExit(0)
+# The router records route/footer metadata even when the provider answered
+# nothing; that transport text must not turn an empty answer into a refusal.
+lines = text.splitlines()
+transport = re.compile(r"^(seat-health: |model-route: |model-result: |model-fallback: |stop-reason: )")
+paired = {"served model", "configured model", "cost usd", "tokens used"}
+while lines:
+    tail = lines[-1].strip()
+    if not tail or transport.match(tail):
+        lines.pop()
+    elif len(lines) >= 2 and lines[-2].strip().lower() in paired:
+        lines.pop()
+        lines.pop()
+    else:
+        break
+if not "\n".join(lines).strip():
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+intent_doubled_timeout() {  # DURATION
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+value = sys.argv[1]
+match = re.fullmatch(r"([0-9]+)([smh]?)", value)
+if not match:
+    print(value)
+else:
+    print("%d%s" % (int(match.group(1)) * 2, match.group(2)))
+PY
+}
+
+# Provenance survives into a later outbound PROJECT.md prompt. Artifact paths
+# under this repository therefore stay repo-relative instead of becoming an
+# absolute-machine-path scrubber failure on the next draft.
+intent_artifact_ref() {  # ARTIFACT
+  local artifact_ref="$1"
+  case "$artifact_ref" in
+    "$REPO"/*) artifact_ref="${artifact_ref#"$REPO"/}" ;;
+  esac
+  printf '%s\n' "$artifact_ref"
+}
+
+intent_draft_artifact_pointers() {  # FIRST [FALLBACK]
+  local first="$1"
+  local fallback="${2:-}"
+  [ -z "$first" ] || printf 'artifact kept: %s\n' "$first" >&2
+  [ -z "$fallback" ] || printf 'fallback artifact kept: %s\n' "$fallback" >&2
+}
+
 if [ "$ACTION" = show ]; then
   if [ -n "$INTENT_ID" ]; then
     require_intent_file
@@ -414,6 +513,35 @@ if [ "$ACTION" = draft ]; then
   case "$GOAL_TEXT" in
     *$'\t'*) fail "--goal must not contain tab characters" ;;
   esac
+
+  fallback_provider=""
+  if [ "$FALLBACK_PROVIDER_SET" -eq 1 ]; then
+    case "$FALLBACK_PROVIDER" in
+      none) ;;
+      *)
+        fallback_provider="$(oms_provider_normalize "$FALLBACK_PROVIDER" 2>/dev/null)" ||
+          fail "--fallback-to requires a supported provider or 'none'"
+        fallback_provider="${fallback_provider//$'\r'/}"
+        primary_provider="${PROVIDER%%:*}"
+        primary_provider="$(oms_provider_normalize "$primary_provider" 2>/dev/null)" ||
+          primary_provider="${PROVIDER%%:*}"
+        primary_provider="${primary_provider//$'\r'/}"
+        [ "$fallback_provider" != "$primary_provider" ] ||
+          fail "--fallback-to must name a provider different from --to"
+        ;;
+    esac
+  else
+    case "$PROVIDER" in
+      codex) fallback_provider="claude" ;;
+      claude) fallback_provider="codex" ;;
+    esac
+    # Default only to a seat that physically resolves on PATH. An explicit
+    # fallback is still attempted so its own artifact records a missing binary.
+    if [ -n "$fallback_provider" ] &&
+      ! oms_provider_cli_discovered "$fallback_provider"; then
+      fallback_provider=""
+    fi
+  fi
 
   existing_spec=""
   if [ -f "$SPEC" ]; then
@@ -475,42 +603,100 @@ $tree_listing
 $existing_spec
 --- end context ---"
 
-  raw="$(agent_memory_mktemp)" || fail "mktemp failed"
+  intent_draft_raw=""
+  intent_fallback_raw=""
+  intent_answer_window=""
+  body=""
+  intent_draft_cleanup() {
+    local file
+    for file in "$intent_draft_raw" "$intent_fallback_raw" \
+      "$intent_answer_window" "$body"; do
+      [ -z "$file" ] || rm -f "$file"
+    done
+  }
+  trap intent_draft_cleanup EXIT
+
+  intent_draft_raw="$(agent_memory_mktemp)" || fail "mktemp failed"
   call_args=(--to "$PROVIDER" --repo "$REPO" --operation plan --prompt "$prompt")
   [ -z "$MODEL" ] || call_args+=(--model "$MODEL")
   [ -z "$FALLBACK_MODEL" ] || call_args+=(--fallback-model "$FALLBACK_MODEL")
   [ "$REASONING_EFFORT" = auto ] || call_args+=(--reasoning-effort "$REASONING_EFFORT")
-  if ! OMS_PEER_TIMEOUT="$PROVIDER_TIMEOUT" "$ROOT/scripts/agent-call.sh" "${call_args[@]}" > "$raw" 2>&1; then
-    echo "error: intent draft call failed:" >&2
-    tail -n 5 "$raw" >&2
-    rm -f "$raw"
+  first_rc=0
+  OMS_PEER_TIMEOUT="$PROVIDER_TIMEOUT" "$ROOT/scripts/agent-call.sh" "${call_args[@]}" \
+    > "$intent_draft_raw" 2>&1 || first_rc=$?
+  first_artifact="$(sed -n 's/^artifact: //p' "$intent_draft_raw" | tail -n 1)"
+  first_artifact="${first_artifact//$'\r'/}"
+  fallback_artifact=""
+  if [ -z "$first_artifact" ] || [ ! -f "$first_artifact" ]; then
+    if [ "$first_rc" -ne 0 ]; then
+      echo "error: intent draft call failed:" >&2
+      tail -n 5 "$intent_draft_raw" >&2
+    else
+      echo "error: intent draft call produced no artifact" >&2
+    fi
+    intent_draft_artifact_pointers "$first_artifact"
     exit 3
   fi
-  answer_artifact="$(sed -n 's/^artifact: //p' "$raw" | tail -n 1)"
-  answer_artifact="${answer_artifact//$'\r'/}"
-  rm -f "$raw"
-  [ -n "$answer_artifact" ] && [ -f "$answer_artifact" ] ||
-    fail "intent draft call produced no artifact"
+
+  intent_answer_window="$(agent_memory_mktemp)" || fail "mktemp failed"
+  if ! intent_artifact_output_window "$first_artifact" > "$intent_answer_window"; then
+    echo "error: could not read the intent draft answer (artifact kept: $first_artifact)" >&2
+    intent_draft_artifact_pointers "$first_artifact"
+    exit 3
+  fi
+
+  answer_artifact="$first_artifact"
+  answering_provider="$PROVIDER"
+  if [ -n "$fallback_provider" ] &&
+    intent_first_call_is_transient "$first_rc" "$intent_answer_window"; then
+    if ! fallback_timeout="$(intent_doubled_timeout "$PROVIDER_TIMEOUT")"; then
+      fallback_timeout="$PROVIDER_TIMEOUT"
+    fi
+    fallback_timeout="${fallback_timeout//$'\r'/}"
+    intent_fallback_raw="$(agent_memory_mktemp)" || fail "mktemp failed"
+    # A model route is provider-family-specific. The fallback gets its normal
+    # route while the generic reasoning effort remains intact.
+    fallback_args=(--to "$fallback_provider" --repo "$REPO" --operation plan --prompt "$prompt")
+    [ "$REASONING_EFFORT" = auto ] || fallback_args+=(--reasoning-effort "$REASONING_EFFORT")
+    fallback_rc=0
+    OMS_PEER_TIMEOUT="$fallback_timeout" "$ROOT/scripts/agent-call.sh" "${fallback_args[@]}" \
+      > "$intent_fallback_raw" 2>&1 || fallback_rc=$?
+    fallback_artifact="$(sed -n 's/^artifact: //p' "$intent_fallback_raw" | tail -n 1)"
+    fallback_artifact="${fallback_artifact//$'\r'/}"
+    if [ -z "$fallback_artifact" ] || [ ! -f "$fallback_artifact" ]; then
+      echo "error: intent draft fallback call produced no artifact:" >&2
+      tail -n 5 "$intent_fallback_raw" >&2
+      intent_draft_artifact_pointers "$first_artifact" "$fallback_artifact"
+      exit 3
+    fi
+    if [ "$fallback_rc" -ne 0 ]; then
+      echo "error: intent draft fallback call failed:" >&2
+      tail -n 5 "$intent_fallback_raw" >&2
+      intent_draft_artifact_pointers "$first_artifact" "$fallback_artifact"
+      exit 3
+    fi
+    answer_artifact="$fallback_artifact"
+    answering_provider="$fallback_provider"
+    if ! intent_artifact_output_window "$answer_artifact" > "$intent_answer_window"; then
+      echo "error: could not read the fallback intent draft answer (artifact kept: $answer_artifact)" >&2
+      intent_draft_artifact_pointers "$first_artifact" "$fallback_artifact"
+      exit 3
+    fi
+  elif [ "$first_rc" -ne 0 ]; then
+    echo "error: intent draft call failed:" >&2
+    tail -n 5 "$intent_draft_raw" >&2
+    intent_draft_artifact_pointers "$first_artifact"
+    exit 3
+  fi
 
   body="$(agent_memory_mktemp)" || fail "mktemp failed"
-  # The transcript can echo the skeleton from the prompt; the answer always
-  # follows the echo, so the LAST '## Status' anchor wins. Harness footer
-  # lines (stop-reason, tokens, model-result) and fence lines are transport,
-  # not spec.
-  if ! python3 - "$answer_artifact" > "$body" <<'PY'
+  # The output window is already isolated above. The transcript can echo the
+  # skeleton from the prompt, so the LAST '## Status' anchor wins; transport
+  # footer and fence lines are not part of the candidate.
+  if ! python3 - "$intent_answer_window" > "$body" <<'PY'
 import re, sys
 
 text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-# Only the transport's Output window speaks: the artifact's own Prompt
-# section quotes the skeleton from the instructions, and a quoted skeleton
-# is not the answer (the same window rule the verdict readers follow).
-windows = text.split("\n## Output\n")
-if len(windows) > 1:
-    text = windows[-1]
-# The artifact's Exit section follows the Output window (observed on the
-# verb's first field use: the exit heading and token footer rode into the
-# candidate); nothing at or after that heading is the answer.
-text = re.split(r"\n## Exit\b", text)[0]
 lines = [line for line in text.splitlines() if line.strip() not in ("```", "```markdown", "```md")]
 anchors = [index for index, line in enumerate(lines) if line.strip() == "## Status"]
 if not anchors:
@@ -532,41 +718,44 @@ while kept:
 print("\n".join(kept))
 PY
   then
-    rm -f "$body"
     echo "error: could not extract an intent spec (artifact kept: $answer_artifact)" >&2
+    intent_draft_artifact_pointers "$first_artifact" "$fallback_artifact"
     exit 3
   fi
 
   if ! validate_intent_file "$body" >/dev/null; then
-    rm -f "$body"
     echo "error: the drafted spec failed validation (artifact kept: $answer_artifact)" >&2
+    intent_draft_artifact_pointers "$first_artifact" "$fallback_artifact"
     exit 3
   fi
 
   mkdir -p "$INTENT_DIR"
   agent_memory_ensure_oms_ignore "$REPO"
-  # The provenance pointer is durable and outbound: a later draft embeds the
-  # adopted PROJECT.md in the provider prompt, and the scrubber blocks absolute
-  # machine paths. Writing one here means the first adopted contract bricks
-  # every later draft in that repository. Artifacts live under the repo, so
-  # record the pointer the way the repository already refers to its own files.
-  artifact_ref="$answer_artifact"
-  case "$artifact_ref" in
-    "$REPO"/*) artifact_ref="${artifact_ref#"$REPO"/}" ;;
-  esac
+  artifact_ref="$(intent_artifact_ref "$answer_artifact")"
+  artifact_ref="${artifact_ref//$'\r'/}"
+  first_artifact_ref=""
+  if [ -n "$fallback_artifact" ]; then
+    first_artifact_ref="$(intent_artifact_ref "$first_artifact")"
+    first_artifact_ref="${first_artifact_ref//$'\r'/}"
+  fi
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   intent_name="intent-$ts"
   target="$INTENT_DIR/$intent_name.md"
   {
     printf '## Provenance\n\n'
-    printf -- '- Drafted by: %s (intent.sh; content below is model output — review before adopt)\n' "$PROVIDER"
+    printf -- '- Drafted by: %s (intent.sh; content below is model output — review before adopt)\n' "$answering_provider"
     printf -- '- Drafted at: %s\n' "$ts"
     printf -- '- Goal sentence: %s\n' "$GOAL_TEXT"
-    printf -- '- Artifact: %s\n\n' "$artifact_ref"
+    printf -- '- Artifact: %s\n' "$artifact_ref"
+    if [ -n "$fallback_artifact" ]; then
+      printf -- '- First call artifact: %s\n' "$first_artifact_ref"
+    fi
+    printf '\n'
     cat "$body"
     printf '\n'
   } > "$target"
   rm -f "$body"
+  body=""
   echo "intent: drafted $intent_name"
   echo "intent: review it (editing is expected): $target"
   echo "intent: then: intent.sh adopt --id $intent_name --repo $REPO"
