@@ -7,6 +7,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms init` registers its just-seeded canonical repo root with the `oms tick`
+  registry. It is idempotent and reports `registered`, `already registered`, or
+  `not registered`; an unavailable tick helper or unwritable registry does not
+  prevent local `.oms` initialization.
 - `oms tick`: an hourly user-level timer sweeps registered repos (journal
   sync, attempt reconcile, threads idle over 7d closed, stale Codex plugin
   cache refreshed) so a session starts on a swept tree; it also closes
