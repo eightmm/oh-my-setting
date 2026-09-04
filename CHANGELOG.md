@@ -266,6 +266,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- The CI-status smoke no longer pipes captured output into `grep -q` under
+  `pipefail`. Under gate load the reader could close first, make `printf`
+  report a broken pipe, and fail an assertion even though its required text
+  was present; direct stdin checks keep the same assertions deterministic.
 - `plan-from-spec` now distinguishes a delegating suite's execution from an
   inspection-only path reference: `bash -n` and ShellCheck can inspect a
   suite, while direct, shell, source, and `bash -c` execution remain refused.

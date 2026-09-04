@@ -100,12 +100,12 @@ test_unauthenticated_gh_is_reported_on_the_explicit_surfaces() {
     bash "$ROOT/scripts/ci-status.sh" main) 2>&1 )"; then
     fail "an unauthenticated gh must not exit 0: $out"
   fi
-  printf '%s' "$out" | grep -Fq "gh not authenticated or unreachable" ||
+  grep -Fq "gh not authenticated or unreachable" <<<"$out" ||
     fail "the failure should name the cause: $out"
-  printf '%s' "$out" | grep -Fq "gh auth login" ||
+  grep -Fq "gh auth login" <<<"$out" ||
     fail "the failure should name the fix: $out"
   # The regression itself: silence read as a clean branch.
-  if printf '%s' "$out" | grep -Fq "no runs for"; then
+  if grep -Fq "no runs for" <<<"$out"; then
     fail "an unanswerable query must never read as 'no runs': $out"
   fi
 
@@ -146,7 +146,7 @@ test_pr_lookup_distinguishes_no_pr_from_an_unusable_gh() {
   out="$( (cd "$repo" && OMS_T_GH_SHA="$head" OMS_GH_BIN="$gh" \
     bash "$ROOT/scripts/ci-status.sh" record main) 2>&1 )" ||
     fail "a branch without a PR must not fail record: $out"
-  if printf '%s' "$out" | grep -Fq "not authenticated"; then
+  if grep -Fq "not authenticated" <<<"$out"; then
     fail "'no pull requests found' is not an outage: $out"
   fi
 
@@ -158,7 +158,7 @@ test_pr_lookup_distinguishes_no_pr_from_an_unusable_gh() {
     bash "$ROOT/scripts/ci-status.sh" record main) 2>&1 )"; then
     fail "an unusable gh must not leave record exiting 0: $out"
   fi
-  printf '%s' "$out" | grep -Fq "gh not authenticated or unreachable" ||
+  grep -Fq "gh not authenticated or unreachable" <<<"$out" ||
     fail "the pr lookup failure should be reported: $out"
   grep -Fq "\"sha\": \"$head\"" "$repo/.oms/ci.jsonl" ||
     fail "the CI row should survive a failed PR lookup"
@@ -180,24 +180,24 @@ test_run_for_a_prior_sha_is_history_not_a_current_result() {
   out="$( (cd "$repo" && OMS_T_GH_SHA="$old" OMS_GH_BIN="$gh" \
     bash "$ROOT/scripts/ci-status.sh" record main) 2>&1 )" ||
     fail "a green run on an earlier commit is not a failure: $out"
-  printf '%s' "$out" | grep -Fq "no run yet for HEAD" ||
+  grep -Fq "no run yet for HEAD" <<<"$out" ||
     fail "HEAD has no run of its own and should say so: $out"
-  printf '%s' "$out" | grep -Fq "history:" ||
+  grep -Fq "history:" <<<"$out" ||
     fail "the earlier run should be labelled history: $out"
 
   [ "$(ci_json_state "$repo")" = pending ] ||
     fail "a pushed HEAD with no run of its own is pending"
   out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
-  printf '%s' "$out" | grep -Fq "unknown/pending" ||
+  grep -Fq "unknown/pending" <<<"$out" ||
     fail "state should report the missing run for HEAD: $out"
-  printf '%s' "$out" | grep -Fq "history:" ||
+  grep -Fq "history:" <<<"$out" ||
     fail "the recorded row belongs under history: $out"
-  if printf '%s' "$out" | grep -Fq "STALE"; then
+  if grep -Fq "STALE" <<<"$out"; then
     fail "a prior-SHA row must not render as a stale current row: $out"
   fi
 
   out="$(bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json)"
-  if printf '%s' "$out" | grep -Fq '"ci-stale"'; then
+  if grep -Fq '"ci-stale"' <<<"$out"; then
     fail "the generic staleness nag is replaced by this model: $out"
   fi
 }
@@ -219,36 +219,36 @@ test_unpushed_head_is_named_as_unpushed_everywhere() {
   # A repo that has CI says what to do before anything has been recorded.
   [ "$(ci_json_state "$repo")" = unpushed ] || fail "two local commits are unpushed"
   out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
-  printf '%s' "$out" | grep -Fq "unpushed: 2 commit(s) ahead of origin/main" ||
+  grep -Fq "unpushed: 2 commit(s) ahead of origin/main" <<<"$out" ||
     fail "state should count the unpushed commits: $out"
-  printf '%s' "$out" | grep -Fq "push to get CI" ||
+  grep -Fq "push to get CI" <<<"$out" ||
     fail "state should name the action: $out"
 
   write_stub_gh "$gh"
   out="$( (cd "$repo" && OMS_T_GH_SHA="$pushed" OMS_GH_BIN="$gh" \
     bash "$ROOT/scripts/ci-status.sh" record main) 2>&1 )" ||
     fail "an unpushed HEAD is not a CI failure: $out"
-  printf '%s' "$out" | grep -Fq "unpushed (2 commits ahead" ||
+  grep -Fq "unpushed (2 commits ahead" <<<"$out" ||
     fail "ci-status should report the push state: $out"
-  printf '%s' "$out" | grep -Fq "history:" ||
+  grep -Fq "history:" <<<"$out" ||
     fail "the last pushed commit's run is history: $out"
   grep -Fq "\"sha\": \"$pushed\"" "$repo/.oms/ci.jsonl" ||
     fail "the run that did happen should still be recorded"
 
   out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
-  printf '%s' "$out" | grep -Fq "unpushed: 2 commit(s)" ||
+  grep -Fq "unpushed: 2 commit(s)" <<<"$out" ||
     fail "a recorded prior run must not displace the push state: $out"
-  printf '%s' "$out" | grep -Fq "history:" || fail "the prior run is history: $out"
-  if printf '%s' "$out" | grep -Fq "STALE"; then
+  grep -Fq "history:" <<<"$out" || fail "the prior run is history: $out"
+  if grep -Fq "STALE" <<<"$out"; then
     fail "unpushed work is not a stale record: $out"
   fi
 
   out="$(bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json)"
-  printf '%s' "$out" | grep -Fq '"unpushed-head"' ||
+  grep -Fq '"unpushed-head"' <<<"$out" ||
     fail "the inbox should carry the push item: $out"
-  printf '%s' "$out" | grep -Fq '"summary": "2 commit(s) not pushed' ||
+  grep -Fq '"summary": "2 commit(s) not pushed' <<<"$out" ||
     fail "the push item should count the commits: $out"
-  if printf '%s' "$out" | grep -Fq '"ci-stale"'; then
+  if grep -Fq '"ci-stale"' <<<"$out"; then
     fail "unpushed work must not also raise the staleness nag: $out"
   fi
   OMS_T_INBOX="$out" python3 - <<'PY' || fail "the push item should be P2 with a push command"
@@ -272,17 +272,17 @@ test_completed_run_for_head_is_the_current_result() {
   out="$( (cd "$repo" && OMS_T_GH_SHA="$head" OMS_GH_BIN="$gh" \
     bash "$ROOT/scripts/ci-status.sh" record main) 2>&1 )" ||
     fail "a green run for HEAD should exit 0: $out"
-  printf '%s' "$out" | grep -Fq "completed success" ||
+  grep -Fq "completed success" <<<"$out" ||
     fail "HEAD's own run is the reported result: $out"
 
   [ "$(ci_json_state "$repo")" = current ] || fail "HEAD's run should read as current"
   out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
-  printf '%s' "$out" | grep -Fq "completed success" || fail "state should show it: $out"
-  if printf '%s' "$out" | grep -Eq "STALE|unpushed|pending"; then
+  grep -Fq "completed success" <<<"$out" || fail "state should show it: $out"
+  if grep -Eq "STALE|unpushed|pending" <<<"$out"; then
     fail "a run for HEAD is neither stale, unpushed, nor pending: $out"
   fi
   out="$(bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json)"
-  if printf '%s' "$out" | grep -Fq '"ci-'; then
+  if grep -Fq '"ci-' <<<"$out"; then
     fail "a green current run is not an inbox item: $out"
   fi
 
@@ -292,7 +292,7 @@ test_completed_run_for_head_is_the_current_result() {
     fail "a red run for HEAD must exit nonzero"
   fi
   out="$(bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json)"
-  printf '%s' "$out" | grep -Fq '"ci-failed"' ||
+  grep -Fq '"ci-failed"' <<<"$out" ||
     fail "a red run for HEAD stays a P1 item: $out"
 }
 
@@ -310,12 +310,12 @@ test_repo_without_upstream_keeps_the_recorded_vs_head_signal() {
   [ "$(ci_json_state "$repo")" = stale ] ||
     fail "without an upstream the recorded row is only known to be stale"
   out="$(bash "$ROOT/scripts/state.sh" --repo "$repo")"
-  printf '%s' "$out" | grep -Fq "STALE" ||
+  grep -Fq "STALE" <<<"$out" ||
     fail "the pre-existing signal should survive: $out"
-  printf '%s' "$out" | grep -Fq "oms state --refresh-ci" ||
+  grep -Fq "oms state --refresh-ci" <<<"$out" ||
     fail "state should still name the refresh: $out"
   out="$(bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json)"
-  printf '%s' "$out" | grep -Fq '"ci-stale"' ||
+  grep -Fq '"ci-stale"' <<<"$out" ||
     fail "the staleness item still applies where push state is unknown: $out"
 }
 
