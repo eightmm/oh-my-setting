@@ -161,8 +161,8 @@ fi
 # dependencies that stay inside the proposal).
 validate_proposal() {  # FILE [APPLY] -> prints "ok <count>" or fails with reason
   python3 - "$1" "$MAX_TASKS" "$ID_PREFIX" "$ALLOWED_ENVELOPE" "$PLAN_FILE" "${2:-0}" \
-    "$ROOT/scripts/lib/path_scope.py" <<'PY'
-import json, re, runpy, sys, unicodedata
+    "$ROOT/scripts/lib/path_scope.py" "$REPO" <<'PY'
+import json, os, re, runpy, shlex, sys, unicodedata
 
 within_envelope = runpy.run_path(sys.argv[7])["within_envelope"]
 
@@ -199,6 +199,193 @@ prefix = sys.argv[3]
 envelope_text = sys.argv[4]
 plan_path = sys.argv[5]
 apply_mode = sys.argv[6] == "1"
+repo = sys.argv[8]
+
+# These suites create worker delegations themselves. A task verify already
+# executes under a worker, so invoking one would exceed the depth cap only
+# after the task has consumed its worker budget.
+DELEGATING_SUITES = (
+    "tests/goal-drive-recovery-smoke.sh",
+    "tests/autopilot-smoke.sh",
+    "tests/autonomy-plan-run-smoke.sh",
+    "tests/executor-smoke.sh",
+    "tests/lifecycle-provider-integration-smoke.sh",
+    "tests/model-routing-smoke.sh",
+    "tests/read-time-expiry-smoke.sh",
+    "tests/patch-land-approval-smoke.sh",
+)
+FULL_SUITE_VERIFIERS = (
+    "scripts/check.sh",
+    "tests/scripts-smoke.sh",
+)
+DELEGATING_SMOKE_SCRIPTS = (
+    "plan-run.sh",
+    "goal-drive.sh",
+    "autopilot.sh",
+    "peer-delegate.sh",
+)
+TOKEN_CHARACTERS = r"A-Za-z0-9_.-"
+
+
+def names_basename(command, basename):
+    return bool(re.search(
+        r"(?<![%s])%s(?![%s])" % (
+            TOKEN_CHARACTERS, re.escape(basename), TOKEN_CHARACTERS,
+        ),
+        command,
+    ))
+
+
+def shell_commands(command, depth=0):
+    """Return shell-command word groups, including one quoted shell layer."""
+    if depth > 4:
+        return []
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return []
+    split_words = []
+    nested = []
+    for word in words:
+        if any(char.isspace() for char in word):
+            nested.extend(shell_commands(word, depth + 1))
+            continue
+        split_words.extend(part for part in re.split(r"([;&|]+)", word) if part)
+    commands = []
+    current = []
+    for word in split_words:
+        if word in (";", "&&", "||", "|", "&"):
+            if current:
+                commands.append(current)
+            current = []
+        else:
+            current.append(word)
+    if current:
+        commands.append(current)
+    return commands + nested
+
+
+def basename(word):
+    return word.rstrip("/").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def smoke_shard_invocations(command):
+    """Yield each run-smoke-shard --only list; None means an unsharded run."""
+    for words in shell_commands(command):
+        for index, word in enumerate(words):
+            if basename(word) != "run-smoke-shard.sh":
+                continue
+            names = []
+            has_only = False
+            cursor = index + 1
+            while cursor < len(words):
+                if words[cursor] == "--only":
+                    has_only = True
+                    if cursor + 1 < len(words):
+                        names.append(words[cursor + 1])
+                    cursor += 2
+                else:
+                    cursor += 1
+            yield names if has_only else None
+
+
+def heredoc_delimiter(line):
+    match = re.search(r"<<-?[ \t]*(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z0-9_]+))", line)
+    if not match:
+        return None
+    return match.group(1) or match.group(2) or match.group(3)
+
+
+def prefix_invokes_script(prefix):
+    prefix = prefix.strip()
+    while prefix.startswith(("$(", "(", "{")):
+        prefix = prefix[2 if prefix.startswith("$(") else 1:].lstrip()
+    try:
+        words = shlex.split(prefix)
+    except ValueError:
+        return False
+    while words and words[0] in ("if", "then", "do", "else", "elif", "while", "until", "time", "!", "{"):
+        words = words[1:]
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words = words[1:]
+    while words and words[0] in ("command", "env", "/bin/env", "/usr/bin/env"):
+        words = words[1:]
+        while words and (words[0].startswith("-") or
+                         re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
+            words = words[1:]
+    if not words:
+        return True
+    head = basename(words[0])
+    if head in ("bash", "sh", "zsh"):
+        return all(word.startswith("-") for word in words[1:])
+    return head in (".", "source")
+
+
+def line_invokes_script(line, script):
+    if line.lstrip().startswith("#"):
+        return False
+    for fragment in re.split(r"&&|\|\||[;|&]", line):
+        for match in re.finditer(
+                r"(?<![%s])%s(?![%s])" % (
+                    TOKEN_CHARACTERS, re.escape(script), TOKEN_CHARACTERS,
+                ), fragment):
+            start = match.start()
+            while start and fragment[start - 1] not in " \t;|&()=":
+                start -= 1
+            if prefix_invokes_script(fragment[:start]):
+                return True
+    return False
+
+
+def smoke_test_delegates(name):
+    if not re.fullmatch(r"test_[A-Za-z0-9_]+", name):
+        return False
+    try:
+        with open(os.path.join(repo, "tests", "scripts-smoke.sh"), encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return False
+    start = re.compile(r"^%s\(\) \{$" % re.escape(name))
+    body = None
+    for index, line in enumerate(lines):
+        if start.fullmatch(line.rstrip("\r")):
+            body = []
+            for candidate in lines[index + 1:]:
+                candidate = candidate.rstrip("\r")
+                if candidate == "}":
+                    break
+                body.append(candidate)
+            else:
+                return False
+            break
+    if body is None:
+        return False
+    heredoc = None
+    for line in body:
+        if heredoc:
+            if line == heredoc:
+                heredoc = None
+            continue
+        if any(line_invokes_script(line, script) for script in DELEGATING_SMOKE_SCRIPTS):
+            return True
+        heredoc = heredoc_delimiter(line)
+    return False
+
+
+def delegating_verifier(verify):
+    for suite in DELEGATING_SUITES + FULL_SUITE_VERIFIERS:
+        if names_basename(verify, basename(suite)):
+            return suite
+    invocations = list(smoke_shard_invocations(verify))
+    if not invocations and names_basename(verify, "run-smoke-shard.sh"):
+        return "tests/run-smoke-shard.sh"
+    for names in invocations:
+        if names is None:
+            return "tests/run-smoke-shard.sh"
+        for name in names:
+            if smoke_test_delegates(name):
+                return "tests/run-smoke-shard.sh --only %s" % name
+    return None
 
 def reject_controls(value, label):
     if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
@@ -281,6 +468,10 @@ for t in tasks:
         reject_controls(t["verify"], "task %s verify" % tid)
     except ValueError as exc:
         sys.stderr.write(str(exc) + "\n"); sys.exit(3)
+    blocked_suite = delegating_verifier(t["verify"])
+    if blocked_suite:
+        sys.stderr.write("task %s verify runs delegating suite: %s\n" % (tid, blocked_suite))
+        sys.exit(3)
     depends = t.get("depends")
     if (not isinstance(depends, list) or any(not isinstance(dep, str) for dep in depends)
             or any(not id_re.fullmatch(dep) for dep in depends)
@@ -620,6 +811,10 @@ restoration. Never write a verify that reads or asserts content that only
 exists in the task's patch (grep/sed/cat of an allowed path, inline asserts
 of new behavior) — those can never pass the floor; new-behavior proof
 belongs in the plan-level acceptance, which runs on the finished tree.
+Delegation rule: task verifies run inside a worker, so never run a delegating
+suite or a whole-suite verifier. Prefer bash tests/run-smoke-shard.sh --only
+test_NAME only when that named smoke test does not invoke plan-run.sh,
+goal-drive.sh, autopilot.sh, or peer-delegate.sh.
 Keep each task within roughly 180 changed lines by default so worker/review
 budgets can carry the full patch. If a genuinely indivisible task must exceed
 that budget, make the exception explicit in its title so parent review sees it.
