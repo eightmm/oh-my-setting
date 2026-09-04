@@ -20926,6 +20926,53 @@ test_worker_guard_sees_planted_and_ignored_files() {
     fail "an ignored-tree replacement should be named: $result"
 }
 
+test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
+  local project="$TMP/guard-soft-remote-ref"
+  local head
+  local result
+  local out
+  local artifact
+
+  make_guard_repo "$project"
+  head="$(git -C "$project" rev-parse HEAD)"
+  result="$(run_guarded_worker "$project" \
+    "git -C \"$project\" update-ref refs/remotes/origin/main \"$head\"")"
+  [ "${result%%$'\t'*}" = 0 ] ||
+    fail "a remote-tracking ref change should not fail an ordinary run: $result"
+  out="${result#*$'\t'}"
+  printf '%s' "$out" | grep -Fq 'changed outside the worktree during this run: remote-refs' ||
+    fail "the remote-ref surface should still be reported: $out"
+  printf '%s' "$out" | grep -Fq 'cannot be attributed to codex' ||
+    fail "the remote-ref warning should remain non-attributable: $out"
+  artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
+  [ -f "$artifact" ] || fail "missing soft remote-ref artifact: $out"
+  assert_file_contains "$artifact" '## Repository changed during the run'
+  assert_file_contains "$artifact" '- surfaces: remote-refs'
+  assert_file_contains "$artifact" '- not attributable to the worker; review the patch before landing'
+
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" \
+    "git -C \"$project\" update-ref -d refs/remotes/origin/main")"
+  [ "${result%%$'\t'*}" != 0 ] ||
+    fail "strict mode should fail on a remote-tracking ref change: $result"
+  printf '%s' "$result" | grep -Fq 'changed protected state outside its worktree: remote-refs' ||
+    fail "strict remote-ref violation should be named: $result"
+}
+
+test_worker_guard_still_fails_on_a_local_branch_ref_change() {
+  local project="$TMP/guard-hard-local-ref"
+  local head
+  local result
+
+  make_guard_repo "$project"
+  head="$(git -C "$project" rev-parse HEAD)"
+  result="$(run_guarded_worker "$project" \
+    "git -C \"$project\" update-ref refs/heads/guard-local \"$head\"")"
+  [ "${result%%$'\t'*}" != 0 ] ||
+    fail "a local branch ref change should fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'changed protected state outside its worktree: refs' ||
+    fail "the local branch ref violation should remain hard: $result"
+}
+
 test_worker_guard_sees_object_store_and_metadata_writes() {
   local project="$TMP/guard-gitmeta"
   local result

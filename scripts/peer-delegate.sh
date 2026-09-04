@@ -178,10 +178,10 @@ Environment:
                              Cap the untracked/ignored stat scan; a truncated
                              scan is reported, never silent.
   OMS_WORKER_GUARD_STRICT=1  Fail on every changed surface. By default a change
-                             to untracked/ignored files or tracked content is
-                             reported but does not fail the run: it cannot be
-                             told apart from the user editing their own repo
-                             while the worker ran.
+                             to untracked/ignored files, tracked content,
+                             remote-tracking refs, or stash is reported but
+                             does not fail the run: it cannot be told apart
+                             from concurrent repository activity.
   OMS_WORKER_AUTHORITY_EXCLUSIVE=1
                              When no sibling can write owner state, compare and
                              restore the full primary .oms authority surface.
@@ -1941,17 +1941,17 @@ if [ -n "$worker_guard_dir" ]; then
     worker_guard_changed="${worker_guard_changed:+$worker_guard_changed, }worktree-identity"
   fi
   # Not every surface can be attributed. Nobody else edits git config, remotes,
-  # refs, hooks, object-store metadata, or rewrites append-only state while a
-  # delegation runs, so those are the worker. Untracked/ignored files and
-  # tracked content change whenever the user keeps working in their own repo,
-  # which is normal and constant — reporting those is useful, failing the run
-  # on them would make the guard fire on ordinary days. OMS_WORKER_GUARD_STRICT
-  # fails on everything, for unattended runs where nothing else touches the tree.
+  # the hard local-ref/HEAD surface, hooks, object-store metadata, or rewrites
+  # append-only state while a delegation runs, so those are the worker.
+  # Untracked/ignored files, tracked content, remote-tracking refs, and stash
+  # can change during ordinary concurrent repository activity. Reporting those
+  # is useful, but failing on them would make the guard fire on ordinary days.
+  # OMS_WORKER_GUARD_STRICT fails on everything for unattended runs.
   worker_guard_hard=""
   worker_guard_soft=""
   for guard_surface in $(printf '%s' "$worker_guard_changed" | tr ',' ' '); do
     case "$guard_surface" in
-      files|tracked)
+      files|tracked|remote-refs)
         if [ "${OMS_WORKER_GUARD_STRICT:-0}" = "1" ]; then
           worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface"
         else

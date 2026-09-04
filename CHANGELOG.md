@@ -102,6 +102,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The delegated-worker guard now reports a change limited to remote-tracking
+  refs or stash as the soft `remote-refs` surface: it warns and records that
+  the change is not attributable to the worker, while strict mode and local
+  refs/HEAD remain hard failures.
 - `goal-drive` silences stale commit-intent diagnostics for a foreign run's
   closed (`landed` or `superseded`) chain while preserving its recovery and
   parking projection for current-run, legacy, and open foreign chains.
