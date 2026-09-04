@@ -17846,8 +17846,6 @@ test_local_agent_files_reach_a_delegate_worktree() {
 
 test_oms_init_reports_missing_project_rules() {
   local project="$TMP/init-rules"
-  local blocked_project="$TMP/init-unwritable-tick"
-  local blocked_registry="$TMP/init-unwritable-registry"
   local out
 
   make_committed_repo "$project"
@@ -17871,6 +17869,20 @@ test_oms_init_reports_missing_project_rules() {
   out="$("$ROOT/scripts/init.sh" --repo "$plain")"
   printf '%s' "$out" | grep -Fq 'rules=missing' ||
     fail "a file without a managed block is not applied rules: $out"
+}
+
+test_oms_init_registers_repo_with_tick() {
+  local project="$TMP/init-tick-registry" out
+  local registry="$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt"
+  local blocked_project="$TMP/init-unwritable-tick"
+  local blocked_registry="$TMP/init-unwritable-registry"
+
+  make_committed_repo "$project"
+  out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
+  printf '%s' "$out" | grep -Fq 'tick registry registered' || fail "init should register the repo: $out"
+  out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "init must be idempotent"
+  printf '%s' "$out" | grep -Fq 'tick registry already registered' || fail "a second init reports the existing entry: $out"
+  [ "$(grep -Fxc "$project" "$registry")" = 1 ] || fail "the registry must hold the repo exactly once"
 
   # A regular file as the registry's parent is unwritable for every test user.
   printf 'not a directory\n' > "$blocked_registry"
