@@ -3,10 +3,9 @@ set -uo pipefail
 
 # SessionStart hook: print one bounded resume block so a fresh session starts
 # knowing what this repo was doing — active task packet (goal, next step,
-# verify), newest handoff digest, unresolved failures, and whether another
-# live session is using the same worktree. Everything here is read from .oms
-# state that was scrubbed at write time. The two writes this hook makes are
-# the autopilot shadow-judgment row and a detached project-graph build, both
+# verify), newest handoff digest, and unresolved failures. Everything here is
+# read from .oms state that was scrubbed at write time. The two writes this
+# hook makes are the autopilot shadow-judgment row and a detached project-graph build, both
 # regenerable and both ambient to the check gate; receipts, claims, and every
 # other surface stay untouched.
 # Best-effort by contract: a hook that blocks session start costs more than a
@@ -228,58 +227,6 @@ case "$au_line" in
   "attention: ok"*|"attention: disabled"*|"") ;;
   *) append "- auto-update ${au_line#attention: }" ;;
 esac
-
-# Peer-session advisory: another session hash with hook events in this cwd in
-# the last 15 minutes means a live neighbor. The incident this prevents:
-# `git add <file>` from a shared dirty tree committing the neighbor's hunks.
-events="$cwd/.oms/hooks/events.jsonl"
-if [ -s "$events" ]; then
-  peer_line="$(python3 - "$events" "$payload" <<'PY' 2>/dev/null
-import hashlib, json, sys, time
-from datetime import datetime, timezone
-
-try:
-    payload = json.loads(sys.argv[2]) if sys.argv[2].strip() else {}
-except Exception:
-    payload = {}
-# Mirrors hook_state.py session_hash exactly, fallback included, so our own
-# rows are always recognized as self.
-sid = str(payload.get("session_id") or payload.get("sessionId") or "nosession")
-me = hashlib.sha256(sid.encode()).hexdigest()[:32]
-now = time.time()
-newest = {}
-try:
-    with open(sys.argv[1], encoding="utf-8") as fh:
-        lines = fh.readlines()[-200:]
-except OSError:
-    sys.exit(0)
-for line in lines:
-    try:
-        row = json.loads(line)
-    except Exception:
-        continue
-    session = row.get("session") or ""
-    ts = row.get("ts") or ""
-    if not session or session == me:
-        continue
-    # Harness children write rows under their own session hashes into the
-    # primary repo's ledger; a session's own delegated workers are not a peer.
-    if row.get("action") == "ignored_child" or row.get("origin"):
-        continue
-    try:
-        when = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-    except Exception:
-        continue
-    if now - when <= 900:
-        newest[session] = max(newest.get(session, 0), when)
-if newest:
-    minutes = int((now - max(newest.values())) // 60)
-    print("- peers: another session used this worktree %dm ago — dirty-tree `git add`/`commit` can pick up its hunks; use `git add -p` or a worktree" % minutes)
-PY
-)" || peer_line=""
-  peer_line="${peer_line//$'\r'/}"
-  [ -z "$peer_line" ] || append "$peer_line"
-fi
 
 # Project graph: `oms graph project find` used to fail in any repository
 # nobody had built one in, so the session opens by saying whether this one has

@@ -28,9 +28,11 @@ oms agent-task --repo . close
 
 At session start the resume hook prints one `[oms resume]` block: active task
 (goal/next/verify), newest handoff pointer, unresolved failures with their
-recorded next action, and a live-peer advisory when another session touched
-this worktree in the last 15 minutes — heed that one before any dirty-tree
-`git add`. Treat the block as the resume entry point; follow its pointers
+recorded next action. On the first prompt, the router separately warns once per
+live neighboring session when another agent touched the same worktree in the
+last 15 minutes; a clean `SessionEnd` retires that neighbor immediately. Heed
+that warning before any dirty-tree `git add`. Treat the resume block as the
+entry point; follow its pointers
 (`oms session-handoff show`, `oms fail-ledger list`) before re-deriving state.
 
 Work Journal automatically projects durable lifecycle receipts and explicit

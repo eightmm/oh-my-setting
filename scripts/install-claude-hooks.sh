@@ -72,8 +72,8 @@ PreCompact|precompact-handoff.sh||30
 # the last few minutes.
 SessionEnd|precompact-handoff.sh||30
 
-# A resuming session starts knowing its active task, newest handoff, open
-# failures, and live-peer status instead of rediscovering them.
+# A resuming session starts knowing its active task, newest handoff, and open
+# failures instead of rediscovering them. The prompt router owns peer warnings.
 SessionStart|resume-hook.sh||10
 
 # Only session/subagent lifecycle counters and bounded identifiers are retained.

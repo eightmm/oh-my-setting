@@ -136,8 +136,7 @@ CHITCHAT_RE = re.compile(
     re.IGNORECASE,
 )
 GOAL_RE = re.compile(r"^\s*(goal|objective|목표)\s*[:：]\s*(.+)$", re.IGNORECASE)
-# Live-peer detection bounds, matching the SessionStart advisory in
-# resume-hook.sh: same 15-minute window, same bounded tail of the ledger.
+# Live-peer detection bounds for the first-prompt advisory.
 PEER_WINDOW_SEC = 900
 PEER_TAIL_ROWS = 200
 PEER_LATCH_MAX = 16
@@ -1025,13 +1024,13 @@ def event_epoch(value: Any) -> float | None:
 
 
 def live_peer_sessions(events: Path, me: str, now: float) -> dict[str, float]:
-    """Neighbor session hashes seen recently, this session's children excluded."""
+    """Recently active neighbor sessions, excluding children and ended sessions."""
     try:
         with events.open(encoding="utf-8", errors="replace") as handle:
             lines = handle.readlines()[-PEER_TAIL_ROWS:]
     except OSError:
         return {}
-    seen: dict[str, float] = {}
+    latest: dict[str, tuple[float, bool]] = {}
     for line in lines:
         try:
             row = json.loads(line)
@@ -1048,10 +1047,16 @@ def live_peer_sessions(events: Path, me: str, now: float) -> dict[str, float]:
         if row.get("action") == "ignored_child" or row.get("origin"):
             continue
         when = event_epoch(row.get("ts"))
-        if when is None or now - when > PEER_WINDOW_SEC:
+        if when is None:
             continue
-        seen[session] = max(seen.get(session, 0.0), when)
-    return seen
+        previous = latest.get(session)
+        if previous is None or when >= previous[0]:
+            latest[session] = (when, row.get("hook") == "SessionEnd")
+    return {
+        session: when
+        for session, (when, ended) in latest.items()
+        if not ended and now - when <= PEER_WINDOW_SEC
+    }
 
 
 def peer_advisory_hint(payload: dict[str, Any]) -> str | None:

@@ -16665,6 +16665,17 @@ test_peer_advisory_ignores_children_and_stale_rows() {
     fail "a stale neighbor row must stay silent: $out"
   fi
 
+  # A clean SessionEnd is stronger evidence than an earlier recent activity
+  # row. Keeping the ended session "live" causes false shared-tree warnings
+  # for the full 15-minute window after every normal shutdown.
+  : > "$events"
+  write_peer_event "$events" peer-ended 40
+  write_peer_event "$events" peer-ended 5 hook=SessionEnd action=telemetry
+  out="$(peer_prompt "$d" "$project" quiet-ended t1)"
+  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+    fail "a cleanly ended neighbor must stay silent: $out"
+  fi
+
   # Kill switch, with a genuinely live neighbor present.
   : > "$events"
   write_peer_event "$events" peer-live 30
@@ -17098,7 +17109,9 @@ test_resume_hook_prints_bounded_resume_block() {
   printf '%s\n' "$out" | grep -q 'session-handoff show claude-abc.md' ||
     fail "missing handoff pointer"
   printf '%s\n' "$out" | grep -q 'failures: 1 actionable' || fail "missing failure line"
-  printf '%s\n' "$out" | grep -q 'peers: another session' || fail "missing peer warning"
+  if printf '%s\n' "$out" | grep -q 'peers:'; then
+    fail "resume hook must leave peer warnings to the prompt router: $out"
+  fi
   # The project graph is reported every session; OMS_GRAPH_AUTOBUILD=0 keeps
   # this test hermetic, since otherwise each call here detaches a real build
   # into the fixture repository.
@@ -17132,37 +17145,6 @@ EOF
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
   if printf '%s\n' "$out" | grep -q 'failures:'; then
     fail "a resolved failure must drop out of the resume count: $out"
-  fi
-
-  # Rows from this session's own hash must not read as a peer.
-  python3 - "$repo/.oms/hooks/events.jsonl" <<'PY'
-import hashlib, json, sys
-from datetime import datetime, timezone
-me = hashlib.sha256(b"me").hexdigest()[:32]
-row = {"session": me,
-       "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-       "hook": "PostToolUse"}
-open(sys.argv[1], "w").write(json.dumps(row) + "\n")
-PY
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
-  if printf '%s\n' "$out" | grep -q 'peers:'; then
-    fail "own session must not be reported as a peer"
-  fi
-
-  # Nor must this session's own delegated workers: harness children write rows
-  # under their own session hashes into the primary repo's ledger.
-  python3 - "$repo/.oms/hooks/events.jsonl" <<'PY'
-import json, sys
-from datetime import datetime, timezone
-now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-rows = [{"session": "child0", "ts": now, "hook": "UserPromptSubmit",
-         "action": "ignored_child", "origin": "peer-delegate"},
-        {"session": "child1", "ts": now, "hook": "Stop", "origin": "peer-review"}]
-open(sys.argv[1], "w").write("".join(json.dumps(row) + "\n" for row in rows))
-PY
-  out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")"
-  if printf '%s\n' "$out" | grep -q 'peers:'; then
-    fail "harness child rows must not be reported as a peer"
   fi
 
   # A malformed autopilot receipt must never break session start: the

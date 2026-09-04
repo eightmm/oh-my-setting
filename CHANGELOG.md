@@ -114,6 +114,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   routing, handoff, and the high-risk verification guard remain. Updating also
   removes those two retired rows from existing Claude settings while preserving
   user-owned hooks.
+- Live-peer warnings now have one owner: the first-prompt router. A clean
+  `SessionEnd` retires a neighbor immediately instead of warning for another
+  15 minutes, and the SessionStart resume hook no longer repeats the same
+  ledger scan and warning.
 - The delegated-worker guard now reports a change limited to remote-tracking
   refs or stash as the soft `remote-refs` surface: it warns and records that
   the change is not attributable to the worker, while strict mode and local
