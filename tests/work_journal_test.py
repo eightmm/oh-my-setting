@@ -18,6 +18,7 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "scripts" / "lib" / "work_journal.py"
+NOTION_MODULE_PATH = ROOT / "scripts" / "lib" / "notion_journal.py"
 
 
 def load_module():
@@ -30,6 +31,18 @@ def load_module():
 
 
 wj = load_module()
+
+
+def load_notion_module():
+    spec = importlib.util.spec_from_file_location("notion_journal", NOTION_MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load notion_journal")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+notion = load_notion_module()
 
 
 NOW = dt.datetime(2026, 7, 31, 3, 0, tzinfo=dt.timezone.utc)
@@ -1294,6 +1307,88 @@ class NotionTransportPersistenceTest(unittest.TestCase):
                 settings = wj.notion_settings()
             self.assertEqual("ntn2", settings["cli_command"])
             self.assertEqual("os", settings["keyring"])
+
+
+class NotionTransportTimeoutRetryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-ntn-retry."))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.counter = self.tmp / "counter"
+        self.requests = self.tmp / "requests"
+        self.requests.mkdir()
+        self.command = self.tmp / "ntn"
+        self.command.write_bytes(
+            (
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "counter=\"${OMS_NTN_COUNTER:?}\"\n"
+                "requests=\"${OMS_NTN_REQUESTS:?}\"\n"
+                "count=0\n"
+                "if [ -f \"$counter\" ]; then\n"
+                "  count=$(tr -d '\\r\\n' < \"$counter\")\n"
+                "fi\n"
+                "count=$((count + 1))\n"
+                "printf '%s\\n' \"$count\" > \"$counter\"\n"
+                "printf '%s\\n' \"$@\" > \"$requests/$count.argv\"\n"
+                "cat > \"$requests/$count.body\"\n"
+                "if [ \"$count\" -le \"${OMS_NTN_STALLS:?}\" ]; then\n"
+                "  exec sleep 0.7\n"
+                "fi\n"
+                "if [ \"${OMS_NTN_STATUS:-0}\" -ne 0 ]; then\n"
+                "  printf 'HTTP 503\\n' >&2\n"
+                "  exit \"$OMS_NTN_STATUS\"\n"
+                "fi\n"
+                "printf '{\"id\":\"retried-page\"}\\n'\n"
+            ).encode("utf-8")
+        )
+        self.command.chmod(0o755)
+
+    def environment(self, stalls: int, status: int = 0):
+        return {
+            "OMS_WORK_JOURNAL_CONFIG": str(self.tmp / "work-journal.json"),
+            "OMS_NOTION_CLI": "ntn",
+            "OMS_NTN_COUNTER": str(self.counter),
+            "OMS_NTN_REQUESTS": str(self.requests),
+            "OMS_NTN_STALLS": str(stalls),
+            "OMS_NTN_STATUS": str(status),
+            "PATH": str(self.tmp) + os.pathsep + os.environ.get("PATH", ""),
+        }
+
+    def transport(self):
+        return notion.NotionCLITransport(wj.notion_settings()["cli_command"])
+
+    def test_retries_one_timed_out_cli_request(self):
+        payload = {"parent": {"page_id": "parent"}}
+        with mock.patch.dict(os.environ, self.environment(1), clear=False):
+            response = self.transport().request("POST", "/v1/pages", payload, 0.2)
+
+        self.assertEqual({"id": "retried-page"}, response)
+        self.assertEqual("2\n", self.counter.read_text(encoding="utf-8"))
+        first = (self.requests / "1.body").read_text(encoding="utf-8")
+        second = (self.requests / "2.body").read_text(encoding="utf-8")
+        self.assertEqual(first, second)
+        self.assertEqual(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")), first
+        )
+        self.assertEqual(
+            (self.requests / "1.argv").read_text(encoding="utf-8"),
+            (self.requests / "2.argv").read_text(encoding="utf-8"),
+        )
+
+    def test_raises_after_the_second_timed_out_cli_request(self):
+        with mock.patch.dict(os.environ, self.environment(2), clear=False):
+            with self.assertRaisesRegex(TimeoutError, "^Notion CLI timed out$"):
+                self.transport().request("GET", "/v1/search", None, 0.2)
+
+        self.assertEqual("2\n", self.counter.read_text(encoding="utf-8"))
+
+    def test_does_not_retry_a_cli_http_error(self):
+        with mock.patch.dict(os.environ, self.environment(0, status=1), clear=False):
+            with self.assertRaises(notion.NotionHTTPError) as raised:
+                self.transport().request("GET", "/v1/search", None, 0.2)
+
+        self.assertEqual(503, raised.exception.status)
+        self.assertEqual("1\n", self.counter.read_text(encoding="utf-8"))
 
 
 class JournalLanguageTest(unittest.TestCase):

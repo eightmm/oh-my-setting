@@ -166,21 +166,30 @@ class NotionCLITransport:
         body = None
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        try:
-            completed = subprocess.run(
-                command,
-                input=body,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=float(timeout),
-                check=False,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
+        request_timeout = float(timeout)
+        retry_timeout = min(
+            2.0 * request_timeout,
+            3.0 * request_timeout - request_timeout,
+        )
+        for attempt_timeout in (request_timeout, retry_timeout):
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=body,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=attempt_timeout,
+                    check=False,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                continue
+            except OSError:
+                raise NotionTransportError("Notion CLI is unavailable") from None
+            break
+        else:
             raise TimeoutError("Notion CLI timed out") from None
-        except OSError:
-            raise NotionTransportError("Notion CLI is unavailable") from None
         if completed.returncode != 0:
             match = re.search(r"(?i)\b(?:http(?: status)?[ :=]*)?([45][0-9]{2})\b", completed.stderr)
             if match:
