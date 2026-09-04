@@ -4,10 +4,9 @@ set -uo pipefail
 # SessionStart hook: print one bounded resume block so a fresh session starts
 # knowing what this repo was doing — active task packet (goal, next step,
 # verify), newest handoff digest, and unresolved failures. Everything here is
-# read from .oms state that was scrubbed at write time. The two writes this
-# hook makes are the autopilot shadow-judgment row and a detached project-graph build, both
-# regenerable and both ambient to the check gate; receipts, claims, and every
-# other surface stay untouched.
+# read from .oms state that was scrubbed at write time. Its only write is the
+# regenerable autopilot shadow-judgment row, which is ambient to the check
+# gate; receipts, claims, and every other surface stay untouched.
 # Best-effort by contract: a hook that blocks session start costs more than a
 # missing resume line, so every failure path exits 0. OMS_RESUME_HOOK=0
 # disables; harness children stay silent (their parent already has context).
@@ -226,89 +225,6 @@ au_line="$("$ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
 case "$au_line" in
   "attention: ok"*|"attention: disabled"*|"") ;;
   *) append "- auto-update ${au_line#attention: }" ;;
-esac
-
-# Project graph: `oms graph project find` used to fail in any repository
-# nobody had built one in, so the session opens by saying whether this one has
-# a current graph — and starts the build itself when it does not. The build is
-# detached and its output discarded: session start never waits on it, never
-# fails because of it, and an inherited stdout would hang every caller that
-# captures this hook. setsid, never nohup — nohup makes SIGHUP unignorable by
-# a trap for descendants, which the harness's signal tests depend on. The
-# check is bounded well inside the hook's own 10s budget.
-graph_state=""
-# Only a repository that already uses OMS gets a graph on its own: a session
-# opened in a plain directory (or a home directory) must not start a scan.
-if [ -f "$ROOT/scripts/graph.sh" ] && [ -d "$cwd/.oms" ] &&
-  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  # `check` exits 3 on a stale or absent graph and still prints the verdict,
-  # so the status is discarded rather than the payload.
-  graph_json=""
-  if command -v timeout >/dev/null 2>&1; then
-    graph_json="$(timeout 5 bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
-      project check --json 2>/dev/null || true)"
-  else
-    graph_json="$(bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
-      project check --json 2>/dev/null || true)"
-  fi
-  graph_state="$(printf '%s' "$graph_json" | python3 -c '
-import json, sys
-try:
-    row = json.load(sys.stdin)
-except Exception:
-    raise SystemExit(0)
-print("fresh %s" % str(row.get("revision") or "")[:12] if row.get("fresh") else "refresh")
-' 2>/dev/null)" || graph_state=""
-  graph_state="${graph_state//$'\r'/}"
-fi
-# Execution graph shadow: with a plan present, record where the bundled
-# goal-drive graph would stand against current reality and whether that agrees
-# with the control plane's own next action. Observe-only evidence, one
-# append-only row (ambient to the check gate, like the autopilot shadow);
-# never a run, never an action. Bounded well inside the hook's budget.
-if [ -f "$ROOT/scripts/graph.sh" ] && [ -f "$cwd/.oms/plan/tasks.json" ] &&
-  [ "${OMS_GRAPH_SHADOW:-1}" != "0" ]; then
-  route_json=""
-  if command -v timeout >/dev/null 2>&1; then
-    route_json="$(timeout 8 bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
-      exec shadow --json 2>/dev/null || true)"
-  else
-    route_json="$(bash "$ROOT/scripts/graph.sh" --repo "$cwd" \
-      exec shadow --json 2>/dev/null || true)"
-  fi
-  route_line="$(printf '%s' "$route_json" | python3 -c '
-import json, sys
-try:
-    row = json.load(sys.stdin)
-except Exception:
-    raise SystemExit(0)
-primary = row.get("route", {}).get("primary") or row.get("route", {}).get("status") or "-"
-plane = row.get("control_plane", {})
-verdict = "agrees" if row.get("agree") else "disagrees"
-action = plane.get("action")
-print("- graph route: %s (%s)" % (
-    primary, "%s with runtime next %s" % (verdict, action) if action else "runtime next unavailable"))
-' 2>/dev/null)" || route_line=""
-  route_line="${route_line//$'\r'/}"
-  [ -z "$route_line" ] || append "$route_line"
-fi
-
-case "$graph_state" in
-  "fresh "*) append "- graph: fresh (${graph_state#fresh })" ;;
-  refresh)
-    if [ "${OMS_GRAPH_AUTOBUILD:-1}" = "0" ]; then
-      append "- graph: absent (OMS_GRAPH_AUTOBUILD=0)"
-    else
-      if command -v setsid >/dev/null 2>&1; then
-        setsid bash "$ROOT/scripts/graph.sh" --repo "$cwd" project ensure \
-          > /dev/null 2>&1 < /dev/null &
-      else
-        ( bash "$ROOT/scripts/graph.sh" --repo "$cwd" project ensure \
-          > /dev/null 2>&1 < /dev/null & )
-      fi
-      append "- graph: building in the background (oms graph project ensure)"
-    fi
-    ;;
 esac
 
 [ -n "$out" ] || exit 0

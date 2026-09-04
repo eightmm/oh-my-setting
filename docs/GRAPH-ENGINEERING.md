@@ -132,9 +132,9 @@ Adapter rules that follow from the audit (do not relearn these the hard way):
   `forbidden_paths` or `role`.
 - Harness children (`OMS_HARNESS_CHILD=1`) cannot `init`/`add`/`apply-proposal`
   and must pass `--lease-id` for leased mutations.
-- `.oms/project-graph/` is ambient for the `check.sh` state guard (the
-  session-start hook refreshes it on the session's own schedule), and so is the
-  one file the hook appends under `.oms/graph/`, `shadow.jsonl`; the rest of
+- `.oms/project-graph/` is ambient for the `check.sh` state guard because a
+  graph reader can refresh the regenerable cache independently of the gate.
+  The explicitly written `.oms/graph/shadow.jsonl` is ambient too; the rest of
   `.oms/graph/` (runs, events, projections) is **not**. Every test still
   writes into a temporary `--repo`.
 - Every durable writer into `.oms` is under the durable-writers contract:
@@ -961,20 +961,13 @@ worktree has no other way to get one. `project context`, whose pack the
 parent's brief owns, and every `exec` writer stay parent-only and fail closed
 with exit 2.
 
-The `SessionStart` hook (`scripts/resume-hook.sh`) reports the graph in the
-resume block — `- graph: fresh (<revision>)`, `- graph: building in the
-background (oms graph project ensure)` after detaching an `ensure` with
-`setsid` (never `nohup`, which makes `SIGHUP` unignorable by a trap for
-descendants), or `- graph: absent (OMS_GRAPH_AUTOBUILD=0)`. It never blocks
-on the build and never fails session start. `.oms/project-graph/` is
-therefore ambient to the check gate (`scripts/lib/oms-state-inventory.py`),
-like `hooks/` and `work-journal/`. When the repository has a plan
-(`.oms/plan/tasks.json`) the hook also runs `exec shadow` (bounded, output
-discarded on any failure, `OMS_GRAPH_SHADOW=0` opts out) and reports
-`- graph route: <frontier> (agrees|disagrees with runtime next <action>)`;
-the one row it appends to `.oms/graph/shadow.jsonl` is ambient by exact path,
-and a `.oms/graph/` directory holding nothing else compares equal to its
-absence (a `runs/` entry inside it is state and still lists).
+`SessionStart` intentionally does no graph work. Project-graph readers call
+`ensure` lazily, while `project ensure` and `exec shadow` remain explicit
+commands. This avoids putting a five-second freshness probe plus an
+eight-second shadow behind a ten-second session hook. The regenerable
+`.oms/project-graph/` cache and explicit `.oms/graph/shadow.jsonl` ledger stay
+ambient to the check gate (`scripts/lib/oms-state-inventory.py`); every other
+`.oms/graph/` entry (runs, events, projections) remains covered.
 
 ## Shadow mode
 
@@ -1010,8 +1003,8 @@ same next effectful step). Mapping: `execute_ready_task`→`implement`,
 `resolve_blocker`/`inspect_plan_contract`→`blocked`, `orient`→`inspect`.
 A blocker the control plane sees and the graph's facts do not (the failure
 ledger) is a recorded disagreement, which is the point: disagreements are
-evidence for the next round, never an action. The `SessionStart` hook is the
-trigger (see CLI).
+evidence for the next round, never an action. Invoke `exec shadow` explicitly
+when that comparison is needed.
 
 ## MCP
 
@@ -1105,8 +1098,8 @@ a value may never start with `-`. Output stays under the server's
   `git archive` copy (revision stable across two builds; `--include`/
   `--exclude` honored), MCP tool calls, child-policy refusals, auto-build on
   a graph-less fixture (summary on stderr, stdout clean), `--no-refresh` and
-  `OMS_GRAPH_AUTOBUILD=0`, the `--max-files` bound, and the session-start
-  hook's three graph lines.
+  `OMS_GRAPH_AUTOBUILD=0`, the `--max-files` bound, and a graph-neutral
+  session-start hook.
   Registered in `scripts/check.sh` as `stage graph`.
 - Every test uses a temporary repository; nothing writes into this
   checkout's `.oms`.

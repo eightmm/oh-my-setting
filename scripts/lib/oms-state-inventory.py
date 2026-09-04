@@ -9,12 +9,11 @@ and empty directories.
 Ambient entries are excluded because the live agent session writes them on its
 own schedule, with no relation to the gate: hooks/ and work-journal/ on every
 turn, ci.jsonl whenever the CI watcher records a run for a push, project-graph/
-whenever a session starts in this checkout without a current graph and the
-session-start hook refreshes it in the background, and the autopilot
-shadow-judgment ledger whenever any session starts here — a green 25-minute
-gate is a wide window for those to land and read as a suite defect. Everything
-else stays covered, including failures.jsonl, where a forgotten --repo is
-exactly the bug worth catching.
+whenever a graph reader refreshes its regenerable cache, an explicit graph
+shadow observation, and the autopilot shadow judgment at session start — a
+green 25-minute gate is a wide window for those to land and read as a suite
+defect. Everything else stays covered, including failures.jsonl, where a
+forgotten --repo is exactly the bug worth catching.
 
 Usage: oms-state-inventory.py OMS_DIR
 """
@@ -34,20 +33,19 @@ AMBIENT_DIRS = {"hooks", "work-journal", "project-graph"}
 # green gate. A suite that wrote only this marker left no state behind, and
 # any real leak brings its own entries.
 AMBIENT_FILES = {"ci.jsonl", ".gitignore"}
-# Path-precise ambient entries below the root: the session-start hook appends
-# a shadow-judgment row (autopilot) and a graph-route shadow row whenever a
-# session opens this checkout mid-gate. Only the ledgers themselves are
-# ambient — every other plan/ or graph/ entry (receipts, tasks, claims, runs,
-# events) stays covered.
+# Path-precise ambient entries below the root: SessionStart may append an
+# autopilot judgment, while an explicit graph shadow may append a route row.
+# Only the ledgers themselves are ambient — every other plan/ or graph/ entry
+# (receipts, tasks, claims, runs, events) stays covered.
 AMBIENT_PATHS = {"plan/autopilot-shadow.jsonl", "graph/shadow.jsonl"}
 
 
 def _holds_only_ambient(rel: str, listed: set[str]) -> bool:
     """A directory that exists only to hold ambient entries is itself ambient.
 
-    The session-start hook creates `graph/` for `graph/shadow.jsonl` in a
-    repository that never ran the execution graph; that directory must compare
-    equal to its absence, while `graph/runs/` (real run state) still lists."""
+    An explicit shadow can create `graph/` before any execution run; that
+    directory must compare equal to its absence, while `graph/runs/` (real run
+    state) still lists."""
     prefix = rel + "/"
     if not any(path.startswith(prefix) for path in AMBIENT_PATHS):
         return False

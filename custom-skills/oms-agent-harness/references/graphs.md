@@ -22,8 +22,7 @@ oms graph project ensure         # explicit build-or-refresh; check reports only
 
 Just query it. Every reader builds the graph when it is absent and refreshes
 it through the cache when the working tree moved, printing one summary line
-to stderr so `--json` stdout stays clean; the session-start hook already
-starts an absent one in the background. `ensure` is the explicit form and
+to stderr so `--json` stdout stays clean. `ensure` is the explicit form and
 `check` the report; `--no-refresh` (or `OMS_GRAPH_AUTOBUILD=0`) reads the
 graph as it stands. Edges carry `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
 confidence: treat only `EXTRACTED` edges as facts. `map`, `find`, and
@@ -177,9 +176,9 @@ stays serialized inside `patch-land`. `exec shadow` reconstructs where the
 graph stands against current reality (proven nodes settled, an unproven
 check assumed failed, the task reality names bound) and compares that
 frontier with the control plane's canonical next action, appending evidence
-to `.oms/graph/shadow.jsonl`; it never acts. The session-start hook runs it
-whenever a plan exists and reports `- graph route: <frontier> (agrees|disagrees
-with runtime next <action>)`; `OMS_GRAPH_SHADOW=0` opts out.
+to `.oms/graph/shadow.jsonl`; it never acts. Run it explicitly when comparing
+the graph route with the control plane is useful; session start stays read-only
+and does no graph work.
 
 ## Boundaries
 

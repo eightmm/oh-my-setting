@@ -575,8 +575,8 @@ test_oms_state_inventory_excludes_only_session_owned_entries() {
   mkdir -p "$state/hooks" "$state/work-journal" "$state/project-graph/cache" "$state/plan"
   printf 'row\n' > "$state/hooks/turn.jsonl"
   printf 'row\n' > "$state/work-journal/today.jsonl"
-  # The session-start hook refreshes an absent or stale project graph in the
-  # background, so a build can land mid-gate exactly like a hook turn does.
+  # A graph reader can refresh the regenerable cache independently of the
+  # gate, so its build must not look like a test-state leak.
   printf '{}\n' > "$state/project-graph/graph.json"
   printf '{}\n' > "$state/project-graph/cache/abc.json"
   printf 'row\n' > "$state/ci.jsonl"

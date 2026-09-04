@@ -46,12 +46,6 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   coupling no parser extracts (config to code, fixture to module, shell to
   Python) is the visible remainder. `--path` focuses, `--limit` bounds the
   JSON; nothing is written to `graph.json`; harness children may run it.
-- The `SessionStart` hook triggers the execution graph's shadow: with a plan
-  present it runs `oms graph exec shadow`, reports `- graph route: <frontier>
-  (agrees|disagrees with runtime next <action>)`, and appends one row to
-  `.oms/graph/shadow.jsonl`, which is now ambient by exact path for the check
-  gate (like `plan/autopilot-shadow.jsonl`); `OMS_GRAPH_SHADOW=0` opts out.
-  Until now nothing in the live control plane ever invoked the execution graph.
 - `oms graph project blast --limit N` bounds every JSON list and reports
   `limits`/`truncated`/`omitted`; the MCP `oms_project_graph_blast` tool passes
   `--limit 120`. On a real change set the tool used to return JSON cut
@@ -118,6 +112,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `SessionEnd` retires a neighbor immediately instead of warning for another
   15 minutes, and the SessionStart resume hook no longer repeats the same
   ledger scan and warning.
+- Session start no longer checks or builds the Project Graph and no longer
+  writes an execution-graph shadow. Graph readers already build or refresh
+  lazily, while `project ensure` and `exec shadow` remain explicit; this removes
+  up to 13 seconds of serial graph work from a hook capped at 10 seconds.
 - The delegated-worker guard now reports a change limited to remote-tracking
   refs or stash as the soft `remote-refs` surface: it warns and records that
   the change is not attributable to the worker, while strict mode and local
@@ -209,8 +207,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `agent-plan list --json` emits every task's `show` view in one process
   (`{"schema": 1, "plan_id", "tasks": [...]}`), and the execution graph's
   plan facts read it instead of running one `show --id` per task, so a route,
-  shadow, or status no longer costs one interpreter start per plan task (the
-  `SessionStart` shadow included).
+  shadow, or status no longer costs one interpreter start per plan task.
 - The gate's `shellcheck` stage runs parallel batches, largest files first,
   instead of one serial invocation over the whole tree: 282s in CI and 160s
   on a workstation become about a third of that. Workers are bounded by

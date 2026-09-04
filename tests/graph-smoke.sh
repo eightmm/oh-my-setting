@@ -24,13 +24,10 @@ PYTHONPATH="$ROOT/scripts/lib" python3 -m unittest discover -v -s "$ROOT/tests" 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-fixture.XXXXXX")"
 work="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-work.XXXXXX")"
 dog="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-dogfood.XXXXXX")"
-# Two more copies of the fixture: the auto-build assertions need a repository
-# nobody has built a graph in, and the session-start hook needs one of its own
-# because its build lands in the background.
+# Another fixture copy lets auto-build assertions start without a graph.
 auto="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-auto.XXXXXX")"
-hook="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-hook.XXXXXX")"
 impact="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-impact.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$hook" "$impact"' EXIT INT TERM HUP
+trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$impact"' EXIT INT TERM HUP
 
 mkdir -p "$tmp/scripts/lib" "$tmp/docs" "$tmp/tests"
 git -C "$tmp" init -q -b main
@@ -465,28 +462,18 @@ OMS_PROJECT_GRAPH_STATE="$work/bounded" "$OMS" graph --repo "$auto" project ensu
 [ "$auto_rc" -eq 0 ] || fail "an existing graph was refused a refresh: $(cat "$work/bounded-again.out")"
 
 # --- session-start hook -----------------------------------------------------
-# The hook reports the graph and starts an absent one in the background; it
-# never blocks and never fails session start.
+# Graph work is demand-driven by the readers exercised above. Merely opening
+# an OMS repository must not inspect, report, or build its project graph.
 hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$tmp" | "$ROOT/scripts/resume-hook.sh")" \
   || fail "the resume hook must exit 0"
-printf '%s\n' "$hook_out" | grep -Eq '^- graph: fresh \([0-9a-f]{12}\)$' \
-  || fail "the hook did not report a current graph: $hook_out"
+if printf '%s\n' "$hook_out" | grep -Fq -- '- graph:'; then
+  fail "session start must not inspect a current project graph: $hook_out"
+fi
 hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$auto" |
   OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" || fail "the resume hook must exit 0"
-printf '%s\n' "$hook_out" | grep -Fq -- '- graph: absent (OMS_GRAPH_AUTOBUILD=0)' \
-  || fail "the hook ignored the auto-build opt-out: $hook_out"
-cp -R "$auto/." "$hook/"
-rm -rf "$hook/.oms/project-graph"
-hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$hook" | "$ROOT/scripts/resume-hook.sh")" \
-  || fail "the resume hook must exit 0"
-printf '%s\n' "$hook_out" | grep -Fq -- '- graph: building in the background (oms graph project ensure)' \
-  || fail "the hook did not start a background build: $hook_out"
-# Reap the detached build before the trap removes its repository. The line
-# above is the contract; landing inside this window is not asserted.
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if [ -f "$hook/.oms/project-graph/graph.json" ]; then break; fi
-  sleep 1
-done
+if printf '%s\n' "$hook_out" | grep -Fq -- '- graph:'; then
+  fail "session start must not inspect an absent project graph: $hook_out"
+fi
 
 # A delegated harness child may build the cache it needs — a regenerable graph
 # carries no authority and an isolated worktree has no other way to get one —
@@ -548,7 +535,7 @@ dog_files2="$(sed -n 's/^graph: built .* files=\([0-9][0-9]*\) .*$/\1/p' "$work/
 # receipt facts, so an empty tree would exercise nothing. No provider is
 # needed here — `exec run` only ever appears as --dry-run.
 exec_repo="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-exec.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$hook" "$exec_repo"' EXIT INT TERM HUP
+trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$exec_repo"' EXIT INT TERM HUP
 
 exec_rc=0
 # The gate scrubs the invoking session's own harness identity: a run that
@@ -673,21 +660,16 @@ assert row["reconstructed"]["bindings"] == {"work_item": "implement"}, row["reco
 assert row["basis"] in ("", "frontier", "successor", "blocked"), row
 PY
 
-# The session-start hook records one shadow row for a repository with a plan
-# and reports the frontier on its own line; the ledger is ambient to the gate.
+# Session start does not run an execution-graph shadow. The explicit command
+# above owns both the observation and its one ambient ledger row.
 hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
   OMS_GRAPH_AUTOBUILD=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh")" \
   || fail "the resume hook must exit 0 with a plan present"
-printf '%s\n' "$hook_out" | grep -Eq -- '^- graph route: implement \((agrees|disagrees) with runtime next [a-z_-]+\)$' \
-  || fail "the hook did not report the graph route: $hook_out"
-shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"
-[ "$shadow_lines" = "2" ] || fail "the hook did not append exactly one shadow row (rows: $shadow_lines)"
-hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
-  OMS_GRAPH_AUTOBUILD=0 OMS_GRAPH_SHADOW=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh")" \
-  || fail "the resume hook must exit 0"
 if printf '%s\n' "$hook_out" | grep -Fq -- '- graph route:'; then
-  fail "OMS_GRAPH_SHADOW=0 must suppress the shadow line: $hook_out"
+  fail "session start must not run the execution-graph shadow: $hook_out"
 fi
+shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"
+[ "$shadow_lines" = "1" ] || fail "session start appended a shadow row (rows: $shadow_lines)"
 python3 - "$ROOT/scripts/lib/oms-state-inventory.py" "$exec_repo/.oms" <<'PY'
 import json
 import subprocess

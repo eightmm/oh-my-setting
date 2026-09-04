@@ -31,9 +31,7 @@ inbox_of() {  # inbox_of REPO -> stdout
 }
 
 resume_of() {  # resume_of REPO -> stdout
-  # The graph line is not what this suite measures, and the opt-out keeps the
-  # hook from detaching a real project-graph build into every fixture repo.
-  printf '{"cwd":"%s"}' "$1" | OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh"
+  printf '{"cwd":"%s"}' "$1" | "$ROOT/scripts/resume-hook.sh"
 }
 
 # --- 1. fresh hook x1: retiring, never P1 ----------------------------------
