@@ -266,6 +266,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- Removing a project template consistently reports the still-active private
+  Git exclusion. Its `project-private status | grep -q` check ran under
+  `pipefail`, so an early match could SIGPIPE the multi-line producer and
+  silently suppress the otherwise actionable cleanup note.
 - CI-status and autonomy-verification smoke assertions no longer pipe captured
   output into `grep -q` under `pipefail`. Under gate load the reader could
   close first and report a false failure even though the required state was

@@ -114,9 +114,13 @@ done
 
 # The managed rule blocks are gone but the files (and their local git exclusion)
 # stay. Say so, so nobody has to discover the leftover block by hand.
+private_status=""
 if [ "$DRY_RUN" != "1" ] &&
-  git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1 &&
-  "$ROOT/scripts/project-private.sh" --repo "$PROJECT_DIR" status 2>/dev/null |
-    grep -qE '^(hidden|reserved)'; then
+  git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  private_status="$(
+    "$ROOT/scripts/project-private.sh" --repo "$PROJECT_DIR" status 2>/dev/null || true
+  )"
+fi
+if grep -qE '^(hidden|reserved)' <<<"$private_status"; then
   echo "note: the agent files stay hidden from git; 'oms project-private remove' undoes that"
 fi
