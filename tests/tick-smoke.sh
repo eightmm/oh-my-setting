@@ -271,6 +271,13 @@ assert isinstance(receipt["artifact_resolve_rc"], int) and receipt["artifact_res
 assert isinstance(receipt["artifact_supersede_rc"], int) and receipt["artifact_supersede_rc"] != 0, receipt
 PY
 
+# --- sweep: one default sweep settles both a supersession and a stale row ----
+y="$TMP/both-at-once"; make_committed_repo "$y"; make_superseded_artifacts_and_stale_failures "$y"
+out="$("$TICK" run --repo "$y")"
+printf '%s' "$out" | grep -q 'artifacts_superseded=1 failures_retired=1' ||
+  fail "one sweep must report both counters at once: $out"
+grep -q 'retired by oms tick' "$y/.oms/failures.jsonl" || fail "the retirement must carry the tick provenance"
+
 # --- sweep: superseded artifacts and stale one-shot failures settle safely --
 x="$TMP/superseded-and-stale"; make_committed_repo "$x"; make_superseded_artifacts_and_stale_failures "$x"
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$x")"
