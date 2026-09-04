@@ -1357,6 +1357,10 @@ class NotionTransportTimeoutRetryTest(unittest.TestCase):
     def transport(self):
         return notion.NotionCLITransport(wj.notion_settings()["cli_command"])
 
+    @staticmethod
+    def http_transport():
+        return notion._StandardLibraryTransport("test-token", "2026-03-11")
+
     def test_retries_one_timed_out_cli_request(self):
         payload = {"parent": {"page_id": "parent"}}
         with mock.patch.dict(os.environ, self.environment(1), clear=False):
@@ -1389,6 +1393,61 @@ class NotionTransportTimeoutRetryTest(unittest.TestCase):
 
         self.assertEqual(503, raised.exception.status)
         self.assertEqual("1\n", self.counter.read_text(encoding="utf-8"))
+
+    def test_retries_one_timed_out_http_request(self):
+        payload = {"parent": {"page_id": "parent"}}
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"id":"retried-page"}'
+        with mock.patch.object(
+            notion.urllib.request,
+            "urlopen",
+            side_effect=[notion.urllib.error.URLError(notion.socket.timeout()), response],
+        ) as urlopen:
+            result = self.http_transport().request("POST", "/v1/pages", payload, 0.2)
+
+        self.assertEqual({"id": "retried-page"}, result)
+        self.assertEqual(2, urlopen.call_count)
+        first_request = urlopen.call_args_list[0][0][0]
+        second_request = urlopen.call_args_list[1][0][0]
+        self.assertIs(first_request, second_request)
+        self.assertEqual(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            first_request.data,
+        )
+        self.assertAlmostEqual(0.2, urlopen.call_args_list[0][1]["timeout"])
+        self.assertAlmostEqual(0.4, urlopen.call_args_list[1][1]["timeout"])
+
+    def test_raises_after_the_second_timed_out_http_request(self):
+        with mock.patch.object(
+            notion.urllib.request,
+            "urlopen",
+            side_effect=[notion.socket.timeout(), notion.socket.timeout()],
+        ) as urlopen:
+            with self.assertRaisesRegex(TimeoutError, "^Notion API timed out$"):
+                self.http_transport().request("GET", "/v1/search", None, 0.2)
+
+        self.assertEqual(2, urlopen.call_count)
+        self.assertAlmostEqual(0.2, urlopen.call_args_list[0][1]["timeout"])
+        self.assertAlmostEqual(0.4, urlopen.call_args_list[1][1]["timeout"])
+
+    def test_does_not_retry_non_timeout_http_failures(self):
+        failures = (
+            (
+                notion.urllib.error.HTTPError(
+                    "https://api.notion.com/v1/search", 503, "unavailable", None, None
+                ),
+                notion.NotionHTTPError,
+            ),
+            (notion.urllib.error.URLError(OSError("unreachable")), notion.NotionTransportError),
+        )
+        for error, expected in failures:
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(
+                    notion.urllib.request, "urlopen", side_effect=error
+                ) as urlopen:
+                    with self.assertRaises(expected):
+                        self.http_transport().request("GET", "/v1/search", None, 0.2)
+                self.assertEqual(1, urlopen.call_count)
 
 
 class JournalLanguageTest(unittest.TestCase):

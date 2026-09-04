@@ -106,19 +106,31 @@ class _StandardLibraryTransport:
             headers=headers,
             method=method,
         )
-        try:
-            with urllib.request.urlopen(http_request, timeout=timeout) as response:
-                raw_response = response.read()
-        except urllib.error.HTTPError as error:
-            retry_after = None
-            if error.headers is not None:
-                retry_after = error.headers.get("Retry-After")
-            raise NotionHTTPError(error.code, retry_after=retry_after) from None
-        except urllib.error.URLError as error:
-            if isinstance(error.reason, (TimeoutError, socket.timeout)):
-                raise TimeoutError("Notion API timed out") from None
-            raise NotionTransportError("Notion API transport failed") from None
-        except (TimeoutError, socket.timeout):
+        request_timeout = float(timeout)
+        retry_timeout = min(
+            2.0 * request_timeout,
+            3.0 * request_timeout - request_timeout,
+        )
+        for attempt_timeout in (request_timeout, retry_timeout):
+            try:
+                with urllib.request.urlopen(
+                    http_request, timeout=attempt_timeout
+                ) as response:
+                    raw_response = response.read()
+            except urllib.error.HTTPError as error:
+                retry_after = None
+                if error.headers is not None:
+                    retry_after = error.headers.get("Retry-After")
+                raise NotionHTTPError(error.code, retry_after=retry_after) from None
+            except urllib.error.URLError as error:
+                if not isinstance(error.reason, (TimeoutError, socket.timeout)):
+                    raise NotionTransportError("Notion API transport failed") from None
+                continue
+            except (TimeoutError, socket.timeout):
+                continue
+            else:
+                break
+        else:
             raise TimeoutError("Notion API timed out") from None
 
         if not raw_response:

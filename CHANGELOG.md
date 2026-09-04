@@ -89,6 +89,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The Work Journal's Notion transports retry one ntn CLI timeout or HTTP
+  `urlopen` timeout once with a doubled timeout, keeping the pair within three
+  times the caller timeout; HTTP and other transport failures are not resent.
 - `oms autopilot propose` now archives a fully completed plan from a
   superseded `PROJECT.md` contract before calling the planner, so a successor
   proposal starts from a clean task graph and can apply without dependencies on
