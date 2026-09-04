@@ -119,6 +119,10 @@ grep -Fq "live sibling worktree $sibling_physical (driving)" "$TMP/sibling-block
   fail "intake must report the live sibling: $(cat "$TMP/sibling-blocked.out")"
 grep -Fq "sibling worktree $sibling_physical still driving" "$TMP/sibling-blocked.out" ||
   fail "a blocked sibling must be visible in land status: $(cat "$TMP/sibling-blocked.out")"
+grep -Fq "siblings: $sibling_physical driving (waited 0s)" "$TMP/sibling-blocked.out" ||
+  fail "status must show the recorded siblings: $(cat "$TMP/sibling-blocked.out")"
+"$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved 2>/dev/null | grep -q sibling &&
+  fail "a blocked sibling landing must not record a fail-ledger row"
 python3 - "$receipt_dir" "$sibling_physical" <<'PY' || fail "blocked sibling receipt is wrong"
 import glob, json, os, sys
 directory, sibling = sys.argv[1:]
@@ -184,6 +188,15 @@ for path in glob.glob(os.path.join(sys.argv[1], "*.json")):
 else:
     raise AssertionError("no ignored sibling receipt")
 PY
+# an unreadable sibling receipt is noted once and never blocks
+printf '{' > "$sibling/.oms/plan/autopilot-run.json"
+gate 'echo invalid sibling gate ok'
+"$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
+  > "$TMP/sibling-invalid.out" 2> "$TMP/sibling-invalid.err" ||
+  fail "an invalid sibling receipt must not block: $(cat "$TMP/sibling-invalid.out" "$TMP/sibling-invalid.err")"
+[ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] || fail "an invalid sibling receipt must not stop the push"
+[ "$(grep -c "ignoring invalid sibling autopilot receipt: $sibling_physical" "$TMP/sibling-invalid.err")" = 1 ] ||
+  fail "the invalid receipt must be noted exactly once: $(cat "$TMP/sibling-invalid.err")"
 git -C "$repo" worktree remove --force "$sibling"
 
 # --- 4. red gate: failure recorded, nothing pushed -----------------------------

@@ -31,8 +31,10 @@ outside the repo:
           checkout's origin (so a push there is what the install pulls)
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
           seconds (default 1500; 0 skips; needs gh)
-  sibling live sibling autopilot runs are reported at intake and waited for
-          before push, up to --sibling-wait seconds (default 1800)
+  sibling live autopilot runs (proposing, proposal-review, driving) in sibling
+          worktrees are reported at intake and waited for before push, up to
+          --sibling-wait seconds (default 1800; 0 checks once and blocks at
+          once, it does not skip: --ignore-siblings skips)
 Without --wait the job detaches (setsid) and this prints the receipt path.
 EOF
 }
@@ -125,13 +127,18 @@ clean_tree() { git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --qui
 SIBLING_LIVE="" SIBLING_FIRST_PATH="" SIBLING_FIRST_STAGE=""
 SIBLING_INVALID_NOTED=""
 
+note() {  # stderr, and the job log when detached (stderr is /dev/null there)
+  echo "$1" >&2
+  [ -z "${LOG:-}" ] || echo "$1" >> "$LOG"
+}
+
 note_invalid_sibling_receipt() {  # PATH
   local path="$1"
 
   if printf '%s\n' "$SIBLING_INVALID_NOTED" | grep -Fqx -- "$path"; then
     return 0
   fi
-  echo "note: ignoring invalid sibling autopilot receipt: $path" >&2
+  note "note: ignoring invalid sibling autopilot receipt: $path"
   if [ -n "$SIBLING_INVALID_NOTED" ]; then
     SIBLING_INVALID_NOTED="$SIBLING_INVALID_NOTED
 $path"
@@ -166,8 +173,7 @@ collect_sibling_worktree() {  # PATH BARE PRUNABLE REPORT
     SIBLING_FIRST_PATH="$physical"
     SIBLING_FIRST_STAGE="$stage"
   fi
-  [ "$report" -eq 0 ] ||
-    printf 'land %s: live sibling worktree %s (%s)\n' "$SHORT" "$physical" "$stage" >&2
+  [ "$report" -eq 0 ] || note "land $SHORT: live sibling worktree $physical ($stage)"
 }
 
 collect_live_siblings() {  # REPORT (0 or 1)
@@ -175,8 +181,8 @@ collect_live_siblings() {  # REPORT (0 or 1)
 
   SIBLING_LIVE="" SIBLING_FIRST_PATH="" SIBLING_FIRST_STAGE=""
   listing="$(git -C "$REPO" worktree list --porcelain 2>/dev/null)" || {
-    echo "note: cannot enumerate sibling worktrees" >&2
-    return 0
+    note "note: cannot enumerate sibling worktrees"
+    return 1
   }
   while IFS= read -r line || [ -n "$line" ]; do
     line="$(oms_strip_cr "$line")"
@@ -204,7 +210,11 @@ wait_for_live_siblings() {
   started="$(date +%s)"
   deadline="$(( started + SIBLING_WAIT ))"
   while :; do
-    collect_live_siblings 0
+    collect_live_siblings 0 || {  # fail closed: an unknown sibling state is live
+      rset push.sibling_wait_seconds="$(( $(date +%s) - started ))"
+      finish blocked "cannot enumerate sibling worktrees"
+      return 1
+    }
     elapsed="$(( $(date +%s) - started ))"
     if [ -z "$SIBLING_LIVE" ]; then
       [ "$waited" -eq 1 ] || elapsed=0
@@ -258,7 +268,7 @@ run_job() {
   if [ "$IGNORE_SIBLINGS" -eq 1 ]; then
     rset siblings.ignored=true
   else
-    collect_live_siblings 1
+    collect_live_siblings 1 || true
     [ -z "$SIBLING_LIVE" ] || rset siblings.live="$SIBLING_LIVE"
   fi
   local t0 rc=0
@@ -328,6 +338,11 @@ print("  gate: %s (%ss)  push: %s  update: %s  ci: %s%s" % (
     c.get("conclusion", "-"), " (run %s)" % c["run_id"] if c.get("run_id") else ""))
 if r.get("summary"):
     print("  %s" % r["summary"])
+s = r.get("siblings", {})
+if s.get("ignored"):
+    print("  siblings: ignored")
+elif s.get("live"):
+    print("  siblings: %s (waited %ss)" % (s["live"], p.get("sibling_wait_seconds", "-")))
 print("  log: %s" % r.get("log", ""))
 PY
 }
