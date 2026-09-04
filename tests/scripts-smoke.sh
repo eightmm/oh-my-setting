@@ -6777,6 +6777,72 @@ EOF
   assert_file_contains "$project/bad-out" "no '## Status' skeleton"
 }
 
+test_intent_draft_falls_back_once_on_transient_failure() {
+  local project="$TMP/intent-draft-fallback"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local candidate first_ref fallback_ref artifact_count
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/src" "$project/tests"
+  # The availability probe must pass; only the actual draft seat simulates the
+  # timeout that hands the request to Claude.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  --version:|exec:--help) printf 'codex 1.0\n'; exit 0 ;;
+esac
+printf '%s\n' "${OMS_PEER_TIMEOUT:-missing}" >> "$HOME/codex-timeouts"
+cat >/dev/null
+exit 124
+EOF
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version|--help) printf 'claude 1.0\n'; exit 0 ;;
+esac
+printf '%s\n' "${OMS_PEER_TIMEOUT:-missing}" >> "$HOME/claude-timeouts"
+cat >/dev/null
+printf '## Status\n\n- State: draft\n- Open decisions: none\n\n'
+printf '## Project\n\n- Goal: retry a transient draft\n- Scope: src/\n- Non-goals: packaging\n\n'
+printf '## Commands\n\n- Test: bash tests/run.sh\n\n'
+printf '## Verification\n\n- Success criteria: fallback spec is written\n- Required checks: bash tests/greet.sh\n\n'
+printf '## Edge cases\n\n- first provider timeout\n\n'
+printf '## Notes\n\n- Risks: fallback unavailable\n- Do not touch: docs/\n'
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/claude"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex \
+    --provider-timeout 7s --goal "retry a transient draft" > "$project/draft-out" 2>&1 ||
+    fail "transient draft should use the fallback: $(tail -5 "$project/draft-out")"
+
+  candidate="$(find "$project/.oms/intents" -name 'intent-*.md' | head -n 1)"
+  [ -n "$candidate" ] || fail "fallback draft candidate missing"
+  assert_file_contains "$candidate" "- Drafted by: claude"
+  fallback_ref="$(sed -n 's/^- Artifact: //p' "$candidate" | head -n 1)"
+  first_ref="$(sed -n 's/^- First call artifact: //p' "$candidate" | head -n 1)"
+  case "$fallback_ref" in
+    .oms/artifacts/call/claude-*.md) ;;
+    *) fail "candidate should name the Claude fallback artifact: $fallback_ref" ;;
+  esac
+  case "$first_ref" in
+    .oms/artifacts/call/codex-*.md) ;;
+    *) fail "candidate should name the timed-out Codex artifact: $first_ref" ;;
+  esac
+  [ -f "$project/$fallback_ref" ] || fail "named fallback artifact is missing: $fallback_ref"
+  [ -f "$project/$first_ref" ] || fail "named first-call artifact is missing: $first_ref"
+  grep -Fxq '124' "$project/$first_ref" ||
+    fail "first-call artifact should preserve the timeout exit"
+  [ "$(cat "$home_dir/codex-timeouts")" = 7s ] ||
+    fail "primary should receive the requested timeout"
+  [ "$(cat "$home_dir/claude-timeouts")" = 14s ] ||
+    fail "fallback should receive double the requested timeout"
+  artifact_count="$(find "$project/.oms/artifacts/call" -type f -name '*.md' | wc -l | tr -d ' ')"
+  [ "$artifact_count" = 2 ] ||
+    fail "one transient retry should produce exactly two call artifacts, got $artifact_count"
+}
+
 test_intent_adopt_gates_then_confirms() {
   local project="$TMP/intent-adopt"
   local intent_dir rc=0
