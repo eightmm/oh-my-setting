@@ -39,17 +39,10 @@ PRINT_EXPECTED=0
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=3
+HOOKS_SCHEMA=4
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
-
-# Model tiering has one hard edge: implementation crosses a delegation
-# boundary. Before an edit the session model makes
-# itself in an adopted repo, the guard advises once per session by default,
-# and asks or refuses when OMS_TIER_GUARD says so. Delegated subagents and
-# harness workers pass; only the OMS worker route guarantees a lower preset.
-PreToolUse|tier-guard-hook.sh|Edit|Write|MultiEdit|NotebookEdit|5
 
 # Failed Bash commands feed the shared failure memory and surface what it
 # already knows. Matcher-scoped so other tools failures never pay for it; a 5s
@@ -83,10 +76,10 @@ SessionEnd|precompact-handoff.sh||30
 # failures, and live-peer status instead of rediscovering them.
 SessionStart|resume-hook.sh||10
 
-# Only content-free counters and bounded identifiers are retained. Keep every
-# event under the recommended five-second synchronous hook budget.
+# Only session/subagent lifecycle counters and bounded identifiers are retained.
+# Tool-level telemetry used to start a shell and Python process after every tool
+# call; the sparse useful fields did not justify that synchronous hot-path cost.
 SessionStart|telemetry-hook.sh||5
-PostToolUse|telemetry-hook.sh||5
 SubagentStop|telemetry-hook.sh||5
 SessionEnd|telemetry-hook.sh||5
 '
@@ -111,9 +104,8 @@ Usage: install-claude-hooks.sh [--remove] [--settings PATH] [--print-expected]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
-edit-time syntax-guard hook, PreToolUse tier-guard hook, PreCompact/SessionEnd
-handoff-snapshot hooks, SessionStart resume hook,
-SessionStart/PostToolUse/SubagentStop/SessionEnd telemetry hooks, main usage
+edit-time syntax-guard hook, PreCompact/SessionEnd handoff-snapshot hooks,
+SessionStart resume hook, SessionStart/SubagentStop/SessionEnd telemetry hooks, main usage
 HUD, and compact subagent HUD in Claude Code's
 settings.json. The merge is additive: existing hooks and user-owned
 statusLine/subagentStatusLine entries are preserved, and repeated installs are
@@ -200,7 +192,6 @@ fi
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
 [ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/syntax-guard-hook.sh" ] || fail "syntax-guard-hook.sh not found under $ROOT"
-[ -f "$ROOT/scripts/tier-guard-hook.sh" ] || fail "tier-guard-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/precompact-handoff.sh" ] || fail "precompact-handoff.sh not found under $ROOT"
 [ -f "$ROOT/scripts/resume-hook.sh" ] || fail "resume-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/telemetry-hook.sh" ] || fail "telemetry-hook.sh not found under $ROOT"
@@ -240,6 +231,7 @@ MARKS = (
     "syntax-guard-hook.sh", "tier-guard-hook.sh", "precompact-handoff.sh",
     "resume-hook.sh", "telemetry-hook.sh",
 )
+expected_pairs = {(row["event"], row["script"]) for row in expected}
 
 settings = {}
 if os.path.isfile(path):
@@ -263,6 +255,38 @@ def ours(entry):
         if any(mark in cmd for mark in MARKS):
             return True
     return False
+
+def managed_mark(hook):
+    command = str(hook.get("command", "")) if isinstance(hook, dict) else ""
+    return next((mark for mark in MARKS if mark in command), None)
+
+def prune_obsolete_surfaces():
+    """Converge old OMS rows without touching hooks the user owns."""
+    for event in list(hooks):
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                kept_entries.append(entry)
+                continue
+            kept_hooks = []
+            removed = False
+            for hook in entry["hooks"]:
+                mark = managed_mark(hook)
+                if mark is not None and (event, mark) not in expected_pairs:
+                    removed = True
+                    continue
+                kept_hooks.append(hook)
+            if kept_hooks or not removed:
+                if removed:
+                    entry = dict(entry, hooks=kept_hooks)
+                kept_entries.append(entry)
+        if kept_entries:
+            hooks[event] = kept_entries
+        else:
+            del hooks[event]
 
 def upsert(event, mark, cmd, matcher=None, timeout=None):
     entries = hooks.setdefault(event, [])
@@ -328,6 +352,7 @@ if remove:
         del settings["subagentStatusLine"]
     action = "removed"
 else:
+    prune_obsolete_surfaces()
     for surface in expected:
         upsert(
             surface["event"], surface["script"], surface["command"],

@@ -22,10 +22,9 @@ agent, a Grok/GLM route, or a custom adapter.
 3. `--fallback-model NAME` is an opt-in, one-shot fallback used only for a
    recognized capacity error. A write attempt that changed its worktree is
    never retried.
-4. The Claude edit-time tier guard enforces the delegation boundary, not an
-   invisible subagent model choice. OMS delegates use the worker preset;
-   native Claude subagents default to the main model unless their `model` is
-   pinned.
+4. Direct implementation by the session agent remains valid. Use an OMS
+   delegate for substantial bounded writes or disjoint parallel work; native
+   Claude subagents default to the main model unless their `model` is pinned.
 5. An unpinned provider-default route may use a bounded distinct catalog model
    when a model safeguard or unavailable-name error explicitly permits
    recovery. Policy, auth, permission, context, and verification failures do

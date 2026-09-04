@@ -13,8 +13,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The expected surface list, recorded. Both literals move together or the gate
 # below fails; see test_expected_surface_list_is_bump_gated.
-EXPECTED_HOOKS_SCHEMA=3
-EXPECTED_SURFACES_SHA256=bcf4c7f196d08901c16e7e65057f0a1e1e29b6e1d63c6675054824bc50a8d264
+EXPECTED_HOOKS_SCHEMA=4
+EXPECTED_SURFACES_SHA256=2b63d8c255ceb2c20471552ae8a9283e35eb17d2f01f64188053e0221666fca9
 
 fail() {
   echo "FAIL: $*" >&2
@@ -122,9 +122,63 @@ pairs = [(s["event"], s["script"]) for s in doc["surfaces"]]
 assert ("SessionEnd", "precompact-handoff.sh") in pairs, pairs
 assert ("PostToolUse", "fail-ledger-hook.sh") in pairs, pairs
 assert ("UserPromptSubmit", "skill-router.sh") in pairs, pairs
+assert ("PreToolUse", "tier-guard-hook.sh") not in pairs, pairs
+assert ("PostToolUse", "telemetry-hook.sh") not in pairs, pairs
 assert len(pairs) == len(set(pairs)), pairs
 for surface in doc["surfaces"]:
     assert surface["command"].endswith("/scripts/" + surface["script"]), surface
+PY
+}
+
+test_install_prunes_retired_default_surfaces() {
+  local home="$TMP/prune-defaults"
+
+  make_fixture "$home" rows 3
+  python3 - "$home/.claude/settings.json" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    row = json.load(fh)
+hooks = row["hooks"]
+hooks.setdefault("PreToolUse", []).append({
+    "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+    "hooks": [{"type": "command", "command": "bash /old/scripts/tier-guard-hook.sh", "timeout": 5}],
+})
+hooks.setdefault("PostToolUse", []).append({
+    "hooks": [{"type": "command", "command": "bash /old/scripts/telemetry-hook.sh", "timeout": 5}],
+})
+hooks["PostToolUse"].append({
+    "hooks": [{"type": "command", "command": "echo user-post-hook"}],
+})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(row, fh, indent=2)
+    fh.write("\n")
+PY
+
+  HOME="$home" \
+  XDG_CONFIG_HOME="$home/.config" \
+  OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
+  OMS_LOCK_DIR="$home/.locks" \
+    bash "$ROOT/scripts/install-claude-hooks.sh" \
+      --settings "$home/.claude/settings.json" >/dev/null ||
+    fail "install should converge a previous hook surface list"
+
+  python3 - "$home/.claude/settings.json" <<'PY' || fail "retired hook surfaces survived install"
+import json, sys
+
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+commands = {
+    event: [hook.get("command", "")
+            for entry in entries
+            for hook in entry.get("hooks", [])]
+    for event, entries in hooks.items()
+}
+assert not any("tier-guard-hook.sh" in command
+               for values in commands.values() for command in values), commands
+assert not any("telemetry-hook.sh" in command
+               for command in commands.get("PostToolUse", [])), commands
+assert "echo user-post-hook" in commands.get("PostToolUse", []), commands
 PY
 }
 
@@ -469,6 +523,7 @@ EOF
 }
 
 test_print_expected_emits_the_registration_list
+test_install_prunes_retired_default_surfaces
 test_missing_registration_fails_and_is_named
 test_complete_registration_is_ok
 test_evidence_window_marks_a_silent_registered_surface

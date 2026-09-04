@@ -447,7 +447,7 @@ test_checkpoint_restores_staged_and_unstaged_content_with_a_backup() {
   fi
 }
 
-test_hook_installers_include_native_telemetry_events() {
+test_hook_installers_keep_telemetry_off_the_tool_hot_path() {
   local settings="$TMP/claude-settings.json"
   local home_dir="$TMP/claude-home"
 
@@ -458,14 +458,21 @@ test_hook_installers_include_native_telemetry_events() {
   python3 - "$settings" <<'PY' || fail "Claude telemetry hooks were not installed"
 import json, sys
 hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
-for event in ("SessionStart", "PostToolUse", "SubagentStop", "SessionEnd"):
+for event in ("SessionStart", "SubagentStop", "SessionEnd"):
     commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
     assert any("telemetry-hook.sh" in command for command in commands), (event, commands)
+post = [h.get("command", "") for entry in hooks.get("PostToolUse", []) for h in entry.get("hooks", [])]
+assert not any("telemetry-hook.sh" in command for command in post), post
 PY
-  for event in SessionStart PostToolUse SubagentStop SessionEnd; do
-    grep -Fq "\"$event\"" "$ROOT/plugins/oh-my-setting/hooks.json" ||
-      fail "Codex plugin is missing $event telemetry"
-  done
+  python3 - "$ROOT/plugins/oh-my-setting/hooks.json" <<'PY' || fail "Codex telemetry hooks use the wrong events"
+import json, sys
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+for event in ("SessionStart", "SubagentStop", "SessionEnd"):
+    commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
+    assert any("telemetry-hook" in command for command in commands), (event, commands)
+post = [h.get("command", "") for entry in hooks.get("PostToolUse", []) for h in entry.get("hooks", [])]
+assert not any("telemetry-hook" in command for command in post), post
+PY
 }
 
 test_gc_bounds_old_checkpoint_and_hook_state() {
@@ -593,7 +600,7 @@ test_inbox_ranks_state_and_applies_only_safe_repairs
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup
-test_hook_installers_include_native_telemetry_events
+test_hook_installers_keep_telemetry_off_the_tool_hot_path
 test_gc_bounds_old_checkpoint_and_hook_state
 
 echo "functional evolution smoke: ok"

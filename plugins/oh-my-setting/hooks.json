@@ -59,15 +59,6 @@
             "timeout": 5
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh\" telemetry-hook",
-            "timeout": 5
-          }
-        ]
       }
     ],
     "SubagentStop": [

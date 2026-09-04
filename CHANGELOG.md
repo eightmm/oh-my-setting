@@ -108,6 +108,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- The default hook bundle no longer starts telemetry after every tool call or
+  applies a Claude-only model-tier policy to every implementation edit.
+  Session/subagent lifecycle telemetry, syntax feedback, failure memory,
+  routing, handoff, and the high-risk verification guard remain. Updating also
+  removes those two retired rows from existing Claude settings while preserving
+  user-owned hooks.
 - The delegated-worker guard now reports a change limited to remote-tracking
   refs or stash as the soft `remote-refs` surface: it warns and records that
   the change is not attributable to the worker, while strict mode and local
