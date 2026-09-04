@@ -83,6 +83,46 @@ make_recovered_artifact_index() {
 {"schema":1,"event_id":"evt_seat_back","operation_id":"op_2","artifact_id":"sha256:a2","ts":"2026-08-12T01:02:00Z","kind":"ask","provider":"codex","exit":0}
 EOF
 }
+make_superseded_artifacts_and_stale_failures() {
+  mkdir -p "$1/.oms/artifacts"
+  cat > "$1/.oms/artifacts/index.jsonl" <<'EOF'
+{"schema":1,"event_id":"evt_superseded_failure","operation_id":"op_superseded","artifact_id":"sha256:s1","ts":"2026-08-12T01:01:00Z","kind":"patch-admit","provider":"codex","exit":1,"patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"schema":1,"event_id":"evt_superseding_success","operation_id":"op_success","artifact_id":"sha256:s2","ts":"2026-08-12T01:02:00Z","kind":"patch-admit","provider":"codex","exit":0,"patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+EOF
+  python3 - "$1/.oms/failures.jsonl" <<'PY'
+import datetime
+import json
+import sys
+
+path = sys.argv[1]
+now = datetime.datetime.now(datetime.timezone.utc)
+foreign_state = "0" * 40 + ":" + "a" * 64 + ":" + "b" * 64
+
+def failure(fingerprint, age_days, kind="cmd"):
+    return {
+        "schema": 2,
+        "event": "fail",
+        "ts": (now - datetime.timedelta(days=age_days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "agent": "codex",
+        "fingerprint": fingerprint,
+        "kind": kind,
+        "cmd": "fixture " + fingerprint,
+        "exit": 1,
+        "state_fingerprint": foreign_state,
+    }
+
+rows = [
+    failure("1111111111111111", 15),
+    failure("2222222222222222", 1),
+    failure("3333333333333333", 16),
+    failure("3333333333333333", 15),
+    failure("4444444444444444", 0, "hook"),
+]
+with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+PY
+}
 
 # --- registry -----------------------------------------------------------------
 a="$TMP/a"; b="$TMP/b"; make_repo "$a"; make_repo "$b"
@@ -116,6 +156,8 @@ r = json.load(open(sys.argv[1]))
 assert r["gc"] == "skipped" and r["threads_closed"] == ["old-thread"], r
 assert r["tasks_closed"] == 1, r
 assert r["artifacts_resolved"] == 0 and r["artifact_resolve_rc"] == 0, r
+assert r["artifacts_superseded"] == 0 and r["artifact_supersede_rc"] == 0, r
+assert r["failures_retired"] == 0, r
 assert isinstance(r["journal_rc"], int) and isinstance(r["reconcile_rc"], int), r
 PY
 "$TASK" --repo "$a" init >/dev/null
@@ -226,7 +268,57 @@ import sys
 
 receipt = json.load(open(sys.argv[1], encoding="utf-8"))
 assert isinstance(receipt["artifact_resolve_rc"], int) and receipt["artifact_resolve_rc"] != 0, receipt
+assert isinstance(receipt["artifact_supersede_rc"], int) and receipt["artifact_supersede_rc"] != 0, receipt
 PY
+
+# --- sweep: superseded artifacts and stale one-shot failures settle safely --
+x="$TMP/superseded-and-stale"; make_committed_repo "$x"; make_superseded_artifacts_and_stale_failures "$x"
+out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$x")"
+printf '%s' "$out" | grep -q 'artifacts_superseded=1' ||
+  fail "a superseded artifact failure must resolve with retirement off: $out"
+printf '%s' "$out" | grep -q 'failures_retired=0' ||
+  fail "retirement opt-out must leave stale failure rows alone: $out"
+python3 - "$x/.oms/tick/last.json" "$x/.oms/failures.jsonl" <<'PY' || fail "retirement opt-out receipt is wrong"
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+ledger = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+assert receipt["artifacts_superseded"] == 1 and receipt["artifact_supersede_rc"] == 0, receipt
+assert receipt["failures_retired"] == 0, receipt
+assert not any(row.get("event") == "resolved" and row.get("fingerprint") == "1111111111111111"
+               for row in ledger), ledger
+PY
+out="$("$TICK" run --repo "$x")"
+printf '%s' "$out" | grep -q 'artifacts_superseded=0' ||
+  fail "an already-resolved superseded artifact must be idempotent: $out"
+printf '%s' "$out" | grep -q 'failures_retired=1' ||
+  fail "one old stale one-shot failure must retire: $out"
+"$ROOT/scripts/fail-ledger.sh" --repo "$x" list --unresolved --json > "$TMP/superseded-unresolved.json"
+python3 - "$x/.oms/tick/last.json" "$x/.oms/artifacts/index.jsonl" "$x/.oms/failures.jsonl" "$TMP/superseded-unresolved.json" <<'PY' || fail "superseded and stale sweep evidence is wrong"
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+artifacts = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+ledger = [json.loads(line) for line in open(sys.argv[3], encoding="utf-8") if line.strip()]
+unresolved = {row["fingerprint"]: row for row in json.load(open(sys.argv[4], encoding="utf-8"))["failures"]}
+assert receipt["artifacts_superseded"] == 0 and receipt["artifact_supersede_rc"] == 0, receipt
+assert receipt["failures_retired"] == 1, receipt
+assert len([row for row in artifacts if row.get("kind") == "artifact-resolution" and
+            row.get("resolves_event_id") == "evt_superseded_failure"]) == 1, artifacts
+assert any(row.get("event") == "resolved" and row.get("fingerprint") == "1111111111111111"
+           for row in ledger), ledger
+assert set(unresolved) == {"2222222222222222", "3333333333333333", "4444444444444444"}, unresolved
+assert unresolved["2222222222222222"]["attention"] == "stale", unresolved
+assert unresolved["3333333333333333"]["count"] == 2 and unresolved["3333333333333333"]["attention"] == "actionable", unresolved
+assert unresolved["4444444444444444"]["attention"] == "retiring", unresolved
+PY
+out="$("$TICK" run --repo "$x")"
+printf '%s' "$out" | grep -q 'artifacts_superseded=0' ||
+  fail "a second superseded sweep must remain idempotent: $out"
+printf '%s' "$out" | grep -q 'failures_retired=0' ||
+  fail "a second stale-failure sweep must remain idempotent: $out"
 o="$TMP/retire-off"; make_committed_repo "$o"; make_stale_plan "$o" 'done'
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$o")"
 printf '%s' "$out" | grep -q 'plans_retired=0' || fail "retirement opt-out must keep plans: $out"
@@ -252,6 +344,12 @@ bad_plan_idle_rc=$?
 set -e
 [ "$bad_plan_idle_rc" -eq 2 ] && printf '%s' "$bad_plan_idle" | grep -q 'must be integers' ||
   fail "a non-numeric plan idle threshold must be rejected: $bad_plan_idle"
+set +e
+bad_failure_stale="$(OMS_TICK_FAILURE_STALE_DAYS=bad "$TICK" status 2>&1)"
+bad_failure_stale_rc=$?
+set -e
+[ "$bad_failure_stale_rc" -eq 2 ] && printf '%s' "$bad_failure_stale" | grep -q 'must be integers' ||
+  fail "a non-numeric failure stale threshold must be rejected: $bad_failure_stale"
 
 # --- install / status / uninstall through the stub --------------------------
 (cd "$b" && "$TICK" install --method systemd --dry-run) | grep -q 'would install' || fail "install dry-run must print"
@@ -270,6 +368,8 @@ printf '%s' "$st" | grep -q "$a  last:" || fail "status must show the last sweep
 printf '%s' "$st" | grep -q 'tasks_closed=0' || fail "status must report task closures: $st"
 printf '%s' "$st" | grep -q 'plans_retired=0' || fail "status must report plan retirements: $st"
 printf '%s' "$st" | grep -q 'artifacts_resolved=0' || fail "status must report artifact recoveries: $st"
+printf '%s' "$st" | grep -q 'artifacts_superseded=0' || fail "status must report artifact supersession: $st"
+printf '%s' "$st" | grep -q 'failures_retired=0' || fail "status must report stale failure retirements: $st"
 "$TICK" uninstall | grep -q 'removed' || fail "uninstall must report"
 [ ! -f "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" ] || fail "uninstall must remove the timer"
 grep -q 'disable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "uninstall must disable the owned timer"

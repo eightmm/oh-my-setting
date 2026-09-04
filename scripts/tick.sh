@@ -3,11 +3,11 @@ set -euo pipefail
 
 # Unattended maintenance tick for registered repos. Each run syncs the work
 # journal, reconciles dead attempts, closes idle threads and goal-less task
-# packets, retires idle all-done plans, resolves mechanically recovered artifact
-# failures, and refreshes a stale Codex plugin cache; gc stays opt-in
-# (OMS_TICK_GC=1) because its retention floor is a per-repo decision. `install`
-# wires an hourly user-level timer (systemd, cron fallback) so sessions start on
-# a swept tree.
+# packets, retires idle all-done plans and stale one-shot failure records,
+# resolves mechanically recovered or superseded artifact failures, and refreshes
+# a stale Codex plugin cache; gc stays opt-in (OMS_TICK_GC=1) because its
+# retention floor is a per-repo decision. `install` wires an hourly user-level
+# timer (systemd, cron fallback) so sessions start on a swept tree.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
@@ -23,9 +23,9 @@ Usage: tick.sh run [--repo PATH ...] [--dry-run]
        tick.sh status
 
 run        Sweep the given repos, or every registered one: journal sync,
-           attempt reconcile, stale thread/task close and plan retirement,
-           optional gc, and a Codex plugin cache refresh when the cache no
-           longer matches the install.
+           attempt reconcile, stale thread/task close, plan and failure
+           retirement, artifact-failure resolution, optional gc, and a Codex
+           plugin cache refresh when the cache no longer matches the install.
            Each repo gets .oms/tick/last.json.
 register   Add a repo (default: PWD, git-root anchored) to the registry;
            install registers PWD when it is an adopted repo.
@@ -36,7 +36,8 @@ Environment:
   OMS_TICK_THREAD_IDLE_DAYS    close open threads idle at least this long (7)
   OMS_TICK_TASK_IDLE_DAYS      close active goal-less tasks idle at least this long (7)
   OMS_TICK_PLAN_IDLE_DAYS      retire all-done plans idle at least this long (14)
-  OMS_TICK_RETIRE=0            skip task and plan retirement (default on)
+  OMS_TICK_FAILURE_STALE_DAYS  retire stale one-shot failure rows at least this old (14)
+  OMS_TICK_RETIRE=0            skip task, plan, and failure retirement (default on)
   OMS_TICK_GC=1                also run `oms gc --apply` per repo (default off)
   OMS_TICK_STEP_TIMEOUT        seconds per step when `timeout` exists (600)
 EOF
@@ -51,6 +52,7 @@ CRON_MARK="# oh-my-setting tick"
 IDLE_DAYS="${OMS_TICK_THREAD_IDLE_DAYS:-7}"
 TASK_IDLE_DAYS="${OMS_TICK_TASK_IDLE_DAYS:-7}"
 PLAN_IDLE_DAYS="${OMS_TICK_PLAN_IDLE_DAYS:-14}"
+FAILURE_STALE_DAYS="${OMS_TICK_FAILURE_STALE_DAYS:-14}"
 RETIRE="${OMS_TICK_RETIRE:-1}"
 case "$RETIRE" in 0|false|no|off) RETIRE=0 ;; esac
 STEP_TIMEOUT="${OMS_TICK_STEP_TIMEOUT:-600}"
@@ -69,7 +71,7 @@ while [ "$#" -gt 0 ]; do
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-case "$IDLE_DAYS$TASK_IDLE_DAYS$PLAN_IDLE_DAYS$STEP_TIMEOUT" in *[!0-9]*) echo "error: OMS_TICK_* values must be integers" >&2; exit 2 ;; esac
+case "$IDLE_DAYS$TASK_IDLE_DAYS$PLAN_IDLE_DAYS$FAILURE_STALE_DAYS$STEP_TIMEOUT" in *[!0-9]*) echo "error: OMS_TICK_* values must be integers" >&2; exit 2 ;; esac
 
 repo_root() { git -C "${1:-$PWD}" rev-parse --show-toplevel 2>/dev/null || (cd "${1:-$PWD}" && pwd -P); }
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout "$STEP_TIMEOUT" "$@"; else "$@"; fi; }
@@ -194,10 +196,60 @@ print(matches[0].group(1))
 '
 }
 
+artifact_superseded_count() {  # resolve-superseded output on stdin -> its resolved count
+  python3 -c '
+import re
+import sys
+
+matches = [re.fullmatch(r"artifact-index: ([0-9]+) superseded failure[(]s[)] resolved", line)
+           for line in sys.stdin.read().splitlines()]
+matches = [match for match in matches if match]
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0].group(1))
+'
+}
+
+stale_failure_fingerprints() {  # fail-ledger list JSON on stdin -> safe stale one-shot fingerprints
+  python3 -c '
+import datetime
+import json
+import sys
+
+try:
+    days = int(sys.argv[1])
+    document = json.load(sys.stdin)
+    failures = document.get("failures")
+    if document.get("schema") != 1 or not isinstance(failures, list):
+        raise ValueError
+except Exception:
+    raise SystemExit(1)
+
+now = datetime.datetime.now(datetime.timezone.utc)
+for failure in failures:
+    if not isinstance(failure, dict) or failure.get("attention") != "stale":
+        continue
+    fingerprint = failure.get("fingerprint")
+    timestamp = failure.get("ts")
+    if (not isinstance(fingerprint, str) or not fingerprint or
+            "\\n" in fingerprint or "\\r" in fingerprint or not isinstance(timestamp, str)):
+        continue
+    try:
+        then = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc)
+    except ValueError:
+        continue
+    if (now - then).total_seconds() >= days * 86400:
+        print(fingerprint)
+' "$FAILURE_STALE_DAYS"
+}
+
 sweep_repo() {  # sweep_repo ROOT -> one summary line; receipt in .oms/tick/last.json
   local root="$1" oms="$ROOT/scripts/oms" journal=0 reconcile=0 gc=skipped closed=() id task_file
   local tasks_closed=0 plans_retired=0 plan_file plan_check plan_sha plan_retire_rc=skipped
   local artifacts_resolved=0 artifact_resolve_out artifact_resolve_rc=skipped
+  local artifacts_superseded=0 artifact_supersede_out artifact_supersede_rc=skipped
+  local failures_retired=0 failure_list failure_candidates failure_fingerprint
   [ -d "$root/.oms" ] || { echo "skip $root: no .oms"; return 0; }
   if [ "$DRY_RUN" = 1 ]; then echo "would sweep $root"; return 0; fi
   bounded "$oms" journal sync --repo "$root" >/dev/null 2>&1 || journal=$?
@@ -240,6 +292,16 @@ sweep_repo() {  # sweep_repo ROOT -> one summary line; receipt in .oms/tick/last
       plan_retire_rc=$?
     fi
   fi
+  if artifact_supersede_out="$(bounded "$oms" artifact-index --repo "$root" resolve-superseded 2>/dev/null)"; then
+    if artifacts_superseded="$(printf '%s\n' "$artifact_supersede_out" | artifact_superseded_count | tr -d '\r')"; then
+      artifact_supersede_rc=0
+    else
+      artifacts_superseded=0
+      artifact_supersede_rc=1
+    fi
+  else
+    artifact_supersede_rc=$?
+  fi
   if artifact_resolve_out="$(bounded "$oms" artifact-index --repo "$root" resolve-recovered 2>/dev/null)"; then
     if artifacts_resolved="$(printf '%s\n' "$artifact_resolve_out" | artifact_recovered_count | tr -d '\r')"; then
       artifact_resolve_rc=0
@@ -250,24 +312,38 @@ sweep_repo() {  # sweep_repo ROOT -> one summary line; receipt in .oms/tick/last
   else
     artifact_resolve_rc=$?
   fi
+  if [ "$RETIRE" != 0 ] &&
+    failure_list="$(bounded "$oms" fail-ledger --repo "$root" list --unresolved --json 2>/dev/null)" &&
+    failure_candidates="$(printf '%s\n' "$failure_list" | stale_failure_fingerprints | tr -d '\r')"; then
+    while IFS= read -r failure_fingerprint; do
+      [ -n "$failure_fingerprint" ] || continue
+      if bounded "$oms" fail-ledger --repo "$root" resolve --fingerprint "$failure_fingerprint" \
+        --how "retired by oms tick: one failure on a commit older than ${FAILURE_STALE_DAYS}d with no recurrence" >/dev/null 2>&1; then
+        failures_retired=$((failures_retired + 1))
+      fi
+    done < <(printf '%s\n' "$failure_candidates")
+  fi
   if [ "${OMS_TICK_GC:-0}" = 1 ]; then gc=0; bounded "$oms" gc --repo "$root" --apply >/dev/null 2>&1 || gc=$?; fi
   mkdir -p "$root/.oms/tick"
-  python3 - "$root/.oms/tick/last.json" "$journal" "$reconcile" "$gc" "$tasks_closed" "$plans_retired" "$plan_retire_rc" "$artifacts_resolved" "$artifact_resolve_rc" "${closed[@]}" <<'PY'
+  python3 - "$root/.oms/tick/last.json" "$journal" "$reconcile" "$gc" "$tasks_closed" "$plans_retired" "$plan_retire_rc" "$artifacts_resolved" "$artifact_resolve_rc" "$artifacts_superseded" "$artifact_supersede_rc" "$failures_retired" "${closed[@]}" <<'PY'
 import datetime, json, os, sys, tempfile
-path, journal, reconcile, gc, tasks_closed, plans_retired, plan_retire_rc, artifacts_resolved, artifact_resolve_rc, *closed = sys.argv[1:]
+path, journal, reconcile, gc, tasks_closed, plans_retired, plan_retire_rc, artifacts_resolved, artifact_resolve_rc, artifacts_superseded, artifact_supersede_rc, failures_retired, *closed = sys.argv[1:]
 row = {"schema": 1, "ran_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
        "journal_rc": int(journal), "reconcile_rc": int(reconcile),
        "gc": "skipped" if gc == "skipped" else int(gc), "threads_closed": closed,
        "tasks_closed": int(tasks_closed), "plans_retired": int(plans_retired),
        "plan_retire_rc": "skipped" if plan_retire_rc == "skipped" else int(plan_retire_rc),
        "artifacts_resolved": int(artifacts_resolved),
-       "artifact_resolve_rc": "skipped" if artifact_resolve_rc == "skipped" else int(artifact_resolve_rc)}
+       "artifact_resolve_rc": "skipped" if artifact_resolve_rc == "skipped" else int(artifact_resolve_rc),
+       "artifacts_superseded": int(artifacts_superseded),
+       "artifact_supersede_rc": "skipped" if artifact_supersede_rc == "skipped" else int(artifact_supersede_rc),
+       "failures_retired": int(failures_retired)}
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tick.")
 with os.fdopen(fd, "w", encoding="utf-8") as fh:
     json.dump(row, fh, ensure_ascii=False, sort_keys=True); fh.write("\n")
 os.replace(tmp, path)
 PY
-  echo "swept $root: journal=$journal reconcile=$reconcile gc=$gc threads_closed=${#closed[@]} tasks_closed=$tasks_closed plans_retired=$plans_retired artifacts_resolved=$artifacts_resolved"
+  echo "swept $root: journal=$journal reconcile=$reconcile gc=$gc threads_closed=${#closed[@]} tasks_closed=$tasks_closed plans_retired=$plans_retired artifacts_resolved=$artifacts_resolved artifacts_superseded=$artifacts_superseded failures_retired=$failures_retired"
 }
 
 run_tick() {
@@ -366,7 +442,7 @@ status_tick() {
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     if [ -f "$root/.oms/tick/last.json" ]; then
-      printf '%s  last: %s\n' "$root" "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["ran_at"], "journal_rc=%s threads_closed=%d tasks_closed=%d plans_retired=%d artifacts_resolved=%d" % (r["journal_rc"], len(r["threads_closed"]), int(r.get("tasks_closed", 0)), int(r.get("plans_retired", 0)), int(r.get("artifacts_resolved", 0))))' "$root/.oms/tick/last.json" 2>/dev/null | tr -d '\r' || echo '?')"
+      printf '%s  last: %s\n' "$root" "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["ran_at"], "journal_rc=%s threads_closed=%d tasks_closed=%d plans_retired=%d artifacts_resolved=%d artifacts_superseded=%d failures_retired=%d" % (r["journal_rc"], len(r["threads_closed"]), int(r.get("tasks_closed", 0)), int(r.get("plans_retired", 0)), int(r.get("artifacts_resolved", 0)), int(r.get("artifacts_superseded", 0)), int(r.get("failures_retired", 0))))' "$root/.oms/tick/last.json" 2>/dev/null | tr -d '\r' || echo '?')"
     else printf '%s  never swept\n' "$root"; fi
   done < "$REGISTRY"
 }

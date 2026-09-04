@@ -11,10 +11,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   sync, attempt reconcile, threads idle over 7d closed, stale Codex plugin
   cache refreshed) so a session starts on a swept tree; it also closes
   goal-less task packets idle over 7d, retires all-done plans idle over 14d,
-  and resolves mechanically recovered artifact timeouts. `OMS_TICK_RETIRE=0`
-  leaves task and plan state alone, gc stays opt-in, and the receipt plus
-  summary line expose `tasks_closed`, `plans_retired`, and
-  `artifacts_resolved`.
+  resolves mechanically recovered and exactly superseded artifact failures,
+  and retires one-shot stale fail-ledger rows older than
+  `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` leaves task, plan,
+  and failure-ledger retirement alone while artifact resolution continues; gc
+  stays opt-in, and the receipt plus summary line expose `tasks_closed`,
+  `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and
+  `failures_retired`.
 - `oms land`: gate, push, install refresh, and CI wait as one detached job
   with a receipt beside its gate log under
   `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` (`oms land status`), so an
