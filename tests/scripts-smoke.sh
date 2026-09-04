@@ -6843,6 +6843,135 @@ EOF
     fail "one transient retry should produce exactly two call artifacts, got $artifact_count"
 }
 
+test_intent_draft_reports_both_artifacts_when_fallback_also_fails() {
+  local project="$TMP/intent-draft-fallback-fails"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local candidate first_artifact fallback_artifact artifact_count rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/src" "$project/tests"
+  # Availability probes succeed; the actual primary times out and the one
+  # permitted fallback fails normally.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  --version:|exec:--help) printf 'codex 1.0\n'; exit 0 ;;
+esac
+printf '%s\n' "${OMS_PEER_TIMEOUT:-missing}" >> "$HOME/codex-timeouts"
+printf 'call\n' >> "$HOME/codex-calls"
+cat >/dev/null
+printf 'primary timed out\n' >&2
+exit 124
+EOF
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version|--help) printf 'claude 1.0\n'; exit 0 ;;
+esac
+printf '%s\n' "${OMS_PEER_TIMEOUT:-missing}" >> "$HOME/claude-timeouts"
+printf 'call\n' >> "$HOME/claude-calls"
+cat >/dev/null
+printf 'fallback ordinary failure\n' >&2
+exit 1
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/claude"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex \
+    --provider-timeout 7s --goal "retain failed fallback artifacts" \
+    > "$project/draft-out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] ||
+    fail "a failed fallback should exit 3, got $rc: $(tail -5 "$project/draft-out")"
+
+  first_artifact="$(find "$project/.oms/artifacts/call" -type f -name 'codex-*.md' | head -n 1)"
+  fallback_artifact="$(find "$project/.oms/artifacts/call" -type f -name 'claude-*.md' | head -n 1)"
+  [ -n "$first_artifact" ] || fail "timed-out primary artifact missing"
+  [ -n "$fallback_artifact" ] || fail "failed fallback artifact missing"
+  assert_file_contains "$project/draft-out" "error: intent draft fallback call failed:"
+  assert_file_contains "$project/draft-out" "artifact kept: $first_artifact"
+  assert_file_contains "$project/draft-out" "fallback artifact kept: $fallback_artifact"
+  grep -Fxq '124' "$first_artifact" ||
+    fail "primary artifact should preserve the timeout exit"
+  grep -Fxq '1' "$fallback_artifact" ||
+    fail "fallback artifact should preserve its ordinary failure exit"
+  [ "$(cat "$home_dir/codex-calls")" = call ] ||
+    fail "the primary should be called exactly once"
+  [ "$(cat "$home_dir/claude-calls")" = call ] ||
+    fail "the fallback should be called exactly once"
+  [ "$(cat "$home_dir/codex-timeouts")" = 7s ] ||
+    fail "primary should receive the requested timeout"
+  [ "$(cat "$home_dir/claude-timeouts")" = 14s ] ||
+    fail "failed fallback should receive double the requested timeout"
+  artifact_count="$(find "$project/.oms/artifacts/call" -type f -name '*.md' | wc -l | tr -d ' ')"
+  [ "$artifact_count" = 2 ] ||
+    fail "a failed fallback must not trigger a third call, got $artifact_count artifacts"
+  candidate=""
+  if [ -d "$project/.oms/intents" ]; then
+    candidate="$(find "$project/.oms/intents" -type f -name 'intent-*.md' -print)"
+  fi
+  [ -z "$candidate" ] || fail "a failed fallback must not write an intent candidate: $candidate"
+  [ ! -e "$project/PROJECT.md" ] || fail "a failed fallback must not write PROJECT.md"
+}
+
+test_intent_draft_does_not_retry_a_nontransient_failure() {
+  local project="$TMP/intent-draft-nontransient-failure"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local candidate first_artifact artifact_count rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/src" "$project/tests"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  --version:|exec:--help) printf 'codex 1.0\n'; exit 0 ;;
+esac
+printf 'call\n' >> "$HOME/codex-calls"
+cat >/dev/null
+printf 'ordinary primary failure\n' >&2
+exit 1
+EOF
+  # The default fallback probe is allowed, but an actual call is proof that an
+  # ordinary failure was retried when it should have remained terminal.
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version|--help) printf 'claude 1.0\n'; exit 0 ;;
+esac
+printf 'unexpected fallback call\n' >> "$HOME/claude-calls"
+cat >/dev/null
+exit 99
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/claude"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex \
+    --goal "do not retry ordinary provider errors" > "$project/draft-out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] ||
+    fail "a non-transient failure should exit 3, got $rc: $(tail -5 "$project/draft-out")"
+
+  first_artifact="$(find "$project/.oms/artifacts/call" -type f -name 'codex-*.md' | head -n 1)"
+  [ -n "$first_artifact" ] || fail "ordinary primary failure artifact missing"
+  assert_file_contains "$project/draft-out" "error: intent draft call failed:"
+  assert_file_contains "$project/draft-out" "artifact kept: $first_artifact"
+  grep -Fxq '1' "$first_artifact" ||
+    fail "ordinary primary artifact should preserve exit 1"
+  [ "$(cat "$home_dir/codex-calls")" = call ] ||
+    fail "the ordinary-failure primary should be called exactly once"
+  [ ! -e "$home_dir/claude-calls" ] ||
+    fail "a non-transient failure must not invoke the fallback"
+  artifact_count="$(find "$project/.oms/artifacts/call" -type f -name '*.md' | wc -l | tr -d ' ')"
+  [ "$artifact_count" = 1 ] ||
+    fail "a non-transient failure should leave one artifact, got $artifact_count"
+  candidate=""
+  if [ -d "$project/.oms/intents" ]; then
+    candidate="$(find "$project/.oms/intents" -type f -name 'intent-*.md' -print)"
+  fi
+  [ -z "$candidate" ] || fail "a non-transient failure must not write an intent candidate: $candidate"
+  [ ! -e "$project/PROJECT.md" ] || fail "a non-transient failure must not write PROJECT.md"
+}
+
 test_intent_adopt_gates_then_confirms() {
   local project="$TMP/intent-adopt"
   local intent_dir rc=0
