@@ -1389,7 +1389,7 @@ class NotionTransportTimeoutRetryTest(unittest.TestCase):
     def test_does_not_retry_a_cli_http_error(self):
         with mock.patch.dict(os.environ, self.environment(0, status=1), clear=False):
             with self.assertRaises(notion.NotionHTTPError) as raised:
-                self.transport().request("GET", "/v1/search", None, 0.2)
+                self.transport().request("GET", "/v1/search", None, 5.0)
 
         self.assertEqual(503, raised.exception.status)
         self.assertEqual("1\n", self.counter.read_text(encoding="utf-8"))

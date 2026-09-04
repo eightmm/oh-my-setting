@@ -107,10 +107,7 @@ class _StandardLibraryTransport:
             method=method,
         )
         request_timeout = float(timeout)
-        retry_timeout = min(
-            2.0 * request_timeout,
-            3.0 * request_timeout - request_timeout,
-        )
+        retry_timeout = 2.0 * request_timeout  # first + second stay within 3x
         for attempt_timeout in (request_timeout, retry_timeout):
             try:
                 with urllib.request.urlopen(
@@ -179,15 +176,12 @@ class NotionCLITransport:
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         request_timeout = float(timeout)
-        retry_timeout = min(
-            2.0 * request_timeout,
-            3.0 * request_timeout - request_timeout,
-        )
+        retry_timeout = 2.0 * request_timeout  # first + second stay within 3x
         for attempt_timeout in (request_timeout, retry_timeout):
             try:
                 completed = subprocess.run(
                     command,
-                    input=body,
+                    **({"input": body} if body is not None else {"stdin": subprocess.DEVNULL}),
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
