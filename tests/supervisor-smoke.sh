@@ -914,11 +914,19 @@ for _ in range(100):
     time.sleep(0.1)
 assert runner_pid, "runner never entered running"
 os.kill(runner_pid, signal.SIGKILL)
-time.sleep(0.2)
-# Under gate-level load one reconcile attempt has failed on transient lock
-# contention while passing standalone; the assertion under test is the
-# CLASSIFICATION, not first-try reconcile latency, so a bounded retry
-# absorbs the contention without weakening what is being proven.
+# A killed runner is only "lost" once the kernel shows it dead: reconcile
+# rightly treats an identity-matching, not-yet-reaped process as alive, and
+# under gate-level load that teardown has taken longer than a fixed sleep.
+# Wait for the zombie/absent state, then give reconcile the same bounded
+# retry for transient lock contention; the assertion is the CLASSIFICATION.
+for _ in range(50):
+    try:
+        raw = open("/proc/%d/stat" % runner_pid, encoding="utf-8", errors="replace").read()
+        if raw[raw.rfind(")") + 2:].split()[0] in ("Z", "X"):
+            break
+    except OSError:
+        break
+    time.sleep(0.1)
 last = None
 for _ in range(3):
     last = subprocess.run(
