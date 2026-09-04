@@ -259,6 +259,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- `plan-from-spec` now distinguishes a delegating suite's execution from an
+  inspection-only path reference: `bash -n` and ShellCheck can inspect a
+  suite, while direct, shell, source, and `bash -c` execution remain refused.
 - `plan-from-spec` refuses a task verify that would spawn a delegation
   inside the worker (the goal-drive, autopilot, plan-run, executor, provider
   integration, model-routing, read-time-expiry and patch-land suites, the

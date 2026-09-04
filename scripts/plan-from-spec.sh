@@ -224,37 +224,101 @@ DELEGATING_SMOKE_SCRIPTS = (
     "autopilot.sh",
     "peer-delegate.sh",
 )
-TOKEN_CHARACTERS = r"A-Za-z0-9_.-"
+SHELL_INTERPRETERS = ("bash", "sh", "zsh")
+SHELL_PREFIX_WORDS = (
+    "if", "then", "do", "else", "elif", "while", "until", "time", "!", "{",
+)
 
 
-def names_basename(command, basename):
-    return bool(re.search(
-        r"(?<![%s])%s(?![%s])" % (
-            TOKEN_CHARACTERS, re.escape(basename), TOKEN_CHARACTERS,
-        ),
-        command,
-    ))
+def basename(word):
+    return word.rstrip("/").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def command_head_index(words):
+    """Return the executable word after simple shell prefixes and wrappers."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if (word in SHELL_PREFIX_WORDS or
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word)):
+            index += 1
+            continue
+        head = basename(word)
+        if head == "command":
+            index += 1
+            while index < len(words) and words[index].startswith("-"):
+                if words[index] in ("-v", "-V"):
+                    return None
+                index += 1
+            continue
+        if head == "env":
+            index += 1
+            while index < len(words):
+                word = words[index]
+                if word == "--":
+                    index += 1
+                    break
+                if (word.startswith("-") or
+                        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word)):
+                    index += 1
+                    continue
+                break
+            continue
+        return index
+    return None
+
+
+def shell_invocation(words):
+    """Describe a shell's command string or script argument and execution mode."""
+    head_index = command_head_index(words)
+    if head_index is None or basename(words[head_index]) not in SHELL_INTERPRETERS:
+        return None
+    noexec = False
+    index = head_index + 1
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            index += 1
+            break
+        if word == "-c":
+            return ("command", words[index + 1] if index + 1 < len(words) else None,
+                    not noexec)
+        if word in ("-o", "-O", "--rcfile", "--init-file"):
+            index += 2
+            continue
+        if word == "--noexec":
+            noexec = True
+            index += 1
+            continue
+        if word.startswith("-") and word != "-":
+            if not word.startswith("--"):
+                options = word[1:]
+                if "n" in options:
+                    noexec = True
+                if "c" in options:
+                    return ("command", words[index + 1] if index + 1 < len(words) else None,
+                            not noexec)
+            index += 1
+            continue
+        break
+    return ("script", index if index < len(words) else None, not noexec)
 
 
 def shell_commands(command, depth=0):
-    """Return shell-command word groups, including one quoted shell layer."""
+    """Return shell-command word groups, expanding executing shell -c strings."""
     if depth > 4:
         return []
     try:
-        words = shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        words = list(lexer)
     except ValueError:
         return []
-    split_words = []
-    nested = []
-    for word in words:
-        if any(char.isspace() for char in word):
-            nested.extend(shell_commands(word, depth + 1))
-            continue
-        split_words.extend(part for part in re.split(r"([;&|]+)", word) if part)
     commands = []
     current = []
-    for word in split_words:
-        if word in (";", "&&", "||", "|", "&"):
+    for word in words:
+        if word and all(char in ";|&" for char in word):
             if current:
                 commands.append(current)
             current = []
@@ -262,31 +326,56 @@ def shell_commands(command, depth=0):
             current.append(word)
     if current:
         commands.append(current)
+    nested = []
+    for words in commands:
+        invocation = shell_invocation(words)
+        if invocation and invocation[0] == "command" and invocation[1] and invocation[2]:
+            nested.extend(shell_commands(invocation[1], depth + 1))
     return commands + nested
 
 
-def basename(word):
-    return word.rstrip("/").replace("\\", "/").rsplit("/", 1)[-1]
+def script_invocation_index(words, script):
+    head_index = command_head_index(words)
+    if head_index is None:
+        return None
+    head = basename(words[head_index])
+    if head == script:
+        return head_index
+    invocation = shell_invocation(words)
+    if invocation:
+        kind, value, executes = invocation
+        if (kind == "script" and executes and value is not None and
+                basename(words[value]) == script):
+            return value
+        return None
+    if head in (".", "source") and head_index + 1 < len(words):
+        if basename(words[head_index + 1]) == script:
+            return head_index + 1
+    return None
+
+
+def script_invocations(command, script):
+    for words in shell_commands(command):
+        index = script_invocation_index(words, script)
+        if index is not None:
+            yield words, index
 
 
 def smoke_shard_invocations(command):
     """Yield each run-smoke-shard --only list; None means an unsharded run."""
-    for words in shell_commands(command):
-        for index, word in enumerate(words):
-            if basename(word) != "run-smoke-shard.sh":
-                continue
-            names = []
-            has_only = False
-            cursor = index + 1
-            while cursor < len(words):
-                if words[cursor] == "--only":
-                    has_only = True
-                    if cursor + 1 < len(words):
-                        names.append(words[cursor + 1])
-                    cursor += 2
-                else:
-                    cursor += 1
-            yield names if has_only else None
+    for words, index in script_invocations(command, "run-smoke-shard.sh"):
+        names = []
+        has_only = False
+        cursor = index + 1
+        while cursor < len(words):
+            if words[cursor] == "--only":
+                has_only = True
+                if cursor + 1 < len(words):
+                    names.append(words[cursor + 1])
+                cursor += 2
+            else:
+                cursor += 1
+        yield names if has_only else None
 
 
 def heredoc_delimiter(line):
@@ -296,45 +385,10 @@ def heredoc_delimiter(line):
     return match.group(1) or match.group(2) or match.group(3)
 
 
-def prefix_invokes_script(prefix):
-    prefix = prefix.strip()
-    while prefix.startswith(("$(", "(", "{")):
-        prefix = prefix[2 if prefix.startswith("$(") else 1:].lstrip()
-    try:
-        words = shlex.split(prefix)
-    except ValueError:
-        return False
-    while words and words[0] in ("if", "then", "do", "else", "elif", "while", "until", "time", "!", "{"):
-        words = words[1:]
-    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
-        words = words[1:]
-    while words and words[0] in ("command", "env", "/bin/env", "/usr/bin/env"):
-        words = words[1:]
-        while words and (words[0].startswith("-") or
-                         re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
-            words = words[1:]
-    if not words:
-        return True
-    head = basename(words[0])
-    if head in ("bash", "sh", "zsh"):
-        return all(word.startswith("-") for word in words[1:])
-    return head in (".", "source")
-
-
 def line_invokes_script(line, script):
     if line.lstrip().startswith("#"):
         return False
-    for fragment in re.split(r"&&|\|\||[;|&]", line):
-        for match in re.finditer(
-                r"(?<![%s])%s(?![%s])" % (
-                    TOKEN_CHARACTERS, re.escape(script), TOKEN_CHARACTERS,
-                ), fragment):
-            start = match.start()
-            while start and fragment[start - 1] not in " \t;|&()=":
-                start -= 1
-            if prefix_invokes_script(fragment[:start]):
-                return True
-    return False
+    return any(script_invocations(line, script))
 
 
 def smoke_test_delegates(name):
@@ -374,12 +428,9 @@ def smoke_test_delegates(name):
 
 def delegating_verifier(verify):
     for suite in DELEGATING_SUITES + FULL_SUITE_VERIFIERS:
-        if names_basename(verify, basename(suite)):
+        if any(script_invocations(verify, basename(suite))):
             return suite
-    invocations = list(smoke_shard_invocations(verify))
-    if not invocations and names_basename(verify, "run-smoke-shard.sh"):
-        return "tests/run-smoke-shard.sh"
-    for names in invocations:
+    for names in smoke_shard_invocations(verify):
         if names is None:
             return "tests/run-smoke-shard.sh"
         for name in names:

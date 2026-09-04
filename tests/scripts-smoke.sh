@@ -6607,15 +6607,28 @@ test_plan_from_spec_rejects_delegating_verify() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"; chmod +x "$project/tests/run.sh"
   printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash tests/run.sh\n\n## Verification\n\n- Required checks: bash tests/run.sh\n' > "$project/PROJECT.md"
   fake_planner() {  # fake_planner VERIFY -> a codex stub proposing one task with that verify
+    local proposal proposal_quoted
+    proposal="$(VERIFY="$1" python3 - <<'PY'
+import json, os
+print(json.dumps({"tasks": [{
+    "id": "t1", "title": "feat: x", "allowed": ["src/"],
+    "verify": os.environ["VERIFY"], "depends": [],
+}]}, separators=(",", ":")))
+PY
+)"
+    printf -v proposal_quoted '%q' "$proposal"
     cat > "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
-printf '%s\n' 'plan follows.' '{"tasks":[{"id":"t1","title":"feat: x","allowed":["src/"],"verify":"$1","depends":[]}]}'
+printf '%s\n' 'plan follows.' $proposal_quoted
 EOF
     chmod +x "$bin_dir/codex"
   }
   local verify
-  for verify in 'bash tests/autopilot-smoke.sh' 'bash scripts/check.sh'; do
+  for verify in 'tests/autopilot-smoke.sh' 'bash tests/autopilot-smoke.sh' \
+    'sh tests/autopilot-smoke.sh' 'source tests/autopilot-smoke.sh' \
+    '. tests/autopilot-smoke.sh' 'bash scripts/check.sh' \
+    "bash -c 'bash tests/autopilot-smoke.sh'"; do
     fake_planner "$verify"
     out="$(HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex 2>&1)" &&
       fail "a verify that delegates must be refused at propose: $verify: $out"
@@ -6623,6 +6636,10 @@ EOF
       fail "the refusal must name the delegating suite ($verify): $out"
     [ ! -f "$project/.oms/plan/tasks.json" ] || fail "a refused proposal must not touch the task board"
   done
+  fake_planner 'bash -n tests/autopilot-smoke.sh && shellcheck -x -S warning tests/autopilot-smoke.sh && grep -F tests/autopilot-smoke.sh tests/run.sh && cat tests/autopilot-smoke.sh >/dev/null && wc -l tests/autopilot-smoke.sh >/dev/null && head -n 1 tests/autopilot-smoke.sh >/dev/null && tail -n 1 tests/autopilot-smoke.sh >/dev/null && test -f tests/autopilot-smoke.sh && [ -f tests/autopilot-smoke.sh ]'
+  HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/inspection.out" 2>&1 ||
+    fail "inspection-only suite references must be proposed: $(tail -3 "$project/inspection.out")"
+  assert_file_contains "$project/inspection.out" "proposed 1 task(s)"
   fake_planner 'bash tests/run.sh'
   HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/out" 2>&1 ||
     fail "a plain verify must still be proposed: $(tail -3 "$project/out")"
