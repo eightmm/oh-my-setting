@@ -7,6 +7,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ## [Unreleased]
 
 ### Added
+- `oms land` is sibling-aware: a live autopilot run (`proposing`, `proposal-review`,
+  `driving`) in another worktree of the same repository is reported at intake and
+  waited for before the push, up to `--sibling-wait` seconds (default 1800). At the
+  deadline the landing ends `blocked` with nothing pushed, so shared
+  `refs/remotes/*` never move under a worker or an unreviewed proposal;
+  `--ignore-siblings` skips the wait and records the override in the receipt.
 - `oms intent draft` retries once on a fallback provider after a transient
   primary failure (timeout, 529/overload/rate-limit output, or an empty answer
   window). `--fallback-to PROVIDER|none` controls the seat; direct `codex` and
