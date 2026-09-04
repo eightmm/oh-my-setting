@@ -232,6 +232,21 @@ test_allowed_turn_stays_silent() {
   [ -z "$out" ] || fail "a verified turn must produce no notice: $out"
 }
 
+test_routine_prompt_disarms_prior_high_risk_route() {
+  local project="$TMP/disarm/project"
+  local out
+
+  make_dirty_repo "$project"
+  route_prompt "$project" s-disarm ',"turn_id":"t1"'
+
+  printf '{"prompt":"이 훅은 왜 필요한 거야?","session_id":"s-disarm","turn_id":"t2","cwd":"%s"}' \
+    "$project" | bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  out="$(printf '{"hook_event_name":"Stop","session_id":"s-disarm","turn_id":"t2","cwd":"%s","last_assistant_message":"일반 설명입니다."}' \
+    "$project" | bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] ||
+    fail "a routine prompt must disarm the prior high-risk route: $out"
+}
+
 test_guard_rows_carry_observation_identity() {
   local project="$TMP/obs/project"
   local out
@@ -279,5 +294,6 @@ test_unreadable_helper_reports_an_unguarded_turn
 test_unparseable_verdict_reports_an_unguarded_turn
 test_crashing_guard_command_reports_an_unguarded_turn
 test_allowed_turn_stays_silent
+test_routine_prompt_disarms_prior_high_risk_route
 
 echo "turn-guard-fuse-smoke: ok"

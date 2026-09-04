@@ -790,8 +790,16 @@ def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> 
     repo = hook_repo(payload)
     if repo is None:
         return
-    hooks_dir = ensure_oms(repo)
+    hooks_dir = repo / ".oms" / "hooks"
     state_path = session_state_path(hooks_dir, payload)
+    # A read-only prompt must replace this session's prior guarded route, or a
+    # release/task request remains armed and blocks unrelated later answers.
+    # Do not adopt a new repository merely because somebody asked a question.
+    if not route["guard"] and not state_path.is_file():
+        return
+    if route["guard"]:
+        hooks_dir = ensure_oms(repo)
+        state_path = session_state_path(hooks_dir, payload)
     previous = load_state(state_path)
     turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
     previous_turn = str(previous.get("turn_id") or "")
@@ -1197,8 +1205,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 0
 
     route = classify_prompt(prompt)
-    if route["guard"]:
-        route_state(payload, prompt, route)
+    route_state(payload, prompt, route)
     auto_task_record(payload, prompt, route)
 
     lower = prompt.strip().lower()
