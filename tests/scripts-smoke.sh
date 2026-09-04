@@ -69,7 +69,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYST
 export GIT_AUTHOR_NAME="oms-test" GIT_AUTHOR_EMAIL="test@example.com"
 export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
 export LC_ALL=C LANG=C TZ=UTC
-export HOME="$TEST_HOME" XDG_CACHE_HOME="$TEST_HOME/.cache" NVM_DIR="$TEST_HOME/.nvm"
+export HOME="$TEST_HOME" XDG_CONFIG_HOME="$TMP/config" XDG_CACHE_HOME="$TEST_HOME/.cache" NVM_DIR="$TEST_HOME/.nvm"
 # Harness residue (worktrees, lock dirs, delegate temp dirs) lives under
 # TMPDIR, and doctor/cleanup count what they find there. With the host's
 # shared /tmp, a stray oh-my-setting-* dir from a real run makes those tests
