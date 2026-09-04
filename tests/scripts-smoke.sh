@@ -23030,6 +23030,33 @@ assert row["status"] == "invalid" and row["capsule_id"] == "'"$latest_id"'", row
     fail "resume rendered a null capsule id instead of unknown: $resume_out"
 }
 
+test_goal_drive_silences_foreign_closed_intents() {
+  local project="$TMP/gd-foreign-intents" out rc=0
+  make_committed_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal silence --accept true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id t1 --title silence >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" block --id t1 --reason fixture >/dev/null
+  python3 - "$project" <<'PY'
+import json, pathlib, subprocess, sys
+repo = pathlib.Path(sys.argv[1])
+base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+row = {"schema": 1, "kind": "commit-intent", "ts": "2026-09-04T00:00:00Z", "cycle": 1,
+       "task_id": "t1", "base_sha": base, "head_ref": "refs/heads/main", "reason": "fixture"}
+rows = [dict(row, run_id="gd-foreign", intent_id="foreign-landed", phase="prepared"),
+        dict(row, run_id="gd-foreign", intent_id="foreign-landed", phase="landed"),
+        dict(row, intent_id="legacy-bad", phase="prepared")]
+with open(repo / ".oms/plan/progress.jsonl", "w", encoding="utf-8") as fh:
+    for r in rows:
+        fh.write(json.dumps(r) + "\n")
+PY
+  out="$("$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 2>&1)" || rc=$?
+  printf '%s' "$out" | grep -Fq 'ignored invalid commit intent legacy-bad' ||
+    fail "a current-run (legacy) invalid intent must still warn (rc=$rc): $out"
+  if printf '%s' "$out" | grep -Fq 'foreign-landed'; then
+    fail "a closed foreign-run chain must stay silent: $out"
+  fi
+}
+
 test_plan_snapshot_is_nonvacuous_across_state_runtime_and_goal_drive() {
   local project="$TMP/nonvacuous-plan"
   local plan="$ROOT/scripts/agent-plan.sh"
