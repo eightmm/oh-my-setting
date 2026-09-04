@@ -7,6 +7,10 @@ fi
 
 ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TMP="$(mktemp -d /tmp/oms-tests.XXXXXX)"
+# Worker-guard cases pin strictness per call. A caller that exports
+# OMS_WORKER_GUARD_STRICT=1 for its own workers (autopilot acceptance does)
+# must not turn the soft-surface cases strict.
+unset OMS_WORKER_GUARD_STRICT OMS_WORKER_GUARD_OFF
 
 source_oms_fingerprint() {
   if [ ! -d "$ROOT/.oms" ]; then
