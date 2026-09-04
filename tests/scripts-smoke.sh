@@ -14204,6 +14204,7 @@ test_gc_reclaims_aged_handoffs() {
 
 test_oms_init_seeds_and_guides() {
   local project="$TMP/oms-init"
+  local registry="$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt"
 
   make_committed_repo "$project"
   printf 'import torch\n' > "$project/model.py"
@@ -14213,6 +14214,10 @@ test_oms_init_seeds_and_guides() {
   [ -f "$project/.oms/memory/shared.md" ] || fail "init should seed shared memory"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
     fail "init should create the project memory database"
+  printf '%s' "$out" | grep -Fq 'tick registry registered' ||
+    fail "init should report tick registration: $out"
+  [ "$(grep -Fxc "$project" "$registry")" = 1 ] ||
+    fail "init should register the repo exactly once"
   printf '%s' "$out" | grep -Fq "ML repo" || fail "init should tailor the checklist to an ML repo"
   printf '%s' "$out" | grep -Fq "oms state" || fail "init should point at oms state"
   printf '%s' "$out" | grep -Fq "oms data-manifest check --name <manifest>" ||
@@ -14222,9 +14227,13 @@ test_oms_init_seeds_and_guides() {
   # Idempotent and migratory: a Markdown-only project gets its derived index
   # back on the next init without changing the source.
   rm -f "$project/.oms/memory/memory.sqlite3"
-  ( cd "$project" && "$ROOT/scripts/init.sh" >/dev/null 2>&1 ) || fail "init must be idempotent"
+  out="$(cd "$project" && "$ROOT/scripts/init.sh")" || fail "init must be idempotent"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
     fail "init should migrate an existing Markdown-only memory"
+  printf '%s' "$out" | grep -Fq 'tick registry already registered' ||
+    fail "an idempotent init should report the existing tick registration: $out"
+  [ "$(grep -Fxc "$project" "$registry")" = 1 ] ||
+    fail "an idempotent init should not duplicate the registry entry"
 }
 
 test_gc_closes_stale_open_run() {
@@ -17837,6 +17846,8 @@ test_local_agent_files_reach_a_delegate_worktree() {
 
 test_oms_init_reports_missing_project_rules() {
   local project="$TMP/init-rules"
+  local blocked_project="$TMP/init-unwritable-tick"
+  local blocked_registry="$TMP/init-unwritable-registry"
   local out
 
   make_committed_repo "$project"
@@ -17860,6 +17871,16 @@ test_oms_init_reports_missing_project_rules() {
   out="$("$ROOT/scripts/init.sh" --repo "$plain")"
   printf '%s' "$out" | grep -Fq 'rules=missing' ||
     fail "a file without a managed block is not applied rules: $out"
+
+  # A regular file as the registry's parent is unwritable for every test user.
+  printf 'not a directory\n' > "$blocked_registry"
+  make_committed_repo "$blocked_project"
+  out="$(OMS_TICK_REGISTRY="$blocked_registry/registry" "$ROOT/scripts/init.sh" --repo "$blocked_project")" ||
+    fail "init should tolerate an unwritable tick registry"
+  [ -f "$blocked_project/.oms/.gitignore" ] ||
+    fail "init should seed state when tick registration fails"
+  printf '%s' "$out" | grep -Fq 'tick registry not registered' ||
+    fail "init should report a failed tick registration: $out"
 }
 
 test_oms_init_hides_agent_files_after_a_late_git_init() {

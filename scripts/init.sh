@@ -59,6 +59,19 @@ OMS="$STATE_ROOT/.oms"
 mkdir -p "$OMS"
 agent_memory_ensure_oms_ignore "$STATE_ROOT" 2>/dev/null || true
 
+# The hourly sweep is optional infrastructure: an unavailable tick script or
+# unwritable registry must not stop a repo from receiving its local state.
+tick_state="not registered"
+if [ -x "$ROOT/scripts/tick.sh" ]; then
+  tick_report=""
+  if tick_report="$("$ROOT/scripts/tick.sh" register --repo "$STATE_ROOT" 2>/dev/null)"; then
+    case "$tick_report" in
+      "registered: "*) tick_state="registered" ;;
+      "already registered: "*) tick_state="already registered" ;;
+    esac
+  fi
+fi
+
 style="general"
 if [ -x "$ROOT/scripts/detect-project-style.sh" ]; then
   style="$("$ROOT/scripts/detect-project-style.sh" "$STATE_ROOT" 2>/dev/null || echo general)"
@@ -114,6 +127,7 @@ plan_state="none"
 [ -f "$OMS/plan/tasks.json" ] && plan_state="present"
 
 echo "oms init: $STATE_ROOT (style=$style, memory=$mem_state, rules=$rules_state, spec=$spec_display)"
+echo "oms init: tick registry $tick_state"
 [ "$private_state" = "just-hidden" ] &&
   echo "oms init: hid the agent files from git (.git/info/exclude)"
 echo
