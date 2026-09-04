@@ -550,12 +550,13 @@ PY
 
 latest_open_intent() {
   [ -f "$PROGRESS" ] || return 0
-  python3 - "$REPO" "$PROGRESS" "$PLAN_FILE" <<'PY' | tr -d '\r'
+  OMS_GD_RUN="$RUN_ID" python3 - "$REPO" "$PROGRESS" "$PLAN_FILE" <<'PY' | tr -d '\r'
 import hashlib, json, os, pathlib, re, subprocess, sys, tempfile
 
 repo = os.path.realpath(sys.argv[1])
 progress = sys.argv[2]
 plan_file = sys.argv[3]
+current_run = os.environ["OMS_GD_RUN"]
 ident = re.compile(r"^[A-Za-z0-9._-]+$")
 sha = re.compile(r"^[0-9a-f]{64}$")
 base_re = re.compile(r"^[0-9a-f]{40,64}$")
@@ -907,6 +908,14 @@ valid = []
 legacy_missing = False
 seen = set()
 for key in order:
+    latest = chains[key][-1]
+    latest_run = latest.get("run_id")
+    silence_closed_foreign = (latest.get("phase") in ("landed", "superseded")
+            and isinstance(latest_run, str) and len(latest_run) <= 64
+            and ident.fullmatch(latest_run)
+            and latest_run != current_run)
+    # Closure changes diagnostics, never the recovery projection: a landed
+    # intent may still need its exact commit reconciled after an interruption.
     active = None
     authority = None
     closed = False
@@ -918,15 +927,17 @@ for key in order:
             try:
                 candidate_authority = validate(row)
             except Exception as error:
-                print("goal-drive: ignored invalid commit intent %s (%s)" %
-                      (key, error), file=sys.stderr)
+                if not silence_closed_foreign:
+                    print("goal-drive: ignored invalid commit intent %s (%s)" %
+                          (key, error), file=sys.stderr)
                 continue
             if active is None or open_transition_allowed(active, row):
                 active = row
                 authority = candidate_authority
             else:
-                print("goal-drive: ignored invalid commit-intent transition %s" % key,
-                      file=sys.stderr)
+                if not silence_closed_foreign:
+                    print("goal-drive: ignored invalid commit-intent transition %s" % key,
+                          file=sys.stderr)
         elif phase in ("committed", "abandoned"):
             if active is not None:
                 if terminal_allowed(active, row, authority):
@@ -934,8 +945,9 @@ for key in order:
                     authority = None
                     closed = True
                 else:
-                    print("goal-drive: ignored unauthoritative commit-intent terminal %s" % key,
-                          file=sys.stderr)
+                    if not silence_closed_foreign:
+                        print("goal-drive: ignored unauthoritative commit-intent terminal %s" % key,
+                              file=sys.stderr)
     if active is None:
         continue
     if active.get("head_ref") is None:

@@ -96,6 +96,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   can land again on a clean tree; tool nodes see `OMS_GRAPH_TASK_<NAME>`.
 
 ### Changed
+- `goal-drive` silences stale commit-intent diagnostics for a foreign run's
+  closed (`landed` or `superseded`) chain while preserving its recovery and
+  parking projection for current-run, legacy, and open foreign chains.
 - The Work Journal's Notion transports retry one ntn CLI timeout or HTTP
   `urlopen` timeout once with a doubled timeout, keeping the pair within three
   times the caller timeout; HTTP and other transport failures are not resent.
