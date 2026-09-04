@@ -1037,7 +1037,7 @@ oms_worker_surface_diff() {
   local changed=""
   local name
 
-  for name in config remotes refs tracked files gitmeta hooks; do
+  for name in config remotes refs remote-refs tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
     if ! oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
@@ -1470,8 +1470,19 @@ oms_worker_surface_capture_one() {
     config) git -C "$repo" config --local --list 2>/dev/null | LC_ALL=C sort ;;
     remotes) git -C "$repo" remote -v 2>/dev/null | LC_ALL=C sort ;;
     refs)
-      git -C "$repo" show-ref 2>/dev/null | LC_ALL=C sort
+      # Remote-tracking refs and stash may move while a sibling fetches or
+      # lands; every other ref remains a worker-attributable, hard surface.
+      (git -C "$repo" show-ref 2>/dev/null || true) |
+        LC_ALL=C awk '$2 != "refs/stash" && index($2, "refs/remotes/") != 1' |
+        LC_ALL=C sort
       git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
+      ;;
+    remote-refs)
+      # Keep the allow-list anchored: refs merely containing "refs/remotes"
+      # still belong to the hard `refs` surface above.
+      (git -C "$repo" show-ref 2>/dev/null || true) |
+        LC_ALL=C awk '$2 == "refs/stash" || index($2, "refs/remotes/") == 1' |
+        LC_ALL=C sort
       ;;
     tracked)
       # Status categories are not content: a file already marked ` M` stays
@@ -1687,7 +1698,7 @@ oms_worker_surface_snapshot() {
   local name
 
   mkdir -p "$dir" || return 1
-  for name in config remotes refs tracked files gitmeta hooks omsstate; do
+  for name in config remotes refs remote-refs tracked files gitmeta hooks omsstate; do
     oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
   done

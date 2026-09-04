@@ -22115,6 +22115,52 @@ test_worker_guard_spends_its_budget_on_untracked_before_ignored() {
   esac
 }
 
+test_worker_guard_splits_remote_tracking_and_stash_refs() {
+  local project="$TMP/guard-remote-refs"
+  local snap="$TMP/guard-remote-refs-snap"
+  local changed
+
+  make_committed_repo "$project"
+
+  rm -rf "$snap"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) ||
+    fail "remote-ref snapshot failed"
+  git -C "$project" update-ref refs/remotes/origin/main \
+    "$(git -C "$project" rev-parse HEAD)"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = "remote-refs" ] ||
+    fail "a remote-tracking ref should change only remote-refs, got: ${changed:-<none>}"
+
+  rm -rf "$snap"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) ||
+    fail "stash snapshot failed"
+  git -C "$project" update-ref refs/stash "$(git -C "$project" rev-parse HEAD)"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = "remote-refs" ] ||
+    fail "stash should change only remote-refs, got: ${changed:-<none>}"
+}
+
+test_worker_guard_keeps_local_branch_refs_hard() {
+  local project="$TMP/guard-local-refs"
+  local snap="$TMP/guard-local-refs-snap"
+  local changed
+
+  make_committed_repo "$project"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) ||
+    fail "local-ref snapshot failed"
+  git -C "$project" update-ref refs/heads/guard-local \
+    "$(git -C "$project" rev-parse HEAD)"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = "refs" ] ||
+    fail "a local branch ref should change only refs, got: ${changed:-<none>}"
+}
+
 test_delegate_says_the_worker_cannot_see_uncommitted_work() {
   local project="$TMP/delegate-dirty-base"
   local bin="$project/bin"
