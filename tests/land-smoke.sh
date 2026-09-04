@@ -16,6 +16,7 @@ export OMS_WORK_JOURNAL_SUPPRESS=1 XDG_STATE_HOME="$TMP/state" GIT_AUTHOR_NAME=t
   GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 log_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["log"])' "$1"; }
 LAND="$ROOT/scripts/land.sh"
+AUTOPILOT_RECEIPT="$ROOT/scripts/lib/autopilot-receipt.py"
 state_land="$XDG_STATE_HOME/oh-my-setting/land"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -29,6 +30,31 @@ gate() {  # gate BODY -> commits scripts/check.sh with that body
   printf '#!/usr/bin/env bash\n%s\n' "$1" > "$repo/scripts/check.sh"
   git -C "$repo" add scripts/check.sh
   git -C "$repo" commit -q -m "gate: $1"
+}
+write_autopilot_receipt() {  # WORKTREE STAGE -> a real typed outer receipt
+  local worktree="$1" stage="$2" receipt expected=absent base_sha
+  local spec_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  local branch="oms/autopilot-${spec_sha:0:12}"
+
+  receipt="$worktree/.oms/plan/autopilot-run.json"
+  mkdir -p "$(dirname "$receipt")"
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    expected="$(python3 "$AUTOPILOT_RECEIPT" digest "$receipt")" ||
+      fail "cannot read fixture autopilot receipt"
+    expected="${expected//$'\r'/}"
+  fi
+  base_sha="$(git -C "$worktree" rev-parse HEAD)"
+  python3 "$AUTOPILOT_RECEIPT" write "$receipt" --expected "$expected" \
+    --stage "$stage" --repo "$worktree" --spec-sha256 "$spec_sha" \
+    --planner codex --worker codex --reviewer codex \
+    --planner-reasoning-effort low --worker-reasoning-effort low \
+    --reviewer-reasoning-effort low --provider-timeout 1m --planner-timeout 1m \
+    --worker-timeout 1m --reviewer-timeout 1m --allowed . --base main \
+    --base-sha "$base_sha" --remote origin --max-cycles 1 --initial-tasks 1 \
+    --replan-tasks 1 --review-mode shadow --branch "$branch" \
+    --owner-id "owner_00000000000000000000000000000000" \
+    --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null ||
+      fail "cannot write fixture autopilot receipt"
 }
 gate 'echo gate ok'
 git -C "$repo" push -q origin HEAD:main
@@ -61,6 +87,7 @@ r = json.load(open(sys.argv[1]))
 assert r["state"] == "passed" and r["sha"] == sys.argv[2], r
 assert r["gate"]["rc"] == 0 and r["push"]["rc"] == 0, r
 assert r["update"]["rc"] == "skipped" and r["ci"]["conclusion"] == "skipped", r
+assert "siblings" not in r, r
 PY
 grep -q 'gate ok' "$(log_of "$receipt")" || fail "gate output must land in the receipt log"
 case "$(log_of "$receipt")" in "$state_land"/*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
@@ -74,7 +101,92 @@ git -C "$repo" worktree remove --force "$peer"
   fail "main checkout must read the removed worktree's receipt"
 git -C "$repo" pull -q --ff-only origin main
 
-# --- 3. red gate: failure recorded, nothing pushed -----------------------------
+# --- 3. live siblings are recorded, waited for, or explicitly ignored ---------
+sibling="$TMP/sibling.. worktree"
+git -C "$repo" worktree add -q -b oms/autopilot-aaaaaaaaaaaa "$sibling" HEAD
+sibling_physical="$(cd "$sibling" && pwd -P)"
+write_autopilot_receipt "$sibling" driving
+python3 "$AUTOPILOT_RECEIPT" metadata "$sibling/.oms/plan/autopilot-run.json" |
+  grep -q '^driving	' || fail "fixture sibling must carry a typed driving receipt"
+gate 'echo sibling gate ok'
+before="$(remote_tip)"
+if "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
+  > "$TMP/sibling-blocked.out" 2>&1; then
+  fail "a live sibling must block before push: $(cat "$TMP/sibling-blocked.out")"
+fi
+[ "$(remote_tip)" = "$before" ] || fail "a blocked sibling landing must not push"
+grep -Fq "live sibling worktree $sibling_physical (driving)" "$TMP/sibling-blocked.out" ||
+  fail "intake must report the live sibling: $(cat "$TMP/sibling-blocked.out")"
+grep -Fq "sibling worktree $sibling_physical still driving" "$TMP/sibling-blocked.out" ||
+  fail "a blocked sibling must be visible in land status: $(cat "$TMP/sibling-blocked.out")"
+python3 - "$receipt_dir" "$sibling_physical" <<'PY' || fail "blocked sibling receipt is wrong"
+import glob, json, os, sys
+directory, sibling = sys.argv[1:]
+for path in glob.glob(os.path.join(directory, "*.json")):
+    row = json.load(open(path))
+    if row.get("state") != "blocked":
+        continue
+    assert row.get("siblings", {}).get("live") == sibling + " driving", row
+    assert row.get("push", {}).get("sibling_wait_seconds") == 0, row
+    assert "rc" not in row.get("push", {}), row
+    break
+else:
+    raise AssertionError("no blocked sibling receipt")
+PY
+
+wait_marker="$TMP/sibling-gate-finished"
+gate "echo sibling wait gate ok; touch \"$wait_marker\""
+(
+  while [ ! -f "$wait_marker" ]; do sleep 1; done
+  sleep 1
+  write_autopilot_receipt "$sibling" reviewing
+) &
+sibling_rewriter=$!
+if ! "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 3 \
+  > "$TMP/sibling-wait.out" 2>&1; then
+  wait "$sibling_rewriter" || true
+  fail "a sibling leaving live stages must release the push: $(cat "$TMP/sibling-wait.out")"
+fi
+wait "$sibling_rewriter" || fail "could not update fixture sibling receipt"
+[ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] ||
+  fail "a released sibling landing must push"
+python3 - "$receipt_dir" "$sibling_physical" <<'PY' || fail "sibling wait receipt is wrong"
+import glob, json, os, sys
+directory, sibling = sys.argv[1:]
+for path in glob.glob(os.path.join(directory, "*.json")):
+    row = json.load(open(path))
+    if row.get("state") != "passed" or row.get("siblings", {}).get("live") != sibling + " driving":
+        continue
+    assert row.get("push", {}).get("rc") == 0, row
+    assert row["push"].get("sibling_wait_seconds", 0) > 0, row
+    break
+else:
+    raise AssertionError("no passed sibling-wait receipt")
+PY
+
+write_autopilot_receipt "$sibling" approved
+write_autopilot_receipt "$sibling" driving
+gate 'echo ignore sibling gate ok'
+"$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 --ignore-siblings \
+  > "$TMP/sibling-ignore.out" 2> "$TMP/sibling-ignore.err" ||
+  fail "--ignore-siblings must permit a push: $(cat "$TMP/sibling-ignore.out")"
+[ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] ||
+  fail "--ignore-siblings must push"
+grep -Fq "$sibling_physical" "$TMP/sibling-ignore.err" &&
+  fail "--ignore-siblings must skip the intake report"
+python3 - "$receipt_dir" <<'PY' || fail "ignored sibling receipt is wrong"
+import glob, json, os, sys
+for path in glob.glob(os.path.join(sys.argv[1], "*.json")):
+    row = json.load(open(path))
+    if row.get("state") == "passed" and row.get("siblings", {}).get("ignored") == "true":
+        assert row.get("push", {}).get("rc") == 0, row
+        break
+else:
+    raise AssertionError("no ignored sibling receipt")
+PY
+git -C "$repo" worktree remove --force "$sibling"
+
+# --- 4. red gate: failure recorded, nothing pushed -----------------------------
 gate 'echo boom; exit 3'
 before="$(remote_tip)"
 if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/fail.out" 2>&1; then
@@ -85,7 +197,7 @@ grep -q 'gate exit 3' "$TMP/fail.out" || fail "the failure reason must be shown:
 "$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved | grep -q 'land: gate failed' ||
   fail "a red gate must be recorded in the fail ledger"
 
-# --- 4. HEAD moves during the gate: nothing pushed -----------------------------
+# --- 5. HEAD moves during the gate: nothing pushed -----------------------------
 gate 'sleep 3; echo slow ok'
 ( sleep 1; echo two > "$repo/two"; git -C "$repo" add two; git -C "$repo" commit -q -m two ) &
 if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/moved.out" 2>&1; then
@@ -95,7 +207,7 @@ wait
 [ "$(remote_tip)" = "$before" ] || fail "a moved HEAD must not push"
 grep -q 'HEAD or the tree changed' "$TMP/moved.out" || fail "moved-HEAD reason missing: $(cat "$TMP/moved.out")"
 
-# --- 5. refusals before any job: dirty tree, diverged remote -----------------
+# --- 6. refusals before any job: dirty tree, diverged remote -----------------
 gate 'echo gate ok'
 receipts_before_refusal="$(find "$receipt_dir" -maxdepth 1 -type f -name '*.json' -print | sort)"
 echo dirty >> "$repo/one"
@@ -119,7 +231,7 @@ grep -q 'rebase first' "$TMP/diverged.err" || fail "diverged refusal must say so
 [ "$receipts_before_refusal" = "$(find "$receipt_dir" -maxdepth 1 -type f -name '*.json' -print | sort)" ] ||
   fail "a refused landing must not leave a receipt"
 
-# --- 6. detached mode: receipt appears, status reads it -----------------------
+# --- 7. detached mode: receipt appears, status reads it -----------------------
 git -C "$repo" pull -q --rebase origin main
 out="$("$LAND" --repo "$repo" --ci-wait 0)"
 printf '%s' "$out" | grep -q 'receipt: ' || fail "detached mode must print the receipt path: $out"
@@ -131,7 +243,7 @@ done
 grep -q '"state": "passed"' "$receipt" || fail "detached landing did not pass in time: $(cat "$receipt" 2>/dev/null)"
 [ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] || fail "detached landing must push"
 
-# --- 7. the detached job must not inherit ignored SIGINT/SIGQUIT --------------
+# --- 8. the detached job must not inherit ignored SIGINT/SIGQUIT --------------
 gate 'grep SigIgn /proc/$$/status'
 echo three > "$repo/three"; git -C "$repo" add three; git -C "$repo" commit -q -m three
 out="$("$LAND" --repo "$repo" --ci-wait 0)"
