@@ -9,6 +9,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 task="$ROOT/scripts/agent-task.sh"
 plan="$ROOT/scripts/agent-plan.sh"
+status_out=""
 
 repo="$TMP/task"
 mkdir -p "$repo"
@@ -17,30 +18,34 @@ rc=0
 "$task" --repo "$repo" verify >/dev/null 2>&1 || rc=$?
 [ "$rc" = 7 ] || fail "failed Verify command exit was not propagated: $rc"
 [ -f "$repo/verify-ran" ] || fail "stored Verify command was not executed in repo"
-"$task" --repo "$repo" status | grep -Fq 'status: active' ||
-  fail "failed verification marked task verified"
+status_out="$("$task" --repo "$repo" status)"
+grep -Fq 'status: active' <<<"$status_out" ||
+  fail "failed verification marked task verified: $status_out"
 grep -Fq 'exit: 7' "$repo/.oms/task/current.md" || fail "failed exit evidence missing"
 grep -Fq 'duration_seconds:' "$repo/.oms/task/current.md" || fail "timing evidence missing"
 
 "$task" --repo "$repo" update --verify 'printf passed > verify-passed' >/dev/null
 "$task" --repo "$repo" verify >/dev/null
 [ -f "$repo/verify-passed" ] || fail "passing Verify command did not run"
-"$task" --repo "$repo" status | grep -Fq 'status: verified' ||
-  fail "passing verification did not mark task verified"
+status_out="$("$task" --repo "$repo" status)"
+grep -Fq 'status: verified' <<<"$status_out" ||
+  fail "passing verification did not mark task verified: $status_out"
 grep -Fq 'exit: 0' "$repo/.oms/task/current.md" || fail "success exit evidence missing"
 "$task" --repo "$repo" update --verify 'exit 6' >/dev/null
 rc=0
 "$task" --repo "$repo" verify >/dev/null 2>&1 || rc=$?
 [ "$rc" = 6 ] || fail "re-verification failure exit was not propagated: $rc"
-"$task" --repo "$repo" status | grep -Fq 'status: active' ||
-  fail "stale verified status survived a later failed verification"
+status_out="$("$task" --repo "$repo" status)"
+grep -Fq 'status: active' <<<"$status_out" ||
+  fail "stale verified status survived a later failed verification: $status_out"
 
 skip_repo="$TMP/skip"
 mkdir -p "$skip_repo"
 "$task" --repo "$skip_repo" init --goal skip --verify 'exit 9' >/dev/null
 "$task" --repo "$skip_repo" verify --skip-verify-run 'external hardware unavailable' >/dev/null
-"$task" --repo "$skip_repo" status | grep -Fq 'status: active' ||
-  fail "explicit verification skip falsely marked task verified"
+status_out="$("$task" --repo "$skip_repo" status)"
+grep -Fq 'status: active' <<<"$status_out" ||
+  fail "explicit verification skip falsely marked task verified: $status_out"
 grep -Fq 'result: SKIPPED' "$skip_repo/.oms/task/current.md" || fail "skip evidence missing"
 grep -Fq 'reason: external hardware unavailable' "$skip_repo/.oms/task/current.md" ||
   fail "skip reason missing"
@@ -100,8 +105,9 @@ print(hashlib.sha256(json.dumps(
 ')"
 "$plan" --repo "$plan_repo" finish --id t1 --lease-id "$review_lease" \
   --expected-landing-receipt-sha256 "$landing_receipt_sha" >/dev/null
-"$plan" --repo "$plan_repo" show --id t1 | grep -Fq '"state": "done"' ||
-  fail "reviewed landing could not finish"
+status_out="$("$plan" --repo "$plan_repo" show --id t1)"
+grep -Fq '"state": "done"' <<<"$status_out" ||
+  fail "reviewed landing could not finish: $status_out"
 
 # --- verify certifies only the task generation it started on ---------------
 # The command runs long and unlocked; if the packet rotates underneath it,
@@ -130,8 +136,9 @@ wait "$verify_pid" || race_rc=$?
 [ "$race_rc" -ne 0 ] || fail "verify certified a task it did not start on"
 grep -Fq 'rotated' "$TMP/verify-race.out" ||
   fail "verify did not name the rotation: $(cat "$TMP/verify-race.out")"
-"$task" --repo "$race_repo" status | grep -Fq 'status: active' ||
-  fail "the successor inherited a verified status it never earned"
+status_out="$("$task" --repo "$race_repo" status)"
+grep -Fq 'status: active' <<<"$status_out" ||
+  fail "the successor inherited a verified status it never earned: $status_out"
 if grep -Fq 'duration_seconds' "$race_repo/.oms/task/current.md"; then
   fail "the successor inherited the predecessor's verification evidence"
 fi
