@@ -59,6 +59,8 @@ AUTOPILOT_NATIVE_PID=""
 AUTOPILOT_NATIVE_PID_SOURCE=""
 APPROVED_PROPOSAL_PATH=""
 APPROVED_PROPOSAL_SHA=""
+REPLAN_FAILURE=""
+PROPOSAL_GENERATED=0
 review_base_sha=""
 
 PLAN_FROM_SPEC="${OMS_AUTOPILOT_PLAN_FROM_SPEC:-$ROOT/scripts/plan-from-spec.sh}"
@@ -1207,6 +1209,8 @@ propose_tasks() {  # PREFIX MAX
   local max_tasks="$2"
   local args out rc proposal_path proposal_digest continuation continuation_line
 
+  REPLAN_FAILURE=""
+  PROPOSAL_GENERATED=0
   [ -n "$ALLOWED" ] || fail "--allowed is required to generate a proposal"
   ALLOWED="$(normalize_allowed "$ALLOWED")" || fail "--allowed is not a safe path envelope"
   [ -n "$BOUND_SPEC_SHA" ] || BOUND_SPEC_SHA="$(oms_sha256_file "$SPEC")" ||
@@ -1235,6 +1239,11 @@ propose_tasks() {  # PREFIX MAX
   oms_git_assert_plain_index "$REPO" ||
     fail "planner installed hidden Git index flags"
   if [ "$rc" -ne 0 ]; then
+    if grep -Fq 'plan-from-spec: proposal carries no tasks' "$out"; then
+      REPLAN_FAILURE="empty"
+    else
+      REPLAN_FAILURE="failed"
+    fi
     rm -f "$out"
     return "$rc"
   fi
@@ -1289,6 +1298,7 @@ PY
   echo "autopilot: proposal awaits parent-agent review"
   echo "autopilot: parent-agent continuation after review:"
   printf '  %s\n' "$continuation_line"
+  PROPOSAL_GENERATED=1
   return 4
 }
 
@@ -1670,7 +1680,20 @@ if [ "$drive_rc" -ne 0 ]; then
       status --porcelain --untracked-files=all)" ] ||
       park "dirty-before-replan" "preserve or remove foreign work"
     rm -f "$drive_out"
-    propose_tasks r1- "$REPLAN_TASKS" || exit $?
+    replan_rc=0
+    propose_tasks r1- "$REPLAN_TASKS" || replan_rc=$?
+    case "$PROPOSAL_GENERATED:$replan_rc" in
+      1:4) exit 4 ;;
+      *)
+        case "$REPLAN_FAILURE" in
+          empty)
+            park "replan-empty" \
+              "the planner found nothing to add; inspect the acceptance failure and the planner artifact"
+            ;;
+          *) park "replan-failed" "inspect the planner output" ;;
+        esac
+        ;;
+    esac
   fi
   rm -f "$drive_out"
   # Keep the driver's own terminal reason: flattening every park into one

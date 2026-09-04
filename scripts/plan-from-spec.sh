@@ -181,7 +181,7 @@ if (not isinstance(data, dict) or set(data) != top_keys or data.get("schema") !=
     sys.exit(3)
 tasks = data.get("tasks")
 if not isinstance(tasks, list) or not tasks:
-    sys.stderr.write("proposal carries no tasks\n")
+    sys.stderr.write("plan-from-spec: proposal carries no tasks\n")
     sys.exit(3)
 if len(tasks) > int(sys.argv[2]):
     sys.stderr.write("proposal exceeds the task cap (%d)\n" % int(sys.argv[2]))

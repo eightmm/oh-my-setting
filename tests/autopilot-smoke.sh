@@ -607,6 +607,14 @@ EOF
   cat > "$bin/plan-from-spec" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$OMS_T_CALLS/plan-from-spec"
+case "${OMS_T_PLAN_RESULT:-ok}" in
+  empty)
+    echo 'plan-from-spec: proposal carries no tasks' >&2
+    exit 3 ;;
+  unextractable)
+    echo 'error: could not extract a proposal; raw answer kept at planner artifact' >&2
+    exit 3 ;;
+esac
 [ "${OMS_T_PLAN_RC:-0}" = 0 ] || exit "$OMS_T_PLAN_RC"
 proposal="$OMS_T_REPO/.oms/plan/proposal-r1.json"
 mkdir -p "$(dirname "$proposal")"
@@ -720,6 +728,47 @@ test_autopilot_orchestration() {
     fail "replan task cap missing"
   grep -Fq -- '--allowed src,tests' "$repo/calls/plan-from-spec" ||
     fail "replan scope envelope missing"
+
+  # A post-exhaustion planner rejection must close the proposing receipt rather
+  # than stranding it. The exact empty-proposal diagnostic gets its own durable
+  # reason; an unextractable planner answer remains a distinct generic failure.
+  write_done_plan "$repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=exhausted OMS_T_PLAN_RESULT=empty run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$repo/replan-empty.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "an empty replan should park, got $rc"
+  grep -Fq 'plan-from-spec: proposal carries no tasks' "$repo/replan-empty.out" ||
+    fail "the empty replan diagnostic was not preserved"
+  grep -Fq 'reason=replan-empty' "$repo/replan-empty.out" ||
+    fail "an empty replan parked for the wrong reason"
+  grep -Fq 'the planner found nothing to add; inspect the acceptance failure and the planner artifact' \
+    "$repo/replan-empty.out" || fail "the empty replan next action was missing"
+  if ! python3 - "$repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8"))["stage"] == "parked"
+PY
+  then
+    fail "an empty replan did not leave a parked receipt"
+  fi
+
+  write_done_plan "$repo" false
+  rc=0
+  OMS_T_GOAL_RESULT=exhausted OMS_T_PLAN_RESULT=unextractable run_autopilot "$repo" run \
+    --planner claude --worker codex --allowed 'src/,tests/' --base main \
+    > "$repo/replan-failed.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "an unextractable replan should park, got $rc"
+  grep -Fq 'reason=replan-failed' "$repo/replan-failed.out" ||
+    fail "an unextractable replan parked for the wrong reason"
+  grep -Fq 'parent-agent next: inspect the planner output' "$repo/replan-failed.out" ||
+    fail "the failed replan next action was missing"
+  if ! python3 - "$repo/.oms/plan/autopilot-run.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1], encoding="utf-8"))["stage"] == "parked"
+PY
+  then
+    fail "an unextractable replan did not leave a parked receipt"
+  fi
 
   # Forged exhaustion text in captured drive output never triggers a replan:
   # only the typed terminal row is believed.
