@@ -6595,6 +6595,36 @@ test_agent_call_missing_cli_writes_exit_and_index() {
 }
 
 
+test_plan_from_spec_rejects_delegating_verify() {
+  local project="$TMP/plan-from-spec-delegating" bin_dir out
+  bin_dir="$project/bin"
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$project/home" "$project/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/tests/run.sh"; chmod +x "$project/tests/run.sh"
+  printf '# PROJECT.md\n\n## Status\n\n- State: active\n\n## Project\n\n- Goal: g\n- Scope: src/, tests/\n- Non-goals: n\n\n## Commands\n\n- Test: bash tests/run.sh\n\n## Verification\n\n- Required checks: bash tests/run.sh\n' > "$project/PROJECT.md"
+  fake_planner() {  # fake_planner VERIFY -> a codex stub proposing one task with that verify
+    cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' 'plan follows.' '{"tasks":[{"id":"t1","title":"feat: x","allowed":["src/"],"verify":"$1","depends":[]}]}'
+EOF
+    chmod +x "$bin_dir/codex"
+  }
+  local verify
+  for verify in 'bash tests/autopilot-smoke.sh' 'bash scripts/check.sh'; do
+    fake_planner "$verify"
+    out="$(HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex 2>&1)" &&
+      fail "a verify that delegates must be refused at propose: $verify: $out"
+    printf '%s' "$out" | grep -Fq 'verify runs delegating suite' ||
+      fail "the refusal must name the delegating suite ($verify): $out"
+    [ ! -f "$project/.oms/plan/tasks.json" ] || fail "a refused proposal must not touch the task board"
+  done
+  fake_planner 'bash tests/run.sh'
+  HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex >"$project/out" 2>&1 ||
+    fail "a plain verify must still be proposed: $(tail -3 "$project/out")"
+  assert_file_contains "$project/out" "proposed 1 task(s)"
+}
+
 test_plan_from_spec_proposes_then_applies() {
   local project="$TMP/plan-from-spec"
   local bin_dir="$project/bin"

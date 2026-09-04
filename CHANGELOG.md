@@ -243,6 +243,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   evaluator-versus-control-plane agreement without taking authority.
 
 ### Fixed
+- `plan-from-spec` refuses a task verify that would spawn a delegation
+  inside the worker (the goal-drive, autopilot, plan-run, executor, provider
+  integration, model-routing, read-time-expiry and patch-land suites, the
+  full gate, or a `run-smoke-shard --only` test whose body invokes those
+  scripts), naming the suite at propose time instead of letting the worker
+  fail on the delegation depth cap after its whole wall clock.
 - The `oms tick` timer and cron line carry a PATH with the resolved tool
   directories (ntn, codex, gh, claude, agy, `~/.local/bin`): a user manager
   runs with a bare system PATH, so the first unattended sweep could not have
