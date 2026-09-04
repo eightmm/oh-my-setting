@@ -1239,7 +1239,7 @@ propose_tasks() {  # PREFIX MAX
   oms_git_assert_plain_index "$REPO" ||
     fail "planner installed hidden Git index flags"
   if [ "$rc" -ne 0 ]; then
-    if grep -Fq 'plan-from-spec: proposal carries no tasks' "$out"; then
+    if grep -Fqx 'plan-from-spec: proposal carries no tasks' "$out"; then
       REPLAN_FAILURE="empty"
     else
       REPLAN_FAILURE="failed"
