@@ -945,7 +945,7 @@ PY
   cat > "$successor_bin/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-printf '%s\n' '{"tasks":[{"id":"t1","title":"feat: successor core","allowed":["src/"],"verify":"true","depends":[]},{"id":"t2","title":"test: successor coverage","allowed":["tests/"],"verify":"bash tests/autopilot-smoke.sh","depends":["t1"]}]}'
+printf '%s\n' '{"tasks":[{"id":"t1","title":"feat: successor core","allowed":["src/"],"verify":"true","depends":[]},{"id":"t2","title":"test: successor coverage","allowed":["tests/"],"verify":"true","depends":["t1"]}]}'
 EOF
   chmod +x "$successor_bin/codex"
   git -C "$successor_repo" switch -q main
