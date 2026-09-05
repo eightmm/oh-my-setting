@@ -927,18 +927,22 @@ for _ in range(50):
     except OSError:
         break
     time.sleep(0.1)
+else:
+    raise AssertionError("killed runner did not become zombie/absent within 5 seconds")
 last = None
 for _ in range(3):
     last = subprocess.run(
         [sup, "--repo", repo, "reconcile", "--apply"],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    if last.returncode == 0:
+    row = runner.ae.load_projection(Path(repo))[1].get(attempt, {})
+    if last.returncode == 0 and row.get("state") == "blocked" and row.get("reason_code") == "runner_lost":
         break
     time.sleep(2)
 else:
     sys.stderr.write(
-        "reconcile kept failing: %s\n"
-        % (last.stderr or b"").decode("utf-8", "replace")[-500:])
+        "reconcile did not settle: exit=%s job=%r projection=%r stderr=%s\n"
+        % (last.returncode, runner.load_job(Path(repo), attempt), row,
+           (last.stderr or b"").decode("utf-8", "replace")[-500:]))
     sys.exit(1)
 PY
   "$EVENTS" --repo "$REPO" show --attempt "$zombie_lost" --json \

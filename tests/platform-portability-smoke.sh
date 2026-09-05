@@ -142,6 +142,107 @@ out="$(PATH="$uv_stub_bin:$PATH" "$uv_shim" -c 'print("uv-shim-ok")')" ||
   fail "uv-backed shim did not exec the resolved interpreter"
 [ "$out" = "uv-shim-ok" ] || fail "uv-backed shim ran the wrong interpreter: $out"
 
+# The timer's private runtime is version-scoped and never replaces user data.
+runtime_repo="$TMP/runtime-repo"
+runtime_root="$TMP/python-runtime"
+runtime_uv="$TMP/runtime-uv"
+runtime_uv_log="$TMP/runtime-uv.log"
+runtime_version="$($real_python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' | tr -d '\r')"
+mkdir -p "$runtime_repo/scripts/lib"
+cp "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/auto-update.sh" \
+  "$ROOT/scripts/install-tools.sh" "$runtime_repo/scripts/"
+for helper in python-runtime.sh tool-lock.py file-lock.sh poll.sh platform.sh; do
+  cp "$ROOT/scripts/lib/$helper" "$runtime_repo/scripts/lib/"
+done
+"$real_python3" - "$ROOT/tools.lock.json" "$runtime_repo/tools.lock.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+row["python"]["version"] = "%d.%d.%d" % sys.version_info[:3]
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+PY
+cat > "$runtime_uv" <<EOF_UV
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >> "$runtime_uv_log"
+case "\${1:-}" in
+  --version) echo 'uv 0.12.3' ;;
+  python) [ "\${OMS_TEST_UV_FAIL:-0}" != 1 ] ;;
+  venv)
+    for target in "\$@"; do :; done
+    mkdir -p "\$target/bin"
+    printf '%s\n' '#!/usr/bin/env bash' 'exec "$real_python3" "\$@"' > "\$target/bin/python3"
+    chmod +x "\$target/bin/python3"
+    ;;
+  *) exit 2 ;;
+esac
+EOF_UV
+chmod +x "$runtime_uv"
+(
+  export OMS_PYTHON_RUNTIME_ROOT="$runtime_root"
+  # shellcheck source=scripts/lib/file-lock.sh
+  . "$ROOT/scripts/lib/file-lock.sh"
+  # shellcheck source=scripts/lib/python-runtime.sh
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  oms_python_runtime_ensure "$runtime_uv" "$runtime_version" >/dev/null &
+  first_pid=$!
+  oms_python_runtime_ensure "$runtime_uv" "$runtime_version" >/dev/null &
+  second_pid=$!
+  wait "$first_pid" && wait "$second_pid" || fail "concurrent runtime creation failed"
+  [ "$(grep -c '^venv ' "$runtime_uv_log")" = 1 ] || fail "runtime builds were not serialized"
+  ROOT="$runtime_repo"
+  export PYTHONHOME="$TMP/nonexistent-python-home" PYTHONPATH="$TMP/foreign-modules"
+  oms_python_runtime_activate || fail "private runtime activation failed"
+  [ -z "${PYTHONHOME:-}${PYTHONPATH:-}" ] || fail "foreign Python configuration leaked"
+  [ "$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' | tr -d '\r')" = "$runtime_version" ] ||
+    fail "private runtime selected a different interpreter"
+  case "$(command -v python3)" in "$runtime_root/launchers/$runtime_version/python3") ;; *)
+    fail "private runtime did not shadow system Python" ;; esac
+  mkdir -p "$TMP/runtime-module"
+  printf 'value = 42\n' > "$TMP/runtime-module/oms_runtime_probe.py"
+  PYTHONPATH="$TMP/runtime-module" python3 -c 'import oms_runtime_probe; assert oms_runtime_probe.value == 42' ||
+    fail "runtime launcher stripped an explicit OMS module path"
+
+  # A different checkout changing the bootstrap hint must not break rollback.
+  printf '0.0.1\n' > "$runtime_root/current"
+  "$runtime_repo/scripts/python-runtime.sh" run python3 -c 'import sys; assert sys.version_info.major == 3' ||
+    fail "a different current pointer disabled a valid locked environment"
+  if OMS_TEST_UV_FAIL=1 oms_python_runtime_ensure "$runtime_uv" 0.0.2 >/dev/null 2>&1; then
+    fail "failed runtime download was accepted"
+  fi
+  [ -x "$runtime_root/envs/$runtime_version/bin/python3" ] || fail "failed upgrade removed the previous runtime"
+  mkdir -p "$runtime_root/envs/0.0.3.oh-my-setting-stage"
+  printf 'preserve\n' > "$runtime_root/envs/0.0.3.oh-my-setting-stage/user-file"
+  OMS_TEST_UV_FAIL=1 oms_python_runtime_ensure "$runtime_uv" 0.0.3 >/dev/null 2>&1 || true
+  [ -f "$runtime_root/envs/0.0.3.oh-my-setting-stage/user-file" ] || fail "runtime deleted an unowned stage"
+  for child in envs managed launchers bin; do
+    foreign_root="$TMP/foreign-runtime-$child"
+    mkdir -p "$foreign_root" "$TMP/foreign-runtime-target"
+    printf 'schema=1\nowner=oh-my-setting\n' > "$foreign_root/.oh-my-setting-python-runtime"
+    ln -s "$TMP/foreign-runtime-target" "$foreign_root/$child"
+    if OMS_PYTHON_RUNTIME_ROOT="$foreign_root" oms_python_runtime_ensure "$runtime_uv" "$runtime_version" >/dev/null 2>&1; then
+      fail "runtime accepted a symlinked $child directory"
+    fi
+  done
+)
+grep -Fq -- "venv --managed-python --no-project --no-config --python $runtime_version" "$runtime_uv_log" ||
+  fail "private runtime allowed project or system-Python fallback"
+
+# A scheduled bootstrap failure replaces stale success, before any Git mutation.
+printf '%s\n' '#!/usr/bin/env bash' 'echo "error: fixture runtime unavailable" >&2' 'exit 9' \
+  > "$runtime_repo/scripts/python-runtime.sh"
+runtime_state="$TMP/runtime-auto.status"
+printf 'status=up_to_date\n' > "$runtime_state"
+if OMS_AUTO_UPDATE_MANAGED=1 OMS_PYTHON_RUNTIME_ROOT="$TMP/missing-runtime" \
+    OH_MY_SETTING_AUTO_UPDATE_STATE="$runtime_state" \
+    OH_MY_SETTING_AUTO_UPDATE_LOG="$TMP/runtime-auto.log" \
+    "$runtime_repo/scripts/auto-update.sh" apply > "$TMP/runtime-auto.out" 2>&1; then
+  fail "scheduled update ignored runtime setup failure"
+fi
+grep -Fq 'status=failed' "$runtime_state" &&
+  grep -Fq 'fixture runtime unavailable' "$runtime_state" ||
+  fail "scheduled runtime failure left stale success visible"
+
 # Windows CRLF in a value bash reads back — see install-contract.sh for why it
 # breaks paths and state words. Simulated with a python3 that emits CRLF, so the
 # regression is reachable on every platform, not only on a Windows runner.

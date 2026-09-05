@@ -757,6 +757,11 @@ load_user_tool_paths() {
       export PATH="$managed_node_bin:$PATH"
     fi
   fi
+  if [ -f "$DEST/scripts/lib/python-runtime.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$DEST/scripts/lib/python-runtime.sh"
+    oms_python_runtime_activate "$DEST"
+  fi
 }
 
 ensure_python3() {
@@ -924,6 +929,14 @@ trap install_lifecycle_exit EXIT
 # shellcheck disable=SC1091
 . "$DEST/scripts/lib/platform.sh"
 ensure_python3
+
+# From here onward, OMS code runs under its exact uv-managed interpreter.
+# A host Python (or an existing uv interpreter exposed by ensure_python3) is
+# only a bootstrap for validating the lock and creating this private runtime.
+"$DEST/scripts/python-runtime.sh" ensure
+# shellcheck disable=SC1091
+. "$DEST/scripts/lib/python-runtime.sh"
+oms_python_runtime_activate "$DEST"
 
 if [ "$TOOLS_FULL" -eq 1 ]; then
   # Explicit compatibility: the historical all-tools council footprint.

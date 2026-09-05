@@ -2,6 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
+  # shellcheck source=scripts/lib/python-runtime.sh
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  oms_python_runtime_activate_if_present
+fi
 
 # A delegated worker may inspect the last updater state, but fetching,
 # applying, or wiring a future unmarked timer spends parent host authority.
@@ -72,7 +77,7 @@ Modes:
   status  Print the last recorded auto-update state.
   attention
           One-line verdict over intent, wiring, and outcome: disabled,
-          unwired, no-run, failed, overdue, or ok. Shared by status,
+          unwired, no-run, failed, blocked, session-only, overdue, or ok. Shared by status,
           repo-state, inbox, and the resume hook; always exits 0.
   install Register the user-level auto-update trigger (systemd timer/cron).
   remove  Remove the auto-update trigger.
@@ -198,6 +203,15 @@ print_attention() {
   fi
   if [ "$status" = "failed" ]; then
     echo "attention: failed — ${message:-last update run failed}${last_run:+ (last run $last_run)}"
+    return 0
+  fi
+  if [ "$status" = "skipped" ]; then
+    echo "attention: blocked — ${message:-last update run was skipped}${last_run:+ (last run $last_run)}"
+    return 0
+  fi
+  if [ "$systemd_state" = enabled ] &&
+     [ "$(oms_install_autoupdate_linger 2>/dev/null || true)" = no ]; then
+    echo "attention: session-only — user timer can stop after logout (linger disabled)"
     return 0
   fi
   if [ -n "$last_run" ]; then
@@ -631,6 +645,19 @@ case "$MODE" in
     ;;
 esac
 
+if [ "${OMS_AUTO_UPDATE_MANAGED:-0}" = 1 ]; then
+  if ! oms_python_runtime_matches_lock "$ROOT"; then
+    runtime_output="$("$ROOT/scripts/python-runtime.sh" ensure 2>&1)" || {
+      write_state failed "private runtime setup failed: $(auto_update_error_line "$runtime_output" 1)"
+      printf '%s\n' "$runtime_output" >&2
+      exit 1
+    }
+  fi
+  oms_python_runtime_activate || {
+    write_state failed "private runtime activation failed"
+    exit 1
+  }
+fi
 require_git_checkout
 # Both receipt-driven and legacy apply paths mutate the same checkout and
 # install receipt. Resolve schema-2 ownership before taking their shared,

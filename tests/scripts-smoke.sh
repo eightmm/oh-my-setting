@@ -10377,6 +10377,7 @@ test_autoupdate_cron_install_and_uninstall() {
   OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron >"$TMP/autoupdate-default"
   assert_file_contains "$TMP/autoupdate-default" "cron installed (apply)"
+  assert_file_contains "$cron_file" "OMS_AUTO_UPDATE_MANAGED=1"
   grep -Fq 'auto-update.sh" apply' "$cron_file" ||
     fail "default auto-update trigger must schedule apply"
   OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
@@ -23216,6 +23217,7 @@ install-tools
 link
 pre-push-check
 precompact-handoff
+python-runtime
 resume-hook
 skill-router
 syntax-guard-hook

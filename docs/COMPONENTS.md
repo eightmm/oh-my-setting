@@ -637,6 +637,20 @@ second updater. Receipt-owned schema-1 and schema-2 installs both preflight and
 apply through `update.sh`, which remains the canonical rollback-capable install
 transaction. Only receipt-less legacy checkouts retain the configured-upstream
 compatibility path until a successful update creates an install receipt.
+New cron/systemd triggers set `OMS_AUTO_UPDATE_MANAGED=1`: the wrapper selects
+the checkout's exact private uv Python before reading receipts or running the
+transaction. Runtime setup failures write a failed updater state instead of
+leaving an old success visible. New installs provision the runtime before
+provider configuration. Internal `scripts/python-runtime.sh` shares
+versioned environments and launchers under the user's private OMS data folder;
+system Python is used only to bootstrap the pinned uv download/lock parser.
+Provisioning is locked, existing broken/unowned environments are preserved,
+and rollback selects the old checkout's retained Python version. These runtime
+files are outside the checkout and retained on uninstall for safe recovery.
+`attention` reports skipped updates as `blocked` and a logout-dependent user
+timer as `session-only`; systemd's `Persistent=true` alone does not keep the
+user manager alive after logout. Linger is opt-in because it affects every user
+service. Custom systemd drop-ins and private user skills remain user-owned.
 Cron ownership is one exact begin/end marker pair. Install, removal, status,
 and legacy receipt inference share the same `absent | valid | malformed`
 classification; a malformed block is reported but never rewritten, so an

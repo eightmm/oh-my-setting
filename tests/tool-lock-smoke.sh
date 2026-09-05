@@ -426,6 +426,7 @@ python3 - "$LOCK" <<'PY' || fail "tool lock contains floating or incomplete sour
 import json, re, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["schema"] == 2
+assert re.fullmatch(r"\d+\.\d+\.\d+", row["python"]["version"])
 assert re.fullmatch(r"v?\d+\.\d+\.\d+", row["node"]["version"])
 assert row["node"]["platforms"]
 for platform, item in row["node"]["platforms"].items():
@@ -458,6 +459,59 @@ for family in ("antigravity", "gh"):
         assert re.fullmatch(r"[0-9a-f]{128}" if key == "sha512" else r"[0-9a-f]{64}", item[key]), (platform, item)
         assert item["url"].startswith("https://"), item
 PY
+
+# A clean but older user NVM is not a corrupt copy of the newly locked NVM.
+# Preserve it, never source it, and activate the independently verified Node
+# payload directly. This is the reinstall path that used to stop on every NVM
+# lock bump before the receipt and auto-update wiring could be refreshed.
+(
+  export HOME="$TMP/older-nvm-home"
+  export NVM_DIR="$HOME/.nvm"
+  old_bin="$TMP/older-nvm-bin"
+  mkdir -p "$NVM_DIR" "$old_bin"
+  cat > "$NVM_DIR/nvm.sh" <<'EOF_NVM'
+printf 'sourced\n' > "$HOME/nvm-was-sourced"
+EOF_NVM
+  printf '%s\n' '#!/usr/bin/env bash' 'echo v1.0.0' > "$old_bin/node"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo npm-old' > "$old_bin/npm"
+  chmod +x "$old_bin/node" "$old_bin/npm"
+  export PATH="$old_bin:$PATH"
+  # shellcheck source=scripts/install-tools.sh
+  . "$ROOT/scripts/install-tools.sh"
+  install_locked_node() {
+    local target="$NVM_DIR/versions/node/v$NODE_VERSION/bin"
+    mkdir -p "$target"
+    printf '%s\n' '#!/usr/bin/env bash' "echo v$NODE_VERSION" > "$target/node"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo npm-locked' > "$target/npm"
+    chmod +x "$target/node" "$target/npm"
+  }
+  ensure_node >/dev/null || fail "an older NVM blocked locked Node activation"
+  [ "$(command -v node)" = "$NVM_DIR/versions/node/v$NODE_VERSION/bin/node" ] ||
+    fail "locked Node was not activated directly beside an older NVM"
+  [ ! -e "$HOME/nvm-was-sourced" ] ||
+    fail "an older NVM was sourced while activating locked Node"
+)
+
+# A fresh NVM install must bind both the archive and the extracted nvm.sh to
+# their independent lock digests. Keep this behavioral: it catches an unset
+# script digest before a downloaded shell file can be promoted.
+(
+  export HOME="$TMP/fresh-nvm-home"
+  export NVM_DIR="$HOME/.nvm"
+  mkdir -p "$HOME"
+  # shellcheck source=scripts/install-tools.sh
+  . "$ROOT/scripts/install-tools.sh"
+  download_locked() { printf 'archive\n' > "$2"; }
+  extract_locked() {
+    mkdir -p "$3/nvm-${NVM_VERSION#v}"
+    printf '#!/usr/bin/env bash\n' > "$3/nvm-${NVM_VERSION#v}/nvm.sh"
+  }
+  verify_digest() {
+    [ -n "$2" ] || fail "fresh NVM install used an empty lock digest for $4"
+  }
+  install_nvm >/dev/null || fail "fresh locked NVM install failed"
+  [ -f "$NVM_DIR/nvm.sh" ] || fail "fresh locked NVM was not promoted"
+)
 
 # A downloaded installer/archive whose bytes do not match the lock must never
 # reach tar, bash, or another executable. This is the fail-closed regression

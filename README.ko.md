@@ -37,6 +37,14 @@ Claude에는 locked Node가 포함되고 Antigravity에는 포함되지 않는�
 version-only로 표시한다. install/update/repair/uninstall은 사용자 단위 lifecycle
 lock 하나를 공유한다.
 
+설치와 예약 자동업데이트는 `tools.lock.json`에 고정된 전용 uv Python을 쓴다.
+시스템·프로젝트 Python은 초기 bootstrap에만 사용하며 타이머 실행에는 쓰지 않는다.
+설치본의 로컬 수정은 덮어쓰지 않고 `blocked`로 알린다. 개인 지침은 추적되는
+설치 파일 대신 별도 사용자 스킬에 둔다. systemd 설치 시 로그아웃 후 실행 가능
+여부를 표시한다. 필요하면 trigger 설치에 `OH_MY_SETTING_AUTO_UPDATE_LINGER=1`을
+명시하거나 cron을 사용한다. Linger는 이 계정의 다른 user service에도 영향을 주며
+호스트 권한이 필요할 수 있어 기본으로 몰래 활성화하지 않는다.
+
 capability profile은 `core`, `council`, `github`, `notion`, `research`, `hpc`,
 `container`, `remote`, `full`이다. 선택형 설치기는 기존 locked downloader와
 transaction을 그대로 재사용하고, 요청한 profile을 private receipt에 기록해

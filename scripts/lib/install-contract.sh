@@ -668,6 +668,16 @@ oms_install_autoupdate_cron_state() {
 # incident: attention read the updater as wired for days on a unit file whose
 # enablement a gate run had removed, while status called the same file
 # "(disabled)".
+oms_install_autoupdate_linger() {
+  local value
+  value="$(loginctl show-user "$(id -un)" -p Linger 2>/dev/null | tr -d '\r')" || true
+  case "$value" in
+    Linger=yes) printf 'yes\n' ;;
+    Linger=no) printf 'no\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
 oms_install_autoupdate_systemd_state() {
   local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 

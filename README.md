@@ -39,6 +39,15 @@ Existing external CLIs at the exact version are reused and labeled as
 version-only by doctor. Install, update, repair, and uninstall share one
 user-wide lifecycle lock.
 
+Installation and scheduled updates use a private uv-managed Python pinned in
+`tools.lock.json`; system/project Python is only a bootstrap, not the timer's
+interpreter. Automatic updates preserve local checkout edits and report them as
+`blocked`. Keep private policy in user skills outside the tracked install tree.
+Systemd installs report whether logout persistence is available; explicitly set
+`OH_MY_SETTING_AUTO_UPDATE_LINGER=1` when installing the trigger to enable it
+(host permission may be required), or use cron. Linger applies to all this
+account's user services, so OMS does not silently enable it by default.
+
 Capability profiles are `core`, `council`, `github`, `notion`, `research`,
 `hpc`, `container`, `remote`, and `full`. The selective installer reuses the
 existing locked download transactions, records the exact requested profile in a

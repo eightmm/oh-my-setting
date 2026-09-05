@@ -42,6 +42,18 @@ def ignore(_directory, names):
 
 shutil.copytree(source, target, ignore=ignore, ignore_dangling_symlinks=True)
 PY
+# The lifecycle fixture never downloads CPython. Bind its copied lock to the
+# interpreter provided by each CI image; tool-lock-smoke separately pins the
+# release lock's exact production version.
+"$PYTHON" - "$upstream/tools.lock.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["python"]["version"] = "%d.%d.%d" % sys.version_info[:3]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, indent=2)
+    handle.write("\n")
+PY
 
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
@@ -121,6 +133,26 @@ EOF
   } > "$bin/$cli"
   chmod +x "$bin/$cli"
 done
+cat > "$bin/uv" <<'EOF_UV'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  --version) echo 'uv 0.12.3' ;;
+  python) exit 0 ;;
+  venv)
+    target=""
+    for target in "$@"; do :; done
+    mkdir -p "$target/bin"
+    cat > "$target/bin/python3" <<'EOF_PYTHON'
+#!/usr/bin/env bash
+exec "$OMS_TEST_REAL_PYTHON" "$@"
+EOF_PYTHON
+    chmod +x "$target/bin/python3"
+    ;;
+  *) exit 2 ;;
+esac
+EOF_UV
+chmod +x "$bin/uv"
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-} ${3:-}" in
@@ -206,6 +238,8 @@ PY
 } > "$bin/npm"
 chmod +x "$bin/npm"
 export PATH="$bin:$PATH"
+OMS_TEST_REAL_PYTHON="$(command -v "$PYTHON")"
+export OMS_TEST_REAL_PYTHON
 
 notion_data_source_id="ea343dea-4a66-4421-9653-dfc4fe68ed10"
 lifecycle_lock="$OMS_LOCK_DIR/install-lifecycle.lock.d"
@@ -339,8 +373,9 @@ grep -Fq "claude-subagent-statusline.py" "$HOME/.claude/settings.json" ||
   fail "minimal install generated a machine snapshot"
 grep -Fq '# oh-my-setting autoupdate:begin' "$TMP/autoupdate.cron" 2>/dev/null ||
   fail "default install did not register the auto-update trigger"
-grep -Fq 'auto-update.sh" apply' "$TMP/autoupdate.cron" ||
-  fail "default auto-update trigger must be apply mode"
+grep -Fq 'OMS_AUTO_UPDATE_MANAGED=1' "$TMP/autoupdate.cron" &&
+  grep -Fq 'auto-update.sh" apply' "$TMP/autoupdate.cron" ||
+  fail "default auto-update trigger must use the OMS Python runtime in apply mode"
 [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
   fail "forced cron method still wrote a systemd unit"
 oms list > "$TMP/oms-tools.txt"
@@ -611,6 +646,26 @@ for cli in claude codex agy gh ntn uv uvx node; do
   } > "$tools_bin/$cli"
   chmod +x "$tools_bin/$cli"
 done
+cat > "$tools_bin/uv" <<'EOF_UV'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  --version) echo 'uv 0.12.3' ;;
+  python) exit 0 ;;
+  venv)
+    target=""
+    for target in "$@"; do :; done
+    mkdir -p "$target/bin"
+    cat > "$target/bin/python3" <<'EOF_PYTHON'
+#!/usr/bin/env bash
+exec "$OMS_TEST_REAL_PYTHON" "$@"
+EOF_PYTHON
+    chmod +x "$target/bin/python3"
+    ;;
+  *) exit 2 ;;
+esac
+EOF_UV
+chmod +x "$tools_bin/uv"
 python3 - "$ROOT/tools.lock.json" "$npm_prefix" <<'PY'
 import json, stat, sys
 from pathlib import Path

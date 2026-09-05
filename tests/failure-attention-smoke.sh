@@ -254,6 +254,14 @@ case "$out" in
   *) fail "enabled+failed must carry the real error: $out" ;;
 esac
 
+printf 'last_run=%s\nstatus=skipped\nmessage=dirty checkout; local changes preserved\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$au_state"
+out="$(attention env)"
+case "$out" in
+  "attention: blocked"*"dirty checkout"*) ;;
+  *) fail "a dirty-tree skip must require attention, not report ok: $out" ;;
+esac
+
 printf 'last_run=2026-01-01T00:00:00Z\nstatus=up_to_date\n' > "$au_state"
 out="$(attention env)"
 case "$out" in "attention: overdue"*) ;; *) fail "an ancient last_run must be overdue: $out" ;; esac
@@ -285,6 +293,12 @@ ln -s ../oh-my-setting-autoupdate.timer \
   "$au_unit_dir/timers.target.wants/oh-my-setting-autoupdate.timer"
 out="$(attention env)"
 case "$out" in "attention: ok"*) ;; *) fail "an enabled systemd timer must read ok: $out" ;; esac
+linger_bin="$TMP/linger-bin"
+mkdir -p "$linger_bin"
+printf '%s\n' '#!/usr/bin/env bash' 'echo Linger=no' > "$linger_bin/loginctl"
+chmod +x "$linger_bin/loginctl"
+out="$(attention PATH="$linger_bin:$PATH")"
+case "$out" in "attention: session-only"*) ;; *) fail "logout-dependent timer must be explicit: $out" ;; esac
 rm -f "$au_unit_dir/timers.target.wants/oh-my-setting-autoupdate.timer" \
   "$au_unit_dir/oh-my-setting-autoupdate.timer"
 

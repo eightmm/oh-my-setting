@@ -2,6 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
+  # shellcheck source=scripts/lib/python-runtime.sh
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  oms_python_runtime_activate_if_present
+fi
 SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-1}"
 SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
 AUTO_UPDATE_SET="${OH_MY_SETTING_AUTO_UPDATE+x}"
@@ -470,6 +475,13 @@ trap 'handle_update_signal INT' INT
 trap 'handle_update_signal TERM' TERM
 
 reconcile_core() {
+  if [ -f "$ROOT/scripts/lib/python-runtime.sh" ] && [ "${OMS_AUTO_UPDATE_MANAGED:-0}" = 1 ]; then
+    # The target may pin a different Python; select it before refreshing components.
+    # shellcheck source=scripts/lib/python-runtime.sh
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    "$ROOT/scripts/python-runtime.sh" ensure || return 1
+    oms_python_runtime_activate || return 1
+  fi
   if [ "$ROLLBACK" != 1 ] && [ "$current" = "$target" ]; then
     export OMS_INSTALL_PREVIOUS_COMMIT="$RECEIPT_PREVIOUS_COMMIT"
   else

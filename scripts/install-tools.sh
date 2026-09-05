@@ -119,6 +119,14 @@ load_nvm() {
   fi
 }
 
+nvm_script_matches_lock() {
+  local expected actual
+  [ -s "$NVM_DIR/nvm.sh" ] || return 1
+  expected="$(tool_lock_get nvm.script_sha256)"
+  actual="$(sha256_file "$NVM_DIR/nvm.sh" 2>/dev/null || true)"
+  [ -n "$actual" ] && [ "$actual" = "$expected" ]
+}
+
 extract_locked() {  # ARCHIVE SOURCE DESTINATION
   mkdir -p "$3"
   python3 "$TOOL_LOCK_HELPER" --lock "$TOOL_LOCK" extract \
@@ -166,10 +174,9 @@ install_nvm() {
   local url expected script_expected tmp extracted stage marker
   script_expected="$(tool_lock_get nvm.script_sha256)"
   if [ -s "$NVM_DIR/nvm.sh" ]; then
-    verify_digest sha256 "$script_expected" "$NVM_DIR/nvm.sh" "existing nvm.sh" || {
-      echo "error: refusing to source an nvm.sh that does not match tools.lock.json" >&2
-      exit 1
-    }
+    if ! nvm_script_matches_lock; then
+      echo "note: preserving existing NVM at $NVM_DIR; its nvm.sh is not the locked release, so OMS will not source it" >&2
+    fi
     return 0
   fi
 
@@ -307,13 +314,25 @@ install_locked_node() {
 }
 
 activate_locked_node() {
-  load_nvm
-  if ! has_cmd nvm; then
-    echo "error: nvm is not loadable after setup" >&2
-    exit 1
+  local managed_node_bin="$NVM_DIR/versions/node/v$NODE_VERSION/bin"
+  if nvm_script_matches_lock; then
+    load_nvm
+    if ! has_cmd nvm; then
+      echo "error: locked nvm is not loadable after setup" >&2
+      exit 1
+    fi
+    nvm alias default "$NODE_VERSION"
+    nvm use default
+  else
+    # The Node archive is independently version- and digest-verified. Use its
+    # stable path without executing or replacing a user's older/foreign NVM.
+    export PATH="$managed_node_bin:$PATH"
+    hash -r
   fi
-  nvm alias default "$NODE_VERSION"
-  nvm use default
+  has_cmd node && has_cmd npm && [ "$(node_exact_version)" = "$NODE_VERSION" ] || {
+    echo "error: locked Node v$NODE_VERSION was installed but not activated" >&2
+    exit 1
+  }
 }
 
 ensure_node() {
@@ -1166,13 +1185,15 @@ install_gh() {
 
 ensure_uv() {
   local platform version url expected archive tmp source_uv source_uvx
-  local target_uv target_uvx source_uv_expected source_uvx_expected
-  export PATH="$HOME/.local/bin:$PATH"
+  local target_uv target_uvx source_uv_expected source_uvx_expected uv_bin_dir
+  uv_bin_dir="${OMS_UV_BIN_DIR:-$HOME/.local/bin}"
+  export PATH="$uv_bin_dir:$HOME/.local/bin:$PATH"
+  mkdir -p "$uv_bin_dir"
 
   platform="$(locked_platform)"
   case "$platform" in
-    windows-*) target_uv="$HOME/.local/bin/uv.exe"; target_uvx="$HOME/.local/bin/uvx.exe" ;;
-    *) target_uv="$HOME/.local/bin/uv"; target_uvx="$HOME/.local/bin/uvx" ;;
+    windows-*) target_uv="$uv_bin_dir/uv.exe"; target_uvx="$uv_bin_dir/uvx.exe" ;;
+    *) target_uv="$uv_bin_dir/uv"; target_uvx="$uv_bin_dir/uvx" ;;
   esac
   version="$(tool_lock_get uv.version)"
   if direct_locked_command_is_current uv "$target_uv" "$version" &&
@@ -1198,14 +1219,14 @@ ensure_uv() {
     windows-*)
       source_uv="$(find "$tmp/extracted" -type f -name uv.exe -print | sed -n '1p')"
       source_uvx="$(find "$tmp/extracted" -type f -name uvx.exe -print | sed -n '1p')"
-      target_uv="$HOME/.local/bin/uv.exe"
-      target_uvx="$HOME/.local/bin/uvx.exe"
+      target_uv="$uv_bin_dir/uv.exe"
+      target_uvx="$uv_bin_dir/uvx.exe"
       ;;
     *)
       source_uv="$(find "$tmp/extracted" -type f -name uv -print | sed -n '1p')"
       source_uvx="$(find "$tmp/extracted" -type f -name uvx -print | sed -n '1p')"
-      target_uv="$HOME/.local/bin/uv"
-      target_uvx="$HOME/.local/bin/uvx"
+      target_uv="$uv_bin_dir/uv"
+      target_uvx="$uv_bin_dir/uvx"
       ;;
   esac
   [ -n "$source_uv" ] && [ -f "$source_uv" ] &&

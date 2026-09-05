@@ -34,6 +34,7 @@ Environment:
   OH_MY_SETTING_AUTO_UPDATE_MODE=apply|check
   OH_MY_SETTING_AUTO_UPDATE_METHOD=auto|systemd|cron
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE=/path  Test-only cron file override.
+  OH_MY_SETTING_AUTO_UPDATE_LINGER=1  Enable this user's logout-persistent timer.
   OH_MY_SETTING_DRY_RUN=1
 EOF
 }
@@ -81,6 +82,7 @@ Description=oh-my-setting auto-update
 Type=oneshot
 Environment=OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS
 Environment=OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN
+Environment=OMS_AUTO_UPDATE_MANAGED=1
 ExecStart="$ROOT/scripts/auto-update.sh" $MODE
 EOF
   cat > "$TIMER_FILE" <<'EOF'
@@ -98,6 +100,17 @@ EOF
 
   systemctl --user daemon-reload
   systemctl --user enable --now oh-my-setting-autoupdate.timer >/dev/null
+  if [ "${OH_MY_SETTING_AUTO_UPDATE_LINGER:-0}" = 1 ]; then
+    loginctl --no-ask-password enable-linger "$(id -un)" || {
+      echo "error: timer installed, but logout persistence could not be enabled" >&2
+      return 1
+    }
+  fi
+  case "$(oms_install_autoupdate_linger)" in
+    yes) echo "auto-update persistence: logout supported" ;;
+    no) echo "warn: user timer can stop after logout; enable linger or use cron" >&2 ;;
+    *) echo "warn: could not verify user timer logout persistence" >&2 ;;
+  esac
   echo "auto-update trigger: systemd timer installed ($MODE)"
 }
 
@@ -106,7 +119,7 @@ install_cron() {
   local filtered
   local line
   local state
-  line="17 6 * * * OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
+  line="17 6 * * * OMS_AUTO_UPDATE_MANAGED=1 OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
 
   current="$(mktemp)" || return
   filtered="$(mktemp)" || {

@@ -157,7 +157,7 @@ def validate(lock: Dict[str, Any]) -> None:
         raise LockError("unsupported tool lock schema")
     exact_keys(
         lock,
-        ("schema", "updated_at", "node", "nvm", "uv", "npm", "antigravity", "gh"),
+        ("schema", "updated_at", "python", "node", "nvm", "uv", "npm", "antigravity", "gh"),
         "tool lock",
     )
     updated_at = text(lock.get("updated_at"), "updated_at")
@@ -167,6 +167,9 @@ def validate(lock: Dict[str, Any]) -> None:
         raise LockError("updated_at must be a real YYYY-MM-DD date") from exc
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated_at):
         raise LockError("updated_at must be YYYY-MM-DD")
+    python = mapping(lock.get("python"), "python")
+    exact_keys(python, ("version",), "python")
+    version(python.get("version"), "python.version")
     node = mapping(lock.get("node"), "node")
     exact_keys(node, ("version", "platforms"), "node")
     node_version = version(node.get("version"), "node.version")
