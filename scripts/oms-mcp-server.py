@@ -68,6 +68,14 @@ MAX_ARGUMENT_BYTES = 16 * 1024
 PROJECT_GRAPH_UI_URI = "ui://oms/project-graph/v1.html"
 MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
 UI_MODEL_LIMIT = 256 * 1024
+# Discovery is fixed for this process; it is not a permission boundary.
+TOOL_PROFILE = os.environ.get("OMS_MCP_TOOL_PROFILE", "core")
+CORE_TOOLS = frozenset({
+    "oms_inbox", "oms_repo_state", "oms_handoffs", "oms_handoff_show",
+    "oms_journal", "oms_peer_start", "oms_peer_result",
+    "oms_peer_operations", "oms_project_graph_render", "oms_project_graph_query",
+    "oms_project_graph_trace", "oms_project_graph_affected",
+})
 
 # Peer consultation: which front-door verb each kind runs, and where that verb
 # writes its answer artifacts. Started detached, polled from disk.
@@ -671,6 +679,8 @@ TOOLS = [
 def tool_definitions() -> list[dict]:
     defs = []
     for tool in TOOLS:
+        if TOOL_PROFILE == "core" and tool["name"] not in CORE_TOOLS:
+            continue
         definition = {
             "name": tool["name"],
             "description": tool["description"],
@@ -1771,6 +1781,9 @@ def handle(message: dict):
 
 
 def main() -> int:
+    if TOOL_PROFILE not in ("core", "full"):
+        print("error: OMS_MCP_TOOL_PROFILE must be core or full", file=sys.stderr)
+        return 2
     stream = sys.stdin.buffer
     while True:
         raw = stream.readline(MAX_REQUEST_BYTES + 1)

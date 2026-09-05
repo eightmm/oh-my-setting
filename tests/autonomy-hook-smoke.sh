@@ -52,6 +52,48 @@ for prompt, expected in cases.items():
 PY
 }
 
+test_peer_tail_is_bounded() {
+  python3 - "$ROOT/scripts/lib/hook_state.py" <<'PY'
+import importlib.util
+import io
+import json
+import sys
+from datetime import datetime, timezone
+
+spec = importlib.util.spec_from_file_location("hook_state", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+stamp = datetime.now(timezone.utc)
+def row(session, hook="SessionStart"):
+    return json.dumps({"session": session, "hook": hook, "ts": stamp.isoformat()}).encode() + b"\n"
+
+class Tail(io.BytesIO):
+    read_bytes = 0
+    def read(self, size=-1):
+        result = super().read(size)
+        self.read_bytes += len(result)
+        assert self.read_bytes <= 262144, "peer advisory read more than 256 KiB"
+        return result
+    def readlines(self, *args):
+        raise AssertionError("peer advisory read the entire event history")
+
+class Events:
+    def __init__(self, data):
+        self.data = data
+    def open(self, *args, **kwargs):
+        return Tail(self.data)
+
+# Recent tail must survive a huge historical row and an unterminated last row.
+history = row("old") + b"x" * 1048576 + b"\n"
+data = history + row("ended") + row("ended", "SessionEnd") + row("live").rstrip(b"\n")
+assert set(module.live_peer_sessions(Events(data), "me", stamp.timestamp())) == {"live"}
+# Keep the existing row window even when many tiny records fit the byte bound.
+data = row("outside") + b"{}\n" * 199 + row("inside")
+assert set(module.live_peer_sessions(Events(data), "me", stamp.timestamp())) == {"inside"}
+assert module.live_peer_sessions(Events(b""), "me", stamp.timestamp()) == {}
+PY
+}
+
 test_verification_disclosure_boundaries() {
   python3 - "$ROOT/scripts/lib/hook_state.py" <<'PY'
 import importlib.util
@@ -253,6 +295,7 @@ test_route_is_hermetic_to_inherited_harness_session() {
 }
 
 test_classifier_boundaries
+test_peer_tail_is_bounded
 test_verification_disclosure_boundaries
 test_explicit_goal_rotation
 test_fail_ledger_hook_resolves_on_success

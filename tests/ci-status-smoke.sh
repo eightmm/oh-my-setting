@@ -294,6 +294,26 @@ test_completed_run_for_head_is_the_current_result() {
   out="$(bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json)"
   grep -Fq '"ci-failed"' <<<"$out" ||
     fail "a red run for HEAD stays a P1 item: $out"
+
+  # No installed timer and journal disabled: Stop still publishes CI through
+  # the detached fallback, independently of the Notion feature flag.
+  repo="$TMP/stop-ci"
+  git_init "$repo"
+  git -C "$repo" remote add origin https://github.com/example/fixture.git
+  head="$(git -C "$repo" rev-parse HEAD)"
+  # shellcheck source=scripts/lib/work-journal.sh
+  . "$ROOT/scripts/lib/work-journal.sh"
+  out="$(OMS_WORK_JOURNAL=0 OMS_T_GH_SHA="$head" OMS_GH_BIN="$gh" \
+    OMS_CI_TICK=1 work_journal_defer_finish "$repo")"
+  [ -z "$out" ] || fail "deferred CI publisher leaked Stop output"
+  local tries=0
+  while [ ! -s "$repo/.oms/ci.jsonl" ] && [ "$tries" -lt 100 ]; do
+    sleep 0.02
+    tries=$((tries + 1))
+  done
+  [ -s "$repo/.oms/ci.jsonl" ] || fail "Stop did not publish CI without a timer"
+  oms_with_file_lock "$repo/.oms/hooks/ci-tick" true
+  [ "$(ci_json_state "$repo")" = current ] || fail "deferred CI should record HEAD"
 }
 
 test_repo_without_upstream_keeps_the_recorded_vs_head_signal() {

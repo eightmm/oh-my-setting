@@ -74,18 +74,24 @@ count="$(wc -l < "$repo/.oms/work-journal/events.jsonl" | tr -d ' ')"
 [ -f "$repo/.oms/work-journal/weekly/2026-W31.md" ] ||
   fail "weekly summary was not materialized"
 
-# Durable observations stay local while the agent works. The top-level finish
-# boundary owns the only remote sync and publishes only today's daily summary.
+# Prompt/Stop remain local even with a configured mirror. Periodic maintenance
+# and explicit sync own network work.
 fake_boundary_journal="$TMP/fake-boundary-journal.py"
 boundary_calls="$TMP/boundary-calls"
 cat > "$fake_boundary_journal" <<'PY'
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1] == "sync":
-    with pathlib.Path(os.environ["OMS_TEST_BOUNDARY_CALLS"]).open("a") as handle:
+    calls = pathlib.Path(os.environ["OMS_TEST_BOUNDARY_CALLS"])
+    with calls.open("a") as handle:
         handle.write(" ".join(sys.argv[1:]) + "\n")
+    deadline = time.monotonic() + 5
+    while not calls.with_suffix(".release").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    calls.with_suffix(".completed").touch()
 PY
 access_name="OMS_WORK_JOURNAL_NOTION_"'TOKEN'
 export "$access_name=test-credential"
@@ -95,10 +101,35 @@ export OMS_TEST_BOUNDARY_CALLS="$boundary_calls"
 work_journal_observe "$repo" run-ledger "$row"
 [ ! -e "$boundary_calls" ] || fail "work-time observation called the remote mirror"
 work_journal_finish "$repo"
-[ "$(wc -l < "$boundary_calls" | tr -d ' ')" = 1 ] ||
-  fail "finish boundary should perform exactly one remote sync"
+work_journal_prompt_tick "$repo"
+[ ! -e "$boundary_calls" ] || fail "prompt or Stop called the remote mirror"
+# The deferred fallback must survive captured Stop output and return before
+# its remote work completes, including when no tick timer is installed.
+OMS_HARNESS_CHILD=1 work_journal_defer_finish "$repo"
+[ ! -e "$boundary_calls" ] || fail "a child scheduled remote publishing"
+deferred_out="$(OMS_CI_TICK=0 work_journal_defer_finish "$repo")"
+[ -z "$deferred_out" ] || fail "deferred publisher leaked output"
+i=0
+while [ ! -e "$boundary_calls" ] && [ "$i" -lt 100 ]; do
+  sleep 0.02
+  i=$((i + 1))
+done
+[ -e "$boundary_calls" ] || fail "deferred publisher never started"
+[ ! -e "$boundary_calls.completed" ] || fail "Stop waited for remote publishing"
+touch "$boundary_calls.release"
+i=0
+while [ ! -e "$boundary_calls.completed" ] && [ "$i" -lt 100 ]; do
+  sleep 0.02
+  i=$((i + 1))
+done
+[ -e "$boundary_calls.completed" ] || fail "deferred publisher never completed"
+oms_with_file_lock "$repo/.oms/work-journal/notion-sync" true
+grep -Fq -- '--force --today' "$boundary_calls" || fail "deferred sync lost its daily scope"
+work_journal_sync "$repo" --force --today
+[ "$(wc -l < "$boundary_calls" | tr -d ' ')" = 2 ] ||
+  fail "explicit sync should still perform one additional remote sync"
 grep -Fq -- '--force --today' "$boundary_calls" ||
-  fail "finish boundary did not limit sync to today's daily summary"
+  fail "explicit sync dropped its daily scope"
 unset "$access_name"
 unset OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID
 unset OMS_WORK_JOURNAL_PYTHON

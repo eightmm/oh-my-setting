@@ -3,6 +3,15 @@
 Use `oms peer-review` to judge an existing diff without writing to it. The
 parent owns fixes, landing, verification, commit, push, and release.
 
+For an authorized release, finish focused checks and local commits, then use
+`oms land` to run the full gate once, push the same unchanged HEAD, and follow
+CI. It already owns that sequence; do not precede it with another full gate or
+add a separate verification-cache authority. A direct Git push retains the
+installed hook. `install-hooks.sh --quick` is only appropriate when required
+branch-protection checks enforce the full CI gate; mere workflow presence is
+not that guarantee. Hook installation resolves Git's hooks path, including
+linked worktrees and explicit `core.hooksPath` configuration.
+
 Before calling reviewers, inspect `git status --short`, the relevant diff or
 explicit base, and any existing verification result. Send the goal, contract,
 changed files, known risks, and only enough context to judge the patch. Use

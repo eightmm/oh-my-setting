@@ -106,7 +106,7 @@ PY
 
     # Python supplies the portable timeout missing from stock macOS userland.
     # A timeout, red run, or transient network error is retried at a later
-    # boundary and never blocks the prompt/Stop hook that called tick.
+    # maintenance pass without holding a conversation hook open.
     python3 - "$timeout_seconds" "$ROOT/scripts/ci-status.sh" "$branch" <<'PY' || true
 import os, subprocess, sys
 timeout, script, branch = int(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -126,9 +126,8 @@ except (OSError, subprocess.TimeoutExpired):
     pass
 PY
   }
-  # Prompt and Stop hooks must never queue behind one another. The first tick
-  # owns the short network budget; concurrent boundaries skip immediately and
-  # let the next natural boundary retry.
+  # Concurrent maintenance calls skip immediately instead of queueing behind
+  # network I/O. The next scheduled pass can retry.
   oms_try_file_lock "$marker" ci_tick_locked || true
   exit 0
 fi

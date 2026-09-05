@@ -6,6 +6,25 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Simplified
+- Prompt and Stop hooks retain local journal capture without waiting on Notion
+  or CI network work. Stop defers a bounded publisher for hosts without a timer;
+  the maintenance tick handles backlog/current-day publishing and CI collection.
+  Both reuse existing sync locks; open weekly reports stay local.
+- Daily failure hints reuse the canonical actionable verdict. Peer presence
+  reads at most 256 KiB of recent events instead of loading the entire ledger.
+- Maintenance reads the thread catalog once per repository and preserves the
+  current conversation even when its file is old.
+- MCP discovery defaults to 12 core tools, including the graph viewer. Set
+  `OMS_MCP_TOOL_PROFILE=full` for all 26; existing direct tool calls retain their
+  contracts. Core discovery is approximately 45% smaller in serialized bytes.
+- Execution Graph commits use goal-drive's exact patch commit and durable
+  recovery transaction instead of independently staging changed filenames.
+- Git hook installation supports linked worktrees and `core.hooksPath`.
+  Release guidance uses `oms land` for one full gate followed by the unchanged
+  committed HEAD; direct pushes retain full verification unless protected CI
+  permits an explicitly selected quick hook.
+
 ### Added
 - `oms land` is sibling-aware: a live autopilot run (`proposing`, `proposal-review`,
   `driving`) in another worktree of the same repository is reported at intake and

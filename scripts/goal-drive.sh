@@ -42,6 +42,10 @@ FALLBACK_MODEL=""
 REASONING_EFFORT=auto
 PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
 EXPECTED_REF=""
+COMMIT_TASK=""
+COMMIT_MESSAGE=""
+COMMIT_PATCH_SHA=""
+COMMIT_RECEIPT_SHA=""
 
 usage() {
   cat <<'EOF'
@@ -78,6 +82,9 @@ it parked; a later run whose acceptance passes resolves those park rows.
   --provider-timeout DUR Worker wall-clock timeout (for example 15m).
   --expected-ref REF  Parent-bound full work ref (refs/heads/...). Goal-drive
                       refuses acceptance, delegation, and commit on another ref.
+  --commit-task ID  Commit only an already-landed task through the same exact
+                    commit intent and recovery transaction. No worker or acceptance.
+  --commit-message TEXT  Optional subject for --commit-task.
 EOF
 }
 
@@ -104,11 +111,14 @@ while [ "$#" -gt 0 ]; do
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires a value"; REASONING_EFFORT="$2"; shift 2 ;;
     --provider-timeout) [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"; PROVIDER_TIMEOUT="$2"; shift 2 ;;
     --expected-ref) [ "$#" -ge 2 ] || fail "--expected-ref requires a ref"; EXPECTED_REF="$2"; shift 2 ;;
+    --commit-task) [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--commit-task requires an id"; COMMIT_TASK="$2"; shift 2 ;;
+    --commit-message) [ "$#" -ge 2 ] || fail "--commit-message requires text"; COMMIT_MESSAGE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
+[ -n "$COMMIT_TASK" ] || [ -z "$COMMIT_MESSAGE" ] || fail "--commit-message requires --commit-task"
 [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
   fail "goal-drive is parent-only; a harness child cannot commit reviewed work"
 oms_model_validate_name "$MODEL" || exit $?
@@ -244,7 +254,7 @@ EOF
 }
 
 ACCEPT_CMD="$(read_accept_cmd)"
-[ -n "$ACCEPT_CMD" ] ||
+[ -n "$COMMIT_TASK" ] || [ -n "$ACCEPT_CMD" ] ||
   fail "plan has no acceptance command; set one: agent-plan init --goal ... --accept CMD"
 PLAN_NONEMPTY="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null | \
   python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("nonempty") else "")' | tr -d '\r')" ||
@@ -1139,7 +1149,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
   load_task_receipt "$task" ||
     park "missing-plan-task" "the reviewed task disappeared; inspect plan state"
   [ "$TASK_RECEIPT_ID" = "$task" ] || park "invalid-review-receipt" "the reviewed task id changed"
-  [ "$TASK_RECEIPT_STATE" = review ] ||
+  [ "$TASK_RECEIPT_STATE" = review ] || { [ "$COMMIT_TASK" = "$task" ] && [ "$TASK_RECEIPT_STATE" = "done" ]; } ||
     park "invalid-review-receipt" "task $task is $TASK_RECEIPT_STATE, not review"
   [ "$TASK_RECEIPT_PROVIDER" = "$PROVIDER" ] ||
     park "invalid-review-receipt" "task $task was reviewed by $TASK_RECEIPT_PROVIDER, not $PROVIDER"
@@ -1169,7 +1179,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
     park "head-moved" "HEAD moved before the reviewed patch could be frozen"
   [ "$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" = "$head_ref" ] ||
     park "intent-ref-moved" "the checked-out branch changed before the reviewed patch could be frozen"
-  git -C "$REPO" apply --check --binary "$source_patch" >/dev/null 2>&1 ||
+  [ -n "$COMMIT_TASK" ] || git -C "$REPO" apply --check --binary "$source_patch" >/dev/null 2>&1 ||
     park "review-patch-base-mismatch" "the reviewed patch does not apply to its frozen base"
   INTENT_TASK="$task"
   INTENT_BASE="$base"
@@ -1240,7 +1250,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
   INTENT_PATCH_SHA="$(oms_sha256_file "$frozen_abs")"
   [ "$(oms_sha256_file "$TASK_RECEIPT_PATCH")" = "$INTENT_PATCH_SHA" ] ||
     park "review-patch-changed" "the reviewed patch changed while it was being frozen"
-  git -C "$REPO" apply --check --binary "$frozen_abs" >/dev/null 2>&1 ||
+  [ -n "$COMMIT_TASK" ] || git -C "$REPO" apply --check --binary "$frozen_abs" >/dev/null 2>&1 ||
     park "review-patch-base-mismatch" "the frozen patch does not apply to its recorded base"
   paths_json="$(intent_patch_paths_json "$frozen_abs")" ||
     park "no-admitted-patch" "the reviewed patch has no parseable paths"
@@ -1249,6 +1259,13 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
     park "invalid-review-receipt" "the task review changed while its patch was being frozen"
   [ "$TASK_RECEIPT_SHA" = "$receipt_sha" ] ||
     park "invalid-review-receipt" "the task review changed while its patch was being frozen"
+  if [ -n "$COMMIT_TASK" ]; then
+    [ "$TASK_RECEIPT_SHA" = "$COMMIT_RECEIPT_SHA" ] && [ "$INTENT_PATCH_SHA" = "$COMMIT_PATCH_SHA" ] ||
+      park "invalid-commit-receipt" "the completed landing changed while freezing its commit"
+    intent_tree_matches "$frozen_abs" ||
+      park "commit-mismatch" "working-tree paths or bytes differ from the landed patch"
+    [ -z "$COMMIT_MESSAGE" ] || INTENT_TITLE="$COMMIT_MESSAGE"
+  fi
   intent_write prepared "reviewed-patch-frozen"
 }
 
@@ -1666,11 +1683,14 @@ intent_commit_already_present() {
       break
     done)"
   current_head="$(git -C "$REPO" rev-parse "$search_ref" 2>/dev/null | tr -d '\r')"
-  if [ -n "$candidate" ] && intent_worktree_matches_head; then
+  if [ -n "$candidate" ]; then
     if [ "$current_head" != "$candidate" ]; then
-      [ -z "$(git_status_porcelain)" ] && return 0
+      intent_worktree_matches_head && [ -z "$(git_status_porcelain)" ] && return 0
       return 1
     fi
+    # After ref CAS, a newly added file is still untracked by the old index.
+    # Compare through the private expected-tree index before aligning it.
+    intent_tree_matches "$patch_abs" || return 1
     intent_align_index "$expected_tree" || align_rc=$?
     [ "$align_rc" -eq 0 ] || return 2
     [ -z "$(git_status_porcelain)" ] && return 0
@@ -1755,6 +1775,8 @@ reconcile_commit_intent() {
   open="$(latest_open_intent)"
   [ -n "$open" ] || return 0
   load_intent "$open"
+  [ -z "$COMMIT_TASK" ] || [ "$INTENT_TASK" = "$COMMIT_TASK" ] ||
+    park "intent-task-mismatch" "another task has an open commit intent; this request cannot advance it"
   [ "$INTENT_PROVIDER" = "$PROVIDER" ] ||
     park "intent-provider-mismatch" "resume with --to $INTENT_PROVIDER or inspect the recorded intent"
   patch_abs="$(intent_patch_file)" || {
@@ -1782,6 +1804,8 @@ reconcile_commit_intent() {
     abandon_invalid_intent "task-receipt-missing"
     return 0
   }
+  [ -z "$COMMIT_TASK" ] || { [ "$TASK_RECEIPT_STATE" = "done" ] && [ "$INTENT_PHASE" != repairing ]; } ||
+    park "intent-task-mismatch" "commit-only recovery cannot land or repair unfinished work"
   [ "$TASK_RECEIPT_ID" = "$INTENT_TASK" ] || {
     abandon_invalid_intent "task-id-receipt-mismatch"
     return 0
@@ -1803,7 +1827,7 @@ reconcile_commit_intent() {
       done) ;;
       *) park "landing-recovery-incomplete" "inspect the outstanding patch-land receipt; the outer intent remains open" ;;
     esac
-  elif [ "$TASK_RECEIPT_STATE" = "done" ] &&
+  elif [ -z "$COMMIT_TASK" ] && [ "$TASK_RECEIPT_STATE" = "done" ] &&
     git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 &&
     intent_tree_matches "$patch_abs"; then
     recover_landing_receipts ||
@@ -1969,6 +1993,52 @@ reconcile_commit_intent() {
 # precisely the liveness bug this journal closes.
 guard_git_authority
 guard_expected_ref
+if [ -n "$COMMIT_TASK" ]; then
+  # Adopt only a completed patch-land receipt from this exact task lineage.
+  # Its base/patch are durable before we freeze the outer commit intent.
+  load_task_receipt "$COMMIT_TASK" || fail "landed task is unreadable"
+  [ "$TASK_RECEIPT_STATE" = "done" ] || fail "--commit-task requires a done task"
+  PROVIDER="$TASK_RECEIPT_PROVIDER"
+  COMMIT_RECEIPT_SHA="$TASK_RECEIPT_SHA"
+  landed_receipt="$(python3 - "$ROOT/scripts/lib" "$REPO" "$COMMIT_TASK" <<'PY' | tr -d '\r'
+import hashlib, pathlib, re, runpy, sys
+sys.path.insert(0, sys.argv[1])
+from oms_runtime.common import read_json, read_jsonl
+repo = pathlib.Path(sys.argv[2])
+plan = read_json(repo / ".oms/plan/tasks.json")
+task = plan["tasks"][sys.argv[3]]
+digest = runpy.run_path(str(pathlib.Path(sys.argv[1]) / "plan-receipt.py"))["digest"](task)
+patch = pathlib.Path(task["patch"])
+if not patch.is_absolute():
+    patch = repo / patch
+if patch.is_symlink() or not patch.is_file() or not patch.resolve().is_relative_to(repo.resolve()):
+    raise SystemExit("unsafe landed patch")
+patch_sha = hashlib.sha256(patch.read_bytes()).hexdigest()
+rows = [row for row in read_jsonl(repo / ".oms/landings.jsonl")
+        if row.get("event") == "complete" and row.get("task") == task["id"]
+        and row.get("plan_id") == plan.get("plan_id")
+        and row.get("lease") == task.get("review_lease_id")
+        and row.get("plan_done_receipt_sha") == digest and row.get("patch_sha") == patch_sha]
+if not rows or not re.fullmatch(r"[0-9a-f]{40,64}", str(rows[-1].get("base_sha", ""))):
+    raise SystemExit("no exact completed landing receipt")
+print(rows[-1]["base_sha"] + ":" + patch_sha)
+PY
+)" || fail "landed task receipt is invalid"
+  landed_base="${landed_receipt%%:*}"
+  COMMIT_PATCH_SHA="${landed_receipt#*:}"
+  load_task_receipt "$COMMIT_TASK" || fail "landed task changed during receipt validation"
+  [ "$TASK_RECEIPT_SHA" = "$COMMIT_RECEIPT_SHA" ] || fail "landed task changed during receipt validation"
+  reconcile_commit_intent
+  if [ -z "$(git_status_porcelain)" ]; then
+    exit 0
+  fi
+  head_ref="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null | tr -d '\r')" ||
+    fail "--commit-task requires a checked-out work branch"
+  intent_prepare "$COMMIT_TASK" "$TASK_RECEIPT_PATCH" "$landed_base" "$head_ref"
+  intent_write landed "adopted-completed-landing"
+  intent_commit
+  exit 0
+fi
 reconcile_commit_intent
 guard_expected_ref
 

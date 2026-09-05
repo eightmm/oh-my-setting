@@ -165,8 +165,12 @@ even after the plan's `next` moved on. Agent nodes call
 `plan-run --id TASK [--land] [--context-pack FILE]`; a node's `context`
 field turns into a project-graph pack that reaches the worker brief as
 orientation only. The bundled specs land, then `exec commit --binding
-work_item` commits exactly the landed patch (the tree must otherwise be
-clean), then re-run acceptance. `--jobs N` runs a wave concurrently only for
+work_item` calls goal-drive's bounded `--commit-task` mode, which freezes the
+exact completed landing receipt and uses the same commit intent, private tree,
+index lock, ref compare-and-set, and crash recovery as goal-drive. Extra bytes
+on a landed path and unrelated staged work are refused; repository commit hooks
+do not run. This mode cannot delegate, land, repair, or advance another task.
+The graph then re-runs acceptance. `--jobs N` runs a wave concurrently only for
 disjoint explicit tasks. The run store under `.oms/graph/runs/<run-id>/`
 (frozen spec, append-only events, derived projection) is what `resume`
 reads — never conversation memory; a crashed node is reconciled against the

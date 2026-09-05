@@ -54,7 +54,7 @@ test_mcp_server_protocol() {
     printf '%s\n' '{"jsonrpc":"2.0","id":19,"method":"resources/list"}'
     printf '%s\n' '{"jsonrpc":"2.0","id":20,"method":"resources/read","params":{"uri":"ui://oms/project-graph/v1.html"}}'
     printf '{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"oms_project_graph_render","arguments":{"repo":"%s","task":"inspect alpha entry"}}}\n' "$repo"
-  } | python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
+  } | OMS_MCP_TOOL_PROFILE=full python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "MCP protocol exchange did not match the contract"
 import json, os
@@ -181,6 +181,46 @@ assert rendered["structuredContent"]["graph"]["kind"] == "project", rendered
 assert rendered["structuredContent"]["graph"]["nodes"], rendered
 assert rendered["structuredContent"]["graph"]["title"].startswith("OMS Context Graph"), rendered
 PY
+
+  # Compact discovery must preserve calls from older/full clients, the UI
+  # resource, and negotiation. A typo must not silently widen the tool list.
+  OMS_T_ROOT="$ROOT" OMS_T_REPO="$repo" OMS_T_FULL="$out" python3 - <<'PY' || fail "MCP tool profile contract failed"
+import json, os, subprocess, sys
+
+env = dict(os.environ)
+env.pop("OMS_MCP_TOOL_PROFILE", None)
+requests = [
+    {"id": 1, "method": "tools/list"},
+    {"id": 2, "method": "tools/call", "params": {
+        "name": "oms_runtime_failures", "arguments": {"repo": os.environ["OMS_T_REPO"]}}},
+    {"id": 3, "method": "resources/list"},
+    {"id": 4, "method": "tools/list", "params": {"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28"}}},
+]
+payload = "".join(json.dumps({"jsonrpc": "2.0", **row}) + "\n" for row in requests)
+command = [sys.executable, os.path.join(os.environ["OMS_T_ROOT"], "scripts/oms-mcp-server.py")]
+out = subprocess.run(command, input=payload, text=True, capture_output=True, env=env, check=True)
+rows = {row["id"]: row for row in map(json.loads, out.stdout.splitlines())}
+core = rows[1]["result"]["tools"]
+assert [tool["name"] for tool in core] == [
+    "oms_inbox", "oms_repo_state", "oms_handoffs", "oms_handoff_show",
+    "oms_journal", "oms_peer_start", "oms_peer_result", "oms_peer_operations",
+    "oms_project_graph_render", "oms_project_graph_query", "oms_project_graph_trace",
+    "oms_project_graph_affected"], core
+with open(os.environ["OMS_T_FULL"], encoding="utf-8") as fh:
+    full = {row["id"]: row for row in map(json.loads, fh)}[2]["result"]["tools"]
+assert len(full) == 26, len(full)
+assert all(tool in full for tool in core), "profile changed schemas or annotations"
+assert not rows[2]["result"]["isError"], rows[2]
+assert rows[3]["result"]["resources"][0]["uri"] == "ui://oms/project-graph/v1.html", rows[3]
+assert rows[4]["result"]["tools"] == core, rows[4]
+assert rows[4]["result"]["resultType"] == "complete", rows[4]
+assert rows[4]["result"]["ttlMs"] > 0, rows[4]
+invalid = subprocess.run(command, input=payload, text=True, capture_output=True,
+                         env={**env, "OMS_MCP_TOOL_PROFILE": "typo"})
+assert invalid.returncode == 2 and not invalid.stdout, invalid
+assert "must be core or full" in invalid.stderr, invalid.stderr
+PY
 }
 
 test_mcp_server_bounds_requests_before_effects() {
@@ -262,7 +302,7 @@ peer_rpc() {
   env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX \
     HOME="$TMP/peer-home" PATH="$TMP/peer-bin:$PATH" \
     OMS_LOCK_DIR="$TMP/peer-locks" OMS_LOCK_FORCE_MKDIR=1 \
-    STUB_GATE="$TMP/peer-gate" \
+    STUB_GATE="$TMP/peer-gate" OMS_MCP_TOOL_PROFILE=core \
     python3 "$ROOT/scripts/oms-mcp-server.py" > "$1"
 }
 
@@ -318,9 +358,9 @@ with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
         by_id[msg.get("id")] = msg
 
 tools = {t["name"]: t for t in by_id[1]["result"]["tools"]}
-# The read-only surface every client already binds must survive the addition.
-assert {"oms_inbox", "oms_task_state", "oms_fail_ledger", "oms_handoffs",
-        "oms_handoff_show", "oms_journal"} <= set(tools), sorted(tools)
+# Core discovery keeps shared state and continuity beside the peer tools.
+assert {"oms_inbox", "oms_repo_state", "oms_journal", "oms_handoffs",
+        "oms_handoff_show"} <= set(tools), sorted(tools)
 start = tools["oms_peer_start"]["inputSchema"]
 assert set(start["required"]) == {"kind", "prompt"}, start
 assert sorted(start["properties"]["kind"]["enum"]) == ["advise", "ask", "consult"], start
@@ -1013,7 +1053,7 @@ import json, os
 result = json.loads(os.environ["OMS_T_OUT"])
 steps = result["injectSteps"]
 assert len(steps) == 1, steps
-assert "unresolved fail-ledger rows" in steps[0]["ephemeralMessage"], steps
+assert "actionable fail-ledger rows" in steps[0]["ephemeralMessage"], steps
 PY
 
   out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"terminationReason":"model_stop","executionNum":1}' "$repo" |
@@ -1095,7 +1135,7 @@ test_update_probe_flag_reaches_the_probe() {
 
 # --- router state hints -----------------------------------------------------
 
-test_router_state_hint_on_unresolved_failures() {
+test_router_state_hint_on_actionable_failures() {
   local repo="$TMP/hint-repo"
   local payload out
 
@@ -1108,13 +1148,13 @@ test_router_state_hint_on_unresolved_failures() {
   payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "unresolved fail-ledger rows" ||
-    fail "two unresolved failures should produce a state hint: $out"
+  grep -Fq "actionable fail-ledger rows" <<< "$out" ||
+    fail "two actionable failures should produce a state hint: $out"
 
   # Same day: the marker suppresses a second hint.
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "unresolved fail-ledger rows"; then
+  if grep -Fq "actionable fail-ledger rows" <<< "$out"; then
     fail "the state hint must fire at most once per day"
   fi
 
@@ -1122,7 +1162,7 @@ test_router_state_hint_on_unresolved_failures() {
   rm -f "$repo/.oms/hooks/state-hint."*
   out="$(printf '%s' "$payload" | OMS_STATE_REPO="$repo" OMS_STATE_HINTS=0 \
     TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "unresolved fail-ledger rows"; then
+  if grep -Fq "actionable fail-ledger rows" <<< "$out"; then
     fail "OMS_STATE_HINTS=0 must disable the hint"
   fi
 }
@@ -1864,7 +1904,7 @@ test_mcp_server_serves_modern_clients_without_a_handshake() {
     printf '%s\n' '{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
     printf '%s\n' '{"jsonrpc":"2.0","id":10,"method":"tools/list"}'
     printf '{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{%s}}\n' "$meta"
-  } | OMS_MCP_TASKS_EXTENSION=1 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
+  } | OMS_MCP_TOOL_PROFILE=full OMS_MCP_TASKS_EXTENSION=1 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "modern MCP client contract failed: $(head -c 800 "$out")"
 import json, os
@@ -1947,7 +1987,7 @@ test_install_agy_plugin_bakes_absolute_paths
 test_agy_surfaces_are_certified_before_hooks_ship
 test_agy_surfaces_stay_mcp_only_when_hooks_never_fire
 test_update_probe_flag_reaches_the_probe
-test_router_state_hint_on_unresolved_failures
+test_router_state_hint_on_actionable_failures
 test_router_state_hint_surfaces_parked_goal
 test_router_state_hint_skips_unadopted_repo
 test_router_state_hint_offers_forge_for_resolved_repeats

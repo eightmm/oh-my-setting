@@ -19,24 +19,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/work-journal.sh"
 
 # Rollover/catch-up on each top-level agent prompt. This stays independent of
-# skill routing (which users may disable): local materialization runs first,
-# then at most one pending mirror item gets a two-second retry. On the first
+# skill routing (which users may disable): local materialization runs first.
+# Deferred Stop publishing and periodic maintenance own network work. On the first
 # prompt of a local day it also prints a bounded journal digest — hook stdout
 # becomes agent context, which is what makes the journal self-referencing.
 if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] &&
   git -C "${OMS_STATE_REPO:-$PWD}" rev-parse --git-dir >/dev/null 2>&1; then
   work_journal_prompt_tick "${OMS_STATE_REPO:-$PWD}"
-fi
-
-# Recover CI results at a natural start boundary without polling during work.
-# Only GitHub-backed adopted repos participate; `tick` is locally deduped,
-# throttled, two-second bounded by default, and fail-open.
-ci_tick_repo="${OMS_STATE_REPO:-$PWD}"
-if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_CI_TICK:-1}" = 1 ] &&
-  [ -d "$ci_tick_repo/.oms" ] &&
-  git -C "$ci_tick_repo" remote get-url origin 2>/dev/null | grep -Eq 'github\.com[:/]'; then
-  (cd "$ci_tick_repo" && OMS_CI_TICK_QUIET=1 \
-    bash "$ROOT/scripts/ci-status.sh" tick) >/dev/null 2>&1 || true
 fi
 
 # State-conditional hints: inject the one thing native skill matching cannot
@@ -123,13 +112,12 @@ if plan.get("accept"):
         )
         raise SystemExit(0)
 failures = load("OMS_SH_FAILURES")
-# Expired hook rows read as retired everywhere else; the daily nag must not
-# count what `check` and `list` no longer hold against anyone.
+# The ledger owns expiry, recurrence and stale-commit classification.
 rows = [f for f in failures.get("failures", [])
-        if not f.get("resolved") and not f.get("expired")]
+        if f.get("actionable") is True]
 if len(rows) >= 2:
     print(
-        "[oms] %d unresolved fail-ledger rows here — run `oms fail-ledger"
+        "[oms] %d actionable fail-ledger rows here — run `oms fail-ledger"
         " list` before retrying anything that already failed."
         % len(rows)
     )

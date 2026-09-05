@@ -34,6 +34,28 @@ resume_of() {  # resume_of REPO -> stdout
   printf '{"cwd":"%s"}' "$1" | "$ROOT/scripts/resume-hook.sh"
 }
 
+# Prompt hints consume the same actionable projection, not raw open counts.
+hint_repo="$TMP/prompt-hints"
+make_repo "$hint_repo"
+for cmd in 'capture one' 'capture two'; do
+  "$ROOT/scripts/fail-ledger.sh" record --repo "$hint_repo" --kind hook \
+    --cmd "$cmd" --exit 1 --summary 'one-shot hook noise' >/dev/null
+done
+hint="$(cd "$hint_repo" && printf '{"prompt":"hello"}' |
+  OMS_WORK_JOURNAL=0 OMS_SKILL_ROUTER_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+if grep -Fq 'fail-ledger rows here' <<< "$hint"; then
+  fail "two retiring rows must not trigger the daily failure hint: $hint"
+fi
+for cmd in 'capture one' 'capture two'; do
+  "$ROOT/scripts/fail-ledger.sh" record --repo "$hint_repo" --kind hook \
+    --cmd "$cmd" --exit 1 --summary 'recurring hook failure' >/dev/null
+done
+find "$hint_repo/.oms/hooks" -name 'state-hint.*' -delete
+hint="$(cd "$hint_repo" && printf '{"prompt":"hello"}' |
+  OMS_WORK_JOURNAL=0 OMS_SKILL_ROUTER_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+grep -Fq '2 actionable fail-ledger rows here' <<< "$hint" ||
+  fail "two recurring failures must trigger the daily actionable hint: $hint"
+
 # --- 1. fresh hook x1: retiring, never P1 ----------------------------------
 repo="$TMP/one-hook"
 make_repo "$repo"

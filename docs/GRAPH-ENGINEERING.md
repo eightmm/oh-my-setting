@@ -1012,6 +1012,13 @@ Read-only, argv-only tools appended to `TOOLS` in `scripts/oms-mcp-server.py`
 **after** `oms_peer_operations` (the tool order is pinned by
 `tests/state-surfaces-smoke.sh`, which is updated in the same change):
 
+The default `core` discovery profile lists graph render, query, trace, and
+affected alongside shared-state and peer tools (12 total). Configure the MCP
+server environment with `OMS_MCP_TOOL_PROFILE=full` and reconnect to list all
+26 tools, including all 11 graph tools. Both profiles accept calls to
+every registered tool; only discovery is filtered, with unchanged input/output
+contracts and viewer resources. Invalid profiles fail at startup.
+
 | tool | argv |
 |---|---|
 | `oms_project_graph_map` | `bash scripts/graph.sh project map --json` |

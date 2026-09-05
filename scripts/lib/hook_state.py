@@ -1026,8 +1026,16 @@ def event_epoch(value: Any) -> float | None:
 def live_peer_sessions(events: Path, me: str, now: float) -> dict[str, float]:
     """Recently active neighbor sessions, excluding children and ended sessions."""
     try:
-        with events.open(encoding="utf-8", errors="replace") as handle:
-            lines = handle.readlines()[-PEER_TAIL_ROWS:]
+        with events.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            start = max(0, handle.tell() - 262144)
+            handle.seek(start)
+            tail = handle.read(262144)
+        # A byte-boundary fragment is not a complete event, even if it happens
+        # to parse. The advisory is best-effort and never scans older history.
+        if start:
+            tail = tail.partition(b"\n")[2]
+        lines = tail.decode("utf-8", errors="replace").splitlines()[-PEER_TAIL_ROWS:]
     except OSError:
         return {}
     latest: dict[str, tuple[float, bool]] = {}

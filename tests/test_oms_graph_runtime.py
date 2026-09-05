@@ -498,9 +498,26 @@ class ExactCommitTest(RuntimeFixture, unittest.TestCase):
             self.drive(exec_commit.commit_bound, self.repo, binding="work_item", run_id=run_id)
         self.assertEqual(self.head_count(), 1)
         (self.repo / "stray.txt").unlink()
+        # A path whitelist alone cannot prove the bytes are the landed patch.
+        (self.repo / "delegated.txt").write_text("one\nextra\n", encoding="utf-8")
+        with self.assertRaises(GraphError):
+            self.drive(exec_commit.commit_bound, self.repo, binding="work_item", run_id=run_id)
+        (self.repo / "delegated.txt").write_text("one\n", encoding="utf-8")
+        (self.repo / "README.md").write_text("other session\n", encoding="utf-8")
+        self.git("add", "README.md")
+        staged = (self.repo / ".git/index").read_bytes()
+        with self.assertRaises(GraphError):
+            self.drive(exec_commit.commit_bound, self.repo, binding="work_item", run_id=run_id)
+        self.assertEqual((self.repo / ".git/index").read_bytes(), staged)
+        self.git("reset", "-q", "HEAD", "--", "README.md")
+        (self.repo / "README.md").write_text("base\n", encoding="utf-8")
+        # Neither post-commit hooks nor another pending task gain authority.
+        self._write(self.repo / ".git/hooks/post-commit", "#!/bin/sh\ntouch hook-ran\n")
         result = self.drive(exec_commit.commit_bound, self.repo, binding="work_item", run_id=run_id)
         self.assertEqual((result["status"], result["task_id"], result["paths"]), ("committed", "t1", ["delegated.txt"]))
         self.assertEqual(self.head_count(), 2)
+        self.assertFalse((self.repo / "hook-ran").exists())
+        self.assertEqual(self.task_state("t2"), "ready")
         again = self.drive(exec_commit.commit_bound, self.repo, binding="work_item", run_id=run_id)
         self.assertEqual(again["status"], "clean")
         with self.assertRaises(GraphError):
@@ -516,6 +533,22 @@ class ExactCommitTest(RuntimeFixture, unittest.TestCase):
         self.assertEqual(exec_commit.patch_paths("diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n"), ["x.txt"])
         with self.assertRaises(GraphError):
             exec_commit.patch_paths('diff --git "a/we ird" "b/we ird"\n')
+
+    def test_exact_commit_recovers_after_ref_publication_without_another_commit(self) -> None:
+        first = self.run_graph(bound_spec())
+        run_id = first["run_id"]
+        with self.assertRaises(GraphError):
+            self.drive(exec_commit.commit_bound, self.repo, binding="work_item", run_id=run_id,
+                       env_extra={"OMS_GOAL_DRIVE_TEST_STOP_AFTER_REF": "1"})
+        self.assertEqual(self.head_count(), 2)
+        result = self.drive(exec_commit.commit_bound, self.repo, binding="work_item", run_id=run_id)
+        self.assertEqual(result["status"], "clean")
+        self.assertEqual(self.head_count(), 2)
+        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        intents = [json.loads(line) for line in (self.repo / ".oms/plan/progress.jsonl").read_text().splitlines()
+                   if json.loads(line).get("kind") == "commit-intent"]
+        self.assertEqual(intents[-1]["phase"], "committed")
+        self.assertEqual(self.task_state("t2"), "ready")
 
 
 PROMPT_DUMP_CODEX = FAKE_CODEX.replace('prompt="$(cat)"\n', 'prompt="$(cat)"\n[ -z "${PROMPT_DUMP:-}" ] || printf \'%s\' "$prompt" > "$PROMPT_DUMP"\n')

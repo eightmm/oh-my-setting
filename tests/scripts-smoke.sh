@@ -11127,6 +11127,14 @@ test_install_hooks_writes_pre_push() {
     fail "quick hook does not route through pre-push-check.sh"
   grep -Fq 'full GitHub Actions gate' "$repo/.git/hooks/pre-push" ||
     fail "quick hook must say that its local result is partial"
+
+  git -C "$repo" add scripts
+  git -C "$repo" -c user.email=test@example.com -c user.name=Test commit -qm fixture
+  git -C "$repo" worktree add --detach "$TMP/install-hooks-linked" >/dev/null
+  (cd "$TMP/install-hooks-linked" && bash scripts/install-hooks.sh --full >/dev/null) ||
+    fail "install-hooks must work from a linked worktree"
+  grep -Fq 'scripts/check.sh' "$repo/.git/hooks/pre-push" ||
+    fail "linked checkout must install the shared full hook"
 }
 
 test_pre_push_quick_gate_uses_the_exact_push_range() {

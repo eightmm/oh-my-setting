@@ -1,15 +1,4 @@
-"""Exact commit of a bound task's landed patch (`oms graph exec commit`).
-
-`patch-land` applies a reviewed patch to the working tree and never commits,
-and it refuses to land onto a dirty tree. A multi-task run therefore needs a
-commit between landings. This is the narrowest step that provides one: it
-stages exactly the paths of the bound task's stored patch, refuses when the
-tree holds any other change, and commits with `--no-verify` the way the
-canonical goal-drive driver publishes its exact commits (admission plus the
-task verifier are the gate for autonomous work, not commit hooks). It is not a
-landing and it never touches plan state: the task must already be `done`
-with a landing receipt, both read through the adapter's read-only verbs.
-"""
+"""Bound-task projection onto goal-drive's exact commit/recovery transaction."""
 
 from __future__ import annotations
 
@@ -17,13 +6,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from oms_runtime.common import bounded_line, run_output
+from oms_runtime.common import bounded_line, install_root, run_output
 
 from . import events as events_module
 from .adapters import plan as plan_adapter
 from .errors import GraphError
 from .facts import receipt_facts
-from .workspace import EXCLUDED_ROOTS
 
 GIT_TIMEOUT = 60
 MESSAGE_LIMIT = 72
@@ -55,35 +43,6 @@ def patch_paths(patch_text: str) -> List[str]:
     return paths
 
 
-def _git(repo: Path, *args: str) -> str:
-    try:
-        completed = subprocess.run(["git", "-C", str(repo)] + list(args), capture_output=True, text=True, timeout=GIT_TIMEOUT)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise GraphError("git %s could not run: %s" % (args[0], bounded_line(exc, 200)))
-    if completed.returncode != 0:
-        raise GraphError("git %s failed: %s" % (args[0], bounded_line(completed.stderr or completed.stdout, 200)))
-    return completed.stdout
-
-
-def _dirty_paths(repo: Path) -> List[str]:
-    raw = _git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    records = raw.split("\0")
-    paths: List[str] = []
-    index = 0
-    while index < len(records):
-        record = records[index]
-        index += 1
-        if len(record) < 4:
-            continue
-        status, path = record[:2], record[3:]
-        if status[0] in ("R", "C"):
-            index += 1
-        if any(path == root or path.startswith(root + "/") for root in EXCLUDED_ROOTS):
-            continue
-        paths.append(path)
-    return sorted(paths)
-
-
 def commit_bound(repo: Path, *, binding: str, run_id: str = "", message: str = "") -> Dict[str, Any]:
     """Commit exactly the landed patch of the task `binding` holds in `run_id`."""
     repo = Path(repo).resolve()
@@ -107,20 +66,20 @@ def commit_bound(repo: Path, *, binding: str, run_id: str = "", message: str = "
     if not patch_ref or not patch_path.is_file() or patch_path.is_symlink():
         raise GraphError("task %s has no readable stored patch" % task_id)
     paths = patch_paths(patch_path.read_text(encoding="utf-8", errors="replace"))
-    dirty = _dirty_paths(repo)
-    if not dirty:
-        return {"schema": 1, "run_id": selected, "binding": str(binding), "task_id": task_id,
-                "commit": head, "paths": paths, "status": "clean"}
-    strangers = [path for path in dirty if path not in paths]
-    if strangers:
-        raise GraphError("tree holds changes outside the landed patch; refusing to sweep them: %s"
-                         % ", ".join(bounded_line(item, 80) for item in strangers[:5]))
-    _git(repo, "add", "--", *dirty)
     title = str(message or task.get("title") or task_id)
     subject = bounded_line(" ".join(title.split()), MESSAGE_LIMIT) or ("plan task %s" % task_id)
-    _git(repo, "-c", "commit.gpgsign=false", "commit", "--no-verify", "-q", "-m", subject)
+    try:
+        completed = subprocess.run(
+            ["bash", str(install_root() / "scripts/goal-drive.sh"), "--repo", str(repo),
+             "--commit-task", task_id, "--commit-message", subject],
+            cwd=str(repo), capture_output=True, text=True, timeout=GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GraphError("exact commit could not complete; retry to reconcile: %s" % bounded_line(exc, 200))
+    if completed.returncode != 0:
+        raise GraphError("exact commit refused: %s" % bounded_line(completed.stderr or completed.stdout, 500))
     new_head = run_output(["git", "-C", str(repo), "rev-parse", "HEAD"], cwd=repo)
-    if not new_head or new_head == head:
-        raise GraphError("commit did not advance HEAD")
+    if not new_head:
+        raise GraphError("commit HEAD is unreadable")
     return {"schema": 1, "run_id": selected, "binding": str(binding), "task_id": task_id,
-            "commit": new_head, "paths": paths, "status": "committed"}
+            "commit": new_head, "paths": paths, "status": "committed" if new_head != head else "clean"}

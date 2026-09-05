@@ -646,6 +646,14 @@ chooses a connector or tracked summary.
 - MCP: shared state reads plus background peer actions that can incur provider
   cost and write `.oms` artifacts. Stdio records and prompts are byte-bounded;
   oversized input is rejected before provider argv or prompt files are built.
+  By default `tools/list` exposes 12 core tools: inbox, repo state, journal,
+  handoff list/read, peer start/result/operations, and graph render/query/trace/
+  affected. Set `OMS_MCP_TOOL_PROFILE=full` in the MCP server's environment
+  and restart its connection to discover all 26 tools; `core` is the default.
+  The profile is fixed at process startup, so cached discovery is stable.
+  Unlisted registered tools remain callable for existing clients: this setting
+  reduces discovery overhead, not permissions. Schemas, annotations, UI resources,
+  and protocol/Tasks negotiation are identical in both profiles.
   Runs are addressable from disk rather than from the conversation that started
   them: `oms_peer_operations` lists them newest first, a run whose process died
   without an exit reads as `stalled` instead of polling as running forever, and

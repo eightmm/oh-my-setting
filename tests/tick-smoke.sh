@@ -137,12 +137,19 @@ THREAD="$ROOT/scripts/thread.sh"
 TASK="$ROOT/scripts/agent-task.sh"
 "$THREAD" new --repo "$a" --id old-thread --topic old >/dev/null
 "$THREAD" append --repo "$a" --id old-thread --role note --text hello >/dev/null
+"$THREAD" new --repo "$a" --id old-thread-two --topic old >/dev/null
 "$THREAD" new --repo "$a" --id new-thread --topic new >/dev/null
 touch -d '10 days ago' "$a/.oms/threads/old-thread.jsonl"
+touch -d '10 days ago' "$a/.oms/threads/old-thread-two.jsonl"
+touch -d '10 days ago' "$a/.oms/threads/new-thread.jsonl"
 "$TASK" --repo "$a" init >/dev/null
 set_task_activity "$a"
-out="$("$TICK" run --repo "$a")"
-printf '%s' "$out" | grep -q 'threads_closed=1' || fail "the idle thread must be closed: $out"
+out="$(bash -x "$TICK" run --repo "$a" 2>"$TMP/tick.trace")"
+printf '%s' "$out" | grep -q 'threads_closed=2' || fail "idle non-current threads must be closed: $out"
+[ "$(grep -c '^++ bounded .* thread list ' "$TMP/tick.trace")" -eq 1 ] ||
+  fail "the sweep must query the thread catalog once"
+grep -Fq 'work_journal_sync' "$TMP/tick.trace" || fail "tick must own journal sync"
+grep -Fq -- '--force' "$TMP/tick.trace" || fail "tick must include current summaries"
 printf '%s' "$out" | grep -q 'tasks_closed=1' || fail "the idle goal-less task must be closed: $out"
 "$THREAD" list --repo "$a" | grep -q 'new-thread' || fail "a fresh thread must stay open"
 if "$THREAD" list --repo "$a" | grep -q 'old-thread'; then fail "the idle thread must not stay open"; fi
@@ -153,7 +160,7 @@ archive="$(find "$a/.oms/task/archive" -type f -name '*.md' -print | sed -n '1p'
 python3 - "$a/.oms/tick/last.json" <<'PY' || fail "sweep receipt is wrong: $(cat "$a/.oms/tick/last.json")"
 import json, sys
 r = json.load(open(sys.argv[1]))
-assert r["gc"] == "skipped" and r["threads_closed"] == ["old-thread"], r
+assert r["gc"] == "skipped" and set(r["threads_closed"]) == {"old-thread", "old-thread-two"}, r
 assert r["tasks_closed"] == 1, r
 assert r["artifacts_resolved"] == 0 and r["artifact_resolve_rc"] == 0, r
 assert r["artifacts_superseded"] == 0 and r["artifact_supersede_rc"] == 0, r
@@ -359,6 +366,33 @@ set -e
   fail "a non-numeric failure stale threshold must be rejected: $bad_failure_stale"
 
 # --- install / status / uninstall through the stub --------------------------
+ci_repo="$TMP/ci-owner"; make_committed_repo "$ci_repo"
+git -C "$ci_repo" remote add origin https://github.com/example/fixture.git
+cat > "$TMP/bin/gh-ci" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'run list')
+    printf '%s\n' queried >> "$OMS_TEST_CI_CALLS"
+    printf '[{"status":"completed","conclusion":"success","workflowName":"test","headSha":"%s","url":"https://example.invalid/run/1"}]\n' "$OMS_TEST_CI_SHA"
+    ;;
+  'pr view') exit 1 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$TMP/bin/gh-ci"
+export OMS_GH_BIN="$TMP/bin/gh-ci" OMS_TEST_CI_CALLS="$TMP/ci-calls"
+OMS_TEST_CI_SHA="$(git -C "$ci_repo" rev-parse HEAD)"; export OMS_TEST_CI_SHA
+OMS_CI_TICK=0 "$TICK" run --repo "$ci_repo" >/dev/null
+[ ! -e "$OMS_TEST_CI_CALLS" ] || fail "CI tick opt-out must not query GitHub"
+"$TICK" run --repo "$ci_repo" >/dev/null
+[ -s "$ci_repo/.oms/ci.jsonl" ] || fail "periodic tick must record available CI results"
+"$TICK" run --repo "$ci_repo" >/dev/null
+[ "$(wc -l < "$OMS_TEST_CI_CALLS")" -eq 1 ] || fail "completed HEAD must not be queried twice"
+unset OMS_GH_BIN OMS_TEST_CI_CALLS OMS_TEST_CI_SHA
+journal_off="$TMP/journal-off"; make_committed_repo "$journal_off"
+OMS_WORK_JOURNAL=0 "$TICK" run --repo "$journal_off" >/dev/null
+[ ! -e "$journal_off/.oms/work-journal" ] || fail "disabled journal must remain untouched by tick"
+
 (cd "$b" && "$TICK" install --method systemd --dry-run) | grep -q 'would install' || fail "install dry-run must print"
 [ ! -f "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" ] || fail "dry-run must not write units"
 grep -Fxq "$b" "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt" && fail "a dry-run install must not register the cwd"

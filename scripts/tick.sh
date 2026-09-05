@@ -22,7 +22,7 @@ Usage: tick.sh run [--repo PATH ...] [--dry-run]
        tick.sh uninstall [--dry-run]
        tick.sh status
 
-run        Sweep the given repos, or every registered one: journal sync,
+run        Sweep the given repos, or every registered one: journal and CI sync,
            attempt reconcile, stale thread/task close, plan and failure
            retirement, artifact-failure resolution, optional gc, and a Codex
            plugin cache refresh when the cache no longer matches the install.
@@ -38,6 +38,7 @@ Environment:
   OMS_TICK_PLAN_IDLE_DAYS      retire all-done plans idle at least this long (14)
   OMS_TICK_FAILURE_STALE_DAYS  retire stale one-shot failure rows at least this old (14)
   OMS_TICK_RETIRE=0            skip task, plan, and failure retirement (default on)
+  OMS_CI_TICK=0                skip periodic CI result collection
   OMS_TICK_GC=1                also run `oms gc --apply` per repo (default off)
   OMS_TICK_STEP_TIMEOUT        seconds per step when `timeout` exists (600)
 EOF
@@ -252,15 +253,38 @@ sweep_repo() {  # sweep_repo ROOT -> one summary line; receipt in .oms/tick/last
   local failures_retired=0 failure_list failure_candidates failure_fingerprint
   [ -d "$root/.oms" ] || { echo "skip $root: no .oms"; return 0; }
   if [ "$DRY_RUN" = 1 ]; then echo "would sweep $root"; return 0; fi
-  bounded "$oms" journal sync --repo "$root" >/dev/null 2>&1 || journal=$?
+  if work_journal_enabled; then
+    bounded bash -c '
+      . "$1/scripts/lib/work-journal.sh"
+      work_journal_call_local "$2" tick --repo "$2" --local-only &&
+      work_journal_sync "$2" && work_journal_sync "$2" --force --today
+    ' _ "$ROOT" "$root" >/dev/null 2>&1 || journal=$?
+  fi
+  if [ "${OMS_CI_TICK:-1}" = 1 ] &&
+    git -C "$root" remote get-url origin 2>/dev/null | grep -Eq 'github\.com[:/]'; then
+    (cd "$root" && OMS_CI_TICK_QUIET=1 bounded "$oms" ci-status tick) >/dev/null 2>&1 || true
+  fi
   bounded "$oms" agent-events --repo "$root" reconcile --apply >/dev/null 2>&1 || reconcile=$?
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     bounded "$oms" thread close --repo "$root" --id "$id" \
       --summary "closed by oms tick: idle over ${IDLE_DAYS}d" >/dev/null 2>&1 && closed+=("$id")
-  done < <(find "$root/.oms/threads" -maxdepth 1 -name '*.jsonl' -mtime "+$((IDLE_DAYS - 1))" 2>/dev/null |
-    while IFS= read -r f; do id="$(basename "$f" .jsonl)"
-      "$oms" thread list --json --repo "$root" 2>/dev/null | grep -Fq "\"$id\"" && echo "$id"; done)
+  done < <(bounded "$oms" thread list --json --repo "$root" 2>/dev/null |
+    python3 -c '
+import json, pathlib, re, sys, time
+try:
+    threads = json.load(sys.stdin)["threads"]
+    cutoff = time.time() - int(sys.argv[2]) * 86400
+    for thread in threads:
+        tid = thread.get("id", "")
+        if thread.get("closed") or thread.get("current") or not re.fullmatch(r"[A-Za-z0-9._-]+", tid):
+            continue
+        path = pathlib.Path(sys.argv[1]) / ".oms" / "threads" / (tid + ".jsonl")
+        if not path.is_symlink() and path.is_file() and path.stat().st_mtime <= cutoff:
+            print(tid)
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+' "$root" "$IDLE_DAYS")
   task_file="$root/.oms/task/current.md"
   if [ "$RETIRE" != 0 ] && [ -s "$task_file" ] && task_goal_empty "$task_file" &&
     bounded "$oms" agent-task --repo "$root" status --json 2>/dev/null | task_is_idle_active; then

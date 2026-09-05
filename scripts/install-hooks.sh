@@ -30,10 +30,12 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-hooks_dir="$ROOT/.git/hooks"
-
-[ -d "$ROOT/.git" ] || { echo "error: not a git checkout: $ROOT" >&2; exit 2; }
+hooks_dir="$(git -C "$ROOT" rev-parse --git-path hooks 2>/dev/null)" ||
+  { echo "error: not a git checkout: $ROOT" >&2; exit 2; }
+hooks_dir="${hooks_dir//$'\r'/}"
+case "$hooks_dir" in /*|[A-Za-z]:/*) ;; *) hooks_dir="$ROOT/$hooks_dir" ;; esac
 mkdir -p "$hooks_dir"
+hooks_dir="$(cd "$hooks_dir" && pwd -P)"
 
 if [ "$mode" = quick ]; then
   cat > "$hooks_dir/pre-push" <<'EOF'
@@ -63,4 +65,4 @@ if [ "$mode" = quick ]; then
 else
   echo "installed: $hooks_dir/pre-push -> scripts/check.sh (full)"
 fi
-echo "bypass once with: git push --no-verify"
+echo "single-gate release: oms land --repo CHECKOUT (checks, pushes the same HEAD, then follows CI)"

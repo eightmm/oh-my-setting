@@ -89,8 +89,8 @@ work_journal_observe() {
   return 0
 }
 
-# Prompt-hook entry: a local rollover tick, one bounded pending-mirror retry,
-# plus a once-per-local-day digest on stdout. UserPromptSubmit stdout becomes
+# Prompt-hook entry: a local rollover tick and once-per-local-day digest on
+# stdout. UserPromptSubmit stdout becomes
 # agent context, so this is the one place journal content surfaces without an
 # explicit command. OMS_WORK_JOURNAL_DIGEST=0 keeps the tick but drops the
 # injection. The tick also carries the once-per-local-day lesson distill, which
@@ -122,21 +122,11 @@ work_journal_prompt_tick() {
     echo "warning: Work Journal materialization degraded; primary lifecycle result is unchanged" >&2
     return 0
   fi
-  # The start boundary retries at most one closed/pending summary within the
-  # provider hook budget. Durable observers stay local while work is running.
-  if ! OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK=1 \
-    OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS=2 \
-    OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS=2 \
-    work_journal_sync "$repo" >/dev/null 2>&1; then
-    echo "warning: Work Journal start sync degraded; local journal is preserved" >&2
-  fi
   [ -z "$out" ] || printf '%s\n' "$out"
   return 0
 }
 
-# Top-level Stop-hook boundary: capture the final HEAD, materialize, then
-# publish today's daily summary once. Idempotent content hashes make repeated
-# Stop delivery a local no-op after the first successful sync.
+# Top-level Stop captures the final HEAD locally before deferred publication.
 work_journal_finish() {
   local repo="$1"
 
@@ -152,16 +142,49 @@ work_journal_finish() {
     echo "warning: Work Journal finish materialization degraded" >&2
     return 0
   fi
-  # Bounded like the start boundary, and for the same reason: a Stop hook has
-  # to return. It was relying on the sync default, which now belongs to the
-  # operator's repair path -- that one has to be able to clear a backlog, and a
-  # hook must never inherit it.
-  if ! OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK=2 \
-    OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS=4 \
-    OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS=8 \
-    work_journal_sync "$repo" --force --today >/dev/null 2>&1; then
-    echo "warning: Work Journal finish sync degraded; local journal is preserved" >&2
-  fi
   return 0
 }
 
+# Keep automatic publishing on hosts without a maintenance timer, without
+# holding the provider's Stop pipe open. Sync locks and content hashes also
+# deduplicate this publisher against periodic maintenance.
+work_journal_defer_finish() {
+  local repo="$1"
+  [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || return 0
+  [ "${OMS_WORK_JOURNAL_ACTIVE:-0}" != 1 ] || return 0
+  [ -d "$repo/.oms" ] || return 0
+  if [ "${OMS_CI_TICK:-1}" != 1 ]; then
+    work_journal_enabled || return 0
+    [ "${OMS_WORK_JOURNAL_SUPPRESS:-0}" != 1 ] || return 0
+  fi
+  python3 - "$WORK_JOURNAL_LIB_DIR/work-journal.sh" "$repo" <<'PY' 2>/dev/null || true
+import subprocess
+import sys
+
+command = '''
+. "$1"
+repo="$2"
+if work_journal_enabled && [ "${OMS_WORK_JOURNAL_SUPPRESS:-0}" != 1 ]; then
+  OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK=2 \
+    OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS=4 \
+    OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS=8 \
+    work_journal_sync "$repo" --force --today || true
+fi
+if [ "${OMS_CI_TICK:-1}" = 1 ]; then
+  remote="$(git -C "$repo" remote get-url origin 2>/dev/null)"
+  case "$remote" in
+    *github.com:*|*github.com/*)
+      (cd "$repo" && OMS_CI_TICK_QUIET=1 bash "$WORK_JOURNAL_LIB_DIR/../ci-status.sh" tick) || true ;;
+  esac
+fi
+'''
+try:
+    subprocess.Popen(
+        ["bash", "-c", command, "oms-stop-publish", *sys.argv[1:]],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+except OSError:
+    pass
+PY
+}

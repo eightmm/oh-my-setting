@@ -39,8 +39,8 @@ or job result that was being observed.
 Capture happens after durable run/capsule, validation, patch review/admission,
 CI, job reconciliation, Agent State, and handoff writes. The provider prompt
 hook first performs a local tick that reconciles `HEAD` and materializes dirty
-periods, then gives at most one closed or pending Notion item a two-second
-retry. This covers the first agent execution after a date or ISO-week rollover
+periods without network calls. This covers the first agent execution after a
+date or ISO-week rollover
 without a daemon or scheduler. Once per local day it also injects a
 bounded digest of at most three recent blockers and three next actions, plus a
 one-line previous-day count and, when a session handoff digest was captured in
@@ -49,8 +49,10 @@ never the handoff's content. This is the automatic read path: the journal can
 inform planning without loading its full history on every prompt. Set
 `OMS_WORK_JOURNAL_DIGEST=0` to keep rollover capture but disable that injection.
 Durable lifecycle observations remain local while work is running. On an
-allowed top-level Stop, the final `HEAD` is reconciled and today's daily page is
-force-synced once; stable content hashes make duplicate Stop delivery a no-op.
+allowed top-level Stop, the final `HEAD` is reconciled locally. Periodic
+`oms tick` maintenance, a detached Stop publisher, and explicit
+`oms journal sync` publish the mirror;
+stable content hashes prevent repeated publication of unchanged summaries.
 
 An event ID is derived, in order, from an authoritative source record ID, a
 caller operation ID, or a hash of normalized stable source fields. Current time
@@ -238,12 +240,16 @@ install receipt. Codex's connected Notion app credential likewise belongs to
 the connector and cannot be extracted or reused by a local shell script.
 
 When the CLI session and configured target are present, work-time observers
-only update local state. A prompt-start check retries at most one closed or
-pending summary within two seconds. An allowed Stop publishes today's daily
-summary within the normal eight-second sync budget. The current ISO week stays
-local until it closes unless `oms journal sync --force` is requested. This
-gives each top-level turn two bounded checkpoints without adding network work
-between them.
+only update local state, including prompt and Stop hooks. Stop then schedules a
+detached publisher with an eight-second Notion budget; it also collects CI
+through its existing bounded tick, independently of journal enablement.
+The provider never waits on either network operation. This preserves automatic
+daily publication on machines without an installed maintenance timer.
+Periodic `oms tick`
+publishes pending summaries and today's daily page for registered repositories.
+Use `oms journal sync --force --today` for an immediate update. The current ISO
+week stays local until it closes unless `oms journal sync --force` is requested. This
+keeps network retries outside the interactive conversation path.
 
 `OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID` can override the persisted target and
 uses the current Notion data source API.
@@ -303,7 +309,8 @@ GitHub SSH and HTTPS remotes normalize to the same lowercase
 split the journal. Duplicate prevention is serialized and guaranteed within
 one local state root.
 The remote lock is non-blocking: when another sync is active, local capture
-still completes and the mirror is retried by a later start or finish boundary.
+still completes and the mirror is retried by a later detached Stop publisher,
+periodic maintenance, or an explicit sync.
 The remote key lookup also reduces duplicates after local sync-state loss.
 Notion does not offer a uniqueness constraint, so two machines or unrelated
 writers racing against the same database can still create duplicate pages; the
