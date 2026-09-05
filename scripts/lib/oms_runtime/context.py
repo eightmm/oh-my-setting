@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from . import RUNTIME_SCHEMA
-from .common import CoreError, atomic_write_bytes, atomic_write_json, canonical_json, read_bytes, relative_path, sensitive_text, sha256_bytes, sha256_file, utc_now
+from .common import CoreError, atomic_write_bytes, atomic_write_json, canonical_json, read_bytes, read_json, relative_path, sensitive_text, sha256_bytes, sha256_file, utc_now
 from .evidence import build_envelope
 
 DEFAULT_CONTEXT_BYTES = 64 * 1024
@@ -91,6 +91,7 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             symbols.add(node.name)
     search_roots = [repo, repo / "src", repo / "scripts"]
+    target_resolved = target.resolve()
     for level, module in sorted(relative_modules):
         base = target.parent
         for _ in range(max(0, level - 1)):
@@ -98,14 +99,14 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
         relative = Path(*module.split(".")) if module else Path()
         candidates = (base / (str(relative) + ".py"), base / relative / "__init__.py") if module else (base / "__init__.py",)
         for candidate in candidates:
-            if candidate.is_file() and not candidate.is_symlink() and candidate.resolve() != target.resolve():
+            if candidate.is_file() and not candidate.is_symlink() and candidate.resolve() != target_resolved:
                 result.append((candidate.resolve(), "direct relative Python import", 88))
                 break
     for module in sorted(modules):
         relative = Path(*module.split("."))
         for root in search_roots:
             for candidate in (root / (str(relative) + ".py"), root / relative / "__init__.py"):
-                if candidate.is_file() and not candidate.is_symlink() and candidate.resolve() != target.resolve():
+                if candidate.is_file() and not candidate.is_symlink() and candidate.resolve() != target_resolved:
                     result.append((candidate.resolve(), "direct Python import", 85))
                     break
     target_rel = relative_path(target, repo)
@@ -115,18 +116,23 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
         if not test_root.is_dir():
             continue
         for candidate in sorted(test_root.rglob("*.py"))[:5000]:
-            if candidate.is_symlink() or candidate.resolve() == target.resolve():
+            if candidate.is_symlink() or candidate.resolve() == target_resolved:
                 continue
             text = _discovery_text(candidate)
             if text and (target_stem in candidate.stem or (target_module and target_module in text) or re.search(r"\b%s\b" % re.escape(target_stem), text)):
                 result.append((candidate.resolve(), "related test", 90))
     public_symbols = sorted(name for name in symbols if name and not name.startswith("_"))[:20]
     if public_symbols:
+        seen: Set[Path] = set()
         for root in search_roots:
             if not root.is_dir():
                 continue
             for candidate in sorted(root.rglob("*.py"))[:5000]:
-                if candidate.is_symlink() or candidate.resolve() == target.resolve() or any(part in {".git", ".oms", "__pycache__"} for part in candidate.parts):
+                # Keep each root's discovery limit, but inspect overlaps once.
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                if candidate.is_symlink() or candidate.resolve() == target_resolved or any(part in {".git", ".oms", "__pycache__"} for part in candidate.parts):
                     continue
                 text = _discovery_text(candidate)
                 if text and any(re.search(r"\b%s\b" % re.escape(symbol), text) for symbol in public_symbols):
@@ -137,6 +143,74 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
         if current is None or priority > current[1]:
             best[path] = (reason, priority)
     return [(path, reason, priority) for path, (reason, priority) in best.items()]
+
+
+def _fresh_graph(repo: Path) -> Optional[Tuple[Any, Path]]:
+    from oms_graph.project import build
+    from oms_graph.project.query import Graph
+
+    override = os.environ.get("OMS_PROJECT_GRAPH_STATE", "").strip()
+    if override and not Path(override).is_absolute():
+        return None
+    state = Path(override) if override else build.state_dir(repo)
+    try:
+        _safe_repo_file(repo, str(state / "manifest.json"), allow_external=bool(override))
+        _safe_repo_file(repo, str(state / "graph.json"), allow_external=bool(override))
+        manifest = read_json(state / "manifest.json", {})
+        discovery = manifest.get("discovery", {})
+        # Freshness only covers the build's selected files. A filtered or
+        # partially parsed graph cannot replace repository discovery.
+        if discovery.get("include") or discovery.get("exclude"):
+            return None
+        if any(row.get("reason") in ("unparsed", "too-large", "binary") for row in manifest.get("skipped", [])):
+            return None
+        graph = build.load_graph(repo, state=state)
+        paths = set(manifest.get("files", {}))
+        if any(node["path"] not in paths for node in graph.get("nodes", [])):
+            return None
+        # A regenerable index is data, not permission to read outside the repo.
+        for raw in paths:
+            path = Path(raw)
+            if not raw or path.is_absolute() or "\\" in raw or any(part in ("..", ".git", ".oms") for part in path.parts):
+                return None
+            _safe_repo_file(repo, raw)
+        status = build.check(repo, state=state)
+        if not status["fresh"] or graph.get("revision") != status["revision"]:
+            return None
+        return Graph(graph), state
+    except (CoreError, OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _related_candidates(repo: Path, targets: Sequence[Path]) -> List[Tuple[Path, str, int]]:
+    graph = _fresh_graph(repo) if targets else None
+    result: List[Tuple[Path, str, int]] = []
+    pending = list(targets)
+    if graph is not None:
+        from oms_graph.project.context import select_context
+
+        index, state = graph
+        labels = [relative_path(path, repo) for path in targets]
+        seeds = list(dict.fromkeys(label for label in labels
+                                  if "file:" + label in index.nodes or "test:" + label in index.nodes))[:12]
+        if seeds:
+            try:
+                pack = select_context(repo, index, task=" ".join(seeds), entry_paths=seeds, state=state)
+                rows = [(row["path"], row["reason"]) for row in pack["evidence"]]
+                known = {path for path, _reason in rows}
+                rows.extend((path, "related test") for path in pack["tests"] if path not in known)
+                result = [(_safe_repo_file(repo, path), "project-graph %s: %s" % (index.graph["revision"], reason), 95 - rank)
+                          for rank, (path, reason) in enumerate(rows) if path not in labels]
+                uncertain = pack["blast"]["truncated"] or any(
+                    row["signals"]["inferred_sites"] or row["signals"]["ambiguous_sites"]
+                    for row in pack["assurance"]["nodes"])
+                if not uncertain:
+                    pending = [path for path, label in zip(targets, labels) if label not in seeds]
+            except (CoreError, OSError, ValueError, TypeError, KeyError, AttributeError):
+                pass
+    for target in pending:
+        result.extend(_python_import_candidates(repo, target))
+    return result
 
 
 def _default_layers(repo: Path) -> List[Tuple[Path, str, int, str]]:
@@ -162,15 +236,15 @@ def _slice(data: bytes, budget: int, policy: str) -> Tuple[bytes, int, str]:
 
 
 def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[Tuple[str, str]] = (), required: Sequence[str] = (), max_bytes: int = DEFAULT_CONTEXT_BYTES, bundle_path: Optional[Path] = None, manifest_path: Optional[Path] = None, allow_external: bool = False, phase: str = "implementation") -> Dict[str, Any]:
-    """Compile a bounded context bundle. Every `targets` entry is a direct
-    target (required, with its Python imports discovered); a project-graph
-    context pack hands its whole file list here, in pack order."""
+    """Compile required targets and bounded evidence; reuse a fresh graph or
+    fall back to Python discovery without building or refreshing graph state."""
     if phase not in ("orientation", "implementation", "verification", "review", "research"):
         raise CoreError("unsupported context phase: %s" % phase)
     if max_bytes < MIN_CONTEXT_BYTES or max_bytes > MAX_CONTEXT_BYTES:
         raise CoreError("context budget must be between %d and %d bytes" % (MIN_CONTEXT_BYTES, MAX_CONTEXT_BYTES))
     candidates: List[Tuple[Path, str, int, str]] = _default_layers(repo)
     target_labels: List[str] = []
+    target_paths: List[Path] = []
     for target in targets:
         if not target:
             continue
@@ -178,9 +252,11 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
         label = relative_path(target_path, repo) or (target_path.name if allow_external else "")
         if label and label not in target_labels:
             target_labels.append(label)
+        if target_path not in target_paths:
+            target_paths.append(target_path)
         candidates.append((target_path, "direct target", 120, "middle"))
-        for path, reason, priority in _python_import_candidates(repo, target_path):
-            candidates.append((path, reason, priority, "middle"))
+    for path, reason, priority in _related_candidates(repo, target_paths):
+        candidates.append((path, reason, priority, "middle"))
     for raw, reason in explicit:
         candidates.append((_safe_repo_file(repo, raw, allow_external=allow_external), reason or "explicit context", 110, "middle"))
     unresolved_required: List[str] = []

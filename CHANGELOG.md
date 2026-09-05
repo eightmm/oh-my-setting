@@ -6,6 +6,44 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+- Stop-hook answer-format blocking is now opt-in with
+  `OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1`; the default no longer regenerates
+  answers merely for a missing verification label. Session budgets, journal
+  capture, and actual verification gates remain unchanged.
+- Read-only council/review prompts omit the unused model-selection catalog.
+  Participant defaults, debate rounds, evidence, routing, and optional
+  synthesis remain unchanged; consultation guidance preserves requested seats.
+- Removed daily and task-close recommendations to create skills from resolved
+  failures or frequent commands. Tool-family usage telemetry is now opt-in
+  (`OMS_USAGE_TRACK=1`); saved history, explicit forge, and actionable failure
+  hints remain. Retired daily usage-hint thresholds no longer affect prompts.
+- Skill matching reuses ASCII word boundaries and narrows generic triggers.
+  Resume guidance no longer requires two extra journal reads; onboarding no
+  longer produces skills by default, and trace avoids a fixed hypothesis quota
+  or unnecessary multi-peer consultation.
+- Runtime context inspects overlapping source roots once per candidate;
+  peer prompt assembly reuses loaded model libraries without resetting the
+  binary identity cache. Quoted-output redaction builds its unchanged sensitive
+  pattern once per call, retaining path masking, line redaction and byte limits.
+- Slimmed harness discovery and peer instructions using official GPT-6 Astra
+  guidance: load relevant references, reuse coverage, and repeat verification
+  only for changed inputs, failures, or unresolved risk. Required gates and
+  provider/permission boundaries remain intact; no model defaults changed.
+- Consolidated cockpit/inbox attention projection, recent-log readers, peer/MCP
+  artifact extraction, graph-backed runtime context, and scheduler selection.
+  Agent guidance groups existing commands into six work families; no public
+  verbs, permission boundaries, or continuity stores are merged.
+- Live collaboration reuses thread turns, locks, and existing prompt/edit hooks:
+  opt-in `thread new --live`, bounded cursor-based `updates` (optional wait up
+  to 30 seconds), and explicit idempotent `ack` receipts in the same log.
+  Ordinary threads stay silent; no new timer, daemon, or hook is installed.
+- Existing MCP peer tools also carry live messages/acknowledgments and read
+  thread deltas without invoking a model. Core discovery remains 12 tools.
+- Shared peer prompts and coding rules prefer decision-relevant source and
+  evidence as input, concise conclusions and verification as output, and direct
+  readable implementations over repeated code or speculative wrappers.
+
 ### Simplified
 - Prompt and Stop hooks retain local journal capture without waiting on Notion
   or CI network work. Stop defers a bounded publisher for hosts without a timer;

@@ -16309,6 +16309,24 @@ refactor this function for clarity
 commit and push the change
 write the training script
 EOF
+
+  # Native matching can handle ordinary work; the hook should not turn a
+  # substring or a generic continuation into harness/GPU orchestration.
+  mkdir -p "$d/bin"
+  printf '#!/usr/bin/env bash\nexit 93\n' > "$d/bin/nvidia-smi"
+  chmod +x "$d/bin/nvidia-smi"
+  for prompt in 'make room in this dialog' 'resume a paused download' '알아서 구현해줘' '최신 모델 이름은?'; do
+    i=$((i + 1))
+    out="$(printf '{"prompt":"%s","session_id":"router-near-%s","turn_id":"t1","cwd":"%s"}' \
+      "$prompt" "$i" "$project" |
+      PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+    if printf '%s' "$out" | grep -Eq 'skill hint:.*oms-(agent-harness|gpu-workstation)'; then
+      fail "generic prompt must not force a specialized skill: $prompt ($out)"
+    fi
+  done
+  out="$(printf '{"prompt":"CUDA OOM","session_id":"router-gpu","turn_id":"t1","cwd":"%s"}' "$project" |
+    PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq 'oms-gpu-workstation' || fail "real OOM must still route to GPU guidance"
 }
 
 test_skill_router_auto_records_task_prompts() {
@@ -16726,12 +16744,14 @@ test_turn_guard_blocks_unverified_dirty_task_once() {
   printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
 
   stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s1","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
-  out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
+  out="$(printf '%s' "$stop_payload" | env -u OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "answer-format blocking must be opt-in, even after a release request: $out"
+  out="$(printf '%s' "$stop_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 bash "$ROOT/scripts/turn-guard.sh")"
   printf '%s' "$out" | grep -Fq '"decision": "block"' ||
     fail "turn guard should block an unverified dirty task: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "block_unverified"'
 
-  out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
+  out="$(printf '%s' "$stop_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "turn guard should block at most once per turn"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_block_limit"'
 }
@@ -16785,7 +16805,7 @@ test_turn_guard_allows_verified_task() {
   printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
 
   stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s2","turn_id":"t1","cwd":"%s","last_assistant_message":"Changed file.txt. Verified: bash scripts/check.sh."}' "$project")"
-  out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
+  out="$(printf '%s' "$stop_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "turn guard should allow verified task: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_verified"'
 }
@@ -18215,6 +18235,86 @@ assert [t["seq"] for t in turns] == [1, 2, 3, 4], turns
 assert turns[2]["provider"] == "codex", turns[2]
 assert turns[2]["model"] == "m1", turns[2]
 ' || fail "thread show --json should expose ordered turns"
+}
+
+test_agent_thread_live_delivery_reuses_the_log() {
+  local project="$TMP/thread-live"
+  make_committed_repo "$project"
+  python3 - "$ROOT" "$project" <<'PY'
+import json, os, pathlib, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+command = ["bash", str(root / "scripts/thread.sh"), "--repo", str(repo)]
+def call(*args, ok=True):
+    result = subprocess.run(command + list(args), capture_output=True, text=True)
+    assert (result.returncode == 0) == ok, (args, result.stdout, result.stderr)
+    return result.stdout.strip()
+def read(*args):
+    return json.loads(call("updates", "--id", "live", *args))
+call("new", "--id", "live", "--live", "--topic", "API change")
+for role, body in [("question", "Which signature?"), ("answer", "Use keyword-only options.")]:
+    call("append", "--id", "live", "--role", role, "--text", body)
+page = read("--turns", "1")
+assert page["has_more"] and page["turns"][0]["live"] is True
+seen = page["turns"]
+while page["has_more"]:
+    page = read("--turns", "1", "--after", page["cursor"])
+    seen += page["turns"]
+assert [row["seq"] for row in seen] == [1, 2, 3]
+cursor = page["cursor"]
+assert not read("--after", cursor)["turns"]
+path = repo / ".oms/threads/live.jsonl"
+assert len(path.read_text().splitlines()) == 3, "reading is not acknowledgment"
+for _ in range(2):
+    call("ack", "--id", "live", "--after", cursor, "--consumer", "claude-session")
+ack = read("--after", cursor)
+assert len(ack["turns"]) == 1 and ack["turns"][0]["receipt"] == "ack"
+assert "claude-session" not in call("context", "--id", "live"), "receipt is not conversation prose"
+cursor = ack["cursor"]
+# A genuinely separate running process waits while another peer writes.
+waiting = subprocess.Popen(command + ["updates", "--id", "live", "--after", cursor, "--wait", "2"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+call("append", "--id", "live", "--role", "decision", "--text", "Caller updates ready; inspect src/api.py before editing.")
+out, err = waiting.communicate(timeout=5)
+assert waiting.returncode == 0, err
+assert json.loads(out)["turns"][0]["role"] == "decision"
+cursor = json.loads(out)["cursor"]
+call("updates", "--id", "live", "--wait", "31", ok=False)
+call("updates", "--id", "live", "--after", "bad-cursor", ok=False)
+call("updates", "--id", "live", "--max-bytes", "1", ok=False)
+call("new", "--id", "other")
+call("updates", "--id", "other", "--after", cursor, ok=False)
+# Incomplete append must not advance the cursor or lose the eventual turn.
+row = {"schema": 1, "thread": "live", "seq": 6, "role": "note", "text": "complete later"}
+with path.open("ab") as handle:
+    handle.write(json.dumps(row).encode())
+partial = read("--after", cursor)
+assert partial["cursor"] == cursor and not partial["turns"]
+with path.open("ab") as handle:
+    handle.write(b"\n")
+assert read("--after", cursor)["turns"][0]["text"] == "complete later"
+original = path.read_bytes()
+# Allocate the replacement while the cursor's original inode is still live.
+# Unlinking the original first allows inode reuse and does not prove replacement.
+replacement = path.with_suffix(".replacement")
+replacement.write_bytes(original)
+assert replacement.stat().st_ino != path.stat().st_ino
+os.replace(replacement, path)
+call("updates", "--id", "live", "--after", cursor, ok=False)
+call("close", "--id", "live")
+call("append", "--id", "live", "--text", "late mutation", ok=False)
+for link in ("symbolic", "hard"):
+    alias = path.parent / (link + ".jsonl")
+    try:
+        if link == "symbolic":
+            alias.symlink_to(path)
+        else:
+            os.link(path, alias)
+    except OSError:
+        continue
+    call("updates", "--id", link, ok=False)
+    call("append", "--id", link, "--text", "no", ok=False)
+    alias.unlink()
+PY
 }
 
 test_agent_thread_refuses_sensitive_turns() {

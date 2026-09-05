@@ -255,9 +255,13 @@ PY
 before="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
 cockpit="$TMP/cockpit.json"
 bash "$ROOT/scripts/ops-cockpit.sh" --repo "$repo" --json > "$cockpit"
-python3 - "$cockpit" <<'PY' || fail "cockpit JSON contract failed"
+python3 - "$cockpit" "$ROOT" <<'PY' || fail "cockpit JSON contract failed"
+import copy
+import importlib.util
 import json
+import os
 import sys
+from pathlib import Path
 
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["schema"] == 1 and row["action"] == "ops-cockpit", row
@@ -275,6 +279,35 @@ assert row["inbox"]["items"][0]["priority"] == "P1", row
 # carries an advisory runtime item — present, and never ahead of a P1.
 codes = [item["code"] for item in row["inbox"]["items"]]
 assert "runtime-evidence-missing" in codes, row
+
+# Both views share one pure projection, not a nested inbox -> state query.
+lib = Path(sys.argv[2]) / "scripts/lib"
+sys.path.insert(0, str(lib))
+from inbox_projection import project_inbox
+
+snapshot = copy.deepcopy(row["state"])
+assert project_inbox(snapshot, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0") == row["inbox"]
+snapshot["threads"] = {"stale_open": 2}
+original = copy.deepcopy(snapshot)
+assert any(item["code"] == "stale-threads" for item in project_inbox(snapshot)["items"])
+muted = project_inbox(snapshot, include_threads=False, safe_actions=["reclaimed-stale-plan"])
+assert not any(item["code"] == "stale-threads" for item in muted["items"])
+assert muted["safe_actions"] == ["reclaimed-stale-plan"]
+assert snapshot == original, "projection must not change its input"
+
+spec = importlib.util.spec_from_file_location("cockpit", lib / "ops-cockpit.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+queries = []
+def read_surface(script, args):
+    queries.append(script)
+    assert script in ("state.sh", "artifact-index.sh"), script
+    return row["state"] if script == "state.sh" else row["telemetry"]
+module.read_surface = read_surface
+module.read_list_surface = lambda script, args: row["lifecycle"]["attempts"] if script == "agent-events.sh" else row["approval"]["items"]
+module.read_observations = lambda repo, limit: row["observations"]
+assert module.build_report("unused", 20) == row
+assert queries.count("state.sh") == 1 and "inbox.sh" not in queries, queries
 PY
 text="$(bash "$ROOT/scripts/ops-cockpit.sh" --repo "$repo")"
 printf '%s\n' "$text" | grep -Fq 'ops cockpit:' || fail "cockpit text header missing"

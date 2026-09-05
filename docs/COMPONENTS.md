@@ -13,6 +13,53 @@ primitives and intent variants remain in `oms list --all`. Use
 [command-routing reference](../custom-skills/oms-agent-harness/references/command-routing.md)
 when two commands appear to overlap.
 
+### Consolidated paths
+
+Agent guidance groups discovery into state, collaboration, implementation,
+verification/landing, continuity, and operations. Public commands remain
+compatible; these groups do not grant combined authority.
+
+- Cockpit collects state once and shares inbox's pure attention projector.
+  Detail-only lifecycle/approval reads remain separate because state summaries
+  truncate those lists. Reports are still non-atomic across underlying stores.
+- Recent log windows read backwards; MCP display reads at most 64 KiB before
+  its existing output cap. Full artifact/thread references stream once so an
+  early result is not lost. Peer and MCP share final Output/Exit interpretation.
+- Runtime context reuses fresh Project Graph evidence selection, preserving
+  explicit inputs and budgets. Missing/stale/unsupported graphs retain local
+  discovery; context acquisition neither builds graphs nor grants authority.
+- Tick and install auto-update share scheduler detection/selection while
+  preserving distinct schedules, ownership markers, and repair transactions.
+- Diagnostic, council, autonomy, profile, experiment, and continuity variants
+  remain behind the existing front doors. Already shared engines are reused,
+  not replaced with another orchestration layer or a combined memory store.
+
+### Default-work audit (2026-09-05)
+
+The catalog review covers 74 public commands, seven managed skills and five
+roles. It is a surface/caller audit, not exhaustive verification of every
+implementation. Remove redundant automatic work before removing interfaces
+that saved workflows still use.
+
+| Surface | Decision |
+|---|---|
+| State, threads, memory, journal, graph/context | Keep shared evidence and incremental collaboration; reuse injected resume/digest context before extra journal reads. |
+| Plans, delegation, admission, recovery, release | Keep leases, reviewed bytes and explicit authority; model capability cannot replace concurrency or recovery guarantees. |
+| Install, update, repair, scheduler | Keep reversible ownership. Tick's backlog and current-day journal sync have different scopes. |
+| Councils, runtime experiments, HPC, external frontends | Keep explicit workflows; no new default calls. One peer precedes a council when sufficient. |
+| Daily and task-close skill-creation recommendations | Removed: resolved failures and frequent tool use alone do not justify another skill. Explicit forge and existing skill verification reminders remain. |
+| Tool-family telemetry | Opt-in with `OMS_USAGE_TRACK=1`; historical usage remains readable and GC-managed. No daily scan of usage/skill bodies to recommend new skills. |
+| Skill selection and onboarding | ASCII trigger boundaries prevent `oom` matching `room`; generic continuation/model questions no longer force the harness. Keep specific collaboration/graph/autopilot triggers. Store ordinary build/test facts in the existing contract. |
+
+The seven skills retain distinct installation, coordination, specification,
+diagnosis, security, Slurm and local-GPU responsibilities. Combining them would
+load unrelated procedures or blur safety boundaries. Trace requires competing
+hypotheses only when real alternatives remain, not a fixed worksheet.
+Retired daily hint knobs (`OMS_USAGE_HINT_MIN`, `OMS_USAGE_HINT_DAYS`,
+`OMS_USAGE_SKILL_ROOTS`) no longer affect prompts; no stored skills or history
+are deleted. `OMS_SKILL_FORGE_HINT` still controls existing skill-contract
+verification reminders at task close.
+
 ## How it fits together
 
 ```text
@@ -323,6 +370,16 @@ use migration and GC commands instead of editing JSONL by hand.
 `.oms/` and project agent files are clone-local by design. A fresh clone needs
 the template/private setup again; continuity is not silently copied between
 machines.
+
+Concurrent collaboration uses the same thread log: `thread new --live` opts a
+scoped conversation into existing prompt/edit-hook delivery, `append` posts a
+question or change, `updates --after CURSOR` reads complete new turns, and `ack`
+records explicit consumption (not approval). Each hook session retains a small
+delivery cursor, never a second transcript. Worktrees can address the canonical
+log explicitly with `--repo`; no cross-machine sync or forced live-model
+interruption is implied. MCP reuses `oms_peer_start` message/ack modes and
+`oms_peer_result(thread, after)` without increasing its 12-tool core catalog.
+The detailed operating contract is in the harness state-memory reference.
 
 ## Plans and bounded autonomy
 

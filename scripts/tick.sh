@@ -387,10 +387,9 @@ run_tick() {
   fi
 }
 
-systemd_usable() { command -v systemctl >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ]; }
 systemd_owns_unit() {  # the unit systemd knows must be this checkout's file, not a namesake
   local fragment
-  systemd_usable || return 1
+  oms_install_scheduler_systemd_available || return 1
   fragment="$(systemctl --user show -p FragmentPath --value oh-my-setting-tick.timer 2>/dev/null)" || return 1
   fragment="${fragment#FragmentPath=}"
   [ -n "$fragment" ] && [ "$(cd "$(dirname "$fragment")" 2>/dev/null && pwd -P)/$(basename "$fragment")" = \
@@ -410,15 +409,8 @@ tool_path() {  # PATH for the trigger: user managers and cron do not see nvm or 
   done
   printf '%s' "${out:+$out:}$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 }
-pick_method() {
-  case "$METHOD" in
-    systemd|cron) printf '%s\n' "$METHOD" ;;
-    auto) if systemd_usable; then echo systemd; elif command -v crontab >/dev/null 2>&1; then echo cron; else echo none; fi ;;
-    *) echo "error: --method must be auto, systemd, or cron" >&2; return 2 ;;
-  esac
-}
 install_tick() {
-  local method; method="$(pick_method)" || exit 2
+  local method; method="$(oms_install_scheduler_method "$METHOD")" || exit 2
   [ "$DRY_RUN" = 1 ] || [ ! -d "$PWD/.oms" ] || register_repo "$PWD" >/dev/null || true
   case "$method" in
     systemd)

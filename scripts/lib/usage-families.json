@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Tool-domain families for the content-free usage counter. The fail-ledger hook appends {family, day} rows when a Bash command matches a pattern; the skill-router's daily hint proposes forging a skill when an uncovered family recurs. covered_by names a global skill whose linked presence silences the family; project skills silence a family when their SKILL.md matches its pattern or key.",
+  "comment": "Tool-domain families for opt-in content-free diagnostics (OMS_USAGE_TRACK=1). Matching Bash calls append {family, day} rows. covered_by retains legacy skill associations; usage does not trigger skill creation or scan skill bodies.",
   "families": {
     "slurm": {
       "pattern": "\\b(sbatch|squeue|sinfo|sacct|srun|scancel)\\b",

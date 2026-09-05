@@ -9,18 +9,19 @@ description: >
 
 # Trace
 
-A fix aimed at an undiscriminated hypothesis changes code without changing the
-cause, and the evidence that would have separated them is gone once the code
-moves. Explain first.
+Diagnose before editing; evidence must distinguish cause from coincidence.
 
-Keep these apart, in writing:
+For uncertain causes, distinguish:
 
 - **Observation** — what was seen, quoted, not paraphrased.
-- **Hypotheses** — at least two that compete.
+- **Hypotheses** — plausible alternatives, not an invented quota.
 - **Evidence for / against** — per hypothesis, including what is missing.
-- **Critical unknown** — the fact keeping the leading two apart.
+- **Critical unknown** — the fact preventing a supported conclusion.
 - **Discriminating probe** — the cheapest step whose result differs between
   them. Run that one, not the most convenient one.
+
+When direct evidence already isolates the cause, report it and its confirming
+check briefly; no hypothesis worksheet or peer call is required.
 
 Evidence is ranked, never flat:
 
@@ -38,8 +39,8 @@ Reach for:
 
 - `oms fail-ledger check --cmd "…"` — has this already failed here? Exit 3 means
   yes, with the prior context.
-- `oms consult --all "…"` — independent hypotheses; distinct model families
-  fail differently, and the run reports how many actually answered.
+- `oms consult "…"` — one peer when a material uncertainty remains;
+  `oms consult --all "…"` only when several independent views are needed.
 - `oms advise --prompt "…"` — before an irreversible conclusion or a release
   call.
 

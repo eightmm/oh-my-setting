@@ -15,8 +15,8 @@ from . import analytics
 from .query import Graph
 
 
-def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None) -> Dict[str, Any]:
-    """Write .oms/project-graph/context/<digest>.json and return the pack."""
+def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None, entry_paths: Sequence[str] = ()) -> Dict[str, Any]:
+    """Rank context without writing; exact paths bypass lexical retrieval."""
     index = graph if isinstance(graph, Graph) else Graph(graph)
     # Generic task verbs describe the requested operation, not the project
     # concept to retrieve. Letting them compete with identifiers can make a
@@ -27,10 +27,14 @@ def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_
         "are", "was", "will", "please",
     }
     tokens = [item for item in re.findall(r"[a-z0-9_]+", task.lower()) if len(item) >= 3 and item not in stopwords]
-    raw_entries = index.find(" ".join(tokens), limit=max(24, max_files * 4)) if tokens else []
+    if entry_paths:
+        raw_entries = [{"id": ident, "score": 100} for path in entry_paths
+                       for ident in ("file:" + path, "test:" + path) if ident in index.nodes]
+    else:
+        raw_entries = index.find(" ".join(tokens), limit=max(24, max_files * 4)) if tokens else []
     entries = []
     entry_keys = set()
-    entry_limit = min(8, max(0, max_files))
+    entry_limit = min(len(entry_paths) if entry_paths else 8, max(0, max_files))
     for entry in raw_entries:
         if not entry_limit:
             break
@@ -212,6 +216,13 @@ def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_
                             "coverage": graph_coverage(Path(repo), state=state),
                             "byte_estimate": {"raw_candidate_files": raw_bytes, "pack": 0}}
     pack["byte_estimate"]["pack"] = len(canonical_json(pack))
+    return pack
+
+
+def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None) -> Dict[str, Any]:
+    """Write .oms/project-graph/context/<digest>.json and return the pack."""
+    pack = select_context(repo, graph, task=task, max_files=max_files,
+                          max_nodes=max_nodes, depth=depth, base=base, state=state)
     directory = ensure_private_dir(state_dir(Path(repo).resolve(), state) / "context")
     digest = sha256_bytes(canonical_json(pack))
     path = directory / (digest + ".json")

@@ -547,6 +547,34 @@ except Exception:
 PY
 }
 
+# Selection is shared; each trigger retains its own ownership and write path.
+oms_install_scheduler_systemd_available() {
+  command -v systemctl >/dev/null 2>&1 &&
+    [ -n "${XDG_RUNTIME_DIR:-}" ] &&
+    systemctl --user show-environment >/dev/null 2>&1
+}
+
+oms_install_scheduler_cron_available() {
+  [ -n "${1:-}" ] || command -v crontab >/dev/null 2>&1
+}
+
+oms_install_scheduler_method() {
+  local method="${1-auto}" cron_file="${2:-}"
+  case "$method" in
+    systemd|cron) printf '%s\n' "$method" ;;
+    auto)
+      if oms_install_scheduler_systemd_available; then
+        printf 'systemd\n'
+      elif oms_install_scheduler_cron_available "$cron_file"; then
+        printf 'cron\n'
+      else
+        printf 'none\n'
+      fi
+      ;;
+    *) echo "error: --method must be auto, systemd, or cron" >&2; return 2 ;;
+  esac
+}
+
 # The cron marker pair is an ownership boundary, not just an installation
 # hint. Every reader and writer must classify the same bytes the same way:
 # absent has no marker, valid has exactly one ordered begin/end pair, and any

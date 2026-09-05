@@ -48,10 +48,9 @@ case "${OMS_FAIL_LEDGER_RESOLVE:-1}" in
 esac
 
 # Content-free usage counter: rows carry a family name and a day, never the
-# command. skill-router's daily hint reads them to propose forging a skill
-# for a domain that keeps recurring without one. OMS_USAGE_TRACK=0 disables.
+# command. Optional diagnostic telemetry; enable with OMS_USAGE_TRACK=1.
 usage_file="$root/.oms/usage.jsonl"
-case "${OMS_USAGE_TRACK:-1}" in
+case "${OMS_USAGE_TRACK:-0}" in
   0|false|FALSE|no|NO|off|OFF) usage_file="" ;;
 esac
 

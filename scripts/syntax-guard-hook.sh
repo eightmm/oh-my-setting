@@ -24,10 +24,12 @@ repo="${OMS_STATE_REPO:-$PWD}"
 root="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo")"
 [ -d "$root/.oms" ] || exit 0
 
-OMS_SGH_PAYLOAD="$payload" python3 - <<'PY' 2>/dev/null || true
+OMS_SGH_PAYLOAD="$payload" OMS_SGH_ROOT="$root" OMS_SGH_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)" python3 - <<'PY' 2>/dev/null || true
+import atexit
 import ast
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -45,6 +47,23 @@ except (ValueError, KeyError):
     raise SystemExit(0)
 if not isinstance(row, dict):
     raise SystemExit(0)
+sys.path.insert(0, os.environ["OMS_SGH_LIB"])
+from hook_state import live_thread_hint
+
+collaboration = live_thread_hint(row, Path(os.environ["OMS_SGH_ROOT"]))
+findings = []
+
+
+def emit_feedback():
+    parts = [collaboration] if collaboration else []
+    if findings:
+        parts.append(("syntax-guard: " + " | ".join(findings))[:MESSAGE_LIMIT])
+    if parts:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                                "additionalContext": "\n".join(parts)}}))
+
+
+atexit.register(emit_feedback)
 tool_name = row.get("tool_name")
 tool_input = row.get("tool_input")
 if not isinstance(tool_input, dict):
@@ -199,7 +218,6 @@ def syntax_problem(path):
     return shown, problem
 
 
-findings = []
 for path in paths:
     finding = syntax_problem(path)
     if finding is not None:
@@ -207,19 +225,5 @@ for path in paths:
         findings.append("%s does not parse after this %s — %s" % (
             shown, tool_name, problem
         ))
-if not findings:
-    raise SystemExit(0)
-message = "syntax-guard: " + " | ".join(findings)
-
-json.dump(
-    {
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": message[:MESSAGE_LIMIT],
-        }
-    },
-    sys.stdout,
-)
-sys.stdout.write("\n")
 PY
 exit 0

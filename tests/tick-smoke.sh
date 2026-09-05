@@ -18,9 +18,17 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/ntn"; chmod +x "$TMP/bin/ntn"
 cat > "$TMP/bin/systemctl" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/systemctl.log"
+[ "\$2" != show-environment ] || exit "\${OMS_TEST_SYSTEMD_AVAILABLE:-0}"
 [ "\$2" != show ] || printf '%s\n' "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer"
 EOF
 chmod +x "$TMP/bin/systemctl"
+cat > "$TMP/bin/crontab" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = -l ] && exit 0
+echo 'unexpected crontab mutation' >&2
+exit 1
+EOF
+chmod +x "$TMP/bin/crontab"
 export PATH="$TMP/bin:$PATH"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -123,6 +131,40 @@ with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(row) + "\n")
 PY
 }
+
+# --- shared scheduler detection, without host writes --------------------------
+(
+  # shellcheck source=scripts/lib/install-contract.sh
+  . "$ROOT/scripts/lib/install-contract.sh"
+  [ "$(oms_install_scheduler_method auto)" = systemd ] || fail "a usable user manager must win"
+  [ "$(OMS_TEST_SYSTEMD_AVAILABLE=1 oms_install_scheduler_method auto)" = cron ] ||
+    fail "an unreachable user manager must fall back to cron"
+  [ "$(XDG_RUNTIME_DIR='' oms_install_scheduler_method auto)" = cron ] ||
+    fail "a missing user runtime must fall back to cron"
+  [ "$(PATH=/nonexistent oms_install_scheduler_method auto)" = none ] ||
+    fail "missing schedulers must be reported"
+  [ "$(PATH=/nonexistent oms_install_scheduler_method auto "$TMP/cron-fixture")" = cron ] ||
+    fail "the auto-update cron fixture must remain supported"
+  [ "$(PATH=/nonexistent oms_install_scheduler_method systemd)" = systemd ] ||
+    fail "explicit method selection must remain caller-controlled"
+  if oms_install_scheduler_method invalid >/dev/null 2>&1; then
+    fail "invalid scheduler method must fail"
+  else
+    [ "$?" -eq 2 ] || fail "invalid scheduler method must return usage error"
+  fi
+)
+for scheduler in tick install-autoupdate; do
+  scheduler_args=(--method auto --dry-run)
+  [ "$scheduler" != tick ] || scheduler_args=(install "${scheduler_args[@]}")
+  out="$("$ROOT/scripts/$scheduler.sh" "${scheduler_args[@]}")"
+  printf '%s' "$out" | grep -q 'would install systemd user timer' ||
+    fail "$scheduler must select the shared usable user manager: $out"
+  out="$(OMS_TEST_SYSTEMD_AVAILABLE=1 "$ROOT/scripts/$scheduler.sh" "${scheduler_args[@]}")"
+  printf '%s' "$out" | grep -q 'would install cron' ||
+    fail "$scheduler must select the shared cron fallback: $out"
+done
+[ ! -e "$XDG_CONFIG_HOME/systemd" ] || fail "scheduler dry-run must not write units"
+[ ! -e "$OMS_INSTALL_RECEIPT" ] || fail "scheduler dry-run must not write a receipt"
 
 # --- registry -----------------------------------------------------------------
 a="$TMP/a"; b="$TMP/b"; make_repo "$a"; make_repo "$b"

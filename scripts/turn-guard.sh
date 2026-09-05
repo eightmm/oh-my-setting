@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stop hook guard plus the Work Journal finish boundary. Both fail open; a
-# blocked high-risk answer is not recorded as finished until the corrected
+# Stop hook budgets plus the Work Journal finish boundary. Answer-format
+# blocking is opt-in (OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1). A
+# blocked answer is not recorded as finished until the corrected
 # Stop delivery arrives. Failing open is not the
 # same as saying nothing: a turn that reached no verdict is announced, so an
 # unguarded turn never passes for a guarded one.

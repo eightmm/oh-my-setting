@@ -17,8 +17,6 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-residue.sh"
 # shellcheck source=model-routing.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/model-routing.sh"
-# shellcheck source=provider-registry.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/provider-registry.sh"
 
 
 MA_SAFE_PATHS=(
@@ -309,16 +307,17 @@ ma_write_harness_context() {
   local include_task="$3"
   local include_ml="$4"
   local recall_query="${5:-}"
+  local include_models="${6:-1}"
   local tmp
   local warnings
 
+  printf 'Use task constraints, source/callers, tests and decisive evidence; inspect missing context where authorized. Truncated input is incomplete evidence.\n'
+  printf 'Return concise conclusions, file/line evidence, verification and uncertainty. Preserve required schemas, complete code/patch and safety detail; omit repeated context.\n\n'
   tmp="$(agent_memory_mktemp)" || return 0
   {
     # Cached only: prompt construction must not cause a provider probe. No
     # cached catalog for any provider means no section, not an empty header.
-    if [ -f "$(dirname "${BASH_SOURCE[0]}")/model-capability.sh" ]; then
-      . "$(dirname "${BASH_SOURCE[0]}")/provider-registry.sh"
-      . "$(dirname "${BASH_SOURCE[0]}")/model-capability.sh"
+    if [ "$include_models" -eq 1 ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/model-capability.sh" ]; then
       model_lines=""
       while IFS= read -r provider; do
         [ -n "$provider" ] || continue
@@ -1354,7 +1353,7 @@ ma_safe_diff() {
 }
 
 extract_output() {
-  awk 'BEGIN{flag=0} /^## Output$/{flag=1;next} /^## Exit$/{flag=0} flag' "$1"
+  python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$1"
 }
 
 # Did the provider actually answer? A CLI can exit 0 and still return nothing
@@ -1627,6 +1626,7 @@ ma_sanitize_quoted_output() {
   local redacted=0
   local original_bytes
   local trimmed
+  local sensitive_re
 
   tmp="$(agent_memory_mktemp)" || return 1
   sanitized="$(agent_memory_mktemp)" || { rm -f "$tmp"; return 1; }
@@ -1644,9 +1644,10 @@ ma_sanitize_quoted_output() {
     [ -s "$trimmed" ] || tail -c $((budget + 4096)) "$tmp" > "$trimmed"
     mv -f "$trimmed" "$tmp"
   fi
+  sensitive_re="$(agent_memory_sensitive_re)"
   {
     while IFS= read -r line; do
-      if printf '%s\n' "$line" | grep -Eiq "$(agent_memory_sensitive_re)"; then
+      if printf '%s\n' "$line" | grep -Eiq "$sensitive_re"; then
         if [ "$redacted" -eq 0 ]; then
           printf '[REDACTED: sensitive-looking provider output line omitted]\n'
           redacted=1

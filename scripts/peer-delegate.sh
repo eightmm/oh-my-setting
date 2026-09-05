@@ -930,13 +930,13 @@ write_compiled_context() {
 }
 
 write_minimal_change_doctrine() {
-  printf 'Search repository structure, affected call paths and contracts, current implementation, and related tests before editing; spend targeted reads to reduce speculative output and state the narrowest change boundary.\n'
-  printf 'For important judgments prefer source code, tests, official docs, issue/PR/history, secondary sources, then inference; label verified facts, inference, and unknowns, and lower confidence in unfamiliar scientific, HPC, or ML logic.\n'
-  printf 'For a failure preserve the symptom, test competing hypotheses with the cheapest discriminating probe, identify the root cause, then fix it; do not rewrite while the cause is undiscriminated.\n'
-  printf 'Before adding code, prefer no change, existing repo code, stdlib or portable native features, and already-declared dependencies before the smallest correct implementation.\n'
+  printf 'Search repository structure, affected call paths and contracts, implementation and tests before editing. Infer reversible details within scope; report material blockers.\n'
+  printf 'Prefer source code, tests, official docs, issue/PR/history, secondary sources, then inference. Distinguish facts from uncertainty; investigate unfamiliar scientific/HPC/ML logic.\n'
+  printf 'For failures, test competing hypotheses with the cheapest discriminating probe before fixing the root cause.\n'
+  printf 'Prefer no change, repo reuse, stdlib, portable native features, declared dependencies, then new code. Keep one readable owner per behavior; avoid speculative wrappers and code-golf.\n'
   printf 'Minimal never means weakening explicit requirements, trust-boundary validation, data-loss protection, security, accessibility, portability, compatibility, or required verification.\n'
-  printf 'Extend an existing canonical test or fixture first; add a new test only when the behavior or boundary is not already covered.\n'
-  printf 'Comments/docstrings preserve task/repo-established public contracts and non-obvious rationale; never restate code, types, tests, or names, and do not delete documentation merely to reduce volume.\n'
+  printf 'Extend an existing canonical test or fixture first; add tests only for uncovered behavior. Run affected and required checks; repeat or broaden only for new changes, failures or unresolved risk.\n'
+  printf 'Comments/docstrings preserve task/repo-established public contracts and non-obvious rationale; never restate code, types, tests, or names. Do not delete useful documentation for brevity. Return patches as artifacts, without repeating full code.\n'
 }
 
 {

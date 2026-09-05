@@ -3,6 +3,13 @@
 These adapters expose existing OMS reads and peer operations. They do not add a
 new task, approval, landing, provider-write, or publication authority.
 
+Live collaboration reuses the existing peer tools: `oms_peer_start` with
+`kind=message|ack` records only a thread turn; `oms_peer_result` with `thread`
+and optional `after` returns a bounded incremental page without starting a
+provider. Ordinary operation-id polling is unchanged. See state-memory.md for
+delivery versus acknowledgment and hook boundaries. Core discovery stays at
+12 tools; no subscription or push capability is advertised.
+
 ## MCP protocol revisions
 
 The stdio server is dual-era. A legacy client opens with `initialize` and is

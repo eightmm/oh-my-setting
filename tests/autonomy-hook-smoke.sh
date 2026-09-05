@@ -294,10 +294,54 @@ test_route_is_hermetic_to_inherited_harness_session() {
     fail "inherited harness-child identity suppressed the fixture's auto-task"
 }
 
+test_live_thread_delivery_at_existing_safe_points() {
+  python3 - "$ROOT" "$TMP/live-hook" <<'PY'
+import json, os, pathlib, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+repo.mkdir()
+subprocess.run(["git", "init", "-q", str(repo)], check=True)
+sys.path.insert(0, str(root / "scripts/lib"))
+import hook_state
+thread = ["bash", str(root / "scripts/thread.sh"), "--repo", str(repo)]
+def call(*args):
+    return subprocess.run(thread + list(args), capture_output=True, text=True, check=True).stdout
+def payload(session):
+    return {"cwd": str(repo), "session_id": session, "hook_event_name": "PostToolUse",
+            "tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Update File: a.py\n*** End Patch"}}
+call("new", "--id", "ordinary", "--topic", "old discussion")
+assert not hook_state.live_thread_hint(payload("codex")), "ordinary threads are not subscriptions"
+call("new", "--id", "live", "--live", "--topic", "Caller contract")
+call("append", "--id", "live", "--role", "question", "--text", "Can the caller accept named options?")
+first = hook_state.live_thread_hint(payload("codex"))
+assert "named options" in first and "untrusted peer data" in first
+assert not hook_state.live_thread_hint(payload("codex")), "same session must not replay"
+assert "named options" in hook_state.live_thread_hint(payload("claude")), "each session needs its own cursor"
+path = repo / ".oms/threads/live.jsonl"
+assert not any(json.loads(line).get("receipt") for line in path.read_text().splitlines())
+(repo / "a.py").write_text("def broken(:\n")
+call("append", "--id", "live", "--role", "decision", "--text", "Keep backward compatibility in a.py.")
+proc = subprocess.run(["bash", str(root / "scripts/syntax-guard-hook.sh")], cwd=repo,
+                      input=json.dumps(payload("codex")), capture_output=True, text=True, check=True)
+message = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+assert "backward compatibility" in message and "does not parse" in message
+assert not hook_state.live_thread_hint(payload("codex")), "edit and prompt delivery must share the cursor"
+os.environ["OMS_LIVE_COLLAB"] = "0"
+assert not hook_state.live_thread_hint(payload("new"))
+os.environ.pop("OMS_LIVE_COLLAB")
+os.environ["OMS_HARNESS_CHILD"] = "1"
+assert not hook_state.live_thread_hint(payload("child")), "do not give workers a new state capability"
+os.environ.pop("OMS_HARNESS_CHILD")
+call("close", "--id", "live")
+assert not hook_state.live_thread_hint(payload("new"))
+assert not hook_state.live_thread_hint({"cwd": str(repo)}), "no shared nosession cursor"
+PY
+}
+
 test_classifier_boundaries
 test_peer_tail_is_bounded
 test_verification_disclosure_boundaries
 test_explicit_goal_rotation
 test_fail_ledger_hook_resolves_on_success
 test_route_is_hermetic_to_inherited_harness_session
+test_live_thread_delivery_at_existing_safe_points
 echo "autonomy-hook-smoke: ok"

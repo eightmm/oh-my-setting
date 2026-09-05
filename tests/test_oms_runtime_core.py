@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
@@ -303,11 +304,16 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(statuses['project-safe'], 'stale')
 
     def test_context_manifest_selects_target_imports_tests_and_reports_debt(self) -> None:
-        manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], required=['scripts/helper.py', 'missing-required.py'], max_bytes=32768)
+        caller = self.repo / 'scripts' / 'caller.py'
+        caller.write_text('from scripts.sample import calculate\ncalculate(2)\n', encoding='utf-8')
+        with patch.object(context, '_discovery_text', wraps=context._discovery_text) as discover:
+            manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], required=['scripts/helper.py', 'missing-required.py'], max_bytes=32768)
+        self.assertEqual(sum(call.args[0] == caller for call in discover.call_args_list), 1)
         selected = {item['path'] for item in manifest['selected']}
         self.assertIn('scripts/sample.py', selected)
         self.assertIn('scripts/helper.py', selected)
         self.assertIn('tests/test_sample.py', selected)
+        self.assertIn('scripts/caller.py', selected)
         self.assertFalse(manifest['sufficient'])
         self.assertIn('missing-required.py', manifest['missing_required'])
         self.assertEqual(manifest['targets'], ['scripts/sample.py'])
@@ -328,6 +334,61 @@ class RuntimeFixture(RuntimeFixtureBase):
         from oms_runtime.cli_parser import build_parser
         args = build_parser().parse_args(['context', '--target', 'a.py', '--target', 'b.py'])
         self.assertEqual(args.target, ['a.py', 'b.py'])
+
+    def test_context_reuses_fresh_graph_without_discovery_or_graph_writes(self) -> None:
+        from oms_graph.project import build
+        from oms_graph.project import context as graph_context
+
+        (self.repo / 'scripts/extra.py').write_text('from scripts.helper import value\n')
+        built = build.build(self.repo)
+        state = build.state_dir(self.repo)
+        before = {str(path): path.read_bytes() for path in state.rglob('*') if path.is_file()}
+        with patch.object(context, '_python_import_candidates', side_effect=AssertionError('duplicate discovery')):
+            with patch.object(graph_context, 'select_context', wraps=graph_context.select_context) as select:
+                manifest = context.plan_context(self.repo, targets=['scripts/sample.py', 'scripts/extra.py', 'scripts/sample.py'],
+                                                explicit=[('scripts/helper.py', 'operator context')], max_bytes=8192)
+        select.assert_called_once()
+        self.assertEqual(select.call_args.kwargs['entry_paths'], ['scripts/sample.py', 'scripts/extra.py'])
+        selected = {row['path']: row for row in manifest['selected']}
+        self.assertIn('scripts/sample.py', selected)
+        self.assertEqual(selected['scripts/helper.py']['reason'], 'operator context')
+        self.assertIn('project-graph ' + built['revision'], selected['tests/test_sample.py']['reason'])
+        self.assertLessEqual((self.repo / manifest['bundle_path']).stat().st_size, 8192)
+        self.assertEqual(before, {str(path): path.read_bytes() for path in state.rglob('*') if path.is_file()})
+
+    def test_context_falls_back_when_graph_is_not_usable(self) -> None:
+        from oms_graph.project import build
+
+        state = build.state_dir(self.repo)
+        for failure in ('missing', 'stale', 'revision', 'invalid', 'excluded', 'dependency-excluded', 'included', 'unsafe', 'uncertain', 'parse-skip'):
+            with self.subTest(failure=failure):
+                if failure != 'missing':
+                    exclude = {'excluded': ('scripts/sample.py',), 'dependency-excluded': ('scripts/helper.py',)}.get(failure, ())
+                    build.build(self.repo, exclude=exclude, include=('scripts/sample.py',) if failure == 'included' else ())
+                if failure == 'stale':
+                    target = self.repo / 'scripts/sample.py'
+                    target.write_text(target.read_text() + '\n# changed\n')
+                elif failure == 'invalid':
+                    (state / 'graph.json').write_text('{broken')
+                elif failure == 'parse-skip':
+                    (self.repo / 'unparsed.c').write_text('int value = 1;\n')
+                    build.build(self.repo)
+                elif failure in ('revision', 'unsafe', 'uncertain'):
+                    graph = json.loads((state / 'graph.json').read_text())
+                    if failure == 'revision':
+                        graph['revision'] = 'not-the-manifest-revision'
+                    elif failure == 'unsafe':
+                        graph['nodes'][0]['path'] = '../outside.py'
+                    else:
+                        for edge in graph['edges']:
+                            if edge['relation'] == 'imports':
+                                edge['confidence'] = 'AMBIGUOUS'
+                    (state / 'graph.json').write_text(json.dumps(graph))
+                with patch.object(context, '_python_import_candidates', wraps=context._python_import_candidates) as fallback:
+                    manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=32768)
+                fallback.assert_called_once()
+                self.assertIn('scripts/helper.py', {row['path'] for row in manifest['selected']})
+                self.assertNotIn('../outside.py', {row['path'] for row in manifest['selected']})
 
     def test_path_lists_reject_parent_traversal_and_jsonl_fails_closed_on_truncation(self) -> None:
         self.assertEqual(parse_path_list(['./src', '../outside', 'tests/../secret', 'safe/**']), ['safe/**', 'src'])

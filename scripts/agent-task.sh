@@ -619,42 +619,6 @@ print(json.dumps({
     if work_journal_enabled && [ -z "$decision_line$next_line" ]; then
       echo "hint: no decision or next step recorded; 'agent-task update --decision/--next' before close feeds the Work Journal daily" >&2
     fi
-    # A failure that repeated and was then resolved is a learned lesson.
-    # Offer — never force — promoting it into a project skill so the next
-    # session starts with the lesson instead of relearning it.
-    if [ "${OMS_SKILL_FORGE_HINT:-1}" = "1" ] && [ -f "$REPO/.oms/failures.jsonl" ]; then
-      lesson_count="$(OMS_AT_LEDGER="$REPO/.oms/failures.jsonl" python3 - <<'PY' 2>/dev/null || printf '0'
-import json, os
-
-state = {}
-try:
-    with open(os.environ["OMS_AT_LEDGER"], encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            fp = row.get("fingerprint")
-            if not fp:
-                continue
-            entry = state.setdefault(fp, {"count": 0, "resolved": False})
-            if row.get("event") == "resolved" or row.get("resolved") is True:
-                entry["resolved"] = True
-            elif row.get("event") == "fail":
-                entry["count"] += 1
-                entry["resolved"] = False
-except OSError:
-    pass
-print(sum(1 for e in state.values() if e["count"] >= 2 and e["resolved"]))
-PY
-)"
-      if [ "${lesson_count:-0}" -gt 0 ] 2>/dev/null; then
-        echo "hint: $lesson_count repeated failure(s) were resolved in this repo; consider 'oms skill-forge add --name oms-NAME' to make the lesson a project skill" >&2
-      fi
-    fi
     # A project skill may declare the evidence it expects (a `verify:`
     # frontmatter command). Remind at close — never execute: running standing
     # context on the harness's own authority is not a rail.

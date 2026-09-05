@@ -3,10 +3,14 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+from peer_artifacts import tail_lines
+
+from inbox_projection import project_inbox
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -79,12 +83,11 @@ def read_list_surface(script: str, args: List[str]) -> List[Dict[str, Any]]:
 
 def read_jsonl_tail(path: Path, limit: int) -> List[Dict[str, Any]]:
     try:
-        with path.open(encoding="utf-8") as handle:
-            lines = handle.readlines()
+        lines, _ = tail_lines(path, limit)
     except OSError:
         return []
     rows = []
-    for line in lines[-limit:]:
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -188,7 +191,7 @@ def count_priorities(items: List[Dict[str, Any]]) -> Dict[str, int]:
 
 def build_report(repo: str, limit: int) -> Dict[str, Any]:
     state = read_surface("state.sh", ["--repo", repo, "--json"])
-    inbox = read_surface("inbox.sh", ["--repo", repo, "--json"])
+    inbox = project_inbox(state, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0")
     telemetry = read_surface(
         "artifact-index.sh",
         ["--repo", repo, "--json", "telemetry", str(limit)],

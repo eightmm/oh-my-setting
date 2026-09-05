@@ -6,23 +6,15 @@ judgment only; it creates no mode, hook, state, or mutation authority.
 
 ## Evidence before output
 
-Use `SEARCH -> UNDERSTAND -> PLAN -> MINIMAL EDIT -> TEST -> REVIEW -> RECORD`.
-Before editing, inspect repository structure, trace the affected call path and
-contracts, read the existing implementation, and locate the tests that own the
-behavior. Prefer a few more targeted reads over a speculative patch, but stop
-when further context cannot change the boundary or verification plan.
+Apply the global evidence hierarchy, debugging workflow, safety floors and
+completion record. This reference adds implementation tradeoffs, not another
+mandatory checklist.
 
-For important judgments, prefer repository source, then tests, official docs,
-issue/PR/history, secondary sources, and only then model inference. A conflict
-is a reason to investigate the contract, not average the sources. Label what is
-verified, inferred, and still unknown. In unfamiliar scientific, HPC, or ML
-logic, lower confidence and inspect the codebase and primary sources rather
-than forcing a familiar generic pattern.
-
-For regressions, silent wrong results, flakiness, or anomalies, use
-`oms-trace`: preserve the symptom, list competing hypotheses, run the cheapest
-probe whose outcomes distinguish them, identify the root cause, then fix it.
-Do not rewrite a subsystem while the hypotheses are still undiscriminated.
+Read enough source, callers, contracts and canonical tests to choose the change
+boundary and verification plan; stop when further context cannot change either.
+Keep contradictory evidence. Fetch missing relevant source when a context pack
+is truncated; do not repeat whole logs or mistake a bounded pack for completeness.
+Use `oms-trace` for regressions or anomalies before choosing a rewrite.
 
 ## Decide after understanding
 
@@ -49,6 +41,11 @@ canonical interface test, table, or fixture when it already owns the contract.
 Create a test only for an uncovered observable contract, a reproduced bug, or
 a safety boundary; a changed line, refactor, document, or wiring task does not
 earn a new test by itself.
+
+Run affected checks and every check required by the project. After they pass,
+repeat or expand only for changed inputs, failures, or unresolved risk. A
+documentation-only edit does not justify unrelated test runs, but cannot waive
+a declared full or release gate. Report any required check not run.
 
 Keep one primary test layer per behavior and use thinner smoke checks only for
 real serialization, process, install, platform, or trust boundaries. Graph
@@ -100,14 +97,6 @@ File/line evidence, the maintenance or behavioral failure, and the replacement
 are required. Line count alone is not evidence, and complexity cannot override
 a mechanical verification failure.
 
-## Record a traceable result
-
-Report What changed, Why, Evidence, Verification, and Remaining uncertainty.
-Evidence names the source, test, command, official document, or history item
-that changed the decision; model confidence is not evidence. Include failed,
-skipped, or impossible checks. Keep the record short enough for the next agent
-to reuse without reconstructing the session.
-
 ## Measure without another benchmark
 
 Use `oms skill-forge eval` for baseline/treatment routing and task value,
@@ -120,3 +109,10 @@ This adapts the minimal-solution ladder popularized by
 [Ponytail](https://github.com/DietrichGebert/ponytail) (MIT) to OMS's existing
 authority and verification contracts; it does not vendor Ponytail's hooks,
 modes, commands, or state.
+
+The [GPT-6 Astra prompting guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra#prompting-best-practices)
+and [Codex customization guidance](https://learn.chatgpt.com/docs/customization/overview)
+(reviewed 2026-09-05) also support auditing conflicting instructions, concise
+output, selective reference loading and proportional verification. OMS applies
+these principles across providers; it does not adopt model-specific defaults,
+recursive delegation, or additional publication authority from guide examples.

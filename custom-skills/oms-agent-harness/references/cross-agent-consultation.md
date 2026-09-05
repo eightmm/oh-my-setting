@@ -1,7 +1,8 @@
 # Cross-Agent Consultation
 
-Ask other agents while working, and keep the exchange. A consult is read-only
-and cheap; a delegation is a write and is not.
+Ask another agent when its judgment can change the next action. Preserve the
+requested council participants; save tokens by removing redundant context,
+not independent viewpoints. Reuse a live thread when only a message is needed.
 
 ## One command
 
@@ -27,12 +28,13 @@ oms peer-ask --prompt "Compare the two designs for this constraint."
 Choose the smallest context: none for a concept, `--repo-context` for repository
 state, `--diff` for an uncommitted change, or a local summary of specific files.
 Use `--debate 1` only when answers materially disagree. Longer debates
-(`--debate 2-3`) stay token-bounded on their own: full positions cross once,
-later rounds carry only each peer's delta sections plus an on-disk pointer to
-the full answer, and the debate stops early when no seat changed position —
-so asking for the budgeted rounds is safe when the disagreement warrants
-them. If policy forbids direct provider calls, use `--export-only` and import
-the answer with `oms artifact-index import`.
+(`--debate 2-3`) quote full positions once, then other peers' delta sections
+with a pointer to the full answer (bounded full quotes if deltas are absent).
+Each fresh invocation retains the question and its own previous answer.
+The debate stops early when every active seat explicitly reports no change;
+that does not prove consensus. Byte limits are not a total billed-token cap:
+retries and optional synthesis also cost calls. If policy forbids direct
+provider calls, use `--export-only` and import with `oms artifact-index import`.
 
 For a debate, raise the wall clock before launching — seats doing real
 verification die at the default 5m and their round is lost (a dropped seat's

@@ -66,30 +66,6 @@ case "$CLAUDE_HOOKS:$CODEX_PLUGIN" in
   *) echo "error: hook/plugin opt-outs must be 0 or 1" >&2; exit 2 ;;
 esac
 
-systemd_available() {
-  command -v systemctl >/dev/null 2>&1 &&
-    [ -n "${XDG_RUNTIME_DIR:-}" ] &&
-    systemctl --user show-environment >/dev/null 2>&1
-}
-
-cron_available() {
-  [ -n "$CRON_FILE" ] || command -v crontab >/dev/null 2>&1
-}
-
-choose_method() {
-  if [ "$METHOD" != "auto" ]; then
-    printf '%s\n' "$METHOD"
-    return 0
-  fi
-  if systemd_available; then
-    printf 'systemd\n'
-  elif cron_available; then
-    printf 'cron\n'
-  else
-    printf 'none\n'
-  fi
-}
-
 install_systemd() {
   if [ "$DRY_RUN" = "1" ]; then
     printf 'would install systemd user timer: %s (%s)\n' "$TIMER_FILE" "$MODE"
@@ -190,17 +166,17 @@ preflight_cron_state() {
 # scheduler or writing its units/receipt. install_cron still reclassifies a
 # fresh snapshot immediately before its own mutation to close the read gap.
 preflight_cron_state
-chosen="$(choose_method)"
+chosen="$(oms_install_scheduler_method "$METHOD" "$CRON_FILE")"
 case "$chosen" in
   systemd)
-    if ! systemd_available && [ "$METHOD" = "systemd" ]; then
+    if [ "$METHOD" = "systemd" ] && ! oms_install_scheduler_systemd_available; then
       echo "auto-update trigger: systemd unavailable" >&2
       exit 1
     fi
     install_systemd
     ;;
   cron)
-    if ! cron_available; then
+    if ! oms_install_scheduler_cron_available "$CRON_FILE"; then
       echo "auto-update trigger: cron unavailable" >&2
       exit 1
     fi

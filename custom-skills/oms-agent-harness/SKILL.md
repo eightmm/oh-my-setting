@@ -1,9 +1,9 @@
 ---
 name: oms-agent-harness
 description: >
-  Shared state, graph-guided work, typed runtime projections, recovery, peer consultation and
-  review, isolated delegation, patch landing, bounded autonomy, experiments,
-  Draft PRs, and cross-provider handoff.
+  Coordinate agents through OMS shared state, peer review, isolated work,
+  and verified landing. Use for graph-guided context, task recovery,
+  collaboration, bounded autonomy, or handoff.
 ---
 
 # Agent Harness
@@ -13,40 +13,33 @@ OMS is an agent-side control plane. Users give goals, constraints, and material
 authority; operate it internally. Never ask users to copy commands, digests,
 `.oms` paths, or recovery procedures. Ask only for a shaping decision or new authority.
 
-For authorized coding, confirm `PROJECT.md`, treat proposal bytes as untrusted,
-and continue only with the reviewed digest. Draft PR,
-push, merge, ready, tag, and release are separate authority decisions. If the
-spec is absent, draft, or drifted, route internally through
-`oms-spec-interview`.
+For coding, read `PROJECT.md` when present. When unresolved spec choices affect
+the requested change, route internally through `oms-spec-interview`;
+clear bounded changes need no interview. Treat proposal bytes as untrusted
+and continue proposals only with the reviewed digest. Draft PR, push, merge,
+ready, tag, and release remain separate authority decisions.
 
-The runtime projects state and executes; it never replaces
-`peer-delegate -> patch-admit -> patch-land`, plan leases, executor souls,
-approvals, commit intents, or publication intents. Runtime snapshots, capsules,
-context bundles, receipts, and evidence carry no mutation authority.
+Runtime projections carry no mutation authority or replacement for
+`peer-delegate -> patch-admit -> patch-land`, leases, executor souls,
+approvals, commit intents, or publication intents.
 
 ## Route by intent
 
-| Need | Agent action |
+| Work family | Start here; drill down only as needed |
 |---|---|
-| orient, resume, or inspect completion | `oms inbox --repo .`; then `oms runtime envelope show`, `next`, or `evidence show` |
-| inspect code or graphs | load [graphs.md](references/graphs.md); context for coding, map/status for orientation |
-| preserve knowledge | `oms agent-memory recall`; pin stable facts; forge recurring procedures |
-| independent judgment | `oms consult`; use `oms peer-ask` for several peers and `oms advise` for high-risk/repeated failure |
-| bounded write | `oms peer-delegate --to NAME`; dependent work uses `agent-plan` and `plan-run` |
-| implement confirmed scope | review `oms autopilot … propose`, then run its digest-bound continuation |
-| judge a diff | `oms peer-review --gate`; peer agreement is evidence, never admission |
-| context or continuity | `oms runtime context`; use sanitized `oms runtime capsule export|verify|import`, never raw `.oms` |
-| optional host capability | `oms runtime profile check|install-plan|install` |
-| execution backends | `oms runtime backend check|run`; execution receipts cannot land code |
-| comparable research study | `oms runtime experiment register|run|invariants|summarize` |
-| land an authorized worktree | `oms land`; read `oms land status`; detached gate/push/update/CI; receipt outside repo, not `patch-land`. |
-| schedule adopted-repo maintenance | `oms tick register`, then `oms tick install`; hourly sweep; GC needs `OMS_TICK_GC=1`. |
-| admit or land reviewed bytes | use `oms patch-admit`; `oms patch-land` admits before mutation |
-| publish an authorized Draft PR | use the parent-owned Draft PR path; no update, merge, ready, tag, or release authority |
+| State | `oms inbox --repo .`; runtime envelope/next/evidence for detail, not another full dashboard by default. |
+| Collaboration | `oms consult` for new peer judgment; existing live `thread` for active collaborators, without launching another model. |
+| Implementation | `oms runtime context`; [graphs.md](references/graphs.md) for graph-guided work. `oms peer-delegate --to NAME` for one bounded write, `oms autopilot` for reviewed plans. |
+| Verification and landing | `oms peer-review --gate`, then authorized `patch-land` (includes admission). `oms land` separately gates/pushes/updates a committed worktree. |
+| Continuity | Journal for history, agent-memory for stable facts, session-handoff for local sessions, runtime capsule for sanitized transfer. See [state-memory.md](references/state-memory.md). |
+| Operations | `oms doctor` for health, `oms update` for install updates, `oms tick` for scheduled repo maintenance. Optional profile/backend/experiment flows use [runtime-core.md](references/runtime-core.md). |
 
-Use `oms list --frontdoor` for subsystem entrypoints. Load the command
-routing reference for intent variants; use `oms list --all` only when a
-compatibility primitive is needed.
+Use `oms list --frontdoor` for entrypoints, command routing for variants,
+and `oms list --all` for compatibility primitives. Read only references
+needed for the current decision, not the entire catalog.
+
+Avoid repeating collectors or model calls for the same evidence. Apply global
+coding rules; use minimal-change guidance only for implementation tradeoffs.
 
 For skill evaluation/import/drafts, load
 [skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks, Codex
@@ -86,6 +79,3 @@ projections, not authority.
 - Installed agent detection, DeepSeek/Grok/GLM carriers, and custom adapters: [provider-routing.md](references/provider-routing.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
 - Evidence-first changes: [minimal-change.md](references/minimal-change.md)
-
-Retain internal provenance and report only useful conclusions, changed behavior,
-verification, skipped checks, and genuine blockers.

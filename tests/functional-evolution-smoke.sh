@@ -260,6 +260,9 @@ PY
     fail "safe repair must leave judgment-requiring artifacts visible"
   grep -Fq '"code": "open-failures"' "$TMP/inbox-fixed" ||
     fail "safe repair must leave failures visible"
+  if grep -Fq '"code": "stale-plan-claim"' "$TMP/inbox-fixed"; then
+    fail "safe repair must project fresh state after reclaim, not its pre-repair snapshot"
+  fi
 }
 
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch() {

@@ -25,11 +25,9 @@ contract, then proceed. Clarify public interfaces, persistence/schema,
 auth/privacy, destructive or expensive work, Slurm resources, dependencies,
 and acceptance criteria only when relevant.
 
-After the contract lands, distill what inspection actually verified — build
-and test invocations, repo-specific pitfalls, domain data rules — into at
-most a few project skills with `oms skill-forge add --name NAME`. Evidence
-only: a skill you cannot back with an inspected fact is context tax, not
-knowledge. All three CLIs load them natively from the project.
+Keep build/test commands and project facts in the existing contract. Add a
+project skill only for a verified recurring procedure that existing guidance
+cannot cover; onboarding alone does not justify creating skills.
 
 Read one reference as needed:
 

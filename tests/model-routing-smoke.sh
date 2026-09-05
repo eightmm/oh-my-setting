@@ -45,6 +45,20 @@ mkdir -p "$gen"
 cp "$TMP/cap/codex.env" "$TMP/cap/antigravity.env" "$gen/"
 printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\ngpt-5.4-mini\ngpt-5.3-codex-spark\n' > "$gen/codex.models"
 printf 'Fetching available models...\ngemini-3.7-flash-high\ngemini-3.7-flash-low\ngemini-3.1-pro-high\nclaude-opus-4-6-thinking\ngpt-oss-120b-medium\n' > "$gen/antigravity.models"
+# Prompt construction consumes the catalog without resetting routing caches.
+PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" bash -c '
+  . "$1/scripts/lib/peer-common.sh"
+  oms_capability_binary_key codex >/dev/null
+  before="$OMS_CAPABILITY_KEY_CACHE"
+  ma_write_harness_context "$2" 0 0 0 > "$2/harness-prompt"
+  ma_write_harness_context "$2" 0 0 0 "" 0 > "$2/council-harness-prompt"
+  [ "$OMS_CAPABILITY_KEY_CACHE" = "$before" ] || exit 7
+' _ "$ROOT" "$TMP" || fail 'prompt construction reset the binary identity cache'
+grep -Fq 'gpt-5.6-sol' "$TMP/harness-prompt" || fail 'prompt omitted the cached model catalog'
+if grep -Fq 'gpt-5.6-sol' "$TMP/council-harness-prompt"; then
+  fail 'read-only council context included an unused model catalog'
+fi
+grep -Fq 'file/line evidence' "$TMP/council-harness-prompt" || fail 'council lost evidence guidance'
 routable() {  # routable PROVIDER -> space-joined routable catalog
   PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_capability_routable_models "$1"' _ "$1" | tr '\n' ' '
 }

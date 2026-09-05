@@ -1030,12 +1030,8 @@ if [ -f "$OMS/lifecycle/events.jsonl" ]; then
   fi
 fi
 
-# 4.4) Usage rows: the content-free family counter the fail-ledger hook
-#      appends on matched Bash calls. The reader (skill-router's usage hint)
-#      drops rows past OMS_USAGE_TTL at read time — this compaction uses the
-#      SAME predicate (unreadable day reads as expired too) and collapses
-#      same-day rows into count rows the reader already sums, so the file
-#      stops growing without the two mechanisms disagreeing.
+# 4.4) Retain opt-in and historical usage under OMS_USAGE_TTL. Unreadable
+#      days expire; same-day rows collapse into count rows for diagnostics.
 usage_file="$OMS/usage.jsonl"
 if [ -f "$usage_file" ] && [ ! -L "$usage_file" ]; then
   usage_ttl="${OMS_USAGE_TTL:-2592000}"

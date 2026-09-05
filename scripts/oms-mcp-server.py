@@ -7,8 +7,8 @@ MCP client (Claude Code, Codex, Antigravity, IDEs) reads the same state
 without per-CLI hook code. Every state tool maps to a fixed read-only
 subcommand argv.
 
-The write surface is exactly one thing: oms_peer_start launches a peer
-consultation (consult, advise, ask), which writes what those verbs always
+The write surface is oms_peer_start: it records a thread message/ack without
+calling a model, or launches a peer consultation (consult, advise, ask), which writes what those verbs always
 write — its own artifacts, thread turns, and a run directory under
 .oms/artifacts/mcp/. It cannot modify repository files: the peer runs a
 read-only pass, and no tool here edits, stages, or commits anything.
@@ -40,6 +40,7 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
 from oms_graph import render as graph_render
+from peer_artifacts import artifact_sections, tail_lines
 
 FALLBACK_PROTOCOL = "2025-06-18"
 # Revisions whose semantics this server actually implements. Echoing an
@@ -379,15 +380,20 @@ TOOLS = [
             " peer. The peer keeps running after this call returns and often"
             " takes 5-25 minutes. Read the answer with oms_peer_result; do"
             " other work between polls instead of waiting."
+            " To collaborate with an already active agent without starting"
+            " another model, use kind='message' (prompt + thread) or 'ack'"
+            " (thread + after + consumer). new_thread=true with message creates"
+            " a live thread for existing prompt/edit hooks. Messages are data,"
+            " not task approval; ack is consumption, not agreement."
         ),
         "properties": {
             **REPO_PROPERTY,
             "kind": {
                 "type": "string",
-                "enum": sorted(PEER_KINDS),
+                "enum": sorted(PEER_KINDS) + ["message", "ack"],
                 "description": (
                     "consult (ask a peer mid-task), advise (adversarial review"
-                    " of a decision), or ask (every peer answers)."
+                    " of a decision), ask (every peer answers), message, or ack."
                 ),
             },
             "prompt": {
@@ -419,11 +425,13 @@ TOOLS = [
                 "description": (
                     "Start a fresh conversation instead of continuing the"
                     " current one — a new topic, not a follow-up."
-                    " kind='consult' only."
+                    " consult, or message with an explicit new thread id."
                 ),
             },
+            "after": {"type": "string", "description": "ack: exact consumed thread cursor."},
+            "consumer": {"type": "string", "description": "ack: self-reported session identifier."},
         },
-        "required": ["kind", "prompt"],
+        "required": ["kind"],
         "annotations": START_PEER,
     },
     {
@@ -436,6 +444,9 @@ TOOLS = [
             " status='stalled' means the run's process is gone without an"
             " exit: no answer is coming. Polling is cheap and never blocks,"
             " but the run takes minutes — do other work between polls."
+            " Alternatively pass thread and optional after cursor (no operation)"
+            " for new complete messages/acks. Retain cursor and page has_more;"
+            " reading never acknowledges."
         ),
         "properties": {
             **REPO_PROPERTY,
@@ -443,8 +454,9 @@ TOOLS = [
                 "type": "string",
                 "description": "Operation id returned by oms_peer_start.",
             },
+            "thread": {"type": "string", "description": "Existing thread id for incremental delivery."},
+            "after": {"type": "string", "description": "Cursor from previous thread read; omit to start."},
         },
-        "required": ["operation"],
         "annotations": READ_ONLY,
     },
     {
@@ -1004,6 +1016,8 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     kind, err = text_argument(arguments, "kind", 64)
     if err:
         return err, True
+    if kind in ("message", "ack"):
+        return thread_exchange(arguments, kind)
     spec = PEER_KINDS.get(kind)
     if spec is None:
         return "error: kind must be one of: %s" % ", ".join(sorted(PEER_KINDS)), True
@@ -1125,63 +1139,43 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
 
 def log_tail(log: Path) -> str:
     try:
-        text = log.read_text(encoding="utf-8", errors="replace")
+        lines, clipped = tail_lines(log, LOG_TAIL_LINES, 64 * 1024)
     except OSError:
         return ""
-    tail = "\n".join(text.splitlines()[-LOG_TAIL_LINES:])
-    if len(tail) > LOG_TAIL_LIMIT:
+    tail = "\n".join(lines)
+    if clipped or len(tail) > LOG_TAIL_LIMIT:
         tail = "[truncated]\n" + tail[-LOG_TAIL_LIMIT:]
     return tail
 
 
-def artifact_paths(log: Path) -> list[str]:
-    """Artifact paths the run reported, in the order it reported them.
-
-    agent-call prints "artifact: PATH" and run_provider prints
-    "ok: PROVIDER -> PATH"; reading the log is how consult itself learns
-    which artifact belongs to which target.
-    """
+def log_references(log: Path) -> tuple[list[str], str]:
+    """Stream the full history once: early artifact paths must not be tail-capped."""
     paths: list[str] = []
+    thread = ""
     try:
-        text = log.read_text(encoding="utf-8", errors="replace")
+        with log.open(encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                line = raw.rstrip("\r\n")
+                match = re.match(r"artifact: (\S.*)\Z", line) or re.match(
+                    r"(?:ok|failed|skipped|blocked|dry-run|exported): \S+ -> (\S.*)\Z", line
+                )
+                if match:
+                    path = match.group(1).strip()
+                    if path not in paths and Path(path).is_file():
+                        paths.append(path)
+                match = re.match(r"thread: (\S+)\Z", line)
+                if match:
+                    thread = match.group(1)
     except OSError:
-        return paths
-    for line in text.splitlines():
-        match = re.match(r"artifact: (\S.*)\Z", line) or re.match(
-            r"(?:ok|failed|skipped|blocked|dry-run|exported): \S+ -> (\S.*)\Z", line
-        )
-        if match is None:
-            continue
-        path = match.group(1).strip()
-        if path not in paths and Path(path).is_file():
-            paths.append(path)
-    return paths
+        return [], ""
+    return paths, thread
 
 
 def artifact_answer(path: str) -> tuple[str, str]:
-    """The Output section and recorded exit of one artifact.
-
-    Same sections as extract_output in peer-common.sh — the answer sits between
-    the Output and Exit headings — but matched from the end. An artifact quotes
-    the whole composed prompt, and a prompt that dictates a reply format brings
-    its own "## Output" heading with it, so the first match is the advisor's
-    template rather than what the advisor said.
-    """
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        return artifact_sections(Path(path))
     except OSError as exc:
         return "error: %s" % exc, ""
-    try:
-        end = len(lines) - 1 - lines[::-1].index("## Exit")
-    except ValueError:
-        return "", ""  # no exit marker: this artifact is still being written
-    exit_code = next((line.strip() for line in lines[end + 1:] if line.strip()), "")
-    head = lines[:end]
-    try:
-        start = len(head) - 1 - head[::-1].index("## Output")
-    except ValueError:
-        return "", exit_code
-    return "\n".join(head[start + 1:]).strip(), exit_code
 
 
 def run_meta(run_dir: Path) -> dict:
@@ -1259,16 +1253,7 @@ def run_age(run_dir: Path) -> int | None:
 
 def log_thread(log: Path) -> str:
     """The thread id consult prints when it finishes; empty while it runs."""
-    thread = ""
-    try:
-        text = log.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    for line in text.splitlines():
-        match = re.match(r"thread: (\S+)\Z", line)
-        if match:
-            thread = match.group(1)
-    return thread
+    return log_references(log)[1]
 
 
 def peer_operations(arguments: dict) -> tuple[str, bool]:
@@ -1329,6 +1314,10 @@ def peer_operations(arguments: dict) -> tuple[str, bool]:
 
 
 def peer_result(arguments: dict) -> tuple[str, bool]:
+    if "thread" in arguments:
+        if arguments.get("operation"):
+            return "error: choose thread or operation, not both", True
+        return thread_exchange(arguments, "updates")
     repo, err = resolve_repo(arguments)
     if err:
         return err, True
@@ -1369,7 +1358,7 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
         )
         return json.dumps(payload, ensure_ascii=False, indent=2), True
 
-    artifacts = artifact_paths(log)
+    artifacts, thread = log_references(log)
     sections = []
     # Each seat gets an equal slice of the budget: joining before cutting let
     # the first artifact spend it all and silently dropped the later seats.
@@ -1397,7 +1386,6 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     payload["exit"] = code
     payload["artifacts"] = artifacts
     payload["answer"] = answer
-    thread = log_thread(log)
     if thread:
         # The follow-up address: pass it back as oms_peer_start thread=ID and
         # the next question starts from what this peer already said.
@@ -1527,6 +1515,47 @@ def write_cancel_request(run_dir: Path) -> None:
             temp.unlink()
         except OSError:
             pass
+
+
+def thread_exchange(arguments: dict, action: str) -> tuple[str, bool]:
+    repo, err = resolve_repo(arguments)
+    if err:
+        return err, True
+    thread, err = text_argument(arguments, "thread", 128)
+    if err or not THREAD_RE.fullmatch(thread):
+        return err or "error: an explicit valid thread id is required", True
+    after, err = text_argument(arguments, "after", 1024)
+    if err:
+        return err, True
+    argv = ["bash", str(ROOT / "scripts/thread.sh"), "--repo", str(repo), "--id", thread]
+    new = arguments.get("new_thread", False)
+    if not isinstance(new, bool) or (new and action != "message"):
+        return "error: new_thread is a boolean for message only", True
+    if arguments.get("providers"):
+        return "error: live messages do not invoke or select providers", True
+    if action == "updates":
+        command = ["updates", "--after", after, "--max-bytes", "8192", "--json"]
+    elif action == "ack":
+        consumer, err = text_argument(arguments, "consumer", 160)
+        if err:
+            return err, True
+        command = ["ack", "--after", after, "--consumer", consumer]
+    else:
+        prompt, err = text_argument(arguments, "prompt", 4000)
+        if err or not prompt.strip():
+            return err or "error: message requires a nonempty prompt", True
+        command = ["append", "--role", "note", "--text", prompt]
+    try:
+        if new:
+            command = ["new", "--live", "--topic", prompt]
+        proc = subprocess.run(argv + command, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "error: %s" % exc, True
+    if proc.returncode:
+        return (proc.stderr or proc.stdout).strip()[:OUTPUT_LIMIT], True
+    if action == "updates":
+        return proc.stdout.strip(), False
+    return json.dumps({"thread": thread, "status": "recorded", "kind": action}), False
 
 
 ACTIONS = {

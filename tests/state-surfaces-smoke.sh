@@ -25,6 +25,51 @@ make_repo() {
 
 # --- MCP server protocol ----------------------------------------------------
 
+test_mcp_live_thread_reuses_peer_tools() {
+  local repo="$TMP/mcp-live"
+  make_repo "$repo"
+  python3 - "$ROOT" "$repo" <<'PY'
+import importlib.util, json, os, sys
+from pathlib import Path
+root, repo = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("oms_mcp_live", root / "scripts/oms-mcp-server.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+def call(name, **args):
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": name, "arguments": {"repo": str(repo), **args}}}
+    result = m.handle(request)["result"]
+    return result["content"][0]["text"], result["isError"]
+text, bad = call("oms_peer_start", kind="message", thread="shared", new_thread=True,
+                 prompt="API signature changed; inspect api.py before updating callers.")
+assert not bad and json.loads(text)["status"] == "recorded", text
+assert not (repo / ".oms/artifacts/mcp").exists(), "message must not start another agent"
+text, bad = call("oms_peer_result", thread="shared")
+assert not bad, text
+data = json.loads(text)
+assert "signature changed" in data["turns"][-1]["text"]
+text, bad = call("oms_peer_start", kind="ack", thread="shared", after=data["cursor"], consumer="codex-1")
+assert not bad, text
+text, bad = call("oms_peer_result", thread="shared", after=data["cursor"])
+assert not bad and json.loads(text)["turns"][0]["receipt"] == "ack", text
+for name, args in [
+    ("oms_peer_result", {"thread": "../outside"}),
+    ("oms_peer_result", {"thread": "shared", "operation": "ambiguous"}),
+    ("oms_peer_start", {"kind": "ack", "thread": "shared", "after": "invalid", "consumer": "codex-1"}),
+    ("oms_peer_start", {"kind": "message", "thread": "shared", "prompt": "api_ke" + "y=s" + "k-abcdefghijklmnopqr"}),
+    ("oms_peer_start", {"kind": "message", "thread": "shared", "prompt": "x" * 4001}),
+]:
+    assert call(name, **args)[1], args
+os.environ["OMS_HARNESS_CHILD"] = "1"
+assert call("oms_peer_start", kind="message", thread="shared", prompt="child mutation")[1]
+os.environ.pop("OMS_HARNESS_CHILD")
+text, bad = call("oms_peer_start", kind="message", thread="rejected", new_thread=True,
+                 prompt="api_ke" + "y=s" + "k-abcdefghijklmnopqr")
+assert bad and not (repo / ".oms/threads/rejected.jsonl").exists(), text
+assert len(m.tool_definitions()) == 12, "do not grow core tool discovery"
+PY
+}
+
 test_mcp_server_protocol() {
   local repo="$TMP/mcp-repo"
   local out="$TMP/mcp-out"
@@ -362,13 +407,14 @@ tools = {t["name"]: t for t in by_id[1]["result"]["tools"]}
 assert {"oms_inbox", "oms_repo_state", "oms_journal", "oms_handoffs",
         "oms_handoff_show"} <= set(tools), sorted(tools)
 start = tools["oms_peer_start"]["inputSchema"]
-assert set(start["required"]) == {"kind", "prompt"}, start
-assert sorted(start["properties"]["kind"]["enum"]) == ["advise", "ask", "consult"], start
+assert set(start["required"]) == {"kind"}, start  # ack has no prompt
+assert sorted(start["properties"]["kind"]["enum"]) == ["ack", "advise", "ask", "consult", "message"], start
 assert "providers" in start["properties"], start
 assert "thread" in start["properties"], start
 assert start["properties"]["new_thread"]["type"] == "boolean", start
 result = tools["oms_peer_result"]["inputSchema"]
-assert result["required"] == ["operation"], result
+assert result["required"] == [], result  # thread and operation are alternatives
+assert {"operation", "thread", "after"} <= set(result["properties"]), result
 # The description has to teach the pattern, or a model blocks on a 25-minute run.
 assert "oms_peer_result" in tools["oms_peer_start"]["description"], tools
 listing = tools["oms_peer_operations"]["inputSchema"]
@@ -529,6 +575,56 @@ payload = json.loads(
 assert payload["status"] == "done", payload
 assert payload["exit"] == 0, payload
 assert payload["answer"] == "REAL-ANSWER: the advisor spoke", payload
+PY
+
+  local extracted
+  extracted="$(bash -c '. "$1/scripts/lib/peer-common.sh"; extract_output "$2"' _ "$ROOT" "$artifact")"
+  [ "$extracted" = 'REAL-ANSWER: the advisor spoke' ] ||
+    fail "peer extraction must agree with MCP and omit quoted prompt sections"
+
+  python3 - "$ROOT" "$artifact" "$run/run.log" <<'PY'
+import importlib.util, io, sys
+from pathlib import Path
+from unittest.mock import patch
+root, artifact, log = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("peer_reader_test", root / "scripts/oms-mcp-server.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+from peer_artifacts import artifact_sections, tail_lines
+
+for body, expected in [
+    ("## Output\npartial", ("", "")),
+    ("## Exit\n\n3\n", ("", "3")),
+    ("## Output\r\nanswer\r\n## Exit\r\n\r\n0\r\n", ("answer", "0")),
+    ("## Output\nquoted\n## Exit\n1\n## Output\nreal\n## Exit\n0", ("real", "0")),
+    ("## Output\nanswer\n## Exit\nquoted\n## Exit\n0", ("answer\n## Exit\nquoted", "0")),
+]:
+    artifact.write_text(body, encoding="utf-8")
+    assert artifact_sections(artifact) == expected, body
+artifact.write_text("## Output\npartial", encoding="utf-8")
+assert artifact_sections(artifact, require_exit=False) == ("partial", "")
+artifact.write_text("## Output\ntemplate\n## Exit\n0\n## Output\nactual partial", encoding="utf-8")
+assert artifact_sections(artifact, require_exit=False) == ("actual partial", "")
+
+# Tail display is byte bounded; full result discovery still sees early paths.
+log.write_text("artifact: %s\nthread: old\n" % artifact + "noise\n" * 100000 + "thread: latest\n", encoding="utf-8")
+assert m.log_references(log) == ([str(artifact)], "latest")
+assert m.log_tail(log).endswith("thread: latest")
+class Counted(io.BytesIO):
+    read_bytes = 0
+    def read(self, size=-1):
+        assert size >= 0, "reader must never request the entire log"
+        data = super().read(size)
+        self.read_bytes += len(data)
+        return data
+stream = Counted(b"x" * 1000000)
+with patch.object(Path, "open", return_value=stream):
+    assert m.log_tail(log) == "[truncated]\n" + "x" * m.LOG_TAIL_LIMIT
+assert stream.read_bytes <= 64 * 1024, stream.read_bytes
+for body in ("a\nb\nc\n", "a\nb\nc", "가\r\n나\r\n", ""):
+    log.write_text(body, encoding="utf-8")
+    assert tail_lines(log, 2)[0] == body.splitlines()[-2:]
+assert tail_lines(log, 0) == ([], False)
 PY
 }
 
@@ -1224,7 +1320,7 @@ test_router_state_hint_skips_unadopted_repo() {
   [ ! -d "$repo/.oms" ] || fail "the hint must not create .oms in a plain directory"
 }
 
-test_router_state_hint_offers_forge_for_resolved_repeats() {
+test_router_keeps_resolved_repeats_quiet() {
   local repo="$TMP/hint-forge-repo"
   local payload out
 
@@ -1238,10 +1334,11 @@ test_router_state_hint_offers_forge_for_resolved_repeats() {
   payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "skill-forge add" ||
-    fail "a resolved repeated failure with no project skill should hint at the forge: $out"
+  if printf '%s' "$out" | grep -Fq "skill-forge add"; then
+    fail "a resolved failure alone must not request another project skill: $out"
+  fi
 
-  # Once any project skill exists, the forge hint stays quiet.
+  # Explicit skill creation still works; creating one is no longer a prompt chore.
   printf -- '---\nname: oms-lesson\ndescription: %s\n---\n\nBody.\n' \
     "A test lesson description long enough to pass the validation gate." |
     ( cd "$repo" && bash "$ROOT/scripts/skill-forge.sh" add --name oms-lesson >/dev/null )
@@ -1253,28 +1350,29 @@ test_router_state_hint_offers_forge_for_resolved_repeats() {
   fi
 }
 
-test_router_hints_on_recurring_uncovered_usage() {
+test_usage_tracking_is_opt_in_without_forge_hints() {
   local repo="$TMP/usage-hint-repo"
-  local payload out yesterday roots
+  local payload out yesterday
 
   make_repo "$repo"
-  roots="$TMP/usage-empty-roots"
-  mkdir -p "$roots"
   payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
 
-  # The hook writes the counter: a live PostToolUse payload appends a
-  # content-free {family, day} row — never the command itself.
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
-    OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
+    env -u OMS_USAGE_TRACK OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
+  [ ! -e "$repo/.oms/usage.jsonl" ] || fail "usage collection must default off"
+
+  # Explicit telemetry still records content-free {family, day} rows.
+  printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
+    OMS_USAGE_TRACK=1 OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   grep -q '"family": "chem"' "$repo/.oms/usage.jsonl" ||
     fail "the hook should append a chem usage row"
   # A read-only command that merely mentions a family token is not use.
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"grep -rn rdkit src/"},"tool_response":{"exit_code":0},"hook_event_name":"PostToolUse"}' |
-    OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
+    OMS_USAGE_TRACK=1 OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   [ "$(grep -c '"family": "chem"' "$repo/.oms/usage.jsonl")" = 1 ] ||
     fail "a grep mentioning rdkit must not count as chem usage"
 
-  # Threshold needs recurrence across days; seed yesterday, raw and count rows.
+  # Even repeated usage across days must not manufacture a skill-creation task.
   yesterday="$(python3 -c 'import datetime; print((datetime.date.today()-datetime.timedelta(days=1)).isoformat())')"
   for _ in 1 2 3 4; do
     printf '{"schema": 1, "family": "chem", "day": "%s"}\n' "$yesterday" \
@@ -1283,48 +1381,11 @@ test_router_hints_on_recurring_uncovered_usage() {
   printf '{"schema": 1, "family": "chem", "day": "%s", "count": 2}\n' "$yesterday" \
     >> "$repo/.oms/usage.jsonl"
   out="$(printf '%s' "$payload" |
-    OMS_STATE_REPO="$repo" OMS_USAGE_SKILL_ROOTS="$roots" TMPDIR="$TMP" \
-    bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "'chem' tooling recurred" ||
-    fail "recurring uncovered usage should surface the forge proposal: $out"
-
-  # A forged skill silences its family by pattern match, whatever the agent
-  # named it — this SKILL.md never says "chem".
-  mkdir -p "$repo/.oms/skills/ligand-ingestion"
-  cat > "$repo/.oms/skills/ligand-ingestion/SKILL.md" <<'EOF'
----
-name: ligand-ingestion
-description: How this repository loads docking outputs through meeko and rdkit conversions, including malformed-molecule defense.
----
-
-Use meeko RDKitMolCreate for DLG/PDBQT conversion.
-EOF
-  rm -f "$repo/.oms/hooks/state-hint."*
-  out="$(printf '%s' "$payload" |
-    OMS_STATE_REPO="$repo" OMS_USAGE_SKILL_ROOTS="$roots" TMPDIR="$TMP" \
+    OMS_STATE_REPO="$repo" TMPDIR="$TMP" \
     bash "$ROOT/scripts/skill-router.sh")"
   if printf '%s' "$out" | grep -Fq "tooling recurred"; then
-    fail "a project skill matching the family pattern must silence the hint: $out"
+    fail "usage frequency alone must not request another project skill: $out"
   fi
-
-  # A family owned by a linked global skill (covered_by) never hints.
-  for _ in 1 2 3 4; do
-    printf '{"schema": 1, "family": "gpu", "day": "%s"}\n' "$yesterday" \
-      >> "$repo/.oms/usage.jsonl"
-  done
-  for _ in 1 2 3; do
-    printf '{"schema": 1, "family": "gpu", "day": "%s"}\n' "$(date +%Y-%m-%d)" \
-      >> "$repo/.oms/usage.jsonl"
-  done
-  mkdir -p "$roots/oms-gpu-workstation"
-  rm -f "$repo/.oms/hooks/state-hint."*
-  out="$(printf '%s' "$payload" |
-    OMS_STATE_REPO="$repo" OMS_USAGE_SKILL_ROOTS="$roots" TMPDIR="$TMP" \
-    bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "tooling recurred"; then
-    fail "a linked global skill must silence its family: $out"
-  fi
-
   # gc compacts under the reader's own TTL predicate: expired rows drop,
   # same-day rows collapse into count rows the reader sums.
   printf '{"schema": 1, "family": "gpu", "day": "2020-01-01"}\n' \
@@ -1547,7 +1608,7 @@ test_skill_forge_rejects_thin_and_sensitive() {
     fail "traversal remove escaped the project skills directory"
 }
 
-test_task_close_hints_at_forging_learned_lessons() {
+test_task_close_does_not_propose_skills_for_resolved_repeats() {
   local repo="$TMP/forge-hint"
   local out
 
@@ -1558,8 +1619,9 @@ test_task_close_hints_at_forging_learned_lessons() {
     bash "$ROOT/scripts/fail-ledger.sh" resolve --cmd "make flaky" >/dev/null )
   bash "$ROOT/scripts/agent-task.sh" --repo "$repo" init --goal "lesson" >/dev/null
   out="$(bash "$ROOT/scripts/agent-task.sh" --repo "$repo" close 2>&1 || true)"
-  printf '%s' "$out" | grep -Fq "skill-forge add" ||
-    fail "close should hint at promoting a resolved repeated failure: $out"
+  if printf '%s' "$out" | grep -Fq "skill-forge add"; then
+    fail "close must not turn a resolved failure into a skill-creation chore: $out"
+  fi
 }
 
 test_template_style_switch_retires_the_old_block() {
@@ -1974,6 +2036,7 @@ PY
 }
 
 test_mcp_server_protocol
+test_mcp_live_thread_reuses_peer_tools
 test_mcp_server_serves_modern_clients_without_a_handshake
 test_mcp_peer_start_refuses_harness_children
 test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations
@@ -1990,14 +2053,14 @@ test_update_probe_flag_reaches_the_probe
 test_router_state_hint_on_actionable_failures
 test_router_state_hint_surfaces_parked_goal
 test_router_state_hint_skips_unadopted_repo
-test_router_state_hint_offers_forge_for_resolved_repeats
-test_router_hints_on_recurring_uncovered_usage
+test_router_keeps_resolved_repeats_quiet
+test_usage_tracking_is_opt_in_without_forge_hints
 test_conditional_skills_link_only_where_required_commands_exist
 test_router_skips_conditional_skill_without_command
 test_skill_forge_stores_links_and_hides
 test_skill_forge_status_flags_stale_skills
 test_skill_forge_rejects_thin_and_sensitive
-test_task_close_hints_at_forging_learned_lessons
+test_task_close_does_not_propose_skills_for_resolved_repeats
 test_ml_template_installs_project_skills
 test_template_style_switch_retires_the_old_block
 test_existing_gemini_md_is_kept_in_sync
