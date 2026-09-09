@@ -81,7 +81,7 @@ cat > "$TMP/borrower.sh" <<'EOF'
 set -euo pipefail
 . "$OMS_TEST_LOCK_HELPER"
 oms_install_lifecycle_lock_acquire_or_borrow "test foreground child borrow"
-[ "${OMS_INSTALL_LIFECYCLE_LOCK_BORROWED:-0}" = 1 ] || exit 1
+[ "$OMS_INSTALL_LIFECYCLE_LOCK_LOCAL" = 0 ] || exit 1
 oms_install_lifecycle_lock_release
 [ -d "$OMS_INSTALL_LIFECYCLE_LOCK" ] || exit 1
 

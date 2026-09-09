@@ -298,7 +298,6 @@ oms_install_lifecycle_lock_borrow_from_parent() {
   OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER=""
   OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID=""
   OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START=""
-  OMS_INSTALL_LIFECYCLE_LOCK_BORROWED=1
 }
 
 oms_install_lifecycle_lock_acquire_or_borrow() {

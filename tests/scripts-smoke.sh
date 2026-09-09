@@ -10051,7 +10051,7 @@ test_update_refreshes_providers_by_default_and_tools_on_request() {
   local bin="$project/bin"
   local receipt="$TMP/update-tools-opt-in-receipt.json"
   local marker="$TMP/update-tools-called"
-  local branch
+  local branch legacy_target
 
   make_committed_repo "$project"
   mkdir -p "$project/scripts/lib" "$bin"
@@ -10078,7 +10078,13 @@ exec /usr/bin/git "$@"
 EOF
   chmod +x "$bin/git"
   git -C "$project" add scripts bin
-  git -C "$project" commit -qm "test: install update fixture"
+  git -C "$project" commit -qm "test: legacy update fixture"
+  legacy_target="$(git -C "$project" rev-parse HEAD)"
+  # Presence of the resolver is the selected checkout's provider-refresh
+  # contract. Older targets lack it and only accept install-tools --upgrade.
+  : > "$project/scripts/lib/provider-latest.py"
+  git -C "$project" add scripts/lib/provider-latest.py
+  git -C "$project" commit -qm "test: modern provider refresh fixture"
   branch="$(git -C "$project" symbolic-ref --short HEAD)"
   git -C "$project" remote add origin "$project"
   git -C "$project" fetch -q origin "$branch"
@@ -10111,6 +10117,16 @@ PY
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
     "$project/scripts/update.sh" --tools --no-doctor >/dev/null
   assert_file_contains "$marker" '--upgrade'
+
+  rm -f "$marker"
+  PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+    "$project/scripts/update.sh" --ref "$legacy_target" --no-doctor \
+      > "$TMP/update-legacy-provider.out" 2>&1 ||
+    fail "an older selected target rejected the new default provider refresh"
+  assert_not_exists "$marker"
+  assert_file_contains "$TMP/update-legacy-provider.out" \
+    'selected target predates automatic provider refresh'
 }
 
 test_update_auto_refreshes_only_installed_codex_plugin() {

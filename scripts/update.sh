@@ -563,7 +563,14 @@ if [ "$SKIP_TOOLS" != "1" ]; then
     "$ROOT/scripts/install-tools.sh" --upgrade
   fi
 elif [ "$REFRESH_PROVIDERS" = 1 ]; then
-  "$ROOT/scripts/install-tools.sh" --providers
+  # `--ref` may deliberately select a release from before provider refreshes
+  # existed. The transaction now runs files from that selected checkout, so do
+  # not pass a new option to its old installer after the core commit is final.
+  if [ -f "$ROOT/scripts/lib/provider-latest.py" ]; then
+    "$ROOT/scripts/install-tools.sh" --providers
+  else
+    echo "note: selected target predates automatic provider refresh; installed providers were not changed" >&2
+  fi
 fi
 if [ "$AUTO_UPDATE" = "1" ]; then
   "$ROOT/scripts/install-autoupdate.sh"
