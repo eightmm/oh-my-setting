@@ -757,6 +757,150 @@ PY
     fail "no-op reconciliation replaced the last real rollback commit"
 }
 
+test_codex_hook_bridge_migration() {
+  python3 - "$ROOT" "$TMP" <<'PY' || fail "Codex hook bridge migration contract"
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+root, temporary = map(Path, sys.argv[1:])
+area = temporary.resolve() / "bridge"
+area.mkdir()
+source = area / "source with spaces"
+native = area / "native"
+shutil.copytree(root / "plugins/oh-my-setting", native)
+manifest = json.loads((native / ".codex-plugin/plugin.json").read_text())
+plugin = source / "plugins/oh-my-setting"
+prefix = 'env CLAUDE_PLUGIN_ROOT="%s" bash "%s/scripts/harness-hook.sh" ' % (plugin, plugin)
+owned = {"type": "command", "command": prefix + "skill-router", "timeout": 5}
+custom = dict(owned, timeout=99)
+user = {"type": "command", "command": "echo preserve-user", "timeout": 5}
+data = {"description": "Keep this custom description", "custom": {"keep": True},
+        "hooks": {"UserPromptSubmit": [{"hooks": [owned, custom, user]}],
+                  "PostToolUse": [{"hooks": [dict(owned, command=prefix + "telemetry-hook")]}],
+                  "SessionStart": [{"hooks": [owned], "custom": "preserve-whole-group"}]}}
+hooks = area / "hooks.json"
+original = (json.dumps(data, indent=4) + "\r\n").encode()
+hooks.write_bytes(original)
+catalog = {"installed": [{"pluginId": "oh-my-setting@oh-my-setting-local",
+                         "installed": True, "enabled": True, "version": manifest["version"],
+                         "source": {"path": str(plugin)}}]}
+command = [sys.executable, str(root / "scripts/lib/codex-hook-bridge.py"),
+           "--hooks", str(hooks), "--source-root", str(source)]
+
+def run(*extra, record=catalog):
+    return subprocess.run(command + list(extra), input=json.dumps(record),
+                          text=True, capture_output=True, check=False)
+
+def unchanged():
+    assert hooks.read_bytes() == original
+    assert not list(area.glob("*.bak"))
+
+assert run("--probe").returncode == 0
+assert run().returncode == 0  # No verified replacement root.
+unchanged()
+disabled = copy.deepcopy(catalog)
+disabled["installed"][0]["enabled"] = False
+assert run("--native-root", str(native), record=disabled).returncode == 0
+unchanged()
+assert run("--native-root", str(native), "--dry-run").returncode == 0
+unchanged()
+# A manifest alone is insufficient: expected native actions must also exist.
+native_hooks = native / "hooks.json"
+saved_native = native_hooks.read_bytes()
+native_hooks.write_text('{"hooks": {}}')
+assert run("--native-root", str(native)).returncode == 0
+unchanged()
+native_hooks.write_bytes(saved_native)
+
+assert run("--native-root", str(native)).returncode == 0
+changed = json.loads(hooks.read_bytes())
+assert changed["custom"] == data["custom"] and changed["description"] == data["description"]
+assert changed["hooks"]["UserPromptSubmit"][0]["hooks"] == [custom, user]
+assert changed["hooks"]["PostToolUse"] == []
+assert changed["hooks"]["SessionStart"] == data["hooks"]["SessionStart"]
+backup = hooks.with_name(hooks.name + ".oms-bridge-" + hashlib.sha256(original).hexdigest() + ".bak")
+assert backup.read_bytes() == original
+updated = hooks.read_bytes()
+assert run("--probe").returncode == 1
+assert run("--native-root", str(native)).returncode == 0
+assert hooks.read_bytes() == updated and len(list(area.glob("*.bak"))) == 1
+
+for invalid in (b'{bad', b'{"hooks":{},"hooks":{}}', b'{"hooks":{},"n":NaN}', b' ' * (1024 * 1024 + 1)):
+    hooks.write_bytes(invalid)
+    assert run("--native-root", str(native)).returncode == 2
+    assert hooks.read_bytes() == invalid
+    assert backup.read_bytes() == original
+hooks.write_bytes(original)
+linked = area / "linked.json"
+os.link(hooks, linked)
+assert run("--native-root", str(native)).returncode == 2
+assert hooks.read_bytes() == original
+linked.unlink()
+hooks.unlink()
+try:
+    hooks.symlink_to(backup)
+except (OSError, NotImplementedError):
+    pass  # Some Windows runners cannot create symlinks without elevation.
+else:
+    assert run("--native-root", str(native)).returncode == 2
+    assert hooks.is_symlink() and backup.read_bytes() == original
+
+# Exercise the installer wiring using a current fixture cache and fake CLI.
+home = area / "home"
+codex_home = home / ".codex"
+cache = codex_home / "plugins/cache/oh-my-setting-local/oh-my-setting" / manifest["version"]
+cache.parent.mkdir(parents=True)
+shutil.copytree(native, cache)
+bin_dir = area / "bin"
+bin_dir.mkdir()
+fake = bin_dir / "codex"
+fake.write_text('#!/usr/bin/env bash\n'
+                'printf "%s\\n" "$*" >> "$OMS_BRIDGE_CALLS"\n'
+                'case "$*" in\n'
+                ' "plugin marketplace list") printf "oh-my-setting-local %s\\n" "$OMS_BRIDGE_ROOT" ;;\n'
+                ' "plugin list --json") cat "$OMS_BRIDGE_CATALOG" ;;\n'
+                ' "features list") printf "hooks stable true\\n" ;;\n'
+                ' *) exit 2 ;;\nesac\n')
+fake.chmod(0o700)
+catalog_path = area / "catalog.json"
+calls = area / "calls.log"
+actual_catalog = copy.deepcopy(catalog)
+actual_catalog["installed"][0]["source"]["path"] = str(root / "plugins/oh-my-setting")
+catalog_path.write_text(json.dumps(actual_catalog))
+env = dict(os.environ, HOME=str(home), CODEX_HOME=str(codex_home),
+           PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+           OMS_BRIDGE_CALLS=str(calls), OMS_BRIDGE_ROOT=str(root),
+           OMS_BRIDGE_CATALOG=str(catalog_path), OMS_INSTALL_RECEIPT=str(area / "absent-receipt.json"))
+installer = ["bash", str(root / "scripts/install-codex-plugin.sh")]
+assert subprocess.run(installer, env=env, capture_output=True).returncode == 0
+assert "features list" not in calls.read_text()
+user_hooks = codex_home / "hooks.json"
+user_hooks.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [user]}]}}))
+calls.write_text("")
+assert subprocess.run(installer, env=env, capture_output=True).returncode == 0
+assert "features list" not in calls.read_text()
+actual_owned = dict(owned, command=owned["command"].replace(str(source), str(root)))
+installed_original = json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [actual_owned, user]}]}}).encode()
+user_hooks.write_bytes(installed_original)
+actual_catalog["installed"][0]["enabled"] = False
+catalog_path.write_text(json.dumps(actual_catalog))
+assert subprocess.run(installer, env=env, capture_output=True).returncode == 0
+assert user_hooks.read_bytes() == installed_original
+actual_catalog["installed"][0]["enabled"] = True
+catalog_path.write_text(json.dumps(actual_catalog))
+assert subprocess.run(installer, env=env, capture_output=True).returncode == 0
+assert json.loads(user_hooks.read_bytes())["hooks"]["UserPromptSubmit"][0]["hooks"] == [user]
+assert next(codex_home.glob("hooks.json.oms-bridge-*.bak")).read_bytes() == installed_original
+PY
+}
+
+test_codex_hook_bridge_migration
 test_session_end_captures_a_handoff_digest
 test_session_end_handoff_honors_child_and_opt_out_gates
 test_handoff_capture_floors_trivial_sessions

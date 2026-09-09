@@ -2,13 +2,15 @@
 name: oms-agent-harness
 description: >
   Coordinate agents through OMS shared state, peer review, isolated work,
-  and verified landing. Use for graph-guided context, task recovery,
+  and verified landing. Use for nontrivial repository changes, graph-guided context, task recovery,
   collaboration, bounded autonomy, or handoff.
 ---
 
 # Agent Harness
 
-You own scope, admission, verification, commit, push, release, and synthesis.
+The top-level parent owns scope, admission, verification, commit, push, release,
+and synthesis, regardless of whether it is Codex, Claude Code, or another agent.
+If you are its worker, return evidence and a patch; do not become another parent.
 OMS is an agent-side control plane. Users give goals, constraints, and material
 authority; operate it internally. Never ask users to copy commands, digests,
 `.oms` paths, or recovery procedures. Ask only for a shaping decision or new authority.
@@ -29,21 +31,30 @@ approvals, commit intents, or publication intents.
 |---|---|
 | State | `oms inbox --repo .`; runtime envelope/next/evidence for detail, not another full dashboard by default. |
 | Collaboration | `oms consult` for new peer judgment; existing live `thread` for active collaborators, without launching another model. |
-| Implementation | `oms runtime context`; [graphs.md](references/graphs.md) for graph-guided work. `oms peer-delegate --to NAME` for one bounded write, `oms autopilot` for reviewed plans. |
+| Implementation | Start nontrivial changes with `oms graph project context --task "..."`; reuse a current supplied pack. Use `oms runtime context --target PATH` when bounded source bytes are needed. [graphs.md](references/graphs.md) covers expansion and fallback. `oms peer-delegate --to NAME` for one bounded write, `oms autopilot` for reviewed plans. |
 | Verification and landing | `oms peer-review --gate`, then authorized `patch-land` (includes admission). `oms land` separately gates/pushes/updates a committed worktree. |
 | Continuity | Journal for history, agent-memory for stable facts, session-handoff for local sessions, runtime capsule for sanitized transfer. See [state-memory.md](references/state-memory.md). |
 | Operations | `oms doctor` for health, `oms update` for install updates, `oms tick` for scheduled repo maintenance. Optional profile/backend/experiment flows use [runtime-core.md](references/runtime-core.md). |
 
-Use `oms list --frontdoor` for entrypoints, command routing for variants,
+Use `oms list` for entrypoints, command routing for variants,
 and `oms list --all` for compatibility primitives. Read only references
 needed for the current decision, not the entire catalog.
 
-Avoid repeating collectors or model calls for the same evidence. Apply global
-coding rules; use minimal-change guidance only for implementation tradeoffs.
+Allocate ordinary requests without requiring delegation keywords: infer intent,
+inspect relevant code, then choose local work, a bounded worker, or a reviewed
+plan. Questions do not authorize edits or autopilot. Keep tiny known edits local
+and retain ambiguous, scientific, security-sensitive or architectural judgment.
+For substantial routine work, select an authorized provider and use
+`peer-delegate --workload routine`; prefer one-shot unless the next instruction
+depends on a worker response. [delegation-artifacts.md](references/delegation-artifacts.md)
+owns the allocation checklist and interactive protocol. Read
+[model-routing.md](references/model-routing.md) before model selection; native
+subagents and frozen executors have separate model contracts.
+Avoid duplicate collectors, worker calls, or full-conversation replay.
 
 For skill evaluation/import/drafts, load
-[skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks, Codex
-app-server, Agent Card, or A2A, load
+[skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks or Codex
+app-server, load
 [interoperability.md](references/interoperability.md); all are optional
 projections, not authority.
 

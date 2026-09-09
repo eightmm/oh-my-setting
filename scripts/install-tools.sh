@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install the exact tool CLI releases in tools.lock.json. Downloads are never
-# executed or extracted before their repository-pinned digest is verified.
+# Bootstrap tools remain pinned; providers resolve stable releases at install
+# time. Downloaded bytes are verified before extraction or execution.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TOOL_LOCK="${OH_MY_SETTING_TOOL_LOCK:-$ROOT/tools.lock.json}"
 TOOL_LOCK_HELPER="$ROOT/scripts/lib/tool-lock.py"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 UPGRADE=0
+PROVIDERS_ONLY=0
 # shellcheck source=scripts/lib/platform.sh
 . "$ROOT/scripts/lib/platform.sh"
 
@@ -24,11 +25,12 @@ NVM_VERSION="$(tool_lock_get nvm.version)"
 
 usage() {
   cat <<'EOF'
-Usage: install-tools.sh [--upgrade] [-h|--help]
+Usage: install-tools.sh [--upgrade|--providers] [-h|--help]
 
-Install missing harness tools at the exact versions and checksums recorded in
-tools.lock.json: Node (via nvm), uv, the three provider CLIs (claude, codex,
-agy), gh, and ntn. --upgrade refreshes them to that same lock.
+Install Node (via nvm), uv, gh, and ntn from tools.lock.json.
+The three provider CLIs (claude, codex, agy) follow stable releases with verified
+checksums; --providers refreshes only already-installed provider CLIs.
+An explicit OH_MY_SETTING_TOOL_LOCK retains reproducible pinned installs.
 
 Nothing here needs root: npm globals use the active writable prefix or
 ~/.local, and direct release payloads such as gh are installed in ~/.local/bin.
@@ -39,12 +41,38 @@ EOF
 case "${1:-}" in
   "") ;;
   --upgrade) UPGRADE=1 ;;
+  --providers) UPGRADE=1; PROVIDERS_ONLY=1 ;;
   -h|--help) usage; exit 0 ;;
   *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
 esac
 
+prepare_provider_versions() {
+  local item snapshot
+  local provider_args=()
+  [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || return 0
+  for item in "$@"; do
+    case "$item" in codex|claude|agy) provider_args+=(--provider "$item") ;; esac
+  done
+  [ "${#provider_args[@]}" -gt 0 ] || return 0
+  snapshot="$HOME/.local/share/oh-my-setting/provider-tools.lock.json"
+  python3 "$ROOT/scripts/lib/provider-latest.py" --lock "$TOOL_LOCK" \
+    --previous "$snapshot" --output "$snapshot" "${provider_args[@]}" >/dev/null || return $?
+  TOOL_LOCK="$snapshot"
+}
+
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+activate_provider_paths() {
+  local node_dir="$NVM_DIR/versions/node/v$NODE_VERSION/bin"
+  # Timers do not source shell startup files. Reuse installed tools without
+  # executing nvm.sh or installing bootstrap dependencies during a refresh.
+  if [ -x "$node_dir/node" ] && [ -x "$node_dir/npm" ]; then
+    export PATH="$node_dir:$PATH"
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+  hash -r
 }
 
 sha256_file() {
@@ -656,8 +684,44 @@ npm_transaction_begin() {  # PACKAGE_ROOT GLOBAL_BIN BINARY
   }
 }
 
+standalone_codex() {
+  local resolved
+  resolved="$(command -v codex 2>/dev/null)" || return 1
+  python3 - "$resolved" "${CODEX_HOME:-$HOME/.codex}/packages/standalone" <<'PY'
+import sys
+from pathlib import Path
+try:
+    parts = Path(sys.argv[1]).resolve(strict=True).relative_to(Path(sys.argv[2]).resolve(strict=True)).parts
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if len(parts) == 4 and parts[0] == "releases" and parts[2:] == ("bin", "codex") else 1)
+PY
+}
+
+refresh_standalone_codex() {
+  local resolved expected
+  resolved="$(command -v codex)"
+  expected="$(tool_lock_get npm.codex.version)"
+  if command_has_version "$resolved" "$expected"; then
+    echo "ok: codex $expected (standalone)"
+    return 0
+  fi
+  [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || {
+    echo "error: standalone Codex does not match explicit pin $expected; native latest update was not run" >&2
+    return 1
+  }
+  "$resolved" update || return $?
+  hash -r
+  standalone_codex && command_has_version "$(command -v codex)" "$expected" || {
+    echo "error: native Codex update did not produce resolved stable version $expected" >&2
+    return 1
+  }
+  echo "ok: codex $expected (standalone updater)"
+}
+
 install_npm_global() {
   local name="$1"
+  if [ "$name" = codex ] && standalone_codex; then refresh_standalone_codex; return $?; fi
   local package binary version locked_integrity spec current tmp package_file
   local root package_root managed native_platform native_alias native_package global_bin
   local native_version native_integrity native_spec native_file
@@ -783,6 +847,7 @@ npm_shim_owned() {  # FILE
 
 preflight_npm_shim() {  # BINARY
   local binary="$1" target="$HOME/.local/bin/$1" global_bin
+  if [ "$binary" = codex ] && standalone_codex; then return 0; fi
   global_bin="$(npm_global_bin_dir)" || return 1
   [ "$global_bin" != "$HOME/.local/bin" ] || return 0
   [ ! -e "$target" ] && [ ! -L "$target" ] && return 0
@@ -794,6 +859,7 @@ preflight_npm_shim() {  # BINARY
 
 write_npm_shim() {
   local binary="$1"
+  if [ "$binary" = codex ] && standalone_codex; then return 0; fi
   local actual
   local node_bin
   local target="$HOME/.local/bin/$binary"
@@ -827,6 +893,10 @@ write_npm_shim() {
 
 verify_resolved_npm_binary() {  # NAME
   local name="$1" binary version resolved target global_bin
+  if [ "$name" = codex ] && standalone_codex; then
+    command_has_version "$(command -v codex)" "$(tool_lock_get npm.codex.version)"
+    return $?
+  fi
   binary="$(tool_lock_get "npm.$name.binary")"
   version="$(tool_lock_get "npm.$name.version")"
   global_bin="$(npm_global_bin_dir)"
@@ -1272,6 +1342,41 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
+[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || {
+  echo "error: a harness child cannot install provider tools" >&2; exit 2;
+}
+# shellcheck source=scripts/lib/install-lifecycle-lock.sh
+. "$ROOT/scripts/lib/install-lifecycle-lock.sh"
+trap oms_install_lifecycle_lock_release EXIT
+oms_install_lifecycle_lock_acquire_or_borrow "refresh tools" || exit $?
+
+if [ "$PROVIDERS_ONLY" = 1 ]; then
+  activate_provider_paths
+  providers=()
+  for item in codex claude agy; do
+    has_cmd "$item" && providers+=("$item")
+  done
+  [ "${#providers[@]}" -gt 0 ] || { echo "providers: none installed"; exit 0; }
+  prepare_provider_versions "${providers[@]}"
+  for item in "${providers[@]}"; do
+    if [ "$item" = agy ]; then
+      install_antigravity
+    elif [ "$item" = codex ] && standalone_codex; then
+      refresh_standalone_codex
+    else
+      has_cmd npm || { echo "error: npm is required to update $item" >&2; exit 1; }
+      ensure_writable_npm_global
+      preflight_npm_shim "$item"
+      install_npm_global "$item"
+      write_npm_shim "$item"
+      verify_resolved_npm_binary "$item"
+    fi
+  done
+  echo "providers: ok"
+  exit 0
+fi
+
+prepare_provider_versions codex claude agy
 ensure_node
 ensure_local_bin_path
 ensure_writable_npm_global

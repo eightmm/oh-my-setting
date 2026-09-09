@@ -100,10 +100,16 @@ a mechanical verification failure.
 ## Measure without another benchmark
 
 Use `oms skill-forge eval` for baseline/treatment routing and task value,
-`oms semantic-eval` for a reviewed patch, and `oms runtime benchmark compare`
+`oms patch-admit` for deterministic current-HEAD patch checks plus
+`oms peer-review --gate --prompt "<review rubric>"` for current-diff review,
+and `oms runtime benchmark compare`
 for existing effectiveness, duplicate-work, correction, defect, reversion,
 refusal, token, cost, and duration trends. Correctness and required checks are
 the gate; fewer files, dependencies, lines, tokens, or seconds are secondary.
+
+The retired `semantic-eval` command only reports migration instructions. Its
+historical-base reports remain evidence for their recorded subject, not
+current-HEAD admission; the replacement routes do not reproduce that old engine.
 
 This adapts the minimal-solution ladder popularized by
 [Ponytail](https://github.com/DietrichGebert/ponytail) (MIT) to OMS's existing

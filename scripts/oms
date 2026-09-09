@@ -63,9 +63,8 @@ Usage: oms <tool> [args...]
        oms list [--frontdoor|--all]
        oms help
 
-Dispatch to an oh-my-setting harness tool by name. `list` and `list --all`
-print the full public catalog; `list --frontdoor` prints the small stable set of
-agent-facing subsystem entrypoints. The `oms-agent-harness` command-routing
+Dispatch to an oh-my-setting harness tool by name. `list` prints the compact
+subsystem entrypoints; `list --all` reveals core primitives. The command-routing
 reference selects intent variants behind those entries. Docs/COMPONENTS.md
 describes the existing subsystems and docs/OMS-RUNTIME.md explains the typed
 runtime projection.
@@ -122,10 +121,8 @@ describe() {
 }
 
 OMS_PUBLIC_TOOLS="
-a2a-bridge
 advise
 agent-call
-agent-card
 agent-events
 agent-executor
 agent-memory
@@ -153,7 +150,6 @@ fail-ledger
 gc
 goal-drive
 graph
-herdr-adapter
 inbox
 init
 install-profile
@@ -182,7 +178,6 @@ run
 run-ledger
 run-reconcile
 runtime
-semantic-eval
 session-handoff
 skill-doctor
 skill-forge
@@ -248,13 +243,13 @@ case "${1:-}" in
   help)
     usage
     echo
-    cmd_list "$OMS_PUBLIC_TOOLS"
+    cmd_list "$OMS_FRONTDOOR_TOOLS"
     exit 0
     ;;
   list)
     case "${2:-}" in
-      ""|--all) cmd_list "$OMS_PUBLIC_TOOLS" ;;
-      --frontdoor) cmd_list "$OMS_FRONTDOOR_TOOLS" ;;
+      ""|--frontdoor) cmd_list "$OMS_FRONTDOOR_TOOLS" ;;
+      --all) cmd_list "$OMS_PUBLIC_TOOLS" ;;
       *) echo "error: oms list accepts --frontdoor or --all" >&2; exit 2 ;;
     esac
     exit 0
@@ -270,7 +265,9 @@ case "$TOOL" in
     ;;
 esac
 TOOL="${TOOL%.sh}"
-if ! is_public_tool "$TOOL"; then
+if [ "$TOOL" = semantic-eval ]; then
+  exec bash "$SCRIPTS_DIR/semantic-eval.sh" "$@"
+elif ! is_public_tool "$TOOL"; then
   echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
 fi

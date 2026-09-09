@@ -29,6 +29,30 @@ oms_reasoning_validate() {
   return 2
 }
 
+# All plan entrances hydrate the same reviewed route. A task assignment owns
+# every routing field so one carrier never inherits another carrier's model.
+oms_task_assignment_resolve() {
+  local route values
+  route="$(python3 "$OMS_MODEL_ROUTING_LIB_DIR/task-assignment.py" \
+    --task-json "$1" --provider "$2" --model "$3" --fallback-model "$4" \
+    --reasoning-effort "$5" --workload "${6:-standard}")" || return $?
+  values="$(printf '%s' "$route" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("\t".join(d[k] for k in ("provider","model","fallback_model","reasoning_effort","workload")))')" || return $?
+  values="${values//$'\r'/}"
+  OMS_TASK_PROVIDER="$(printf '%s' "$values" | cut -f1)"
+  OMS_TASK_PROVIDER="$(oms_provider_normalize "$OMS_TASK_PROVIDER")" || return $?
+  OMS_TASK_MODEL="$(printf '%s' "$values" | cut -f2)"
+  OMS_TASK_FALLBACK_MODEL="$(printf '%s' "$values" | cut -f3)"
+  OMS_TASK_REASONING_EFFORT="$(printf '%s' "$values" | cut -f4)"
+  # shellcheck disable=SC2034 # Result consumed by the plan/delegate callers.
+  OMS_TASK_WORKLOAD="$(printf '%s' "$values" | cut -f5)"
+  oms_model_validate_name "$OMS_TASK_MODEL" || return $?
+  oms_model_validate_name "$OMS_TASK_FALLBACK_MODEL" || return $?
+  oms_reasoning_validate "$OMS_TASK_REASONING_EFFORT"
+}
+
 oms_reasoning_provider_validate() {
   local provider="$1" effort="$2" model="${3:-}"
   local scale=""
@@ -95,14 +119,17 @@ EOF
   fi
 }
 
-# Which seeded worker route an operation takes. A write delegate uses the
-# second price rank; judging calls keep their account-specific provider
-# default. The worker rank is therefore a stable role preset, not a claim that
-# every account's provider default is the first seed entry.
+# The parent declares routine work; never infer difficulty from prompt words.
+# Standard workers keep the existing second-rank preset.
 # Exit 1: no role-shaped route here.
 oms_model_role_rank() {
   case "${OMS_MODEL_OPERATION:-}" in
-    delegate) printf 'worker\n' ;;
+    delegate)
+      case "${OMS_MODEL_WORKLOAD:-standard}" in
+        routine) printf 'routine-worker\n' ;;
+        *) printf 'worker\n' ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
 }
@@ -151,11 +178,11 @@ oms_model_role_default() {
   role="$(oms_model_role_rank)" || return 1
   ranked="$(oms_model_role_ranked_candidates "$provider")" || return 1
   [ -n "$ranked" ] || return 1
-  # shellcheck disable=SC2086
-  set -- $ranked
+  # Catalog spellings may contain spaces; select whole newline-delimited names.
   case "$role" in
-    worker) printf '%s\n' "${2:-$1}" ;;
-    *) printf '%s\n' "$1" ;;
+    routine-worker) printf '%s\n' "$ranked" | tail -n 1 ;;
+    worker) printf '%s\n' "$ranked" | head -n 2 | tail -n 1 ;;
+    *) printf '%s\n' "$ranked" | head -n 1 ;;
   esac
 }
 

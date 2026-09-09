@@ -67,7 +67,7 @@ writes a reason row to .oms/plan/progress.jsonl and a fail-ledger entry when
 it parked; a later run whose acceptance passes resolves those park rows.
 
   --repo PATH     Repository (default: current directory). Tree must be clean.
-  --to PROVIDER   Worker for plan-run delegation (default: codex).
+  --to PROVIDER   Default worker for tasks without an assignment (default: codex).
   --max-cycles N  Hard cycle cap (default 3, max 10).
   --run-id ID      Optional caller correlation receipt (1..64 safe characters).
   --auto-repair   Run one same-lease repair delegation after a failed landing,
@@ -299,6 +299,11 @@ TASK_RECEIPT_EXECUTOR_ID=""
 TASK_RECEIPT_EXECUTOR_SOUL=""
 TASK_RECEIPT_REPAIR_COUNT=0
 TASK_RECEIPT_SHA=""
+TASK_ROUTE_PROVIDER=""
+TASK_ROUTE_MODEL=""
+TASK_ROUTE_FALLBACK_MODEL=""
+TASK_ROUTE_REASONING_EFFORT=auto
+TASK_ROUTE_WORKLOAD=standard
 
 progress_append() {
   python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl append "$PROGRESS"
@@ -1076,8 +1081,12 @@ load_task_receipt() {  # TASK_ID
   local task_json values
   task_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$1" 2>/dev/null)" || return 1
   values="$(printf '%s' "$task_json" | python3 -c '
-import hashlib, json, shlex, sys
+import hashlib, json, runpy, shlex, sys
 d=json.load(sys.stdin)
+route = runpy.run_path(sys.argv[1])["resolve"](d, {
+    "provider": sys.argv[2], "model": sys.argv[3], "fallback_model": sys.argv[4],
+    "reasoning_effort": sys.argv[5], "workload": "standard",
+})
 names=("id","title","state","provider","lease_id","review_lease_id","verify","patch",
        "artifact","executor_id","executor_soul_sha256")
 for name in names:
@@ -1100,13 +1109,18 @@ assignments={
  "TASK_RECEIPT_EXECUTOR_SOUL":d.get("executor_soul_sha256", ""),
  "TASK_RECEIPT_REPAIR_COUNT":str(repair),
 }
+for key in ("provider", "model", "fallback_model", "reasoning_effort", "workload"):
+    assignments["TASK_ROUTE_" + key.upper()] = route[key]
 stable={name:d.get(name, "") for name in names}
 stable["repair_count"]=repair
 stable["allowed_paths"]=allowed
+if d.get("assignment"):
+    stable["assignment"]=d["assignment"]
 assignments["TASK_RECEIPT_SHA"]=hashlib.sha256(json.dumps(
  stable,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
 for key,value in assignments.items(): print("%s=%s" % (key,shlex.quote(value)))
-' | tr -d '\r')" || return 1
+' "$ROOT/scripts/lib/task-assignment.py" "$PROVIDER" "$MODEL" "$FALLBACK_MODEL" \
+    "$REASONING_EFFORT" | tr -d '\r')" || return 1
   eval "$values"
 }
 
@@ -1151,8 +1165,8 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
   [ "$TASK_RECEIPT_ID" = "$task" ] || park "invalid-review-receipt" "the reviewed task id changed"
   [ "$TASK_RECEIPT_STATE" = review ] || { [ "$COMMIT_TASK" = "$task" ] && [ "$TASK_RECEIPT_STATE" = "done" ]; } ||
     park "invalid-review-receipt" "task $task is $TASK_RECEIPT_STATE, not review"
-  [ "$TASK_RECEIPT_PROVIDER" = "$PROVIDER" ] ||
-    park "invalid-review-receipt" "task $task was reviewed by $TASK_RECEIPT_PROVIDER, not $PROVIDER"
+  [ "$TASK_RECEIPT_PROVIDER" = "$TASK_ROUTE_PROVIDER" ] ||
+    park "invalid-review-receipt" "task $task was reviewed by $TASK_RECEIPT_PROVIDER, not $TASK_ROUTE_PROVIDER"
   [ -n "$TASK_RECEIPT_LEASE" ] && [ "$TASK_RECEIPT_LEASE" = "$TASK_RECEIPT_REVIEW_LEASE" ] ||
     park "invalid-review-receipt" "task $task has no exact review lease"
   [ -n "$TASK_RECEIPT_VERIFY" ] || park "missing-verify-contract" "the reviewed task has no verifier"
@@ -1166,7 +1180,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
     [ "$reuse_id" = "$INTENT_ID" ] && [ "$task" = "$prior_task" ] &&
       [ "$base" = "$prior_base" ] && [ "$head_ref" = "$prior_ref" ] &&
       [ "$TASK_RECEIPT_LEASE" = "$prior_lease" ] &&
-      [ "$PROVIDER" = "$prior_provider" ] &&
+      [ "$TASK_ROUTE_PROVIDER" = "$prior_provider" ] &&
       [ "$(printf '%s' "$TASK_RECEIPT_VERIFY" | oms_sha256_stream)" = "$prior_verify_sha" ] ||
       park "repair-receipt-mismatch" "the repaired review changed its frozen task, base, lease, provider, or verifier"
   fi
@@ -1187,7 +1201,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
   INTENT_TITLE="$TASK_RECEIPT_TITLE"
   INTENT_LEASE="$TASK_RECEIPT_LEASE"
   INTENT_VERIFY_SHA="$(printf '%s' "$TASK_RECEIPT_VERIFY" | oms_sha256_stream)"
-  INTENT_PROVIDER="$PROVIDER"
+  INTENT_PROVIDER="$TASK_ROUTE_PROVIDER"
   INTENT_ID="${reuse_id:-$RUN_ID-$CYCLE-$task}"
   frozen_dir="$REPO/.oms/plan/commit-patches"
   repo_physical="$(cd "$REPO" && pwd -P)"
@@ -1699,8 +1713,8 @@ intent_commit_already_present() {
 }
 
 pending_review() {
-  OMS_GD_PROVIDER="$PROVIDER" python3 - "$PLAN_FILE" <<'PY' | tr -d '\r'
-import json, os, re, sys
+  OMS_GD_PROVIDER="$PROVIDER" python3 - "$PLAN_FILE" "$ROOT/scripts/lib/task-assignment.py" <<'PY' | tr -d '\r'
+import json, os, re, runpy, sys
 try:
     data=json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
@@ -1709,12 +1723,23 @@ tasks=data.get("tasks", {})
 if not isinstance(tasks, dict):
     raise SystemExit(6)
 provider=os.environ["OMS_GD_PROVIDER"]
+validate_assignment=runpy.run_path(sys.argv[2])["validate"]
 valid=[]
 executor_bound=[]
 invalid=[]
 ident=re.compile(r"^[A-Za-z0-9._-]+$")
 for key, task in tasks.items():
-    if not isinstance(task, dict) or task.get("state") != "review" or task.get("provider") != provider:
+    if not isinstance(task, dict) or task.get("state") != "review":
+        continue
+    try:
+        assignment=validate_assignment(task.get("assignment", {}))
+    except ValueError:
+        invalid.append(key)
+        continue
+    expected_provider=assignment.get("provider", provider)
+    if task.get("provider") != expected_provider:
+        if assignment:
+            invalid.append(key)
         continue
     executor_id=task.get("executor_id", "")
     executor_soul=task.get("executor_soul_sha256", "")
@@ -1777,8 +1802,6 @@ reconcile_commit_intent() {
   load_intent "$open"
   [ -z "$COMMIT_TASK" ] || [ "$INTENT_TASK" = "$COMMIT_TASK" ] ||
     park "intent-task-mismatch" "another task has an open commit intent; this request cannot advance it"
-  [ "$INTENT_PROVIDER" = "$PROVIDER" ] ||
-    park "intent-provider-mismatch" "resume with --to $INTENT_PROVIDER or inspect the recorded intent"
   patch_abs="$(intent_patch_file)" || {
     abandon_invalid_intent "unsafe-frozen-patch-path"
     return 0
@@ -1804,6 +1827,8 @@ reconcile_commit_intent() {
     abandon_invalid_intent "task-receipt-missing"
     return 0
   }
+  [ "$INTENT_PROVIDER" = "$TASK_ROUTE_PROVIDER" ] ||
+    park "intent-provider-mismatch" "resume with the reviewed assignment or --to $INTENT_PROVIDER for an unassigned task"
   [ -z "$COMMIT_TASK" ] || { [ "$TASK_RECEIPT_STATE" = "done" ] && [ "$INTENT_PHASE" != repairing ]; } ||
     park "intent-task-mismatch" "commit-only recovery cannot land or repair unfinished work"
   [ "$TASK_RECEIPT_ID" = "$INTENT_TASK" ] || {
@@ -1860,7 +1885,7 @@ reconcile_commit_intent() {
         ;;
     esac
   fi
-  [ "$TASK_RECEIPT_PROVIDER" = "$PROVIDER" ] ||
+  [ "$TASK_RECEIPT_PROVIDER" = "$TASK_ROUTE_PROVIDER" ] ||
     {
       abandon_invalid_intent "task-provider-receipt-mismatch"
       return 0
@@ -2232,11 +2257,12 @@ print(found)
     intent_write repairing "landing-repair-started"
     if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" repair --id "$task_id" \
       --lease-id "$repair_lease" --artifact "$land_log" >/dev/null 2>&1; then
-      repair_args=(--repo "$REPO" --to "$PROVIDER" --plan-task "$task_id" \
+      repair_args=(--repo "$REPO" --to "$TASK_ROUTE_PROVIDER" --plan-task "$task_id" \
         --repair 0 --review-artifact "$land_log" --terminalize-resumed-repair)
-      [ -z "$MODEL" ] || repair_args+=(--model "$MODEL")
-      [ -z "$FALLBACK_MODEL" ] || repair_args+=(--fallback-model "$FALLBACK_MODEL")
-      [ "$REASONING_EFFORT" = auto ] || repair_args+=(--reasoning-effort "$REASONING_EFFORT")
+      [ -z "$TASK_ROUTE_MODEL" ] || repair_args+=(--model "$TASK_ROUTE_MODEL")
+      [ -z "$TASK_ROUTE_FALLBACK_MODEL" ] || repair_args+=(--fallback-model "$TASK_ROUTE_FALLBACK_MODEL")
+      [ "$TASK_ROUTE_REASONING_EFFORT" = auto ] || repair_args+=(--reasoning-effort "$TASK_ROUTE_REASONING_EFFORT")
+      [ "$TASK_ROUTE_WORKLOAD" = standard ] || repair_args+=(--workload "$TASK_ROUTE_WORKLOAD")
       goal_phase_run env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" bash \
         "$ROOT/scripts/peer-delegate.sh" "${repair_args[@]}" || repair_rc=$?
       repair_out="$GOAL_PHASE_OUT"

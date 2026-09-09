@@ -8,6 +8,8 @@ if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
   oms_python_runtime_activate_if_present
 fi
 SKIP_TOOLS="${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-1}"
+REFRESH_PROVIDERS=1
+if [ "${OH_MY_SETTING_UPDATE_SKIP_TOOLS:-}" = 1 ]; then REFRESH_PROVIDERS=0; fi
 SKIP_DOCTOR="${OH_MY_SETTING_UPDATE_SKIP_DOCTOR:-0}"
 AUTO_UPDATE_SET="${OH_MY_SETTING_AUTO_UPDATE+x}"
 AUTO_UPDATE_MODE_SET="${OH_MY_SETTING_AUTO_UPDATE_MODE+x}"
@@ -48,7 +50,8 @@ Options:
                 If a pinned ref is missing, follow origin's default branch for
                 this run only. Without this flag, a missing pin fails closed.
   --tools       Refresh Node/uv/provider tools after the core update commits.
-  --no-tools    Skip tool refresh (default).
+  --no-tools    Skip all tool refresh, including providers.
+                Default: refresh installed provider CLIs to latest stable.
   --no-doctor   Skip the post-update doctor (disables its rollback gate).
   --probe-agy-surfaces
                 Certify this Antigravity binary's lifecycle hook surfaces
@@ -76,8 +79,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --fallback-to-edge) FALLBACK_TO_EDGE=1; shift ;;
-    --tools) SKIP_TOOLS=0; shift ;;
-    --no-tools) SKIP_TOOLS=1; shift ;;
+    --tools) SKIP_TOOLS=0; REFRESH_PROVIDERS=1; shift ;;
+    --no-tools) SKIP_TOOLS=1; REFRESH_PROVIDERS=0; shift ;;
     --no-doctor) SKIP_DOCTOR=1; shift ;;
     --probe-agy-surfaces) PROBE_AGY=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -546,6 +549,9 @@ if ! reconcile_core; then
 fi
 TRANSACTION_ACTIVE=0
 
+if [ "$ROLLBACK" = 1 ]; then
+  REFRESH_PROVIDERS=0
+fi
 if [ "$SKIP_TOOLS" != "1" ]; then
   # An install that chose its capabilities updates exactly that choice; an
   # install from before the capability receipt keeps the legacy full-tool
@@ -556,6 +562,8 @@ if [ "$SKIP_TOOLS" != "1" ]; then
   else
     "$ROOT/scripts/install-tools.sh" --upgrade
   fi
+elif [ "$REFRESH_PROVIDERS" = 1 ]; then
+  "$ROOT/scripts/install-tools.sh" --providers
 fi
 if [ "$AUTO_UPDATE" = "1" ]; then
   "$ROOT/scripts/install-autoupdate.sh"

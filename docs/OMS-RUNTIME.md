@@ -167,14 +167,23 @@ oms runtime context \
   --max-bytes 65536
 ```
 
-The context planner starts from bounded layers and, for Python targets, adds
-only direct imports, related tests, and bounded symbol callers. Every selected
-source records:
+The context planner starts from bounded layers and reuses fresh graph relations.
+Partial/filtered graphs supplement, never replace, direct Python import, related
+test and bounded symbol-caller discovery. Stale or invalid graphs are ignored;
+this compiler does not build or refresh them. Every selected source records:
 
 - path and content digest
 - inclusion reason and priority
 - bytes before and after selection
 - truncation policy
+
+An existing `PROJECT.md` is required context and is selected before ordinary
+targets; omission or truncation creates context debt rather than a successful
+sufficiency verdict. Missing projects remain supported. Pinned project facts
+precede summaries and journal recency, within the same byte budget and source
+scrubbing/path checks. No Markdown link is fetched automatically. See
+[project intent and context](PROJECT-CONTEXT.md) for document ownership and
+detached-worker handoff.
 
 Missing required sources become explicit context debt. Sensitive-looking,
 non-UTF-8, external, or over-budget sources are omitted with reasons. The
@@ -183,6 +192,17 @@ bundle and manifest are stored under `.oms/runtime/context/`.
 This is intentionally not a mandatory compiler for every interactive turn.
 It is suited to delegated implementation and review boundaries where context
 reproducibility matters.
+
+Ordinary `peer-delegate` calls automatically attach bounded graph file/test
+pointers, not source bytes. Preparation uses the detached snapshot and a private
+cache: a coherent parent graph/manifest can be copied but is never rewritten.
+The worker's default `.oms/project-graph` holds that private cache, allowing
+later graph queries and opt-in source bundles to reuse it without another build.
+Tracked or unignored cache targets are refused without overwriting existing ignore rules.
+Timeout (10 seconds plus one for termination), errors and no matches fall back
+to a direct-source inspection instruction. Explicit `--context-pack` takes
+precedence; `--no-graph-context`, `OMS_GRAPH_AUTOBUILD=0` and dry runs disable
+automatic preparation. No extra provider call or session hook is involved.
 
 `oms peer-delegate --context-manifest` compiles from the worker's detached
 `HEAD`, appends that exact bundle to the initial and repair prompts, and records
@@ -467,10 +487,9 @@ or input requests are a refusal, and an adapter failure does not retry through
 the CLI transport. `trusted-local`, isolated, remote, provider write workers,
 and patch admission retain their existing engines and authority.
 
-The A2A Agent Card and loopback bridge expose only state projections. They do
-not turn runtime envelopes into remote mutation requests, create A2A tasks, or
-start a listener during install/update. See the harness interoperability
-reference for the exact opt-ins and wire boundaries.
+See the harness interoperability reference for the exact opt-ins and wire
+boundaries. State, inbox, and runtime profiles remain available through the
+existing CLI and MCP tools without a separate HTTP bridge.
 
 Model routing should remain simple until this evidence exists. The core does
 not turn provider names into an unvalidated learned scheduler.

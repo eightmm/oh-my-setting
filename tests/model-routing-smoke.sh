@@ -114,7 +114,13 @@ printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\n' > "$gen/codex.model
 out="$(role_prepare codex delegate implementation-worker "$TMP/role.err")"
 [ "$out" = 'gpt-5.6-terra|role-default|role:worker|gpt-5.6-luna' ] ||
   fail "a write worker takes the second price rank and tries cheaper recovery first: $out"
-out="$(role_prepare codex consult '' "$TMP/role2.err")"
+out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine.err")"
+case "$out" in 'gpt-5.6-luna|role-default|role:routine-worker|'*) ;; *) fail "routine work must select the lowest routable seeded rank: $out" ;; esac
+out="$(OMS_MODEL_WORKLOAD=routine role_prepare claude delegate implementation-worker "$TMP/routine-claude.err")"
+case "$out" in 'sonnet|role-default|role:routine-worker|'*) ;; *) fail "routine selection must work across providers: $out" ;; esac
+out="$(OMS_MODEL_WORKLOAD=routine OMS_ROLE_ROUTING=0 role_prepare codex delegate implementation-worker "$TMP/routine-off.err")"
+case "$out" in 'provider-default|provider-default|'*) ;; *) fail "routing opt-out must also disable routine: $out" ;; esac
+out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex consult '' "$TMP/role2.err")"
 [ "$out" = 'provider-default|provider-default|provider-default|gpt-5.6-sol' ] ||
   fail "a judge keeps the provider default: $out"
 out="$(OMS_ROLE_ROUTING=0 role_prepare codex delegate implementation-worker "$TMP/role3.err")"
@@ -124,11 +130,18 @@ out="$(OMS_ROLE_ROUTING=0 role_prepare codex delegate implementation-worker "$TM
 # routable and the next routable rank is taken instead of an unlisted name.
 out="$(role_prepare antigravity delegate implementation-worker "$TMP/role5.err")"
 case "$out" in 'gemini-3.7-flash-low|role-default|role:worker|'*) ;; *) fail "the antigravity worker rank skips a seed entry the catalog does not route: $out" ;; esac
+printf 'Gemini 3.7 Flash (High)\nGemini 3.7 Flash (Low)\n' > "$gen/antigravity.models"
+for workload in standard routine; do
+  out="$(OMS_MODEL_WORKLOAD="$workload" role_prepare antigravity delegate implementation-worker "$TMP/spaced.err")"
+  case "$out" in 'Gemini 3.7 Flash (Low)|role-default|'*) ;; *) fail "worker ranks must preserve spaced catalog names: $out" ;; esac
+done
 # No catalog at all (claude): the seed stands in for the routable set, and
 # recovery tries the cheaper seeded rank before a higher one.
 out="$(role_prepare claude delegate implementation-worker "$TMP/role6.err")"
 [ "$out" = 'opus|role-default|role:worker|sonnet' ] || fail "a catalog-less provider routes its worker and recovery from the seed: $out"
 printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
+out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-new.err")"
+case "$out" in 'provider-default|provider-default|'*) ;; *) fail "routine must not invent unseeded generation models: $out" ;; esac
 out="$(role_prepare codex delegate implementation-worker "$TMP/role4.err")"
 [ "$out" = 'provider-default|provider-default|provider-default|gpt-5.10-nova' ] ||
   fail "an unseeded generation routes as provider default: $out"

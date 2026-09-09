@@ -17,14 +17,31 @@ agent, a Grok/GLM route, or a custom adapter.
    order within a generation is the registry's one seed
    (`oms_provider_price_order`); an unseeded generation routes as the
    provider default and says so. `OMS_ROLE_ROUTING=0` switches this off.
-   `--model NAME` is exact and never switches to a catalog entry or provider
-   default.
+   An effective `--model NAME` is exact and never switches to a catalog entry
+   or provider default. For assigned plan tasks, the reviewed assignment owns
+   that effective route; run-wide model options are defaults for unassigned tasks.
+   For a substantial routine task with known paths, constraints and a verifier,
+   pass `peer-delegate --workload routine`: select the lowest seeded routable
+   rank, not the standard second rank. The parent decides from repository
+   evidence; no extra classifier call or prompt-keyword heuristic runs.
+   `--model` still wins, `OMS_ROLE_ROUTING=0` still disables presets, and an
+   unknown generation still uses provider default. This is not a spending cap:
+   existing bounded recovery may use a higher rank. Frozen executors reject
+   `--workload routine`; choose their exact model before freezing. Unclassified
+   plan-run/autopilot workers keep the standard route. A reviewed task
+   `assignment` can select routine work or an exact model per transport;
+   [autonomy-loop.md](autonomy-loop.md) owns its schema and precedence.
 3. `--fallback-model NAME` is an opt-in, one-shot fallback used only for a
    recognized capacity error. A write attempt that changed its worktree is
    never retried.
 4. Direct implementation by the session agent remains valid. Use an OMS
-   delegate for substantial bounded writes or disjoint parallel work; native
-   Claude subagents default to the main model unless their `model` is pinned.
+   delegate for substantial bounded writes or disjoint parallel work. Keep
+   tiny known edits local; retain ambiguous, scientific, security-sensitive
+   and architectural judgment with the parent. A routine brief needs relevant
+   context and success criteria, not the whole conversation. Native subagents
+   are outside this shell router: choose their model explicitly when supported.
+   Provider choice is separate: use an already-authorized installed transport,
+   never install, log in, fan out or switch companies merely to find a cheap model.
 5. An unpinned provider-default route may use a bounded distinct catalog model
    when a model safeguard or unavailable-name error explicitly permits
    recovery. Policy, auth, permission, context, and verification failures do
@@ -34,11 +51,11 @@ agent, a Grok/GLM route, or a custom adapter.
    generation or a model another vendor re-hosts through the CLI runs only
    when named with `--model`, with a warning; it is never chosen, and
    `model-doctor` warns when a configured default has fallen outside the set.
-5. Pass `--reasoning-effort` only after checking the selected model's cached
+6. Pass `--reasoning-effort` only after checking the selected model's cached
    scale. Supported values are `auto`, `low`, `medium`, `high`, `xhigh`, `max`,
    and `ultra`; each provider accepts only its reported subset.
-6. For high-risk review, run `oms model-doctor --strict-diversity`. Provider
+7. For high-risk review, run `oms model-doctor --strict-diversity`. Provider
    identity is not model-family independence: Antigravity using Claude and
    Claude Code using Anthropic remain one family.
-7. The owner still admits patches and runs mechanical verification. Agreement
+8. The owner still admits patches and runs mechanical verification. Agreement
    is evidence, not a pass condition.

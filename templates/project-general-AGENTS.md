@@ -1,7 +1,7 @@
 # Project Guidelines
 
 - Prefer repository conventions over global defaults.
-- Read `PROJECT.md`. Pause only when unresolved choices affect the requested change.
+- Read `PROJECT.md` and task-relevant references. Pause only when unresolved choices affect the requested change.
 - Inspect the implementation before editing; change only task-relevant lines.
 - Do not add dependencies, alter public contracts, or mask failures without
   explicit authority.

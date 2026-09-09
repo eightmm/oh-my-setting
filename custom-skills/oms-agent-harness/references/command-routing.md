@@ -2,8 +2,8 @@
 
 Choose the narrowest front door; retain primitives for lower-level contracts.
 
-`oms list --frontdoor` exposes compact subsystem entrypoints; `oms list --all`
-retains every public primitive. Start with the six work families in SKILL.md;
+`oms list` (also `--frontdoor`) exposes compact subsystem entrypoints;
+`oms list --all` exposes core primitives. Start with the six work families in SKILL.md;
 this reference resolves intent variants, not additional default steps.
 
 ## Orient and resume

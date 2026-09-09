@@ -2018,9 +2018,11 @@ ma_provider_attempt() {
       fi
       ;;
     claude)
-      permission=plan
-      [ "$access" != write ] || permission=acceptEdits
       cmd=(claude)
+      # Write workers inherit the operator's native permission policy. Forcing
+      # acceptEdits overrides auto but still cannot approve Python/test commands
+      # in a headless session. Read-only seats remain explicitly restricted.
+      [ "$access" = write ] || cmd+=(--permission-mode plan)
       [ "$model" = provider-default ] || cmd+=(--model "$model")
       # Same empty-effort contract as the codex branch above.
       [ -z "$effort" ] || cmd+=(--effort "$effort")
@@ -2050,7 +2052,7 @@ ma_provider_attempt() {
       # envelope is parsed back to plain text right after the run
       # (ma_claude_envelope_to_text), so every downstream reader keeps its
       # shape; anything that is not the envelope passes through untouched.
-      cmd+=(--permission-mode "$permission" --output-format json -p)
+      cmd+=(--output-format json -p)
       ;;
     antigravity|agy)
       # --print TAKES the prompt as its value here (--prompt is its alias), so
@@ -2084,7 +2086,11 @@ ma_provider_attempt() {
         echo "error: prompt is $(wc -c < "$prompt_file" | tr -d ' ')B; the antigravity transport carries it as one argv element (limit ~128KiB) — trim the quoted context or use another provider" > "$output_file"
         return 2
       fi
-      cmd+=(--print "$(cat "$prompt_file")")
+      if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
+        cmd+=(--output-format json)
+      else
+        cmd+=(--print "$(cat "$prompt_file")")
+      fi
       ;;
     cursor)
       binary="$(oms_provider_binary "$provider")"
@@ -2338,16 +2344,24 @@ ma_provider_attempt() {
     fi
   fi
 
-  (
-    ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
-    cd "$workdir" || exit 1
-    run_with_timeout "${cmd[@]}" < "$provider_stdin"
-  ) > "$output_file" 2>&1 &
-  local pid="$!"
+  if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
+    ma_conversation_run "$provider" "$access" "$prompt_file" "$output_file" "$workdir" \
+      "$origin" "$state_repo" "$call_id" "$authority_before" "$authority_after" \
+      "${cmd[@]}" || status=$?
+  else
+    (
+      ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
+      cd "$workdir" || exit 1
+      run_with_timeout "${cmd[@]}" < "$provider_stdin"
+    ) > "$output_file" 2>&1 &
+    local pid="$!"
 
-  if wait "$pid"; then status=0; else status=$?; fi
+    if wait "$pid"; then status=0; else status=$?; fi
+  fi
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
-  [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
+  if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+    [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
+  fi
   [ "$provider" != codex ] || ma_codex_jsonl_to_text "$output_file"
   ma_note_configured_default_model "$provider" "$model" "$output_file"
   if [ -n "$authority_before" ]; then
@@ -2524,6 +2538,13 @@ ma_run_routed_provider_inner() {
     status=125
   fi
   cat "$attempt_file" >> "$artifact"
+
+  # Conversation completion, EOF, and protocol errors are never model retries.
+  # Replaying the controller could attach another session or duplicate a turn.
+  if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then
+    rm -f "$attempt_file"
+    return "$status"
+  fi
 
   # An authority breach is not a provider/model failure. Never route the same
   # process against another model after it touched owner state.

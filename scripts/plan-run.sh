@@ -26,6 +26,7 @@ RETRY_KNOWN=0
 DRY_RUN=0
 EXECUTOR_ID=""
 MODEL=""
+WORKLOAD=standard
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
 LEASE_ID=""
@@ -52,7 +53,7 @@ and admission boundaries. Success stops in review by default; --land is an
 explicit request to admit and apply the reviewed patch.
 
 Options:
-  --to PROVIDER   Registered write-capable agent transport.
+  --to PROVIDER   Default transport for tasks without a reviewed assignment.
   --id ID         Claim and execute this ready task. With --land, a matching
                   reviewed task continues from its stored patch first.
   --next          Atomically claim the next actionable task.
@@ -69,7 +70,7 @@ Options:
                   is an unresolved known failure.
   --executor ID   Use a frozen task-scoped executor soul. A reviewed task that
                   carries an executor receipt requires this exact ID and soul.
-  --model MODEL   Exact provider model; disables implicit fallback.
+  --model MODEL   Exact default model for unassigned tasks; disables implicit fallback.
   --fallback-model M  Explicit one-shot capacity fallback model.
   --reasoning-effort E  auto, low, medium, high, xhigh, max, or ultra.
   --repo PATH     Target repo (default: current directory).
@@ -305,6 +306,19 @@ if [ "$DRY_RUN" -eq 0 ] && [ -z "$EXECUTOR_PLAN_TASK" ]; then
   esac
 fi
 
+hydrate_assignment() {
+  if [ -n "$EXECUTOR_ID" ]; then
+    printf '%s' "$task_json" | python3 -c 'import json,sys; sys.exit(bool(json.load(sys.stdin).get("assignment", {})))' ||
+      fail "task assignment cannot override a frozen executor; use an unassigned task"
+  fi
+  oms_task_assignment_resolve "$task_json" "$TO" "$MODEL" "$FALLBACK_MODEL" "$REASONING_EFFORT" || exit $?
+  TO="$OMS_TASK_PROVIDER"
+  MODEL="$OMS_TASK_MODEL"
+  FALLBACK_MODEL="$OMS_TASK_FALLBACK_MODEL"
+  REASONING_EFFORT="$OMS_TASK_REASONING_EFFORT"
+  WORKLOAD="$OMS_TASK_WORKLOAD"
+}
+
 if [ "$USE_NEXT" -eq 1 ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" next --json)" || exit $?
@@ -313,8 +327,11 @@ if [ "$USE_NEXT" -eq 1 ]; then
     CLAIMED=1
   fi
   TASK_ID="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  LEASE_ID="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))')"
+  hydrate_assignment
 else
   task_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$TASK_ID")" || exit $?
+  hydrate_assignment
   state="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')"
   if [ "$state" = claimed ] && [ "$LAND" -eq 1 ] && [ "$AUTO_REPAIR" -eq 1 ]; then
     POSSIBLE_REPAIR_RESUME="$(printf '%s' "$task_json" | python3 -c '
@@ -434,9 +451,12 @@ import hashlib,json,sys
 d=json.load(sys.stdin)
 keys=("id","title","brief","depends","allowed_paths","forbidden_paths","verify","role")
 stable={k:d.get(k) for k in keys}
+if d.get("assignment"):
+    stable["assignment"]=d["assignment"]
 print(hashlib.sha256(json.dumps(stable,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()[:16])
 ')"
 if [ -n "$EXECUTOR_ID" ]; then
+  assignment_route="frozen-executor=$EXECUTOR_ID"
   route_contract="$(printf '%s' "$executor_meta" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -445,11 +465,15 @@ print("|".join(str(d.get(k,"")) for k in keys))
 ')|request=$MODEL:$FALLBACK_MODEL:$REASONING_EFFORT"
 else
   task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))')"
+  # Match peer-delegate's default; ambient routine hints must not give this
+  # same task a different failure identity than the worker actually uses.
+  export OMS_MODEL_WORKLOAD="$WORKLOAD"
   export OMS_MODEL_EXPLICIT="$MODEL"
   export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
   export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT" OMS_REASONING_FALLBACK_EXPLICIT=""
   export OMS_MODEL_ROLE="$task_role" OMS_MODEL_OPERATION=delegate
   oms_model_prepare "$TO" || exit $?
+  assignment_route="model=$OMS_MODEL_PRIMARY class=$OMS_MODEL_RESOLVED_CLASS workload=$WORKLOAD"
   route_contract="$OMS_MODEL_RESOLVED_CLASS:$OMS_MODEL_PRIMARY:$OMS_MODEL_FALLBACK:$OMS_REASONING_RESOLVED:$OMS_REASONING_FALLBACK"
 fi
 route_hash="$(printf '%s' "$route_contract" | oms_sha256_stream | cut -c1-16)"
@@ -470,6 +494,7 @@ if [ "$failure_check_rc" -ne 0 ] && [ "$RETRY_KNOWN" -eq 0 ]; then
 fi
 
 echo "plan-run: task=$TASK_ID provider=$TO title=$TITLE"
+echo "plan-run: assignment $assignment_route mode=one-shot"
 echo "plan-run: scope=$ALLOWED verify=$VERIFY"
 [ -z "$CONTEXT_PACK" ] ||
   echo "plan-run: context-pack=$CONTEXT_PACK files=$CONTEXT_PACK_FILES sha256=$CONTEXT_PACK_SHA"
@@ -487,6 +512,7 @@ delegate_script="${OMS_PLAN_RUN_DELEGATE:-$ROOT/scripts/peer-delegate.sh}"
 delegate_repair="$REPAIR"
 [ "$RESUME_REPAIR" -eq 0 ] || delegate_repair=0
 delegate_common_cmd=("$delegate_script" --repo "$REPO" --to "$TO" --plan-task "$TASK_ID")
+[ "$WORKLOAD" = standard ] || delegate_common_cmd+=(--workload "$WORKLOAD")
 [ -n "$EXECUTOR_ID" ] && delegate_common_cmd+=(--executor "$EXECUTOR_ID")
 [ -n "$MODEL" ] && delegate_common_cmd+=(--model "$MODEL")
 [ -n "$FALLBACK_MODEL" ] && delegate_common_cmd+=(--fallback-model "$FALLBACK_MODEL")

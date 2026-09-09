@@ -7,10 +7,12 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 fail() { echo "goal-drive-recovery-smoke: $*" >&2; exit 1; }
 
-make_case() {  # DIR MODE
+make_case() {  # DIR MODE [ASSIGNMENT_JSON]
   local repo="$1"
   local mode="$2"
   local allowed="new.txt"
+  local assignment_args=()
+  [ -z "${3:-}" ] || assignment_args=(--assignment "$3")
 
   mkdir -p "$repo/scripts"
   git -C "$repo" init -q -b main
@@ -34,7 +36,7 @@ EOF
     --accept "bash scripts/check.sh $mode" >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id "$mode" \
     --title "fix: recover $mode landing" --allowed "$allowed" \
-    --verify "bash scripts/check.sh $mode" >/dev/null
+    --verify "bash scripts/check.sh $mode" ${assignment_args[@]+"${assignment_args[@]}"} >/dev/null
 }
 
 append_outer_intent() {  # REPO TASK SOURCE_PATCH INTENT_ID PHASE PROVIDER
@@ -177,7 +179,12 @@ grep -Fq 'reason=expected-ref-moved' "$TMP/expected-ref-start.out" ||
 
 for mode in new tracked; do
   repo="$TMP/$mode"
-  make_case "$repo" "$mode"
+  # The assigned provider, not the run default, owns crash recovery.
+  if [ "$mode" = tracked ]; then
+    make_case "$repo" "$mode" '{"provider":"cursor"}'
+  else
+    make_case "$repo" "$mode"
+  fi
   before="$(git -C "$repo" rev-parse HEAD)"
   rc=0
   HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" CALL_LOG="$calls" \
@@ -185,6 +192,11 @@ for mode in new tracked; do
     "$ROOT/scripts/goal-drive.sh" --repo "$repo" --to codex --max-cycles 2 \
     > "$TMP/$mode-stop.out" 2>&1 || rc=$?
   [ "$rc" = 75 ] || fail "$mode crash fixture should stop after landing with 75, got $rc: $(tail -12 "$TMP/$mode-stop.out")"
+  if [ "$mode" = tracked ]; then
+    "$ROOT/scripts/agent-plan.sh" --repo "$repo" show --id "$mode" |
+      python3 -c 'import json,sys;assert json.load(sys.stdin)["provider"] == "cursor"' ||
+      fail "assigned landing used the run default provider"
+  fi
   [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] ||
     fail "$mode stop committed before the injected crash"
   [ -n "$(git -C "$repo" status --porcelain)" ] ||
@@ -210,7 +222,7 @@ done
 # the unique exact reviewed receipt instead of reporting tasks exhausted or
 # calling the provider again.
 review_repo="$TMP/review-window"
-make_case "$review_repo" new
+make_case "$review_repo" new '{"provider":"codex"}'
 review_calls="$TMP/review-window-calls"
 rc=0
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
@@ -219,7 +231,7 @@ HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   > "$TMP/review-window-stop.out" 2>&1 || rc=$?
 [ "$rc" = 75 ] || fail "review-window fixture should stop after provider review: $(tail -12 "$TMP/review-window-stop.out"); artifact: $(tail -20 "$review_repo"/.oms/artifacts/delegate/*.md 2>/dev/null || true)"
 "$ROOT/scripts/agent-plan.sh" --repo "$review_repo" show --id new |
-  python3 -c 'import json,sys;assert json.load(sys.stdin)["state"] == "review"' ||
+  python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["state"] == "review" and d["provider"] == "codex"' ||
   fail "review-window fixture did not retain reviewed work"
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$review_calls" "$ROOT/scripts/goal-drive.sh" --repo "$review_repo" \
@@ -619,11 +631,16 @@ git -C "$repair_review_repo" commit -qm base
   --goal repair-review --accept 'grep -Fxq repaired tracked.txt' >/dev/null
 "$ROOT/scripts/agent-plan.sh" --repo "$repair_review_repo" add --id repair-review \
   --title 'fix: recover repaired review' --allowed 'tracked.txt,scripts/check.sh' \
-  --verify true >/dev/null
+  --verify true --assignment '{"provider":"cursor","workload":"routine","model":"assigned-model"}' >/dev/null
 repair_review_calls="$TMP/repair-review-window-calls"
 cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
+case " $* " in
+  *' assigned-model '*) ;;
+  *) echo 'assigned model missing from initial/repair call' >&2; exit 9 ;;
+esac
+case " $* " in *run-default-model*) echo 'run model leaked into assignment' >&2; exit 9 ;; esac
 cat >/dev/null
 count=0
 [ ! -f "$CALL_LOG" ] || count="$(wc -l < "$CALL_LOG" | tr -d ' ')"
@@ -640,13 +657,18 @@ rc=0
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$repair_review_calls" OMS_GOAL_DRIVE_TEST_STOP_AFTER_REPAIR_REVIEW=1 \
   "$ROOT/scripts/goal-drive.sh" --repo "$repair_review_repo" --to codex \
+  --model run-default-model --reasoning-effort high \
   --max-cycles 2 --auto-repair > "$TMP/repair-review-stop.out" 2>&1 || rc=$?
 [ "$rc" = 75 ] || fail "repair-review fixture did not stop after repaired review"
+"$ROOT/scripts/agent-plan.sh" --repo "$repair_review_repo" show --id repair-review |
+  python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["provider"] == "cursor" and d["repair_count"] == 1' ||
+  fail "assigned repair did not keep its provider and one-shot receipt"
 [ "$(wc -l < "$repair_review_calls" | tr -d ' ')" = 2 ] ||
   fail "repair-review fixture did not make exactly initial+repair calls"
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$repair_review_calls" "$ROOT/scripts/goal-drive.sh" \
-  --repo "$repair_review_repo" --to codex --max-cycles 2 --auto-repair \
+  --repo "$repair_review_repo" --to codex --model run-default-model \
+  --reasoning-effort high --max-cycles 2 --auto-repair \
   > "$TMP/repair-review-resume.out" 2>&1 ||
   fail "repaired review intent recovery failed"
 [ "$(wc -l < "$repair_review_calls" | tr -d ' ')" = 2 ] ||

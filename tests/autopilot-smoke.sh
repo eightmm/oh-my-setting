@@ -95,6 +95,15 @@ test_atomic_proposal_apply() {
   make_repo "$repo"
   proposal="$repo/proposal.json"
   write_proposal "$proposal"
+  python3 - "$proposal" <<'PY'
+import json,sys
+path=sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data=json.load(handle)
+data["tasks"][0]["assignment"]={"provider":"claude", "workload":"routine"}
+with open(path,"w",encoding="utf-8") as handle:
+    json.dump(data,handle)
+PY
   proposal_sha="$(sha256_file "$proposal")"
 
   "$ROOT/scripts/agent-plan.sh" --repo "$repo" apply-proposal \
@@ -116,6 +125,7 @@ assert data["project_contract"]["spec_sha256"]
 assert data["project_contract"]["allowed_envelope"] == ["src", "tests"]
 assert list(data["tasks"]) == ["t1", "t2"]
 assert data["tasks"]["t2"]["depends"] == ["t1"]
+assert data["tasks"]["t1"]["assignment"] == {"provider":"claude", "workload":"routine"}
 PY
 
   # Crash recovery may replay the exact apply. It is idempotent when every
@@ -129,6 +139,26 @@ PY
     fail "exact proposal replay should converge"
   grep -Fq 'already applied' "$repo/replay.out" ||
     fail "proposal replay did not report convergence"
+
+  local changed_assignment="$repo/changed-assignment.json"
+  python3 - "$proposal" "$changed_assignment" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data=json.load(handle)
+data["tasks"][0]["assignment"]["provider"]="codex"
+with open(sys.argv[2],"w",encoding="utf-8") as handle:
+    json.dump(data,handle)
+PY
+  before="$(sha256_file "$repo/.oms/plan/tasks.json")"
+  if "$ROOT/scripts/agent-plan.sh" --repo "$repo" apply-proposal \
+      --proposal "$changed_assignment" --expected-proposal-sha256 "$(sha256_file "$changed_assignment")" \
+      --expected-plan-sha256 absent --goal "finish the bounded feature" --accept true \
+      --allowed-envelope 'src,tests' --accept-files PROJECT.md >"$repo/assignment-replay.out" 2>&1; then
+    fail "replay changed an admitted task assignment"
+  fi
+  grep -Fq 'assignment does not match' "$repo/assignment-replay.out" ||
+    fail "changed assignment was not rejected by immutable replay"
+  [ "$before" = "$(sha256_file "$repo/.oms/plan/tasks.json")" ] || fail "assignment replay mutated plan"
 
   # A documented resume may pass the same reviewed proposal after goal-drive
   # has legitimately committed work. With the durable contract already in
@@ -251,6 +281,37 @@ PY
   fi
   [ ! -f "$control_repo/.oms/plan/tasks.json" ] ||
     fail "control-character proposal partially changed the plan"
+
+  local assignment_case assignment_sha
+  for assignment_case in null '[]' '{"workload":"routine"}' \
+    '{"provider":"agy"}' '{"provider":"cursor-agent"}' \
+    '{"provider":"claude","workload":"cheap"}' \
+    '{"provider":"claude","model":"bad\tmodel"}' \
+    '{"provider":"codex","reasoning_effort":"invalid"}' \
+    '{"provider":"claude","permission":"bypass"}'; do
+    write_proposal "$control_proposal"
+    python3 - "$control_proposal" "$assignment_case" <<'PY'
+import json,sys
+path=sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data=json.load(handle)
+data["tasks"][0]["assignment"]=json.loads(sys.argv[2])
+with open(path,"w",encoding="utf-8") as handle:
+    json.dump(data,handle)
+PY
+    assignment_sha="$(sha256_file "$control_proposal")"
+    if "$ROOT/scripts/plan-from-spec.sh" --repo "$control_repo" \
+        --apply "$control_proposal" --allowed 'src,tests' >/dev/null 2>&1; then
+      fail "planner accepted invalid assignment: $assignment_case"
+    fi
+    if "$ROOT/scripts/agent-plan.sh" --repo "$control_repo" apply-proposal \
+        --proposal "$control_proposal" --expected-proposal-sha256 "$assignment_sha" \
+        --expected-plan-sha256 absent --goal g --accept true \
+        --allowed-envelope 'src,tests' --accept-files PROJECT.md >/dev/null 2>&1; then
+      fail "atomic apply accepted invalid assignment: $assignment_case"
+    fi
+    [ ! -f "$control_repo/.oms/plan/tasks.json" ] || fail "invalid assignment changed plan state"
+  done
 
   write_proposal "$control_proposal"
   python3 - "$control_proposal" <<'PY'
@@ -2197,6 +2258,30 @@ PY
     --base main --draft-pr --review-mode gate > "$repo/gate.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "strict semantic gate should park, got $rc"
   [ ! -s "$repo/calls/draft-pr" ] || fail "failed semantic gate reached remote publish"
+
+  # A run-default worker is not the only author once tasks are assigned.
+  write_done_plan "$repo" true
+  python3 - "$repo/.oms/plan/tasks.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data=json.load(handle)
+task=next(iter(data["tasks"].values()))
+task["assignment"]={"provider":"claude"}
+task["provider"]="claude"
+with open(path,"w",encoding="utf-8") as handle:
+    json.dump(data,handle)
+PY
+  : > "$repo/calls/peer-review"
+  : > "$repo/calls/draft-pr"
+  rc=0
+  OMS_T_GOAL_RESULT=success run_autopilot "$repo" run \
+    --planner claude --worker codex --reviewer claude --allowed 'src,tests' \
+    --base main --review-mode gate --draft-pr >"$repo/self-review.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "assigned author passed its own review gate"
+  grep -Fq 'reviewer-authored-task' "$repo/self-review.out" || fail "assigned authorship was not checked"
+  [ ! -s "$repo/calls/peer-review" ] && [ ! -s "$repo/calls/draft-pr" ] ||
+    fail "self-review boundary called a reviewer or publisher"
 
   # Off mode is an operator choice that is disclosed, not hidden: no reviewer
   # call happens and the publication intent carries the skip verbatim.

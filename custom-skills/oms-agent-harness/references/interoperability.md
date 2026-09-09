@@ -54,21 +54,3 @@ It accepts bounded agent-message deltas and successful completion only. Any
 server request for approval, permissions, or user input fails closed. A failed
 app-server request is never resent through `codex exec`. Write delegation must
 use the ordinary CLI transport.
-
-## A2A v1 read bridge
-
-`oms agent-card --url http://127.0.0.1:PORT` prints the public card. Running
-`oms a2a-bridge --repo . --host 127.0.0.1 --port PORT` is the only way to start
-the bridge; installation and update never do so. The bind host must be a
-loopback IP literal.
-
-The HTTP+JSON interface provides:
-
-- `GET /.well-known/agent-card.json`;
-- `POST /message:send` with exactly one text part: `status`, `inbox`, or
-  `capabilities`.
-
-Responses are synchronous A2A Messages containing JSON text. Streaming, push,
-authentication, remote bind, mutation prompts, provider calls, continuation,
-and A2A Tasks are unsupported. Keep it behind the host's local trust boundary;
-localhost-only is not an account-isolation mechanism.

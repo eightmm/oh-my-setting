@@ -26,6 +26,7 @@ CONTEXT_MISSING_REQUIRED=""
 context_manifest_file=""
 context_bundle_file=""
 CONTEXT_PACK=""
+AUTO_GRAPH_CONTEXT=1
 CONTEXT_PACK_SHA=""
 CONTEXT_PACK_FILES=""
 context_pack_section=""
@@ -75,6 +76,13 @@ REPAIR=0
 # comes from the caller, never from role prose (roles are data).
 WORKER_ACCESS="write"
 MODEL=""
+WORKLOAD=standard
+INTERACTIVE=0
+CONVERSATION_MAX_TURNS=5
+CONVERSATION_IDLE_SECONDS=300
+conversation_scratch=""
+# Only this front door may enable the conversation transport.
+unset OMS_PEER_INTERACTIVE OMS_CONVERSATION_MAX_TURNS OMS_CONVERSATION_IDLE_SECONDS
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
 REASONING_EFFORT_EXPLICIT=0
@@ -109,6 +117,19 @@ Options:
                        addressed.
   --repo PATH          Git repo to work on. Default: current directory.
   --model MODEL        Exact provider model; disables implicit fallback.
+  --workload CLASS     standard (default) or routine. Routine selects the lowest
+                       seeded routable rank for a well-specified bounded task.
+                       --model wins; routine is incompatible with --executor.
+  --interactive        Claude/Antigravity conversation in one isolated worktree.
+                       stdout is NDJSON; stdin accepts {"prompt":"..."} or
+                       {"finish":true}. Every turn returns an unverified answer;
+                       finish runs the final verifier and returns a patch.
+                       Standalone writes only: no repair, executor, plan-task,
+                       read-only, apply, fallback-model, or dry-run.
+  --max-turns N        Interactive turn cap including the initial prompt (1-20;
+                       default 5). Reaching it still requires explicit finish.
+  --idle-timeout N     Seconds to wait for each control message (1-3600;
+                       default 300). EOF/timeout fails; never auto-finishes.
   --fallback-model M   Explicit one-shot capacity fallback model.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --verify CMD         Command run inside the worktree after the worker
@@ -164,7 +185,9 @@ Options:
                        manifest and bundle digests on the delegation row.
   --context-pack FILE  Typed Project Graph orientation pack (validated before
                        the worktree exists). Renders file/test pointers into
-                       the brief; orientation only, never a write scope.
+                       the brief; replaces automatic graph orientation.
+  --no-graph-context   Skip automatic graph orientation (default: bounded file/
+                       test pointers from the worker snapshot, no source bytes).
   --dry-run            Write prompt and empty patch without calling the CLI.
   -h, --help           Show this help.
 
@@ -253,6 +276,25 @@ while [ "$#" -gt 0 ]; do
     --model)
       [ "$#" -ge 2 ] || fail "--model requires value"
       MODEL="$2"
+      shift 2
+      ;;
+    --workload)
+      [ "$#" -ge 2 ] || fail "--workload requires standard or routine"
+      case "$2" in standard|routine) WORKLOAD="$2" ;; *) fail "--workload requires standard or routine" ;; esac
+      shift 2
+      ;;
+    --interactive) INTERACTIVE=1; shift ;;
+    --max-turns|--idle-timeout)
+      [ "$#" -ge 2 ] || fail "$1 requires a positive integer"
+      case "$2" in ''|*[!0-9]*|0*) fail "$1 requires a positive integer without leading zeros" ;; esac
+      [ "${#2}" -le 4 ] || fail "$1 exceeds its limit"
+      if [ "$1" = --max-turns ]; then
+        [ "$2" -le 20 ] || fail "--max-turns must be 1-20"
+        CONVERSATION_MAX_TURNS="$2"
+      else
+        [ "$2" -le 3600 ] || fail "--idle-timeout must be 1-3600"
+        CONVERSATION_IDLE_SECONDS="$2"
+      fi
       shift 2
       ;;
     --fallback-model)
@@ -371,6 +413,10 @@ while [ "$#" -gt 0 ]; do
       CONTEXT_PACK="$2"
       shift 2
       ;;
+    --no-graph-context)
+      AUTO_GRAPH_CONTEXT=0
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -384,6 +430,10 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$WORKLOAD" = routine ] && [ -n "$EXECUTOR_ID" ]; then
+  fail "--workload routine cannot override a frozen executor; pin its model when creating it"
+fi
 
 if [ -n "$AUTOPILOT_OWNER_ID" ]; then
   case "$AUTOPILOT_OWNER_ID" in owner_*) ;; *) fail "autopilot owner id is invalid" ;; esac
@@ -450,6 +500,20 @@ plan_publish_review() {
 
 [ -n "$TO" ] || fail "--to is required"
 TO="$(oms_provider_normalize "$TO")" || exit $?
+if [ "$INTERACTIVE" = 1 ]; then
+  case "$TO" in claude|antigravity) ;; *) fail "--interactive supports claude and antigravity" ;; esac
+  [ "$WORKER_ACCESS" = write ] && [ "$REPAIR" = 0 ] && [ "$APPLY" = 0 ] &&
+    [ "$DRY_RUN" = 0 ] && [ -z "$EXECUTOR_ID$PLAN_TASK_ID$FALLBACK_MODEL" ] ||
+    fail "--interactive requires standalone writes without repair, apply, dry-run, executor, plan-task or fallback-model"
+  [ "${OMS_WORKER_GUARD_OFF:-0}" != 1 ] || fail "--interactive requires the worker guard"
+  # Keep protocol streams away from provider children and ordinary CLI prose.
+  exec 3>&1 4<&0
+  exec 1>&2
+  export OMS_PEER_INTERACTIVE=1 OMS_CONVERSATION_MAX_TURNS="$CONVERSATION_MAX_TURNS" \
+    OMS_CONVERSATION_IDLE_SECONDS="$CONVERSATION_IDLE_SECONDS"
+  # shellcheck source=lib/peer-conversation.sh
+  . "$(ma_scripts_dir)/lib/peer-conversation.sh"
+fi
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
@@ -489,7 +553,7 @@ fi
 # secret-shaped pack must be refused before a worktree or artifact exists. The
 # rendered section carries pointers only — never file bytes — and the brief's
 # allowed_paths stay the sole write scope.
-if [ -n "$CONTEXT_PACK" ]; then
+load_context_pack() {
   context_pack_summary="$(PYTHONDONTWRITEBYTECODE=1 python3 \
     "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" --repo "$REPO" "$CONTEXT_PACK" 2>&1)" ||
     fail "context-pack: $context_pack_summary"
@@ -536,6 +600,10 @@ print("\n".join(lines))
   context_pack_targets="$(printf '%s' "$context_pack_summary" |
     python3 -c 'import json,sys; [print(p) for p in json.load(sys.stdin).get("files", [])[:8]]')" ||
     fail "context-pack: could not read the validated file list"
+}
+
+if [ -n "$CONTEXT_PACK" ]; then
+  load_context_pack
 fi
 
 write_context_pack_section() {
@@ -667,6 +735,22 @@ if [ -n "$PLAN_TASK_ID" ]; then
       ;;
     *) fail "plan task has no immutable lineage" ;;
   esac
+  # Bind route, lease and brief to the same final snapshot, including legacy
+  # plans reread after ensure-lineage; never keep a pre-lineage route.
+  if [ -n "$EXECUTOR_ID" ]; then
+    printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; sys.exit(bool(json.load(sys.stdin).get("assignment", {})))' ||
+      fail "task assignment cannot override a frozen executor; use an unassigned task"
+  fi
+  oms_task_assignment_resolve "$PLAN_JSON" "$TO" "$MODEL" "$FALLBACK_MODEL" "$REASONING_EFFORT" "$WORKLOAD" || exit $?
+  TO="$OMS_TASK_PROVIDER"
+  MODEL="$OMS_TASK_MODEL"
+  FALLBACK_MODEL="$OMS_TASK_FALLBACK_MODEL"
+  REASONING_EFFORT="$OMS_TASK_REASONING_EFFORT"
+  WORKLOAD="$OMS_TASK_WORKLOAD"
+  plan_provider="$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))')"
+  plan_provider="${plan_provider//$'\r'/}"
+  [ -z "$plan_provider" ] || [ "$plan_provider" = "$TO" ] ||
+    fail "task claim provider does not match its execution assignment"
   PLAN_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
     python3 -c 'import json,sys;print(json.load(sys.stdin).get("lease_id", ""))' |
     tr -d '\r')" || fail "could not read lease for plan task $PLAN_TASK_ID"
@@ -728,6 +812,8 @@ lines = ["# Task %s: %s" % (t.get("id", ""), t.get("title", "")),
 if t.get("forbidden_paths"):
     lines.append("forbidden_paths: %s" % ", ".join(t["forbidden_paths"]))
 lines.append("verify: %s" % (t.get("verify") or "(none)"))
+if t.get("assignment"):
+    lines.append("assignment: %s" % json.dumps(t["assignment"], sort_keys=True))
 if t.get("role"):
     lines.append("role: %s" % t["role"])
 print("\n".join(lines))
@@ -763,6 +849,7 @@ if [ -n "$ROLE" ]; then
   echo "role: $ROLE ($role_file)"
 fi
 
+export OMS_MODEL_WORKLOAD="$WORKLOAD"
 export OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
@@ -871,6 +958,7 @@ cleanup() {
     executor_finalized=1
   fi
   rm -f "$prompt_file" "$repair_prompt_file" "$verify_out"
+  [ -z "$conversation_scratch" ] || rm -rf -- "$conversation_scratch"
   [ -z "$plan_brief_file" ] || rm -f "$plan_brief_file"
   [ -z "$executor_brief_file" ] || rm -f "$executor_brief_file"
   # Remove the liveness marker; a leftover file means the process died without
@@ -930,7 +1018,7 @@ write_compiled_context() {
 }
 
 write_minimal_change_doctrine() {
-  printf 'Search repository structure, affected call paths and contracts, implementation and tests before editing. Infer reversible details within scope; report material blockers.\n'
+  printf 'Search repository structure, affected call paths and contracts, implementation and tests before editing. Read PROJECT.md when present and only task-relevant referenced sections; report missing required documents. Infer reversible details within scope; report material blockers.\n'
   printf 'Prefer source code, tests, official docs, issue/PR/history, secondary sources, then inference. Distinguish facts from uncertainty; investigate unfamiliar scientific/HPC/ML logic.\n'
   printf 'For failures, test competing hypotheses with the cheapest discriminating probe before fixing the root cause.\n'
   printf 'Prefer no change, repo reuse, stdlib, portable native features, declared dependencies, then new code. Keep one readable owner per behavior; avoid speculative wrappers and code-golf.\n'
@@ -941,7 +1029,12 @@ write_minimal_change_doctrine() {
 
 {
   printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
-  printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized. If blocked, report it without asking questions.\n'
+  printf 'Follow repository instructions and the brief. Stay in scope. Do not run git commit or git push; do not change git config, dependencies, toolchain, or public contracts unless explicitly authorized.\n'
+  if [ "$INTERACTIVE" = 1 ]; then
+    printf 'The parent can send follow-up turns in this same conversation. Ask a concise clarification when it materially blocks the task; do not widen scope or bypass permissions.\n'
+  else
+    printf 'If blocked, report it without asking questions.\n'
+  fi
   write_minimal_change_doctrine
   printf '\n'
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$PROMPT"
@@ -974,7 +1067,11 @@ write_minimal_change_doctrine() {
     printf '%s\n' "$PROMPT"
   fi
   write_context_pack_section
-  printf '\nReport What changed, Why, Evidence, Verification (including skipped checks), Remaining uncertainty, and blockers.\n'
+  if [ "$INTERACTIVE" = 1 ]; then
+    printf '\nAnswer the current question concisely. Include changed files, checks, uncertainty or blockers when relevant; do not repeat a completion template on every turn. The parent owns final verification and landing.\n'
+  else
+    printf '\nReport What changed, Why, Evidence, Verification (including skipped checks), Remaining uncertainty, and blockers.\n'
+  fi
 } > "$prompt_file"
 
 # Pre-flight: fail before any worker runs, so no work is wasted. Untracked
@@ -1029,6 +1126,37 @@ worker_identity_backpointer_sha="$OMS_WORKER_IDENTITY_BACKPOINTER_SHA"
 worker_identity_worktree_stat="$OMS_WORKER_IDENTITY_WORKTREE_STAT"
 worker_identity_gitdir_stat="$OMS_WORKER_IDENTITY_GITDIR_STAT"
 oms_seed_local_agent_files "$REPO" "$worktree"
+
+# Build against the worker's bytes, not dirty/untracked primary sources. The
+# parent cache is read-only input to a private copy checked against this
+# worktree; parallel delegates never overwrite each other's graph state.
+if [ "$AUTO_GRAPH_CONTEXT" = 1 ] && [ -z "$CONTEXT_PACK" ] &&
+  [ "$DRY_RUN" = 0 ] && [ "${OMS_GRAPH_AUTOBUILD:-1}" != 0 ]; then
+  graph_task="$PROMPT"
+  [ -n "$graph_task" ] || graph_task="$(head -c 2000 "$BRIEF_FILE")"
+  graph_task="${graph_task:0:2000}"
+  auto_pack="$worktree_parent/graph-context.json"
+  if OMS_PEER_KILL_AFTER=1 \
+    ma_run_bounded 10 graph-context python3 -B "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" \
+    --auto "$worktree" "$REPO" "$worktree/.oms/project-graph" "$graph_task" \
+    > "$auto_pack" 2> "$worktree_parent/graph-context.log" &&
+    auto_section="$(
+      CONTEXT_PACK="$auto_pack"
+      load_context_pack
+      [ "$CONTEXT_PACK_FILES" -gt 0 ] || exit 3
+      write_context_pack_section
+    )"; then
+    context_pack_section="$auto_section
+Graph source: detached worker snapshot. Bounded orientation is not exhaustive coverage or test-pass evidence; inspect missing paths directly and refresh graph queries after edits."
+    write_context_pack_section >> "$prompt_file"
+  else
+    printf '\nGraph orientation unavailable or unmatched; inspect source paths, callers and tests directly.\n' >> "$prompt_file"
+    echo 'graph-context: unavailable or unmatched; using direct repository discovery' >&2
+  fi
+  # Graph metadata is untrusted too. Never call a worker on an unchecked layer.
+  ma_validate_outbound_prompt "$prompt_file" ||
+    fail "automatic graph context failed outbound validation; no worker ran"
+fi
 
 context_compile_block() {
   rm -f "$context_manifest_file" "$context_bundle_file"
@@ -1718,6 +1846,22 @@ worker_execution_boundary_check() {
 if [ -n "$worker_guard_dir" ]; then
   OMS_WRITE_POST_ATTEMPT_GUARD_FN=worker_execution_boundary_check
 fi
+conversation_boundary_check() {
+  local changed surface
+  worker_worktree_require_identity "conversation boundary" || return 2
+  worker_execution_boundary_check || return 2
+  changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
+    "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
+  for surface in $(printf '%s' "$changed" | tr ',' ' '); do
+    case "$surface" in
+      files|tracked|remote-refs) [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2 ;;
+      *) echo "error: conversation changed owner surface: $surface" >&2; return 2 ;;
+    esac
+  done
+}
+if [ "$INTERACTIVE" = 1 ]; then
+  OMS_WRITE_POST_ATTEMPT_GUARD_FN=conversation_boundary_check
+fi
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
   echo "dry-run: $TO -> $artifact"
@@ -1783,6 +1927,9 @@ if [ -n "$VERIFY_CMD" ]; then
     printf 'DRY RUN: verify skipped.\n' >> "$artifact"
   elif [ "$worker_boundary_failed" = 1 ]; then
     printf 'SKIPPED: worker changed Git execution config/index state.\n' >> "$artifact"
+    verify_status=125
+  elif [ "$INTERACTIVE" = 1 ] && [ "$worker_status" -ne 0 ]; then
+    printf 'SKIPPED: conversation did not finish successfully.\n' >> "$artifact"
     verify_status=125
   else
     run_verify
@@ -2162,6 +2309,14 @@ if [ "$KEEP_WORKTREE" = 1 ]; then
 fi
 
 if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+  if [ "$INTERACTIVE" = 1 ]; then
+    python3 - "$artifact" "$patch_file" "$worker_status" "$verify_status" <<'PY' >&3
+import json, sys
+print(json.dumps({"event": "failed", "artifact": sys.argv[1], "patch": sys.argv[2],
+                  "worker_exit": int(sys.argv[3]), "verify_exit": int(sys.argv[4]),
+                  "applied": False}))
+PY
+  fi
   delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
   [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" --reason "worker or verify failed" >/dev/null || true
   [ -z "$EXECUTOR_ID" ] || executor_finalized=1
@@ -2181,4 +2336,12 @@ fi
 if [ "$APPLY" = 1 ] && [ "$DRY_RUN" != "1" ] && [ "$applied" = 0 ]; then
   echo "error: worker succeeded but requested landing did not complete" >&2
   exit 1
+fi
+if [ "$INTERACTIVE" = 1 ]; then
+  python3 - "$artifact" "$patch_file" "$verify_status" "$VERIFY_CMD" <<'PY' >&3
+import json, sys
+print(json.dumps({"event": "finished", "artifact": sys.argv[1], "patch": sys.argv[2],
+                  "verification": "passed" if sys.argv[4] and sys.argv[3] == "0" else "not_run",
+                  "applied": False}))
+PY
 fi

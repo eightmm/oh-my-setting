@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# UserPromptSubmit hook: deterministic skill routing. Skills often
-# go un-invoked because nothing at prompt time reminds the model they exist;
-# this matches the prompt against the trigger phrases in skills.manifest.json
-# and prints a one-line hint (stdout becomes injected context). Precision over
-# recall: at most OMS_ROUTER_MAX suggestions per prompt, each skill suggested
-# at most once per turn, silence on no match, and system-ish prompts
-# (tool notifications, slash commands) are skipped entirely. Fail-open: this
-# hook must never block a prompt.
+# UserPromptSubmit hook: journal and live state-aware hints. Native skill
+# matching owns ordinary routing; OMS_SKILL_HINTS=1 enables bounded keyword
+# suggestions from skills.manifest.json. Fail-open: never block a prompt.
 #
 # Automatic task recording is opt-in with OMS_AUTO_TASK=1. Disable the router
 # entirely with OMS_SKILL_ROUTER_OFF=1. Claude Code installs this directly;
@@ -129,7 +124,6 @@ fi
 
 MANIFEST="${OMS_SKILL_MANIFEST:-$ROOT/skills.manifest.json}"
 HELPER="$ROOT/scripts/lib/hook_state.py"
-[ -f "$MANIFEST" ] || exit 0
 [ -f "$HELPER" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 

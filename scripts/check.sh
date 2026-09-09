@@ -721,7 +721,6 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage model-doctor bash tests/model-doctor-smoke.sh
   stage tsp-queue bash tests/tsp-queue-smoke.sh
   stage interoperability bash tests/interoperability-smoke.sh
-  stage herdr-adapter bash tests/herdr-adapter-smoke.sh
   stage tool-lock bash tests/tool-lock-smoke.sh
   stage artifact-supersession bash tests/artifact-supersession-smoke.sh
   stage debate-delta bash tests/debate-delta-smoke.sh

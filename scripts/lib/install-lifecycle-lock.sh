@@ -262,6 +262,56 @@ oms_install_lifecycle_lock_adopt() {
   OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START="$recorded_pid_start"
 }
 
+# A lifecycle owner sometimes has to run mutation code from the checkout it
+# just selected. That code is a foreground child, so it cannot adopt ownership
+# (its PID is different), but it may execute while the live parent continues to
+# hold the lock. The parent PID, owner token, canonical path, and process-start
+# token authenticate that one-generation borrow. Borrowers never gain release
+# authority, and their children cannot borrow recursively.
+oms_install_lifecycle_lock_borrow_from_parent() {
+  local path="$1"
+  local recorded_owner
+  local recorded_pid
+  local recorded_pid_start
+  local actual_pid_start
+
+  [ "${OMS_INSTALL_LIFECYCLE_LOCK_HELD:-0}" = 1 ] || return 1
+  [ "${OMS_INSTALL_LIFECYCLE_LOCK_PATH:-}" = "$path" ] || return 1
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  recorded_owner="$(oms_install_lifecycle_lock_read "$path/owner")"
+  recorded_pid="$(oms_install_lifecycle_lock_read "$path/pid")"
+  recorded_pid_start="$(oms_install_lifecycle_lock_read "$path/pid-start")"
+  [ -n "${OMS_INSTALL_LIFECYCLE_LOCK_OWNER:-}" ] || return 1
+  [ "$recorded_owner" = "$OMS_INSTALL_LIFECYCLE_LOCK_OWNER" ] || return 1
+  case "${PPID:-}" in *[!0-9]*|"") return 1 ;; esac
+  [ "$recorded_pid" = "$PPID" ] || return 1
+  kill -0 "$recorded_pid" 2>/dev/null || return 1
+  if [ -n "$recorded_pid_start" ]; then
+    actual_pid_start="$(oms_install_lifecycle_lock_process_start "$recorded_pid")"
+    actual_pid_start="${actual_pid_start//$'\r'/}"
+    [ -n "$actual_pid_start" ] || return 1
+    [ "$recorded_pid_start" = "$actual_pid_start" ] || return 1
+  fi
+
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL=0
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PATH=""
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_OWNER=""
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID=""
+  OMS_INSTALL_LIFECYCLE_LOCK_LOCAL_PID_START=""
+  OMS_INSTALL_LIFECYCLE_LOCK_BORROWED=1
+}
+
+oms_install_lifecycle_lock_acquire_or_borrow() {
+  local action="${1:-mutate the install}"
+  local path
+
+  path="$(oms_install_lifecycle_lock_path)" || return 75
+  if oms_install_lifecycle_lock_borrow_from_parent "$path"; then
+    return 0
+  fi
+  oms_install_lifecycle_lock_acquire "$action"
+}
+
 oms_install_lifecycle_lock_mkdir_acquire() {
   local path="$1"
   local timeout="$2"

@@ -6,11 +6,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 from oms_runtime.common import CoreError
-from oms_runtime.context_pack import MAX_PACK_BYTES, validate_context_pack
+from oms_runtime.context_pack import MAX_PACK_BYTES, automatic_context_pack, validate_context_pack
 
 MODULE = ROOT / "scripts" / "lib" / "oms_runtime" / "context_pack.py"
 
@@ -46,6 +47,47 @@ class ContextPackValidatorTest(unittest.TestCase):
     def write(self, value, *, text: str = "") -> Path:
         self.path.write_text(text or json.dumps(value), encoding="utf-8")
         return self.path
+
+    def test_automatic_pack_cold_warm_and_mixed_cache_generations(self) -> None:
+        from oms_graph.project import build
+
+        source = self.repo / 'lease.py'
+        source.write_text('def recover_lease(): return 1\n', encoding='utf-8')
+        parent = Path(self.tmp.name) / 'parent'
+        parent.mkdir()
+        cold = automatic_context_pack(self.repo, parent, Path(self.tmp.name) / 'cold', 'recover lease')
+        self.assertIn('lease.py', cold['files'])
+        self.assertFalse((parent / '.oms').exists())
+        build.build(self.repo)
+        original_graph = (self.repo / '.oms/project-graph/graph.json').read_bytes()
+        # Warm copies must not reparse or mutate the parent's cache.
+        with mock.patch.object(build, 'build', side_effect=AssertionError('unexpected rebuild')):
+            warm = automatic_context_pack(self.repo, self.repo, Path(self.tmp.name) / 'warm', 'recover lease')
+        self.assertEqual(warm['project_graph_revision'], cold['project_graph_revision'])
+        self.assertEqual((self.repo / '.oms/project-graph/graph.json').read_bytes(), original_graph)
+        mixed = json.loads(original_graph)
+        mixed['revision'] = 'f' * 64
+        mixed['nodes'] = []
+        (self.repo / '.oms/project-graph/graph.json').write_text(json.dumps(mixed), encoding='utf-8')
+        mixed_bytes = (self.repo / '.oms/project-graph/graph.json').read_bytes()
+        recovered = automatic_context_pack(self.repo, self.repo, Path(self.tmp.name) / 'mixed', 'recover lease')
+        self.assertIn('lease.py', recovered['files'])
+        self.assertEqual((self.repo / '.oms/project-graph/graph.json').read_bytes(), mixed_bytes)
+        blocked = Path(self.tmp.name) / 'child'
+        with mock.patch.dict(os.environ, {'OMS_HARNESS_CHILD': '1'}), self.assertRaises(CoreError):
+            automatic_context_pack(self.repo, self.repo, blocked, 'recover lease')
+        self.assertFalse(blocked.exists())
+        subprocess.run(['git', 'init', '-q'], cwd=self.repo, check=True)
+        marker = self.repo / '.oms/.gitignore'
+        marker.write_text('runtime/\n', encoding='utf-8')
+        with self.assertRaisesRegex(CoreError, 'Git-ignored'):
+            automatic_context_pack(self.repo, parent, build.state_dir(self.repo), 'recover lease')
+        self.assertEqual(marker.read_text(encoding='utf-8'), 'runtime/\n')
+        marker.write_text('*\n', encoding='utf-8')
+        subprocess.run(['git', 'add', '-f', '.oms/project-graph/graph.json'], cwd=self.repo, check=True)
+        with self.assertRaisesRegex(CoreError, 'tracked files'):
+            automatic_context_pack(self.repo, parent, build.state_dir(self.repo), 'recover lease')
+        self.assertEqual((self.repo / '.oms/project-graph/graph.json').read_bytes(), mixed_bytes)
 
     def refuses(self, value, needle: str, *, text: str = "") -> None:
         self.write(value, text=text)
@@ -128,19 +170,20 @@ class ContextPackValidatorTest(unittest.TestCase):
     def test_module_entrypoint_is_the_single_code_path_for_bash(self) -> None:
         path = self.write(_pack())
         ok = subprocess.run([sys.executable, str(MODULE), "--repo", str(self.repo), str(path)],
-                            capture_output=True, text=True)
+                            cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertEqual(json.loads(ok.stdout)["file_count"], 2)
 
         self.write(_pack(files=["/etc/passwd"]))
         bad = subprocess.run([sys.executable, str(MODULE), "--repo", str(self.repo), str(path)],
-                             capture_output=True, text=True)
+                             cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(bad.returncode, 2)
         self.assertEqual(bad.stdout, "")
         self.assertTrue(bad.stderr.strip())
         self.assertNotIn("Traceback", bad.stderr)
 
-        usage = subprocess.run([sys.executable, str(MODULE), str(path)], capture_output=True, text=True)
+        usage = subprocess.run([sys.executable, str(MODULE), str(path)], cwd=self.repo,
+                               capture_output=True, text=True)
         self.assertEqual(usage.returncode, 2)
         self.assertIn("usage:", usage.stderr)
 

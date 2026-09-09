@@ -7,7 +7,7 @@ Copilot CLI, Factory Droid, Aider, and marker-prefixed custom adapters are
 detected as optional transports. It gives them shared rules, skills, state,
 peer calls, isolated write delegation, and one verification boundary for
 OMS-managed delegated patches.
-The primary subsystem catalog is `oms list --frontdoor`; compatibility
+The default subsystem catalog is `oms list` (also `--frontdoor`); core
 primitives and intent variants remain in `oms list --all`. Use
 `oms <tool> --help` for flags and the
 [command-routing reference](../custom-skills/oms-agent-harness/references/command-routing.md)
@@ -36,7 +36,7 @@ compatible; these groups do not grant combined authority.
 
 ### Default-work audit (2026-09-05)
 
-The catalog review covers 74 public commands, seven managed skills and five
+The revised catalog has 13 front doors, 70 core commands, seven managed skills and five
 roles. It is a surface/caller audit, not exhaustive verification of every
 implementation. Remove redundant automatic work before removing interfaces
 that saved workflows still use.
@@ -50,6 +50,10 @@ that saved workflows still use.
 | Daily and task-close skill-creation recommendations | Removed: resolved failures and frequent tool use alone do not justify another skill. Explicit forge and existing skill verification reminders remain. |
 | Tool-family telemetry | Opt-in with `OMS_USAGE_TRACK=1`; historical usage remains readable and GC-managed. No daily scan of usage/skill bodies to recommend new skills. |
 | Skill selection and onboarding | ASCII trigger boundaries prevent `oom` matching `room`; generic continuation/model questions no longer force the harness. Keep specific collaboration/graph/autopilot triggers. Store ordinary build/test facts in the existing contract. |
+| Generic keyword skill hints | Off by default; native skill discovery remains. `OMS_SKILL_HINTS=1` restores keyword hints without changing live collaboration or journal delivery. |
+| Stop answer/budget guards | No implicit format block or session cap. Positive `OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN`, `OMS_SESSION_BUDGET_TURNS`, or `OMS_SESSION_BUDGET_HOURS` enables the requested guard. Journal finalization remains. |
+| External adapters | Removed Herdr pane control and the standalone A2A HTTP bridge/card. Native peer calls, live threads, and CLI/MCP state reads remain; external clients of the removed adapters must migrate. No extras dispatcher remains. |
+| Standalone semantic evaluation | Retired executable engine; use current-HEAD `patch-admit` checks and `peer-review` with the minimal-change rubric. Historical reports remain readable. |
 
 The seven skills retain distinct installation, coordination, specification,
 diagnosis, security, Slurm and local-GPU responsibilities. Combining them would
@@ -70,8 +74,8 @@ user request
        -> write: peer-delegate -> isolated worktree -> patch
                                       -> patch-admit -> patch-land
        -> orchestrate: agent-supervisor -> agent-events -> approval-inbox
-       -> operate: execution-profile / herdr-adapter / open-in
-       -> observe: ops-cockpit / otel-export / semantic-eval
+       -> operate: execution-profile / open-in
+       -> observe: ops-cockpit / otel-export
   -> local state in .oms/
        -> inbox / state / handoff / MCP / Work Journal
 ```
@@ -87,12 +91,20 @@ tools required by the selected profile; optional capabilities add the council,
 GitHub, Notion, research, HPC, container, or remote surfaces. Setup fails rather
 than silently recording a selected profile with missing required CLIs. Required
 provider dependencies are part of that plan: Codex and Claude include Node,
-while Antigravity does not. Versions, URLs, and integrity values live in
-`tools.lock.json`; direct platform payloads and npm wrapper/native packages are
+while Antigravity does not. Bootstrap versions, URLs, and integrity values live in
+`tools.lock.json`. Providers resolve official stable releases during installation
+and updates; a private `provider-tools.lock.json` records the resolved checksum
+snapshot used by the installer and doctor, not a permanent version pin.
+Explicit `OH_MY_SETTING_TOOL_LOCK` keeps reproducible pinned operation.
+Recognized standalone Codex uses its native updater and keeps its launcher;
+OMS checks the resulting version, not a provider-owned payload digest.
+Direct platform payloads and npm wrapper/native packages are
 verified before use and npm installation runs offline with a fresh cache.
 Install, update, repair, and uninstall share one user-wide lifecycle lock. Lock
-ownership survives installer `exec` handoff but cannot be inherited or
-released by a child shell.
+ownership survives installer `exec` handoff. A checkout-selected foreground
+child may borrow the live parent's critical section only after matching its
+owner, PID, start token, and canonical path; ownership and release authority
+remain parent-only, and the borrow cannot pass to another child.
 An already-installed external CLI at the exact version is reused as
 version-only evidence; doctor distinguishes it from a digest-owned install.
 Managed direct binaries and npm package/shim swaps carry recovery state, and
@@ -597,9 +609,9 @@ canonical next action; the evaluator takes no authority from `goal-drive` or
 | `land` | One detached job per landing: gate, `git push --no-verify`, `oms update` when the repo is the harness checkout, CI poll, receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and single stale failure-ledger rows retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`; a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
-| `execution-profile`, `herdr-adapter` | Compatibility preflight and optional pane/agent control. `execution-profile` preserves its public report while delegating backend readiness to the typed runtime engine. They are not a sandbox or landing authority. |
+| `execution-profile` | Compatibility preflight delegates backend readiness to the typed runtime engine; not a sandbox or landing authority. |
 | `open-in`, `ops-cockpit` | Probed VS Code/Stably Orca/Codex launch plans and a read-only, non-atomic operational summary. Its `observations` block projects the pending observation decisions — turn-guard intervention pairing, fail-ledger hook-row retirement, usage-family exposure — with no thresholds or tuning. |
-| `otel-export`, `semantic-eval` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; opt-in `--gen-ai` standard semantic attributes; advisory patch evaluation from trusted host checks plus a self-reported judge result. |
+| `otel-export` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; opt-in `--gen-ai` standard semantic attributes. |
 | `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |
 
 Commands that retain different authority may still share one decision engine.
@@ -625,9 +637,8 @@ before launch. The private approval store is outside worker-writable `.oms/`
 and uses `0700`/`0600`, but another process running as the same OS user can read
 it; this is a write-integrity boundary, not account isolation.
 
-Herdr, VS Code, and Orca are optional interfaces. Their session states are
-observations, not OMS verification results: in particular, Herdr `done` means
-background work returned to idle, not that tests passed. Direct commit, merge,
+VS Code and Orca are optional interfaces. Their session states are
+observations, not OMS verification results. Direct commit, merge,
 push, or PR actions in an external frontend bypass OMS admission and landing.
 OMS is the authority only for flows started and completed through its managed
 commands; keep one flow under one authority.
@@ -658,10 +669,10 @@ orphan marker cannot consume unrelated user cron entries. That malformed
 verdict takes precedence over another installed trigger and is identical in
 dry-run and apply mode.
 
-`semantic-eval` calls no model. A spec command needs `--allow-host-checks`; its
-temporary worktree is not a host sandbox. A local judge file has self-reported
-provenance, so an evaluation requiring an independent judge remains
-`incomplete`. `otel-export` writes only to stdout or a local file and never
+`semantic-eval` is a migration-only shim: help explains the replacement, and
+old execution requests fail without running checks or rewriting stored reports.
+Use `patch-admit` at current HEAD and `peer-review`; this is not a replacement
+for historical-base evaluation. `otel-export` writes only to stdout or a local file and never
 sends network traffic. Writers accept a valid incoming `OMS_TRACEPARENT`, store
 only opaque trace/span IDs and flags, and derive child context without storing
 raw `traceparent`, `tracestate`, baggage, prompts, or tool arguments. Existing
@@ -696,6 +707,10 @@ chooses a connector or tracked summary.
   managed native status line when the user has not set one. On Python 3.9/3.10,
   arbitrary existing TOML requires `tomli` so
   the helper never rewrites an unvalidated config.
+  Install/update retires exact legacy OMS user-hook bridge entries only after
+  verifying an enabled native plugin, current cache and stable hook support.
+  It backs up the original bytes and preserves custom hooks; inconclusive
+  replacement evidence or malformed/linked config leaves the file untouched.
 - Antigravity: shared rules, skills, MCP, and provider calls. Hooks are enabled
   only after the installed binary passes a live surface probe; otherwise it is
   intentionally MCP-only. `--peer-permissions` grants `read_file(*)`,
@@ -748,11 +763,6 @@ chooses a connector or tracked summary.
   only read seats to one ephemeral, read-only, no-network, approval-never turn.
   The default remains `codex exec`; adapter failure never falls back to it and
   write delegation is refused.
-- A2A: `oms agent-card` prints a public A2A v1 card. `oms a2a-bridge` is an
-  explicit foreground HTTP+JSON bridge that accepts only loopback IP literals
-  and the synchronous `status`, `inbox`, and `capabilities` reads. It installs
-  no service, starts no model, advertises no mutation, and owns no A2A task
-  state.
 
 Integration removal failures propagate to `oms uninstall`; successful-looking
 messages are emitted only after the corresponding CLI confirms removal.

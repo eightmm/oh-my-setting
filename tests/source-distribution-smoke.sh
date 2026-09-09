@@ -227,7 +227,6 @@ expected = {
     "tool-lock": "tool-lock-smoke.sh",
     "provider-permissions-mcp-boundary": "provider-permissions-mcp-boundary-smoke.sh",
     "execution-profile": "execution-profile-smoke.sh",
-    "herdr-adapter": "herdr-adapter-smoke.sh",
     "operator-tools": "operator-tools-smoke.sh",
     "skill-lifecycle": "skill-lifecycle-smoke.sh",
     "interoperability": "interoperability-smoke.sh",

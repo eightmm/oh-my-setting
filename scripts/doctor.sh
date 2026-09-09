@@ -350,9 +350,48 @@ doctor_npm_shim_targets() {  # SHIM GLOBAL_BIN BINARY
   return 1
 }
 
+provider_lock_path() {
+  local snapshot="$HOME/.local/share/oh-my-setting/provider-tools.lock.json" cursor parent
+  if [ -n "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
+    printf '%s\n' "$OH_MY_SETTING_TOOL_LOCK"
+  elif [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
+    cursor="$snapshot"
+    while :; do
+      [ ! -L "$cursor" ] || { echo "error: redirected provider snapshot" >&2; return 1; }
+      parent="$(dirname "$cursor")"
+      [ "$parent" != "$cursor" ] || break
+      cursor="$parent"
+    done
+    printf '%s\n' "$snapshot"
+  else
+    printf '%s\n' "$INSTALL_ROOT/tools.lock.json"
+  fi
+}
+
 check_locked_npm_version() {  # NAME
   local name="$1" package binary expected installed resolved global_bin local_shim
   local global_root package_root helper platform alias native_package native_version
+  local OH_MY_SETTING_TOOL_LOCK="${OH_MY_SETTING_TOOL_LOCK:-}"
+  case "$name" in claude|codex) OH_MY_SETTING_TOOL_LOCK="$(provider_lock_path)" || return 1 ;; esac
+  if [ "$name" = codex ] && python3 - "$(command -v codex 2>/dev/null || true)" \
+      "${CODEX_HOME:-$HOME/.codex}/packages/standalone" <<'PY'
+import sys
+from pathlib import Path
+try:
+    parts = Path(sys.argv[1]).resolve(strict=True).relative_to(Path(sys.argv[2]).resolve(strict=True)).parts
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if len(parts) == 4 and parts[0] == "releases" and parts[2:] == ("bin", "codex") else 1)
+PY
+  then
+    expected="$(tool_lock_value npm.codex.version)" || return 1
+    if command_has_locked_version codex "$expected"; then
+      echo "ok: tool version codex $expected (standalone managed)"
+    else
+      report_tool_drift codex "standalone command differs from resolved stable version $expected"
+    fi
+    return 0
+  fi
   command -v npm >/dev/null 2>&1 || return 0
   package="$(tool_lock_value "npm.$name.package")" || return 1
   binary="$(tool_lock_value "npm.$name.binary")" || return 1
@@ -450,6 +489,8 @@ PY
 
 check_locked_direct_version() {  # LABEL COMMAND LOCK_FIELD
   local label="$1" command="$2" field="$3" expected resolved owner recorded actual
+  local OH_MY_SETTING_TOOL_LOCK="${OH_MY_SETTING_TOOL_LOCK:-}"
+  if [ "$command" = agy ]; then OH_MY_SETTING_TOOL_LOCK="$(provider_lock_path)" || return 1; fi
   command -v "$command" >/dev/null 2>&1 || return 0
   expected="$(tool_lock_value "$field")" || return 1
   if ! command_has_locked_version "$command" "$expected"; then

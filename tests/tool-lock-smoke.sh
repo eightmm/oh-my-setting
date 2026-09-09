@@ -12,6 +12,52 @@ HELPER="$ROOT/scripts/lib/tool-lock.py"
 [ -x "$HELPER" ] || fail "missing executable tool-lock helper"
 python3 "$HELPER" --lock "$LOCK" validate >/dev/null || fail "tool lock is invalid"
 
+# Native Codex owns its standalone launcher; updates must not replace it with npm.
+(
+  set --
+  . "$ROOT/scripts/install-tools.sh"
+  export CODEX_HOME="$TMP/codex-native"
+  native_bin="$CODEX_HOME/packages/standalone/releases/fixture/bin"
+  mkdir -p "$native_bin" "$TMP/native-path"
+  cat > "$native_bin/codex" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  --version) echo "codex-cli $(cat "$CODEX_HOME/version")" ;;
+  update) printf '%s\n' "$NATIVE_EXPECTED" > "$CODEX_HOME/version"; touch "$CODEX_HOME/updated" ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$native_bin/codex"
+  ln -s "$native_bin/codex" "$TMP/native-path/codex"
+  export PATH="$TMP/native-path:$PATH"
+  export NATIVE_EXPECTED
+  NATIVE_EXPECTED="$(tool_lock_get npm.codex.version)"
+  printf '0.0.1\n' > "$CODEX_HOME/version"
+  standalone_codex || fail "standalone Codex was not detected"
+  export OH_MY_SETTING_TOOL_LOCK="$LOCK"
+  if refresh_standalone_codex > /dev/null 2>&1; then fail "native updater ignored explicit pin"; fi
+  [ ! -e "$CODEX_HOME/updated" ] || fail "explicit pin triggered native update"
+  unset OH_MY_SETTING_TOOL_LOCK
+  refresh_standalone_codex >/dev/null || fail "native Codex refresh failed"
+  preflight_npm_shim codex || fail "native launcher rejected by npm preflight"
+  install_npm_global codex >/dev/null || fail "current native Codex was not retained"
+  write_npm_shim codex || fail "native launcher not preserved"
+  verify_resolved_npm_binary codex || fail "native version verification failed"
+  [ -L "$TMP/native-path/codex" ] || fail "native launcher was replaced"
+  eval "$(sed -n '/^check_locked_npm_version()/,/^}/p' "$ROOT/scripts/doctor.sh")"
+  provider_lock_path() { printf '%s\n' "$LOCK"; }
+  tool_lock_value() { tool_lock_get "$1"; }
+  command_has_locked_version() { command_has_version "$@"; }
+  report_tool_drift() { printf 'native-drift: %s\n' "$*"; }
+  check_locked_npm_version codex | grep -q '(standalone managed)' || fail "doctor did not recognize native Codex"
+  printf '0.0.1\n' > "$CODEX_HOME/version"
+  check_locked_npm_version codex | grep -q 'native-drift:' || fail "doctor accepted native version drift"
+  export NATIVE_EXPECTED=0.0.2
+  if refresh_standalone_codex >/dev/null 2>&1; then fail "native unexpected version passed"; fi
+  export CODEX_HOME="$TMP/foreign-codex"
+  if standalone_codex; then fail "foreign path was accepted as standalone"; fi
+)
+
 # Integrity verification binds the package bytes that npm will install, not
 # only registry metadata fetched in an earlier request.
 printf 'locked package bytes\n' > "$TMP/package.tgz"
@@ -593,5 +639,60 @@ shim_body="$(sed -n '/^write_npm_shim()/,/^}/p' "$ROOT/scripts/install-tools.sh"
 if printf '%s\n' "$shim_body" | grep -Fq 'nvm.sh'; then
   fail "provider shims source mutable nvm code without revalidating it"
 fi
+
+# Timer PATH discovery is read-only and does not source shell/nvm startup.
+(
+  export HOME="$TMP/timer-home"
+  export NVM_DIR="$HOME/.nvm"
+  set --
+  . "$ROOT/scripts/install-tools.sh"
+  node_dir="$NVM_DIR/versions/node/v$NODE_VERSION/bin"
+  mkdir -p "$node_dir" "$HOME/.local/bin"
+  for binary in node npm; do
+    printf '#!/bin/sh\nexit 0\n' > "$node_dir/$binary"
+    chmod +x "$node_dir/$binary"
+  done
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/codex"
+  chmod +x "$HOME/.local/bin/codex"
+  PATH=/usr/bin:/bin
+  activate_provider_paths
+  [ "$(command -v codex)" = "$HOME/.local/bin/codex" ] || fail "timer missed local provider"
+  [ "$(command -v npm)" = "$node_dir/npm" ] || fail "timer missed installed npm"
+  [ ! -e "$HOME/.profile" ] || fail "provider discovery edited shell configuration"
+)
+
+# Resolution is scoped to selected providers and never rewrites the repo lock.
+(
+  export HOME="$TMP/provider-home"
+  mkdir -p "$HOME"
+  set --
+  . "$ROOT/scripts/install-tools.sh"
+  python3() {
+    if [ "$1" = "$ROOT/scripts/lib/provider-latest.py" ]; then
+      printf '%s\n' "$@" > "$TMP/provider-args"
+      local output=""
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = --output ]; then output="$2"; break; fi
+        shift
+      done
+      mkdir -p "$(dirname "$output")"
+      cp "$LOCK" "$output"
+    else
+      command python3 "$@"
+    fi
+  }
+  prepare_provider_versions node codex
+  [ "$TOOL_LOCK" = "$HOME/.local/share/oh-my-setting/provider-tools.lock.json" ] ||
+    fail "installer did not select resolved provider snapshot"
+  grep -Fxq codex "$TMP/provider-args" || fail "selected provider was not resolved"
+  if grep -Exq 'node|claude|agy' "$TMP/provider-args"; then fail "unselected provider was resolved"; fi
+  python3() { return 23; }
+  if prepare_provider_versions codex; then fail "release lookup failure was ignored"; fi
+  OH_MY_SETTING_TOOL_LOCK="$LOCK" prepare_provider_versions codex ||
+    fail "explicit lock should bypass release lookup"
+)
+
+python3 -m unittest discover -s "$ROOT/tests" -p test_provider_latest.py ||
+  fail "provider release resolver regression"
 
 echo "tool-lock-smoke: ok"

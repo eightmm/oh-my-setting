@@ -14,7 +14,8 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 # inherited session would route these fixtures at the wrong repo or switch the
 # guard off before the first assertion runs.
 unset OMS_HOOK_PAYLOAD OMS_STATE_REPO OMS_TURN_GUARD_OFF OMS_TURN_GUARD_STRICT \
-  OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN OMS_AGENT
+  OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN OMS_AGENT OMS_SESSION_BUDGET_TURNS \
+  OMS_SESSION_BUDGET_HOURS OMS_SKILL_HINTS OMS_AUTO_TASK
 export OMS_HARNESS_CHILD=0 OMS_CI_TICK=0 OMS_STATE_HINTS=0
 export OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1
 export HOME="$TMP/home"
@@ -248,6 +249,105 @@ test_routine_prompt_disarms_prior_high_risk_route() {
     fail "a routine prompt must disarm the prior high-risk route: $out"
 }
 
+test_default_hooks_skip_guard_state_and_keep_journal() (
+  local project="$TMP/default/project"
+  local fake="$TMP/default/root"
+  local out
+  unset OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN
+  export OMS_WORK_JOURNAL=0
+  make_dirty_repo "$project"
+
+  out="$(printf '{"prompt":"Use the project graph and push","session_id":"s-default","cwd":"%s"}' \
+    "$project" | bash "$ROOT/scripts/skill-router.sh")"
+  [ -z "$out" ] || fail "default routing must not inject keyword hints: $out"
+  [ ! -d "$project/.oms" ] || fail "disabled guards must not create route state"
+  out="$(run_stop "$ROOT/scripts/turn-guard.sh" "$project" s-default)"
+  [ -z "$out" ] || fail "disabled guards must stay silent: $out"
+  [ ! -d "$project/.oms" ] || fail "disabled guards must not create Stop state"
+
+  # The shell must not even launch the guard helper in the default path, yet
+  # keep both journal callbacks and resolve the payload's repository.
+  broken_helper_root "$fake"
+  printf 'import sys\nassert sys.argv[1] == "repo", sys.argv\nprint(%s)\n' \
+    "\"$project\"" > "$fake/scripts/lib/hook_state.py"
+  cat > "$fake/scripts/lib/work-journal.sh" <<'SH'
+work_journal_enabled() { return 0; }
+work_journal_finish() { printf 'finish:%s\n' "$1"; }
+work_journal_defer_finish() { printf 'defer:%s\n' "$1"; }
+SH
+  out="$(run_stop "$fake/scripts/turn-guard.sh" "$project" s-default)"
+  [ "$out" = "$(printf 'finish:%s\ndefer:%s' "$project" "$project")" ] ||
+    fail "default Stop must bypass guard execution but retain journal finish: $out"
+
+  # Disabling guard routes must not hide a session after its SessionStart row
+  # expires. Presence stays content-free, adopted-only, and minute-bounded.
+  python3 - "$ROOT/scripts/lib" "$project" <<'PY' || fail "default live presence contract"
+import importlib, json, pathlib, sys
+from datetime import datetime, timedelta, timezone
+sys.path.insert(0, sys.argv[1])
+hooks = importlib.import_module("hook_state")
+repo = pathlib.Path(sys.argv[2])
+hooks.hook_repo = lambda payload: repo
+payload = {"session_id": "s-default", "hook_event_name": "UserPromptSubmit"}
+assert hooks.peer_advisory_hint(payload) is None
+assert not (repo / ".oms").exists(), "presence must not adopt a repository"
+hooks.ensure_oms(repo)
+events = repo / ".oms/hooks/events.jsonl"
+old = datetime.now(timezone.utc) - timedelta(seconds=hooks.PEER_WINDOW_SEC + 1)
+events.write_text(json.dumps({"session": hooks.session_hash(payload),
+    "hook": "SessionStart", "ts": old.isoformat()}) + "\n")
+assert hooks.peer_advisory_hint(payload) is None
+assert hooks.peer_advisory_hint(payload) is None
+rows = [json.loads(line) for line in events.read_text().splitlines()]
+presence = [row for row in rows if row.get("action") == "presence"]
+assert len(presence) == 1, rows
+assert not any("prompt" in key for key in presence[0]), presence
+other = {"session_id": "s-neighbor", "hook_event_name": "UserPromptSubmit"}
+assert "another session is live" in hooks.peer_advisory_hint(other)
+assert hooks.peer_advisory_hint(other) is None, "peer latch must still dedupe"
+assert not hooks.session_state_path(repo / ".oms/hooks", payload).exists()
+PY
+)
+
+test_session_budget_survives_prompt_rewrites() {
+  python3 - "$ROOT/scripts/lib" "$TMP/budget-state" <<'PY' || fail "session budget rewrite contract"
+import importlib, os, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+hooks = importlib.import_module("hook_state")
+repo = pathlib.Path(sys.argv[2])
+repo.mkdir()
+hooks.hook_repo = lambda payload: repo
+hooks.start_handoff_capture = lambda *args, **kwargs: False
+hooks.git_dirty = lambda repo: (_ for _ in ()).throw(AssertionError("budget-only guard must not inspect Git"))
+os.environ["OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN"] = "0"
+os.environ["OMS_SESSION_BUDGET_TURNS"] = "2"
+payload = {"session_id": "budget-state", "turn_id": "t1"}
+route = {"workflow": "read", "risk": "low", "guard": False}
+hooks.route_state(payload, "explain this helper", route)
+path = hooks.session_state_path(repo / ".oms/hooks", payload)
+state = hooks.load_state(path)
+assert hooks.session_budget_reason(repo, payload, state, path) is None
+started = state["started_at"]
+payload["turn_id"] = "t2"
+hooks.route_state(payload, "explain the next helper", route)
+state = hooks.load_state(path)
+assert state["budget_turns"] == 1 and state["started_at"] == started, state
+assert "2 turns" in hooks.session_budget_reason(repo, payload, state, path)
+payload["turn_id"] = "t3"
+hooks.route_state(payload, "one more question", route)
+state = hooks.load_state(path)
+assert state["budget_turns"] == 2 and state["budget_band"] == 4, state
+hooks.load_payload = lambda: ({**payload, "stop_hook_active": True}, "")
+assert hooks.cmd_guard(None) == 0
+before = path.read_bytes()
+os.environ["OMS_SESSION_BUDGET_TURNS"] = "0"
+assert hooks.session_budget_reason(repo, payload, state, path) is None
+assert hooks.cmd_guard(None) == 0
+hooks.route_state(payload, "disabled now", route)
+assert path.read_bytes() == before, "disabled budget must not rewrite state"
+PY
+}
+
 test_guard_rows_carry_observation_identity() {
   local project="$TMP/obs/project"
   local out
@@ -296,5 +396,7 @@ test_unparseable_verdict_reports_an_unguarded_turn
 test_crashing_guard_command_reports_an_unguarded_turn
 test_allowed_turn_stays_silent
 test_routine_prompt_disarms_prior_high_risk_route
+test_default_hooks_skip_guard_state_and_keep_journal
+test_session_budget_survives_prompt_rewrites
 
 echo "turn-guard-fuse-smoke: ok"

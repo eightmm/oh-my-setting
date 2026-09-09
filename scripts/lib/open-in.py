@@ -204,7 +204,7 @@ def orca_plan(repo: Path, raw_file: Optional[str]) -> Dict[str, Any]:
     if binary is None:
         fail("Stably Orca was not found or failed its status --json identity probe")
     _, relative = resolve_file(repo, raw_file)
-    # Herdr/Orca's file subcommand has no documented `--` separator. Prefix a
+    # Orca's file subcommand has no documented `--` separator. Prefix a
     # repository-relative path so a filename such as `--worktree` cannot be
     # reinterpreted as another option.
     relative_arg = "./" + relative

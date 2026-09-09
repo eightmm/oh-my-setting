@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Focused regressions for the read-only operator cockpit, content-free OTLP
-# JSONL export, explicit editor launch adapters, and deterministic semantic
-# evaluation. Every fixture lives below TMP; no real provider or GUI is called.
+# JSONL export, explicit editor launch adapters, and retired semantic-eval
+# migration. Every fixture lives below TMP; no real provider or GUI is called.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-operator-tools.XXXXXX")"
@@ -27,8 +27,8 @@ git -C "$repo" add value.txt
 git -C "$repo" commit -qm init
 base_sha="$(git -C "$repo" rev-parse HEAD)"
 
-# One real patch subject. Restore the fixture immediately so every assertion
-# can prove semantic evaluation never mutates the primary checkout.
+# One real patch subject for the artifact readers. Restore the fixture
+# immediately so read-only tools must leave the primary checkout unchanged.
 printf 'new\n' > "$repo/value.txt"
 git -C "$repo" diff --binary -- value.txt > "$repo/.oms/artifacts/change.patch"
 git -C "$repo" checkout -- value.txt
@@ -564,160 +564,59 @@ assert pathlib.Path(row["command"][0]).name == "orca-ide", row
 PY
 [ ! -e "$TMP/gui.log" ] || fail "--dry-run launched a GUI command"
 
-# --- Deterministic semantic evaluation ------------------------------------
+# --- Retired semantic evaluation migration ---------------------------------
 
-python3 - "$TMP/spec.json" "$TMP/judge.json" "$TMP/fail-spec.json" \
-  "$TMP/same-judge.json" "$TMP/independent-spec.json" \
-  "$TMP/background.pid" "$TMP/background-marker" <<'PY'
+# Help and refusal must work without Python, Git, a provider, or any other
+# external executable. In particular, even --force cannot overwrite history.
+python3 - "$repo" "$TMP/spec.json" "$TMP/host-check-ran" <<'PY'
 import json
+import pathlib
 import sys
 
-spec = {
-    "schema": 1,
-    "id": "patch-quality",
-    "checks": [
-        {
-            "id": "content",
-            "argv": ["grep", "-qx", "new", "value.txt"],
-            "required": True,
-            "timeout_s": 10,
-        },
-        {
-            "id": "descendant-cleanup",
-            "argv": [
-                "bash",
-                "-c",
-                "(trap '' TERM; printf '%s\\n' \"$BASHPID\" > \"$1\"; sleep 5; printf leaked > \"$2\") & while [ ! -s \"$1\" ]; do :; done",
-                "_",
-                sys.argv[6],
-                sys.argv[7],
-            ],
-            "required": True,
-            "timeout_s": 10,
-        },
-        {
-            "id": "output-cap",
-            "argv": [sys.executable, "-c", "import sys; sys.stdout.write('x' * 2097152)"],
-            "required": False,
-            "timeout_s": 10,
-        },
-    ],
-    "rubric": [{"id": "correctness", "weight": 1.0}],
-    "threshold": 0.8,
-    "require_independent_judge": False,
-}
-judge = {
-    "schema": 1,
-    "provider": "claude",
-    "model": "fixture",
-    "verdict": "pass",
-    "scores": {"correctness": 0.9},
-}
-fail_spec = dict(spec)
-fail_spec["id"] = "patch-quality-fail"
-fail_spec["checks"] = [
-    {
-        "id": "content",
-        "argv": ["grep", "-qx", "missing", "value.txt"],
-        "required": True,
-        "timeout_s": 10,
-    }
-]
-same = dict(judge)
-same["provider"] = "codex"
-independent = dict(spec)
-independent["id"] = "patch-quality-independent"
-independent["require_independent_judge"] = True
-for path, value in zip(sys.argv[1:6], (spec, judge, fail_spec, same, independent)):
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(value, handle, sort_keys=True)
-        handle.write("\n")
+repo = pathlib.Path(sys.argv[1])
+report = {"schema": 1, "action": "semantic-eval", "semantic_outcome": "pass",
+          "subject": {"base_sha": "historical-base", "event_id": "evt_subject"}}
+(repo / ".oms/artifacts/historical-eval.json").write_text(
+    json.dumps(report) + "\n", encoding="utf-8")
+spec = {"schema": 1, "id": "retired",
+        "checks": [{"id": "must-not-run",
+                    "argv": ["touch", sys.argv[3]]}]}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(spec), encoding="utf-8")
 PY
+cp "$repo/.oms/artifacts/historical-eval.json" "$TMP/historical-before.json"
+cp "$repo/.oms/artifacts/index.jsonl" "$TMP/index-before.jsonl"
+before_status="$(git -C "$repo" status --porcelain)"
+before_worktrees="$(git -C "$repo" worktree list --porcelain)"
+bash_bin="$(command -v bash)"
+PATH="$TMP/no-programs" "$bash_bin" "$ROOT/scripts/semantic-eval.sh" --help > "$TMP/eval-help.txt"
+grep -Fq 'patch-admit' "$TMP/eval-help.txt" || fail "migration help omitted deterministic route"
+grep -Fq 'peer-review --gate --prompt' "$TMP/eval-help.txt" || fail "migration help omitted rubric route"
+grep -Fq 'historical-base' "$TMP/eval-help.txt" || fail "migration help omitted historical boundary"
 
-if bash "$ROOT/scripts/semantic-eval.sh" --repo "$repo" --spec "$TMP/spec.json" \
-    --subject-event evt_subject --judge-result "$TMP/judge.json" \
-    >/dev/null 2>"$TMP/host-check-denied.err"; then
-  fail "semantic eval ran repository-provided host commands without explicit consent"
-fi
-grep -Fq -- '--allow-host-checks' "$TMP/host-check-denied.err" ||
-  fail "host-check refusal did not name the explicit trust switch"
-
-bash "$ROOT/scripts/semantic-eval.sh" --repo "$repo" --spec "$TMP/spec.json" \
-  --allow-host-checks \
-  --subject-event evt_subject --judge-result "$TMP/judge.json" > "$TMP/eval-pass.json"
-python3 - "$TMP/eval-pass.json" <<'PY' || fail "semantic pass result is wrong"
-import json
-import sys
-
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-assert row["semantic_outcome"] == "pass", row
-assert row["score"] == 0.9, row
-assert row["checks"][0]["exit"] == 0, row
-assert row["subject"]["event_id"] == "evt_subject", row
-assert "output" not in row["checks"][0], row
-output_check = next(item for item in row["checks"] if item["id"] == "output-cap")
-assert output_check["output_limited"] is True, output_check
-assert output_check["exit"] != 0, output_check
-PY
-background_pid="$(cat "$TMP/background.pid")"
-if kill -0 "$background_pid" 2>/dev/null; then
-  # A whole-tree outer supervisor intentionally adopts the killed descendant
-  # and reaps it when the supervised check exits. kill -0 also succeeds for
-  # that non-running zombie, so distinguish it from the fixture's live sleep.
-  background_state="$(ps -o stat= -p "$background_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-  case "$background_state" in
-    Z*) ;;
-    *) fail "semantic eval left a background check descendant running" ;;
-  esac
-fi
-[ ! -e "$TMP/background-marker" ] || fail "background check escaped its evaluation lifetime"
-[ "$(cat "$repo/value.txt")" = old ] || fail "semantic eval changed the primary checkout"
-[ "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ] ||
-  fail "semantic eval leaked a temporary worktree"
-
-if bash "$ROOT/scripts/semantic-eval.sh" --repo "$repo" --spec "$TMP/fail-spec.json" \
-    --allow-host-checks \
-    --subject-event evt_subject --judge-result "$TMP/judge.json" > "$TMP/eval-fail.json"; then
-  fail "a required semantic check failure returned success"
-fi
-python3 - "$TMP/eval-fail.json" <<'PY' || fail "semantic fail result is wrong"
-import json
-import sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-assert row["semantic_outcome"] == "fail", row
-assert row["checks"][0]["exit"] != 0, row
-PY
-
-set +e
-bash "$ROOT/scripts/semantic-eval.sh" --repo "$repo" --spec "$TMP/independent-spec.json" \
-  --allow-host-checks \
-  --subject-event evt_subject --judge-result "$TMP/same-judge.json" > "$TMP/eval-incomplete.json"
-eval_rc=$?
-set -e
-[ "$eval_rc" -eq 3 ] || fail "self-reported independent judge should return incomplete (3), got $eval_rc"
-python3 - "$TMP/eval-incomplete.json" <<'PY' || fail "independent-judge rejection is wrong"
-import json
-import sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-assert row["semantic_outcome"] == "incomplete", row
-assert any("provenance" in reason for reason in row["reasons"]), row
-PY
-
-printf '{not-json\n' > "$TMP/bad-judge.json"
-set +e
-bash "$ROOT/scripts/semantic-eval.sh" --repo "$repo" --spec "$TMP/spec.json" \
-  --allow-host-checks \
-  --subject-event evt_subject --judge-result "$TMP/bad-judge.json" > "$TMP/eval-bad-judge.json"
-eval_rc=$?
-set -e
-[ "$eval_rc" -eq 3 ] || fail "malformed judge should return incomplete (3), got $eval_rc"
-python3 - "$TMP/eval-bad-judge.json" <<'PY' || fail "malformed judge result is wrong"
-import json
-import sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-assert row["semantic_outcome"] == "incomplete", row
-assert any("invalid JSON" in reason for reason in row["reasons"]), row
-PY
+for mode in bare legacy mixed-help; do
+  set --
+  if [ "$mode" != bare ]; then
+    set -- --repo "$repo" --spec "$TMP/spec.json" --subject-event evt_subject \
+      --allow-host-checks --output "$repo/.oms/artifacts/historical-eval.json" --force
+  fi
+  [ "$mode" != mixed-help ] || set -- "$@" --help
+  eval_rc=0
+  PATH="$TMP/no-programs" "$bash_bin" "$ROOT/scripts/semantic-eval.sh" "$@" \
+    > "$TMP/eval-out.txt" 2> "$TMP/eval-err.txt" || eval_rc=$?
+  [ "$eval_rc" -eq 2 ] || fail "retired $mode invocation returned $eval_rc, expected 2"
+  [ ! -s "$TMP/eval-out.txt" ] || fail "retired command emitted a result"
+  grep -Fq 'retired; no evaluation is performed' "$TMP/eval-err.txt" ||
+    fail "retired command did not explain refusal"
+done
+cmp "$TMP/historical-before.json" "$repo/.oms/artifacts/historical-eval.json" ||
+  fail "migration changed a historical report"
+cmp "$TMP/index-before.jsonl" "$repo/.oms/artifacts/index.jsonl" ||
+  fail "migration changed the artifact index"
+[ ! -e "$TMP/host-check-ran" ] || fail "migration executed a host check"
+[ "$(cat "$repo/value.txt")" = old ] || fail "migration changed the primary checkout"
+[ "$(git -C "$repo" status --porcelain)" = "$before_status" ] || fail "migration changed worktree status"
+[ "$(git -C "$repo" worktree list --porcelain)" = "$before_worktrees" ] ||
+  fail "migration changed registered worktrees"
 
 # --- Cockpit observations block --------------------------------------------
 

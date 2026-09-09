@@ -510,10 +510,18 @@ test_detached_schema2_auto_update_check() {
   cp "$ROOT/scripts/lib/managed-target.py" "$repo/scripts/lib/managed-target.py"
   cat > "$repo/scripts/update.sh" <<'EOF'
 #!/usr/bin/env bash
-commit="$(git rev-parse HEAD)"
+commit="$(git -C "$(dirname "$0")/.." rev-parse HEAD)"
 echo "current: ${commit:0:7}"
 echo "update-check: up_to_date $commit"
 EOF
+  cat > "$repo/scripts/install-tools.sh" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --providers ] || exit 2
+printf 'provider refresh\n' >> "$HOME/provider-refresh.log"
+exit "${OMS_TEST_PROVIDER_REFRESH_EXIT:-0}"
+EOF
+  chmod +x "$repo/scripts/install-tools.sh"
+  printf 'local/\n' > "$repo/.gitignore"
   chmod +x "$repo/scripts/auto-update.sh" "$repo/scripts/update.sh"
   git -C "$repo" init -q
   git -C "$repo" checkout -qb main
@@ -537,6 +545,16 @@ PY
   if grep -Fq 'detached HEAD; auto-update skipped' "$repo/local/auto-update.status"; then
     fail "detached schema-2 check was skipped"
   fi
+  [ ! -e "$home/provider-refresh.log" ] || fail "check mode refreshed providers"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    "$repo/scripts/auto-update.sh" apply >/dev/null
+  [ "$(wc -l < "$home/provider-refresh.log" | tr -d ' ')" = 1 ] ||
+    fail "unchanged OMS must still refresh providers exactly once"
+  if HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+    OMS_TEST_PROVIDER_REFRESH_EXIT=1 "$repo/scripts/auto-update.sh" apply >/dev/null; then
+    fail "provider refresh failure must not report success"
+  fi
+  grep -Fq 'status=failed' "$repo/local/auto-update.status" || fail "provider failure not recorded"
 }
 
 test_schema1_auto_update_reuses_update_transaction() {
@@ -607,8 +625,9 @@ PY
     fail "schema-1 auto-update did not apply through the canonical updater"
   [ "$(grep -c '^--check$' "$marker")" = 1 ] ||
     fail "schema-1 auto-update did not preflight exactly once"
-  grep -Fxq -- '--no-tools' "$marker" ||
-    fail "schema-1 auto-update did not call the canonical update transaction"
+  if grep -Fxq -- '--no-tools' "$marker"; then
+    fail "schema-1 auto-update must not suppress provider updates"
+  fi
   grep -Fq 'status=applied' "$state" ||
     fail "schema-1 auto-update did not record the canonical transaction outcome"
 }

@@ -12,7 +12,7 @@ from oms_runtime.context import plan_context
 from .blast import blast_radius, changed_paths
 from .build import coverage as graph_coverage, state_dir
 from . import analytics
-from .query import Graph
+from .query import Graph, _identifier_words
 
 
 def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None, entry_paths: Sequence[str] = ()) -> Dict[str, Any]:
@@ -26,7 +26,11 @@ def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, ma
         "add", "change", "fix", "make", "modify", "update", "use",
         "are", "was", "will", "please",
     }
-    tokens = [item for item in re.findall(r"[a-z0-9_]+", task.lower()) if len(item) >= 3 and item not in stopwords]
+    # Filter whole words before splitting identifiers: `update_cache` is a
+    # subject, not the generic verb `update`. Short non-ASCII words are useful.
+    tokens = [token for word in re.findall(r"\w+", task)
+              if (len(word) >= 3 or not word.isascii()) and word.casefold() not in stopwords
+              for token in _identifier_words(word)]
     if entry_paths:
         raw_entries = [{"id": ident, "score": 100} for path in entry_paths
                        for ident in ("file:" + path, "test:" + path) if ident in index.nodes]

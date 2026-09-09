@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Inspect or install only the locked tools required by selected OMS capability
-# profiles. The legacy install-tools.sh full council remains unchanged; this
-# script reuses its digest-verified transactional installer functions.
+# Inspect or install only the tools required by selected OMS capability
+# profiles, reusing the digest-verified transactional installers.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ACTION=apply
 PRIMARY_PROVIDER="${OH_MY_SETTING_PRIMARY_PROVIDER:-auto}"
@@ -19,7 +18,7 @@ usage() {
   cat <<'USAGE'
 Usage: install-profile.sh [--plan|--check|--apply] (--profile NAME... | --reapply) [options]
 
-Resolve the smallest locked OMS tool set needed by one or more capability
+Resolve the smallest OMS tool set needed by one or more capability
 profiles. Optional GitHub, Notion, council, research, HPC, container, and remote
 adapters no longer have to be installed with the core runtime.
 
@@ -36,7 +35,7 @@ Options:
   --profile NAME          core, council, github, notion, research, hpc,
                           container, remote, or full. Repeatable.
   --primary-provider NAME auto (default), codex, claude, or agy for core.
-  --upgrade               Refresh selected managed tools to tools.lock.json.
+  --upgrade               Refresh selected tools (stable providers, locked bootstrap).
   --allow-missing         Permit a degraded apply receipt when external or
                           optional capabilities remain unavailable.
   --receipt PATH          Private user-local receipt path.
@@ -139,6 +138,10 @@ if [ "$ACTION" = check ]; then
   exit $?
 fi
 [ "$ACTION" = apply ] || fail "invalid action: $ACTION"
+# shellcheck source=scripts/lib/install-lifecycle-lock.sh
+. "$ROOT/scripts/lib/install-lifecycle-lock.sh"
+trap oms_install_lifecycle_lock_release EXIT
+oms_install_lifecycle_lock_acquire_or_borrow "apply capability tools" || exit $?
 
 while IFS= read -r line; do
   [ -n "$line" ] && SELECTED_TOOLS+=("$line")
@@ -157,6 +160,7 @@ if [ "${#SELECTED_TOOLS[@]}" -gt 0 ]; then
   set --
   . "$ROOT/scripts/install-tools.sh"
   UPGRADE="$UPGRADE_FLAG"
+  prepare_provider_versions "${SELECTED_TOOLS[@]}"
 
   selected() {
     local wanted="$1" item

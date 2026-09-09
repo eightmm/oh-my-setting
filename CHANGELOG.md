@@ -6,7 +6,59 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Fixed
+
+- Foreground tool installers can borrow their live parent's lifecycle lock
+  without acquiring ownership or release authority, preventing nested update
+  deadlocks while retaining standalone serialization.
+- Preserve native standalone Codex updates and discover installed provider/Node
+  paths in unattended timers without sourcing shell startup files.
+
 ### Changed
+- Provider installation and automatic updates follow official stable Codex,
+  Claude Code, and agy releases with checksum verification. Already-installed
+  providers refresh even when OMS is unchanged; bootstrap tools stay pinned,
+  and explicit tool locks retain reproducible installs.
+- Context bundles include existing root and target-ancestor AGENTS.md files;
+  omitted, truncated, or rejected rules create context debt without crawling
+  unrelated documentation. Common rules clarify existing authorization and
+  allow concise completion reports without mandatory headings.
+- Reviewed task assignments carry provider-neutral model/workload routes through
+  claims, execution, recovery, and review; unassigned tasks retain run defaults.
+- Claude/Antigravity delegation supports bounded interactive follow-ups through
+  native session IDs, within one isolated worktree and one OMS attempt. Each
+  control turn is validated; explicit finish runs final verification. Protocol
+  failures never trigger model retries or automatic patch application.
+- Routine delegation selects the lowest seeded routable model through
+  `peer-delegate --workload routine`, with parent-side task selection and no
+  classifier call. Explicit pins and frozen executors stay authoritative;
+  model names containing spaces remain intact.
+- Automatic graph preparation uses the worker's default, Git-ignored graph
+  cache, so follow-up queries and optional source bundles reuse the same snapshot.
+- Delegates attach bounded graph orientation by default, using private snapshot
+  caches and existing pack validation; explicit packs win and preparation failure
+  falls back to direct inspection. No new hook or provider call is added. Fresh
+  partial graphs now supplement runtime context without suppressing discovery.
+- Project context treats an existing PROJECT.md as required, reports truncation
+  or omission as debt, and prioritizes pinned project facts over recent summaries.
+  Default context layers reject redirected paths without increasing byte budgets.
+- Graph context reuses Unicode identifier matching, including short Korean words.
+  PROJECT scaffolds and intent drafts record Decisions/rationale and explicit
+  references; worker guidance covers missing documents and private-doc briefs.
+- Default command discovery now shows 13 front doors; `list --all` retains 70
+  core commands. Herdr pane control and standalone A2A HTTP bridge/Agent Card
+  are removed together with their exclusive tests and extras dispatcher;
+  native peer collaboration and CLI/MCP state queries remain. The standalone `semantic-eval` engine is retired
+  in favor of current-HEAD admission checks and peer review; old reports remain.
+- Generic keyword skill hints and implicit session budgets are off by default.
+  Guard-disabled turns skip guard state and checks while journal finalization,
+  live threads, and bounded prompt presence remain. Requested council seats
+  and actual verification boundaries are unchanged.
+- Codex installation safely retires exact temporary OMS user-hook bridge
+  commands after verifying the enabled native replacement. Original bytes are
+  backed up; custom hooks and unverified configurations are preserved.
+- Timeout fallback fixtures resolve the actual Python interpreter before
+  clearing PATH, so managed-runtime Bash launchers do not cause false failures.
 - Stop-hook answer-format blocking is now opt-in with
   `OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1`; the default no longer regenerates
   answers merely for a missing verification label. Session budgets, journal

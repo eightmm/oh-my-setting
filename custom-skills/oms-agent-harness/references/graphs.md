@@ -94,11 +94,14 @@ oms graph exec status --run RUN_ID \
   --json --html-fragment /absolute/task-owned/oms-execution-run.html
 ```
 
-For a graph-guided coding request, the agent owns the loop:
+For nontrivial coding, use graph context without waiting for the user to request
+it. A trivial known-location edit needs no whole-project graph. Reuse a current
+supplied pack; do not repeat the same query or render a viewer for every edit.
+The agent owns the loop:
 
 1. Use `map` only for broad orientation; use `context` with the user's current
    task before inspecting or changing code.
-2. In Codex, choose a task-owned absolute fragment path, request JSON and HTML
+2. When a visual is requested or useful, choose a task-owned absolute fragment path, request JSON and HTML
    in the same call, read the JSON as evidence, and surface the returned
    `html_fragment` inline. Never ask the user to run the command or manage the path.
 3. Selecting a node fills and focuses an instruction draft. Review or edit the
@@ -107,6 +110,25 @@ For a graph-guided coding request, the agent owns the loop:
    impact, and related tests, then acts only within existing authority.
 4. Regenerate context after relevant edits. At a pause, gate, or handoff, use
    `exec status` the same way so the live route and its visual stay aligned.
+
+`peer-delegate` supplies automatic orientation when no explicit `--context-pack`
+was passed: up to 8 file pointers, related tests and bounded case names, not
+source bodies. It checks a private copy of a coherent parent cache against the
+detached snapshot, or builds privately; it never rewrites the parent's graph.
+The private cache lives at the worker's normal `.oms/project-graph` path, so
+subsequent queries and opt-in runtime bundles reuse it. Read the indicated code
+only when needed; use `--no-graph-context` for a delegated, known-location trivial
+edit. Do not infer "trivial" from brief length or suppress graph context by keywords.
+Tracked or unignored cache targets fall back rather than changing project ignore rules.
+Preparation has a 10-second wall-clock limit (plus one second for termination).
+Failure or no match adds a direct-search fallback to the brief. `--no-graph-context`,
+`OMS_GRAPH_AUTOBUILD=0`, and dry runs skip automatic preparation; explicit packs
+retain their validation and precedence. `--context-manifest` remains opt-in.
+
+Runtime context reuses fresh partial graphs as supplementary evidence while
+retaining Python discovery for incomplete or uncertain coverage. It never
+builds a graph itself. Unsupported languages still require direct source
+inspection; partial context must not narrow required verification.
 
 The Project view is capped at 200 nodes and 1 MiB, defaults to extracted edges,
 and provides search, task scope, change impact, node selection, keyboard

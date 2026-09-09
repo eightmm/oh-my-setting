@@ -29,8 +29,11 @@ that no independent signal was obtained.
 ```bash
 oms peer-review --repo . --prompt "Review this diff for blocking findings."
 oms peer-review --repo . --base origin/main --gate \
-  --verify "bash scripts/check.sh"
+  --verify "bash scripts/check-bash32.sh"
 ```
+
+Select the relevant project check for `--verify`; the example is OMS shell
+syntax coverage, not a full release gate. Leave the full gate to `oms land`.
 
 Ask for concrete bugs, regressions, unsafe behavior, and missing interface
 tests rather than style preferences. `--verify CMD` is the mechanical oracle:

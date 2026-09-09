@@ -73,6 +73,40 @@ OMS_TEST_LOCK_HELPER="$ROOT/scripts/lib/install-lifecycle-lock.sh" \
 [ ! -e "$OMS_INSTALL_LIFECYCLE_LOCK" ] ||
   fail "the exec adoption path leaked its lifecycle lock"
 
+# An old lock-owning updater can select a checkout whose tool installer now
+# takes the lifecycle lock. The new child must run under that still-live parent
+# without claiming release authority; no marker from the old caller is needed.
+cat > "$TMP/borrower.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$OMS_TEST_LOCK_HELPER"
+oms_install_lifecycle_lock_acquire_or_borrow "test foreground child borrow"
+[ "${OMS_INSTALL_LIFECYCLE_LOCK_BORROWED:-0}" = 1 ] || exit 1
+oms_install_lifecycle_lock_release
+[ -d "$OMS_INSTALL_LIFECYCLE_LOCK" ] || exit 1
+
+# The borrow is one generation only. A borrower's child still contends with the
+# original live owner and must not enter the mutation section.
+status=0
+bash -c '. "$OMS_TEST_LOCK_HELPER"; oms_install_lifecycle_lock_acquire_or_borrow "test recursive borrow"' \
+  > "$OMS_TEST_RECURSIVE_BORROW_LOG" 2>&1 || status=$?
+[ "$status" = 75 ]
+EOF
+oms_install_lifecycle_lock_acquire "test legacy parent" ||
+  fail "legacy parent could not acquire the lifecycle lock"
+borrow_owner="$(sed -n '1p' "$OMS_INSTALL_LIFECYCLE_LOCK/owner")"
+OMS_TEST_LOCK_HELPER="$ROOT/scripts/lib/install-lifecycle-lock.sh" \
+  OMS_TEST_RECURSIVE_BORROW_LOG="$TMP/recursive-borrow.log" \
+  bash "$TMP/borrower.sh" ||
+  fail "a foreground child could not borrow its parent's lifecycle lock"
+[ -d "$OMS_INSTALL_LIFECYCLE_LOCK" ] ||
+  fail "a foreground borrower released its parent's lifecycle lock"
+[ "$(sed -n '1p' "$OMS_INSTALL_LIFECYCLE_LOCK/owner")" = "$borrow_owner" ] ||
+  fail "a foreground borrower changed lifecycle lock ownership"
+oms_install_lifecycle_lock_release
+[ ! -e "$OMS_INSTALL_LIFECYCLE_LOCK" ] ||
+  fail "the parent could not release its lock after a foreground borrow"
+
 # Stock macOS Bash 3.2 has no BASHPID, so identity falls back to a child
 # probe. A probe measured through a substitution fork returns a different,
 # already-dead pid on every call: adopt and release then never match, the

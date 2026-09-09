@@ -208,6 +208,8 @@ if [ "$ACTION" = "create" ]; then
   lease_id=""
   if [ -n "$PLAN_TASK" ]; then
     plan_json="$($ROOT/scripts/agent-plan.sh --repo "$REPO" show --id "$PLAN_TASK")" || fail "unknown plan task: $PLAN_TASK"
+    printf '%s' "$plan_json" | python3 -c 'import json,sys; sys.exit(bool(json.load(sys.stdin).get("assignment", {})))' ||
+      fail "task assignment cannot override a frozen executor; use an unassigned task"
     values="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("id",""),d.get("lease_id",""),",".join(d.get("allowed_paths",[])),",".join(d.get("forbidden_paths",[])),d.get("verify",""),d.get("role",""),d.get("state",""),d.get("provider","")]))')"
     plan_id="$(printf '%s' "$values" | cut -f1)"; lease_id="$(printf '%s' "$values" | cut -f2)"
     plan_allowed="$(printf '%s' "$values" | cut -f3)"; plan_forbidden="$(printf '%s' "$values" | cut -f4)"

@@ -72,8 +72,8 @@ Check for or apply oh-my-setting updates.
 Modes:
   check   Fetch the configured upstream and record whether an update exists.
   apply   Apply only fast-forward updates; skips dirty/diverged checkouts.
-          Re-runs link.sh, but intentionally skips tool (re)installation;
-          use update.sh --tools when install-tools.sh should be covered too.
+          Refreshes installed provider CLIs to latest stable even when the
+          OMS commit is unchanged; bootstrap tools remain pinned.
   status  Print the last recorded auto-update state.
   attention
           One-line verdict over intent, wiring, and outcome: disabled,
@@ -411,6 +411,10 @@ receipt_transaction_update() {
     return 1
   fi
   if [ "$current" = "$remote" ]; then
+    if ! "$ROOT/scripts/install-tools.sh" --providers; then
+      write_state failed "provider update failed" "$current" "$remote" "$upstream"
+      return 1
+    fi
     write_state up_to_date "already up to date" "$current" "$remote" "$upstream"
     print_status
     return 0
@@ -441,7 +445,7 @@ receipt_transaction_update() {
 
   set +e
   output="$(OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$expected" \
-    "$ROOT/scripts/update.sh" --no-tools 2>&1)"
+    "$ROOT/scripts/update.sh" 2>&1)"
   status=$?
   set -e
   [ -z "$output" ] || printf '%s\n' "$output"
@@ -532,6 +536,13 @@ auto_update_apply_locked() {
   local state_message
 
   if ! fetch_and_compare "$remote" "$remote_ref" "$upstream" >/dev/null; then
+    if [ "$(state_value status)" = up_to_date ] &&
+       [ -z "$(git -C "$ROOT" status --porcelain)" ]; then
+      if ! "$ROOT/scripts/install-tools.sh" --providers; then
+        write_state failed "provider update failed" "$(git -C "$ROOT" rev-parse HEAD)" "" "$upstream"
+        return 1
+      fi
+    fi
     print_status
     return 0
   fi
@@ -608,6 +619,10 @@ auto_update_apply_locked() {
     set -e
   fi
 
+  if ! "$ROOT/scripts/install-tools.sh" --providers; then
+    write_state failed "provider update failed after apply" "$new_full" "$remote_full" "$upstream"
+    return 1
+  fi
   state_message="updated: $old_short -> $new_short"
   if [ "$doctor_status" -ne 0 ]; then
     write_state failed "doctor failed after apply at $new_short" "$new_full" "$remote_full" "$upstream"

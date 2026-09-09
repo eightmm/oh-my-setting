@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 REPO="$PWD"
 PROVIDER="codex"
+WORKER_PROVIDER="codex"
 APPLY_FILE=""
 VALIDATE_SPEC=""
 MAX_TASKS=6
@@ -43,6 +44,7 @@ for review — nothing touches the task board until --apply.
 
   --repo PATH     Repository with a PROJECT.md (default: current directory).
   --to PROVIDER   Peer for the decomposition call (default: codex).
+  --worker-provider P  Authorized default task transport (default: codex).
   --max-tasks N   Cap on proposed tasks (default 6, max 12).
   --id-prefix P   Require every generated task id to start with P. Bounded
                   autopilot replans use r1- so a second tranche is observable.
@@ -80,6 +82,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --to) [ "$#" -ge 2 ] || fail "--to requires a provider"; PROVIDER="$2"; shift 2 ;;
+    --worker-provider) [ "$#" -ge 2 ] || fail "--worker-provider requires a provider"; WORKER_PROVIDER="$2"; shift 2 ;;
     --max-tasks)
       [ "$#" -ge 2 ] || fail "--max-tasks requires a count"
       case "$2" in *[!0-9]*|"") fail "--max-tasks requires a positive integer" ;; esac
@@ -120,6 +123,7 @@ case "$REASONING_EFFORT" in
   auto|low|medium|high|xhigh|max|ultra) ;;
   *) fail "--reasoning-effort must be auto, low, medium, high, xhigh, max, or ultra" ;;
 esac
+WORKER_PROVIDER="$(oms_normalize_provider "$WORKER_PROVIDER")" || fail "unknown worker provider"
 printf '%s\n' "$PROVIDER_TIMEOUT" | grep -Eq '^[1-9][0-9]*([smh])?$' ||
   fail "--provider-timeout must be a positive duration such as 15m"
 python3 - "$PROVIDER_TIMEOUT" <<'PY' ||
@@ -161,10 +165,11 @@ fi
 # dependencies that stay inside the proposal).
 validate_proposal() {  # FILE [APPLY] -> prints "ok <count>" or fails with reason
   python3 - "$1" "$MAX_TASKS" "$ID_PREFIX" "$ALLOWED_ENVELOPE" "$PLAN_FILE" "${2:-0}" \
-    "$ROOT/scripts/lib/path_scope.py" "$REPO" <<'PY'
+    "$ROOT/scripts/lib/path_scope.py" "$REPO" "$ROOT/scripts/lib/task-assignment.py" <<'PY'
 import json, os, re, runpy, shlex, sys, unicodedata
 
 within_envelope = runpy.run_path(sys.argv[7])["within_envelope"]
+validate_assignment = runpy.run_path(sys.argv[9])["validate"]
 
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -479,8 +484,12 @@ seen = []
 for t in tasks:
     if not isinstance(t, dict):
         sys.stderr.write("task entries must be objects\n"); sys.exit(3)
-    if set(t) != {"id", "title", "allowed", "verify", "depends"}:
-        sys.stderr.write("task entries must match id/title/allowed/verify/depends exactly\n"); sys.exit(3)
+    if set(t) - {"assignment"} != {"id", "title", "allowed", "verify", "depends"}:
+        sys.stderr.write("task entries must match id/title/allowed/verify/depends with optional assignment\n"); sys.exit(3)
+    try:
+        validate_assignment(t.get("assignment", {}))
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\n"); sys.exit(3)
     tid = t.get("id") or ""
     if not id_re.fullmatch(tid):
         sys.stderr.write("bad task id: %r\n" % tid); sys.exit(3)
@@ -845,7 +854,23 @@ prompt="Decompose the remaining work for this repository into at most $MAX_TASKS
 plan tasks. Ground every task in the PROJECT.md contract below; stay inside
 Scope, never touch Non-goals.
 
-Return ONLY one JSON object, no prose, matching exactly:
+Allocate by observable behavior, not by equal-sized pieces or generic phases.
+Keep a behavior and its necessary regression in the same bounded task. Separate
+independent tasks only when their writable paths are disjoint; use dependencies
+for shared interfaces and actual prerequisites. Resolve design uncertainty from
+the confirmed contract rather than inventing architecture. The parent may be
+Codex, Claude Code, Antigravity, or another agent; parent and worker transports
+are independent. Do not infer a provider hierarchy from this planner call.
+For substantial routine work with known scope and verification, add optional
+assignment: {\"provider\": \"$WORKER_PROVIDER\", \"workload\": \"routine\"}.
+Otherwise omit assignment to preserve the run's explicit model/defaults.
+An assignment owns the complete task route, not a partial overlay. Parent review
+may select an already-authorized registered transport and optional model,
+fallback_model, reasoning_effort, workload (standard or routine). Do not invent
+model names or choose another company without parent-reviewed authority.
+No provider/model/role/workload fields outside assignment; no child delegation.
+
+Return ONLY one JSON object, no prose, with this shape (tasks may also include assignment):
 {\"tasks\": [{\"id\": \"t1\", \"title\": \"feat: ...\", \"allowed\": [\"path/prefix\"],
 \"verify\": \"one mechanical shell command\", \"depends\": [\"earlier-id\"]}]}
 
@@ -977,6 +1002,8 @@ for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
     deps = ",".join(t.get("depends") or []) or "-"
     print("  %-14s %s  [allowed: %s] [verify: %s] [depends: %s]" % (
         t["id"], t["title"], ",".join(t["allowed"]), t["verify"], deps))
+    if t.get("assignment"):
+        print("    assignment: " + json.dumps(t["assignment"], sort_keys=True))
     # A task whose verify names a file inside its own scope is admittable only
     # while the patch leaves that file alone: patch-admit refuses a patch that
     # rewrites the test judging it, and asks for verifier-change consent the

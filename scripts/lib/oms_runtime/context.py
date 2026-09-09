@@ -145,7 +145,7 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
     return [(path, reason, priority) for path, (reason, priority) in best.items()]
 
 
-def _fresh_graph(repo: Path) -> Optional[Tuple[Any, Path]]:
+def _fresh_graph(repo: Path) -> Optional[Tuple[Any, Path, bool]]:
     from oms_graph.project import build
     from oms_graph.project.query import Graph
 
@@ -158,12 +158,6 @@ def _fresh_graph(repo: Path) -> Optional[Tuple[Any, Path]]:
         _safe_repo_file(repo, str(state / "graph.json"), allow_external=bool(override))
         manifest = read_json(state / "manifest.json", {})
         discovery = manifest.get("discovery", {})
-        # Freshness only covers the build's selected files. A filtered or
-        # partially parsed graph cannot replace repository discovery.
-        if discovery.get("include") or discovery.get("exclude"):
-            return None
-        if any(row.get("reason") in ("unparsed", "too-large", "binary") for row in manifest.get("skipped", [])):
-            return None
         graph = build.load_graph(repo, state=state)
         paths = set(manifest.get("files", {}))
         if any(node["path"] not in paths for node in graph.get("nodes", [])):
@@ -177,7 +171,13 @@ def _fresh_graph(repo: Path) -> Optional[Tuple[Any, Path]]:
         status = build.check(repo, state=state)
         if not status["fresh"] or graph.get("revision") != status["revision"]:
             return None
-        return Graph(graph), state
+        # Freshness covers selected files only. Partial graphs may contribute
+        # orientation, but never replace discovery. Use current coverage so a
+        # newly added unsupported file also preserves the fallback.
+        skipped = status["coverage"]["skipped_by_reason"]
+        complete = not (discovery.get("include") or discovery.get("exclude") or
+                        any(skipped.get(reason) for reason in ("unparsed", "too-large", "binary")))
+        return Graph(graph), state, complete
     except (CoreError, OSError, ValueError, TypeError, KeyError, AttributeError):
         return None
 
@@ -189,7 +189,7 @@ def _related_candidates(repo: Path, targets: Sequence[Path]) -> List[Tuple[Path,
     if graph is not None:
         from oms_graph.project.context import select_context
 
-        index, state = graph
+        index, state, complete = graph
         labels = [relative_path(path, repo) for path in targets]
         seeds = list(dict.fromkeys(label for label in labels
                                   if "file:" + label in index.nodes or "test:" + label in index.nodes))[:12]
@@ -204,7 +204,7 @@ def _related_candidates(repo: Path, targets: Sequence[Path]) -> List[Tuple[Path,
                 uncertain = pack["blast"]["truncated"] or any(
                     row["signals"]["inferred_sites"] or row["signals"]["ambiguous_sites"]
                     for row in pack["assurance"]["nodes"])
-                if not uncertain:
+                if complete and not uncertain:
                     pending = [path for path, label in zip(targets, labels) if label not in seeds]
             except (CoreError, OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass
@@ -214,8 +214,15 @@ def _related_candidates(repo: Path, targets: Sequence[Path]) -> List[Tuple[Path,
 
 
 def _default_layers(repo: Path) -> List[Tuple[Path, str, int, str]]:
-    candidates = [(repo / "PROJECT.md", "project contract", 100, "head"), (repo / ".oms" / "task" / "current.md", "active task packet", 100, "tail"), (repo / ".oms" / "memory" / "summary.md", "compacted project memory", 55, "tail"), (repo / ".oms" / "work-journal" / "today.md", "current work journal", 35, "tail")]
-    return [row for row in candidates if row[0].is_file() and not row[0].is_symlink()]
+    candidates = [(repo / "PROJECT.md", "project contract", 125, "head"), (repo / ".oms" / "task" / "current.md", "active task packet", 100, "tail"), (repo / ".oms" / "memory" / "pins.md", "pinned project facts", 96, "tail"), (repo / ".oms" / "memory" / "summary.md", "compacted project memory", 55, "tail"), (repo / ".oms" / "work-journal" / "today.md", "current work journal", 35, "tail")]
+    layers = []
+    for path, reason, priority, policy in candidates:
+        try:
+            path = _safe_repo_file(repo, str(path))
+        except CoreError:
+            continue
+        layers.append((path, reason, priority, policy))
+    return layers
 
 
 def _slice(data: bytes, budget: int, policy: str) -> Tuple[bytes, int, str]:
@@ -261,7 +268,19 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
         candidates.append((_safe_repo_file(repo, raw, allow_external=allow_external), reason or "explicit context", 110, "middle"))
     unresolved_required: List[str] = []
     required_resolved: Dict[str, str] = {}
-    for raw in required:
+    # Only target ancestors apply; do not crawl siblings or follow document links.
+    root = repo.resolve()
+    rule_dirs = {root}
+    for target in target_paths:
+        if relative_path(target, root):
+            cursor = target.parent
+            while cursor != root:
+                rule_dirs.add(cursor)
+                cursor = cursor.parent
+    scoped_rules = [(directory / "AGENTS.md").relative_to(root).as_posix()
+                    for directory in sorted(rule_dirs)
+                    if os.path.lexists(directory / "AGENTS.md")]
+    for raw in list(required) + scoped_rules:
         try:
             required_path = _safe_repo_file(repo, raw, allow_external=allow_external)
         except CoreError:
@@ -284,6 +303,10 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
     included_paths: Set[str] = set()
     required_paths = set(required_resolved.values())
     required_paths.update(target_labels)
+    # A selected implementation is not sufficient without its existing contract.
+    # Missing projects remain supported; unreadable/redirected ones cannot look absent.
+    if os.path.lexists(repo / "PROJECT.md"):
+        required_paths.add("PROJECT.md")
     for path, (reason, priority, policy) in ordered:
         label = relative_path(path, repo) or (path.name if allow_external else "")
         if not label:

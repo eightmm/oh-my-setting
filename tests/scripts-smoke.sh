@@ -4071,6 +4071,13 @@ mkdir -p "$HOME/.oms-test"
 printf 'codex-plugin\n' >> "$HOME/.oms-test/refresh.log"
 EOF
   chmod +x "$repo/scripts/install-claude-hooks.sh" "$repo/scripts/install-codex-plugin.sh"
+  cat > "$repo/scripts/install-tools.sh" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --providers ] || exit 2
+mkdir -p "$HOME/.oms-test"
+printf 'providers\n' >> "$HOME/.oms-test/refresh.log"
+EOF
+  chmod +x "$repo/scripts/install-tools.sh"
 }
 
 setup_auto_update_fixture() {
@@ -4098,13 +4105,24 @@ test_delegate_dry_run() {
 
   make_committed_repo "$project"
 
+  if "$ROOT/scripts/peer-delegate.sh" --workload typo >"$TMP/workload.err" 2>&1; then
+    fail "unknown workloads must be rejected"
+  fi
+  assert_file_contains "$TMP/workload.err" '--workload requires standard or routine'
+  if "$ROOT/scripts/peer-delegate.sh" --workload routine --executor frozen >"$TMP/workload.err" 2>&1; then
+    fail "workload must not override a frozen executor"
+  fi
+  assert_file_contains "$TMP/workload.err" 'cannot override a frozen executor'
+
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
+    --workload routine --model exact-routine-model \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --prompt "Add a helper" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Do not run git commit'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" 'exact-routine-model'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
     'Search repository structure, affected call paths and contracts'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' \
@@ -4130,6 +4148,19 @@ test_delegate_dry_run() {
   [ -n "$patch" ] || fail "missing delegate patch artifact"
   [ ! -s "$patch" ] || fail "dry-run patch should be empty"
   [ -z "$(git -C "$project" status --porcelain file.txt)" ] || fail "delegate dry-run touched main tree"
+
+  mkdir -p "$project/cap"
+  printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\n' > "$project/cap/codex.models"
+  OMS_CAPABILITY_DIR="$project/cap" OH_MY_SETTING_DELEGATE_DRY_RUN=1 \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --workload routine --prompt "Routine route probe" >/dev/null
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "routine flag did not reach the resolved route"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    row = json.loads(handle.readlines()[-1])
+assert row["requested_model"] == "gpt-5.6-luna", row
+assert row["model_class"] == "role-default", row
+PY
 }
 
 test_delegate_read_only_rejects_apply() {
@@ -4209,6 +4240,93 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-create-delegated-file-*.md' 'worker done'
 }
 
+test_delegate_graph_context_is_automatic_and_snapshot_bound() {
+  local project="$TMP/delegate-auto-graph"
+  local bin_dir="$TMP/delegate-auto-graph-bin"
+  local home_dir="$TMP/delegate-auto-graph-home"
+  local capture="$TMP/delegate-auto-graph-prompt"
+  local stamp="$TMP/delegate-auto-graph-stamp"
+
+  make_committed_repo "$project"
+  printf 'def recover_lease():\n    return 1\n' > "$project/lease.py"
+  mkdir -p "$project/tests" "$bin_dir" "$home_dir"
+  printf 'from lease import recover_lease\ndef test_recovery():\n    assert recover_lease() == 1\n' > "$project/tests/test_lease.py"
+  git -C "$project" add lease.py tests
+  git -C "$project" commit -qm graph-fixture
+  "$ROOT/scripts/graph.sh" --repo "$project" project ensure >/dev/null
+  python3 - "$project/.oms/project-graph/graph.json" "$stamp" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[2]).write_text(str(pathlib.Path(sys.argv[1]).stat().st_mtime_ns), encoding="utf-8")
+PY
+  # These primary-tree bytes are not part of the detached worker snapshot.
+  printf 'def private_recover_lease(): pass\n' >> "$project/lease.py"
+  printf 'def untracked_recover_lease(): pass\n' > "$project/untracked.py"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+set -e
+for arg in "$@"; do
+  case "$arg" in --version|--help) printf 'codex fixture\n'; exit 0 ;; esac
+done
+cat > "$OMS_CONTEXT_CAPTURE"
+if [ "$OMS_GRAPH_EXPECT_READY" = 1 ]; then
+  PYTHONPATH="$OMS_GRAPH_TEST_LIB" python3 -B - <<'PY'
+from pathlib import Path
+from unittest import mock
+from oms_graph.project import build
+from oms_runtime.context import _fresh_graph
+repo = Path.cwd()
+assert (repo / '.oms/project-graph/graph.json').is_file(), 'prepared graph is invisible to worker'
+with mock.patch.object(build, 'build', side_effect=AssertionError('duplicate graph build')):
+    assert build.ensure(repo)['action'] == 'fresh'
+assert _fresh_graph(repo) is not None, 'runtime context cannot reuse prepared graph'
+PY
+  git check-ignore -q .oms/project-graph/graph.json
+fi
+printf 'worker done\n'
+EOF
+  chmod +x "$bin_dir/codex"
+
+  local mode
+  for mode in first cached disabled unmatched; do
+    local flags=()
+    local query='recover lease'
+    local expect_ready=1
+    [ "$mode" != disabled ] || flags+=(--no-graph-context)
+    [ "$mode" != disabled ] || expect_ready=0
+    [ "$mode" != unmatched ] || query='zzzz_no_matching_subject'
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+      OMS_CONTEXT_CAPTURE="$capture" OMS_GRAPH_EXPECT_READY="$expect_ready" \
+      OMS_GRAPH_TEST_LIB="$ROOT/scripts/lib" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+      --artifact-dir "$TMP/delegate-auto-graph-artifacts" --no-verify \
+      --prompt "$query" ${flags[@]+"${flags[@]}"} >/dev/null || {
+        tail -35 "$TMP/delegate-auto-graph-artifacts"/codex-*.md >&2
+        fail "automatic graph worker probe failed ($mode)"
+      }
+    python3 - "$capture" "$project/.oms/project-graph/graph.json" "$stamp" "$mode" <<'PY'
+import json, pathlib, sys
+prompt, graph, stamp = map(pathlib.Path, sys.argv[1:4])
+mode = sys.argv[4]
+text = prompt.read_text(encoding="utf-8")
+assert "private_recover_lease" not in text and "untracked.py" not in text, text
+assert "def recover_lease" not in text, "automatic orientation included source bytes"
+if mode in ("disabled", "unmatched"):
+    assert "## Project Graph orientation" not in text, text
+    if mode == "unmatched":
+        assert "inspect source paths, callers and tests directly" in text, text
+else:
+    assert "## Project Graph orientation" in text, text
+    assert "lease.py" in text and "tests/test_lease.py" in text, text
+    assert "detached worker snapshot" in text, text
+data = graph.read_text(encoding="utf-8")
+assert "private_recover_lease" not in data and "untracked.py" not in data, data
+assert json.loads(data)["nodes"]
+signature = str(graph.stat().st_mtime_ns)
+assert stamp.read_text(encoding="utf-8") == signature, "delegate modified parent graph"
+PY
+  done
+}
+
 test_delegate_context_manifest_reaches_worker() {
   local project="$TMP/delegate-context"
   local artifact_dir="$TMP/delegate-context-artifacts"
@@ -4263,12 +4381,14 @@ test_delegate_context_debt_reaches_worker() {
   local capture="$TMP/delegate-context-debt-prompt"
 
   make_committed_repo "$project"
-  python3 - "$project/large.py" <<'PY'
+  python3 - "$project/large.py" "$project/PROJECT.md" <<'PY'
 import sys
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     handle.write("VALUE = 1\n" * 8000)
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write("Preserve the project invariant.\n" * 3000)
 PY
-  git -C "$project" add large.py
+  git -C "$project" add large.py PROJECT.md
   git -C "$project" -c user.email=test@example.com -c user.name='Test User' \
     commit -m large-context >/dev/null
   "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id context-debt \
@@ -4289,17 +4409,17 @@ EOF
     --artifact-dir "$artifact_dir" --plan-task context-debt \
     --context-manifest --no-verify >/dev/null
 
-  assert_file_contains "$capture" 'context_debt: 1'
-  assert_file_contains "$capture" 'missing_or_truncated_required: large.py'
+  assert_file_contains "$capture" 'context_debt: 2'
+  assert_file_contains "$capture" 'missing_or_truncated_required: PROJECT.md, large.py'
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 row = [item for item in rows if item.get("kind") == "delegate"][-1]
-assert row["context_debt"] == 1, row
+assert row["context_debt"] == 2, row
 assert row["context_selected_bytes"] > 0, row
 PY
   "$ROOT/scripts/runtime.sh" --repo "$project" benchmark show |
-    python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["context"]["debt_sum"] == 1, row["context"]'
+    python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["context"]["debt_sum"] == 2, row["context"]'
 }
 
 test_delegate_context_compile_failure_never_runs_worker() {
@@ -6681,7 +6801,7 @@ EOF
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-printf 'plan follows.\n{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]},{"id":"t2","title":"test: greeting covered","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}\n'
+printf 'plan follows.\n{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","depends":[],"assignment":{"provider":"claude","workload":"routine"}},{"id":"t2","title":"test: greeting covered","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}\n'
 EOF
   chmod +x "$bin_dir/codex"
 
@@ -6714,6 +6834,12 @@ EOF
   "$ROOT/scripts/agent-plan.sh" --repo "$project" status >"$project/plan-status"
   assert_file_contains "$project/plan-status" "accept: bash tests/run.sh"
   assert_file_contains "$project/plan-status" "ready now: t1"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id t1 | python3 -c '
+import json,sys
+assert json.load(sys.stdin)["assignment"] == {"provider":"claude", "workload":"routine"}
+' || fail "reviewed assignment was lost during proposal apply"
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --apply "$proposal" >/dev/null ||
+    fail "exact assignment proposal replay should succeed"
 
   # A draft spec refuses: decomposing an unconfirmed contract is guessing.
   sed 's/- State: active/- State: draft/' "$project/PROJECT.md" > "$project/PROJECT.md.tmp" &&
@@ -9920,11 +10046,11 @@ test_command_help_surfaces_run() {
   "$ROOT/scripts/uninstall.sh" --help >/dev/null
 }
 
-test_update_refreshes_tools_only_when_requested() {
+test_update_refreshes_providers_by_default_and_tools_on_request() {
   local project="$TMP/update-tools-opt-in"
   local bin="$project/bin"
   local receipt="$TMP/update-tools-opt-in-receipt.json"
-  local marker="$project/tools-called"
+  local marker="$TMP/update-tools-called"
   local branch
 
   make_committed_repo "$project"
@@ -9940,7 +10066,7 @@ test_update_refreshes_tools_only_when_requested() {
   done
   cat > "$project/scripts/install-tools.sh" <<'EOF'
 #!/usr/bin/env bash
-touch "$OMS_TEST_TOOLS_MARKER"
+printf '%s\n' "$*" > "$OMS_TEST_TOOLS_MARKER"
 EOF
   chmod +x "$project/scripts/install-tools.sh"
   cat > "$bin/git" <<'EOF'
@@ -9973,13 +10099,18 @@ PY
 
   PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
-    "$project/scripts/update.sh" --no-doctor >/dev/null
+    "$project/scripts/update.sh" --no-tools --no-doctor >/dev/null
   assert_not_exists "$marker"
 
   PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+    "$project/scripts/update.sh" --no-doctor >/dev/null
+  assert_file_contains "$marker" '--providers'
+
+  PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
+    OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
     "$project/scripts/update.sh" --tools --no-doctor >/dev/null
-  [ -f "$marker" ] || fail "update --tools should refresh provider tools"
+  assert_file_contains "$marker" '--upgrade'
 }
 
 test_update_auto_refreshes_only_installed_codex_plugin() {
@@ -10342,6 +10473,7 @@ test_auto_update_apply_happy_path_records_applied() {
   assert_symlink_to "$home_dir/.oms-test/readme" "$work/README.md"
   assert_file_contains "$home_dir/.oms-test/refresh.log" "claude-hooks"
   assert_file_contains "$home_dir/.oms-test/refresh.log" "codex-plugin"
+  assert_file_contains "$home_dir/.oms-test/refresh.log" "providers"
   assert_file_contains "$work/README.md" "two"
 }
 
@@ -12668,7 +12800,9 @@ test_run_with_timeout_uses_python_fallback() {
   local err="$TMP/rwt-err"
   local python_bin
 
-  python_bin="$(command -v python3)"
+  # Empty PATH deliberately removes timeout and Bash; use the interpreter,
+  # not a managed-runtime launcher whose shebang needs Bash on PATH.
+  python_bin="$(python3 -c 'import sys; print(sys.executable.replace("\\", "/"))' | tr -d '\r')"
   # Stock macOS has no timeout/gtimeout. The Python 3.9 floor supplies the
   # same wall clock without stealing the provider prompt from stdin.
   printf 'stdin-survived\n' |
@@ -12689,7 +12823,7 @@ test_python_timeout_fallback_kills_the_process_group() {
   local child_script="$TMP/rwt-ignore-term-child.sh"
   local python_bin rc=0 parent child i
 
-  python_bin="$(command -v python3)"
+  python_bin="$(python3 -c 'import sys; print(sys.executable.replace("\\", "/"))' | tr -d '\r')"
   cat > "$child_script" <<'EOF'
 #!/bin/sh
 trap '' TERM
@@ -12715,7 +12849,7 @@ EOF
 test_python_timeout_fallback_bounds_verifier() {
   local python_bin rc=0
 
-  python_bin="$(command -v python3)"
+  python_bin="$(python3 -c 'import sys; print(sys.executable.replace("\\", "/"))' | tr -d '\r')"
   OMS_PYTHON_BIN="$python_bin" \
     OMS_RUN_BOUNDED_HELPER="$ROOT/scripts/lib/run-bounded.py" \
     bash -c '. "$1"; PATH=""; OMS_PEER_VERIFY_TIMEOUT=1s OMS_PEER_KILL_AFTER=1s run_verify_with_timeout /bin/sleep 30' \
@@ -13008,15 +13142,30 @@ test_oms_dispatcher_lists_and_dispatches() {
   # Capture first: grep -q on a live pipe SIGPIPEs the dispatcher under
   # pipefail as soon as the match is found.
   out="$("$bin/oms" list)" || fail "oms list should succeed"
+  [ "$out" = "$("$bin/oms" list --frontdoor)" ] || fail "default catalog must be compact"
+  printf '%s' "$out" | grep -Eq '^inbox ' || fail "compact catalog needs inbox"
+  if printf '%s' "$out" | grep -Eq '^agent-run |^herdr-adapter |^semantic-eval '; then
+    fail "default catalog leaked primitive, optional or retired tools"
+  fi
+  out="$("$bin/oms" list --all)" || fail "expanded catalog should succeed"
   printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
   printf '%s' "$out" | grep -Eq '^agent-run ' || fail "oms list should include agent-run"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
-    execution-profile herdr-adapter open-in ops-cockpit otel-export semantic-eval; do
+    execution-profile open-in ops-cockpit otel-export; do
     printf '%s\n' "$out" | grep -Eq "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
       fail "oms should dispatch new public tool: $public"
   done
+  for retired in herdr-adapter a2a-bridge agent-card; do
+    if printf '%s\n' "$out" | grep -Eq "^${retired} "; then
+      fail "retired adapter leaked into core catalog: $retired"
+    fi
+    if "$bin/oms" "$retired" --help >/dev/null 2>&1; then
+      fail "retired adapter still dispatched: $retired"
+    fi
+  done
+  "$bin/oms" semantic-eval --help >/dev/null || fail "retired evaluator needs migration help"
   for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
     generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule tool-lock uninstall-autoupdate write-machine-snapshot; do
     if printf '%s' "$out" | grep -Eq "^${hidden} "; then
@@ -16122,6 +16271,8 @@ EOF
 }
 
 test_skill_router_matches_and_dedupes() {
+  local OMS_SKILL_HINTS=1 OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1
+  export OMS_SKILL_HINTS OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN
   local d="$TMP/skill-router"
   local project="$d/project"
   local out
@@ -16202,6 +16353,8 @@ test_skill_router_matches_and_dedupes() {
 }
 
 test_skill_router_separates_consultation_from_delegation() {
+  local OMS_SKILL_HINTS=1
+  export OMS_SKILL_HINTS
   local d="$TMP/skill-router-actions"
   local project="$d/project"
   local out
@@ -16223,6 +16376,8 @@ test_skill_router_separates_consultation_from_delegation() {
 }
 
 test_skill_router_routes_trust_boundary_precisely() {
+  local OMS_SKILL_HINTS=1
+  export OMS_SKILL_HINTS
   local d="$TMP/skill-router-trust-boundary"
   local project="$d/project"
   local prompt
@@ -16268,6 +16423,8 @@ EOF
 }
 
 test_skill_router_keeps_trace_off_ordinary_test_talk() {
+  local OMS_SKILL_HINTS=1
+  export OMS_SKILL_HINTS
   local d="$TMP/skill-router-precision"
   local project="$d/project"
   local prompt
@@ -16369,6 +16526,8 @@ test_skill_router_auto_task_is_opt_in() {
 }
 
 test_skill_router_plain_question_leaves_no_state() {
+  local OMS_SKILL_HINTS=1
+  export OMS_SKILL_HINTS
   local d="$TMP/skill-router-plain-question"
   local project="$d/project"
   local out
@@ -16742,7 +16901,7 @@ test_turn_guard_blocks_unverified_dirty_task_once() {
   printf 'change\n' >> "$project/file.txt"
 
   route_payload="$(printf '{"prompt":"fix this and push까지 진행","session_id":"s1","turn_id":"t1","cwd":"%s"}' "$project")"
-  printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$route_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
 
   stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s1","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
   out="$(printf '%s' "$stop_payload" | env -u OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN bash "$ROOT/scripts/turn-guard.sh")"
@@ -16763,7 +16922,7 @@ test_session_budget_blocks_once_past_the_turn_cap() {
   local stop_payload out
   make_committed_repo "$project"
   printf '{"prompt":"fix this helper","session_id":"s-budget","turn_id":"t1","cwd":"%s"}' "$project" |
-    TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+    OMS_SESSION_BUDGET_TURNS=2 TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
   stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s-budget","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
   out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "one turn is inside a two-turn budget: $out"
@@ -16803,7 +16962,7 @@ test_turn_guard_allows_verified_task() {
   printf 'change\n' >> "$project/file.txt"
 
   route_payload="$(printf '{"prompt":"fix this bug and push","session_id":"s2","turn_id":"t1","cwd":"%s"}' "$project")"
-  printf '%s' "$route_payload" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$route_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
 
   stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s2","turn_id":"t1","cwd":"%s","last_assistant_message":"Changed file.txt. Verified: bash scripts/check.sh."}' "$project")"
   out="$(printf '%s' "$stop_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 bash "$ROOT/scripts/turn-guard.sh")"
@@ -18910,6 +19069,16 @@ Grant the worker read access in the delegation profile, then re-run the gate.
 ARTIFACT
   verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/about-permissions.md'")"
   [ "$verdict" = "ok" ] || fail "an answer about permissions is not a refusal, got: $verdict"
+
+  local item text expected
+  for item in "42:ok" "Yes.:ok" "가능합니다.:ok" "Why?:thin"; do
+    text="${item%%:*}"
+    expected="${item##*:}"
+    printf '# codex call\n\n## Output\n\n%s\n\n## Exit\n\n0\n' "$text" > "$dir/short.md"
+    verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/short.md'")"
+    [ "$verdict" = "$expected" ] ||
+      fail "short fixture '$text' expected '$expected', got: $verdict"
+  done
 }
 
 test_consult_falls_back_when_the_first_peer_does_not_answer() {
@@ -18950,6 +19119,34 @@ assert [a["provider"] for a in answers] == ["codex", "antigravity"], answers
 assert answers[0]["quality"] == "thin", answers[0]
 assert answers[1].get("quality") == "ok", answers[1]
 ' || fail "the thread should record one question, a thin answer, and a real one"
+
+  project="$TMP/consult-short-answer"
+  bin_dir="$project/bin"
+  home_dir="$project/home"
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+echo "42"
+EOF
+  cat > "$bin_dir/agy" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}:\${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+touch "$project/agy-called"
+echo "Fallback answered after an unnecessary provider call."
+EOF
+  chmod +x "$bin_dir/codex" "$bin_dir/agy"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
+    "what is six times seven?" --quiet 2>&1)" || fail "consult should succeed: $out"
+  [ ! -f "$project/agy-called" ] || fail "short valid answer must not call a fallback provider"
+  "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
+import json, sys
+answers = [t for t in json.load(sys.stdin)["turns"] if t["role"] == "answer"]
+assert len(answers) == 1, answers
+assert answers[0]["provider"] == "codex", answers
+assert answers[0].get("quality") == "ok", answers
+' || fail "a short answer should need exactly one provider call"
 }
 
 test_consult_does_not_second_guess_a_pinned_peer() {
@@ -22483,6 +22680,250 @@ test_task_verify_survives_a_gate_with_no_failure_line() {
     fail "a silent passing gate must verify, not abort"
 }
 
+test_delegate_interactive_conversation() {
+  local fixture="$TMP/delegate-interactive" case_dir project scenario provider
+  mkdir -p "$fixture/bin"
+  python3 - "$ROOT/scripts/lib/peer-conversation.py" "$fixture" <<'PY' || fail "conversation protocol rejection table failed"
+import json, subprocess, sys
+from pathlib import Path
+
+helper, fixture = sys.argv[1:]
+controls = [
+    '{"prompt":"first","prompt":"second"}\n',
+    '{"prompt":"next","unknown":true}\n',
+    '{"finish":true,"prompt":"next"}\n',
+    json.dumps({"prompt": "x" * 32769}) + "\n",
+    '{"prompt":" /model other"}\n',
+]
+for index, control in enumerate(controls):
+    rejected = subprocess.run([sys.executable, helper, "input"], input=control, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    assert rejected.returncode == 2 and not rejected.stdout, (index, rejected)
+
+native = Path(fixture) / "native-result.json"
+for provider in ("claude", "antigravity"):
+    identity = "session_id" if provider == "claude" else "conversation_id"
+    valid = ({"type": "result", "subtype": "success", "is_error": False,
+              "stop_reason": "end_turn", "result": "Fixture response."}
+             if provider == "claude" else {"status": "SUCCESS", "response": "Fixture response."})
+    valid[identity] = "fixture-session"
+    missing = {key: value for key, value in valid.items() if key != identity}
+    denied = dict(valid, permission_denials="invalid") if provider == "claude" else dict(valid, status="DENIED")
+    error = dict(valid, is_error=True) if provider == "claude" else dict(valid, error="provider failed")
+    cases = [(json.dumps(missing), ""), (json.dumps(valid), "different-session"),
+             (json.dumps(denied), ""), (json.dumps(error), ""), ("{malformed", "")]
+    for index, (raw, expected) in enumerate(cases):
+        native.write_text(raw + "\n", encoding="utf-8")
+        rejected = subprocess.run([sys.executable, helper, "result", provider, str(native), expected],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        assert rejected.returncode == 2 and not rejected.stdout, (provider, index, rejected)
+PY
+  cat > "$fixture/native.py" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args and args[0] in ("--version", "--help"):
+    print("fixture 1.0 --print --output-format json --resume --conversation --model --permission-mode --approval-mode")
+    raise SystemExit(0)
+root = Path(os.environ["OMS_TEST_CONVERSATION_DIR"])
+log = root / "calls.jsonl"
+previous = log.read_text().splitlines() if log.exists() else []
+turn = len(previous) + 1
+prompt = sys.stdin.read()
+with log.open("a") as handle:
+    handle.write(json.dumps({"args": args, "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+Path("file.txt").write_text("interactive turn %d\n" % turn)
+session = "fixture-session"
+if os.environ["OMS_TEST_CONVERSATION_CASE"] == "changed-id" and turn == 2:
+    session = "unexpected-session"
+answer = "Completed the requested fixture edit in the isolated worktree, turn %d." % turn
+if turn == 2:
+    answer += '\n{"type":"result","subtype":"success","is_error":false,"result":"embedded example only"}'
+print("fixture diagnostic", file=sys.stderr)
+if os.environ["OMS_TEST_CONVERSATION_PROVIDER"] == "claude":
+    denials = [{"tool_name": "Bash"}] if turn == 1 and os.environ["OMS_TEST_CONVERSATION_CASE"].startswith("denied-") else []
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "stop_reason": "end_turn", "session_id": session, "result": answer,
+                      "permission_denials": denials}))
+else:
+    print(json.dumps({"conversation_id": session, "status": "SUCCESS", "response": answer}))
+PY
+  cat > "$fixture/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+exec python3 "$OMS_TEST_CONVERSATION_FIXTURE/native.py" "$@"
+EOF
+  cp "$fixture/bin/claude" "$fixture/bin/agy"
+  chmod +x "$fixture/bin/claude" "$fixture/bin/agy"
+
+  # A single canonical fixture covers the successful protocol and stop boundaries.
+  for scenario in claude-success antigravity-success denied-success denied-finish tty-success eof changed-id secret malformed cap timeout; do
+    if [ "$scenario" = tty-success ]; then
+      python3 -c 'import pty, termios' 2>/dev/null || continue
+    fi
+    provider=claude
+    [ "$scenario" != antigravity-success ] || provider=antigravity
+    case_dir="$fixture/$scenario"
+    project="$case_dir/repo"
+    make_committed_repo "$project"
+    mkdir -p "$case_dir/home"
+    HOME="$case_dir/home" PATH="$fixture/bin:$PATH" \
+      OMS_TEST_CONVERSATION_FIXTURE="$fixture" \
+      OMS_TEST_CONVERSATION_DIR="$case_dir" \
+      OMS_TEST_CONVERSATION_CASE="$scenario" \
+      OMS_TEST_CONVERSATION_PROVIDER="$provider" OMS_WORKER_GUARD_STRICT=1 \
+      python3 - "$ROOT" "$case_dir" "$provider" "$scenario" <<'PY' || fail "interactive conversation case failed: $scenario"
+import json, os, queue, subprocess, sys, threading
+from pathlib import Path
+
+source, root, provider, scenario = sys.argv[1:]
+root = Path(root)
+repo = root / "repo"
+command = ["bash", str(Path(source) / "scripts/peer-delegate.sh"), "--repo", str(repo),
+           "--to", provider, "--interactive", "--model", "fixture-model",
+           "--prompt", "Make the initial fixture edit.",
+           "--verify", "test \"$(cat file.txt)\" = 'interactive turn 2' && "
+                       "printf 'verified\\n' > \"$OMS_TEST_CONVERSATION_DIR/verified\""]
+if scenario == "claude-success":
+    for incompatible in (["--read-only"], ["--executor", "fixture-executor"],
+                         ["--plan-task", "fixture-task"], ["--repair", "1"],
+                         ["--apply"], ["--fallback-model", "fixture-fallback"], ["--dry-run"]):
+        rejected = subprocess.run(command + incompatible, input="", text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        assert rejected.returncode != 0, incompatible
+        assert not (root / "calls.jsonl").exists(), ("provider ran for incompatible mode", incompatible)
+if scenario == "cap":
+    command += ["--max-turns", "1"]
+if scenario == "timeout":
+    command += ["--idle-timeout", "1"]
+secret = "sk-" + "a" * 48
+events = []
+with (root / "stderr").open("w") as errors:
+    if scenario == "tty-success":
+        import fcntl, pty, termios
+        master, slave = pty.openpty()
+        process = subprocess.Popen(command, stdin=slave, stdout=subprocess.PIPE,
+                                   stderr=errors, text=True, start_new_session=True,
+                                   preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
+        os.close(slave)
+        process.stdin = os.fdopen(master, "w")
+    else:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=errors, text=True)
+    pending = queue.Queue()
+    def read_events():
+        for row in process.stdout:
+            pending.put(row)
+        pending.put(None)
+    reader = threading.Thread(target=read_events, daemon=True)
+    reader.start()
+    try:
+        # Reading the first event before sending input proves actual interactive
+        # delivery, and lets us distinguish an idle timeout from startup cost.
+        line = pending.get(timeout=60)
+        assert line, ("missing initial event", (root / "stderr").read_text())
+        events.append(json.loads(line))
+        assert events[0]["event"] == "turn" and events[0]["verified"] is False, events
+        assert events[0]["permission_denials"] == int(scenario.startswith("denied-")), events
+        calls = [json.loads(row) for row in (root / "calls.jsonl").read_text().splitlines()]
+        sentinel = root / "verified"
+        assert not sentinel.exists(), "verifier ran before finish"
+        if scenario == "timeout":
+            # Leave stdin open without a message until the bounded reader exits.
+            process.wait(timeout=20)
+        elif scenario == "denied-finish":
+            process.stdin.write('{"finish":true}\n')
+            process.stdin.flush()
+        elif scenario == "eof":
+            process.stdin.close()
+        else:
+            message = {"prompt": "Make the second fixture edit."}
+            if scenario == "secret":
+                message = {"prompt": "Use API_KEY=" + secret}
+            control = "{malformed\n" if scenario == "malformed" else json.dumps(message) + "\n"
+            process.stdin.write(control)
+            process.stdin.flush()
+            if scenario.endswith("success"):
+                events.append(json.loads(pending.get(timeout=60)))
+                assert events[-1]["event"] == "turn", events
+                assert not sentinel.exists(), "verifier ran between turns"
+                process.stdin.write('{"finish":true}\n')
+                process.stdin.flush()
+            if scenario != "tty-success":
+                process.stdin.close()
+        process.wait(timeout=60)
+        reader.join(timeout=5)
+        assert not reader.is_alive(), "conversation output remained open"
+        while not pending.empty():
+            row = pending.get_nowait()
+            if row is not None and row.strip():
+                events.append(json.loads(row))
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        reader.join(timeout=5)
+        process.stdout.close()
+        if not process.stdin.closed:
+            process.stdin.close()
+
+calls = [json.loads(row) for row in (root / "calls.jsonl").read_text().splitlines()]
+expected_calls = 2 if scenario.endswith("success") or scenario == "changed-id" else 1
+assert len(calls) == expected_calls, (scenario, calls)
+assert len({row["cwd"] for row in calls}) == 1 and calls[0]["cwd"] != str(repo), calls
+assert events[0]["worktree"] == calls[0]["cwd"], events
+assert (repo / "file.txt").read_text() == "base\n", "owner worktree was edited"
+assert len(list((repo / ".oms/lifecycle/attempts").glob("*/spec.json"))) == 1, "turns created new OMS attempts"
+resume = "--resume" if provider == "claude" else "--conversation"
+for index, call in enumerate(calls):
+    args = call["args"]
+    assert args[args.index("--model") + 1] == "fixture-model", args
+    assert args[args.index("--output-format") + 1] == "json", args
+    if provider == "claude":
+        assert "--permission-mode" not in args, "write worker must inherit the operator permission mode"
+        assert "--setting-sources" not in args, args
+        assert "--dangerously-skip-permissions" not in args, args
+    else:
+        assert "--sandbox" in args and args[args.index("--add-dir") + 1] == call["cwd"], args
+    delivered = call["prompt"] if provider == "claude" else args[args.index("--print") + 1]
+    assert ("Make the initial fixture edit." if index == 0 else "Make the second fixture edit.") in delivered
+    if index == 0:
+        assert resume not in args, args
+    else:
+        assert args[args.index(resume) + 1] == "fixture-session", args
+        def frozen(row):
+            values = row["args"][:]
+            for flag in (resume, "--print" if provider != "claude" else "--unused"):
+                if flag in values:
+                    offset = values.index(flag)
+                    del values[offset:offset + 2]
+            return values
+        assert frozen(calls[0]) == frozen(call), calls
+turns = [event for event in events if event["event"] == "turn"]
+assert [event["turn"] for event in turns] == list(range(1, len(turns) + 1)), events
+assert all(event["verified"] is False and "fixture edit" in event["response"] for event in turns), events
+finished = [event for event in events if event["event"] == "finished"]
+if scenario.endswith("success"):
+    assert process.returncode == 0, (root / "stderr").read_text()
+    assert len(turns) == 2 and len(finished) == 1, events
+    result = finished[0]
+    assert result["verification"] == "passed" and result["applied"] is False, result
+    artifact, patch = Path(result["artifact"]), Path(result["patch"])
+    assert artifact.is_file() and patch.is_file(), result
+    transcript = artifact.read_text()
+    assert all(event["response"] in transcript for event in turns), "artifact lost a conversation turn or its embedded JSON example"
+    assert "> Make the second fixture edit." in transcript, "artifact omitted the quoted controller follow-up"
+    assert "+interactive turn 2" in patch.read_text(), patch.read_text()
+    assert sentinel.read_text() == "verified\n", "verifier did not run after finish"
+else:
+    assert process.returncode != 0 and not finished, (scenario, events, (root / "stderr").read_text())
+    assert len(turns) == 1, events
+    assert not sentinel.exists(), "failed dialogue ran verification"
+    assert secret not in (root / "stderr").read_text() and secret not in json.dumps(events)
+PY
+  done
+}
+
 test_delegate_consults_an_advisor_after_a_repair_also_fails() {
   local project="$TMP/delegate-advise"
   local bin="$project/bin"
@@ -23219,6 +23660,7 @@ pre-push-check
 precompact-handoff
 python-runtime
 resume-hook
+semantic-eval
 skill-router
 syntax-guard-hook
 tier-guard-hook

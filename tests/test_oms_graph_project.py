@@ -17,7 +17,7 @@ from oms_graph.project.affected import affected_plan
 from oms_graph.errors import GraphError
 from oms_graph import render
 from oms_graph.project.build import build, check, ensure, load_graph
-from oms_graph.project.context import context_pack
+from oms_graph.project.context import context_pack, select_context
 from oms_graph.project.query import Graph
 
 
@@ -132,6 +132,23 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(status["coverage"]["unparsed_by_extension"], {".ts": 1})
         pack = context_pack(self.repo, graph, task="recover expired lease", max_files=2, state=self.state)
         self.assertEqual(pack["coverage"], status["coverage"])
+
+        self.write("localized.py", "def 권한(): pass\ndef 갱신(): pass\n")
+        self.write("identifiers.py", "def context_pack(): pass\ndef renderGraph(): pass\n"
+                   "def update_cache(): pass\ndef read_cache(): pass\ndef go_io(): pass\n")
+        graph = self.graph()
+        for name, path in (("권한", "localized.py"), ("갱신", "localized.py"),
+                           ("context_pack", "identifiers.py"), ("renderGraph", "identifiers.py"),
+                           ("update_cache", "identifiers.py"), ("go_io", "identifiers.py")):
+            with self.subTest(context_query=name):
+                task = name if not name.isascii() else "please fix " + name
+                selected = select_context(self.repo, graph, task=task, max_files=1, state=self.state)
+                self.assertEqual(selected["entries"], ["symbol:%s::%s" % (path, name)])
+                self.assertEqual(selected["files"], [path])
+        selected = select_context(self.repo, graph, task="권한", entry_paths=("lease.py",),
+                                  max_files=1, state=self.state)
+        self.assertEqual(selected["entries"], ["file:lease.py"])
+        self.assertEqual(selected["files"], ["lease.py"])
 
     def test_trace_is_a_bounded_projection_with_explicit_loss(self) -> None:
         nodes = [{"id": "root", "kind": "file", "path": "root.py"}]

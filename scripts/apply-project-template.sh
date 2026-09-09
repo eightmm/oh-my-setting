@@ -184,6 +184,10 @@ project_content() {
   printf -- '- Goal:\n'
   printf -- '- Scope:\n'
   printf -- '- Non-goals:\n\n'
+  printf '## Decisions\n\n'
+  printf -- '- Rationale/invariants:\n'
+  printf -- '- Alternatives ruled out:\n'
+  printf -- '- References (repo-relative paths/sections):\n\n'
   printf '## Commands\n\n'
   if [ "$style" = "ml" ]; then
     printf -- '- Setup: uv sync\n'

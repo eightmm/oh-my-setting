@@ -48,6 +48,7 @@ case "${1:-}" in
     ;;
 esac
 prompt="$(cat)"
+[ -z "${ARGV_DUMP:-}" ] || printf '%s\n' "$@" > "$ARGV_DUMP"
 [ -z "${CALL_LOG:-}" ] || printf 'call\n' >> "$CALL_LOG"
 [ -z "${PROMPT_DUMP:-}" ] || printf '%s\n' "$prompt" > "$PROMPT_DUMP"
 [ -z "${STEAL_TASK:-}" ] || [ "${OMS_TASK_ID:-}" != "$STEAL_TASK" ] || {
@@ -82,6 +83,62 @@ chmod +x "$bin/codex"
 
 PLAN="$ROOT/scripts/agent-plan.sh"
 RUN="$ROOT/scripts/plan-run.sh"
+
+# A parent transport is not a worker identity. Preserve reviewed routes in
+# atomic claims, dry-run, and direct peer hydration without calling real CLIs.
+assignment_repo="$TMP/assignment-repo"
+git clone -q "$repo" "$assignment_repo"
+"$PLAN" --repo "$assignment_repo" init --goal allocation >/dev/null
+"$PLAN" --repo "$assignment_repo" add --id t1 --title assigned \
+  --allowed delegated.txt --verify 'bash scripts/check.sh t1' \
+  --assignment '{"provider":"codex","workload":"routine"}' >/dev/null
+selected="$($PLAN --repo "$assignment_repo" next --claim --provider claude --json)"
+printf '%s' "$selected" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["provider"] == "codex" and d["assignment"]["workload"] == "routine" and d["lease_id"]
+' || fail "atomic claim ignored reviewed task assignment"
+# Legacy plans acquire lineage at the direct delegate entrance; route and
+# verification must come from the final snapshot reread after that transition.
+python3 - "$assignment_repo/.oms/plan/tasks.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data=json.load(handle)
+data.pop("plan_id", None)
+with open(path,"w",encoding="utf-8") as handle:
+    json.dump(data,handle)
+PY
+ARGV_DUMP="$TMP/assigned-argv" HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
+  --repo "$assignment_repo" --to claude --model wrong-carrier-model --reasoning-effort ultra --plan-task t1 \
+  >"$TMP/assigned-peer.out" 2>&1 || fail "direct peer assignment hydration failed"
+if grep -Eq 'wrong-carrier-model|ultra' "$TMP/assigned-argv"; then
+  fail "default model/effort leaked into the other provider's invocation"
+fi
+"$PLAN" --repo "$assignment_repo" show --id t1 | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["provider"] == "codex" and d["state"] == "review"
+' || fail "assigned worker did not retain its claim provider"
+[ ! -e "$assignment_repo/delegated.txt" ] || fail "assigned worker changed the parent tree"
+"$PLAN" --repo "$assignment_repo" add --id reverse --title reverse \
+  --allowed delegated.txt --verify 'bash scripts/check.sh t1' \
+  --assignment '{"provider":"claude","model":"assigned-claude","workload":"routine"}' >/dev/null
+HOME="$home" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$assignment_repo" \
+  --to codex --model wrong-carrier-model --id reverse --dry-run >"$TMP/assigned-plan.out"
+grep -Fq 'provider=claude' "$TMP/assigned-plan.out" || fail "plan-run lost assigned provider"
+grep -Fq 'model=assigned-claude' "$TMP/assigned-plan.out" || fail "plan-run lost assigned model"
+if grep -Fq wrong-carrier-model "$TMP/assigned-plan.out"; then fail "run default leaked into assigned route"; fi
+"$PLAN" --repo "$assignment_repo" show --id reverse | grep -Fq '"state": "ready"' ||
+  fail "assigned dry-run claimed a task"
+if "$ROOT/scripts/agent-executor.sh" create --repo "$assignment_repo" --id conflict \
+    --provider claude --plan-task reverse --soul-file "$assignment_repo/README.md" \
+    >"$TMP/assignment-executor.out" 2>&1; then
+  fail "executor accepted a separate task assignment"
+fi
+grep -Fq 'assignment cannot override a frozen executor' "$TMP/assignment-executor.out" ||
+  fail "executor did not enforce the separate route boundary"
+
 "$PLAN" --repo "$repo" init --goal bounded >/dev/null
 initial_plan_id="$(python3 - "$repo/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
 import json, sys
@@ -545,28 +602,49 @@ fi
 call_log="$TMP/calls"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/failing-delegate"
 chmod +x "$TMP/failing-delegate"
+mkdir -p "$TMP/routing-cap"
+printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\n' > "$TMP/routing-cap/codex.models"
 rc=0
-OMS_PLAN_RUN_DELEGATE="$TMP/failing-delegate" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+OMS_CAPABILITY_DIR="$TMP/routing-cap" OMS_MODEL_WORKLOAD=standard OMS_ROLE_ROUTING=1 \
+  OMS_PLAN_RUN_DELEGATE="$TMP/failing-delegate" HOME="$home" PATH="$bin:/usr/bin:/bin" \
   "$RUN" --repo "$repo" --to codex --id known >/dev/null 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "fixture plan-run failure should exit 1"
 rc=0
-HOME="$home" CALL_LOG="$call_log" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id known >/dev/null 2>"$TMP/known.err" || rc=$?
+OMS_CAPABILITY_DIR="$TMP/routing-cap" OMS_MODEL_WORKLOAD=standard OMS_ROLE_ROUTING=1 \
+  HOME="$home" CALL_LOG="$call_log" PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$repo" --to codex --id known >/dev/null 2>"$TMP/known.err" || rc=$?
 [ "$rc" = 2 ] || fail "known unchanged failure should be refused with exit 2, got $rc"
 [ ! -e "$call_log" ] || fail "known unchanged failure called provider"
 grep -Fq 'known unchanged plan-run failure' "$TMP/known.err" || fail "known failure guidance missing"
 "$PLAN" --repo "$repo" show --id known | grep -Fq '"state": "ready"' || fail "known-failure refusal stranded claim"
 
+# Ambient workload cannot change a plan's failure identity: peer-delegate
+# defaults to standard unless its caller explicitly supplies --workload.
+rc=0
+OMS_CAPABILITY_DIR="$TMP/routing-cap" OMS_MODEL_WORKLOAD=routine OMS_ROLE_ROUTING=1 \
+  HOME="$home" PATH="$bin:/usr/bin:/bin" \
+  "$RUN" --repo "$repo" --to codex --id known --dry-run \
+  >"$TMP/ambient-workload.out" 2>"$TMP/ambient-workload.err" || rc=$?
+[ "$rc" = 2 ] || fail "ambient routine workload bypassed the standard-route known failure: exit $rc"
+grep -Fq 'known unchanged plan-run failure' "$TMP/ambient-workload.err" ||
+  fail "ambient workload changed the standard-route failure fingerprint"
+"$PLAN" --repo "$repo" show --id known | grep -Fq '"state": "ready"' ||
+  fail "ambient workload dry-run changed plan state"
+
 # A changed resolved route is a changed failure hypothesis; with tiers gone
 # the route changes by naming a different model outright.
 "$PLAN" --repo "$repo" add --id mapped --title mapped --allowed mapped.txt --verify true >/dev/null
 rc=0
-OMS_PLAN_RUN_DELEGATE="$TMP/failing-delegate" HOME="$home" PATH="$bin:/usr/bin:/bin" \
+OMS_CAPABILITY_DIR="$TMP/routing-cap" OMS_MODEL_WORKLOAD=standard OMS_ROLE_ROUTING=1 \
+  OMS_PLAN_RUN_DELEGATE="$TMP/failing-delegate" HOME="$home" PATH="$bin:/usr/bin:/bin" \
   "$RUN" --repo "$repo" --to codex --id mapped >/dev/null 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "mapped fixture failure should exit 1"
-HOME="$home" PATH="$bin:/usr/bin:/bin" \
+OMS_CAPABILITY_DIR="$TMP/routing-cap" OMS_MODEL_WORKLOAD=routine OMS_ROLE_ROUTING=1 \
+  HOME="$home" PATH="$bin:/usr/bin:/bin" \
   "$RUN" --repo "$repo" --to codex --id mapped --model changed-model --dry-run \
   >"$TMP/mapped.out" 2>"$TMP/mapped.err" ||
   fail "changed resolved route should not match the old known failure"
+grep -Fq 'plan-run: assignment model=changed-model ' "$TMP/mapped.out" ||
+  fail "assignment should name the resolved explicit model"
 
 # TERM waits for child cleanup before releasing the exact lease.
 "$PLAN" --repo "$repo" add --id signal --title signal --allowed signal.txt --verify true >/dev/null

@@ -32,7 +32,16 @@ Python, and one coding-agent provider. It does not make GitHub CLI, Notion CLI,
 all three providers, research tooling, or cluster tools mandatory. Use the
 `full` compatibility profile only on machines that should carry the historical
 all-provider/GitHub/Notion/research footprint. Nothing needs root; managed tool
-versions, platform URLs, and integrity values are pinned in `tools.lock.json`.
+bootstrap versions, platform URLs, and integrity values are pinned in `tools.lock.json`.
+Codex, Claude, and agy resolve current stable releases during install/update,
+then verify downloaded bytes against their official release checksums. Scheduled
+apply refreshes installed providers even when OMS itself is unchanged. Manual
+`--no-tools` skips tool refresh; an explicit `OH_MY_SETTING_TOOL_LOCK` retains
+reproducible pinned installs. The private `provider-tools.lock.json` snapshot
+records resolved versions, not a permanent version policy or proof of installation.
+Recognized standalone Codex installations keep their native updater; OMS checks
+the resulting version without replacing the launcher with npm or claiming an
+OMS-verified payload digest.
 Provider dependencies are selected with the provider: Codex and Claude include
 locked Node, while Antigravity does not. New downloads are verified before use.
 Existing external CLIs at the exact version are reused and labeled as
@@ -123,8 +132,8 @@ Plan leases, executor souls, one-use approvals, commit intents, and Draft PR
 intents remain authoritative. Runtime snapshots, capsules, context bundles, and
 backend receipts are evidence or advisory state, never write authority.
 
-The compact catalog is `oms list --frontdoor`; every compatibility primitive is
-still available through `oms list --all`.
+The default compact catalog is `oms list`; core primitives are available
+through `oms list --all`.
 
 ## What You Can Say
 
@@ -150,7 +159,7 @@ Update oh-my-setting and re-run its doctor.
 ## What's Inside
 
 Your agent picks these up on its own when a task calls for them. The compact
-agent surface is `oms list --frontdoor`; the complete compatibility catalog is
+agent surface is `oms list`; the expanded core catalog is
 `oms list --all`, documented in [docs/COMPONENTS.md](docs/COMPONENTS.md).
 
 - **Typed semantic runtime** — effective TaskEnvelope projection,
@@ -191,8 +200,8 @@ agent surface is `oms list --frontdoor`; the complete compatibility catalog is
 - **Operations and execution boundaries** — durable attempt events with
   child-attempt resume, a bounded supervisor, one-use approvals,
   `trusted-local`/`isolated`/`remote` preflight and executable backends,
-  optional Herdr control and VS Code/Stably Orca/Codex launchers, a read-only
-  cockpit, local OTLP JSONL, advisory semantic evaluation, and an agent-managed
+  VS Code/Stably Orca/Codex launchers, a read-only
+  cockpit, local OTLP JSONL, and an agent-managed
   bounded coding loop whose only built-in remote-write path creates a branch
   plus Draft PR
 - **Maintenance** — transactional update with rollback, explicit stable/edge

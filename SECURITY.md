@@ -174,14 +174,12 @@ check, not an executor: `isolated` verifies an existing Docker daemon and local
 image, while `remote` verifies an operator-owned adapter. It installs, pulls,
 and connects to nothing.
 
-The Herdr adapter controls panes and recognized agents but has no approval,
-lease, admission, success, or landing authority. Its `done` state is an idle
-observation after unseen work, not proof of verification. External frontend
-commit/merge/push actions bypass OMS; OMS authority applies only to managed
-flows. `semantic-eval` invokes no model; its optional judge JSON is
-self-reported and cannot prove independent provenance.
-Spec commands run only after `--allow-host-checks`, in a temporary worktree
-that is not a process sandbox. Use trusted specs only.
+External frontend commit/merge/push actions bypass OMS; OMS authority applies
+only to managed flows. Frontend state is not proof of verification.
+The retired `semantic-eval` command refuses execution; use `patch-admit` and
+`peer-review` for current-HEAD verification and review. Historical semantic
+reports remain readable, but self-reported judge provenance is not independent
+evidence. Verification worktrees are not process sandboxes; use trusted checks.
 
 `ops-cockpit` is read-only but exposes operational and approval metadata and is
 not an atomic snapshot. `otel-export` writes a whitelisted, content-free OTLP

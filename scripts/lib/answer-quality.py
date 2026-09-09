@@ -86,10 +86,7 @@ def main(path: str) -> None:
         print("blocked")
         return
 
-    body = "\n".join(lines)
-    if len(body.encode("utf-8")) < 24:
-        print("empty")
-    elif all(line.endswith("?") for line in lines):
+    if all(line.endswith("?") for line in lines):
         print("thin")
     else:
         print("ok")

@@ -320,6 +320,83 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertTrue((self.repo / manifest['manifest_path']).is_file())
         self.assertTrue((self.repo / manifest['bundle_path']).is_file())
 
+    def test_context_preserves_project_contract_completeness(self) -> None:
+        project = self.repo / 'PROJECT.md'
+        for content in ('Project invariant.\n' * 2000, 'api_' + 'key: abc12345678901234567890\n'):
+            with self.subTest(size=len(content)):
+                project.write_text(content, encoding='utf-8')
+                manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=8192)
+                self.assertFalse(manifest['sufficient'])
+                self.assertIn('PROJECT.md', manifest['missing_required'])
+                self.assertLessEqual(manifest['selected_bytes'], 8192)
+        project.write_bytes(bytes([255]))
+        with self.assertRaises(CoreError):
+            context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=8192)
+        project.unlink()
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=8192)
+        self.assertTrue(manifest['sufficient'])
+        self.assertNotIn('PROJECT.md', manifest['missing_required'])
+
+    def test_context_includes_only_target_ancestor_rules_and_reports_debt(self) -> None:
+        root_rules = self.repo / 'AGENTS.md'
+        root_rules.write_text('Repository boundary.\n', encoding='utf-8')
+        rules = self.repo / 'scripts' / 'AGENTS.md'
+        rules.write_text('Scripts boundary.\n', encoding='utf-8')
+        unrelated = self.repo / 'unrelated'
+        unrelated.mkdir()
+        (unrelated / 'AGENTS.md').write_text('Unrelated boundary.\n', encoding='utf-8')
+        (self.repo / 'scripts' / 'README.md').write_text('Not automatic.\n', encoding='utf-8')
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py', 'scripts/sample.py'])
+        paths = [item['path'] for item in manifest['selected']]
+        self.assertTrue(manifest['sufficient'])
+        self.assertEqual(paths.count('AGENTS.md'), 1)
+        self.assertEqual(paths.count('scripts/AGENTS.md'), 1)
+        self.assertLess(paths.index('AGENTS.md'), paths.index('scripts/AGENTS.md'))
+        self.assertNotIn('unrelated/AGENTS.md', paths)
+        self.assertNotIn('scripts/README.md', paths)
+        for content in ('Boundary.\n' * 3000, 'api_' + 'key: abc12345678901234567890\n', bytes([255])):
+            with self.subTest(content_type=type(content).__name__, size=len(content)):
+                rules.write_bytes(content if isinstance(content, bytes) else content.encode('utf-8'))
+                manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=8192)
+                self.assertFalse(manifest['sufficient'])
+                self.assertIn('scripts/AGENTS.md', manifest['missing_required'])
+                self.assertLessEqual(manifest['selected_bytes'], 8192)
+        rules.unlink()
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py'])
+        self.assertTrue(manifest['sufficient'])
+        self.assertNotIn('scripts/AGENTS.md', manifest['missing_required'])
+        try:
+            rules.symlink_to(root_rules)
+        except OSError:
+            return  # Symlinks may be unavailable on Windows.
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py'])
+        self.assertFalse(manifest['sufficient'])
+        self.assertIn('scripts/AGENTS.md', manifest['missing_required'])
+        self.assertNotIn('scripts/AGENTS.md', [item['path'] for item in manifest['selected']])
+
+    def test_context_prioritizes_pins_without_reading_redirected_memory(self) -> None:
+        memory = self.repo / '.oms' / 'memory'
+        memory.mkdir()
+        pins = memory / 'pins.md'
+        pins.write_text('- Fixed project fact.\n', encoding='utf-8')
+        (memory / 'summary.md').write_text('Recent note.\n' * 1000, encoding='utf-8')
+        manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=8192)
+        paths = [row['path'] for row in manifest['selected']]
+        self.assertIn('.oms/memory/pins.md', paths)
+        self.assertLess(paths.index('PROJECT.md'), paths.index('.oms/memory/pins.md'))
+        self.assertLess(paths.index('.oms/memory/pins.md'), paths.index('.oms/memory/summary.md'))
+        self.assertLessEqual(manifest['selected_bytes'], 8192)
+        pins.write_text('api_' + 'key: abc12345678901234567890\n', encoding='utf-8')
+        manifest = context.plan_context(self.repo, max_bytes=8192)
+        self.assertNotIn('.oms/memory/pins.md', [row['path'] for row in manifest['selected']])
+        moved = self.repo.parent / 'outside-memory'
+        memory.rename(moved)
+        try:
+            memory.symlink_to(moved, target_is_directory=True)
+        except OSError:
+            return  # Native Windows may not grant symlink creation.
+        self.assertFalse(any('.oms/memory/' in str(row[0]) for row in context._default_layers(self.repo)))
+
     def test_context_accepts_several_direct_targets_each_required(self) -> None:
         (self.repo / 'notes.md').write_text('orientation notes\n', encoding='utf-8')
         manifest = context.plan_context(self.repo, targets=['scripts/sample.py', 'notes.md', 'scripts/sample.py'], max_bytes=32768)
@@ -358,10 +435,16 @@ class RuntimeFixture(RuntimeFixtureBase):
 
     def test_context_falls_back_when_graph_is_not_usable(self) -> None:
         from oms_graph.project import build
+        from oms_graph.project import context as graph_context
 
         state = build.state_dir(self.repo)
-        for failure in ('missing', 'stale', 'revision', 'invalid', 'excluded', 'dependency-excluded', 'included', 'unsafe', 'uncertain', 'parse-skip'):
+        (self.repo / 'guide.md').write_text('Entry point: scripts/sample.py\n')
+        (self.repo / 'fallback_only.py').write_text('hint = "calculate"\n')
+        for failure in ('missing', 'stale', 'revision', 'invalid', 'excluded', 'dependency-excluded', 'included', 'unsafe', 'uncertain', 'parse-skip', 'new-unparsed', 'binary', 'too-large'):
             with self.subTest(failure=failure):
+                for name in ('unparsed.c', 'new-unparsed.ts', 'asset.py'):
+                    if (self.repo / name).exists():
+                        (self.repo / name).unlink()
                 if failure != 'missing':
                     exclude = {'excluded': ('scripts/sample.py',), 'dependency-excluded': ('scripts/helper.py',)}.get(failure, ())
                     build.build(self.repo, exclude=exclude, include=('scripts/sample.py',) if failure == 'included' else ())
@@ -372,6 +455,11 @@ class RuntimeFixture(RuntimeFixtureBase):
                     (state / 'graph.json').write_text('{broken')
                 elif failure == 'parse-skip':
                     (self.repo / 'unparsed.c').write_text('int value = 1;\n')
+                    build.build(self.repo)
+                elif failure == 'new-unparsed':
+                    (self.repo / 'new-unparsed.ts').write_text('export const value = 1;\n')
+                elif failure in ('binary', 'too-large'):
+                    (self.repo / 'asset.py').write_bytes(b'\0' if failure == 'binary' else b'x' * (2 * 1024 * 1024 + 1))
                     build.build(self.repo)
                 elif failure in ('revision', 'unsafe', 'uncertain'):
                     graph = json.loads((state / 'graph.json').read_text())
@@ -384,11 +472,24 @@ class RuntimeFixture(RuntimeFixtureBase):
                             if edge['relation'] == 'imports':
                                 edge['confidence'] = 'AMBIGUOUS'
                     (state / 'graph.json').write_text(json.dumps(graph))
-                with patch.object(context, '_python_import_candidates', wraps=context._python_import_candidates) as fallback:
+                before = {str(path): path.read_bytes() for path in state.rglob('*') if path.is_file()}
+                with patch.object(context, '_python_import_candidates', wraps=context._python_import_candidates) as fallback, \
+                        patch.object(graph_context, 'select_context', wraps=graph_context.select_context) as select, \
+                        patch.object(build, 'build', side_effect=AssertionError('context cannot build a graph')):
                     manifest = context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=32768)
                 fallback.assert_called_once()
-                self.assertIn('scripts/helper.py', {row['path'] for row in manifest['selected']})
-                self.assertNotIn('../outside.py', {row['path'] for row in manifest['selected']})
+                selected = {row['path']: row['reason'] for row in manifest['selected']}
+                self.assertIn('scripts/helper.py', selected)
+                self.assertIn('fallback_only.py', selected)
+                self.assertNotIn('../outside.py', selected)
+                if failure in ('dependency-excluded', 'included', 'uncertain', 'parse-skip', 'new-unparsed', 'binary', 'too-large'):
+                    select.assert_called_once()
+                    if failure != 'included':
+                        self.assertTrue(selected.get('guide.md', '').startswith('project-graph '), selected)
+                else:
+                    select.assert_not_called()
+                    self.assertFalse(any(reason.startswith('project-graph ') for reason in selected.values()))
+                self.assertEqual(before, {str(path): path.read_bytes() for path in state.rglob('*') if path.is_file()})
 
     def test_path_lists_reject_parent_traversal_and_jsonl_fails_closed_on_truncation(self) -> None:
         self.assertEqual(parse_path_list(['./src', '../outside', 'tests/../secret', 'safe/**']), ['safe/**', 'src'])

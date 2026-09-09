@@ -787,6 +787,11 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
 
 
 def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> None:
+    if os.environ.get("OMS_TURN_GUARD_OFF") == "1":
+        return
+    budget_enabled = session_budget_enabled()
+    if max_blocks_per_turn() == 0 and not budget_enabled:
+        return
     repo = hook_repo(payload)
     if repo is None:
         return
@@ -795,9 +800,9 @@ def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> 
     # A read-only prompt must replace this session's prior guarded route, or a
     # release/task request remains armed and blocks unrelated later answers.
     # Do not adopt a new repository merely because somebody asked a question.
-    if not route["guard"] and not state_path.is_file():
+    if not route["guard"] and not budget_enabled and not state_path.is_file():
         return
-    if route["guard"]:
+    if route["guard"] or budget_enabled:
         hooks_dir = ensure_oms(repo)
         state_path = session_state_path(hooks_dir, payload)
     previous = load_state(state_path)
@@ -827,6 +832,10 @@ def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> 
         "stop_seq": previous.get("stop_seq", 0),
         "route_seq": route_seq if same_turn else route_seq + 1,
     }
+    if budget_enabled:
+        for key in ("started_at", "budget_turns", "budget_band"):
+            if key in previous:
+                state[key] = previous[key]
     write_json_atomic(state_path, state)
     append_event(
         repo,
@@ -1072,17 +1081,22 @@ def peer_advisory_hint(payload: dict[str, Any]) -> str | None:
     """Tell the incumbent session, once per neighbor, that it is not alone."""
     if os.environ.get("OMS_PEER_ADVISORY", "1") != "1":
         return None
+    if not (payload.get("session_id") or payload.get("sessionId")):
+        return None
     repo = hook_repo(payload)
     # Adopted repos only: the hook ledger is the evidence, and without .oms
     # there is nowhere to keep the once-per-neighbor latch.
     if repo is None or not (repo / ".oms").is_dir():
         return None
     events = repo / ".oms" / "hooks" / "events.jsonl"
-    if not events.is_file():
-        return None
     now = time.time()
     me = session_hash(payload)
-    peers = live_peer_sessions(events, me, now)
+    peers = live_peer_sessions(events, "", now)
+    last_seen = peers.pop(me, None)
+    # Prompt presence replaces per-tool telemetry and disabled guard routes.
+    # Reuse the bounded ledger scan instead of adding a heartbeat or state file.
+    if last_seen is None or now - last_seen >= 60:
+        append_event(repo, payload, action="presence", status="prompt")
     if not peers:
         return None
 
@@ -1225,6 +1239,11 @@ def cmd_route(args: argparse.Namespace) -> int:
     route_state(payload, prompt, route)
     auto_task_record(payload, prompt, route)
 
+    # Native skill catalogs already provide matching. Keep only state-aware
+    # collaboration/context hints by default; keyword suggestions are opt-in.
+    if os.environ.get("OMS_SKILL_HINTS") != "1":
+        return 0
+
     lower = prompt.strip().lower()
     scored: list[tuple[int, str]] = []
     for skill in load_skills(args.manifest):
@@ -1349,6 +1368,11 @@ def max_blocks_per_turn() -> int:
         return 0
 
 
+def session_budget_enabled() -> bool:
+    return any(env_int(name, 0) > 0 for name in (
+        "OMS_SESSION_BUDGET_TURNS", "OMS_SESSION_BUDGET_HOURS"))
+
+
 def assistant_message(payload: dict[str, Any]) -> str:
     for key in ("last_assistant_message", "lastAssistantMessage", "message"):
         value = payload.get(key)
@@ -1384,6 +1408,8 @@ def guard_turn_key(payload: dict[str, Any], state: dict[str, Any]) -> tuple[str,
 def cmd_guard(_: argparse.Namespace) -> int:
     if os.environ.get("OMS_TURN_GUARD_OFF") == "1":
         return 0
+    if max_blocks_per_turn() == 0 and not session_budget_enabled():
+        return 0
     payload, _ = load_payload()
     repo = hook_repo(payload)
     if is_harness_child():
@@ -1403,6 +1429,8 @@ def cmd_guard(_: argparse.Namespace) -> int:
         print(json.dumps({"decision": "block", "reason": budget}, ensure_ascii=False))
         return 0
 
+    if max_blocks_per_turn() == 0:
+        return 0
     dirty = git_dirty(repo)
     risk = str(state.get("risk") or "low")
     workflow = str(state.get("workflow") or "unknown")
@@ -1462,11 +1490,11 @@ def cmd_guard(_: argparse.Namespace) -> int:
 
 def session_budget_reason(repo: Path, payload: dict[str, Any], state: dict[str, Any],
                           state_path: Path) -> str | None:
-    """Count Stops and wall-clock per routed session; past the budget, block the
-    Stop once per further quarter so the model lands what is verified and hands
-    off instead of running until the context dies (user decision 2026-09-03)."""
-    turns_cap = env_int("OMS_SESSION_BUDGET_TURNS", 200, minimum=0)
-    hours_cap = env_int("OMS_SESSION_BUDGET_HOURS", 6, minimum=0)
+    """Enforce explicitly configured session caps, once per quarter-cap band."""
+    turns_cap = env_int("OMS_SESSION_BUDGET_TURNS", 0, minimum=0)
+    hours_cap = env_int("OMS_SESSION_BUDGET_HOURS", 0, minimum=0)
+    if not turns_cap and not hours_cap:
+        return None
     started = str(state.get("started_at") or "")
     try:
         began = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)

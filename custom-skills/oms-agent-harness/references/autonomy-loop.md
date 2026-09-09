@@ -54,6 +54,42 @@ resolved yourself.
 
 ## One-Task Plan Driver
 
+Before admitting an autopilot proposal, check task allocation as well as scope:
+each task should own one observable behavior and its required regression;
+dependencies must represent real ordering, and independent tasks should avoid
+overlapping writable paths. Keep architecture/security/scientific decisions in
+the parent until the resulting implementation task is bounded.
+
+Tasks may carry an optional reviewed `assignment`, for example
+`{"provider":"claude","workload":"routine"}` or
+`{"provider":"codex","model":"<exact cached model>"}`. The provider is the
+worker transport, not the parent: Claude Code can coordinate Codex, Codex can
+coordinate Claude, and Antigravity follows the same contract.
+
+An assignment owns the complete task route: required `provider`, optional
+`model`, `fallback_model`, `reasoning_effort` (default `auto`), and `workload`
+(`standard` or `routine`, default `standard`). Omitted model/fallback values
+are empty; another provider's run defaults never leak into this route.
+An absent or empty assignment preserves the existing run defaults
+(`--worker`, `--worker-model`, effort/fallback). Review assignments before
+admitting proposal bytes; exact replay checks them and retries retain them.
+No live assignment mutation or automatic provider failover is provided.
+
+`plan-from-spec --to` selects the planner; `--worker-provider` supplies the
+authorized worker transport for routine assignment suggestions. Autopilot
+passes its existing `--worker` value. Inspect cached capabilities before
+naming models; the planner must not invent models or provider authorization.
+For a manual plan, `agent-plan add --assignment '{"provider":"claude"}'`
+stores the same contract. Contract-bound plans still require reviewed proposals.
+Frozen executors remain a separate route: use an unassigned task with them.
+Unpinned catalog selection and bounded recovery follow model-routing.md; the
+stored request is not proof that every call serves an identical model.
+`plan-run` is one-shot and serial in goal-drive. Standalone interactive sessions
+are for parent-driven clarification, not a way around plan leases or admission.
+Scope, dependencies, regression ownership and parent review remain unchanged;
+model allocation does not grant workers delegation, installation or publication
+authority. Mixed-risk work must not all be sent to the cheapest model.
+
 For an existing plan task with non-empty scope and verification:
 
 ```bash
@@ -114,8 +150,12 @@ the proposal's sha256 plus a shell-safe continuation containing every effective
 option. The second accepts only a regular non-symlink proposal of at most 1 MiB,
 requires that digest back, atomically applies only matching bytes, drives the
 existing loop, permits at most
-one `r1-` remainder proposal, re-runs acceptance, and uses a different-family
-semantic review. Draft PR publication defaults to a blocking gate; use
+one `r1-` remainder proposal, re-runs acceptance, and uses a separate semantic
+reviewer. Gate mode refuses a reviewer that authored any completed task;
+shadow mode reports that overlap. Different transports alone do not establish
+model-family independence, especially with multi-model carriers. Review actual
+model provenance before claiming independent judgment.
+Draft PR publication defaults to a blocking gate; use
 `--review-mode shadow` only as an explicit advisory choice.
 `--draft-pr` is the only built-in remote-write path: an immutable local intent
 creates a new branch and Draft PR and can be replayed after interruption. It has

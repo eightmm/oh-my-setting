@@ -568,6 +568,12 @@ matching exactly this skeleton:
 - Scope: <one line: repo-relative path prefixes the work may touch>
 - Non-goals: <one line: what this explicitly does not do>
 
+## Decisions
+
+- Rationale/invariants: <why this matters and behavior to preserve; unresolved choices go in Open decisions>
+- Alternatives ruled out: <evidence-backed rejected approaches, or none>
+- References (repo-relative paths/sections): <existing task-relevant design or intent documents, or none; do not invent paths>
+
 ## Commands
 
 - Test: <how this repository runs its tests>

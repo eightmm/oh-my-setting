@@ -80,11 +80,12 @@ oms checkpoint restore <id>          # dry-run
 oms checkpoint restore <id> --apply
 ```
 
-The skill router emits hints and records guarded routes. Disable it with
-`OMS_SKILL_ROUTER_OFF=1`. Stop-hook answer-format blocking is off by default;
-`OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1` opts in. Session budgets and journal
-capture remain active. `OMS_TURN_GUARD_OFF=1` also bypasses session budgets;
-it is not needed merely to stop verification-label nags.
+The router keeps state-aware collaboration hints; generic keyword skill hints
+require `OMS_SKILL_HINTS=1`. `OMS_SKILL_ROUTER_OFF=1` disables routing.
+Guard state, Stop answer-format blocking and session budgets are off by default.
+Positive `OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN`, `OMS_SESSION_BUDGET_TURNS`, or
+`OMS_SESSION_BUDGET_HOURS` enables only the requested limit.
+`OMS_TURN_GUARD_OFF=1` bypasses both guards, not journal finalization.
 
 ## Concurrent collaboration
 

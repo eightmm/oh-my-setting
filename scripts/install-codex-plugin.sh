@@ -311,3 +311,30 @@ else
 fi
 
 configure_hud install
+
+# Native plugin hooks and user hooks are both loaded by stable-hook clients.
+# Only migrate a bridge when the replacement is installed, enabled and current.
+# Ordinary installations without a user hook file pay no extra provider probes.
+legacy_hooks="$CODEX_HOME_DIR/hooks.json"
+if [ -e "$legacy_hooks" ] || [ -L "$legacy_hooks" ]; then
+  bridge_probe=0
+  python3 "$ROOT/scripts/lib/codex-hook-bridge.py" --hooks "$legacy_hooks" \
+    --source-root "$ROOT" --probe || bridge_probe=$?
+  if [ "$bridge_probe" -eq 1 ]; then
+    : # No exact OMS bridge entries: preserve user hooks without native probes.
+  elif [ "$bridge_probe" -ne 0 ]; then
+    echo "warning: Codex legacy hook migration skipped; user hook file was preserved" >&2
+  elif plugin_cache_is_current &&
+     provider_cmd codex features list 2>/dev/null |
+       awk '$1 == "hooks" && $2 == "stable" && $3 == "true" { found=1 } END { exit(found ? 0 : 1) }'; then
+    bridge_args=(--hooks "$legacy_hooks" --source-root "$ROOT"
+      --native-root "$PLUGIN_CACHE" --plugin-id "$PLUGIN_NAME@$MARKETPLACE_NAME")
+    [ "$DRY_RUN" != 1 ] || bridge_args+=(--dry-run)
+    if ! provider_cmd codex plugin list --json |
+        python3 "$ROOT/scripts/lib/codex-hook-bridge.py" "${bridge_args[@]}"; then
+      echo "warning: Codex legacy hook migration was not completed; existing hooks were preserved" >&2
+    fi
+  else
+    echo "codex-hook-bridge: preserved; current native hook support is unverified"
+  fi
+fi

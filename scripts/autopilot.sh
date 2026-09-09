@@ -144,7 +144,7 @@ Options:
   --worker-timeout DUR    Worker override for --provider-timeout.
   --reviewer-timeout DUR  Reviewer override for --provider-timeout.
   --planner-model MODEL   Exact planner model.
-  --worker-model MODEL    Exact implementation model.
+  --worker-model MODEL    Exact default model for tasks without an assignment.
   --reviewer-model MODEL  Exact semantic-review model.
   --planner-fallback-model MODEL
   --worker-fallback-model MODEL
@@ -1222,7 +1222,8 @@ propose_tasks() {  # PREFIX MAX
   outer_receipt_prepare_new || fail "cannot archive the completed outer receipt"
   outer_receipt_write proposing >/dev/null ||
     fail "cannot bind this planning call to the durable outer receipt"
-  args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED")
+  args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED"
+    --worker-provider "$WORKER")
   [ -z "$prefix" ] || args+=(--id-prefix "$prefix")
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || args+=(--allow-verifier-change)
   [ -z "$PLANNER_MODEL" ] || args+=(--model "$PLANNER_MODEL")
@@ -1752,14 +1753,33 @@ review_evidence="mode=off outcome=skipped reviewer=none"
 outer_receipt_write reviewing >/dev/null ||
   park "outer-receipt-write-failed" "inspect oms autopilot --repo . status"
 if [ "$REVIEW_MODE" != off ]; then
+  review_writers="$(python3 - "$PLAN_FILE" "$WORKER" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    tasks=json.load(handle).get("tasks", {})
+writers={task.get("provider") or task.get("assignment", {}).get("provider", sys.argv[2])
+         for task in tasks.values() if task.get("state") == "done"}
+print(",".join(sorted(writers or {sys.argv[2]})))
+PY
+)" || park "review-authorship-unreadable" "inspect the completed task receipts"
+  review_writers="${review_writers//$'\r'/}"
+  case ",$review_writers," in
+    *",$REVIEWER,"*)
+      if [ "$REVIEW_MODE" = gate ]; then
+        park "reviewer-authored-task" "the selected reviewer implemented a completed task; parent review needs another authorized reviewer"
+      fi
+      echo "warning: reviewer authored part of this change; shadow review is not independent" >&2
+      ;;
+  esac
   review_out="$(autopilot_mktemp)" || fail "mktemp failed"
   review_args=(--repo "$REPO" --base "$review_base_sha" \
-    --providers "$REVIEWER" --writer "$WORKER" --gate --verify "$accept_cmd")
+    --providers "$REVIEWER" --gate --verify "$accept_cmd")
+  case "$review_writers" in *,*) ;; *) review_args+=(--writer "$review_writers") ;; esac
   [ -z "$REVIEWER_MODEL" ] || review_args+=(--model "$REVIEWER_MODEL")
   [ -z "$REVIEWER_FALLBACK_MODEL" ] ||
     review_args+=(--fallback-model "$REVIEWER_FALLBACK_MODEL")
   review_args+=(--reasoning-effort "$REVIEWER_REASONING_EFFORT" \
-    --prompt "Review whether the confirmed PROJECT.md goal and every explicit success criterion are satisfied by this whole change. Treat ambiguity as a finding; do not widen scope." \
+    --prompt "Review whether the confirmed PROJECT.md goal and every explicit success criterion are satisfied by this whole change. Implementation transports: $review_writers. Transport difference alone does not establish model-family independence. Treat ambiguity as a finding; do not widen scope." \
   )
   OMS_PEER_TIMEOUT="$REVIEWER_TIMEOUT" \
     run_phase peer-review "$REVIEWER_PHASE_WALL" \
@@ -1773,7 +1793,7 @@ if [ "$REVIEW_MODE" != off ]; then
   rm -f "$review_out"
   if [ "$review_rc" -eq 0 ]; then
     echo "autopilot: semantic review: pass"
-    review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER"
+    review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER writers=$review_writers family-independence=not-verified"
   elif [ "$REVIEW_MODE" = shadow ]; then
     if [ "$review_rc" -eq 1 ]; then
       echo "autopilot: semantic review: advisory fail"

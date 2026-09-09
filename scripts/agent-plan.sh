@@ -52,6 +52,7 @@ FORBIDDEN=""
 VERIFY=""
 ACCEPT=""
 ROLE=""
+ASSIGNMENT="{}"
 STATE_FILTER=""
 CLAIM=0
 REFREEZE_ACCEPTANCE=0
@@ -108,6 +109,7 @@ Commands:
                                      the plan lock. Exact replay is idempotent.
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
+         [--assignment '{"provider":"claude","workload":"routine"}']
          [--verify CMD] [--role NAME]
   claim  --id ID --provider NAME [--ttl TEXT]   Claim a ready task for a worker.
   start  --id ID [--lease-id TOKEN]  Mark a claimed task running.
@@ -250,6 +252,7 @@ while [ "$#" -gt 0 ]; do
       EXPECTED_LANDING_RECEIPT_SHA256_SET=1
       shift 2
       ;;
+    --assignment) [ "$#" -ge 2 ] || fail "--assignment requires JSON"; ASSIGNMENT="$2"; shift 2 ;;
     --depends) [ "$#" -ge 2 ] || fail "--depends requires list"; DEPENDS="$2"; shift 2 ;;
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires list"; ALLOWED="$2"; shift 2 ;;
     --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
@@ -482,6 +485,7 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_CHECK_ONLY="$CHECK_ONLY" OMS_APPLY="$APPLY" \
   OMS_DISPOSITION="$DISPOSITION" OMS_RETIRE_PHASE="$RETIRE_PHASE"
 export OMS_AUTOPILOT_OWNER_ID="$OWNER_ID" OMS_PLAN_MARKERS_DIR="$PY_MARKERS_DIR"
+export OMS_TASK_ASSIGNMENT="$ASSIGNMENT"
 
 plan_run() {
 python3 - "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
@@ -489,7 +493,7 @@ python3 - "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
   "$ROOT/scripts/lib/process_liveness.py" \
   "$ROOT/scripts/lib/plan-retire.py" \
   "$ROOT/scripts/lib/path_scope.py" \
-  "$ROOT/scripts/lib/project-state.py" <<'PY'
+  "$ROOT/scripts/lib/project-state.py" "$ROOT/scripts/lib/task-assignment.py" <<'PY'
 import datetime, hashlib, json, math, os, re, runpy, secrets, stat, subprocess, sys, tempfile, unicodedata
 
 SCHEMA = 3
@@ -505,6 +509,7 @@ persisted_native_pid_is_proven = process_liveness[
 ]
 within_envelope = runpy.run_path(sys.argv[6])["within_envelope"]
 project_state_snapshot = runpy.run_path(sys.argv[7])["snapshot"]
+validate_assignment = runpy.run_path(sys.argv[8])["validate"]
 def env(k): return os.environ.get(k, "")
 
 STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
@@ -526,6 +531,10 @@ def load():
     if "plan_id" in d and not PLAN_ID_RE.fullmatch(str(d.get("plan_id", ""))):
         die("plan_id is malformed; refusing to replace immutable lineage")
     for task in d["tasks"].values():
+        try:
+            validate_assignment(task.get("assignment", {}))
+        except ValueError as exc:
+            die(str(exc))
         task.setdefault("lease_epoch", 0)
         task.setdefault("lease_id", "")
         task.setdefault("repair_count", 0)
@@ -907,6 +916,8 @@ def brief_text(t):
     if t.get("forbidden_paths"):
         lines.append("forbidden_paths: %s" % ", ".join(t["forbidden_paths"]))
     lines.append("verify: %s" % (t.get("verify") or "(none)"))
+    if t.get("assignment"):
+        lines.append("assignment: %s" % json.dumps(t["assignment"], sort_keys=True))
     if t.get("role"):
         lines.append("role: %s" % t["role"])
     return "\n".join(lines)
@@ -1077,8 +1088,12 @@ if act == "apply-proposal":
     for index, raw in enumerate(raw_tasks):
         if not isinstance(raw, dict):
             die("proposal task %d must be an object" % index)
-        if set(raw) != {"id", "title", "allowed", "verify", "depends"}:
+        if set(raw) - {"assignment"} != {"id", "title", "allowed", "verify", "depends"}:
             die("proposal task %d fields do not match the exact reviewed schema" % index)
+        try:
+            assignment = validate_assignment(raw.get("assignment", {}))
+        except ValueError as exc:
+            die(str(exc))
         task_id = raw.get("id")
         title = raw.get("title")
         verify = raw.get("verify")
@@ -1132,7 +1147,7 @@ if act == "apply-proposal":
         prepared.append({
             "id": task_id, "title": title.strip(), "depends": list(depends),
             "allowed_paths": cleaned_allowed, "forbidden_paths": cleaned_forbidden,
-            "verify": verify, "role": role,
+            "verify": verify, "role": role, "assignment": assignment,
         })
         seen.append(task_id)
 
@@ -1152,6 +1167,8 @@ if act == "apply-proposal":
             die("proposal is partially present; refusing a non-atomic recovery")
         for item in prepared:
             current = tasks[item["id"]]
+            if current.get("assignment", {}) != item["assignment"]:
+                die("existing task %s assignment does not match the reviewed proposal" % item["id"])
             if any(current.get(name, "" if name in ("verify", "role") else []) != item[name]
                    for name in immutable):
                 die("existing task %s does not match the reviewed proposal" % item["id"])
@@ -1237,7 +1254,7 @@ if act == "apply-proposal":
             "id": task_id, "title": item["title"], "state": "ready",
             "depends": item["depends"], "allowed_paths": item["allowed_paths"],
             "forbidden_paths": item["forbidden_paths"], "verify": item["verify"],
-            "role": item["role"], "provider": "", "ttl": "", "artifact": "",
+            "role": item["role"], "assignment": item["assignment"], "provider": "", "ttl": "", "artifact": "",
             "patch": "", "reason": "", "executor_id": "",
             "executor_soul_sha256": "", "lease_epoch": 0, "lease_id": "",
             "autopilot_owner_id": "",
@@ -1249,6 +1266,10 @@ if act == "apply-proposal":
     sys.exit(0)
 
 if act == "add":
+    try:
+        assignment = validate_assignment(json.loads(env("OMS_TASK_ASSIGNMENT")))
+    except (ValueError, TypeError) as exc:
+        die(str(exc))
     i = require_id(); title = env("OMS_TITLE")
     if not title: die("--title is required for add")
     reject_controls(title, "task title")
@@ -1266,7 +1287,7 @@ if act == "add":
         "allowed_paths": split_list(env("OMS_ALLOWED")),
         "forbidden_paths": split_list(env("OMS_FORBIDDEN")),
         "verify": env("OMS_VERIFY"),
-        "role": env("OMS_ROLE"),
+        "role": env("OMS_ROLE"), "assignment": assignment,
         "provider": "", "ttl": "", "artifact": "", "patch": "", "reason": "",
         "executor_id": "", "executor_soul_sha256": "",
         "autopilot_owner_id": "",
@@ -1292,7 +1313,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         t["claimed_at"] = ts
     elif act == "claim":
         require_project_contract_authority()
-        prov = env("OMS_PROVIDER")
+        prov = t.get("assignment", {}).get("provider", env("OMS_PROVIDER"))
         if not prov: die("--provider is required for claim")
         # Only a ready task can be claimed; a blocked task must be reopened first.
         if t["state"] != "ready":
@@ -1684,7 +1705,7 @@ if act == "next":
             "re-claiming under a new lease" if env("OMS_CLAIM") == "1"
             else "offered as claimable"))
     if env("OMS_CLAIM") == "1":
-        prov = env("OMS_PROVIDER")
+        prov = t.get("assignment", {}).get("provider", env("OMS_PROVIDER"))
         if not prov:
             die("--claim requires --provider")
         # A fresh lease is the fence: whatever the previous holder does next

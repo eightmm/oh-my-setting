@@ -31,11 +31,17 @@ Antigravity만 쓰는 `core` profile에는 Node가 필요 없다.
 세 개 전부, 연구 도구, 클러스터 도구는 기본 필수 의존성이 아니다. 예전의
 all-provider/GitHub/Notion/research 구성이 필요한 머신에서만 `full` 호환
 profile을 사용한다. root 권한은 필요 없다. 관리 도구 버전·플랫폼 URL·무결성
-값은 `tools.lock.json`에 고정된다. provider 의존성도 함께 선택되므로 Codex와
+값 중 bootstrap 도구는 `tools.lock.json`에 고정된다. Codex·Claude·agy는 설치와
+업데이트 시 공식 최신 안정 버전을 조회하고 해당 checksum으로 검증한다.
+예약 apply는 OMS 커밋이 같아도 이미 설치된 provider를 갱신한다. `--no-tools`는
+수동 OMS 업데이트에서 도구 갱신을 생략한다. 명시적 `OH_MY_SETTING_TOOL_LOCK`만
+재현 가능한 버전 고정을 유지한다. provider 의존성도 함께 선택되므로 Codex와
 Claude에는 locked Node가 포함되고 Antigravity에는 포함되지 않는다. 새 다운로드는
 사용 전에 검증된다. 이미 있는 외부 CLI는 정확한 버전이면 재사용하고 doctor가
 version-only로 표시한다. install/update/repair/uninstall은 사용자 단위 lifecycle
-lock 하나를 공유한다.
+lock 하나를 공유한다. 인식 가능한 standalone Codex는 자체 updater와 launcher를
+유지하며 npm 설치로 바꾸지 않는다. 이 경로는 결과 버전을 검사하며 OMS가 직접
+payload digest를 검증했다고 표시하지 않는다.
 
 설치와 예약 자동업데이트는 `tools.lock.json`에 고정된 전용 uv Python을 쓴다.
 시스템·프로젝트 Python은 초기 bootstrap에만 사용하며 타이머 실행에는 쓰지 않는다.
@@ -115,8 +121,8 @@ plan lease, executor soul, one-use approval, commit intent, Draft PR intent가
 계속 권위 경계다. runtime snapshot·capsule·context bundle·backend receipt는
 증거나 advisory state일 뿐 write authority가 아니다.
 
-간결한 agent 표면은 `oms list --frontdoor`, 기존 전체 명령은
-`oms list --all`에서 볼 수 있다.
+간결한 기본 명령 목록은 `oms list`, 상세 core 명령은 `oms list --all`에서
+볼 수 있다.
 
 ## 이렇게 말하면 된다
 
@@ -142,7 +148,7 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 ## 구성 요소
 
 전부 agent가 필요할 때 알아서 집어 쓴다. 간결한 agent catalog는
-`oms list --frontdoor`, 기존 호환 명령 전체는 `oms list --all`, 상세 문서는
+`oms list`, 상세 core 명령은 `oms list --all`, 상세 문서는
 [docs/COMPONENTS.md](docs/COMPONENTS.md)다.
 
 - **Typed semantic runtime** — effective TaskEnvelope projection,
@@ -176,8 +182,8 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   답은 완성된 것처럼 읽히는 대신 fail-closed로 떨어진다
 - **운영과 실행 경계** — 영속 attempt 이벤트와 child-attempt 재개, 제한된
   supervisor, 한 번만 쓰는 승인, `trusted-local`/`isolated`/`remote` preflight와
-  실제 실행 backend, 선택적 Herdr 제어와 VS Code·Stably Orca·Codex 열기,
-  읽기 전용 cockpit, 로컬 OTLP JSONL, advisory semantic 평가, 기본 원격 쓰기
+  실제 실행 backend, VS Code·Stably Orca·Codex 열기,
+  읽기 전용 cockpit, 로컬 OTLP JSONL, 기본 원격 쓰기
   경로가 새 브랜치와 Draft PR 생성뿐인 제한 코딩 루프
 - **유지보수** — 롤백 가능한 트랜잭션 업데이트, stable/edge channel projection,
   doctor, 하나의 전체 검증 게이트와 보호 브랜치용 빠른 pre-push 모드;

@@ -2,7 +2,8 @@
 
 The pack is orientation metadata a parent hands to a delegated worker: it says
 where to look, never what may be written. Nothing here widens a task's
-allowed_paths, writes OMS state, or reads the named source files.
+allowed_paths. Validation never reads named sources; automatic preparation
+builds only a private, disposable graph of the detached worker snapshot.
 """
 
 from __future__ import annotations
@@ -170,8 +171,53 @@ def validate_context_pack(path: Path, repo: Path, *, max_bytes: int = MAX_PACK_B
     }
 
 
+def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> Dict[str, Any]:
+    from oms_runtime.context import _safe_repo_file
+    from oms_runtime.common import atomic_write_bytes, ensure_private_dir, read_bytes, run_output
+    from oms_graph.project import build
+    from oms_graph.project.context import context_pack
+
+    if os.environ.get("OMS_HARNESS_CHILD") == "1":
+        raise CoreError("automatic context preparation is parent-only")
+    default_state = state == build.state_dir(repo)
+    if default_state and run_output(['git', '-C', str(repo), 'ls-files', '--', '.oms/project-graph']):
+        raise CoreError("automatic graph cache must not contain tracked files")
+    # Do not refresh a shared parent graph from a detached tree: parallel
+    # viewers/delegates could otherwise mix graph and manifest generations.
+    state = ensure_private_dir(state)
+    # Warm copies skip build(), which normally installs the ignore marker.
+    build._ensure_state_marker(repo, state)
+    if default_state and not run_output(['git', '-C', str(repo), 'check-ignore', '--', '.oms/project-graph/']):
+        raise CoreError("automatic graph cache must be Git-ignored")
+    try:
+        source = parent / ".oms" / "project-graph"
+        graph_bytes = read_bytes(_safe_repo_file(parent, str(source / "graph.json")), build.GRAPH_BYTES_LIMIT)
+        manifest_bytes = read_bytes(_safe_repo_file(parent, str(source / "manifest.json")))
+        graph, manifest = json.loads(graph_bytes), json.loads(manifest_bytes)
+        coherent = (isinstance(graph, dict) and isinstance(manifest, dict)
+                    and bool(graph.get("revision"))
+                    and graph.get("revision") == manifest.get("revision")
+                    and graph.get("schema") == manifest.get("schema"))
+    except (CoreError, OSError, ValueError):
+        coherent = False
+    if coherent:
+        atomic_write_bytes(state / "graph.json", graph_bytes)
+        atomic_write_bytes(state / "manifest.json", manifest_bytes)
+    build.ensure(repo, state=state)
+    return context_pack(repo, build.load_graph(repo, state=state), task=task[:2000], max_files=8, state=state)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 5 and args[0] == "--auto":
+        try:
+            pack = automatic_context_pack(Path(args[1]), Path(args[2]), Path(args[3]), args[4])
+        except (CoreError, OSError, ValueError, TypeError, KeyError):
+            print("automatic graph context unavailable", file=sys.stderr)
+            return 2
+        json.dump(pack, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 0
     repo = ""
     target = ""
     while args:
