@@ -55,6 +55,10 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 
+# All package payloads below are local fixtures, not a live registry mirror.
+# Exercise the explicit reproducible-install contract throughout this suite.
+export OH_MY_SETTING_TOOL_LOCK="$upstream/tools.lock.json"
+
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
@@ -378,7 +382,7 @@ grep -Fq 'OMS_AUTO_UPDATE_MANAGED=1' "$TMP/autoupdate.cron" &&
   fail "default auto-update trigger must use the OMS Python runtime in apply mode"
 [ ! -e "$HOME/.config/systemd/user/oh-my-setting-autoupdate.timer" ] ||
   fail "forced cron method still wrote a systemd unit"
-oms list > "$TMP/oms-tools.txt"
+oms list --all > "$TMP/oms-tools.txt"
 grep -Fq plan-run "$TMP/oms-tools.txt" || fail "dispatcher omitted plan-run"
 grep -Fq model-doctor "$TMP/oms-tools.txt" || fail "dispatcher omitted model-doctor"
 grep -Fq journal "$TMP/oms-tools.txt" || fail "dispatcher omitted journal"

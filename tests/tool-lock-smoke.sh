@@ -45,7 +45,17 @@ EOF
   verify_resolved_npm_binary codex || fail "native version verification failed"
   [ -L "$TMP/native-path/codex" ] || fail "native launcher was replaced"
   eval "$(sed -n '/^check_locked_npm_version()/,/^}/p' "$ROOT/scripts/doctor.sh")"
-  provider_lock_path() { printf '%s\n' "$LOCK"; }
+  eval "$(sed -n '/^provider_lock_path()/,/^}/p' "$ROOT/scripts/doctor.sh")"
+  export HOME="$TMP/native-doctor-home"
+  # shellcheck disable=SC2034 # Consumed by the doctor function loaded above.
+  INSTALL_ROOT="$ROOT"
+  [ "$(provider_lock_path)" = "$LOCK" ] || fail "doctor lost bootstrap fallback"
+  snapshot="$HOME/.local/share/oh-my-setting/provider-tools.lock.json"
+  mkdir -p "$(dirname "$snapshot")"
+  cp "$LOCK" "$snapshot"
+  [ "$(provider_lock_path)" = "$snapshot" ] || fail "doctor ignored provider snapshot"
+  [ "$(OH_MY_SETTING_TOOL_LOCK="$LOCK" provider_lock_path)" = "$LOCK" ] ||
+    fail "doctor ignored explicit pin over snapshot"
   tool_lock_value() { tool_lock_get "$1"; }
   command_has_locked_version() { command_has_version "$@"; }
   report_tool_drift() { printf 'native-drift: %s\n' "$*"; }
