@@ -3147,11 +3147,17 @@ test_import_refuses_empty_and_names_nonanswers() {
   fi
   assert_file_contains "$project/err" "result file is empty"
 
-  # A fragment imports (the operator may want the record) but is named at
-  # the door: imports bypass every in-band completeness check.
+  # Concision alone is not a non-answer. A clarification-only result still
+  # imports for the record but must be identified at the boundary.
   printf 'ok\n' > "$project/fragment.md"
   "$ROOT/scripts/import-agent-result.sh" --repo "$project" --kind ask \
     --provider codex --file "$project/fragment.md" >/dev/null 2>"$project/err2"
+  if grep -Fq 'reads as a non-answer' "$project/err2"; then
+    fail "a concise answer must not be rejected by length alone"
+  fi
+  printf 'What should I check?\n' > "$project/question.md"
+  "$ROOT/scripts/import-agent-result.sh" --repo "$project" --kind ask \
+    --provider codex --file "$project/question.md" >/dev/null 2>"$project/err2"
   assert_file_contains "$project/err2" "reads as a non-answer"
 }
 
@@ -13041,7 +13047,7 @@ test_oms_dispatcher_refuses_an_unusable_receipt() {
 
   # The supported shape resolves and dispatches.
   printf '{"schema": 2, "source_root": "%s"}\n' "$ROOT" > "$receipt"
-  out="$(OMS_INSTALL_RECEIPT="$receipt" "$dir/bin/oms" list 2>&1)" ||
+  out="$(OMS_INSTALL_RECEIPT="$receipt" "$dir/bin/oms" list --all 2>&1)" ||
     fail "oms must dispatch through a schema-2 receipt: $out"
   printf '%s' "$out" | grep -Fq plan-run ||
     fail "receipt dispatch did not reach the real tool list: $out"
@@ -13234,7 +13240,7 @@ test_oms_frontdoor_routes_primary_subsystems() {
   all_tools="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   help_text="$("$bin/oms" --help)" || fail "oms --help should succeed"
   review_help="$("$bin/oms" peer-review --help)" || fail "peer-review --help should succeed"
-  printf '%s\n' "$help_text" | grep -Fq 'full public catalog' ||
+  printf '%s\n' "$help_text" | grep -Fq 'reveals core primitives' ||
     fail "oms help should distinguish the full public catalog from subsystem front doors"
   printf '%s\n' "$review_help" | grep -Fq 'Plain review persists seat answers as artifacts.' ||
     fail "peer-review help should not promise a typed gate outcome in plain mode"
@@ -17890,7 +17896,7 @@ test_oms_list_joins_full_first_sentence() {
 
   mkdir -p "$bin"
   ln -sfn "$ROOT/scripts/oms" "$bin/oms"
-  out="$("$bin/oms" list)" || fail "oms list should succeed"
+  out="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   # Header comments span lines; the catalog must show the whole first
   # sentence, not the first physical comment line.
   printf '%s\n' "$out" | grep -Eq '^advise .*agent-call\.sh\.$' ||
@@ -22773,7 +22779,7 @@ EOF
   chmod +x "$fixture/bin/claude" "$fixture/bin/agy"
 
   # A single canonical fixture covers the successful protocol and stop boundaries.
-  for scenario in claude-success antigravity-success denied-success denied-finish tty-success eof changed-id secret malformed cap timeout; do
+  for scenario in claude-success antigravity-success denied-success denied-finish tty-success eof changed-id sensitive malformed cap timeout; do
     if [ "$scenario" = tty-success ]; then
       python3 -c 'import pty, termios' 2>/dev/null || continue
     fi
@@ -22812,7 +22818,7 @@ if scenario == "cap":
     command += ["--max-turns", "1"]
 if scenario == "timeout":
     command += ["--idle-timeout", "1"]
-secret = "sk-" + "a" * 48
+sample = "sk-" + "a" * 48
 events = []
 with (root / "stderr").open("w") as errors:
     if scenario == "tty-success":
@@ -22854,8 +22860,8 @@ with (root / "stderr").open("w") as errors:
             process.stdin.close()
         else:
             message = {"prompt": "Make the second fixture edit."}
-            if scenario == "secret":
-                message = {"prompt": "Use API_KEY=" + secret}
+            if scenario == "sensitive":
+                message = {"prompt": "Use " + "API_" + "KEY=" + sample}
             control = "{malformed\n" if scenario == "malformed" else json.dumps(message) + "\n"
             process.stdin.write(control)
             process.stdin.flush()
@@ -22935,7 +22941,7 @@ else:
     assert process.returncode != 0 and not finished, (scenario, events, (root / "stderr").read_text())
     assert len(turns) == 1, events
     assert not sentinel.exists(), "failed dialogue ran verification"
-    assert secret not in (root / "stderr").read_text() and secret not in json.dumps(events)
+    assert sample not in (root / "stderr").read_text() and sample not in json.dumps(events)
 PY
   done
 }

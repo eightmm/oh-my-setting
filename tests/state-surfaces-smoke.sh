@@ -1465,12 +1465,12 @@ test_router_skips_conditional_skill_without_command() {
   chmod +x "$stub/sinfo"
   payload='{"prompt":"sbatch로 잡 제출하고 squeue 봐줘","session_id":"s","turn_id":"t"}'
 
-  out="$(printf '%s' "$payload" | PATH="$stub:$toolbox" \
+  out="$(printf '%s' "$payload" | OMS_SKILL_HINTS=1 PATH="$stub:$toolbox" \
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "oms-slurm" ||
     fail "router should suggest oms-slurm when sinfo exists: $out"
 
-  out="$(printf '%s' "$payload" | PATH="$toolbox" \
+  out="$(printf '%s' "$payload" | OMS_SKILL_HINTS=1 PATH="$toolbox" \
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
   if printf '%s' "$out" | grep -Fq "oms-slurm"; then
     fail "router must not suggest oms-slurm without sinfo: $out"

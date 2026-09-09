@@ -8,12 +8,12 @@ description: >
 
 # Agent Harness
 
-The top-level parent owns scope, admission, verification, commit, push, release,
-and synthesis, regardless of whether it is Codex, Claude Code, or another agent.
-If you are its worker, return evidence and a patch; do not become another parent.
-OMS is an agent-side control plane. Users give goals, constraints, and material
-authority; operate it internally. Never ask users to copy commands, digests,
-`.oms` paths, or recovery procedures. Ask only for a shaping decision or new authority.
+OMS is an agent-side control plane.
+The parent owns scope, admission, verification, commit, push, release, and
+synthesis across providers. Workers return evidence and patches.
+Operate OMS internally. Users give goals, constraints, and authority.
+Never ask users to copy commands, digests, `.oms` paths, or recovery procedures.
+Ask only for material decisions or new authority.
 
 For coding, read `PROJECT.md` when present. When unresolved spec choices affect
 the requested change, route internally through `oms-spec-interview`;
