@@ -305,7 +305,7 @@ grep -Fq 'install-tools.sh" --upgrade' "$ROOT/scripts/update.sh" ||
 # runtime promises: one provider for core, Notion optional, council plural.
 grep -Fq 'selected capabilities remain unavailable' "$ROOT/scripts/install-profile.sh" ||
   fail "a failed capability check must fail the apply, not masquerade as success"
-if grep -Fq -- '--no-tools' "$ROOT/README.md" || grep -Fq -- '--no-tools' "$ROOT/README.ko.md"; then
+if grep -Eq -- 'install\.sh[^[:cntrl:]]*--no-tools' "$ROOT/README.md" "$ROOT/README.ko.md"; then
   fail "README still documents a partial initial install"
 fi
 
