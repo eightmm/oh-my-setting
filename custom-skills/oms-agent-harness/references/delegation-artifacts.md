@@ -14,9 +14,10 @@ When using the `agent-run` wrapper intentionally, pass `--mode read` or
 
 ## Allocate an ordinary request
 
-The parent interprets the user's intent; a keyword hook must not launch paid
-workers or turn an explanation request into a write task. Inspect relevant
-source first, then select the smallest useful execution path:
+Work locally unless the user or applicable instructions explicitly request
+delegation. The paths below describe authorized delegation, not permission to
+launch workers. A keyword hook must not launch paid workers or turn an
+explanation request into a write task. Inspect relevant source first:
 
 - Answer, status, diagnosis, or review: keep read-only authority. Ask an
   independent peer only when its judgment can change the decision.

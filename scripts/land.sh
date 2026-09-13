@@ -291,11 +291,12 @@ run_job() {
   git push --no-verify "$REMOTE" "HEAD:refs/heads/$TARGET" >> "$LOG" 2>&1 || rc=$?
   rset push.rc="$rc"
   [ "$rc" -eq 0 ] || { finish failed "push exit $rc"; return 1; }
-  local install
+  local install update_rc=0
   if [ "$UPDATE" -eq 1 ] && install="$(install_root)"; then
     rc=0
     "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
     rset update.rc="$rc"
+    update_rc="$rc"
   else
     rset update.rc=skipped
   fi
@@ -315,6 +316,10 @@ run_job() {
     rset ci.run_id="${run_id:-}" ci.conclusion="$conclusion"
   else
     rset ci.conclusion=skipped
+  fi
+  if [ "$update_rc" -ne 0 ]; then
+    finish failed "pushed $SHORT but install update exit $update_rc; ci $conclusion"
+    return 1
   fi
   case "$conclusion" in
     success|skipped) finish passed "pushed $SHORT to $REMOTE/$TARGET; ci $conclusion" ;;

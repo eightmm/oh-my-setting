@@ -72,22 +72,20 @@ Default: concise, scoped, evidence-driven.
 
 ## Multi-Agent Work
 
-- Choose local work, bounded delegation, or reviewed plans from intent/evidence
-  without waiting for "delegate". Questions stay read-only, tiny edits local,
-  uncertainty with the parent. Use oms-agent-harness for allocation/providers.
+- Do not spawn subagents unless explicitly instructed by the user or applicable
+  instructions; otherwise work locally.
 - Give workers one bounded strategy profile, scope, and success criteria;
   the parent owns admission, verification, commit, push, and synthesis.
   Parent/worker are roles, not providers: Claude/Codex delegation works both
   ways; workers return to parents.
 - Match workers to the task: session model for judgment,
   cheaper workers for bounded routine analysis. Preserve frozen routes/fallbacks.
-- Run commands/tests directly. Delegate independent judgment or disjoint writes
-  in parallel.
+- Run commands/tests directly. When authorized, delegate independent judgment
+  or disjoint writes in parallel.
 - Use a task-scoped executor only for substantial writes; workers cannot widen
   authority or recursively delegate.
-- Consult an advisor at irreversible decisions, repeated failures, release
-  gates; `oms advise` reaches another model family — same-family advice adds
-  evidence, not independence.
+- For authorized advice, `oms advise` reaches another model family;
+  same-family advice adds evidence, not independence.
 
 ## Harness
 

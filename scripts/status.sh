@@ -47,6 +47,7 @@ load_user_tool_paths() {
     . "$NVM_DIR/nvm.sh"
     nvm use default >/dev/null 2>&1 || true
   fi
+  export PATH="$HOME/.local/bin:$PATH"
 }
 
 tool_version() {

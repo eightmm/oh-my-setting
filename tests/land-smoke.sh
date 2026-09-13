@@ -269,4 +269,30 @@ grep -q '"state": "passed"' "$receipt" || fail "signal probe landing did not pas
 grep -Eq 'SigIgn:.*[0-9a-f]*[01489]$' "$(log_of "$receipt")" ||
   fail "the detached gate must see SIGINT and SIGQUIT unignored: $(grep SigIgn "$(log_of "$receipt")")"
 
+# A successful push does not hide a failed installation refresh.
+install="$TMP/install"
+git init -q "$install"
+git -C "$install" remote add origin "$TMP/remote.git"
+mkdir -p "$install/scripts"
+printf '#!/usr/bin/env bash\nexit 42\n' > "$install/scripts/update.sh"
+chmod +x "$install/scripts/update.sh"
+python3 - "$TMP/install.json" "$install" <<'PY'
+import json, sys
+with open(sys.argv[1], "w") as fh:
+    json.dump({"source_root": sys.argv[2]}, fh)
+PY
+gate 'echo update failure probe'
+if OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 0 \
+  > "$TMP/update-failed.out" 2>&1; then
+  fail "installation failure was reported as a successful landing"
+fi
+[ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] || fail "update failure lost the successful push"
+grep -q 'install update exit 42' "$TMP/update-failed.out" || fail "update failure reason missing"
+receipt="$(find "$receipt_dir" -name '*.json' | sort | tail -n 1)"
+python3 - "$receipt" <<'PY' || fail "update failure receipt is wrong"
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["state"] == "failed" and r["push"]["rc"] == 0 and r["update"]["rc"] == 42, r
+PY
+
 echo "land-smoke: ok"

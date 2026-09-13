@@ -47,8 +47,26 @@ EOF
   eval "$(sed -n '/^check_locked_npm_version()/,/^}/p' "$ROOT/scripts/doctor.sh")"
   eval "$(sed -n '/^provider_lock_path()/,/^}/p' "$ROOT/scripts/doctor.sh")"
   export HOME="$TMP/native-doctor-home"
+  export NVM_DIR="$HOME/.nvm"
+  node_bin="$NVM_DIR/versions/node/v$NODE_VERSION/bin"
+  mkdir -p "$HOME/.local/bin" "$node_bin"
+  ln -s "$native_bin/codex" "$HOME/.local/bin/codex"
+  printf '#!/usr/bin/env bash\necho v%s\n' "$NODE_VERSION" > "$node_bin/node"
+  printf '#!/usr/bin/env bash\necho stale-codex\n' > "$node_bin/codex"
+  chmod +x "$node_bin/node" "$node_bin/codex"
   # shellcheck disable=SC2034 # Consumed by the doctor function loaded above.
   INSTALL_ROOT="$ROOT"
+  eval "$(sed -n '/^load_user_tool_paths()/,/^}/p' "$ROOT/scripts/doctor.sh")"
+  load_user_tool_paths
+  [ "$(command -v codex)" = "$HOME/.local/bin/codex" ] ||
+    fail "doctor shadows the active native Codex with a stale npm executable"
+  printf 'nvm() { export PATH="%s:$PATH"; }\n' "$node_bin" > "$NVM_DIR/nvm.sh"
+  eval "$(sed -n '/^load_user_tool_paths()/,/^}/p' "$ROOT/scripts/status.sh")"
+  # shellcheck disable=SC2034 # Read by the extracted status function.
+  VERBOSE=1
+  load_user_tool_paths
+  [ "$(command -v codex)" = "$HOME/.local/bin/codex" ] ||
+    fail "verbose status shadows the active native Codex"
   [ "$(provider_lock_path)" = "$LOCK" ] || fail "doctor lost bootstrap fallback"
   snapshot="$HOME/.local/share/oh-my-setting/provider-tools.lock.json"
   mkdir -p "$(dirname "$snapshot")"

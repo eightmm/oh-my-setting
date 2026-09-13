@@ -40,11 +40,10 @@ Use `oms list` for entrypoints, command routing for variants,
 and `oms list --all` for compatibility primitives. Read only references
 needed for the current decision, not the entire catalog.
 
-Allocate ordinary requests without requiring delegation keywords: infer intent,
-inspect relevant code, then choose local work, a bounded worker, or a reviewed
-plan. Questions do not authorize edits or autopilot. Keep tiny known edits local
-and retain ambiguous, scientific, security-sensitive or architectural judgment.
-For substantial routine work, select an authorized provider and use
+Work locally unless the user or applicable instructions explicitly request
+subagents or delegation. Task size or routine complexity alone is not permission
+to launch a worker. Questions do not authorize edits or autopilot.
+For explicitly authorized substantial routine delegation, select a provider and use
 `peer-delegate --workload routine`; prefer one-shot unless the next instruction
 depends on a worker response. [delegation-artifacts.md](references/delegation-artifacts.md)
 owns the allocation checklist and interactive protocol. Read

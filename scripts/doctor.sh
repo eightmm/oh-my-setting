@@ -648,6 +648,9 @@ load_user_tool_paths() {
       export PATH="$managed_node_bin:$PATH"
     fi
   fi
+  # Match installation/runtime precedence: a native provider launcher wins
+  # over an older npm executable alongside the managed Node binary.
+  export PATH="$HOME/.local/bin:$PATH"
 }
 
 # Which capability owns a managed tool, for receipt-aware absence messages.

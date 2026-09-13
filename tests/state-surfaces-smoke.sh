@@ -1414,6 +1414,11 @@ make_toolbox() {
     uname wc head tail awk cmp touch env cut cksum sha256sum flock xargs \
     sleep; do
     path="$(command -v "$cmd" 2>/dev/null)" || continue
+    if [ "$cmd" = python3 ]; then
+      # The managed launcher resolves its runtime relative to its own path;
+      # a toolbox symlink must target the interpreter, not that launcher.
+      path="$(python3 -c 'import sys; print(sys.executable)' | tr -d '\r')"
+    fi
     ln -sf "$path" "$dir/$cmd"
   done
 }

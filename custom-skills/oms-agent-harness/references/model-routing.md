@@ -34,8 +34,8 @@ agent, a Grok/GLM route, or a custom adapter.
 3. `--fallback-model NAME` is an opt-in, one-shot fallback used only for a
    recognized capacity error. A write attempt that changed its worktree is
    never retried.
-4. Direct implementation by the session agent remains valid. Use an OMS
-   delegate for substantial bounded writes or disjoint parallel work. Keep
+4. Work locally unless the user or applicable instructions explicitly request
+   delegation. When authorized, use an OMS delegate for bounded writes. Keep
    tiny known edits local; retain ambiguous, scientific, security-sensitive
    and architectural judgment with the parent. A routine brief needs relevant
    context and success criteria, not the whole conversation. Native subagents

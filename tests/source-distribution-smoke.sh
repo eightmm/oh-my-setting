@@ -66,6 +66,34 @@ lane_union="$( (bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 1/4 
   bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 4/4 --list-stages) | sort)"
 [ "$full_stages" = "$lane_union" ] ||
   fail "focused lanes must partition the stage list exactly (no drop, no double)"
+# Exercise the local orchestrator without recursively running the full gate.
+(
+  probe="$(mktemp -d "${TMPDIR:-/tmp}/oms-parallel-probe.XXXXXX")"
+  trap 'rm -rf "$probe"' EXIT
+  export OMS_PARALLEL_PROBE="$probe"
+  OMS_PARALLEL_QUIT="$(python3 -c 'import signal; print(int(signal.getsignal(signal.SIGQUIT) == signal.SIG_IGN))')"
+  export OMS_PARALLEL_QUIT
+  cat > "$probe/check.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+python3 - <<'PY'
+import os, signal
+assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN
+assert int(signal.getsignal(signal.SIGQUIT) == signal.SIG_IGN) == int(os.environ["OMS_PARALLEL_QUIT"])
+PY
+key="${1#--}${3:+-${3%/*}}"
+touch "$OMS_PARALLEL_PROBE/$key.ran"
+if [ "${OMS_PARALLEL_FAIL:-0}" = 1 ] && [ "$key" = focused-only-2 ]; then exit 11; fi
+EOF
+  # shellcheck source=scripts/lib/check-parallel.sh
+  . "$ROOT/scripts/lib/check-parallel.sh"
+  oms_check_parallel "$probe/check.sh" "$probe/logs" 0 > "$probe/pass.log" 2>&1 ||
+    fail "parallel gate failed or ignored signals: $(cat "$probe/pass.log")"
+  [ "$(find "$probe" -name '*.ran' | wc -l | tr -d ' ')" = 6 ] || fail "parallel gate omitted a partition"
+  if OMS_PARALLEL_FAIL=1 oms_check_parallel "$probe/check.sh" "$probe/fail-logs" 0 > "$probe/fail.log" 2>&1; then
+    fail "parallel gate swallowed a failing lane"
+  fi
+) || exit 1
 # Copy mode is the Windows ownership contract. Proving it only on the Windows
 # runner means the slowest leg in the matrix is the first to report a broken
 # marker or a lost backup, so a Linux leg forces the same path early.

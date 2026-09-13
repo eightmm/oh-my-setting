@@ -80,6 +80,7 @@ unset OMS_SMOKE_TIMINGS OMS_SMOKE_TIMING_LIMIT
 # of environment variables, which would leak into every descendant (including
 # tests that invoke this gate themselves).
 MODE=full
+PARALLEL=0
 SKIP_LINT=0
 SMOKE_SHARD=""
 QUICK_FROM=""
@@ -106,6 +107,8 @@ manifest) then the test suites. With no arguments it runs both.
   --no-lint             Skip lint in the complete or affected gate. CI uses
                         this with --affected because lint is an independent job.
   --lint-only           Run only lint stages.
+  --parallel            Run the complete gate as concurrent CI partitions,
+                        preserving signal handling and failure propagation.
   --focused-only        Run only the focused test suites.
   --focused-lane I/N    Run only every Nth focused stage starting at the Ith
                         (with --focused-only). The partition is positional,
@@ -139,6 +142,7 @@ select_mode() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --parallel) PARALLEL=1; shift ;;
     --no-lint) SKIP_LINT=1; shift ;;
     --lint-only) select_mode lint; shift ;;
     --focused-only) select_mode focused; shift ;;
@@ -215,6 +219,17 @@ if [ "$MODE" = quick ] || [ "$MODE" = affected ]; then
 elif [ -n "$QUICK_FROM" ] || [ -n "$QUICK_TO" ]; then
   echo "error: --changed-from/--changed-to require --quick or --affected" >&2
   exit 2
+fi
+
+if [ "$PARALLEL" = 1 ]; then
+  [ "$MODE" = full ] || { echo "error: --parallel requires the complete gate" >&2; exit 2; }
+  if [ "$LIST_STAGES" != 1 ]; then
+    # shellcheck source=scripts/lib/check-parallel.sh
+    . "$ROOT/scripts/lib/check-parallel.sh"
+    oms_check_parallel "$ROOT/scripts/check.sh" "$CHECK_RUNTIME/parallel" "$SKIP_LINT"
+    echo "check: ok (parallel complete gate)"
+    exit 0
+  fi
 fi
 
 RUN_LINT=0
