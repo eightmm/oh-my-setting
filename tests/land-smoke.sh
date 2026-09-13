@@ -288,10 +288,12 @@ if OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wa
 fi
 [ "$(remote_tip)" = "$(git -C "$repo" rev-parse HEAD)" ] || fail "update failure lost the successful push"
 grep -q 'install update exit 42' "$TMP/update-failed.out" || fail "update failure reason missing"
-receipt="$(find "$receipt_dir" -name '*.json' | sort | tail -n 1)"
-python3 - "$receipt" <<'PY' || fail "update failure receipt is wrong"
-import json, sys
-r = json.load(open(sys.argv[1]))
+python3 - "$receipt_dir" "$(git -C "$repo" rev-parse HEAD)" <<'PY' || fail "update failure receipt is wrong"
+import json, pathlib, sys
+rows = [json.loads(path.read_text()) for path in pathlib.Path(sys.argv[1]).glob("*.json")]
+matches = [row for row in rows if row.get("sha") == sys.argv[2]]
+assert len(matches) == 1, matches
+r = matches[0]
 assert r["state"] == "failed" and r["push"]["rc"] == 0 and r["update"]["rc"] == 42, r
 PY
 
