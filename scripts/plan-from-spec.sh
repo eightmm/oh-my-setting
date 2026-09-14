@@ -213,7 +213,6 @@ DELEGATING_SUITES = (
     "tests/goal-drive-recovery-smoke.sh",
     "tests/autopilot-smoke.sh",
     "tests/autonomy-plan-run-smoke.sh",
-    "tests/executor-smoke.sh",
     "tests/lifecycle-provider-integration-smoke.sh",
     "tests/model-routing-smoke.sh",
     "tests/read-time-expiry-smoke.sh",

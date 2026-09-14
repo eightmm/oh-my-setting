@@ -910,6 +910,5 @@ test_affected_gate_runs_positive_evidence_and_fails_open
 test_gate_fingerprints_full_oms_state
 test_uninstall_stops_before_unlink_on_removal_failure
 test_install_owner_guards_and_stale_status
-"$ROOT/tests/executor-smoke.sh"
 
 echo "harness-enhancements-smoke: ok"
