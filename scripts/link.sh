@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install rules, skills, prompts, and the oms dispatcher into all three agent
+# Install rules, skills, and the oms dispatcher into all three agent
 # CLIs. POSIX hosts use symlinks; Windows Git Bash uses ownership-marked copies.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -11,7 +11,7 @@ usage() {
   cat <<'EOF'
 usage: link.sh
 
-Install this checkout's rules, skills, prompts, and the oms dispatcher for
+Install this checkout's rules, skills, and the oms dispatcher for
 Codex, Claude Code, and Antigravity, and record this checkout as the canonical
 install owner. Takes no arguments; behaviour comes from the environment
 (OH_MY_SETTING_LINK_MODE, OH_MY_SETTING_PROFILE, the snapshot toggles).
@@ -165,6 +165,7 @@ PY
 link_all() {
   local skill_validation
   local receipt
+  local retired_prompts="$HOME/.oh-my-setting-prompts" backup
 
   if ! skill_validation="$("$ROOT/scripts/install-skills.sh" 2>&1)"; then
     printf '%s\n' "$skill_validation" >&2
@@ -184,7 +185,17 @@ link_all() {
   # codex/antigravity have no equivalent surface, and their human-read
   # answers ride the harness answer-language block instead (peer-common).
   link_target "$ROOT/output-styles/oms-korean.md" "$HOME/.claude/output-styles/oms-korean.md"
-  link_target "$ROOT/prompts" "$HOME/.oh-my-setting-prompts"
+  # Soul was the last shared prompt. Retire only proven-owned links/copies;
+  # modified copies and foreign paths remain user data.
+  if oms_install_target_owned "$ROOT/prompts" "$retired_prompts"; then
+    backup="$(oms_ops_latest_backup "$retired_prompts")"
+    oms_install_remove_managed_target "$retired_prompts"
+    echo "removed retired prompt target $retired_prompts"
+    if [ -n "$backup" ]; then
+      mv "$backup" "$retired_prompts"
+      echo "restored $retired_prompts from $backup"
+    fi
+  fi
   # The one-name dispatcher: `oms <tool>` from any agent CLI, no script paths.
   link_target "$ROOT/scripts/oms" "$HOME/.local/bin/oms"
 

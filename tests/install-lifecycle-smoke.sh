@@ -277,6 +277,8 @@ grep -Fq "note: moved your existing" "$TMP/install-out.txt" ||
   fail "displacing existing rules must be announced at install time"
 dest="$HOME/.oh-my-setting"
 [ -d "$dest/.git" ] || fail "install did not clone the fixture"
+[ ! -e "$HOME/.oh-my-setting-prompts" ] && [ ! -L "$HOME/.oh-my-setting-prompts" ] ||
+  fail "fresh install created a retired prompt target"
 # Same reason as HOME: the checkout is the source side of every ownership
 # comparison, so it has to be spelled the way link.sh spelled it.
 dest="$(cd "$dest" && pwd -P)"
@@ -464,7 +466,19 @@ grep -Fq 'skill-router.sh' "$HOME/.claude/settings.json" ||
   fail "blocked uninstall removed the Claude hooks"
 rm -rf "$lifecycle_lock"
 
+# Upgrade an old prompt target with a displaced user directory. This uses the
+# same ownership contract in the symlink and Windows/copy lifecycle lanes.
+mkdir -p "$dest/prompts" "$HOME/.oh-my-setting-prompts.backup.20260914000000"
+printf 'retired prompt\n' > "$dest/prompts/SOUL.md"
+printf 'user prompt\n' > "$HOME/.oh-my-setting-prompts.backup.20260914000000/user.md"
+oms_install_materialize "$dest/prompts" "$HOME/.oh-my-setting-prompts"
+rm -rf "$dest/prompts"
 (cd "$HOME" && "$dest/scripts/update.sh" --no-tools)
+grep -Fxq 'user prompt' "$HOME/.oh-my-setting-prompts/user.md" ||
+  fail "update did not restore displaced user prompts"
+[ ! -e "$HOME/.oh-my-setting-prompts/SOUL.md" ] || fail "update kept retired managed prompts"
+[ ! -e "$(oms_install_marker_path "$HOME/.oh-my-setting-prompts")" ] ||
+  fail "update retained prompt copy ownership"
 [ "$(git -C "$dest" rev-parse HEAD)" = "$(git -C "$upstream" rev-parse HEAD)" ] ||
   fail "update did not fast-forward to fixture HEAD"
 oms_install_target_matches "$dest/rules/global-AGENTS.md" "$HOME/.codex/AGENTS.md" ||

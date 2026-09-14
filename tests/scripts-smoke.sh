@@ -9488,8 +9488,11 @@ test_link_round_trip_restores_existing_claude_file() {
 
   mkdir -p "$(dirname "$target")"
   printf 'original claude config\n' > "$target"
+  mkdir -p "$home_dir/.oh-my-setting-prompts"
+  printf 'user prompt\n' > "$home_dir/.oh-my-setting-prompts/user.md"
 
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
+  assert_file_contains "$home_dir/.oh-my-setting-prompts/user.md" 'user prompt'
 
   backup="$(find "$home_dir/.claude" -maxdepth 1 -type f -name 'CLAUDE.md.backup.*' -print)"
   [ "$(printf '%s\n' "$backup" | sed '/^$/d' | wc -l)" = "1" ] ||
@@ -9498,6 +9501,7 @@ test_link_round_trip_restores_existing_claude_file() {
   assert_symlink_to "$target" "$ROOT/rules/global-AGENTS.md"
 
   HOME="$home_dir" "$ROOT/scripts/unlink.sh" >/dev/null
+  assert_file_contains "$home_dir/.oh-my-setting-prompts/user.md" 'user prompt'
 
   [ -f "$target" ] || fail "CLAUDE.md backup was not restored as a file"
   [ ! -L "$target" ] || fail "restored CLAUDE.md should not be a symlink"

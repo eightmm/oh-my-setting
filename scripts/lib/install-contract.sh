@@ -456,7 +456,6 @@ row = {
         ".codex/skills",
         ".claude/skills",
         ".gemini/antigravity/skills",
-        ".oh-my-setting-prompts",
         ".local/bin/oms",
     ],
     "plugin": {

@@ -1908,7 +1908,6 @@ check_path "$HOME/.gemini/AGENTS.md" "$INSTALL_ROOT/rules/global-AGENTS.md"
 check_custom_skills "$HOME/.codex/skills"
 check_custom_skills "$HOME/.claude/skills"
 check_custom_skills "$HOME/.gemini/antigravity/skills"
-check_path "$HOME/.oh-my-setting-prompts" "$INSTALL_ROOT/prompts"
 check_path "$HOME/.local/bin/oms" "$INSTALL_ROOT/scripts/oms"
 check_displaced_config
 
