@@ -1,11 +1,8 @@
 ---
 name: oms-trust-boundary
 description: >
-  Review or implement a security-sensitive change by tracing assets, actors,
-  trust boundaries, abuse paths, controls, and verification evidence. Use for
-  threat models and security gates, or when changing authentication,
-  authorization, untrusted input or files, secrets, public endpoints,
-  payments, webhooks, or sensitive data. Skip routine internal-only edits.
+  Trace trust boundaries for requested security reviews or changes to privileges,
+  untrusted-input handling or sensitive-data flows. Skip routine internal-only edits.
 ---
 
 # Trust Boundary Review

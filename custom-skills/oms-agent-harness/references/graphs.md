@@ -94,13 +94,14 @@ oms graph exec status --run RUN_ID \
   --json --html-fragment /absolute/task-owned/oms-execution-run.html
 ```
 
-For nontrivial coding, use graph context without waiting for the user to request
-it. A trivial known-location edit needs no whole-project graph. Reuse a current
-supplied pack; do not repeat the same query or render a viewer for every edit.
+When callers, dependencies or change impact are unclear, use graph context
+without waiting for the user to request it. Known local scope can use direct
+search and source inspection; task size alone does not require a graph.
+Reuse a current supplied pack; do not repeat the same query or render a viewer for every edit.
 The agent owns the loop:
 
 1. Use `map` only for broad orientation; use `context` with the user's current
-   task before inspecting or changing code.
+   task when relationship evidence can change the implementation or test scope.
 2. When a visual is requested or useful, choose a task-owned absolute fragment path, request JSON and HTML
    in the same call, read the JSON as evidence, and surface the returned
    `html_fragment` inline. Never ask the user to run the command or manage the path.
@@ -108,8 +109,9 @@ The agent owns the loop:
    draft, then send it explicitly or copy it when the host bridge is absent.
    The follow-up refreshes context, inspects direct dependencies, reverse
    impact, and related tests, then acts only within existing authority.
-4. Regenerate context after relevant edits. At a pause, gate, or handoff, use
-   `exec status` the same way so the live route and its visual stay aligned.
+4. Before relying on graph evidence after relevant edits, refresh context;
+   ordinary queries already refresh stale caches. For an active execution-graph
+   run, use `exec status` at a gate or handoff when its live route is needed.
 
 `peer-delegate` supplies automatic orientation when no explicit `--context-pack`
 was passed: up to 8 file pointers, related tests and bounded case names, not

@@ -1,6 +1,8 @@
 # Cross-Agent Consultation
 
-Ask another agent when its judgment can change the next action. Preserve the
+Use this route only when peer consultation or delegation is explicitly authorized;
+uncertainty alone is not permission to call another model. Ask when its judgment
+can change the next action. Preserve the
 requested council participants; save tokens by removing redundant context,
 not independent viewpoints. Reuse a live thread when only a message is needed.
 
@@ -51,7 +53,9 @@ seats share one model family, which the reported family count makes explicit.
 
 ## Advisor that reads your history
 
-`oms advise` is the decision-point advisor (VERDICT/RISKS/MISSING/NEXT). Add
+`oms advise` is the decision-point advisor (VERDICT/RISKS/MISSING/NEXT).
+Another provider is not necessarily another model family; same-family advice
+adds evidence, not independence. Add
 `--session` to attach a mechanical digest of the current session, so the
 advisor judges the decision against what actually happened instead of only
 your summary of it — the same read Claude Code's native advisor gets, from

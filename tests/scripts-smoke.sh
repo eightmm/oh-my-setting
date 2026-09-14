@@ -13914,15 +13914,14 @@ test_agent_role_and_delegate_injection() {
 
 test_global_rules_stay_compact_and_route_workflows() {
   local global_rules="$ROOT/rules/global-AGENTS.md"
+  local delegation="$ROOT/custom-skills/oms-agent-harness/references/delegation-artifacts.md"
   local heading
   local line_count
   local word_count
 
   [ -f "$global_rules" ] || fail "dedicated global rules file should exist"
-  # This file is loaded into every session on all three CLIs, so the budget is a
-  # standing context cost, not a style rule. The evidence-first workflow earns
-  # a small input increase because it prevents larger speculative outputs;
-  # raise it only for another rule that changes decisions, never for prose.
+  # This file is loaded into every session on all three CLIs. The standing
+  # context budget is a ceiling, not a target; conditional workflows live in skills.
   line_count="$(wc -l < "$global_rules" | tr -d ' ')"
   [ "$line_count" -le 160 ] ||
     fail "global rules should stay compact (got $line_count lines)"
@@ -13964,8 +13963,6 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should preserve established public documentation contracts"
   grep -Fq 'never restate code, types, tests, or names' "$global_rules" ||
     fail "global rules should reject commentary that only restates the implementation"
-  grep -Fq 'SEARCH -> UNDERSTAND -> PLAN -> MINIMAL EDIT -> TEST -> REVIEW ->' "$global_rules" ||
-    fail "global rules should carry the evidence-first workflow"
   grep -Fq 'source code, then tests, official docs' "$global_rules" ||
     fail "global rules should carry the evidence hierarchy"
   grep -Fq 'Separate verified fact, inference, and unknown' "$global_rules" ||
@@ -13978,10 +13975,13 @@ test_global_rules_stay_compact_and_route_workflows() {
     fail "global rules should retain a compact multi-agent policy"
   grep -Fq 'oms-agent-harness' "$global_rules" ||
     fail "global rules should route detailed harness work to the skill"
-  grep -Fq 'task-scoped executor' "$global_rules" ||
-    fail "global rules should retain the write-executor safety boundary"
-  grep -Fq 'Match workers to the task' "$global_rules" ||
-    fail "global rules should route workers by task and judgment needs"
+  # Allocation belongs to the on-demand delegation reference, which must
+  # remain reachable from the harness rather than being injected globally.
+  assert_file_contains "$ROOT/custom-skills/oms-agent-harness/SKILL.md" 'references/delegation-artifacts.md'
+  grep -Fq 'task-scoped executor' "$delegation" ||
+    fail "delegation guidance should retain the write-executor safety boundary"
+  grep -Fq 'Match workers to the task' "$delegation" ||
+    fail "delegation guidance should route workers by task and judgment needs"
   grep -Fq 'Run commands/tests directly' "$global_rules" ||
     fail "global rules should avoid model workers for routine command execution"
   if grep -Eq '^## (Model Tiering|Native Subagent Strategies|Run Provenance & Coordination)$' "$global_rules"; then

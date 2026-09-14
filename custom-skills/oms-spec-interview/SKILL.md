@@ -1,9 +1,8 @@
 ---
 name: oms-spec-interview
 description: >
-  Resolve implementation-shaping choices for new projects, repo onboarding,
-  unresolved drafts, or broad features. Inspect first and ask only about
-  material gaps; clear bounded changes do not require an interview.
+  Resolve material specification gaps during project onboarding or feature
+  design; clear bounded changes need no interview.
 ---
 
 # Specification Interview

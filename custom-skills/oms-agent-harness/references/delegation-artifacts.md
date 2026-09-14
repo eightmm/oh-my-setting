@@ -41,6 +41,11 @@ cross-provider coordination. Native app threads remain an optional local UI.
 For each worker, supply one outcome, relevant paths/current source references,
 constraints, a verifier, and when to stop or return a decision. Respect the
 detached-context boundary below and keep code in files/patches.
+Give workers one bounded strategy profile. Use a task-scoped executor only for
+substantial writes; the parent owns admission, verification, commit, push and
+synthesis. Match workers to the task: session-model judgment for uncertain
+decisions, cheaper workers for bounded routine analysis. Native subagents and
+frozen executors retain their separate model contracts in [model-routing.md](model-routing.md).
 Split independent scopes, not arbitrary equal pieces: couple a behavior with
 its necessary regression, serialize shared interfaces, and parallelize only
 disjoint work with useful parent work alongside it. Reuse an already-running

@@ -1,10 +1,8 @@
 ---
 name: oms-trace
 description: >
-  Explain why an observed failure or anomaly happened before changing anything:
-  competing hypotheses, ranked evidence, and the cheapest probe that tells them
-  apart. Use for regressions, silent wrong results, flaky or unreproducible
-  behaviour, and "why did this happen" questions.
+  Diagnose regressions, wrong results or unexplained failures using competing
+  hypotheses and discriminating probes; direct known-cause fixes need no worksheet.
 ---
 
 # Trace
@@ -35,7 +33,8 @@ Evidence is ranked, never flat:
 Try to refute your own favourite before adopting it, and down-rank any
 hypothesis resting on 4–5 while stronger evidence contradicts it.
 
-Reach for:
+Use the failure ledger locally; the peer tools below require explicit
+consultation or delegation authority:
 
 - `oms fail-ledger check --cmd "…"` — has this already failed here? Exit 3 means
   yes, with the prior context.

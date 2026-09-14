@@ -12,10 +12,13 @@ Default: concise, scoped, evidence-driven.
 
 ## Execution
 
-- Follow `SEARCH -> UNDERSTAND -> PLAN -> MINIMAL EDIT -> TEST -> REVIEW ->
-  RECORD`. Inspect structure, affected calls, implementation and tests first.
-- Complete authorized work; infer reversible details. Ask only about missing
-  scope, authority, interface, or risk decisions.
+- Inspect enough relevant source, callers and tests to bound the change.
+  Scale planning and context to uncertainty; known local edits need no full
+  repository survey or formal plan.
+- Complete authorized work through implementation, relevant verification and
+  repair of failures caused by the change; stop when done or genuinely blocked.
+  Infer reversible details; ask only about missing scope, authority, interface,
+  or risk decisions. A first implementation is not a completion boundary.
 - When interfaces differ, name both and the one you are taking; proceed within
   authority unless hard to reverse.
 - Preserve unrelated work; report failures, bound retries, continue safe work.
@@ -56,11 +59,11 @@ Default: concise, scoped, evidence-driven.
   and rationale; distinguish explicit requirements from interpretation.
   Continue unaffected authorized work.
 - Batch independent calls; serialize dependencies. Bound output; re-read changes.
-- Reserve the window's last 20% for small work.
 
 ## Specification
 
-- Read `PROJECT.md` when present; specific rules override defaults.
+- Read `PROJECT.md` when present to establish the relevant contract; reuse it
+  while current rather than rereading before every edit. Specific rules override defaults.
 
 ## Verification
 
@@ -74,25 +77,16 @@ Default: concise, scoped, evidence-driven.
 
 - Do not spawn subagents unless explicitly instructed by the user or applicable
   instructions; otherwise work locally.
-- Give workers one bounded strategy profile, scope, and success criteria;
-  the parent owns admission, verification, commit, push, and synthesis.
-  Parent/worker are roles, not providers: Claude/Codex delegation works both
-  ways; workers return to parents.
-- Match workers to the task: session model for judgment,
-  cheaper workers for bounded routine analysis. Preserve frozen routes/fallbacks.
-- Run commands/tests directly. When authorized, delegate independent judgment
-  or disjoint writes in parallel.
-- Use a task-scoped executor only for substantial writes; workers cannot widen
-  authority or recursively delegate.
-- For authorized advice, `oms advise` reaches another model family;
-  same-family advice adds evidence, not independence.
+- Run commands/tests directly. For authorized delegation, load
+  `oms-agent-harness`; the parent owns admission, verification and publication.
+  Workers cannot widen authority or recursively delegate.
 
 ## Harness
 
 - OMS is an agent-side control plane. Never ask users to copy commands, inspect
   `.oms`, or resume runs; operate internally.
-- Use `oms-agent-harness` for workflows, `oms list` for tools; never hand-edit
-  `.oms/`. Forge repeating fixes with `oms skill-forge` into `oms-` project skills.
+- Use `oms-agent-harness` for shared state, graph context and collaboration,
+  `oms list` for tools; never hand-edit `.oms/`.
 - Peer CLIs: `claude`, `codex`, `agy`. Cross-model work
   uses `peer-ask`, `peer-review`, `peer-delegate`, `consult`, `advise` —
   never raw CLI calls.

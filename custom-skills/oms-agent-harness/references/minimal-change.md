@@ -84,10 +84,11 @@ real risks; documentation density and style alone are not findings.
 
 ## Review through existing routes
 
-- Current diff: use `oms peer-review --gate`. A complexity finding needs a
+- Review locally by default. For authorized peer review of a current diff,
+  use `oms peer-review --gate`. A complexity finding needs a
   concrete duplicate facility, unnecessary dependency or layer, speculative
   flexibility, or a narrower behavior-equivalent replacement.
-- Whole repository: use `oms peer-delegate --read-only --role repo-auditor`
+- Authorized delegated repository audit: use `oms peer-delegate --read-only --role repo-auditor`
   with a bounded surface. Rank evidence-backed removals; omit code-golf and
   style.
 - Implementation: the shared delegate prompt carries the compact doctrine;
@@ -122,3 +123,8 @@ and [Codex customization guidance](https://learn.chatgpt.com/docs/customization/
 output, selective reference loading and proportional verification. OMS applies
 these principles across providers; it does not adopt model-specific defaults,
 recursive delegation, or additional publication authority from guide examples.
+
+[Rethinking skills and prompts for GPT-6 Astra](https://x.com/pvncher/status/2095991462416490862)
+(Eric Provencher, reviewed 2026-09-14) informs narrow skill triggers, selective
+context and explicit completion boundaries. These are guidance choices, not
+measured token savings or grounds to remove cross-provider safety and release gates.
