@@ -941,7 +941,6 @@ ma_append_artifact_index() {
   OMS_INDEX_CONTEXT_DEBT="${OMS_INDEX_CONTEXT_DEBT:-}" \
   OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
-  OMS_INDEX_EXECUTOR_ID="${OMS_EXECUTOR_ID:-}" OMS_INDEX_SOUL_SHA256="${OMS_SOUL_SHA256:-}" \
   OMS_INDEX_ATTEMPT_ID="${OMS_ATTEMPT_ID:-${OMS_LAST_ATTEMPT_ID:-}}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
   OMS_INDEX_MODEL_CLASS="${OMS_MODEL_RESOLVED_CLASS:-}" \
@@ -1038,15 +1037,9 @@ if plan_id:
 delegation_id = safe_id(os.environ.get("OMS_INDEX_DELEGATION_ID", ""))
 if delegation_id:
     row["delegation_id"] = delegation_id
-executor_id = safe_id(os.environ.get("OMS_INDEX_EXECUTOR_ID", ""))
-if executor_id:
-    row["executor_id"] = executor_id
 attempt_id = safe_id(os.environ.get("OMS_INDEX_ATTEMPT_ID", ""))
 if attempt_id:
     row["attempt_id"] = attempt_id
-soul_sha256 = os.environ.get("OMS_INDEX_SOUL_SHA256", "")
-if re.match(r"^[0-9a-f]{64}$", soul_sha256):
-    row["soul_sha256"] = soul_sha256
 parent_event_id = safe_id(os.environ.get("OMS_INDEX_PARENT_EVENT_ID", ""))
 if parent_event_id:
     row["parent_event_id"] = parent_event_id
@@ -1357,12 +1350,11 @@ extract_output() {
 }
 
 # Did the provider actually answer? A CLI can exit 0 and still return nothing
-# usable — an empty body, a banner, or only a question back at us (which is what
-# a provider that never received the prompt produces). Exit status alone cannot
+# usable — an empty body or a banner. Exit status alone cannot
 # tell a council "3/3 succeeded" from "2 answers and one non-answer".
 # Deliberately not a length test: a concise correct answer is still an answer,
 # and rejecting one costs a second provider call for nothing.
-# Prints: ok | thin | empty | blocked.
+# Prints: ok | empty | blocked | truncated. Semantic quality belongs to the parent.
 ma_answer_quality() {
   local artifact="$1"
   local helper

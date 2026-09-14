@@ -39,11 +39,6 @@ BRIEF_FILE=""
 REVIEW_ARTIFACT=""
 ROLE=""
 role_file=""
-EXECUTOR_ID=""
-executor_brief_file=""
-EXECUTOR_SOUL_SHA=""
-executor_started=0
-executor_finalized=0
 liveness_file=""
 liveness_python_file=""
 delegation_lock_target=""
@@ -85,7 +80,6 @@ conversation_scratch=""
 unset OMS_PEER_INTERACTIVE OMS_CONVERSATION_MAX_TURNS OMS_CONVERSATION_IDLE_SECONDS
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
-REASONING_EFFORT_EXPLICIT=0
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
 
 usage() {
@@ -104,8 +98,6 @@ Options:
   --role NAME          Prepend a reusable strategy profile (agent-role.sh:
                        repo, global, then bundled fallback) to the worker brief.
                        Overrides a plan task's role field.
-  --executor ID        Use one frozen task-scoped executor soul. Mutually
-                       exclusive with --role; provider/task/lease are checked.
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
   --review-artifact P  Prior peer-review artifact (e.g. its _synthesis file).
@@ -119,12 +111,12 @@ Options:
   --model MODEL        Exact provider model; disables implicit fallback.
   --workload CLASS     standard (default) or routine. Routine selects the lowest
                        seeded routable rank for a well-specified bounded task.
-                       --model wins; routine is incompatible with --executor.
+                       --model wins over the routine preset.
   --interactive        Claude/Antigravity conversation in one isolated worktree.
                        stdout is NDJSON; stdin accepts {"prompt":"..."} or
                        {"finish":true}. Every turn returns an unverified answer;
                        finish runs the final verifier and returns a patch.
-                       Standalone writes only: no repair, executor, plan-task,
+                       Standalone writes only: no repair, plan-task,
                        read-only, apply, fallback-model, or dry-run.
   --max-turns N        Interactive turn cap including the initial prompt (1-20;
                        default 5). Reaching it still requires explicit finish.
@@ -149,6 +141,7 @@ Options:
                        verify output tail. Missing-CLI and outbound-gate
                        failures are never retried. Each round adds another
                        OMS_PEER_TIMEOUT of wall-clock budget.
+                       No additional advisor unless OMS_ADVISE_ON_REPEAT=1.
                        Default: 0 (one-shot).
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
@@ -193,6 +186,8 @@ Options:
 
 Environment:
   OH_MY_SETTING_DELEGATE_DRY_RUN=1  Same as --dry-run.
+  OMS_ADVISE_ON_REPEAT=1     Permit one extra advisor call after a failed repair.
+                             Default: off; set only within user-authorized scope.
   OMS_DELEGATE_WORKTREE_ROOT  Parent for temporary delegated worktrees. Default:
                              $XDG_CACHE_HOME/oh-my-setting/worktrees, else
                              ~/.cache/oh-my-setting/worktrees.
@@ -218,8 +213,8 @@ receive no primary state capability; the default guard nevertheless tolerates
 JSONL growth because it cannot attribute a sibling agent's append. Rewriting
 existing rows, truncating them, or deleting a state file is a violation.
 For a plan-bound operation, the default guard also binds the complete selected
-task/lease and executor/soul objects across the provider window. Other tasks
-and executors may move concurrently; this operation's authority may not.
+task/lease objects across the provider window. Other tasks may move
+concurrently; this operation's authority may not.
 On a violation the run fails and the operation's own authority is repaired
 from the pre-launch snapshot: authority and evidence fields always restore,
 while claim-cycle fields restore only under the operation's own lease
@@ -262,12 +257,7 @@ while [ "$#" -gt 0 ]; do
       ROLE="$2"
       shift 2
       ;;
-    --executor)
-      [ "$#" -ge 2 ] || fail "--executor requires an id"
-      case "$2" in *[!A-Za-z0-9._-]*|"") fail "--executor must match [A-Za-z0-9._-]+" ;; esac
-      EXECUTOR_ID="$2"
-      shift 2
-      ;;
+    --executor) fail "Soul executors were removed; use --brief-file and an explicit plan task" ;;
     --repo)
       [ "$#" -ge 2 ] || fail "--repo requires path"
       REPO="$2"
@@ -305,7 +295,6 @@ while [ "$#" -gt 0 ]; do
     --reasoning-effort)
       [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"
       REASONING_EFFORT="$2"
-      REASONING_EFFORT_EXPLICIT=1
       shift 2
       ;;
     --verify)
@@ -431,9 +420,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ "$WORKLOAD" = routine ] && [ -n "$EXECUTOR_ID" ]; then
-  fail "--workload routine cannot override a frozen executor; pin its model when creating it"
-fi
 
 if [ -n "$AUTOPILOT_OWNER_ID" ]; then
   case "$AUTOPILOT_OWNER_ID" in owner_*) ;; *) fail "autopilot owner id is invalid" ;; esac
@@ -486,14 +472,10 @@ plan_failure_transition() {
 
 plan_publish_review() {
   # The plan receipt is the durable authority used by a later plan-run
-  # continuation. Stamp the exact frozen executor identity with the patch so a
-  # caller cannot omit or swap that executor when landing reviewed work.
+  # continuation. Bind the patch to the current task and lease.
   local artifact_path="$1"
   local patch_path="$2"
   local -a receipt_args=(--artifact "$artifact_path" --patch "$patch_path")
-  if [ -n "$EXECUTOR_ID" ]; then
-    receipt_args+=(--executor-id "$EXECUTOR_ID" --executor-soul-sha256 "$EXECUTOR_SOUL_SHA")
-  fi
   plan_transition review "${receipt_args[@]}"
   plan_finalized=1
 }
@@ -503,8 +485,8 @@ TO="$(oms_provider_normalize "$TO")" || exit $?
 if [ "$INTERACTIVE" = 1 ]; then
   case "$TO" in claude|antigravity) ;; *) fail "--interactive supports claude and antigravity" ;; esac
   [ "$WORKER_ACCESS" = write ] && [ "$REPAIR" = 0 ] && [ "$APPLY" = 0 ] &&
-    [ "$DRY_RUN" = 0 ] && [ -z "$EXECUTOR_ID$PLAN_TASK_ID$FALLBACK_MODEL" ] ||
-    fail "--interactive requires standalone writes without repair, apply, dry-run, executor, plan-task or fallback-model"
+    [ "$DRY_RUN" = 0 ] && [ -z "$PLAN_TASK_ID$FALLBACK_MODEL" ] ||
+    fail "--interactive requires standalone writes without repair, apply, dry-run, plan-task or fallback-model"
   [ "${OMS_WORKER_GUARD_OFF:-0}" != 1 ] || fail "--interactive requires the worker guard"
   # Keep protocol streams away from provider children and ordinary CLI prose.
   exec 3>&1 4<&0
@@ -636,72 +618,9 @@ if [ "$WORKER_ACCESS" = read ] && [ "$APPLY" = 1 ]; then
   fail "--read-only produces no patch; --apply has nothing to apply"
 fi
 
-if [ -n "$EXECUTOR_ID" ]; then
-  [ -z "$ROLE" ] || fail "--executor and --role are mutually exclusive"
-  executor_meta="$("$(ma_scripts_dir)/agent-executor.sh" show --repo "$REPO" --id "$EXECUTOR_ID")" ||
-    fail "cannot read executor $EXECUTOR_ID"
-  executor_values="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("provider",""),d.get("state",""),d.get("mode",""),d.get("plan_task",""),d.get("task_id",""),d.get("verify",""),d.get("soul_sha256",""),d.get("strategy",""),d.get("model_class",""),d.get("model",""),d.get("fallback_model",""),d.get("reasoning_effort",""),d.get("fallback_reasoning_effort","")]))')"
-  executor_provider="$(printf '%s' "$executor_values" | cut -f1)"
-  executor_state="$(printf '%s' "$executor_values" | cut -f2)"
-  executor_mode="$(printf '%s' "$executor_values" | cut -f3)"
-  executor_plan="$(printf '%s' "$executor_values" | cut -f4)"
-  executor_task="$(printf '%s' "$executor_values" | cut -f5)"
-  executor_verify="$(printf '%s' "$executor_values" | cut -f6)"
-  EXECUTOR_SOUL_SHA="$(printf '%s' "$executor_values" | cut -f7)"
-  executor_strategy="$(printf '%s' "$executor_values" | cut -f8)"
-  executor_model_class="$(printf '%s' "$executor_values" | cut -f9)"
-  executor_model="$(printf '%s' "$executor_values" | cut -f10)"
-  executor_fallback_model="$(printf '%s' "$executor_values" | cut -f11)"
-  executor_reasoning_effort="$(printf '%s' "$executor_values" | cut -f12)"
-  executor_fallback_reasoning_effort="$(printf '%s' "$executor_values" | cut -f13)"
-  # Executors store the resolved route for provenance. For an unpinned route
-  # that value is the provider-default sentinel, not a user-supplied model.
-  # Normalize old and new metadata before checking the caller contract so a
-  # default executor does not accidentally become an explicit model request.
-  if [ "$executor_model_class" = provider-default ] && [ "$executor_model" = provider-default ]; then
-    executor_model=""
-  fi
-  [ "$executor_provider" = "$TO" ] || fail "executor provider is $executor_provider, not $TO"
-  [ "$executor_state" = "frozen" ] || fail "executor $EXECUTOR_ID is $executor_state, not frozen"
-  [ "$executor_mode" = "worktree-write" ] ||
-    fail "legacy read executor is unsupported; retire it and use oms peer-delegate --read-only --role repo-auditor without --executor"
-  [ -z "$MODEL" ] || [ "$MODEL" = "$executor_model" ] || fail "--model conflicts with executor contract"
-  [ -z "$FALLBACK_MODEL" ] || [ "$FALLBACK_MODEL" = "$executor_fallback_model" ] ||
-    fail "--fallback-model conflicts with executor contract"
-  [ "$REASONING_EFFORT_EXPLICIT" = 0 ] || [ "$REASONING_EFFORT" = auto ] ||
-    [ -z "$executor_reasoning_effort" ] ||
-    [ "$REASONING_EFFORT" = "$executor_reasoning_effort" ] ||
-    fail "--reasoning-effort conflicts with executor contract"
-  MODEL="$executor_model"
-  FALLBACK_MODEL="$executor_fallback_model"
-  if [ -n "$executor_reasoning_effort" ]; then
-    REASONING_EFFORT="$executor_reasoning_effort"
-  elif [ "$REASONING_EFFORT_EXPLICIT" = 0 ]; then
-    REASONING_EFFORT=auto
-  fi
-  if [ -n "$executor_plan" ]; then
-    [ -z "$PLAN_TASK_ID" ] || [ "$PLAN_TASK_ID" = "$executor_plan" ] || fail "--plan-task conflicts with executor"
-    PLAN_TASK_ID="$executor_plan"
-  fi
-  if [ -n "$executor_task" ]; then
-    [ -z "$TASK_ID" ] || [ "$TASK_ID" = "$executor_task" ] || fail "--task-id conflicts with executor"
-    TASK_ID="$executor_task"
-  fi
-  if [ -n "$executor_verify" ]; then
-    [ -z "$VERIFY_CMD" ] || [ "$VERIFY_CMD" = "$executor_verify" ] || fail "--verify conflicts with executor contract"
-    VERIFY_CMD="$executor_verify"
-  fi
-  executor_brief_file="$(mktemp)" || fail "mktemp failed"
-  if ! "$(ma_scripts_dir)/agent-executor.sh" brief --repo "$REPO" --id "$EXECUTOR_ID" > "$executor_brief_file"; then
-    rm -f "$executor_brief_file"
-    fail "executor $EXECUTOR_ID failed frozen validation"
-  fi
-  export OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_SOUL_SHA256="$EXECUTOR_SOUL_SHA"
-fi
 
 # Stamp every artifact-index row from this delegation with the exact plan/task
-# snapshot it belongs to. Executor resolution above may supply the plan task,
-# so this cannot happen during argv parsing. evidence-snapshot reads the task
+# snapshot it belongs to. evidence-snapshot reads the task
 # and top-level immutable id under one plan lock; the frozen id intentionally
 # survives a replacement plan appearing while the worker or verifier runs.
 if [ -n "$PLAN_TASK_ID" ]; then
@@ -712,6 +631,7 @@ if [ -n "$PLAN_TASK_ID" ]; then
     "$(ma_scripts_dir)/agent-plan.sh" --repo "$REPO" evidence-snapshot \
       --id "$PLAN_TASK_ID" 2>/dev/null
   )" || fail "could not read plan task $PLAN_TASK_ID"
+  oms_require_current_task_contract "$PLAN_JSON" || exit $?
   PLAN_ID="$(printf '%s' "$PLAN_JSON" |
     python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
     tr -d '\r')"
@@ -737,10 +657,6 @@ if [ -n "$PLAN_TASK_ID" ]; then
   esac
   # Bind route, lease and brief to the same final snapshot, including legacy
   # plans reread after ensure-lineage; never keep a pre-lineage route.
-  if [ -n "$EXECUTOR_ID" ]; then
-    printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; sys.exit(bool(json.load(sys.stdin).get("assignment", {})))' ||
-      fail "task assignment cannot override a frozen executor; use an unassigned task"
-  fi
   oms_task_assignment_resolve "$PLAN_JSON" "$TO" "$MODEL" "$FALLBACK_MODEL" "$REASONING_EFFORT" "$WORKLOAD" || exit $?
   TO="$OMS_TASK_PROVIDER"
   MODEL="$OMS_TASK_MODEL"
@@ -833,7 +749,7 @@ print("\n".join(lines))
     fi
   fi
   # A plan task can name a role; --role wins over it.
-  if [ -z "$ROLE" ] && [ -z "$EXECUTOR_ID" ]; then
+  if [ -z "$ROLE" ]; then
     plan_role="$(printf '%s' "$PLAN_JSON" |
       python3 -c 'import json,sys;r=json.load(sys.stdin).get("role", "");print(r) if r else None' |
       tr -d '\r')"
@@ -853,8 +769,8 @@ export OMS_MODEL_WORKLOAD="$WORKLOAD"
 export OMS_MODEL_EXPLICIT="$MODEL"
 export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
 export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
-export OMS_REASONING_FALLBACK_EXPLICIT="${executor_fallback_reasoning_effort:-}"
-export OMS_MODEL_ROLE="${ROLE:-${executor_strategy:-}}" OMS_MODEL_OPERATION=delegate
+export OMS_REASONING_FALLBACK_EXPLICIT=""
+export OMS_MODEL_ROLE="$ROLE" OMS_MODEL_OPERATION=delegate
 oms_model_prepare "$TO" || exit $?
 
 load_user_tool_paths
@@ -952,15 +868,9 @@ cleanup() {
     [ "$plan_started" = 1 ] && [ "$plan_finalized" = 0 ]; then
     plan_failure_transition >/dev/null 2>&1 || true
   fi
-  if [ "$executor_started" = 1 ] && [ "$executor_finalized" = 0 ] && [ -n "$EXECUTOR_ID" ]; then
-    "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" \
-      --reason "delegation exited before executor finalization" >/dev/null 2>&1 || true
-    executor_finalized=1
-  fi
   rm -f "$prompt_file" "$repair_prompt_file" "$verify_out"
   [ -z "$conversation_scratch" ] || rm -rf -- "$conversation_scratch"
   [ -z "$plan_brief_file" ] || rm -f "$plan_brief_file"
-  [ -z "$executor_brief_file" ] || rm -f "$executor_brief_file"
   # Remove the liveness marker; a leftover file means the process died without
   # cleanup (a crashed orphan), which oms state / gc can then flag by dead pid.
   [ -z "$liveness_file" ] || [ -z "$delegation_lock_target" ] ||
@@ -1018,13 +928,7 @@ write_compiled_context() {
 }
 
 write_minimal_change_doctrine() {
-  printf 'Search repository structure, affected call paths and contracts, implementation and tests before editing. Read PROJECT.md when present and only task-relevant referenced sections; report missing required documents. Infer reversible details within scope; report material blockers.\n'
-  printf 'Prefer source code, tests, official docs, issue/PR/history, secondary sources, then inference. Distinguish facts from uncertainty; investigate unfamiliar scientific/HPC/ML logic.\n'
-  printf 'For failures, test competing hypotheses with the cheapest discriminating probe before fixing the root cause.\n'
-  printf 'Prefer no change, repo reuse, stdlib, portable native features, declared dependencies, then new code. Keep one readable owner per behavior; avoid speculative wrappers and code-golf.\n'
-  printf 'Minimal never means weakening explicit requirements, trust-boundary validation, data-loss protection, security, accessibility, portability, compatibility, or required verification.\n'
-  printf 'Extend an existing canonical test or fixture first; add tests only for uncovered behavior. Run affected and required checks; repeat or broaden only for new changes, failures or unresolved risk.\n'
-  printf 'Comments/docstrings preserve task/repo-established public contracts and non-obvious rationale; never restate code, types, tests, or names. Do not delete useful documentation for brevity. Return patches as artifacts, without repeating full code.\n'
+  printf 'Read applicable repository instructions and PROJECT.md. Use source evidence to bound the smallest complete change, preserve contracts and safety, reuse existing tests, and run affected checks. Report changes, evidence, verification and uncertainty; return code as patch artifacts.\n'
 }
 
 {
@@ -1042,11 +946,6 @@ write_minimal_change_doctrine() {
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'
     cat "$role_file"
-    printf '\n\n'
-  fi
-  if [ -n "$executor_brief_file" ]; then
-    printf '## Frozen Executor Soul\n\n'
-    cat "$executor_brief_file"
     printf '\n\n'
   fi
   if [ -n "$REVIEW_ARTIFACT" ]; then
@@ -1397,8 +1296,8 @@ PY
   }
   DELEGATION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
     fail "could not timestamp the worker marker"
-  export OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="$EXECUTOR_ID" \
-    OMS_DL_SOUL_SHA="$EXECUTOR_SOUL_SHA" OMS_DL_PID="$$" \
+  export OMS_DL_ID="$timestamp" OMS_DL_PROVIDER="$TO" OMS_DL_ROLE="$ROLE" OMS_DL_EXECUTOR="" \
+    OMS_DL_SOUL_SHA="" OMS_DL_PID="$$" \
     OMS_DL_NATIVE_PID="$DELEGATION_NATIVE_PID" \
     OMS_DL_NATIVE_PID_SOURCE="$DELEGATION_NATIVE_PID_SOURCE" \
     OMS_DL_MODEL_CLASS="$OMS_MODEL_RESOLVED_CLASS" OMS_DL_MODEL="$OMS_MODEL_PRIMARY" \
@@ -1683,9 +1582,6 @@ write_repair_prompt() {
     if [ -n "$role_file" ]; then
       printf '## Role\n\n'; cat "$role_file"; printf '\n\n'
     fi
-    if [ -n "$executor_brief_file" ]; then
-      printf '## Frozen Executor Soul\n\n'; cat "$executor_brief_file"; printf '\n\n'
-    fi
     printf '## Original Brief\n\n'
     if [ -n "$BRIEF_FILE" ]; then
       cat "$BRIEF_FILE"
@@ -1723,9 +1619,6 @@ route_fallback_reason=""
 route_reasoning=""
 route_fallback_reasoning=""
 route_selected_reasoning=""
-[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] ||
-  "$(ma_scripts_dir)/agent-executor.sh" start --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
-[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_started=1
 plan_transition start
 plan_started=1
 
@@ -1793,29 +1686,23 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
       fail "hidden primary Git index flags block delegated provider start"
     oms_git_assert_plain_index "$worktree" ||
       fail "hidden delegated-worktree Git index flags block provider start"
-    if [ -n "$PLAN_TASK_ID$EXECUTOR_ID" ] &&
+    if [ -n "$PLAN_TASK_ID" ] &&
       ! oms_worker_operation_snapshot "$REPO" \
         "$worker_guard_dir/current-operation.json" \
-        "$PLAN_TASK_ID" "$PLAN_LEASE_ID" "$EXECUTOR_ID" "$EXECUTOR_SOUL_SHA"; then
+        "$PLAN_TASK_ID" "$PLAN_LEASE_ID"; then
       # Binding failed before the provider started, so no trusted frozen
       # snapshot exists to repair from — post-run recovery restores only from
       # the snapshot this process hashed at launch. The lease may also have
       # legitimately moved before the freeze; fail and release instead.
       plan_failure_transition >/dev/null 2>&1 || true
-      if [ -n "$EXECUTOR_ID" ] && [ "$executor_started" = 1 ]; then
-        "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
-          --id "$EXECUTOR_ID" --reason "current authority snapshot failed" \
-          >/dev/null 2>&1 || true
-        executor_finalized=1
-      fi
-      fail "could not bind current plan/executor authority before provider start"
+      fail "could not bind current plan authority before provider start"
     fi
     if [ -f "$worker_guard_dir/current-operation.json" ]; then
       worker_operation_snapshot_sha="$(
         oms_sha256_file "$worker_guard_dir/current-operation.json" 2>/dev/null || true
       )"
       [ -n "$worker_operation_snapshot_sha" ] ||
-        fail "could not hash current plan/executor authority snapshot"
+        fail "could not hash current plan authority snapshot"
     fi
     # A bounded scan must say it was bounded: silent truncation reads as full
     # coverage exactly where coverage matters.
@@ -1941,19 +1828,14 @@ fi
 # A missing CLI (127) or a blocked one (126) is not repairable, and a repair
 # prompt that trips the outbound gate stops the loop — re-sending secret-laden
 # context is futile.
-# One outside opinion after a repair has already failed. The rules say to
-# consult an advisor "after repeated failures", and until now nothing did: the
-# loop simply re-sent the same brief to the same worker, which is what a second
-# identical attempt is. Fires once per delegation, only when a repair round has
-# already come back failing, so an ordinary run never pays for it. The advisor
-# is input to the next attempt, not a gate — if it cannot be reached, the
-# repair proceeds exactly as before.
+# A repair budget covers the same worker, not another provider. Optional advice
+# requires explicit opt-in and never gates repair if the advisor is unavailable.
 advise_used=0
 advise_after_repeated_failure() {
   local target="$1"
   local context advice rc=0
 
-  [ "${OMS_ADVISE_ON_REPEAT:-1}" != "0" ] || return 0
+  [ "${OMS_ADVISE_ON_REPEAT:-0}" = "1" ] || return 0
   [ "$advise_used" -eq 0 ] || return 0
   advise_used=1
 
@@ -2121,7 +2003,7 @@ if [ -n "$worker_guard_dir" ]; then
     KEEP_WORKTREE=1
     if [ -s "$worker_guard_dir/current-operation-detail" ]; then
       # Repair the operation's own authority before the failure transition so
-      # release and executor fail act on the restored row, not the worker's
+      # release acts on the restored row, not the worker's
       # bytes. The run still fails: this repairs owner state, it never admits
       # the worker's output.
       oms_worker_operation_restore "$REPO" \
@@ -2160,7 +2042,7 @@ if [ -n "$worker_guard_dir" ]; then
           [ -z "$detail" ] || echo "error: current-operation: $detail" >&2
         done < "$worker_guard_dir/current-operation-recovery"
       else
-        echo "error: current-operation recovery produced no outcome; inspect plan/executor state" >&2
+        echo "error: current-operation recovery produced no outcome; inspect plan state" >&2
       fi
     fi
     if [ -s "$worker_guard_dir/worktree-identity-detail" ]; then
@@ -2182,9 +2064,6 @@ if [ -n "$worker_guard_dir" ]; then
       echo "warning: worker-authority breach was NOT recorded in the fail ledger; later commands will not remember it" >&2
     ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
-    [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" \
-      --id "$EXECUTOR_ID" --reason "worker changed protected state" >/dev/null 2>&1 || true
-    executor_finalized=1
     plan_failure_transition
     exit 1
   fi
@@ -2251,7 +2130,6 @@ elif [ "$APPLY" = 1 ]; then
     land_args=(--patch "$patch_file" --repo "$REPO")
     [ -n "$VERIFY_CMD" ] && land_args+=(--verify "$VERIFY_CMD")
     [ -n "$PLAN_TASK_ID" ] && land_args+=(--plan-task "$PLAN_TASK_ID")
-    [ -n "$EXECUTOR_ID" ] && land_args+=(--executor "$EXECUTOR_ID")
     [ "$ALLOW_RESTRUCTURE" = 1 ] && land_args+=(--allow-restructure)
     if bash "$land_script" "${land_args[@]}" >/dev/null; then
       applied=1
@@ -2318,14 +2196,9 @@ print(json.dumps({"event": "failed", "artifact": sys.argv[1], "patch": sys.argv[
 PY
   fi
   delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
-  [ -z "$EXECUTOR_ID" ] || "$(ma_scripts_dir)/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" --reason "worker or verify failed" >/dev/null || true
-  [ -z "$EXECUTOR_ID" ] || executor_finalized=1
   plan_failure_transition
   exit 1
 fi
-[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] ||
-  "$(ma_scripts_dir)/agent-executor.sh" "done" --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
-[ "$DRY_RUN" = "1" ] || [ -z "$EXECUTOR_ID" ] || executor_finalized=1
 if [ "$applied" = 1 ]; then
   : # patch-land already recorded lineage and finished a coupled plan task.
 elif [ "$plan_reviewed" = 1 ]; then

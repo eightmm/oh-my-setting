@@ -106,7 +106,6 @@ re-implements them and never keeps a second copy of their state.
 | Verify command, verifier floor | `patch-admit` ladder (`apply, secrets, scope, structure, syntax, tests, verifier, verify, verify-floor`) | admission rows in `.oms/artifacts/index.jsonl` (`kind: patch-admit`, `exit`) |
 | Landing (serialized, CAS-fenced) | `scripts/patch-land.sh` holding the `.oms/landings.jsonl` lock; refuses, never rebases; exit 75 when another landing holds the lock | `.oms/landings.jsonl`, index rows `kind: patch-land` |
 | Plan acceptance | `agent-plan accept` → `.oms/plan/progress.jsonl` rows `kind: acceptance`, `status: pass\|fail\|error`, exit 0/3/2 | `progress.jsonl` |
-| Executor contract | `scripts/agent-executor.sh` (frozen souls under `.oms/executors/<id>/meta.json`); launch is `peer-delegate` | `agent-executor show` |
 | Lifecycle events | `scripts/lib/agent-events.py` (`.oms/lifecycle/events.jsonl`, four event types) | `agent-events list` |
 | Failure ledger | `scripts/fail-ledger.sh` (`.oms/failures.jsonl`) | `fail-ledger list --unresolved --json` |
 | Typed projection / evidence coverage | `scripts/lib/oms_runtime/{projection,evidence}.py` | `oms runtime envelope show`, `evidence show`, `next` |

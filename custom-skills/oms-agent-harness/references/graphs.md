@@ -1,6 +1,9 @@
 # Project Graph and Execution Graph
 
-`oms graph` adds two graphs above the existing control plane. Neither owns
+Project Graph is optional context support, not a prerequisite for coding.
+Use direct source search for known scope. Execution Graph is an advanced,
+explicitly selected workflow or a way to resume an existing graph run.
+Neither graph owns
 authority: the Project Graph is a regenerable cache of how the code is
 connected, and the Execution Graph decides what is *legal* to run next while
 `agent-plan`, `plan-run`, `patch-admit`, and `patch-land` decide what *may*
@@ -64,6 +67,7 @@ still means full fallback.
 ```bash
 oms graph project context --task "fix lease recovery" --max-files 12 --bundle
 oms graph project context --task "fix lease recovery" --max-files 12 --base HEAD --json
+oms graph project context --task "잠금 복구" --entry-path scripts/lib/file-lock.sh --json
 ```
 
 The pack path-deduplicates lexical entries, excludes ambiguous traversal,
@@ -75,6 +79,12 @@ their `EXTRACTED` reverse-dependency impact. `--bundle` compiles the selected fi
 through `oms runtime context`, so the delegate brief carries the same bounded
 bundle format as before. Expand with `neighbors`/`trace` on demand rather
 than widening the pack.
+
+Retrieval is lexical, not translation or semantic search. Preserve the user's
+task and use discovered repo-relative `--entry-path` anchors when its language
+differs from identifiers. A `retrieval.status` of `no-match` or `partial` means
+inspect source directly; it never means there is no implementation. Byte
+estimates are payload size, not measured token savings or engineering quality.
 
 ## Work from the graph in an agent UI
 
@@ -88,10 +98,6 @@ oms graph project map --json \
   --html-fragment /absolute/task-owned/oms-project-graph.html
 oms graph project context --task "fix lease recovery" --max-files 12 \
   --json --html-fragment /absolute/task-owned/oms-context-graph.html
-oms graph exec render goal-drive \
-  --html-fragment /absolute/task-owned/oms-execution-graph.html
-oms graph exec status --run RUN_ID \
-  --json --html-fragment /absolute/task-owned/oms-execution-run.html
 ```
 
 When callers, dependencies or change impact are unclear, use graph context
@@ -158,55 +164,12 @@ authority, and cannot be written by a harness child.
 nodes and 160 slim edges. Check `truncated`, `omitted_edges`, and `limits`, then
 continue from a narrower node when more detail is required.
 
-## Make the orchestration inspectable
+## Advanced execution graphs
 
-```bash
-oms graph exec validate coding-change
-oms graph exec render coding-change --mermaid
-oms graph exec route coding-change --outcomes '{"inspect":"completed"}'
-oms graph exec test tests/fixtures/graph-routes
-```
-
-A GraphSpec (`config/graphs/*.json` or a path) names nodes, typed outcomes,
-edges, repeat budgets, gates, and proof predicates. `route` is a pure
-evaluation of facts plus recorded outcomes: a claimed `completed` without
-its proof facts is `unverified`, cycles stop on `max_repeats`/`max_steps`,
-and gates wait for `exec decide`. Fixtures test routing without a model.
-
-## Run a graph through the existing primitives
-
-```bash
-oms graph exec run goal-drive --worker codex --goal "..." [--jobs 2]
-oms graph exec status --run RUN_ID          # shows bindings: work_item -> t1
-oms graph exec decide --run RUN_ID --node review --outcome approved
-oms graph exec resume --run RUN_ID --worker codex
-```
-
-`plan_task: "next"` is a selector, not a task: the runner peeks the plan once
-(read-only), records the concrete id on the node's `node_started` row, and a
-`bind_task` name lets later `plan_task_from` nodes execute exactly that task
-even after the plan's `next` moved on. Agent nodes call
-`plan-run --id TASK [--land] [--context-pack FILE]`; a node's `context`
-field turns into a project-graph pack that reaches the worker brief as
-orientation only. The bundled specs land, then `exec commit --binding
-work_item` calls goal-drive's bounded `--commit-task` mode, which freezes the
-exact completed landing receipt and uses the same commit intent, private tree,
-index lock, ref compare-and-set, and crash recovery as goal-drive. Extra bytes
-on a landed path and unrelated staged work are refused; repository commit hooks
-do not run. This mode cannot delegate, land, repair, or advance another task.
-The graph then re-runs acceptance. `--jobs N` runs a wave concurrently only for
-disjoint explicit tasks. The run store under `.oms/graph/runs/<run-id>/`
-(frozen spec, append-only events, derived projection) is what `resume`
-reads — never conversation memory; a crashed node is reconciled against the
-plan (live lease → waiting, expired → unverified, dead write tool →
-blocked). The runner has no path to `agent-plan land/finish/claim`; landing
-stays serialized inside `patch-land`. `exec shadow` reconstructs where the
-graph stands against current reality (proven nodes settled, an unproven
-check assumed failed, the task reality names bound) and compares that
-frontier with the control plane's canonical next action, appending evidence
-to `.oms/graph/shadow.jsonl`; it never acts. Run it explicitly when comparing
-the graph route with the control plane is useful; session start stays read-only
-and does no graph work.
+For explicit graph workflows, read `docs/GRAPH-ENGINEERING.md` for GraphSpec,
+route proofs, run/decide/resume, bindings and crash recovery. Keep existing
+run records and admission boundaries intact; ordinary work uses the existing
+plan/autopilot hierarchy without this extra layer.
 
 ## Boundaries
 

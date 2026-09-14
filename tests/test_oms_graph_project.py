@@ -149,6 +149,33 @@ class ProjectGraphTest(unittest.TestCase):
                                   max_files=1, state=self.state)
         self.assertEqual(selected["entries"], ["file:lease.py"])
         self.assertEqual(selected["files"], ["lease.py"])
+        self.assertEqual(selected["retrieval"]["method"], "entry-path")
+        missing = select_context(self.repo, graph, task="없는개념입니다", state=self.state)
+        self.assertEqual(missing["retrieval"]["status"], "no-match")
+        self.assertIn("does not translate", missing["retrieval"]["hint"])
+        mixed = context_pack(self.repo, graph, task="잠금 복구", state=self.state,
+                             entry_paths=("lease.py", "missing.py"))
+        self.assertEqual(mixed["task"], "잠금 복구")
+        self.assertIn("lease.py", mixed["files"])
+        self.assertEqual(mixed["retrieval"]["status"], "partial")
+        self.assertEqual(mixed["retrieval"]["unmatched_entry_paths"], ["missing.py"])
+        for path in ("../outside.py", "/outside.py", "C:/outside.py", ""):
+            with self.subTest(invalid_entry_path=path), self.assertRaises(GraphError):
+                context_pack(self.repo, graph, task="잠금 복구", state=self.state, entry_paths=(path,))
+        from oms_graph.cli import build_parser
+        args = build_parser().parse_args(["project", "context", "--task", "잠금 복구",
+                                         "--entry-path", "lease.py", "--entry-path", "missing.py"])
+        self.assertEqual(args.entry_path, ["lease.py", "missing.py"])
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/lib/oms_graph_core.py"), "--repo", str(self.repo),
+             "project", "context", "--task", "잠금 복구", "--entry-path", "lease.py", "--json", "--no-refresh"],
+            env=dict(os.environ, OMS_PROJECT_GRAPH_STATE=str(self.state)), capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout)["retrieval"]["status"], "matched")
+        subprocess.run([sys.executable, "-c",
+                        "import sys; sys.path.insert(0, sys.argv[1]); import oms_graph.cli; "
+                        "assert not any(n in sys.modules for n in "
+                        "('oms_graph.runner', 'oms_graph.commit', 'oms_graph.shadow'))",
+                        str(ROOT / "scripts/lib")], check=True)
 
     def test_trace_is_a_bounded_projection_with_explicit_loss(self) -> None:
         nodes = [{"id": "root", "kind": "file", "path": "root.py"}]

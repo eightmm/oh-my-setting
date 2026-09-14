@@ -75,7 +75,7 @@ user request
                                       -> patch-admit -> patch-land
        -> orchestrate: agent-supervisor -> agent-events -> approval-inbox
        -> operate: execution-profile / open-in
-       -> observe: ops-cockpit / otel-export
+       -> observe: inbox / targeted state queries / otel-export
   -> local state in .oms/
        -> inbox / state / handoff / MCP / Work Journal
 ```
@@ -283,8 +283,7 @@ capability snapshot. `oms models` reads the cache; `oms models --refresh` and
 `oms model-doctor` perform explicit probes.
 
 Artifacts record requested and selected models, reasoning effort, fallback use,
-and reason. An executor stores `provider-default` as provenance, but loading it
-does not turn that sentinel into an explicit model request.
+and reason.
 
 ## Delegating writes
 
@@ -299,7 +298,7 @@ A write delegation:
 1. Creates a detached worktree from the current `HEAD` under the private
    `${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/worktrees` root (override
    with `OMS_DELEGATE_WORKTREE_ROOT`).
-2. Injects the brief, selected role or frozen executor, and bounded context.
+2. Injects the brief, optional role, and bounded context.
 3. Runs the provider and the declared verification command.
 4. Returns an artifact and binary-safe patch; it does not commit or push.
 5. Optionally uses bounded repair rounds with the prior failure attached.
@@ -319,17 +318,16 @@ exact-action approval; `--request-approval` creates the request without applying
 the patch.
 
 Write providers receive task context but not the primary `.oms` pointer,
-attempt/lease capability, or executor capability. The default guard preserves
+or attempt/lease capability. The default guard preserves
 parallel agent state, rejects destructive rewrites, and binds the selected
-task/lease plus executor/soul objects exactly while other tasks may move. On a
+task/lease objects exactly while other tasks may move. On a
 violation the failing run also repairs the operation's own authority from its
-hash-verified pre-launch snapshot: scope, verifier, executor receipt, soul
-bytes, and review evidence always restore, while claim-cycle fields restore
+hash-verified pre-launch snapshot: scope, verifier, and review evidence always restore, while claim-cycle fields restore
 only under the operation's own lease and are otherwise kept and named. A
 caller that guarantees no sibling writer may set
 `OMS_WORKER_AUTHORITY_EXCLUSIVE=1` for complete authority-state comparison and
 rollback. Plan landing and completion require the reviewed patch bytes,
-verifier, lease, and any executor ID/soul receipt to match exactly inside the
+verifier and lease to match exactly inside the
 plan lock. The delegated checkout's physical identity and both Git
 backpointers are rechecked
 at every mutation boundary, including cleanup. Landing terminal rows close a
@@ -500,12 +498,12 @@ publication. For a spent intent, rename the work branch once
 checkout guard accepts); the parent then resumes review and preparation on the
 new name. This recovery procedure is agent-facing, not an end-user handoff.
 
-Frozen executors combine a reusable role with task-specific scope, base SHA,
-lease, model route, and verify command. They are write-only and cannot widen
-their own authority or recursively delegate. A failed landing may re-arm the
-same reviewed task and executor once, without changing that frozen contract;
-provider failure or signal exit blocks that repair before it can become
-claimable again, including after a restart.
+Task-specific behavior belongs in the brief, not a separately generated Soul.
+Soul executors and their command are removed. Existing records and bound reviews
+remain readable evidence but cannot authorize new execution or landing; create
+a fresh reviewed task without editing away the old binding. GC preserves legacy
+executor markers instead of attempting to resume or retire their contracts.
+Normal task leases, scoped admission, one-use approvals and one-shot repair remain.
 
 Each new autopilot receipt also binds an opaque run owner. Claims and worker
 markers inherit it. Re-entry recovers only that owner's exact current
@@ -514,8 +512,7 @@ running work, another owner, and `review`/`landing` evidence are preserved.
 Its owner and dead claimant come from one receipt-lock judgment token, never a
 later ledger reread. Routine GC CASes the observed state and lease and vetoes
 any exact live worker marker under the plan lock, so a retry or task that
-advances during cleanup cannot be requeued by stale evidence. Executor cleanup
-uses the same check/apply predicate under its metadata lock. Windows liveness
+advances during cleanup cannot be requeued by stale evidence. Windows liveness
 binds the Git Bash PID to its native WINPID and uses a wait-only process handle;
 it never probes by sending signal zero through Python. A missing legacy native
 identity is preserved as unknown. GC treats markers as bounded, no-follow
@@ -605,14 +602,20 @@ canonical next action; the evaluator takes no authority from `goal-drive` or
 | Front door | Actual boundary |
 |---|---|
 | `agent-events`, `agent-supervisor` | Append-only attempt lifecycle and bounded `trusted-local` execution. Resume creates a child attempt; reconcile closes stale supervisor-owned queues that lost their runtime record. The supervisor never lands, commits, or pushes. |
-| `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode, executor+soul, and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
+| `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
 | `land` | One detached job per landing: gate, `git push --no-verify`, `oms update` when the repo is the harness checkout, CI poll, receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and single stale failure-ledger rows retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`; a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
 | `execution-profile` | Compatibility preflight delegates backend readiness to the typed runtime engine; not a sandbox or landing authority. |
-| `open-in`, `ops-cockpit` | Probed VS Code/Stably Orca/Codex launch plans and a read-only, non-atomic operational summary. Its `observations` block projects the pending observation decisions — turn-guard intervention pairing, fail-ledger hook-row retirement, usage-family exposure — with no thresholds or tuning. |
+| `open-in` | Probed VS Code/Stably Orca/Codex launch plans. The redundant `ops-cockpit` aggregate was retired; use `inbox`, then the relevant state, approval, or artifact telemetry query. Historical records are unchanged. |
 | `otel-export` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; opt-in `--gen-ai` standard semantic attributes. |
 | `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |
+
+`check.sh` and `tick` coordinate through the existing per-file lock namespace.
+Checks may run concurrently; a sweep defers while a check or another sweep is
+active on that repo. Dead check markers are recoverable, and the timer stays
+enabled. This does not exclude maintenance receipts or task state from the
+gate's state-leak detection; both entrypoints must have the updated code.
 
 Commands that retain different authority may still share one decision engine.
 Scope consumers use one Bash-compatible literal/glob matcher with deny

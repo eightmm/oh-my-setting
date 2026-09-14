@@ -97,14 +97,14 @@ wall-clock bound, but that is not isolation. Use an OS sandbox or container
 when that stronger boundary is required.
 
 Write-provider children do not receive the primary `OMS_STATE_REPO`, attempt,
-plan lease, or executor capability variables. The default guard preserves
+or plan lease capability variables. The default guard preserves
 parallel owner work while rejecting rewrites, truncation, and deletion of
 existing shared-state evidence. For a plan-bound delegation it also binds the
-complete selected task/lease and executor/soul objects while allowing sibling
+complete selected task/lease objects while allowing sibling
 tasks to move. A mismatch fails before a review or landing is published, and
 the operation's own frozen authority is then repaired from the pre-launch
 snapshot this process hashed: authority and evidence fields (scope, verifier,
-executor receipt and soul bytes, review evidence) always restore, because no
+review evidence) always restore, because no
 legitimate writer moves them mid-run and a later reclaim would otherwise
 inherit them; claim-cycle fields restore only while the task still carries
 this operation's lease — keeping an operator block and heartbeat — and are
@@ -131,10 +131,10 @@ cleanup; a replaced path or symbolic worktree registry is preserved for
 inspection instead of followed.
 
 Plan landing and completion bind the exact reviewed patch bytes, task verifier,
-lease, and, when present, executor ID plus soul hash. Omitting or replacing any
+and lease. Omitting or replacing any
 receipt fails closed through a compare-and-set inside the plan lock. A rejected
 landing can re-enter the same review lease for one bounded repair; it cannot
-mint a wider lease or repeatedly re-arm an executor. That repair is
+mint a wider lease or repeatedly re-arm a task. That repair is
 terminalized as blocked on provider failure or signal exit, including after a
 restart, so a later run cannot call another worker for it.
 
@@ -181,11 +181,11 @@ The retired `semantic-eval` command refuses execution; use `patch-admit` and
 reports remain readable, but self-reported judge provenance is not independent
 evidence. Verification worktrees are not process sandboxes; use trusted checks.
 
-`ops-cockpit` is read-only but exposes operational and approval metadata and is
-not an atomic snapshot. `otel-export` writes a whitelisted, content-free OTLP
+`inbox` and `state` expose local operational metadata, not atomic snapshots.
+`otel-export` writes a whitelisted, content-free OTLP
 JSONL stream to stdout or a local file and performs no network transmission. It
 links lifecycle, approval, landing, artifact, and hook metadata with opaque
-correlation IDs and labels usage as measured or advisory. Treat both outputs as
+correlation IDs and labels usage as measured or advisory. Treat these outputs as
 local operational metadata.
 
 ## Hardening recommendations for users

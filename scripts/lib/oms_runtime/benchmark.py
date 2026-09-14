@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import collections
+import datetime as dt
+import heapq
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -96,14 +98,26 @@ def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
 
 def _context_rows(repo: Path) -> List[Dict[str, Any]]:
     root = repo / ".oms" / "runtime" / "context"
-    rows: List[Dict[str, Any]] = []
     if not root.is_dir() or root.is_symlink():
-        return rows
-    for path in sorted(root.glob("*.json"))[-1000:]:
-        row = read_json(path, default=None)
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+        return []
+
+    def candidates():
+        for path in root.glob("*.json"):
+            row = read_json(path, default=None)
+            if not isinstance(row, dict):
+                continue
+            # Hash names and copied-file mtimes are not creation timestamps.
+            stamp = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+            try:
+                parsed = dt.datetime.fromisoformat(row.get("generated_at", "").replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    stamp = parsed.astimezone(dt.timezone.utc)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                pass
+            yield stamp, path.name, row
+
+    # Read all timestamps, but retain at most the sample plus one candidate.
+    return [item[2] for item in heapq.nlargest(1000, candidates(), key=lambda item: item[:2])]
 
 
 def outcome_path(repo: Path) -> Path:
@@ -179,8 +193,6 @@ def snapshot(repo: Path) -> Dict[str, Any]:
     context_bytes = [float(row.get("selected_bytes")) for row in contexts if isinstance(row.get("selected_bytes"), (int, float))]
     context_debt = [float(row.get("context_debt")) for row in contexts if isinstance(row.get("context_debt"), (int, float))]
     acceptance_weight = sum(float(item.get("weight", 1)) for item in envelope.get("criteria", []) if item.get("status") == "verified")
-    denominator = (sum(tokens) if tokens else 0.0) + 100.0 * len(artifacts) + (sum(durations) if durations else 0.0)
-    efficiency = acceptance_weight / denominator if denominator > 0 else None
     manual_metrics: Dict[str, int] = {"human_corrections": 0, "escaped_defects": 0, "reverted_lines": 0, "false_refusals": 0, "duplicate_work": 0}
     for row in manual_outcomes:
         metrics = row.get("metrics")
@@ -206,8 +218,10 @@ def snapshot(repo: Path) -> Dict[str, Any]:
         "duration_seconds": {"count": len(durations), "sum": sum(durations) if durations else None, "mean": statistics.mean(durations) if durations else None},
         "tokens": {"count": len(tokens), "sum": sum(tokens) if tokens else None},
         "cost_usd": {"count": len(costs), "sum": sum(costs) if costs else None},
-        "context": {"manifests": len(contexts), "selected_bytes_sum": sum(context_bytes) if context_bytes else None, "selected_bytes_mean": statistics.mean(context_bytes) if context_bytes else None, "debt_sum": sum(context_debt) if context_debt else None},
-        "useful_work_efficiency": efficiency,
+        "context": {"manifests": len(contexts), "sample_limit": 1000, "selection": "generated_at_desc_undated_last", "selected_bytes_sum": sum(context_bytes) if context_bytes else None, "selected_bytes_mean": statistics.mean(context_bytes) if context_bytes else None, "debt_sum": sum(context_debt) if context_debt else None},
+        # Legacy field: adding tokens, seconds and event counts is not a
+        # calibrated efficiency measure. Keep raw measurements, not a score.
+        "useful_work_efficiency": None,
         "manual_outcomes": {"count": len(manual_outcomes), "totals": manual_metrics},
         "skill_evals": _skill_eval_summary(skill_evals),
         "unknown_metrics": [] if manual_outcomes else ["human_corrections", "escaped_defects", "reverted_lines", "false_refusals", "duplicate_work"],
@@ -221,7 +235,7 @@ def persist(repo: Path, row: Optional[Mapping[str, Any]] = None) -> Dict[str, An
 
 
 def compare(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str, Any]:
-    fields = [("success_rate",), ("useful_work_efficiency",), ("acceptance", "coverage"), ("acceptance", "risk_score"), ("context", "selected_bytes_mean"), ("tokens", "sum"), ("cost_usd", "sum"), ("duration_seconds", "sum"), ("skill_evals", "task_pass_delta_sum")]
+    fields = [("success_rate",), ("acceptance", "coverage"), ("acceptance", "risk_score"), ("context", "selected_bytes_mean"), ("tokens", "sum"), ("cost_usd", "sum"), ("duration_seconds", "sum"), ("skill_evals", "task_pass_delta_sum")]
     fields.extend(("manual_outcomes", "totals", name) for name in (
         "human_corrections", "escaped_defects", "reverted_lines",
         "false_refusals", "duplicate_work"))

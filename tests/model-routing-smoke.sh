@@ -434,30 +434,6 @@ fi
 grep -Fxq -- 'agy-model-b' "$TMP/agy-argv/2.argv" ||
   fail 'Antigravity fallback model was not selected'
 
-# Frozen executor effort is part of the route contract and must reach agy.
-printf 'Keep the task bounded and report verification.\n' > "$TMP/agy-soul.md"
-env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" \
-  bash "$ROOT/scripts/agent-executor.sh" create --repo "$TMP/invoke-repo" \
-    --id agy-effort --provider antigravity --reasoning-effort high \
-    --soul-file "$TMP/agy-soul.md" >/dev/null || fail 'Antigravity executor create failed'
-bash "$ROOT/scripts/agent-executor.sh" freeze --repo "$TMP/invoke-repo" \
-  --id agy-effort >/dev/null || fail 'Antigravity executor freeze failed'
-printf '0\n' > "$TMP/agy.count"
-rm -rf "$TMP/agy-argv"; mkdir -p "$TMP/agy-argv"
-env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
-  AGY_ARGV_OUT="$TMP/agy.argv" OMS_TEST_AGY_COUNT_FILE="$TMP/agy.count" \
-  OMS_TEST_AGY_ARGV_DIR="$TMP/agy-argv" OMS_CAPABILITY_DIR="$TMP/cap" \
-  OMS_LOCK_DIR="$TMP/locks" OMS_LOCK_FORCE_MKDIR=1 \
-  bash "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/invoke-repo" \
-    --to antigravity --executor agy-effort --no-verify \
-    --artifact-dir "$TMP/invoke-repo/.oms/artifacts/agy-executor" \
-    --prompt "executor effort" >/dev/null 2>&1 ||
-  fail 'Antigravity frozen executor call failed'
-grep -Fxq -- '--effort' "$TMP/agy-argv/1.argv" ||
-  fail 'Antigravity frozen executor dropped --effort'
-grep -Fxq -- 'high' "$TMP/agy-argv/1.argv" ||
-  fail 'Antigravity frozen executor dropped its effort value'
-
 # When catalog recovery succeeds but verification fails, repair continues on
 # the selected model and preserves the selected explicit effort.
 printf '0\n' > "$TMP/agy.count"

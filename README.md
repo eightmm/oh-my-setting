@@ -128,7 +128,7 @@ It deliberately does **not** replace the established mutation path:
 peer-delegate -> patch-admit -> patch-land
 ```
 
-Plan leases, executor souls, one-use approvals, commit intents, and Draft PR
+Plan leases, one-use approvals, commit intents, and Draft PR
 intents remain authoritative. Runtime snapshots, capsules, context bundles, and
 backend receipts are evidence or advisory state, never write authority.
 
@@ -178,7 +178,7 @@ agent surface is `oms list`; the expanded core catalog is
   synthesis, never quoted as one more opinion
 - **Delegating writes** — isolated worktree delegation (`--read-only` for
   audits that must not produce a patch), an admission ladder, one mutation
-  boundary, hash-frozen executor souls and worker-authority fingerprints
+  boundary, worker-authority fingerprints
   with snapshot-backed authority repair on violation, primary authority
   receipts withheld from write children, and no recursive delegation — a
   worker asking for another peer is refused server-side and told to report

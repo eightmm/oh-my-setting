@@ -13,6 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
+# shellcheck source=scripts/lib/check-maintenance.sh
+. "$ROOT/scripts/lib/check-maintenance.sh"
 
 usage() {
   cat <<'EOF'
@@ -26,7 +28,8 @@ run        Sweep the given repos, or every registered one: journal and CI sync,
            attempt reconcile, stale thread/task close, plan and failure
            retirement, artifact-failure resolution, optional gc, and a Codex
            plugin cache refresh when the cache no longer matches the install.
-           Each repo gets .oms/tick/last.json.
+           Each completed sweep gets .oms/tick/last.json. A repo under
+           verification or another sweep is deferred until a later tick.
 register   Add a repo (default: PWD, git-root anchored) to the registry;
            install registers PWD when it is an adopted repo.
 install    Register the hourly trigger; uninstall removes only a unit this
@@ -245,14 +248,32 @@ for failure in failures:
 ' "$FAILURE_STALE_DAYS"
 }
 
-sweep_repo() {  # sweep_repo ROOT -> one summary line; receipt in .oms/tick/last.json
+sweep_repo() (
+  local root
+  root="$(cd "$1" && pwd -P)" || exit 1
+  [ -d "$root/.oms" ] || { echo "skip $root: no .oms"; exit 0; }
+  if [ "$DRY_RUN" = 1 ]; then echo "would sweep $root"; exit 0; fi
+  if ! oms_hold_file_lock "$root/.oms/tick/last.json" 8; then
+    echo "deferred $root: maintenance already running"
+    exit 0
+  fi
+  trap oms_release_held_file_lock EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if oms_check_maintenance_active "$root"; then
+    echo "deferred $root: verification running"
+    exit 0
+  fi
+  sweep_repo_unlocked "$root"
+)
+
+sweep_repo_unlocked() {  # receipt in .oms/tick/last.json
   local root="$1" oms="$ROOT/scripts/oms" journal=0 reconcile=0 gc=skipped closed=() id task_file
   local tasks_closed=0 plans_retired=0 plan_file plan_check plan_sha plan_retire_rc=skipped
   local artifacts_resolved=0 artifact_resolve_out artifact_resolve_rc=skipped
   local artifacts_superseded=0 artifact_supersede_out artifact_supersede_rc=skipped
   local failures_retired=0 failure_list failure_candidates failure_fingerprint
-  [ -d "$root/.oms" ] || { echo "skip $root: no .oms"; return 0; }
-  if [ "$DRY_RUN" = 1 ]; then echo "would sweep $root"; return 0; fi
   if work_journal_enabled; then
     bounded bash -c '
       . "$1/scripts/lib/work-journal.sh"

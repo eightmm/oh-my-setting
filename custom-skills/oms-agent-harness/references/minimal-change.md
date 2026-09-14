@@ -92,7 +92,7 @@ real risks; documentation density and style alone are not findings.
   with a bounded surface. Rank evidence-backed removals; omit code-golf and
   style.
 - Implementation: the shared delegate prompt carries the compact doctrine;
-  roles and executor souls refine strategy without changing authority.
+  roles refine strategy without changing authority.
 
 File/line evidence, the maintenance or behavioral failure, and the replacement
 are required. Line count alone is not evidence, and complexity cannot override

@@ -26,8 +26,7 @@ agent, a Grok/GLM route, or a custom adapter.
    evidence; no extra classifier call or prompt-keyword heuristic runs.
    `--model` still wins, `OMS_ROLE_ROUTING=0` still disables presets, and an
    unknown generation still uses provider default. This is not a spending cap:
-   existing bounded recovery may use a higher rank. Frozen executors reject
-   `--workload routine`; choose their exact model before freezing. Unclassified
+   existing bounded recovery may use a higher rank. Unclassified
    plan-run/autopilot workers keep the standard route. A reviewed task
    `assignment` can select routine work or an exact model per transport;
    [autonomy-loop.md](autonomy-loop.md) owns its schema and precedence.

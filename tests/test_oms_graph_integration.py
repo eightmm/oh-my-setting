@@ -143,7 +143,7 @@ class FrontDoorGuardTest(unittest.TestCase):
 
     SOURCE = Path(runner.__file__).read_text(encoding="utf-8")
     TREE = ast.parse(SOURCE)
-    FENCED_SCRIPTS = ("agent-plan.sh", "plan-run.sh", "patch-land.sh", "peer-delegate.sh", "agent-executor.sh")
+    FENCED_SCRIPTS = ("agent-plan.sh", "plan-run.sh", "patch-land.sh", "peer-delegate.sh")
 
     def test_no_control_plane_script_is_named(self) -> None:
         scripts = {node.value for node in ast.walk(self.TREE)

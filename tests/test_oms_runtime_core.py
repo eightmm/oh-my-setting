@@ -200,6 +200,19 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(row['scope']['forbidden'], ['secrets/'])
         self.assertEqual(row['next_actions'][0]['id'], 'execute_ready_task')
 
+        legacy = self.repo / '.oms' / 'executors' / 'old' / 'meta.json'
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(json.dumps({
+            'executor_id': 'old', 'state': 'frozen', 'soul_sha256': 'a' * 64,
+            'allowed_paths': ['legacy-only/'], 'forbidden_paths': ['src/'],
+        }), encoding='utf-8')
+        with_legacy = evidence.build_envelope(self.repo)
+        self.assertEqual(with_legacy['scope'], row['scope'])
+        self.assertTrue(with_legacy['executor']['retired'])
+        self.assertFalse(with_legacy['executor']['active'])
+        self.assertFalse(with_legacy['executor']['frozen'])
+        self.assertTrue(any('Retired Soul' in item for item in with_legacy['warnings']))
+
     def test_completed_plan_without_active_task_routes_to_retirement_check(self) -> None:
         actions = projection._actions(
             {'present': True},
@@ -1116,8 +1129,34 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertTrue(stable['ready'])
         self.assertEqual(failures.classify('verification failed')['code'], 'verifier_failed')
         row = benchmark_snapshot(self.repo)
-        self.assertIn('useful_work_efficiency', row)
+        self.assertIsNone(row['useful_work_efficiency'])
+        from oms_runtime.benchmark import compare
+        comparison = compare(dict(row, useful_work_efficiency=1), dict(row, useful_work_efficiency=2))
+        self.assertNotIn('useful_work_efficiency', json.dumps(comparison))
         self.assertIn('human_corrections', row['unknown_metrics'])
+
+        # Digest names and copied-file mtimes do not identify recent context.
+        from oms_runtime.benchmark import _context_rows
+        context_root = self.repo / '.oms' / 'runtime' / 'context'
+        for number in range(1000):
+            atomic_write_json(context_root / ('f%063x.json' % number), {
+                'generated_at': '2026-09-01T00:00:00Z', 'selected_bytes': 1,
+            })
+        newest = context_root / ('0' * 64 + '.json')
+        atomic_write_json(newest, {'generated_at': '2026-09-14T00:00:00Z', 'selected_bytes': 1001})
+        os.utime(newest, (1, 1))
+        atomic_write_json(context_root / 'offset.json', {
+            'generated_at': '2026-09-14T08:00:00+09:00', 'selected_bytes': 2,
+        })
+        for name, stamp in [('missing', None), ('invalid', 'not-a-date'), ('naive', '2026-09-15')]:
+            atomic_write_json(context_root / (name + '.json'), {'generated_at': stamp, 'selected_bytes': 9999})
+        selected = _context_rows(self.repo)
+        self.assertEqual(len(selected), 1000)
+        self.assertEqual([item['selected_bytes'] for item in selected[:2]], [1001, 2])
+        sampled = benchmark_snapshot(self.repo)['context']
+        self.assertEqual(sampled['selected_bytes_sum'], 2001)
+        self.assertEqual(sampled['sample_limit'], 1000)
+        self.assertEqual(sampled['selection'], 'generated_at_desc_undated_last')
 
     def test_benchmark_groups_only_attributable_model_outcomes(self) -> None:
         # The per-model table is what a routing decision can be argued from:

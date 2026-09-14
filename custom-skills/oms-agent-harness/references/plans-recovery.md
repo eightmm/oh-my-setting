@@ -61,5 +61,5 @@ Recovery sequence:
 4. Run `oms agent-plan --repo . reclaim --include-review` if review work needs
    explicit requeueing.
 
-GC must preserve active tasks, live workers, open runs, frozen/running
-executors, and unresolved failures.
+GC must preserve active tasks, live workers, open runs, legacy Soul records,
+and unresolved failures.

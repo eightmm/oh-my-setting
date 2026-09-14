@@ -370,7 +370,7 @@ row = next(item for item in rows if item["name"] == "oms-spec-interview")
 assert "start this project" in [str(value).casefold() for value in row.get("triggers", [])]
 PY
 
-for command in agent-call agent-run agent-executor peer-ask peer-review peer-delegate plan-run; do
+for command in agent-call agent-run peer-ask peer-review peer-delegate plan-run; do
   help="$(bash "$ROOT/scripts/$command.sh" --help 2>&1)" ||
     fail "$command --help failed"
   printf '%s' "$help" | grep -Fq 'xhigh' || fail "$command help omits xhigh effort"

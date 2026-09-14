@@ -15,6 +15,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   paths in unattended timers without sourcing shell startup files.
 
 ### Changed
+- Retire Soul executors in favor of reviewed plan tasks and worker briefs.
+  Keep legacy records as evidence, reject their reuse for execution or landing,
+  and preserve task leases, scoped admission and exact-action approvals.
+- Condense duplicated worker guidance, follow nested skill references, and stop
+  excluding council responses merely because their sentences end in questions.
 - Provider installation and automatic updates follow official stable Codex,
   Claude Code, and agy releases with checksum verification. Already-installed
   providers refresh even when OMS is unchanged; bootstrap tools stay pinned,
@@ -31,7 +36,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   failures never trigger model retries or automatic patch application.
 - Routine delegation selects the lowest seeded routable model through
   `peer-delegate --workload routine`, with parent-side task selection and no
-  classifier call. Explicit pins and frozen executors stay authoritative;
+  classifier call. Explicit pins stay authoritative;
   model names containing spaces remain intact.
 - Automatic graph preparation uses the worker's default, Git-ignored graph
   cache, so follow-up queries and optional source bundles reuse the same snapshot.

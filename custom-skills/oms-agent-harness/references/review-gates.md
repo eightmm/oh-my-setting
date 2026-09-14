@@ -1,7 +1,8 @@
 # Review Gates
 
-Use `oms peer-review` to judge an existing diff without writing to it. The
-parent owns fixes, landing, verification, commit, push, and release.
+For explicitly authorized peer review, use `oms peer-review` to judge an existing
+diff without writing to it. The parent owns fixes, landing, verification, commit,
+push, and release.
 
 For an authorized release, finish focused checks and local commits, then use
 `oms land` to run the full gate once, push the same unchanged HEAD, and follow
@@ -57,10 +58,12 @@ the same object.
 
 When the change was authored by a peer provider, pass `--writer PROVIDER` so
 its family sits out of the council: same-family agreement is correlated
-judgment, not a second opinion. Bound iteration: after a failed gate, apply
-fixes in place and re-run the gate at most once — additional rounds add
-false positives faster than signal; if the second round still fails, escalate
-to `oms advise` or a human rather than looping.
+judgment, not a second opinion. Bound iteration: repair demonstrated defects
+and rerun affected checks; do not repeat an unchanged failed approach or request
+another council for routine fixes. If the repair bound is exhausted, report the
+remaining blocker. Use `oms advise` only within explicit user authorization
+when additional judgment is needed; concrete mechanical failures need diagnosis,
+not more reviewer votes.
 
 When direct calls are prohibited, use `--export-only`, run the sanitized prompt
 inside the approved boundary, and import it with `oms artifact-index import

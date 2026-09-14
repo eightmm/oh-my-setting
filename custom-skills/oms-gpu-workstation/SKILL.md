@@ -27,10 +27,22 @@ scheduler would impose is yours to apply.
 - Long or expensive runs also go through `oms run-ledger` so parallel agents
   see them and duplicates are caught before they burn hours.
 
-## CUDA OOM triage (in order)
+## CUDA OOM diagnosis
 
-1. Confirm nothing else holds VRAM (`nvidia-smi`); reclaim zombie processes.
-2. Reduce batch size / enable gradient accumulation.
-3. Mixed precision or activation checkpointing.
-4. Only then consider model sharding or a smaller model — and record the
-   working configuration in the run ledger row.
+Distinguish competing processes, retained tensors, input/padding growth and
+the task's real memory requirement before changing the experiment. Use live
+resource state and the failing configuration; an old snapshot cannot prove
+that resources are free. Never terminate another job or an unverified PID.
+Clean up only a confirmed task-owned process within existing authority.
+
+Choose the smallest remedy supported by that evidence. Queuing or correcting
+an unintended allocation may suffice. Batch size, gradient accumulation,
+precision, checkpointing and sharding are options, not a fixed ladder or
+assumed equivalents. Check their effect on the task's numerical behavior,
+effective batch, stochastic state and resume contract before adopting them.
+Changing model, data, precision or a scientific comparison beyond the approved
+contract requires user direction; do not silently shrink the problem to fit.
+
+Validate the selected remedy with the smallest authorized representative run.
+Record the configuration and what was actually verified in the existing run
+ledger. A memory-only check does not establish scientific or performance parity.

@@ -131,11 +131,7 @@ print(fails)
 COUNT
 }
 
-# The rules have always said to consult an advisor after repeated failures, and
-# peer-delegate does it from the second repair round. The primary agent's own
-# gate failures land here and escalated nowhere: it would file the row and try
-# the same thing again. Naming the advisor at the threshold costs one line of
-# stderr and no model call, so the decision to spend one stays with the caller.
+# A hint does not grant authority to call another model.
 advise_hint_if_repeated() {
   local fp="$1"
   local fails="$2"
@@ -144,7 +140,7 @@ advise_hint_if_repeated() {
   case "$threshold" in ''|*[!0-9]*) threshold=2 ;; esac
   [ "$threshold" -gt 0 ] || return 0
   [ "$fails" -ge "$threshold" ] || return 0
-  printf 'fail-ledger: %s has failed %dx unresolved; get an outside read before the next attempt (oms advise --prompt "...")\n' \
+  printf 'fail-ledger: %s has failed %dx unresolved; reassess the evidence; optional outside read if authorized (oms advise --prompt "...")\n' \
     "$fp" "$fails" >&2
 }
 
@@ -350,8 +346,8 @@ if fails > 0 and last is not None:
     threshold = int(threshold) if threshold.isdigit() else 2
     if threshold > 0 and fails >= threshold:
         sys.stderr.write(
-            "fail-ledger: %s has failed %dx unresolved; get an outside read before "
-            "the next attempt (oms advise --prompt \"...\")\n" % (fp, fails))
+            "fail-ledger: %s has failed %dx unresolved; reassess the evidence; "
+            "optional outside read if authorized (oms advise --prompt \"...\")\n" % (fp, fails))
     sys.exit(3)
 sys.exit(0)
 PY

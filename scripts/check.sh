@@ -11,7 +11,7 @@ set -euo pipefail
 # between edits, and a green run has nothing to say beyond "ok". OMS_VERBOSE=1
 # prints everything, and a failing stage always prints its own output.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
 
 # Git exports GIT_DIR (and friends) to hooks. From a linked worktree that
@@ -44,12 +44,16 @@ unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
 # so the production path cannot key off an ambient XDG variable (file-lock.sh).
 CHECK_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/oms-check-runtime.XXXXXX")"
 CHECK_STATE_GUARD_ACTIVE=0
+CHECK_ORIGINAL_LOCK_DIR="${OMS_LOCK_DIR:-}"
 cleanup_check_runtime() {
   local rc=$?
   trap - EXIT HUP INT TERM
   set +e
   if [ "$CHECK_STATE_GUARD_ACTIVE" = 1 ] && ! verify_oms_state; then
     rc=1
+  fi
+  if [ -n "${OMS_CHECK_MAINTENANCE_MARKER:-}" ]; then
+    oms_check_maintenance_end
   fi
   rm -rf "$CHECK_RUNTIME"
   exit "$rc"
@@ -219,6 +223,14 @@ if [ "$MODE" = quick ] || [ "$MODE" = affected ]; then
 elif [ -n "$QUICK_FROM" ] || [ -n "$QUICK_TO" ]; then
   echo "error: --changed-from/--changed-to require --quick or --affected" >&2
   exit 2
+fi
+
+if [ "$LIST_STAGES" != 1 ]; then
+  # Use the caller's lock namespace, not the fixture-only OMS_LOCK_DIR above.
+  # Each parallel lane registers independently; no inherited bypass flag.
+  # shellcheck source=scripts/lib/check-maintenance.sh
+  . "$ROOT/scripts/lib/check-maintenance.sh"
+  OMS_LOCK_DIR="$CHECK_ORIGINAL_LOCK_DIR" oms_check_maintenance_begin "$ROOT"
 fi
 
 if [ "$PARALLEL" = 1 ]; then

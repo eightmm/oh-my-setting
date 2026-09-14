@@ -6,17 +6,21 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from oms_runtime.common import atomic_write_json, canonical_json, ensure_private_dir, relative_path, sha256_bytes
+from oms_runtime.common import atomic_write_json, canonical_json, ensure_private_dir, parse_path_list, relative_path, sha256_bytes
 from oms_runtime.context import plan_context
 
 from .blast import blast_radius, changed_paths
 from .build import coverage as graph_coverage, state_dir
 from . import analytics
 from .query import Graph, _identifier_words
+from ..errors import GraphError
 
 
 def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None, entry_paths: Sequence[str] = ()) -> Dict[str, Any]:
     """Rank context without writing; exact paths bypass lexical retrieval."""
+    entry_paths = [str(path).replace("\\", "/") for path in entry_paths]
+    if any(parse_path_list([path]) != [path] for path in entry_paths):
+        raise GraphError("entry paths must be normalized repo-relative file paths")
     index = graph if isinstance(graph, Graph) else Graph(graph)
     # Generic task verbs describe the requested operation, not the project
     # concept to retrieve. Letting them compete with identifiers can make a
@@ -219,14 +223,25 @@ def select_context(repo: Path, graph: Any, *, task: str, max_files: int = 12, ma
                             "assurance": assurance_view, "change": change_view,
                             "coverage": graph_coverage(Path(repo), state=state),
                             "byte_estimate": {"raw_candidate_files": raw_bytes, "pack": 0}}
+    unmatched = [path for path in entry_paths if "file:" + path not in index.nodes
+                 and "test:" + path not in index.nodes]
+    pack["retrieval"] = {
+        "method": "entry-path" if entry_paths else "lexical",
+        "status": "no-match" if not entries else "partial" if unmatched else "matched",
+        "unmatched_entry_paths": unmatched,
+        "hint": "" if entries and not unmatched else (
+            "No complete match. Search source identifiers/paths directly, then use --entry-path. "
+            "Lexical search does not translate the task; missing matches do not prove missing code."
+        ),
+    }
     pack["byte_estimate"]["pack"] = len(canonical_json(pack))
     return pack
 
 
-def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None) -> Dict[str, Any]:
+def context_pack(repo: Path, graph: Any, *, task: str, max_files: int = 12, max_nodes: int = 40, depth: int = 2, base: str = "", state: Optional[Path] = None, entry_paths: Sequence[str] = ()) -> Dict[str, Any]:
     """Write .oms/project-graph/context/<digest>.json and return the pack."""
     pack = select_context(repo, graph, task=task, max_files=max_files,
-                          max_nodes=max_nodes, depth=depth, base=base, state=state)
+                          max_nodes=max_nodes, depth=depth, base=base, state=state, entry_paths=entry_paths)
     directory = ensure_private_dir(state_dir(Path(repo).resolve(), state) / "context")
     digest = sha256_bytes(canonical_json(pack))
     path = directory / (digest + ".json")

@@ -21,14 +21,12 @@ this reference resolves intent variants, not additional default steps.
 | Need | Use | Boundary |
 |---|---|---|
 | Installation summary | `oms status` | Link identity, tools, update state, and active tasks. |
-| Repository detail | `oms state` | Tasks, plans, runs, artifacts, guards. |
-| Composed operational view | `oms ops-cockpit` | Read-only, non-atomic lifecycle, review, approval, and telemetry projection. |
 | Aggregate installation health | `oms doctor` | Managed files, tools, skills, manifests, and provider surfaces. |
 | Narrow domain health | `oms project-doctor`, `oms model-doctor`, or `oms skill-doctor` | Diagnose only that project, model-routing, or skill surface. |
 | Restorable tracked Git edits | `oms checkpoint` | Same-HEAD tracked snapshot; restore is dry-run unless applied. |
 | Private machine or cluster context | `oms snapshot` | Local agent facts, not a Git restore point. |
 
-Choose one report first. Cockpit projects inbox from the same collected state.
+Start with `inbox`; drill into one source only when its detail is needed.
 `doctor` already includes model/skill checks; run narrow diagnostics only for
 additional evidence. Installation health and project integrity remain distinct.
 
@@ -42,7 +40,7 @@ additional evidence. Installation health and project integrity remain distinct.
 | High-risk decision, repeated failure, or release go/no-go | `oms advise` | Do not spend an advisor on routine completion. |
 | One bounded implementation | `oms peer-delegate --to PROVIDER` | Write workers return a patch, with no commit/push authority. |
 | Questions/changes for agents already working together | `oms thread append`, `updates`, `ack` on a scoped live thread | Messages neither spawn providers nor grant authority; see state-memory.md. |
-| Isolated clean-HEAD audit with a worker role | `oms peer-delegate --read-only` | Not an executor: report only, never a patch. |
+| Isolated clean-HEAD audit with a worker role | `oms peer-delegate --read-only` | Report only, never a patch. |
 
 `agent-call`/`agent-run` are compatibility primitives, not extra council seats.
 `agent-run` dispatches to read or write; select known authority explicitly.
@@ -60,7 +58,10 @@ All peer outputs use the same artifact section reader; review remains typed.
 
 `autopilot -> goal-drive -> plan-run` is an execution hierarchy, not three
 parallel loops. `agent-plan` owns tasks/leases. Start only the required layer;
-retain its stop/publication boundary and the frozen executor contract.
+retain its stop/publication boundary and reviewed task contract.
+
+Use Execution Graph only for explicit branching or an existing graph run,
+not ordinary tasks. GPU/Slurm/experiments stay project-specific.
 
 ## Land and maintain
 

@@ -38,7 +38,7 @@ a Task. Its `taskId` is the existing durable peer operation ID.
   the existing bounded operation inventory.
 
 Clients without all opt-ins receive the legacy CallToolResult. Do not treat a
-task handle as plan, executor, approval, or patch authority.
+task handle as plan, approval, or patch authority.
 
 ## Codex app-server read transport
 

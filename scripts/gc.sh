@@ -93,13 +93,6 @@ mode="dry-run"; [ "$DRY_RUN" = 0 ] && mode="apply"
 echo "gc: $STATE_ROOT (older than ${DAYS}d, $mode)"
 
 removed=0
-executor_gc_args=(gc --repo "$STATE_ROOT" --days "$DAYS" --dry-run)
-[ "$DRY_RUN" = 1 ] || executor_gc_args=(gc --repo "$STATE_ROOT" --days "$DAYS" --apply)
-executor_gc_out="$("$ROOT/scripts/agent-executor.sh" "${executor_gc_args[@]}")"
-printf '%s\n' "$executor_gc_out"
-executor_changes="$(printf '%s\n' "$executor_gc_out" | awk '/^executor-gc: [0-9]+ (candidate|removed)/ {n=$2} END {print n+0}')"
-removed=$((removed + executor_changes))
-
 supervisor_gc_args=(--repo "$STATE_ROOT" gc --older-than-days "$DAYS")
 [ "$DRY_RUN" = 1 ] || supervisor_gc_args+=(--apply)
 supervisor_gc_out="$("$ROOT/scripts/agent-supervisor.sh" "${supervisor_gc_args[@]}")"
@@ -506,11 +499,11 @@ PY
 delegation_marker_gc() {  # MARKER
   local marker="$1" snapshot snapshot_rc status pid _native_pid task_id
   local marker_lease executor_id marker_digest marker_dev marker_ino marker_size
-  local executor_state task_info task_state task_lease delete_rc=0
-  local executor_show_rc executor_recovery_rc plan_show_rc plan_recovery_rc
-  local executor_recovery_out plan_recovery_out
+  local task_info task_state task_lease delete_rc=0
+  local plan_show_rc plan_recovery_rc
+  local plan_recovery_out
   local recovery_hard_failure=0
-  local -a executor_recovery_args recovery_args
+  local -a recovery_args
 
   snapshot_rc=0
   snapshot="$(oms_with_file_lock "$delegation_set_lock" \
@@ -535,42 +528,8 @@ EOF
   [ "$status" = dead ] || return 0
 
   if [ -n "$executor_id" ]; then
-    executor_show_rc=0
-    executor_state="$("$ROOT/scripts/agent-executor.sh" show --repo "$STATE_ROOT" --id "$executor_id" 2>/dev/null |
-      python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null)" ||
-      executor_show_rc=$?
-    executor_state="${executor_state//$'\r'/}"
-    if [ "$executor_show_rc" -ne 0 ]; then
-      echo "warning: gc: executor $executor_id is unreadable; kept trigger evidence" >&2
-      recovery_hard_failure=1
-    else
-      case "$executor_state" in
-        running)
-          executor_recovery_args=(recover --repo "$STATE_ROOT" --id "$executor_id" \
-            --expected-state "$executor_state" --markers-dir "$OMS/delegations")
-          [ "$DRY_RUN" = 0 ] || executor_recovery_args+=(--check)
-          executor_recovery_rc=0
-          executor_recovery_out="$("$ROOT/scripts/agent-executor.sh" \
-            "${executor_recovery_args[@]}" 2>&1)" || executor_recovery_rc=$?
-          executor_recovery_out="${executor_recovery_out//$'\r'/}"
-          if [ "$executor_recovery_rc" -eq 0 ]; then
-            printf -- '- orphan-delegation-executor: %s running -> failed\n' "$executor_id"
-          else
-            echo "warning: gc: executor $executor_id changed or has a live exact worker; kept it" >&2
-            if [ "$executor_recovery_rc" -ne 3 ] ||
-                printf '%s\n' "$executor_recovery_out" |
-                  grep -Fxq 'executor-recovery-outcome: unproven'; then
-              recovery_hard_failure=1
-            fi
-          fi
-          ;;
-        draft|frozen|done|failed) ;;
-        *)
-          echo "warning: gc: executor $executor_id has an invalid state; kept trigger evidence" >&2
-          recovery_hard_failure=1
-          ;;
-      esac
-    fi
+    echo "warning: gc: retired Soul executor $executor_id; keeping legacy marker and evidence" >&2
+    return 0
   fi
   if [ -n "$task_id" ]; then
     plan_show_rc=0

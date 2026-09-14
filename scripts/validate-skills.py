@@ -4,12 +4,49 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 
-REFERENCE_RE = re.compile(r"\]\((references/[^)#]+)(?:#[^)]+)?\)")
+REFERENCE_RE = re.compile(r"\]\(([^)#]+)(?:#[^)]+)?\)")
+
+
+def linked_references(skill_dir: Path, errors: list[str], source: str) -> set[str]:
+    refs = skill_dir / "references"
+    pending = [skill_dir / "SKILL.md"]
+    seen: set[Path] = set()
+    linked: set[str] = set()
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        for match in REFERENCE_RE.finditer(path.read_text(encoding="utf-8")):
+            target = match.group(1)
+            if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", target) or target.startswith("/"):
+                continue
+            candidate = path.parent / target
+            # Only traverse this skill's references, never arbitrary linked docs.
+            lexical = Path(os.path.abspath(candidate))
+            try:
+                relative = lexical.relative_to(refs)
+            except ValueError:
+                if target.startswith("references/"):
+                    errors.append(f"unsafe local reference: {source}/{target}")
+                continue
+            label = "references/" + relative.as_posix()
+            linked.add(label)
+            if any(part.is_symlink() for part in (lexical, *lexical.parents)
+                   if part == skill_dir or skill_dir in part.parents):
+                errors.append(f"symlink local reference: {source}/{label}")
+            elif not lexical.is_file():
+                if not label.endswith(".generated.md"):
+                    errors.append(f"missing local reference: {source}/{label}")
+            elif lexical.suffix == ".md":
+                pending.append(lexical)
+    return linked
 
 
 def frontmatter(text: str) -> dict[str, str]:
@@ -139,14 +176,9 @@ def main() -> int:
             # into references/.
             errors.append(f"SKILL.md over 500 lines ({body_lines}): {source}")
 
-        targets = {match.group(1) for match in REFERENCE_RE.finditer(content)}
-        for target in sorted(targets):
-            target_path = skill_dir / target
-            if not target_path.is_file() and not target.endswith(".generated.md"):
-                errors.append(f"missing local reference: {source}/{target}")
+        referenced = linked_references(skill_dir, errors, source)
         refs_dir = skill_dir / "references"
         if refs_dir.is_dir():
-            referenced = {Path(target).as_posix() for target in targets}
             for ref_path in sorted(refs_dir.rglob("*.md")):
                 relative = ref_path.relative_to(skill_dir).as_posix()
                 if relative.endswith(".generated.md"):

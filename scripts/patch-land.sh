@@ -32,7 +32,6 @@ VERIFY=""
 VERIFY_EXPLICIT=0
 ML=0
 PLAN_TASK=""
-EXECUTOR_ID=""
 PLAN_ID=""
 PLAN_LEASE_ID=""
 PLAN_REVIEW_LEASE_ID=""
@@ -61,7 +60,6 @@ SOURCE_PATCH=""
 FROZEN_PATCH=""
 FROZEN_PATCH_PERSIST=0
 LANDING_BASE=""
-executor_soul_sha=""
 intent_plan_receipt_sha=""
 intent_plan_done_receipt_sha=""
 intent_plan_id=""
@@ -87,7 +85,6 @@ Options:
                    patch-admit.sh; default: scripts/check.sh when present).
   --ml             Prefer ml-smoke verification when auto-detecting.
   --plan-task ID   On a successful land, mark this agent-plan task done.
-  --executor ID    Enforce a frozen/running executor soul and scope.
   --allow-verifier-change  Forward to patch-admit: permit a patch that touches
                    its own verifier (normally rejected).
   --allow-test-reduction  Forward to patch-admit: permit a patch that
@@ -138,10 +135,7 @@ while [ "$#" -gt 0 ]; do
         *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;;
       esac
       PLAN_TASK="$2"; shift 2 ;;
-    --executor)
-      [ "$#" -ge 2 ] || fail "--executor requires id"
-      case "$2" in *[!A-Za-z0-9._-]*|"") fail "--executor must match [A-Za-z0-9._-]+" ;; esac
-      EXECUTOR_ID="$2"; shift 2 ;;
+    --executor) fail "Soul executors were removed; use a fresh plan task and brief" ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
     --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
@@ -858,22 +852,12 @@ EOF
   exit 0
 fi
 
-if [ -n "$EXECUTOR_ID" ]; then
-  "$ROOT/scripts/agent-executor.sh" validate --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null ||
-    fail "executor $EXECUTOR_ID failed frozen validation"
-  executor_json="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" --id "$EXECUTOR_ID")"
-  executor_values="$(printf '%s' "$executor_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([d.get("task_id",""),d.get("soul_sha256","")]))')"
-  executor_task="$(printf '%s' "$executor_values" | cut -f1)"
-  executor_soul_sha="$(printf '%s' "$executor_values" | cut -f2)"
-  [ -z "$PLAN_TASK" ] || [ -z "$executor_task" ] || [ "$PLAN_TASK" = "$executor_task" ] ||
-    fail "executor task conflicts with --plan-task"
-  export OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_SOUL_SHA256="$executor_soul_sha"
-fi
 
 if [ -n "$PLAN_TASK" ]; then
   PLAN_JSON="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" \
     evidence-snapshot --id "$PLAN_TASK" 2>/dev/null)" ||
     fail "cannot read plan task $PLAN_TASK"
+  oms_require_current_task_contract "$PLAN_JSON" || exit $?
   PLAN_ID="$(printf '%s' "$PLAN_JSON" |
     python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
     tr -d '\r')"
@@ -985,21 +969,8 @@ fi
   if [ ! -f "$PLAN_REVIEW_PATCH" ] || [ ! -r "$PLAN_REVIEW_PATCH" ]; then
     fail "plan task $PLAN_TASK stored patch is missing or unreadable"
   fi
-  if [ -z "$PLAN_REVIEW_EXECUTOR_ID$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ]; then
-    [ -z "$EXECUTOR_ID" ] ||
-      fail "plan task $PLAN_TASK review has no executor receipt for --executor $EXECUTOR_ID"
-  else
-    if [ -z "$PLAN_REVIEW_EXECUTOR_ID" ] || [ -z "$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ]; then
-      fail "plan task $PLAN_TASK has an incomplete executor review receipt"
-    fi
-    [ -n "$EXECUTOR_ID" ] ||
-      fail "plan task $PLAN_TASK review requires --executor $PLAN_REVIEW_EXECUTOR_ID"
-    [ "$EXECUTOR_ID" = "$PLAN_REVIEW_EXECUTOR_ID" ] ||
-      fail "executor $EXECUTOR_ID does not match plan review executor $PLAN_REVIEW_EXECUTOR_ID"
-    if [ -z "$executor_soul_sha" ] || [ "$executor_soul_sha" != "$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ]; then
-      fail "executor $EXECUTOR_ID soul does not match the plan review receipt"
-    fi
-  fi
+  [ -z "$PLAN_REVIEW_EXECUTOR_ID$PLAN_REVIEW_EXECUTOR_SOUL_SHA" ] ||
+    fail "Soul executor review is retired; preserve this patch and use a fresh task"
 }
 [ -f "$PATCH" ] || fail "patch not found: $PATCH"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd -P)/$(basename "$PATCH")"
@@ -1037,8 +1008,8 @@ APPROVAL_PARAMETERS="$( \
   OMS_APPROVAL_ML="$approval_ml" \
   OMS_APPROVAL_VERIFY_EXPLICIT="$approval_verify_explicit" \
   OMS_APPROVAL_VERIFY_SHA="$approval_verify_sha" \
-  OMS_APPROVAL_EXECUTOR_ID="$EXECUTOR_ID" \
-  OMS_APPROVAL_EXECUTOR_SOUL="$executor_soul_sha" \
+  OMS_APPROVAL_EXECUTOR_ID="" \
+  OMS_APPROVAL_EXECUTOR_SOUL="" \
   python3 <<'PY'
 import json
 import os
@@ -1061,7 +1032,7 @@ PY
 )" || fail "cannot encode the approval admission contract"
 
 # Approval requests bind the exact base, patch, task lease, execution profile,
-# verifier hash/mode, ML selection, frozen executor identity, and admission
+# verifier hash/mode, ML selection, retired executor-binding fields, and admission
 # exceptions. The verifier text itself is not stored. Creating a request never
 # runs the verifier or mutates Git; an operator decision produces the one-time
 # grant.
@@ -1231,7 +1202,6 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ -n "$VERIFY" ] && admit_cmd+=(--verify "$VERIFY")
 [ "$ML" = 1 ] && admit_cmd+=(--ml)
 [ -n "$PLAN_TASK" ] && admit_cmd+=(--plan-task "$PLAN_TASK")
-[ -n "$EXECUTOR_ID" ] && admit_cmd+=(--executor "$EXECUTOR_ID")
 [ "$ALLOW_VERIFIER_CHANGE" = 1 ] && admit_cmd+=(--allow-verifier-change)
 [ "$ALLOW_TEST_REDUCTION" = 1 ] && admit_cmd+=(--allow-test-reduction)
 [ "$ALLOW_RESTRUCTURE" = 1 ] && admit_cmd+=(--allow-restructure)

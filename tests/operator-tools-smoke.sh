@@ -250,70 +250,35 @@ for name, pid in (("live", int(os.environ["OMS_FIXTURE_PID"])), ("dead", 9999999
     )
 PY
 
-# --- Unified cockpit -------------------------------------------------------
+# --- One attention view over shared state ----------------------------------
 
 before="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
-cockpit="$TMP/cockpit.json"
-bash "$ROOT/scripts/ops-cockpit.sh" --repo "$repo" --json > "$cockpit"
-python3 - "$cockpit" "$ROOT" <<'PY' || fail "cockpit JSON contract failed"
+bash "$ROOT/scripts/state.sh" --repo "$repo" --json > "$TMP/shared-state.json"
+bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json > "$TMP/inbox.json"
+python3 - "$TMP/shared-state.json" "$TMP/inbox.json" "$ROOT" <<'PY' || fail "inbox projection failed"
 import copy
-import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
-
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-assert row["schema"] == 1 and row["action"] == "ops-cockpit", row
-assert row["lifecycle"]["live_delegations"] == 1, row
-assert row["lifecycle"]["orphan_delegations"] == 1, row
-assert row["lifecycle"]["phase"] == "attention", row
-assert row["lifecycle"]["active_attempts"] == 0, row
-assert isinstance(row["lifecycle"]["attempts"], list), row
-assert row["approval"]["required"] is True, row
-assert isinstance(row["approval"]["items"], list), row
-assert row["telemetry"]["operations"]["eligible"] == 3, row
-assert row["telemetry"]["usage"]["provider_reported_tokens"]["total"] == 120, row
-assert row["inbox"]["items"][0]["priority"] == "P1", row
-# Plan tasks now project as criteria, so a plan fixture with no evidence
-# carries an advisory runtime item — present, and never ahead of a P1.
-codes = [item["code"] for item in row["inbox"]["items"]]
-assert "runtime-evidence-missing" in codes, row
-
-# Both views share one pure projection, not a nested inbox -> state query.
-lib = Path(sys.argv[2]) / "scripts/lib"
-sys.path.insert(0, str(lib))
+sys.path.insert(0, str(Path(sys.argv[3]) / "scripts/lib"))
 from inbox_projection import project_inbox
 
-snapshot = copy.deepcopy(row["state"])
-assert project_inbox(snapshot, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0") == row["inbox"]
+snapshot = json.load(open(sys.argv[1], encoding="utf-8"))
+inbox = json.load(open(sys.argv[2], encoding="utf-8"))
+assert project_inbox(snapshot, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0") == inbox
+assert inbox["items"][0]["priority"] == "P1", inbox
+assert "runtime-evidence-missing" in [item["code"] for item in inbox["items"]]
 snapshot["threads"] = {"stale_open": 2}
 original = copy.deepcopy(snapshot)
 assert any(item["code"] == "stale-threads" for item in project_inbox(snapshot)["items"])
 muted = project_inbox(snapshot, include_threads=False, safe_actions=["reclaimed-stale-plan"])
 assert not any(item["code"] == "stale-threads" for item in muted["items"])
 assert muted["safe_actions"] == ["reclaimed-stale-plan"]
-assert snapshot == original, "projection must not change its input"
-
-spec = importlib.util.spec_from_file_location("cockpit", lib / "ops-cockpit.py")
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-queries = []
-def read_surface(script, args):
-    queries.append(script)
-    assert script in ("state.sh", "artifact-index.sh"), script
-    return row["state"] if script == "state.sh" else row["telemetry"]
-module.read_surface = read_surface
-module.read_list_surface = lambda script, args: row["lifecycle"]["attempts"] if script == "agent-events.sh" else row["approval"]["items"]
-module.read_observations = lambda repo, limit: row["observations"]
-assert module.build_report("unused", 20) == row
-assert queries.count("state.sh") == 1 and "inbox.sh" not in queries, queries
+assert snapshot == original
 PY
-text="$(bash "$ROOT/scripts/ops-cockpit.sh" --repo "$repo")"
-printf '%s\n' "$text" | grep -Fq 'ops cockpit:' || fail "cockpit text header missing"
-printf '%s\n' "$text" | grep -Fq 'approval=yes' || fail "cockpit approval missing"
 after="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
-[ "$before" = "$after" ] || fail "cockpit mutated the fixture repository"
+[ "$before" = "$after" ] || fail "attention queries mutated the fixture repository"
 
 # --- Content-free OTLP JSONL ----------------------------------------------
 
@@ -618,64 +583,6 @@ cmp "$TMP/index-before.jsonl" "$repo/.oms/artifacts/index.jsonl" ||
 [ "$(git -C "$repo" worktree list --porcelain)" = "$before_worktrees" ] ||
   fail "migration changed registered worktrees"
 
-# --- Cockpit observations block --------------------------------------------
-
-obs_repo="$TMP/obs-repo"
-mkdir -p "$obs_repo"
-git -C "$obs_repo" init -q
-printf 'base\n' > "$obs_repo/file.txt"
-git -C "$obs_repo" add file.txt
-git -C "$obs_repo" -c user.email=t@example.com -c user.name=t commit -qm init
-mkdir -p "$obs_repo/.oms/hooks"
-python3 - "$obs_repo" <<'PY'
-import json, pathlib, sys
-
-repo = pathlib.Path(sys.argv[1])
-rows = [
-    {"action": "turn_guard", "status": "block_unverified", "agent": "claude",
-     "turn_obs": "aaaa", "turn_obs_source": "route", "eligible": True},
-    {"action": "turn_guard", "status": "allow_verified", "agent": "claude",
-     "turn_obs": "aaaa", "turn_obs_source": "route", "eligible": True},
-    {"action": "turn_guard", "status": "block_unverified", "agent": "claude",
-     "turn_obs": "bbbb", "turn_obs_source": "route", "eligible": True},
-    {"action": "turn_guard", "status": "allow", "agent": "codex",
-     "turn_obs": "cccc", "turn_obs_source": "payload", "eligible": False},
-    {"action": "turn_guard", "status": "allow"},
-]
-with (repo / ".oms/hooks/events.jsonl").open("w", encoding="utf-8") as fh:
-    for row in rows:
-        fh.write(json.dumps(row) + "\n")
-(repo / ".oms/usage.jsonl").write_text(
-    json.dumps({"family": "gpu", "day": "2026-08-10"}) + "\n", encoding="utf-8")
-PY
-(cd "$obs_repo" && bash "$ROOT/scripts/fail-ledger.sh" record --kind hook \
-  --cmd "hook: obs" --exit 1 --summary observed) >/dev/null
-
-bash "$ROOT/scripts/ops-cockpit.sh" --repo "$obs_repo" --json > "$TMP/obs-cockpit.json"
-python3 - "$TMP/obs-cockpit.json" <<'PY' || fail "cockpit observations contract failed"
-import json
-import sys
-
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-obs = row["observations"]
-guard = obs["guard"]
-assert guard["instrumented_rows"] == 4, guard
-assert guard["uninstrumented_rows"] == 1, guard
-assert guard["eligible_turns"] == 2, guard
-assert guard["blocked_turns"] == 2, guard
-assert guard["corrected_after_block"] == 1, guard
-assert guard["by_agent"]["claude"] == 3, guard
-failures = obs["failures"]
-assert failures["hook_rows"] == 1, failures
-assert failures["hook_open"] == 1, failures
-usage = obs["usage"]
-assert usage["file_present"] is True, usage
-assert usage["rows"] == 1, usage
-assert usage["families"] == {"gpu": 1}, usage
-PY
-text="$(bash "$ROOT/scripts/ops-cockpit.sh" --repo "$obs_repo")"
-printf '%s\n' "$text" | grep -Fq 'observations:' ||
-  fail "cockpit text observations line missing: $text"
 
 # Persisted trace context is authority metadata, not arbitrary artifact data.
 # The validator must reject malformed IDs and raw propagation headers rather

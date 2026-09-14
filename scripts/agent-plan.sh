@@ -116,7 +116,6 @@ Commands:
   touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
                                      claimed_at so a live worker is not reclaimed.
   review --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
-         [--executor-id ID --executor-soul-sha256 SHA256]
                                      Move a claimed/running task to review.
   repair --id ID [--lease-id TOKEN] [--artifact PATH]
                                      Re-enter a reviewed task under the same
@@ -894,7 +893,8 @@ def project_contract_verdict(d):
     }
 
 def contract_actionable(d, t):
-    return CONTRACT_VERDICT["satisfied"] and actionable(d, t)
+    return (not (t.get("executor_id") or t.get("executor_soul_sha256"))
+            and CONTRACT_VERDICT["satisfied"] and actionable(d, t))
 
 def require_project_contract_authority():
     if CONTRACT_VERDICT["satisfied"]:
@@ -1304,6 +1304,9 @@ def get_task(i):
 
 if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch"):
     i = require_id(); t = get_task(i)
+    if act in {"claim", "start", "review", "repair", "land", "finish"} and (
+            t.get("executor_id") or t.get("executor_soul_sha256")):
+        die("Soul executor receipt is retired; preserve the old evidence and create a fresh plan task")
     if act == "touch":
         # Heartbeat: a live worker refreshes claimed_at so reclaim's TTL clock
         # restarts and it is not mistaken for a dead worker mid-run.
@@ -1335,20 +1338,8 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         require_current_lease(t)
         executor_id = env("OMS_EXECUTOR_ID")
         executor_soul = env("OMS_EXECUTOR_SOUL_SHA256")
-        if bool(executor_id) != bool(executor_soul):
-            die("task %s review executor receipt requires both id and soul hash" % i)
-        if executor_id and not ID_RE.fullmatch(executor_id):
-            die("--executor-id must match [A-Za-z0-9._-]+")
-        if executor_soul and not re.match(r"^[0-9a-f]{64}$", executor_soul):
-            die("--executor-soul-sha256 must be a lowercase SHA-256")
-        # A repair is the same review lease re-entering claimed state. It may
-        # replace the patch evidence, but it cannot shed or swap the executor
-        # that produced the prior review. A fresh lease may establish a new
-        # receipt after an ordinary release/reclaim.
-        same_review_lease = bool(t.get("lease_id")) and t.get("review_lease_id", "") == t.get("lease_id", "")
-        if t.get("repair_count", 0) and same_review_lease:
-            if executor_id != t.get("executor_id", "") or executor_soul != t.get("executor_soul_sha256", ""):
-                die("task %s repaired review must keep the exact executor receipt" % i)
+        if executor_id or executor_soul:
+            die("Soul executor receipts cannot be created; use the task brief and lease")
         t.update(state="review", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""),
                  review_lease_id=t.get("lease_id", ""), executor_id=executor_id,

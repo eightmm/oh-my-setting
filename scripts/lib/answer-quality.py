@@ -86,10 +86,9 @@ def main(path: str) -> None:
         print("blocked")
         return
 
-    if all(line.endswith("?") for line in lines):
-        print("thin")
-    else:
-        print("ok")
+    # Transport usability is not semantic quality. Questions and concise
+    # findings remain available to the parent; punctuation cannot drop a seat.
+    print("ok")
 
 
 if __name__ == "__main__":

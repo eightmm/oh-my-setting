@@ -41,11 +41,11 @@ cross-provider coordination. Native app threads remain an optional local UI.
 For each worker, supply one outcome, relevant paths/current source references,
 constraints, a verifier, and when to stop or return a decision. Respect the
 detached-context boundary below and keep code in files/patches.
-Give workers one bounded strategy profile. Use a task-scoped executor only for
-substantial writes; the parent owns admission, verification, commit, push and
+Give workers a bounded brief and a role when useful;
+the parent owns admission, verification, commit, push and
 synthesis. Match workers to the task: session-model judgment for uncertain
-decisions, cheaper workers for bounded routine analysis. Native subagents and
-frozen executors retain their separate model contracts in [model-routing.md](model-routing.md).
+decisions, cheaper workers for bounded routine analysis. See
+[model-routing.md](model-routing.md) for native and CLI model selection.
 Split independent scopes, not arbitrary equal pieces: couple a behavior with
 its necessary regression, serialize shared interfaces, and parallelize only
 disjoint work with useful parent work alongside it. Reuse an already-running
@@ -190,8 +190,8 @@ there is no automatic model retry or provider switch. Each follow-up is scanned
 before dispatch; owner/Git guards run between turns. Native hooks, credentials
 and tools retain the same host trust assumptions as ordinary delegation.
 
-Initial support is standalone write delegation only: no read-only, frozen
-executor, plan-task, repair, automatic apply, fallback-model or dry-run. Final
+Initial support is standalone write delegation only: no read-only,
+plan-task, repair, automatic apply, fallback-model or dry-run. Final
 verification runs only after explicit finish; inspect/admit/land the resulting
 patch normally. `--no-verify` remains explicit and reports `not_run`, not passed.
 There is no cross-process reconnect after the OMS controller exits. Do not use

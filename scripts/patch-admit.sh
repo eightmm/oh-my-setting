@@ -34,7 +34,6 @@ KEEP_WORKTREE=0
 REPORT=""
 PLAN_TASK=""
 COVERS=""
-EXECUTOR_ID=""
 SCOPE_ALLOWED=""
 SCOPE_FORBIDDEN=""
 ACCEPTANCE_FILES=""
@@ -67,7 +66,6 @@ Options:
                  Ids are validated against the runtime envelope before any
                  work; the receipt records them exit-judged — verified on
                  ADMIT, failed on REJECT — bound to the patch digest.
-  --executor ID   Enforce a frozen executor's scope and soul hash.
   --keep-worktree  Keep the worktree for inspection.
   --allow-verifier-change  Permit a patch that modifies the verify command's
                  own files. The base-owned verification floor still runs.
@@ -84,7 +82,7 @@ Ladder: patch applies cleanly (not stale) -> changed files stay in scope ->
 changed shell files parse (bash -n) -> patch does not weaken the tests ->
 candidate verification passes -> changed verification surfaces also pass with
 those changes restored from HEAD. Exit 0 only if every gate passes. Without
---plan-task/--executor there is no declared scope, so the structural floor
+--plan-task there is no declared scope, so the structural floor
 stands in for it: keep the existing layout.
 EOF
 }
@@ -130,7 +128,7 @@ while [ "$#" -gt 0 ]; do
     --report) [ "$#" -ge 2 ] || fail "--report requires a path"; REPORT="$2"; shift 2 ;;
     --plan-task) [ "$#" -ge 2 ] || fail "--plan-task requires id"; PLAN_TASK="$2"; shift 2 ;;
     --covers) [ "$#" -ge 2 ] || fail "--covers requires a criterion id"; COVERS="$COVERS $2"; shift 2 ;;
-    --executor) [ "$#" -ge 2 ] || fail "--executor requires id"; EXECUTOR_ID="$2"; shift 2 ;;
+    --executor) fail "Soul executors were removed; use a fresh plan task and brief" ;;
     --keep-worktree) KEEP_WORKTREE=1; shift ;;
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
@@ -157,6 +155,7 @@ fi
 if [ -n "$PLAN_TASK" ]; then
   case "$PLAN_TASK" in *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;; esac
   plan_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" evidence-snapshot --id "$PLAN_TASK")" || fail "cannot read plan task $PLAN_TASK"
+  oms_require_current_task_contract "$plan_json" || exit $?
   PLAN_ID="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' | tr -d '\r')"
   if [ -z "$PLAN_ID" ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" ensure-lineage >/dev/null ||
@@ -178,23 +177,6 @@ if [ -n "$PLAN_TASK" ]; then
   SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
   ACCEPTANCE_FILES="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("project_contract") or {}; print("\n".join(c.get("acceptance_files") or d.get("acceptance_files") or []))')"
   export OMS_TASK_ID="$PLAN_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
-fi
-if [ -n "$EXECUTOR_ID" ]; then
-  case "$EXECUTOR_ID" in *[!A-Za-z0-9._-]*|"") fail "--executor must match [A-Za-z0-9._-]+" ;; esac
-  "$ROOT/scripts/agent-executor.sh" validate --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null ||
-    fail "executor $EXECUTOR_ID failed frozen validation"
-  executor_json="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" --id "$EXECUTOR_ID")"
-  executor_values="$(printf '%s' "$executor_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\t".join([",".join(d.get("allowed_paths",[])),",".join(d.get("forbidden_paths",[])),d.get("task_id",""),d.get("soul_sha256","")]))')"
-  executor_allowed="$(printf '%s' "$executor_values" | cut -f1)"
-  executor_forbidden="$(printf '%s' "$executor_values" | cut -f2)"
-  executor_task="$(printf '%s' "$executor_values" | cut -f3)"
-  executor_soul_sha="$(printf '%s' "$executor_values" | cut -f4)"
-  [ -z "$PLAN_TASK" ] || [ -z "$executor_task" ] || [ "$PLAN_TASK" = "$executor_task" ] ||
-    fail "executor task conflicts with --plan-task"
-  [ -z "$SCOPE_ALLOWED" ] || [ "$SCOPE_ALLOWED" = "$executor_allowed" ] || fail "executor allowed scope conflicts with plan task"
-  [ -z "$SCOPE_FORBIDDEN" ] || [ "$SCOPE_FORBIDDEN" = "$executor_forbidden" ] || fail "executor forbidden scope conflicts with plan task"
-  SCOPE_ALLOWED="$executor_allowed"; SCOPE_FORBIDDEN="$executor_forbidden"
-  export OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_SOUL_SHA256="$executor_soul_sha"
 fi
 
 base_full_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
@@ -282,7 +264,7 @@ if [ "$apply_ok" = 1 ]; then
         --no-renames HEAD -- 2>/dev/null
     } | LC_ALL=C sort -u)"
 
-    # --- Gate 2: task/executor path scope ----------------------------------
+    # --- Gate 2: task path scope ----------------------------------
     scope_detail="$(OMS_CHANGED="$changed_files" OMS_ALLOWED="$SCOPE_ALLOWED" OMS_FORBIDDEN="$SCOPE_FORBIDDEN" \
       OMS_PATH_SCOPE_HELPER="$ROOT_LIB/path_scope.py" python3 - <<'PY'
 import os, re, runpy
@@ -304,14 +286,14 @@ PY
     if [ -n "$scope_detail" ]; then
       record "scope" "FAIL" "$scope_detail"
     elif [ -n "$SCOPE_ALLOWED$SCOPE_FORBIDDEN" ]; then
-      record "scope" "PASS" "changed files satisfy task/executor scope"
+      record "scope" "PASS" "changed files satisfy task scope"
     else
-      record "scope" "SKIP" "no task/executor scope supplied"
+      record "scope" "SKIP" "no task scope supplied"
     fi
 
     # --- Gate 2b: structural floor when no scope constrains the paths -------
     # The scope gate is the only one that says WHERE a patch may write, and
-    # with no --plan-task/--executor it has nothing to enforce, so any layout
+    # with no --plan-task it has nothing to enforce, so any layout
     # change was admitted: a worker patch with malformed headers applied as a
     # rename and moved two test files to the repo root. When nothing declares
     # a scope, the changed set must still read as editing this tree rather

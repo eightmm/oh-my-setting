@@ -26,7 +26,7 @@ Usage: state.sh [--repo PATH] [--json]
 
 Print a read-only dashboard of the shared .oms state for a repo: the active
 task packet, plan tasks by state (stale claims flagged), the experiment board
-(active + stale), task-scoped executors, the current/open runs, the latest
+(active + stale), legacy Soul records, the current/open runs, the latest
 artifact-index rows, and whether a change-guard is active.
 
 Options:
@@ -693,7 +693,7 @@ if os.path.isdir(deleg_dir):
                             "live": alive})
 state["delegations"] = delegations
 
-# --- Task-scoped executors -------------------------------------------------
+# --- Retired Soul records  -------------------------------------------------
 executors = []
 executor_dir = oms("executors")
 if os.path.isdir(executor_dir):
@@ -704,7 +704,7 @@ if os.path.isdir(executor_dir):
         except Exception:
             continue
         executors.append({"id": d.get("executor_id", os.path.basename(os.path.dirname(f))),
-                          "state": d.get("state", "unknown"),
+                          "state": d.get("state", "unknown"), "retired": True,
                           "provider": d.get("provider", ""),
                           "strategy": d.get("strategy", ""),
                           "task_id": d.get("task_id", ""),
@@ -1008,7 +1008,7 @@ else:
 
     executors = state["executors"]
     if executors:
-        line("\n## Executors")
+        line("\n## Legacy Soul records (retired)")
         for e in executors:
             line("  %-8s %s provider=%s strategy=%s task=%s soul=%s" % (
                 e.get("state", "?"), e.get("id", "?"), e.get("provider", "?") or "-",

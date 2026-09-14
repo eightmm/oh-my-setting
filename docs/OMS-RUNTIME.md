@@ -2,7 +2,7 @@
 
 This change adds a typed, standard-library-only semantic core **above** the
 existing hardened OMS execution plane. It deliberately does not rewrite
-`peer-delegate`, `patch-admit`, `patch-land`, plan leases, executor souls,
+`peer-delegate`, `patch-admit`, `patch-land`, plan leases,
 approval consumption, commit intents, or Draft PR intents.
 
 The core solves a different problem: OMS already has strong primitives, but the
@@ -30,7 +30,7 @@ agent skill / MCP / intent router
 | Existing hardened execution plane             |
 |                                               |
 | peer-delegate -> patch-admit -> patch-land     |
-| plan leases | executor souls | approvals       |
+| plan leases | scopes | approvals               |
 | goal-drive | commit intent | Draft PR intent   |
 +-----------------------+-----------------------+
                         |
@@ -81,7 +81,7 @@ The envelope projects, without copying authority:
 - `PROJECT.md`
 - `.oms/task/current.md`
 - `.oms/plan/tasks.json`
-- the newest executor metadata
+- legacy Soul metadata as retired evidence, never effective scope
 - current Git state
 - unresolved failure receipts
 - criterion-level evidence coverage
@@ -454,8 +454,17 @@ oms runtime benchmark compare before.json after.json
 
 The snapshot uses existing content-free receipts to report evidence coverage,
 risk, success rate, durations, token/cost fields when present, context bytes,
-skill-evaluation trigger errors and baseline/treatment task-pass deltas, and a
-useful-work efficiency denominator. Its `models` table groups attributable
+skill-evaluation trigger errors and baseline/treatment task-pass deltas.
+Context metrics cover at most the latest 1,000 manifests by `generated_at`,
+not hash filename or filesystem modification time. The snapshot reports
+`context.sample_limit` and `context.selection`; these are sample totals, not
+lifetime totals. Missing, invalid or timezone-less timestamps rank last, with
+filename tie-breaking. Reading timestamps scans all manifests, but retains
+only the bounded sample in memory.
+The legacy `useful_work_efficiency` field is null and excluded from comparisons:
+adding seconds, tokens and arbitrary event weights did not measure efficiency.
+Compare like-for-like tasks using separate quality, time and cost evidence.
+Its `models` table groups attributable
 artifact rows by `provider/model`: a transport-confirmed model (Claude
 `modelUsage`), an explicitly selected model, or a Codex configured-default
 inference, with source counts kept beside the result. Multi-model/fallback

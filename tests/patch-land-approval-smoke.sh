@@ -84,6 +84,32 @@ assert params["executor_id"] is None, params
 assert params["executor_soul_sha256"] is None, params
 PY
 
+# Retired bindings must remain part of the approval digest: dropping those
+# fields would turn an old Soul-specific grant into a general landing grant.
+python3 - "$TMP/request.json" "$APPROVAL" "$LAND" "$repo" "$patch" <<'PY' || fail "legacy Soul approval was replayable"
+import json, os, subprocess, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+approval_cmd = [sys.argv[2], "--repo", sys.argv[4]]
+params = dict(row["parameters"], executor_id="retired", executor_soul_sha256="a" * 64)
+old = subprocess.check_output(approval_cmd + [
+    "request", "--action", row["action"], "--object-id", row["object_id"],
+    "--summary", "legacy Soul binding", "--base-sha", row["base_sha"],
+    "--patch-sha", row["patch_sha"], "--parameters-json", json.dumps(params),
+], text=True).strip()
+token = subprocess.check_output(approval_cmd + [
+    "decide", "--approval", old, "--decision", "approve",
+    "--expected-version", "1", "--actor", "operator",
+], text=True).strip()
+result = subprocess.run([
+    sys.argv[3], "--repo", sys.argv[4], "--patch", sys.argv[5], "--verify", "true",
+    "--approval", old, "--approval-version", "2", "--approval-token", token,
+], env=dict(os.environ, OMS_REQUIRE_LANDING_APPROVAL="1"), capture_output=True, text=True)
+assert result.returncode != 0, "legacy grant authorized an unbound landing"
+current = json.loads(subprocess.check_output(approval_cmd + ["show", "--approval", old, "--json"], text=True))
+assert current["state"] == "approved" and current["version"] == 2, current
+PY
+grep -Fxq base "$repo/file.txt" || fail "legacy approval changed the patch target"
+
 grant="$($APPROVAL --repo "$repo" decide --approval "$approval" \
   --decision approve --expected-version 1 --actor operator)" || fail "approval failed"
 
@@ -201,57 +227,6 @@ fi
 grep -Fxq base "$race_repo/file.txt" ||
   fail "frozen-patch mutation changed the main tree"
 
-# Executor identity is part of admission scope. An approval requested under a
-# frozen soul cannot be consumed after omitting that executor, even when patch,
-# base, verifier, and all allow flags are unchanged.
-executor_repo="$TMP/executor-repo"
-mkdir -p "$executor_repo"
-git -C "$executor_repo" init -q
-git -C "$executor_repo" config user.email test@example.com
-git -C "$executor_repo" config user.name test
-printf 'base\n' > "$executor_repo/file.txt"
-git -C "$executor_repo" add file.txt
-git -C "$executor_repo" commit -qm base
-executor_patch="$TMP/executor.patch"
-printf 'executor approved\n' > "$executor_repo/file.txt"
-git -C "$executor_repo" diff --binary > "$executor_patch"
-git -C "$executor_repo" restore file.txt
-printf '# Specialization\n\nLand only the reviewed file.\n' > "$TMP/land-executor-soul.md"
-"$ROOT/scripts/agent-executor.sh" create --repo "$executor_repo" \
-  --id land-executor --provider codex --strategy implementation-worker \
-  --allowed file.txt --verify true --soul-file "$TMP/land-executor-soul.md" >/dev/null
-"$ROOT/scripts/agent-executor.sh" freeze --repo "$executor_repo" \
-  --id land-executor >/dev/null
-executor_approval="$(OMS_REQUIRE_LANDING_APPROVAL=1 "$LAND" --repo "$executor_repo" \
-  --patch "$executor_patch" --verify true --executor land-executor \
-  --request-approval)" || fail "could not request executor-bound approval"
-"$APPROVAL" --repo "$executor_repo" show --approval "$executor_approval" --json \
-  > "$TMP/executor-request.json"
-python3 - "$TMP/executor-request.json" \
-  "$executor_repo/.oms/executors/land-executor/meta.json" <<'PY' || fail "approval omitted executor identity"
-import json, sys
-row = json.load(open(sys.argv[1], encoding="utf-8"))
-meta = json.load(open(sys.argv[2], encoding="utf-8"))
-params = row["parameters"]
-assert params["executor_id"] == "land-executor", params
-assert params["executor_soul_sha256"] == meta["soul_sha256"], (params, meta)
-PY
-executor_grant="$($APPROVAL --repo "$executor_repo" decide \
-  --approval "$executor_approval" --decision approve --expected-version 1 \
-  --actor operator)" || fail "could not approve executor-bound landing"
-if OMS_REQUIRE_LANDING_APPROVAL=1 "$LAND" --repo "$executor_repo" \
-  --patch "$executor_patch" --verify true --approval "$executor_approval" \
-  --approval-version 2 --approval-token "$executor_grant" >/dev/null 2>&1; then
-  fail "executor-bound approval was accepted after omitting the executor"
-fi
-OMS_REQUIRE_LANDING_APPROVAL=1 "$LAND" --repo "$executor_repo" \
-  --patch "$executor_patch" --verify true --executor land-executor \
-  --approval "$executor_approval" --approval-version 2 \
-  --approval-token "$executor_grant" >/dev/null ||
-  fail "matching executor-bound approval did not land"
-grep -Fxq 'executor approved' "$executor_repo/file.txt" ||
-  fail "executor-bound approved patch was not applied"
-
 # An approval requested from one lifecycle attempt is not a bearer grant for
 # the same patch outside that attempt. A missing caller attempt must fail just
 # like a different one; otherwise dropping OMS_ATTEMPT_ID silently weakens the
@@ -309,111 +284,50 @@ OMS_ATTEMPT_ID=att_exact_owner OMS_REQUIRE_LANDING_APPROVAL=1 \
 grep -Fxq 'attempt approved' "$attempt_repo/file.txt" ||
   fail "matching attempt did not land its approved patch"
 
-# A plan review produced by a frozen executor is an authority receipt, not
-# merely informational metadata. Landing must carry that executor explicitly
-# and match both its ID and frozen soul while retaining the exact review lease.
-plan_executor_repo="$TMP/plan-executor-receipt-repo"
-mkdir -p "$plan_executor_repo"
-git -C "$plan_executor_repo" init -q
-git -C "$plan_executor_repo" config user.email test@example.com
-git -C "$plan_executor_repo" config user.name test
-printf 'base\n' > "$plan_executor_repo/file.txt"
-git -C "$plan_executor_repo" add file.txt
-git -C "$plan_executor_repo" commit -qm base
-plan_executor_patch="$TMP/plan-executor-receipt.patch"
-printf 'executor reviewed\n' > "$plan_executor_repo/file.txt"
-git -C "$plan_executor_repo" diff --binary > "$plan_executor_patch"
-git -C "$plan_executor_repo" restore file.txt
-plan_soul_patch="$TMP/plan-executor-soul-mismatch.patch"
-printf 'wrong soul\n' > "$plan_executor_repo/file.txt"
-git -C "$plan_executor_repo" diff --binary > "$plan_soul_patch"
-git -C "$plan_executor_repo" restore file.txt
-printf 'reviewed\n' > "$TMP/plan-executor-artifact.md"
-printf '# Specialization\n\nLand only the executor-reviewed patch.\n' \
-  > "$TMP/plan-executor-soul.md"
-
 PLAN="$ROOT/scripts/agent-plan.sh"
-EXECUTOR="$ROOT/scripts/agent-executor.sh"
-"$PLAN" --repo "$plan_executor_repo" init --goal test >/dev/null
-"$PLAN" --repo "$plan_executor_repo" add --id executor-bound \
-  --title executor-bound --allowed file.txt --verify true >/dev/null
-"$PLAN" --repo "$plan_executor_repo" add --id soul-bound \
-  --title soul-bound --allowed file.txt --verify true >/dev/null
-"$PLAN" --repo "$plan_executor_repo" claim --id executor-bound \
-  --provider codex >/dev/null
-"$PLAN" --repo "$plan_executor_repo" claim --id soul-bound \
-  --provider codex >/dev/null
-executor_bound_lease="$("$PLAN" --repo "$plan_executor_repo" show \
-  --id executor-bound | python3 -c \
-  'import json,sys;print(json.load(sys.stdin)["lease_id"])' | tr -d '\r')"
-soul_bound_lease="$("$PLAN" --repo "$plan_executor_repo" show \
-  --id soul-bound | python3 -c \
-  'import json,sys;print(json.load(sys.stdin)["lease_id"])' | tr -d '\r')"
-"$EXECUTOR" create --repo "$plan_executor_repo" --id receipt-executor \
-  --provider codex --plan-task executor-bound \
-  --soul-file "$TMP/plan-executor-soul.md" >/dev/null
-"$EXECUTOR" freeze --repo "$plan_executor_repo" \
-  --id receipt-executor >/dev/null
-receipt_soul_sha="$("$EXECUTOR" show --repo "$plan_executor_repo" \
-  --id receipt-executor | python3 -c \
-  'import json,sys;print(json.load(sys.stdin)["soul_sha256"])' | tr -d '\r')"
 
-# Give a second executor identity the same frozen task, lease, scope, and soul
-# so this negative path isolates ID matching rather than failing on its hash.
-cp -R "$plan_executor_repo/.oms/executors/receipt-executor" \
-  "$plan_executor_repo/.oms/executors/receipt-alias"
-python3 - "$plan_executor_repo/.oms/executors/receipt-alias/meta.json" <<'PY'
+# Old Soul-bound receipts are preserved, not silently converted into authority.
+legacy_repo="$TMP/legacy-soul"
+mkdir -p "$legacy_repo"
+git -C "$legacy_repo" init -q
+git -C "$legacy_repo" config user.email test@example.com
+git -C "$legacy_repo" config user.name test
+printf 'base\n' > "$legacy_repo/file.txt"
+git -C "$legacy_repo" add file.txt
+git -C "$legacy_repo" commit -qm base
+"$PLAN" --repo "$legacy_repo" init --goal legacy >/dev/null
+"$PLAN" --repo "$legacy_repo" add --id old --title old --allowed file.txt --verify true >/dev/null
+"$PLAN" --repo "$legacy_repo" claim --id old --provider codex >/dev/null
+"$PLAN" --repo "$legacy_repo" review --id old --artifact "$TMP/legacy.md" --patch "$patch" >/dev/null
+python3 - "$legacy_repo/.oms/plan/tasks.json" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
-row = json.loads(path.read_text(encoding="utf-8"))
-row["executor_id"] = "receipt-alias"
-path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
+row = json.loads(path.read_text())
+row['tasks']['old'].update(executor_id='retired', executor_soul_sha256='a' * 64)
+path.write_text(json.dumps(row))
 PY
-"$EXECUTOR" validate --repo "$plan_executor_repo" \
-  --id receipt-alias >/dev/null || fail "same-soul executor alias is invalid"
-
-"$EXECUTOR" create --repo "$plan_executor_repo" --id soul-executor \
-  --provider codex --plan-task soul-bound \
-  --soul-file "$TMP/plan-executor-soul.md" >/dev/null
-"$EXECUTOR" freeze --repo "$plan_executor_repo" \
-  --id soul-executor >/dev/null
-actual_soul_sha="$("$EXECUTOR" show --repo "$plan_executor_repo" \
-  --id soul-executor | python3 -c \
-  'import json,sys;print(json.load(sys.stdin)["soul_sha256"])' | tr -d '\r')"
-wrong_soul_sha=0000000000000000000000000000000000000000000000000000000000000000
-[ "$actual_soul_sha" != "$wrong_soul_sha" ] || fail "soul mismatch fixture collided"
-
-"$PLAN" --repo "$plan_executor_repo" review --id executor-bound \
-  --lease-id "$executor_bound_lease" --artifact "$TMP/plan-executor-artifact.md" \
-  --patch "$plan_executor_patch" --executor-id receipt-executor \
-  --executor-soul-sha256 "$receipt_soul_sha" >/dev/null
-"$PLAN" --repo "$plan_executor_repo" review --id soul-bound \
-  --lease-id "$soul_bound_lease" --artifact "$TMP/plan-executor-artifact.md" \
-  --patch "$plan_soul_patch" --executor-id soul-executor \
-  --executor-soul-sha256 "$wrong_soul_sha" >/dev/null
-
-if "$LAND" --repo "$plan_executor_repo" --plan-task executor-bound \
-  --verify true >/dev/null 2>&1; then
-  fail "executor-bound plan review landed without --executor"
-fi
-if "$LAND" --repo "$plan_executor_repo" --plan-task executor-bound \
-  --executor receipt-alias --verify true >/dev/null 2>&1; then
-  fail "executor-bound plan review landed under a different executor ID"
-fi
-if "$LAND" --repo "$plan_executor_repo" --plan-task soul-bound \
-  --executor soul-executor --verify true >/dev/null 2>&1; then
-  fail "executor-bound plan review landed under a different soul"
-fi
-grep -Fxq base "$plan_executor_repo/file.txt" ||
-  fail "executor receipt mismatch still changed the patch target"
-"$PLAN" --repo "$plan_executor_repo" show --id executor-bound |
-  python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["state"]=="review" and d["lease_id"]==d["review_lease_id"],d' ||
-  fail "executor receipt refusal changed the exact review lease"
-"$LAND" --repo "$plan_executor_repo" --plan-task executor-bound \
-  --executor receipt-executor --verify true >/dev/null ||
-  fail "matching plan executor receipt did not land"
-grep -Fxq 'executor reviewed' "$plan_executor_repo/file.txt" ||
-  fail "matching plan executor receipt applied the wrong patch"
+cp "$legacy_repo/.oms/plan/tasks.json" "$TMP/legacy-before.json"
+for tool in peer-delegate plan-run patch-admit patch-land; do
+  if "$ROOT/scripts/$tool.sh" --executor retired --repo "$legacy_repo" >"$TMP/legacy-out" 2>&1; then
+    fail "$tool accepted a retired executor"
+  fi
+  grep -Fq 'Soul executors were removed' "$TMP/legacy-out" || fail "$tool did not explain removal"
+done
+for invocation in 'plan-run --to codex --id old --land --dry-run' \
+  'peer-delegate --to codex --plan-task old --prompt legacy --dry-run' \
+  'patch-admit --plan-task old' 'patch-land --plan-task old'; do
+  # shellcheck disable=SC2086
+  set -- $invocation
+  legacy_tool="$1"; shift
+  case "$legacy_tool" in patch-*) set -- "$@" --patch "$patch" ;; esac
+  if "$ROOT/scripts/$legacy_tool.sh" --repo "$legacy_repo" "$@" >"$TMP/legacy-out" 2>&1; then
+    fail "$legacy_tool accepted a legacy receipt without its executor"
+  fi
+  grep -Fq 'Soul executor receipt is retired' "$TMP/legacy-out" ||
+    fail "$legacy_tool did not reject the legacy receipt: $(cat "$TMP/legacy-out")"
+done
+cmp "$TMP/legacy-before.json" "$legacy_repo/.oms/plan/tasks.json" || fail "legacy rejection changed plan evidence"
+grep -Fxq base "$legacy_repo/file.txt" || fail "legacy rejection applied a patch"
 
 # A reviewed plan task binds patch bytes, not a caller-selected pathname. A
 # goal driver may hand landing a private copy, but it must hash exactly like
@@ -471,14 +385,6 @@ relative_evidence_lease="$("$PLAN" --repo "$plan_patch_repo" show --id relative-
 empty_verifier_lease="$("$PLAN" --repo "$plan_patch_repo" show --id empty-verifier |
   python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])' | tr -d '\r')"
 
-# The executor is valid for this exact task and lease, but the manual review
-# below deliberately carries no executor receipt. Supplying it at landing must
-# not add authority that was absent from the review.
-"$EXECUTOR" create --repo "$plan_patch_repo" --id receiptless-executor \
-  --provider codex --plan-task bytes-bound \
-  --soul-file "$TMP/plan-executor-soul.md" >/dev/null
-"$EXECUTOR" freeze --repo "$plan_patch_repo" \
-  --id receiptless-executor >/dev/null
 "$PLAN" --repo "$plan_patch_repo" review --id bytes-bound \
   --lease-id "$bytes_bound_lease" --artifact "$TMP/plan-patch-artifact.md" \
   --patch "$stored_review_patch" >/dev/null

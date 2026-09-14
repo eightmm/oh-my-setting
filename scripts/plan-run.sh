@@ -24,7 +24,6 @@ AUTO_REPAIR=0
 ALLOW_VERIFIER_CHANGE=0
 RETRY_KNOWN=0
 DRY_RUN=0
-EXECUTOR_ID=""
 MODEL=""
 WORKLOAD=standard
 FALLBACK_MODEL=""
@@ -36,7 +35,6 @@ KNOWN_FAILURE_FP=""
 CHILD_PID=""
 KEEP_CLAIM=0
 CLAIMED=0
-EXECUTOR_PLAN_TASK=""
 CONTINUE_REVIEW=0
 POSSIBLE_REPAIR_RESUME=0
 RESUME_REPAIR=0
@@ -65,11 +63,9 @@ Options:
                   delegation with the failed gate's own output embedded in
                   the worker brief, retry landing once, then park the task
                   for an outside read (oms advise). The plan lease and any
-                  frozen executor contract are reused, never widened. Never loops.
+                  scope and verification contract are reused, never widened. Never loops.
   --retry-known   Retry even when this exact task/base/provider/verify contract
                   is an unresolved known failure.
-  --executor ID   Use a frozen task-scoped executor soul. A reviewed task that
-                  carries an executor receipt requires this exact ID and soul.
   --model MODEL   Exact default model for unassigned tasks; disables implicit fallback.
   --fallback-model M  Explicit one-shot capacity fallback model.
   --reasoning-effort E  auto, low, medium, high, xhigh, max, or ultra.
@@ -99,7 +95,7 @@ while [ "$#" -gt 0 ]; do
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --auto-repair) AUTO_REPAIR=1; [ "$REPAIR" -ge 1 ] || REPAIR=1; shift ;;
     --retry-known) RETRY_KNOWN=1; shift ;;
-    --executor) [ "$#" -ge 2 ] || fail "--executor requires ID"; EXECUTOR_ID="$2"; shift 2 ;;
+    --executor) fail "Soul executors were removed; use a fresh plan task and brief" ;;
     --model) [ "$#" -ge 2 ] || fail "--model requires value"; MODEL="$2"; shift 2 ;;
     --fallback-model) [ "$#" -ge 2 ] || fail "--fallback-model requires value"; FALLBACK_MODEL="$2"; shift 2 ;;
     --reasoning-effort) [ "$#" -ge 2 ] || fail "--reasoning-effort requires value"; REASONING_EFFORT="$2"; shift 2 ;;
@@ -121,7 +117,7 @@ case "$REPAIR" in *[!0-9]*|"") fail "--repair must be 0-3" ;; esac
 [ "$AUTO_REPAIR" -eq 0 ] || [ "$LAND" -eq 1 ] || fail "--auto-repair requires --land"
 if [ "$USE_NEXT" -eq 1 ] && [ -n "$TASK_ID" ]; then fail "use exactly one of --id or --next"; fi
 if [ "$USE_NEXT" -eq 0 ] && [ -z "$TASK_ID" ]; then fail "use exactly one of --id or --next"; fi
-case "$TASK_ID$EXECUTOR_ID" in *[!A-Za-z0-9._-]* ) fail "task/executor ids must match [A-Za-z0-9._-]+" ;; esac
+case "$TASK_ID" in *[!A-Za-z0-9._-]* ) fail "task ids must match [A-Za-z0-9._-]+" ;; esac
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
@@ -141,15 +137,6 @@ if [ -n "$CONTEXT_PACK" ]; then
   CONTEXT_PACK_SHA="$(printf '%s' "$context_pack_values" | cut -f2)"
 fi
 
-if [ -n "$EXECUTOR_ID" ]; then
-  executor_meta="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" --id "$EXECUTOR_ID")" ||
-    fail "cannot read executor $EXECUTOR_ID"
-  EXECUTOR_PLAN_TASK="$(printf '%s' "$executor_meta" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_task", ""))')"
-  if [ -n "$EXECUTOR_PLAN_TASK" ]; then
-    [ "$USE_NEXT" -eq 0 ] || fail "a plan-bound executor requires --id, not --next"
-    [ "$TASK_ID" = "$EXECUTOR_PLAN_TASK" ] || fail "executor is bound to plan task $EXECUTOR_PLAN_TASK"
-  fi
-fi
 
 release_claim() {
   local state current_lease
@@ -166,7 +153,6 @@ release_claim() {
 
 terminalize_resumed_repair_failure() {
   local current values current_state current_lease current_review_lease current_repair
-  local executor_state executor_repair
 
   [ "$RESUME_REPAIR" -eq 1 ] || return 0
   current="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --id "$TASK_ID" 2>/dev/null)" || {
@@ -233,32 +219,6 @@ if (d.get("state") != "blocked" or isinstance(repair, bool) or repair != 1
   fi
   KEEP_CLAIM=1
 
-  if [ -n "$EXECUTOR_ID" ]; then
-    executor_state="$("$ROOT/scripts/agent-executor.sh" show --repo "$REPO" --id "$EXECUTOR_ID" 2>/dev/null |
-      python3 -c 'import json,sys;print(json.load(sys.stdin).get("state", ""))' 2>/dev/null || true)"
-    case "$executor_state" in
-      frozen|running)
-        "$ROOT/scripts/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" \
-          --reason "bounded landing repair failed" >/dev/null 2>&1 || {
-          echo "error: could not fail executor $EXECUTOR_ID after resumed repair failure" >&2
-          return 1
-        }
-        ;;
-      failed) ;;
-      *)
-        echo "error: resumed repair executor $EXECUTOR_ID is $executor_state, not failed" >&2
-        return 1
-        ;;
-    esac
-    values="$("$ROOT/scripts/agent-executor.sh" show --repo "$REPO" --id "$EXECUTOR_ID" 2>/dev/null |
-      python3 -c 'import json,sys;d=json.load(sys.stdin);print("%s\t%s"%(d.get("state", ""),d.get("repair_count", 0)))' 2>/dev/null || true)"
-    executor_state="$(printf '%s' "$values" | cut -f1)"
-    executor_repair="$(printf '%s' "$values" | cut -f2)"
-    if [ "$executor_state" != failed ] || [ "$executor_repair" != 1 ]; then
-      echo "error: resumed repair executor $EXECUTOR_ID did not converge to failed" >&2
-      return 1
-    fi
-  fi
 
   echo "plan-run: failed resumed bounded repair parked task=$TASK_ID state=blocked" >&2
   return 0
@@ -295,9 +255,8 @@ trap 'exit 143' TERM
 # the --id path below requires a ready task. A caller that only ever runs
 # plan-run never invokes reclaim, so a dead worker would park its task forever.
 # Guarded and tolerant: if this cannot run, the claim simply stays put. Skipped
-# for a dry run (which must not write) and for a plan-bound executor, whose
-# task is required to STAY claimed.
-if [ "$DRY_RUN" -eq 0 ] && [ -z "$EXECUTOR_PLAN_TASK" ]; then
+# for a dry run, which must not write.
+if [ "$DRY_RUN" -eq 0 ]; then
   preflight="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" reclaim 2>/dev/null || true)"
   case "$preflight" in
     ""|*"reclaimed 0 task"*) ;;
@@ -307,10 +266,7 @@ if [ "$DRY_RUN" -eq 0 ] && [ -z "$EXECUTOR_PLAN_TASK" ]; then
 fi
 
 hydrate_assignment() {
-  if [ -n "$EXECUTOR_ID" ]; then
-    printf '%s' "$task_json" | python3 -c 'import json,sys; sys.exit(bool(json.load(sys.stdin).get("assignment", {})))' ||
-      fail "task assignment cannot override a frozen executor; use an unassigned task"
-  fi
+  oms_require_current_task_contract "$task_json" || exit $?
   oms_task_assignment_resolve "$task_json" "$TO" "$MODEL" "$FALLBACK_MODEL" "$REASONING_EFFORT" || exit $?
   TO="$OMS_TASK_PROVIDER"
   MODEL="$OMS_TASK_MODEL"
@@ -341,22 +297,12 @@ count=d.get("repair_count",0)
 print(1 if count == 1 and not isinstance(count,bool) and d.get("lease_id") and d.get("review_lease_id") == d.get("lease_id") else 0)
 ')"
   fi
-  if [ -n "$EXECUTOR_PLAN_TASK" ]; then
-    if [ "$state" = review ] && [ "$LAND" -eq 1 ]; then
-      CONTINUE_REVIEW=1
-    else
-      [ "$state" = claimed ] || fail "plan-bound executor task $TASK_ID is $state, not claimed"
-    fi
-    task_provider="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))')"
-    [ "$task_provider" = "$TO" ] || fail "task $TASK_ID claim provider is $task_provider, not $TO"
+  if [ "$state" = review ] && [ "$LAND" -eq 1 ]; then
+    CONTINUE_REVIEW=1
+  elif [ "$POSSIBLE_REPAIR_RESUME" -eq 1 ]; then
+    : # Exact repair marker is validated with the full receipt below.
   else
-    if [ "$state" = review ] && [ "$LAND" -eq 1 ]; then
-      CONTINUE_REVIEW=1
-    elif [ "$POSSIBLE_REPAIR_RESUME" -eq 1 ]; then
-      : # Exact repair marker is validated with the full receipt below.
-    else
-      [ "$state" = ready ] || fail "task $TASK_ID is $state, not ready; the audited exits: oms agent-plan release --id $TASK_ID requeues it (review evidence kept) for a fresh drive, review+--land continues from the stored patch, and --auto-repair owns the in-drive repair loop"
-    fi
+    [ "$state" = ready ] || fail "task $TASK_ID is $state, not ready; the audited exits: oms agent-plan release --id $TASK_ID requeues it (review evidence kept) for a fresh drive, review+--land continues from the stored patch, and --auto-repair owns the in-drive repair loop"
   fi
   if [ "$CONTINUE_REVIEW" -eq 1 ]; then
     task_provider="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("provider", ""))')"
@@ -368,7 +314,7 @@ print(1 if count == 1 and not isinstance(count,bool) and d.get("lease_id") and d
     [ "$task_provider" = "$TO" ] ||
       fail "interrupted repair task $TASK_ID provider is $task_provider, not $TO"
   fi
-  if [ "$DRY_RUN" -eq 0 ] && [ -z "$EXECUTOR_PLAN_TASK" ] &&
+  if [ "$DRY_RUN" -eq 0 ] &&
     [ "$CONTINUE_REVIEW" -eq 0 ] && [ "$POSSIBLE_REPAIR_RESUME" -eq 0 ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" claim --id "$TASK_ID" --provider "$TO" >/dev/null
     CLAIMED=1
@@ -408,40 +354,13 @@ fi
 if [ "$CONTINUE_REVIEW" -eq 1 ] || [ "$RESUME_REPAIR" -eq 1 ]; then
   [ -n "$LEASE_ID" ] || fail "reviewed task $TASK_ID has no active lease"
   [ -n "$artifact" ] && [ -n "$patch" ] || fail "reviewed task $TASK_ID is missing artifact/patch evidence"
-  if [ -n "$review_executor_id$review_executor_soul" ]; then
-    [ -n "$review_executor_id" ] && [ -n "$review_executor_soul" ] ||
-      fail "reviewed task $TASK_ID has an incomplete executor receipt"
-  fi
-  [ "$EXECUTOR_ID" = "$review_executor_id" ] || {
-    if [ -n "$review_executor_id" ]; then
-      fail "reviewed task $TASK_ID requires executor $review_executor_id"
-    fi
-    fail "reviewed task $TASK_ID was not produced by an executor"
-  }
-  if [ -n "$review_executor_id" ]; then
-    current_executor_soul="$(printf '%s' "$executor_meta" |
-      python3 -c 'import json,sys;print(json.load(sys.stdin).get("soul_sha256", ""))')"
-    [ "$current_executor_soul" = "$review_executor_soul" ] ||
-      fail "reviewed task $TASK_ID executor soul receipt does not match $EXECUTOR_ID"
-  fi
+  [ -z "$review_executor_id$review_executor_soul" ] ||
+    fail "Soul executor receipt is retired; preserve this review and create a fresh task"
 fi
 
-# The plan row is the durable repair intent. If a prior plan-run stopped after
-# review -> claimed but before done -> frozen, reconcile the executor under the
-# exact retained lease/scope/verifier/receipt. agent-executor repair is
-# idempotent only for frozen+repair_count=1, so retries cannot re-arm twice.
+# The plan row owns the durable one-shot repair intent.
 if [ "$RESUME_REPAIR" -eq 1 ]; then
   echo "plan-run: resuming interrupted bounded repair task=$TASK_ID lease=$LEASE_ID"
-  if [ "$DRY_RUN" -eq 0 ] && [ -n "$EXECUTOR_ID" ]; then
-    "$ROOT/scripts/agent-executor.sh" repair --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null ||
-      fail "could not reconcile interrupted executor repair $EXECUTOR_ID"
-    executor_meta="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" --id "$EXECUTOR_ID")" ||
-      fail "cannot reread reconciled executor $EXECUTOR_ID"
-    if [ "${OMS_PLAN_RUN_TEST_STOP_AFTER_EXECUTOR_REPAIR:-0}" = 1 ]; then
-      echo "plan-run: injected stop after reconciled executor repair" >&2
-      exit 76
-    fi
-  fi
 fi
 
 base="$(git -C "$REPO" rev-parse HEAD)"
@@ -455,27 +374,18 @@ if d.get("assignment"):
     stable["assignment"]=d["assignment"]
 print(hashlib.sha256(json.dumps(stable,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()[:16])
 ')"
-if [ -n "$EXECUTOR_ID" ]; then
-  assignment_route="frozen-executor=$EXECUTOR_ID"
-  route_contract="$(printf '%s' "$executor_meta" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-keys=("executor_id","provider","strategy","mode","plan_task","task_id","base_sha","allowed_paths","forbidden_paths","verify","model_class","model","fallback_model","reasoning_effort","fallback_reasoning_effort","soul_sha256")
-print("|".join(str(d.get(k,"")) for k in keys))
-')|request=$MODEL:$FALLBACK_MODEL:$REASONING_EFFORT"
-else
-  task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))')"
-  # Match peer-delegate's default; ambient routine hints must not give this
-  # same task a different failure identity than the worker actually uses.
-  export OMS_MODEL_WORKLOAD="$WORKLOAD"
-  export OMS_MODEL_EXPLICIT="$MODEL"
-  export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
-  export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT" OMS_REASONING_FALLBACK_EXPLICIT=""
-  export OMS_MODEL_ROLE="$task_role" OMS_MODEL_OPERATION=delegate
-  oms_model_prepare "$TO" || exit $?
-  assignment_route="model=$OMS_MODEL_PRIMARY class=$OMS_MODEL_RESOLVED_CLASS workload=$WORKLOAD"
-  route_contract="$OMS_MODEL_RESOLVED_CLASS:$OMS_MODEL_PRIMARY:$OMS_MODEL_FALLBACK:$OMS_REASONING_RESOLVED:$OMS_REASONING_FALLBACK"
-fi
+task_role="$(printf '%s' "$task_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("role", ""))')"
+# Match peer-delegate's default; ambient routine hints must not give this
+# same task a different failure identity than the worker actually uses.
+export OMS_MODEL_WORKLOAD="$WORKLOAD"
+export OMS_MODEL_EXPLICIT="$MODEL"
+export OMS_MODEL_FALLBACK_EXPLICIT="$FALLBACK_MODEL"
+export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT" OMS_REASONING_FALLBACK_EXPLICIT=""
+export OMS_MODEL_ROLE="$task_role" OMS_MODEL_OPERATION=delegate
+oms_model_prepare "$TO" || exit $?
+assignment_route="model=$OMS_MODEL_PRIMARY class=$OMS_MODEL_RESOLVED_CLASS workload=$WORKLOAD"
+route_contract="$OMS_MODEL_RESOLVED_CLASS:$OMS_MODEL_PRIMARY:$OMS_MODEL_FALLBACK:$OMS_REASONING_RESOLVED:$OMS_REASONING_FALLBACK"
+
 route_hash="$(printf '%s' "$route_contract" | oms_sha256_stream | cut -c1-16)"
 FAIL_CMD="plan-run task=$TASK_ID base=$base provider=$TO verify=$verify_hash contract=$contract_hash route=$route_hash"
 set +e
@@ -513,7 +423,6 @@ delegate_repair="$REPAIR"
 [ "$RESUME_REPAIR" -eq 0 ] || delegate_repair=0
 delegate_common_cmd=("$delegate_script" --repo "$REPO" --to "$TO" --plan-task "$TASK_ID")
 [ "$WORKLOAD" = standard ] || delegate_common_cmd+=(--workload "$WORKLOAD")
-[ -n "$EXECUTOR_ID" ] && delegate_common_cmd+=(--executor "$EXECUTOR_ID")
 [ -n "$MODEL" ] && delegate_common_cmd+=(--model "$MODEL")
 [ -n "$FALLBACK_MODEL" ] && delegate_common_cmd+=(--fallback-model "$FALLBACK_MODEL")
 [ -n "$REASONING_EFFORT" ] && [ "$REASONING_EFFORT" != auto ] &&
@@ -569,7 +478,6 @@ if [ "$LAND" -eq 1 ]; then
   # land through this front door without the admission override; the flag is
   # forwarded verbatim, never implied (the live campaign hit exactly this).
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || land_cmd+=(--allow-verifier-change)
-  [ -n "$EXECUTOR_ID" ] && land_cmd+=(--executor "$EXECUTOR_ID")
   land_log="$(agent_memory_mktemp)" || exit 1
   set +e
   "${land_cmd[@]}" >"$land_log" 2>&1
@@ -590,18 +498,6 @@ if [ "$LAND" -eq 1 ]; then
       [ "${OMS_PLAN_RUN_TEST_STOP_AFTER_PLAN_REPAIR:-0}" = 1 ]; then
       echo "plan-run: injected stop after durable plan repair" >&2
       exit 75
-    fi
-    if [ "$repair_status" -eq 0 ] && [ -n "$EXECUTOR_ID" ]; then
-      "$ROOT/scripts/agent-executor.sh" repair --repo "$REPO" --id "$EXECUTOR_ID" >/dev/null
-      repair_status=$?
-      if [ "$repair_status" -ne 0 ]; then
-        # The task transition retained the prior review evidence. Put it back
-        # in review under the same lease when the executor cannot be re-armed;
-        # never continue by dropping the frozen executor contract.
-        "$ROOT/scripts/agent-plan.sh" --repo "$REPO" review --id "$TASK_ID" \
-          --lease-id "$LEASE_ID" --executor-id "$review_executor_id" \
-          --executor-soul-sha256 "$review_executor_soul" >/dev/null 2>&1 || true
-      fi
     fi
     if [ "$repair_status" -eq 0 ]; then
       repair_log="$(agent_memory_mktemp)"
@@ -634,16 +530,6 @@ if [ "$LAND" -eq 1 ]; then
       # for the outside read named below.
       "$ROOT/scripts/agent-plan.sh" --repo "$REPO" block --id "$TASK_ID" \
         --lease-id "$LEASE_ID" --reason "bounded landing repair failed" >/dev/null 2>&1 || true
-      if [ -n "$EXECUTOR_ID" ]; then
-        executor_state="$($ROOT/scripts/agent-executor.sh show --repo "$REPO" \
-          --id "$EXECUTOR_ID" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' 2>/dev/null || true)"
-        case "$executor_state" in
-          frozen|running)
-            "$ROOT/scripts/agent-executor.sh" fail --repo "$REPO" --id "$EXECUTOR_ID" \
-              --reason "bounded landing repair failed" >/dev/null 2>&1 || true
-            ;;
-        esac
-      fi
     fi
     set -e
   fi

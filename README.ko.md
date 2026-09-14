@@ -117,7 +117,7 @@ capability profile을 선택하고, 여러 머신 사이에 sanitized capsule을
 peer-delegate -> patch-admit -> patch-land
 ```
 
-plan lease, executor soul, one-use approval, commit intent, Draft PR intent가
+plan lease, one-use approval, commit intent, Draft PR intent가
 계속 권위 경계다. runtime snapshot·capsule·context bundle·backend receipt는
 증거나 advisory state일 뿐 write authority가 아니다.
 
@@ -164,7 +164,7 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
   없음, 작성자의 논리 없이 증거만 — 그리고 죽거나 잘린 시트는 합성에서
   이름으로 표시될 뿐 하나의 의견처럼 인용되지 않는다
 - **쓰기 위임** — 격리 worktree 위임(patch를 만들면 안 되는 감사는
-  `--read-only`), admission 사다리, 단일 변이 경계, 해시 동결 executor soul과
+  `--read-only`), admission 사다리, 단일 변이 경계,
   워커 권한 지문, 위반 시 스냅샷 기반 권한 복구, primary 권한 환경변수
   미전달, 그리고 재귀 위임 금지 — 워커가 다른 peer를 부르려 하면 서버 측에서
   거부되고 필요를 답변으로 보고하라고 안내받는다

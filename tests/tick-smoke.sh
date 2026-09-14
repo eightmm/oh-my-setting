@@ -174,6 +174,38 @@ out="$("$TICK" register --repo "$TMP" 2>&1 || true)"
 printf '%s' "$out" | grep -q 'no .oms' || fail "an unadopted dir must be refused: $out"
 [ "$(wc -l < "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt")" -eq 1 ] || fail "registry must hold one line"
 
+# The receipt stays in the purity inventory: defer the entire sweep instead.
+# Multiple checks can register, and only the last live check permits a sweep.
+maintenance="$TMP/check-coordination"; make_repo "$maintenance"
+for backend in 0 1; do
+  (
+    export OMS_LOCK_FORCE_MKDIR="$backend" OMS_LOCK_DIR="$TMP/coordination-$backend"
+    . "$ROOT/scripts/lib/check-maintenance.sh"
+    oms_check_maintenance_begin "$maintenance"
+    first_marker="$OMS_CHECK_MAINTENANCE_MARKER"
+    first_owner="$OMS_CHECK_MAINTENANCE_OWNER"
+    oms_check_maintenance_begin "$maintenance"
+    out="$("$TICK" run --repo "$maintenance")"
+    printf '%s' "$out" | grep -q 'verification running' || fail "tick ignored active checks: $out"
+    [ ! -e "$maintenance/.oms/tick" ] || fail "deferred sweep wrote a receipt"
+    oms_check_maintenance_end
+    out="$("$TICK" run --repo "$maintenance")"
+    printf '%s' "$out" | grep -q 'verification running' || fail "one check released another"
+    OMS_CHECK_MAINTENANCE_MARKER="$first_marker"
+    OMS_CHECK_MAINTENANCE_OWNER="$first_owner"
+    oms_check_maintenance_end
+    # A finished/crashed process cannot suppress future maintenance.
+    (oms_check_maintenance_begin "$maintenance")
+    oms_hold_file_lock "$maintenance/.oms/tick/last.json" 8
+    trap oms_release_held_file_lock EXIT
+    oms_check_maintenance_active "$maintenance" && fail "dead check remained active"
+    out="$("$TICK" run --repo "$maintenance")"
+    printf '%s' "$out" | grep -q 'maintenance already running' || fail "overlapping sweep was allowed"
+  )
+done
+out="$("$TICK" run --repo "$maintenance")"
+printf '%s' "$out" | grep -q 'swept ' || fail "maintenance did not resume: $out"
+
 # --- sweep: idle thread/task closed, fresh/live task kept, gc off, receipt ----
 THREAD="$ROOT/scripts/thread.sh"
 TASK="$ROOT/scripts/agent-task.sh"

@@ -542,6 +542,8 @@ test_gate_fingerprints_full_oms_state() {
   mkdir -p "$gate/scripts/lib" "$gate/tests"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
   cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+    "$ROOT/scripts/lib/poll.sh" "$gate/scripts/lib/"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-python.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-bash32.sh"
   cat > "$gate/fake-shellcheck" <<'EOF'
@@ -572,6 +574,12 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
   nested-ci) mkdir -p "$root/.oms/plan"; printf 'leak\n' >> "$root/.oms/plan/ci.jsonl" ;;
   graph-shadow) mkdir -p "$root/.oms/graph"; printf 'ambient\n' >> "$root/.oms/graph/shadow.jsonl" ;;
   graph-run) mkdir -p "$root/.oms/graph/runs/r1"; printf 'leak\n' >> "$root/.oms/graph/runs/r1/events.jsonl" ;;
+  tick-write) mkdir -p "$root/.oms/tick"; printf 'leak\n' > "$root/.oms/tick/last.json" ;;
+  tick)
+    out="$(OMS_LOCK_DIR="$OMS_TEST_TICK_LOCK_DIR" OMS_WORK_JOURNAL=0 \
+      OMS_INSTALL_RECEIPT="$root/no-receipt" "$OMS_TEST_TICK" run --repo "$root")"
+    printf '%s' "$out" | grep -q 'verification running'
+    ;;
 esac
 EOF
   done
@@ -588,7 +596,7 @@ EOF
   git -C "$gate" commit -qm head
   head="$(git -C "$gate" rev-parse HEAD)"
 
-  for mutation in content symlink directory mode lint failed-content nested-ci graph-run; do
+  for mutation in content symlink directory mode lint failed-content nested-ci graph-run tick-write; do
     rm -rf "$gate/.oms"
     mkdir -p "$gate/.oms"
     printf 'before\n' > "$gate/.oms/state"
@@ -605,11 +613,12 @@ EOF
   # test: two trees it writes every turn, plus the CI row it records whenever a
   # push lands. Their ambient writes must not make a clean gate flaky, while
   # the same file name one level down stays a leak (see nested-ci above).
-  for mutation in hooks journal ci graph-shadow; do
+  for mutation in hooks journal ci graph-shadow tick; do
     rm -rf "$gate/.oms"
     mkdir -p "$gate/.oms"
     printf 'before\n' > "$gate/.oms/state"
     (cd "$gate" && OMS_SHELLCHECK_BIN="$gate/fake-shellcheck" \
+      OMS_TEST_TICK="$ROOT/scripts/tick.sh" OMS_TEST_TICK_LOCK_DIR="${OMS_LOCK_DIR:-}" \
       OMS_TEST_CHECK_MUTATION="$mutation" \
       bash scripts/check.sh --quick --changed-from "$base" --changed-to "$head" >/dev/null) ||
       fail "check gate treated ambient $mutation state as a suite leak"
@@ -631,6 +640,8 @@ test_affected_gate_runs_positive_evidence_and_fails_open() {
   mkdir -p "$gate/scripts/lib" "$gate/tests" "$gate/lib"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
   cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+    "$ROOT/scripts/lib/poll.sh" "$gate/scripts/lib/"
   cp "$ROOT/tests/run-smoke-shard.sh" "$gate/tests/run-smoke-shard.sh"
   for script in check-python.sh check-bash32.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/$script"

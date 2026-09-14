@@ -10,12 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import GRAPH_PACKAGE_VERSION
-from . import commit as exec_commit
-from . import events as exec_events
 from . import render
-from . import route as exec_route
-from . import runner
-from . import shadow as exec_shadow
 from .child_policy import CHILD_GRAPH_ERROR, child_action_is_allowed
 from .errors import GraphError
 from .facts import collect_facts
@@ -145,6 +140,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--json", action="store_true")
     context = project_sub.add_parser("context")
     context.add_argument("--task", required=True)
+    context.add_argument("--entry-path", action="append", default=[], metavar="PATH",
+                         help="anchor context to an exact repo-relative file; repeatable, no query translation")
     context.add_argument("--max-files", type=int, default=12)
     context.add_argument("--bundle", action="store_true")
     context.add_argument("--base", default="")
@@ -159,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
         analyze, coupling, context,
     ):
         reader.add_argument("--no-refresh", action="store_true", help="read the graph as it stands; never build or refresh it")
-    execution = groups.add_parser("exec", help="execution graph: validate, route, run, resume, decide, status, events")
+    execution = groups.add_parser("exec", help="advanced opt-in execution graph; ordinary work uses existing plans/autopilot")
     exec_sub = execution.add_subparsers(dest="action", required=True)
     validate = exec_sub.add_parser("validate")
     validate.add_argument("spec")
@@ -346,6 +343,9 @@ def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
 def _project_find(args: argparse.Namespace, repo: Path, state: Path) -> int:
     full_graph, index = _index(repo, state)
     rows = index.find(args.query, kinds=(args.kind,) if args.kind else (), limit=args.limit, include_tests=args.include_tests)
+    if not rows and args.limit > 0:
+        print("graph find: no lexical match; search source identifiers or paths directly. "
+              "The query is not translated, and an empty result does not prove missing code.", file=sys.stderr)
     if args.json:
         assurance = analytics.structural_assurance(
             full_graph.get("nodes", []), full_graph.get("edges", []),
@@ -495,7 +495,10 @@ def _project_affected(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 def _project_context(args: argparse.Namespace, repo: Path, state: Path) -> int:
     graph, index = _index(repo, state)
-    pack = project_context.context_pack(repo, index, task=args.task, max_files=args.max_files, base=args.base, state=state)
+    pack = project_context.context_pack(repo, index, task=args.task, max_files=args.max_files,
+                                        base=args.base, state=state, entry_paths=args.entry_path)
+    if pack["retrieval"]["status"] != "matched":
+        print("graph context: " + pack["retrieval"]["hint"], file=sys.stderr)
     if args.bundle:
         pack["bundle"] = project_context.compile_bundle(repo, pack)
     if args.ui_model:
@@ -631,6 +634,7 @@ def _json_option(value: str) -> Dict[str, Any]:
 
 def _run_view(repo: Path, run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Frozen spec, events projection, and current facts for one recorded run."""
+    from . import events as exec_events, runner
     spec = exec_events.load_run_spec(repo, run_id)
     rows = exec_events.read_events(repo, run_id)
     projection = exec_events.project(rows, spec)
@@ -669,6 +673,7 @@ def _print_route(route: Dict[str, Any]) -> None:
 
 
 def _exec_route(args: argparse.Namespace) -> int:
+    from . import route as exec_route
     repo = repo_root(args.repo)
     if args.run:
         spec, state, facts = _run_view(repo, args.run)
@@ -689,6 +694,7 @@ def _exec_route(args: argparse.Namespace) -> int:
 
 
 def _exec_run(args: argparse.Namespace) -> int:
+    from . import runner
     repo = repo_root(args.repo)
     result = runner.run(repo, args.spec, worker=args.worker, run_id=args.run, model=args.model,
                         reasoning_effort=args.reasoning_effort, max_steps=args.max_steps,
@@ -715,6 +721,7 @@ def _report_run(args: argparse.Namespace, result: Dict[str, Any]) -> int:
 
 
 def _exec_resume(args: argparse.Namespace) -> int:
+    from . import runner
     result = runner.resume(repo_root(args.repo), args.run, worker=args.worker, model=args.model,
                            reasoning_effort=args.reasoning_effort, max_steps=args.max_steps,
                            jobs=args.jobs, goal=args.goal)
@@ -722,6 +729,7 @@ def _exec_resume(args: argparse.Namespace) -> int:
 
 
 def _exec_decide(args: argparse.Namespace) -> int:
+    from . import runner
     result = runner.decide(repo_root(args.repo), args.run, args.node, args.outcome, note=args.note)
     if args.json:
         emit(result, args.pretty)
@@ -732,6 +740,7 @@ def _exec_decide(args: argparse.Namespace) -> int:
 
 
 def _exec_status(args: argparse.Namespace) -> int:
+    from . import events as exec_events, route as exec_route
     repo = repo_root(args.repo)
     run_id = args.run or exec_events.latest_run_id(repo)
     if not run_id:
@@ -770,6 +779,7 @@ def _exec_status(args: argparse.Namespace) -> int:
 
 
 def _exec_events(args: argparse.Namespace) -> int:
+    from . import events as exec_events
     rows = exec_events.read_events(repo_root(args.repo), args.run)
     selected = rows[-args.limit:] if args.limit > 0 else rows
     if args.json:
@@ -782,6 +792,7 @@ def _exec_events(args: argparse.Namespace) -> int:
 
 
 def _exec_shadow(args: argparse.Namespace) -> int:
+    from . import shadow as exec_shadow
     row = exec_shadow.shadow(repo_root(args.repo), spec_name=args.spec)
     if args.json:
         emit(row, args.pretty)
@@ -794,6 +805,7 @@ def _exec_shadow(args: argparse.Namespace) -> int:
 
 
 def _exec_test(args: argparse.Namespace) -> int:
+    from . import route as exec_route
     path = Path(args.path)
     files = sorted(path.glob("*.json")) if path.is_dir() else [path]
     if not files:
@@ -815,6 +827,7 @@ def _exec_test(args: argparse.Namespace) -> int:
 
 
 def _exec_commit(args: argparse.Namespace) -> int:
+    from . import commit as exec_commit
     result = exec_commit.commit_bound(repo_root(args.repo), binding=args.binding, run_id=args.run, message=args.message)
     if args.json:
         emit(result, args.pretty)

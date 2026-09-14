@@ -12,7 +12,7 @@ oms runtime next
 oms runtime evidence show
 ```
 
-The TaskEnvelope reconciles `PROJECT.md`, the active task, plan, executor,
+The TaskEnvelope reconciles `PROJECT.md`, the active task, plan,
 failures, and evidence. Treat it as a derived view. Never edit its snapshot to
 change authority.
 

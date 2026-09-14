@@ -21,7 +21,7 @@ and continue proposals only with the reviewed digest. Draft PR, push, merge,
 ready, tag, and release remain separate authority decisions.
 
 Runtime projections carry no mutation authority or replacement for
-`peer-delegate -> patch-admit -> patch-land`, leases, executor souls,
+`peer-delegate -> patch-admit -> patch-land`, leases,
 approvals, commit intents, or publication intents.
 
 ## Route by intent
@@ -72,10 +72,8 @@ projections, not authority.
 - Shared decisions: [shared-projections.md](references/shared-projections.md)
 - Graphs: [graphs.md](references/graphs.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
-- Autonomous stopping: [autonomy-loop.md](references/autonomy-loop.md)
-- Roles/executors: [roles-executors.md](references/roles-executors.md)
+- Worker roles: [roles.md](references/roles.md)
 - Consultation: [cross-agent-consultation.md](references/cross-agent-consultation.md)
 - Review/release gates: [review-gates.md](references/review-gates.md)
-- Installed agent detection, DeepSeek/Grok/GLM carriers, and custom adapters: [provider-routing.md](references/provider-routing.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
 - Evidence-first changes: [minimal-change.md](references/minimal-change.md)

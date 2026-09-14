@@ -124,7 +124,6 @@ OMS_PUBLIC_TOOLS="
 advise
 agent-call
 agent-events
-agent-executor
 agent-memory
 agent-plan
 agent-role
@@ -160,7 +159,6 @@ land
 model-doctor
 models
 open-in
-ops-cockpit
 otel-export
 patch-admit
 patch-land
