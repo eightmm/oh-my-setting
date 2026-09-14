@@ -50,9 +50,6 @@ SECRET_RE = re.compile(
     r"(?:https?|ssh)://[^/@\s:]+:[^/@\s]+@"
     r")"
 )
-PRIVATE_PATH_RE = re.compile(
-    r"(?:/home|/Users)/[^/\s]+|[A-Za-z]:[\\/]Users[\\/][^\\/\s]+"
-)
 
 
 class LifecycleError(Exception):
@@ -745,150 +742,6 @@ def evaluate(repo: Path, name: str, suite_path: Path, allow_host: bool, record: 
     return result
 
 
-def strict_jsonl(path: Path, where: str, maximum: int = MAX_JSON_BYTES) -> List[Dict[str, Any]]:
-    raw = read_regular(path, where, maximum)
-    if raw and not raw.endswith(b"\n"):
-        fail("%s must end with LF" % where)
-    rows = []
-    for number, line in enumerate(raw.split(b"\n")[:-1], 1):
-        if not line or b"\r" in line:
-            fail("%s line %d is malformed" % (where, number))
-        value = strict_json_bytes(line, "%s line %d" % (where, number))
-        rows.append(value)
-    return rows
-
-
-def scrub_text(value: str) -> str:
-    clean = SECRET_RE.sub("[REDACTED]", value)
-    clean = PRIVATE_PATH_RE.sub("<private-path>", clean)
-    clean = "".join(char if char >= " " or char in "\n\t" else " " for char in clean)
-    return clean.strip()[:12000]
-
-
-def source_evidence(repo: Path, kind: str, source_id: str) -> Tuple[bytes, List[str]]:
-    if not SAFE_ID_RE.fullmatch(source_id):
-        fail("source id is invalid")
-    if kind == "thread":
-        path = repo / ".oms" / "threads" / (source_id + ".jsonl")
-        if not path.exists() and not path.is_symlink():
-            fail("insufficient-source: thread does not exist")
-        rows = strict_jsonl(path, "thread evidence")
-        texts = []
-        expected = 1
-        for row in rows:
-            if row.get("schema") != 1 or row.get("thread") != source_id or row.get("seq") != expected:
-                fail("thread evidence has an invalid sequence/schema")
-            expected += 1
-            text = row.get("text")
-            if isinstance(text, str) and text.strip():
-                texts.append(scrub_text(text))
-        raw = read_regular(path, "thread evidence")
-    elif kind == "journal":
-        path = repo / ".oms" / "work-journal" / "events.jsonl"
-        if not path.exists() and not path.is_symlink():
-            fail("insufficient-source: journal does not exist")
-        rows = strict_jsonl(path, "journal evidence")
-        match = [row for row in rows if row.get("event_id") == source_id]
-        if len(match) != 1:
-            fail("insufficient-source: journal event is missing or ambiguous")
-        row = match[0]
-        outcome = row.get("outcome") if isinstance(row.get("outcome"), dict) else {}
-        texts = [scrub_text(str(value)) for value in (outcome.get("summary"), row.get("event_type"), row.get("verification_status")) if isinstance(value, str) and value]
-        raw = canonical_json(row)
-    elif kind == "attempt":
-        path = repo / ".oms" / "lifecycle" / "events.jsonl"
-        if not path.exists() and not path.is_symlink():
-            fail("insufficient-source: attempt ledger does not exist")
-        rows = strict_jsonl(path, "attempt evidence")
-        selected = [row for row in rows if row.get("attempt_id") == source_id]
-        if not selected:
-            fail("insufficient-source: attempt does not exist")
-        refs: List[str] = []
-        for row in selected:
-            value = row.get("refs")
-            if isinstance(value, dict):
-                refs.extend(item for item in value.values() if isinstance(item, str))
-        texts = []
-        for ref in refs:
-            candidate = (repo / ref).resolve()
-            if os.path.commonpath((str(repo), str(candidate))) != str(repo) or not candidate.is_file() or candidate.is_symlink():
-                continue
-            content = read_regular(candidate, "attempt referenced artifact", MAX_FILE_BYTES).decode("utf-8", errors="replace")
-            texts.append(scrub_text(content))
-        raw = canonical_json(selected)
-    else:
-        fail("unsupported derive source: %s" % kind)
-    texts = [item for item in texts if len(item.encode("utf-8")) >= 20]
-    if not texts or sum(len(item.encode("utf-8")) for item in texts) < 80:
-        fail("insufficient-source: source has no reviewable procedural evidence")
-    return raw, texts[:20]
-
-
-def derive(repo: Path, kind: str, source_id: str, name: str, apply: bool) -> Dict[str, Any]:
-    name = validate_name(name, imported=True)
-    raw, texts = source_evidence(repo, kind, source_id)
-    source_sha = hashlib.sha256(raw).hexdigest()
-    bullets = []
-    for text in texts:
-        compact = re.sub(r"\s+", " ", text).strip()
-        if compact:
-            bullets.append("- " + compact[:600])
-    description = "Reviewed operating guidance derived from bounded %s evidence; inspect provenance and verification before adoption." % kind
-    skill_text = "\n".join((
-        "---",
-        "name: %s" % name,
-        "description: %s" % description,
-        "---",
-        "",
-        "# Candidate runbook",
-        "",
-        "> Unreviewed draft. Do not adopt until every instruction is verified against the current repository.",
-        "",
-        "## Evidence-derived observations",
-        "",
-        *bullets,
-        "",
-        "## Review checklist",
-        "",
-        "- Confirm each command and authority boundary against current code.",
-        "- Add a focused regression that fails before the proposed guidance.",
-        "- Remove incidental or one-off details before importing this draft.",
-        "",
-    ))
-    review_text = "\n".join((
-        "# Draft review receipt",
-        "",
-        "- status: unreviewed",
-        "- source_kind: %s" % kind,
-        "- source_id: %s" % source_id,
-        "- source_sha256: %s" % source_sha,
-        "- activation: none",
-        "",
-        "Adopt only through `oms skill-forge import ... --apply` after review and evaluation.",
-        "",
-    ))
-    draft_sha = hashlib.sha256((skill_text + "\x00" + review_text).encode("utf-8")).hexdigest()
-    relative = Path(".oms") / "drafts" / "skills" / name / draft_sha
-    result: Dict[str, Any] = {"schema": 1, "status": "preview", "name": name, "draft_sha256": draft_sha, "source": {"kind": kind, "id": source_id, "sha256": source_sha}}
-    if not apply:
-        return result
-    destination = repo / relative
-    if destination.exists() or destination.is_symlink():
-        if destination.is_symlink() or not destination.is_dir():
-            fail("draft destination is unsafe")
-        current_skill = read_regular(destination / "SKILL.md", "existing draft SKILL.md").decode("utf-8")
-        current_review = read_regular(destination / "REVIEW.md", "existing draft REVIEW.md").decode("utf-8")
-        if current_skill != skill_text or current_review != review_text:
-            fail("existing draft digest occupant differs")
-    else:
-        destination.mkdir(parents=True, exist_ok=False)
-        atomic_write(destination / "SKILL.md", skill_text.encode("utf-8"))
-        atomic_write(destination / "REVIEW.md", review_text.encode("utf-8"))
-    result["status"] = "written"
-    result["draft_path"] = str(relative).replace(os.sep, "/")
-    return result
-
-
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser()
     value.add_argument("--repo", default=".")
@@ -915,12 +768,6 @@ def parser() -> argparse.ArgumentParser:
     rollback.add_argument("--apply", action="store_true")
     rollback.add_argument("--json", action="store_true")
     active = sub.add_parser("active-targets")
-    derive_parser = sub.add_parser("derive")
-    derive_parser.add_argument("--from", dest="source_kind", choices=("attempt", "thread", "journal"), required=True)
-    derive_parser.add_argument("--id", required=True)
-    derive_parser.add_argument("--name", required=True)
-    derive_parser.add_argument("--apply", action="store_true")
-    derive_parser.add_argument("--json", action="store_true")
     return value
 
 
@@ -942,10 +789,6 @@ def main() -> int:
         return 0
     if args.command == "eval":
         result = evaluate(repo, args.name, Path(args.suite), args.allow_host_commands, args.record)
-        emit(result, args.json)
-        return 0
-    if args.command == "derive":
-        result = derive(repo, args.source_kind, args.id, args.name, args.apply)
         emit(result, args.json)
         return 0
     if args.command == "rollback":

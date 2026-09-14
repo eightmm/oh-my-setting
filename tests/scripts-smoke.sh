@@ -13201,7 +13201,7 @@ test_oms_dispatcher_lists_and_dispatches() {
   printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
   printf '%s' "$out" | grep -Eq '^agent-run ' || fail "oms list should include agent-run"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
-    execution-profile open-in otel-export; do
+    runtime open-in otel-export; do
     printf '%s\n' "$out" | grep -Eq "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||

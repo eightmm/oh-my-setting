@@ -12,6 +12,37 @@ HELPER="$ROOT/scripts/lib/tool-lock.py"
 [ -x "$HELPER" ] || fail "missing executable tool-lock helper"
 python3 "$HELPER" --lock "$LOCK" validate >/dev/null || fail "tool lock is invalid"
 
+# External newer gh is not an OMS-owned drift; pins and owned bytes stay strict.
+(
+  mkdir -p "$TMP/gh-bin"
+  printf '#!/usr/bin/env bash\nprintf "gh version %%s\\n" "$OMS_TEST_GH_VERSION"\n' > "$TMP/gh-bin/gh"
+  chmod +x "$TMP/gh-bin/gh"
+  export PATH="$TMP/gh-bin:$PATH"
+  unset OH_MY_SETTING_TOOL_LOCK
+  export REQUIRE_TOOLS=0
+  export OMS_TEST_GH_VERSION=2.99.0
+  for function_name in command_has_locked_version external_gh_is_newer check_locked_direct_version doctor_sha256_file; do
+    eval "$(sed -n "/^${function_name}()/,/^}/p" "$ROOT/scripts/doctor.sh")"
+  done
+  tool_lock_value() { printf '2.97.0\n'; }
+  report_tool_drift() { printf 'drift: %s\n' "$*"; }
+  check_locked_direct_version gh gh gh.version | grep -q '^note:.*newer' || fail "external newer gh should not require downgrade"
+  for OMS_TEST_GH_VERSION in 2.9.0 2.99.0-rc1 invalid; do
+    check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "older or unverified gh escaped drift"
+  done
+  OMS_TEST_GH_VERSION=2.99.0
+  REQUIRE_TOOLS=1
+  check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "strict gh pin was relaxed"
+  REQUIRE_TOOLS=0
+  OH_MY_SETTING_TOOL_LOCK="$LOCK"
+  check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "explicit gh pin was relaxed"
+  unset OH_MY_SETTING_TOOL_LOCK
+  touch "$TMP/gh-bin/gh.oh-my-setting-managed"
+  check_locked_direct_version gh gh gh.version | grep -q '^drift:' || fail "owned gh version drift was ignored"
+  OMS_TEST_GH_VERSION=2.97.0
+  check_locked_direct_version gh gh gh.version | grep -q 'managed binary digest changed' || fail "owned gh integrity was ignored"
+)
+
 # Native Codex owns its standalone launcher; updates must not replace it with npm.
 (
   set --

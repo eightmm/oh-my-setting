@@ -1,6 +1,6 @@
 # Skill Lifecycle
 
-Use this reference when improving, importing, evaluating, or deriving a project
+Use this reference when writing, importing, or evaluating a project
 skill. `skill-forge` is the only activation authority; do not write links or
 `.oms/skill-store` by hand.
 
@@ -13,7 +13,6 @@ skill. `skill-forge` is the only activation authority; do not write links or
 | Update | `update --expected-current-sha256 OLD --expected-bundle-sha256 NEW --apply` | Both current provenance and previewed new bytes are CAS-bound. |
 | Roll back | `rollback oms-NAME --to SHA --expected-current-sha256 CURRENT --apply` | Selects an already stored immutable revision. |
 | Measure routing/task value | `eval NAME --suite SUITE --allow-host-commands` | Explicit host execution in fresh baseline/treatment dirs; no sandbox claim. Add `--record` only when the aggregate result should enter runtime benchmark telemetry. |
-| Learn from prior work | `derive --from thread|journal|attempt-ref --id ID --name oms-NAME` | Preview by default. `--apply` writes an inert review draft, never an active skill. |
 
 Preview before every import/update. Never execute code merely to inspect a
 bundle. A bundle with symlinks, hardlinks, nonregular or sensitive entries,
@@ -26,7 +25,7 @@ be an explicit argv array, and every host command requires the caller's
 `--allow-host-commands`. Compare aggregate trigger confusion counts and task
 pass delta; do not use stored prompts or outputs as telemetry.
 
-A derived draft must cite sufficient bounded source evidence. Review and edit
-its `SKILL.md` and `REVIEW.md`, then use the normal local `skill-forge add|link`
-flow if it deserves activation. Draft creation alone proves neither correctness
-nor recurrence.
+Write useful guidance directly from current source evidence; retain only
+reusable decisions. Review before `skill-forge add|link` for local skills or
+preview/import for bundles. Existing inert drafts are not activated or deleted
+by the removal of automatic draft generation.

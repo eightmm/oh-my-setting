@@ -74,7 +74,7 @@ user request
        -> write: peer-delegate -> isolated worktree -> patch
                                       -> patch-admit -> patch-land
        -> orchestrate: agent-supervisor -> agent-events -> approval-inbox
-       -> operate: execution-profile / open-in
+       -> operate: runtime backend / open-in
        -> observe: inbox / targeted state queries / otel-export
   -> local state in .oms/
        -> inbox / state / handoff / MCP / Work Journal
@@ -188,9 +188,9 @@ Skill evaluation is an explicit black-box experiment. A suite declares near-
 miss trigger cases and baseline/treatment task commands; host commands run only
 with `--allow-host-commands`. The result contains aggregate counts and command
 digests, never prompts or outputs. `--record` appends content-free metrics that
-`oms runtime benchmark` projects. `derive --from thread|journal|attempt-ref`
-can turn sufficient typed evidence into `.oms/drafts/skills/...`, but the draft
-is inert until a later review and ordinary `skill-forge add|link` action.
+`oms runtime benchmark` projects. Write useful guidance directly from reviewed
+source evidence, then use `skill-forge add|link` for local skills or the
+preview/import flow for bundles. Automatic draft generation is not required.
 
 ## Asking other agents
 
@@ -606,7 +606,6 @@ canonical next action; the evaluator takes no authority from `goal-drive` or
 | `land` | One detached job per landing: gate, `git push --no-verify`, `oms update` when the repo is the harness checkout, CI poll, receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and single stale failure-ledger rows retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`; a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
-| `execution-profile` | Compatibility preflight delegates backend readiness to the typed runtime engine; not a sandbox or landing authority. |
 | `open-in` | Probed VS Code/Stably Orca/Codex launch plans. The redundant `ops-cockpit` aggregate was retired; use `inbox`, then the relevant state, approval, or artifact telemetry query. Historical records are unchanged. |
 | `otel-export` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; opt-in `--gen-ai` standard semantic attributes. |
 | `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |

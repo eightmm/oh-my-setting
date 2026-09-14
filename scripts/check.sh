@@ -753,7 +753,6 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage debate-delta bash tests/debate-delta-smoke.sh
   stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh
-  stage execution-profile bash tests/execution-profile-smoke.sh
   stage prompt-budget bash tests/prompt-budget-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh
   stage source-distribution bash tests/source-distribution-smoke.sh

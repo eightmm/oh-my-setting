@@ -1338,8 +1338,52 @@ class RuntimeFixture(RuntimeFixtureBase):
             os.environ['HOME'] = old_home
 
     def test_backend_readiness_and_absolute_local_command(self) -> None:
-        self.assertFalse(check_backend('isolated', image='missing-image')['ready'])
-        self.assertFalse(check_backend('remote', adapter='missing-adapter')['ready'])
+        import contextlib
+        import io
+        from oms_runtime.cli import main
+
+        # Consolidated preflight keeps the former shell entrypoint's safety
+        # coverage without running a second suite or invoking real adapters.
+        with patch.dict(os.environ, {'OMS_CONTAINER_ENGINE': '', 'OMS_DOCKER_BIN': 'fixture-engine',
+                                     'OMS_REMOTE_ADAPTER': '', 'OMS_ISOLATED_IMAGE': 'fixture:image'}), \
+             patch('oms_runtime.execution.shutil.which', side_effect=lambda name: {'fixture-engine': '/fixture/engine', 'preferred': '/fixture/preferred', 'fixture-adapter': '/fixture/adapter'}.get(name)), \
+             patch('oms_runtime.execution.subprocess.run') as probe:
+            probe.return_value = subprocess.CompletedProcess([], 0)
+            ready = check_backend('isolated')
+            self.assertTrue(ready['ready'], ready)
+            self.assertTrue(ready['details']['daemon_ready'])
+            self.assertTrue(ready['details']['image_local'])
+            self.assertNotIn('engine_path', ready['details'])
+            self.assertEqual([call.args[0] for call in probe.call_args_list],
+                             [['/fixture/engine', 'info'], ['/fixture/engine', 'image', 'inspect', 'fixture:image']])
+            with patch.dict(os.environ, {'OMS_CONTAINER_ENGINE': 'preferred'}):
+                self.assertEqual(check_backend('isolated')['details']['engine'], 'preferred')
+            probe.reset_mock()
+            probe.side_effect = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 1)]
+            self.assertEqual(check_backend('isolated', image='missing')['missing'], ['local-image'])
+            probe.side_effect = None
+            probe.return_value = subprocess.CompletedProcess([], 1)
+            self.assertEqual(check_backend('isolated')['missing'], ['container-daemon'])
+            with patch.dict(os.environ, {'OMS_DOCKER_BIN': 'missing-engine'}):
+                self.assertEqual(check_backend('isolated')['missing'], ['docker-or-podman'])
+            probe.reset_mock()
+            remote = check_backend('remote', adapter='fixture-adapter')
+            self.assertTrue(remote['ready'])
+            self.assertEqual(remote['declared']['transport'], 'external-adapter')
+            self.assertNotIn('adapter_path', remote['details'])
+            self.assertEqual(check_backend('remote', adapter='missing')['missing'], ['remote-adapter'])
+            local = check_backend('trusted-local')
+            self.assertTrue(local['ready'])
+            self.assertFalse(local['enforced']['filesystem'])
+            probe.assert_not_called()
+        for is_ready in (True, False):
+            report = dict(ready, ready=is_ready, missing=[] if is_ready else ['local-image'])
+            output = io.StringIO()
+            with patch('oms_runtime.cli.check_backend', return_value=report) as check, contextlib.redirect_stdout(output):
+                rc = main(['--repo', str(self.repo), 'backend', 'check', 'isolated', '--image', 'explicit:image'])
+            self.assertEqual(rc, 0 if is_ready else 3)
+            self.assertEqual(json.loads(output.getvalue()), report)
+            check.assert_called_once_with('isolated', image='explicit:image', adapter='')
         script = Path(self.tmp.name) / 'absolute-script.py'
         script.write_text("print('absolute-ok')\n", encoding='utf-8')
         receipt, rc = run_backend('trusted-local', self.repo, [sys.executable, str(script)], timeout_seconds=10)

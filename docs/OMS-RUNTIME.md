@@ -254,9 +254,12 @@ capability.
 
 ## Execution backends
 
-`oms runtime backend` is the canonical readiness and execution engine. The
-legacy `oms execution-profile` command keeps its established report schema but
-uses this same resolver. `OMS_CONTAINER_ENGINE` is the preferred explicit
+`oms runtime backend` is the single readiness and execution entrypoint.
+The former `execution-profile` command is removed: use `backend describe PROFILE`
+or `backend check PROFILE` (`--adapter` replaces `--remote-adapter`). Check reports
+use the runtime JSON schema with `ready`, `missing`, and `details`; an unready
+backend exits 3. Checks never install engines, pull images, or run adapters.
+`OMS_CONTAINER_ENGINE` is the preferred explicit
 container executable; `OMS_DOCKER_BIN` remains a compatibility override. With
 neither set, Docker is preferred and Podman is the fallback.
 

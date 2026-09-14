@@ -45,7 +45,7 @@ subagents or delegation. Task size or routine complexity alone is not permission
 to launch a worker. Questions do not authorize edits or autopilot.
 Avoid duplicate collectors, worker calls, or full-conversation replay.
 
-For skill evaluation/import/drafts, load
+For skill evaluation/import, load
 [skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks or Codex
 app-server, load
 [interoperability.md](references/interoperability.md); all are optional

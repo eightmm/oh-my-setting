@@ -264,6 +264,18 @@ report_tool_drift() {  # LABEL DETAIL
   fi
 }
 
+external_gh_is_newer() {  # COMMAND EXPECTED
+  local output
+  output="$("$1" --version 2>/dev/null | tr -d '\r')" || return 1
+  printf '%s' "$output" | python3 -c '
+import re, sys
+actual = re.match(r"gh version (\d+)\.(\d+)\.(\d+)(?:\s|$)", sys.stdin.read())
+expected = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+raise SystemExit(0 if actual and expected and
+    tuple(map(int, actual.groups())) > tuple(map(int, expected.groups())) else 1)
+' "$2"
+}
+
 check_locked_command_version() {  # LABEL COMMAND LOCK_FIELD
   local label="$1" command="$2" field="$3" expected
   command -v "$command" >/dev/null 2>&1 || return 0
@@ -493,12 +505,23 @@ check_locked_direct_version() {  # LABEL COMMAND LOCK_FIELD
   if [ "$command" = agy ]; then OH_MY_SETTING_TOOL_LOCK="$(provider_lock_path)" || return 1; fi
   command -v "$command" >/dev/null 2>&1 || return 0
   expected="$(tool_lock_value "$field")" || return 1
+  resolved="$(command -v "$command" 2>/dev/null | tr -d '\r')"
+  owner="$resolved.oh-my-setting-managed"
   if ! command_has_locked_version "$command" "$expected"; then
+    # An external package manager may supply a newer gh. Keep explicit pins
+    # and OMS-owned binary integrity strict; do not recommend a downgrade.
+    if [ "$command" = gh ] && [ "$REQUIRE_TOOLS" != 1 ] &&
+       [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] &&
+       [ ! -e "$owner" ] && [ ! -L "$owner" ] &&
+       [ ! -e "$resolved.oh-my-setting-stage" ] &&
+       [ ! -e "$resolved.oh-my-setting-backup" ] &&
+       external_gh_is_newer "$command" "$expected"; then
+      echo "note: tool version $label is newer than bootstrap $expected (external; bytes not authenticated)"
+      return 0
+    fi
     report_tool_drift "$label" "expected $expected"
     return 0
   fi
-  resolved="$(command -v "$command" 2>/dev/null | tr -d '\r')"
-  owner="$resolved.oh-my-setting-managed"
   if [ -f "$owner" ]; then
     recorded="$(sed -n 's/^sha256=//p' "$owner")"
     actual="$(doctor_sha256_file "$resolved" 2>/dev/null || true)"

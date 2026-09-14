@@ -183,44 +183,6 @@ test_skill_bundle_preview_import_update_and_rollback() {
     fail "credential bundle refusal was not explicit: $out"
 }
 
-test_reviewed_draft_is_inert_and_source_bound() {
-  local repo="$TMP/derive-repo" thread
-  local out draft
-  thread="$repo/.oms/threads/th-fixture.jsonl"
-  make_repo "$repo"
-  mkdir -p "$(dirname "$thread")"
-  cat > "$thread" <<'EOF'
-{"schema":1,"ts":"2026-08-27T00:00:00Z","thread":"th-fixture","seq":1,"role":"user","agent":"test","text":"When the fixture fails, inspect the bounded status report and record the exact failing check."}
-{"schema":1,"ts":"2026-08-27T00:01:00Z","thread":"th-fixture","seq":2,"role":"assistant","agent":"test","text":"Run the focused verifier, fix only the confirmed boundary, then rerun the focused verifier before the final gate."}
-EOF
-
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" derive --from thread \
-    --id th-fixture --name oms-derived-fixture --json)" || fail "draft preview failed"
-  printf '%s' "$out" | python3 -c '
-import json,sys
-row=json.load(sys.stdin)
-assert row["status"] == "preview" and row["source"]["kind"] == "thread", row
-assert len(row["source"]["sha256"]) == 64, row
-' || fail "draft preview contract is wrong: $out"
-  [ ! -e "$repo/.oms/drafts" ] || fail "draft preview mutated the repo"
-
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" derive --from thread \
-    --id th-fixture --name oms-derived-fixture --apply --json)" || fail "draft write failed"
-  draft="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_path"])')"
-  [ -f "$repo/$draft/SKILL.md" ] || fail "derived SKILL.md missing"
-  [ -f "$repo/$draft/REVIEW.md" ] || fail "derived review receipt missing"
-  [ ! -e "$repo/.oms/skills/oms-derived-fixture" ] ||
-    fail "derive activated an unreviewed skill"
-  [ ! -e "$repo/.agents/skills/oms-derived-fixture" ] ||
-    fail "derive linked an unreviewed skill"
-
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" derive --from attempt \
-    --id missing --name oms-missing --json 2>&1)" &&
-    fail "derive fabricated a draft from missing attempt evidence: $out"
-  printf '%s' "$out" | grep -Fq 'insufficient-source' ||
-    fail "insufficient source refusal is not typed: $out"
-}
-
 test_corrupt_lock_hides_only_its_own_skill() {
   local repo="$TMP/corrupt-lock-repo" src_a="$TMP/lock-src-a" src_z="$TMP/lock-src-z"
   local sha out
@@ -256,7 +218,6 @@ test_corrupt_lock_hides_only_its_own_skill() {
 
 test_skill_eval_is_explicit_repeatable_and_content_free
 test_skill_bundle_preview_import_update_and_rollback
-test_reviewed_draft_is_inert_and_source_bound
 test_corrupt_lock_hides_only_its_own_skill
 
 echo "skill-lifecycle-smoke: ok"

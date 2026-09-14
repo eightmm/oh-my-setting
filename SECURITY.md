@@ -169,10 +169,10 @@ deliberately creates a new session can escape. Windows launches suspended,
 assigns the process tree to a kill-on-close Job Object, then resumes it; setup
 failure aborts before an unowned child can continue.
 Hard token/cost budgets are refused before launch because trusted-local has no
-authenticated provider-native limiter. `execution-profile` is a readiness
-check, not an executor: `isolated` verifies an existing Docker daemon and local
-image, while `remote` verifies an operator-owned adapter. It installs, pulls,
-and connects to nothing.
+authenticated provider-native limiter. `runtime backend check` only probes
+readiness: `isolated` verifies an existing Docker/Podman daemon and local
+image, while `remote` verifies an operator-owned adapter. The check installs,
+pulls, and connects to nothing; `runtime backend run` is a separate action.
 
 External frontend commit/merge/push actions bypass OMS; OMS authority applies
 only to managed flows. Frontend state is not proof of verification.

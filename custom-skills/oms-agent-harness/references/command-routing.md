@@ -98,7 +98,8 @@ contracts. Do not merge them or treat one as another's authority source.
 ## Typed runtime and compatibility surfaces
 
 Prefer `oms runtime profile`, `backend`, and `experiment`. `install-profile`
-and `execution-profile` already share their engines; do not repeat probes.
+shares the profile engine; `runtime backend` owns execution preflight and runs.
+Do not repeat probes.
 `research-runner` is a single-run wrapper, not a comparable multi-arm study.
 Experiment-board owns intent/claims, run-ledger records execution, and runtime
 experiment links study evidence. Keep their IDs linked, not their stores merged.

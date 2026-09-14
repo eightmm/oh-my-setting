@@ -42,8 +42,6 @@ Commands:
                               update requires an exact current digest CAS.
   rollback NAME --to SHA      Repoint an imported skill to a verified stored
       --expected-current-sha256 SHA --apply
-  derive --from SOURCE        Build an inert, provenance-bound draft from a
-      --id ID --name NAME     thread, attempt artifact, or journal event.
 
 Project skills live in <repo>/.oms/skills/<name>/SKILL.md. They load through
 each CLI's native project skill discovery — no router entry, no manifest.
@@ -608,7 +606,7 @@ case "${1:-}" in
   show) shift; cmd_show "$@" ;;
   remove) shift; cmd_remove "$@" ;;
   status) shift; cmd_status "$@" ;;
-  eval|preview|import|update|rollback|derive)
+  eval|preview|import|update|rollback)
     command="$1"; shift; cmd_lifecycle "$command" "$@"
     ;;
   ""|help) usage ;;

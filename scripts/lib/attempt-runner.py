@@ -717,7 +717,7 @@ def submit(args: argparse.Namespace) -> int:
     if not cwd.is_dir() or not same_git_repository(repo, cwd):
         raise ae.OpsError("cwd must be this repository or one of its Git worktrees")
     if args.profile != "trusted-local":
-        raise ae.OpsError("agent-supervisor currently accepts trusted-local; use execution-profile for other backends")
+        raise ae.OpsError("agent-supervisor currently accepts trusted-local; use oms runtime backend check for other backends")
     max_log_bytes = getattr(args, "max_log_bytes", DEFAULT_MAX_LOG_BYTES)
     if (
         isinstance(max_log_bytes, bool)
