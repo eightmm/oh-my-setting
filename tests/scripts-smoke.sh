@@ -18861,10 +18861,10 @@ test_consult_falls_back_when_the_first_peer_does_not_answer() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
-  # First peer exits 0 with a non-answer; the second one answers.
+  # First peer exits 0 with an authentication failure; the second answers.
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
-echo "Could you clarify what you mean?"
+echo "error: not authenticated"
 EOF
   cat > "$bin_dir/agy" <<'EOF'
 #!/usr/bin/env bash
@@ -18877,7 +18877,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     "which loader?" --quiet 2>&1)" || fail "consult should recover: $out"
-  printf '%s' "$out" | grep -Fq 'did not really answer (thin); asking antigravity' ||
+  printf '%s' "$out" | grep -Fq 'did not really answer (blocked); asking antigravity' ||
     fail "consult should report the fallback: $out"
 
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
@@ -18888,9 +18888,9 @@ roles = [t["role"] for t in turns]
 assert roles.count("question") == 1, roles
 answers = [t for t in turns if t["role"] == "answer"]
 assert [a["provider"] for a in answers] == ["codex", "antigravity"], answers
-assert answers[0]["quality"] == "thin", answers[0]
+assert answers[0]["quality"] == "blocked", answers[0]
 assert answers[1].get("quality") == "ok", answers[1]
-' || fail "the thread should record one question, a thin answer, and a real one"
+' || fail "the thread should record one question, a blocked attempt, and an answer"
 
   project="$TMP/consult-short-answer"
   bin_dir="$project/bin"
@@ -18899,7 +18899,7 @@ assert answers[1].get("quality") == "ok", answers[1]
   mkdir -p "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
-echo "42"
+echo "Could you clarify which input?"
 EOF
   cat > "$bin_dir/agy" <<EOF
 #!/usr/bin/env bash
@@ -18911,7 +18911,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     "what is six times seven?" --quiet 2>&1)" || fail "consult should succeed: $out"
-  [ ! -f "$project/agy-called" ] || fail "short valid answer must not call a fallback provider"
+  [ ! -f "$project/agy-called" ] || fail "a short clarification must not call a fallback provider"
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
 import json, sys
 answers = [t for t in json.load(sys.stdin)["turns"] if t["role"] == "answer"]
