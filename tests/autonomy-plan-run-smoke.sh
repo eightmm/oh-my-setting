@@ -267,8 +267,19 @@ SLOW_TASK=repair-signal SLOW_STARTED="$slow_started" HOME="$home" \
   PATH="$bin:/usr/bin:/bin" "$RUN" --repo "$resume_repo" --to codex \
   --id repair-signal --land --auto-repair >"$TMP/repair-signal.out" 2>&1 &
 repair_signal_pid="$!"
-for _ in $(seq 1 50); do [ -e "$slow_started" ] && break; sleep 0.1; done
-[ -e "$slow_started" ] || fail "repair signal fixture never reached its provider"
+# Admission rejection and repair setup precede this handshake; five seconds
+# is not a reliable startup bound, especially beside the full lint/test gate.
+for _ in $(seq 1 300); do
+  [ -e "$slow_started" ] && break
+  kill -0 "$repair_signal_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if [ ! -e "$slow_started" ]; then
+  kill -TERM "$repair_signal_pid" 2>/dev/null || true
+  wait "$repair_signal_pid" 2>/dev/null || true
+  cat "$TMP/repair-signal.out" >&2
+  fail "repair signal fixture never reached its provider"
+fi
 kill -TERM "$repair_signal_pid"
 rc=0
 wait "$repair_signal_pid" || rc=$?
