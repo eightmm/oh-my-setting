@@ -15449,9 +15449,9 @@ PY
     fail "gc deleted trigger evidence for executor metadata with no typed state"
   [ -f "$plan_marker" ] ||
     fail "gc deleted trigger evidence for a plan task with no typed state"
-  grep -Fq 'executor invalid-state has an invalid state; kept trigger evidence' \
+  grep -Fq 'retired Soul executor invalid-state; keeping legacy marker and evidence' \
     "$project/gc-invalid-state.err" ||
-    fail "gc did not explain the invalid executor state"
+    fail "gc did not explain preservation of the retired executor"
   grep -Fq 'plan task t1 has an invalid state; kept trigger evidence' \
     "$project/gc-invalid-state.err" ||
     fail "gc did not explain the invalid plan state"
