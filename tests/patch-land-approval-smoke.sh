@@ -96,13 +96,13 @@ old = subprocess.check_output(approval_cmd + [
     "--summary", "legacy Soul binding", "--base-sha", row["base_sha"],
     "--patch-sha", row["patch_sha"], "--parameters-json", json.dumps(params),
 ], text=True).strip()
-token = subprocess.check_output(approval_cmd + [
+old_grant = subprocess.check_output(approval_cmd + [
     "decide", "--approval", old, "--decision", "approve",
     "--expected-version", "1", "--actor", "operator",
 ], text=True).strip()
 result = subprocess.run([
     sys.argv[3], "--repo", sys.argv[4], "--patch", sys.argv[5], "--verify", "true",
-    "--approval", old, "--approval-version", "2", "--approval-token", token,
+    "--approval", old, "--approval-version", "2", "--approval-token", old_grant,
 ], env=dict(os.environ, OMS_REQUIRE_LANDING_APPROVAL="1"), capture_output=True, text=True)
 assert result.returncode != 0, "legacy grant authorized an unbound landing"
 current = json.loads(subprocess.check_output(approval_cmd + ["show", "--approval", old, "--json"], text=True))
